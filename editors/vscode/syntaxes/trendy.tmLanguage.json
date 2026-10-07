@@ -1,0 +1,54 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "comment": "Generated from the lexer by crates/lsp/tests/textmate.rs. Do not edit: run `UPDATE_TEXTMATE=1 cargo test -p trendy_lsp --test textmate`.",
+  "name": "trendy",
+  "patterns": [
+    {
+      "include": "#definition"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#punctuation"
+    }
+  ],
+  "repository": {
+    "definition": {
+      "captures": {
+        "1": {
+          "name": "keyword.other.trendy"
+        },
+        "2": {
+          "name": "entity.name.function.trendy"
+        }
+      },
+      "match": "\\b(operator)\\s+([A-Z_a-z][0-9A-Z_a-z]*)"
+    },
+    "keywords": {
+      "match": "\\b(?:operator)\\b",
+      "name": "keyword.other.trendy"
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "match": "[\\{\\}]",
+          "name": "punctuation.section.braces.trendy"
+        },
+        {
+          "match": "[\\[\\]]",
+          "name": "punctuation.section.brackets.trendy"
+        },
+        {
+          "match": "[\\(\\)]",
+          "name": "punctuation.section.parens.trendy"
+        },
+        {
+          "match": "[\\;]",
+          "name": "punctuation.terminator.trendy"
+        }
+      ]
+    }
+  },
+  "scopeName": "source.trendy"
+}

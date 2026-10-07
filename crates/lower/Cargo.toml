@@ -1,0 +1,11 @@
+[package]
+name = "trendy_lower"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+trendy_hir.workspace = true
+trendy_lir.workspace = true

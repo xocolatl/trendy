@@ -1,0 +1,26 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+trendy_diag = { path = "crates/diag" }
+trendy_lexer = { path = "crates/lexer" }
+trendy_syntax = { path = "crates/syntax" }
+trendy_parser = { path = "crates/parser" }
+trendy_hir = { path = "crates/hir" }
+trendy_lir = { path = "crates/lir" }
+trendy_lower = { path = "crates/lower" }
+trendy_sema = { path = "crates/sema" }
+trendy_codegen = { path = "crates/codegen" }
+trendy_fmt = { path = "crates/fmt" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }

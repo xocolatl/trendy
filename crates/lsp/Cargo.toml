@@ -1,0 +1,22 @@
+[package]
+name = "trendy_lsp"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "trendy-lsp"
+path = "src/main.rs"
+
+[dependencies]
+trendy_diag.workspace = true
+trendy_syntax.workspace = true
+trendy_lexer.workspace = true
+trendy_parser.workspace = true
+trendy_sema.workspace = true
+trendy_fmt.workspace = true
+lsp-server = "0.10.0"
+lsp-types = "0.97.0"
+serde_json = "1.0.151"

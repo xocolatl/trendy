@@ -1,0 +1,9 @@
+[package]
+name = "trendy_hir"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

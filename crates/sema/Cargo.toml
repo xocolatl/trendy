@@ -1,0 +1,16 @@
+[package]
+name = "trendy_sema"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+trendy_diag.workspace = true
+trendy_syntax.workspace = true
+trendy_hir.workspace = true
+
+[dev-dependencies]
+trendy_lexer.workspace = true
+trendy_parser.workspace = true

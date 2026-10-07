@@ -1,0 +1,76 @@
+{
+  "name": "trendy",
+  "displayName": "trendy",
+  "description": "Language support for trendy: syntax highlighting, diagnostics, and formatting.",
+  "version": "0.1.0",
+  "publisher": "trendy",
+  "private": true,
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.91.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Formatters"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "trendy",
+        "aliases": [
+          "trendy"
+        ],
+        "extensions": [
+          ".trendy"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "trendy",
+        "scopeName": "source.trendy",
+        "path": "./syntaxes/trendy.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "trendy",
+      "properties": {
+        "trendy.server.path": {
+          "type": "string",
+          "default": "trendy-lsp",
+          "markdownDescription": "Path to the `trendy-lsp` executable. The default finds it on `PATH`."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "trendy.restartServer",
+        "title": "trendy: Restart Language Server"
+      }
+    ],
+    "configurationDefaults": {
+      "[trendy]": {
+        "editor.semanticHighlighting.enabled": true
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p .",
+    "watch": "tsc -watch -p .",
+    "check": "tsc --noEmit -p .",
+    "package": "vsce package --allow-missing-repository --skip-license --out trendy.vsix",
+    "install-extension": "npm run package && code --install-extension trendy.vsix --force"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^10.1.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "@types/vscode": "1.91.0",
+    "@vscode/vsce": "4.0.0",
+    "typescript": "^7.0.2"
+  }
+}

@@ -1,0 +1,12 @@
+[package]
+name = "trendy_parser"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+trendy_diag.workspace = true
+trendy_lexer.workspace = true
+trendy_syntax.workspace = true

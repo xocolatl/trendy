@@ -1,0 +1,11 @@
+[package]
+name = "trendy_lexer"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+trendy_diag.workspace = true
+trendy_syntax.workspace = true

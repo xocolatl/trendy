@@ -1,0 +1,14 @@
+[package]
+name = "trendy_fmt"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+trendy_syntax.workspace = true
+
+[dev-dependencies]
+trendy_lexer.workspace = true
+trendy_parser.workspace = true

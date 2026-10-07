@@ -1,0 +1,45 @@
+#!/bin/sh
+# Refuse the commit unless the staged tree is rustfmt-clean, builds with no
+# errors or warnings (rustc, clippy, rustdoc), has every example in canonical
+# trendy format, has an up-to-date generated TextMate grammar, and the VS Code
+# extension type-checks cleanly.
+#
+# Install: ln -s ../../.githooks/pre-commit .git/hooks/pre-commit
+#
+# Checks run against a copy of the index, not the working tree, so unstaged
+# edits can neither hide a problem nor cause a false failure.
+set -eu
+
+repo=$(git rev-parse --show-toplevel)
+tree=$(mktemp -d "${TMPDIR:-/tmp}/trendy-pre-commit.XXXXXX")
+trap 'rm -rf "$tree"' EXIT
+
+git checkout-index --all --prefix="$tree/"
+cd "$tree"
+
+# A target dir of its own, so this never invalidates the normal build cache.
+export CARGO_TARGET_DIR="$repo/target/pre-commit"
+
+step() {
+    printf 'pre-commit: %s\n' "$1"
+    shift
+    if ! "$@"; then
+        printf 'pre-commit: FAILED: %s\n' "$*" >&2
+        exit 1
+    fi
+}
+
+step "rustfmt" cargo fmt --all --check
+step "clippy" cargo clippy --locked --workspace --all-targets --quiet -- -D warnings
+step "rustdoc" env RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --quiet
+step "trendyfmt" cargo run --locked --quiet -p trendyfmt -- --check examples/*.trendy
+step "textmate grammar" cargo test --locked --quiet -p trendy_lsp --test textmate
+
+# The extension's dependencies aren't in the index, so borrow the installed ones.
+ext=editors/vscode
+if [ ! -d "$repo/$ext/node_modules" ]; then
+    printf 'pre-commit: FAILED: run `npm ci` in %s first\n' "$ext" >&2
+    exit 1
+fi
+ln -s "$repo/$ext/node_modules" "$ext/node_modules"
+step "typescript" npm --prefix "$ext" run --silent check
