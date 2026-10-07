@@ -97,7 +97,14 @@ pub fn code_actions(uri: &Uri, source: &str, range: Range) -> Vec<CodeActionOrCo
 /// to them by index.
 pub fn semantic_tokens_legend() -> SemanticTokensLegend {
     SemanticTokensLegend {
-        token_types: vec![SemanticTokenType::KEYWORD, SemanticTokenType::FUNCTION],
+        token_types: vec![
+            SemanticTokenType::KEYWORD,
+            SemanticTokenType::FUNCTION,
+            SemanticTokenType::VARIABLE,
+            SemanticTokenType::TYPE,
+            SemanticTokenType::NUMBER,
+            SemanticTokenType::STRING,
+        ],
         token_modifiers: vec![
             SemanticTokenModifier::DECLARATION,
             SemanticTokenModifier::DEFINITION,
@@ -111,6 +118,10 @@ fn token_type(class: Class) -> u32 {
         Class::Keyword => 0,
         // Operators are trendy's functions.
         Class::Operator => 1,
+        Class::Variable => 2,
+        Class::Type => 3,
+        Class::Number => 4,
+        Class::Text => 5,
     }
 }
 
@@ -199,7 +210,10 @@ mod tests {
     fn secondary_labels_are_related_information() {
         let diags = diagnostics(&uri(), "operator main{}[];\noperator main{}[];");
         let related = diags[0].related_information.as_ref().unwrap();
-        assert_eq!(related[0].message, "`main` is first defined here");
+        assert_eq!(
+            related[0].message,
+            "`main` is first defined here as an operator"
+        );
         assert_eq!(
             related[0].location.range,
             Range::new(Position::new(0, 9), Position::new(0, 13))
@@ -274,6 +288,22 @@ mod tests {
                 token(0, 9, 1, 1, DEFINITION_MODIFIERS),
             ]
         );
+    }
+
+    #[test]
+    fn token_types_match_the_legend() {
+        let legend = semantic_tokens_legend();
+        let named = |class| {
+            legend.token_types[token_type(class) as usize]
+                .as_str()
+                .to_string()
+        };
+        assert_eq!(named(Class::Keyword), "keyword");
+        assert_eq!(named(Class::Operator), "function");
+        assert_eq!(named(Class::Variable), "variable");
+        assert_eq!(named(Class::Type), "type");
+        assert_eq!(named(Class::Number), "number");
+        assert_eq!(named(Class::Text), "string");
     }
 
     #[test]

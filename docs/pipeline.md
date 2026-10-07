@@ -6,6 +6,9 @@ layer below. Layers never call each other: small programs called drivers
 connect them. `trendyc` is the compiler driver, and the formatter and language
 server are drivers that reuse the front-end layers.
 
+This document is about the compiler. For the language itself, see
+[`language.md`](language.md).
+
 ```mermaid
 flowchart TD
     src[/source text/] --> lexer
@@ -49,6 +52,10 @@ so it stays at the bottom of the graph.
 - A typed view over the tree (`ast::SourceFile`, `ast::Operator`, …) with
   accessors that return `Option`, because a tree with errors can be missing
   any part.
+- `literal`, the meaning of literals: the escape table, the integer syntax,
+  and decoding. The lexer uses it to report malformed literals, and sema uses
+  it (through `ast::Literal::value`) to decode them, so the rules exist in
+  one place.
 
 The CST is lossless. It holds every byte of the source, including whitespace
 and text that failed to parse, so printing it reproduces the input exactly.
@@ -60,14 +67,22 @@ without touching any other layer.
 ### lexer (`trendy_lexer`)
 
 **Input:** source text. **Output:** `Lexed`, the tokens plus an error for each
-character the lexer doesn't recognize.
+unrecognized character and malformed literal.
 
 The tokens cover the source exactly, whitespace included. Each token is a kind
 plus a span, and doesn't copy its text out of the source. The lexer never
 fails: an unrecognized character becomes an error token, and lexing
 continues.
 
-**Owns:** what counts as whitespace, identifiers, keywords and punctuation.
+**A malformed literal keeps the kind it was meant to have.** For example,
+`1_000` is still an integer literal and `"abc` is still a text literal, so the
+parser accepts them, and the mistake gives one error, not a cascade. An
+unterminated text literal ends at the end of its line, or just before a final
+`;` on that line, which is most likely where the closing quote was meant to
+go.
+
+**Owns:** what counts as whitespace, identifiers, keywords, literals and
+punctuation.
 **Must not:** know the grammar. It never looks at more than one token at a
 time to decide anything.
 
@@ -78,13 +93,15 @@ lexer and parser error, ordered by position.
 
 **Owns:** the grammar, using recursive descent with one token of lookahead.
 It never fails. A missing token is reported and the parser carries on, and
-text that fits nowhere is wrapped in an error node, up to the next `operator`
-keyword. Whitespace is attached to the innermost node that is open when it
+text that fits nowhere is wrapped in an error node, up to the next definition
+keyword (`operator` or `var`). In a variable declaration, a missing `:` or
+`:=` is recognized from the type or value that follows it, and `=` is parsed
+as `:=` and reported. Whitespace is attached to the innermost node that is open when it
 appears, so whitespace between definitions belongs to the file.
 
 **Must not:** resolve names, check meaning, or reject a program that is
-grammatically valid. For example, "no `main`" and "duplicate operator" are
-sema errors, not parse errors.
+grammatically valid. For example, "no `main`", "duplicate name" and "unknown
+type" are sema errors, not parse errors.
 
 ### fmt (`trendy_fmt`)
 
@@ -95,6 +112,10 @@ text in canonical style.
 the official style. **Must not:** depend on sema. Formatting is purely
 syntactic, so a program that parses but has semantic errors can still be
 formatted.
+
+The canonical layout is one definition per line: consecutive variable
+declarations go on adjacent lines, and other definitions are separated by a
+blank line.
 
 The formatter reprints the CST's tokens in order and decides only the
 whitespace between them. Because it never adds, drops, or reorders any other
@@ -109,6 +130,15 @@ tree-shaped like the source, but names are resolved into indices (such as
 `OperatorId`), and every invariant sema promises holds. Relational algebra
 will live here, and the optimizer will rewrite it.
 
+It holds the operators, the variables, and the built-in types (`Type`) and
+values (`Value`). Every variable has an explicit type and initial value: sema
+infers whichever one the source leaves out.
+
+Every type's equality must hold exactly when no operator can tell two values
+apart (TTM RM Prescription 8). For rationals, that is IEEE 754 totalOrder.
+`hir::Rational` implements it, and every comparison, ordering or hash of a
+rational goes through that type, never through `f64` operators.
+
 **Must not:** refer to syntax: no tokens, no CST, no spans. When debug info
 arrives, source locations come back as a separate, explicit HIR field rather
 than as `Span`.
@@ -118,9 +148,17 @@ than as `Span`.
 **Input:** the CST of a file with no syntax errors. **Output:** `hir::Program`,
 or every semantic error found.
 
-**Owns:** name resolution, and type checking once there are types. It also
-translates the CST to HIR. **It is the last layer allowed to report an error
-to the user.**
+**Owns:** name resolution, type checking, and translating the CST to HIR.
+**It is the last layer allowed to report an error to the user.**
+
+There are two namespaces. Variables and operators share the value namespace,
+so no two of them can have the same name. Types have their own namespace, so a
+variable can be named after a type. Sema collects every name before checking
+anything, so errors can refer to definitions anywhere in the file.
+
+A variable without a value gets its type's default (`0`, `""`), and one
+without a type gets its value's type. These are the two options *The Third
+Manifesto* allows for initialization (RM Prescription 11).
 
 ### lir (`trendy_lir`)
 
@@ -128,6 +166,15 @@ to the user.**
 blocks, and each block ends in a terminator. Blocks will hold instructions
 once the language has expressions. There is no nesting and nothing implicit:
 every jump and return is spelled out.
+
+It also describes static data (`Data`) field by field, rather than as bytes,
+so the description doesn't depend on the target. Values are represented like
+this:
+
+- `integer`: one 64-bit field.
+- `rational`: one 64-bit IEEE 754 binary floating-point field.
+- `text`: the address of a read-only constant holding the UTF-8 bytes,
+  followed by the length in bytes, the size of a pointer.
 
 **Must not:** contain high-level constructs. Anything codegen would have to
 "figure out" belongs in lowering instead, so codegen stays a direct
@@ -137,17 +184,26 @@ translation.
 
 **Input:** `hir::Program`. **Output:** `lir::Program`. It cannot fail.
 
-**Owns:** turning tree-shaped code into control flow. Once relations arrive,
-this is where relational operators get fused into loops over tuples with fixed
-layouts.
+**Owns:** turning tree-shaped code into control flow, and choosing how each
+value is represented in memory. Once relations arrive, this is where
+relational operators get fused into loops over tuples with fixed layouts.
 
 ### codegen (`trendy_codegen`)
 
 **Input:** `lir::Program`. **Output:** object file bytes for the host target,
 produced with Cranelift.
 
-**Owns:** symbol mangling (`trendy_op_<name>`), calling conventions, and the
-C-ABI `main` entry shim. **Must not:** see syntax, or produce user-facing
+**Owns:**
+- symbol mangling: `trendy_op_<name>` for operators, `trendy_var_<name>` for
+  variables, and `trendy_const_<index>` for constants, all local;
+- laying out data for the target's byte order and pointer size, where every
+  object occupies at least one byte;
+- calling conventions, and the C-ABI `main` entry shim.
+
+When comparison operators arrive, rational comparisons must compile to
+totalOrder (an integer comparison on the bits, after flipping the bits of
+negative values), not to the target's floating-point compare instructions.
+LIR carries rationals as exact bits (`Field::F64Bits`) for the same reason. **Must not:** see syntax, or produce user-facing
 errors. Any error it returns is a compiler bug, and the driver reports it as
 `internal compiler error`.
 

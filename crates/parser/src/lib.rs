@@ -25,6 +25,7 @@ pub fn parse(source: &str, lexed: Lexed) -> Parse {
         tokens: &lexed.tokens,
         pos: 0,
         last_end: None,
+        form: errors::OPERATOR_FORM,
         missing: None,
         builder: TreeBuilder::new(),
         errors: lexed.errors,
@@ -47,6 +48,8 @@ struct Parser<'a> {
     pos: usize,
     /// Where the last significant token ended. Missing tokens belong here.
     last_end: Option<usize>,
+    /// The form of the definition being parsed, for notes on errors in it.
+    form: &'static str,
     /// Tokens found missing at `pos`, reported together as one error once
     /// the parser moves on, so one mistake gives one error.
     missing: Option<Missing>,
@@ -58,6 +61,9 @@ struct Missing {
     /// The token index where they were noticed.
     pos: usize,
     expected: Vec<SyntaxKind>,
+    form: &'static str,
+    /// Advice for what can't be inserted mechanically, such as a name.
+    help: Option<&'static str>,
 }
 
 /// Something the parser found where it expected something else.
@@ -81,25 +87,19 @@ impl<'a> Parser<'a> {
     /// The builder opens and closes the root node itself.
     fn source_file(&mut self) {
         while let Some(found) = self.found() {
-            if found.kind == SyntaxKind::OperatorKw {
-                self.operator();
-            } else {
-                self.junk(found);
+            match found.kind {
+                SyntaxKind::OperatorKw => self.operator(),
+                SyntaxKind::VarKw => self.var_decl(),
+                _ => self.junk(found),
             }
         }
     }
 
     fn operator(&mut self) {
+        self.form = errors::OPERATOR_FORM;
         self.builder.start_node(SyntaxKind::Operator);
         self.bump();
-
-        if self.at(SyntaxKind::Ident) {
-            self.builder.start_node(SyntaxKind::Name);
-            self.bump();
-            self.builder.finish_node();
-        } else {
-            self.missing(SyntaxKind::Ident);
-        }
+        self.name("add a name after `operator`, such as `operator main{} [];`");
 
         self.delimited(
             SyntaxKind::ParamList,
@@ -116,6 +116,87 @@ impl<'a> Parser<'a> {
         );
         self.expect(SyntaxKind::Semicolon);
         self.builder.finish_node();
+    }
+
+    /// `var name: type := value;`, where either the type or the value may be
+    /// left out. Sema checks that at least one is there.
+    fn var_decl(&mut self) {
+        self.form = errors::VARIABLE_FORM;
+        self.builder.start_node(SyntaxKind::VarDecl);
+        self.bump();
+        self.name("add a name after `var`, such as `var count: integer := 0;`");
+
+        if self.at(SyntaxKind::Colon) || self.at(SyntaxKind::Ident) {
+            self.builder.start_node(SyntaxKind::TypeAnnotation);
+            if self.at(SyntaxKind::Colon) {
+                self.bump();
+            } else {
+                // `var i integer`: the type is there but the colon isn't.
+                self.missing(SyntaxKind::Colon);
+            }
+            self.type_ref();
+            self.builder.finish_node();
+        }
+
+        match self.found() {
+            Some(found) if matches!(found.kind, SyntaxKind::ColonEq | SyntaxKind::Eq) => {
+                self.builder.start_node(SyntaxKind::Initializer);
+                let span = self.bump();
+                if found.kind == SyntaxKind::Eq {
+                    self.errors.push(errors::assignment_with_eq(span));
+                }
+                self.expression();
+                self.builder.finish_node();
+            }
+            Some(found) if is_literal(found.kind) => {
+                // `var i: integer 0`: the value is there but `:=` isn't.
+                self.builder.start_node(SyntaxKind::Initializer);
+                self.missing(SyntaxKind::ColonEq);
+                self.expression();
+                self.builder.finish_node();
+            }
+            _ => {}
+        }
+        self.expect(SyntaxKind::Semicolon);
+        self.builder.finish_node();
+    }
+
+    /// A definition's name, or `help` on what to write if it's missing.
+    fn name(&mut self, help: &'static str) {
+        if self.at(SyntaxKind::Ident) {
+            self.builder.start_node(SyntaxKind::Name);
+            self.bump();
+            self.builder.finish_node();
+        } else {
+            self.missing_with_help(SyntaxKind::Ident, help);
+        }
+    }
+
+    fn type_ref(&mut self) {
+        if self.at(SyntaxKind::Ident) {
+            self.builder.start_node(SyntaxKind::TypeRef);
+            self.bump();
+            self.builder.finish_node();
+        } else {
+            self.missing_with_help(
+                SyntaxKind::TypeRef,
+                "write a type after `:`, such as `integer` or `text`, or remove the `:`",
+            );
+        }
+    }
+
+    /// For now, the only expressions are literals.
+    fn expression(&mut self) {
+        if self.peek().is_some_and(is_literal) {
+            self.builder.start_node(SyntaxKind::Literal);
+            self.bump();
+            self.builder.finish_node();
+        } else {
+            self.missing_with_help(
+                SyntaxKind::Literal,
+                "write a value, such as `0` or `\"\"`, or remove the `:=`",
+            );
+        }
     }
 
     /// A `node` made of a `delims` pair with nothing between.
@@ -164,18 +245,23 @@ impl<'a> Parser<'a> {
     }
 
     /// Wrap tokens that don't start a definition in an error node, up to the
-    /// next `operator` keyword or the end of input. `first` is the next token.
+    /// next definition keyword or the end of input. `first` is the next token.
     fn junk(&mut self, first: Found<'a>) {
-        let next = self.found_after(1);
+        let name = self.found_after(1);
+        let after_name = self.found_after(2);
         self.builder.start_node(SyntaxKind::Error);
-        while self.peek().is_some_and(|k| k != SyntaxKind::OperatorKw) {
+        while self
+            .peek()
+            .is_some_and(|k| !matches!(k, SyntaxKind::OperatorKw | SyntaxKind::VarKw))
+        {
             self.bump();
         }
         self.builder.finish_node();
         let end = self.last_end.unwrap_or(first.span.end);
         self.errors.push(errors::expected_definition(
             first,
-            next,
+            name,
+            after_name,
             Span::new(first.span.start, end),
         ));
     }
@@ -257,8 +343,19 @@ impl<'a> Parser<'a> {
                 self.missing = Some(Missing {
                     pos: self.pos,
                     expected: vec![kind],
+                    form: self.form,
+                    help: None,
                 });
             }
+        }
+    }
+
+    /// Like [`Parser::missing`], for something that can't be inserted
+    /// mechanically, with `help` on what to write.
+    fn missing_with_help(&mut self, kind: SyntaxKind, help: &'static str) {
+        self.missing(kind);
+        if let Some(missing) = &mut self.missing {
+            missing.help.get_or_insert(help);
         }
     }
 
@@ -268,13 +365,25 @@ impl<'a> Parser<'a> {
         };
         let found = (missing.pos < self.tokens.len()).then(|| self.found_at(missing.pos));
         let at = self.last_end.or(found.map(|f| f.span.start)).unwrap_or(0);
-        self.errors
-            .push(errors::missing(&missing.expected, found, Span::empty(at)));
+        self.errors.push(errors::missing(
+            &missing.expected,
+            found,
+            Span::empty(at),
+            missing.form,
+            missing.help,
+        ));
     }
 }
 
 fn is_skipped(kind: SyntaxKind) -> bool {
     kind.is_trivia() || kind == SyntaxKind::ErrorToken
+}
+
+fn is_literal(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::IntLiteral | SyntaxKind::RationalLiteral | SyntaxKind::TextLiteral
+    )
 }
 
 #[cfg(test)]
@@ -442,10 +551,136 @@ SourceFile
         assert_eq!(errors[0].code, Code::ExpectedDefinition);
         assert_eq!(
             errors[0].message,
-            "expected an operator definition, found identifier `fn`"
+            "expected a definition, found identifier `fn`"
         );
         assert_eq!(errors[0].span(), Span::new(0, 13));
         assert_eq!(fix(source), "operator main{} [];");
+    }
+
+    #[test]
+    fn variable_tree() {
+        let parse = parse_str(r#"var t: text := "x";"#);
+        assert!(parse.errors.is_empty());
+        assert_eq!(
+            outline(parse.tree.syntax()),
+            "\
+SourceFile
+  VarDecl
+    VarKw \"var\"
+    Whitespace \" \"
+    Name
+      Ident \"t\"
+    TypeAnnotation
+      Colon \":\"
+      Whitespace \" \"
+      TypeRef
+        Ident \"text\"
+    Whitespace \" \"
+    Initializer
+      ColonEq \":=\"
+      Whitespace \" \"
+      Literal
+        TextLiteral \"\\\"x\\\"\"
+    Semicolon \";\"
+"
+        );
+    }
+
+    #[test]
+    fn variable_parts_are_optional() {
+        for source in ["var i: integer;", "var i := 0;", "var i;"] {
+            assert!(parse_str(source).errors.is_empty(), "{source}");
+        }
+        let decl = parse_str("var i := 0;").tree.variables().next().unwrap();
+        assert!(decl.type_ref().is_none());
+        assert!(decl.initializer().is_some());
+    }
+
+    #[test]
+    fn variables_and_operators_interleave() {
+        let parse = parse_str("var a := 1;\noperator main{} [];\nvar b := 2;");
+        assert!(parse.errors.is_empty());
+        assert_eq!(parse.tree.items().count(), 3);
+    }
+
+    #[test]
+    fn eq_for_assignment() {
+        let source = "var i: integer = 0;";
+        let errors = parse_str(source).errors;
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, Code::AssignmentWithEq);
+        assert_eq!(errors[0].span(), Span::new(15, 16));
+        assert_eq!(fix(source), "var i: integer := 0;");
+    }
+
+    #[test]
+    fn missing_colon_before_type() {
+        let source = "var i integer := 0;";
+        assert_eq!(
+            messages(source),
+            ["expected `:`, found identifier `integer`"]
+        );
+        assert_eq!(fix(source), "var i: integer := 0;");
+    }
+
+    #[test]
+    fn missing_assignment_before_value() {
+        assert_eq!(fix("var i: integer 0;"), "var i: integer:= 0;");
+    }
+
+    #[test]
+    fn missing_type_after_colon() {
+        let errors = parse_str("var i: := 0;").errors;
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].message, "expected type, found `:=`");
+        assert!(errors[0].help[0].contains("such as `integer` or `text`"));
+        assert!(errors[0].notes[0].starts_with("a variable declaration has the form"));
+    }
+
+    #[test]
+    fn missing_value_after_assignment() {
+        let errors = parse_str("var i :=;").errors;
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].message, "expected literal, found `;`");
+        assert!(errors[0].help[0].contains("or remove the `:=`"));
+    }
+
+    #[test]
+    fn foreign_variable_keywords() {
+        assert_eq!(fix("let x = 0;"), "var x = 0;");
+        assert_eq!(fix("const x: integer := 0;"), "var x: integer := 0;");
+        assert_eq!(fix("int x;"), "var x;");
+        assert_eq!(fix("int main() {}"), "operator main() {}");
+    }
+
+    #[test]
+    fn junk_stops_at_var() {
+        let parse = parse_str("junk var i := 0;");
+        assert_eq!(parse.errors.len(), 1);
+        assert_eq!(parse.tree.variables().count(), 1);
+    }
+
+    #[test]
+    fn rational_initializer() {
+        let parse = parse_str("var r: rational := 1.5e-3;");
+        assert!(parse.errors.is_empty());
+        assert!(
+            parse
+                .tree
+                .variables()
+                .next()
+                .unwrap()
+                .initializer()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn malformed_literal_is_one_error() {
+        let errors = parse_str("var i := 1_000;").errors;
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, Code::InvalidInteger);
+        assert_eq!(parse_str("var t := \"abc;").errors.len(), 1);
     }
 
     #[test]

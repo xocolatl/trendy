@@ -1,7 +1,9 @@
-//! The examples in every `trendyc --explain` page must behave as documented:
-//! a ```` ```trendy,error ```` block produces its code, and a ```` ```trendy ````
-//! block compiles cleanly. Where every error in a failing example carries a
-//! fix, applying the fixes must produce a valid program.
+//! The examples in every `trendyc --explain` page, and in
+//! `docs/language.md`, must behave as documented: a ```` ```trendy ```` block
+//! compiles cleanly, and a ```` ```trendy,error ```` block doesn't (in an
+//! explanation, it must produce that page's code). Where every error in a
+//! failing explanation example carries a fix, applying the fixes must resolve
+//! that code.
 
 use trendy_diag::{Code, Diagnostic};
 
@@ -79,6 +81,31 @@ fn explanation_examples_behave_as_documented() {
                 }
                 other => panic!("{code}: unknown code block `{other}`"),
             }
+        }
+    }
+}
+
+#[test]
+fn language_reference_examples_behave_as_documented() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/language.md");
+    let reference = std::fs::read_to_string(path).unwrap();
+    let blocks: Vec<_> = code_blocks(&reference)
+        .into_iter()
+        .filter(|(info, _)| info.starts_with("trendy"))
+        .collect();
+    assert!(!blocks.is_empty());
+    for (info, source) in blocks {
+        let errors = errors(&source);
+        match info {
+            "trendy" => assert!(
+                errors.is_empty(),
+                "docs/language.md example has errors:\n{source}\n{errors:#?}"
+            ),
+            "trendy,error" => assert!(
+                !errors.is_empty(),
+                "docs/language.md failing example compiles:\n{source}"
+            ),
+            other => panic!("docs/language.md: unknown code block `{other}`"),
         }
     }
 }

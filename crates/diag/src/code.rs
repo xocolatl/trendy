@@ -11,18 +11,38 @@ pub enum Code {
     MissingToken,
     WrongDelimiter,
     ExpectedDefinition,
-    DuplicateOperator,
+    AssignmentWithEq,
+    UnterminatedText,
+    InvalidEscape,
+    InvalidInteger,
+    InvalidRational,
+    DuplicateName,
     MissingMain,
+    UnknownType,
+    TypeMismatch,
+    IntegerOutOfRange,
+    UntypedVariable,
+    RationalOutOfRange,
 }
 
 impl Code {
-    pub const ALL: [Code; 6] = [
+    pub const ALL: [Code; 16] = [
         Code::UnexpectedCharacter,
         Code::MissingToken,
         Code::WrongDelimiter,
         Code::ExpectedDefinition,
-        Code::DuplicateOperator,
+        Code::AssignmentWithEq,
+        Code::UnterminatedText,
+        Code::InvalidEscape,
+        Code::InvalidInteger,
+        Code::InvalidRational,
+        Code::DuplicateName,
         Code::MissingMain,
+        Code::UnknownType,
+        Code::TypeMismatch,
+        Code::IntegerOutOfRange,
+        Code::UntypedVariable,
+        Code::RationalOutOfRange,
     ];
 
     #[must_use]
@@ -32,8 +52,18 @@ impl Code {
             Code::MissingToken => "E0002",
             Code::WrongDelimiter => "E0003",
             Code::ExpectedDefinition => "E0004",
-            Code::DuplicateOperator => "E0101",
+            Code::AssignmentWithEq => "E0005",
+            Code::UnterminatedText => "E0006",
+            Code::InvalidEscape => "E0007",
+            Code::InvalidInteger => "E0008",
+            Code::InvalidRational => "E0009",
+            Code::DuplicateName => "E0101",
             Code::MissingMain => "E0102",
+            Code::UnknownType => "E0103",
+            Code::TypeMismatch => "E0104",
+            Code::IntegerOutOfRange => "E0105",
+            Code::UntypedVariable => "E0106",
+            Code::RationalOutOfRange => "E0107",
         }
     }
 
@@ -53,8 +83,18 @@ impl Code {
             Code::MissingToken => include_str!("../errors/E0002.md"),
             Code::WrongDelimiter => include_str!("../errors/E0003.md"),
             Code::ExpectedDefinition => include_str!("../errors/E0004.md"),
-            Code::DuplicateOperator => include_str!("../errors/E0101.md"),
+            Code::AssignmentWithEq => include_str!("../errors/E0005.md"),
+            Code::UnterminatedText => include_str!("../errors/E0006.md"),
+            Code::InvalidEscape => include_str!("../errors/E0007.md"),
+            Code::InvalidInteger => include_str!("../errors/E0008.md"),
+            Code::InvalidRational => include_str!("../errors/E0009.md"),
+            Code::DuplicateName => include_str!("../errors/E0101.md"),
             Code::MissingMain => include_str!("../errors/E0102.md"),
+            Code::UnknownType => include_str!("../errors/E0103.md"),
+            Code::TypeMismatch => include_str!("../errors/E0104.md"),
+            Code::IntegerOutOfRange => include_str!("../errors/E0105.md"),
+            Code::UntypedVariable => include_str!("../errors/E0106.md"),
+            Code::RationalOutOfRange => include_str!("../errors/E0107.md"),
         }
     }
 }

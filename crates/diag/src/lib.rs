@@ -184,3 +184,47 @@ pub fn render_all(diagnostics: &[Diagnostic], format: Format, path: &str, source
             .collect(),
     }
 }
+
+/// Join items for prose: `a`, `a and b`, or `a, b and c`.
+#[must_use]
+pub fn conjoin(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [only] => only.clone(),
+        [init @ .., last] => format!("{} and {last}", init.join(", ")),
+    }
+}
+
+/// Levenshtein distance, comparing case-insensitively. Used to suggest the
+/// name that a misspelled one was probably meant to be.
+#[must_use]
+pub fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.to_lowercase().chars().collect();
+    let b: Vec<char> = b.to_lowercase().chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let substitute = diagonal + usize::from(ca != cb);
+            diagonal = row[j + 1];
+            row[j + 1] = substitute.min(row[j] + 1).min(row[j + 1] + 1);
+        }
+    }
+    row[b.len()]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edit_distances() {
+        assert_eq!(edit_distance("operator", "operator"), 0);
+        assert_eq!(edit_distance("Operator", "operator"), 0);
+        assert_eq!(edit_distance("opertor", "operator"), 1);
+        assert_eq!(edit_distance("oprator", "operator"), 1);
+        assert_eq!(edit_distance("operater", "operator"), 1);
+        assert_eq!(edit_distance("main", "operator"), 7);
+    }
+}

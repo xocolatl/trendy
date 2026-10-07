@@ -35,7 +35,9 @@ impl Client {
         assert_eq!(result["capabilities"]["codeActionProvider"], true);
         assert_eq!(
             result["capabilities"]["semanticTokensProvider"]["legend"]["tokenTypes"],
-            json!(["keyword", "function"])
+            json!([
+                "keyword", "function", "variable", "type", "number", "string"
+            ])
         );
         client.notify("initialized", json!({}));
         client

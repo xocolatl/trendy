@@ -1,31 +1,51 @@
 //! The parser's diagnostics. Each one says where the fix goes and, when the
 //! fix is mechanical, carries it.
 
-use trendy_diag::{Code, Diagnostic, Edit, Span};
+use trendy_diag::{Code, Diagnostic, Edit, Span, edit_distance};
 use trendy_syntax::SyntaxKind;
 
 use crate::Found;
 
-const DEFINITION_FORM: &str = "an operator definition has the form `operator name{} [];`";
+pub(crate) const OPERATOR_FORM: &str = "an operator definition has the form `operator name{} [];`";
+pub(crate) const VARIABLE_FORM: &str = "a variable declaration has the form `var name: type := value;`, where either the type or the value may be left out";
 
-/// Keywords other languages use to start a definition, which models and
-/// people tend to write from habit.
-const FOREIGN_DEFINITION_KEYWORDS: &[&str] = &[
+/// Words other languages use to start a definition or declaration, which
+/// models and people tend to write from habit: keywords such as `fn` and
+/// `let`, and type names that C-family languages put first, such as `int`.
+const FOREIGN_KEYWORDS: &[&str] = &[
+    "auto",
+    "bool",
+    "char",
+    "const",
     "def",
+    "double",
     "fn",
     "fun",
     "func",
     "function",
     "int",
+    "let",
+    "long",
     "method",
     "proc",
     "procedure",
+    "static",
+    "string",
     "sub",
+    "val",
     "void",
 ];
 
-/// `expected` should have come right before `found`, at `at`.
-pub(crate) fn missing(expected: &[SyntaxKind], found: Option<Found>, at: Span) -> Diagnostic {
+/// `expected` should have come right before `found`, at `at`, in a
+/// definition of the given `form`. `help` says what to write when it can't be
+/// inserted mechanically.
+pub(crate) fn missing(
+    expected: &[SyntaxKind],
+    found: Option<Found>,
+    at: Span,
+    form: &str,
+    help: Option<&str>,
+) -> Diagnostic {
     let found_desc = found.map_or_else(|| "end of file".to_string(), |f| f.describe());
     let mut d = Diagnostic::error(
         Code::MissingToken,
@@ -33,10 +53,10 @@ pub(crate) fn missing(expected: &[SyntaxKind], found: Option<Found>, at: Span) -
         at,
         format!("expected {} here", describe_sequence(expected)),
     )
-    .with_note(DEFINITION_FORM);
+    .with_note(form);
 
     if let Some(found) = found.filter(|f| f.span.start != at.start) {
-        let label = if found.kind == SyntaxKind::OperatorKw {
+        let label = if matches!(found.kind, SyntaxKind::OperatorKw | SyntaxKind::VarKw) {
             "the next definition starts here".to_string()
         } else {
             format!("found {found_desc}")
@@ -53,10 +73,10 @@ pub(crate) fn missing(expected: &[SyntaxKind], found: Option<Found>, at: Span) -
                 replacement: text,
             }],
         ),
-        None if expected.contains(&SyntaxKind::Ident) => {
-            d.with_help("add a name after `operator`, such as `operator main{} [];`")
-        }
-        None => d,
+        None => match help {
+            Some(help) => d.with_help(help),
+            None => d,
+        },
     }
 }
 
@@ -120,66 +140,70 @@ pub(crate) fn wrong_delimiter(
     d.with_suggestion(format!("use `{right_open}{right_close}`"), edits)
 }
 
-/// Text at `span`, starting with `first`, that isn't part of any definition.
-pub(crate) fn expected_definition(first: Found, next: Option<Found>, span: Span) -> Diagnostic {
-    let d = Diagnostic::error(
-        Code::ExpectedDefinition,
-        format!(
-            "expected an operator definition, found {}",
-            first.describe()
-        ),
+/// `=` where `:=` belongs.
+pub(crate) fn assignment_with_eq(span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::AssignmentWithEq,
+        "expected `:=` for the initial value, found `=`",
         span,
-        "not part of any definition",
+        "`=` is not assignment",
     )
-    .with_note("every top-level item is an operator definition, starting with `operator`");
-
-    // `fn main…` or `opertor main…`: a definition with the wrong keyword.
-    let names_something = next.is_some_and(|n| n.kind == SyntaxKind::Ident);
-    let looks_like_keyword = first.kind == SyntaxKind::Ident
-        && (FOREIGN_DEFINITION_KEYWORDS.contains(&first.text)
-            || (first.text.len() >= 5 && edit_distance(first.text, "operator") <= 2));
-    if !(names_something && looks_like_keyword) {
-        return d;
-    }
-    d.with_suggestion(
-        format!("replace `{}` with `operator`", first.text),
+    .with_note("in trendy, as in Tutorial D, `=` means equality; assignment is `:=`")
+    .with_suggestion(
+        "write `:=`",
         vec![Edit {
-            span: first.span,
-            replacement: "operator".to_string(),
+            span,
+            replacement: ":=".to_string(),
         }],
     )
 }
 
-/// Levenshtein distance, comparing case-insensitively.
-fn edit_distance(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.to_lowercase().chars().collect();
-    let b: Vec<char> = b.to_lowercase().chars().collect();
-    let mut row: Vec<usize> = (0..=b.len()).collect();
-    for (i, ca) in a.iter().enumerate() {
-        let mut diagonal = row[0];
-        row[0] = i + 1;
-        for (j, cb) in b.iter().enumerate() {
-            let substitute = diagonal + usize::from(ca != cb);
-            diagonal = row[j + 1];
-            row[j + 1] = substitute.min(row[j] + 1).min(row[j + 1] + 1);
-        }
+/// Text at `span`, starting with `first`, that isn't part of any definition.
+/// `name` and `after_name` are the two tokens after `first`.
+pub(crate) fn expected_definition(
+    first: Found,
+    name: Option<Found>,
+    after_name: Option<Found>,
+    span: Span,
+) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::ExpectedDefinition,
+        format!("expected a definition, found {}", first.describe()),
+        span,
+        "not part of any definition",
+    )
+    .with_note(
+        "every top-level item is an operator definition, starting with `operator`, or a variable declaration, starting with `var`",
+    );
+
+    // `fn main{…`, `let x = …` or `opertor main…`: a definition with the wrong
+    // keyword. What follows the name says which kind of definition it is.
+    if first.kind != SyntaxKind::Ident || name.is_none_or(|n| n.kind != SyntaxKind::Ident) {
+        return d;
     }
-    row[b.len()]
+    let keyword = match after_name.map(|f| f.kind) {
+        Some(SyntaxKind::LBrace | SyntaxKind::LParen | SyntaxKind::LBracket) => "operator",
+        Some(SyntaxKind::Eq | SyntaxKind::ColonEq | SyntaxKind::Colon | SyntaxKind::Semicolon) => {
+            "var"
+        }
+        _ => return d,
+    };
+    let misspelled = first.text.len() >= 5 && edit_distance(first.text, keyword) <= 2;
+    if !(FOREIGN_KEYWORDS.contains(&first.text) || misspelled) {
+        return d;
+    }
+    d.with_suggestion(
+        format!("replace `{}` with `{keyword}`", first.text),
+        vec![Edit {
+            span: first.span,
+            replacement: keyword.to_string(),
+        }],
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn edit_distances() {
-        assert_eq!(edit_distance("operator", "operator"), 0);
-        assert_eq!(edit_distance("Operator", "operator"), 0);
-        assert_eq!(edit_distance("opertor", "operator"), 1);
-        assert_eq!(edit_distance("oprator", "operator"), 1);
-        assert_eq!(edit_distance("operater", "operator"), 1);
-        assert_eq!(edit_distance("main", "operator"), 7);
-    }
 
     #[test]
     fn sequence_descriptions() {

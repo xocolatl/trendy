@@ -14,6 +14,11 @@ pub enum Class {
     Keyword,
     /// An operator's name.
     Operator,
+    /// A variable's name.
+    Variable,
+    Type,
+    Number,
+    Text,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +46,12 @@ fn classify(token: &SyntaxToken) -> Option<Highlight> {
         (SyntaxKind::Ident, Some(SyntaxKind::Name), Some(SyntaxKind::Operator)) => {
             (Class::Operator, true)
         }
+        (SyntaxKind::Ident, Some(SyntaxKind::Name), Some(SyntaxKind::VarDecl)) => {
+            (Class::Variable, true)
+        }
+        (SyntaxKind::Ident, Some(SyntaxKind::TypeRef), _) => (Class::Type, false),
+        (SyntaxKind::IntLiteral | SyntaxKind::RationalLiteral, _, _) => (Class::Number, false),
+        (SyntaxKind::TextLiteral, _, _) => (Class::Text, false),
         _ => return None,
     };
     Some(Highlight {
@@ -69,6 +80,25 @@ mod tests {
             [
                 ("operator", Class::Keyword, false),
                 ("main", Class::Operator, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn variables() {
+        assert_eq!(
+            highlight("var t: text := \"x\";\nvar i := 0;\nvar r := 1e5;"),
+            [
+                ("var", Class::Keyword, false),
+                ("t", Class::Variable, true),
+                ("text", Class::Type, false),
+                ("\"x\"", Class::Text, false),
+                ("var", Class::Keyword, false),
+                ("i", Class::Variable, true),
+                ("0", Class::Number, false),
+                ("var", Class::Keyword, false),
+                ("r", Class::Variable, true),
+                ("1e5", Class::Number, false),
             ]
         );
     }

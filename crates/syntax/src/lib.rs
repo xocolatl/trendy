@@ -9,6 +9,7 @@
 //! layers.
 
 pub mod ast;
+pub mod literal;
 
 use std::fmt::Write;
 
@@ -23,13 +24,29 @@ pub enum SyntaxKind {
     // Tokens.
     Ident,
     OperatorKw,
+    VarKw,
     LBrace,
     RBrace,
     LBracket,
     RBracket,
+    /// Not in the grammar yet; lexed so that C-style `()` can be recognized
+    /// and fixed.
     LParen,
     RParen,
+    Colon,
+    ColonEq,
+    /// Not in the grammar yet; lexed so that `=` written for `:=` can be
+    /// recognized and fixed.
+    Eq,
     Semicolon,
+    /// Digits, possibly followed by other identifier characters. Malformed
+    /// literals keep this kind, so one mistake gives one error.
+    IntLiteral,
+    /// Digits with a decimal point, an exponent, or both. Malformed literals
+    /// keep this kind too.
+    RationalLiteral,
+    /// `"…"`, including an unterminated one.
+    TextLiteral,
     /// A character the lexer does not recognize.
     ErrorToken,
 
@@ -37,34 +54,54 @@ pub enum SyntaxKind {
     SourceFile,
     /// `operator name{params} [body];`
     Operator,
+    /// `var name: type := value;`
+    VarDecl,
     Name,
     /// `{…}`
     ParamList,
     /// `[…]`
     Body,
+    /// `: type`
+    TypeAnnotation,
+    TypeRef,
+    /// `:= value`
+    Initializer,
+    Literal,
     /// Tokens the parser could not fit into the grammar.
     Error,
 }
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 17] = [
+    pub const ALL: [SyntaxKind; 29] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Ident,
         SyntaxKind::OperatorKw,
+        SyntaxKind::VarKw,
         SyntaxKind::LBrace,
         SyntaxKind::RBrace,
         SyntaxKind::LBracket,
         SyntaxKind::RBracket,
         SyntaxKind::LParen,
         SyntaxKind::RParen,
+        SyntaxKind::Colon,
+        SyntaxKind::ColonEq,
+        SyntaxKind::Eq,
         SyntaxKind::Semicolon,
+        SyntaxKind::IntLiteral,
+        SyntaxKind::RationalLiteral,
+        SyntaxKind::TextLiteral,
         SyntaxKind::ErrorToken,
         SyntaxKind::SourceFile,
         SyntaxKind::Operator,
+        SyntaxKind::VarDecl,
         SyntaxKind::Name,
         SyntaxKind::ParamList,
         SyntaxKind::Body,
+        SyntaxKind::TypeAnnotation,
+        SyntaxKind::TypeRef,
+        SyntaxKind::Initializer,
+        SyntaxKind::Literal,
         SyntaxKind::Error,
     ];
 
@@ -75,7 +112,7 @@ impl SyntaxKind {
 
     #[must_use]
     pub fn is_keyword(self) -> bool {
-        matches!(self, SyntaxKind::OperatorKw)
+        matches!(self, SyntaxKind::OperatorKw | SyntaxKind::VarKw)
     }
 
     /// The keyword spelled `text`, if it is one.
@@ -97,12 +134,16 @@ impl SyntaxKind {
     pub fn fixed_text(self) -> Option<&'static str> {
         Some(match self {
             SyntaxKind::OperatorKw => "operator",
+            SyntaxKind::VarKw => "var",
             SyntaxKind::LBrace => "{",
             SyntaxKind::RBrace => "}",
             SyntaxKind::LBracket => "[",
             SyntaxKind::RBracket => "]",
             SyntaxKind::LParen => "(",
             SyntaxKind::RParen => ")",
+            SyntaxKind::Colon => ":",
+            SyntaxKind::ColonEq => ":=",
+            SyntaxKind::Eq => "=",
             SyntaxKind::Semicolon => ";",
             _ => return None,
         })
@@ -115,19 +156,31 @@ impl SyntaxKind {
             SyntaxKind::Whitespace => "whitespace",
             SyntaxKind::Ident => "identifier",
             SyntaxKind::OperatorKw => "`operator`",
+            SyntaxKind::VarKw => "`var`",
             SyntaxKind::LBrace => "`{`",
             SyntaxKind::RBrace => "`}`",
             SyntaxKind::LBracket => "`[`",
             SyntaxKind::RBracket => "`]`",
             SyntaxKind::LParen => "`(`",
             SyntaxKind::RParen => "`)`",
+            SyntaxKind::Colon => "`:`",
+            SyntaxKind::ColonEq => "`:=`",
+            SyntaxKind::Eq => "`=`",
             SyntaxKind::Semicolon => "`;`",
+            SyntaxKind::IntLiteral => "integer literal",
+            SyntaxKind::RationalLiteral => "rational literal",
+            SyntaxKind::TextLiteral => "text literal",
             SyntaxKind::ErrorToken => "unrecognized character",
             SyntaxKind::SourceFile => "source file",
             SyntaxKind::Operator => "operator definition",
+            SyntaxKind::VarDecl => "variable declaration",
             SyntaxKind::Name => "name",
             SyntaxKind::ParamList => "parameter list",
             SyntaxKind::Body => "body",
+            SyntaxKind::TypeAnnotation => "type annotation",
+            SyntaxKind::TypeRef => "type",
+            SyntaxKind::Initializer => "initial value",
+            SyntaxKind::Literal => "literal",
             SyntaxKind::Error => "error",
         }
     }

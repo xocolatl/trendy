@@ -48,6 +48,8 @@ in the "Diagnostics" section of `docs/pipeline.md`.
 
 ## Conventions
 
+- `docs/language.md` is the language reference. Update it with every language
+  change; its examples are compiled by `crates/trendyc/tests/explanations.rs`.
 - `docs/pipeline.md` defines the compiler layers. Its `layers` block is
   enforced by `crates/trendyc/tests/layers.rs`, so a dependency change means
   editing the doc.

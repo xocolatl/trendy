@@ -26,52 +26,126 @@ fn punctuation_scope(kind: SyntaxKind) -> &'static str {
         SyntaxKind::LBrace | SyntaxKind::RBrace => "punctuation.section.braces.trendy",
         SyntaxKind::LBracket | SyntaxKind::RBracket => "punctuation.section.brackets.trendy",
         SyntaxKind::LParen | SyntaxKind::RParen => "punctuation.section.parens.trendy",
+        SyntaxKind::Colon => "punctuation.separator.type.trendy",
+        SyntaxKind::ColonEq => "keyword.operator.assignment.trendy",
+        SyntaxKind::Eq => "keyword.operator.comparison.trendy",
         SyntaxKind::Semicolon => "punctuation.terminator.trendy",
         other => panic!("choose a TextMate scope for the new punctuation {other:?}"),
     }
 }
 
-/// Every character for which `accepts` holds, as a regex character class.
-fn char_class(accepts: impl Fn(char) -> bool) -> String {
-    let mut ranges: Vec<(char, char)> = Vec::new();
-    for c in (0..=u32::from(char::MAX)).filter_map(char::from_u32) {
-        if !accepts(c) {
-            continue;
-        }
-        match ranges.last_mut() {
-            Some((_, end)) if u32::from(*end) + 1 == u32::from(c) => *end = c,
-            _ => ranges.push((c, c)),
+/// A set of characters, built in increasing order.
+#[derive(Default)]
+struct CharClass(Vec<(char, char)>);
+
+impl CharClass {
+    fn add(&mut self, c: char) {
+        self.add_range(c, c);
+    }
+
+    /// Add `start..=end`, which must come after everything already added.
+    fn add_range(&mut self, start: char, end: char) {
+        match self.0.last_mut() {
+            Some((_, last)) if u32::from(*last) + 1 == u32::from(start) => *last = end,
+            _ => self.0.push((start, end)),
         }
     }
-    let one = |c: char| match c {
-        'a'..='z' | 'A'..='Z' | '0'..='9' | '_' => c.to_string(),
-        _ => format!("\\x{{{:X}}}", u32::from(c)),
-    };
-    let body: String = ranges
-        .iter()
-        .map(|&(start, end)| match u32::from(end) - u32::from(start) {
-            0 => one(start),
-            1 => one(start) + &one(end),
-            _ => format!("{}-{}", one(start), one(end)),
-        })
-        .collect();
-    format!("[{body}]")
+
+    /// Append `other`, whose characters all come after this class's.
+    fn extend(&mut self, other: &CharClass) {
+        for &(start, end) in &other.0 {
+            self.add_range(start, end);
+        }
+    }
+
+    /// As a regex character class.
+    fn pattern(&self) -> String {
+        let one = |c: char| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '_' => c.to_string(),
+            _ => format!("\\x{{{:X}}}", u32::from(c)),
+        };
+        let body: String = self
+            .0
+            .iter()
+            .map(|&(start, end)| match u32::from(end) - u32::from(start) {
+                0 => one(start),
+                1 => one(start) + &one(end),
+                _ => format!("{}-{}", one(start), one(end)),
+            })
+            .collect();
+        format!("[{body}]")
+    }
 }
 
-/// The lexer's identifier syntax, found by asking the lexer about every
-/// character.
-fn identifier_pattern() -> String {
-    let single = |s: &str| {
-        let lexed = trendy_lexer::lex(s);
-        lexed.tokens.len() == 1 && lexed.errors.is_empty()
+/// Word-like token syntax, found by asking the lexer about every character.
+struct Probed {
+    identifier: String,
+    number: String,
+}
+
+fn probe() -> Probed {
+    // Every character is probed independently, so the work is split across
+    // threads by code point range and the results joined in order.
+    let threads = std::thread::available_parallelism().map_or(1, usize::from);
+    let chunk = (u32::from(char::MAX) + 1).div_ceil(u32::try_from(threads).unwrap());
+    let parts: Vec<[CharClass; 4]> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..threads)
+            .map(|t| {
+                let start = chunk * u32::try_from(t).unwrap();
+                let end = (start + chunk).min(u32::from(char::MAX) + 1);
+                scope.spawn(move || probe_range(start..end))
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let mut classes: [CharClass; 4] = Default::default();
+    for part in &parts {
+        for (class, piece) in classes.iter_mut().zip(part) {
+            class.extend(piece);
+        }
+    }
+    let [ident_start, ident_continue, number_start, number_continue] = classes;
+    // A sign continues a number only directly after an exponent marker.
+    let markers: String = trendy_syntax::literal::EXPONENT_MARKERS.iter().collect();
+    Probed {
+        identifier: format!("{}{}*", ident_start.pattern(), ident_continue.pattern()),
+        number: format!(
+            "{}(?:[{markers}][+\\-]|{})*",
+            number_start.pattern(),
+            number_continue.pattern()
+        ),
+    }
+}
+
+/// For the code points in `range`: identifier start, identifier
+/// continuation, number start, and number continuation characters.
+fn probe_range(range: std::ops::Range<u32>) -> [CharClass; 4] {
+    let single = |s: &str, want: &dyn Fn(SyntaxKind) -> bool| {
+        let tokens = trendy_lexer::lex(s).tokens;
+        tokens.len() == 1 && want(tokens[0].kind)
     };
     let is_word = |kind: SyntaxKind| kind == SyntaxKind::Ident || kind.is_keyword();
-    let start = char_class(|c| {
-        let s = c.to_string();
-        single(&s) && is_word(trendy_lexer::lex(&s).tokens[0].kind)
-    });
-    let continuation = char_class(|c| single(&format!("a{c}")));
-    format!("{start}{continuation}*")
+    let is_number =
+        |kind: SyntaxKind| matches!(kind, SyntaxKind::IntLiteral | SyntaxKind::RationalLiteral);
+    let mut classes: [CharClass; 4] = Default::default();
+    for c in range.filter_map(char::from_u32) {
+        let alone = c.to_string();
+        if single(&alone, &is_word) && trendy_lexer::lex(&alone).errors.is_empty() {
+            classes[0].add(c);
+        }
+        if single(&format!("a{c}"), &is_word) {
+            classes[1].add(c);
+        }
+        if single(&alone, &is_number) {
+            classes[2].add(c);
+        }
+        // Valid or not, a character that continues a number is colored as
+        // part of it; the diagnostic says what's wrong.
+        if single(&format!("1{c}"), &is_number) {
+            classes[3].add(c);
+        }
+    }
+    classes
 }
 
 fn regex_escape(text: &str) -> String {
@@ -86,25 +160,43 @@ fn regex_escape(text: &str) -> String {
         .collect()
 }
 
-fn generate() -> Value {
+fn generate(probed: &Probed) -> Value {
     let kinds = SyntaxKind::ALL;
+    let keyword = |kind: SyntaxKind| regex_escape(kind.fixed_text().unwrap());
     let keywords: Vec<_> = kinds
-        .iter()
+        .into_iter()
         .filter(|k| k.is_keyword())
-        .map(|k| regex_escape(k.fixed_text().unwrap()))
+        .map(keyword)
         .collect();
-    let identifier = identifier_pattern();
-    let definition_keyword = regex_escape(SyntaxKind::OperatorKw.fixed_text().unwrap());
+    let identifier = &probed.identifier;
 
-    let mut punctuation: Vec<(&str, String)> = Vec::new();
-    for kind in kinds.iter().filter(|k| k.is_punctuation()) {
-        let text = regex_escape(kind.fixed_text().unwrap());
-        let scope = punctuation_scope(*kind);
+    // Group punctuation by scope; longer tokens are tried first, so that
+    // `:=` isn't taken for `:` followed by `=`.
+    let mut punctuation: Vec<(&str, Vec<&str>)> = Vec::new();
+    for kind in kinds.into_iter().filter(|k| k.is_punctuation()) {
+        let text = kind.fixed_text().unwrap();
+        let scope = punctuation_scope(kind);
         match punctuation.iter_mut().find(|(s, _)| *s == scope) {
-            Some((_, chars)) => chars.push_str(&text),
-            None => punctuation.push((scope, text)),
+            Some((_, texts)) => texts.push(text),
+            None => punctuation.push((scope, vec![text])),
         }
     }
+    let longest = |texts: &[&str]| texts.iter().map(|t| t.len()).max().unwrap();
+    punctuation.sort_by_key(|(_, texts)| std::cmp::Reverse(longest(texts)));
+    let punctuation_patterns: Vec<_> = punctuation
+        .iter()
+        .map(|(scope, texts)| {
+            let mut texts = texts.clone();
+            texts.sort_by_key(|t| std::cmp::Reverse(t.len()));
+            let alternatives: Vec<_> = texts.iter().map(|t| regex_escape(t)).collect();
+            json!({ "match": alternatives.join("|"), "name": scope })
+        })
+        .collect();
+
+    let simple_escapes: String = trendy_syntax::literal::SIMPLE_ESCAPES
+        .iter()
+        .map(|(c, _)| regex_escape(&c.to_string()))
+        .collect();
 
     json!({
         "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
@@ -112,35 +204,69 @@ fn generate() -> Value {
         "scopeName": "source.trendy",
         "comment": "Generated from the lexer by crates/lsp/tests/textmate.rs. Do not edit: run `UPDATE_TEXTMATE=1 cargo test -p trendy_lsp --test textmate`.",
         "patterns": [
-            { "include": "#definition" },
+            { "include": "#operator-definition" },
+            { "include": "#variable-declaration" },
             { "include": "#keywords" },
+            { "include": "#number" },
+            { "include": "#text" },
             { "include": "#punctuation" },
         ],
         "repository": {
-            "definition": {
-                "match": format!("\\b({definition_keyword})\\s+({identifier})"),
+            "operator-definition": {
+                "match": format!("\\b({})\\s+({identifier})", keyword(SyntaxKind::OperatorKw)),
                 "captures": {
                     "1": { "name": "keyword.other.trendy" },
                     "2": { "name": "entity.name.function.trendy" },
+                },
+            },
+            "variable-declaration": {
+                "match": format!(
+                    "\\b({})\\s+({identifier})(?:\\s*({})\\s*({identifier}))?",
+                    keyword(SyntaxKind::VarKw),
+                    regex_escape(SyntaxKind::Colon.fixed_text().unwrap()),
+                ),
+                "captures": {
+                    "1": { "name": "keyword.other.trendy" },
+                    "2": { "name": "variable.other.definition.trendy" },
+                    "3": { "name": punctuation_scope(SyntaxKind::Colon) },
+                    "4": { "name": "entity.name.type.trendy" },
                 },
             },
             "keywords": {
                 "match": format!("\\b(?:{})\\b", keywords.join("|")),
                 "name": "keyword.other.trendy",
             },
-            "punctuation": {
-                "patterns": punctuation
-                    .iter()
-                    .map(|(scope, chars)| json!({ "match": format!("[{chars}]"), "name": scope }))
-                    .collect::<Vec<_>>(),
+            "number": {
+                "match": format!("\\b{}", probed.number),
+                "name": "constant.numeric.trendy",
             },
+            // Like the lexer, an unterminated literal ends at the end of the
+            // line.
+            "text": {
+                "begin": "\"",
+                "end": "\"|$",
+                "name": "string.quoted.double.trendy",
+                "patterns": [
+                    {
+                        // The `\u{…}` form is defined in trendy_syntax::literal.
+                        "match": format!("\\\\(?:[{simple_escapes}]|u\\{{[0-9A-Fa-f]{{1,6}}\\}})"),
+                        "name": "constant.character.escape.trendy",
+                    },
+                    { "match": "\\\\.", "name": "invalid.illegal.escape.trendy" },
+                ],
+            },
+            "punctuation": { "patterns": punctuation_patterns },
         },
     })
 }
 
 #[test]
 fn grammar_is_generated_from_the_lexer() {
-    let expected = generate();
+    let probed = probe();
+    assert_eq!(probed.identifier, "[A-Z_a-z][0-9A-Z_a-z]*");
+    assert_eq!(probed.number, "[0-9](?:[eE][+\\-]|[\\x{2E}0-9A-Z_a-z])*");
+
+    let expected = generate(&probed);
     let path = grammar_path();
     if std::env::var_os("UPDATE_TEXTMATE").is_some() {
         let text = serde_json::to_string_pretty(&expected).unwrap() + "\n";
@@ -153,9 +279,4 @@ fn grammar_is_generated_from_the_lexer() {
         "{} is out of date; run `UPDATE_TEXTMATE=1 cargo test -p trendy_lsp --test textmate`",
         path.display()
     );
-}
-
-#[test]
-fn identifier_pattern_matches_the_lexer() {
-    assert_eq!(identifier_pattern(), "[A-Z_a-z][0-9A-Z_a-z]*");
 }

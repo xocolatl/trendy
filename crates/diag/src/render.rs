@@ -231,7 +231,7 @@ help: insert `]`
     fn labels_on_one_line_get_a_row_each() {
         let source = "operator a{}[]; operator a{}[];";
         let d = Diagnostic::error(
-            Code::DuplicateOperator,
+            Code::DuplicateName,
             "operator `a` is defined more than once",
             Span::new(25, 26),
             "redefined here",
@@ -278,7 +278,7 @@ error[E0101]: operator `a` is defined more than once
     #[test]
     fn distant_lines_are_elided() {
         let source = "a\nb\nc\nd\n";
-        let d = Diagnostic::error(Code::DuplicateOperator, "m", Span::new(6, 7), "here")
+        let d = Diagnostic::error(Code::DuplicateName, "m", Span::new(6, 7), "here")
             .with_secondary(Span::new(0, 1), "there");
         assert!(
             d.render("f", source)

@@ -1,0 +1,6 @@
+var i: integer := 0;
+var r1: rational := 0.0;
+var r2: rational := 0e0;
+var t: text := "";
+
+operator main{} [];

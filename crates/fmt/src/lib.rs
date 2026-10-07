@@ -6,8 +6,8 @@
 //! survive formatting once the language has them. This crate defines the
 //! language's layout: whatever it prints is the style.
 
-use trendy_syntax::SyntaxKind;
 use trendy_syntax::ast::{AstNode, SourceFile};
+use trendy_syntax::{SyntaxKind, SyntaxToken};
 
 /// Render a file in canonical style.
 ///
@@ -17,7 +17,7 @@ use trendy_syntax::ast::{AstNode, SourceFile};
 #[must_use]
 pub fn format(file: &SourceFile) -> String {
     let mut out = String::new();
-    let mut prev = None;
+    let mut prev: Option<SyntaxToken> = None;
     let tokens = file
         .syntax()
         .descendants_with_tokens()
@@ -25,11 +25,11 @@ pub fn format(file: &SourceFile) -> String {
         .filter(|t| t.kind() != SyntaxKind::Whitespace);
 
     for token in tokens {
-        if let Some(prev) = prev {
-            out.push_str(separator(prev, token.kind()));
+        if let Some(prev) = &prev {
+            out.push_str(separator(prev, &token));
         }
         out.push_str(token.text());
-        prev = Some(token.kind());
+        prev = Some(token);
     }
     if prev.is_some() {
         out.push('\n');
@@ -38,14 +38,29 @@ pub fn format(file: &SourceFile) -> String {
 }
 
 /// The whitespace that goes between two adjacent tokens.
-fn separator(prev: SyntaxKind, next: SyntaxKind) -> &'static str {
-    use SyntaxKind::{LBracket, OperatorKw, RBrace, Semicolon};
-    match (prev, next) {
-        // Each operator definition ends with `;`; leave a blank line after.
-        (Semicolon, _) => "\n\n",
-        (OperatorKw, _) | (RBrace, LBracket) => " ",
+fn separator(prev: &SyntaxToken, next: &SyntaxToken) -> &'static str {
+    use SyntaxKind::{Colon, ColonEq, LBracket, OperatorKw, RBrace, Semicolon, VarDecl, VarKw};
+    if prev.kind() == Semicolon {
+        // Between definitions: variable declarations in a row stay together,
+        // and everything else is separated by a blank line.
+        let both_variables = item_kind(prev) == Some(VarDecl) && item_kind(next) == Some(VarDecl);
+        return if both_variables { "\n" } else { "\n\n" };
+    }
+    match (prev.kind(), next.kind()) {
+        (OperatorKw | VarKw | Colon | ColonEq, _) | (_, ColonEq) | (RBrace, LBracket) => " ",
         _ => "",
     }
+}
+
+/// The kind of the top-level definition that contains `token`.
+fn item_kind(token: &SyntaxToken) -> Option<SyntaxKind> {
+    token
+        .parent_ancestors()
+        .find(|node| {
+            node.parent()
+                .is_some_and(|p| p.kind() == SyntaxKind::SourceFile)
+        })
+        .map(|node| node.kind())
 }
 
 #[cfg(test)]
@@ -91,6 +106,22 @@ mod tests {
     }
 
     #[test]
+    fn variables() {
+        assert_eq!(
+            fmt("var   i:integer:=0 ;var t :text;var u:=\"x\";\n\n\noperator main{}[];"),
+            "var i: integer := 0;\nvar t: text;\nvar u := \"x\";\n\noperator main{} [];\n"
+        );
+    }
+
+    #[test]
+    fn blank_line_between_variables_and_operators() {
+        assert_eq!(
+            fmt("operator a{}[];var i:=1;operator b{}[];"),
+            "operator a{} [];\n\nvar i := 1;\n\noperator b{} [];\n"
+        );
+    }
+
+    #[test]
     fn empty_file() {
         assert_eq!(fmt("  \n"), "");
     }
@@ -101,6 +132,7 @@ mod tests {
             "operator main{} [];",
             "operator a { } [ ] ; operator main{}[];",
             "\n\n  operator   x{}\n\n\n[];\n\n",
+            "var a:integer:=1;var b:=\"t\\n\";operator main{}[];",
         ] {
             let once = fmt(source);
             assert_eq!(fmt(&once), once, "not idempotent for {source:?}");

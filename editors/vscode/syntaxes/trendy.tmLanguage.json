@@ -4,17 +4,34 @@
   "name": "trendy",
   "patterns": [
     {
-      "include": "#definition"
+      "include": "#operator-definition"
+    },
+    {
+      "include": "#variable-declaration"
     },
     {
       "include": "#keywords"
+    },
+    {
+      "include": "#number"
+    },
+    {
+      "include": "#text"
     },
     {
       "include": "#punctuation"
     }
   ],
   "repository": {
-    "definition": {
+    "keywords": {
+      "match": "\\b(?:operator|var)\\b",
+      "name": "keyword.other.trendy"
+    },
+    "number": {
+      "match": "\\b[0-9](?:[eE][+\\-]|[\\x{2E}0-9A-Z_a-z])*",
+      "name": "constant.numeric.trendy"
+    },
+    "operator-definition": {
       "captures": {
         "1": {
           "name": "keyword.other.trendy"
@@ -25,29 +42,69 @@
       },
       "match": "\\b(operator)\\s+([A-Z_a-z][0-9A-Z_a-z]*)"
     },
-    "keywords": {
-      "match": "\\b(?:operator)\\b",
-      "name": "keyword.other.trendy"
-    },
     "punctuation": {
       "patterns": [
         {
-          "match": "[\\{\\}]",
+          "match": "\\:\\=",
+          "name": "keyword.operator.assignment.trendy"
+        },
+        {
+          "match": "\\{|\\}",
           "name": "punctuation.section.braces.trendy"
         },
         {
-          "match": "[\\[\\]]",
+          "match": "\\[|\\]",
           "name": "punctuation.section.brackets.trendy"
         },
         {
-          "match": "[\\(\\)]",
+          "match": "\\(|\\)",
           "name": "punctuation.section.parens.trendy"
         },
         {
-          "match": "[\\;]",
+          "match": "\\:",
+          "name": "punctuation.separator.type.trendy"
+        },
+        {
+          "match": "\\=",
+          "name": "keyword.operator.comparison.trendy"
+        },
+        {
+          "match": "\\;",
           "name": "punctuation.terminator.trendy"
         }
       ]
+    },
+    "text": {
+      "begin": "\"",
+      "end": "\"|$",
+      "name": "string.quoted.double.trendy",
+      "patterns": [
+        {
+          "match": "\\\\(?:[\\\"\\\\nrt0]|u\\{[0-9A-Fa-f]{1,6}\\})",
+          "name": "constant.character.escape.trendy"
+        },
+        {
+          "match": "\\\\.",
+          "name": "invalid.illegal.escape.trendy"
+        }
+      ]
+    },
+    "variable-declaration": {
+      "captures": {
+        "1": {
+          "name": "keyword.other.trendy"
+        },
+        "2": {
+          "name": "variable.other.definition.trendy"
+        },
+        "3": {
+          "name": "punctuation.separator.type.trendy"
+        },
+        "4": {
+          "name": "entity.name.type.trendy"
+        }
+      },
+      "match": "\\b(var)\\s+([A-Z_a-z][0-9A-Z_a-z]*)(?:\\s*(\\:)\\s*([A-Z_a-z][0-9A-Z_a-z]*))?"
     }
   },
   "scopeName": "source.trendy"

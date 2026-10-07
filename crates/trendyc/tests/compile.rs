@@ -32,6 +32,11 @@ fn empty_main() {
     assert_eq!(compile_and_run("empty_main"), 0);
 }
 
+#[test]
+fn variables() {
+    assert_eq!(compile_and_run("variables"), 0);
+}
+
 /// Run `trendyc` on `source` with `args`, returning (success, stdout, stderr).
 fn trendyc(name: &str, source: &str, args: &[&str]) -> (bool, String, String) {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
