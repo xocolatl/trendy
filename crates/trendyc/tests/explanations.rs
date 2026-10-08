@@ -9,11 +9,16 @@ use trendy_diag::{Code, Diagnostic};
 
 /// Every error in `source`, as the compiler would report it.
 fn errors(source: &str) -> Vec<Diagnostic> {
+    let prelude_source = trendy_prelude::SOURCE;
+    let prelude = trendy_parser::parse(prelude_source, trendy_lexer::lex(prelude_source));
+    let prelude = trendy_sema::Prelude::load(&prelude.tree).unwrap();
     let parse = trendy_parser::parse(source, trendy_lexer::lex(source));
     if !parse.errors.is_empty() {
         return parse.errors;
     }
-    trendy_sema::analyze(&parse.tree).err().unwrap_or_default()
+    trendy_sema::analyze(&prelude, &parse.tree)
+        .err()
+        .unwrap_or_default()
 }
 
 /// Apply each error's first suggestion, or `None` if some error has none.

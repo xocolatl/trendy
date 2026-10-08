@@ -16,6 +16,7 @@ trendy_syntax.workspace = true
 trendy_lexer.workspace = true
 trendy_parser.workspace = true
 trendy_sema.workspace = true
+trendy_prelude.workspace = true
 trendy_fmt.workspace = true
 lsp-server = "0.10.0"
 lsp-types = "0.97.0"

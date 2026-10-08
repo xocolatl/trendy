@@ -38,6 +38,13 @@ macro_rules! ast_node {
 
 ast_node!(SourceFile);
 ast_node!(Operator);
+ast_node!(BuiltinOperator);
+ast_node!(BuiltinType);
+ast_node!(Body);
+ast_node!(CallStmt);
+ast_node!(Arguments);
+ast_node!(PositionalArg);
+ast_node!(NameRef);
 ast_node!(VarDecl);
 ast_node!(Name);
 ast_node!(TypeRef);
@@ -54,6 +61,8 @@ ast_node!(RelationLiteral);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Item {
     Operator(Operator),
+    Builtin(BuiltinOperator),
+    BuiltinType(BuiltinType),
     Variable(VarDecl),
 }
 
@@ -63,6 +72,8 @@ impl SourceFile {
         self.0.children().filter_map(|node| {
             Operator::cast(node.clone())
                 .map(Item::Operator)
+                .or_else(|| BuiltinOperator::cast(node.clone()).map(Item::Builtin))
+                .or_else(|| BuiltinType::cast(node.clone()).map(Item::BuiltinType))
                 .or_else(|| VarDecl::cast(node).map(Item::Variable))
         })
     }
@@ -80,6 +91,105 @@ impl Operator {
     #[must_use]
     pub fn name(&self) -> Option<Name> {
         self.0.children().find_map(Name::cast)
+    }
+
+    /// The parameters: a heading.
+    #[must_use]
+    pub fn params(&self) -> Option<Heading> {
+        self.0.children().find_map(Heading::cast)
+    }
+
+    #[must_use]
+    pub fn body(&self) -> Option<Body> {
+        self.0.children().find_map(Body::cast)
+    }
+}
+
+impl BuiltinOperator {
+    #[must_use]
+    pub fn name(&self) -> Option<Name> {
+        self.0.children().find_map(Name::cast)
+    }
+
+    /// The parameters: a heading.
+    #[must_use]
+    pub fn params(&self) -> Option<Heading> {
+        self.0.children().find_map(Heading::cast)
+    }
+
+    /// The `builtin` keyword.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).find(|t| t.kind() == SyntaxKind::BuiltinKw)
+    }
+}
+
+impl BuiltinType {
+    #[must_use]
+    pub fn name(&self) -> Option<Name> {
+        self.0.children().find_map(Name::cast)
+    }
+
+    /// The `builtin` keyword.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).find(|t| t.kind() == SyntaxKind::BuiltinKw)
+    }
+}
+
+impl Body {
+    pub fn statements(&self) -> impl Iterator<Item = CallStmt> {
+        self.0.children().filter_map(CallStmt::cast)
+    }
+}
+
+impl CallStmt {
+    /// The operator called.
+    #[must_use]
+    pub fn callee(&self) -> Option<NameRef> {
+        self.0.children().find_map(NameRef::cast)
+    }
+
+    #[must_use]
+    pub fn arguments(&self) -> Option<Arguments> {
+        self.0.children().find_map(Arguments::cast)
+    }
+}
+
+impl Arguments {
+    /// The named arguments, `name: value`.
+    pub fn named(&self) -> impl Iterator<Item = AttributeValue> {
+        self.0.children().filter_map(AttributeValue::cast)
+    }
+
+    pub fn positional(&self) -> impl Iterator<Item = PositionalArg> {
+        self.0.children().filter_map(PositionalArg::cast)
+    }
+
+    /// Where a new argument goes, as for [`TupleLiteral::insertion`].
+    #[must_use]
+    pub fn insertion(&self) -> (usize, &'static str, &'static str) {
+        list_insertion(&self.0, self.named().last().map(|a| a.0))
+    }
+
+    /// The span to delete to remove `argument`, with its comma.
+    #[must_use]
+    pub fn removal(&self, argument: &AttributeValue) -> Span {
+        list_removal(argument.syntax())
+    }
+}
+
+impl PositionalArg {
+    #[must_use]
+    pub fn value(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+}
+
+impl NameRef {
+    #[must_use]
+    pub fn ident(&self) -> Option<SyntaxToken> {
+        ident_of(&self.0)
     }
 }
 
@@ -142,12 +252,13 @@ impl TypeExpr {
     }
 }
 
-/// An expression. For now: a literal, a tuple value, or a relation value.
+/// An expression: a literal, a tuple value, a relation value, or a name.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Expr {
     Literal(Literal),
     Tuple(TupleLiteral),
     Relation(RelationLiteral),
+    Name(NameRef),
 }
 
 impl Expr {
@@ -156,7 +267,8 @@ impl Expr {
         Literal::cast(node.clone())
             .map(Expr::Literal)
             .or_else(|| TupleLiteral::cast(node.clone()).map(Expr::Tuple))
-            .or_else(|| RelationLiteral::cast(node).map(Expr::Relation))
+            .or_else(|| RelationLiteral::cast(node.clone()).map(Expr::Relation))
+            .or_else(|| NameRef::cast(node).map(Expr::Name))
     }
 
     #[must_use]
@@ -165,6 +277,7 @@ impl Expr {
             Expr::Literal(e) => e.syntax(),
             Expr::Tuple(e) => e.syntax(),
             Expr::Relation(e) => e.syntax(),
+            Expr::Name(e) => e.syntax(),
         }
     }
 
@@ -223,18 +336,7 @@ impl TupleLiteral {
     /// trailing.
     #[must_use]
     pub fn insertion(&self) -> (usize, &'static str, &'static str) {
-        let Some(last) = self.attributes().last() else {
-            let after_brace = significant_tokens(&self.0)
-                .find(|t| t.kind() == SyntaxKind::LBrace)
-                .map_or_else(|| self.span().end, |t| span(t.text_range()).end);
-            return (after_brace, " ", "");
-        };
-        match next_significant(last.syntax()) {
-            Some(comma) if comma.kind() == SyntaxKind::Comma => {
-                (span(comma.text_range()).end, " ", ",")
-            }
-            _ => (last.span().end, ", ", ""),
-        }
+        list_insertion(&self.0, self.attributes().last().map(|a| a.0))
     }
 
     /// The span to delete to remove `attribute`, including the comma that
@@ -262,6 +364,31 @@ impl RelationLiteral {
     #[must_use]
     pub fn removal(&self, tuple: &TupleLiteral) -> Span {
         list_removal(tuple.syntax())
+    }
+}
+
+/// Where a new element goes in the braced list `container`, whose last
+/// element is `last_item`: an offset and the text to put around it. After the
+/// last element, keeping any trailing comma trailing; or just inside the `{`.
+fn list_insertion(
+    container: &SyntaxNode,
+    last_item: Option<SyntaxNode>,
+) -> (usize, &'static str, &'static str) {
+    let Some(last_item) = last_item else {
+        // The container's own `{` is a token child; a heading's is inside it.
+        let after_brace = significant_tokens(container)
+            .find(|t| t.kind() == SyntaxKind::LBrace)
+            .map_or_else(
+                || span(container.text_range()).end,
+                |t| span(t.text_range()).end,
+            );
+        return (after_brace, " ", "");
+    };
+    match next_significant(&last_item) {
+        Some(comma) if comma.kind() == SyntaxKind::Comma => {
+            (span(comma.text_range()).end, " ", ",")
+        }
+        _ => (span(last_item.text_range()).end, ", ", ""),
     }
 }
 

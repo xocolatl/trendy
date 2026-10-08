@@ -1,0 +1,7 @@
+builtin type any;
+builtin type boolean;
+builtin type integer;
+builtin type rational;
+builtin type text;
+
+builtin operator debug_value{v: any};

@@ -18,6 +18,7 @@ pub enum Code {
     InvalidRational,
     MiscasedKeyword,
     AttributeSeparator,
+    MissingCall,
     DuplicateName,
     MissingMain,
     UnknownType,
@@ -30,10 +31,18 @@ pub enum Code {
     UnknownAttribute,
     UnknownRelationHeading,
     DuplicateTuple,
+    BuiltinOutsidePrelude,
+    AnyOutsideBuiltin,
+    UnknownName,
+    OperatorAsValue,
+    NotAnOperator,
+    PositionalArgument,
+    MainWithParams,
+    NameInConstant,
 }
 
 impl Code {
-    pub const ALL: [Code; 23] = [
+    pub const ALL: [Code; 32] = [
         Code::UnexpectedCharacter,
         Code::MissingToken,
         Code::WrongDelimiter,
@@ -45,6 +54,7 @@ impl Code {
         Code::InvalidRational,
         Code::MiscasedKeyword,
         Code::AttributeSeparator,
+        Code::MissingCall,
         Code::DuplicateName,
         Code::MissingMain,
         Code::UnknownType,
@@ -57,6 +67,14 @@ impl Code {
         Code::UnknownAttribute,
         Code::UnknownRelationHeading,
         Code::DuplicateTuple,
+        Code::BuiltinOutsidePrelude,
+        Code::AnyOutsideBuiltin,
+        Code::UnknownName,
+        Code::OperatorAsValue,
+        Code::NotAnOperator,
+        Code::PositionalArgument,
+        Code::MainWithParams,
+        Code::NameInConstant,
     ];
 
     #[must_use]
@@ -73,6 +91,7 @@ impl Code {
             Code::InvalidRational => "E0009",
             Code::MiscasedKeyword => "E0010",
             Code::AttributeSeparator => "E0011",
+            Code::MissingCall => "E0013",
             Code::DuplicateName => "E0101",
             Code::MissingMain => "E0102",
             Code::UnknownType => "E0103",
@@ -85,6 +104,14 @@ impl Code {
             Code::UnknownAttribute => "E0110",
             Code::UnknownRelationHeading => "E0111",
             Code::DuplicateTuple => "E0112",
+            Code::BuiltinOutsidePrelude => "E0113",
+            Code::AnyOutsideBuiltin => "E0114",
+            Code::UnknownName => "E0115",
+            Code::OperatorAsValue => "E0116",
+            Code::NotAnOperator => "E0117",
+            Code::PositionalArgument => "E0118",
+            Code::MainWithParams => "E0119",
+            Code::NameInConstant => "E0120",
         }
     }
 
@@ -111,6 +138,7 @@ impl Code {
             Code::InvalidRational => include_str!("../errors/E0009.md"),
             Code::MiscasedKeyword => include_str!("../errors/E0010.md"),
             Code::AttributeSeparator => include_str!("../errors/E0011.md"),
+            Code::MissingCall => include_str!("../errors/E0013.md"),
             Code::DuplicateName => include_str!("../errors/E0101.md"),
             Code::MissingMain => include_str!("../errors/E0102.md"),
             Code::UnknownType => include_str!("../errors/E0103.md"),
@@ -123,6 +151,14 @@ impl Code {
             Code::UnknownAttribute => include_str!("../errors/E0110.md"),
             Code::UnknownRelationHeading => include_str!("../errors/E0111.md"),
             Code::DuplicateTuple => include_str!("../errors/E0112.md"),
+            Code::BuiltinOutsidePrelude => include_str!("../errors/E0113.md"),
+            Code::AnyOutsideBuiltin => include_str!("../errors/E0114.md"),
+            Code::UnknownName => include_str!("../errors/E0115.md"),
+            Code::OperatorAsValue => include_str!("../errors/E0116.md"),
+            Code::NotAnOperator => include_str!("../errors/E0117.md"),
+            Code::PositionalArgument => include_str!("../errors/E0118.md"),
+            Code::MainWithParams => include_str!("../errors/E0119.md"),
+            Code::NameInConstant => include_str!("../errors/E0120.md"),
         }
     }
 }

@@ -12,5 +12,6 @@ trendy_syntax.workspace = true
 trendy_hir.workspace = true
 
 [dev-dependencies]
+trendy_prelude.workspace = true
 trendy_lexer.workspace = true
 trendy_parser.workspace = true

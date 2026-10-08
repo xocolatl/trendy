@@ -9,6 +9,24 @@ server are drivers that reuse the front-end layers.
 This document is about the compiler. For the language itself, see
 [`language.md`](language.md).
 
+### The prelude and the runtime
+
+**`trendy_prelude`** holds the prelude: trendy source declaring the built-in
+types and operators, which is part of every program. Drivers parse it next to
+the program, and sema checks every declaration against what the compiler
+implements (`hir::Builtin`, and the scalar types). A wrong prelude is an
+internal compiler error, and the tests keep it valid. A built-in is added in
+three places: its declaration in `prelude.trendy`, its `hir::Builtin` entry,
+and its implementation, which is usually in the runtime.
+
+**`trendy_runtime`** is a `no_std` library linked into every executable. It
+uses only the C library. `trendyc`'s `build.rs` builds it as a static library
+(`cargo rustc --crate-type staticlib` with `panic = "abort"`, in a target
+directory of its own), embeds the archive, and passes it to `cc` with the
+object. **`trendy_text`**, `no_std` and dependency-free, holds the escape
+rules for text literals, so the compiler, which reads them, and the runtime,
+which writes them, can't disagree.
+
 ```mermaid
 flowchart TD
     src[/source text/] --> lexer
@@ -123,11 +141,13 @@ Everything else goes on one line, except that a relation value with more than
 one tuple is broken across lines: each tuple on its own line, indented four
 spaces per level of nesting, with the closing brace on a line of its own.
 
-The formatter reprints the CST's tokens in order and decides only the
-whitespace between them. Because it never adds, drops, or reorders any other
-token, it can't change what a program means, and it will keep comments
-intact once they exist. It must also be idempotent: formatting its own output
-changes nothing.
+The formatter reprints the CST's tokens and decides the whitespace between
+them. It never adds or drops a token, so it will keep comments intact once
+they exist. The only tokens it moves are the attributes of a relation's
+tuples, which it writes in the order of the relation's heading (the
+selector's own, else the expected type's, else the first tuple's).
+Attributes are unordered, so that can't change what a program means. It must
+also be idempotent: formatting its own output changes nothing.
 
 ### hir (`trendy_hir`)
 
@@ -193,9 +213,11 @@ with a rename that fixes both.
 ### lir (`trendy_lir`)
 
 **Provides:** the low-level IR. A function is a control-flow graph of basic
-blocks, and each block ends in a terminator. Blocks will hold instructions
-once the language has expressions. There is no nesting and nothing implicit:
-every jump and return is spelled out.
+blocks: each block is a list of instructions (`Copy`, `Call`, `CallRuntime`)
+ending in a terminator. Instructions refer to memory through places: a data
+object, a stack slot, or the parameter struct, plus a path through nested
+structs. Every value's shape is a `Layout`. There is no nesting and nothing
+implicit: every jump and return is spelled out.
 
 It also describes static data (`Data`) field by field, rather than as bytes,
 so the description doesn't depend on the target. Values are represented like
@@ -240,6 +262,16 @@ produced with Cranelift.
 - laying out data for the target's byte order and pointer size, where every
   object occupies at least one byte;
 - calling conventions, and the C-ABI `main` entry shim.
+
+The calling convention: a function with parameters takes one pointer, to a
+struct of its parameters in name order, because a call's arguments are a
+tuple. The caller builds that struct in a stack slot, copying each argument
+from a constant, a variable, or its own parameters. Runtime functions taking
+`any` get the value's address and a type descriptor: read-only data laid out
+as `trendy_runtime::TypeDesc` and `Attr`, built by lowering from ordinary
+fields. Its sizes and offsets are LIR's `Size` and `Offset` fields, which
+codegen resolves with the same layout engine as everything else, so the
+runtime never repeats the layout rules.
 
 When comparison operators arrive, rational comparisons must compile to
 totalOrder (an integer comparison on the bits, after flipping the bits of
@@ -344,19 +376,22 @@ section above that describes it, and create the crate.
 
 ```layers
 # crate          dependencies
+trendy_text    :
+trendy_prelude :
 trendy_diag    : serde_json
-trendy_syntax  : trendy_diag rowan
+trendy_syntax  : trendy_diag trendy_text rowan
 trendy_lexer   : trendy_diag trendy_syntax
 trendy_parser  : trendy_diag trendy_syntax trendy_lexer
-trendy_fmt     : trendy_syntax
+trendy_fmt     : trendy_syntax trendy_lexer
 trendy_hir     :
 trendy_sema    : trendy_diag trendy_syntax trendy_hir
 trendy_lir     :
 trendy_lower   : trendy_hir trendy_lir
+trendy_runtime : trendy_text
 trendy_codegen : trendy_lir cranelift-codegen cranelift-frontend cranelift-module cranelift-native cranelift-object
-trendyc        : trendy_diag trendy_lexer trendy_parser trendy_sema trendy_lower trendy_codegen
+trendyc        : trendy_diag trendy_lexer trendy_parser trendy_prelude trendy_sema trendy_lower trendy_codegen
 trendyfmt      : trendy_diag trendy_lexer trendy_parser trendy_fmt
-trendy_lsp     : trendy_diag trendy_syntax trendy_lexer trendy_parser trendy_sema trendy_fmt lsp-server lsp-types serde_json
+trendy_lsp     : trendy_diag trendy_syntax trendy_lexer trendy_parser trendy_prelude trendy_sema trendy_fmt lsp-server lsp-types serde_json
 ```
 
 ## Planned layers

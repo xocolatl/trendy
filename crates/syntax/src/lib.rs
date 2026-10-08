@@ -31,6 +31,8 @@ pub enum SyntaxKind {
     FalseKw,
     TupleKw,
     RelationKw,
+    CallKw,
+    BuiltinKw,
     LBrace,
     RBrace,
     LBracket,
@@ -61,13 +63,24 @@ pub enum SyntaxKind {
     SourceFile,
     /// `operator name{params} [body];`
     Operator,
+    /// `builtin operator name{params};`, only in the prelude.
+    BuiltinOperator,
+    /// `builtin type name;`, only in the prelude. `type` is a contextual
+    /// keyword, an identifier elsewhere.
+    BuiltinType,
     /// `var name: type := value;`
     VarDecl,
     Name,
-    /// `{…}`
-    ParamList,
-    /// `[…]`
+    /// `[statement …]`
     Body,
+    /// `call name{arguments};`
+    CallStmt,
+    /// `{name: value, …}`: a call's arguments, a tuple of its parameters.
+    Arguments,
+    /// An argument without a name, which is reported with a fix.
+    PositionalArg,
+    /// A name used as an expression, or as the operator in a call.
+    NameRef,
     /// `: type`
     TypeAnnotation,
     TypeRef,
@@ -96,7 +109,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 41] = [
+    pub const ALL: [SyntaxKind; 48] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Ident,
         SyntaxKind::OperatorKw,
@@ -105,6 +118,8 @@ impl SyntaxKind {
         SyntaxKind::FalseKw,
         SyntaxKind::TupleKw,
         SyntaxKind::RelationKw,
+        SyntaxKind::CallKw,
+        SyntaxKind::BuiltinKw,
         SyntaxKind::LBrace,
         SyntaxKind::RBrace,
         SyntaxKind::LBracket,
@@ -122,10 +137,15 @@ impl SyntaxKind {
         SyntaxKind::ErrorToken,
         SyntaxKind::SourceFile,
         SyntaxKind::Operator,
+        SyntaxKind::BuiltinOperator,
+        SyntaxKind::BuiltinType,
         SyntaxKind::VarDecl,
         SyntaxKind::Name,
-        SyntaxKind::ParamList,
         SyntaxKind::Body,
+        SyntaxKind::CallStmt,
+        SyntaxKind::Arguments,
+        SyntaxKind::PositionalArg,
+        SyntaxKind::NameRef,
         SyntaxKind::TypeAnnotation,
         SyntaxKind::TypeRef,
         SyntaxKind::Initializer,
@@ -155,6 +175,8 @@ impl SyntaxKind {
                 | SyntaxKind::FalseKw
                 | SyntaxKind::TupleKw
                 | SyntaxKind::RelationKw
+                | SyntaxKind::CallKw
+                | SyntaxKind::BuiltinKw
         )
     }
 
@@ -196,6 +218,8 @@ impl SyntaxKind {
             SyntaxKind::FalseKw => "false",
             SyntaxKind::TupleKw => "tuple",
             SyntaxKind::RelationKw => "relation",
+            SyntaxKind::CallKw => "call",
+            SyntaxKind::BuiltinKw => "builtin",
             SyntaxKind::LBrace => "{",
             SyntaxKind::RBrace => "}",
             SyntaxKind::LBracket => "[",
@@ -223,6 +247,8 @@ impl SyntaxKind {
             SyntaxKind::FalseKw => "`false`",
             SyntaxKind::TupleKw => "`tuple`",
             SyntaxKind::RelationKw => "`relation`",
+            SyntaxKind::CallKw => "`call`",
+            SyntaxKind::BuiltinKw => "`builtin`",
             SyntaxKind::LBrace => "`{`",
             SyntaxKind::RBrace => "`}`",
             SyntaxKind::LBracket => "`[`",
@@ -240,10 +266,14 @@ impl SyntaxKind {
             SyntaxKind::ErrorToken => "unrecognized character",
             SyntaxKind::SourceFile => "source file",
             SyntaxKind::Operator => "operator definition",
+            SyntaxKind::BuiltinOperator => "built-in operator declaration",
+            SyntaxKind::BuiltinType => "built-in type declaration",
             SyntaxKind::VarDecl => "variable declaration",
-            SyntaxKind::Name => "name",
-            SyntaxKind::ParamList => "parameter list",
+            SyntaxKind::Name | SyntaxKind::NameRef => "name",
             SyntaxKind::Body => "body",
+            SyntaxKind::CallStmt => "call",
+            SyntaxKind::Arguments => "arguments",
+            SyntaxKind::PositionalArg => "argument",
             SyntaxKind::TypeAnnotation => "type annotation",
             SyntaxKind::TypeRef => "type",
             SyntaxKind::Initializer => "initial value",

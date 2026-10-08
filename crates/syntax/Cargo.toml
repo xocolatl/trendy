@@ -9,3 +9,4 @@ workspace = true
 [dependencies]
 rowan = "0.16.1"
 trendy_diag.workspace = true
+trendy_text.workspace = true

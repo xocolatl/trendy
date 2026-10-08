@@ -186,6 +186,28 @@ fn punctuation_patterns() -> Vec<Value> {
         .collect()
 }
 
+/// Text literals: like the lexer, an unterminated literal ends at the end of
+/// the line.
+fn text_rule() -> Value {
+    let simple_escapes: String = trendy_syntax::literal::SIMPLE_ESCAPES
+        .iter()
+        .map(|(c, _)| regex_escape(&c.to_string()))
+        .collect();
+    json!({
+        "begin": "\"",
+        "end": "\"|$",
+        "name": "string.quoted.double.trendy",
+        "patterns": [
+            {
+                // The `\u{…}` form is defined in trendy_syntax::literal.
+                "match": format!("\\\\(?:[{simple_escapes}]|u\\{{[0-9A-Fa-f]{{1,6}}\\}})"),
+                "name": "constant.character.escape.trendy",
+            },
+            { "match": "\\\\.", "name": "invalid.illegal.escape.trendy" },
+        ],
+    })
+}
+
 fn generate(probed: &Probed) -> Value {
     let kinds = SyntaxKind::ALL;
     let keyword = |kind: SyntaxKind| regex_escape(kind.fixed_text().unwrap());
@@ -205,11 +227,6 @@ fn generate(probed: &Probed) -> Value {
 
     let punctuation_patterns = punctuation_patterns();
 
-    let simple_escapes: String = trendy_syntax::literal::SIMPLE_ESCAPES
-        .iter()
-        .map(|(c, _)| regex_escape(&c.to_string()))
-        .collect();
-
     json!({
         "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
         "name": "trendy",
@@ -217,6 +234,8 @@ fn generate(probed: &Probed) -> Value {
         "comment": "Generated from the lexer by crates/lsp/tests/textmate.rs. Do not edit: run `UPDATE_TEXTMATE=1 cargo test -p trendy_lsp --test textmate`.",
         "patterns": [
             { "include": "#operator-definition" },
+            { "include": "#builtin-type" },
+            { "include": "#call" },
             { "include": "#variable-declaration" },
             { "include": "#keywords" },
             { "include": "#boolean" },
@@ -248,6 +267,25 @@ fn generate(probed: &Probed) -> Value {
                     "4": { "name": "entity.name.type.trendy" },
                 },
             },
+            // `type` is a keyword only here, so it gets a rule of its own.
+            "builtin-type": {
+                "match": format!(
+                    "\\b({})\\s+(type)\\s+({identifier})",
+                    keyword(SyntaxKind::BuiltinKw)
+                ),
+                "captures": {
+                    "1": { "name": "keyword.other.trendy" },
+                    "2": { "name": "keyword.other.trendy" },
+                    "3": { "name": "entity.name.type.trendy" },
+                },
+            },
+            "call": {
+                "match": format!("\\b({})\\s+({identifier})", keyword(SyntaxKind::CallKw)),
+                "captures": {
+                    "1": { "name": "keyword.other.trendy" },
+                    "2": { "name": "entity.name.function.trendy" },
+                },
+            },
             "keywords": {
                 "match": format!("\\b(?:{})\\b", keywords.join("|")),
                 "name": "keyword.other.trendy",
@@ -260,21 +298,7 @@ fn generate(probed: &Probed) -> Value {
                 "match": format!("\\b{}", probed.number),
                 "name": "constant.numeric.trendy",
             },
-            // Like the lexer, an unterminated literal ends at the end of the
-            // line.
-            "text": {
-                "begin": "\"",
-                "end": "\"|$",
-                "name": "string.quoted.double.trendy",
-                "patterns": [
-                    {
-                        // The `\u{…}` form is defined in trendy_syntax::literal.
-                        "match": format!("\\\\(?:[{simple_escapes}]|u\\{{[0-9A-Fa-f]{{1,6}}\\}})"),
-                        "name": "constant.character.escape.trendy",
-                    },
-                    { "match": "\\\\.", "name": "invalid.illegal.escape.trendy" },
-                ],
-            },
+            "text": text_rule(),
             "punctuation": { "patterns": punctuation_patterns },
         },
     })

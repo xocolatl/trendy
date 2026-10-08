@@ -588,6 +588,7 @@ dependencies = [
  "trendy_fmt",
  "trendy_lexer",
  "trendy_parser",
+ "trendy_prelude",
  "trendy_sema",
  "trendy_syntax",
 ]
@@ -602,6 +603,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "trendy_prelude"
+version = "0.1.0"
+
+[[package]]
+name = "trendy_runtime"
+version = "0.1.0"
+dependencies = [
+ "trendy_text",
+]
+
+[[package]]
 name = "trendy_sema"
 version = "0.1.0"
 dependencies = [
@@ -609,6 +621,7 @@ dependencies = [
  "trendy_hir",
  "trendy_lexer",
  "trendy_parser",
+ "trendy_prelude",
  "trendy_syntax",
 ]
 
@@ -618,7 +631,12 @@ version = "0.1.0"
 dependencies = [
  "rowan",
  "trendy_diag",
+ "trendy_text",
 ]
+
+[[package]]
+name = "trendy_text"
+version = "0.1.0"
 
 [[package]]
 name = "trendyc"
@@ -627,9 +645,11 @@ dependencies = [
  "serde_json",
  "trendy_codegen",
  "trendy_diag",
+ "trendy_hir",
  "trendy_lexer",
  "trendy_lower",
  "trendy_parser",
+ "trendy_prelude",
  "trendy_sema",
 ]
 

@@ -1,7 +1,12 @@
-use cranelift_codegen::ir::{AbiParam, Endianness, InstBuilder, types};
+use std::collections::HashMap;
+
+use cranelift_codegen::ir::{
+    AbiParam, Endianness, InstBuilder, MemFlagsData, StackSlotData, StackSlotKind, Value, types,
+};
+use cranelift_codegen::isa::TargetFrontendConfig;
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
-use cranelift_module::{DataDescription, Linkage, Module, default_libcall_names};
+use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module, default_libcall_names};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 
 use trendy_lir as lir;
@@ -12,7 +17,8 @@ use trendy_lir as lir;
 /// `main` is emitted alongside it that calls the program's entry function
 /// and returns 0, so the object links against the platform's C startup code.
 /// Variables become local data symbols named `trendy_var_<name>`, and
-/// constants `trendy_const_<index>`.
+/// constants `trendy_const_<index>`. Runtime functions are imported by their
+/// symbols, for the linker to resolve against the runtime library.
 ///
 /// # Errors
 ///
@@ -29,43 +35,62 @@ pub fn compile(program: &lir::Program) -> Result<Vec<u8>, String> {
     let builder =
         ObjectBuilder::new(isa, "trendy", default_libcall_names()).map_err(|e| e.to_string())?;
     let mut module = ObjectModule::new(builder);
-    define_data(&mut module, &program.data)?;
-    let mut ctx = module.make_context();
-    let mut fctx = FunctionBuilderContext::new();
-    let target = module.target_config();
+    let target = Target {
+        pointer_bytes: usize::from(module.isa().pointer_bytes()),
+        endianness: module.isa().endianness(),
+    };
+    let data_ids = define_data(&mut module, &target, &program.data)?;
+    let data_layouts: Vec<lir::Layout> = program
+        .data
+        .iter()
+        .map(|d| lir::Layout::Struct(d.fields.iter().map(field_layout).collect()))
+        .collect();
 
-    let fn_sig = module.make_signature();
+    let config = module.target_config();
+    let pointer = config.pointer_type();
     // Indexed by `lir::FunctionId`.
-    let ids = program
+    let function_ids = program
         .functions
         .iter()
         .map(|f| {
+            let mut signature = module.make_signature();
+            if f.params.is_some() {
+                signature.params.push(AbiParam::new(pointer));
+            }
             module
-                .declare_function(&mangle(&f.name), Linkage::Local, &fn_sig)
+                .declare_function(&mangle(&f.name), Linkage::Local, &signature)
                 .map_err(|e| e.to_string())
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    for (function, &id) in program.functions.iter().zip(&ids) {
-        ctx.func.signature = fn_sig.clone();
-        let mut b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
-        // Indexed by `lir::BlockId`.
-        let blocks: Vec<_> = function.blocks.iter().map(|_| b.create_block()).collect();
-        for (block, &cl_block) in function.blocks.iter().zip(&blocks) {
-            b.switch_to_block(cl_block);
-            match block.terminator {
-                lir::Terminator::Return => b.ins().return_(&[]),
-            };
-        }
-        b.seal_all_blocks();
-        b.finalize(target);
-
-        module
+    let mut functions = Functions {
+        module,
+        target,
+        config,
+        data_ids,
+        data_layouts,
+        function_ids,
+        runtime: HashMap::new(),
+    };
+    let mut ctx = functions.module.make_context();
+    let mut fctx = FunctionBuilderContext::new();
+    for (index, function) in program.functions.iter().enumerate() {
+        ctx.func.signature = functions
+            .module
+            .declarations()
+            .get_function_decl(functions.function_ids[index])
+            .signature
+            .clone();
+        functions.build(function, &mut ctx.func, &mut fctx)?;
+        let id = functions.function_ids[index];
+        functions
+            .module
             .define_function(id, &mut ctx)
             .map_err(|e| e.to_string())?;
-        module.clear_context(&mut ctx);
+        functions.module.clear_context(&mut ctx);
     }
 
+    let mut module = functions.module;
     let mut entry_sig = module.make_signature();
     entry_sig.returns.push(AbiParam::new(types::I32));
     let entry_id = module
@@ -77,11 +102,11 @@ pub fn compile(program: &lir::Program) -> Result<Vec<u8>, String> {
         let entry = b.create_block();
         b.switch_to_block(entry);
         b.seal_block(entry);
-        let entry_fn = module.declare_func_in_func(ids[program.entry.0], b.func);
+        let entry_fn = module.declare_func_in_func(functions.function_ids[program.entry.0], b.func);
         b.ins().call(entry_fn, &[]);
         let zero = b.ins().iconst(types::I32, 0);
         b.ins().return_(&[zero]);
-        b.finalize(target);
+        b.finalize(config);
     }
     module
         .define_function(entry_id, &mut ctx)
@@ -91,9 +116,195 @@ pub fn compile(program: &lir::Program) -> Result<Vec<u8>, String> {
     module.finish().emit().map_err(|e| e.to_string())
 }
 
-/// Declare and define every data object, laid out for the target.
-fn define_data(module: &mut ObjectModule, data: &[lir::Data]) -> Result<(), String> {
-    // Indexed by `lir::DataId`.
+/// Everything needed to build function bodies.
+struct Functions {
+    module: ObjectModule,
+    target: Target,
+    config: TargetFrontendConfig,
+    /// Indexed by `lir::DataId`.
+    data_ids: Vec<DataId>,
+    /// Each data object's layout: the struct of its fields.
+    data_layouts: Vec<lir::Layout>,
+    /// Indexed by `lir::FunctionId`.
+    function_ids: Vec<FuncId>,
+    /// Runtime functions, imported when first called.
+    runtime: HashMap<&'static str, FuncId>,
+}
+
+impl Functions {
+    fn build(
+        &mut self,
+        function: &lir::Function,
+        func: &mut cranelift_codegen::ir::Function,
+        fctx: &mut FunctionBuilderContext,
+    ) -> Result<(), String> {
+        let mut b = FunctionBuilder::new(func, fctx);
+        let slots = function
+            .slots
+            .iter()
+            .map(|layout| {
+                let align = self.target.align(layout);
+                let size = u32::try_from(self.target.size(layout)).map_err(|e| e.to_string())?;
+                let align_shift =
+                    u8::try_from(align.trailing_zeros()).map_err(|e| e.to_string())?;
+                Ok(b.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    size,
+                    align_shift,
+                )))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        // Indexed by `lir::BlockId`.
+        let blocks: Vec<_> = function.blocks.iter().map(|_| b.create_block()).collect();
+        b.append_block_params_for_function_params(blocks[0]);
+        b.switch_to_block(blocks[0]);
+        let params = b.block_params(blocks[0]).first().copied();
+
+        let frame = Frame {
+            function,
+            slots: &slots,
+            params,
+        };
+        for (i, (block, &cl_block)) in function.blocks.iter().zip(&blocks).enumerate() {
+            if i > 0 {
+                b.switch_to_block(cl_block);
+            }
+            for inst in &block.insts {
+                self.inst(inst, &frame, &mut b)?;
+            }
+            match block.terminator {
+                lir::Terminator::Return => b.ins().return_(&[]),
+            };
+        }
+        b.seal_all_blocks();
+        b.finalize(self.config);
+        Ok(())
+    }
+
+    fn inst(
+        &mut self,
+        inst: &lir::Inst,
+        frame: &Frame,
+        b: &mut FunctionBuilder,
+    ) -> Result<(), String> {
+        match inst {
+            lir::Inst::Copy { dst, src, layout } => {
+                let dst = self.address(dst, frame, b)?;
+                let src = self.address(src, frame, b)?;
+                let size = u64::try_from(self.target.size(layout)).map_err(|e| e.to_string())?;
+                let align = u8::try_from(self.target.align(layout)).map_err(|e| e.to_string())?;
+                b.emit_small_memory_copy(
+                    self.config,
+                    dst,
+                    src,
+                    size,
+                    align,
+                    align,
+                    true,
+                    MemFlagsData::new(),
+                );
+            }
+            lir::Inst::Call { function, args } => {
+                let callee = self
+                    .module
+                    .declare_func_in_func(self.function_ids[function.0], b.func);
+                let args = match args {
+                    Some(place) => vec![self.address(place, frame, b)?],
+                    None => Vec::new(),
+                };
+                b.ins().call(callee, &args);
+            }
+            lir::Inst::CallRuntime { function, args } => {
+                let id = self.runtime_function(*function, args.len())?;
+                let callee = self.module.declare_func_in_func(id, b.func);
+                let args = args
+                    .iter()
+                    .map(|place| self.address(place, frame, b))
+                    .collect::<Result<Vec<_>, _>>()?;
+                b.ins().call(callee, &args);
+            }
+        }
+        Ok(())
+    }
+
+    /// Import a runtime function, which takes `params` pointers.
+    fn runtime_function(
+        &mut self,
+        function: lir::RuntimeFn,
+        params: usize,
+    ) -> Result<FuncId, String> {
+        if let Some(&id) = self.runtime.get(function.symbol()) {
+            return Ok(id);
+        }
+        let mut signature = self.module.make_signature();
+        for _ in 0..params {
+            signature
+                .params
+                .push(AbiParam::new(self.config.pointer_type()));
+        }
+        let id = self
+            .module
+            .declare_function(function.symbol(), Linkage::Import, &signature)
+            .map_err(|e| e.to_string())?;
+        self.runtime.insert(function.symbol(), id);
+        Ok(id)
+    }
+
+    /// The address of `place`.
+    fn address(
+        &mut self,
+        place: &lir::Place,
+        frame: &Frame,
+        b: &mut FunctionBuilder,
+    ) -> Result<Value, String> {
+        let pointer = self.config.pointer_type();
+        let base_layout = match place.base {
+            lir::Base::Data(id) => &self.data_layouts[id.0],
+            lir::Base::Slot(slot) => &frame.function.slots[slot.0],
+            lir::Base::Params => frame
+                .function
+                .params
+                .as_ref()
+                .ok_or("parameters used in a function without them")?,
+        };
+        let offset = i64::try_from(self.target.path_offset(base_layout, &place.path)?)
+            .map_err(|e| e.to_string())?;
+        Ok(match place.base {
+            lir::Base::Data(id) => {
+                let global = self
+                    .module
+                    .declare_data_in_func(self.data_ids[id.0], b.func);
+                let base = b.ins().symbol_value(pointer, global);
+                b.ins().iadd_imm_s(base, offset)
+            }
+            lir::Base::Slot(slot) => {
+                let offset = i32::try_from(offset).map_err(|e| e.to_string())?;
+                b.ins().stack_addr(pointer, frame.slots[slot.0], offset)
+            }
+            lir::Base::Params => {
+                let base = frame
+                    .params
+                    .ok_or("parameters used in a function without them")?;
+                b.ins().iadd_imm_s(base, offset)
+            }
+        })
+    }
+}
+
+/// The function being built: its stack slots and its parameter pointer.
+struct Frame<'a> {
+    function: &'a lir::Function,
+    slots: &'a [cranelift_codegen::ir::StackSlot],
+    params: Option<Value>,
+}
+
+/// Declare and define every data object, laid out for the target. Returns
+/// their ids, indexed by `lir::DataId`.
+fn define_data(
+    module: &mut ObjectModule,
+    target: &Target,
+    data: &[lir::Data],
+) -> Result<Vec<DataId>, String> {
     let ids = data
         .iter()
         .enumerate()
@@ -108,12 +319,8 @@ fn define_data(module: &mut ObjectModule, data: &[lir::Data]) -> Result<(), Stri
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let layout = Layout {
-        pointer_bytes: usize::from(module.isa().pointer_bytes()),
-        endianness: module.isa().endianness(),
-    };
     for (d, &id) in data.iter().zip(&ids) {
-        let laid_out = layout.lay_out(&d.fields)?;
+        let laid_out = target.lay_out(&d.fields)?;
         let mut description = DataDescription::new();
         description.define(laid_out.bytes.into_boxed_slice());
         description.set_align(laid_out.align);
@@ -126,7 +333,7 @@ fn define_data(module: &mut ObjectModule, data: &[lir::Data]) -> Result<(), Stri
             .define_data(id, &description)
             .map_err(|e| e.to_string())?;
     }
-    Ok(())
+    Ok(ids)
 }
 
 /// A data object's contents, ready to emit.
@@ -137,13 +344,81 @@ struct LaidOut {
     addresses: Vec<(usize, lir::DataId)>,
 }
 
-/// How the target stores integers and addresses.
-struct Layout {
+/// The layout of a data field.
+fn field_layout(field: &lir::Field) -> lir::Layout {
+    match field {
+        lir::Field::U8(_) => lir::Layout::U8,
+        lir::Field::I64(_) => lir::Layout::I64,
+        lir::Field::F64Bits(_) => lir::Layout::F64Bits,
+        lir::Field::Usize(_) | lir::Field::Size(_) | lir::Field::Offset(..) => lir::Layout::Usize,
+        lir::Field::Address(_) => lir::Layout::Address,
+        lir::Field::Bytes(raw) => lir::Layout::Bytes(raw.len()),
+        lir::Field::Struct(inner) => lir::Layout::Struct(inner.iter().map(field_layout).collect()),
+    }
+}
+
+/// How the target lays out memory: the one place sizes, alignments and
+/// offsets are computed, for data, stack slots and places alike. Every field
+/// is at its natural alignment, and every struct is padded to its alignment.
+struct Target {
     pointer_bytes: usize,
     endianness: Endianness,
 }
 
-impl Layout {
+impl Target {
+    fn align(&self, layout: &lir::Layout) -> usize {
+        match layout {
+            lir::Layout::U8 | lir::Layout::Bytes(_) => 1,
+            lir::Layout::I64 | lir::Layout::F64Bits => 8,
+            lir::Layout::Usize | lir::Layout::Address => self.pointer_bytes,
+            lir::Layout::Struct(fields) => fields.iter().map(|f| self.align(f)).max().unwrap_or(1),
+        }
+    }
+
+    fn size(&self, layout: &lir::Layout) -> usize {
+        match layout {
+            lir::Layout::U8 => 1,
+            lir::Layout::I64 | lir::Layout::F64Bits => 8,
+            lir::Layout::Usize | lir::Layout::Address => self.pointer_bytes,
+            lir::Layout::Bytes(n) => *n,
+            lir::Layout::Struct(fields) => {
+                let end = self.offsets(fields).last().map_or(0, |&last| {
+                    last + self.size(fields.last().expect("offsets match fields"))
+                });
+                end.next_multiple_of(self.align(layout))
+            }
+        }
+    }
+
+    /// The offset of each field of a struct.
+    fn offsets(&self, fields: &[lir::Layout]) -> Vec<usize> {
+        let mut offsets = Vec::with_capacity(fields.len());
+        let mut end: usize = 0;
+        for field in fields {
+            let offset = end.next_multiple_of(self.align(field));
+            offsets.push(offset);
+            end = offset + self.size(field);
+        }
+        offsets
+    }
+
+    /// The offset of the field at `path` within `layout`.
+    fn path_offset(&self, layout: &lir::Layout, path: &[usize]) -> Result<usize, String> {
+        let mut offset = 0;
+        let mut current = layout;
+        for &index in path {
+            let lir::Layout::Struct(fields) = current else {
+                return Err(format!("a path goes into a non-struct {current:?}"));
+            };
+            let field = fields
+                .get(index)
+                .ok_or_else(|| format!("field {index} is out of range"))?;
+            offset += self.offsets(fields)[index];
+            current = field;
+        }
+        Ok(offset)
+    }
+
     /// Lay out a data object's fields, each at its natural alignment.
     fn lay_out(&self, fields: &[lir::Field]) -> Result<LaidOut, String> {
         let mut out = LaidOut {
@@ -151,7 +426,10 @@ impl Layout {
             align: 1,
             addresses: Vec::new(),
         };
-        let align = self.place_all(fields, &mut out)?;
+        self.place_all(fields, &mut out)?;
+        let align = self.align(&lir::Layout::Struct(
+            fields.iter().map(field_layout).collect(),
+        ));
         // Every object occupies at least one byte, so that distinct objects
         // have distinct addresses, and its size is a multiple of its
         // alignment.
@@ -161,19 +439,18 @@ impl Layout {
         Ok(out)
     }
 
-    /// Append `fields` in order, each at its natural alignment, and return
-    /// their combined alignment.
-    fn place_all(&self, fields: &[lir::Field], out: &mut LaidOut) -> Result<usize, String> {
-        let mut align = 1;
+    /// Append `fields` in order, each at its natural alignment.
+    fn place_all(&self, fields: &[lir::Field], out: &mut LaidOut) -> Result<(), String> {
         for field in fields {
-            align = align.max(self.place(field, out)?);
+            self.place(field, out)?;
         }
-        Ok(align)
+        Ok(())
     }
 
-    /// Append `field` at its natural alignment, and return that alignment.
-    fn place(&self, field: &lir::Field, out: &mut LaidOut) -> Result<usize, String> {
-        let align = self.align_of(field);
+    /// Append `field` at its natural alignment.
+    fn place(&self, field: &lir::Field, out: &mut LaidOut) -> Result<(), String> {
+        let layout = field_layout(field);
+        let align = self.align(&layout);
         out.bytes.resize(out.bytes.len().next_multiple_of(align), 0);
         match field {
             lir::Field::U8(n) => out.bytes.push(*n),
@@ -182,16 +459,14 @@ impl Layout {
                 out.bytes
                     .extend(self.in_target_order(bits.to_le_bytes(), 8));
             }
-            lir::Field::Usize(n) => {
-                let fits = self.pointer_bytes >= 8 || *n >> (8 * self.pointer_bytes) == 0;
-                if !fits {
-                    return Err(format!(
-                        "{n} doesn't fit in a {}-byte usize",
-                        self.pointer_bytes
-                    ));
-                }
-                out.bytes
-                    .extend(self.in_target_order(n.to_le_bytes(), self.pointer_bytes));
+            lir::Field::Usize(n) => self.usize(*n, out)?,
+            lir::Field::Size(layout) => {
+                let size = u64::try_from(self.size(layout)).map_err(|e| e.to_string())?;
+                self.usize(size, out)?;
+            }
+            lir::Field::Offset(layout, index) => {
+                let offset = self.path_offset(layout, &[*index])?;
+                self.usize(u64::try_from(offset).map_err(|e| e.to_string())?, out)?;
             }
             lir::Field::Address(target) => {
                 out.addresses.push((out.bytes.len(), *target));
@@ -203,20 +478,23 @@ impl Layout {
                 // same layout embedded as it has on its own.
                 let start = out.bytes.len();
                 self.place_all(inner, out)?;
-                let size = (out.bytes.len() - start).next_multiple_of(align);
-                out.bytes.resize(start + size, 0);
+                out.bytes.resize(start + self.size(&layout), 0);
             }
         }
-        Ok(align)
+        Ok(())
     }
 
-    fn align_of(&self, field: &lir::Field) -> usize {
-        match field {
-            lir::Field::I64(_) | lir::Field::F64Bits(_) => 8,
-            lir::Field::Usize(_) | lir::Field::Address(_) => self.pointer_bytes,
-            lir::Field::U8(_) | lir::Field::Bytes(_) => 1,
-            lir::Field::Struct(inner) => inner.iter().map(|f| self.align_of(f)).max().unwrap_or(1),
+    fn usize(&self, n: u64, out: &mut LaidOut) -> Result<(), String> {
+        let fits = self.pointer_bytes >= 8 || n >> (8 * self.pointer_bytes) == 0;
+        if !fits {
+            return Err(format!(
+                "{n} doesn't fit in a {}-byte usize",
+                self.pointer_bytes
+            ));
         }
+        out.bytes
+            .extend(self.in_target_order(n.to_le_bytes(), self.pointer_bytes));
+        Ok(())
     }
 
     /// The low `width` bytes of a little-endian value, in target order.
@@ -243,7 +521,10 @@ mod tests {
         lir::Program {
             functions: vec![lir::Function {
                 name: "main".to_string(),
+                params: None,
+                slots: Vec::new(),
                 blocks: vec![lir::Block {
+                    insts: Vec::new(),
                     terminator: lir::Terminator::Return,
                 }],
             }],
@@ -348,8 +629,91 @@ mod tests {
     }
 
     #[test]
+    fn calls_copies_and_runtime_imports() {
+        let args = lir::Layout::Struct(vec![lir::Layout::I64]);
+        let callee = lir::Function {
+            name: "show".to_string(),
+            params: Some(args.clone()),
+            slots: Vec::new(),
+            blocks: vec![lir::Block {
+                insts: vec![lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::DebugValue,
+                    args: vec![
+                        lir::Place {
+                            base: lir::Base::Params,
+                            path: vec![0],
+                        },
+                        lir::Place::whole(lir::Base::Data(lir::DataId(0))),
+                    ],
+                }],
+                terminator: lir::Terminator::Return,
+            }],
+        };
+        let main = lir::Function {
+            name: "main".to_string(),
+            params: None,
+            slots: vec![args],
+            blocks: vec![lir::Block {
+                insts: vec![
+                    lir::Inst::Copy {
+                        dst: lir::Place {
+                            base: lir::Base::Slot(lir::SlotId(0)),
+                            path: vec![0],
+                        },
+                        src: lir::Place {
+                            base: lir::Base::Data(lir::DataId(0)),
+                            path: vec![0],
+                        },
+                        layout: lir::Layout::I64,
+                    },
+                    lir::Inst::Call {
+                        function: lir::FunctionId(0),
+                        args: Some(lir::Place::whole(lir::Base::Slot(lir::SlotId(0)))),
+                    },
+                ],
+                terminator: lir::Terminator::Return,
+            }],
+        };
+        let object_bytes = compile(&lir::Program {
+            functions: vec![callee, main],
+            data: vec![variable("x", vec![lir::Field::I64(5)])],
+            entry: lir::FunctionId(1),
+        })
+        .unwrap();
+        let object = object::File::parse(&*object_bytes).unwrap();
+        let imported = object
+            .symbols()
+            .filter(ObjectSymbol::is_undefined)
+            .filter_map(|s| s.name().ok().map(str::to_string))
+            .collect::<Vec<_>>();
+        assert!(
+            imported
+                .iter()
+                .any(|n| n.ends_with("trendy_rt_debug_value")),
+            "{imported:?}"
+        );
+    }
+
+    #[test]
+    fn descriptor_fields_resolve_sizes_and_offsets() {
+        let layout = Target {
+            pointer_bytes: 8,
+            endianness: Endianness::Little,
+        };
+        let tuple = lir::Layout::Struct(vec![lir::Layout::U8, lir::Layout::I64]);
+        let laid_out = layout
+            .lay_out(&[
+                lir::Field::Size(tuple.clone()),
+                lir::Field::Offset(tuple, 1),
+            ])
+            .unwrap();
+        assert_eq!(laid_out.bytes[..8], 16_u64.to_le_bytes());
+        assert_eq!(laid_out.bytes[8..], 8_u64.to_le_bytes());
+    }
+
+    #[test]
     fn layout_aligns_fields_and_pads_empty_objects() {
-        let layout = Layout {
+        let layout = Target {
             pointer_bytes: 8,
             endianness: Endianness::Little,
         };
@@ -369,7 +733,7 @@ mod tests {
 
     #[test]
     fn structs_are_padded_to_their_alignment() {
-        let layout = Layout {
+        let layout = Target {
             pointer_bytes: 8,
             endianness: Endianness::Little,
         };
@@ -392,7 +756,7 @@ mod tests {
 
     #[test]
     fn addresses_inside_structs_are_relocated_at_their_offset() {
-        let layout = Layout {
+        let layout = Target {
             pointer_bytes: 8,
             endianness: Endianness::Little,
         };
@@ -411,7 +775,7 @@ mod tests {
 
     #[test]
     fn big_endian_and_narrow_pointers() {
-        let layout = Layout {
+        let layout = Target {
             pointer_bytes: 4,
             endianness: Endianness::Big,
         };

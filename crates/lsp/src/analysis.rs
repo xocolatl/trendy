@@ -1,6 +1,7 @@
 //! Editor features as pure functions of document text.
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, Diagnostic, DiagnosticRelatedInformation,
@@ -11,11 +12,25 @@ use lsp_types::{
 use crate::highlight::{self, Class};
 use crate::position::LineIndex;
 
+/// The prelude, parsed and checked once. It ships with the server, and its
+/// tests in the compiler keep it valid.
+fn prelude() -> &'static trendy_sema::Prelude {
+    static PRELUDE: OnceLock<trendy_sema::Prelude> = OnceLock::new();
+    PRELUDE.get_or_init(|| {
+        let source = trendy_prelude::SOURCE;
+        let parse = trendy_parser::parse(source, trendy_lexer::lex(source));
+        assert!(parse.errors.is_empty(), "the prelude doesn't parse");
+        trendy_sema::Prelude::load(&parse.tree).expect("the prelude is valid")
+    })
+}
+
 /// Every lexer and parser error, or if there are none, every sema error.
 fn errors(source: &str) -> Vec<trendy_diag::Diagnostic> {
     let parse = trendy_parser::parse(source, trendy_lexer::lex(source));
     if parse.errors.is_empty() {
-        trendy_sema::analyze(&parse.tree).err().unwrap_or_default()
+        trendy_sema::analyze(prelude(), &parse.tree)
+            .err()
+            .unwrap_or_default()
     } else {
         parse.errors
     }
@@ -105,6 +120,7 @@ pub fn semantic_tokens_legend() -> SemanticTokensLegend {
             SemanticTokenType::NUMBER,
             SemanticTokenType::STRING,
             SemanticTokenType::PROPERTY,
+            SemanticTokenType::PARAMETER,
         ],
         token_modifiers: vec![
             SemanticTokenModifier::DECLARATION,
@@ -124,6 +140,7 @@ fn token_type(class: Class) -> u32 {
         Class::Number => 4,
         Class::Text => 5,
         Class::Attribute => 6,
+        Class::Parameter => 7,
     }
 }
 
@@ -307,6 +324,7 @@ mod tests {
         assert_eq!(named(Class::Number), "number");
         assert_eq!(named(Class::Text), "string");
         assert_eq!(named(Class::Attribute), "property");
+        assert_eq!(named(Class::Parameter), "parameter");
     }
 
     #[test]

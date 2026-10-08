@@ -1,0 +1,10 @@
+[package]
+name = "trendy_runtime"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+trendy_text.workspace = true

@@ -89,6 +89,7 @@ impl<'a> Parser<'a> {
         while let Some(found) = self.found() {
             match found.kind {
                 SyntaxKind::OperatorKw => self.operator(),
+                SyntaxKind::BuiltinKw => self.builtin(),
                 SyntaxKind::VarKw => self.var_decl(),
                 _ => self.junk(found),
             }
@@ -100,22 +101,176 @@ impl<'a> Parser<'a> {
         self.start_node(SyntaxKind::Operator);
         self.bump();
         self.name("add a name after `operator`, such as `operator main{} [];`");
-
+        self.params();
         self.delimited(
-            SyntaxKind::ParamList,
-            (SyntaxKind::LBrace, SyntaxKind::RBrace),
-            &[(SyntaxKind::LParen, SyntaxKind::RParen)],
-        );
-        self.delimited(
-            SyntaxKind::Body,
+            Some(SyntaxKind::Body),
+            "body",
             (SyntaxKind::LBracket, SyntaxKind::RBracket),
             &[
                 (SyntaxKind::LBrace, SyntaxKind::RBrace),
                 (SyntaxKind::LParen, SyntaxKind::RParen),
             ],
+            Self::statements,
         );
         self.expect(SyntaxKind::Semicolon);
         self.builder.finish_node();
+    }
+
+    /// `builtin type name;` or `builtin operator name{params};`: a
+    /// declaration of something the compiler implements. Only the prelude
+    /// has these.
+    fn builtin(&mut self) {
+        self.form = errors::BUILTIN_FORM;
+        let is_type = self
+            .found_after(1)
+            .is_some_and(|f| f.kind == SyntaxKind::Ident && f.text == "type");
+        if is_type {
+            self.start_node(SyntaxKind::BuiltinType);
+            self.bump();
+            self.bump();
+            self.name("add the type's name after `builtin type`");
+            self.expect(SyntaxKind::Semicolon);
+            self.builder.finish_node();
+            return;
+        }
+        self.start_node(SyntaxKind::BuiltinOperator);
+        self.bump();
+        self.expect(SyntaxKind::OperatorKw);
+        self.name("add a name after `operator`");
+        self.params();
+        self.expect(SyntaxKind::Semicolon);
+        self.builder.finish_node();
+    }
+
+    /// An operator's parameters: a heading, which C-style `()` is accepted
+    /// for and reported.
+    fn params(&mut self) {
+        let outer_form = std::mem::replace(&mut self.form, errors::HEADING_FORM);
+        self.delimited(
+            Some(SyntaxKind::Heading),
+            "parameter list",
+            (SyntaxKind::LBrace, SyntaxKind::RBrace),
+            &[(SyntaxKind::LParen, SyntaxKind::RParen)],
+            |p| {
+                p.items(Self::at_attribute, |p| {
+                    p.attribute(SyntaxKind::AttributeType, Self::type_expr);
+                });
+            },
+        );
+        self.form = outer_form;
+    }
+
+    /// Statements up to the end of a body.
+    fn statements(&mut self) {
+        while let Some(found) = self.found() {
+            // A statement can't start with `;`, so one here ends the body:
+            // in `[;`, the `]` is missing.
+            let ends_body = matches!(
+                found.kind,
+                SyntaxKind::RBracket
+                    | SyntaxKind::RBrace
+                    | SyntaxKind::RParen
+                    | SyntaxKind::Semicolon
+                    | SyntaxKind::OperatorKw
+                    | SyntaxKind::VarKw
+                    | SyntaxKind::BuiltinKw
+            );
+            if ends_body {
+                break;
+            }
+            self.statement();
+        }
+    }
+
+    /// A statement. For now, the only statements are calls.
+    fn statement(&mut self) {
+        let Some(found) = self.found() else {
+            return;
+        };
+        let call_like = self
+            .found_after(1)
+            .is_some_and(|f| matches!(f.kind, SyntaxKind::LBrace | SyntaxKind::LParen));
+        if found.kind == SyntaxKind::CallKw {
+            self.call_stmt();
+        } else if found.kind == SyntaxKind::Ident && call_like {
+            // `debug_value{v: r};`: a call without `call`.
+            self.errors.push(errors::missing_call(found));
+            self.call_stmt();
+        } else {
+            self.missing_with_help(
+                SyntaxKind::CallKw,
+                "statements are calls, such as `call debug_value{v: 1};`",
+            );
+            self.start_node(SyntaxKind::Error);
+            while let Some(kind) = self.peek() {
+                if matches!(
+                    kind,
+                    SyntaxKind::RBracket | SyntaxKind::OperatorKw | SyntaxKind::VarKw
+                ) {
+                    break;
+                }
+                self.bump();
+                if kind == SyntaxKind::Semicolon {
+                    break;
+                }
+            }
+            self.builder.finish_node();
+        }
+    }
+
+    /// `call name{arguments};`, with `call` already reported if missing.
+    fn call_stmt(&mut self) {
+        self.start_node(SyntaxKind::CallStmt);
+        if self.at(SyntaxKind::CallKw) {
+            self.bump();
+        }
+        if self.at(SyntaxKind::Ident) {
+            self.start_node(SyntaxKind::NameRef);
+            self.bump();
+            self.builder.finish_node();
+        } else {
+            self.missing_with_help(SyntaxKind::Ident, "name the operator to call after `call`");
+        }
+        self.delimited(
+            Some(SyntaxKind::Arguments),
+            "argument list",
+            (SyntaxKind::LBrace, SyntaxKind::RBrace),
+            &[(SyntaxKind::LParen, SyntaxKind::RParen)],
+            |p| p.items(Self::at_argument, Self::argument),
+        );
+        self.expect(SyntaxKind::Semicolon);
+        self.builder.finish_node();
+    }
+
+    fn at_argument(&mut self) -> bool {
+        self.peek().is_some_and(|k| {
+            k.is_literal()
+                || matches!(
+                    k,
+                    SyntaxKind::Ident
+                        | SyntaxKind::TupleKw
+                        | SyntaxKind::RelationKw
+                        | SyntaxKind::LBrace
+                )
+        })
+    }
+
+    /// `name: value`, or a value without a name, which sema reports.
+    fn argument(&mut self) {
+        let named = self.at(SyntaxKind::Ident)
+            && self.found_after(1).is_some_and(|f| {
+                matches!(
+                    f.kind,
+                    SyntaxKind::Colon | SyntaxKind::Eq | SyntaxKind::ColonEq
+                )
+            });
+        if named {
+            self.attribute(SyntaxKind::AttributeValue, Self::expression);
+        } else {
+            self.start_node(SyntaxKind::PositionalArg);
+            self.expression();
+            self.builder.finish_node();
+        }
     }
 
     /// `var name: type := value;`, where either the type or the value may be
@@ -229,6 +384,10 @@ impl<'a> Parser<'a> {
                 found,
                 errors::boolean_spelling(found.text).expect("just checked"),
             ));
+        } else if self.at(SyntaxKind::Ident) {
+            self.start_node(SyntaxKind::NameRef);
+            self.bump();
+            self.builder.finish_node();
         } else {
             self.missing_with_help(
                 SyntaxKind::Literal,
@@ -251,9 +410,16 @@ impl<'a> Parser<'a> {
         if has_keyword && self.at_heading() {
             self.heading();
         }
-        self.braced_list(
-            |p| p.at(SyntaxKind::Ident),
-            |p| p.attribute(SyntaxKind::AttributeValue, Self::expression),
+        self.delimited(
+            None,
+            "tuple",
+            (SyntaxKind::LBrace, SyntaxKind::RBrace),
+            &[],
+            |p| {
+                p.items(Self::at_attribute, |p| {
+                    p.attribute(SyntaxKind::AttributeValue, Self::expression);
+                });
+            },
         );
         self.builder.finish_node();
         self.form = outer_form;
@@ -282,9 +448,17 @@ impl<'a> Parser<'a> {
             self.form = outer_form;
             return;
         }
-        self.braced_list(
-            |p| p.at(SyntaxKind::LBrace) || p.at_keyword(SyntaxKind::TupleKw),
-            |p| p.tuple_literal(true),
+        self.delimited(
+            None,
+            "relation",
+            (SyntaxKind::LBrace, SyntaxKind::RBrace),
+            &[],
+            |p| {
+                p.items(
+                    |p| p.at(SyntaxKind::LBrace) || p.at_keyword(SyntaxKind::TupleKw),
+                    |p| p.tuple_literal(true),
+                );
+            },
         );
         self.builder.finish_node();
         self.form = outer_form;
@@ -293,24 +467,27 @@ impl<'a> Parser<'a> {
     /// `{ name: type, … }`.
     fn heading(&mut self) {
         let outer_form = std::mem::replace(&mut self.form, errors::HEADING_FORM);
-        self.start_node(SyntaxKind::Heading);
-        self.braced_list(
-            |p| p.at(SyntaxKind::Ident),
-            |p| p.attribute(SyntaxKind::AttributeType, Self::type_expr),
+        self.delimited(
+            Some(SyntaxKind::Heading),
+            "heading",
+            (SyntaxKind::LBrace, SyntaxKind::RBrace),
+            &[],
+            |p| {
+                p.items(Self::at_attribute, |p| {
+                    p.attribute(SyntaxKind::AttributeType, Self::type_expr);
+                });
+            },
         );
-        self.builder.finish_node();
         self.form = outer_form;
     }
 
-    /// `{ item, … }`, with an optional trailing comma. `starts_item` says
-    /// whether an item starts at the next token, and `item` parses one.
-    fn braced_list(&mut self, starts_item: fn(&mut Self) -> bool, item: fn(&mut Self)) {
-        if !self.at(SyntaxKind::LBrace) {
-            self.missing(SyntaxKind::LBrace);
-            self.missing(SyntaxKind::RBrace);
-            return;
-        }
-        self.bump();
+    fn at_attribute(&mut self) -> bool {
+        self.at(SyntaxKind::Ident)
+    }
+
+    /// Comma-separated items, with an optional trailing comma. `starts_item`
+    /// says whether an item starts at the next token, and `item` parses one.
+    fn items(&mut self, starts_item: fn(&mut Self) -> bool, item: fn(&mut Self)) {
         while starts_item(self) {
             item(self);
             if self.at(SyntaxKind::Comma) {
@@ -322,7 +499,6 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        self.expect(SyntaxKind::RBrace);
     }
 
     /// `name: x`, with `x` parsed by `item`.
@@ -432,46 +608,42 @@ impl<'a> Parser<'a> {
         depth == 0 && significant.next() == Some(SyntaxKind::LBrace)
     }
 
-    /// A `node` made of a `delims` pair with nothing between.
-    ///
-    /// A pair in `mistakes` is parsed as if it were `delims` and reported
-    /// with a fix. Only pairs that can't be the start of what comes next are
-    /// listed, so that a missing node isn't mistaken for a misspelled one.
+    /// `open contents close`, as a `node` if given. `contents` parses what's
+    /// between. A pair in `mistakes`, such as C-style `()`, is parsed the same
+    /// way and reported with a fix replacing both delimiters; `what` names
+    /// the construct in that error.
     fn delimited(
         &mut self,
-        node: SyntaxKind,
+        node: Option<SyntaxKind>,
+        what: &'static str,
         delims: (SyntaxKind, SyntaxKind),
         mistakes: &[(SyntaxKind, SyntaxKind)],
+        contents: fn(&mut Self),
     ) {
         let (open, close) = delims;
-        if self.at(open) {
-            self.start_node(node);
-            self.bump();
-            self.expect(close);
-            self.builder.finish_node();
-            return;
-        }
-
-        let Some(&(wrong_open, wrong_close)) = mistakes.iter().find(|(o, _)| self.at(*o)) else {
+        let used = if self.at(open) {
+            delims
+        } else if let Some(&mistake) = mistakes.iter().find(|(o, _)| self.at(*o)) {
+            mistake
+        } else {
             self.missing(open);
             self.missing(close);
             return;
         };
-        self.start_node(node);
+        if let Some(node) = node {
+            self.start_node(node);
+        }
         let open_span = self.bump();
-        let close_span = if self.at(wrong_close) {
-            Some(self.bump())
-        } else {
-            None
-        };
-        self.builder.finish_node();
-        self.errors.push(errors::wrong_delimiter(
-            node,
-            delims,
-            (wrong_open, wrong_close),
-            open_span,
-            close_span,
-        ));
+        contents(self);
+        let close_span = self.at(used.1).then(|| self.bump());
+        if node.is_some() {
+            self.builder.finish_node();
+        }
+        if used != delims {
+            self.errors.push(errors::wrong_delimiter(
+                what, delims, used, open_span, close_span,
+            ));
+        }
         if close_span.is_none() {
             self.missing(close);
         }
@@ -483,10 +655,12 @@ impl<'a> Parser<'a> {
         let name = self.found_after(1);
         let after_name = self.found_after(2);
         self.start_node(SyntaxKind::Error);
-        while self
-            .peek()
-            .is_some_and(|k| !matches!(k, SyntaxKind::OperatorKw | SyntaxKind::VarKw))
-        {
+        while self.peek().is_some_and(|k| {
+            !matches!(
+                k,
+                SyntaxKind::OperatorKw | SyntaxKind::VarKw | SyntaxKind::BuiltinKw
+            )
+        }) {
             self.bump();
         }
         self.builder.finish_node();
@@ -613,10 +787,15 @@ impl<'a> Parser<'a> {
         };
         let found = (missing.pos < self.tokens.len()).then(|| self.found_at(missing.pos));
         let at = self.last_end.or(found.map(|f| f.span.start)).unwrap_or(0);
+        let neighbors = (
+            self.source[..at].chars().next_back(),
+            self.source[at..].chars().next(),
+        );
         self.errors.push(errors::missing(
             &missing.expected,
             found,
             Span::empty(at),
+            neighbors,
             missing.form,
             missing.help,
         ));
@@ -675,7 +854,7 @@ SourceFile
     Whitespace \" \"
     Name
       Ident \"main\"
-    ParamList
+    Heading
       LBrace \"{\"
       RBrace \"}\"
     Whitespace \" \"
@@ -1102,6 +1281,120 @@ SourceFile
                 );
             }
         }
+    }
+
+    #[test]
+    fn calls_and_parameters() {
+        for source in [
+            "var r: relation { a: boolean, b: integer } := relation {{a:true, b:3}, {b:25, a:false}};\n\nbuiltin operator debug_value{v:any};\n\noperator main{} [\n    call debug_value{v: r};\n];",
+            "operator greet{name: text, times: integer} [ call debug_value{v: name}; call debug_value{v: tuple { n: times }}; ];",
+            "operator main{} [ call greet{name: \"Ada\", times: 2,}; ];",
+            "operator main{} [ call f{}; ];",
+        ] {
+            let parse = parse_str(source);
+            assert!(parse.errors.is_empty(), "{source}: {:#?}", parse.errors);
+        }
+        let parse = parse_str("operator greet{name: text} [ call debug_value{v: name}; ];");
+        let op = parse.tree.operators().next().unwrap();
+        assert_eq!(op.params().unwrap().attributes().count(), 1);
+        let call = op.body().unwrap().statements().next().unwrap();
+        assert_eq!(
+            call.callee().unwrap().ident().unwrap().text(),
+            "debug_value"
+        );
+        assert_eq!(call.arguments().unwrap().named().count(), 1);
+    }
+
+    #[test]
+    fn positional_arguments_parse_for_sema_to_fix() {
+        let parse = parse_str("operator main{} [ call debug_value{r}; ];");
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let call = parse
+            .tree
+            .operators()
+            .next()
+            .unwrap()
+            .body()
+            .unwrap()
+            .statements()
+            .next()
+            .unwrap();
+        assert_eq!(call.arguments().unwrap().positional().count(), 1);
+    }
+
+    #[test]
+    fn builtin_declarations() {
+        let parse = parse_str("builtin operator debug_value{v: any};");
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        assert!(matches!(
+            parse.tree.items().next(),
+            Some(trendy_syntax::ast::Item::Builtin(_))
+        ));
+    }
+
+    #[test]
+    fn call_recovery() {
+        let one_fix = |source: &str, fixed: &str| {
+            let errors = parse_str(source).errors;
+            assert_eq!(errors.len(), 1, "{source}: {errors:#?}");
+            assert_eq!(fix(source), fixed, "{source}");
+        };
+        one_fix(
+            "operator main{} [ debug_value{v: 1}; ];",
+            "operator main{} [ call debug_value{v: 1}; ];",
+        );
+        one_fix(
+            "operator main{} [ call debug_value(v: 1); ];",
+            "operator main{} [ call debug_value{v: 1}; ];",
+        );
+        one_fix("operator f(x: integer) [];", "operator f{x: integer} [];");
+        let codes: Vec<_> = parse_str("operator main() { call f{}; }")
+            .errors
+            .iter()
+            .map(|e| e.code)
+            .collect();
+        assert_eq!(
+            codes,
+            [
+                Code::WrongDelimiter,
+                Code::WrongDelimiter,
+                Code::MissingToken
+            ]
+        );
+        assert_eq!(
+            fix("operator main() { call f{}; }"),
+            "operator main{} [ call f{}; ];"
+        );
+    }
+
+    #[test]
+    fn statements_that_arent_calls() {
+        let parse = parse_str("operator main{} [ 42; call f{}; ];");
+        assert_eq!(parse.errors.len(), 1, "{:#?}", parse.errors);
+        assert_eq!(
+            parse.errors[0].message,
+            "expected `call`, found integer literal"
+        );
+        assert_eq!(
+            parse
+                .tree
+                .operators()
+                .next()
+                .unwrap()
+                .body()
+                .unwrap()
+                .statements()
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn inserted_keywords_are_separated_from_words() {
+        assert_eq!(
+            fix("builtin debug_value{v: any};"),
+            "builtin operator debug_value{v: any};"
+        );
     }
 
     #[test]

@@ -7,6 +7,9 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
+trendy_text = { path = "crates/text" }
+trendy_runtime = { path = "crates/runtime" }
+trendy_prelude = { path = "crates/prelude" }
 trendy_diag = { path = "crates/diag" }
 trendy_lexer = { path = "crates/lexer" }
 trendy_syntax = { path = "crates/syntax" }

@@ -1,4 +1,6 @@
+mod body;
 mod errors;
+mod prelude;
 mod types;
 
 use std::collections::HashMap;
@@ -6,9 +8,12 @@ use std::collections::HashMap;
 use trendy_diag::{Diagnostic, Span};
 use trendy_hir as hir;
 use trendy_syntax::SyntaxToken;
-use trendy_syntax::ast::{Item, SourceFile, VarDecl};
+use trendy_syntax::ast::{AstNode, Item, SourceFile, VarDecl};
 
-/// Check a parsed program and translate it to HIR.
+pub use prelude::Prelude;
+
+/// Check a parsed program and translate it to HIR. The prelude's built-in
+/// operators are in scope.
 ///
 /// This is the last layer allowed to report errors to the user. Drivers run
 /// it only on trees without syntax errors; parts that are missing anyway are
@@ -17,13 +22,32 @@ use trendy_syntax::ast::{Item, SourceFile, VarDecl};
 /// # Errors
 ///
 /// Returns every semantic error, in source order.
-pub fn analyze(file: &SourceFile) -> Result<hir::Program, Vec<Diagnostic>> {
+pub fn analyze(prelude: &Prelude, file: &SourceFile) -> Result<hir::Program, Vec<Diagnostic>> {
     let mut errors = Vec::new();
-    let values = collect_names(file, &mut errors);
+    let values = collect_names(prelude, file, &mut errors);
 
-    let mut operators = Vec::new();
+    // Variables first: their initial values are constants, and operator
+    // bodies refer to them.
     let mut variables = Vec::new();
-    let mut entry = None;
+    let mut variable_ids = HashMap::new();
+    for decl in file.variables() {
+        if let Some(variable) = variable(&decl, &values, &mut errors) {
+            variable_ids.insert(variable.name.clone(), hir::VariableId(variables.len()));
+            variables.push(variable);
+        }
+    }
+
+    // Every operator's signature before any body, so that a call can refer
+    // to an operator defined after it.
+    let mut operators = prelude.operators().to_vec();
+    let mut signatures = HashMap::new();
+    for (i, op) in operators.iter().enumerate() {
+        signatures.insert(
+            op.name.clone(),
+            body::Signature::builtin(hir::OperatorId(i)),
+        );
+    }
+    let mut user_operators = Vec::new();
     for item in file.items() {
         match item {
             Item::Operator(op) => {
@@ -33,26 +57,52 @@ pub fn analyze(file: &SourceFile) -> Result<hir::Program, Vec<Diagnostic>> {
                 if !values.is_first(&ident) {
                     continue;
                 }
-                if ident.text() == "main" {
-                    entry = Some(hir::OperatorId(operators.len()));
-                }
+                let id = hir::OperatorId(operators.len());
+                let params = op
+                    .params()
+                    .and_then(|h| body::params(&h, &values, &mut errors));
                 operators.push(hir::Operator {
                     name: ident.text().to_string(),
+                    params: params.clone().unwrap_or_default(),
+                    kind: hir::OperatorKind::User { body: Vec::new() },
                 });
+                signatures.insert(
+                    ident.text().to_string(),
+                    body::Signature::user(id, op.clone(), params.is_some()),
+                );
+                user_operators.push((op, id));
             }
-            Item::Variable(decl) => {
-                if let Some(variable) = variable(&decl, &values, &mut errors) {
-                    variables.push(variable);
-                }
-            }
+            Item::Builtin(builtin) => errors.push(errors::builtin_outside_prelude(
+                builtin.keyword(),
+                builtin.syntax(),
+            )),
+            Item::BuiltinType(builtin) => errors.push(errors::builtin_outside_prelude(
+                builtin.keyword(),
+                builtin.syntax(),
+            )),
+            Item::Variable(_) => {}
         }
     }
 
-    if entry.is_none() {
-        errors.push(errors::missing_main(file, &values));
+    let context = body::Context {
+        values: &values,
+        operators: &operators,
+        signatures: &signatures,
+        variables: &variables,
+        variable_ids: &variable_ids,
+    };
+    let mut bodies = Vec::new();
+    for (op, id) in &user_operators {
+        if let Some(statements) = body::body(op, *id, &context, &mut errors) {
+            bodies.push((*id, statements));
+        }
     }
-    errors.sort_by_key(|d| d.span().start);
+    for (id, statements) in bodies {
+        operators[id.0].kind = hir::OperatorKind::User { body: statements };
+    }
 
+    let entry = entry(file, &values, &operators, &user_operators, &mut errors);
+    errors.sort_by_key(|d| d.span().start);
     match entry {
         Some(entry) if errors.is_empty() => Ok(hir::Program {
             operators,
@@ -63,10 +113,34 @@ pub fn analyze(file: &SourceFile) -> Result<hir::Program, Vec<Diagnostic>> {
     }
 }
 
+/// The operator named `main`, which must be the program's own and take no
+/// parameters.
+fn entry(
+    file: &SourceFile,
+    values: &Values,
+    operators: &[hir::Operator],
+    user_operators: &[(trendy_syntax::ast::Operator, hir::OperatorId)],
+    errors: &mut Vec<Diagnostic>,
+) -> Option<hir::OperatorId> {
+    let Some((op, id)) = user_operators
+        .iter()
+        .find(|(_, id)| operators[id.0].name == "main")
+    else {
+        errors.push(errors::missing_main(file, values));
+        return None;
+    };
+    if let Some(params) = op.params().filter(|h| h.attributes().next().is_some()) {
+        errors.push(errors::main_with_params(&params));
+        return None;
+    }
+    Some(*id)
+}
+
 /// What a name in the value namespace refers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Kind {
     Operator,
+    Builtin,
     Variable,
 }
 
@@ -74,21 +148,23 @@ impl Kind {
     pub(crate) fn describe(self) -> &'static str {
         match self {
             Kind::Operator => "an operator",
+            Kind::Builtin => "a built-in operator",
             Kind::Variable => "a variable",
         }
     }
 }
 
 /// The value namespace, shared by operators and variables: each name's first
-/// definition. Types have a namespace of their own.
-pub(crate) struct Values(HashMap<String, (Kind, Span)>);
+/// definition, and where it is in the program (built-ins are in the prelude,
+/// so they have no span). Types have a namespace of their own.
+pub(crate) struct Values(HashMap<String, (Kind, Option<Span>)>);
 
 impl Values {
-    pub(crate) fn get(&self, name: &str) -> Option<(Kind, Span)> {
+    pub(crate) fn get(&self, name: &str) -> Option<(Kind, Option<Span>)> {
         self.0.get(name).copied()
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (&str, Kind, Span)> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&str, Kind, Option<Span>)> {
         self.0
             .iter()
             .map(|(name, &(kind, span))| (name.as_str(), kind, span))
@@ -97,17 +173,24 @@ impl Values {
     /// Whether `ident` is its name's first definition, not a duplicate.
     fn is_first(&self, ident: &SyntaxToken) -> bool {
         self.get(ident.text())
-            .is_some_and(|(_, span)| span == trendy_syntax::span(ident.text_range()))
+            .is_some_and(|(_, span)| span == Some(trendy_syntax::span(ident.text_range())))
     }
 }
 
-/// Record every top-level name, reporting each one defined more than once.
-fn collect_names(file: &SourceFile, errors: &mut Vec<Diagnostic>) -> Values {
-    let mut values = HashMap::new();
+/// Record every top-level name, the prelude's first, reporting each one
+/// defined more than once.
+fn collect_names(prelude: &Prelude, file: &SourceFile, errors: &mut Vec<Diagnostic>) -> Values {
+    let mut values: HashMap<String, (Kind, Option<Span>)> = prelude
+        .operators()
+        .iter()
+        .map(|op| (op.name.clone(), (Kind::Builtin, None)))
+        .collect();
     for item in file.items() {
         let (kind, name) = match item {
             Item::Operator(op) => (Kind::Operator, op.name()),
             Item::Variable(decl) => (Kind::Variable, decl.name()),
+            // Reported as being outside the prelude.
+            Item::Builtin(_) | Item::BuiltinType(_) => continue,
         };
         let Some(ident) = name.and_then(|n| n.ident()) else {
             continue;
@@ -118,7 +201,7 @@ fn collect_names(file: &SourceFile, errors: &mut Vec<Diagnostic>) -> Values {
                 errors.push(errors::duplicate_name(ident.text(), (kind, span), first));
             }
             None => {
-                values.insert(ident.text().to_string(), (kind, span));
+                values.insert(ident.text().to_string(), (kind, Some(span)));
             }
         }
     }
@@ -181,10 +264,18 @@ mod tests {
     use super::*;
     use trendy_diag::Code;
 
-    fn analyze_str(source: &str) -> Result<hir::Program, Vec<Diagnostic>> {
+    fn parse(source: &str) -> SourceFile {
         let parse = trendy_parser::parse(source, trendy_lexer::lex(source));
         assert!(parse.errors.is_empty(), "{:?}", parse.errors);
-        analyze(&parse.tree)
+        parse.tree
+    }
+
+    fn prelude() -> Prelude {
+        Prelude::load(&parse(trendy_prelude::SOURCE)).unwrap()
+    }
+
+    fn analyze_str(source: &str) -> Result<hir::Program, Vec<Diagnostic>> {
+        analyze(&prelude(), &parse(source))
     }
 
     fn errors(source: &str) -> Vec<Diagnostic> {
@@ -225,7 +316,11 @@ mod tests {
     #[test]
     fn entry_is_main_wherever_it_appears() {
         let program = analyze_str("operator a{}[]; operator main{}[];").unwrap();
-        assert_eq!(program.entry, hir::OperatorId(1));
+        assert_eq!(program.operator(program.entry).name, "main");
+        assert!(matches!(
+            program.operators[0].kind,
+            hir::OperatorKind::Builtin(hir::Builtin::DebugValue)
+        ));
     }
 
     #[test]
@@ -640,7 +735,7 @@ mod tests {
         ));
         let codes: Vec<_> = errors.iter().map(|e| e.code).collect();
         assert_eq!(codes, [Code::DuplicateAttribute, Code::DuplicateAttribute]);
-        assert_eq!(errors[0].secondary[0].message, "`x` is first defined here");
+        assert_eq!(errors[0].secondary[0].message, "`x` is first given here");
     }
 
     #[test]
@@ -845,6 +940,141 @@ mod tests {
             format!(
                 "var t: tuple {{ a: integer, r: relation {{ x: integer }} }} := tuple {{ a: 1, r: relation {{ x: integer }} {{}} }};{MAIN}"
             )
+        );
+    }
+
+    fn codes(source: &str) -> Vec<Code> {
+        errors(source).iter().map(|e| e.code).collect()
+    }
+
+    #[test]
+    fn the_prelude_loads() {
+        let prelude = prelude();
+        assert_eq!(prelude.operators()[0].name, "debug_value");
+        assert_eq!(
+            prelude.operators()[0].params,
+            hir::Builtin::DebugValue.params()
+        );
+    }
+
+    #[test]
+    fn calls_with_parameters_and_variables() {
+        let program = analyze_str(
+            "var r := relation { { a: 1 } };\n\noperator greet{name: text, r: integer} [\n    call debug_value{v: name};\n    call debug_value{v: r};\n];\n\noperator main{} [\n    call debug_value{v: r};\n    call greet{r: 2, name: \"Ada\"};\n];",
+        )
+        .unwrap();
+        let greet = program
+            .operators
+            .iter()
+            .find(|o| o.name == "greet")
+            .unwrap();
+        let hir::OperatorKind::User { body } = &greet.kind else {
+            panic!("greet is a user operator");
+        };
+        // Inside `greet`, `r` is the parameter, which hides the variable.
+        let hir::Statement::Call { args, .. } = &body[1];
+        assert_eq!(args["v"], hir::Expr::Parameter("r".to_string()));
+        let main = program.operator(program.entry);
+        let hir::OperatorKind::User { body } = &main.kind else {
+            panic!("main is a user operator");
+        };
+        let hir::Statement::Call { args, .. } = &body[0];
+        assert_eq!(args["v"], hir::Expr::Variable(hir::VariableId(0)));
+        let hir::Statement::Call { args, .. } = &body[1];
+        assert_eq!(
+            args["name"],
+            hir::Expr::Constant(hir::Value::Text("Ada".to_string()))
+        );
+    }
+
+    #[test]
+    fn calls_can_precede_definitions() {
+        analyze_str("operator main{} [ call later{}; ];\noperator later{} [];").unwrap();
+    }
+
+    #[test]
+    fn argument_errors() {
+        let source = "operator greet{name: text} [];\noperator main{} [\n    call greet{nam: \"Ada\"};\n    call greet{};\n    call greet{name: 1};\n    call greet{\"Ada\"};\n];";
+        assert_eq!(
+            codes(source),
+            [
+                Code::UnknownAttribute,
+                Code::MissingAttribute,
+                Code::TypeMismatch,
+                Code::PositionalArgument
+            ]
+        );
+        assert_eq!(
+            fix(source),
+            "operator greet{name: text} [];\noperator main{} [\n    call greet{name: \"Ada\"};\n    call greet{ name: \"\"};\n    call greet{name: \"1\"};\n    call greet{name: \"Ada\"};\n];"
+        );
+        let errors = errors(source);
+        assert_eq!(errors[1].message, "missing argument `name`");
+        let origin = errors[2].secondary[0].span;
+        assert_eq!(
+            &source[origin.start..origin.end],
+            "text",
+            "the parameter's type"
+        );
+    }
+
+    #[test]
+    fn debug_value_takes_anything_but_needs_its_argument() {
+        analyze_str(
+            "operator main{} [ call debug_value{v: 1}; call debug_value{v: relation { { a: 1 } }}; ];",
+        )
+        .unwrap();
+        let errors = errors("operator main{} [ call debug_value{}; ];");
+        assert_eq!(errors[0].code, Code::MissingAttribute);
+        assert!(errors[0].suggestions.is_empty(), "`any` has no default");
+    }
+
+    #[test]
+    fn names() {
+        let source = "var count := 1;\noperator main{} [\n    call debug_value{v: cout};\n    call debug_valu{v: 1};\n    call debug_value{v: main};\n    call count{};\n];";
+        assert_eq!(
+            codes(source),
+            [
+                Code::UnknownName,
+                Code::UnknownName,
+                Code::OperatorAsValue,
+                Code::NotAnOperator
+            ]
+        );
+        assert!(fix(source).contains("call debug_value{v: count};\n    call debug_value{v: 1};"));
+    }
+
+    #[test]
+    fn builtins_and_any() {
+        assert_eq!(
+            codes("builtin operator show{v: integer};\noperator main{} [];"),
+            [Code::BuiltinOutsidePrelude]
+        );
+        assert_eq!(
+            codes("var x: any := 1;\noperator show{v: any} [];\noperator main{} [];"),
+            [Code::AnyOutsideBuiltin, Code::AnyOutsideBuiltin]
+        );
+        // A variable may be named `any`; it's only reserved as a type.
+        analyze_str("var any := 1;\noperator main{} [ call debug_value{v: any}; ];").unwrap();
+        let errors = errors("operator debug_value{} [];\noperator main{} [];");
+        assert_eq!(errors[0].code, Code::DuplicateName);
+        assert!(errors[0].notes[0].contains("declared in the prelude"));
+    }
+
+    #[test]
+    fn main_takes_no_parameters() {
+        let source = "operator main{args: text} [];";
+        assert_eq!(codes(source), [Code::MainWithParams]);
+        assert_eq!(fix(source), "operator main{} [];");
+    }
+
+    #[test]
+    fn names_in_constants() {
+        assert_eq!(
+            codes(
+                "var a := 1;\nvar b := a;\noperator main{} [ call debug_value{v: tuple { x: a }}; ];"
+            ),
+            [Code::NameInConstant, Code::NameInConstant]
         );
     }
 

@@ -10,6 +10,7 @@ pub(crate) const OPERATOR_FORM: &str = "an operator definition has the form `ope
 pub(crate) const HEADING_FORM: &str = "a heading lists attributes with their types: `{ name: type, … }`, as in `tuple { name: text }` or `relation { name: text }`";
 pub(crate) const RELATION_VALUE_FORM: &str = "a relation value has the form `relation { tuple, … }`, optionally with a heading first: `relation { name: type, … } { … }`";
 pub(crate) const TUPLE_VALUE_FORM: &str = "a tuple value has the form `tuple { name: value, … }`";
+pub(crate) const BUILTIN_FORM: &str = "built-ins are declared as `builtin type name;` or `builtin operator name{params};`, only in the prelude";
 pub(crate) const VARIABLE_FORM: &str = "a variable declaration has the form `var name: type := value;`, where either the type or the value may be left out";
 
 /// Words other languages use to start a definition or declaration, which
@@ -40,12 +41,14 @@ const FOREIGN_KEYWORDS: &[&str] = &[
 ];
 
 /// `expected` should have come right before `found`, at `at`, in a
-/// definition of the given `form`. `help` says what to write when it can't be
-/// inserted mechanically.
+/// definition of the given `form`. `neighbors` are the characters before and
+/// after `at`. `help` says what to write when it can't be inserted
+/// mechanically.
 pub(crate) fn missing(
     expected: &[SyntaxKind],
     found: Option<Found>,
     at: Span,
+    neighbors: (Option<char>, Option<char>),
     form: &str,
     help: Option<&str>,
 ) -> Diagnostic {
@@ -67,20 +70,51 @@ pub(crate) fn missing(
         d = d.with_secondary(found.span, label);
     }
 
-    let fixed: Option<String> = expected.iter().map(|k| k.fixed_text()).collect();
-    match fixed {
-        Some(text) => d.with_suggestion(
-            format!("insert `{text}`"),
-            vec![Edit {
-                span: at,
-                replacement: text,
-            }],
-        ),
+    let fixed: Option<Vec<&str>> = expected.iter().map(|k| k.fixed_text()).collect();
+    match fixed.map(|texts| join_tokens(&texts)) {
+        Some(text) => {
+            // A space wherever the insertion would otherwise run into a
+            // word, which would change how it lexes.
+            let (before, after) = neighbors;
+            let space = |c: Option<char>| c.is_some_and(is_word_char);
+            let mut replacement = text.clone();
+            if space(before) && text.starts_with(is_word_char) {
+                replacement.insert(0, ' ');
+            }
+            if space(after) && text.ends_with(is_word_char) {
+                replacement.push(' ');
+            }
+            d.with_suggestion(
+                format!("insert `{text}`"),
+                vec![Edit {
+                    span: at,
+                    replacement,
+                }],
+            )
+        }
         None => match help {
             Some(help) => d.with_help(help),
             None => d,
         },
     }
+}
+
+/// Tokens written in a row, with a space between two words so they don't
+/// run together: `[`operator`, `{`]` is `operator{`, but two keywords are
+/// separated.
+fn join_tokens(texts: &[&str]) -> String {
+    let mut joined = String::new();
+    for text in texts {
+        if joined.ends_with(is_word_char) && text.starts_with(is_word_char) {
+            joined.push(' ');
+        }
+        joined.push_str(text);
+    }
+    joined
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
 }
 
 /// Describe a sequence of expected tokens, merging adjacent fixed-text
@@ -104,9 +138,10 @@ fn describe_sequence(kinds: &[SyntaxKind]) -> String {
     parts.join(", then ")
 }
 
-/// A `node` enclosed in `wrong` delimiters instead of `right` ones.
+/// A `what` (such as "parameter list") enclosed in `wrong` delimiters
+/// instead of `right` ones.
 pub(crate) fn wrong_delimiter(
-    node: SyntaxKind,
+    what: &str,
     right: (SyntaxKind, SyntaxKind),
     wrong: (SyntaxKind, SyntaxKind),
     open: Span,
@@ -122,8 +157,7 @@ pub(crate) fn wrong_delimiter(
     let mut d = Diagnostic::error(
         Code::WrongDelimiter,
         format!(
-            "the {} must be enclosed in `{right_open}{right_close}`, not `{}{}`",
-            node.describe(),
+            "the {what} must be enclosed in `{right_open}{right_close}`, not `{}{}`",
             text(wrong.0),
             text(wrong.1),
         ),
@@ -131,7 +165,7 @@ pub(crate) fn wrong_delimiter(
         format!("expected `{right_open}`"),
     )
     .with_note(
-        "trendy encloses parameter lists in `{}` and bodies in `[]`, unlike C-family languages",
+        "trendy encloses parameter and argument lists in `{}` and bodies in `[]`, unlike C-family languages",
     );
     if let Some(close) = close {
         d = d.with_secondary(close, format!("expected `{right_close}`"));
@@ -184,6 +218,27 @@ pub(crate) fn wrong_attribute_separator(found: SyntaxKind, span: Span) -> Diagno
         vec![Edit {
             span,
             replacement: ":".to_string(),
+        }],
+    )
+}
+
+/// A call statement, starting with the operator's name `found`, without
+/// `call`.
+pub(crate) fn missing_call(found: Found) -> Diagnostic {
+    Diagnostic::error(
+        Code::MissingCall,
+        format!("expected `call` before `{}`", found.text),
+        found.span,
+        "a call statement starts with `call`",
+    )
+    .with_note(
+        "update operators, which don't return a value, are invoked by a `call` statement, as in TTM",
+    )
+    .with_suggestion(
+        "insert `call`",
+        vec![Edit {
+            span: Span::empty(found.span.start),
+            replacement: "call ".to_string(),
         }],
     )
 }

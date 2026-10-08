@@ -1,18 +1,9 @@
 //! What literals mean. The lexer uses this module to report malformed
 //! literals and sema uses it to decode them, so the rules live only here.
 
-use std::fmt::Write;
 use std::ops::Range;
 
-/// Escapes written as a backslash and one character, and what they stand for.
-pub const SIMPLE_ESCAPES: &[(char, char)] = &[
-    ('"', '"'),
-    ('\\', '\\'),
-    ('n', '\n'),
-    ('r', '\r'),
-    ('t', '\t'),
-    ('0', '\0'),
-];
+pub use trendy_text::SIMPLE_ESCAPES;
 
 /// The written forms of every escape, for messages: `\" \\ \n \r \t \0 \u{…}`.
 #[must_use]
@@ -30,19 +21,8 @@ pub fn escape_list() -> String {
 #[must_use]
 pub fn escape_text(text: &str) -> String {
     let mut body = String::with_capacity(text.len());
-    for c in text.chars() {
-        match SIMPLE_ESCAPES.iter().find(|(_, value)| *value == c) {
-            Some((name, _)) => {
-                body.push('\\');
-                body.push(*name);
-            }
-            None if c.is_control() => {
-                // Writing to a `String` cannot fail.
-                let _ = write!(body, "\\u{{{:X}}}", u32::from(c));
-            }
-            None => body.push(c),
-        }
-    }
+    // Writing to a `String` cannot fail.
+    let _ = trendy_text::escape(text, &mut body);
     body
 }
 

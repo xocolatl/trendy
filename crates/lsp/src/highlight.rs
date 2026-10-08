@@ -18,6 +18,8 @@ pub enum Class {
     Variable,
     /// A tuple attribute's name.
     Attribute,
+    /// An operator's parameter.
+    Parameter,
     Type,
     Number,
     Text,
@@ -43,11 +45,45 @@ pub fn highlights(file: &SourceFile) -> Vec<Highlight> {
 fn classify(token: &SyntaxToken) -> Option<Highlight> {
     let parent = token.parent().map(|p| p.kind());
     let grandparent = token.parent().and_then(|p| p.parent()).map(|p| p.kind());
+    // A heading's owner: an operator's heading holds its parameters.
+    let heading_owner = token
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .map(|p| p.kind());
     let (class, definition) = match (token.kind(), parent, grandparent) {
         (kind, _, _) if kind.is_keyword() => (Class::Keyword, false),
-        (SyntaxKind::Ident, Some(SyntaxKind::Name), Some(SyntaxKind::Operator)) => {
-            (Class::Operator, true)
+        // The contextual keyword in `builtin type name;`.
+        (SyntaxKind::Ident, Some(SyntaxKind::BuiltinType), _) if token.text() == "type" => {
+            (Class::Keyword, false)
         }
+        (SyntaxKind::Ident, Some(SyntaxKind::Name), Some(SyntaxKind::BuiltinType)) => {
+            (Class::Type, true)
+        }
+        (SyntaxKind::Ident, Some(SyntaxKind::Name), Some(SyntaxKind::AttributeType))
+            if matches!(
+                heading_owner,
+                Some(SyntaxKind::Operator | SyntaxKind::BuiltinOperator)
+            ) =>
+        {
+            (Class::Parameter, true)
+        }
+        (SyntaxKind::Ident, Some(SyntaxKind::NameRef), Some(SyntaxKind::CallStmt)) => {
+            (Class::Operator, false)
+        }
+        (SyntaxKind::Ident, Some(SyntaxKind::NameRef), _) => {
+            if is_parameter(token) {
+                (Class::Parameter, false)
+            } else {
+                (Class::Variable, false)
+            }
+        }
+        (
+            SyntaxKind::Ident,
+            Some(SyntaxKind::Name),
+            Some(SyntaxKind::Operator | SyntaxKind::BuiltinOperator),
+        ) => (Class::Operator, true),
         (SyntaxKind::Ident, Some(SyntaxKind::Name), Some(SyntaxKind::VarDecl)) => {
             (Class::Variable, true)
         }
@@ -67,6 +103,22 @@ fn classify(token: &SyntaxToken) -> Option<Highlight> {
         class,
         definition,
     })
+}
+
+/// Whether the name `token` refers to a parameter of the operator it is in.
+/// Parameters hide variables of the same name, so this decides it.
+fn is_parameter(token: &SyntaxToken) -> bool {
+    token
+        .parent_ancestors()
+        .find_map(trendy_syntax::ast::Operator::cast)
+        .and_then(|op| op.params())
+        .is_some_and(|params| {
+            params.attributes().any(|a| {
+                a.name()
+                    .and_then(|n| n.ident())
+                    .is_some_and(|i| i.text() == token.text())
+            })
+        })
 }
 
 #[cfg(test)]
@@ -136,6 +188,54 @@ mod tests {
                 ("tuple", Class::Keyword, false),
                 ("x", Class::Attribute, false),
                 ("1.0", Class::Number, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn operators_parameters_and_calls() {
+        assert_eq!(
+            highlight("var x := 1;\noperator show{x: integer, y: text} [ call debug_value{v: x}; call debug_value{v: y}; ];\noperator main{} [ call show{x: x, y: \"a\"}; ];")
+                .into_iter()
+                .filter(|(_, class, _)| *class != Class::Keyword)
+                .collect::<Vec<_>>(),
+            [
+                ("x", Class::Variable, true),
+                ("1", Class::Number, false),
+                ("show", Class::Operator, true),
+                ("x", Class::Parameter, true),
+                ("integer", Class::Type, false),
+                ("y", Class::Parameter, true),
+                ("text", Class::Type, false),
+                ("debug_value", Class::Operator, false),
+                ("v", Class::Attribute, false),
+                ("x", Class::Parameter, false),
+                ("debug_value", Class::Operator, false),
+                ("v", Class::Attribute, false),
+                ("y", Class::Parameter, false),
+                ("main", Class::Operator, true),
+                ("show", Class::Operator, false),
+                ("x", Class::Attribute, false),
+                ("x", Class::Variable, false),
+                ("y", Class::Attribute, false),
+                ("\"a\"", Class::Text, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn builtins() {
+        assert_eq!(
+            highlight("builtin type any;\nbuiltin operator debug_value{v: any};"),
+            [
+                ("builtin", Class::Keyword, false),
+                ("type", Class::Keyword, false),
+                ("any", Class::Type, true),
+                ("builtin", Class::Keyword, false),
+                ("operator", Class::Keyword, false),
+                ("debug_value", Class::Operator, true),
+                ("v", Class::Parameter, true),
+                ("any", Class::Type, false),
             ]
         );
     }

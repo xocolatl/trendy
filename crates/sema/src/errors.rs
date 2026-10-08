@@ -4,7 +4,7 @@
 use trendy_diag::{Code, Diagnostic, Edit, Span, edit_distance};
 use trendy_hir as hir;
 use trendy_syntax::SyntaxToken;
-use trendy_syntax::ast::{AstNode, Expr, SourceFile, TupleLiteral};
+use trendy_syntax::ast::{AstNode, Expr, SourceFile};
 
 use crate::types::Origin;
 use crate::{Kind, Values};
@@ -33,27 +33,38 @@ const TYPE_ALIASES: &[(&str, hir::Scalar)] = &[
     ("varchar", hir::Scalar::Text),
 ];
 
-/// `name` is defined at `this` but was already defined at `first`.
-pub(crate) fn duplicate_name(name: &str, this: (Kind, Span), first: (Kind, Span)) -> Diagnostic {
-    Diagnostic::error(
+/// `name` is defined at `this` but was already defined at `first`, which
+/// has no span for a built-in.
+pub(crate) fn duplicate_name(
+    name: &str,
+    this: (Kind, Span),
+    first: (Kind, Option<Span>),
+) -> Diagnostic {
+    let d = Diagnostic::error(
         Code::DuplicateName,
         format!("`{name}` is defined more than once"),
         this.1,
         format!("redefined here as {}", this.0.describe()),
-    )
-    .with_secondary(
-        first.1,
-        format!("`{name}` is first defined here as {}", first.0.describe()),
-    )
-    .with_note("variables and operators share one namespace, so every name must be unique")
-    .with_help("delete the duplicate definition, or rename one of them")
+    );
+    let d = match first.1 {
+        Some(span) => d.with_secondary(
+            span,
+            format!("`{name}` is first defined here as {}", first.0.describe()),
+        ),
+        None => d.with_note(format!(
+            "`{name}` is {}, declared in the prelude",
+            first.0.describe()
+        )),
+    };
+    d.with_note("variables and operators share one namespace, so every name must be unique")
+        .with_help("delete the duplicate definition, or rename one of them")
 }
 
 pub(crate) fn missing_main(file: &SourceFile, values: &Values) -> Diagnostic {
     const MESSAGE: &str = "program has no `main` operator";
     const ENTRY_NOTE: &str = "execution starts in the operator named `main`";
 
-    if let Some((Kind::Variable, span)) = values.get("main") {
+    if let Some((Kind::Variable, Some(span))) = values.get("main") {
         return Diagnostic::error(
             Code::MissingMain,
             MESSAGE,
@@ -69,8 +80,9 @@ pub(crate) fn missing_main(file: &SourceFile, values: &Values) -> Diagnostic {
     let near_miss = values
         .iter()
         .filter(|&(name, kind, _)| kind == Kind::Operator && name.eq_ignore_ascii_case("main"))
-        .min_by_key(|&(_, _, span)| span.start);
-    if let Some((name, _, span)) = near_miss {
+        .filter_map(|(name, _, span)| Some((name, span?)))
+        .min_by_key(|&(_, span)| span.start);
+    if let Some((name, span)) = near_miss {
         return Diagnostic::error(
             Code::MissingMain,
             MESSAGE,
@@ -158,27 +170,32 @@ pub(crate) fn unknown_type(ident: &SyntaxToken, values: &Values) -> Diagnostic {
     d
 }
 
-/// A value written as `expr` whose type isn't `declared`, which is expected
-/// because of `origin`.
+/// A value written as `expr`, of type `found`, where `declared` is expected
+/// because of `origin`. `value` is the value, if it is a constant, for fixes
+/// that rewrite the literal.
 pub(crate) fn type_mismatch(
     declared: &hir::Type,
     origin: &Origin,
-    value: &hir::Value,
+    found: &hir::Type,
+    value: Option<&hir::Value>,
     expr: &Expr,
 ) -> Diagnostic {
-    let found = value.ty();
     let mut d = Diagnostic::error(
         Code::TypeMismatch,
         format!("mismatched types: expected `{declared}`, found `{found}`"),
         expr.span(),
         format!("this is `{found}`"),
     )
-    .with_secondary(origin.span(), origin.label())
     .with_note("values never convert to another type implicitly");
+    if let Some(span) = origin.span() {
+        d = d.with_secondary(span, origin.label());
+    }
 
     // Rewriting the literal is the likelier fix when it is mechanical, so it
     // comes first; changing the declared type always works.
-    if let (hir::Type::Scalar(scalar), Expr::Literal(literal)) = (declared, expr) {
+    if let (hir::Type::Scalar(scalar), Expr::Literal(literal), Some(value)) =
+        (declared, expr, value)
+    {
         let written = literal.token().map(|t| t.text().to_string());
         if let Some(replacement) = written.and_then(|w| rewrite_literal(*scalar, value, &w)) {
             d = d.with_suggestion(
@@ -199,7 +216,7 @@ pub(crate) fn type_mismatch(
                 replacement: found.to_string(),
             }],
         ),
-        Origin::Heading(_) | Origin::Value(_) => d,
+        Origin::Heading(_) | Origin::Value(_) | Origin::Builtin => d,
     }
 }
 
@@ -284,79 +301,119 @@ fn source_text(value: &hir::Value) -> Option<String> {
     })
 }
 
-/// An attribute named `name`, at `span`, appearing more than once, first at
-/// `first`.
-pub(crate) fn duplicate_attribute(name: &str, span: Span, first: Span) -> Diagnostic {
+/// What a list of `name: value` items is: a tuple's attributes, or a call's
+/// arguments. They follow the same rules, and errors say which they are.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Noun {
+    Attribute,
+    Argument,
+}
+
+impl Noun {
+    fn one(self) -> &'static str {
+        match self {
+            Noun::Attribute => "attribute",
+            Noun::Argument => "argument",
+        }
+    }
+
+    fn many(self) -> &'static str {
+        match self {
+            Noun::Attribute => "attributes",
+            Noun::Argument => "arguments",
+        }
+    }
+}
+
+/// An attribute or argument named `name`, at `span`, appearing more than
+/// once, first at `first`.
+pub(crate) fn duplicate_attribute(noun: Noun, name: &str, span: Span, first: Span) -> Diagnostic {
+    let set = match noun {
+        Noun::Attribute => "a tuple's attributes are a set, so each name can appear only once",
+        Noun::Argument => "arguments are a tuple of the parameters, so each one is given once",
+    };
     Diagnostic::error(
         Code::DuplicateAttribute,
-        format!("attribute `{name}` is defined more than once"),
+        format!("{} `{name}` is given more than once", noun.one()),
         span,
-        "redefined here",
+        "given again here",
     )
-    .with_secondary(first, format!("`{name}` is first defined here"))
-    .with_note("a tuple's attributes are a set, so each name can appear only once")
+    .with_secondary(first, format!("`{name}` is first given here"))
+    .with_note(set)
     .with_help("rename or remove the duplicate")
 }
 
-/// A tuple value, written as `literal`, without the `missing` attributes of
-/// its declared type `ty`.
+/// A tuple value or argument list, at `at`, without the `missing`
+/// attributes or arguments, each with its type (`None` for `any`). `context`
+/// is a note on what was expected; `insertion` is where new items go.
 pub(crate) fn missing_attributes(
-    missing: &[(&str, &hir::Type)],
-    ty: &hir::Type,
-    literal: &TupleLiteral,
+    noun: Noun,
+    missing: &[(&str, Option<&hir::Type>)],
+    context: &str,
+    at: Span,
+    insertion: (usize, &str, &str),
 ) -> Diagnostic {
     let names: Vec<_> = missing
         .iter()
         .map(|(name, _)| format!("`{name}`"))
         .collect();
-    let noun = if missing.len() == 1 {
-        "attribute"
+    let what = if missing.len() == 1 {
+        noun.one()
     } else {
-        "attributes"
+        noun.many()
     };
     let d = Diagnostic::error(
         Code::MissingAttribute,
-        format!("missing {noun} {}", trendy_diag::conjoin(&names)),
-        literal.span(),
-        format!("this value has no {}", trendy_diag::conjoin(&names)),
+        format!("missing {what} {}", trendy_diag::conjoin(&names)),
+        at,
+        format!("no {}", trendy_diag::conjoin(&names)),
     )
-    .with_note(format!("the expected type is `{ty}`"))
-    .with_note("a tuple value must have every attribute of its type");
+    .with_note(context.to_string())
+    .with_note(match noun {
+        Noun::Attribute => "a tuple value must have every attribute of its type",
+        Noun::Argument => "every parameter needs an argument",
+    });
 
-    let attributes = missing
+    // Defaults make the fix; an `any` parameter has none.
+    let items = missing
         .iter()
-        .map(|(name, ty)| Some(format!("{name}: {}", source_text(&ty.default_value())?)))
+        .map(|(name, ty)| Some(format!("{name}: {}", source_text(&(*ty)?.default_value())?)))
         .collect::<Option<Vec<_>>>();
-    let Some(attributes) = attributes else {
-        return d;
+    let Some(items) = items else {
+        return d.with_help(format!("give {}", trendy_diag::conjoin(&names)));
     };
-    let (at, before, after) = literal.insertion();
+    let (offset, before, after) = insertion;
     d.with_suggestion(
         format!("add {} with default values", trendy_diag::conjoin(&names)),
         vec![Edit {
-            span: Span::empty(at),
-            replacement: format!("{before}{}{after}", attributes.join(", ")),
+            span: Span::empty(offset),
+            replacement: format!("{before}{}{after}", items.join(", ")),
         }],
     )
 }
 
-/// An attribute `name`, at `span`, that the declared type `ty` doesn't
-/// have. `rename` is the missing attribute it was probably meant to be, and
-/// `removal` the span that removes it.
+/// An attribute or argument `name`, at `span`, that isn't expected.
+/// `context` is a note on what was expected; `rename` is the missing item it
+/// was probably meant to be, and `removal` the span that removes it.
 pub(crate) fn unknown_attribute(
+    noun: Noun,
     name: &str,
     span: Span,
-    ty: &hir::Type,
+    context: &str,
     rename: Option<&str>,
     removal: Span,
 ) -> Diagnostic {
+    let label = match noun {
+        Noun::Attribute => "not an attribute of the expected type",
+        Noun::Argument => "not a parameter of this operator",
+    };
     let mut d = Diagnostic::error(
         Code::UnknownAttribute,
-        format!("unknown attribute `{name}`"),
+        format!("unknown {} `{name}`", noun.one()),
         span,
-        "not an attribute of the expected type",
+        label,
     )
-    .with_note(format!("the expected type is `{ty}`"));
+    .with_note(context.to_string());
     if let Some(target) = rename {
         d = d.with_suggestion(
             format!("rename it to `{target}`"),
@@ -372,6 +429,149 @@ pub(crate) fn unknown_attribute(
             span: removal,
             replacement: String::new(),
         }],
+    )
+}
+
+/// `builtin …`, the declaration `decl` with `keyword`, outside the prelude.
+pub(crate) fn builtin_outside_prelude(
+    keyword: Option<SyntaxToken>,
+    decl: &trendy_syntax::SyntaxNode,
+) -> Diagnostic {
+    let span = keyword.map_or_else(
+        || trendy_syntax::span(decl.text_range()),
+        |k| trendy_syntax::span(k.text_range()),
+    );
+    Diagnostic::error(
+        Code::BuiltinOutsidePrelude,
+        "built-ins can only be declared in the prelude",
+        span,
+        "not allowed in a program",
+    )
+    .with_note("the prelude declares the types and operators the compiler implements, such as `integer` and `debug_value`; they are always in scope")
+    .with_help("to define an operator, remove `builtin` and give it a body: `operator name{…} [ … ];`")
+}
+
+/// The reserved type name `any`, at `span`, used outside a built-in
+/// operator's parameters.
+pub(crate) fn any_outside_builtin(span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::AnyOutsideBuiltin,
+        "`any` is only for the parameters of built-in operators",
+        span,
+        "not a type that values or variables can have",
+    )
+    .with_note("`any` lets a built-in operator such as `debug_value` take a value of every type")
+    .with_help("use a specific type, such as `integer`, `text` or `tuple { name: text }`")
+}
+
+/// A name `name`, at `span`, that refers to nothing. `kind` is what was
+/// looked for ("value" or "operator"), and `candidates` the names in scope.
+pub(crate) fn unknown_name(name: &str, span: Span, kind: &str, candidates: &[&str]) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::UnknownName,
+        format!("unknown {kind} `{name}`"),
+        span,
+        "not defined",
+    );
+    let closest = candidates
+        .iter()
+        .filter(|c| edit_distance(c, name) <= 2)
+        .min_by_key(|c| edit_distance(c, name));
+    match closest {
+        Some(closest) => d.with_suggestion(
+            format!("did you mean `{closest}`?"),
+            vec![Edit {
+                span,
+                replacement: (*closest).to_string(),
+            }],
+        ),
+        None => d.with_help(match kind {
+            "operator" => "define the operator, or call one that exists, such as `debug_value`",
+            _ => "declare a variable with this name, or use a parameter",
+        }),
+    }
+}
+
+/// The operator `name`, at `span`, used as a value.
+pub(crate) fn operator_as_value(name: &str, span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::OperatorAsValue,
+        format!("`{name}` is an operator, not a value"),
+        span,
+        "operators can't be used as values",
+    )
+    .with_help(format!(
+        "to invoke it, write a statement: `call {name}{{…}};`"
+    ))
+}
+
+/// `call name{…}`, at `span`, where `name` is `what`, not an operator.
+pub(crate) fn not_an_operator(name: &str, span: Span, what: &str) -> Diagnostic {
+    Diagnostic::error(
+        Code::NotAnOperator,
+        format!("`{name}` is {what}, not an operator"),
+        span,
+        "can't be called",
+    )
+    .with_note("`call` invokes an update operator, such as `debug_value`")
+}
+
+/// An argument without a name, at `span`, in a call to `signature`.
+/// `only_param` is the name it must have, when that is certain.
+pub(crate) fn positional_argument(
+    span: Span,
+    only_param: Option<&str>,
+    signature: &str,
+) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::PositionalArgument,
+        "arguments must be named",
+        span,
+        "no parameter name",
+    )
+    .with_note(format!(
+        "arguments are a tuple of the operator's parameters, so each is written `name: value`; the parameters are {signature}"
+    ));
+    match only_param {
+        Some(param) => d.with_suggestion(
+            format!("name it `{param}`"),
+            vec![Edit {
+                span: Span::empty(span.start),
+                replacement: format!("{param}: "),
+            }],
+        ),
+        None => d.with_help("write each argument as `name: value`"),
+    }
+}
+
+/// `operator main{…}`, whose parameters `params` must be empty.
+pub(crate) fn main_with_params(params: &trendy_syntax::ast::Heading) -> Diagnostic {
+    Diagnostic::error(
+        Code::MainWithParams,
+        "`main` can't take parameters",
+        params.span(),
+        "nothing passes arguments to `main`",
+    )
+    .with_note("execution starts in `main`, with no arguments")
+    .with_suggestion(
+        "remove the parameters",
+        vec![Edit {
+            span: params.span(),
+            replacement: "{}".to_string(),
+        }],
+    )
+}
+
+/// A name, at `span`, in a value that must be constant.
+pub(crate) fn name_in_constant(span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::NameInConstant,
+        "a name can't be used in this value",
+        span,
+        "must be a constant",
+    )
+    .with_note(
+        "for now, initial values and the attributes of tuple and relation values can only be literals; a call's arguments can be names",
     )
 }
 

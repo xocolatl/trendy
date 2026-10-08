@@ -10,9 +10,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program {
+    /// The prelude's built-in operators, then the program's own.
     pub operators: Vec<Operator>,
     pub variables: Vec<Variable>,
-    /// The operator the executable starts in.
+    /// The operator the executable starts in: a user operator with no
+    /// parameters.
     pub entry: OperatorId,
 }
 
@@ -21,16 +23,125 @@ impl Program {
     pub fn operator(&self, id: OperatorId) -> &Operator {
         &self.operators[id.0]
     }
+
+    #[must_use]
+    pub fn variable(&self, id: VariableId) -> &Variable {
+        &self.variables[id.0]
+    }
+
+    /// The type of `expr`, inside the operator `within`.
+    ///
+    /// # Panics
+    ///
+    /// If `expr` names a parameter `within` doesn't have, or one of type
+    /// `any`, which sema never produces.
+    #[must_use]
+    pub fn type_of(&self, expr: &Expr, within: OperatorId) -> Type {
+        match expr {
+            Expr::Constant(value) => value.ty(),
+            Expr::Variable(id) => self.variable(*id).ty.clone(),
+            Expr::Parameter(name) => match &self.operator(within).params[name] {
+                ParamType::Type(ty) => ty.clone(),
+                ParamType::Any => unreachable!("only built-ins have `any` parameters"),
+            },
+        }
+    }
 }
 
 /// Index into [`Program::operators`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct OperatorId(pub usize);
 
+/// Index into [`Program::variables`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct VariableId(pub usize);
+
+/// An update operator: it returns nothing and is invoked by `call`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Operator {
-    /// Unique within the program.
+    /// Unique among variables and operators.
     pub name: String,
+    /// The parameters, by name. A call's arguments are a tuple of them.
+    pub params: BTreeMap<String, ParamType>,
+    pub kind: OperatorKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OperatorKind {
+    /// Defined in the program, with a body.
+    User { body: Vec<Statement> },
+    /// Declared in the prelude and implemented by the compiler.
+    Builtin(Builtin),
+}
+
+/// The type of a parameter: a type, or `any`, which only built-in operators
+/// use. `any` is not a type: no value or variable has it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParamType {
+    Type(Type),
+    Any,
+}
+
+impl std::fmt::Display for ParamType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParamType::Type(ty) => write!(f, "{ty}"),
+            ParamType::Any => f.write_str("any"),
+        }
+    }
+}
+
+/// The operators the compiler implements. Each is declared in the prelude,
+/// and sema checks the declaration against [`Builtin::params`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Builtin {
+    /// Print a value to stderr as one line of trendy source.
+    DebugValue,
+}
+
+impl Builtin {
+    pub const ALL: [Builtin; 1] = [Builtin::DebugValue];
+
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Builtin::DebugValue => "debug_value",
+        }
+    }
+
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Builtin> {
+        Builtin::ALL.into_iter().find(|b| b.name() == name)
+    }
+
+    /// The parameters the compiler's implementation takes.
+    #[must_use]
+    pub fn params(self) -> BTreeMap<String, ParamType> {
+        match self {
+            Builtin::DebugValue => [("v".to_string(), ParamType::Any)].into(),
+        }
+    }
+}
+
+/// A statement in an operator's body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Statement {
+    /// `call name{arguments};`: the arguments are the callee's parameters,
+    /// by name.
+    Call {
+        operator: OperatorId,
+        args: BTreeMap<String, Expr>,
+    },
+}
+
+/// An expression whose value is known only when the program runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Expr {
+    /// A value known at compile time.
+    Constant(Value),
+    Variable(VariableId),
+    /// A parameter of the operator the expression is in.
+    Parameter(String),
 }
 
 /// A variable defined at the top level of the program.

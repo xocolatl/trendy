@@ -1,0 +1,33 @@
+var flag := true;
+var count := 42;
+var ratio := 1.5e-3;
+var big := 1e300;
+var greeting := "say \"hi\"\n\ttab \\ é";
+var point := tuple { x: 1.0, y: tuple { z: false } };
+var unit := tuple {};
+var nobody: relation { name: text };
+var people := relation {
+    { name: "Ada", born: 1815 },
+    { name: "Edgar", born: 1923 },
+};
+var teams := relation { { team: "core", members: relation { { name: "Ada" } } } };
+
+operator show{label: text, value: integer} [
+    call debug_value{v: label};
+    call debug_value{v: value};
+];
+
+operator main{} [
+    call debug_value{v: flag};
+    call debug_value{v: count};
+    call debug_value{v: ratio};
+    call debug_value{v: big};
+    call debug_value{v: greeting};
+    call debug_value{v: point};
+    call debug_value{v: unit};
+    call debug_value{v: nobody};
+    call debug_value{v: people};
+    call debug_value{v: teams};
+    call debug_value{v: 7};
+    call show{value: count, label: "count"};
+];

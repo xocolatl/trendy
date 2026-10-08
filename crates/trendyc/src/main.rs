@@ -52,13 +52,30 @@ fn build(input: &Path, output: &Path, format: Format) -> Result<(), String> {
     if !parse.errors.is_empty() {
         return Err(report(&parse.errors));
     }
-    let hir = trendy_sema::analyze(&parse.tree).map_err(|errors| report(&errors))?;
+    let prelude = prelude()?;
+    let hir = trendy_sema::analyze(&prelude, &parse.tree).map_err(|errors| report(&errors))?;
 
     // Past sema, every failure is a compiler bug, not a user error.
     let lir = trendy_lower::lower(&hir);
     let object =
         trendy_codegen::compile(&lir).map_err(|e| format!("internal compiler error: {e}"))?;
     link(&object, output)
+}
+
+/// The prelude, parsed and checked. It is part of the compiler, so any error
+/// in it is a compiler bug.
+fn prelude() -> Result<trendy_sema::Prelude, String> {
+    let source = trendy_prelude::SOURCE;
+    let parse = trendy_parser::parse(source, trendy_lexer::lex(source));
+    if !parse.errors.is_empty() {
+        let rendered =
+            trendy_diag::render_all(&parse.errors, Format::Human, trendy_prelude::PATH, source);
+        return Err(format!(
+            "internal compiler error: the prelude doesn't parse\n{rendered}"
+        ));
+    }
+    trendy_sema::Prelude::load(&parse.tree)
+        .map_err(|e| format!("internal compiler error: the prelude is invalid: {e}"))
 }
 
 /// Rendered diagnostics, plus for people a summary that says where to learn
@@ -115,18 +132,27 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Mode, String> {
     })
 }
 
-/// Link the object with the system C compiler driver, which supplies the
-/// platform startup code and libc.
+/// The runtime library, built by `build.rs` and linked into every executable.
+const RUNTIME: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libtrendy_runtime.a"));
+
+/// Link the object and the runtime with the system C compiler driver, which
+/// supplies the platform startup code and libc.
 fn link(object: &[u8], output: &Path) -> Result<(), String> {
-    let object_path = std::env::temp_dir().join(format!("trendyc-{}.o", std::process::id()));
+    let temp = std::env::temp_dir();
+    let id = std::process::id();
+    let object_path = temp.join(format!("trendyc-{id}.o"));
+    let runtime_path = temp.join(format!("trendyc-{id}-runtime.a"));
     std::fs::write(&object_path, object).map_err(|e| format!("writing object file: {e}"))?;
+    std::fs::write(&runtime_path, RUNTIME).map_err(|e| format!("writing runtime: {e}"))?;
 
     let status = Command::new("cc")
         .arg(&object_path)
+        .arg(&runtime_path)
         .arg("-o")
         .arg(output)
         .status();
     let _ = std::fs::remove_file(&object_path);
+    let _ = std::fs::remove_file(&runtime_path);
 
     match status {
         Ok(s) if s.success() => Ok(()),

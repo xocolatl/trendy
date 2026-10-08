@@ -8,7 +8,7 @@ workspace = true
 
 [dependencies]
 trendy_syntax.workspace = true
+trendy_lexer.workspace = true
 
 [dev-dependencies]
-trendy_lexer.workspace = true
 trendy_parser.workspace = true

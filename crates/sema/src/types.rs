@@ -28,20 +28,27 @@ pub(crate) enum Origin {
     Heading(ast::Heading),
     /// An earlier value that set the type, such as a relation's first tuple.
     Value(Expr),
+    /// A built-in operator's parameter, declared in the prelude: there is no
+    /// place in the program to point at.
+    Builtin,
 }
 
 impl Origin {
-    pub(crate) fn span(&self) -> Span {
+    /// Where to point a secondary label, if anywhere.
+    pub(crate) fn span(&self) -> Option<Span> {
         match self {
-            Origin::Type(t) => t.span(),
-            Origin::Heading(h) => h.span(),
-            Origin::Value(v) => v.span(),
+            Origin::Type(t) => Some(t.span()),
+            Origin::Heading(h) => Some(h.span()),
+            Origin::Value(v) => Some(v.span()),
+            Origin::Builtin => None,
         }
     }
 
     pub(crate) fn label(&self) -> &'static str {
         match self {
-            Origin::Type(_) | Origin::Heading(_) => "expected because of this type",
+            Origin::Type(_) | Origin::Heading(_) | Origin::Builtin => {
+                "expected because of this type"
+            }
             Origin::Value(_) => "expected because of this value",
         }
     }
@@ -115,6 +122,12 @@ pub(crate) fn resolve(
     match type_expr {
         TypeExpr::Named(type_ref) => {
             let ident = type_ref.ident()?;
+            if ident.text() == "any" {
+                errors.push(errors::any_outside_builtin(trendy_syntax::span(
+                    ident.text_range(),
+                )));
+                return None;
+            }
             let scalar = hir::Scalar::from_name(ident.text());
             if scalar.is_none() {
                 errors.push(errors::unknown_type(&ident, values));
@@ -130,7 +143,7 @@ pub(crate) fn resolve(
     }
 }
 
-fn resolve_heading(
+pub(crate) fn resolve_heading(
     heading: &ast::Heading,
     values: &Values,
     errors: &mut Vec<Diagnostic>,
@@ -144,7 +157,12 @@ fn resolve_heading(
         };
         let span = trendy_syntax::span(ident.text_range());
         if let Some(&first) = first_spans.get(ident.text()) {
-            errors.push(errors::duplicate_attribute(ident.text(), span, first));
+            errors.push(errors::duplicate_attribute(
+                errors::Noun::Attribute,
+                ident.text(),
+                span,
+                first,
+            ));
             ok = false;
             continue;
         }
@@ -178,6 +196,10 @@ pub(crate) fn value(
         }
         Expr::Tuple(tuple) => tuple_value(tuple, expected, values, errors),
         Expr::Relation(relation) => relation_value(relation, expected, values, errors),
+        Expr::Name(name) => {
+            errors.push(errors::name_in_constant(name.span()));
+            None
+        }
     }
 }
 
@@ -190,7 +212,13 @@ fn matches(
 ) -> Option<hir::Value> {
     match expected {
         Some(e) if value.ty() != e.ty => {
-            errors.push(errors::type_mismatch(&e.ty, &e.origin, &value, expr));
+            errors.push(errors::type_mismatch(
+                &e.ty,
+                &e.origin,
+                &value.ty(),
+                Some(&value),
+                expr,
+            ));
             None
         }
         _ => Some(value),
@@ -251,7 +279,12 @@ fn tuple_value(
     });
     for (attribute, name, span) in &given {
         if let Some(first) = first_occurrence(&given, name, *span) {
-            errors.push(errors::duplicate_attribute(name, *span, first));
+            errors.push(errors::duplicate_attribute(
+                errors::Noun::Attribute,
+                name,
+                *span,
+                first,
+            ));
             ok = false;
             continue;
         }
@@ -277,9 +310,10 @@ fn tuple_value(
                         missing.retain(|m| *m != target);
                     }
                     errors.push(errors::unknown_attribute(
+                        errors::Noun::Attribute,
                         name,
                         *span,
-                        &here.ty,
+                        &format!("the expected type is `{}`", here.ty),
                         renamed,
                         tuple.removal(attribute),
                     ));
@@ -298,9 +332,15 @@ fn tuple_value(
     if let (Some(here), Some(heading), false) = (here, heading, missing.is_empty()) {
         let missing: Vec<_> = missing
             .into_iter()
-            .filter_map(|name| Some((name, heading.get(name)?)))
+            .filter_map(|name| Some((name, Some(heading.get(name)?))))
             .collect();
-        errors.push(errors::missing_attributes(&missing, &here.ty, tuple));
+        errors.push(errors::missing_attributes(
+            errors::Noun::Attribute,
+            &missing,
+            &format!("the expected type is `{}`", here.ty),
+            tuple.span(),
+            tuple.insertion(),
+        ));
         ok = false;
     }
     if !ok {

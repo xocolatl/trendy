@@ -7,6 +7,12 @@
       "include": "#operator-definition"
     },
     {
+      "include": "#builtin-type"
+    },
+    {
+      "include": "#call"
+    },
+    {
       "include": "#variable-declaration"
     },
     {
@@ -30,8 +36,33 @@
       "match": "\\b(?:true|false)\\b",
       "name": "constant.language.boolean.trendy"
     },
+    "builtin-type": {
+      "captures": {
+        "1": {
+          "name": "keyword.other.trendy"
+        },
+        "2": {
+          "name": "keyword.other.trendy"
+        },
+        "3": {
+          "name": "entity.name.type.trendy"
+        }
+      },
+      "match": "\\b(builtin)\\s+(type)\\s+([A-Z_a-z][0-9A-Z_a-z]*)"
+    },
+    "call": {
+      "captures": {
+        "1": {
+          "name": "keyword.other.trendy"
+        },
+        "2": {
+          "name": "entity.name.function.trendy"
+        }
+      },
+      "match": "\\b(call)\\s+([A-Z_a-z][0-9A-Z_a-z]*)"
+    },
     "keywords": {
-      "match": "\\b(?:operator|var|tuple|relation)\\b",
+      "match": "\\b(?:operator|var|tuple|relation|call|builtin)\\b",
       "name": "keyword.other.trendy"
     },
     "number": {
@@ -115,7 +146,7 @@
           "name": "entity.name.type.trendy"
         }
       },
-      "match": "\\b(var)\\s+([A-Z_a-z][0-9A-Z_a-z]*)(?:\\s*(\\:)\\s*(?!(?:operator|var|true|false|tuple|relation)\\b)([A-Z_a-z][0-9A-Z_a-z]*))?"
+      "match": "\\b(var)\\s+([A-Z_a-z][0-9A-Z_a-z]*)(?:\\s*(\\:)\\s*(?!(?:operator|var|true|false|tuple|relation|call|builtin)\\b)([A-Z_a-z][0-9A-Z_a-z]*))?"
     }
   },
   "scopeName": "source.trendy"

@@ -23,12 +23,105 @@ operator main{} [];
 ## Operators
 
 ```trendy
+operator greet{name: text, times: integer} [
+    call debug_value{v: name};
+    call debug_value{v: times};
+];
+
+operator main{} [
+    call greet{name: "Ada", times: 2};
+];
+```
+
+An operator definition is the keyword `operator`, a name, its parameters, a
+body in square brackets `[]`, and a closing `;`.
+
+- **Parameters are a heading:** `{name: type, …}`, with each name unique and
+  in any order. `main` has none, since nothing passes it arguments.
+- **A body is a list of statements,** each ending with `;`. For now, the only
+  statement is `call`.
+- **Arguments are a tuple of the parameters:** `call greet{name: "Ada",
+  times: 2};`. Every argument is named, every parameter gets one, and the
+  order doesn't matter.
+
+Following *The Third Manifesto*, operators are either read-only operators,
+which return a value and are used in expressions, or update operators, which
+return nothing and are invoked by a `call` statement. So far there are only
+update operators.
+
+```trendy,error
+operator main{} [
+    debug_value{v: 1};
+];
+```
+
+```trendy,error
+operator main{} [
+    call debug_value{1};
+];
+```
+
+### Names
+
+Inside an operator, a name refers to one of its parameters, or else to a
+variable of the program: parameters hide variables with the same name. An
+operator is not a value, so its name can only follow `call`.
+
+For now, a variable's initial value and the attributes of a tuple or relation
+value must be constants, written with literals. Only a call's arguments can be
+names.
+
+```trendy
+var greeting := "hello";
+
+operator show{greeting: integer} [
+    call debug_value{v: greeting};
+];
+
+operator main{} [
+    call debug_value{v: greeting};
+    call show{greeting: 1};
+];
+```
+
+```trendy,error
+var a := 1;
+var b := a;
+
 operator main{} [];
 ```
 
-An operator definition is the keyword `operator`, a name, a parameter list in
-braces `{}`, a body in square brackets `[]`, and a closing `;`. Parameters and
-statements don't exist yet, so both are empty.
+### Built-in operators
+
+The compiler implements some operators itself. They are declared in the
+*prelude*, trendy source that is part of every program, so they are always in
+scope. A program can't declare built-ins itself. The prelude also declares the
+built-in types, and `any`: a type name reserved for the parameters of built-in
+operators that accept a value of every type.
+
+```
+builtin type any;
+builtin type boolean;
+builtin type integer;
+builtin type rational;
+builtin type text;
+
+builtin operator debug_value{v: any};
+```
+
+**`debug_value{v: any}`** writes `v` to stderr, on one line, as trendy source.
+Tuples and relations are written with their attributes in name order,
+relations with their heading first and their tuples in a fixed order, so the
+output reads back as the same value. For example:
+`relation { a: boolean, b: integer } { { a: false, b: 25 }, { a: true, b: 3 } }`.
+
+`any` is a type name only, so a variable can be named `any`.
+
+```trendy,error
+operator show{v: any} [];
+
+operator main{} [];
+```
 
 ## Variables
 
@@ -267,8 +360,9 @@ operator main{} [];
 ## Names
 
 Names are ASCII letters, digits and `_`, and don't start with a digit. They
-are case-sensitive. The keywords are `operator`, `var`, `tuple`, `relation`,
-`true` and `false`, all lowercase.
+are case-sensitive. The keywords are `operator`, `var`, `call`, `builtin`,
+`tuple`, `relation`, `true` and `false`, all lowercase. `type` is a keyword
+only after `builtin`.
 
 Variables and operators share one namespace, so no two of them can have the
 same name. Types have their own namespace, so a variable can be named after a
@@ -296,7 +390,13 @@ operator main{} [];
 - a blank line between other definitions;
 - single spaces around `:=` and after `:`;
 - a relation value with more than one tuple has each tuple on its own line,
-  indented four spaces per level of nesting.
+  indented four spaces per level of nesting;
+- a relation's tuples list their attributes in the order of the relation's
+  heading: the selector's own heading, else the declared type, else the first
+  tuple's order;
+- an operator's body has each statement on its own line, indented;
+- parameters and arguments are written without spaces inside their braces:
+  `operator greet{name: text}`, `call greet{name: "Ada"}`.
 
 A trailing comma is kept or left out as written.
 
@@ -305,6 +405,7 @@ A trailing comma is kept or left out as written.
 | Elsewhere | In trendy |
 |---|---|
 | `fn`, `def`, `function`, `void main()` | `operator main{} [];` |
+| `print(x)`, `f(x)` | `call debug_value{v: x};` |
 | `let`, `const`, `int x` | `var x` |
 | `x = 0` | `x := 0` |
 | `(params) { body }` | `{params} [body]` |

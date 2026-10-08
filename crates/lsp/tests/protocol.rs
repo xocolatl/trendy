@@ -36,7 +36,14 @@ impl Client {
         assert_eq!(
             result["capabilities"]["semanticTokensProvider"]["legend"]["tokenTypes"],
             json!([
-                "keyword", "function", "variable", "type", "number", "string", "property"
+                "keyword",
+                "function",
+                "variable",
+                "type",
+                "number",
+                "string",
+                "property",
+                "parameter"
             ])
         );
         client.notify("initialized", json!({}));
