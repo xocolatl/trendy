@@ -782,57 +782,42 @@ pub(crate) fn failure(
     }
 }
 
-/// The first operand, written `operand`, of `op`, written `token`, of type
-/// `found`, which isn't a scalar type.
-pub(crate) fn not_operand(
-    op: crate::ops::Operator,
-    token: &SyntaxToken,
-    found: &hir::Type,
-    operand: &Expr,
-) -> Diagnostic {
-    Diagnostic::error(
-        Code::TypeMismatch,
-        format!(
-            "mismatched types: `{}` takes {}, found `{found}`",
-            token.text(),
-            op.takes()
-        ),
-        operand.span(),
-        format!("this is `{found}`"),
-    )
-    .with_secondary(
-        trendy_syntax::span(token.text_range()),
-        format!("`{}` takes {}", token.text(), op.takes()),
-    )
-    .with_note("values never convert to another type implicitly")
-}
-
 /// How a type's values are named in the plural.
-fn plural(scalar: hir::Scalar) -> &'static str {
-    match scalar {
-        hir::Scalar::Boolean => "booleans",
-        hir::Scalar::Integer => "integers",
-        hir::Scalar::Rational => "rationals",
-        hir::Scalar::Text => "text",
+fn plural(ty: &hir::Type) -> &'static str {
+    match ty {
+        hir::Type::Scalar(hir::Scalar::Boolean) => "booleans",
+        hir::Type::Scalar(hir::Scalar::Integer) => "integers",
+        hir::Type::Scalar(hir::Scalar::Rational) => "rationals",
+        hir::Type::Scalar(hir::Scalar::Text) => "text",
+        hir::Type::Tuple(_) => "tuples",
+        hir::Type::Relation(_) => "relations",
     }
 }
 
-/// The operator `op`, written `token`, applied to operands of type
-/// `scalar`, which it doesn't take.
+/// The operator `op`, written `token`, applied to operands of type `ty`,
+/// which it doesn't take.
 pub(crate) fn wrong_operand_type(
     op: crate::ops::Operator,
     token: &SyntaxToken,
-    scalar: hir::Scalar,
+    ty: &hir::Type,
 ) -> Diagnostic {
     use crate::ops::Operator;
     let span = trendy_syntax::span(token.text_range());
     let d = Diagnostic::error(
         Code::WrongOperandType,
-        format!("`{}` can't be applied to {}", token.text(), plural(scalar)),
+        format!("`{}` can't be applied to {}", token.text(), plural(ty)),
         span,
         format!("`{}` takes {}", token.text(), op.takes()),
     )
     .with_note("values never convert to another type implicitly");
+    let hir::Type::Scalar(scalar) = *ty else {
+        return match op {
+            Operator::Compare(_) => d.with_note(
+                "tuples and relations have no order; they can only be compared with `=` and `<>`",
+            ),
+            _ => d,
+        };
+    };
     let replace = |d: Diagnostic, with: &str, message: &str| {
         // A keyword needs spaces where the operator had none, as in `a/b`.
         let word = with.starts_with(|c: char| c.is_ascii_alphabetic());

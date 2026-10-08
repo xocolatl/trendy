@@ -1,5 +1,11 @@
 var folded := 1 < 2 and "a" < "b" and false < true;
 var signed_zeros := -0.0 < 0.0 and -0.0 <> 0.0;
+var ada := tuple { name: "Ada", born: 1815 };
+var people := relation {
+    { name: "Ada", born: 1815 },
+    { name: "Edgar", born: 1923 },
+};
+var folded_tuples := ada = tuple { born: 1815, name: "Ada" };
 
 operator booleans{a: boolean, b: boolean} [
     call debug_value{v: a = b};
@@ -37,9 +43,25 @@ operator texts{a: text, b: text} [
     call debug_value{v: a >= b};
 ];
 
+operator tuples{a: tuple { name: text, born: integer }, b: tuple { name: text, born: integer }} [
+    call debug_value{v: a = b};
+    call debug_value{v: a <> b};
+];
+
+operator relations{a: relation { name: text, born: integer }, b: relation { name: text, born: integer }} [
+    call debug_value{v: a = b};
+    call debug_value{v: a <> b};
+];
+
+operator nested{a: tuple { r: relation { x: rational } }, b: tuple { r: relation { x: rational } }} [
+    call debug_value{v: a = b};
+    call debug_value{v: a <> b};
+];
+
 operator main{} [
     call debug_value{v: folded};
     call debug_value{v: signed_zeros};
+    call debug_value{v: folded_tuples};
     call booleans{a: false, b: true};
     call booleans{a: true, b: true};
     call integers{a: -2, b: 1};
@@ -50,4 +72,22 @@ operator main{} [
     call texts{a: "é", b: "😀"};
     call texts{a: "ab", b: "a"};
     call texts{a: "", b: ""};
+    call tuples{a: ada, b: tuple { name: "Ada", born: 1815 }};
+    call tuples{a: ada, b: tuple { name: "Ada", born: 1816 }};
+    call tuples{a: ada, b: tuple { name: "Adb", born: 1815 }};
+    call relations{a: people, b: relation {
+        { name: "Edgar", born: 1923 },
+        { name: "Ada", born: 1815 }
+    }};
+    call relations{a: people, b: relation { { name: "Ada", born: 1815 } }};
+    call relations{a: people, b: relation {}};
+    call relations{a: relation {}, b: relation {}};
+    call nested{a: tuple { r: relation { { x: 0.0 } } }, b: tuple { r: relation { { x: -0.0 } } }};
+    call nested{a: tuple { r: relation {
+        { x: 1.5 },
+        { x: 2.5 }
+    } }, b: tuple { r: relation {
+        { x: 2.5 },
+        { x: 1.5 }
+    } }};
 ];

@@ -138,6 +138,10 @@ pub enum RuntimeFn {
     /// an [`Layout::I64`], as `lhs` is before, equal to or after `rhs` in
     /// code point order.
     CompareText,
+    /// `trendy_rt_equal(dst, lhs, rhs, descriptor)`: store at `dst`, a
+    /// [`Layout::U8`], whether two values of the type the descriptor
+    /// describes are equal. For tuples and relations.
+    Equal,
 }
 
 impl RuntimeFn {
@@ -150,6 +154,7 @@ impl RuntimeFn {
             RuntimeFn::Concat => "trendy_rt_concat",
             RuntimeFn::FreeText => "trendy_rt_free_text",
             RuntimeFn::CompareText => "trendy_rt_compare_text",
+            RuntimeFn::Equal => "trendy_rt_equal",
         }
     }
 }
@@ -243,7 +248,8 @@ pub enum BinaryOp {
     Mod,
     /// A comparison, whose result is a boolean: `false` before `true`,
     /// integers numerically, and rationals by IEEE 754 totalOrder. Texts
-    /// are compared by [`RuntimeFn::CompareText`].
+    /// are compared by [`RuntimeFn::CompareText`], and tuples and relations
+    /// by [`RuntimeFn::Equal`].
     Compare(Comparison, Operand),
 }
 

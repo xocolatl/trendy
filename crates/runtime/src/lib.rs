@@ -83,6 +83,77 @@ pub unsafe extern "C" fn trendy_rt_concat(dst: *mut Text, lhs: *const Text, rhs:
     }
 }
 
+/// Store at `dst` 1 if `lhs` and `rhs`, of the type `desc` describes, are
+/// equal, and 0 if not. Two values are equal exactly when they are the same
+/// value: rationals when they have the same bits (IEEE 754 totalOrder),
+/// tuples attribute by attribute, and relations when they have the same
+/// tuples. The compiler keeps every relation's tuples in one canonical
+/// order, so equal relations have equal arrays.
+///
+/// # Safety
+///
+/// `lhs` and `rhs` must point to valid values of the type `desc` describes,
+/// `desc` to a valid descriptor, and `dst` to a byte.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_equal(
+    dst: *mut u8,
+    lhs: *const u8,
+    rhs: *const u8,
+    desc: *const TypeDesc,
+) {
+    // SAFETY: guaranteed by the caller.
+    unsafe { dst.write(u8::from(equal(lhs, rhs, &*desc))) }
+}
+
+/// Whether `lhs` and `rhs`, of the type `desc` describes, are equal.
+///
+/// # Safety
+///
+/// As for [`trendy_rt_equal`].
+#[must_use]
+pub unsafe fn equal(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> bool {
+    // SAFETY: guaranteed by the caller; each size and offset in a
+    // descriptor is the layout of the value it describes.
+    unsafe {
+        match desc.kind {
+            KIND_BOOLEAN => *lhs == *rhs,
+            KIND_INTEGER | KIND_RATIONAL => {
+                lhs.cast::<u64>().read_unaligned() == rhs.cast::<u64>().read_unaligned()
+            }
+            KIND_TEXT => {
+                let (a, b) = (read_slice(lhs), read_slice(rhs));
+                a.1 == b.1
+                    && core::slice::from_raw_parts(a.0, a.1)
+                        == core::slice::from_raw_parts(b.0, b.1)
+            }
+            KIND_TUPLE => tuples_equal(lhs, rhs, desc),
+            KIND_RELATION => {
+                let ((a, count), (b, other)) = (read_slice(lhs), read_slice(rhs));
+                count == other
+                    && (0..count).all(|i| {
+                        let offset = i * desc.element_size;
+                        tuples_equal(a.add(offset), b.add(offset), desc)
+                    })
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Whether two tuples with the attributes of `desc` are equal.
+///
+/// # Safety
+///
+/// As for [`equal`], with `desc` describing a tuple or relation.
+unsafe fn tuples_equal(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> bool {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        attributes(desc)
+            .iter()
+            .all(|attr| equal(lhs.add(attr.offset), rhs.add(attr.offset), &*attr.desc))
+    }
+}
+
 /// Store at `dst` -1, 0 or 1, as `lhs` is before, equal to or after `rhs`
 /// in code point order, which is the order of their UTF-8 bytes.
 ///
@@ -465,6 +536,50 @@ mod tests {
         assert_eq!(rational(0.0), "0.0");
         assert_eq!(rational(1.5e-3), "0.0015");
         assert_eq!(rational(1e300), "1e300");
+    }
+
+    #[test]
+    fn equality() {
+        let rational = scalar(KIND_RATIONAL, 8);
+        let same = |a: f64, b: f64| unsafe {
+            equal(
+                a.to_ne_bytes().as_ptr(),
+                b.to_ne_bytes().as_ptr(),
+                &rational,
+            )
+        };
+        assert!(same(1.5, 1.5));
+        assert!(!same(0.0, -0.0), "different values, by totalOrder");
+        let text = scalar(KIND_TEXT, 16);
+        let value = |t: &str| [t.as_ptr() as usize, t.len()];
+        let same_text = |a: &str, b: &str| unsafe {
+            equal(value(a).as_ptr().cast(), value(b).as_ptr().cast(), &text)
+        };
+        assert!(same_text("é", &String::from("é")));
+        assert!(!same_text("ab", "abc"));
+        assert!(same_text("", ""));
+        // tuple { a: boolean, b: integer }: `a` at 0, `b` at 8.
+        let boolean = scalar(KIND_BOOLEAN, 1);
+        let integer = scalar(KIND_INTEGER, 8);
+        let heading = [attr("a", 0, &boolean), attr("b", 8, &integer)];
+        let tuple = TypeDesc {
+            kind: KIND_TUPLE,
+            size: 16,
+            attributes: heading.as_ptr(),
+            count: 2,
+            element_size: 0,
+        };
+        let value = |a: u8, b: i64| {
+            let mut bytes = [0_u8; 16];
+            bytes[0] = a;
+            bytes[8..].copy_from_slice(&b.to_ne_bytes());
+            bytes
+        };
+        let same_tuple =
+            |x: [u8; 16], y: [u8; 16]| unsafe { equal(x.as_ptr(), y.as_ptr(), &tuple) };
+        assert!(same_tuple(value(1, 7), value(1, 7)));
+        assert!(!same_tuple(value(1, 7), value(0, 7)));
+        assert!(!same_tuple(value(1, 7), value(1, 8)));
     }
 
     #[test]

@@ -241,7 +241,11 @@ since the type expected of them is that of their boolean result.
 
 Comparisons follow one order per type (`hir::compare`): `false` before
 `true`, integers numerically, rationals by IEEE 754 totalOrder, and text
-by code point. Codegen compares rationals as integers, after flipping every
+by code point. Tuples and relations have only `=` and `<>`
+(`hir::Compared`), by value equality: when folding, `hir::Value`'s, and at
+run time `trendy_rt_equal`, which walks the type descriptor. A relation's
+tuples are always in one canonical order, so equal relations have equal
+arrays; building relations at run time must keep that order. Codegen compares rationals as integers, after flipping every
 bit but the sign of a negative value's bits, which is totalOrder; text is
 compared by `trendy_rt_compare_text`, since UTF-8 byte order is code point
 order.

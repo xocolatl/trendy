@@ -236,20 +236,19 @@ fn text() {
 fn comparisons() {
     let (code, stderr) = run_example("comparisons");
     assert_eq!(code, 0, "{stderr}");
-    let lines: Vec<&str> = stderr.lines().collect();
+    let bits: Vec<char> = stderr
+        .lines()
+        .map(|b| if b == "true" { '1' } else { '0' })
+        .collect();
     // Evaluated when compiling.
-    assert_eq!(lines[..2], ["true", "true"]);
-    // Each call: `=`, `<>`, `<`, `<=`, `>`, `>=`, as 1 for true.
-    let rows: Vec<String> = lines[2..]
+    assert_eq!(bits[..3], ['1', '1', '1']);
+    // Each scalar call: `=`, `<>`, `<`, `<=`, `>`, `>=`.
+    let scalars: Vec<String> = bits[3..63]
         .chunks(6)
-        .map(|row| {
-            row.iter()
-                .map(|b| if *b == "true" { '1' } else { '0' })
-                .collect()
-        })
+        .map(|row| row.iter().collect())
         .collect();
     assert_eq!(
-        rows,
+        scalars,
         [
             "011100", // false, true
             "100101", // true, true
@@ -261,6 +260,25 @@ fn comparisons() {
             "011100", // "é", "😀"
             "010011", // "ab", "a"
             "100101", // "", ""
+        ]
+    );
+    // Each tuple and relation call: `=`, `<>`.
+    let values: Vec<String> = bits[63..]
+        .chunks(2)
+        .map(|row| row.iter().collect())
+        .collect();
+    assert_eq!(
+        values,
+        [
+            "10", // equal tuples
+            "01", // another attribute value
+            "01", // another text
+            "10", // the same tuples, listed in another order
+            "01", // a subset
+            "01", // against the empty relation
+            "10", // two empty relations
+            "01", // `0.0` and `-0.0` are different values, even nested
+            "10", // nested relations compare as sets
         ]
     );
 }

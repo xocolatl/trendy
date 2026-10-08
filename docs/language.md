@@ -452,8 +452,8 @@ program runs allocates memory for its result, and stops the program with
 ### Comparisons
 
 `a = b`, `a <> b`, `a < b`, `a <= b`, `a > b` and `a >= b` compare two
-values of the same built-in type, and are booleans. Every built-in type is
-ordered:
+values of the same type, and are booleans. Every type has `=` and `<>`.
+The built-in types are also ordered:
 
 | Type | Order |
 |---|---|
@@ -463,7 +463,14 @@ ordered:
 | `text` | by code point, which is also the order of the UTF-8 bytes. There is no collation: `"Z" < "a"`, and `"é" > "z"` |
 
 Two values are equal exactly when they are the same value, as *The Third
-Manifesto* requires (RM Prescription 8).
+Manifesto* requires (RM Prescription 8). Two tuples are equal when every
+attribute's values are equal, and two relations when they have the same
+tuples, in any order; the values inside are compared the same way, so
+`tuple { x: 0.0 } <> tuple { x: -0.0 }`. Tuples and relations have no
+order, so `<`, `<=`, `>` and `>=` don't apply to them (E0124).
+
+The right operand of a tuple or relation comparison takes its heading
+from the left one, so `r = relation {}` asks whether `r` is empty.
 
 ```trendy
 var sorted := "apple" < "banana" and -1 < 0 and false < true;
@@ -473,9 +480,21 @@ operator check{n: integer, name: text} [
     call debug_value{v: name <> ""};
 ];
 
+operator same{a: tuple { x: integer }, r: relation { x: integer }} [
+    call debug_value{v: a = tuple { x: 1 }};
+    call debug_value{v: r = relation {}};
+];
+
 operator main{} [
     call check{n: 42, name: "Ada"};
+    call same{a: tuple { x: 1 }, r: relation { { x: 2 }, { x: 1 } }};
 ];
+```
+
+```trendy,error
+var a := tuple { x: 1 } < tuple { x: 2 };
+
+operator main{} [];
 ```
 
 The operands must have the same type, since values never convert

@@ -141,14 +141,29 @@ impl Operator {
             Operator::Divide => "rationals",
             Operator::Div | Operator::Mod => "integers",
             Operator::Concatenate => "text",
+            Operator::Compare(hir::Comparison::Equal | hir::Comparison::NotEqual) => {
+                "two values of the same type"
+            }
             Operator::Compare(_) => "booleans, integers, rationals or text",
         }
     }
 
-    /// The operator for operands of type `scalar`, or `None` if it doesn't
-    /// take them: `/` doesn't take integers, nor `div` and `mod` rationals.
-    pub(crate) fn resolve(self, scalar: hir::Scalar) -> Option<Resolved> {
+    /// The operator for operands of type `ty`, or `None` if it doesn't take
+    /// them: `/` doesn't take integers, nor `div` and `mod` rationals, and
+    /// tuples and relations only have `=` and `<>`.
+    pub(crate) fn resolve(self, ty: &hir::Type) -> Option<Resolved> {
         use hir::BinaryOp as B;
+        let hir::Type::Scalar(scalar) = *ty else {
+            return match self {
+                Operator::Compare(
+                    comparison @ (hir::Comparison::Equal | hir::Comparison::NotEqual),
+                ) => Some(Resolved::Binary(B::Compare(
+                    comparison,
+                    hir::Compared::of(ty),
+                ))),
+                _ => None,
+            };
+        };
         let numeric = hir::Numeric::of(scalar);
         Some(match (self, numeric) {
             (Operator::Not, _) => Resolved::Unary(hir::UnaryOp::Not),
@@ -167,7 +182,9 @@ impl Operator {
             (Operator::Concatenate, None) if scalar == hir::Scalar::Text => {
                 Resolved::Binary(B::Concatenate)
             }
-            (Operator::Compare(comparison), _) => Resolved::Binary(B::Compare(comparison, scalar)),
+            (Operator::Compare(comparison), _) => {
+                Resolved::Binary(B::Compare(comparison, hir::Compared::Scalar(scalar)))
+            }
             _ => return None,
         })
     }
@@ -193,9 +210,7 @@ pub(crate) fn check_operands<T>(
     errors: &mut Vec<Diagnostic>,
 ) -> Option<(Resolved, Vec<T>)> {
     // A context the operator can work in sets the operand type.
-    let context = expected.filter(|e| {
-        op.result_is_operand() && matches!(e.ty, hir::Type::Scalar(s) if op.resolve(s).is_some())
-    });
+    let context = expected.filter(|e| op.result_is_operand() && op.resolve(&e.ty).is_some());
     let mut expectation = match op.operands() {
         Operands::Fixed(scalar) => Some(Expected {
             ty: hir::Type::Scalar(scalar),
@@ -205,47 +220,59 @@ pub(crate) fn check_operands<T>(
     };
     let mut checked = Vec::new();
     let mut ok = true;
+    // Whether the operator was reported as not taking the operands' type.
+    let mut wrong_type = false;
     for operand in operands {
         let Some(operand) = operand else {
             ok = false;
             continue;
         };
-        let Some((value, ty)) = check(&operand, expectation.as_ref(), errors) else {
+        let before = errors.len();
+        let result = check(&operand, expectation.as_ref(), errors);
+        if wrong_type {
+            // The operand was checked against a type the operator doesn't
+            // take, which is already reported; only its own errors remain.
+            let span = operand.span();
+            let mut i = before;
+            while i < errors.len() {
+                if errors[i].code == trendy_diag::Code::TypeMismatch && errors[i].span() == span {
+                    errors.remove(i);
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        let Some((value, ty)) = result else {
             ok = false;
             continue;
         };
         if expectation.is_none() && ok {
             // The first operand sets the type for the rest, if the operator
             // works on it.
-            let hir::Type::Scalar(scalar) = ty else {
-                errors.push(errors::not_operand(op, token, &ty, &operand));
+            // An operator that doesn't take this type is reported once; the
+            // other operands are still checked against it, so that an empty
+            // relation gets its heading and a mismatch is still reported.
+            if op.resolve(&ty).is_none() {
+                errors.push(errors::wrong_operand_type(op, token, &ty));
                 ok = false;
-                continue;
-            };
-            if op.resolve(scalar).is_none() {
-                errors.push(errors::wrong_operand_type(op, token, scalar));
-                ok = false;
-                continue;
+                wrong_type = true;
             }
             expectation = Some(Expected {
                 ty,
                 origin: Origin::Value(operand),
             });
+            if !ok {
+                continue;
+            }
         }
         checked.push(value);
     }
-    let Some(Expected {
-        ty: hir::Type::Scalar(scalar),
-        ..
-    }) = expectation
-    else {
-        return None;
-    };
+    let Expected { ty, .. } = expectation?;
     if !ok {
         return None;
     }
-    let Some(resolved) = op.resolve(scalar) else {
-        errors.push(errors::wrong_operand_type(op, token, scalar));
+    let Some(resolved) = op.resolve(&ty) else {
+        errors.push(errors::wrong_operand_type(op, token, &ty));
         return None;
     };
     Some((resolved, checked))
@@ -417,9 +444,8 @@ pub(crate) fn binary(
     if let (hir::Expr::Constant(a), hir::Expr::Constant(b)) = (&lhs, &rhs) {
         return op.apply(a, b).map(hir::Expr::Constant);
     }
-    let numeric = hir::Numeric::of(op.operand());
     let negate = |e| {
-        let numeric = numeric.expect("only arithmetic negates");
+        let numeric = hir::Numeric::of(op.operand()).expect("only arithmetic negates");
         unary(hir::UnaryOp::Negate(numeric), e)
     };
     // `result`, which drops one operand, unless that one can fail.

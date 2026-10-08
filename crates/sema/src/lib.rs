@@ -1616,10 +1616,7 @@ mod tests {
                     Code::TypeMismatch,
                     "mismatched types: expected `text`, found `integer`"
                 ),
-                (
-                    Code::TypeMismatch,
-                    "mismatched types: `||` takes text, found `tuple {}`"
-                ),
+                (Code::WrongOperandType, "`||` can't be applied to tuples"),
             ]
         );
         assert_eq!(
@@ -1677,7 +1674,7 @@ mod tests {
     #[test]
     fn comparison_operand_types() {
         let source = format!(
-            "var a := 1 = 1.0;\nvar b: integer := 1 < 2;\nvar c := tuple {{}} = tuple {{}};\nvar d: boolean := 1 = 2;{MAIN}"
+            "var a := 1 = 1.0;\nvar b: integer := 1 < 2;\nvar c := tuple {{}} < tuple {{}};\nvar d: boolean := 1 = 2;{MAIN}"
         );
         let errors = errors(&source);
         let found: Vec<_> = errors.iter().map(|e| (e.code, &e.message[..])).collect();
@@ -1692,12 +1689,90 @@ mod tests {
                     Code::TypeMismatch,
                     "mismatched types: expected `integer`, found `boolean`"
                 ),
-                (
-                    Code::TypeMismatch,
-                    "mismatched types: `=` takes booleans, integers, rationals or text, found `tuple {}`"
-                ),
+                (Code::WrongOperandType, "`<` can't be applied to tuples"),
             ],
             "the expected boolean result doesn't make the operands booleans"
+        );
+    }
+
+    #[test]
+    fn tuple_and_relation_equality() {
+        let yes = hir::Value::Boolean(true);
+        let no = hir::Value::Boolean(false);
+        assert_eq!(
+            init(
+                "var a := tuple { x: 1, y: \"a\" } = tuple { y: \"a\", x: 1 };",
+                "a"
+            ),
+            yes
+        );
+        assert_eq!(init("var a := tuple { x: 1 } <> tuple { x: 2 };", "a"), yes);
+        assert_eq!(init("var a := tuple {} = tuple {};", "a"), yes);
+        assert_eq!(
+            init(
+                "var a := relation { { x: 1 }, { x: 2 } } = relation { { x: 2 }, { x: 1 } };",
+                "a"
+            ),
+            yes,
+            "relations are sets"
+        );
+        // The right operand's heading comes from the left one.
+        assert_eq!(
+            init("var a := relation { { x: 1 } } = relation {};", "a"),
+            no
+        );
+        assert_eq!(
+            init(
+                "var a := tuple { r: relation { { x: -0.0 } } } = tuple { r: relation { { x: 0.0 } } };",
+                "a"
+            ),
+            no,
+            "nested values compare as values"
+        );
+        let source = format!(
+            "var a := tuple {{ x: 1 }} = tuple {{ x: 1, y: 2 }};\nvar b := tuple {{ x: 1 }} = relation {{ {{ x: 1 }} }};\nvar c := relation {{ {{ x: 1 }} }} >= relation {{}};{MAIN}"
+        );
+        let errors = errors(&source);
+        let found: Vec<_> = errors.iter().map(|e| (e.code, &e.message[..])).collect();
+        assert_eq!(
+            found,
+            [
+                (Code::UnknownAttribute, "unknown attribute `y`"),
+                (
+                    Code::TypeMismatch,
+                    "mismatched types: expected `tuple { x: integer }`, found `relation { x: integer }`"
+                ),
+                (Code::WrongOperandType, "`>=` can't be applied to relations"),
+            ]
+        );
+        assert!(
+            errors[2]
+                .notes
+                .iter()
+                .any(|n| n.contains("only be compared with `=` and `<>`"))
+        );
+    }
+
+    #[test]
+    fn tuple_equality_in_bodies() {
+        let body = main_body(
+            "var t := tuple { x: 1 };\nvar r := relation { { x: 1 } };\noperator main{} [\n    call debug_value{v: t = tuple { x: 1 }};\n    call debug_value{v: r <> relation {}};\n];",
+        );
+        let t = || Box::new(hir::Expr::Variable(hir::VariableId(0)));
+        let hir::Expr::Binary(op, lhs, _) = argument(&body[0]) else {
+            panic!("a comparison");
+        };
+        assert_eq!(
+            *op,
+            hir::BinaryOp::Compare(hir::Comparison::Equal, hir::Compared::Tuple)
+        );
+        assert_eq!(lhs, &t());
+        let hir::Expr::Binary(op, ..) = argument(&body[1]) else {
+            panic!("a comparison");
+        };
+        assert_eq!(
+            *op,
+            hir::BinaryOp::Compare(hir::Comparison::NotEqual, hir::Compared::Relation)
         );
     }
 

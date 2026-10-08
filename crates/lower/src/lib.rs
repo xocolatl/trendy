@@ -310,22 +310,43 @@ impl FunctionBuilder<'_> {
                 dst
             }
             hir::Expr::Binary(op, lhs, rhs) => {
+                let operand_ty = self.program.type_of(lhs, self.within);
                 let lhs = self.place(lhs, cx);
                 let rhs = self.place(rhs, cx);
-                self.binary(*op, lhs, rhs, cx)
+                self.binary(*op, &operand_ty, lhs, rhs, cx)
             }
         }
     }
 
-    /// `lhs op rhs`, computed into a new stack slot.
+    /// `lhs op rhs`, of operands of type `operand_ty`, computed into a new
+    /// stack slot.
     fn binary(
         &mut self,
         op: hir::BinaryOp,
+        operand_ty: &hir::Type,
         lhs: lir::Place,
         rhs: lir::Place,
         cx: &mut Lowering,
     ) -> lir::Place {
         let (op, lhs, rhs) = match op {
+            hir::BinaryOp::Compare(comparison, hir::Compared::Tuple | hir::Compared::Relation) => {
+                let equal = self.slot(lir::Layout::U8);
+                let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(operand_ty)));
+                self.insts.push(lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::Equal,
+                    args: vec![equal.clone(), lhs, rhs, descriptor],
+                });
+                if comparison == hir::Comparison::Equal {
+                    return equal;
+                }
+                let dst = self.slot(lir::Layout::U8);
+                self.insts.push(lir::Inst::Unary {
+                    dst: dst.clone(),
+                    op: lir::UnaryOp::Not,
+                    src: equal,
+                });
+                return dst;
+            }
             hir::BinaryOp::Concatenate => {
                 let dst = self.slot(scalar_layout(hir::Scalar::Text));
                 self.insts.push(lir::Inst::CallRuntime {
@@ -335,7 +356,7 @@ impl FunctionBuilder<'_> {
                 self.owned.push(dst.clone());
                 return dst;
             }
-            hir::BinaryOp::Compare(comparison, hir::Scalar::Text) => {
+            hir::BinaryOp::Compare(comparison, hir::Compared::Scalar(hir::Scalar::Text)) => {
                 // The runtime orders the texts as -1, 0 or 1, which is then
                 // compared with 0.
                 let ordering = self.slot(lir::Layout::I64);
@@ -393,10 +414,16 @@ fn lower_binary_op(op: hir::BinaryOp) -> lir::BinaryOp {
         hir::BinaryOp::Compare(comparison, scalar) => lir::BinaryOp::Compare(
             lower_comparison(comparison),
             match scalar {
-                hir::Scalar::Boolean => lir::Operand::Boolean,
-                hir::Scalar::Integer => lir::Operand::Numeric(lir::Numeric::Integer),
-                hir::Scalar::Rational => lir::Operand::Numeric(lir::Numeric::Rational),
-                hir::Scalar::Text => unreachable!("text is compared by a runtime call"),
+                hir::Compared::Scalar(hir::Scalar::Boolean) => lir::Operand::Boolean,
+                hir::Compared::Scalar(hir::Scalar::Integer) => {
+                    lir::Operand::Numeric(lir::Numeric::Integer)
+                }
+                hir::Compared::Scalar(hir::Scalar::Rational) => {
+                    lir::Operand::Numeric(lir::Numeric::Rational)
+                }
+                hir::Compared::Scalar(hir::Scalar::Text)
+                | hir::Compared::Tuple
+                | hir::Compared::Relation => unreachable!("compared by a runtime call"),
             },
         ),
         hir::BinaryOp::Concatenate => unreachable!("text is concatenated by a runtime call"),

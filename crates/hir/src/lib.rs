@@ -269,9 +269,32 @@ pub enum BinaryOp {
     Mod,
     /// `||`, of texts.
     Concatenate,
-    /// A comparison of two values of a scalar type, whose result is a
+    /// A comparison of two values of the same type, whose result is a
     /// boolean.
-    Compare(Comparison, Scalar),
+    Compare(Comparison, Compared),
+}
+
+/// What a comparison compares. Scalars are ordered; tuples and relations
+/// only have `=` and `<>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Compared {
+    Scalar(Scalar),
+    /// Tuples of one tuple type, equal when every attribute is.
+    Tuple,
+    /// Relations of one relation type, equal when they have the same tuples.
+    Relation,
+}
+
+impl Compared {
+    /// What values of type `ty` are, for comparing them.
+    #[must_use]
+    pub fn of(ty: &Type) -> Compared {
+        match ty {
+            Type::Scalar(scalar) => Compared::Scalar(*scalar),
+            Type::Tuple(_) => Compared::Tuple,
+            Type::Relation(_) => Compared::Relation,
+        }
+    }
 }
 
 /// A comparison operator.
@@ -322,6 +345,11 @@ pub fn compare(lhs: &Value, rhs: &Value) -> std::cmp::Ordering {
 
 impl BinaryOp {
     /// The type of both operands.
+    ///
+    /// # Panics
+    ///
+    /// For a comparison of tuples or relations, whose operand types aren't
+    /// scalars: see [`Compared`].
     #[must_use]
     pub fn operand(self) -> Scalar {
         match self {
@@ -332,7 +360,10 @@ impl BinaryOp {
             BinaryOp::Divide => Scalar::Rational,
             BinaryOp::Div | BinaryOp::Mod => Scalar::Integer,
             BinaryOp::Concatenate => Scalar::Text,
-            BinaryOp::Compare(_, scalar) => scalar,
+            BinaryOp::Compare(_, Compared::Scalar(scalar)) => scalar,
+            BinaryOp::Compare(_, Compared::Tuple | Compared::Relation) => {
+                panic!("tuple and relation comparisons have no scalar operand type")
+            }
         }
     }
 
@@ -358,8 +389,16 @@ impl BinaryOp {
     ///
     /// If an operand isn't of the operand type, which sema rules out.
     pub fn apply(self, lhs: &Value, rhs: &Value) -> Result<Value, Failure> {
-        if let BinaryOp::Compare(comparison, _) = self {
-            return Ok(Value::Boolean(comparison.holds(compare(lhs, rhs))));
+        match self {
+            BinaryOp::Compare(comparison, Compared::Scalar(_)) => {
+                return Ok(Value::Boolean(comparison.holds(compare(lhs, rhs))));
+            }
+            // Value equality is the language's: attribute-wise for tuples,
+            // set equality for relations.
+            BinaryOp::Compare(Comparison::Equal, _) => return Ok(Value::Boolean(lhs == rhs)),
+            BinaryOp::Compare(Comparison::NotEqual, _) => return Ok(Value::Boolean(lhs != rhs)),
+            BinaryOp::Compare(..) => panic!("tuples and relations aren't ordered"),
+            _ => {}
         }
         match (lhs, rhs) {
             (Value::Boolean(a), Value::Boolean(b)) => Ok(Value::Boolean(match self {
@@ -811,7 +850,7 @@ mod tests {
             let Type::Scalar(scalar) = a.ty() else {
                 panic!("not a scalar");
             };
-            BinaryOp::Compare(c, scalar).apply(&a, &b) == Ok(Value::Boolean(true))
+            BinaryOp::Compare(c, Compared::Scalar(scalar)).apply(&a, &b) == Ok(Value::Boolean(true))
         };
         let r = |x| Value::Rational(Rational::new(x));
         let t = |s: &str| Value::Text(s.to_string());
@@ -843,6 +882,52 @@ mod tests {
             Value::Integer(3),
             Value::Integer(3)
         ));
+    }
+
+    #[test]
+    fn tuple_and_relation_equality() {
+        let tuple = |a, b: &str| {
+            Value::Tuple(TupleValue::new(
+                [
+                    ("a".to_string(), Value::Integer(a)),
+                    ("b".to_string(), Value::Text(b.to_string())),
+                ]
+                .into(),
+            ))
+        };
+        let equal = BinaryOp::Compare(Comparison::Equal, Compared::Tuple);
+        assert_eq!(
+            equal.apply(&tuple(1, "x"), &tuple(1, "x")),
+            Ok(Value::Boolean(true))
+        );
+        assert_eq!(
+            equal.apply(&tuple(1, "x"), &tuple(1, "y")),
+            Ok(Value::Boolean(false))
+        );
+        let relation = |tuples: &[Value]| {
+            let heading = match tuples.first().map(Value::ty) {
+                Some(Type::Tuple(heading)) => heading,
+                _ => Heading::new(BTreeMap::new()),
+            };
+            Value::Relation(RelationValue {
+                heading,
+                tuples: tuples
+                    .iter()
+                    .map(|t| match t {
+                        Value::Tuple(t) => t.clone(),
+                        _ => unreachable!(),
+                    })
+                    .collect(),
+            })
+        };
+        let not_equal = BinaryOp::Compare(Comparison::NotEqual, Compared::Relation);
+        let ab = relation(&[tuple(1, "x"), tuple(2, "y")]);
+        let ba = relation(&[tuple(2, "y"), tuple(1, "x")]);
+        assert_eq!(not_equal.apply(&ab, &ba), Ok(Value::Boolean(false)), "sets");
+        assert_eq!(
+            not_equal.apply(&ab, &relation(&[tuple(1, "x")])),
+            Ok(Value::Boolean(true))
+        );
     }
 
     #[test]
