@@ -720,20 +720,39 @@ pub(crate) fn failure(
     }
 }
 
-/// An operand, written `operand`, of type `found`, of the arithmetic
-/// operator written `token`.
-pub(crate) fn not_numeric(token: &SyntaxToken, found: &hir::Type, operand: &Expr) -> Diagnostic {
+/// The first operand, written `operand`, of `op`, written `token`, of type
+/// `found`, which isn't a scalar type.
+pub(crate) fn not_operand(
+    op: crate::ops::Operator,
+    token: &SyntaxToken,
+    found: &hir::Type,
+    operand: &Expr,
+) -> Diagnostic {
     Diagnostic::error(
         Code::TypeMismatch,
-        format!("mismatched types: expected `integer` or `rational`, found `{found}`"),
+        format!(
+            "mismatched types: `{}` takes {}, found `{found}`",
+            token.text(),
+            op.takes()
+        ),
         operand.span(),
         format!("this is `{found}`"),
     )
     .with_secondary(
         trendy_syntax::span(token.text_range()),
-        format!("`{}` takes integers or rationals", token.text()),
+        format!("`{}` takes {}", token.text(), op.takes()),
     )
     .with_note("values never convert to another type implicitly")
+}
+
+/// How a type's values are named in the plural.
+fn plural(scalar: hir::Scalar) -> &'static str {
+    match scalar {
+        hir::Scalar::Boolean => "booleans",
+        hir::Scalar::Integer => "integers",
+        hir::Scalar::Rational => "rationals",
+        hir::Scalar::Text => "text",
+    }
 }
 
 /// The operator `op`, written `token`, applied to operands of type
@@ -747,9 +766,9 @@ pub(crate) fn wrong_operand_type(
     let span = trendy_syntax::span(token.text_range());
     let d = Diagnostic::error(
         Code::WrongOperandType,
-        format!("`{}` can't be applied to {}s", token.text(), scalar.name()),
+        format!("`{}` can't be applied to {}", token.text(), plural(scalar)),
         span,
-        format!("the operands are {}s", scalar.name()),
+        format!("`{}` takes {}", token.text(), op.takes()),
     )
     .with_note("values never convert to another type implicitly");
     let replace = |d: Diagnostic, with: &str, message: &str| {
@@ -765,22 +784,33 @@ pub(crate) fn wrong_operand_type(
         }
         d.with_suggestion(message, vec![Edit { span, replacement }])
     };
-    match op {
-        Operator::Divide => replace(
+    match (op, scalar) {
+        (Operator::Divide, hir::Scalar::Integer) => replace(
             d.with_note(
                 "`/` divides rationals; integer division is `div`, which truncates toward zero",
             ),
             "div",
             "use integer division: `div`",
         ),
-        Operator::Div => replace(
+        (Operator::Div, hir::Scalar::Rational) => replace(
             d.with_note("`div` is integer division; rationals divide with `/`"),
             "/",
             "use rational division: `/`",
         ),
-        _ => d.with_note(
+        (Operator::Mod, hir::Scalar::Rational) => d.with_note(
             "`mod` is the remainder of integer division; rationals have no remainder operator",
         ),
+        (Operator::Concatenate, hir::Scalar::Boolean) => replace(
+            d.with_note("`||` concatenates text; the boolean operator is `or`"),
+            "or",
+            "use `or`",
+        ),
+        (Operator::Add, hir::Scalar::Text) => replace(
+            d.with_note("`+` adds numbers; text is concatenated with `||`"),
+            "||",
+            "concatenate with `||`",
+        ),
+        _ => d,
     }
 }
 

@@ -397,6 +397,7 @@ mod tests {
         );
         assert_eq!(fmt("var a := - -1;"), "var a := - -1;\n");
         assert_eq!(fmt("var a := 1.0/-2.0;"), "var a := 1.0 / -2.0;\n");
+        assert_eq!(fmt("var a := \"a\"||b;"), "var a := \"a\" || b;\n");
         assert_eq!(fmt("var a := not-1;"), "var a := not -1;\n");
     }
 

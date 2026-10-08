@@ -369,7 +369,7 @@ impl<'a> Parser<'a> {
     /// An expression whose dyadic operators bind at least as tightly as
     /// `min`, by precedence climbing. From loosest to tightest: `implies`
     /// (1, grouping to the right), `or` (2), `xor` (3), `and` (4), then
-    /// `+` and `-` (7), and `*`, `/`, `div` and `mod` (8), all grouping to the
+    /// `+`, `-` and `||` (7), and `*`, `/`, `div` and `mod` (8), all grouping to the
     /// left. Prefix `not` sits between them at 5, so `not a + b` negates
     /// the sum, and prefix `-` and `+` bind tightest. Comparisons will take
     /// 6, so that `not a = b` negates the comparison.
@@ -407,7 +407,7 @@ impl<'a> Parser<'a> {
             SyntaxKind::OrKw => 2,
             SyntaxKind::XorKw => 3,
             SyntaxKind::AndKw => 4,
-            SyntaxKind::Plus | SyntaxKind::Minus => 7,
+            SyntaxKind::Plus | SyntaxKind::Minus | SyntaxKind::PipePipe => 7,
             SyntaxKind::Star | SyntaxKind::Slash | SyntaxKind::DivKw | SyntaxKind::ModKw => 8,
             _ => return None,
         };
@@ -1583,7 +1583,7 @@ SourceFile
 
     #[test]
     fn foreign_and_miscased_operators() {
-        let source = "var x := a && !b || c -> d;";
+        let source = "var x := a && !b | c -> d;";
         let codes: Vec<_> = parse_str(source).errors.iter().map(|e| e.code).collect();
         assert_eq!(codes, [Code::ForeignOperator; 4]);
         assert_eq!(fix(source), "var x := a and not b or c implies d;");
@@ -1604,6 +1604,8 @@ SourceFile
             "the remainder of integer division is the keyword `mod`"
         );
         assert_eq!(shape("a / b * c"), "((a / b) * c)");
+        assert_eq!(shape("a || b || c"), "((a || b) || c)");
+        assert_eq!(shape("a || b and c"), "((a || b) and c)");
         assert_eq!(fix(source), "var x := a/b mod c;");
         assert_eq!(fix("var x := a DIV b Mod c;"), "var x := a div b mod c;");
     }

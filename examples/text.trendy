@@ -1,0 +1,16 @@
+var greeting := "hello" || ", " || "world";
+var nothing := "" || "";
+
+operator greet{name: text, punctuation: text} [
+    call debug_value{v: "hello, " || name || punctuation};
+    call debug_value{v: name || ""};
+    call debug_value{v: tuple { t: "constant " || "parts fold" }};
+];
+
+operator main{} [
+    call debug_value{v: greeting};
+    call debug_value{v: nothing};
+    call greet{name: "Ada", punctuation: "!"};
+    call greet{name: "é\u{1F600}\"", punctuation: "\n"};
+    call greet{name: "", punctuation: ""};
+];

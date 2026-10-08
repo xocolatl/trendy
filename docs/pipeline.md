@@ -118,7 +118,7 @@ as `:=` and reported. Whitespace is attached to the innermost node that is open 
 appears, so whitespace between definitions belongs to the file.
 
 Expressions use precedence climbing. From tightest to loosest: prefix `-`
-and `+`; `*`, `/`, `div` and `mod`; `+` and `-`; prefix `not`; `and`; `xor`;
+and `+`; `*`, `/`, `div` and `mod`; `+`, `-` and `||`; prefix `not`; `and`; `xor`;
 `or`; and `implies`, which groups to the right. Comparisons will go between
 the arithmetic operators and `not`. Looking for
 a dyadic operator after an operand uses a lookahead that leaves whitespace
@@ -290,7 +290,14 @@ translation.
 **Owns:** turning tree-shaped code into control flow, and choosing how each
 value is represented in memory. A computed expression, such as `not p`, is
 evaluated into a stack slot of its own, which the instruction that uses it
-then reads. Once relations arrive, this is where
+then reads.
+
+It also owns the lifetime of allocated values. A concatenation done at run
+time calls `trendy_rt_concat`, which allocates the result's bytes with
+`malloc`. No value can outlive the statement that computes it yet, since
+there is no assignment and operators return nothing, so lowering releases
+each one with `trendy_rt_free_text` when its statement ends. Assignment and
+returned values will need a real ownership scheme. Once relations arrive, this is where
 relational operators get fused into loops over tuples with fixed layouts.
 
 ### codegen (`trendy_codegen`)

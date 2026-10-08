@@ -126,6 +126,14 @@ pub enum RuntimeFn {
     /// `trendy_rt_fail(failure)`, which doesn't return. It takes a
     /// [`Failure::code`] by value, not a place, so only codegen calls it.
     Fail,
+    /// `trendy_rt_concat(dst, lhs, rhs)`: store the concatenation of two
+    /// texts at `dst`, in allocated memory that must be released with
+    /// [`RuntimeFn::FreeText`]. It stops the program if the memory can't be
+    /// allocated.
+    Concat,
+    /// `trendy_rt_free_text(text)`: release a text made by
+    /// [`RuntimeFn::Concat`].
+    FreeText,
 }
 
 impl RuntimeFn {
@@ -135,6 +143,8 @@ impl RuntimeFn {
         match self {
             RuntimeFn::DebugValue => "trendy_rt_debug_value",
             RuntimeFn::Fail => "trendy_rt_fail",
+            RuntimeFn::Concat => "trendy_rt_concat",
+            RuntimeFn::FreeText => "trendy_rt_free_text",
         }
     }
 }

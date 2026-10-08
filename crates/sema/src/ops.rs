@@ -30,6 +30,8 @@ pub(crate) enum Operator {
     Divide,
     Div,
     Mod,
+    /// `||`
+    Concatenate,
 }
 
 /// What an operator's operands must be.
@@ -37,9 +39,9 @@ pub(crate) enum Operator {
 pub(crate) enum Operands {
     /// Always this type.
     Fixed(hir::Scalar),
-    /// Integers or rationals, both the same: the type comes from the context
-    /// or, failing that, from the first operand.
-    Numeric,
+    /// Of a type the operator works on, all the same: the type comes from
+    /// the context or, failing that, from the first operand.
+    Inferred,
 }
 
 /// An operator with its operand type known.
@@ -80,6 +82,7 @@ impl Operator {
             (SyntaxKind::Slash, _) => Operator::Divide,
             (SyntaxKind::DivKw, _) => Operator::Div,
             (SyntaxKind::ModKw, _) => Operator::Mod,
+            (SyntaxKind::PipePipe, _) => Operator::Concatenate,
             _ => return None,
         })
     }
@@ -88,9 +91,10 @@ impl Operator {
         matches!(self, Operator::Not | Operator::Negate | Operator::Plus)
     }
 
-    /// What the operands must be. `/`, `div` and `mod` take their type like
-    /// the other arithmetic operators, so that applying one to the wrong
-    /// numeric type is reported at the operator, with the one that fits.
+    /// What the operands must be. Every operator but the boolean ones takes
+    /// its type from the operands, so that an operator applied to a type it
+    /// doesn't take, such as `+` to texts, is reported at the operator, with
+    /// the one that fits.
     pub(crate) fn operands(self) -> Operands {
         match self {
             Operator::Not | Operator::And | Operator::Or | Operator::Xor | Operator::Implies => {
@@ -103,7 +107,25 @@ impl Operator {
             | Operator::Multiply
             | Operator::Divide
             | Operator::Div
-            | Operator::Mod => Operands::Numeric,
+            | Operator::Mod
+            | Operator::Concatenate => Operands::Inferred,
+        }
+    }
+
+    /// The types the operator takes, as written in an error message.
+    pub(crate) fn takes(self) -> &'static str {
+        match self {
+            Operator::Not | Operator::And | Operator::Or | Operator::Xor | Operator::Implies => {
+                "booleans"
+            }
+            Operator::Negate
+            | Operator::Plus
+            | Operator::Add
+            | Operator::Subtract
+            | Operator::Multiply => "integers or rationals",
+            Operator::Divide => "rationals",
+            Operator::Div | Operator::Mod => "integers",
+            Operator::Concatenate => "text",
         }
     }
 
@@ -126,6 +148,9 @@ impl Operator {
             (Operator::Divide, Some(hir::Numeric::Rational)) => Resolved::Binary(B::Divide),
             (Operator::Div, Some(hir::Numeric::Integer)) => Resolved::Binary(B::Div),
             (Operator::Mod, Some(hir::Numeric::Integer)) => Resolved::Binary(B::Mod),
+            (Operator::Concatenate, None) if scalar == hir::Scalar::Text => {
+                Resolved::Binary(B::Concatenate)
+            }
             _ => return None,
         })
     }
@@ -150,14 +175,15 @@ pub(crate) fn check_operands<T>(
     check: &mut CheckOperand<'_, T>,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<(Resolved, Vec<T>)> {
-    let numeric_context =
-        expected.filter(|e| matches!(e.ty, hir::Type::Scalar(s) if hir::Numeric::of(s).is_some()));
+    // A context the operator can work in sets the operand type.
+    let context =
+        expected.filter(|e| matches!(e.ty, hir::Type::Scalar(s) if op.resolve(s).is_some()));
     let mut expectation = match op.operands() {
         Operands::Fixed(scalar) => Some(Expected {
             ty: hir::Type::Scalar(scalar),
             origin: Origin::Operator(token.clone()),
         }),
-        Operands::Numeric => numeric_context.cloned(),
+        Operands::Inferred => context.cloned(),
     };
     let mut checked = Vec::new();
     let mut ok = true;
@@ -170,18 +196,23 @@ pub(crate) fn check_operands<T>(
             ok = false;
             continue;
         };
-        if expectation.is_none() {
-            // The first operand sets the type for the rest.
-            if matches!(ty, hir::Type::Scalar(s) if hir::Numeric::of(s).is_some()) {
-                expectation = Some(Expected {
-                    ty,
-                    origin: Origin::Value(operand),
-                });
-            } else {
-                errors.push(errors::not_numeric(token, &ty, &operand));
+        if expectation.is_none() && ok {
+            // The first operand sets the type for the rest, if the operator
+            // works on it.
+            let hir::Type::Scalar(scalar) = ty else {
+                errors.push(errors::not_operand(op, token, &ty, &operand));
+                ok = false;
+                continue;
+            };
+            if op.resolve(scalar).is_none() {
+                errors.push(errors::wrong_operand_type(op, token, scalar));
                 ok = false;
                 continue;
             }
+            expectation = Some(Expected {
+                ty,
+                origin: Origin::Value(operand),
+            });
         }
         checked.push(value);
     }
@@ -277,6 +308,8 @@ enum Known {
     Zero,
     /// `-0.0`, which IEEE 754 sign rules make the identity of `+`.
     NegativeZero,
+    /// `""`
+    Empty,
     One,
     MinusOne,
 }
@@ -291,6 +324,7 @@ fn known(expr: &hir::Expr) -> Option<Known> {
         hir::Value::Integer(0) => Known::Zero,
         hir::Value::Integer(1) => Known::One,
         hir::Value::Integer(-1) => Known::MinusOne,
+        hir::Value::Text(t) if t.is_empty() => Known::Empty,
         hir::Value::Rational(r) => match r.get() {
             r if r.to_bits() == 0.0_f64.to_bits() => Known::Zero,
             r if r.to_bits() == (-0.0_f64).to_bits() => Known::NegativeZero,
@@ -346,8 +380,10 @@ pub(crate) fn binary(
     lhs: hir::Expr,
     rhs: hir::Expr,
 ) -> Result<hir::Expr, hir::Failure> {
-    use Known::{False, MinusOne, NegativeZero, One, True, Zero};
-    use hir::BinaryOp::{Add, And, Div, Divide, Implies, Mod, Multiply, Or, Subtract, Xor};
+    use Known::{Empty, False, MinusOne, NegativeZero, One, True, Zero};
+    use hir::BinaryOp::{
+        Add, And, Concatenate, Div, Divide, Implies, Mod, Multiply, Or, Subtract, Xor,
+    };
     use hir::Numeric::{Integer, Rational};
     if let (hir::Expr::Constant(a), hir::Expr::Constant(b)) = (&lhs, &rhs) {
         return op.apply(a, b).map(hir::Expr::Constant);
@@ -376,12 +412,14 @@ pub(crate) fn binary(
         | (Or | Xor, Some(False), _)
         | (Add(Integer), Some(Zero), _)
         | (Add(Rational), Some(NegativeZero), _)
-        | (Multiply(_), Some(One), _) => rhs,
+        | (Multiply(_), Some(One), _)
+        | (Concatenate, Some(Empty), _) => rhs,
         (And, _, Some(True))
         | (Or | Xor, _, Some(False))
         | (Add(Integer) | Subtract(_), _, Some(Zero))
         | (Add(Rational), _, Some(NegativeZero))
-        | (Multiply(_) | Div | Divide, _, Some(One)) => lhs,
+        | (Multiply(_) | Div | Divide, _, Some(One))
+        | (Concatenate, _, Some(Empty)) => lhs,
         // negates it,
         (Xor, Some(True), _) => unary(hir::UnaryOp::Not, rhs)?,
         (Xor, _, Some(True)) | (Implies, _, Some(False)) => unary(hir::UnaryOp::Not, lhs)?,

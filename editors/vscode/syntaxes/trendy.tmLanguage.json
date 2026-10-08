@@ -94,6 +94,10 @@
           "name": "keyword.operator.assignment.trendy"
         },
         {
+          "match": "\\|\\|",
+          "name": "keyword.operator.concatenation.trendy"
+        },
+        {
           "match": "\\{|\\}",
           "name": "punctuation.section.braces.trendy"
         },

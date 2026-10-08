@@ -47,6 +47,7 @@ pub fn lower(program: &hir::Program) -> lir::Program {
             variable_data: &variable_data,
             slots: Vec::new(),
             insts: Vec::new(),
+            owned: Vec::new(),
         };
         for statement in body {
             function.statement(statement, &mut cx);
@@ -209,10 +210,24 @@ struct FunctionBuilder<'a> {
     variable_data: &'a [lir::DataId],
     slots: Vec<lir::Layout>,
     insts: Vec<lir::Inst>,
+    /// Texts the current statement allocated, released when it ends. No
+    /// value outlives the statement that computes it, since there is no
+    /// assignment yet and operators return nothing.
+    owned: Vec<lir::Place>,
 }
 
 impl FunctionBuilder<'_> {
     fn statement(&mut self, statement: &hir::Statement, cx: &mut Lowering) {
+        self.call(statement, cx);
+        for text in std::mem::take(&mut self.owned) {
+            self.insts.push(lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::FreeText,
+                args: vec![text],
+            });
+        }
+    }
+
+    fn call(&mut self, statement: &hir::Statement, cx: &mut Lowering) {
         let hir::Statement::Call { operator, args } = statement;
         let callee = self.program.operator(*operator);
         match &callee.kind {
@@ -294,6 +309,17 @@ impl FunctionBuilder<'_> {
                 });
                 dst
             }
+            hir::Expr::Binary(hir::BinaryOp::Concatenate, lhs, rhs) => {
+                let lhs = self.place(lhs, cx);
+                let rhs = self.place(rhs, cx);
+                let dst = self.slot(scalar_layout(hir::Scalar::Text));
+                self.insts.push(lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::Concat,
+                    args: vec![dst.clone(), lhs, rhs],
+                });
+                self.owned.push(dst.clone());
+                dst
+            }
             hir::Expr::Binary(op, lhs, rhs) => {
                 let lhs = self.place(lhs, cx);
                 let rhs = self.place(rhs, cx);
@@ -313,6 +339,7 @@ impl FunctionBuilder<'_> {
                     hir::BinaryOp::Divide => lir::BinaryOp::Divide,
                     hir::BinaryOp::Div => lir::BinaryOp::Div,
                     hir::BinaryOp::Mod => lir::BinaryOp::Mod,
+                    hir::BinaryOp::Concatenate => unreachable!("a runtime call, above"),
                 };
                 self.insts.push(lir::Inst::Binary {
                     dst: dst.clone(),
@@ -565,6 +592,42 @@ mod tests {
                 }
             ]
         ));
+    }
+
+    #[test]
+    fn concatenations_are_released_when_the_statement_ends() {
+        let t = || Box::new(hir::Expr::Variable(hir::VariableId(0)));
+        let inner = hir::Expr::Binary(hir::BinaryOp::Concatenate, t(), t());
+        let expr = hir::Expr::Binary(hir::BinaryOp::Concatenate, Box::new(inner), t());
+        let lowered = lower(&program(
+            vec![
+                debug_value(),
+                user("main", &[], vec![call(0, vec![("v", expr)])]),
+            ],
+            vec![variable("t", hir::Value::Text("a".to_string()))],
+        ));
+        let main = &lowered.functions[0];
+        let text = lir::Layout::Struct(vec![lir::Layout::Address, lir::Layout::Usize]);
+        assert_eq!(main.slots, [text.clone(), text]);
+        let slot = |i| lir::Place::whole(lir::Base::Slot(lir::SlotId(i)));
+        let runtime: Vec<_> = main.blocks[0]
+            .insts
+            .iter()
+            .map(|inst| match inst {
+                lir::Inst::CallRuntime { function, args } => (*function, args[0].clone()),
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            runtime,
+            [
+                (lir::RuntimeFn::Concat, slot(0)),
+                (lir::RuntimeFn::Concat, slot(1)),
+                (lir::RuntimeFn::DebugValue, slot(1)),
+                (lir::RuntimeFn::FreeText, slot(0)),
+                (lir::RuntimeFn::FreeText, slot(1)),
+            ]
+        );
     }
 
     #[test]

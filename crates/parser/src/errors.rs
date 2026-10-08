@@ -214,7 +214,7 @@ pub(crate) fn wrong_attribute_separator(found: SyntaxKind, span: Span) -> Diagno
 pub(crate) fn foreign_operator(text: &str) -> Option<SyntaxKind> {
     Some(match text {
         "&&" | "&" => SyntaxKind::AndKw,
-        "||" | "|" => SyntaxKind::OrKw,
+        "|" => SyntaxKind::OrKw,
         "^" => SyntaxKind::XorKw,
         "->" | "=>" => SyntaxKind::ImpliesKw,
         "!" => SyntaxKind::NotKw,

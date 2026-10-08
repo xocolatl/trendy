@@ -267,6 +267,8 @@ pub enum BinaryOp {
     /// The remainder of [`BinaryOp::Div`], with the sign of the dividend:
     /// `a = (a div b) * b + a mod b`.
     Mod,
+    /// `||`, of texts.
+    Concatenate,
 }
 
 impl BinaryOp {
@@ -280,6 +282,7 @@ impl BinaryOp {
             }
             BinaryOp::Divide => Scalar::Rational,
             BinaryOp::Div | BinaryOp::Mod => Scalar::Integer,
+            BinaryOp::Concatenate => Scalar::Text,
         }
     }
 
@@ -325,6 +328,9 @@ impl BinaryOp {
                     _ => panic!("`{self:?}` of integers"),
                 };
                 result.map(Value::Integer).ok_or(Failure::Overflow)
+            }
+            (Value::Text(a), Value::Text(b)) if self == BinaryOp::Concatenate => {
+                Ok(Value::Text(format!("{a}{b}")))
             }
             (Value::Rational(a), Value::Rational(b)) => {
                 let (a, b) = (a.get(), b.get());
@@ -741,6 +747,13 @@ mod tests {
             UnaryOp::Negate(Numeric::Rational).apply(&r(0.0)),
             Ok(r(-0.0))
         );
+    }
+
+    #[test]
+    fn concatenation() {
+        let t = |s: &str| Value::Text(s.to_string());
+        assert_eq!(BinaryOp::Concatenate.apply(&t("ab"), &t("é")), Ok(t("abé")));
+        assert_eq!(BinaryOp::Concatenate.apply(&t(""), &t("")), Ok(t("")));
     }
 
     #[test]

@@ -58,6 +58,8 @@ pub fn lex(source: &str) -> Lexed {
             )
         } else if source[start..].starts_with(":=") {
             (SyntaxKind::ColonEq, start + 2)
+        } else if source[start..].starts_with("||") {
+            (SyntaxKind::PipePipe, start + 2)
         } else if let Some(len) = foreign_operator(&source[start..]) {
             (SyntaxKind::ForeignOperator, start + len)
         } else {
@@ -97,7 +99,7 @@ pub fn lex(source: &str) -> Lexed {
 /// Operators from other languages, which the parser replaces with trendy's
 /// keywords: `&&` for `and`, `->` for `implies`, `%` for `mod`, and so on.
 /// Longer ones come first, so that `&&` isn't two `&`.
-pub const FOREIGN_OPERATORS: [&str; 9] = ["&&", "||", "->", "=>", "!", "&", "|", "^", "%"];
+pub const FOREIGN_OPERATORS: [&str; 8] = ["&&", "->", "=>", "!", "&", "|", "^", "%"];
 
 /// The length of the foreign operator `text` starts with, if any.
 fn foreign_operator(text: &str) -> Option<usize> {
@@ -567,7 +569,7 @@ mod tests {
     #[test]
     fn foreign_operators() {
         assert_eq!(
-            kinds("a&&b||!c->d=>e"),
+            kinds("a&&b|!c->d=>e||f"),
             [
                 Ident,
                 ForeignOperator,
@@ -578,6 +580,8 @@ mod tests {
                 ForeignOperator,
                 Ident,
                 ForeignOperator,
+                Ident,
+                PipePipe,
                 Ident
             ]
         );

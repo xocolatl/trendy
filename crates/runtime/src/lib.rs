@@ -30,6 +30,8 @@ pub const FAIL_INTEGER_OVERFLOW: u32 = 0;
 pub const FAIL_DIVISION_BY_ZERO: u32 = 1;
 /// A rational result beyond the largest finite magnitude.
 pub const FAIL_RATIONAL_OVERFLOW: u32 = 2;
+/// Memory for a result couldn't be allocated.
+pub const FAIL_OUT_OF_MEMORY: u32 = 3;
 
 /// The line written to stderr for each `FAIL_` constant, with the
 /// compiler's error code, which `trendyc --explain` describes.
@@ -39,8 +41,59 @@ pub fn failure_message(failure: u32) -> &'static str {
         FAIL_INTEGER_OVERFLOW => "error[E0122]: integer overflow\n",
         FAIL_DIVISION_BY_ZERO => "error[E0123]: division by zero\n",
         FAIL_RATIONAL_OVERFLOW => "error[E0122]: rational overflow\n",
+        FAIL_OUT_OF_MEMORY => "error: out of memory\n",
         _ => "error: the program failed\n",
     }
+}
+
+/// A `text` value: the address of its UTF-8 bytes, and their number. The
+/// compiler lays text out as this pair.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct Text {
+    pub bytes: *const u8,
+    pub len: usize,
+}
+
+/// Store `lhs || rhs` at `dst`, in memory allocated for it, which
+/// [`trendy_rt_free_text`] releases. Stops the program if the memory can't
+/// be allocated.
+///
+/// # Safety
+///
+/// `lhs` and `rhs` must point to valid text values, and `dst` to memory for
+/// one.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_concat(dst: *mut Text, lhs: *const Text, rhs: *const Text) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let (lhs, rhs) = (lhs.read_unaligned(), rhs.read_unaligned());
+        let Some(len) = lhs.len.checked_add(rhs.len) else {
+            trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+        };
+        // At least one byte, so that even the empty text has an address.
+        let bytes = malloc(len.max(1));
+        if bytes.is_null() {
+            trendy_rt_fail(FAIL_OUT_OF_MEMORY);
+        }
+        core::ptr::copy_nonoverlapping(lhs.bytes, bytes, lhs.len);
+        core::ptr::copy_nonoverlapping(rhs.bytes, bytes.add(lhs.len), rhs.len);
+        dst.write_unaligned(Text { bytes, len });
+    }
+}
+
+/// Release the memory of a text made by [`trendy_rt_concat`].
+///
+/// # Safety
+///
+/// `text` must point to a text value made by [`trendy_rt_concat`] and not
+/// yet released.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_free_text(text: *const Text) {
+    // SAFETY: guaranteed by the caller.
+    unsafe { free(text.read_unaligned().bytes.cast_mut()) }
 }
 
 /// Stop the program because of `failure`, one of the `FAIL_` constants:
@@ -333,6 +386,10 @@ unsafe extern "C" {
     fn abort() -> !;
     #[cfg(not(test))]
     fn exit(status: i32) -> !;
+    #[cfg(not(test))]
+    fn malloc(size: usize) -> *mut u8;
+    #[cfg(not(test))]
+    fn free(pointer: *mut u8);
 }
 
 #[cfg(not(test))]

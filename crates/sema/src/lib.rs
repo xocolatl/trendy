@@ -1415,7 +1415,8 @@ mod tests {
             [
                 // The left operand sets the type.
                 "expected because of this value",
-                "`-` takes integers or rationals",
+                // `-` doesn't take text: reported at the operator.
+                "",
                 "expected because of this type",
                 "`not` takes a boolean operand",
                 "expected because of this value",
@@ -1519,7 +1520,7 @@ mod tests {
         );
         assert_eq!(
             codes(&format!("var a := 1 + 1.5;\nvar b := true + 1;{MAIN}")),
-            [Code::TypeMismatch, Code::TypeMismatch]
+            [Code::TypeMismatch, Code::WrongOperandType]
         );
     }
 
@@ -1583,6 +1584,76 @@ mod tests {
             ),
             [Code::DivisionByZero]
         );
+    }
+
+    #[test]
+    fn concatenation() {
+        let t = |s: &str| hir::Value::Text(s.to_string());
+        assert_eq!(init("var a := \"ab\" || \"c\" || \"\";", "a"), t("abc"));
+        assert_eq!(
+            init("var a := b || \"!\";\nvar b := \"hé\";", "a"),
+            t("hé!")
+        );
+        let source = format!(
+            "var a := true || false;\nvar b := \"a\" + \"b\";\nvar c := \"a\" || 1;\nvar d: text := 1 || 2;\nvar e := tuple {{}} || \"\";{MAIN}"
+        );
+        let errors = errors(&source);
+        let found: Vec<_> = errors.iter().map(|e| (e.code, &e.message[..])).collect();
+        assert_eq!(
+            found,
+            [
+                (Code::WrongOperandType, "`||` can't be applied to booleans"),
+                (Code::WrongOperandType, "`+` can't be applied to text"),
+                (
+                    Code::TypeMismatch,
+                    "mismatched types: expected `text`, found `integer`"
+                ),
+                (
+                    Code::TypeMismatch,
+                    "mismatched types: expected `text`, found `integer`"
+                ),
+                (
+                    Code::TypeMismatch,
+                    "mismatched types: expected `text`, found `integer`"
+                ),
+                (
+                    Code::TypeMismatch,
+                    "mismatched types: `||` takes text, found `tuple {}`"
+                ),
+            ]
+        );
+        assert_eq!(
+            fix(&source),
+            format!(
+                "var a := true or false;\nvar b := \"a\" || \"b\";\nvar c := \"a\" || \"1\";\nvar d: text := \"1\" || \"2\";\nvar e := tuple {{}} || \"\";{MAIN}"
+            )
+        );
+    }
+
+    #[test]
+    fn concatenation_simplification() {
+        let cases = [
+            ("t || \"\"", "t"),
+            ("\"\" || t", "t"),
+            ("\"a\" || \"b\" || t", "\"ab\" || t"),
+            ("t || \"a\" || \"b\"", "t || \"a\" || \"b\""),
+        ];
+        for (written, simplified) in cases {
+            let source = |e: &str| {
+                format!(
+                    "operator f{{t: text}} [ call debug_value{{v: {e}}}; ];\noperator main{{}} [];"
+                )
+            };
+            let body = |e: &str| {
+                let program = analyze_str(&source(e)).unwrap();
+                let f = program.operators.iter().find(|o| o.name == "f").unwrap();
+                let hir::OperatorKind::User { body } = &f.kind else {
+                    panic!("f is a user operator");
+                };
+                argument(&body[0]).clone()
+            };
+            assert_eq!(body(written), body(simplified), "{written}");
+        }
     }
 
     #[test]

@@ -421,6 +421,34 @@ A `-` written directly before a number literal makes a negative literal, so
 the smallest integer, `-9223372036854775808`, can be written, and so can
 `-0.0`.
 
+### Text
+
+`a || b` is the text `a` followed by the text `b`. Both operands must be
+text: `"n = " || 1` is an error, since values never convert implicitly, and
+`+` doesn't concatenate (E0124, with a fix to `||`).
+
+```trendy
+var greeting := "hello" || ", " || "world";
+
+operator greet{name: text} [
+    call debug_value{v: "hello, " || name || "!"};
+];
+
+operator main{} [
+    call greet{name: "Ada"};
+];
+```
+
+```trendy,error
+var greeting := "hello" + "world";
+
+operator main{} [];
+```
+
+Concatenations of constants are done when compiling. One done while the
+program runs allocates memory for its result, and stops the program with
+`error: out of memory` if there is none.
+
 ### Precedence
 
 From tightest to loosest:
@@ -429,7 +457,7 @@ From tightest to loosest:
 |---|---|
 | prefix `-` and `+` | |
 | `*`, `/`, `div`, `mod` | left |
-| `+`, `-` | left |
+| `+`, `-`, `\|\|` | left |
 | `not` | |
 | `and` | left |
 | `xor` | left |
@@ -442,8 +470,9 @@ means `a implies (b implies c)`. Parentheses group explicitly.
 
 ### Other languages' operators
 
-The symbols other languages use, such as `&&`, `||`, `!`, `^`, `->` and
-`%`, are not operators in trendy. Neither are capitalized spellings such as
+The symbols other languages use, such as `&&`, `|`, `!`, `^`, `->` and
+`%`, are not operators in trendy. `||` is concatenation, as in Tutorial D
+and SQL, so `a || b` on booleans is an error with a fix to `or`. Neither are capitalized spellings such as
 `AND` or `MOD`. The compiler suggests the keyword for each.
 
 ```trendy,error
@@ -596,7 +625,9 @@ A trailing comma is kept or left out as written.
 | `tuple { x = 1 }` | `tuple { x: 1 }` |
 | `RELATION { TUPLE { … } }` | `relation { { … } }` |
 | `VAR`, `TUPLE`, `TRUE` | `var`, `tuple`, `true` |
-| `!a`, `a && b`, `a \|\| b` | `not a`, `a and b`, `a or b` |
+| `!a`, `a && b` | `not a`, `a and b` |
+| `a \|\| b` for booleans | `a or b` |
+| `"a" + "b"`, `concat("a", "b")` | `"a" \|\| "b"` |
 | `a ^ b`, `a != b` for booleans | `a xor b` |
 | `a -> b`, `a => b` | `a implies b` |
 | `AND`, `Or`, `NOT` | `and`, `or`, `not` |

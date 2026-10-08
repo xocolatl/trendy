@@ -209,6 +209,29 @@ fn rational_failures_stop_the_program() {
     }
 }
 
+#[test]
+fn text() {
+    let (code, stderr) = run_example("text");
+    assert_eq!(code, 0, "{stderr}");
+    let folded = r#"tuple { t: "constant parts fold" }"#;
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            r#""hello, world""#,
+            r#""""#,
+            r#""hello, Ada!""#,
+            r#""Ada""#,
+            folded,
+            r#""hello, é😀\"\n""#,
+            r#""é😀\"""#,
+            folded,
+            r#""hello, ""#,
+            r#""""#,
+            folded,
+        ]
+    );
+}
+
 /// Compile `source`, run it, and return its exit code and stderr.
 fn run_source(name: &str, source: &str) -> (i32, String) {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
