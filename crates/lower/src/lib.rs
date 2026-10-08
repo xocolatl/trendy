@@ -285,7 +285,7 @@ impl FunctionBuilder<'_> {
                 let dst = self.slot(scalar_layout(op.result()));
                 let op = match op {
                     hir::UnaryOp::Not => lir::UnaryOp::Not,
-                    hir::UnaryOp::Negate => lir::UnaryOp::Negate,
+                    hir::UnaryOp::Negate(numeric) => lir::UnaryOp::Negate(lower_numeric(*numeric)),
                 };
                 self.insts.push(lir::Inst::Unary {
                     dst: dst.clone(),
@@ -303,9 +303,14 @@ impl FunctionBuilder<'_> {
                     hir::BinaryOp::Or => lir::BinaryOp::Or,
                     hir::BinaryOp::Xor => lir::BinaryOp::Xor,
                     hir::BinaryOp::Implies => lir::BinaryOp::Implies,
-                    hir::BinaryOp::Add => lir::BinaryOp::Add,
-                    hir::BinaryOp::Subtract => lir::BinaryOp::Subtract,
-                    hir::BinaryOp::Multiply => lir::BinaryOp::Multiply,
+                    hir::BinaryOp::Add(numeric) => lir::BinaryOp::Add(lower_numeric(*numeric)),
+                    hir::BinaryOp::Subtract(numeric) => {
+                        lir::BinaryOp::Subtract(lower_numeric(*numeric))
+                    }
+                    hir::BinaryOp::Multiply(numeric) => {
+                        lir::BinaryOp::Multiply(lower_numeric(*numeric))
+                    }
+                    hir::BinaryOp::Divide => lir::BinaryOp::Divide,
                     hir::BinaryOp::Div => lir::BinaryOp::Div,
                     hir::BinaryOp::Mod => lir::BinaryOp::Mod,
                 };
@@ -325,6 +330,13 @@ impl FunctionBuilder<'_> {
         let slot = lir::SlotId(self.slots.len());
         self.slots.push(layout);
         lir::Place::whole(lir::Base::Slot(slot))
+    }
+}
+
+fn lower_numeric(numeric: hir::Numeric) -> lir::Numeric {
+    match numeric {
+        hir::Numeric::Integer => lir::Numeric::Integer,
+        hir::Numeric::Rational => lir::Numeric::Rational,
     }
 }
 
@@ -528,7 +540,7 @@ mod tests {
     fn integer_expressions_compute_into_integer_slots() {
         let n = || Box::new(hir::Expr::Variable(hir::VariableId(0)));
         let expr = hir::Expr::Unary(
-            hir::UnaryOp::Negate,
+            hir::UnaryOp::Negate(hir::Numeric::Integer),
             Box::new(hir::Expr::Binary(hir::BinaryOp::Mod, n(), n())),
         );
         let lowered = lower(&program(
@@ -548,7 +560,7 @@ mod tests {
                     ..
                 },
                 lir::Inst::Unary {
-                    op: lir::UnaryOp::Negate,
+                    op: lir::UnaryOp::Negate(lir::Numeric::Integer),
                     ..
                 }
             ]

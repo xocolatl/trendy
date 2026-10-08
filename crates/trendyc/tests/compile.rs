@@ -155,6 +155,60 @@ fn integers() {
     );
 }
 
+#[test]
+fn rationals() {
+    let (code, stderr) = run_example("rationals");
+    assert_eq!(code, 0, "{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    // Evaluated when compiling.
+    assert_eq!(lines[..4], ["0.5", "18.75", "-0.0", "1e-310"]);
+    // Each row: `-a`, `a + b`, `a - b`, `a * b`, `a / b`, rounded as IEEE
+    // 754 rounds them, signed zeros included.
+    let rows: Vec<_> = lines[4..].chunks(5).collect();
+    assert_eq!(
+        rows,
+        [
+            ["-7.0", "9.0", "5.0", "14.0", "3.5"],
+            [
+                "-0.1",
+                "0.30000000000000004",
+                "-0.1",
+                "0.020000000000000004",
+                "0.5"
+            ],
+            ["-0.0", "-1.0", "1.0", "-0.0", "-0.0"],
+            ["-1e300", "1e300", "1e300", "1e292", "1e308"],
+        ]
+    );
+}
+
+#[test]
+fn rational_failures_stop_the_program() {
+    use trendy_diag::Code;
+    let program = |call: &str| {
+        format!(
+            "operator f{{a: rational, b: rational}} [\n    call debug_value{{v: 1.0}};\n    call debug_value{{v: {call}}};\n];\n\noperator main{{}} [\n    call f{{a: 1e308, b: 0.0}};\n];\n"
+        )
+    };
+    let overflow = format!("1.0\nerror[{}]: rational overflow\n", Code::Overflow.id());
+    let division = format!(
+        "1.0\nerror[{}]: division by zero\n",
+        Code::DivisionByZero.id()
+    );
+    let cases = [
+        ("add", "a + a", &overflow),
+        ("subtract", "-a - a", &overflow),
+        ("multiply", "a * 10.0", &overflow),
+        ("divide", "a / 0.1", &overflow),
+        ("divide_zero", "a / b", &division),
+        ("divide_negative_zero", "a / -b", &division),
+    ];
+    for (name, expr, expected) in cases {
+        let (code, stderr) = run_source(&format!("rational_{name}"), &program(expr));
+        assert_eq!((code, &stderr), (1, expected), "{expr}");
+    }
+}
+
 /// Compile `source`, run it, and return its exit code and stderr.
 fn run_source(name: &str, source: &str) -> (i32, String) {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
@@ -187,10 +241,7 @@ fn run_time_failures_stop_the_program() {
             "operator f{{a: integer, b: integer}} [\n    call debug_value{{v: 1}};\n    call debug_value{{v: {call}}};\n    call debug_value{{v: 2}};\n];\n\noperator main{{}} [\n    call f{{a: 9223372036854775807, b: 0}};\n];\n"
         )
     };
-    let overflow = format!(
-        "1\nerror[{}]: integer overflow\n",
-        Code::IntegerOverflow.id()
-    );
+    let overflow = format!("1\nerror[{}]: integer overflow\n", Code::Overflow.id());
     let division = format!(
         "1\nerror[{}]: division by zero\n",
         Code::DivisionByZero.id()

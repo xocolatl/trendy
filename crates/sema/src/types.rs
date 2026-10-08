@@ -16,7 +16,7 @@ use trendy_syntax::ast::{
     TupleLiteral, TypeExpr,
 };
 
-use crate::ops::{self, Operator};
+use crate::ops::{self, Operands, Operator, Resolved};
 use crate::{Values, errors};
 
 /// Where an expected type comes from: for the secondary label of a
@@ -55,9 +55,10 @@ impl Origin {
                 "expected because of this type".to_string()
             }
             Origin::Value(_) => "expected because of this value".to_string(),
-            Origin::Operator(token) => match Operator::of(token) {
-                Some(op) if op.is_prefix() => {
-                    let ty = op.operand().name();
+            // Only operators with a fixed operand type are origins.
+            Origin::Operator(token) => match Operator::of(token).map(|op| (op, op.operands())) {
+                Some((op, Operands::Fixed(scalar))) if op.is_prefix() => {
+                    let ty = scalar.name();
                     let article = if ty.starts_with(['a', 'e', 'i', 'o', 'u']) {
                         "an"
                     } else {
@@ -65,8 +66,10 @@ impl Origin {
                     };
                     format!("`{}` takes {article} {ty} operand", token.text())
                 }
-                Some(op) => format!("`{}` takes {} operands", token.text(), op.operand().name()),
-                None => "expected because of this operator".to_string(),
+                Some((_, Operands::Fixed(scalar))) => {
+                    format!("`{}` takes {} operands", token.text(), scalar.name())
+                }
+                _ => "expected because of this operator".to_string(),
             },
         }
     }
@@ -118,14 +121,6 @@ pub(crate) struct Expected {
 }
 
 impl Expected {
-    /// The expectation for an operand of `op`, written `token`.
-    pub(crate) fn operand(op: Operator, token: SyntaxToken) -> Expected {
-        Expected {
-            ty: hir::Type::Scalar(op.operand()),
-            origin: Origin::Operator(token),
-        }
-    }
-
     /// The expectation for attribute `name`, of type `ty`, inside this one.
     fn attribute(&self, name: &str, ty: &hir::Type) -> Expected {
         Expected {
@@ -262,32 +257,63 @@ pub(crate) fn value(
                 return matches(expected, value, expr, errors);
             }
             let token = unary.operator()?;
-            let op = Operator::of(&token)?;
-            let operand = unary.operand().and_then(|operand| {
-                value(&operand, Some(&Expected::operand(op, token)), scope, errors)
-            });
-            result_type(expected, op.result(), expr, errors)?;
-            let operand = operand?;
-            match op {
-                Operator::Plus => Some(operand),
-                Operator::Unary(op) => evaluated(op.apply(&operand), expr, None, errors),
-                Operator::Binary(_) => None,
+            let (resolved, operands) =
+                operands(&token, vec![unary.operand()], expected, scope, errors)?;
+            result_type(expected, resolved.result(), expr, errors)?;
+            let [operand] = <[hir::Value; 1]>::try_from(operands).ok()?;
+            match resolved {
+                Resolved::Identity(_) => Some(operand),
+                Resolved::Unary(op) => evaluated(op.apply(&operand), resolved, expr, None, errors),
+                Resolved::Binary(_) => None,
             }
         }
         Expr::Binary(binary) => {
             let token = binary.operator()?;
-            let Some(Operator::Binary(op)) = Operator::of(&token) else {
+            let (resolved, operands) = operands(
+                &token,
+                vec![binary.lhs(), binary.rhs()],
+                expected,
+                scope,
+                errors,
+            )?;
+            result_type(expected, resolved.result(), expr, errors)?;
+            let (Resolved::Binary(op), [lhs, rhs]) =
+                (resolved, <[hir::Value; 2]>::try_from(operands).ok()?)
+            else {
                 return None;
             };
-            let expected_operand = Expected::operand(Operator::Binary(op), token);
-            let mut operand =
-                |side: Option<Expr>| value(&side?, Some(&expected_operand), scope, errors);
-            let lhs = operand(binary.lhs());
-            let rhs = operand(binary.rhs());
-            result_type(expected, op.result(), expr, errors)?;
-            evaluated(op.apply(&lhs?, &rhs?), expr, binary.rhs().as_ref(), errors)
+            evaluated(
+                op.apply(&lhs, &rhs),
+                resolved,
+                expr,
+                binary.rhs().as_ref(),
+                errors,
+            )
         }
     }
+}
+
+/// The operator written `token` and the values of its `operands`.
+fn operands(
+    token: &SyntaxToken,
+    operands: Vec<Option<Expr>>,
+    expected: Option<&Expected>,
+    scope: &mut dyn Scope,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<(Resolved, Vec<hir::Value>)> {
+    let op = Operator::of(token)?;
+    ops::check_operands(
+        op,
+        token,
+        operands,
+        expected,
+        &mut |operand, expected, errors| {
+            let value = value(operand, expected, scope, errors)?;
+            let ty = value.ty();
+            Some((value, ty))
+        },
+        errors,
+    )
 }
 
 /// An operator's result, written `expr`, or `None` after reporting why there
@@ -295,12 +321,15 @@ pub(crate) fn value(
 /// reported.
 pub(crate) fn evaluated<T>(
     result: Result<T, hir::Failure>,
+    resolved: Resolved,
     expr: &Expr,
     divisor: Option<&Expr>,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<T> {
     result
-        .map_err(|failure| errors.push(errors::failure(failure, expr, divisor)))
+        .map_err(|failure| {
+            errors.push(errors::failure(failure, resolved.result(), expr, divisor));
+        })
         .ok()
 }
 

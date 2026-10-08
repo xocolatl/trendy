@@ -118,7 +118,7 @@ as `:=` and reported. Whitespace is attached to the innermost node that is open 
 appears, so whitespace between definitions belongs to the file.
 
 Expressions use precedence climbing. From tightest to loosest: prefix `-`
-and `+`; `*`, `div` and `mod`; `+` and `-`; prefix `not`; `and`; `xor`;
+and `+`; `*`, `/`, `div` and `mod`; `+` and `-`; prefix `not`; `and`; `xor`;
 `or`; and `implies`, which groups to the right. Comparisons will go between
 the arithmetic operators and `not`. Looking for
 a dyadic operator after an operand uses a lookahead that leaves whitespace
@@ -222,8 +222,19 @@ changes what a program does. An operand is dropped only if it can't fail,
 so that every operand is evaluated and no run-time error is skipped. A
 constant overflow, or a division by a constant zero, is a compile error
 (E0122, E0123). `-` directly before a number literal makes a negative
-literal, so that the smallest integer can be written. Tuple and relation values in bodies are still built when
-compiling, so a parameter or variable inside one is an error (E0120).
+literal, so that the smallest integer can be written. Rational folding and
+simplification are exact IEEE 754 binary64, the same arithmetic the program
+does at run time, so folding never changes a result. Tuple and relation
+values in bodies are still built when compiling, so a parameter or variable
+inside one is an error (E0120).
+
+The arithmetic operators are overloaded on integers and rationals
+(`ops::Operator` resolves to a typed `hir::BinaryOp`): the operand type
+comes from the expected type when it is numeric, and otherwise from the
+first operand, which then sets the expectation for the second. `/`,
+`div` and `mod` resolve the same way, so that one applied to the wrong
+numeric type is reported at the operator, with a fix to the right one
+(E0124).
 
 Checking is bidirectional: the expected type flows down into a value
 (`types::Expected`), along with where it came from (`types::Origin`): a
@@ -293,11 +304,14 @@ produced with Cranelift.
 - laying out data for the target's byte order and pointer size, where every
   object occupies at least one byte;
 - calling conventions, and the C-ABI `main` entry shim;
-- the checks of integer instructions: overflow is detected with Cranelift's
-  `sadd_overflow` and its kin, and division by zero, or of the smallest
-  integer by -1, with explicit comparisons, each branching to a cold block
-  that calls `trendy_rt_fail`. That writes `error[E0122]: integer overflow`
-  or `error[E0123]: division by zero` to stderr and exits with status 1.
+- the checks of arithmetic instructions, each branching to a cold block that
+  calls `trendy_rt_fail`, which writes the error, such as
+  `error[E0122]: integer overflow`, to stderr and exits with status 1.
+  Integer overflow is detected with Cranelift's `sadd_overflow` and its
+  kin, and division by zero, or of the smallest integer by -1, with
+  explicit comparisons. Rational operands are always finite, so a rational
+  result overflowed exactly when it is infinite, and there is never a NaN;
+  a division is checked for a zero divisor first.
 
 The calling convention: a function with parameters takes one pointer, to a
 struct of its parameters in name order, because a call's arguments are a

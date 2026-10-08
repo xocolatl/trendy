@@ -33,7 +33,7 @@
 //!
 //! # Failures
 //!
-//! An integer instruction whose result doesn't exist stops the program by
+//! An arithmetic instruction whose result doesn't exist stops the program by
 //! calling [`RuntimeFn::Fail`], which writes the error to stderr and exits
 //! with status 1.
 //!
@@ -157,9 +157,9 @@ pub enum Inst {
         function: RuntimeFn,
         args: Vec<Place>,
     },
-    /// Store `op src` at `dst`. Booleans and integers only.
+    /// Store `op src` at `dst`.
     Unary { dst: Place, op: UnaryOp, src: Place },
-    /// Store `lhs op rhs` at `dst`. Booleans and integers only.
+    /// Store `lhs op rhs` at `dst`.
     Binary {
         dst: Place,
         op: BinaryOp,
@@ -168,19 +168,48 @@ pub enum Inst {
     },
 }
 
+/// The type an arithmetic operator works on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Numeric {
+    /// [`Layout::I64`].
+    Integer,
+    /// [`Layout::F64Bits`].
+    Rational,
+}
+
+/// What an instruction's operands are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Operand {
+    /// [`Layout::U8`], `0` or `1`.
+    Boolean,
+    Numeric(Numeric),
+}
+
 /// A monadic operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp {
     /// Of a boolean.
     Not,
-    /// Of an integer; fails with [`Failure::Overflow`] for the smallest one.
-    Negate,
+    /// Fails with [`Failure::IntegerOverflow`] for the smallest integer;
+    /// never fails for a rational.
+    Negate(Numeric),
 }
 
-/// A dyadic operator. The integer operators are checked: a result that
-/// isn't an `i64` stops the program with a [`Failure`], as if the
-/// instruction were followed by a branch to a call to
-/// [`RuntimeFn::Fail`]. Codegen emits that branch.
+impl UnaryOp {
+    #[must_use]
+    pub fn operand(self) -> Operand {
+        match self {
+            UnaryOp::Not => Operand::Boolean,
+            UnaryOp::Negate(numeric) => Operand::Numeric(numeric),
+        }
+    }
+}
+
+/// A dyadic operator. Arithmetic is checked: a result that doesn't exist
+/// stops the program with a [`Failure`], as if the instruction were
+/// followed by a branch to a call to [`RuntimeFn::Fail`]. Codegen emits
+/// that branch. Rational results are rounded as IEEE 754 binary64 rounds
+/// them, and must be finite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
     And,
@@ -188,31 +217,37 @@ pub enum BinaryOp {
     Xor,
     /// `!lhs || rhs`.
     Implies,
-    Add,
-    Subtract,
-    Multiply,
-    /// Truncating toward zero.
+    Add(Numeric),
+    Subtract(Numeric),
+    Multiply(Numeric),
+    /// Of rationals. Fails with [`Failure::DivisionByZero`] for either zero.
+    Divide,
+    /// Of integers, truncating toward zero.
     Div,
-    /// With the sign of the dividend. `i64::MIN mod -1` is 0.
+    /// Of integers, with the sign of the dividend. `i64::MIN mod -1` is 0.
     Mod,
 }
 
 impl BinaryOp {
-    /// Whether the operands are integers, rather than booleans.
     #[must_use]
-    pub fn is_integer(self) -> bool {
-        matches!(
-            self,
-            BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply | BinaryOp::Div | BinaryOp::Mod
-        )
+    pub fn operand(self) -> Operand {
+        match self {
+            BinaryOp::And | BinaryOp::Or | BinaryOp::Xor | BinaryOp::Implies => Operand::Boolean,
+            BinaryOp::Add(numeric) | BinaryOp::Subtract(numeric) | BinaryOp::Multiply(numeric) => {
+                Operand::Numeric(numeric)
+            }
+            BinaryOp::Divide => Operand::Numeric(Numeric::Rational),
+            BinaryOp::Div | BinaryOp::Mod => Operand::Numeric(Numeric::Integer),
+        }
     }
 }
 
 /// Why a program stops: the argument of [`RuntimeFn::Fail`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Failure {
-    Overflow,
+    IntegerOverflow,
     DivisionByZero,
+    RationalOverflow,
 }
 
 impl Failure {
@@ -220,8 +255,9 @@ impl Failure {
     #[must_use]
     pub fn code(self) -> u32 {
         match self {
-            Failure::Overflow => 0,
+            Failure::IntegerOverflow => 0,
             Failure::DivisionByZero => 1,
+            Failure::RationalOverflow => 2,
         }
     }
 }

@@ -369,7 +369,7 @@ impl<'a> Parser<'a> {
     /// An expression whose dyadic operators bind at least as tightly as
     /// `min`, by precedence climbing. From loosest to tightest: `implies`
     /// (1, grouping to the right), `or` (2), `xor` (3), `and` (4), then
-    /// `+` and `-` (7), and `*`, `div` and `mod` (8), all grouping to the
+    /// `+` and `-` (7), and `*`, `/`, `div` and `mod` (8), all grouping to the
     /// left. Prefix `not` sits between them at 5, so `not a + b` negates
     /// the sum, and prefix `-` and `+` bind tightest. Comparisons will take
     /// 6, so that `not a = b` negates the comparison.
@@ -408,7 +408,7 @@ impl<'a> Parser<'a> {
             SyntaxKind::XorKw => 3,
             SyntaxKind::AndKw => 4,
             SyntaxKind::Plus | SyntaxKind::Minus => 7,
-            SyntaxKind::Star | SyntaxKind::DivKw | SyntaxKind::ModKw => 8,
+            SyntaxKind::Star | SyntaxKind::Slash | SyntaxKind::DivKw | SyntaxKind::ModKw => 8,
             _ => return None,
         };
         Some((precedence, found, keyword))
@@ -1598,12 +1598,13 @@ SourceFile
         let source = "var x := a/b % c;";
         let errors = parse_str(source).errors;
         let codes: Vec<_> = errors.iter().map(|e| e.code).collect();
-        assert_eq!(codes, [Code::ForeignOperator; 2]);
+        assert_eq!(codes, [Code::ForeignOperator], "`/` is rational division");
         assert_eq!(
             errors[0].notes[0],
-            "integer division is the keyword `div`, and its remainder `mod`"
+            "the remainder of integer division is the keyword `mod`"
         );
-        assert_eq!(fix(source), "var x := a div b mod c;");
+        assert_eq!(shape("a / b * c"), "((a / b) * c)");
+        assert_eq!(fix(source), "var x := a/b mod c;");
         assert_eq!(fix("var x := a DIV b Mod c;"), "var x := a div b mod c;");
     }
 

@@ -122,7 +122,7 @@
           "name": "punctuation.terminator.trendy"
         },
         {
-          "match": "\\+|\\-|\\*",
+          "match": "\\+|\\-|\\*|\\/",
           "name": "keyword.operator.arithmetic.trendy"
         }
       ]

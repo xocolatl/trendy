@@ -679,12 +679,28 @@ pub(crate) fn integer_out_of_range(span: Span) -> Diagnostic {
     ))
 }
 
-/// An operator written `expr` that has no result, because of `failure`.
-/// `divisor` is its right operand, where a division by zero is reported.
-pub(crate) fn failure(failure: hir::Failure, expr: &Expr, divisor: Option<&Expr>) -> Diagnostic {
-    match failure {
-        hir::Failure::Overflow => Diagnostic::error(
-            Code::IntegerOverflow,
+/// An operator written `expr`, whose result would be a `result`, that has
+/// no result because of `failure`. `divisor` is its right operand, where a
+/// division by zero is reported.
+pub(crate) fn failure(
+    failure: hir::Failure,
+    result: hir::Scalar,
+    expr: &Expr,
+    divisor: Option<&Expr>,
+) -> Diagnostic {
+    match (failure, result) {
+        (hir::Failure::Overflow, hir::Scalar::Rational) => Diagnostic::error(
+            Code::Overflow,
+            "rational overflow",
+            expr.span(),
+            "the result is too large for a rational",
+        )
+        .with_note(format!(
+            "rationals are finite, up to about {:e} in magnitude; a larger result is an error, not an infinity",
+            f64::MAX
+        )),
+        (hir::Failure::Overflow, _) => Diagnostic::error(
+            Code::Overflow,
             "integer overflow",
             expr.span(),
             "the result doesn't fit in a 64-bit integer",
@@ -694,13 +710,77 @@ pub(crate) fn failure(failure: hir::Failure, expr: &Expr, divisor: Option<&Expr>
             i64::MIN,
             i64::MAX
         )),
-        hir::Failure::DivisionByZero => Diagnostic::error(
+        (hir::Failure::DivisionByZero, _) => Diagnostic::error(
             Code::DivisionByZero,
             "division by zero",
             divisor.map_or(expr.span(), Expr::span),
             "this is zero",
         )
-        .with_note("`div` and `mod` have no result when the divisor is zero"),
+        .with_note("`/`, `div` and `mod` have no result when the divisor is zero"),
+    }
+}
+
+/// An operand, written `operand`, of type `found`, of the arithmetic
+/// operator written `token`.
+pub(crate) fn not_numeric(token: &SyntaxToken, found: &hir::Type, operand: &Expr) -> Diagnostic {
+    Diagnostic::error(
+        Code::TypeMismatch,
+        format!("mismatched types: expected `integer` or `rational`, found `{found}`"),
+        operand.span(),
+        format!("this is `{found}`"),
+    )
+    .with_secondary(
+        trendy_syntax::span(token.text_range()),
+        format!("`{}` takes integers or rationals", token.text()),
+    )
+    .with_note("values never convert to another type implicitly")
+}
+
+/// The operator `op`, written `token`, applied to operands of type
+/// `scalar`, which it doesn't take.
+pub(crate) fn wrong_operand_type(
+    op: crate::ops::Operator,
+    token: &SyntaxToken,
+    scalar: hir::Scalar,
+) -> Diagnostic {
+    use crate::ops::Operator;
+    let span = trendy_syntax::span(token.text_range());
+    let d = Diagnostic::error(
+        Code::WrongOperandType,
+        format!("`{}` can't be applied to {}s", token.text(), scalar.name()),
+        span,
+        format!("the operands are {}s", scalar.name()),
+    )
+    .with_note("values never convert to another type implicitly");
+    let replace = |d: Diagnostic, with: &str, message: &str| {
+        // A keyword needs spaces where the operator had none, as in `a/b`.
+        let word = with.starts_with(|c: char| c.is_ascii_alphabetic());
+        let tight = |t: Option<SyntaxToken>| t.is_some_and(|t| !t.kind().is_trivia());
+        let mut replacement = with.to_string();
+        if word && tight(token.prev_token()) {
+            replacement.insert(0, ' ');
+        }
+        if word && tight(token.next_token()) {
+            replacement.push(' ');
+        }
+        d.with_suggestion(message, vec![Edit { span, replacement }])
+    };
+    match op {
+        Operator::Divide => replace(
+            d.with_note(
+                "`/` divides rationals; integer division is `div`, which truncates toward zero",
+            ),
+            "div",
+            "use integer division: `div`",
+        ),
+        Operator::Div => replace(
+            d.with_note("`div` is integer division; rationals divide with `/`"),
+            "/",
+            "use rational division: `/`",
+        ),
+        _ => d.with_note(
+            "`mod` is the remainder of integer division; rationals have no remainder operator",
+        ),
     }
 }
 

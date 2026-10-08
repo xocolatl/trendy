@@ -1392,8 +1392,8 @@ mod tests {
         assert_eq!(
             found,
             [
-                (Code::IntegerOverflow, "9223372036854775807 + 1"),
-                (Code::IntegerOverflow, "-(-9223372036854775808)"),
+                (Code::Overflow, "9223372036854775807 + 1"),
+                (Code::Overflow, "-(-9223372036854775808)"),
                 (Code::DivisionByZero, "(2 - 2)"),
                 (Code::IntegerOutOfRange, "-9223372036854775809"),
             ]
@@ -1413,17 +1413,175 @@ mod tests {
         assert_eq!(
             labels,
             [
-                "`+` takes integer operands",
-                "`-` takes an integer operand",
+                // The left operand sets the type.
+                "expected because of this value",
+                "`-` takes integers or rationals",
                 "expected because of this type",
                 "`not` takes a boolean operand",
-                "`+` takes integer operands",
+                "expected because of this value",
                 "expected because of this type",
             ]
         );
+        let fixed = fix(&source);
+        assert!(fixed.contains("var e := 1.5 + 1.0;"), "{fixed}");
         assert!(
-            fix(&source).ends_with(&format!("var r: rational := -1.0;{MAIN}")),
+            fixed.ends_with(&format!("var r: rational := -1.0;{MAIN}")),
             "a negative literal is rewritten like any other"
+        );
+    }
+
+    #[test]
+    fn rational_initial_values() {
+        let r = |x| hir::Value::Rational(hir::Rational::new(x));
+        assert_eq!(init("var a := 1.5 + 2.25 * 2.0;", "a"), r(6.0));
+        assert_eq!(init("var a := 1.0 / 4.0 - 0.5;", "a"), r(-0.25));
+        assert_eq!(init("var a := -(0.0);", "a"), r(-0.0));
+        assert_eq!(init("var a := +2.5;", "a"), r(2.5));
+        assert_eq!(init("var a := b / 2.0;\nvar b := 3.0;", "a"), r(1.5));
+        // The context sets the operand type, so the literal is what's wrong.
+        let source = format!("var a: rational := 1 + 2;{MAIN}");
+        assert_eq!(fix(&source), format!("var a: rational := 1.0 + 2.0;{MAIN}"));
+    }
+
+    #[test]
+    fn rational_failures_when_compiling() {
+        let source = format!(
+            "var a := 1e300 * 1e300;\nvar b := 1.0 / 0.0;\nvar c := 1.0 / -0.0;\nvar d := -1e308 - 1e308;{MAIN}"
+        );
+        let errors = errors(&source);
+        let found: Vec<_> = errors
+            .iter()
+            .map(|e| {
+                (
+                    e.code,
+                    &e.message[..],
+                    &source[e.span().start..e.span().end],
+                )
+            })
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (Code::Overflow, "rational overflow", "1e300 * 1e300"),
+                (Code::DivisionByZero, "division by zero", "0.0"),
+                (Code::DivisionByZero, "division by zero", "-0.0"),
+                (Code::Overflow, "rational overflow", "-1e308 - 1e308"),
+            ]
+        );
+    }
+
+    #[test]
+    fn division_operators_by_type() {
+        let source = format!(
+            "var a := 7 / 2;\nvar b := 7.0 div 2.0;\nvar c := 7.0 mod 2.0;\nvar d: integer := 1/2;{MAIN}"
+        );
+        let errors = errors(&source);
+        let found: Vec<_> = errors
+            .iter()
+            .map(|e| {
+                (
+                    e.code,
+                    &e.message[..],
+                    &source[e.span().start..e.span().end],
+                )
+            })
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (
+                    Code::WrongOperandType,
+                    "`/` can't be applied to integers",
+                    "/"
+                ),
+                (
+                    Code::WrongOperandType,
+                    "`div` can't be applied to rationals",
+                    "div"
+                ),
+                (
+                    Code::WrongOperandType,
+                    "`mod` can't be applied to rationals",
+                    "mod"
+                ),
+                (
+                    Code::WrongOperandType,
+                    "`/` can't be applied to integers",
+                    "/"
+                ),
+            ]
+        );
+        assert_eq!(
+            fix(&source),
+            format!(
+                "var a := 7 div 2;\nvar b := 7.0 / 2.0;\nvar c := 7.0 mod 2.0;\nvar d: integer := 1 div 2;{MAIN}"
+            )
+        );
+        assert_eq!(
+            codes(&format!("var a := 1 + 1.5;\nvar b := true + 1;{MAIN}")),
+            [Code::TypeMismatch, Code::TypeMismatch]
+        );
+    }
+
+    #[test]
+    fn rational_simplification() {
+        let cases = [
+            ("x * 1.0", "x"),
+            ("1.0 * x", "x"),
+            ("x / 1.0", "x"),
+            ("x - 0.0", "x"),
+            ("x + -0.0", "x"),
+            ("-0.0 + x", "x"),
+            ("-0.0 - x", "-x"),
+            ("x * -1.0", "-x"),
+            ("x / -1.0", "-x"),
+            ("- -x", "x"),
+            ("+x", "x"),
+            // IEEE 754 signed zeros: these aren't the identity.
+            ("x + 0.0", "x + 0.0"),
+            ("0.0 - x", "0.0 - x"),
+            ("x * 0.0", "x * 0.0"),
+        ];
+        for (written, simplified) in cases {
+            let source = |e: &str| {
+                format!(
+                    "operator f{{x: rational}} [ call debug_value{{v: {e}}}; ];\noperator main{{}} [];"
+                )
+            };
+            let body = |e: &str| {
+                let program = analyze_str(&source(e)).unwrap();
+                let f = program.operators.iter().find(|o| o.name == "f").unwrap();
+                let hir::OperatorKind::User { body } = &f.kind else {
+                    panic!("f is a user operator");
+                };
+                argument(&body[0]).clone()
+            };
+            assert_eq!(body(written), body(simplified), "{written}");
+        }
+        let x = || Box::new(hir::Expr::Parameter("x".to_string()));
+        let program = analyze_str(
+            "operator f{x: rational} [ call debug_value{v: x + 0.0}; ];\noperator main{} [];",
+        )
+        .unwrap();
+        let f = program.operators.iter().find(|o| o.name == "f").unwrap();
+        let hir::OperatorKind::User { body } = &f.kind else {
+            panic!("f is a user operator");
+        };
+        assert_eq!(
+            argument(&body[0]),
+            &hir::Expr::Binary(
+                hir::BinaryOp::Add(hir::Numeric::Rational),
+                x(),
+                Box::new(hir::Expr::Constant(hir::Value::Rational(
+                    hir::Rational::new(0.0)
+                )))
+            )
+        );
+        assert_eq!(
+            codes(
+                "operator f{x: rational} [ call debug_value{v: x / 0.0}; ];\noperator main{} [];"
+            ),
+            [Code::DivisionByZero]
         );
     }
 

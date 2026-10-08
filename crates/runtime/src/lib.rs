@@ -25,17 +25,20 @@ pub const KIND_TUPLE: u8 = 4;
 pub const KIND_RELATION: u8 = 5;
 
 /// An integer result out of range.
-pub const FAIL_OVERFLOW: u32 = 0;
-/// `div` or `mod` by zero.
+pub const FAIL_INTEGER_OVERFLOW: u32 = 0;
+/// `/`, `div` or `mod` by zero.
 pub const FAIL_DIVISION_BY_ZERO: u32 = 1;
+/// A rational result beyond the largest finite magnitude.
+pub const FAIL_RATIONAL_OVERFLOW: u32 = 2;
 
 /// The line written to stderr for each `FAIL_` constant, with the
 /// compiler's error code, which `trendyc --explain` describes.
 #[must_use]
 pub fn failure_message(failure: u32) -> &'static str {
     match failure {
-        FAIL_OVERFLOW => "error[E0122]: integer overflow\n",
+        FAIL_INTEGER_OVERFLOW => "error[E0122]: integer overflow\n",
         FAIL_DIVISION_BY_ZERO => "error[E0123]: division by zero\n",
+        FAIL_RATIONAL_OVERFLOW => "error[E0122]: rational overflow\n",
         _ => "error: the program failed\n",
     }
 }

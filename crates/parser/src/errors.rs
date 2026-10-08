@@ -218,7 +218,6 @@ pub(crate) fn foreign_operator(text: &str) -> Option<SyntaxKind> {
         "^" => SyntaxKind::XorKw,
         "->" | "=>" => SyntaxKind::ImpliesKw,
         "!" => SyntaxKind::NotKw,
-        "/" => SyntaxKind::DivKw,
         "%" => SyntaxKind::ModKw,
         _ => return None,
     })
@@ -249,9 +248,7 @@ pub(crate) fn foreign_operator_used(
         format!("trendy writes this `{spelled}`"),
     )
     .with_note(match keyword {
-        SyntaxKind::DivKw | SyntaxKind::ModKw => {
-            "integer division is the keyword `div`, and its remainder `mod`"
-        }
+        SyntaxKind::ModKw => "the remainder of integer division is the keyword `mod`",
         _ => "the boolean operators are the keywords `not`, `and`, `or`, `xor` and `implies`",
     })
     .with_suggestion(

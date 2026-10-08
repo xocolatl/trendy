@@ -347,31 +347,30 @@ operator main{} [
 ];
 ```
 
-### Integer operators
+### Arithmetic
 
-| Operator | Result |
-|---|---|
-| `-a` | `a` negated |
-| `+a` | `a` |
-| `a + b`, `a - b`, `a * b` | the sum, difference and product |
-| `a div b` | the quotient, rounded toward zero: `-7 div 2` is `-3` |
-| `a mod b` | the remainder of `div`, with the sign of `a`: `-7 mod 2` is `-1`, and `7 mod -2` is `1` |
+| Operator | Operands | Result |
+|---|---|---|
+| `-a` | integer or rational | `a` negated |
+| `+a` | integer or rational | `a` |
+| `a + b`, `a - b`, `a * b` | two integers or two rationals | the sum, difference and product |
+| `a / b` | rationals | the quotient |
+| `a div b` | integers | the quotient, rounded toward zero: `-7 div 2` is `-3` |
+| `a mod b` | integers | the remainder of `div`, with the sign of `a`: `-7 mod 2` is `-1`, and `7 mod -2` is `1` |
 
-`div` and `mod` always satisfy `a = (a div b) * b + a mod b`. The operands
-must be integers: there are no implicit conversions, so `1 + 1.5` and
-`1 + true` are errors.
+`div` and `mod` always satisfy `a = (a div b) * b + a mod b`.
 
-An operator whose result doesn't fit in 64 bits has no result, and neither
-does `div` or `mod` by zero. They never wrap around. When the operands are
-known while compiling, this is a compile error (E0122 for overflow, E0123
-for division by zero). Otherwise the program stops at that operator, writing
-the error to stderr, such as `error[E0122]: integer overflow`, and exits
-with status 1.
+Values never convert to another type implicitly, so both operands have the
+same type: `1 + 1.5` and `1 + true` are errors. The type comes from the
+context when it says, as in `var r: rational := 1 + 2;`, where `1` and `2`
+must be written `1.0` and `2.0`, and otherwise from the left operand. `/`
+doesn't divide integers, and `div` doesn't divide rationals (E0124).
 
 ```trendy
 var seven := 1 + 2 * 3;
 var smallest := -9223372036854775808;
 var largest := -(smallest + 1);
+var half := 1.0 / 2.0;
 
 operator show{a: integer, b: integer} [
     call debug_value{v: -a + b * 2};
@@ -381,8 +380,28 @@ operator show{a: integer, b: integer} [
 
 operator main{} [
     call show{a: seven, b: -2};
+    call debug_value{v: half * 3.0};
 ];
 ```
+
+```trendy,error
+var half := 7 / 2;
+
+operator main{} [];
+```
+
+Rational arithmetic is IEEE 754 binary64 arithmetic, rounded to nearest:
+`0.1 + 0.2` is `0.30000000000000004`, and signed zeros follow its rules, so
+`0.0 * -1.0` is `-0.0`.
+
+An operator whose result is out of range has no result: an integer outside
+64 bits, or a rational beyond about `1.8e308` in magnitude. Neither does
+division by zero, including by `-0.0`. Results never wrap around and never
+become infinities or NaN, so every rational is finite and can be written as
+a literal. When the operands are known while compiling, this is a compile
+error (E0122 for overflow, E0123 for division by zero). Otherwise the
+program stops at that operator, writing the error to stderr, such as
+`error[E0122]: integer overflow`, and exits with status 1.
 
 ```trendy,error
 var big := 9223372036854775807 + 1;
@@ -391,8 +410,8 @@ operator main{} [];
 ```
 
 ```trendy,error
-operator half{n: integer} [
-    call debug_value{v: n div 0};
+operator inverse{x: rational} [
+    call debug_value{v: x / 0.0};
 ];
 
 operator main{} [];
@@ -400,8 +419,7 @@ operator main{} [];
 
 A `-` written directly before a number literal makes a negative literal, so
 the smallest integer, `-9223372036854775808`, can be written, and so can
-negative rationals such as `-1.5` and `-0.0`. Rationals have no other
-operators yet.
+`-0.0`.
 
 ### Precedence
 
@@ -410,7 +428,7 @@ From tightest to loosest:
 | Operators | Grouping |
 |---|---|
 | prefix `-` and `+` | |
-| `*`, `div`, `mod` | left |
+| `*`, `/`, `div`, `mod` | left |
 | `+`, `-` | left |
 | `not` | |
 | `and` | left |
@@ -424,13 +442,13 @@ means `a implies (b implies c)`. Parentheses group explicitly.
 
 ### Other languages' operators
 
-The symbols other languages use, such as `&&`, `||`, `!`, `^`, `->`, `/`
-and `%`, are not operators in trendy. Neither are capitalized spellings
-such as `AND` or `MOD`. The compiler suggests the keyword for each.
+The symbols other languages use, such as `&&`, `||`, `!`, `^`, `->` and
+`%`, are not operators in trendy. Neither are capitalized spellings such as
+`AND` or `MOD`. The compiler suggests the keyword for each.
 
 ```trendy,error
 var a := true && false;
-var b := 7 / 2 % 3;
+var b := 7 % 3;
 
 operator main{} [];
 ```
@@ -442,7 +460,9 @@ in one is never skipped. Whatever doesn't depend on parameters or variables
 is evaluated when compiling, and so is whatever a constant operand decides,
 when the other operand can't fail: `p and false` is just `false`,
 `true and p` is just `p`, and `n * 1` is just `n`. But `(n + 1) * 0` is
-still computed, since `n + 1` can overflow.
+still computed, since `n + 1` can overflow. Rationals are simplified only
+where IEEE 754 makes it exact, signed zeros included: `x * 1.0` is `x`, but
+`x + 0.0` isn't, since `-0.0 + 0.0` is `0.0`.
 
 ## Literals
 
@@ -580,7 +600,10 @@ A trailing comma is kept or left out as written.
 | `a ^ b`, `a != b` for booleans | `a xor b` |
 | `a -> b`, `a => b` | `a implies b` |
 | `AND`, `Or`, `NOT` | `and`, `or`, `not` |
-| `a / b`, `a % b` for integers | `a div b`, `a mod b` |
+| `a / b` for integers | `a div b` |
+| `a % b` | `a mod b` |
+| `1 / 2` meaning one half | `1.0 / 2.0` |
+| `inf`, `NaN`, `1.0 / 0.0` | an error: rationals are finite |
 
 The compiler recognizes each of these habits and suggests the fix.
 `trendyc --explain <code>` describes any error code in detail, and

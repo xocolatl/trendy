@@ -58,6 +58,7 @@ pub enum SyntaxKind {
     Plus,
     Minus,
     Star,
+    Slash,
     /// An operator from another language, such as `&&` or `->`: lexed so it
     /// can be recognized and replaced by trendy's keyword.
     ForeignOperator,
@@ -128,7 +129,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 62] = [
+    pub const ALL: [SyntaxKind; 63] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Ident,
         SyntaxKind::OperatorKw,
@@ -160,6 +161,7 @@ impl SyntaxKind {
         SyntaxKind::Plus,
         SyntaxKind::Minus,
         SyntaxKind::Star,
+        SyntaxKind::Slash,
         SyntaxKind::ForeignOperator,
         SyntaxKind::IntLiteral,
         SyntaxKind::RationalLiteral,
@@ -242,7 +244,7 @@ impl SyntaxKind {
         self.is_operator_keyword()
             || matches!(
                 self,
-                SyntaxKind::Plus | SyntaxKind::Minus | SyntaxKind::Star
+                SyntaxKind::Plus | SyntaxKind::Minus | SyntaxKind::Star | SyntaxKind::Slash
             )
     }
 
@@ -307,6 +309,7 @@ impl SyntaxKind {
             SyntaxKind::Plus => "+",
             SyntaxKind::Minus => "-",
             SyntaxKind::Star => "*",
+            SyntaxKind::Slash => "/",
             _ => return None,
         })
     }
@@ -347,6 +350,7 @@ impl SyntaxKind {
             SyntaxKind::Plus => "`+`",
             SyntaxKind::Minus => "`-`",
             SyntaxKind::Star => "`*`",
+            SyntaxKind::Slash => "`/`",
             SyntaxKind::IntLiteral => "integer literal",
             SyntaxKind::RationalLiteral => "rational literal",
             SyntaxKind::TextLiteral => "text literal",

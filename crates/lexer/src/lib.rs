@@ -75,6 +75,7 @@ pub fn lex(source: &str) -> Lexed {
                 '+' => SyntaxKind::Plus,
                 '-' => SyntaxKind::Minus,
                 '*' => SyntaxKind::Star,
+                '/' => SyntaxKind::Slash,
                 _ => {
                     let span = Span::new(start, start + c.len_utf8());
                     errors.push(unexpected_character(c, span));
@@ -94,9 +95,9 @@ pub fn lex(source: &str) -> Lexed {
 }
 
 /// Operators from other languages, which the parser replaces with trendy's
-/// keywords: `&&` for `and`, `->` for `implies`, `/` for `div`, and so on.
+/// keywords: `&&` for `and`, `->` for `implies`, `%` for `mod`, and so on.
 /// Longer ones come first, so that `&&` isn't two `&`.
-pub const FOREIGN_OPERATORS: [&str; 10] = ["&&", "||", "->", "=>", "!", "&", "|", "^", "/", "%"];
+pub const FOREIGN_OPERATORS: [&str; 9] = ["&&", "||", "->", "=>", "!", "&", "|", "^", "%"];
 
 /// The length of the foreign operator `text` starts with, if any.
 fn foreign_operator(text: &str) -> Option<usize> {
@@ -623,7 +624,7 @@ mod tests {
         );
         assert_eq!(
             kinds("a/b%c"),
-            [Ident, ForeignOperator, Ident, ForeignOperator, Ident]
+            [Ident, Slash, Ident, ForeignOperator, Ident]
         );
     }
 

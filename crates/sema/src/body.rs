@@ -7,7 +7,7 @@ use trendy_diag::{Diagnostic, Span, edit_distance};
 use trendy_hir as hir;
 use trendy_syntax::ast::{self, AstNode, AttributeValue, Expr};
 
-use crate::ops::{self, Operator};
+use crate::ops::{self, Operator, Resolved};
 use crate::types::{self, Expected, Origin, Scope};
 use crate::{Kind, Values, errors};
 
@@ -271,34 +271,37 @@ fn expr(
                 return types::value(expr, expected, &mut scope, errors).map(hir::Expr::Constant);
             }
             let token = unary.operator()?;
-            let op = Operator::of(&token)?;
-            let operand = unary.operand().and_then(|operand| {
-                let expected = Expected::operand(op, token);
-                self::expr(&operand, Some(&expected), within, cx, errors)
-            });
-            types::result_type(expected, op.result(), expr, errors)?;
-            match op {
-                Operator::Plus => operand,
-                Operator::Unary(op) => {
-                    types::evaluated(ops::unary(op, operand?), expr, None, errors)
+            let (resolved, operands) =
+                operands(&token, vec![unary.operand()], expected, within, cx, errors)?;
+            types::result_type(expected, resolved.result(), expr, errors)?;
+            let [operand] = <[hir::Expr; 1]>::try_from(operands).ok()?;
+            match resolved {
+                Resolved::Identity(_) => Some(operand),
+                Resolved::Unary(op) => {
+                    types::evaluated(ops::unary(op, operand), resolved, expr, None, errors)
                 }
-                Operator::Binary(_) => None,
+                Resolved::Binary(_) => None,
             }
         }
         Expr::Binary(binary) => {
             let token = binary.operator()?;
-            let Some(Operator::Binary(op)) = Operator::of(&token) else {
+            let (resolved, operands) = operands(
+                &token,
+                vec![binary.lhs(), binary.rhs()],
+                expected,
+                within,
+                cx,
+                errors,
+            )?;
+            types::result_type(expected, resolved.result(), expr, errors)?;
+            let (Resolved::Binary(op), Ok([lhs, rhs])) =
+                (resolved, <[hir::Expr; 2]>::try_from(operands))
+            else {
                 return None;
             };
-            let expected_operand = Expected::operand(Operator::Binary(op), token);
-            let mut operand = |side: Option<Expr>| {
-                self::expr(&side?, Some(&expected_operand), within, cx, errors)
-            };
-            let lhs = operand(binary.lhs());
-            let rhs = operand(binary.rhs());
-            types::result_type(expected, op.result(), expr, errors)?;
             types::evaluated(
-                ops::binary(op, lhs?, rhs?),
+                ops::binary(op, lhs, rhs),
+                resolved,
                 expr,
                 binary.rhs().as_ref(),
                 errors,
@@ -308,6 +311,44 @@ fn expr(
             let mut scope = Selector { cx, within };
             types::value(expr, expected, &mut scope, errors).map(hir::Expr::Constant)
         }
+    }
+}
+
+/// The operator written `token` and its checked `operands`.
+fn operands(
+    token: &trendy_syntax::SyntaxToken,
+    operands: Vec<Option<Expr>>,
+    expected: Option<&Expected>,
+    within: hir::OperatorId,
+    cx: &Context,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<(Resolved, Vec<hir::Expr>)> {
+    let op = Operator::of(token)?;
+    ops::check_operands(
+        op,
+        token,
+        operands,
+        expected,
+        &mut |operand, expected, errors| {
+            let checked = self::expr(operand, expected, within, cx, errors)?;
+            let ty = type_of(&checked, within, cx);
+            Some((checked, ty))
+        },
+        errors,
+    )
+}
+
+/// The type of `expr`, in the body of `within`.
+fn type_of(expr: &hir::Expr, within: hir::OperatorId, cx: &Context) -> hir::Type {
+    match expr {
+        hir::Expr::Constant(value) => value.ty(),
+        hir::Expr::Variable(id) => cx.variables[id.0].ty.clone(),
+        hir::Expr::Parameter(name) => match &cx.operators[within.0].params[name] {
+            hir::ParamType::Type(ty) => ty.clone(),
+            hir::ParamType::Any => unreachable!("only built-ins have `any` parameters"),
+        },
+        hir::Expr::Unary(op, _) => hir::Type::Scalar(op.result()),
+        hir::Expr::Binary(op, ..) => hir::Type::Scalar(op.result()),
     }
 }
 

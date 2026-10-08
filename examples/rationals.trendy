@@ -1,0 +1,23 @@
+var half := 1.0 / 2.0;
+var area := 3.0 * 2.5 * 2.5;
+var negative_zero := -0.0;
+var tiny := 1e-300 / 1e10;
+
+operator arithmetic{a: rational, b: rational} [
+    call debug_value{v: -a};
+    call debug_value{v: a + b};
+    call debug_value{v: a - b};
+    call debug_value{v: a * b};
+    call debug_value{v: a / b};
+];
+
+operator main{} [
+    call debug_value{v: half};
+    call debug_value{v: area};
+    call debug_value{v: negative_zero};
+    call debug_value{v: tiny};
+    call arithmetic{a: 7.0, b: 2.0};
+    call arithmetic{a: 0.1, b: 0.2};
+    call arithmetic{a: 0.0, b: -1.0};
+    call arithmetic{a: 1e300, b: 1e-8};
+];

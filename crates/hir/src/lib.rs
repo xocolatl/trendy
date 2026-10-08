@@ -151,12 +151,51 @@ pub enum Expr {
     Binary(BinaryOp, Box<Expr>, Box<Expr>),
 }
 
-/// Why an operator has no result: its result isn't an `integer`, or it
-/// divides by zero.
+/// Why an operator has no result: it is out of its type's range (for a
+/// rational, beyond the largest finite magnitude), or it divides by zero.
+/// Rationals are therefore always finite: no operator produces an infinity
+/// or a NaN.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Failure {
     Overflow,
     DivisionByZero,
+}
+
+/// The type an arithmetic operator works on: both operands and the result
+/// have it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Numeric {
+    Integer,
+    Rational,
+}
+
+impl Numeric {
+    #[must_use]
+    pub fn scalar(self) -> Scalar {
+        match self {
+            Numeric::Integer => Scalar::Integer,
+            Numeric::Rational => Scalar::Rational,
+        }
+    }
+
+    /// The numeric type `scalar` is, if it is one.
+    #[must_use]
+    pub fn of(scalar: Scalar) -> Option<Numeric> {
+        match scalar {
+            Scalar::Integer => Some(Numeric::Integer),
+            Scalar::Rational => Some(Numeric::Rational),
+            Scalar::Boolean | Scalar::Text => None,
+        }
+    }
+}
+
+/// A finite rational result, or why there is none.
+fn finite(r: f64) -> Result<Value, Failure> {
+    if r.is_finite() {
+        Ok(Value::Rational(Rational::new(r)))
+    } else {
+        Err(Failure::Overflow)
+    }
 }
 
 /// A monadic operator.
@@ -164,8 +203,9 @@ pub enum Failure {
 pub enum UnaryOp {
     /// `not`, of a boolean.
     Not,
-    /// `-`, of an integer.
-    Negate,
+    /// `-`. It never fails for a rational, and only for the smallest
+    /// integer.
+    Negate(Numeric),
 }
 
 impl UnaryOp {
@@ -174,7 +214,7 @@ impl UnaryOp {
     pub fn operand(self) -> Scalar {
         match self {
             UnaryOp::Not => Scalar::Boolean,
-            UnaryOp::Negate => Scalar::Integer,
+            UnaryOp::Negate(numeric) => numeric.scalar(),
         }
     }
 
@@ -197,8 +237,11 @@ impl UnaryOp {
     pub fn apply(self, operand: &Value) -> Result<Value, Failure> {
         match (self, operand) {
             (UnaryOp::Not, Value::Boolean(b)) => Ok(Value::Boolean(!b)),
-            (UnaryOp::Negate, Value::Integer(n)) => {
+            (UnaryOp::Negate(Numeric::Integer), Value::Integer(n)) => {
                 n.checked_neg().map(Value::Integer).ok_or(Failure::Overflow)
+            }
+            (UnaryOp::Negate(Numeric::Rational), Value::Rational(r)) => {
+                Ok(Value::Rational(Rational::new(-r.get())))
             }
             _ => panic!("`{self:?}` of {operand:?}"),
         }
@@ -214,9 +257,11 @@ pub enum BinaryOp {
     Xor,
     /// False only when the left operand is true and the right is false.
     Implies,
-    Add,
-    Subtract,
-    Multiply,
+    Add(Numeric),
+    Subtract(Numeric),
+    Multiply(Numeric),
+    /// `/`, of rationals.
+    Divide,
     /// Integer division, truncating toward zero.
     Div,
     /// The remainder of [`BinaryOp::Div`], with the sign of the dividend:
@@ -230,11 +275,11 @@ impl BinaryOp {
     pub fn operand(self) -> Scalar {
         match self {
             BinaryOp::And | BinaryOp::Or | BinaryOp::Xor | BinaryOp::Implies => Scalar::Boolean,
-            BinaryOp::Add
-            | BinaryOp::Subtract
-            | BinaryOp::Multiply
-            | BinaryOp::Div
-            | BinaryOp::Mod => Scalar::Integer,
+            BinaryOp::Add(numeric) | BinaryOp::Subtract(numeric) | BinaryOp::Multiply(numeric) => {
+                numeric.scalar()
+            }
+            BinaryOp::Divide => Scalar::Rational,
+            BinaryOp::Div | BinaryOp::Mod => Scalar::Integer,
         }
     }
 
@@ -244,12 +289,14 @@ impl BinaryOp {
         self.operand()
     }
 
-    /// The result for `lhs` and `rhs`, which have the operand type.
+    /// The result for `lhs` and `rhs`, which have the operand type. Rational
+    /// results are rounded as IEEE 754 binary64 arithmetic rounds them, to
+    /// nearest, ties to even.
     ///
     /// # Errors
     ///
-    /// Returns why there is no result: an integer result out of range, or a
-    /// division by zero.
+    /// Returns why there is no result: a result out of range, or a division
+    /// by zero.
     ///
     /// # Panics
     ///
@@ -265,9 +312,9 @@ impl BinaryOp {
             })),
             (&Value::Integer(a), &Value::Integer(b)) => {
                 let result = match self {
-                    BinaryOp::Add => a.checked_add(b),
-                    BinaryOp::Subtract => a.checked_sub(b),
-                    BinaryOp::Multiply => a.checked_mul(b),
+                    BinaryOp::Add(_) => a.checked_add(b),
+                    BinaryOp::Subtract(_) => a.checked_sub(b),
+                    BinaryOp::Multiply(_) => a.checked_mul(b),
                     BinaryOp::Div | BinaryOp::Mod if b == 0 => {
                         return Err(Failure::DivisionByZero);
                     }
@@ -278,6 +325,18 @@ impl BinaryOp {
                     _ => panic!("`{self:?}` of integers"),
                 };
                 result.map(Value::Integer).ok_or(Failure::Overflow)
+            }
+            (Value::Rational(a), Value::Rational(b)) => {
+                let (a, b) = (a.get(), b.get());
+                match self {
+                    BinaryOp::Add(_) => finite(a + b),
+                    BinaryOp::Subtract(_) => finite(a - b),
+                    BinaryOp::Multiply(_) => finite(a * b),
+                    // Either zero.
+                    BinaryOp::Divide if b == 0.0 => Err(Failure::DivisionByZero),
+                    BinaryOp::Divide => finite(a / b),
+                    _ => panic!("`{self:?}` of rationals"),
+                }
             }
             _ => panic!("`{self:?}` of {lhs:?} and {rhs:?}"),
         }
@@ -645,25 +704,68 @@ mod tests {
     }
 
     #[test]
+    fn rational_operators() {
+        let r = |x| Value::Rational(Rational::new(x));
+        let apply = |op: BinaryOp, a, b| op.apply(&r(a), &r(b));
+        assert_eq!(
+            apply(BinaryOp::Add(Numeric::Rational), 0.5, 0.25),
+            Ok(r(0.75))
+        );
+        assert_eq!(apply(BinaryOp::Divide, 1.0, 4.0), Ok(r(0.25)));
+        assert_eq!(
+            apply(BinaryOp::Divide, 1.0, 0.0),
+            Err(Failure::DivisionByZero)
+        );
+        assert_eq!(
+            apply(BinaryOp::Divide, 0.0, -0.0),
+            Err(Failure::DivisionByZero)
+        );
+        assert_eq!(
+            apply(BinaryOp::Multiply(Numeric::Rational), 1e300, 1e10),
+            Err(Failure::Overflow)
+        );
+        assert_eq!(
+            apply(BinaryOp::Divide, 1e300, 1e-10),
+            Err(Failure::Overflow)
+        );
+        // IEEE 754 sign rules: these are different values.
+        assert_eq!(
+            apply(BinaryOp::Add(Numeric::Rational), -0.0, 0.0),
+            Ok(r(0.0))
+        );
+        assert_eq!(
+            apply(BinaryOp::Multiply(Numeric::Rational), -5.0, 0.0),
+            Ok(r(-0.0))
+        );
+        assert_eq!(
+            UnaryOp::Negate(Numeric::Rational).apply(&r(0.0)),
+            Ok(r(-0.0))
+        );
+    }
+
+    #[test]
     fn integer_operators() {
         let apply = |op: BinaryOp, a, b| op.apply(&Value::Integer(a), &Value::Integer(b));
         let ok = |n| Ok(Value::Integer(n));
-        assert_eq!(apply(BinaryOp::Add, 2, 3), ok(5));
-        assert_eq!(apply(BinaryOp::Subtract, 2, 3), ok(-1));
-        assert_eq!(apply(BinaryOp::Multiply, -2, 3), ok(-6));
+        assert_eq!(apply(BinaryOp::Add(Numeric::Integer), 2, 3), ok(5));
+        assert_eq!(apply(BinaryOp::Subtract(Numeric::Integer), 2, 3), ok(-1));
+        assert_eq!(apply(BinaryOp::Multiply(Numeric::Integer), -2, 3), ok(-6));
         // Truncating: the quotient rounds toward zero, and the remainder has
         // the dividend's sign.
         assert_eq!(apply(BinaryOp::Div, -7, 2), ok(-3));
         assert_eq!(apply(BinaryOp::Mod, -7, 2), ok(-1));
         assert_eq!(apply(BinaryOp::Div, 7, -2), ok(-3));
         assert_eq!(apply(BinaryOp::Mod, 7, -2), ok(1));
-        assert_eq!(apply(BinaryOp::Add, i64::MAX, 1), Err(Failure::Overflow));
         assert_eq!(
-            apply(BinaryOp::Subtract, i64::MIN, 1),
+            apply(BinaryOp::Add(Numeric::Integer), i64::MAX, 1),
             Err(Failure::Overflow)
         );
         assert_eq!(
-            apply(BinaryOp::Multiply, i64::MAX, 2),
+            apply(BinaryOp::Subtract(Numeric::Integer), i64::MIN, 1),
+            Err(Failure::Overflow)
+        );
+        assert_eq!(
+            apply(BinaryOp::Multiply(Numeric::Integer), i64::MAX, 2),
             Err(Failure::Overflow)
         );
         assert_eq!(apply(BinaryOp::Div, i64::MIN, -1), Err(Failure::Overflow));
@@ -671,10 +773,13 @@ mod tests {
         assert_eq!(apply(BinaryOp::Div, 1, 0), Err(Failure::DivisionByZero));
         assert_eq!(apply(BinaryOp::Mod, 1, 0), Err(Failure::DivisionByZero));
         assert_eq!(
-            UnaryOp::Negate.apply(&Value::Integer(i64::MIN)),
+            UnaryOp::Negate(Numeric::Integer).apply(&Value::Integer(i64::MIN)),
             Err(Failure::Overflow)
         );
-        assert_eq!(UnaryOp::Negate.apply(&Value::Integer(5)), ok(-5));
+        assert_eq!(
+            UnaryOp::Negate(Numeric::Integer).apply(&Value::Integer(5)),
+            ok(-5)
+        );
     }
 
     #[test]

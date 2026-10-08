@@ -224,26 +224,23 @@ impl Functions {
                     .collect::<Result<Vec<_>, _>>()?;
                 b.ins().call(callee, &args);
             }
-            lir::Inst::Unary { dst, op, src } => match op {
-                lir::UnaryOp::Not => {
-                    let value = self.load(types::I8, src, frame, b)?;
-                    let result = b.ins().bxor_imm_u(value, 1);
-                    self.store(dst, result, frame, b)?;
-                }
-                lir::UnaryOp::Negate => {
-                    let value = self.load(types::I64, src, frame, b)?;
-                    let zero = b.ins().iconst(types::I64, 0);
-                    let (result, overflow) = b.ins().ssub_overflow(zero, value);
-                    self.fail_if(overflow, lir::Failure::Overflow, b)?;
-                    self.store(dst, result, frame, b)?;
-                }
-            },
-            lir::Inst::Binary { dst, op, lhs, rhs } => {
-                let ty = if op.is_integer() {
-                    types::I64
-                } else {
-                    types::I8
+            lir::Inst::Unary { dst, op, src } => {
+                let value = self.load(operand_type(op.operand()), src, frame, b)?;
+                let result = match op {
+                    lir::UnaryOp::Not => b.ins().bxor_imm_u(value, 1),
+                    lir::UnaryOp::Negate(lir::Numeric::Integer) => {
+                        let zero = b.ins().iconst(types::I64, 0);
+                        let (result, overflow) = b.ins().ssub_overflow(zero, value);
+                        self.fail_if(overflow, lir::Failure::IntegerOverflow, b)?;
+                        result
+                    }
+                    // Exact: only the sign changes.
+                    lir::UnaryOp::Negate(lir::Numeric::Rational) => b.ins().fneg(value),
                 };
+                self.store(dst, result, frame, b)?;
+            }
+            lir::Inst::Binary { dst, op, lhs, rhs } => {
+                let ty = operand_type(op.operand());
                 let lhs = self.load(ty, lhs, frame, b)?;
                 let rhs = self.load(ty, rhs, frame, b)?;
                 let result = self.binary(*op, lhs, rhs, b)?;
@@ -253,7 +250,7 @@ impl Functions {
         Ok(())
     }
 
-    /// `lhs op rhs`, failing the program where an integer result doesn't
+    /// `lhs op rhs`, failing the program where an arithmetic result doesn't
     /// exist.
     fn binary(
         &mut self,
@@ -262,9 +259,19 @@ impl Functions {
         rhs: Value,
         b: &mut FunctionBuilder,
     ) -> Result<Value, String> {
-        use cranelift_codegen::ir::condcodes::IntCC;
+        use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
+        use lir::Numeric::{Integer, Rational};
         let checked = |this: &mut Self, (result, overflow), b: &mut FunctionBuilder| {
-            this.fail_if(overflow, lir::Failure::Overflow, b)
+            this.fail_if(overflow, lir::Failure::IntegerOverflow, b)
+                .map(|()| result)
+        };
+        // The operands are finite, so an infinite result is an overflow, and
+        // there is never a NaN.
+        let finite = |this: &mut Self, result: Value, b: &mut FunctionBuilder| {
+            let magnitude = b.ins().fabs(result);
+            let infinity = b.ins().f64const(f64::INFINITY);
+            let overflow = b.ins().fcmp(FloatCC::Equal, magnitude, infinity);
+            this.fail_if(overflow, lir::Failure::RationalOverflow, b)
                 .map(|()| result)
         };
         Ok(match op {
@@ -275,17 +282,37 @@ impl Functions {
                 let not_lhs = b.ins().bxor_imm_u(lhs, 1);
                 b.ins().bor(not_lhs, rhs)
             }
-            lir::BinaryOp::Add => {
+            lir::BinaryOp::Add(Integer) => {
                 let sum = b.ins().sadd_overflow(lhs, rhs);
                 checked(self, sum, b)?
             }
-            lir::BinaryOp::Subtract => {
+            lir::BinaryOp::Subtract(Integer) => {
                 let difference = b.ins().ssub_overflow(lhs, rhs);
                 checked(self, difference, b)?
             }
-            lir::BinaryOp::Multiply => {
+            lir::BinaryOp::Multiply(Integer) => {
                 let product = b.ins().smul_overflow(lhs, rhs);
                 checked(self, product, b)?
+            }
+            lir::BinaryOp::Add(Rational) => {
+                let sum = b.ins().fadd(lhs, rhs);
+                finite(self, sum, b)?
+            }
+            lir::BinaryOp::Subtract(Rational) => {
+                let difference = b.ins().fsub(lhs, rhs);
+                finite(self, difference, b)?
+            }
+            lir::BinaryOp::Multiply(Rational) => {
+                let product = b.ins().fmul(lhs, rhs);
+                finite(self, product, b)?
+            }
+            lir::BinaryOp::Divide => {
+                // Equal to 0.0 for both zeros.
+                let zero = b.ins().f64const(0.0);
+                let by_zero = b.ins().fcmp(FloatCC::Equal, rhs, zero);
+                self.fail_if(by_zero, lir::Failure::DivisionByZero, b)?;
+                let quotient = b.ins().fdiv(lhs, rhs);
+                finite(self, quotient, b)?
             }
             lir::BinaryOp::Div | lir::BinaryOp::Mod => {
                 let zero = b.ins().icmp_imm_s(IntCC::Equal, rhs, 0);
@@ -300,7 +327,7 @@ impl Functions {
                     let min = b.ins().icmp_imm_s(IntCC::Equal, lhs, i64::MIN);
                     let minus_one = b.ins().icmp_imm_s(IntCC::Equal, rhs, -1);
                     let overflow = b.ins().band(min, minus_one);
-                    self.fail_if(overflow, lir::Failure::Overflow, b)?;
+                    self.fail_if(overflow, lir::Failure::IntegerOverflow, b)?;
                     b.ins().sdiv(lhs, rhs)
                 }
             }
@@ -416,6 +443,15 @@ impl Functions {
                 b.ins().iadd_imm_s(base, offset)
             }
         })
+    }
+}
+
+/// The Cranelift type an instruction's operands are loaded as.
+fn operand_type(operand: lir::Operand) -> cranelift_codegen::ir::Type {
+    match operand {
+        lir::Operand::Boolean => types::I8,
+        lir::Operand::Numeric(lir::Numeric::Integer) => types::I64,
+        lir::Operand::Numeric(lir::Numeric::Rational) => types::F64,
     }
 }
 

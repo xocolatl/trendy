@@ -31,7 +31,7 @@ fn punctuation_scope(kind: SyntaxKind) -> &'static str {
         SyntaxKind::ColonEq => "keyword.operator.assignment.trendy",
         SyntaxKind::Eq => "keyword.operator.comparison.trendy",
         SyntaxKind::Semicolon => "punctuation.terminator.trendy",
-        SyntaxKind::Plus | SyntaxKind::Minus | SyntaxKind::Star => {
+        SyntaxKind::Plus | SyntaxKind::Minus | SyntaxKind::Star | SyntaxKind::Slash => {
             "keyword.operator.arithmetic.trendy"
         }
         other => panic!("choose a TextMate scope for the new punctuation {other:?}"),
