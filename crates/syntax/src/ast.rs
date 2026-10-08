@@ -42,10 +42,13 @@ ast_node!(VarDecl);
 ast_node!(Name);
 ast_node!(TypeRef);
 ast_node!(Literal);
-ast_node!(TupleType);
+ast_node!(Heading);
 ast_node!(AttributeType);
+ast_node!(TupleType);
+ast_node!(RelationType);
 ast_node!(TupleLiteral);
 ast_node!(AttributeValue);
+ast_node!(RelationLiteral);
 
 /// A top-level definition.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -107,11 +110,12 @@ impl VarDecl {
     }
 }
 
-/// A type as written: a name, or a tuple type.
+/// A type as written: a name, a tuple type, or a relation type.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeExpr {
     Named(TypeRef),
     Tuple(TupleType),
+    Relation(RelationType),
 }
 
 impl TypeExpr {
@@ -119,7 +123,8 @@ impl TypeExpr {
     pub fn cast(node: SyntaxNode) -> Option<Self> {
         TypeRef::cast(node.clone())
             .map(TypeExpr::Named)
-            .or_else(|| TupleType::cast(node).map(TypeExpr::Tuple))
+            .or_else(|| TupleType::cast(node.clone()).map(TypeExpr::Tuple))
+            .or_else(|| RelationType::cast(node).map(TypeExpr::Relation))
     }
 
     #[must_use]
@@ -127,6 +132,7 @@ impl TypeExpr {
         match self {
             TypeExpr::Named(t) => t.syntax(),
             TypeExpr::Tuple(t) => t.syntax(),
+            TypeExpr::Relation(t) => t.syntax(),
         }
     }
 
@@ -136,11 +142,12 @@ impl TypeExpr {
     }
 }
 
-/// An expression. For now: a literal, or a tuple value.
+/// An expression. For now: a literal, a tuple value, or a relation value.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Expr {
     Literal(Literal),
     Tuple(TupleLiteral),
+    Relation(RelationLiteral),
 }
 
 impl Expr {
@@ -148,7 +155,8 @@ impl Expr {
     pub fn cast(node: SyntaxNode) -> Option<Self> {
         Literal::cast(node.clone())
             .map(Expr::Literal)
-            .or_else(|| TupleLiteral::cast(node).map(Expr::Tuple))
+            .or_else(|| TupleLiteral::cast(node.clone()).map(Expr::Tuple))
+            .or_else(|| RelationLiteral::cast(node).map(Expr::Relation))
     }
 
     #[must_use]
@@ -156,6 +164,7 @@ impl Expr {
         match self {
             Expr::Literal(e) => e.syntax(),
             Expr::Tuple(e) => e.syntax(),
+            Expr::Relation(e) => e.syntax(),
         }
     }
 
@@ -165,9 +174,23 @@ impl Expr {
     }
 }
 
-impl TupleType {
+impl Heading {
     pub fn attributes(&self) -> impl Iterator<Item = AttributeType> {
         self.0.children().filter_map(AttributeType::cast)
+    }
+}
+
+impl TupleType {
+    #[must_use]
+    pub fn heading(&self) -> Option<Heading> {
+        self.0.children().find_map(Heading::cast)
+    }
+}
+
+impl RelationType {
+    #[must_use]
+    pub fn heading(&self) -> Option<Heading> {
+        self.0.children().find_map(Heading::cast)
     }
 }
 
@@ -184,6 +207,13 @@ impl AttributeType {
 }
 
 impl TupleLiteral {
+    /// The heading written before the attributes, as in
+    /// `tuple { a: integer } { a: 1 }`.
+    #[must_use]
+    pub fn heading(&self) -> Option<Heading> {
+        self.0.children().find_map(Heading::cast)
+    }
+
     pub fn attributes(&self) -> impl Iterator<Item = AttributeValue> {
         self.0.children().filter_map(AttributeValue::cast)
     }
@@ -211,27 +241,49 @@ impl TupleLiteral {
     /// separates it from a neighbor.
     #[must_use]
     pub fn removal(&self, attribute: &AttributeValue) -> Span {
-        let own = attribute.span();
-        if let Some(comma) =
-            next_significant(attribute.syntax()).filter(|t| t.kind() == SyntaxKind::Comma)
-        {
-            // Up to the next attribute, so its spacing stays as it was.
-            let end = comma
-                .next_token()
-                .filter(|t| t.kind().is_trivia())
-                .map_or_else(
-                    || span(comma.text_range()).end,
-                    |ws| span(ws.text_range()).end,
-                );
-            return Span::new(own.start, end);
-        }
-        if let Some(comma) =
-            previous_significant(attribute.syntax()).filter(|t| t.kind() == SyntaxKind::Comma)
-        {
-            return Span::new(span(comma.text_range()).start, own.end);
-        }
-        own
+        list_removal(attribute.syntax())
     }
+}
+
+impl RelationLiteral {
+    /// The heading written before the tuples, as in
+    /// `relation { a: integer } {}`.
+    #[must_use]
+    pub fn heading(&self) -> Option<Heading> {
+        self.0.children().find_map(Heading::cast)
+    }
+
+    pub fn tuples(&self) -> impl Iterator<Item = TupleLiteral> {
+        self.0.children().filter_map(TupleLiteral::cast)
+    }
+
+    /// The span to delete to remove `tuple`, including the comma that
+    /// separates it from a neighbor.
+    #[must_use]
+    pub fn removal(&self, tuple: &TupleLiteral) -> Span {
+        list_removal(tuple.syntax())
+    }
+}
+
+/// The span to delete to remove a comma-separated list element, including
+/// the comma that separates it from a neighbor.
+fn list_removal(item: &SyntaxNode) -> Span {
+    let own = span(item.text_range());
+    if let Some(comma) = next_significant(item).filter(|t| t.kind() == SyntaxKind::Comma) {
+        // Up to the next element, so its spacing stays as it was.
+        let end = comma
+            .next_token()
+            .filter(|t| t.kind().is_trivia())
+            .map_or_else(
+                || span(comma.text_range()).end,
+                |ws| span(ws.text_range()).end,
+            );
+        return Span::new(own.start, end);
+    }
+    if let Some(comma) = previous_significant(item).filter(|t| t.kind() == SyntaxKind::Comma) {
+        return Span::new(span(comma.text_range()).start, own.end);
+    }
+    own
 }
 
 fn significant_tokens(node: &SyntaxNode) -> impl Iterator<Item = SyntaxToken> {

@@ -119,6 +119,10 @@ blank line to group them, in which case one blank line is kept. Other
 definitions are always separated by a blank line. This is the only place the
 formatter looks at the original whitespace.
 
+Everything else goes on one line, except that a relation value with more than
+one tuple is broken across lines: each tuple on its own line, indented four
+spaces per level of nesting, with the closing brace on a line of its own.
+
 The formatter reprints the CST's tokens in order and decides only the
 whitespace between them. Because it never adds, drops, or reorders any other
 token, it can't change what a program means, and it will keep comments
@@ -136,11 +140,16 @@ It holds the operators, the variables, and the built-in types (`Type`) and
 values (`Value`). Every variable has an explicit type and initial value: sema
 infers whichever one the source leaves out.
 
-Types are either built-in scalars (`Scalar`) or tuples (`Type::Tuple`). A
-tuple type's `Heading` maps attribute names to types. It is sorted by name,
+Types are built-in scalars (`Scalar`), tuples (`Type::Tuple`) or relations
+(`Type::Relation`). A tuple or relation type's `Heading` maps attribute names
+to types. It is sorted by name,
 because attributes are unordered (TTM RM Proscription 1), and the sorted
 order is also the canonical order for display and layout. Types are
-structural: two tuple types are equal exactly when their headings are.
+structural: two tuple types, or two relation types, are equal exactly when
+their headings are. A relation value carries its heading, because an empty
+one has no tuples to take it from, and keeps its tuples in a sorted set.
+Values are totally ordered only so that they can be kept in sorted sets; the
+order has no meaning in the language.
 
 Every type's equality must hold exactly when no operator can tell two values
 apart (TTM RM Prescription 8). For rationals, that is IEEE 754 totalOrder.
@@ -168,7 +177,13 @@ A variable without a value gets its type's default (`0`, `""`), and one
 without a type gets its value's type. These are the two options *The Third
 Manifesto* allows for initialization (RM Prescription 11).
 
-A value is checked against its declared type structurally, and a problem is
+Checking is bidirectional: the expected type flows down into a value
+(`types::Expected`), along with where it came from (`types::Origin`): a
+written type, a selector's heading, or an earlier value such as a relation's
+first tuple. That is how an empty relation gets its heading from context, and
+how each error's secondary label points at the source of the expectation.
+
+A value is checked against its expected type structurally, and a problem is
 reported at the innermost place it occurs. A wrong scalar deep inside a
 nested tuple is reported at that literal, with the attribute's declared type
 as the secondary label. Missing and unknown attributes are reported at the
@@ -190,6 +205,8 @@ this:
 - `integer`: one 64-bit field.
 - `rational`: one 64-bit IEEE 754 binary floating-point field.
 - a tuple: a `Struct` of its attributes' fields, in name order.
+- a relation: the address of a read-only array of its tuples, in sorted
+  order, followed by the number of tuples.
 - `text`: the address of a read-only constant holding the UTF-8 bytes,
   followed by the length in bytes, the size of a pointer.
 

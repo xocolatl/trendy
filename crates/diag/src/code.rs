@@ -28,10 +28,12 @@ pub enum Code {
     DuplicateAttribute,
     MissingAttribute,
     UnknownAttribute,
+    UnknownRelationHeading,
+    DuplicateTuple,
 }
 
 impl Code {
-    pub const ALL: [Code; 21] = [
+    pub const ALL: [Code; 23] = [
         Code::UnexpectedCharacter,
         Code::MissingToken,
         Code::WrongDelimiter,
@@ -53,6 +55,8 @@ impl Code {
         Code::DuplicateAttribute,
         Code::MissingAttribute,
         Code::UnknownAttribute,
+        Code::UnknownRelationHeading,
+        Code::DuplicateTuple,
     ];
 
     #[must_use]
@@ -79,6 +83,8 @@ impl Code {
             Code::DuplicateAttribute => "E0108",
             Code::MissingAttribute => "E0109",
             Code::UnknownAttribute => "E0110",
+            Code::UnknownRelationHeading => "E0111",
+            Code::DuplicateTuple => "E0112",
         }
     }
 
@@ -115,6 +121,8 @@ impl Code {
             Code::DuplicateAttribute => include_str!("../errors/E0108.md"),
             Code::MissingAttribute => include_str!("../errors/E0109.md"),
             Code::UnknownAttribute => include_str!("../errors/E0110.md"),
+            Code::UnknownRelationHeading => include_str!("../errors/E0111.md"),
+            Code::DuplicateTuple => include_str!("../errors/E0112.md"),
         }
     }
 }

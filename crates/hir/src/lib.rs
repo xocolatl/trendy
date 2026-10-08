@@ -6,7 +6,7 @@
 //!
 //! Variables and operators share one namespace; types have their own.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program {
@@ -44,14 +44,16 @@ pub struct Variable {
     pub init: Value,
 }
 
-/// A type: a built-in scalar type, or a tuple type.
+/// A type: a built-in scalar type, a tuple type, or a relation type.
 ///
-/// Types are structural: two tuple types are the same type exactly when
-/// their headings are equal, wherever they are written.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// Types are structural: two tuple types, or two relation types, are the
+/// same type exactly when their headings are equal, wherever they are
+/// written.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Type {
     Scalar(Scalar),
     Tuple(Heading),
+    Relation(Heading),
 }
 
 impl Type {
@@ -67,6 +69,11 @@ impl Type {
                     .map(|(name, ty)| (name.to_string(), ty.default_value()))
                     .collect(),
             )),
+            // TTM's default for a relation variable: the empty relation.
+            Type::Relation(heading) => Value::Relation(RelationValue {
+                heading: heading.clone(),
+                tuples: BTreeSet::new(),
+            }),
         }
     }
 }
@@ -77,23 +84,31 @@ impl std::fmt::Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Type::Scalar(scalar) => f.write_str(scalar.name()),
-            Type::Tuple(heading) if heading.is_empty() => f.write_str("tuple {}"),
-            Type::Tuple(heading) => {
-                f.write_str("tuple { ")?;
-                for (i, (name, ty)) in heading.attributes().enumerate() {
-                    if i > 0 {
-                        f.write_str(", ")?;
-                    }
-                    write!(f, "{name}: {ty}")?;
-                }
-                f.write_str(" }")
-            }
+            Type::Tuple(heading) => write!(f, "tuple {heading}"),
+            Type::Relation(heading) => write!(f, "relation {heading}"),
         }
     }
 }
 
+/// Source text for the heading: `{ a: integer, b: text }` or `{}`.
+impl std::fmt::Display for Heading {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_empty() {
+            return f.write_str("{}");
+        }
+        f.write_str("{ ")?;
+        for (i, (name, ty)) in self.attributes().enumerate() {
+            if i > 0 {
+                f.write_str(", ")?;
+            }
+            write!(f, "{name}: {ty}")?;
+        }
+        f.write_str(" }")
+    }
+}
+
 /// A built-in scalar type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Scalar {
     /// `true` or `false`.
     Boolean,
@@ -146,7 +161,7 @@ impl Scalar {
 /// A tuple type's heading: its attributes' names and types. Attributes are
 /// unordered (TTM RM Proscription 1); they are kept sorted by name, which is
 /// also the order they are displayed and laid out in.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Heading(BTreeMap<String, Type>);
 
 impl Heading {
@@ -171,13 +186,16 @@ impl Heading {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// A value. Values are totally ordered, so that a relation's tuples form a
+/// sorted set; the order has no meaning in the language.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Value {
     Boolean(bool),
     Integer(i64),
     Rational(Rational),
     Text(String),
     Tuple(TupleValue),
+    Relation(RelationValue),
 }
 
 impl Value {
@@ -195,13 +213,14 @@ impl Value {
                     .map(|(name, value)| (name.to_string(), value.ty()))
                     .collect(),
             )),
+            Value::Relation(relation) => Type::Relation(relation.heading.clone()),
         }
     }
 }
 
 /// A tuple value: a value for each attribute of its heading. Two tuples are
 /// equal when every attribute's values are equal.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TupleValue(BTreeMap<String, Value>);
 
 impl TupleValue {
@@ -214,6 +233,18 @@ impl TupleValue {
     pub fn attributes(&self) -> impl Iterator<Item = (&str, &Value)> {
         self.0.iter().map(|(name, value)| (name.as_str(), value))
     }
+}
+
+/// A relation value: a set of tuples, all with the relation's heading.
+///
+/// The heading is part of the value because an empty relation has no
+/// tuples to take it from. Two relations are equal when they have the same
+/// heading and the same tuples.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RelationValue {
+    pub heading: Heading,
+    /// Sorted and without duplicates; the order has no meaning.
+    pub tuples: BTreeSet<TupleValue>,
 }
 
 /// A `rational` value: a 64-bit IEEE 754 binary floating-point number.
@@ -324,6 +355,25 @@ mod tests {
         assert_eq!(ab, ba);
         assert_eq!(ba.to_string(), "tuple { a: integer, b: text }");
         assert_eq!(tuple(&[]).to_string(), "tuple {}");
+    }
+
+    #[test]
+    fn relations() {
+        let heading = Heading::new([("a".to_string(), Type::Scalar(Scalar::Integer))].into());
+        let ty = Type::Relation(heading.clone());
+        assert_eq!(ty.to_string(), "relation { a: integer }");
+        let Value::Relation(empty) = ty.default_value() else {
+            panic!("a relation's default is a relation");
+        };
+        assert!(empty.tuples.is_empty());
+        assert_eq!(Value::Relation(empty).ty(), ty);
+
+        let tuple = |n| TupleValue::new([("a".to_string(), Value::Integer(n))].into());
+        let r = RelationValue {
+            heading,
+            tuples: [tuple(2), tuple(1), tuple(2)].into(),
+        };
+        assert_eq!(r.tuples.len(), 2, "a set has no duplicates");
     }
 
     #[test]

@@ -138,6 +138,66 @@ var point: tuple { x: rational, y: rational } := tuple { x: 1.0 };
 operator main{} [];
 ```
 
+## Relations
+
+A relation type is written `relation { name: type, … }`. A relation value is
+a set of tuples that all have the relation's heading. It's written
+`relation { tuple, … }`, and inside a relation the `tuple` keyword may be
+left out, since a relation can hold nothing else.
+
+```trendy
+var empty: relation { a: boolean, b: integer };
+var people := relation {
+    tuple { name: "Ada", born: 1815 },
+    { name: "Edgar", born: 1923 },
+};
+
+operator main{} [];
+```
+
+A relation selector can start with its heading, and so can a tuple
+selector, written before the values: `relation { name: type, … } { … }` and
+`tuple { name: type, … } { … }`. The heading is checked against the tuples.
+
+```trendy
+var r := relation { a: integer } { { a: 1 } };
+var t := tuple { a: integer } { a: 1 };
+
+operator main{} [];
+```
+
+- **The heading comes from context.** It's taken from the selector's own
+  heading, from the type expected of the value (such as the variable's
+  declared type), or from the first tuple, in that order. So an empty
+  relation needs one of the first two.
+- **The default is the empty relation.** A relation variable declared without
+  a value starts with no tuples.
+- **No duplicates.** A relation is a set, so listing the same tuple twice is
+  an error, even with its attributes in another order.
+- **Equality is set equality.** Two relations are equal when they have the
+  same heading and the same tuples. Tuples have no order.
+- **Relations are values like any other.** A tuple's attribute can be a
+  relation, and so can a relation's.
+
+```trendy
+var typed: relation { name: text } := relation {};
+var friends: tuple { name: text, friends: relation { name: text } };
+
+operator main{} [];
+```
+
+```trendy,error
+var unknown := relation {};
+
+operator main{} [];
+```
+
+```trendy,error
+var twice := relation { { a: 1 }, { a: 1 } };
+
+operator main{} [];
+```
+
 ## Literals
 
 **Boolean literals** are `true` and `false`, in lowercase.
@@ -207,8 +267,8 @@ operator main{} [];
 ## Names
 
 Names are ASCII letters, digits and `_`, and don't start with a digit. They
-are case-sensitive. The keywords are `operator`, `var`, `tuple`, `true` and
-`false`, all lowercase.
+are case-sensitive. The keywords are `operator`, `var`, `tuple`, `relation`,
+`true` and `false`, all lowercase.
 
 Variables and operators share one namespace, so no two of them can have the
 same name. Types have their own namespace, so a variable can be named after a
@@ -234,7 +294,11 @@ operator main{} [];
 - consecutive variable declarations on adjacent lines, unless you separate
   them with a blank line to group them; several blank lines become one;
 - a blank line between other definitions;
-- single spaces around `:=` and after `:`.
+- single spaces around `:=` and after `:`;
+- a relation value with more than one tuple has each tuple on its own line,
+  indented four spaces per level of nesting.
+
+A trailing comma is kept or left out as written.
 
 ## Coming from other languages
 
@@ -252,6 +316,7 @@ operator main{} [];
 | `string`, `str`, `varchar` | `text` |
 | `{ x: 1 }`, `TUPLE { X 1 }` | `tuple { x: 1 }` |
 | `tuple { x = 1 }` | `tuple { x: 1 }` |
+| `RELATION { TUPLE { … } }` | `relation { { … } }` |
 | `VAR`, `TUPLE`, `TRUE` | `var`, `tuple`, `true` |
 
 The compiler recognizes each of these habits and suggests the fix.

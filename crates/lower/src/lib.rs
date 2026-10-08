@@ -58,6 +58,22 @@ fn value_fields(value: &hir::Value, data: &mut Vec<lir::Data>) -> Vec<lir::Field
                 .flat_map(|(_, value)| value_fields(value, data))
                 .collect(),
         )],
+        hir::Value::Relation(relation) => {
+            // The tuples go in a read-only array, in their canonical order.
+            let elements: Vec<_> = relation
+                .tuples
+                .iter()
+                .flat_map(|t| value_fields(&hir::Value::Tuple(t.clone()), data))
+                .collect();
+            let array = lir::DataId(data.len());
+            data.push(lir::Data {
+                kind: lir::DataKind::Constant,
+                writable: false,
+                fields: elements,
+            });
+            let count = u64::try_from(relation.tuples.len()).expect("counts fit in 64 bits");
+            vec![lir::Field::Address(array), lir::Field::Usize(count)]
+        }
     }
 }
 
@@ -181,6 +197,84 @@ mod tests {
                 lir::Field::Address(lir::DataId(0)),
                 lir::Field::Usize(1),
             ])]
+        );
+    }
+
+    #[test]
+    fn relations_point_to_an_array_of_tuples() {
+        let tuple = |n| hir::TupleValue::new([("a".to_string(), hir::Value::Integer(n))].into());
+        let value = hir::Value::Relation(hir::RelationValue {
+            heading: hir::Heading::new(
+                [("a".to_string(), hir::Type::Scalar(hir::Scalar::Integer))].into(),
+            ),
+            tuples: [tuple(2), tuple(1)].into(),
+        });
+        let program = lower(&hir::Program {
+            operators: vec![op("main")],
+            variables: vec![hir::Variable {
+                name: "r".to_string(),
+                ty: value.ty(),
+                init: value,
+            }],
+            entry: hir::OperatorId(0),
+        });
+        let element = |n| lir::Field::Struct(vec![lir::Field::I64(n)]);
+        assert_eq!(program.data[0].fields, [element(1), element(2)]);
+        assert!(!program.data[0].writable);
+        assert_eq!(
+            program.data[1].fields,
+            [lir::Field::Address(lir::DataId(0)), lir::Field::Usize(2)]
+        );
+    }
+
+    #[test]
+    fn relation_valued_attributes_point_to_their_own_arrays() {
+        let int = |n| hir::Value::Integer(n);
+        let tuple = |attributes: Vec<(&str, hir::Value)>| {
+            hir::TupleValue::new(
+                attributes
+                    .into_iter()
+                    .map(|(n, v)| (n.to_string(), v))
+                    .collect(),
+            )
+        };
+        let x_heading =
+            hir::Heading::new([("x".to_string(), hir::Type::Scalar(hir::Scalar::Integer))].into());
+        let inner = |xs: &[i64]| {
+            hir::Value::Relation(hir::RelationValue {
+                heading: x_heading.clone(),
+                tuples: xs.iter().map(|&x| tuple(vec![("x", int(x))])).collect(),
+            })
+        };
+        let outer = hir::Value::Relation(hir::RelationValue {
+            heading: hir::Heading::new(
+                [("inner".to_string(), hir::Type::Relation(x_heading.clone()))].into(),
+            ),
+            tuples: [tuple(vec![("inner", inner(&[1, 2]))])].into(),
+        });
+        let program = lower(&hir::Program {
+            operators: vec![op("main")],
+            variables: vec![hir::Variable {
+                name: "r".to_string(),
+                ty: outer.ty(),
+                init: outer,
+            }],
+            entry: hir::OperatorId(0),
+        });
+        let element = |n| lir::Field::Struct(vec![lir::Field::I64(n)]);
+        // The inner relation's array comes first, then the outer array, whose
+        // one tuple points to it, then the variable.
+        assert_eq!(program.data[0].fields, [element(1), element(2)]);
+        assert_eq!(
+            program.data[1].fields,
+            [lir::Field::Struct(vec![
+                lir::Field::Address(lir::DataId(0)),
+                lir::Field::Usize(2),
+            ])]
+        );
+        assert_eq!(
+            program.data[2].fields,
+            [lir::Field::Address(lir::DataId(1)), lir::Field::Usize(1)]
         );
     }
 }

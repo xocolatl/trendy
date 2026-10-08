@@ -14,6 +14,10 @@
 //! - `rational`: one [`Field::F64Bits`], a 64-bit IEEE 754 binary float.
 //! - `text`: an [`Field::Address`] of a read-only constant holding the UTF-8
 //!   bytes, then a [`Field::Usize`] with the length in bytes.
+//! - a relation: an [`Field::Address`] of a read-only constant holding its
+//!   tuples, as consecutive structs in their canonical (sorted) order, then
+//!   a [`Field::Usize`] with the number of tuples. Since each struct is
+//!   padded to its alignment, the array's stride is the tuple's size.
 //! - a tuple: a [`Field::Struct`] of its attributes' fields, in attribute
 //!   name order. Because a struct's layout doesn't depend on where it is, an
 //!   attribute that is itself a tuple can be used, or passed, on its own.

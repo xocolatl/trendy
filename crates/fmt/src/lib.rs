@@ -6,8 +6,8 @@
 //! survive formatting once the language has them. This crate defines the
 //! language's layout: whatever it prints is the style.
 
-use trendy_syntax::ast::{AstNode, SourceFile};
-use trendy_syntax::{SyntaxKind, SyntaxToken};
+use trendy_syntax::ast::{AstNode, RelationLiteral, SourceFile};
+use trendy_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
 /// Render a file in canonical style.
 ///
@@ -31,7 +31,13 @@ pub fn format(file: &SourceFile) -> String {
             continue;
         }
         if let Some(prev) = &prev {
-            out.push_str(separator(prev, &token, blank_line));
+            match broken_line(prev, &token) {
+                Some(indent) => {
+                    out.push('\n');
+                    out.push_str(&INDENT.repeat(indent));
+                }
+                None => out.push_str(separator(prev, &token, blank_line)),
+            }
         }
         out.push_str(token.text());
         prev = Some(token);
@@ -43,12 +49,41 @@ pub fn format(file: &SourceFile) -> String {
     out
 }
 
+const INDENT: &str = "    ";
+
+/// Whether a relation value is laid out one tuple per line: when it has
+/// more than one tuple.
+fn is_broken(relation: &SyntaxNode) -> bool {
+    RelationLiteral::cast(relation.clone()).is_some_and(|r| r.tuples().nth(1).is_some())
+}
+
+/// How many broken relation values enclose `relation`.
+fn nesting(relation: &SyntaxNode) -> usize {
+    relation.ancestors().skip(1).filter(is_broken).count()
+}
+
+/// If a line break goes between `prev` and `next`, the indentation level of
+/// the new line. Inside a broken relation, each tuple starts its own line,
+/// and the closing brace goes on a line of its own.
+fn broken_line(prev: &SyntaxToken, next: &SyntaxToken) -> Option<usize> {
+    let in_broken = |token: &SyntaxToken| token.parent().filter(is_broken);
+    if next.kind() == SyntaxKind::RBrace
+        && let Some(relation) = in_broken(next)
+    {
+        return Some(nesting(&relation));
+    }
+    match prev.kind() {
+        SyntaxKind::LBrace | SyntaxKind::Comma => in_broken(prev).map(|r| nesting(&r) + 1),
+        _ => None,
+    }
+}
+
 /// The whitespace that goes between two adjacent tokens. `blank_line` says
 /// whether the source has a blank line between them.
 fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'static str {
     use SyntaxKind::{
-        Colon, ColonEq, Comma, LBrace, LBracket, OperatorKw, RBrace, Semicolon, TupleKw,
-        TupleLiteral, TupleType, VarDecl, VarKw,
+        Colon, ColonEq, Comma, Heading, LBrace, LBracket, OperatorKw, RBrace, RelationKw,
+        RelationLiteral, Semicolon, TupleKw, TupleLiteral, VarDecl, VarKw,
     };
     if prev.kind() == Semicolon {
         // Between definitions: variable declarations in a row go on adjacent
@@ -61,19 +96,20 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
             "\n\n"
         };
     }
-    // Inside a tuple's braces: `tuple { a: integer, b: text }`, `tuple {}`.
-    let tuple_brace = |token: &SyntaxToken| {
+    // Braces of a heading, a tuple or a relation, as opposed to an
+    // operator's `{}`: `tuple { a: integer }`, `relation { a: integer } {}`.
+    let list_brace = |token: &SyntaxToken| {
         token
             .parent()
-            .is_some_and(|p| matches!(p.kind(), TupleType | TupleLiteral))
+            .is_some_and(|p| matches!(p.kind(), Heading | TupleLiteral | RelationLiteral))
     };
     match (prev.kind(), next.kind()) {
-        (LBrace, RBrace) if tuple_brace(prev) => "",
-        (LBrace, _) if tuple_brace(prev) => " ",
-        (_, RBrace) if tuple_brace(next) => " ",
-        (OperatorKw | VarKw | TupleKw | Colon | ColonEq | Comma, _)
+        (LBrace, RBrace) if list_brace(prev) => "",
+        (LBrace, _) if list_brace(prev) => " ",
+        (_, RBrace) if list_brace(next) => " ",
+        (OperatorKw | VarKw | TupleKw | RelationKw | Colon | ColonEq | Comma, _)
         | (_, ColonEq)
-        | (RBrace, LBracket) => " ",
+        | (RBrace, LBracket | LBrace) => " ",
         _ => "",
     }
 }
@@ -166,6 +202,32 @@ mod tests {
     }
 
     #[test]
+    fn relations() {
+        assert_eq!(
+            fmt(
+                "var r:=relation{a:integer}{{a:1},tuple{a:2}};var e:relation{a:integer}:=relation{};var d:=relation{}{};var t:=tuple{a:integer}{a:1};"
+            ),
+            "var r := relation { a: integer } {\n    { a: 1 },\n    tuple { a: 2 }\n};\nvar e: relation { a: integer } := relation {};\nvar d := relation {} {};\nvar t := tuple { a: integer } { a: 1 };\n"
+        );
+    }
+
+    #[test]
+    fn relations_with_several_tuples_break_across_lines() {
+        assert_eq!(
+            fmt("var p:=relation{tuple{n:\"Ada\"},{n:\"Edgar\"},};"),
+            "var p := relation {\n    tuple { n: \"Ada\" },\n    { n: \"Edgar\" },\n};\n"
+        );
+        assert_eq!(
+            fmt("var p:=relation{n:text}{{n:\"a\"},{n:\"b\"}};"),
+            "var p := relation { n: text } {\n    { n: \"a\" },\n    { n: \"b\" }\n};\n"
+        );
+        assert_eq!(
+            fmt("var q:=relation{{r:relation{{x:1},{x:2}}},{r:relation{}}};"),
+            "var q := relation {\n    { r: relation {\n        { x: 1 },\n        { x: 2 }\n    } },\n    { r: relation {} }\n};\n"
+        );
+    }
+
+    #[test]
     fn empty_file() {
         assert_eq!(fmt("  \n"), "");
     }
@@ -178,6 +240,7 @@ mod tests {
             "\n\n  operator   x{}\n\n\n[];\n\n",
             "var a:integer:=1;var b:=\"t\\n\";operator main{}[];",
             "var p:tuple{a:tuple{},b:text}:=tuple{a:tuple{},b:\"\",};",
+            "var r:=relation{a:integer}{{a:1},tuple{a:2},};",
         ] {
             let once = fmt(source);
             assert_eq!(fmt(&once), once, "not idempotent for {source:?}");

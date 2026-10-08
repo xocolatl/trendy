@@ -1,0 +1,16 @@
+var empty: relation { a: boolean, b: integer };
+var r := relation { a: integer } { { a: 1 } };
+var people := relation {
+    tuple { name: "Ada", born: 1815 },
+    { name: "Edgar", born: 1923 },
+};
+var nested: tuple { name: text, friends: relation { name: text } };
+var teams := relation {
+    { team: "core", members: relation {
+        { name: "Ada" },
+        { name: "Edgar" }
+    } },
+    { team: "docs", members: relation { name: text } {} },
+};
+
+operator main{} [];

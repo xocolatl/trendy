@@ -4,8 +4,9 @@
 use trendy_diag::{Code, Diagnostic, Edit, Span, edit_distance};
 use trendy_hir as hir;
 use trendy_syntax::SyntaxToken;
-use trendy_syntax::ast::{AstNode, Expr, SourceFile, TupleLiteral, TypeExpr};
+use trendy_syntax::ast::{AstNode, Expr, SourceFile, TupleLiteral};
 
+use crate::types::Origin;
 use crate::{Kind, Values};
 
 /// Type names from other languages, and the built-in type each one means.
@@ -157,11 +158,11 @@ pub(crate) fn unknown_type(ident: &SyntaxToken, values: &Values) -> Diagnostic {
     d
 }
 
-/// A value written as `expr` whose type isn't `declared`, written as
-/// `type_expr`.
+/// A value written as `expr` whose type isn't `declared`, which is expected
+/// because of `origin`.
 pub(crate) fn type_mismatch(
     declared: &hir::Type,
-    type_expr: &TypeExpr,
+    origin: &Origin,
     value: &hir::Value,
     expr: &Expr,
 ) -> Diagnostic {
@@ -172,7 +173,7 @@ pub(crate) fn type_mismatch(
         expr.span(),
         format!("this is `{found}`"),
     )
-    .with_secondary(type_expr.span(), "expected because of this type")
+    .with_secondary(origin.span(), origin.label())
     .with_note("values never convert to another type implicitly");
 
     // Rewriting the literal is the likelier fix when it is mechanical, so it
@@ -189,13 +190,17 @@ pub(crate) fn type_mismatch(
             );
         }
     }
-    d.with_suggestion(
-        format!("change the type to `{found}`"),
-        vec![Edit {
-            span: type_expr.span(),
-            replacement: found.to_string(),
-        }],
-    )
+    // Only a written type can be changed to fit the value.
+    match origin {
+        Origin::Type(type_expr) => d.with_suggestion(
+            format!("change the type to `{found}`"),
+            vec![Edit {
+                span: type_expr.span(),
+                replacement: found.to_string(),
+            }],
+        ),
+        Origin::Heading(_) | Origin::Value(_) => d,
+    }
 }
 
 /// A literal of type `ty` for the same value as `value`, written `written`,
@@ -258,6 +263,23 @@ fn source_text(value: &hir::Value) -> Option<String> {
                 format!("tuple {{ {} }}", attributes.join(", "))
             }
         }
+        // With its heading first, so that even an empty relation is
+        // self-describing.
+        hir::Value::Relation(relation) => {
+            let tuples = relation
+                .tuples
+                .iter()
+                .map(|t| {
+                    source_text(&hir::Value::Tuple(t.clone()))
+                        .map(|text| text.trim_start_matches("tuple ").to_string())
+                })
+                .collect::<Option<Vec<_>>>()?;
+            if tuples.is_empty() {
+                format!("relation {} {{}}", relation.heading)
+            } else {
+                format!("relation {} {{ {} }}", relation.heading, tuples.join(", "))
+            }
+        }
         hir::Value::Integer(_) => return None,
     })
 }
@@ -298,7 +320,7 @@ pub(crate) fn missing_attributes(
         literal.span(),
         format!("this value has no {}", trendy_diag::conjoin(&names)),
     )
-    .with_note(format!("the declared type is `{ty}`"))
+    .with_note(format!("the expected type is `{ty}`"))
     .with_note("a tuple value must have every attribute of its type");
 
     let attributes = missing
@@ -332,9 +354,9 @@ pub(crate) fn unknown_attribute(
         Code::UnknownAttribute,
         format!("unknown attribute `{name}`"),
         span,
-        "not an attribute of the declared type",
+        "not an attribute of the expected type",
     )
-    .with_note(format!("the declared type is `{ty}`"));
+    .with_note(format!("the expected type is `{ty}`"));
     if let Some(target) = rename {
         d = d.with_suggestion(
             format!("rename it to `{target}`"),
@@ -351,6 +373,40 @@ pub(crate) fn unknown_attribute(
             replacement: String::new(),
         }],
     )
+}
+
+/// A tuple at `span` that the relation already has, first at `first`.
+/// `removal` is the span that removes it.
+pub(crate) fn duplicate_tuple(span: Span, first: Span, removal: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::DuplicateTuple,
+        "duplicate tuple in a relation value",
+        span,
+        "this tuple is already in the relation",
+    )
+    .with_secondary(first, "first listed here")
+    .with_note("a relation is a set of tuples, so each tuple can appear only once")
+    .with_help("if a different tuple was meant, change this one; otherwise remove it")
+    .with_suggestion(
+        "remove the duplicate",
+        vec![Edit {
+            span: removal,
+            replacement: String::new(),
+        }],
+    )
+}
+
+/// A relation value at `span` with no tuples and nothing else giving its
+/// heading.
+pub(crate) fn unknown_relation_heading(span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::UnknownRelationHeading,
+        "the heading of this empty relation is unknown",
+        span,
+        "no tuples, no heading, and no expected type",
+    )
+    .with_note("a relation's heading comes from its selector's heading, from its tuples, or from the type expected of it")
+    .with_help("write the heading, as in `relation { name: text } {}`, or declare the variable's type, as in `var r: relation { name: text } := relation {};`")
 }
 
 pub(crate) fn rational_out_of_range(span: Span) -> Diagnostic {

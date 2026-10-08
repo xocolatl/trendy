@@ -30,6 +30,7 @@ pub enum SyntaxKind {
     /// `false`, a boolean literal.
     FalseKw,
     TupleKw,
+    RelationKw,
     LBrace,
     RBrace,
     LBracket,
@@ -72,14 +73,22 @@ pub enum SyntaxKind {
     TypeRef,
     /// `:= value`
     Initializer,
+    /// `{ name: type, … }`: the attributes of a tuple or relation type, or
+    /// of a selector.
+    Heading,
+    /// `name: type`, in a heading.
+    AttributeType,
     /// `tuple { name: type, … }`
     TupleType,
-    /// `name: type`, in a tuple type.
-    AttributeType,
-    /// `tuple { name: value, … }`
+    /// `relation { name: type, … }`
+    RelationType,
+    /// `tuple [heading] { name: value, … }`; in a relation, `tuple` may be
+    /// left out.
     TupleLiteral,
     /// `name: value`, in a tuple literal.
     AttributeValue,
+    /// `relation [heading] { tuple, … }`
+    RelationLiteral,
     Literal,
     /// Tokens the parser could not fit into the grammar.
     Error,
@@ -87,7 +96,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 37] = [
+    pub const ALL: [SyntaxKind; 41] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Ident,
         SyntaxKind::OperatorKw,
@@ -95,6 +104,7 @@ impl SyntaxKind {
         SyntaxKind::TrueKw,
         SyntaxKind::FalseKw,
         SyntaxKind::TupleKw,
+        SyntaxKind::RelationKw,
         SyntaxKind::LBrace,
         SyntaxKind::RBrace,
         SyntaxKind::LBracket,
@@ -119,10 +129,13 @@ impl SyntaxKind {
         SyntaxKind::TypeAnnotation,
         SyntaxKind::TypeRef,
         SyntaxKind::Initializer,
-        SyntaxKind::TupleType,
+        SyntaxKind::Heading,
         SyntaxKind::AttributeType,
+        SyntaxKind::TupleType,
+        SyntaxKind::RelationType,
         SyntaxKind::TupleLiteral,
         SyntaxKind::AttributeValue,
+        SyntaxKind::RelationLiteral,
         SyntaxKind::Literal,
         SyntaxKind::Error,
     ];
@@ -141,6 +154,7 @@ impl SyntaxKind {
                 | SyntaxKind::TrueKw
                 | SyntaxKind::FalseKw
                 | SyntaxKind::TupleKw
+                | SyntaxKind::RelationKw
         )
     }
 
@@ -181,6 +195,7 @@ impl SyntaxKind {
             SyntaxKind::TrueKw => "true",
             SyntaxKind::FalseKw => "false",
             SyntaxKind::TupleKw => "tuple",
+            SyntaxKind::RelationKw => "relation",
             SyntaxKind::LBrace => "{",
             SyntaxKind::RBrace => "}",
             SyntaxKind::LBracket => "[",
@@ -207,6 +222,7 @@ impl SyntaxKind {
             SyntaxKind::TrueKw => "`true`",
             SyntaxKind::FalseKw => "`false`",
             SyntaxKind::TupleKw => "`tuple`",
+            SyntaxKind::RelationKw => "`relation`",
             SyntaxKind::LBrace => "`{`",
             SyntaxKind::RBrace => "`}`",
             SyntaxKind::LBracket => "`[`",
@@ -231,8 +247,11 @@ impl SyntaxKind {
             SyntaxKind::TypeAnnotation => "type annotation",
             SyntaxKind::TypeRef => "type",
             SyntaxKind::Initializer => "initial value",
+            SyntaxKind::Heading => "heading",
             SyntaxKind::TupleType => "tuple type",
+            SyntaxKind::RelationType => "relation type",
             SyntaxKind::TupleLiteral => "tuple value",
+            SyntaxKind::RelationLiteral => "relation value",
             SyntaxKind::AttributeType | SyntaxKind::AttributeValue => "attribute",
             SyntaxKind::Literal => "value",
             SyntaxKind::Error => "error",

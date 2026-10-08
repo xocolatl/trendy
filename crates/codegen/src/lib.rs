@@ -313,6 +313,41 @@ mod tests {
     }
 
     #[test]
+    fn addresses_in_read_only_arrays_are_relocated() {
+        // A relation whose one tuple has a relation-valued attribute: the
+        // outer array holds an address of the inner array.
+        let constant = |fields| lir::Data {
+            kind: lir::DataKind::Constant,
+            writable: false,
+            fields,
+        };
+        let element = |n| lir::Field::Struct(vec![lir::Field::I64(n)]);
+        let object_bytes = compile(&program(vec![
+            constant(vec![element(1), element(2)]),
+            constant(vec![lir::Field::Struct(vec![
+                lir::Field::Address(lir::DataId(0)),
+                lir::Field::Usize(2),
+            ])]),
+            variable(
+                "r",
+                vec![lir::Field::Address(lir::DataId(1)), lir::Field::Usize(1)],
+            ),
+        ]))
+        .unwrap();
+        let object = object::File::parse(&*object_bytes).unwrap();
+
+        let (inner, _) = symbol_bytes(&object, "trendy_const_0", 16);
+        assert_eq!(inner[..8], 1_i64.to_le_bytes());
+        assert_eq!(inner[8..], 2_i64.to_le_bytes());
+        let (outer, relocated) = symbol_bytes(&object, "trendy_const_1", 16);
+        assert!(relocated, "the inner relation's address needs a relocation");
+        assert_eq!(outer[8..], 2_u64.to_le_bytes());
+        let (r, relocated) = symbol_bytes(&object, "trendy_var_r", 16);
+        assert!(relocated);
+        assert_eq!(r[8..], 1_u64.to_le_bytes());
+    }
+
+    #[test]
     fn layout_aligns_fields_and_pads_empty_objects() {
         let layout = Layout {
             pointer_bytes: 8,

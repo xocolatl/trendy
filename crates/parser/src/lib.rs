@@ -97,7 +97,7 @@ impl<'a> Parser<'a> {
 
     fn operator(&mut self) {
         self.form = errors::OPERATOR_FORM;
-        self.builder.start_node(SyntaxKind::Operator);
+        self.start_node(SyntaxKind::Operator);
         self.bump();
         self.name("add a name after `operator`, such as `operator main{} [];`");
 
@@ -122,13 +122,18 @@ impl<'a> Parser<'a> {
     /// left out. Sema checks that at least one is there.
     fn var_decl(&mut self) {
         self.form = errors::VARIABLE_FORM;
-        self.builder.start_node(SyntaxKind::VarDecl);
+        self.start_node(SyntaxKind::VarDecl);
         self.bump();
         self.name("add a name after `var`, such as `var count: integer := 0;`");
 
-        let starts_type = |k| matches!(k, SyntaxKind::Ident | SyntaxKind::TupleKw);
+        let starts_type = |k| {
+            matches!(
+                k,
+                SyntaxKind::Ident | SyntaxKind::TupleKw | SyntaxKind::RelationKw
+            )
+        };
         if self.at(SyntaxKind::Colon) || self.peek().is_some_and(starts_type) {
-            self.builder.start_node(SyntaxKind::TypeAnnotation);
+            self.start_node(SyntaxKind::TypeAnnotation);
             if self.at(SyntaxKind::Colon) {
                 self.bump();
             } else {
@@ -141,7 +146,7 @@ impl<'a> Parser<'a> {
 
         match self.found() {
             Some(found) if matches!(found.kind, SyntaxKind::ColonEq | SyntaxKind::Eq) => {
-                self.builder.start_node(SyntaxKind::Initializer);
+                self.start_node(SyntaxKind::Initializer);
                 let span = self.bump();
                 if found.kind == SyntaxKind::Eq {
                     self.errors.push(errors::assignment_with_eq(span));
@@ -149,9 +154,12 @@ impl<'a> Parser<'a> {
                 self.expression();
                 self.builder.finish_node();
             }
-            Some(found) if found.kind.is_literal() || found.kind == SyntaxKind::TupleKw => {
+            Some(found)
+                if found.kind.is_literal()
+                    || matches!(found.kind, SyntaxKind::TupleKw | SyntaxKind::RelationKw) =>
+            {
                 // `var i: integer 0`: the value is there but `:=` isn't.
-                self.builder.start_node(SyntaxKind::Initializer);
+                self.start_node(SyntaxKind::Initializer);
                 self.missing(SyntaxKind::ColonEq);
                 self.expression();
                 self.builder.finish_node();
@@ -165,7 +173,7 @@ impl<'a> Parser<'a> {
     /// A definition's name, or `help` on what to write if it's missing.
     fn name(&mut self, help: &'static str) {
         if self.at(SyntaxKind::Ident) {
-            self.builder.start_node(SyntaxKind::Name);
+            self.start_node(SyntaxKind::Name);
             self.bump();
             self.builder.finish_node();
         } else {
@@ -173,45 +181,48 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// A named type, or a tuple type.
+    /// A named type, a tuple type, or a relation type.
     fn type_expr(&mut self) {
-        if self.at_tuple() {
-            self.tuple(
-                SyntaxKind::TupleType,
-                SyntaxKind::AttributeType,
-                Self::type_expr,
-            );
+        if self.at_keyword(SyntaxKind::TupleKw) || self.at(SyntaxKind::LBrace) {
+            // A bare `{`, as in TypeScript, is a tuple type without `tuple`.
+            self.start_node(SyntaxKind::TupleType);
+            self.keyword(SyntaxKind::TupleKw);
+            self.heading();
+            self.builder.finish_node();
+        } else if self.at_keyword(SyntaxKind::RelationKw) {
+            self.start_node(SyntaxKind::RelationType);
+            self.keyword(SyntaxKind::RelationKw);
+            self.heading();
+            self.builder.finish_node();
         } else if self.at(SyntaxKind::Ident) {
-            self.builder.start_node(SyntaxKind::TypeRef);
+            self.start_node(SyntaxKind::TypeRef);
             self.bump();
             self.builder.finish_node();
         } else {
             self.missing_with_help(
                 SyntaxKind::TypeRef,
-                "write a type, such as `integer`, `text` or `tuple { name: text }`",
+                "write a type, such as `integer`, `tuple { name: text }` or `relation { name: text }`",
             );
         }
     }
 
-    /// A literal, or a tuple value.
+    /// A literal, a tuple value, or a relation value.
     fn expression(&mut self) {
         if self.peek().is_some_and(SyntaxKind::is_literal) {
-            self.builder.start_node(SyntaxKind::Literal);
+            self.start_node(SyntaxKind::Literal);
             self.bump();
             self.builder.finish_node();
-        } else if self.at_tuple() {
-            self.tuple(
-                SyntaxKind::TupleLiteral,
-                SyntaxKind::AttributeValue,
-                Self::expression,
-            );
+        } else if self.at_keyword(SyntaxKind::RelationKw) {
+            self.relation_literal();
+        } else if self.at_keyword(SyntaxKind::TupleKw) || self.at(SyntaxKind::LBrace) {
+            self.tuple_literal(false);
         } else if let Some(found) = self
             .found()
             .filter(|f| f.kind == SyntaxKind::Ident && errors::boolean_spelling(f.text).is_some())
         {
             // `True` or `TRUE`: a boolean literal in the wrong case. It's kept
             // as the literal it was meant to be, so nothing else cascades.
-            self.builder.start_node(SyntaxKind::Literal);
+            self.start_node(SyntaxKind::Literal);
             self.bump();
             self.builder.finish_node();
             self.errors.push(errors::miscased_keyword(
@@ -221,80 +232,103 @@ impl<'a> Parser<'a> {
         } else {
             self.missing_with_help(
                 SyntaxKind::Literal,
-                "write a value, such as `0`, `\"\"` or `tuple { name: \"x\" }`",
+                "write a value, such as `0`, `\"\"`, `tuple { name: \"x\" }` or `relation { { name: \"x\" } }`",
             );
         }
     }
 
-    /// Whether a tuple type or value starts here: `tuple {`, a mis-cased
-    /// `TUPLE {`, or a bare `{`, as in a JSON or JavaScript object.
-    fn at_tuple(&mut self) -> bool {
-        let Some(found) = self.found() else {
-            return false;
-        };
-        let brace_next = self
-            .found_after(1)
-            .is_some_and(|f| f.kind == SyntaxKind::LBrace);
-        match found.kind {
-            SyntaxKind::TupleKw | SyntaxKind::LBrace => true,
-            SyntaxKind::Ident => brace_next && found.text.eq_ignore_ascii_case("tuple"),
-            _ => false,
+    /// `tuple [heading] { name: value, … }`. In a relation, the `tuple`
+    /// keyword may be left out; elsewhere a bare `{` is reported, with a fix.
+    fn tuple_literal(&mut self, in_relation: bool) {
+        let outer_form = std::mem::replace(&mut self.form, errors::TUPLE_VALUE_FORM);
+        self.start_node(SyntaxKind::TupleLiteral);
+        // A heading needs the keyword: in a relation, `{ a: 1 } { a: 2 }` is
+        // two tuples with a missing comma, not a heading and a body.
+        let has_keyword = self.at_keyword(SyntaxKind::TupleKw);
+        if has_keyword || !in_relation {
+            self.keyword(SyntaxKind::TupleKw);
         }
-    }
-
-    /// `tuple { item, … }`, where an item is `name: x` and `x` is parsed by
-    /// `item`. `node` and `attribute` are the node kinds for the whole and
-    /// for each item. A trailing comma is allowed.
-    fn tuple(&mut self, node: SyntaxKind, attribute: SyntaxKind, item: fn(&mut Self)) {
-        let outer_form = std::mem::replace(
-            &mut self.form,
-            if node == SyntaxKind::TupleType {
-                errors::TUPLE_TYPE_FORM
-            } else {
-                errors::TUPLE_VALUE_FORM
-            },
+        if has_keyword && self.at_heading() {
+            self.heading();
+        }
+        self.braced_list(
+            |p| p.at(SyntaxKind::Ident),
+            |p| p.attribute(SyntaxKind::AttributeValue, Self::expression),
         );
-        self.builder.start_node(node);
-        let found = self.found().expect("at_tuple saw a token");
-        match found.kind {
-            SyntaxKind::TupleKw => {
-                self.bump();
-            }
-            SyntaxKind::Ident => {
-                // `TUPLE` or `Tuple`.
-                self.bump();
-                self.errors.push(errors::miscased_keyword(found, "tuple"));
-            }
-            _ => self.missing(SyntaxKind::TupleKw),
-        }
-
-        if self.at(SyntaxKind::LBrace) {
-            self.bump();
-            while self.at(SyntaxKind::Ident) {
-                self.attribute(attribute, item);
-                match self.peek() {
-                    Some(SyntaxKind::Comma) => {
-                        self.bump();
-                    }
-                    // `tuple { a: 1 b: 2 }`: the next attribute is there but
-                    // the comma isn't.
-                    Some(SyntaxKind::Ident) => self.missing(SyntaxKind::Comma),
-                    _ => break,
-                }
-            }
-            self.expect(SyntaxKind::RBrace);
-        } else {
-            self.missing(SyntaxKind::LBrace);
-            self.missing(SyntaxKind::RBrace);
-        }
         self.builder.finish_node();
         self.form = outer_form;
     }
 
+    /// `relation [heading] { tuple, … }`.
+    fn relation_literal(&mut self) {
+        let outer_form = std::mem::replace(&mut self.form, errors::RELATION_VALUE_FORM);
+        self.start_node(SyntaxKind::RelationLiteral);
+        self.keyword(SyntaxKind::RelationKw);
+        if self.at_heading() {
+            self.heading();
+        } else if self.at(SyntaxKind::LBrace)
+            && self
+                .found_after(1)
+                .is_some_and(|f| f.kind == SyntaxKind::Ident)
+            && self
+                .found_after(2)
+                .is_some_and(|f| f.kind == SyntaxKind::Colon)
+        {
+            // `relation { a: integer }`: a heading with no tuples after it.
+            self.heading();
+            self.missing(SyntaxKind::LBrace);
+            self.missing(SyntaxKind::RBrace);
+            self.builder.finish_node();
+            self.form = outer_form;
+            return;
+        }
+        self.braced_list(
+            |p| p.at(SyntaxKind::LBrace) || p.at_keyword(SyntaxKind::TupleKw),
+            |p| p.tuple_literal(true),
+        );
+        self.builder.finish_node();
+        self.form = outer_form;
+    }
+
+    /// `{ name: type, … }`.
+    fn heading(&mut self) {
+        let outer_form = std::mem::replace(&mut self.form, errors::HEADING_FORM);
+        self.start_node(SyntaxKind::Heading);
+        self.braced_list(
+            |p| p.at(SyntaxKind::Ident),
+            |p| p.attribute(SyntaxKind::AttributeType, Self::type_expr),
+        );
+        self.builder.finish_node();
+        self.form = outer_form;
+    }
+
+    /// `{ item, … }`, with an optional trailing comma. `starts_item` says
+    /// whether an item starts at the next token, and `item` parses one.
+    fn braced_list(&mut self, starts_item: fn(&mut Self) -> bool, item: fn(&mut Self)) {
+        if !self.at(SyntaxKind::LBrace) {
+            self.missing(SyntaxKind::LBrace);
+            self.missing(SyntaxKind::RBrace);
+            return;
+        }
+        self.bump();
+        while starts_item(self) {
+            item(self);
+            if self.at(SyntaxKind::Comma) {
+                self.bump();
+            } else if starts_item(self) {
+                // `{ a: 1 b: 2 }`: the next item is there but the comma isn't.
+                self.missing(SyntaxKind::Comma);
+            } else {
+                break;
+            }
+        }
+        self.expect(SyntaxKind::RBrace);
+    }
+
     /// `name: x`, with `x` parsed by `item`.
     fn attribute(&mut self, attribute: SyntaxKind, item: fn(&mut Self)) {
-        self.builder.start_node(attribute);
-        self.builder.start_node(SyntaxKind::Name);
+        self.start_node(attribute);
+        self.start_node(SyntaxKind::Name);
         self.bump();
         self.builder.finish_node();
         match self.found() {
@@ -313,6 +347,91 @@ impl<'a> Parser<'a> {
         self.builder.finish_node();
     }
 
+    /// Whether `keyword` is next: the keyword itself, or a mis-cased spelling
+    /// of it followed by `{`, as in `TUPLE {`.
+    fn at_keyword(&mut self, keyword: SyntaxKind) -> bool {
+        let Some(found) = self.found() else {
+            return false;
+        };
+        if found.kind == keyword {
+            return true;
+        }
+        let spelled = keyword.fixed_text().expect("keywords have fixed text");
+        found.kind == SyntaxKind::Ident
+            && found.text.eq_ignore_ascii_case(spelled)
+            && self
+                .found_after(1)
+                .is_some_and(|f| f.kind == SyntaxKind::LBrace)
+    }
+
+    /// Consume `keyword`, reporting a mis-cased spelling of it, or record it
+    /// as missing.
+    fn keyword(&mut self, keyword: SyntaxKind) {
+        let Some(found) = self.found() else {
+            self.missing(keyword);
+            return;
+        };
+        if found.kind == keyword {
+            self.bump();
+        } else if found.kind == SyntaxKind::Ident && self.at_keyword(keyword) {
+            self.bump();
+            let spelled = keyword.fixed_text().expect("keywords have fixed text");
+            self.errors.push(errors::miscased_keyword(found, spelled));
+        } else {
+            self.missing(keyword);
+        }
+    }
+
+    /// Whether a selector's heading starts here: a brace group that looks
+    /// like a heading, followed by another brace group, the body.
+    fn at_heading(&mut self) -> bool {
+        self.braces_then_brace() && self.looks_like_heading()
+    }
+
+    /// Whether the brace group at the next token starts like a heading: it is
+    /// empty, or its first attribute is `name: type` or Tutorial D's
+    /// `NAME TYPE`. A value such as `a: 1` doesn't.
+    fn looks_like_heading(&mut self) -> bool {
+        let kind = |p: &mut Self, n| p.found_after(n).map(|f| f.kind);
+        match (kind(self, 1), kind(self, 2), kind(self, 3)) {
+            (Some(SyntaxKind::RBrace), _, _)
+            | (Some(SyntaxKind::Ident), Some(SyntaxKind::Ident), _) => true,
+            (Some(SyntaxKind::Ident), Some(SyntaxKind::Colon), Some(after)) => matches!(
+                after,
+                SyntaxKind::Ident
+                    | SyntaxKind::TupleKw
+                    | SyntaxKind::RelationKw
+                    | SyntaxKind::LBrace
+            ),
+            _ => false,
+        }
+    }
+
+    /// Whether the next token is `{`, and the token after its matching `}`
+    /// is another `{`: a heading followed by a body.
+    fn braces_then_brace(&mut self) -> bool {
+        if !self.at(SyntaxKind::LBrace) {
+            return false;
+        }
+        let mut depth = 0_usize;
+        let mut significant = (self.pos..self.tokens.len())
+            .map(|i| self.tokens[i].kind)
+            .filter(|&k| !is_skipped(k));
+        for kind in significant.by_ref() {
+            match kind {
+                SyntaxKind::LBrace => depth += 1,
+                SyntaxKind::RBrace => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        depth == 0 && significant.next() == Some(SyntaxKind::LBrace)
+    }
+
     /// A `node` made of a `delims` pair with nothing between.
     ///
     /// A pair in `mistakes` is parsed as if it were `delims` and reported
@@ -326,7 +445,7 @@ impl<'a> Parser<'a> {
     ) {
         let (open, close) = delims;
         if self.at(open) {
-            self.builder.start_node(node);
+            self.start_node(node);
             self.bump();
             self.expect(close);
             self.builder.finish_node();
@@ -338,7 +457,7 @@ impl<'a> Parser<'a> {
             self.missing(close);
             return;
         };
-        self.builder.start_node(node);
+        self.start_node(node);
         let open_span = self.bump();
         let close_span = if self.at(wrong_close) {
             Some(self.bump())
@@ -363,7 +482,7 @@ impl<'a> Parser<'a> {
     fn junk(&mut self, first: Found<'a>) {
         let name = self.found_after(1);
         let after_name = self.found_after(2);
-        self.builder.start_node(SyntaxKind::Error);
+        self.start_node(SyntaxKind::Error);
         while self
             .peek()
             .is_some_and(|k| !matches!(k, SyntaxKind::OperatorKw | SyntaxKind::VarKw))
@@ -386,6 +505,13 @@ impl<'a> Parser<'a> {
                 Span::new(first.span.start, end),
             ),
         });
+    }
+
+    /// Start a node at the next significant token, so that trivia before it
+    /// stays in the enclosing node and every node's span starts at a token.
+    fn start_node(&mut self, kind: SyntaxKind) {
+        self.peek();
+        self.builder.start_node(kind);
     }
 
     /// The kind of the next significant token, or `None` at end of input.
@@ -827,18 +953,19 @@ SourceFile
       TupleType
         TupleKw \"tuple\"
         Whitespace \" \"
-        LBrace \"{\"
-        Whitespace \" \"
-        AttributeType
-          Name
-            Ident \"a\"
-          Colon \":\"
+        Heading
+          LBrace \"{\"
           Whitespace \" \"
-          TypeRef
-            Ident \"integer\"
-        Comma \",\"
-        Whitespace \" \"
-        RBrace \"}\"
+          AttributeType
+            Name
+              Ident \"a\"
+            Colon \":\"
+            Whitespace \" \"
+            TypeRef
+              Ident \"integer\"
+          Comma \",\"
+          Whitespace \" \"
+          RBrace \"}\"
     Semicolon \";\"
 "
         );
@@ -897,6 +1024,84 @@ SourceFile
         assert_eq!(fix("OPERATOR main{} [];"), "operator main{} [];");
         // `TUPLE` alone is just a (wrong) type name.
         assert!(codes("var p: TUPLE;").is_empty());
+    }
+
+    #[test]
+    fn relations() {
+        for source in [
+            "var r: relation { a: boolean, b: integer };",
+            "var r := relation { a: integer } { { a: 1 } };",
+            "var r := relation { tuple { a: 1 }, { a: 2 }, };",
+            "var r := relation {};",
+            "var r := relation {} {};",
+            "var t := tuple { a: integer } { a: 1 };",
+            "var n: tuple { r: relation { x: rational } };",
+            "var n := relation { { r: relation { { x: 1.0 } } } };",
+        ] {
+            let parse = parse_str(source);
+            assert!(parse.errors.is_empty(), "{source}: {:#?}", parse.errors);
+        }
+    }
+
+    #[test]
+    fn heading_or_body() {
+        let literal = |source: &str| {
+            let decl = parse_str(source).tree.variables().next().unwrap();
+            match decl.initializer() {
+                Some(trendy_syntax::ast::Expr::Relation(r)) => r,
+                other => panic!("{source}: {other:?}"),
+            }
+        };
+        let with_heading = literal("var r := relation { a: integer } { { a: 1 } };");
+        assert!(with_heading.heading().is_some());
+        assert_eq!(with_heading.tuples().count(), 1);
+        let without = literal("var r := relation { { a: 1 }, { a: 2 } };");
+        assert!(without.heading().is_none());
+        assert_eq!(without.tuples().count(), 2);
+    }
+
+    #[test]
+    fn relation_recovery() {
+        // A heading with no body: the empty body is inserted.
+        let source = "var r := relation { a: integer };";
+        let errors = parse_str(source).errors;
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(fix(source), "var r := relation { a: integer }{};");
+        // Missing comma between tuples, with or without the keyword.
+        assert_eq!(
+            fix("var r := relation { tuple { a: 1 } tuple { a: 2 } };"),
+            "var r := relation { tuple { a: 1 }, tuple { a: 2 } };"
+        );
+        assert_eq!(
+            fix("var r := relation { { a: 1 } { a: 2 } };"),
+            "var r := relation { { a: 1 }, { a: 2 } };"
+        );
+        assert_eq!(
+            fix("var r: RELATION { a: integer };"),
+            "var r: relation { a: integer };"
+        );
+    }
+
+    #[test]
+    fn nodes_start_at_tokens() {
+        for source in [
+            "var x: tuple { a: integer } := tuple { a: 1 };",
+            "var r := relation { a: integer } { { a: 1 } , tuple { a: 2 } };",
+            "operator main ( ) { } ;",
+            "var p := { x = 1 y: 2 };",
+            "junk  var  i ;",
+        ] {
+            let tree = parse_str(source).tree;
+            for node in tree.syntax().descendants().skip(1) {
+                let first = node.first_child_or_token().map(|e| e.kind());
+                assert_ne!(
+                    first,
+                    Some(SyntaxKind::Whitespace),
+                    "{source}: {:?} starts with whitespace",
+                    node.kind()
+                );
+            }
+        }
     }
 
     #[test]

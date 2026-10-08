@@ -136,9 +136,8 @@ fn variable(
     let declared = decl
         .type_expr()
         .map(|t| (types::resolve(&t, values, errors), t));
-    let init = decl.initializer().map(|e| (types::value(&e, errors), e));
 
-    let (ty, init) = match (declared, init) {
+    let (ty, init) = match (declared, decl.initializer()) {
         (None, None) => {
             errors.push(errors::untyped_variable(
                 ident.text(),
@@ -151,15 +150,22 @@ fn variable(
             let init = ty.default_value();
             (ty, init)
         }
-        (None, Some((value, _))) => {
-            let value = value?;
+        (None, Some(expr)) => {
+            let value = types::value(&expr, None, values, errors)?;
             (value.ty(), value)
         }
-        (Some((ty, type_expr)), Some((value, expr))) => {
-            let (ty, value) = (ty?, value?);
-            if !types::check(&ty, &type_expr, &value, &expr, errors) {
-                return None;
-            }
+        (Some((None, _)), Some(expr)) => {
+            // The type is invalid, but the value can still have errors of its
+            // own.
+            types::value(&expr, None, values, errors);
+            return None;
+        }
+        (Some((Some(ty), type_expr)), Some(expr)) => {
+            let expected = types::Expected {
+                ty: ty.clone(),
+                origin: types::Origin::Type(type_expr),
+            };
+            let value = types::value(&expr, Some(&expected), values, errors)?;
             (ty, value)
         }
     };
@@ -643,6 +649,202 @@ mod tests {
         assert_eq!(
             fix(&source),
             format!("var p: tuple {{ a: integer }};{MAIN}")
+        );
+    }
+
+    fn relation_value(var: &hir::Variable) -> &hir::RelationValue {
+        match &var.init {
+            hir::Value::Relation(r) => r,
+            other => panic!("not a relation: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn relation_default_is_empty() {
+        let vars = variables("var r: relation { a: boolean, b: integer };");
+        assert_eq!(
+            vars[0].ty.to_string(),
+            "relation { a: boolean, b: integer }"
+        );
+        assert!(relation_value(&vars[0]).tuples.is_empty());
+    }
+
+    #[test]
+    fn relation_selectors() {
+        let vars = variables(
+            "var a := relation { a: integer } { { a: 1 } };\nvar b := relation { tuple { a: 1 }, { a: 2 }, };\nvar c: relation { a: integer } := relation {};\nvar d := relation {} {};\nvar e := tuple { a: integer } { a: 1 };",
+        );
+        assert_eq!(vars[0].ty.to_string(), "relation { a: integer }");
+        assert_eq!(relation_value(&vars[0]).tuples.len(), 1);
+        assert_eq!(vars[1].ty, vars[0].ty);
+        assert_eq!(relation_value(&vars[1]).tuples.len(), 2);
+        assert_eq!(vars[2].ty, vars[0].ty);
+        assert!(relation_value(&vars[2]).tuples.is_empty());
+        assert_eq!(vars[3].ty.to_string(), "relation {}");
+        assert_eq!(vars[4].ty.to_string(), "tuple { a: integer }");
+    }
+
+    #[test]
+    fn empty_relation_needs_a_heading() {
+        let errors = errors(&format!("var r := relation {{}};{MAIN}"));
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, Code::UnknownRelationHeading);
+    }
+
+    #[test]
+    fn duplicate_tuples() {
+        let source = format!("var r := relation {{ {{ a: 1, b: 2 }}, {{ b: 2, a: 1 }} }};{MAIN}");
+        let errors = errors(&source);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, Code::DuplicateTuple);
+        assert_eq!(
+            fix(&source),
+            format!("var r := relation {{ {{ a: 1, b: 2 }} }};{MAIN}")
+        );
+    }
+
+    #[test]
+    fn inferred_heading_mismatch() {
+        let source = format!("var r := relation {{ {{ a: 1 }}, {{ a: \"x\" }} }};{MAIN}");
+        let errors = errors(&source);
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].code, Code::TypeMismatch);
+        assert_eq!(
+            &source[errors[0].span().start..errors[0].span().end],
+            "\"x\""
+        );
+        let origin = &errors[0].secondary[0];
+        assert_eq!(&source[origin.span.start..origin.span.end], "1");
+        assert_eq!(origin.message, "expected because of this value");
+        assert!(
+            errors[0]
+                .suggestions
+                .iter()
+                .all(|s| !s.message.starts_with("change the type")),
+            "no written type to change"
+        );
+    }
+
+    #[test]
+    fn selector_heading_checks_its_tuples() {
+        let source = format!("var t := tuple {{ a: integer }} {{ a: \"x\" }};{MAIN}");
+        let errors = errors(&source);
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        let origin = errors[0].secondary[0].span;
+        assert_eq!(&source[origin.start..origin.end], "integer");
+        assert_eq!(
+            fix(&source),
+            format!("var t := tuple {{ a: text }} {{ a: \"x\" }};{MAIN}")
+        );
+    }
+
+    #[test]
+    fn selector_heading_against_declared_type() {
+        let errors = errors(&format!(
+            "var r: relation {{ a: integer }} := relation {{ a: text }} {{}};{MAIN}"
+        ));
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            errors[0].message,
+            "mismatched types: expected `relation { a: integer }`, found `relation { a: text }`"
+        );
+    }
+
+    #[test]
+    fn missing_attribute_in_a_relation_tuple() {
+        let source = format!(
+            "var r: relation {{ a: integer, b: text }} := relation {{ {{ a: 1 }} }};{MAIN}"
+        );
+        assert_eq!(
+            fix(&source),
+            format!(
+                "var r: relation {{ a: integer, b: text }} := relation {{ {{ a: 1, b: \"\" }} }};{MAIN}"
+            )
+        );
+    }
+
+    #[test]
+    fn nested_relations() {
+        let vars = variables(
+            "var n: tuple { r: relation { x: rational } };\nvar m := tuple { r: relation { { x: 1.0 } } };\nvar rr := relation { { inner: relation { { x: 1 } } } };",
+        );
+        assert_eq!(vars[0].ty, vars[1].ty);
+        assert_eq!(
+            vars[2].ty.to_string(),
+            "relation { inner: relation { x: integer } }"
+        );
+    }
+
+    #[test]
+    fn relation_valued_attributes_compare_as_sets() {
+        // The inner relations list the same tuples in another order, so the
+        // outer tuples are equal: a duplicate.
+        let source = format!(
+            "var r := relation {{\n    {{ k: 1, inner: relation {{ {{ x: 1 }}, {{ x: 2 }} }} }},\n    {{ k: 1, inner: relation {{ {{ x: 2 }}, {{ x: 1 }} }} }},\n}};{MAIN}"
+        );
+        let errors = errors(&source);
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].code, Code::DuplicateTuple);
+
+        // Different inner relations make different outer tuples.
+        let vars = variables(
+            "var r := relation {\n    { k: 1, inner: relation { { x: 1 } } },\n    { k: 1, inner: relation { { x: 2 } } },\n};",
+        );
+        assert_eq!(relation_value(&vars[0]).tuples.len(), 2);
+    }
+
+    #[test]
+    fn errors_inside_a_relation_valued_attribute() {
+        let source = format!(
+            "var r: relation {{ inner: relation {{ x: integer }} }} := relation {{ {{ inner: relation {{ {{ x: \"a\" }} }} }} }};{MAIN}"
+        );
+        let found = errors(&source);
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert_eq!(found[0].code, Code::TypeMismatch);
+        let at = found[0].span();
+        assert_eq!(&source[at.start..at.end], "\"a\"");
+        let origin = found[0].secondary[0].span;
+        assert_eq!(
+            &source[origin.start..origin.end],
+            "integer",
+            "the inner heading's type"
+        );
+
+        // An inner relation's tuples must agree with each other too.
+        let source = format!(
+            "var r := relation {{ {{ inner: relation {{ {{ x: 1 }}, {{ y: 2 }} }} }} }};{MAIN}"
+        );
+        // One error: `y` is one edit from the missing `x`, so the fix renames
+        // it; and the outer relation, whose only tuple is invalid, doesn't
+        // also report an unknown heading.
+        let found = errors(&source);
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert_eq!(found[0].code, Code::UnknownAttribute);
+        assert_eq!(found[0].suggestions[0].message, "rename it to `x`");
+    }
+
+    #[test]
+    fn empty_inner_relation_takes_its_heading_from_the_first_tuple() {
+        let vars = variables(
+            "var teams := relation {\n    { members: relation { { name: \"Ada\" } } },\n    { members: relation {} },\n};",
+        );
+        assert_eq!(
+            vars[0].ty.to_string(),
+            "relation { members: relation { name: text } }"
+        );
+        assert_eq!(relation_value(&vars[0]).tuples.len(), 2);
+    }
+
+    #[test]
+    fn missing_relation_attribute_gets_an_empty_relation() {
+        let source = format!(
+            "var t: tuple {{ a: integer, r: relation {{ x: integer }} }} := tuple {{ a: 1 }};{MAIN}"
+        );
+        assert_eq!(
+            fix(&source),
+            format!(
+                "var t: tuple {{ a: integer, r: relation {{ x: integer }} }} := tuple {{ a: 1, r: relation {{ x: integer }} {{}} }};{MAIN}"
+            )
         );
     }
 
