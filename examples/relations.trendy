@@ -6,10 +6,13 @@ var people := relation {
 };
 var nested: tuple { name: text, friends: relation { name: text } };
 var teams := relation {
-    { team: "core", members: relation {
-        { name: "Ada" },
-        { name: "Edgar" }
-    } },
+    {
+        team: "core",
+        members: relation {
+            { name: "Ada" },
+            { name: "Edgar" }
+        }
+    },
     { team: "docs", members: relation { name: text } {} },
 };
 

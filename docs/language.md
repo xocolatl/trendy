@@ -662,6 +662,10 @@ operator main{} [];
 - single spaces around `:=` and after `:`;
 - a relation value with more than one tuple has each tuple on its own line,
   indented four spaces per level of nesting;
+- a tuple value, relation value or call's arguments with several items, one
+  of which spans lines, has each item on its own line too, so nothing
+  follows a value's last line but its closing braces; a single item stays
+  inside its braces, as in `call f{v: relation {` … `}};`;
 - a relation's tuples list their attributes in the order of the relation's
   heading: the selector's own heading, else the declared type, else the first
   tuple's order;

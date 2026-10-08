@@ -10,7 +10,7 @@
 
 mod order;
 
-use trendy_syntax::ast::{AstNode, Body, RelationLiteral, SourceFile};
+use trendy_syntax::ast::{Arguments, AstNode, Body, RelationLiteral, SourceFile, TupleLiteral};
 use trendy_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
 /// Render a file in canonical style.
@@ -57,16 +57,42 @@ pub fn format(file: &SourceFile) -> String {
 const INDENT: &str = "    ";
 
 /// Whether a node is laid out one item per line, indented: a body with
-/// statements, or a relation value with more than one tuple.
+/// statements, a relation value with more than one tuple, and a tuple value,
+/// relation value or call's arguments with several items, one of them laid
+/// out across lines. So a value broken across lines is never followed by
+/// more items on its last line; a single item stays hugged by its braces,
+/// as in `call f{v: relation {` … `}};`.
 fn is_block(node: &SyntaxNode) -> bool {
     match node.kind() {
         SyntaxKind::Body => {
             Body::cast(node.clone()).is_some_and(|b| b.statements().next().is_some())
         }
-        SyntaxKind::RelationLiteral => {
-            RelationLiteral::cast(node.clone()).is_some_and(|r| r.tuples().nth(1).is_some())
+        SyntaxKind::RelationLiteral | SyntaxKind::TupleLiteral | SyntaxKind::Arguments => {
+            is_multi_tuple_relation(node)
+                || (items(node) > 1
+                    && node
+                        .descendants()
+                        .skip(1)
+                        .any(|n| is_multi_tuple_relation(&n)))
         }
         _ => false,
+    }
+}
+
+fn is_multi_tuple_relation(node: &SyntaxNode) -> bool {
+    RelationLiteral::cast(node.clone()).is_some_and(|r| r.tuples().nth(1).is_some())
+}
+
+/// How many items a tuple value, relation value or call's arguments lists.
+fn items(node: &SyntaxNode) -> usize {
+    if let Some(relation) = RelationLiteral::cast(node.clone()) {
+        relation.tuples().count()
+    } else if let Some(tuple) = TupleLiteral::cast(node.clone()) {
+        tuple.attributes().count()
+    } else if let Some(args) = Arguments::cast(node.clone()) {
+        args.named().count() + args.positional().count()
+    } else {
+        0
     }
 }
 
@@ -303,6 +329,28 @@ mod tests {
         assert_eq!(
             fmt("operator main{}[call debug_value{v:relation{{a:1},{a:2}}};];"),
             "operator main{} [\n    call debug_value{v: relation {\n        { a: 1 },\n        { a: 2 }\n    }};\n];\n"
+        );
+    }
+
+    #[test]
+    fn values_containing_blocks_are_blocks() {
+        // Several items, one broken: one per line.
+        let source = "operator main{} [ call f{a: tuple { r: relation { { x: 1 }, { x: 2 } }, s: 1 }, b: 1}; ];";
+        assert_eq!(
+            fmt(source),
+            "operator main{} [\n    call f{\n        a: tuple {\n            r: relation {\n                { x: 1 },\n                { x: 2 }\n            },\n            s: 1\n        },\n        b: 1\n    };\n];\n"
+        );
+        // A single item stays hugged.
+        assert_eq!(
+            fmt(
+                "operator main{} [ call f{a: tuple { r: relation { { x: 1 }, { x: 2 } } }, b: 1}; ];"
+            ),
+            "operator main{} [\n    call f{\n        a: tuple { r: relation {\n            { x: 1 },\n            { x: 2 }\n        } },\n        b: 1\n    };\n];\n"
+        );
+        // Nothing broken inside: one line, as before.
+        assert_eq!(
+            fmt("operator main{} [ call f{a: tuple { r: relation { { x: 1 } } }, b: 2}; ];"),
+            "operator main{} [\n    call f{a: tuple { r: relation { { x: 1 } } }, b: 2};\n];\n"
         );
     }
 

@@ -75,19 +75,25 @@ operator main{} [
     call tuples{a: ada, b: tuple { name: "Ada", born: 1815 }};
     call tuples{a: ada, b: tuple { name: "Ada", born: 1816 }};
     call tuples{a: ada, b: tuple { name: "Adb", born: 1815 }};
-    call relations{a: people, b: relation {
-        { name: "Edgar", born: 1923 },
-        { name: "Ada", born: 1815 }
-    }};
+    call relations{
+        a: people,
+        b: relation {
+            { name: "Edgar", born: 1923 },
+            { name: "Ada", born: 1815 }
+        }
+    };
     call relations{a: people, b: relation { { name: "Ada", born: 1815 } }};
     call relations{a: people, b: relation {}};
     call relations{a: relation {}, b: relation {}};
     call nested{a: tuple { r: relation { { x: 0.0 } } }, b: tuple { r: relation { { x: -0.0 } } }};
-    call nested{a: tuple { r: relation {
-        { x: 1.5 },
-        { x: 2.5 }
-    } }, b: tuple { r: relation {
-        { x: 2.5 },
-        { x: 1.5 }
-    } }};
+    call nested{
+        a: tuple { r: relation {
+            { x: 1.5 },
+            { x: 2.5 }
+        } },
+        b: tuple { r: relation {
+            { x: 2.5 },
+            { x: 1.5 }
+        } }
+    };
 ];
