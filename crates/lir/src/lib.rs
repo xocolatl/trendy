@@ -147,6 +147,25 @@ pub enum Inst {
         function: RuntimeFn,
         args: Vec<Place>,
     },
+    /// Store the negation of the boolean at `src` at `dst`.
+    Not { dst: Place, src: Place },
+    /// Store `lhs op rhs`, of booleans, at `dst`.
+    Bool {
+        dst: Place,
+        op: BoolOp,
+        lhs: Place,
+        rhs: Place,
+    },
+}
+
+/// A dyadic operator on booleans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoolOp {
+    And,
+    Or,
+    Xor,
+    /// `!lhs || rhs`.
+    Implies,
 }
 
 /// Index into [`Function::blocks`].

@@ -12,6 +12,8 @@ use trendy_syntax::{SyntaxKind, SyntaxToken};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Class {
     Keyword,
+    /// A boolean operator written as a keyword, such as `and`.
+    Logical,
     /// An operator's name.
     Operator,
     /// A variable's name.
@@ -53,6 +55,7 @@ fn classify(token: &SyntaxToken) -> Option<Highlight> {
         .and_then(|p| p.parent())
         .map(|p| p.kind());
     let (class, definition) = match (token.kind(), parent, grandparent) {
+        (kind, _, _) if kind.is_operator_keyword() => (Class::Logical, false),
         (kind, _, _) if kind.is_keyword() => (Class::Keyword, false),
         // The contextual keyword in `builtin type name;`.
         (SyntaxKind::Ident, Some(SyntaxKind::BuiltinType), _) if token.text() == "type" => {
@@ -131,6 +134,23 @@ mod tests {
             .into_iter()
             .map(|h| (&source[h.span.start..h.span.end], h.class, h.definition))
             .collect()
+    }
+
+    #[test]
+    fn boolean_operators() {
+        assert_eq!(
+            highlight("var a := not b and (c implies true);"),
+            [
+                ("var", Class::Keyword, false),
+                ("a", Class::Variable, true),
+                ("not", Class::Logical, false),
+                ("b", Class::Variable, false),
+                ("and", Class::Logical, false),
+                ("c", Class::Variable, false),
+                ("implies", Class::Logical, false),
+                ("true", Class::Keyword, false),
+            ]
+        );
     }
 
     #[test]

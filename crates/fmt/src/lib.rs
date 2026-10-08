@@ -103,9 +103,9 @@ fn broken_line(prev: &SyntaxToken, next: &SyntaxToken) -> Option<usize> {
 /// whether the source has a blank line between them.
 fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'static str {
     use SyntaxKind::{
-        BuiltinKw, BuiltinType, CallKw, Colon, ColonEq, Comma, Heading, Ident, LBrace, LBracket,
-        OperatorKw, RBrace, RelationKw, RelationLiteral, Semicolon, TupleKw, TupleLiteral, VarDecl,
-        VarKw,
+        AndKw, BuiltinKw, BuiltinType, CallKw, Colon, ColonEq, Comma, Heading, Ident, ImpliesKw,
+        LBrace, LBracket, NotKw, OperatorKw, OrKw, RBrace, RelationKw, RelationLiteral, Semicolon,
+        TupleKw, TupleLiteral, VarDecl, VarKw, XorKw,
     };
     if prev.kind() == Semicolon {
         // Between definitions: variable declarations in a row go on adjacent
@@ -146,10 +146,10 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
         _ if type_keyword => " ",
         (
             OperatorKw | VarKw | TupleKw | RelationKw | CallKw | BuiltinKw | Colon | ColonEq
-            | Comma,
+            | Comma | NotKw | AndKw | OrKw | XorKw | ImpliesKw,
             _,
         )
-        | (_, ColonEq)
+        | (_, ColonEq | AndKw | OrKw | XorKw | ImpliesKw)
         | (RBrace, LBracket | LBrace) => " ",
         _ => "",
     }
@@ -362,6 +362,18 @@ mod tests {
                 "operator f{r: relation { b: integer, a: integer }} [];operator main{}[call f{r: relation { { a: 1, b: 2 } }};];"
             ),
             "operator f{r: relation { b: integer, a: integer }} [];\n\noperator main{} [\n    call f{r: relation { { b: 2, a: 1 } }};\n];\n"
+        );
+    }
+
+    #[test]
+    fn boolean_operators() {
+        assert_eq!(
+            fmt("var a:=not(true)and false or  true xor\ntrue implies not false;"),
+            "var a := not (true) and false or true xor true implies not false;\n"
+        );
+        assert_eq!(
+            fmt("operator main{}[call debug_value{v:( a or b )};];"),
+            "operator main{} [\n    call debug_value{v: (a or b)};\n];\n"
         );
     }
 

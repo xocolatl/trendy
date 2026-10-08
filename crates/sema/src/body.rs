@@ -7,7 +7,7 @@ use trendy_diag::{Diagnostic, Span, edit_distance};
 use trendy_hir as hir;
 use trendy_syntax::ast::{self, AstNode, AttributeValue, Expr};
 
-use crate::types::{self, Expected, Origin};
+use crate::types::{self, Expected, Origin, Scope};
 use crate::{Kind, Values, errors};
 
 /// What a call needs to know about the operator it calls.
@@ -252,7 +252,8 @@ fn arguments(
     ok.then_some(result)
 }
 
-/// An expression in a body: a name, or a constant.
+/// An expression in a body. Whatever doesn't depend on parameters or
+/// variables is evaluated now, to a constant.
 fn expr(
     expr: &Expr,
     expected: Option<&Expected>,
@@ -260,9 +261,88 @@ fn expr(
     cx: &Context,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Expr> {
-    let Expr::Name(name_ref) = expr else {
-        return types::value(expr, expected, cx.values, errors).map(hir::Expr::Constant);
-    };
+    match expr {
+        Expr::Name(name_ref) => name(name_ref, expr, expected, within, cx, errors),
+        Expr::Paren(paren) => self::expr(&paren.inner()?, expected, within, cx, errors),
+        Expr::Unary(unary) => {
+            let operator = unary.operator()?;
+            let operand = unary.operand().and_then(|operand| {
+                let expected = Expected::operand(operator);
+                self::expr(&operand, Some(&expected), within, cx, errors)
+            });
+            types::boolean_result(expected, expr, errors)?;
+            Some(negation(operand?))
+        }
+        Expr::Binary(binary) => {
+            let operator = binary.operator()?;
+            let op = types::bool_op(&operator)?;
+            let mut operand = |side: Option<Expr>| {
+                let expected = Expected::operand(operator.clone());
+                self::expr(&side?, Some(&expected), within, cx, errors)
+            };
+            let lhs = operand(binary.lhs());
+            let rhs = operand(binary.rhs());
+            types::boolean_result(expected, expr, errors)?;
+            Some(dyadic(op, lhs?, rhs?))
+        }
+        Expr::Literal(_) | Expr::Tuple(_) | Expr::Relation(_) => {
+            let mut scope = Selector { cx, within };
+            types::value(expr, expected, &mut scope, errors).map(hir::Expr::Constant)
+        }
+    }
+}
+
+/// The constant `b`, if `expr` is one.
+fn constant(expr: &hir::Expr) -> Option<bool> {
+    match expr {
+        hir::Expr::Constant(hir::Value::Boolean(b)) => Some(*b),
+        _ => None,
+    }
+}
+
+fn boolean(b: bool) -> hir::Expr {
+    hir::Expr::Constant(hir::Value::Boolean(b))
+}
+
+/// `not operand`, simplified. Expressions have no side effects, so whatever
+/// a constant operand decides needn't be computed.
+fn negation(operand: hir::Expr) -> hir::Expr {
+    match operand {
+        hir::Expr::Constant(hir::Value::Boolean(b)) => boolean(!b),
+        hir::Expr::Not(inner) => *inner,
+        operand => hir::Expr::Not(Box::new(operand)),
+    }
+}
+
+/// `lhs op rhs`, simplified as for [`negation`].
+fn dyadic(op: hir::BoolOp, lhs: hir::Expr, rhs: hir::Expr) -> hir::Expr {
+    use hir::BoolOp::{And, Implies, Or, Xor};
+    match (op, constant(&lhs), constant(&rhs)) {
+        (_, Some(a), Some(b)) => boolean(op.apply(a, b)),
+        // The constant leaves the other operand as it is,
+        (And | Implies, Some(true), None) | (Or | Xor, Some(false), None) => rhs,
+        (And, None, Some(true)) | (Or | Xor, None, Some(false)) => lhs,
+        // negates it,
+        (Xor, Some(true), None) => negation(rhs),
+        (Xor, None, Some(true)) | (Implies, None, Some(false)) => negation(lhs),
+        // or decides the result.
+        (And, Some(false), None) | (And, None, Some(false)) => boolean(false),
+        (Or, Some(true), None)
+        | (Or | Implies, None, Some(true))
+        | (Implies, Some(false), None) => boolean(true),
+        _ => hir::Expr::Binary(op, Box::new(lhs), Box::new(rhs)),
+    }
+}
+
+/// A name in a body: a parameter, or else a variable.
+fn name(
+    name_ref: &ast::NameRef,
+    expr: &Expr,
+    expected: Option<&Expected>,
+    within: hir::OperatorId,
+    cx: &Context,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<hir::Expr> {
     let ident = name_ref.ident()?;
     let name = ident.text();
     let span = trendy_syntax::span(ident.text_range());
@@ -277,20 +357,13 @@ fn expr(
     } else if let Some(&id) = cx.variable_ids.get(name) {
         (hir::Expr::Variable(id), cx.variables[id.0].ty.clone())
     } else {
-        match cx.values.get(name) {
-            Some((Kind::Operator | Kind::Builtin, _)) => {
-                errors.push(errors::operator_as_value(name, span));
-            }
-            // A variable with errors in its declaration, already reported.
-            Some((Kind::Variable, _)) => {}
-            None => {
-                let candidates: Vec<&str> = params
-                    .keys()
-                    .map(String::as_str)
-                    .chain(cx.variable_ids.keys().map(String::as_str))
-                    .collect();
-                errors.push(errors::unknown_name(name, span, "value", &candidates));
-            }
+        // A variable with errors in its declaration is already reported.
+        if cx
+            .values
+            .get(name)
+            .is_none_or(|(kind, _)| kind != Kind::Variable)
+        {
+            cx.not_a_value(name, span, within, errors);
         }
         return None;
     };
@@ -307,6 +380,61 @@ fn expr(
         return None;
     }
     Some(resolved)
+}
+
+impl Context<'_> {
+    /// Report the name `name`, at `span`, which is neither a parameter of
+    /// `within` nor a variable.
+    fn not_a_value(
+        &self,
+        name: &str,
+        span: Span,
+        within: hir::OperatorId,
+        errors: &mut Vec<Diagnostic>,
+    ) {
+        if let Some((Kind::Operator | Kind::Builtin, _)) = self.values.get(name) {
+            errors.push(errors::operator_as_value(name, span));
+            return;
+        }
+        let candidates: Vec<&str> = self.operators[within.0]
+            .params
+            .keys()
+            .map(String::as_str)
+            .chain(self.variable_ids.keys().map(String::as_str))
+            .collect();
+        errors.push(errors::unknown_name(name, span, "value", &candidates));
+    }
+}
+
+/// A tuple or relation value in a body, which is built when compiling, so
+/// that its attributes can't refer to parameters or variables.
+struct Selector<'a, 'b> {
+    cx: &'a Context<'b>,
+    within: hir::OperatorId,
+}
+
+impl Scope for Selector<'_, '_> {
+    fn values(&self) -> &Values {
+        self.cx.values
+    }
+
+    fn constant(
+        &mut self,
+        name_ref: &ast::NameRef,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Value> {
+        let ident = name_ref.ident()?;
+        let name = ident.text();
+        let span = trendy_syntax::span(ident.text_range());
+        if self.cx.operators[self.within.0].params.contains_key(name) {
+            errors.push(errors::name_in_selector(name, span, "a parameter"));
+        } else if let Some((Kind::Variable, _)) = self.cx.values.get(name) {
+            errors.push(errors::name_in_selector(name, span, "a variable"));
+        } else {
+            self.cx.not_a_value(name, span, self.within, errors);
+        }
+        None
+    }
 }
 
 /// Parameters as written: `{name: text, times: integer}`.

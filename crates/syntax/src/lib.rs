@@ -33,6 +33,11 @@ pub enum SyntaxKind {
     RelationKw,
     CallKw,
     BuiltinKw,
+    NotKw,
+    AndKw,
+    OrKw,
+    XorKw,
+    ImpliesKw,
     LBrace,
     RBrace,
     LBracket,
@@ -50,6 +55,9 @@ pub enum SyntaxKind {
     Semicolon,
     /// Digits, possibly followed by other identifier characters. Malformed
     /// literals keep this kind, so one mistake gives one error.
+    /// An operator from another language, such as `&&` or `->`: lexed so it
+    /// can be recognized and replaced by trendy's keyword.
+    ForeignOperator,
     IntLiteral,
     /// Digits with a decimal point, an exponent, or both. Malformed literals
     /// keep this kind too.
@@ -81,6 +89,12 @@ pub enum SyntaxKind {
     PositionalArg,
     /// A name used as an expression, or as the operator in a call.
     NameRef,
+    /// `not x`
+    UnaryExpr,
+    /// `x and y`, and the other dyadic operators.
+    BinaryExpr,
+    /// `(x)`
+    ParenExpr,
     /// `: type`
     TypeAnnotation,
     TypeRef,
@@ -109,7 +123,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 48] = [
+    pub const ALL: [SyntaxKind; 57] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Ident,
         SyntaxKind::OperatorKw,
@@ -120,6 +134,11 @@ impl SyntaxKind {
         SyntaxKind::RelationKw,
         SyntaxKind::CallKw,
         SyntaxKind::BuiltinKw,
+        SyntaxKind::NotKw,
+        SyntaxKind::AndKw,
+        SyntaxKind::OrKw,
+        SyntaxKind::XorKw,
+        SyntaxKind::ImpliesKw,
         SyntaxKind::LBrace,
         SyntaxKind::RBrace,
         SyntaxKind::LBracket,
@@ -131,6 +150,7 @@ impl SyntaxKind {
         SyntaxKind::ColonEq,
         SyntaxKind::Eq,
         SyntaxKind::Semicolon,
+        SyntaxKind::ForeignOperator,
         SyntaxKind::IntLiteral,
         SyntaxKind::RationalLiteral,
         SyntaxKind::TextLiteral,
@@ -146,6 +166,9 @@ impl SyntaxKind {
         SyntaxKind::Arguments,
         SyntaxKind::PositionalArg,
         SyntaxKind::NameRef,
+        SyntaxKind::UnaryExpr,
+        SyntaxKind::BinaryExpr,
+        SyntaxKind::ParenExpr,
         SyntaxKind::TypeAnnotation,
         SyntaxKind::TypeRef,
         SyntaxKind::Initializer,
@@ -177,6 +200,24 @@ impl SyntaxKind {
                 | SyntaxKind::RelationKw
                 | SyntaxKind::CallKw
                 | SyntaxKind::BuiltinKw
+                | SyntaxKind::NotKw
+                | SyntaxKind::AndKw
+                | SyntaxKind::OrKw
+                | SyntaxKind::XorKw
+                | SyntaxKind::ImpliesKw
+        )
+    }
+
+    /// Whether this is a keyword that is an operator, such as `and`.
+    #[must_use]
+    pub fn is_operator_keyword(self) -> bool {
+        matches!(
+            self,
+            SyntaxKind::NotKw
+                | SyntaxKind::AndKw
+                | SyntaxKind::OrKw
+                | SyntaxKind::XorKw
+                | SyntaxKind::ImpliesKw
         )
     }
 
@@ -220,6 +261,11 @@ impl SyntaxKind {
             SyntaxKind::RelationKw => "relation",
             SyntaxKind::CallKw => "call",
             SyntaxKind::BuiltinKw => "builtin",
+            SyntaxKind::NotKw => "not",
+            SyntaxKind::AndKw => "and",
+            SyntaxKind::OrKw => "or",
+            SyntaxKind::XorKw => "xor",
+            SyntaxKind::ImpliesKw => "implies",
             SyntaxKind::LBrace => "{",
             SyntaxKind::RBrace => "}",
             SyntaxKind::LBracket => "[",
@@ -249,6 +295,12 @@ impl SyntaxKind {
             SyntaxKind::RelationKw => "`relation`",
             SyntaxKind::CallKw => "`call`",
             SyntaxKind::BuiltinKw => "`builtin`",
+            SyntaxKind::NotKw => "`not`",
+            SyntaxKind::AndKw => "`and`",
+            SyntaxKind::OrKw => "`or`",
+            SyntaxKind::XorKw => "`xor`",
+            SyntaxKind::ImpliesKw => "`implies`",
+            SyntaxKind::ForeignOperator => "operator",
             SyntaxKind::LBrace => "`{`",
             SyntaxKind::RBrace => "`}`",
             SyntaxKind::LBracket => "`[`",
@@ -270,6 +322,7 @@ impl SyntaxKind {
             SyntaxKind::BuiltinType => "built-in type declaration",
             SyntaxKind::VarDecl => "variable declaration",
             SyntaxKind::Name | SyntaxKind::NameRef => "name",
+            SyntaxKind::UnaryExpr | SyntaxKind::BinaryExpr | SyntaxKind::ParenExpr => "expression",
             SyntaxKind::Body => "body",
             SyntaxKind::CallStmt => "call",
             SyntaxKind::Arguments => "arguments",
@@ -334,6 +387,10 @@ pub fn outline(node: &SyntaxNode) -> String {
     out
 }
 
+/// A position in a [`TreeBuilder`], from [`TreeBuilder::checkpoint`].
+#[derive(Debug, Clone, Copy)]
+pub struct Checkpoint(rowan::Checkpoint);
+
 /// Builds a source file's tree bottom-up, in source order. Used by the
 /// parser.
 ///
@@ -361,6 +418,19 @@ impl TreeBuilder {
 
     pub fn finish_node(&mut self) {
         self.0.finish_node();
+    }
+
+    /// A position to start a node at later, around what is built after it.
+    #[must_use]
+    pub fn checkpoint(&self) -> Checkpoint {
+        Checkpoint(self.0.checkpoint())
+    }
+
+    /// Start a node at `checkpoint`, so that it contains everything built
+    /// since then: how a binary expression wraps its left operand.
+    pub fn start_node_at(&mut self, checkpoint: Checkpoint, kind: SyntaxKind) {
+        self.0
+            .start_node_at(checkpoint.0, <Trendy as rowan::Language>::kind_to_raw(kind));
     }
 
     /// The finished tree. Every node started since [`TreeBuilder::new`] must

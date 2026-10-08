@@ -223,7 +223,49 @@ impl Functions {
                     .collect::<Result<Vec<_>, _>>()?;
                 b.ins().call(callee, &args);
             }
+            lir::Inst::Not { dst, src } => {
+                let value = self.load_bool(src, frame, b)?;
+                let result = b.ins().bxor_imm_u(value, 1);
+                self.store_bool(dst, result, frame, b)?;
+            }
+            lir::Inst::Bool { dst, op, lhs, rhs } => {
+                let lhs = self.load_bool(lhs, frame, b)?;
+                let rhs = self.load_bool(rhs, frame, b)?;
+                let result = match op {
+                    lir::BoolOp::And => b.ins().band(lhs, rhs),
+                    lir::BoolOp::Or => b.ins().bor(lhs, rhs),
+                    lir::BoolOp::Xor => b.ins().bxor(lhs, rhs),
+                    lir::BoolOp::Implies => {
+                        let not_lhs = b.ins().bxor_imm_u(lhs, 1);
+                        b.ins().bor(not_lhs, rhs)
+                    }
+                };
+                self.store_bool(dst, result, frame, b)?;
+            }
         }
+        Ok(())
+    }
+
+    /// The boolean at `place`: `0` or `1`, as an `i8`.
+    fn load_bool(
+        &mut self,
+        place: &lir::Place,
+        frame: &Frame,
+        b: &mut FunctionBuilder,
+    ) -> Result<Value, String> {
+        let address = self.address(place, frame, b)?;
+        Ok(b.ins().load(types::I8, MemFlagsData::trusted(), address, 0))
+    }
+
+    fn store_bool(
+        &mut self,
+        place: &lir::Place,
+        value: Value,
+        frame: &Frame,
+        b: &mut FunctionBuilder,
+    ) -> Result<(), String> {
+        let address = self.address(place, frame, b)?;
+        b.ins().store(MemFlagsData::trusted(), value, address, 0);
         Ok(())
     }
 

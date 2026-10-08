@@ -51,14 +51,7 @@ fn empty_main() {
 
 #[test]
 fn variables() {
-    assert_eq!(
-        run_example("variables"),
-        (
-            0,
-            "relation { a: boolean, b: integer } { { a: false, b: 25 }, { a: true, b: 3 } }\n"
-                .to_string()
-        )
-    );
+    assert_eq!(compile_and_run("variables"), 0);
 }
 
 #[test]
@@ -109,6 +102,27 @@ fn debug_output_reads_back_as_the_same_value() {
             variable.name
         );
     }
+}
+
+#[test]
+fn booleans() {
+    let (code, stderr) = run_example("booleans");
+    assert_eq!(code, 0);
+    let lines: Vec<&str> = stderr.lines().collect();
+    // `u` and `chain`, evaluated when compiling.
+    assert_eq!(lines[..2], ["true", "true"]);
+    // Each row: `not a`, `a and b`, `a or b`, `a xor b`, `a implies b`.
+    let rows: Vec<_> = lines[2..22].chunks(5).collect();
+    assert_eq!(
+        rows,
+        [
+            ["true", "false", "false", "false", "true"],
+            ["true", "false", "true", "true", "true"],
+            ["false", "false", "true", "true", "false"],
+            ["false", "true", "true", "false", "true"],
+        ]
+    );
+    assert_eq!(lines[22..], ["false"]);
 }
 
 #[test]

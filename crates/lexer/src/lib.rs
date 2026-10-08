@@ -58,6 +58,8 @@ pub fn lex(source: &str) -> Lexed {
             )
         } else if source[start..].starts_with(":=") {
             (SyntaxKind::ColonEq, start + 2)
+        } else if let Some(len) = foreign_operator(&source[start..]) {
+            (SyntaxKind::ForeignOperator, start + len)
         } else {
             let kind = match c {
                 '{' => SyntaxKind::LBrace,
@@ -86,6 +88,19 @@ pub fn lex(source: &str) -> Lexed {
     }
 
     Lexed { tokens, errors }
+}
+
+/// Operators from other languages, which the parser replaces with trendy's
+/// keywords: `&&` for `and`, `->` for `implies`, and so on.
+pub const FOREIGN_OPERATORS: [&str; 8] = ["&&", "||", "->", "=>", "!", "&", "|", "^"];
+
+/// The length of the foreign operator `text` starts with, if any. Longer
+/// ones are tried first, so that `&&` isn't two `&`.
+fn foreign_operator(text: &str) -> Option<usize> {
+    FOREIGN_OPERATORS
+        .iter()
+        .find(|op| text.starts_with(**op))
+        .map(|op| op.len())
 }
 
 /// Whether `text` starts with a decimal point followed by a digit, like
@@ -541,6 +556,41 @@ mod tests {
             [
                 TupleKw, Whitespace, LBrace, Whitespace, Ident, Colon, Whitespace, IntLiteral,
                 Comma, Whitespace, RBrace
+            ]
+        );
+    }
+
+    #[test]
+    fn foreign_operators() {
+        assert_eq!(
+            kinds("a&&b||!c->d=>e"),
+            [
+                Ident,
+                ForeignOperator,
+                Ident,
+                ForeignOperator,
+                ForeignOperator,
+                Ident,
+                ForeignOperator,
+                Ident,
+                ForeignOperator,
+                Ident
+            ]
+        );
+        assert!(lex("a && b").errors.is_empty(), "the parser reports them");
+        assert_eq!(
+            kinds("x = 1"),
+            [Ident, Whitespace, Eq, Whitespace, IntLiteral]
+        );
+    }
+
+    #[test]
+    fn boolean_keywords() {
+        assert_eq!(
+            kinds("not and or xor implies"),
+            [
+                NotKw, Whitespace, AndKw, Whitespace, OrKw, Whitespace, XorKw, Whitespace,
+                ImpliesKw
             ]
         );
     }

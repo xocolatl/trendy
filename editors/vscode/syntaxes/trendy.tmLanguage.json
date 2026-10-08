@@ -19,6 +19,9 @@
       "include": "#keywords"
     },
     {
+      "include": "#logical"
+    },
+    {
       "include": "#boolean"
     },
     {
@@ -64,6 +67,10 @@
     "keywords": {
       "match": "\\b(?:operator|var|tuple|relation|call|builtin)\\b",
       "name": "keyword.other.trendy"
+    },
+    "logical": {
+      "match": "\\b(?:not|and|or|xor|implies)\\b",
+      "name": "keyword.operator.logical.trendy"
     },
     "number": {
       "match": "\\b[0-9](?:[eE][+\\-]|[\\x{2E}0-9A-Z_a-z])*",
@@ -146,7 +153,7 @@
           "name": "entity.name.type.trendy"
         }
       },
-      "match": "\\b(var)\\s+([A-Z_a-z][0-9A-Z_a-z]*)(?:\\s*(\\:)\\s*(?!(?:operator|var|true|false|tuple|relation|call|builtin)\\b)([A-Z_a-z][0-9A-Z_a-z]*))?"
+      "match": "\\b(var)\\s+([A-Z_a-z][0-9A-Z_a-z]*)(?:\\s*(\\:)\\s*(?!(?:operator|var|true|false|tuple|relation|call|builtin|not|and|or|xor|implies)\\b)([A-Z_a-z][0-9A-Z_a-z]*))?"
     }
   },
   "scopeName": "source.trendy"

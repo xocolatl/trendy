@@ -117,6 +117,15 @@ keyword (`operator` or `var`). In a variable declaration, a missing `:` or
 as `:=` and reported. Whitespace is attached to the innermost node that is open when it
 appears, so whitespace between definitions belongs to the file.
 
+Expressions use precedence climbing: `not` binds tightest, then `and`,
+`xor`, `or` and `implies`, with `implies` grouping to the right. Looking for
+a dyadic operator after an operand uses a lookahead that leaves whitespace
+unattached, so whitespace after the last operand belongs to the node that
+continues, not to the expression. The symbols of other languages (`&&`,
+`!`, `->`, …) are lexed as `ForeignOperator` tokens, and they and
+capitalized keywords (`AND`) are parsed as the operator they stand for and
+reported with a fix.
+
 **Must not:** resolve names, check meaning, or reject a program that is
 grammatically valid. For example, "no `main`", "duplicate name" and "unknown
 type" are sema errors, not parse errors.
@@ -197,11 +206,25 @@ A variable without a value gets its type's default (`0`, `""`), and one
 without a type gets its value's type. These are the two options *The Third
 Manifesto* allows for initialization (RM Prescription 11).
 
+Initial values are evaluated when compiling, so a HIR variable holds a
+`Value`, never an expression. An initial value can refer to any variable:
+each variable is evaluated when first needed, after the ones it refers to,
+and a variable referred to while it is itself being evaluated closes a
+cycle, reported once with a label at each reference in it (E0121).
+
+In an operator's body, expressions become `hir::Expr`. Whatever doesn't
+depend on parameters or variables is folded to a constant, and so is
+whatever a constant operand decides (`p and false` is `false`, `true and p`
+is `p`): expressions have no side effects, so this never changes what a
+program does. Tuple and relation values in bodies are still built when
+compiling, so a parameter or variable inside one is an error (E0120).
+
 Checking is bidirectional: the expected type flows down into a value
 (`types::Expected`), along with where it came from (`types::Origin`): a
 written type, a selector's heading, or an earlier value such as a relation's
-first tuple. That is how an empty relation gets its heading from context, and
-how each error's secondary label points at the source of the expectation.
+first tuple, or an operator such as `and` for its operands. That is how an
+empty relation gets its heading from context, and how each error's secondary
+label points at the source of the expectation.
 
 A value is checked against its expected type structurally, and a problem is
 reported at the innermost place it occurs. A wrong scalar deep inside a
@@ -213,8 +236,8 @@ with a rename that fixes both.
 ### lir (`trendy_lir`)
 
 **Provides:** the low-level IR. A function is a control-flow graph of basic
-blocks: each block is a list of instructions (`Copy`, `Call`, `CallRuntime`)
-ending in a terminator. Instructions refer to memory through places: a data
+blocks: each block is a list of instructions (`Copy`, `Call`, `CallRuntime`,
+and the boolean `Not` and `Bool`) ending in a terminator. Instructions refer to memory through places: a data
 object, a stack slot, or the parameter struct, plus a path through nested
 structs. Every value's shape is a `Layout`. There is no nesting and nothing
 implicit: every jump and return is spelled out.
@@ -248,7 +271,9 @@ translation.
 **Input:** `hir::Program`. **Output:** `lir::Program`. It cannot fail.
 
 **Owns:** turning tree-shaped code into control flow, and choosing how each
-value is represented in memory. Once relations arrive, this is where
+value is represented in memory. A computed expression, such as `not p`, is
+evaluated into a stack slot of its own, which the instruction that uses it
+then reads. Once relations arrive, this is where
 relational operators get fused into loops over tuples with fixed layouts.
 
 ### codegen (`trendy_codegen`)

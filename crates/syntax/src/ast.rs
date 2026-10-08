@@ -45,6 +45,9 @@ ast_node!(CallStmt);
 ast_node!(Arguments);
 ast_node!(PositionalArg);
 ast_node!(NameRef);
+ast_node!(UnaryExpr);
+ast_node!(BinaryExpr);
+ast_node!(ParenExpr);
 ast_node!(VarDecl);
 ast_node!(Name);
 ast_node!(TypeRef);
@@ -186,6 +189,44 @@ impl PositionalArg {
     }
 }
 
+impl UnaryExpr {
+    /// The operator: `not`, or a foreign spelling of it such as `!`.
+    #[must_use]
+    pub fn operator(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    #[must_use]
+    pub fn operand(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+}
+
+impl BinaryExpr {
+    /// The operator: a keyword such as `and`, or a foreign spelling of one.
+    #[must_use]
+    pub fn operator(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    #[must_use]
+    pub fn lhs(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+
+    #[must_use]
+    pub fn rhs(&self) -> Option<Expr> {
+        self.0.children().filter_map(Expr::cast).nth(1)
+    }
+}
+
+impl ParenExpr {
+    #[must_use]
+    pub fn inner(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+}
+
 impl NameRef {
     #[must_use]
     pub fn ident(&self) -> Option<SyntaxToken> {
@@ -252,13 +293,16 @@ impl TypeExpr {
     }
 }
 
-/// An expression: a literal, a tuple value, a relation value, or a name.
+/// An expression.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Expr {
     Literal(Literal),
     Tuple(TupleLiteral),
     Relation(RelationLiteral),
     Name(NameRef),
+    Unary(UnaryExpr),
+    Binary(BinaryExpr),
+    Paren(ParenExpr),
 }
 
 impl Expr {
@@ -268,7 +312,10 @@ impl Expr {
             .map(Expr::Literal)
             .or_else(|| TupleLiteral::cast(node.clone()).map(Expr::Tuple))
             .or_else(|| RelationLiteral::cast(node.clone()).map(Expr::Relation))
-            .or_else(|| NameRef::cast(node).map(Expr::Name))
+            .or_else(|| NameRef::cast(node.clone()).map(Expr::Name))
+            .or_else(|| UnaryExpr::cast(node.clone()).map(Expr::Unary))
+            .or_else(|| BinaryExpr::cast(node.clone()).map(Expr::Binary))
+            .or_else(|| ParenExpr::cast(node).map(Expr::Paren))
     }
 
     #[must_use]
@@ -278,6 +325,9 @@ impl Expr {
             Expr::Tuple(e) => e.syntax(),
             Expr::Relation(e) => e.syntax(),
             Expr::Name(e) => e.syntax(),
+            Expr::Unary(e) => e.syntax(),
+            Expr::Binary(e) => e.syntax(),
+            Expr::Paren(e) => e.syntax(),
         }
     }
 

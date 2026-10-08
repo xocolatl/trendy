@@ -121,6 +121,7 @@ pub fn semantic_tokens_legend() -> SemanticTokensLegend {
             SemanticTokenType::STRING,
             SemanticTokenType::PROPERTY,
             SemanticTokenType::PARAMETER,
+            SemanticTokenType::OPERATOR,
         ],
         token_modifiers: vec![
             SemanticTokenModifier::DECLARATION,
@@ -141,6 +142,7 @@ fn token_type(class: Class) -> u32 {
         Class::Text => 5,
         Class::Attribute => 6,
         Class::Parameter => 7,
+        Class::Logical => 8,
     }
 }
 

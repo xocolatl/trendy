@@ -44,6 +44,7 @@ impl Program {
                 ParamType::Type(ty) => ty.clone(),
                 ParamType::Any => unreachable!("only built-ins have `any` parameters"),
             },
+            Expr::Not(_) | Expr::Binary(..) => Type::Scalar(Scalar::Boolean),
         }
     }
 }
@@ -134,7 +135,8 @@ pub enum Statement {
     },
 }
 
-/// An expression whose value is known only when the program runs.
+/// An expression whose value is known only when the program runs. Parts
+/// known at compile time are already evaluated to constants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     /// A value known at compile time.
@@ -142,6 +144,33 @@ pub enum Expr {
     Variable(VariableId),
     /// A parameter of the operator the expression is in.
     Parameter(String),
+    /// `not x`, of a boolean.
+    Not(Box<Expr>),
+    /// A dyadic boolean operator.
+    Binary(BoolOp, Box<Expr>, Box<Expr>),
+}
+
+/// A dyadic boolean operator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BoolOp {
+    And,
+    Or,
+    /// Exactly one is true.
+    Xor,
+    /// False only when the left operand is true and the right is false.
+    Implies,
+}
+
+impl BoolOp {
+    #[must_use]
+    pub fn apply(self, lhs: bool, rhs: bool) -> bool {
+        match self {
+            BoolOp::And => lhs && rhs,
+            BoolOp::Or => lhs || rhs,
+            BoolOp::Xor => lhs != rhs,
+            BoolOp::Implies => !lhs || rhs,
+        }
+    }
 }
 
 /// A variable defined at the top level of the program.
@@ -485,6 +514,18 @@ mod tests {
             tuples: [tuple(2), tuple(1), tuple(2)].into(),
         };
         assert_eq!(r.tuples.len(), 2, "a set has no duplicates");
+    }
+
+    #[test]
+    fn boolean_operators() {
+        let table = |op: BoolOp| {
+            [(false, false), (false, true), (true, false), (true, true)]
+                .map(|(a, b)| op.apply(a, b))
+        };
+        assert_eq!(table(BoolOp::And), [false, false, false, true]);
+        assert_eq!(table(BoolOp::Or), [false, true, true, true]);
+        assert_eq!(table(BoolOp::Xor), [false, true, true, false]);
+        assert_eq!(table(BoolOp::Implies), [true, true, false, true]);
     }
 
     #[test]

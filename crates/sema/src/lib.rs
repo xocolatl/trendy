@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use trendy_diag::{Diagnostic, Span};
 use trendy_hir as hir;
 use trendy_syntax::SyntaxToken;
-use trendy_syntax::ast::{AstNode, Item, SourceFile, VarDecl};
+use trendy_syntax::ast::{AstNode, Item, NameRef, SourceFile, VarDecl};
 
 pub use prelude::Prelude;
 
@@ -26,16 +26,13 @@ pub fn analyze(prelude: &Prelude, file: &SourceFile) -> Result<hir::Program, Vec
     let mut errors = Vec::new();
     let values = collect_names(prelude, file, &mut errors);
 
-    // Variables first: their initial values are constants, and operator
-    // bodies refer to them.
-    let mut variables = Vec::new();
-    let mut variable_ids = HashMap::new();
-    for decl in file.variables() {
-        if let Some(variable) = variable(&decl, &values, &mut errors) {
-            variable_ids.insert(variable.name.clone(), hir::VariableId(variables.len()));
-            variables.push(variable);
-        }
-    }
+    // Variables first: operator bodies refer to them.
+    let variables = Globals::new(file, &values).evaluate(file, &mut errors);
+    let variable_ids: HashMap<_, _> = variables
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (v.name.clone(), hir::VariableId(i)))
+        .collect();
 
     // Every operator's signature before any body, so that a call can refer
     // to an operator defined after it.
@@ -208,13 +205,127 @@ fn collect_names(prelude: &Prelude, file: &SourceFile, errors: &mut Vec<Diagnost
     Values(values)
 }
 
+/// The program's variables, whose initial values are evaluated when
+/// compiling. An initial value can refer to any variable, so each is
+/// evaluated when first needed, after the ones it refers to.
+struct Globals<'a> {
+    values: &'a Values,
+    /// The first declaration of each variable.
+    decls: HashMap<String, VarDecl>,
+    states: HashMap<String, State>,
+    /// The variables being evaluated, innermost last: each one's name, its
+    /// declaration's name span, and where its initial value refers to the
+    /// next.
+    stack: Vec<(String, Span, Span)>,
+}
+
+enum State {
+    Evaluating,
+    /// `None` after reporting errors.
+    Done(Option<hir::Variable>),
+}
+
+impl<'a> Globals<'a> {
+    fn new(file: &SourceFile, values: &'a Values) -> Self {
+        let decls = file
+            .variables()
+            .filter_map(|decl| {
+                let ident = decl.name()?.ident()?;
+                values
+                    .is_first(&ident)
+                    .then(|| (ident.text().to_string(), decl))
+            })
+            .collect();
+        Globals {
+            values,
+            decls,
+            states: HashMap::new(),
+            stack: Vec::new(),
+        }
+    }
+
+    /// Every valid variable, in source order.
+    fn evaluate(mut self, file: &SourceFile, errors: &mut Vec<Diagnostic>) -> Vec<hir::Variable> {
+        let mut variables = Vec::new();
+        for decl in file.variables() {
+            let Some(ident) = decl.name().and_then(|n| n.ident()) else {
+                continue;
+            };
+            if self.values.is_first(&ident) {
+                variables.extend(self.variable(ident.text(), errors));
+            } else {
+                // A duplicate, already reported, but it can have errors of
+                // its own.
+                variable(&decl, &mut self, errors);
+            }
+        }
+        variables
+    }
+
+    /// The first declared variable named `name`, evaluated if it isn't yet.
+    fn variable(&mut self, name: &str, errors: &mut Vec<Diagnostic>) -> Option<hir::Variable> {
+        match self.states.get(name) {
+            Some(State::Done(variable)) => return variable.clone(),
+            Some(State::Evaluating) => unreachable!("cycles are caught at the reference"),
+            None => {}
+        }
+        let decl = self.decls.get(name)?.clone();
+        let declared = trendy_syntax::span(decl.name()?.ident()?.text_range());
+        self.states.insert(name.to_string(), State::Evaluating);
+        self.stack.push((name.to_string(), declared, declared));
+        let variable = variable(&decl, self, errors);
+        self.stack.pop();
+        self.states
+            .insert(name.to_string(), State::Done(variable.clone()));
+        variable
+    }
+}
+
+impl types::Scope for Globals<'_> {
+    fn values(&self) -> &Values {
+        self.values
+    }
+
+    fn constant(&mut self, name_ref: &NameRef, errors: &mut Vec<Diagnostic>) -> Option<hir::Value> {
+        let ident = name_ref.ident()?;
+        let name = ident.text();
+        let span = trendy_syntax::span(ident.text_range());
+        match self.values.get(name) {
+            Some((Kind::Variable, _)) => {}
+            Some((Kind::Operator | Kind::Builtin, _)) => {
+                errors.push(errors::operator_as_value(name, span));
+                return None;
+            }
+            None => {
+                let variables: Vec<&str> = self.decls.keys().map(String::as_str).collect();
+                errors.push(errors::unknown_name(name, span, "value", &variables));
+                return None;
+            }
+        }
+        if let Some(State::Evaluating) = self.states.get(name) {
+            let start = self.stack.iter().position(|(n, _, _)| n == name)?;
+            let mut cycle = self.stack[start..].to_vec();
+            if let Some(last) = cycle.last_mut() {
+                last.2 = span;
+            }
+            errors.push(errors::cyclic_initial_values(&cycle));
+            return None;
+        }
+        if let Some(innermost) = self.stack.last_mut() {
+            innermost.2 = span;
+        }
+        Some(self.variable(name, errors)?.init)
+    }
+}
+
 /// Check a variable declaration: at least one of its type and initial value
 /// must be given, and they must agree.
 fn variable(
     decl: &VarDecl,
-    values: &Values,
+    globals: &mut Globals,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Variable> {
+    let values = globals.values;
     let ident = decl.name()?.ident()?;
     let declared = decl
         .type_expr()
@@ -234,13 +345,13 @@ fn variable(
             (ty, init)
         }
         (None, Some(expr)) => {
-            let value = types::value(&expr, None, values, errors)?;
+            let value = types::value(&expr, None, globals, errors)?;
             (value.ty(), value)
         }
         (Some((None, _)), Some(expr)) => {
             // The type is invalid, but the value can still have errors of its
             // own.
-            types::value(&expr, None, values, errors);
+            types::value(&expr, None, globals, errors);
             return None;
         }
         (Some((Some(ty), type_expr)), Some(expr)) => {
@@ -248,7 +359,7 @@ fn variable(
                 ty: ty.clone(),
                 origin: types::Origin::Type(type_expr),
             };
-            let value = types::value(&expr, Some(&expected), values, errors)?;
+            let value = types::value(&expr, Some(&expected), globals, errors)?;
             (ty, value)
         }
     };
@@ -1069,12 +1180,206 @@ mod tests {
     }
 
     #[test]
-    fn names_in_constants() {
+    fn names_in_selectors_in_bodies() {
         assert_eq!(
             codes(
-                "var a := 1;\nvar b := a;\noperator main{} [ call debug_value{v: tuple { x: a }}; ];"
+                "var a := 1;\noperator show{p: integer} [ call debug_value{v: tuple { x: a, y: p, z: main }}; ];\noperator main{} [];"
             ),
-            [Code::NameInConstant, Code::NameInConstant]
+            [
+                Code::NameInSelector,
+                Code::NameInSelector,
+                Code::OperatorAsValue
+            ]
+        );
+    }
+
+    fn init(source: &str, name: &str) -> hir::Value {
+        variables(source)
+            .into_iter()
+            .find(|v| v.name == name)
+            .unwrap()
+            .init
+    }
+
+    #[test]
+    fn initial_values_are_evaluated() {
+        let t = hir::Value::Boolean(true);
+        let f = hir::Value::Boolean(false);
+        assert_eq!(init("var a := not false;", "a"), t);
+        assert_eq!(init("var a := true and false;", "a"), f);
+        assert_eq!(init("var a := true xor true;", "a"), f);
+        assert_eq!(init("var a := true implies false;", "a"), f);
+        assert_eq!(init("var a := false implies false;", "a"), t);
+        // `not` binds tightest, then `and`, `xor`, `or`, `implies`.
+        assert_eq!(init("var a := not true or true;", "a"), t);
+        assert_eq!(init("var a := true or true and false;", "a"), t);
+        assert_eq!(init("var a := (true or true) and false;", "a"), f);
+        assert_eq!(init("var a := true xor true or true;", "a"), t);
+        assert_eq!(init("var a := false implies false implies false;", "a"), t);
+        assert_eq!(
+            init("var a := (false implies false) implies false;", "a"),
+            f
+        );
+    }
+
+    #[test]
+    fn initial_values_refer_to_variables_in_any_order() {
+        let vars = variables(
+            "var u := t or false;\nvar t: boolean := not s;\nvar s := true;\nvar p := tuple { a: s, r: relation { { b: u } } };",
+        );
+        let names: Vec<_> = vars.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, ["u", "t", "s", "p"], "in source order");
+        assert_eq!(vars[0].init, hir::Value::Boolean(false));
+        assert_eq!(
+            vars[3].ty.to_string(),
+            "tuple { a: boolean, r: relation { b: boolean } }"
+        );
+    }
+
+    #[test]
+    fn cyclic_initial_values() {
+        let source =
+            format!("var a := b;\nvar b := not c;\nvar c := a and true;\nvar d := a;{MAIN}");
+        let errors = errors(&source);
+        assert_eq!(errors.len(), 1, "one error per cycle: {errors:#?}");
+        assert_eq!(errors[0].code, Code::CyclicInitialValues);
+        assert_eq!(
+            errors[0].message,
+            "the initial values of `a`, `b` and `c` depend on each other"
+        );
+        assert_eq!(errors[0].span(), Span::new(4, 5));
+        let labels: Vec<_> = errors[0]
+            .secondary
+            .iter()
+            .map(|l| (&source[l.span.start..l.span.end], &l.message[..]))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                ("b", "`a` refers to `b`"),
+                ("c", "`b` refers to `c`"),
+                ("a", "`c` refers to `a`")
+            ]
+        );
+        let errors = self::errors(&format!("var a := not a;{MAIN}"));
+        assert_eq!(
+            errors[0].message,
+            "the initial value of `a` depends on itself"
+        );
+        assert_eq!(errors[0].secondary[0].message, "`a` refers to itself");
+    }
+
+    #[test]
+    fn names_in_initial_values() {
+        let source = format!("var count := true;\nvar a := not cout;\nvar b := main;{MAIN}");
+        assert_eq!(codes(&source), [Code::UnknownName, Code::OperatorAsValue]);
+        assert!(fix(&source).contains("var a := not count;"));
+    }
+
+    #[test]
+    fn operands_must_be_boolean() {
+        let source = format!(
+            "var i := 1;\nvar a := not i;\nvar b := true and 0;\nvar c: integer := true or false;{MAIN}"
+        );
+        let errors = errors(&source);
+        assert_eq!(
+            errors.iter().map(|e| &e.message[..]).collect::<Vec<_>>(),
+            [
+                "mismatched types: expected `boolean`, found `integer`",
+                "mismatched types: expected `boolean`, found `integer`",
+                "mismatched types: expected `integer`, found `boolean`",
+            ]
+        );
+        let origin = &errors[0].secondary[0];
+        assert_eq!(&source[origin.span.start..origin.span.end], "not");
+        assert_eq!(origin.message, "`not` takes boolean operands");
+        assert_eq!(
+            fix(&source),
+            format!(
+                "var i := 1;\nvar a := not i;\nvar b := true and false;\nvar c: boolean := true or false;{MAIN}"
+            ),
+            "`0` is rewritten as `false`; nothing to fix on a name"
+        );
+    }
+
+    fn main_body(source: &str) -> Vec<hir::Statement> {
+        let program = analyze_str(source).unwrap();
+        let hir::OperatorKind::User { body } = &program.operator(program.entry).kind else {
+            panic!("main is a user operator");
+        };
+        body.clone()
+    }
+
+    fn argument(statement: &hir::Statement) -> &hir::Expr {
+        let hir::Statement::Call { args, .. } = statement;
+        &args["v"]
+    }
+
+    #[test]
+    fn constant_operands_simplify() {
+        let cases = [
+            ("true and p", "p"),
+            ("p and true", "p"),
+            ("false and p", "false"),
+            ("p and false", "false"),
+            ("false or p", "p"),
+            ("p or false", "p"),
+            ("true or p", "true"),
+            ("p or true", "true"),
+            ("false xor p", "p"),
+            ("p xor false", "p"),
+            ("true xor p", "not p"),
+            ("p xor true", "not p"),
+            ("true implies p", "p"),
+            ("false implies p", "true"),
+            ("p implies true", "true"),
+            ("p implies false", "not p"),
+            ("not not p", "p"),
+            ("not (p xor true)", "p"),
+            ("p and q", "p and q"),
+        ];
+        for (written, simplified) in cases {
+            let source = |e: &str| {
+                format!(
+                    "operator f{{p: boolean, q: boolean}} [ call debug_value{{v: {e}}}; ];\noperator main{{}} [];"
+                )
+            };
+            let body = |e: &str| {
+                let program = analyze_str(&source(e)).unwrap();
+                let f = program.operators.iter().find(|o| o.name == "f").unwrap();
+                let hir::OperatorKind::User { body } = &f.kind else {
+                    panic!("f is a user operator");
+                };
+                argument(&body[0]).clone()
+            };
+            assert_eq!(body(written), body(simplified), "{written}");
+        }
+    }
+
+    #[test]
+    fn expressions_in_bodies() {
+        let body = main_body(
+            "var b := true;\noperator main{} [\n    call debug_value{v: not b};\n    call debug_value{v: b and (true xor true)};\n    call debug_value{v: not (true implies false)};\n];",
+        );
+        let b = || Box::new(hir::Expr::Variable(hir::VariableId(0)));
+        assert_eq!(argument(&body[0]), &hir::Expr::Not(b()));
+        assert_eq!(
+            argument(&body[1]),
+            &hir::Expr::Constant(hir::Value::Boolean(false)),
+            "`b and false` is false, whatever `b` is"
+        );
+        assert_eq!(
+            argument(&body[2]),
+            &hir::Expr::Constant(hir::Value::Boolean(true))
+        );
+        let errors = errors(
+            "operator show{p: integer, q: boolean} [ call debug_value{v: p or q}; call show{p: 1, q: q and p}; ];\noperator main{} [];",
+        );
+        let codes: Vec<_> = errors.iter().map(|e| e.code).collect();
+        assert_eq!(codes, [Code::TypeMismatch, Code::TypeMismatch]);
+        assert_eq!(
+            errors[0].secondary[0].message,
+            "`or` takes boolean operands"
         );
     }
 

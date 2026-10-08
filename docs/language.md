@@ -67,10 +67,6 @@ Inside an operator, a name refers to one of its parameters, or else to a
 variable of the program: parameters hide variables with the same name. An
 operator is not a value, so its name can only follow `call`.
 
-For now, a variable's initial value and the attributes of a tuple or relation
-value must be constants, written with literals. Only a call's arguments can be
-names.
-
 ```trendy
 var greeting := "hello";
 
@@ -84,9 +80,15 @@ operator main{} [
 ];
 ```
 
+For now, the attributes of a tuple or relation value in an operator's body
+can't refer to parameters or variables: those values are built when
+compiling. A variable's initial value can refer to other variables (see
+[Variables](#variables)), so declare one and use it instead.
+
 ```trendy,error
-var a := 1;
-var b := a;
+operator show{n: integer} [
+    call debug_value{v: tuple { n: n }};
+];
 
 operator main{} [];
 ```
@@ -147,6 +149,29 @@ operator main{} [];
 
 Initial values are written with `:=`. As in Tutorial D, `=` means equality,
 not assignment.
+
+An initial value is any expression, and can refer to other variables,
+declared before or after it. Initial values are evaluated when compiling,
+each after the ones it refers to, so the program starts with every variable
+already holding its value: below, `ready` is simply `true`.
+
+```trendy
+var ready := started or false;
+var started := not stopped;
+var stopped: boolean;
+
+operator main{} [];
+```
+
+Variables whose initial values refer to each other in a cycle have no order
+to be evaluated in, which is an error.
+
+```trendy,error
+var a := b;
+var b := a;
+
+operator main{} [];
+```
 
 ```trendy,error
 var count: integer = 0;
@@ -291,6 +316,56 @@ var twice := relation { { a: 1 }, { a: 1 } };
 operator main{} [];
 ```
 
+## Expressions
+
+### Boolean operators
+
+| Operator | Result |
+|---|---|
+| `not a` | `true` when `a` is `false` |
+| `a and b` | `true` when both are `true` |
+| `a or b` | `true` when either is `true`, or both |
+| `a xor b` | `true` when exactly one is `true` |
+| `a implies b` | `false` only when `a` is `true` and `b` is `false`: the same as `not a or b` |
+
+The operands must be booleans: there is no truthiness, so `not 0` and
+`"" or true` are errors.
+
+From tightest to loosest, the operators bind as `not`, `and`, `xor`, `or`,
+`implies`. `and`, `xor` and `or` group from the left, and `implies` from
+the right, as in logic: `a implies b implies c` means
+`a implies (b implies c)`. Parentheses group explicitly.
+
+```trendy
+var a := true;
+var b := not a or a and false;
+var c := (a or b) and not b;
+var d := a implies b implies c;
+
+operator check{p: boolean, q: boolean} [
+    call debug_value{v: p xor q};
+    call debug_value{v: not (p and q)};
+];
+
+operator main{} [
+    call check{p: a, q: true};
+];
+```
+
+The symbols other languages use for these, such as `&&`, `||`, `!`, `^` and
+`->`, are not operators in trendy. Neither are capitalized spellings such as
+`AND`. The compiler suggests the keyword for each.
+
+```trendy,error
+var a := true && false;
+
+operator main{} [];
+```
+
+Whatever doesn't depend on parameters or variables is evaluated when
+compiling, and so is whatever a constant operand decides: `p and false` is
+just `false`, and `true and p` is just `p`.
+
 ## Literals
 
 **Boolean literals** are `true` and `false`, in lowercase.
@@ -361,7 +436,8 @@ operator main{} [];
 
 Names are ASCII letters, digits and `_`, and don't start with a digit. They
 are case-sensitive. The keywords are `operator`, `var`, `call`, `builtin`,
-`tuple`, `relation`, `true` and `false`, all lowercase. `type` is a keyword
+`tuple`, `relation`, `true`, `false`, `not`, `and`, `or`, `xor` and
+`implies`, all lowercase. `type` is a keyword
 only after `builtin`.
 
 Variables and operators share one namespace, so no two of them can have the
@@ -396,7 +472,9 @@ operator main{} [];
   tuple's order;
 - an operator's body has each statement on its own line, indented;
 - parameters and arguments are written without spaces inside their braces:
-  `operator greet{name: text}`, `call greet{name: "Ada"}`.
+  `operator greet{name: text}`, `call greet{name: "Ada"}`;
+- single spaces around `and`, `or`, `xor` and `implies` and after `not`, and
+  none inside parentheses: `not (a and b)`.
 
 A trailing comma is kept or left out as written.
 
@@ -419,6 +497,10 @@ A trailing comma is kept or left out as written.
 | `tuple { x = 1 }` | `tuple { x: 1 }` |
 | `RELATION { TUPLE { … } }` | `relation { { … } }` |
 | `VAR`, `TUPLE`, `TRUE` | `var`, `tuple`, `true` |
+| `!a`, `a && b`, `a \|\| b` | `not a`, `a and b`, `a or b` |
+| `a ^ b`, `a != b` for booleans | `a xor b` |
+| `a -> b`, `a => b` | `a implies b` |
+| `AND`, `Or`, `NOT` | `and`, `or`, `not` |
 
 The compiler recognizes each of these habits and suggests the fix.
 `trendyc --explain <code>` describes any error code in detail, and

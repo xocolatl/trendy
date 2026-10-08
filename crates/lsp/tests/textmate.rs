@@ -216,7 +216,11 @@ fn generate(probed: &Probed) -> Value {
         .into_iter()
         .filter(|k| k.is_keyword())
         .partition(|k| k.is_literal());
+    // Operator keywords (`not`, `and`, …) are colored as operators.
+    let (operator_keywords, keywords): (Vec<_>, Vec<_>) =
+        keywords.into_iter().partition(|k| k.is_operator_keyword());
     let keywords: Vec<_> = keywords.into_iter().map(keyword).collect();
+    let operator_keywords: Vec<_> = operator_keywords.into_iter().map(keyword).collect();
     let all_keywords: Vec<_> = kinds
         .into_iter()
         .filter(|k| k.is_keyword())
@@ -238,6 +242,7 @@ fn generate(probed: &Probed) -> Value {
             { "include": "#call" },
             { "include": "#variable-declaration" },
             { "include": "#keywords" },
+            { "include": "#logical" },
             { "include": "#boolean" },
             { "include": "#number" },
             { "include": "#text" },
@@ -289,6 +294,10 @@ fn generate(probed: &Probed) -> Value {
             "keywords": {
                 "match": format!("\\b(?:{})\\b", keywords.join("|")),
                 "name": "keyword.other.trendy",
+            },
+            "logical": {
+                "match": format!("\\b(?:{})\\b", operator_keywords.join("|")),
+                "name": "keyword.operator.logical.trendy",
             },
             "boolean": {
                 "match": format!("\\b(?:{})\\b", literal_keywords.join("|")),

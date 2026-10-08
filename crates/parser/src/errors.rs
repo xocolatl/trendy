@@ -72,26 +72,13 @@ pub(crate) fn missing(
 
     let fixed: Option<Vec<&str>> = expected.iter().map(|k| k.fixed_text()).collect();
     match fixed.map(|texts| join_tokens(&texts)) {
-        Some(text) => {
-            // A space wherever the insertion would otherwise run into a
-            // word, which would change how it lexes.
-            let (before, after) = neighbors;
-            let space = |c: Option<char>| c.is_some_and(is_word_char);
-            let mut replacement = text.clone();
-            if space(before) && text.starts_with(is_word_char) {
-                replacement.insert(0, ' ');
-            }
-            if space(after) && text.ends_with(is_word_char) {
-                replacement.push(' ');
-            }
-            d.with_suggestion(
-                format!("insert `{text}`"),
-                vec![Edit {
-                    span: at,
-                    replacement,
-                }],
-            )
-        }
+        Some(text) => d.with_suggestion(
+            format!("insert `{text}`"),
+            vec![Edit {
+                span: at,
+                replacement: spaced(&text, neighbors),
+            }],
+        ),
         None => match help {
             Some(help) => d.with_help(help),
             None => d,
@@ -220,6 +207,66 @@ pub(crate) fn wrong_attribute_separator(found: SyntaxKind, span: Span) -> Diagno
             replacement: ":".to_string(),
         }],
     )
+}
+
+/// The keyword a foreign operator stands for: `&&` for `and`, `!` for
+/// `not`, and so on.
+pub(crate) fn foreign_operator(text: &str) -> Option<SyntaxKind> {
+    Some(match text {
+        "&&" | "&" => SyntaxKind::AndKw,
+        "||" | "|" => SyntaxKind::OrKw,
+        "^" => SyntaxKind::XorKw,
+        "->" | "=>" => SyntaxKind::ImpliesKw,
+        "!" => SyntaxKind::NotKw,
+        _ => return None,
+    })
+}
+
+/// The operator keyword `text` spells in another case, such as Tutorial D's
+/// `AND`, if any.
+pub(crate) fn operator_spelling(text: &str) -> Option<SyntaxKind> {
+    SyntaxKind::ALL.into_iter().find(|k| {
+        k.is_operator_keyword()
+            && k.fixed_text()
+                .is_some_and(|t| t != text && t.eq_ignore_ascii_case(text))
+    })
+}
+
+/// A foreign operator, `found`, used for `keyword`. `neighbors` are the
+/// characters around it.
+pub(crate) fn foreign_operator_used(
+    found: Found,
+    keyword: SyntaxKind,
+    neighbors: (Option<char>, Option<char>),
+) -> Diagnostic {
+    let spelled = keyword.fixed_text().expect("keywords have fixed text");
+    Diagnostic::error(
+        Code::ForeignOperator,
+        format!("`{}` is not an operator; write `{spelled}`", found.text),
+        found.span,
+        format!("trendy writes this `{spelled}`"),
+    )
+    .with_note("the boolean operators are the keywords `not`, `and`, `or`, `xor` and `implies`")
+    .with_suggestion(
+        format!("write `{spelled}`"),
+        vec![Edit {
+            span: found.span,
+            replacement: spaced(spelled, neighbors),
+        }],
+    )
+}
+
+/// `text`, with a space on either side where it would otherwise run into a
+/// word next to it, which would change how it lexes.
+fn spaced(text: &str, (before, after): (Option<char>, Option<char>)) -> String {
+    let mut spaced = text.to_string();
+    if before.is_some_and(is_word_char) && text.starts_with(is_word_char) {
+        spaced.insert(0, ' ');
+    }
+    if after.is_some_and(is_word_char) && text.ends_with(is_word_char) {
+        spaced.push(' ');
+    }
+    spaced
 }
 
 /// A call statement, starting with the operator's name `found`, without

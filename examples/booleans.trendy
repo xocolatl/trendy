@@ -1,0 +1,22 @@
+var u := t or false;
+var t := not f;
+var f: boolean;
+var chain := f implies f implies f;
+
+operator table{a: boolean, b: boolean} [
+    call debug_value{v: not a};
+    call debug_value{v: a and b};
+    call debug_value{v: a or b};
+    call debug_value{v: a xor b};
+    call debug_value{v: a implies b};
+];
+
+operator main{} [
+    call debug_value{v: u};
+    call debug_value{v: chain};
+    call table{a: false, b: false};
+    call table{a: false, b: true};
+    call table{a: true, b: false};
+    call table{a: true, b: true};
+    call debug_value{v: not (t and f) xor t};
+];

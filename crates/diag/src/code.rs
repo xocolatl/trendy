@@ -19,6 +19,7 @@ pub enum Code {
     MiscasedKeyword,
     AttributeSeparator,
     MissingCall,
+    ForeignOperator,
     DuplicateName,
     MissingMain,
     UnknownType,
@@ -38,11 +39,12 @@ pub enum Code {
     NotAnOperator,
     PositionalArgument,
     MainWithParams,
-    NameInConstant,
+    NameInSelector,
+    CyclicInitialValues,
 }
 
 impl Code {
-    pub const ALL: [Code; 32] = [
+    pub const ALL: [Code; 34] = [
         Code::UnexpectedCharacter,
         Code::MissingToken,
         Code::WrongDelimiter,
@@ -55,6 +57,7 @@ impl Code {
         Code::MiscasedKeyword,
         Code::AttributeSeparator,
         Code::MissingCall,
+        Code::ForeignOperator,
         Code::DuplicateName,
         Code::MissingMain,
         Code::UnknownType,
@@ -74,7 +77,8 @@ impl Code {
         Code::NotAnOperator,
         Code::PositionalArgument,
         Code::MainWithParams,
-        Code::NameInConstant,
+        Code::NameInSelector,
+        Code::CyclicInitialValues,
     ];
 
     #[must_use]
@@ -92,6 +96,7 @@ impl Code {
             Code::MiscasedKeyword => "E0010",
             Code::AttributeSeparator => "E0011",
             Code::MissingCall => "E0013",
+            Code::ForeignOperator => "E0014",
             Code::DuplicateName => "E0101",
             Code::MissingMain => "E0102",
             Code::UnknownType => "E0103",
@@ -111,7 +116,8 @@ impl Code {
             Code::NotAnOperator => "E0117",
             Code::PositionalArgument => "E0118",
             Code::MainWithParams => "E0119",
-            Code::NameInConstant => "E0120",
+            Code::NameInSelector => "E0120",
+            Code::CyclicInitialValues => "E0121",
         }
     }
 
@@ -139,6 +145,7 @@ impl Code {
             Code::MiscasedKeyword => include_str!("../errors/E0010.md"),
             Code::AttributeSeparator => include_str!("../errors/E0011.md"),
             Code::MissingCall => include_str!("../errors/E0013.md"),
+            Code::ForeignOperator => include_str!("../errors/E0014.md"),
             Code::DuplicateName => include_str!("../errors/E0101.md"),
             Code::MissingMain => include_str!("../errors/E0102.md"),
             Code::UnknownType => include_str!("../errors/E0103.md"),
@@ -158,7 +165,8 @@ impl Code {
             Code::NotAnOperator => include_str!("../errors/E0117.md"),
             Code::PositionalArgument => include_str!("../errors/E0118.md"),
             Code::MainWithParams => include_str!("../errors/E0119.md"),
-            Code::NameInConstant => include_str!("../errors/E0120.md"),
+            Code::NameInSelector => include_str!("../errors/E0120.md"),
+            Code::CyclicInitialValues => include_str!("../errors/E0121.md"),
         }
     }
 }

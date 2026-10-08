@@ -14,6 +14,7 @@ use trendy_syntax::ast::{
     self, AstNode, AttributeValue, Expr, Literal, LiteralError, LiteralValue, RelationLiteral,
     TupleLiteral, TypeExpr,
 };
+use trendy_syntax::{SyntaxKind, SyntaxToken};
 
 use crate::{Values, errors};
 
@@ -31,6 +32,8 @@ pub(crate) enum Origin {
     /// A built-in operator's parameter, declared in the prelude: there is no
     /// place in the program to point at.
     Builtin,
+    /// An operator such as `and`, whose operands are booleans.
+    Operator(SyntaxToken),
 }
 
 impl Origin {
@@ -41,15 +44,17 @@ impl Origin {
             Origin::Heading(h) => Some(h.span()),
             Origin::Value(v) => Some(v.span()),
             Origin::Builtin => None,
+            Origin::Operator(token) => Some(trendy_syntax::span(token.text_range())),
         }
     }
 
-    pub(crate) fn label(&self) -> &'static str {
+    pub(crate) fn label(&self) -> String {
         match self {
             Origin::Type(_) | Origin::Heading(_) | Origin::Builtin => {
-                "expected because of this type"
+                "expected because of this type".to_string()
             }
-            Origin::Value(_) => "expected because of this value",
+            Origin::Value(_) => "expected because of this value".to_string(),
+            Origin::Operator(token) => format!("`{}` takes boolean operands", token.text()),
         }
     }
 
@@ -100,6 +105,14 @@ pub(crate) struct Expected {
 }
 
 impl Expected {
+    /// The expectation for an operand of the boolean operator `operator`.
+    pub(crate) fn operand(operator: SyntaxToken) -> Expected {
+        Expected {
+            ty: hir::Type::Scalar(hir::Scalar::Boolean),
+            origin: Origin::Operator(operator),
+        }
+    }
+
     /// The expectation for attribute `name`, of type `ty`, inside this one.
     fn attribute(&self, name: &str, ty: &hir::Type) -> Expected {
         Expected {
@@ -109,6 +122,49 @@ impl Expected {
                 .attribute(name)
                 .unwrap_or_else(|| self.origin.clone()),
         }
+    }
+}
+
+/// What names in a value can refer to, where its value must be known when
+/// compiling.
+pub(crate) trait Scope {
+    fn values(&self) -> &Values;
+
+    /// The value `name` refers to, or `None` after reporting why it has none
+    /// that is known when compiling.
+    fn constant(&mut self, name: &ast::NameRef, errors: &mut Vec<Diagnostic>)
+    -> Option<hir::Value>;
+}
+
+/// The operator a dyadic boolean operator keyword denotes. Sema sees only
+/// trees without syntax errors, so foreign spellings such as `&&` never reach
+/// it.
+pub(crate) fn bool_op(operator: &SyntaxToken) -> Option<hir::BoolOp> {
+    match operator.kind() {
+        SyntaxKind::AndKw => Some(hir::BoolOp::And),
+        SyntaxKind::OrKw => Some(hir::BoolOp::Or),
+        SyntaxKind::XorKw => Some(hir::BoolOp::Xor),
+        SyntaxKind::ImpliesKw => Some(hir::BoolOp::Implies),
+        _ => None,
+    }
+}
+
+/// Check that a boolean operator's result, written `expr`, is what the
+/// context expects; `None` after reporting that it isn't.
+pub(crate) fn boolean_result(
+    expected: Option<&Expected>,
+    expr: &Expr,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<()> {
+    let boolean = hir::Type::Scalar(hir::Scalar::Boolean);
+    match expected {
+        Some(e) if e.ty != boolean => {
+            errors.push(errors::type_mismatch(
+                &e.ty, &e.origin, &boolean, None, expr,
+            ));
+            None
+        }
+        _ => Some(()),
     }
 }
 
@@ -180,13 +236,13 @@ pub(crate) fn resolve_heading(
     ok.then(|| hir::Heading::new(attributes))
 }
 
-/// The value `expr` denotes, checked against `expected` if given. Returns
-/// `None` after reporting why there is no valid value (or if the lexer
-/// already reported it as malformed).
+/// The value `expr` denotes, evaluated when compiling and checked against
+/// `expected` if given. Returns `None` after reporting why there is no valid
+/// value (or if the lexer already reported it as malformed).
 pub(crate) fn value(
     expr: &Expr,
     expected: Option<&Expected>,
-    values: &Values,
+    scope: &mut dyn Scope,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Value> {
     match expr {
@@ -194,12 +250,40 @@ pub(crate) fn value(
             let value = literal_value(literal, errors)?;
             matches(expected, value, expr, errors)
         }
-        Expr::Tuple(tuple) => tuple_value(tuple, expected, values, errors),
-        Expr::Relation(relation) => relation_value(relation, expected, values, errors),
+        Expr::Tuple(tuple) => tuple_value(tuple, expected, scope, errors),
+        Expr::Relation(relation) => relation_value(relation, expected, scope, errors),
         Expr::Name(name) => {
-            errors.push(errors::name_in_constant(name.span()));
-            None
+            let value = scope.constant(name, errors)?;
+            matches(expected, value, expr, errors)
         }
+        Expr::Paren(paren) => value(&paren.inner()?, expected, scope, errors),
+        Expr::Unary(unary) => {
+            let operator = unary.operator()?;
+            let operand = boolean(unary.operand(), operator, scope, errors);
+            boolean_result(expected, expr, errors)?;
+            Some(hir::Value::Boolean(!operand?))
+        }
+        Expr::Binary(binary) => {
+            let operator = binary.operator()?;
+            let op = bool_op(&operator)?;
+            let lhs = boolean(binary.lhs(), operator.clone(), scope, errors);
+            let rhs = boolean(binary.rhs(), operator, scope, errors);
+            boolean_result(expected, expr, errors)?;
+            Some(hir::Value::Boolean(op.apply(lhs?, rhs?)))
+        }
+    }
+}
+
+/// The value of an operand of the boolean operator `operator`.
+fn boolean(
+    operand: Option<Expr>,
+    operator: SyntaxToken,
+    scope: &mut dyn Scope,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<bool> {
+    match value(&operand?, Some(&Expected::operand(operator)), scope, errors)? {
+        hir::Value::Boolean(b) => Some(b),
+        _ => unreachable!("checked to be boolean"),
     }
 }
 
@@ -249,10 +333,10 @@ fn own_heading(
 fn tuple_value(
     tuple: &TupleLiteral,
     expected: Option<&Expected>,
-    values: &Values,
+    scope: &mut dyn Scope,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Value> {
-    let own = own_heading(tuple.heading(), hir::Type::Tuple, values, errors).ok()?;
+    let own = own_heading(tuple.heading(), hir::Type::Tuple, scope.values(), errors).ok()?;
     let here = own.as_ref().or(expected);
     let heading = match here {
         Some(Expected {
@@ -262,7 +346,7 @@ fn tuple_value(
         // The context expects something else: evaluate the tuple on its own,
         // then report the mismatch for the whole of it.
         Some(_) => {
-            let value = tuple_value(tuple, None, values, errors)?;
+            let value = tuple_value(tuple, None, scope, errors)?;
             return matches(expected, value, &Expr::Tuple(tuple.clone()), errors);
         }
         None => None,
@@ -322,7 +406,7 @@ fn tuple_value(
             }
             None => None,
         };
-        match value(&attr_expr, attr_expected.as_ref(), values, errors) {
+        match value(&attr_expr, attr_expected.as_ref(), scope, errors) {
             Some(v) => {
                 attributes.insert(name.clone(), v);
             }
@@ -357,10 +441,16 @@ fn tuple_value(
 fn relation_value(
     relation: &RelationLiteral,
     expected: Option<&Expected>,
-    values: &Values,
+    scope: &mut dyn Scope,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Value> {
-    let own = own_heading(relation.heading(), hir::Type::Relation, values, errors).ok()?;
+    let own = own_heading(
+        relation.heading(),
+        hir::Type::Relation,
+        scope.values(),
+        errors,
+    )
+    .ok()?;
     let here = own.as_ref().or(expected);
     // What each tuple must be: the tuple type of the relation's heading.
     let mut element = match here {
@@ -372,7 +462,7 @@ fn relation_value(
             origin: origin.element().unwrap_or_else(|| origin.clone()),
         }),
         Some(_) => {
-            let value = relation_value(relation, None, values, errors)?;
+            let value = relation_value(relation, None, scope, errors)?;
             return matches(expected, value, &Expr::Relation(relation.clone()), errors);
         }
         None => None,
@@ -381,7 +471,7 @@ fn relation_value(
     let mut tuples: BTreeMap<hir::TupleValue, Span> = BTreeMap::new();
     let mut ok = true;
     for tuple in relation.tuples() {
-        let Some(hir::Value::Tuple(value)) = tuple_value(&tuple, element.as_ref(), values, errors)
+        let Some(hir::Value::Tuple(value)) = tuple_value(&tuple, element.as_ref(), scope, errors)
         else {
             ok = false;
             continue;

@@ -230,20 +230,19 @@ impl FunctionBuilder<'_> {
                 // The arguments are a tuple: build it in a stack slot, in
                 // parameter name order, and pass its address.
                 let args_place = params_layout(&callee.params).map(|params| {
-                    let slot = lir::SlotId(self.slots.len());
-                    self.slots.push(params);
+                    let slot = self.slot(params);
                     for (i, (name, param)) in callee.params.iter().enumerate() {
                         let src = self.place(&args[name], cx);
                         self.insts.push(lir::Inst::Copy {
                             dst: lir::Place {
-                                base: lir::Base::Slot(slot),
+                                base: slot.base,
                                 path: vec![i],
                             },
                             src,
                             layout: param_layout(param),
                         });
                     }
-                    lir::Place::whole(lir::Base::Slot(slot))
+                    slot
                 });
                 self.insts.push(lir::Inst::Call {
                     function: self.function_ids[operator],
@@ -253,8 +252,9 @@ impl FunctionBuilder<'_> {
         }
     }
 
-    /// Where `expr`'s value is in memory.
-    fn place(&self, expr: &hir::Expr, cx: &mut Lowering) -> lir::Place {
+    /// Where `expr`'s value is in memory: computed into a new stack slot, if
+    /// it is computed.
+    fn place(&mut self, expr: &hir::Expr, cx: &mut Lowering) -> lir::Place {
         match expr {
             hir::Expr::Constant(value) => {
                 let field = cx.value_field(value);
@@ -280,7 +280,41 @@ impl FunctionBuilder<'_> {
                     path: vec![index],
                 }
             }
+            hir::Expr::Not(operand) => {
+                let src = self.place(operand, cx);
+                let dst = self.slot(lir::Layout::U8);
+                self.insts.push(lir::Inst::Not {
+                    dst: dst.clone(),
+                    src,
+                });
+                dst
+            }
+            hir::Expr::Binary(op, lhs, rhs) => {
+                let lhs = self.place(lhs, cx);
+                let rhs = self.place(rhs, cx);
+                let dst = self.slot(lir::Layout::U8);
+                let op = match op {
+                    hir::BoolOp::And => lir::BoolOp::And,
+                    hir::BoolOp::Or => lir::BoolOp::Or,
+                    hir::BoolOp::Xor => lir::BoolOp::Xor,
+                    hir::BoolOp::Implies => lir::BoolOp::Implies,
+                };
+                self.insts.push(lir::Inst::Bool {
+                    dst: dst.clone(),
+                    op,
+                    lhs,
+                    rhs,
+                });
+                dst
+            }
         }
+    }
+
+    /// A new stack slot holding a value with `layout`.
+    fn slot(&mut self, layout: lir::Layout) -> lir::Place {
+        let slot = lir::SlotId(self.slots.len());
+        self.slots.push(layout);
+        lir::Place::whole(lir::Base::Slot(slot))
     }
 }
 
@@ -426,6 +460,50 @@ mod tests {
                 lir::Field::Usize(2)
             ])]
         );
+    }
+
+    #[test]
+    fn boolean_expressions_compute_into_slots() {
+        // `debug_value{v: not (a and b)}`, of two variables.
+        let a = || Box::new(hir::Expr::Variable(hir::VariableId(0)));
+        let b = || Box::new(hir::Expr::Variable(hir::VariableId(1)));
+        let expr = hir::Expr::Not(Box::new(hir::Expr::Binary(hir::BoolOp::And, a(), b())));
+        let lowered = lower(&program(
+            vec![
+                debug_value(),
+                user("main", &[], vec![call(0, vec![("v", expr)])]),
+            ],
+            vec![
+                variable("a", hir::Value::Boolean(true)),
+                variable("b", hir::Value::Boolean(false)),
+            ],
+        ));
+        let main = &lowered.functions[0];
+        assert_eq!(main.slots, [lir::Layout::U8, lir::Layout::U8]);
+        let slot = |i| lir::Place::whole(lir::Base::Slot(lir::SlotId(i)));
+        let data = |id| lir::Place {
+            base: lir::Base::Data(lir::DataId(id)),
+            path: vec![0],
+        };
+        assert_eq!(
+            main.blocks[0].insts[..2],
+            [
+                lir::Inst::Bool {
+                    dst: slot(0),
+                    op: lir::BoolOp::And,
+                    lhs: data(0),
+                    rhs: data(1),
+                },
+                lir::Inst::Not {
+                    dst: slot(1),
+                    src: slot(0),
+                },
+            ]
+        );
+        let lir::Inst::CallRuntime { args, .. } = &main.blocks[0].insts[2] else {
+            panic!("expected a runtime call");
+        };
+        assert_eq!(args[0], slot(1));
     }
 
     #[test]

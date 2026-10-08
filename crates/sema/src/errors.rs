@@ -216,7 +216,7 @@ pub(crate) fn type_mismatch(
                 replacement: found.to_string(),
             }],
         ),
-        Origin::Heading(_) | Origin::Value(_) | Origin::Builtin => d,
+        Origin::Heading(_) | Origin::Value(_) | Origin::Builtin | Origin::Operator(_) => d,
     }
 }
 
@@ -562,17 +562,55 @@ pub(crate) fn main_with_params(params: &trendy_syntax::ast::Heading) -> Diagnost
     )
 }
 
-/// A name, at `span`, in a value that must be constant.
-pub(crate) fn name_in_constant(span: Span) -> Diagnostic {
+/// The name `name`, at `span`, of `what` (a parameter or a variable),
+/// inside a tuple or relation value in an operator's body.
+pub(crate) fn name_in_selector(name: &str, span: Span, what: &str) -> Diagnostic {
     Diagnostic::error(
-        Code::NameInConstant,
-        "a name can't be used in this value",
+        Code::NameInSelector,
+        format!("{what} can't be used inside a tuple or relation value here"),
         span,
-        "must be a constant",
+        format!("`{name}` is known only when the program runs"),
     )
     .with_note(
-        "for now, initial values and the attributes of tuple and relation values can only be literals; a call's arguments can be names",
+        "for now, tuple and relation values in an operator's body are built when compiling, so their attributes can't refer to parameters or variables",
     )
+    .with_help(
+        "a variable's initial value can refer to other variables: declare one with this value, and use it here",
+    )
+}
+
+/// The variables in `cycle`, each with its declaration's name span and the
+/// span where its initial value refers to the next one, the last referring
+/// to the first.
+pub(crate) fn cyclic_initial_values(cycle: &[(String, Span, Span)]) -> Diagnostic {
+    let (first, declared, _) = &cycle[0];
+    let names: Vec<String> = cycle.iter().map(|(n, _, _)| format!("`{n}`")).collect();
+    let message = match names.as_slice() {
+        [_] => format!("the initial value of `{first}` depends on itself"),
+        _ => format!(
+            "the initial values of {} depend on each other",
+            trendy_diag::conjoin(&names)
+        ),
+    };
+    let mut d = Diagnostic::error(
+        Code::CyclicInitialValues,
+        message,
+        *declared,
+        "declared here",
+    );
+    for (i, (name, _, via)) in cycle.iter().enumerate() {
+        let next = &cycle[(i + 1) % cycle.len()].0;
+        let label = if next == name {
+            format!("`{name}` refers to itself")
+        } else {
+            format!("`{name}` refers to `{next}`")
+        };
+        d = d.with_secondary(*via, label);
+    }
+    d.with_note(
+        "initial values are evaluated when compiling, each after the ones it refers to, so a cycle has no order to evaluate them in",
+    )
+    .with_help("give one of these variables a value that doesn't refer to the others")
 }
 
 /// A tuple at `span` that the relation already has, first at `first`.

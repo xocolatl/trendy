@@ -43,7 +43,8 @@ impl Client {
                 "number",
                 "string",
                 "property",
-                "parameter"
+                "parameter",
+                "operator"
             ])
         );
         client.notify("initialized", json!({}));

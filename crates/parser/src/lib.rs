@@ -361,8 +361,105 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// A literal, a tuple value, or a relation value.
+    /// An expression.
     fn expression(&mut self) {
+        self.binary(0);
+    }
+
+    /// An expression whose dyadic operators bind at least as tightly as
+    /// `min`, by precedence climbing: `implies` (1, grouping to the right),
+    /// then `or` (2), `xor` (3) and `and` (4), all grouping to the left.
+    fn binary(&mut self, min: u8) {
+        self.peek();
+        let start = self.builder.checkpoint();
+        self.unary();
+        while let Some((precedence, found, keyword)) = self.binary_operator() {
+            if precedence < min {
+                break;
+            }
+            self.builder.start_node_at(start, SyntaxKind::BinaryExpr);
+            self.operator_token(found, keyword);
+            let right_grouping = keyword == SyntaxKind::ImpliesKw;
+            self.binary(if right_grouping {
+                precedence
+            } else {
+                precedence + 1
+            });
+            self.builder.finish_node();
+        }
+    }
+
+    /// The dyadic operator at the next token, if any: its precedence, the
+    /// token, and the keyword it is or stands for.
+    fn binary_operator(&self) -> Option<(u8, Found<'a>, SyntaxKind)> {
+        let found = self.lookahead()?;
+        let keyword = match found.kind {
+            SyntaxKind::ForeignOperator => errors::foreign_operator(found.text)?,
+            SyntaxKind::Ident => errors::operator_spelling(found.text)?,
+            kind => kind,
+        };
+        let precedence = match keyword {
+            SyntaxKind::ImpliesKw => 1,
+            SyntaxKind::OrKw => 2,
+            SyntaxKind::XorKw => 3,
+            SyntaxKind::AndKw => 4,
+            _ => return None,
+        };
+        Some((precedence, found, keyword))
+    }
+
+    /// `not x`, or an operand.
+    fn unary(&mut self) {
+        let not = self.found().filter(|f| match f.kind {
+            SyntaxKind::NotKw => true,
+            SyntaxKind::ForeignOperator => {
+                errors::foreign_operator(f.text) == Some(SyntaxKind::NotKw)
+            }
+            SyntaxKind::Ident => errors::operator_spelling(f.text) == Some(SyntaxKind::NotKw),
+            _ => false,
+        });
+        if let Some(found) = not {
+            self.start_node(SyntaxKind::UnaryExpr);
+            self.operator_token(found, SyntaxKind::NotKw);
+            self.unary();
+            self.builder.finish_node();
+        } else {
+            self.primary();
+        }
+    }
+
+    /// Consume an operator: `keyword` itself, or another spelling of it,
+    /// which is reported with a fix.
+    fn operator_token(&mut self, found: Found<'a>, keyword: SyntaxKind) {
+        self.bump();
+        match found.kind {
+            SyntaxKind::ForeignOperator => {
+                let neighbors = (
+                    self.source[..found.span.start].chars().next_back(),
+                    self.source[found.span.end..].chars().next(),
+                );
+                self.errors
+                    .push(errors::foreign_operator_used(found, keyword, neighbors));
+            }
+            SyntaxKind::Ident => {
+                let spelled = keyword.fixed_text().expect("keywords have fixed text");
+                self.errors.push(errors::miscased_keyword(found, spelled));
+            }
+            _ => {}
+        }
+    }
+
+    /// An operand: a literal, a tuple or relation value, a name, or an
+    /// expression in parentheses.
+    fn primary(&mut self) {
+        if self.at(SyntaxKind::LParen) {
+            self.start_node(SyntaxKind::ParenExpr);
+            self.bump();
+            self.binary(0);
+            self.expect(SyntaxKind::RParen);
+            self.builder.finish_node();
+            return;
+        }
         if self.peek().is_some_and(SyntaxKind::is_literal) {
             self.start_node(SyntaxKind::Literal);
             self.bump();
@@ -719,6 +816,13 @@ impl<'a> Parser<'a> {
         let pos = (self.pos + 1..self.tokens.len())
             .filter(|&i| !is_skipped(self.tokens[i].kind))
             .nth(n - 1)?;
+        Some(self.found_at(pos))
+    }
+
+    /// The next significant token, leaving the trivia before it for whichever
+    /// node consumes it: a lookahead that may not take the token.
+    fn lookahead(&self) -> Option<Found<'a>> {
+        let pos = (self.pos..self.tokens.len()).find(|&i| !is_skipped(self.tokens[i].kind))?;
         Some(self.found_at(pos))
     }
 
@@ -1395,6 +1499,70 @@ SourceFile
             fix("builtin debug_value{v: any};"),
             "builtin operator debug_value{v: any};"
         );
+    }
+
+    /// The expression in `var x := <source>;`, as an outline of its
+    /// structure: `(a and (b or c))`.
+    fn shape(source: &str) -> String {
+        fn show(expr: &trendy_syntax::ast::Expr) -> String {
+            use trendy_syntax::ast::Expr;
+            match expr {
+                Expr::Binary(b) => format!(
+                    "({} {} {})",
+                    show(&b.lhs().unwrap()),
+                    b.operator().unwrap().text(),
+                    show(&b.rhs().unwrap())
+                ),
+                Expr::Unary(u) => format!("(not {})", show(&u.operand().unwrap())),
+                Expr::Paren(p) => show(&p.inner().unwrap()),
+                other => other.syntax().to_string().trim().to_string(),
+            }
+        }
+        let source = format!("var x := {source};");
+        let parse = parse_str(&source);
+        assert!(parse.errors.is_empty(), "{source}: {:#?}", parse.errors);
+        show(
+            &parse
+                .tree
+                .variables()
+                .next()
+                .unwrap()
+                .initializer()
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn precedence() {
+        assert_eq!(shape("a and b or c"), "((a and b) or c)");
+        assert_eq!(shape("a or b and c"), "(a or (b and c))");
+        assert_eq!(shape("a or b xor c"), "(a or (b xor c))");
+        assert_eq!(shape("a xor b and c"), "(a xor (b and c))");
+        assert_eq!(shape("a and b and c"), "((a and b) and c)");
+        assert_eq!(shape("a implies b implies c"), "(a implies (b implies c))");
+        assert_eq!(shape("a or b implies c"), "((a or b) implies c)");
+        assert_eq!(shape("not a and b"), "((not a) and b)");
+        assert_eq!(shape("not not a"), "(not (not a))");
+        assert_eq!(shape("a and (b or c)"), "(a and (b or c))");
+        assert_eq!(shape("(a)"), "a");
+    }
+
+    #[test]
+    fn foreign_and_miscased_operators() {
+        let source = "var x := a && !b || c -> d;";
+        let codes: Vec<_> = parse_str(source).errors.iter().map(|e| e.code).collect();
+        assert_eq!(codes, [Code::ForeignOperator; 4]);
+        assert_eq!(fix(source), "var x := a and not b or c implies d;");
+        assert_eq!(
+            fix("var x := a AND NOT b Or c;"),
+            "var x := a and not b or c;"
+        );
+    }
+
+    #[test]
+    fn incomplete_expressions() {
+        assert_eq!(messages("var x := a and;"), ["expected value, found `;`"]);
+        assert_eq!(fix("var x := (a or b;"), "var x := (a or b);");
     }
 
     #[test]
