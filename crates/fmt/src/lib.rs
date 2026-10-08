@@ -25,7 +25,7 @@ pub fn format(file: &SourceFile) -> String {
     // Since the previous significant token: whether the source has a blank
     // line, and the comments, each with whether it starts its own line.
     let mut blank_line = false;
-    let mut comments: Vec<(SyntaxToken, bool)> = Vec::new();
+    let mut comments: Vec<Comment> = Vec::new();
     // Whether the source has a line break, and a blank line, since the last
     // token or comment.
     let mut newline = false;
@@ -40,7 +40,11 @@ pub fn format(file: &SourceFile) -> String {
                 continue;
             }
             SyntaxKind::Comment => {
-                comments.push((token, newline || prev.is_none()));
+                comments.push(Comment {
+                    own_line: newline || prev.is_none(),
+                    blank_before: blank_since && !comments.is_empty(),
+                    token,
+                });
                 newline = false;
                 blank_since = false;
                 continue;
@@ -65,11 +69,18 @@ pub fn format(file: &SourceFile) -> String {
         blank_since = false;
     }
     // Comments after the last token.
-    for (comment, own_line) in comments {
+    for comment in comments {
         if !out.is_empty() {
-            out.push(if own_line { '\n' } else { ' ' });
+            if comment.own_line {
+                out.push('\n');
+                if comment.blank_before {
+                    out.push('\n');
+                }
+            } else {
+                out.push(' ');
+            }
         }
-        out.push_str(comment.text());
+        out.push_str(comment.token.text());
     }
     if !out.is_empty() {
         out.push('\n');
@@ -90,6 +101,16 @@ fn between(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> String {
     } else {
         separator.to_string()
     }
+}
+
+/// A comment in the source, between two significant tokens.
+struct Comment {
+    token: SyntaxToken,
+    /// Whether it starts its own line.
+    own_line: bool,
+    /// Whether the source has a blank line between it and the comment before
+    /// it.
+    blank_before: bool,
 }
 
 /// What goes between two significant tokens: `sep`, the layout's own
@@ -138,7 +159,7 @@ impl Gap<'_> {
     /// layout breaks the line anyway, indented like the code after it;
     /// anywhere else a comment goes inline, which a block comment always
     /// can.
-    fn write(&self, comments: &[(SyntaxToken, bool)], out: &mut String) {
+    fn write(&self, comments: &[Comment], out: &mut String) {
         if comments.is_empty() {
             out.push_str(self.sep);
             return;
@@ -158,12 +179,15 @@ impl Gap<'_> {
         let after = spaced(self.before_closer());
         let mut sep_written = false;
         let mut last_own_line = false;
-        for (i, (comment, own_line)) in comments.iter().enumerate() {
-            last_own_line = *own_line && breaks;
+        for (i, comment) in comments.iter().enumerate() {
+            last_own_line = comment.own_line && breaks;
             if last_own_line {
                 if sep_written || (self.at_start() && i == 0) {
                     if i > 0 || !self.at_start() {
                         out.push('\n');
+                        if comment.blank_before {
+                            out.push('\n');
+                        }
                         out.push_str(indent);
                     }
                 } else {
@@ -175,7 +199,7 @@ impl Gap<'_> {
             } else if !self.at_start() {
                 out.push_str(if breaks { " " } else { before });
             }
-            out.push_str(comment.text());
+            out.push_str(comment.token.text());
         }
         if last_own_line {
             out.push('\n');
@@ -636,6 +660,15 @@ mod tests {
         // Nested and multi-line comments are kept as written.
         let nested = "/* a /* nested */\n   comment */\nvar a := 1;\n";
         assert_eq!(fmt(nested), nested);
+        // Blank lines between comments are kept, one at most.
+        assert_eq!(
+            fmt("var a := 1;\n\n/* one */\n\n\n/* two */\n/* three */\nvar b := 2;"),
+            "var a := 1;\n\n/* one */\n\n/* two */\n/* three */\nvar b := 2;\n"
+        );
+        assert_eq!(
+            fmt("var a := 1;\n/* one */\n\n/* two */"),
+            "var a := 1;\n/* one */\n\n/* two */\n"
+        );
         // At the end of the file.
         assert_eq!(fmt("var a := 1;\n/* end */"), "var a := 1;\n/* end */\n");
         assert_eq!(fmt("var a := 1; /* end */"), "var a := 1; /* end */\n");

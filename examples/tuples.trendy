@@ -1,5 +1,132 @@
 var x: tuple { a: tuple { b: boolean }, c: text };
 var q := tuple { x: 1.0, y: 2.0 };
 var e: tuple {};
+var addr := tuple { street: "1600 Pennsylvania Ave.", city: "Washington", state: "DC", zip: "20500" };
+
+/* Tuple operators, to design and then implement one at a time. Each comment
+   is one operator: what The Third Manifesto asks for (RM Prescription 6
+   unless noted), Tutorial D's spelling, and a proposed trendy spelling to
+   workshop, with code that uses it.
+
+   Underneath, the operators are those of Algebra A (The Third Manifesto,
+   Appendix A): remove, rename and compose, with and, or and not for
+   relations. The others are defined in terms of them; project, for one,
+   is remove of the attributes not named.
+
+   In extend and update, the tuple's own attributes are in scope by name,
+   and hide any variable or parameter of the same name. To use one of
+   those, rename it first. */
+
+/* Selector with run-time values (RM Prescription 9).
+   Tutorial D: TUPLE { STREET S, CITY C, ... }
+   Proposed: as now, but attribute values can be parameters, variables and
+   any other expression, not only constants (lifting E0120 for tuples).
+
+   operator moved{to: text} [
+       call debug_value{v: tuple { street: to, city: "Washington" }};
+   ];
+*/
+
+/* Attribute extraction (RM Prescription 6, item b).
+   Tutorial D: ZIP FROM ADDR
+   Proposed: dot notation, as Date and Darwen suggest themselves (ch. 6),
+   reaching into nested tuples too.
+
+   call debug_value{v: addr.zip};
+   call debug_value{v: x.a.b};
+*/
+
+/* Projection, and its complement, remove (Algebra A's REMOVE): the tuple
+   with only the attributes named, or without them.
+   Tutorial D: ADDR { STATE, ZIP } and ADDR { ALL BUT CITY, STREET }
+   Decided: `project` and `remove` operators with a list of names. Bare
+   braces after an expression would read as a call of a read-only operator,
+   or as a selector's heading.
+
+   call debug_value{v: addr project { state, zip }};
+   call debug_value{v: addr remove { city, street }};
+*/
+
+/* Renaming attributes (Algebra A's RENAME).
+   Tutorial D: ADDR RENAME ( ZIP AS POSTCODE ), and the prefix variant
+   ADDR RENAME ( PREFIX 'ST' AS 'G' )
+   Decided: a `rename` operator with `new: old` pairs, the name being
+   defined on the left as everywhere else: it's `extend { postcode: zip }`
+   with `zip` removed.
+
+   call debug_value{v: addr rename { postcode: zip }};
+   call debug_value{v: addr rename { prefix "g": "st" }};
+*/
+
+/* Extension: the tuple with attributes added, computed from its own.
+   Tutorial D: EXTEND ADDR ADD ( 'USA' AS COUNTRY )
+   Proposed: an `extend` operator with attribute values, in which the
+   tuple's own attributes are in scope by name.
+
+   call debug_value{v: addr extend { country: "USA" }};
+   call debug_value{v: q extend { sum: x + y }};
+*/
+
+/* Join, also called tuple union: the union of two tuples' attributes. Any
+   attribute both have must have the same value in both.
+   Tutorial D: ADDR UNION TUPLE { NAME 'Clark Kent' }, and n-adic
+   UNION { T1, T2, T3 }
+   Proposed: a `join` operator.
+
+   call debug_value{v: addr join tuple { name: "Clark Kent" }};
+*/
+
+/* Compose: join, then drop the attributes the operands have in common
+   (Algebra A's COMPOSE; Tutorial D, beyond RM Prescription 6).
+   Tutorial D: T1 COMPOSE T2
+   Proposed: a `compose` operator.
+
+   call debug_value{v: addr compose tuple { zip: "20500", plus4: "0003" }};
+*/
+
+/* Wrap: gather attributes into one tuple-valued attribute (RM Prescription
+   6, item c: "nesting").
+   Tutorial D: ADDR WRAP ( { STREET, CITY } AS PLACE )
+   Proposed: a `wrap` operator, with the new attribute's name and the names
+   it gathers.
+
+   call debug_value{v: addr wrap { place: { street, city } }};
+*/
+
+/* Unwrap: replace a tuple-valued attribute with its attributes (RM
+   Prescription 6, item c: "unnesting").
+   Tutorial D: X UNWRAP ( A )
+   Proposed: an `unwrap` operator, with the names to unwrap.
+
+   call debug_value{v: x unwrap { a }};
+*/
+
+/* Substitute: the tuple with some attributes replaced, computed from its
+   own (Tutorial D, beyond RM Prescription 6; shorthand for extend, project
+   and rename).
+   Tutorial D: UPDATE ADDR ( ZIP := '20501' )
+   Proposed: an `update` operator with attribute values, in which the
+   tuple's own attributes are in scope by name.
+
+   call debug_value{v: addr update { zip: "20501" }};
+   call debug_value{v: q update { x: x * 2.0 }};
+*/
+
+/* Tuple extraction: the one tuple of a relation with exactly one, else a
+   run-time error (RM Prescription 7's relation operators).
+   Tutorial D: TUPLE FROM R
+   Proposed: a `tuple from` prefix, as in Tutorial D.
+
+   call debug_value{v: tuple from relation { { name: "Ada" } }};
+*/
+
+/* Assignment and update (RM Prescription 21), once variables can be
+   assigned at all.
+   Tutorial D: ADDR := TUPLE { ... }, and UPDATE ADDR ( ZIP := '20501' )
+   Proposed: an assignment statement, and `update` as a statement.
+
+   addr := addr update { zip: "20501" };
+   update addr { zip: "20501" };
+*/
 
 operator main{} [];
