@@ -1,0 +1,5 @@
+var x: tuple { a: tuple { b: boolean }, c: text };
+var q := tuple { x: 1.0, y: 2.0 };
+var e: tuple {};
+
+operator main{} [];

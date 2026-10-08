@@ -7,7 +7,7 @@
 use trendy_diag::Span;
 
 use crate::literal;
-use crate::{SyntaxKind, SyntaxNode, SyntaxToken, span};
+use crate::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, span};
 
 /// A typed wrapper around a node of one particular kind.
 pub trait AstNode: Sized {
@@ -42,6 +42,10 @@ ast_node!(VarDecl);
 ast_node!(Name);
 ast_node!(TypeRef);
 ast_node!(Literal);
+ast_node!(TupleType);
+ast_node!(AttributeType);
+ast_node!(TupleLiteral);
+ast_node!(AttributeValue);
 
 /// A top-level definition.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -84,22 +88,187 @@ impl VarDecl {
 
     /// The declared type, from `: type`.
     #[must_use]
-    pub fn type_ref(&self) -> Option<TypeRef> {
+    pub fn type_expr(&self) -> Option<TypeExpr> {
         self.0
             .children()
             .find(|n| n.kind() == SyntaxKind::TypeAnnotation)?
             .children()
-            .find_map(TypeRef::cast)
+            .find_map(TypeExpr::cast)
     }
 
     /// The initial value, from `:= value`.
     #[must_use]
-    pub fn initializer(&self) -> Option<Literal> {
+    pub fn initializer(&self) -> Option<Expr> {
         self.0
             .children()
             .find(|n| n.kind() == SyntaxKind::Initializer)?
             .children()
-            .find_map(Literal::cast)
+            .find_map(Expr::cast)
+    }
+}
+
+/// A type as written: a name, or a tuple type.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TypeExpr {
+    Named(TypeRef),
+    Tuple(TupleType),
+}
+
+impl TypeExpr {
+    #[must_use]
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        TypeRef::cast(node.clone())
+            .map(TypeExpr::Named)
+            .or_else(|| TupleType::cast(node).map(TypeExpr::Tuple))
+    }
+
+    #[must_use]
+    pub fn syntax(&self) -> &SyntaxNode {
+        match self {
+            TypeExpr::Named(t) => t.syntax(),
+            TypeExpr::Tuple(t) => t.syntax(),
+        }
+    }
+
+    #[must_use]
+    pub fn span(&self) -> Span {
+        span(self.syntax().text_range())
+    }
+}
+
+/// An expression. For now: a literal, or a tuple value.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Expr {
+    Literal(Literal),
+    Tuple(TupleLiteral),
+}
+
+impl Expr {
+    #[must_use]
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        Literal::cast(node.clone())
+            .map(Expr::Literal)
+            .or_else(|| TupleLiteral::cast(node).map(Expr::Tuple))
+    }
+
+    #[must_use]
+    pub fn syntax(&self) -> &SyntaxNode {
+        match self {
+            Expr::Literal(e) => e.syntax(),
+            Expr::Tuple(e) => e.syntax(),
+        }
+    }
+
+    #[must_use]
+    pub fn span(&self) -> Span {
+        span(self.syntax().text_range())
+    }
+}
+
+impl TupleType {
+    pub fn attributes(&self) -> impl Iterator<Item = AttributeType> {
+        self.0.children().filter_map(AttributeType::cast)
+    }
+}
+
+impl AttributeType {
+    #[must_use]
+    pub fn name(&self) -> Option<Name> {
+        self.0.children().find_map(Name::cast)
+    }
+
+    #[must_use]
+    pub fn type_expr(&self) -> Option<TypeExpr> {
+        self.0.children().find_map(TypeExpr::cast)
+    }
+}
+
+impl TupleLiteral {
+    pub fn attributes(&self) -> impl Iterator<Item = AttributeValue> {
+        self.0.children().filter_map(AttributeValue::cast)
+    }
+
+    /// Where a new attribute goes, as an offset and the text to put around
+    /// `name: value`: after the last attribute, keeping any trailing comma
+    /// trailing.
+    #[must_use]
+    pub fn insertion(&self) -> (usize, &'static str, &'static str) {
+        let Some(last) = self.attributes().last() else {
+            let after_brace = significant_tokens(&self.0)
+                .find(|t| t.kind() == SyntaxKind::LBrace)
+                .map_or_else(|| self.span().end, |t| span(t.text_range()).end);
+            return (after_brace, " ", "");
+        };
+        match next_significant(last.syntax()) {
+            Some(comma) if comma.kind() == SyntaxKind::Comma => {
+                (span(comma.text_range()).end, " ", ",")
+            }
+            _ => (last.span().end, ", ", ""),
+        }
+    }
+
+    /// The span to delete to remove `attribute`, including the comma that
+    /// separates it from a neighbor.
+    #[must_use]
+    pub fn removal(&self, attribute: &AttributeValue) -> Span {
+        let own = attribute.span();
+        if let Some(comma) =
+            next_significant(attribute.syntax()).filter(|t| t.kind() == SyntaxKind::Comma)
+        {
+            // Up to the next attribute, so its spacing stays as it was.
+            let end = comma
+                .next_token()
+                .filter(|t| t.kind().is_trivia())
+                .map_or_else(
+                    || span(comma.text_range()).end,
+                    |ws| span(ws.text_range()).end,
+                );
+            return Span::new(own.start, end);
+        }
+        if let Some(comma) =
+            previous_significant(attribute.syntax()).filter(|t| t.kind() == SyntaxKind::Comma)
+        {
+            return Span::new(span(comma.text_range()).start, own.end);
+        }
+        own
+    }
+}
+
+fn significant_tokens(node: &SyntaxNode) -> impl Iterator<Item = SyntaxToken> {
+    node.children_with_tokens()
+        .filter_map(rowan::NodeOrToken::into_token)
+        .filter(|t| !t.kind().is_trivia())
+}
+
+/// The next sibling token of `node` that isn't trivia.
+fn next_significant(node: &SyntaxNode) -> Option<SyntaxToken> {
+    std::iter::successors(
+        node.next_sibling_or_token(),
+        SyntaxElement::next_sibling_or_token,
+    )
+    .find(|e| !e.kind().is_trivia())?
+    .into_token()
+}
+
+/// The previous sibling token of `node` that isn't trivia.
+fn previous_significant(node: &SyntaxNode) -> Option<SyntaxToken> {
+    std::iter::successors(
+        node.prev_sibling_or_token(),
+        SyntaxElement::prev_sibling_or_token,
+    )
+    .find(|e| !e.kind().is_trivia())?
+    .into_token()
+}
+
+impl AttributeValue {
+    #[must_use]
+    pub fn name(&self) -> Option<Name> {
+        self.0.children().find_map(Name::cast)
+    }
+
+    #[must_use]
+    pub fn value(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
     }
 }
 

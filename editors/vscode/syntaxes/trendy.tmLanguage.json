@@ -31,7 +31,7 @@
       "name": "constant.language.boolean.trendy"
     },
     "keywords": {
-      "match": "\\b(?:operator|var)\\b",
+      "match": "\\b(?:operator|var|tuple)\\b",
       "name": "keyword.other.trendy"
     },
     "number": {
@@ -70,6 +70,10 @@
         {
           "match": "\\:",
           "name": "punctuation.separator.type.trendy"
+        },
+        {
+          "match": "\\,",
+          "name": "punctuation.separator.comma.trendy"
         },
         {
           "match": "\\=",
@@ -111,7 +115,7 @@
           "name": "entity.name.type.trendy"
         }
       },
-      "match": "\\b(var)\\s+([A-Z_a-z][0-9A-Z_a-z]*)(?:\\s*(\\:)\\s*([A-Z_a-z][0-9A-Z_a-z]*))?"
+      "match": "\\b(var)\\s+([A-Z_a-z][0-9A-Z_a-z]*)(?:\\s*(\\:)\\s*(?!(?:operator|var|true|false|tuple)\\b)([A-Z_a-z][0-9A-Z_a-z]*))?"
     }
   },
   "scopeName": "source.trendy"

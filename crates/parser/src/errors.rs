@@ -7,6 +7,8 @@ use trendy_syntax::SyntaxKind;
 use crate::Found;
 
 pub(crate) const OPERATOR_FORM: &str = "an operator definition has the form `operator name{} [];`";
+pub(crate) const TUPLE_TYPE_FORM: &str = "a tuple type has the form `tuple { name: type, … }`";
+pub(crate) const TUPLE_VALUE_FORM: &str = "a tuple value has the form `tuple { name: value, … }`";
 pub(crate) const VARIABLE_FORM: &str = "a variable declaration has the form `var name: type := value;`, where either the type or the value may be left out";
 
 /// Words other languages use to start a definition or declaration, which
@@ -148,21 +150,39 @@ pub(crate) fn boolean_spelling(text: &str) -> Option<&'static str> {
         .find(|literal| literal.eq_ignore_ascii_case(text))
 }
 
-/// `True` or `TRUE` where `true` belongs.
-pub(crate) fn miscased_boolean(found: Found) -> Diagnostic {
-    let literal = boolean_spelling(found.text).expect("checked by the caller");
+/// A keyword written in another case, such as `TRUE` for `true`.
+pub(crate) fn miscased_keyword(found: Found, keyword: &str) -> Diagnostic {
     Diagnostic::error(
-        Code::MiscasedBoolean,
-        format!("`{}` is not a boolean literal", found.text),
+        Code::MiscasedKeyword,
+        format!("`{}` is not a keyword; write `{keyword}`", found.text),
         found.span,
-        "boolean literals are lowercase",
+        "keywords are lowercase",
     )
-    .with_note("the boolean literals are `true` and `false`; keywords are case-sensitive")
+    .with_note("keywords are case-sensitive, and every keyword is lowercase")
     .with_suggestion(
-        format!("write `{literal}`"),
+        format!("write `{keyword}`"),
         vec![Edit {
             span: found.span,
-            replacement: literal.to_string(),
+            replacement: keyword.to_string(),
+        }],
+    )
+}
+
+/// `=` or `:=` between an attribute's name and its type or value.
+pub(crate) fn wrong_attribute_separator(found: SyntaxKind, span: Span) -> Diagnostic {
+    let text = found.fixed_text().expect("separators have fixed text");
+    Diagnostic::error(
+        Code::AttributeSeparator,
+        format!("expected `:` after the attribute name, found `{text}`"),
+        span,
+        "attributes are written `name: value`",
+    )
+    .with_note("in both tuple types and tuple values, an attribute's name is followed by `:`")
+    .with_suggestion(
+        "write `:`",
+        vec![Edit {
+            span,
+            replacement: ":".to_string(),
         }],
     )
 }
@@ -215,7 +235,8 @@ pub(crate) fn expected_definition(
         }
         _ => return d,
     };
-    let misspelled = first.text.len() >= 5 && edit_distance(first.text, keyword) <= 2;
+    let distance = edit_distance(first.text, keyword);
+    let misspelled = distance == 0 || (first.text.len() >= 5 && distance <= 2);
     if !(FOREIGN_KEYWORDS.contains(&first.text) || misspelled) {
         return d;
     }

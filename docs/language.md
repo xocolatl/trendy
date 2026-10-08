@@ -95,6 +95,49 @@ var ratio: rational := 1;
 operator main{} [];
 ```
 
+## Tuples
+
+A tuple type is written `tuple { name: type, … }`, and a tuple value
+`tuple { name: value, … }`. Tuples are values like any other: an attribute
+can itself be a tuple, and a variable can hold one.
+
+```trendy
+var point: tuple { x: rational, y: rational } := tuple { x: 1.0, y: 2.0 };
+var person := tuple { name: "Ada", born: tuple { year: 1815, month: 12 } };
+var unit: tuple {};
+
+operator main{} [];
+```
+
+- **Attributes are unordered.** A tuple's attributes are a set, so
+  `tuple { x: rational, y: rational }` and `tuple { y: rational, x: rational }`
+  are the same type, and a value can list its attributes in any order.
+- **Types are structural.** Two tuple types with the same attribute names and
+  types are the same type, wherever they are written.
+- **Defaults are attribute-wise.** A tuple variable declared without a value
+  starts with every attribute at its own default. So
+  `tuple { a: tuple { b: boolean }, c: text }` starts as
+  `tuple { a: tuple { b: false }, c: "" }`.
+- **Equality is attribute-wise.** Two tuples are equal when every attribute's
+  values are equal.
+- **Every attribute is required.** A value must have exactly the attributes
+  of its declared type, each with a distinct name.
+- `tuple {}`, the tuple with no attributes, is a valid type with exactly one
+  value.
+- A trailing comma after the last attribute is allowed.
+
+```trendy
+var reordered: tuple { x: integer, y: integer } := tuple { y: 2, x: 1, };
+
+operator main{} [];
+```
+
+```trendy,error
+var point: tuple { x: rational, y: rational } := tuple { x: 1.0 };
+
+operator main{} [];
+```
+
 ## Literals
 
 **Boolean literals** are `true` and `false`, in lowercase.
@@ -164,7 +207,8 @@ operator main{} [];
 ## Names
 
 Names are ASCII letters, digits and `_`, and don't start with a digit. They
-are case-sensitive. The keywords are `operator`, `var`, `true` and `false`.
+are case-sensitive. The keywords are `operator`, `var`, `tuple`, `true` and
+`false`, all lowercase.
 
 Variables and operators share one namespace, so no two of them can have the
 same name. Types have their own namespace, so a variable can be named after a
@@ -187,7 +231,8 @@ operator main{} [];
 `trendyfmt` defines the canonical layout:
 
 - one definition per line;
-- consecutive variable declarations on adjacent lines;
+- consecutive variable declarations on adjacent lines, unless you separate
+  them with a blank line to group them; several blank lines become one;
 - a blank line between other definitions;
 - single spaces around `:=` and after `:`.
 
@@ -205,6 +250,9 @@ operator main{} [];
 | `float`, `double`, `real`, `f64` | `rational` |
 | `.5`, `5.` | `0.5`, `5.0` |
 | `string`, `str`, `varchar` | `text` |
+| `{ x: 1 }`, `TUPLE { X 1 }` | `tuple { x: 1 }` |
+| `tuple { x = 1 }` | `tuple { x: 1 }` |
+| `VAR`, `TUPLE`, `TRUE` | `var`, `tuple`, `true` |
 
 The compiler recognizes each of these habits and suggests the fix.
 `trendyc --explain <code>` describes any error code in detail, and

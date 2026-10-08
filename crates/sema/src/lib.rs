@@ -1,13 +1,12 @@
 mod errors;
+mod types;
 
 use std::collections::HashMap;
 
 use trendy_diag::{Diagnostic, Span};
 use trendy_hir as hir;
 use trendy_syntax::SyntaxToken;
-use trendy_syntax::ast::{
-    AstNode, Item, Literal, LiteralError, LiteralValue, SourceFile, TypeRef, VarDecl,
-};
+use trendy_syntax::ast::{Item, SourceFile, VarDecl};
 
 /// Check a parsed program and translate it to HIR.
 ///
@@ -135,11 +134,9 @@ fn variable(
 ) -> Option<hir::Variable> {
     let ident = decl.name()?.ident()?;
     let declared = decl
-        .type_ref()
-        .map(|t| (resolve_type(&t, values, errors), t));
-    let init = decl
-        .initializer()
-        .map(|lit| (literal_value(&lit, errors), lit));
+        .type_expr()
+        .map(|t| (types::resolve(&t, values, errors), t));
+    let init = decl.initializer().map(|e| (types::value(&e, errors), e));
 
     let (ty, init) = match (declared, init) {
         (None, None) => {
@@ -151,16 +148,16 @@ fn variable(
         }
         (Some((ty, _)), None) => {
             let ty = ty?;
-            (ty, ty.default_value())
+            let init = ty.default_value();
+            (ty, init)
         }
         (None, Some((value, _))) => {
             let value = value?;
             (value.ty(), value)
         }
-        (Some((ty, type_ref)), Some((value, literal))) => {
+        (Some((ty, type_expr)), Some((value, expr))) => {
             let (ty, value) = (ty?, value?);
-            if value.ty() != ty {
-                errors.push(errors::type_mismatch(ty, &type_ref, &value, &literal));
+            if !types::check(&ty, &type_expr, &value, &expr, errors) {
                 return None;
             }
             (ty, value)
@@ -171,41 +168,6 @@ fn variable(
         ty,
         init,
     })
-}
-
-/// The built-in type a type reference names, or `None` after reporting an
-/// unknown type.
-fn resolve_type(
-    type_ref: &TypeRef,
-    values: &Values,
-    errors: &mut Vec<Diagnostic>,
-) -> Option<hir::Type> {
-    let ident = type_ref.ident()?;
-    let ty = hir::Type::from_name(ident.text());
-    if ty.is_none() {
-        errors.push(errors::unknown_type(&ident, values));
-    }
-    ty
-}
-
-/// A literal's value, or `None` if it has none: either it's too large, which
-/// is reported here, or the lexer already reported it as malformed.
-fn literal_value(literal: &Literal, errors: &mut Vec<Diagnostic>) -> Option<hir::Value> {
-    match literal.value() {
-        Ok(LiteralValue::Boolean(value)) => Some(hir::Value::Boolean(value)),
-        Ok(LiteralValue::Integer(value)) => Some(hir::Value::Integer(value)),
-        Ok(LiteralValue::Rational(value)) => Some(hir::Value::Rational(hir::Rational::new(value))),
-        Ok(LiteralValue::Text(value)) => Some(hir::Value::Text(value)),
-        Err(LiteralError::IntegerTooLarge) => {
-            errors.push(errors::integer_out_of_range(literal.span()));
-            None
-        }
-        Err(LiteralError::RationalTooLarge) => {
-            errors.push(errors::rational_out_of_range(literal.span()));
-            None
-        }
-        Err(LiteralError::Malformed) => None,
-    }
 }
 
 #[cfg(test)]
@@ -267,12 +229,12 @@ mod tests {
             [
                 hir::Variable {
                     name: "i".to_string(),
-                    ty: hir::Type::Integer,
+                    ty: hir::Type::Scalar(hir::Scalar::Integer),
                     init: hir::Value::Integer(7),
                 },
                 hir::Variable {
                     name: "t".to_string(),
-                    ty: hir::Type::Text,
+                    ty: hir::Type::Scalar(hir::Scalar::Text),
                     init: hir::Value::Text("a\tb".to_string()),
                 },
             ]
@@ -289,8 +251,8 @@ mod tests {
     #[test]
     fn inferred_types() {
         let vars = variables("var i := 7;\nvar t := \"\";");
-        assert_eq!(vars[0].ty, hir::Type::Integer);
-        assert_eq!(vars[1].ty, hir::Type::Text);
+        assert_eq!(vars[0].ty, hir::Type::Scalar(hir::Scalar::Integer));
+        assert_eq!(vars[1].ty, hir::Type::Scalar(hir::Scalar::Text));
     }
 
     #[test]
@@ -419,24 +381,27 @@ mod tests {
         let vars = variables(
             "var a: rational := 0.0;\nvar b: rational := 0e0;\nvar c := 1.5e-3;\nvar d: rational;",
         );
-        let values: Vec<_> = vars.iter().map(|v| (v.ty, v.init.clone())).collect();
+        let values: Vec<_> = vars
+            .iter()
+            .map(|v| (v.ty.clone(), v.init.clone()))
+            .collect();
         assert_eq!(
             values,
             [
                 (
-                    hir::Type::Rational,
+                    hir::Type::Scalar(hir::Scalar::Rational),
                     hir::Value::Rational(hir::Rational::new(0.0))
                 ),
                 (
-                    hir::Type::Rational,
+                    hir::Type::Scalar(hir::Scalar::Rational),
                     hir::Value::Rational(hir::Rational::new(0.0))
                 ),
                 (
-                    hir::Type::Rational,
+                    hir::Type::Scalar(hir::Scalar::Rational),
                     hir::Value::Rational(hir::Rational::new(0.0015))
                 ),
                 (
-                    hir::Type::Rational,
+                    hir::Type::Scalar(hir::Scalar::Rational),
                     hir::Value::Rational(hir::Rational::new(0.0))
                 ),
             ]
@@ -489,13 +454,25 @@ mod tests {
     #[test]
     fn booleans() {
         let vars = variables("var a := true;\nvar b: boolean := false;\nvar c: boolean;");
-        let values: Vec<_> = vars.iter().map(|v| (v.ty, v.init.clone())).collect();
+        let values: Vec<_> = vars
+            .iter()
+            .map(|v| (v.ty.clone(), v.init.clone()))
+            .collect();
         assert_eq!(
             values,
             [
-                (hir::Type::Boolean, hir::Value::Boolean(true)),
-                (hir::Type::Boolean, hir::Value::Boolean(false)),
-                (hir::Type::Boolean, hir::Value::Boolean(false)),
+                (
+                    hir::Type::Scalar(hir::Scalar::Boolean),
+                    hir::Value::Boolean(true)
+                ),
+                (
+                    hir::Type::Scalar(hir::Scalar::Boolean),
+                    hir::Value::Boolean(false)
+                ),
+                (
+                    hir::Type::Scalar(hir::Scalar::Boolean),
+                    hir::Value::Boolean(false)
+                ),
             ]
         );
     }
@@ -510,6 +487,162 @@ mod tests {
             format!(
                 "var a: boolean := true;\nvar b: boolean := false;\nvar c: text := \"true\";\nvar d: boolean;\nvar e: integer := 2;{MAIN}"
             )
+        );
+    }
+
+    fn scalar(s: hir::Scalar) -> hir::Type {
+        hir::Type::Scalar(s)
+    }
+
+    fn tuple_type(attributes: &[(&str, hir::Type)]) -> hir::Type {
+        hir::Type::Tuple(hir::Heading::new(
+            attributes
+                .iter()
+                .map(|(n, t)| ((*n).to_string(), t.clone()))
+                .collect(),
+        ))
+    }
+
+    #[test]
+    fn nested_tuple_default() {
+        let vars = variables("var x: tuple { a: tuple { b: boolean }, c: text };");
+        let b = tuple_type(&[("b", scalar(hir::Scalar::Boolean))]);
+        assert_eq!(
+            vars[0].ty,
+            tuple_type(&[("a", b), ("c", scalar(hir::Scalar::Text))])
+        );
+        assert_eq!(
+            vars[0].ty.default_value(),
+            vars[0].init,
+            "starts at its type's default"
+        );
+        assert_eq!(
+            vars[0].ty.to_string(),
+            "tuple { a: tuple { b: boolean }, c: text }"
+        );
+    }
+
+    #[test]
+    fn tuple_inference_and_unordered_attributes() {
+        let vars = variables(
+            "var q := tuple { y: 2.0, x: 1.0 };\nvar p: tuple { a: integer, b: text } := tuple { b: \"x\", a: 1, };\nvar e: tuple {};\nvar f := tuple {};",
+        );
+        assert_eq!(vars[0].ty.to_string(), "tuple { x: rational, y: rational }");
+        assert_eq!(vars[1].ty.to_string(), "tuple { a: integer, b: text }");
+        assert_eq!(vars[2].ty, tuple_type(&[]));
+        assert_eq!(vars[3].ty, tuple_type(&[]));
+    }
+
+    #[test]
+    fn mismatch_is_reported_at_the_attribute() {
+        let source = "var p: tuple { a: tuple { b: boolean } } := tuple { a: tuple { b: 1 } };"
+            .to_string()
+            + MAIN;
+        let errors = errors(&source);
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].code, Code::TypeMismatch);
+        assert_eq!(&source[errors[0].span().start..errors[0].span().end], "1");
+        let secondary = errors[0].secondary[0].span;
+        assert_eq!(&source[secondary.start..secondary.end], "boolean");
+        assert_eq!(
+            fix(&source),
+            "var p: tuple { a: tuple { b: boolean } } := tuple { a: tuple { b: true } };"
+                .to_string()
+                + MAIN
+        );
+    }
+
+    #[test]
+    fn tuple_against_scalar() {
+        let errors = errors(&format!("var p: tuple {{ a: integer }} := 5;{MAIN}"));
+        assert_eq!(
+            errors[0].message,
+            "mismatched types: expected `tuple { a: integer }`, found `integer`"
+        );
+        assert_eq!(
+            errors[0].suggestions[0].message,
+            "change the type to `integer`"
+        );
+    }
+
+    #[test]
+    fn missing_attributes() {
+        let source = format!(
+            "var p: tuple {{ x: rational, y: rational, z: text }} := tuple {{ x: 1.0 }};{MAIN}"
+        );
+        let errors = errors(&source);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, Code::MissingAttribute);
+        assert_eq!(errors[0].message, "missing attributes `y` and `z`");
+        assert_eq!(
+            fix(&source),
+            format!(
+                "var p: tuple {{ x: rational, y: rational, z: text }} := tuple {{ x: 1.0, y: 0.0, z: \"\" }};{MAIN}"
+            )
+        );
+        assert_eq!(
+            fix(&format!(
+                "var p: tuple {{ x: integer, y: integer }} := tuple {{ x: 1, }};{MAIN}"
+            )),
+            format!("var p: tuple {{ x: integer, y: integer }} := tuple {{ x: 1, y: 0, }};{MAIN}")
+        );
+        assert_eq!(
+            fix(&format!(
+                "var p: tuple {{ x: integer }} := tuple {{}};{MAIN}"
+            )),
+            format!("var p: tuple {{ x: integer }} := tuple {{ x: 0}};{MAIN}")
+        );
+    }
+
+    #[test]
+    fn unknown_attributes() {
+        let source = format!(
+            "var p: tuple {{ x: rational, y: rational }} := tuple {{ x: 1.0, why: 2.0 }};{MAIN}"
+        );
+        let errors = errors(&source);
+        assert_eq!(
+            errors.len(),
+            1,
+            "a rename resolves the missing attribute too"
+        );
+        assert_eq!(errors[0].code, Code::UnknownAttribute);
+        assert_eq!(errors[0].suggestions[0].message, "rename it to `y`");
+        assert_eq!(
+            fix(&source),
+            format!(
+                "var p: tuple {{ x: rational, y: rational }} := tuple {{ x: 1.0, y: 2.0 }};{MAIN}"
+            )
+        );
+        assert_eq!(
+            fix(&format!(
+                "var p: tuple {{ x: integer }} := tuple {{ x: 1, zzz: 2 }};{MAIN}"
+            )),
+            format!("var p: tuple {{ x: integer }} := tuple {{ x: 1 }};{MAIN}")
+        );
+        assert_eq!(
+            fix(&format!(
+                "var p: tuple {{ x: integer }} := tuple {{ zzz: 2, x: 1 }};{MAIN}"
+            )),
+            format!("var p: tuple {{ x: integer }} := tuple {{ x: 1 }};{MAIN}")
+        );
+    }
+
+    #[test]
+    fn duplicate_attributes() {
+        let errors = errors(&format!(
+            "var p: tuple {{ x: integer, x: text }};\nvar q := tuple {{ y: 1, y: 2 }};{MAIN}"
+        ));
+        let codes: Vec<_> = errors.iter().map(|e| e.code).collect();
+        assert_eq!(codes, [Code::DuplicateAttribute, Code::DuplicateAttribute]);
+        assert_eq!(errors[0].secondary[0].message, "`x` is first defined here");
+    }
+
+    #[test]
+    fn unknown_type_inside_a_tuple() {
+        let source = format!("var p: tuple {{ a: int }};{MAIN}");
+        assert_eq!(
+            fix(&source),
+            format!("var p: tuple {{ a: integer }};{MAIN}")
         );
     }
 

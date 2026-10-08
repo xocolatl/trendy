@@ -104,6 +104,7 @@ pub fn semantic_tokens_legend() -> SemanticTokensLegend {
             SemanticTokenType::TYPE,
             SemanticTokenType::NUMBER,
             SemanticTokenType::STRING,
+            SemanticTokenType::PROPERTY,
         ],
         token_modifiers: vec![
             SemanticTokenModifier::DECLARATION,
@@ -122,6 +123,7 @@ fn token_type(class: Class) -> u32 {
         Class::Type => 3,
         Class::Number => 4,
         Class::Text => 5,
+        Class::Attribute => 6,
     }
 }
 
@@ -304,6 +306,7 @@ mod tests {
         assert_eq!(named(Class::Type), "type");
         assert_eq!(named(Class::Number), "number");
         assert_eq!(named(Class::Text), "string");
+        assert_eq!(named(Class::Attribute), "property");
     }
 
     #[test]

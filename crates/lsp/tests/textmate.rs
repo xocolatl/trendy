@@ -27,6 +27,7 @@ fn punctuation_scope(kind: SyntaxKind) -> &'static str {
         SyntaxKind::LBracket | SyntaxKind::RBracket => "punctuation.section.brackets.trendy",
         SyntaxKind::LParen | SyntaxKind::RParen => "punctuation.section.parens.trendy",
         SyntaxKind::Colon => "punctuation.separator.type.trendy",
+        SyntaxKind::Comma => "punctuation.separator.comma.trendy",
         SyntaxKind::ColonEq => "keyword.operator.assignment.trendy",
         SyntaxKind::Eq => "keyword.operator.comparison.trendy",
         SyntaxKind::Semicolon => "punctuation.terminator.trendy",
@@ -160,22 +161,11 @@ fn regex_escape(text: &str) -> String {
         .collect()
 }
 
-fn generate(probed: &Probed) -> Value {
-    let kinds = SyntaxKind::ALL;
-    let keyword = |kind: SyntaxKind| regex_escape(kind.fixed_text().unwrap());
-    // Literal keywords (`true`, `false`) are colored as constants.
-    let (literal_keywords, keywords): (Vec<_>, Vec<_>) = kinds
-        .into_iter()
-        .filter(|k| k.is_keyword())
-        .partition(|k| k.is_literal());
-    let keywords: Vec<_> = keywords.into_iter().map(keyword).collect();
-    let literal_keywords: Vec<_> = literal_keywords.into_iter().map(keyword).collect();
-    let identifier = &probed.identifier;
-
-    // Group punctuation by scope; longer tokens are tried first, so that
-    // `:=` isn't taken for `:` followed by `=`.
+/// One pattern per punctuation scope. Longer tokens are tried first, so
+/// that `:=` isn't taken for `:` followed by `=`.
+fn punctuation_patterns() -> Vec<Value> {
     let mut punctuation: Vec<(&str, Vec<&str>)> = Vec::new();
-    for kind in kinds.into_iter().filter(|k| k.is_punctuation()) {
+    for kind in SyntaxKind::ALL.into_iter().filter(|k| k.is_punctuation()) {
         let text = kind.fixed_text().unwrap();
         let scope = punctuation_scope(kind);
         match punctuation.iter_mut().find(|(s, _)| *s == scope) {
@@ -185,7 +175,7 @@ fn generate(probed: &Probed) -> Value {
     }
     let longest = |texts: &[&str]| texts.iter().map(|t| t.len()).max().unwrap();
     punctuation.sort_by_key(|(_, texts)| std::cmp::Reverse(longest(texts)));
-    let punctuation_patterns: Vec<_> = punctuation
+    punctuation
         .iter()
         .map(|(scope, texts)| {
             let mut texts = texts.clone();
@@ -193,7 +183,27 @@ fn generate(probed: &Probed) -> Value {
             let alternatives: Vec<_> = texts.iter().map(|t| regex_escape(t)).collect();
             json!({ "match": alternatives.join("|"), "name": scope })
         })
+        .collect()
+}
+
+fn generate(probed: &Probed) -> Value {
+    let kinds = SyntaxKind::ALL;
+    let keyword = |kind: SyntaxKind| regex_escape(kind.fixed_text().unwrap());
+    // Literal keywords (`true`, `false`) are colored as constants.
+    let (literal_keywords, keywords): (Vec<_>, Vec<_>) = kinds
+        .into_iter()
+        .filter(|k| k.is_keyword())
+        .partition(|k| k.is_literal());
+    let keywords: Vec<_> = keywords.into_iter().map(keyword).collect();
+    let all_keywords: Vec<_> = kinds
+        .into_iter()
+        .filter(|k| k.is_keyword())
+        .map(keyword)
         .collect();
+    let literal_keywords: Vec<_> = literal_keywords.into_iter().map(keyword).collect();
+    let identifier = &probed.identifier;
+
+    let punctuation_patterns = punctuation_patterns();
 
     let simple_escapes: String = trendy_syntax::literal::SIMPLE_ESCAPES
         .iter()
@@ -222,11 +232,14 @@ fn generate(probed: &Probed) -> Value {
                     "2": { "name": "entity.name.function.trendy" },
                 },
             },
+            // The type name is only captured when it isn't a keyword, such as
+            // the `tuple` of a tuple type.
             "variable-declaration": {
                 "match": format!(
-                    "\\b({})\\s+({identifier})(?:\\s*({})\\s*({identifier}))?",
+                    "\\b({})\\s+({identifier})(?:\\s*({})\\s*(?!(?:{})\\b)({identifier}))?",
                     keyword(SyntaxKind::VarKw),
                     regex_escape(SyntaxKind::Colon.fixed_text().unwrap()),
+                    all_keywords.join("|"),
                 ),
                 "captures": {
                     "1": { "name": "keyword.other.trendy" },

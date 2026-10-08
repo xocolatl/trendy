@@ -37,6 +37,11 @@ fn variables() {
     assert_eq!(compile_and_run("variables"), 0);
 }
 
+#[test]
+fn tuples() {
+    assert_eq!(compile_and_run("tuples"), 0);
+}
+
 /// Run `trendyc` on `source` with `args`, returning (success, stdout, stderr).
 fn trendyc(name: &str, source: &str, args: &[&str]) -> (bool, String, String) {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));

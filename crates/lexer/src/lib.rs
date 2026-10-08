@@ -67,6 +67,7 @@ pub fn lex(source: &str) -> Lexed {
                 '(' => SyntaxKind::LParen,
                 ')' => SyntaxKind::RParen,
                 ':' => SyntaxKind::Colon,
+                ',' => SyntaxKind::Comma,
                 '=' => SyntaxKind::Eq,
                 ';' => SyntaxKind::Semicolon,
                 _ => {
@@ -531,6 +532,17 @@ mod tests {
     #[test]
     fn a_lone_point_is_still_unexpected() {
         assert_eq!(codes("."), [Code::UnexpectedCharacter]);
+    }
+
+    #[test]
+    fn tuple_tokens() {
+        assert_eq!(
+            kinds("tuple { a: 1, }"),
+            [
+                TupleKw, Whitespace, LBrace, Whitespace, Ident, Colon, Whitespace, IntLiteral,
+                Comma, Whitespace, RBrace
+            ]
+        );
     }
 
     #[test]

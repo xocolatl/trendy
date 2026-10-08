@@ -29,6 +29,7 @@ pub enum SyntaxKind {
     TrueKw,
     /// `false`, a boolean literal.
     FalseKw,
+    TupleKw,
     LBrace,
     RBrace,
     LBracket,
@@ -38,6 +39,7 @@ pub enum SyntaxKind {
     LParen,
     RParen,
     Colon,
+    Comma,
     ColonEq,
     /// Not in the grammar yet; lexed so that `=` written for `:=` can be
     /// recognized and fixed.
@@ -70,6 +72,14 @@ pub enum SyntaxKind {
     TypeRef,
     /// `:= value`
     Initializer,
+    /// `tuple { name: type, … }`
+    TupleType,
+    /// `name: type`, in a tuple type.
+    AttributeType,
+    /// `tuple { name: value, … }`
+    TupleLiteral,
+    /// `name: value`, in a tuple literal.
+    AttributeValue,
     Literal,
     /// Tokens the parser could not fit into the grammar.
     Error,
@@ -77,13 +87,14 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 31] = [
+    pub const ALL: [SyntaxKind; 37] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Ident,
         SyntaxKind::OperatorKw,
         SyntaxKind::VarKw,
         SyntaxKind::TrueKw,
         SyntaxKind::FalseKw,
+        SyntaxKind::TupleKw,
         SyntaxKind::LBrace,
         SyntaxKind::RBrace,
         SyntaxKind::LBracket,
@@ -91,6 +102,7 @@ impl SyntaxKind {
         SyntaxKind::LParen,
         SyntaxKind::RParen,
         SyntaxKind::Colon,
+        SyntaxKind::Comma,
         SyntaxKind::ColonEq,
         SyntaxKind::Eq,
         SyntaxKind::Semicolon,
@@ -107,6 +119,10 @@ impl SyntaxKind {
         SyntaxKind::TypeAnnotation,
         SyntaxKind::TypeRef,
         SyntaxKind::Initializer,
+        SyntaxKind::TupleType,
+        SyntaxKind::AttributeType,
+        SyntaxKind::TupleLiteral,
+        SyntaxKind::AttributeValue,
         SyntaxKind::Literal,
         SyntaxKind::Error,
     ];
@@ -120,7 +136,11 @@ impl SyntaxKind {
     pub fn is_keyword(self) -> bool {
         matches!(
             self,
-            SyntaxKind::OperatorKw | SyntaxKind::VarKw | SyntaxKind::TrueKw | SyntaxKind::FalseKw
+            SyntaxKind::OperatorKw
+                | SyntaxKind::VarKw
+                | SyntaxKind::TrueKw
+                | SyntaxKind::FalseKw
+                | SyntaxKind::TupleKw
         )
     }
 
@@ -160,6 +180,7 @@ impl SyntaxKind {
             SyntaxKind::VarKw => "var",
             SyntaxKind::TrueKw => "true",
             SyntaxKind::FalseKw => "false",
+            SyntaxKind::TupleKw => "tuple",
             SyntaxKind::LBrace => "{",
             SyntaxKind::RBrace => "}",
             SyntaxKind::LBracket => "[",
@@ -167,6 +188,7 @@ impl SyntaxKind {
             SyntaxKind::LParen => "(",
             SyntaxKind::RParen => ")",
             SyntaxKind::Colon => ":",
+            SyntaxKind::Comma => ",",
             SyntaxKind::ColonEq => ":=",
             SyntaxKind::Eq => "=",
             SyntaxKind::Semicolon => ";",
@@ -184,6 +206,7 @@ impl SyntaxKind {
             SyntaxKind::VarKw => "`var`",
             SyntaxKind::TrueKw => "`true`",
             SyntaxKind::FalseKw => "`false`",
+            SyntaxKind::TupleKw => "`tuple`",
             SyntaxKind::LBrace => "`{`",
             SyntaxKind::RBrace => "`}`",
             SyntaxKind::LBracket => "`[`",
@@ -191,6 +214,7 @@ impl SyntaxKind {
             SyntaxKind::LParen => "`(`",
             SyntaxKind::RParen => "`)`",
             SyntaxKind::Colon => "`:`",
+            SyntaxKind::Comma => "`,`",
             SyntaxKind::ColonEq => "`:=`",
             SyntaxKind::Eq => "`=`",
             SyntaxKind::Semicolon => "`;`",
@@ -207,7 +231,10 @@ impl SyntaxKind {
             SyntaxKind::TypeAnnotation => "type annotation",
             SyntaxKind::TypeRef => "type",
             SyntaxKind::Initializer => "initial value",
-            SyntaxKind::Literal => "literal",
+            SyntaxKind::TupleType => "tuple type",
+            SyntaxKind::TupleLiteral => "tuple value",
+            SyntaxKind::AttributeType | SyntaxKind::AttributeValue => "attribute",
+            SyntaxKind::Literal => "value",
             SyntaxKind::Error => "error",
         }
     }

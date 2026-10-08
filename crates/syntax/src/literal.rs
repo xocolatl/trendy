@@ -1,6 +1,7 @@
 //! What literals mean. The lexer uses this module to report malformed
 //! literals and sema uses it to decode them, so the rules live only here.
 
+use std::fmt::Write;
 use std::ops::Range;
 
 /// Escapes written as a backslash and one character, and what they stand for.
@@ -22,6 +23,27 @@ pub fn escape_list() -> String {
         .chain(std::iter::once("\\u{…}".to_string()))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// The body of a text literal for `text`: the inverse of [`decode_text`].
+/// Quotes and backslashes are escaped, as are control characters.
+#[must_use]
+pub fn escape_text(text: &str) -> String {
+    let mut body = String::with_capacity(text.len());
+    for c in text.chars() {
+        match SIMPLE_ESCAPES.iter().find(|(_, value)| *value == c) {
+            Some((name, _)) => {
+                body.push('\\');
+                body.push(*name);
+            }
+            None if c.is_control() => {
+                // Writing to a `String` cannot fail.
+                let _ = write!(body, "\\u{{{:X}}}", u32::from(c));
+            }
+            None => body.push(c),
+        }
+    }
+    body
 }
 
 /// A problem inside a text literal. Ranges are byte offsets into the body,
@@ -282,6 +304,15 @@ mod tests {
     #[test]
     fn unicode_escapes() {
         assert_eq!(decode_text(r"\u{1F600}\u{e9}"), ("😀é".to_string(), vec![]));
+    }
+
+    #[test]
+    fn escape_is_the_inverse_of_decode() {
+        for text in ["", "plain", "a\"b\\c\nd\re\tf\0g", "\u{7}bell", "é😀"] {
+            let body = escape_text(text);
+            assert_eq!(decode_text(&body), (text.to_string(), vec![]), "{body}");
+        }
+        assert_eq!(escape_text("say \"hi\""), r#"say \"hi\""#);
     }
 
     #[test]

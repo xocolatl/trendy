@@ -16,7 +16,8 @@ pub enum Code {
     InvalidEscape,
     InvalidInteger,
     InvalidRational,
-    MiscasedBoolean,
+    MiscasedKeyword,
+    AttributeSeparator,
     DuplicateName,
     MissingMain,
     UnknownType,
@@ -24,10 +25,13 @@ pub enum Code {
     IntegerOutOfRange,
     UntypedVariable,
     RationalOutOfRange,
+    DuplicateAttribute,
+    MissingAttribute,
+    UnknownAttribute,
 }
 
 impl Code {
-    pub const ALL: [Code; 17] = [
+    pub const ALL: [Code; 21] = [
         Code::UnexpectedCharacter,
         Code::MissingToken,
         Code::WrongDelimiter,
@@ -37,7 +41,8 @@ impl Code {
         Code::InvalidEscape,
         Code::InvalidInteger,
         Code::InvalidRational,
-        Code::MiscasedBoolean,
+        Code::MiscasedKeyword,
+        Code::AttributeSeparator,
         Code::DuplicateName,
         Code::MissingMain,
         Code::UnknownType,
@@ -45,6 +50,9 @@ impl Code {
         Code::IntegerOutOfRange,
         Code::UntypedVariable,
         Code::RationalOutOfRange,
+        Code::DuplicateAttribute,
+        Code::MissingAttribute,
+        Code::UnknownAttribute,
     ];
 
     #[must_use]
@@ -59,7 +67,8 @@ impl Code {
             Code::InvalidEscape => "E0007",
             Code::InvalidInteger => "E0008",
             Code::InvalidRational => "E0009",
-            Code::MiscasedBoolean => "E0010",
+            Code::MiscasedKeyword => "E0010",
+            Code::AttributeSeparator => "E0011",
             Code::DuplicateName => "E0101",
             Code::MissingMain => "E0102",
             Code::UnknownType => "E0103",
@@ -67,6 +76,9 @@ impl Code {
             Code::IntegerOutOfRange => "E0105",
             Code::UntypedVariable => "E0106",
             Code::RationalOutOfRange => "E0107",
+            Code::DuplicateAttribute => "E0108",
+            Code::MissingAttribute => "E0109",
+            Code::UnknownAttribute => "E0110",
         }
     }
 
@@ -91,7 +103,8 @@ impl Code {
             Code::InvalidEscape => include_str!("../errors/E0007.md"),
             Code::InvalidInteger => include_str!("../errors/E0008.md"),
             Code::InvalidRational => include_str!("../errors/E0009.md"),
-            Code::MiscasedBoolean => include_str!("../errors/E0010.md"),
+            Code::MiscasedKeyword => include_str!("../errors/E0010.md"),
+            Code::AttributeSeparator => include_str!("../errors/E0011.md"),
             Code::DuplicateName => include_str!("../errors/E0101.md"),
             Code::MissingMain => include_str!("../errors/E0102.md"),
             Code::UnknownType => include_str!("../errors/E0103.md"),
@@ -99,6 +112,9 @@ impl Code {
             Code::IntegerOutOfRange => include_str!("../errors/E0105.md"),
             Code::UntypedVariable => include_str!("../errors/E0106.md"),
             Code::RationalOutOfRange => include_str!("../errors/E0107.md"),
+            Code::DuplicateAttribute => include_str!("../errors/E0108.md"),
+            Code::MissingAttribute => include_str!("../errors/E0109.md"),
+            Code::UnknownAttribute => include_str!("../errors/E0110.md"),
         }
     }
 }

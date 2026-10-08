@@ -6,6 +6,8 @@
 //!
 //! Variables and operators share one namespace; types have their own.
 
+use std::collections::BTreeMap;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program {
     pub operators: Vec<Operator>,
@@ -42,9 +44,57 @@ pub struct Variable {
     pub init: Value,
 }
 
+/// A type: a built-in scalar type, or a tuple type.
+///
+/// Types are structural: two tuple types are the same type exactly when
+/// their headings are equal, wherever they are written.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Type {
+    Scalar(Scalar),
+    Tuple(Heading),
+}
+
+impl Type {
+    /// The value a variable of this type starts with when none is given:
+    /// for a tuple, each attribute's default.
+    #[must_use]
+    pub fn default_value(&self) -> Value {
+        match self {
+            Type::Scalar(scalar) => scalar.default_value(),
+            Type::Tuple(heading) => Value::Tuple(TupleValue(
+                heading
+                    .attributes()
+                    .map(|(name, ty)| (name.to_string(), ty.default_value()))
+                    .collect(),
+            )),
+        }
+    }
+}
+
+/// Source text for the type, with attributes in name order, as in
+/// `tuple { a: integer, b: text }`.
+impl std::fmt::Display for Type {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Type::Scalar(scalar) => f.write_str(scalar.name()),
+            Type::Tuple(heading) if heading.is_empty() => f.write_str("tuple {}"),
+            Type::Tuple(heading) => {
+                f.write_str("tuple { ")?;
+                for (i, (name, ty)) in heading.attributes().enumerate() {
+                    if i > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{name}: {ty}")?;
+                }
+                f.write_str(" }")
+            }
+        }
+    }
+}
+
 /// A built-in scalar type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Type {
+pub enum Scalar {
     /// `true` or `false`.
     Boolean,
     /// A 64-bit signed integer.
@@ -56,36 +106,68 @@ pub enum Type {
     Text,
 }
 
-impl Type {
+impl Scalar {
     /// In alphabetical order, as messages list them.
-    pub const ALL: [Type; 4] = [Type::Boolean, Type::Integer, Type::Rational, Type::Text];
+    pub const ALL: [Scalar; 4] = [
+        Scalar::Boolean,
+        Scalar::Integer,
+        Scalar::Rational,
+        Scalar::Text,
+    ];
 
     /// The type's name in source code.
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
-            Type::Boolean => "boolean",
-            Type::Integer => "integer",
-            Type::Rational => "rational",
-            Type::Text => "text",
+            Scalar::Boolean => "boolean",
+            Scalar::Integer => "integer",
+            Scalar::Rational => "rational",
+            Scalar::Text => "text",
         }
     }
 
     /// The built-in type called `name`, if there is one.
     #[must_use]
-    pub fn from_name(name: &str) -> Option<Type> {
-        Type::ALL.into_iter().find(|t| t.name() == name)
+    pub fn from_name(name: &str) -> Option<Scalar> {
+        Scalar::ALL.into_iter().find(|t| t.name() == name)
     }
 
-    /// The value a variable of this type starts with when none is given.
     #[must_use]
     pub fn default_value(self) -> Value {
         match self {
-            Type::Boolean => Value::Boolean(false),
-            Type::Integer => Value::Integer(0),
-            Type::Rational => Value::Rational(Rational::new(0.0)),
-            Type::Text => Value::Text(String::new()),
+            Scalar::Boolean => Value::Boolean(false),
+            Scalar::Integer => Value::Integer(0),
+            Scalar::Rational => Value::Rational(Rational::new(0.0)),
+            Scalar::Text => Value::Text(String::new()),
         }
+    }
+}
+
+/// A tuple type's heading: its attributes' names and types. Attributes are
+/// unordered (TTM RM Proscription 1); they are kept sorted by name, which is
+/// also the order they are displayed and laid out in.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct Heading(BTreeMap<String, Type>);
+
+impl Heading {
+    #[must_use]
+    pub fn new(attributes: BTreeMap<String, Type>) -> Self {
+        Heading(attributes)
+    }
+
+    /// The attributes, sorted by name.
+    pub fn attributes(&self) -> impl Iterator<Item = (&str, &Type)> {
+        self.0.iter().map(|(name, ty)| (name.as_str(), ty))
+    }
+
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<&Type> {
+        self.0.get(name)
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 }
 
@@ -95,17 +177,42 @@ pub enum Value {
     Integer(i64),
     Rational(Rational),
     Text(String),
+    Tuple(TupleValue),
 }
 
 impl Value {
     #[must_use]
     pub fn ty(&self) -> Type {
+        let scalar = |s| Type::Scalar(s);
         match self {
-            Value::Boolean(_) => Type::Boolean,
-            Value::Integer(_) => Type::Integer,
-            Value::Rational(_) => Type::Rational,
-            Value::Text(_) => Type::Text,
+            Value::Boolean(_) => scalar(Scalar::Boolean),
+            Value::Integer(_) => scalar(Scalar::Integer),
+            Value::Rational(_) => scalar(Scalar::Rational),
+            Value::Text(_) => scalar(Scalar::Text),
+            Value::Tuple(tuple) => Type::Tuple(Heading(
+                tuple
+                    .attributes()
+                    .map(|(name, value)| (name.to_string(), value.ty()))
+                    .collect(),
+            )),
         }
+    }
+}
+
+/// A tuple value: a value for each attribute of its heading. Two tuples are
+/// equal when every attribute's values are equal.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct TupleValue(BTreeMap<String, Value>);
+
+impl TupleValue {
+    #[must_use]
+    pub fn new(attributes: BTreeMap<String, Value>) -> Self {
+        TupleValue(attributes)
+    }
+
+    /// The attributes, sorted by name.
+    pub fn attributes(&self) -> impl Iterator<Item = (&str, &Value)> {
+        self.0.iter().map(|(name, value)| (name.as_str(), value))
     }
 }
 
@@ -172,6 +279,52 @@ impl std::hash::Hash for Rational {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tuple(attributes: &[(&str, Type)]) -> Type {
+        Type::Tuple(Heading::new(
+            attributes
+                .iter()
+                .map(|(name, ty)| ((*name).to_string(), ty.clone()))
+                .collect(),
+        ))
+    }
+
+    #[test]
+    fn nested_tuple_defaults() {
+        let ty = tuple(&[
+            ("c", Type::Scalar(Scalar::Text)),
+            ("a", tuple(&[("b", Type::Scalar(Scalar::Boolean))])),
+        ]);
+        let expected = Value::Tuple(TupleValue::new(
+            [
+                (
+                    "a".to_string(),
+                    Value::Tuple(TupleValue::new(
+                        [("b".to_string(), Value::Boolean(false))].into(),
+                    )),
+                ),
+                ("c".to_string(), Value::Text(String::new())),
+            ]
+            .into(),
+        ));
+        assert_eq!(ty.default_value(), expected);
+        assert_eq!(expected.ty(), ty);
+    }
+
+    #[test]
+    fn tuple_types_are_structural_and_unordered() {
+        let ab = tuple(&[
+            ("a", Type::Scalar(Scalar::Integer)),
+            ("b", Type::Scalar(Scalar::Text)),
+        ]);
+        let ba = tuple(&[
+            ("b", Type::Scalar(Scalar::Text)),
+            ("a", Type::Scalar(Scalar::Integer)),
+        ]);
+        assert_eq!(ab, ba);
+        assert_eq!(ba.to_string(), "tuple { a: integer, b: text }");
+        assert_eq!(tuple(&[]).to_string(), "tuple {}");
+    }
 
     #[test]
     fn rational_equality_is_identity() {

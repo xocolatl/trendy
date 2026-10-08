@@ -14,6 +14,9 @@
 //! - `rational`: one [`Field::F64Bits`], a 64-bit IEEE 754 binary float.
 //! - `text`: an [`Field::Address`] of a read-only constant holding the UTF-8
 //!   bytes, then a [`Field::Usize`] with the length in bytes.
+//! - a tuple: a [`Field::Struct`] of its attributes' fields, in attribute
+//!   name order. Because a struct's layout doesn't depend on where it is, an
+//!   attribute that is itself a tuple can be used, or passed, on its own.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program {
@@ -85,4 +88,8 @@ pub enum Field {
     Address(DataId),
     /// Raw bytes, with no alignment.
     Bytes(Vec<u8>),
+    /// Fields laid out together. A struct is aligned to its widest field
+    /// and padded to a multiple of that alignment, so it has the same layout
+    /// wherever it is embedded.
+    Struct(Vec<Field>),
 }

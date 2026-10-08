@@ -126,7 +126,8 @@ impl<'a> Parser<'a> {
         self.bump();
         self.name("add a name after `var`, such as `var count: integer := 0;`");
 
-        if self.at(SyntaxKind::Colon) || self.at(SyntaxKind::Ident) {
+        let starts_type = |k| matches!(k, SyntaxKind::Ident | SyntaxKind::TupleKw);
+        if self.at(SyntaxKind::Colon) || self.peek().is_some_and(starts_type) {
             self.builder.start_node(SyntaxKind::TypeAnnotation);
             if self.at(SyntaxKind::Colon) {
                 self.bump();
@@ -134,7 +135,7 @@ impl<'a> Parser<'a> {
                 // `var i integer`: the type is there but the colon isn't.
                 self.missing(SyntaxKind::Colon);
             }
-            self.type_ref();
+            self.type_expr();
             self.builder.finish_node();
         }
 
@@ -148,7 +149,7 @@ impl<'a> Parser<'a> {
                 self.expression();
                 self.builder.finish_node();
             }
-            Some(found) if found.kind.is_literal() => {
+            Some(found) if found.kind.is_literal() || found.kind == SyntaxKind::TupleKw => {
                 // `var i: integer 0`: the value is there but `:=` isn't.
                 self.builder.start_node(SyntaxKind::Initializer);
                 self.missing(SyntaxKind::ColonEq);
@@ -172,25 +173,38 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn type_ref(&mut self) {
-        if self.at(SyntaxKind::Ident) {
+    /// A named type, or a tuple type.
+    fn type_expr(&mut self) {
+        if self.at_tuple() {
+            self.tuple(
+                SyntaxKind::TupleType,
+                SyntaxKind::AttributeType,
+                Self::type_expr,
+            );
+        } else if self.at(SyntaxKind::Ident) {
             self.builder.start_node(SyntaxKind::TypeRef);
             self.bump();
             self.builder.finish_node();
         } else {
             self.missing_with_help(
                 SyntaxKind::TypeRef,
-                "write a type after `:`, such as `integer` or `text`, or remove the `:`",
+                "write a type, such as `integer`, `text` or `tuple { name: text }`",
             );
         }
     }
 
-    /// For now, the only expressions are literals.
+    /// A literal, or a tuple value.
     fn expression(&mut self) {
         if self.peek().is_some_and(SyntaxKind::is_literal) {
             self.builder.start_node(SyntaxKind::Literal);
             self.bump();
             self.builder.finish_node();
+        } else if self.at_tuple() {
+            self.tuple(
+                SyntaxKind::TupleLiteral,
+                SyntaxKind::AttributeValue,
+                Self::expression,
+            );
         } else if let Some(found) = self
             .found()
             .filter(|f| f.kind == SyntaxKind::Ident && errors::boolean_spelling(f.text).is_some())
@@ -200,13 +214,103 @@ impl<'a> Parser<'a> {
             self.builder.start_node(SyntaxKind::Literal);
             self.bump();
             self.builder.finish_node();
-            self.errors.push(errors::miscased_boolean(found));
+            self.errors.push(errors::miscased_keyword(
+                found,
+                errors::boolean_spelling(found.text).expect("just checked"),
+            ));
         } else {
             self.missing_with_help(
                 SyntaxKind::Literal,
-                "write a value, such as `0` or `\"\"`, or remove the `:=`",
+                "write a value, such as `0`, `\"\"` or `tuple { name: \"x\" }`",
             );
         }
+    }
+
+    /// Whether a tuple type or value starts here: `tuple {`, a mis-cased
+    /// `TUPLE {`, or a bare `{`, as in a JSON or JavaScript object.
+    fn at_tuple(&mut self) -> bool {
+        let Some(found) = self.found() else {
+            return false;
+        };
+        let brace_next = self
+            .found_after(1)
+            .is_some_and(|f| f.kind == SyntaxKind::LBrace);
+        match found.kind {
+            SyntaxKind::TupleKw | SyntaxKind::LBrace => true,
+            SyntaxKind::Ident => brace_next && found.text.eq_ignore_ascii_case("tuple"),
+            _ => false,
+        }
+    }
+
+    /// `tuple { item, … }`, where an item is `name: x` and `x` is parsed by
+    /// `item`. `node` and `attribute` are the node kinds for the whole and
+    /// for each item. A trailing comma is allowed.
+    fn tuple(&mut self, node: SyntaxKind, attribute: SyntaxKind, item: fn(&mut Self)) {
+        let outer_form = std::mem::replace(
+            &mut self.form,
+            if node == SyntaxKind::TupleType {
+                errors::TUPLE_TYPE_FORM
+            } else {
+                errors::TUPLE_VALUE_FORM
+            },
+        );
+        self.builder.start_node(node);
+        let found = self.found().expect("at_tuple saw a token");
+        match found.kind {
+            SyntaxKind::TupleKw => {
+                self.bump();
+            }
+            SyntaxKind::Ident => {
+                // `TUPLE` or `Tuple`.
+                self.bump();
+                self.errors.push(errors::miscased_keyword(found, "tuple"));
+            }
+            _ => self.missing(SyntaxKind::TupleKw),
+        }
+
+        if self.at(SyntaxKind::LBrace) {
+            self.bump();
+            while self.at(SyntaxKind::Ident) {
+                self.attribute(attribute, item);
+                match self.peek() {
+                    Some(SyntaxKind::Comma) => {
+                        self.bump();
+                    }
+                    // `tuple { a: 1 b: 2 }`: the next attribute is there but
+                    // the comma isn't.
+                    Some(SyntaxKind::Ident) => self.missing(SyntaxKind::Comma),
+                    _ => break,
+                }
+            }
+            self.expect(SyntaxKind::RBrace);
+        } else {
+            self.missing(SyntaxKind::LBrace);
+            self.missing(SyntaxKind::RBrace);
+        }
+        self.builder.finish_node();
+        self.form = outer_form;
+    }
+
+    /// `name: x`, with `x` parsed by `item`.
+    fn attribute(&mut self, attribute: SyntaxKind, item: fn(&mut Self)) {
+        self.builder.start_node(attribute);
+        self.builder.start_node(SyntaxKind::Name);
+        self.bump();
+        self.builder.finish_node();
+        match self.found() {
+            Some(found) if found.kind == SyntaxKind::Colon => {
+                self.bump();
+            }
+            Some(found) if matches!(found.kind, SyntaxKind::Eq | SyntaxKind::ColonEq) => {
+                let span = self.bump();
+                self.errors
+                    .push(errors::wrong_attribute_separator(found.kind, span));
+            }
+            // `TUPLE { A INTEGER }`, as in Tutorial D: the colon is missing.
+            _ => self.missing(SyntaxKind::Colon),
+        }
+        item(self);
+        self.builder.finish_node();
     }
 
     /// A `node` made of a `delims` pair with nothing between.
@@ -268,12 +372,20 @@ impl<'a> Parser<'a> {
         }
         self.builder.finish_node();
         let end = self.last_end.unwrap_or(first.span.end);
-        self.errors.push(errors::expected_definition(
-            first,
-            name,
-            after_name,
-            Span::new(first.span.start, end),
-        ));
+        // `VAR` or `Operator`: a definition keyword in the wrong case.
+        let miscased = [SyntaxKind::OperatorKw, SyntaxKind::VarKw]
+            .into_iter()
+            .filter_map(SyntaxKind::fixed_text)
+            .find(|k| first.kind == SyntaxKind::Ident && k.eq_ignore_ascii_case(first.text));
+        self.errors.push(match miscased {
+            Some(keyword) => errors::miscased_keyword(first, keyword),
+            None => errors::expected_definition(
+                first,
+                name,
+                after_name,
+                Span::new(first.span.start, end),
+            ),
+        });
     }
 
     /// The kind of the next significant token, or `None` at end of input.
@@ -595,7 +707,7 @@ SourceFile
             assert!(parse_str(source).errors.is_empty(), "{source}");
         }
         let decl = parse_str("var i := 0;").tree.variables().next().unwrap();
-        assert!(decl.type_ref().is_none());
+        assert!(decl.type_expr().is_none());
         assert!(decl.initializer().is_some());
     }
 
@@ -636,7 +748,7 @@ SourceFile
         let errors = parse_str("var i: := 0;").errors;
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].message, "expected type, found `:=`");
-        assert!(errors[0].help[0].contains("such as `integer` or `text`"));
+        assert!(errors[0].help[0].contains("such as `integer`"));
         assert!(errors[0].notes[0].starts_with("a variable declaration has the form"));
     }
 
@@ -644,8 +756,8 @@ SourceFile
     fn missing_value_after_assignment() {
         let errors = parse_str("var i :=;").errors;
         assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].message, "expected literal, found `;`");
-        assert!(errors[0].help[0].contains("or remove the `:=`"));
+        assert_eq!(errors[0].message, "expected value, found `;`");
+        assert!(errors[0].help[0].contains("such as `0`"));
     }
 
     #[test]
@@ -692,8 +804,99 @@ SourceFile
         let source = "var a := True;\nvar b := FALSE;";
         let errors = parse_str(source).errors;
         assert_eq!(errors.len(), 2);
-        assert_eq!(errors[0].code, Code::MiscasedBoolean);
+        assert_eq!(errors[0].code, Code::MiscasedKeyword);
         assert_eq!(fix(source), "var a := true;\nvar b := false;");
+    }
+
+    #[test]
+    fn tuple_type_tree() {
+        let parse = parse_str("var x: tuple { a: integer, };");
+        assert!(parse.errors.is_empty(), "{:?}", parse.errors);
+        assert_eq!(
+            outline(parse.tree.syntax()),
+            "\
+SourceFile
+  VarDecl
+    VarKw \"var\"
+    Whitespace \" \"
+    Name
+      Ident \"x\"
+    TypeAnnotation
+      Colon \":\"
+      Whitespace \" \"
+      TupleType
+        TupleKw \"tuple\"
+        Whitespace \" \"
+        LBrace \"{\"
+        Whitespace \" \"
+        AttributeType
+          Name
+            Ident \"a\"
+          Colon \":\"
+          Whitespace \" \"
+          TypeRef
+            Ident \"integer\"
+        Comma \",\"
+        Whitespace \" \"
+        RBrace \"}\"
+    Semicolon \";\"
+"
+        );
+    }
+
+    #[test]
+    fn tuples_nest_in_types_and_values() {
+        for source in [
+            "var x: tuple { a: tuple { b: boolean }, c: text };",
+            "var q := tuple { x: 1.0, y: tuple { z: \"\" } };",
+            "var e: tuple {} := tuple {};",
+            "var t: tuple { a: integer } := tuple { a: 1, };",
+        ] {
+            assert!(parse_str(source).errors.is_empty(), "{source}");
+        }
+    }
+
+    #[test]
+    fn tuple_recovery() {
+        let one_fix = |source: &str, fixed: &str| {
+            let errors = parse_str(source).errors;
+            assert_eq!(errors.len(), 1, "{source}: {errors:#?}");
+            assert_eq!(fix(source), fixed, "{source}");
+        };
+        // Tutorial D: no colon.
+        one_fix(
+            "var p: tuple { x rational };",
+            "var p: tuple { x: rational };",
+        );
+        // Missing comma.
+        one_fix(
+            "var p := tuple { x: 1 y: 2 };",
+            "var p := tuple { x: 1, y: 2 };",
+        );
+        // `=` as the separator.
+        one_fix("var p := tuple { x = 1 };", "var p := tuple { x : 1 };");
+        // A JavaScript object literal.
+        one_fix("var p := { x: 1 };", "var p :=tuple { x: 1 };");
+        one_fix("var p: { x: integer };", "var p:tuple { x: integer };");
+        // Missing closing brace.
+        one_fix("var p := tuple { x: 1;", "var p := tuple { x: 1};");
+    }
+
+    #[test]
+    fn miscased_keywords() {
+        let codes = |source: &str| -> Vec<Code> {
+            parse_str(source).errors.iter().map(|e| e.code).collect()
+        };
+        assert_eq!(
+            codes("var p: TUPLE { x: rational };"),
+            [Code::MiscasedKeyword]
+        );
+        assert_eq!(fix("var p := Tuple { x: 1 };"), "var p := tuple { x: 1 };");
+        assert_eq!(codes("VAR x := 1;"), [Code::MiscasedKeyword]);
+        assert_eq!(fix("VAR x := 1;"), "var x := 1;");
+        assert_eq!(fix("OPERATOR main{} [];"), "operator main{} [];");
+        // `TUPLE` alone is just a (wrong) type name.
+        assert!(codes("var p: TUPLE;").is_empty());
     }
 
     #[test]

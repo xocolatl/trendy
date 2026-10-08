@@ -4,4 +4,6 @@ var r1: rational := 0.0;
 var r2: rational := 0e0;
 var t: text := "";
 
+var tp: tuple { a: boolean, b: integer };
+
 operator main{} [];

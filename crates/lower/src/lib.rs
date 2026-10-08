@@ -51,6 +51,13 @@ fn value_fields(value: &hir::Value, data: &mut Vec<lir::Data>) -> Vec<lir::Field
             let len = u64::try_from(text.len()).expect("lengths fit in 64 bits");
             vec![lir::Field::Address(bytes), lir::Field::Usize(len)]
         }
+        // Attributes come in name order, the heading's order.
+        hir::Value::Tuple(tuple) => vec![lir::Field::Struct(
+            tuple
+                .attributes()
+                .flat_map(|(_, value)| value_fields(value, data))
+                .collect(),
+        )],
     }
 }
 
@@ -146,6 +153,34 @@ mod tests {
                     fields: vec![lir::Field::U8(1)],
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn tuples_become_structs_in_attribute_order() {
+        let value = hir::Value::Tuple(hir::TupleValue::new(
+            [
+                ("t".to_string(), hir::Value::Text("x".to_string())),
+                ("a".to_string(), hir::Value::Integer(1)),
+            ]
+            .into(),
+        ));
+        let program = lower(&hir::Program {
+            operators: vec![op("main")],
+            variables: vec![hir::Variable {
+                name: "p".to_string(),
+                ty: value.ty(),
+                init: value,
+            }],
+            entry: hir::OperatorId(0),
+        });
+        assert_eq!(
+            program.data[1].fields,
+            [lir::Field::Struct(vec![
+                lir::Field::I64(1),
+                lir::Field::Address(lir::DataId(0)),
+                lir::Field::Usize(1),
+            ])]
         );
     }
 }

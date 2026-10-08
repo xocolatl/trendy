@@ -113,9 +113,11 @@ the official style. **Must not:** depend on sema. Formatting is purely
 syntactic, so a program that parses but has semantic errors can still be
 formatted.
 
-The canonical layout is one definition per line: consecutive variable
-declarations go on adjacent lines, and other definitions are separated by a
-blank line.
+The canonical layout is one definition per line. Consecutive variable
+declarations go on adjacent lines, unless the source separates them with a
+blank line to group them, in which case one blank line is kept. Other
+definitions are always separated by a blank line. This is the only place the
+formatter looks at the original whitespace.
 
 The formatter reprints the CST's tokens in order and decides only the
 whitespace between them. Because it never adds, drops, or reorders any other
@@ -133,6 +135,12 @@ will live here, and the optimizer will rewrite it.
 It holds the operators, the variables, and the built-in types (`Type`) and
 values (`Value`). Every variable has an explicit type and initial value: sema
 infers whichever one the source leaves out.
+
+Types are either built-in scalars (`Scalar`) or tuples (`Type::Tuple`). A
+tuple type's `Heading` maps attribute names to types. It is sorted by name,
+because attributes are unordered (TTM RM Proscription 1), and the sorted
+order is also the canonical order for display and layout. Types are
+structural: two tuple types are equal exactly when their headings are.
 
 Every type's equality must hold exactly when no operator can tell two values
 apart (TTM RM Prescription 8). For rationals, that is IEEE 754 totalOrder.
@@ -160,6 +168,13 @@ A variable without a value gets its type's default (`0`, `""`), and one
 without a type gets its value's type. These are the two options *The Third
 Manifesto* allows for initialization (RM Prescription 11).
 
+A value is checked against its declared type structurally, and a problem is
+reported at the innermost place it occurs. A wrong scalar deep inside a
+nested tuple is reported at that literal, with the attribute's declared type
+as the secondary label. Missing and unknown attributes are reported at the
+tuple value. An unknown attribute close to a missing one is reported once,
+with a rename that fixes both.
+
 ### lir (`trendy_lir`)
 
 **Provides:** the low-level IR. A function is a control-flow graph of basic
@@ -174,8 +189,16 @@ this:
 - `boolean`: one byte, `0` for false and `1` for true.
 - `integer`: one 64-bit field.
 - `rational`: one 64-bit IEEE 754 binary floating-point field.
+- a tuple: a `Struct` of its attributes' fields, in name order.
 - `text`: the address of a read-only constant holding the UTF-8 bytes,
   followed by the length in bytes, the size of a pointer.
+
+A `Struct` is aligned to its widest field and padded to a multiple of that
+alignment, so a tuple has the same layout embedded in another tuple as it has
+on its own. That is what lets an attribute be used, and later passed to an
+operator, as a value in its own right. Reordering attributes by alignment to
+save padding would be a valid later optimization, since attribute order has no
+meaning.
 
 **Must not:** contain high-level constructs. Anything codegen would have to
 "figure out" belongs in lowering instead, so codegen stays a direct

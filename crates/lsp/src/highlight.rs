@@ -16,6 +16,8 @@ pub enum Class {
     Operator,
     /// A variable's name.
     Variable,
+    /// A tuple attribute's name.
+    Attribute,
     Type,
     Number,
     Text,
@@ -48,6 +50,12 @@ fn classify(token: &SyntaxToken) -> Option<Highlight> {
         }
         (SyntaxKind::Ident, Some(SyntaxKind::Name), Some(SyntaxKind::VarDecl)) => {
             (Class::Variable, true)
+        }
+        (SyntaxKind::Ident, Some(SyntaxKind::Name), Some(SyntaxKind::AttributeType)) => {
+            (Class::Attribute, true)
+        }
+        (SyntaxKind::Ident, Some(SyntaxKind::Name), Some(SyntaxKind::AttributeValue)) => {
+            (Class::Attribute, false)
         }
         (SyntaxKind::Ident, Some(SyntaxKind::TypeRef), _) => (Class::Type, false),
         (SyntaxKind::IntLiteral | SyntaxKind::RationalLiteral, _, _) => (Class::Number, false),
@@ -111,6 +119,23 @@ mod tests {
                 ("var", Class::Keyword, false),
                 ("b", Class::Variable, true),
                 ("true", Class::Keyword, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn tuples() {
+        assert_eq!(
+            highlight("var p: tuple { x: rational } := tuple { x: 1.0 };"),
+            [
+                ("var", Class::Keyword, false),
+                ("p", Class::Variable, true),
+                ("tuple", Class::Keyword, false),
+                ("x", Class::Attribute, true),
+                ("rational", Class::Type, false),
+                ("tuple", Class::Keyword, false),
+                ("x", Class::Attribute, false),
+                ("1.0", Class::Number, false),
             ]
         );
     }

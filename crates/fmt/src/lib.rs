@@ -18,18 +18,24 @@ use trendy_syntax::{SyntaxKind, SyntaxToken};
 pub fn format(file: &SourceFile) -> String {
     let mut out = String::new();
     let mut prev: Option<SyntaxToken> = None;
+    // Whether the source has a blank line since the previous token.
+    let mut blank_line = false;
     let tokens = file
         .syntax()
         .descendants_with_tokens()
-        .filter_map(trendy_syntax::SyntaxElement::into_token)
-        .filter(|t| t.kind() != SyntaxKind::Whitespace);
+        .filter_map(trendy_syntax::SyntaxElement::into_token);
 
     for token in tokens {
+        if token.kind() == SyntaxKind::Whitespace {
+            blank_line |= token.text().matches('\n').count() >= 2;
+            continue;
+        }
         if let Some(prev) = &prev {
-            out.push_str(separator(prev, &token));
+            out.push_str(separator(prev, &token, blank_line));
         }
         out.push_str(token.text());
         prev = Some(token);
+        blank_line = false;
     }
     if prev.is_some() {
         out.push('\n');
@@ -37,17 +43,37 @@ pub fn format(file: &SourceFile) -> String {
     out
 }
 
-/// The whitespace that goes between two adjacent tokens.
-fn separator(prev: &SyntaxToken, next: &SyntaxToken) -> &'static str {
-    use SyntaxKind::{Colon, ColonEq, LBracket, OperatorKw, RBrace, Semicolon, VarDecl, VarKw};
+/// The whitespace that goes between two adjacent tokens. `blank_line` says
+/// whether the source has a blank line between them.
+fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'static str {
+    use SyntaxKind::{
+        Colon, ColonEq, Comma, LBrace, LBracket, OperatorKw, RBrace, Semicolon, TupleKw,
+        TupleLiteral, TupleType, VarDecl, VarKw,
+    };
     if prev.kind() == Semicolon {
-        // Between definitions: variable declarations in a row stay together,
-        // and everything else is separated by a blank line.
+        // Between definitions: variable declarations in a row go on adjacent
+        // lines unless the source groups them with a blank line, and
+        // everything else is separated by a blank line.
         let both_variables = item_kind(prev) == Some(VarDecl) && item_kind(next) == Some(VarDecl);
-        return if both_variables { "\n" } else { "\n\n" };
+        return if both_variables && !blank_line {
+            "\n"
+        } else {
+            "\n\n"
+        };
     }
+    // Inside a tuple's braces: `tuple { a: integer, b: text }`, `tuple {}`.
+    let tuple_brace = |token: &SyntaxToken| {
+        token
+            .parent()
+            .is_some_and(|p| matches!(p.kind(), TupleType | TupleLiteral))
+    };
     match (prev.kind(), next.kind()) {
-        (OperatorKw | VarKw | Colon | ColonEq, _) | (_, ColonEq) | (RBrace, LBracket) => " ",
+        (LBrace, RBrace) if tuple_brace(prev) => "",
+        (LBrace, _) if tuple_brace(prev) => " ",
+        (_, RBrace) if tuple_brace(next) => " ",
+        (OperatorKw | VarKw | TupleKw | Colon | ColonEq | Comma, _)
+        | (_, ColonEq)
+        | (RBrace, LBracket) => " ",
         _ => "",
     }
 }
@@ -122,6 +148,24 @@ mod tests {
     }
 
     #[test]
+    fn blank_lines_group_variables() {
+        assert_eq!(
+            fmt("var a := 1;\n\n\n\nvar b := 2;\nvar c := 3;\n\noperator main{} [];"),
+            "var a := 1;\n\nvar b := 2;\nvar c := 3;\n\noperator main{} [];\n"
+        );
+    }
+
+    #[test]
+    fn tuples() {
+        assert_eq!(
+            fmt(
+                "var x:tuple{a:tuple{b:boolean},c:text};var e:tuple{ };var q:=tuple{x:1.0,y:2.0,};operator main{}[];"
+            ),
+            "var x: tuple { a: tuple { b: boolean }, c: text };\nvar e: tuple {};\nvar q := tuple { x: 1.0, y: 2.0, };\n\noperator main{} [];\n"
+        );
+    }
+
+    #[test]
     fn empty_file() {
         assert_eq!(fmt("  \n"), "");
     }
@@ -133,6 +177,7 @@ mod tests {
             "operator a { } [ ] ; operator main{}[];",
             "\n\n  operator   x{}\n\n\n[];\n\n",
             "var a:integer:=1;var b:=\"t\\n\";operator main{}[];",
+            "var p:tuple{a:tuple{},b:text}:=tuple{a:tuple{},b:\"\",};",
         ] {
             let once = fmt(source);
             assert_eq!(fmt(&once), once, "not idempotent for {source:?}");

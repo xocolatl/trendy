@@ -146,49 +146,77 @@ struct Layout {
 impl Layout {
     /// Lay out a data object's fields, each at its natural alignment.
     fn lay_out(&self, fields: &[lir::Field]) -> Result<LaidOut, String> {
-        let mut bytes = Vec::new();
-        let mut align = 1;
-        let mut addresses = Vec::new();
-        for field in fields {
-            let field_align = match field {
-                lir::Field::I64(_) | lir::Field::F64Bits(_) => 8,
-                lir::Field::Usize(_) | lir::Field::Address(_) => self.pointer_bytes,
-                lir::Field::U8(_) | lir::Field::Bytes(_) => 1,
-            };
-            bytes.resize(bytes.len().next_multiple_of(field_align), 0);
-            align = align.max(field_align);
-            match field {
-                lir::Field::U8(n) => bytes.push(*n),
-                lir::Field::I64(n) => bytes.extend(self.in_target_order(n.to_le_bytes(), 8)),
-                lir::Field::F64Bits(bits) => {
-                    bytes.extend(self.in_target_order(bits.to_le_bytes(), 8));
-                }
-                lir::Field::Usize(n) => {
-                    let fits = self.pointer_bytes >= 8 || *n >> (8 * self.pointer_bytes) == 0;
-                    if !fits {
-                        return Err(format!(
-                            "{n} doesn't fit in a {}-byte usize",
-                            self.pointer_bytes
-                        ));
-                    }
-                    bytes.extend(self.in_target_order(n.to_le_bytes(), self.pointer_bytes));
-                }
-                lir::Field::Address(target) => {
-                    addresses.push((bytes.len(), *target));
-                    bytes.resize(bytes.len() + self.pointer_bytes, 0);
-                }
-                lir::Field::Bytes(raw) => bytes.extend(raw),
-            }
-        }
+        let mut out = LaidOut {
+            bytes: Vec::new(),
+            align: 1,
+            addresses: Vec::new(),
+        };
+        let align = self.place_all(fields, &mut out)?;
         // Every object occupies at least one byte, so that distinct objects
         // have distinct addresses, and its size is a multiple of its
         // alignment.
-        bytes.resize(bytes.len().max(1).next_multiple_of(align), 0);
-        Ok(LaidOut {
-            bytes,
-            align: u64::try_from(align).map_err(|e| e.to_string())?,
-            addresses,
-        })
+        out.bytes
+            .resize(out.bytes.len().max(1).next_multiple_of(align), 0);
+        out.align = u64::try_from(align).map_err(|e| e.to_string())?;
+        Ok(out)
+    }
+
+    /// Append `fields` in order, each at its natural alignment, and return
+    /// their combined alignment.
+    fn place_all(&self, fields: &[lir::Field], out: &mut LaidOut) -> Result<usize, String> {
+        let mut align = 1;
+        for field in fields {
+            align = align.max(self.place(field, out)?);
+        }
+        Ok(align)
+    }
+
+    /// Append `field` at its natural alignment, and return that alignment.
+    fn place(&self, field: &lir::Field, out: &mut LaidOut) -> Result<usize, String> {
+        let align = self.align_of(field);
+        out.bytes.resize(out.bytes.len().next_multiple_of(align), 0);
+        match field {
+            lir::Field::U8(n) => out.bytes.push(*n),
+            lir::Field::I64(n) => out.bytes.extend(self.in_target_order(n.to_le_bytes(), 8)),
+            lir::Field::F64Bits(bits) => {
+                out.bytes
+                    .extend(self.in_target_order(bits.to_le_bytes(), 8));
+            }
+            lir::Field::Usize(n) => {
+                let fits = self.pointer_bytes >= 8 || *n >> (8 * self.pointer_bytes) == 0;
+                if !fits {
+                    return Err(format!(
+                        "{n} doesn't fit in a {}-byte usize",
+                        self.pointer_bytes
+                    ));
+                }
+                out.bytes
+                    .extend(self.in_target_order(n.to_le_bytes(), self.pointer_bytes));
+            }
+            lir::Field::Address(target) => {
+                out.addresses.push((out.bytes.len(), *target));
+                out.bytes.resize(out.bytes.len() + self.pointer_bytes, 0);
+            }
+            lir::Field::Bytes(raw) => out.bytes.extend(raw),
+            lir::Field::Struct(inner) => {
+                // A struct is padded to its own alignment, so that it has the
+                // same layout embedded as it has on its own.
+                let start = out.bytes.len();
+                self.place_all(inner, out)?;
+                let size = (out.bytes.len() - start).next_multiple_of(align);
+                out.bytes.resize(start + size, 0);
+            }
+        }
+        Ok(align)
+    }
+
+    fn align_of(&self, field: &lir::Field) -> usize {
+        match field {
+            lir::Field::I64(_) | lir::Field::F64Bits(_) => 8,
+            lir::Field::Usize(_) | lir::Field::Address(_) => self.pointer_bytes,
+            lir::Field::U8(_) | lir::Field::Bytes(_) => 1,
+            lir::Field::Struct(inner) => inner.iter().map(|f| self.align_of(f)).max().unwrap_or(1),
+        }
     }
 
     /// The low `width` bytes of a little-endian value, in target order.
@@ -302,6 +330,48 @@ mod tests {
 
         let empty = layout.lay_out(&[lir::Field::Bytes(Vec::new())]).unwrap();
         assert_eq!((empty.bytes.len(), empty.align), (1, 1));
+    }
+
+    #[test]
+    fn structs_are_padded_to_their_alignment() {
+        let layout = Layout {
+            pointer_bytes: 8,
+            endianness: Endianness::Little,
+        };
+        // tuple { a: tuple { x: integer, y: boolean }, b: boolean }: the inner
+        // tuple is 16 bytes on its own, so `b` comes after its padding.
+        let laid_out = layout
+            .lay_out(&[lir::Field::Struct(vec![
+                lir::Field::Struct(vec![lir::Field::I64(7), lir::Field::U8(1)]),
+                lir::Field::U8(1),
+            ])])
+            .unwrap();
+        assert_eq!(laid_out.bytes.len(), 24);
+        assert_eq!(laid_out.align, 8);
+        assert_eq!(laid_out.bytes[8], 1, "inner `y`");
+        assert_eq!(laid_out.bytes[16], 1, "outer `b`, after the inner padding");
+
+        let empty = layout.lay_out(&[lir::Field::Struct(Vec::new())]).unwrap();
+        assert_eq!((empty.bytes.len(), empty.align), (1, 1));
+    }
+
+    #[test]
+    fn addresses_inside_structs_are_relocated_at_their_offset() {
+        let layout = Layout {
+            pointer_bytes: 8,
+            endianness: Endianness::Little,
+        };
+        let laid_out = layout
+            .lay_out(&[lir::Field::Struct(vec![
+                lir::Field::U8(1),
+                lir::Field::Struct(vec![
+                    lir::Field::Address(lir::DataId(5)),
+                    lir::Field::Usize(2),
+                ]),
+            ])])
+            .unwrap();
+        assert_eq!(laid_out.addresses, [(8, lir::DataId(5))]);
+        assert_eq!(laid_out.bytes.len(), 24);
     }
 
     #[test]
