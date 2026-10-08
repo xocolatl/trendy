@@ -15,5 +15,213 @@ var teams := relation {
     },
     { team: "docs", members: relation { name: text } {} },
 };
+var cities := relation {
+    { name: "Ada", city: "London" },
+    { name: "Edgar", city: "Portland" },
+};
+
+/* Relational operators, to design and then implement one at a time, each
+   with its tuple analog where there is one (see tuples.trendy). Each
+   comment is one operator: what The Third Manifesto asks for (RM
+   Prescription 18 unless noted), Tutorial D's spelling, and a proposed
+   trendy spelling to workshop, with code that uses it.
+
+   Underneath, the operators are those of Algebra A (The Third Manifesto,
+   Appendix A): and, or and not, which generalize join, union and
+   complement, with remove, rename and compose. The others are defined in
+   terms of them. Not, the complement, can be infinite, so it is only used
+   underneath, never written.
+
+   In where, extend, update and summarize, the attributes of the tuple at
+   hand are in scope by name, and hide any variable or parameter of the
+   same name. To use one of those, rename it first. */
+
+/* Building relations from run-time values (RM Prescription 10).
+   Tuple analog: building tuples from run-time values.
+   Tutorial D: RELATION { TUPLE { NAME N, BORN B }, ... }
+   Proposed: as now, but tuples and attribute values can be parameters,
+   variables and any other expression, not only constants (lifting E0120).
+   Duplicates are removed when the program runs, so the result can have
+   fewer tuples than written.
+
+   operator add{name: text, born: integer} [
+       call debug_value{v: relation { { name: name, born: born }, { name: "Ada", born: 1815 } }};
+   ];
+*/
+
+/* The empty relations of degree zero (RM Prescription 10): table_dee, with
+   one tuple, which is true, and table_dum, with none, which is false.
+   Tutorial D: TABLE_DEE and TABLE_DUM
+   Proposed: they're relation {} {{}} and relation {} {}, so no keywords
+   are needed; perhaps built-in constants in the prelude, named dee and dum.
+
+   call debug_value{v: relation {} { {} }};
+*/
+
+/* Membership: whether a tuple is in a relation (RM Prescription 22).
+   Tutorial D: t ∈ r, and t ∉ r
+   Proposed: an `in` operator. Since `not` binds tightest, not being in is
+   `not (t in r)`.
+
+   call debug_value{v: tuple { name: "Ada", born: 1815 } in people};
+*/
+
+/* Comparisons (RM Prescription 22): = and <> as now, and subset and
+   superset, proper or not.
+   Tutorial D: ⊆, ⊂, ⊇ and ⊃
+   Proposed: keywords, since relations have no order and `<=` would suggest
+   one: `subset`, `superset`, and `proper subset`, `proper superset`.
+
+   call debug_value{v: people project { name } subset cities project { name }};
+*/
+
+/* Projection, and its complement, remove (Algebra A's REMOVE). The result
+   has no duplicates, so it can have fewer tuples.
+   Tuple analog: project and remove.
+   Tutorial D: PEOPLE { NAME } and PEOPLE { ALL BUT BORN }
+   Decided: `project` and `remove`, as for tuples.
+
+   call debug_value{v: people project { name }};
+   call debug_value{v: people remove { born }};
+*/
+
+/* Renaming attributes (Algebra A's RENAME).
+   Tuple analog: rename.
+   Tutorial D: PEOPLE RENAME ( NAME AS WHO )
+   Decided: `rename` with `new: old` pairs, as for tuples.
+
+   call debug_value{v: people rename { who: name }};
+*/
+
+/* Restriction: the tuples for which a condition holds.
+   Tutorial D: PEOPLE WHERE BORN < 1900
+   Proposed: a `where` operator, whose condition is a boolean expression
+   in which the tuple's attributes are in scope. Its condition takes the
+   rest of the expression, so it binds loosest, or needs parentheses.
+
+   call debug_value{v: people where born < 1900};
+   call debug_value{v: people where born < 1900 and name <> "Ada"};
+*/
+
+/* Extension: each tuple with attributes added, computed from its own.
+   Tuple analog: extend.
+   Tutorial D: EXTEND PEOPLE ADD ( 2024 - BORN AS AGE )
+   Proposed: an `extend` operator, as for tuples.
+
+   call debug_value{v: people extend { age: 2024 - born }};
+*/
+
+/* Substitution: each tuple with some attributes replaced, computed from
+   its own (dropped in Tutorial D version 2).
+   Tuple analog: update.
+   Tutorial D: UPDATE PEOPLE ( BORN := BORN + 1 )
+   Proposed: an `update` operator, as for tuples.
+
+   call debug_value{v: people update { born: born + 1 }};
+*/
+
+/* Union, intersection and difference, of relations with the same heading,
+   and disjoint union, where the operands must have no tuple in common.
+   Union is a special case of Algebra A's OR, intersection of its AND.
+   Tutorial D: R1 UNION R2, R1 INTERSECT R2, R1 MINUS R2, R1 D_UNION R2,
+   and n-adic UNION { R1, R2, R3 } and so on
+   Proposed: `union`, `intersect`, `minus` and `disjoint union` operators.
+
+   call debug_value{v: people union relation { { name: "Grace", born: 1906 } }};
+   call debug_value{v: people minus people where born > 1900};
+*/
+
+/* Join: the tuples of both, matched on their common attributes; with no
+   common attributes it's the Cartesian product, and with all of them,
+   intersection. A special case of Algebra A's AND.
+   Tuple analog: join.
+   Tutorial D: PEOPLE JOIN CITIES, and n-adic JOIN { R1, R2, R3 }; TIMES
+   is join with no common attributes
+   Proposed: a `join` operator, and `times`, which must have no common
+   attributes, to catch one that's there by mistake.
+
+   call debug_value{v: people join cities};
+   call debug_value{v: people project { name } times relation { { year: 2024 } }};
+*/
+
+/* Compose: join, then remove the common attributes (Algebra A's COMPOSE).
+   Tuple analog: compose.
+   Tutorial D: PEOPLE COMPOSE CITIES
+
+   call debug_value{v: people compose cities};
+*/
+
+/* Semijoin and semidifference: the tuples of the first that have, or
+   don't have, a match in the second.
+   Tutorial D: PEOPLE MATCHING CITIES and PEOPLE NOT MATCHING CITIES
+   Proposed: `matching` and `not matching` operators.
+
+   call debug_value{v: people matching cities where city = "London"};
+   call debug_value{v: people not matching cities};
+*/
+
+/* Wrap and unwrap, of each tuple (RM Prescription 7: nesting).
+   Tuple analog: wrap and unwrap.
+   Tutorial D: PEOPLE WRAP ( { NAME, BORN } AS WHO ), PEOPLE UNWRAP ( WHO )
+
+   call debug_value{v: people wrap { who: { name, born } }};
+*/
+
+/* Group and ungroup: gather attributes into a relation-valued attribute,
+   one tuple per value of the other attributes, and back.
+   Tutorial D: CITIES GROUP ( { NAME } AS RESIDENTS ), and
+   TEAMS UNGROUP ( MEMBERS )
+   Proposed: `group` and `ungroup` operators, with the new attribute's name
+   and the names it gathers, as for wrap.
+
+   call debug_value{v: cities group { residents: { name } }};
+   call debug_value{v: teams ungroup { members }};
+*/
+
+/* Aggregates (RM Prescription 18 and OO Prescription 6): count, sum, avg,
+   max, min, and, or, xor, exactly, union, disjoint union and intersect,
+   of a relation, or of one of its attributes.
+   Tutorial D: COUNT ( PEOPLE ), MAX ( PEOPLE, BORN )
+   Proposed: read-only built-in operators, called like any operator, once
+   read-only operators exist. The empty relation's sum is 0, while its max
+   has no value, which is an error.
+
+   call debug_value{v: count{r: people}};
+   call debug_value{v: max{r: people project { born }}};
+*/
+
+/* Summarize: aggregates per group of tuples.
+   Tutorial D: SUMMARIZE PEOPLE BY { CITY } ADD ( COUNT() AS N )
+   Proposed: a `summarize` operator with a `by` list and the aggregates to
+   add, as extend adds attributes.
+
+   call debug_value{v: people join cities summarize by { city } { n: count{} }};
+*/
+
+/* Transitive closure, of a relation of degree two whose attributes have
+   the same type (RM Very Strong Suggestion 6).
+   Tutorial D: TCLOSE R
+
+   call debug_value{v: tclose relation { { from: 1, to: 2 }, { from: 2, to: 3 } }};
+*/
+
+/* Tuple extraction: the one tuple of a relation with exactly one, else a
+   run-time error. Listed with the tuple operators too.
+   Tutorial D: TUPLE FROM R
+
+   call debug_value{v: tuple from (people where name = "Ada")};
+*/
+
+/* Assignment, and its shorthands (RM Prescription 21), once variables can
+   be assigned at all.
+   Tutorial D: R := ..., INSERT R ..., DELETE R WHERE ..., and
+   UPDATE R WHERE ... ( A := ... )
+   Proposed: statements.
+
+   people := people union relation { { name: "Grace", born: 1906 } };
+   insert people relation { { name: "Grace", born: 1906 } };
+   delete people where born > 1900;
+   update people where name = "Ada" { born: 1815 };
+*/
 
 operator main{} [];

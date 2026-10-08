@@ -17,7 +17,7 @@ var addr := tuple { street: "1600 Pennsylvania Ave.", city: "Washington", state:
    and hide any variable or parameter of the same name. To use one of
    those, rename it first. */
 
-/* Selector with run-time values (RM Prescription 9).
+/* Building tuples from run-time values (RM Prescription 9).
    Tutorial D: TUPLE { STREET S, CITY C, ... }
    Proposed: as now, but attribute values can be parameters, variables and
    any other expression, not only constants (lifting E0120 for tuples).
