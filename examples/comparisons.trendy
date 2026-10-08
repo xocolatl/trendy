@@ -1,0 +1,53 @@
+var folded := 1 < 2 and "a" < "b" and false < true;
+var signed_zeros := -0.0 < 0.0 and -0.0 <> 0.0;
+
+operator booleans{a: boolean, b: boolean} [
+    call debug_value{v: a = b};
+    call debug_value{v: a <> b};
+    call debug_value{v: a < b};
+    call debug_value{v: a <= b};
+    call debug_value{v: a > b};
+    call debug_value{v: a >= b};
+];
+
+operator integers{a: integer, b: integer} [
+    call debug_value{v: a = b};
+    call debug_value{v: a <> b};
+    call debug_value{v: a < b};
+    call debug_value{v: a <= b};
+    call debug_value{v: a > b};
+    call debug_value{v: a >= b};
+];
+
+operator rationals{a: rational, b: rational} [
+    call debug_value{v: a = b};
+    call debug_value{v: a <> b};
+    call debug_value{v: a < b};
+    call debug_value{v: a <= b};
+    call debug_value{v: a > b};
+    call debug_value{v: a >= b};
+];
+
+operator texts{a: text, b: text} [
+    call debug_value{v: a = b};
+    call debug_value{v: a <> b};
+    call debug_value{v: a < b};
+    call debug_value{v: a <= b};
+    call debug_value{v: a > b};
+    call debug_value{v: a >= b};
+];
+
+operator main{} [
+    call debug_value{v: folded};
+    call debug_value{v: signed_zeros};
+    call booleans{a: false, b: true};
+    call booleans{a: true, b: true};
+    call integers{a: -2, b: 1};
+    call integers{a: 7, b: 7};
+    call rationals{a: -0.0, b: 0.0};
+    call rationals{a: 2.5, b: -1e300};
+    call texts{a: "Z", b: "a"};
+    call texts{a: "é", b: "😀"};
+    call texts{a: "ab", b: "a"};
+    call texts{a: "", b: ""};
+];

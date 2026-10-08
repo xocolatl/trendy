@@ -83,6 +83,31 @@ pub unsafe extern "C" fn trendy_rt_concat(dst: *mut Text, lhs: *const Text, rhs:
     }
 }
 
+/// Store at `dst` -1, 0 or 1, as `lhs` is before, equal to or after `rhs`
+/// in code point order, which is the order of their UTF-8 bytes.
+///
+/// # Safety
+///
+/// `lhs` and `rhs` must point to valid text values, and `dst` to an `i64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_compare_text(dst: *mut i64, lhs: *const Text, rhs: *const Text) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let ordering = text_bytes(lhs.read_unaligned()).cmp(text_bytes(rhs.read_unaligned()));
+        dst.write_unaligned(ordering as i64);
+    }
+}
+
+/// The bytes of `text`.
+///
+/// # Safety
+///
+/// `text` must be a valid text value.
+unsafe fn text_bytes<'a>(text: Text) -> &'a [u8] {
+    // SAFETY: guaranteed by the caller.
+    unsafe { core::slice::from_raw_parts(text.bytes, text.len) }
+}
+
 /// Release the memory of a text made by [`trendy_rt_concat`].
 ///
 /// # Safety

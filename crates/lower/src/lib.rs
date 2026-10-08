@@ -309,47 +309,64 @@ impl FunctionBuilder<'_> {
                 });
                 dst
             }
-            hir::Expr::Binary(hir::BinaryOp::Concatenate, lhs, rhs) => {
+            hir::Expr::Binary(op, lhs, rhs) => {
                 let lhs = self.place(lhs, cx);
                 let rhs = self.place(rhs, cx);
+                self.binary(*op, lhs, rhs, cx)
+            }
+        }
+    }
+
+    /// `lhs op rhs`, computed into a new stack slot.
+    fn binary(
+        &mut self,
+        op: hir::BinaryOp,
+        lhs: lir::Place,
+        rhs: lir::Place,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let (op, lhs, rhs) = match op {
+            hir::BinaryOp::Concatenate => {
                 let dst = self.slot(scalar_layout(hir::Scalar::Text));
                 self.insts.push(lir::Inst::CallRuntime {
                     function: lir::RuntimeFn::Concat,
                     args: vec![dst.clone(), lhs, rhs],
                 });
                 self.owned.push(dst.clone());
-                dst
+                return dst;
             }
-            hir::Expr::Binary(op, lhs, rhs) => {
-                let lhs = self.place(lhs, cx);
-                let rhs = self.place(rhs, cx);
-                let dst = self.slot(scalar_layout(op.result()));
-                let op = match op {
-                    hir::BinaryOp::And => lir::BinaryOp::And,
-                    hir::BinaryOp::Or => lir::BinaryOp::Or,
-                    hir::BinaryOp::Xor => lir::BinaryOp::Xor,
-                    hir::BinaryOp::Implies => lir::BinaryOp::Implies,
-                    hir::BinaryOp::Add(numeric) => lir::BinaryOp::Add(lower_numeric(*numeric)),
-                    hir::BinaryOp::Subtract(numeric) => {
-                        lir::BinaryOp::Subtract(lower_numeric(*numeric))
-                    }
-                    hir::BinaryOp::Multiply(numeric) => {
-                        lir::BinaryOp::Multiply(lower_numeric(*numeric))
-                    }
-                    hir::BinaryOp::Divide => lir::BinaryOp::Divide,
-                    hir::BinaryOp::Div => lir::BinaryOp::Div,
-                    hir::BinaryOp::Mod => lir::BinaryOp::Mod,
-                    hir::BinaryOp::Concatenate => unreachable!("a runtime call, above"),
-                };
-                self.insts.push(lir::Inst::Binary {
-                    dst: dst.clone(),
-                    op,
-                    lhs,
-                    rhs,
+            hir::BinaryOp::Compare(comparison, hir::Scalar::Text) => {
+                // The runtime orders the texts as -1, 0 or 1, which is then
+                // compared with 0.
+                let ordering = self.slot(lir::Layout::I64);
+                self.insts.push(lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::CompareText,
+                    args: vec![ordering.clone(), lhs, rhs],
                 });
-                dst
+                let zero = self.place(&hir::Expr::Constant(hir::Value::Integer(0)), cx);
+                let op = lir::BinaryOp::Compare(
+                    lower_comparison(comparison),
+                    lir::Operand::Numeric(lir::Numeric::Integer),
+                );
+                (op, ordering, zero)
             }
-        }
+            op => (lower_binary_op(op), lhs, rhs),
+        };
+        let dst = self.slot(match op {
+            lir::BinaryOp::Compare(..) => scalar_layout(hir::Scalar::Boolean),
+            op => match op.operand() {
+                lir::Operand::Boolean => lir::Layout::U8,
+                lir::Operand::Numeric(lir::Numeric::Integer) => lir::Layout::I64,
+                lir::Operand::Numeric(lir::Numeric::Rational) => lir::Layout::F64Bits,
+            },
+        });
+        self.insts.push(lir::Inst::Binary {
+            dst: dst.clone(),
+            op,
+            lhs,
+            rhs,
+        });
+        dst
     }
 
     /// A new stack slot holding a value with `layout`.
@@ -357,6 +374,43 @@ impl FunctionBuilder<'_> {
         let slot = lir::SlotId(self.slots.len());
         self.slots.push(layout);
         lir::Place::whole(lir::Base::Slot(slot))
+    }
+}
+
+/// The instruction for `op`, which isn't one done by a runtime call.
+fn lower_binary_op(op: hir::BinaryOp) -> lir::BinaryOp {
+    match op {
+        hir::BinaryOp::And => lir::BinaryOp::And,
+        hir::BinaryOp::Or => lir::BinaryOp::Or,
+        hir::BinaryOp::Xor => lir::BinaryOp::Xor,
+        hir::BinaryOp::Implies => lir::BinaryOp::Implies,
+        hir::BinaryOp::Add(numeric) => lir::BinaryOp::Add(lower_numeric(numeric)),
+        hir::BinaryOp::Subtract(numeric) => lir::BinaryOp::Subtract(lower_numeric(numeric)),
+        hir::BinaryOp::Multiply(numeric) => lir::BinaryOp::Multiply(lower_numeric(numeric)),
+        hir::BinaryOp::Divide => lir::BinaryOp::Divide,
+        hir::BinaryOp::Div => lir::BinaryOp::Div,
+        hir::BinaryOp::Mod => lir::BinaryOp::Mod,
+        hir::BinaryOp::Compare(comparison, scalar) => lir::BinaryOp::Compare(
+            lower_comparison(comparison),
+            match scalar {
+                hir::Scalar::Boolean => lir::Operand::Boolean,
+                hir::Scalar::Integer => lir::Operand::Numeric(lir::Numeric::Integer),
+                hir::Scalar::Rational => lir::Operand::Numeric(lir::Numeric::Rational),
+                hir::Scalar::Text => unreachable!("text is compared by a runtime call"),
+            },
+        ),
+        hir::BinaryOp::Concatenate => unreachable!("text is concatenated by a runtime call"),
+    }
+}
+
+fn lower_comparison(comparison: hir::Comparison) -> lir::Comparison {
+    match comparison {
+        hir::Comparison::Equal => lir::Comparison::Equal,
+        hir::Comparison::NotEqual => lir::Comparison::NotEqual,
+        hir::Comparison::Less => lir::Comparison::Less,
+        hir::Comparison::LessOrEqual => lir::Comparison::LessOrEqual,
+        hir::Comparison::Greater => lir::Comparison::Greater,
+        hir::Comparison::GreaterOrEqual => lir::Comparison::GreaterOrEqual,
     }
 }
 

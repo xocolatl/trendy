@@ -269,6 +269,55 @@ pub enum BinaryOp {
     Mod,
     /// `||`, of texts.
     Concatenate,
+    /// A comparison of two values of a scalar type, whose result is a
+    /// boolean.
+    Compare(Comparison, Scalar),
+}
+
+/// A comparison operator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Comparison {
+    Equal,
+    NotEqual,
+    Less,
+    LessOrEqual,
+    Greater,
+    GreaterOrEqual,
+}
+
+impl Comparison {
+    /// Whether two values in the order `ordering` compare true.
+    #[must_use]
+    pub fn holds(self, ordering: std::cmp::Ordering) -> bool {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        match self {
+            Comparison::Equal => ordering == Equal,
+            Comparison::NotEqual => ordering != Equal,
+            Comparison::Less => ordering == Less,
+            Comparison::LessOrEqual => ordering != Greater,
+            Comparison::Greater => ordering == Greater,
+            Comparison::GreaterOrEqual => ordering != Less,
+        }
+    }
+}
+
+/// The order of two values of the same scalar type: `false` before `true`,
+/// integers numerically, rationals by IEEE 754 totalOrder (so `-0.0` before
+/// `0.0`, and two rationals are equal exactly when they are the same value),
+/// and text by code point, which is the order of its UTF-8 bytes.
+///
+/// # Panics
+///
+/// If the values aren't of one scalar type, which sema rules out.
+#[must_use]
+pub fn compare(lhs: &Value, rhs: &Value) -> std::cmp::Ordering {
+    match (lhs, rhs) {
+        (Value::Boolean(a), Value::Boolean(b)) => a.cmp(b),
+        (Value::Integer(a), Value::Integer(b)) => a.cmp(b),
+        (Value::Rational(a), Value::Rational(b)) => a.cmp(b),
+        (Value::Text(a), Value::Text(b)) => a.as_bytes().cmp(b.as_bytes()),
+        _ => panic!("comparing {lhs:?} with {rhs:?}"),
+    }
 }
 
 impl BinaryOp {
@@ -283,13 +332,17 @@ impl BinaryOp {
             BinaryOp::Divide => Scalar::Rational,
             BinaryOp::Div | BinaryOp::Mod => Scalar::Integer,
             BinaryOp::Concatenate => Scalar::Text,
+            BinaryOp::Compare(_, scalar) => scalar,
         }
     }
 
     /// The type of the result.
     #[must_use]
     pub fn result(self) -> Scalar {
-        self.operand()
+        match self {
+            BinaryOp::Compare(..) => Scalar::Boolean,
+            _ => self.operand(),
+        }
     }
 
     /// The result for `lhs` and `rhs`, which have the operand type. Rational
@@ -305,6 +358,9 @@ impl BinaryOp {
     ///
     /// If an operand isn't of the operand type, which sema rules out.
     pub fn apply(self, lhs: &Value, rhs: &Value) -> Result<Value, Failure> {
+        if let BinaryOp::Compare(comparison, _) = self {
+            return Ok(Value::Boolean(comparison.holds(compare(lhs, rhs))));
+        }
         match (lhs, rhs) {
             (Value::Boolean(a), Value::Boolean(b)) => Ok(Value::Boolean(match self {
                 BinaryOp::And => *a && *b,
@@ -747,6 +803,46 @@ mod tests {
             UnaryOp::Negate(Numeric::Rational).apply(&r(0.0)),
             Ok(r(-0.0))
         );
+    }
+
+    #[test]
+    fn comparisons() {
+        let holds = |c: Comparison, a: Value, b: Value| {
+            let Type::Scalar(scalar) = a.ty() else {
+                panic!("not a scalar");
+            };
+            BinaryOp::Compare(c, scalar).apply(&a, &b) == Ok(Value::Boolean(true))
+        };
+        let r = |x| Value::Rational(Rational::new(x));
+        let t = |s: &str| Value::Text(s.to_string());
+        assert!(holds(
+            Comparison::Less,
+            Value::Boolean(false),
+            Value::Boolean(true)
+        ));
+        assert!(holds(
+            Comparison::Less,
+            Value::Integer(-2),
+            Value::Integer(1)
+        ));
+        assert!(holds(Comparison::Less, r(-0.0), r(0.0)));
+        assert!(holds(Comparison::NotEqual, r(-0.0), r(0.0)));
+        assert!(holds(Comparison::Equal, r(0.5), r(0.5)));
+        // By code point: `Z` before `a`, and `é` (U+E9) before `😀`.
+        assert!(holds(Comparison::Less, t("Z"), t("a")));
+        assert!(holds(Comparison::Less, t("é"), t("😀")));
+        assert!(holds(Comparison::Less, t("ab"), t("abc")));
+        assert!(holds(Comparison::LessOrEqual, t(""), t("")));
+        assert!(holds(
+            Comparison::GreaterOrEqual,
+            Value::Integer(3),
+            Value::Integer(3)
+        ));
+        assert!(!holds(
+            Comparison::Greater,
+            Value::Integer(3),
+            Value::Integer(3)
+        ));
     }
 
     #[test]

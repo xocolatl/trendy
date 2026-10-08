@@ -1657,6 +1657,112 @@ mod tests {
     }
 
     #[test]
+    fn comparison_initial_values() {
+        let yes = hir::Value::Boolean(true);
+        let no = hir::Value::Boolean(false);
+        assert_eq!(init("var a := false < true;", "a"), yes);
+        assert_eq!(init("var a := 1 + 1 = 2;", "a"), yes);
+        assert_eq!(init("var a := -0.0 < 0.0;", "a"), yes);
+        assert_eq!(init("var a := -0.0 = 0.0;", "a"), no);
+        assert_eq!(init("var a := \"Z\" < \"a\";", "a"), yes);
+        assert_eq!(init("var a := \"é\" > \"z\";", "a"), yes);
+        assert_eq!(init("var a := not (1 >= 2);", "a"), yes);
+        // `not` binds tightest: these are `(not false) = true`, and so on.
+        assert_eq!(init("var a := not false = true;", "a"), yes);
+        assert_eq!(init("var a := not true < true;", "a"), yes);
+        assert_eq!(init("var a := (1 < 2) = (3 < 4);", "a"), yes);
+        assert_eq!(init("var a := 1 <> 1 or 2 <= 1;", "a"), no);
+    }
+
+    #[test]
+    fn comparison_operand_types() {
+        let source = format!(
+            "var a := 1 = 1.0;\nvar b: integer := 1 < 2;\nvar c := tuple {{}} = tuple {{}};\nvar d: boolean := 1 = 2;{MAIN}"
+        );
+        let errors = errors(&source);
+        let found: Vec<_> = errors.iter().map(|e| (e.code, &e.message[..])).collect();
+        assert_eq!(
+            found,
+            [
+                (
+                    Code::TypeMismatch,
+                    "mismatched types: expected `integer`, found `rational`"
+                ),
+                (
+                    Code::TypeMismatch,
+                    "mismatched types: expected `integer`, found `boolean`"
+                ),
+                (
+                    Code::TypeMismatch,
+                    "mismatched types: `=` takes booleans, integers, rationals or text, found `tuple {}`"
+                ),
+            ],
+            "the expected boolean result doesn't make the operands booleans"
+        );
+    }
+
+    #[test]
+    fn not_before_a_comparison() {
+        let source =
+            format!("var n := 1;\nvar a := not n = 0 and true;\nvar b := not n + 1 < 2;{MAIN}");
+        let errors = errors(&source);
+        assert_eq!(errors.len(), 2, "{errors:#?}");
+        assert_eq!(errors[0].code, Code::TypeMismatch);
+        assert_eq!(
+            errors[0].suggestions[0].message,
+            "negate the comparison: `not (n = 0)`"
+        );
+        assert_eq!(
+            fix(&source),
+            format!("var n := 1;\nvar a := not (n = 0) and true;\nvar b := not (n + 1 < 2);{MAIN}")
+        );
+        // In a body too, and not when `not` isn't the comparison's left side.
+        let body =
+            "operator f{n: integer} [ call debug_value{v: not n = 0}; ];\noperator main{} [];";
+        assert_eq!(
+            fix(body),
+            "operator f{n: integer} [ call debug_value{v: not (n = 0)}; ];\noperator main{} [];"
+        );
+        let errors = self::errors(&format!("var a := true = not 1;{MAIN}"));
+        assert!(
+            errors[0]
+                .suggestions
+                .iter()
+                .all(|s| !s.message.starts_with("negate the comparison")),
+            "{errors:#?}"
+        );
+    }
+
+    #[test]
+    fn comparison_simplification() {
+        let cases = [
+            ("p = true", "p"),
+            ("true = p", "p"),
+            ("p = false", "not p"),
+            ("p <> true", "not p"),
+            ("false <> p", "p"),
+            ("not (n < 1) = false", "n < 1"),
+            ("n < m", "n < m"),
+        ];
+        for (written, simplified) in cases {
+            let source = |e: &str| {
+                format!(
+                    "operator f{{p: boolean, n: integer, m: integer}} [ call debug_value{{v: {e}}}; ];\noperator main{{}} [];"
+                )
+            };
+            let body = |e: &str| {
+                let program = analyze_str(&source(e)).unwrap();
+                let f = program.operators.iter().find(|o| o.name == "f").unwrap();
+                let hir::OperatorKind::User { body } = &f.kind else {
+                    panic!("f is a user operator");
+                };
+                argument(&body[0]).clone()
+            };
+            assert_eq!(body(written), body(simplified), "{written}");
+        }
+    }
+
+    #[test]
     fn integer_simplification() {
         let cases = [
             ("n + 0", "n"),

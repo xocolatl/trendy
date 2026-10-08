@@ -94,6 +94,10 @@
           "name": "keyword.operator.assignment.trendy"
         },
         {
+          "match": "\\<\\>|\\<\\=|\\>\\=|\\=|\\<|\\>",
+          "name": "keyword.operator.comparison.trendy"
+        },
+        {
           "match": "\\|\\|",
           "name": "keyword.operator.concatenation.trendy"
         },
@@ -116,10 +120,6 @@
         {
           "match": "\\,",
           "name": "punctuation.separator.comma.trendy"
-        },
-        {
-          "match": "\\=",
-          "name": "keyword.operator.comparison.trendy"
         },
         {
           "match": "\\;",

@@ -66,6 +66,9 @@ struct Missing {
     help: Option<&'static str>,
 }
 
+/// The precedence of the comparison operators.
+const COMPARISON: u8 = 6;
+
 /// Something the parser found where it expected something else.
 #[derive(Clone, Copy)]
 struct Found<'a> {
@@ -368,27 +371,43 @@ impl<'a> Parser<'a> {
 
     /// An expression whose dyadic operators bind at least as tightly as
     /// `min`, by precedence climbing. From loosest to tightest: `implies`
-    /// (1, grouping to the right), `or` (2), `xor` (3), `and` (4), then
-    /// `+`, `-` and `||` (7), and `*`, `/`, `div` and `mod` (8), all grouping to the
-    /// left. Prefix `not` sits between them at 5, so `not a + b` negates
-    /// the sum, and prefix `-` and `+` bind tightest. Comparisons will take
-    /// 6, so that `not a = b` negates the comparison.
+    /// (1, grouping to the right), `or` (2), `xor` (3), `and` (4), the
+    /// comparisons (6), which don't chain, `+`, `-` and `||` (7), and `*`,
+    /// `/`, `div` and `mod` (8), all grouping to the left. The prefix
+    /// operators, `not`, `-` and `+`, bind tightest, so `not a = b` is
+    /// `(not a) = b`.
     fn binary(&mut self, min: u8) {
         self.peek();
         let start = self.builder.checkpoint();
         self.unary();
+        // The right operand of a comparison just parsed: comparisons don't
+        // chain, so another one after it is reported, with a fix.
+        let mut compared: Option<Span> = None;
         while let Some((precedence, found, keyword)) = self.binary_operator() {
             if precedence < min {
                 break;
             }
+            if let Some(middle) = compared.filter(|_| precedence == COMPARISON) {
+                let before = self.source[..found.span.start].chars().next_back();
+                self.errors.push(errors::chained_comparison(
+                    found,
+                    &self.source[middle.start..middle.end],
+                    before,
+                ));
+            }
             self.builder.start_node_at(start, SyntaxKind::BinaryExpr);
             self.operator_token(found, keyword);
+            let rhs_start = self.lookahead().map(|f| f.span.start);
             let right_grouping = keyword == SyntaxKind::ImpliesKw;
             self.binary(if right_grouping {
                 precedence
             } else {
                 precedence + 1
             });
+            compared = match (precedence == COMPARISON, rhs_start, self.last_end) {
+                (true, Some(start), Some(end)) if start < end => Some(Span::new(start, end)),
+                _ => None,
+            };
             self.builder.finish_node();
         }
     }
@@ -407,6 +426,7 @@ impl<'a> Parser<'a> {
             SyntaxKind::OrKw => 2,
             SyntaxKind::XorKw => 3,
             SyntaxKind::AndKw => 4,
+            kind if kind.is_comparison() => COMPARISON,
             SyntaxKind::Plus | SyntaxKind::Minus | SyntaxKind::PipePipe => 7,
             SyntaxKind::Star | SyntaxKind::Slash | SyntaxKind::DivKw | SyntaxKind::ModKw => 8,
             _ => return None,
@@ -434,11 +454,7 @@ impl<'a> Parser<'a> {
         };
         self.start_node(SyntaxKind::UnaryExpr);
         self.operator_token(found, keyword);
-        if keyword == SyntaxKind::NotKw {
-            self.binary(5);
-        } else {
-            self.unary();
-        }
+        self.unary();
         self.builder.finish_node();
     }
 
@@ -1575,9 +1591,8 @@ SourceFile
         assert_eq!(shape("- -a"), "(- (- a))");
         assert_eq!(shape("+a - -1"), "((+ a) - (- 1))");
         assert_eq!(shape("a - (b - c)"), "(a - (b - c))");
-        // Arithmetic binds tighter than every boolean operator, `not`
-        // included.
-        assert_eq!(shape("not a + b"), "(not (a + b))");
+        // Prefix operators bind tightest, `not` included.
+        assert_eq!(shape("not a + b"), "((not a) + b)");
         assert_eq!(shape("not a and b + c"), "((not a) and (b + c))");
     }
 
@@ -1590,6 +1605,35 @@ SourceFile
         assert_eq!(
             fix("var x := a AND NOT b Or c;"),
             "var x := a and not b or c;"
+        );
+    }
+
+    #[test]
+    fn comparisons() {
+        assert_eq!(shape("a + 1 < b * 2"), "((a + 1) < (b * 2))");
+        assert_eq!(shape("not a = b"), "((not a) = b)");
+        assert_eq!(shape("not (a = b)"), "(not (a = b))");
+        assert_eq!(shape("a <> b and c >= d"), "((a <> b) and (c >= d))");
+        assert_eq!(shape("a = (b = c)"), "(a = (b = c))");
+        assert_eq!(
+            fix("var x := a == b or c != d;"),
+            "var x := a = b or c <> d;"
+        );
+    }
+
+    #[test]
+    fn comparisons_dont_chain() {
+        let errors = parse_str("var x := a < b + 1 <= c;").errors;
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, Code::ChainedComparison);
+        assert_eq!(
+            fix("var x := a < b + 1 <= c;"),
+            "var x := a < b + 1 and b + 1 <= c;"
+        );
+        assert_eq!(fix("var x := a<b<c;"), "var x := a<b and b <c;");
+        assert_eq!(
+            fix("var x := a = b = c = d;"),
+            "var x := a = b and b = c and c = d;"
         );
     }
 

@@ -134,6 +134,10 @@ pub enum RuntimeFn {
     /// `trendy_rt_free_text(text)`: release a text made by
     /// [`RuntimeFn::Concat`].
     FreeText,
+    /// `trendy_rt_compare_text(dst, lhs, rhs)`: store -1, 0 or 1 at `dst`,
+    /// an [`Layout::I64`], as `lhs` is before, equal to or after `rhs` in
+    /// code point order.
+    CompareText,
 }
 
 impl RuntimeFn {
@@ -145,6 +149,7 @@ impl RuntimeFn {
             RuntimeFn::Fail => "trendy_rt_fail",
             RuntimeFn::Concat => "trendy_rt_concat",
             RuntimeFn::FreeText => "trendy_rt_free_text",
+            RuntimeFn::CompareText => "trendy_rt_compare_text",
         }
     }
 }
@@ -236,6 +241,21 @@ pub enum BinaryOp {
     Div,
     /// Of integers, with the sign of the dividend. `i64::MIN mod -1` is 0.
     Mod,
+    /// A comparison, whose result is a boolean: `false` before `true`,
+    /// integers numerically, and rationals by IEEE 754 totalOrder. Texts
+    /// are compared by [`RuntimeFn::CompareText`].
+    Compare(Comparison, Operand),
+}
+
+/// A comparison operator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Comparison {
+    Equal,
+    NotEqual,
+    Less,
+    LessOrEqual,
+    Greater,
+    GreaterOrEqual,
 }
 
 impl BinaryOp {
@@ -248,6 +268,7 @@ impl BinaryOp {
             }
             BinaryOp::Divide => Operand::Numeric(Numeric::Rational),
             BinaryOp::Div | BinaryOp::Mod => Operand::Numeric(Numeric::Integer),
+            BinaryOp::Compare(_, operand) => operand,
         }
     }
 }

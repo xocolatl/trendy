@@ -32,6 +32,7 @@ pub(crate) enum Operator {
     Mod,
     /// `||`
     Concatenate,
+    Compare(hir::Comparison),
 }
 
 /// What an operator's operands must be.
@@ -83,6 +84,12 @@ impl Operator {
             (SyntaxKind::DivKw, _) => Operator::Div,
             (SyntaxKind::ModKw, _) => Operator::Mod,
             (SyntaxKind::PipePipe, _) => Operator::Concatenate,
+            (SyntaxKind::Eq, _) => Operator::Compare(hir::Comparison::Equal),
+            (SyntaxKind::LtGt, _) => Operator::Compare(hir::Comparison::NotEqual),
+            (SyntaxKind::Lt, _) => Operator::Compare(hir::Comparison::Less),
+            (SyntaxKind::LtEq, _) => Operator::Compare(hir::Comparison::LessOrEqual),
+            (SyntaxKind::Gt, _) => Operator::Compare(hir::Comparison::Greater),
+            (SyntaxKind::GtEq, _) => Operator::Compare(hir::Comparison::GreaterOrEqual),
             _ => return None,
         })
     }
@@ -108,8 +115,16 @@ impl Operator {
             | Operator::Divide
             | Operator::Div
             | Operator::Mod
-            | Operator::Concatenate => Operands::Inferred,
+            | Operator::Concatenate
+            | Operator::Compare(_) => Operands::Inferred,
         }
+    }
+
+    /// Whether the result has the operands' type, so that the type expected
+    /// of the result is the type of the operands. A comparison's result is a
+    /// boolean whatever it compares.
+    fn result_is_operand(self) -> bool {
+        !matches!(self, Operator::Compare(_))
     }
 
     /// The types the operator takes, as written in an error message.
@@ -126,6 +141,7 @@ impl Operator {
             Operator::Divide => "rationals",
             Operator::Div | Operator::Mod => "integers",
             Operator::Concatenate => "text",
+            Operator::Compare(_) => "booleans, integers, rationals or text",
         }
     }
 
@@ -151,6 +167,7 @@ impl Operator {
             (Operator::Concatenate, None) if scalar == hir::Scalar::Text => {
                 Resolved::Binary(B::Concatenate)
             }
+            (Operator::Compare(comparison), _) => Resolved::Binary(B::Compare(comparison, scalar)),
             _ => return None,
         })
     }
@@ -176,8 +193,9 @@ pub(crate) fn check_operands<T>(
     errors: &mut Vec<Diagnostic>,
 ) -> Option<(Resolved, Vec<T>)> {
     // A context the operator can work in sets the operand type.
-    let context =
-        expected.filter(|e| matches!(e.ty, hir::Type::Scalar(s) if op.resolve(s).is_some()));
+    let context = expected.filter(|e| {
+        op.result_is_operand() && matches!(e.ty, hir::Type::Scalar(s) if op.resolve(s).is_some())
+    });
     let mut expectation = match op.operands() {
         Operands::Fixed(scalar) => Some(Expected {
             ty: hir::Type::Scalar(scalar),
@@ -294,7 +312,17 @@ fn can_fail(expr: &hir::Expr) -> bool {
         hir::Expr::Unary(hir::UnaryOp::Negate(hir::Numeric::Integer), _) => true,
         hir::Expr::Unary(_, operand) => can_fail(operand),
         hir::Expr::Binary(op, lhs, rhs) => {
-            op.operand() != hir::Scalar::Boolean || can_fail(lhs) || can_fail(rhs)
+            // Arithmetic and concatenation can fail themselves; the boolean
+            // operators and comparisons can't.
+            let itself = !matches!(
+                op,
+                hir::BinaryOp::And
+                    | hir::BinaryOp::Or
+                    | hir::BinaryOp::Xor
+                    | hir::BinaryOp::Implies
+                    | hir::BinaryOp::Compare(..)
+            );
+            itself || can_fail(lhs) || can_fail(rhs)
         }
     }
 }
@@ -382,8 +410,9 @@ pub(crate) fn binary(
 ) -> Result<hir::Expr, hir::Failure> {
     use Known::{Empty, False, MinusOne, NegativeZero, One, True, Zero};
     use hir::BinaryOp::{
-        Add, And, Concatenate, Div, Divide, Implies, Mod, Multiply, Or, Subtract, Xor,
+        Add, And, Compare, Concatenate, Div, Divide, Implies, Mod, Multiply, Or, Subtract, Xor,
     };
+    use hir::Comparison::{Equal, NotEqual};
     use hir::Numeric::{Integer, Rational};
     if let (hir::Expr::Constant(a), hir::Expr::Constant(b)) = (&lhs, &rhs) {
         return op.apply(a, b).map(hir::Expr::Constant);
@@ -408,21 +437,24 @@ pub(crate) fn binary(
     let constant = |value| hir::Expr::Constant(value);
     Ok(match (op, known(&lhs), known(&rhs)) {
         // The constant leaves the other operand as it is,
-        (And | Implies, Some(True), _)
-        | (Or | Xor, Some(False), _)
+        (And | Implies | Compare(Equal, _), Some(True), _)
+        | (Or | Xor | Compare(NotEqual, _), Some(False), _)
         | (Add(Integer), Some(Zero), _)
         | (Add(Rational), Some(NegativeZero), _)
         | (Multiply(_), Some(One), _)
         | (Concatenate, Some(Empty), _) => rhs,
-        (And, _, Some(True))
-        | (Or | Xor, _, Some(False))
+        (And | Compare(Equal, _), _, Some(True))
+        | (Or | Xor | Compare(NotEqual, _), _, Some(False))
         | (Add(Integer) | Subtract(_), _, Some(Zero))
         | (Add(Rational), _, Some(NegativeZero))
         | (Multiply(_) | Div | Divide, _, Some(One))
         | (Concatenate, _, Some(Empty)) => lhs,
         // negates it,
-        (Xor, Some(True), _) => unary(hir::UnaryOp::Not, rhs)?,
-        (Xor, _, Some(True)) | (Implies, _, Some(False)) => unary(hir::UnaryOp::Not, lhs)?,
+        (Xor | Compare(NotEqual, _), Some(True), _) | (Compare(Equal, _), Some(False), _) => {
+            unary(hir::UnaryOp::Not, rhs)?
+        }
+        (Xor | Compare(NotEqual, _), _, Some(True))
+        | (Compare(Equal, _) | Implies, _, Some(False)) => unary(hir::UnaryOp::Not, lhs)?,
         (Subtract(Integer), Some(Zero), _)
         | (Subtract(Rational), Some(NegativeZero), _)
         | (Multiply(_), Some(MinusOne), _) => negate(rhs)?,

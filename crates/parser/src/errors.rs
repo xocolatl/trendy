@@ -219,6 +219,8 @@ pub(crate) fn foreign_operator(text: &str) -> Option<SyntaxKind> {
         "->" | "=>" => SyntaxKind::ImpliesKw,
         "!" => SyntaxKind::NotKw,
         "%" => SyntaxKind::ModKw,
+        "==" => SyntaxKind::Eq,
+        "!=" => SyntaxKind::LtGt,
         _ => return None,
     })
 }
@@ -249,6 +251,9 @@ pub(crate) fn foreign_operator_used(
     )
     .with_note(match keyword {
         SyntaxKind::ModKw => "the remainder of integer division is the keyword `mod`",
+        SyntaxKind::Eq | SyntaxKind::LtGt => {
+            "equality is `=`, and inequality `<>`; assignment is `:=`"
+        }
         _ => "the boolean operators are the keywords `not`, `and`, `or`, `xor` and `implies`",
     })
     .with_suggestion(
@@ -256,6 +261,30 @@ pub(crate) fn foreign_operator_used(
         vec![Edit {
             span: found.span,
             replacement: spaced(spelled, neighbors),
+        }],
+    )
+}
+
+/// A comparison, `found`, right after another one whose right operand is
+/// written `middle`. `before` is the character before `found`.
+pub(crate) fn chained_comparison(found: Found, middle: &str, before: Option<char>) -> Diagnostic {
+    let space = if before.is_some_and(char::is_whitespace) {
+        ""
+    } else {
+        " "
+    };
+    Diagnostic::error(
+        Code::ChainedComparison,
+        "comparisons can't be chained",
+        found.span,
+        "a second comparison",
+    )
+    .with_note("`a < b < c` would compare the boolean `a < b` with `c`, which is almost never meant, so comparisons don't chain")
+    .with_suggestion(
+        format!("compare `{middle}` twice: `… and {middle} {} …`", found.text),
+        vec![Edit {
+            span: trendy_diag::Span::empty(found.span.start),
+            replacement: format!("{space}and {middle} "),
         }],
     )
 }

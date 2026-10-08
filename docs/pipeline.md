@@ -117,10 +117,12 @@ keyword (`operator` or `var`). In a variable declaration, a missing `:` or
 as `:=` and reported. Whitespace is attached to the innermost node that is open when it
 appears, so whitespace between definitions belongs to the file.
 
-Expressions use precedence climbing. From tightest to loosest: prefix `-`
-and `+`; `*`, `/`, `div` and `mod`; `+`, `-` and `||`; prefix `not`; `and`; `xor`;
-`or`; and `implies`, which groups to the right. Comparisons will go between
-the arithmetic operators and `not`. Looking for
+Expressions use precedence climbing. From tightest to loosest: the prefix
+operators `not`, `-` and `+`; `*`, `/`, `div` and `mod`; `+`, `-` and
+`||`; the comparisons, which don't chain (E0015, with a fix that compares
+the middle operand twice); `and`; `xor`; `or`; and `implies`, which groups
+to the right. Since `not` binds tightest, `not n = 0` on an integer is a
+type error, whose fix negates the comparison instead: `not (n = 0)`. Looking for
 a dyadic operator after an operand uses a lookahead that leaves whitespace
 unattached, so whitespace after the last operand belongs to the node that
 continues, not to the expression. The symbols of other languages (`&&`,
@@ -234,7 +236,15 @@ comes from the expected type when it is numeric, and otherwise from the
 first operand, which then sets the expectation for the second. `/`,
 `div` and `mod` resolve the same way, so that one applied to the wrong
 numeric type is reported at the operator, with a fix to the right one
-(E0124).
+(E0124). Comparisons take their operand type from the first operand only,
+since the type expected of them is that of their boolean result.
+
+Comparisons follow one order per type (`hir::compare`): `false` before
+`true`, integers numerically, rationals by IEEE 754 totalOrder, and text
+by code point. Codegen compares rationals as integers, after flipping every
+bit but the sign of a negative value's bits, which is totalOrder; text is
+compared by `trendy_rt_compare_text`, since UTF-8 byte order is code point
+order.
 
 Checking is bidirectional: the expected type flows down into a value
 (`types::Expected`), along with where it came from (`types::Origin`): a
@@ -330,11 +340,13 @@ fields. Its sizes and offsets are LIR's `Size` and `Offset` fields, which
 codegen resolves with the same layout engine as everything else, so the
 runtime never repeats the layout rules.
 
-When comparison operators arrive, rational comparisons must compile to
-totalOrder (an integer comparison on the bits, after flipping the bits of
-negative values), not to the target's floating-point compare instructions.
-LIR carries rationals as exact bits (`Field::F64Bits`) for the same reason. **Must not:** see syntax, or produce user-facing
-errors. Any error it returns is a compiler bug, and the driver reports it as
+Rational comparisons compile to totalOrder (an integer comparison on the
+bits, after flipping every bit but the sign of negative values), never to
+the target's floating-point compare instructions, which would make `-0.0`
+equal to `0.0`. LIR carries rationals as exact bits (`Field::F64Bits`) for
+the same reason.
+
+**Must not:** see syntax, or produce user-facing errors. Any error it returns is a compiler bug, and the driver reports it as
 `internal compiler error`.
 
 ### Drivers

@@ -29,7 +29,12 @@ fn punctuation_scope(kind: SyntaxKind) -> &'static str {
         SyntaxKind::Colon => "punctuation.separator.type.trendy",
         SyntaxKind::Comma => "punctuation.separator.comma.trendy",
         SyntaxKind::ColonEq => "keyword.operator.assignment.trendy",
-        SyntaxKind::Eq => "keyword.operator.comparison.trendy",
+        SyntaxKind::Eq
+        | SyntaxKind::LtGt
+        | SyntaxKind::Lt
+        | SyntaxKind::LtEq
+        | SyntaxKind::Gt
+        | SyntaxKind::GtEq => "keyword.operator.comparison.trendy",
         SyntaxKind::Semicolon => "punctuation.terminator.trendy",
         SyntaxKind::Plus | SyntaxKind::Minus | SyntaxKind::Star | SyntaxKind::Slash => {
             "keyword.operator.arithmetic.trendy"

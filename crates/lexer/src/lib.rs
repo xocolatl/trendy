@@ -58,8 +58,8 @@ pub fn lex(source: &str) -> Lexed {
             )
         } else if source[start..].starts_with(":=") {
             (SyntaxKind::ColonEq, start + 2)
-        } else if source[start..].starts_with("||") {
-            (SyntaxKind::PipePipe, start + 2)
+        } else if let Some((kind, len)) = two_character_token(&source[start..]) {
+            (kind, start + len)
         } else if let Some(len) = foreign_operator(&source[start..]) {
             (SyntaxKind::ForeignOperator, start + len)
         } else {
@@ -73,6 +73,8 @@ pub fn lex(source: &str) -> Lexed {
                 ':' => SyntaxKind::Colon,
                 ',' => SyntaxKind::Comma,
                 '=' => SyntaxKind::Eq,
+                '<' => SyntaxKind::Lt,
+                '>' => SyntaxKind::Gt,
                 ';' => SyntaxKind::Semicolon,
                 '+' => SyntaxKind::Plus,
                 '-' => SyntaxKind::Minus,
@@ -99,7 +101,21 @@ pub fn lex(source: &str) -> Lexed {
 /// Operators from other languages, which the parser replaces with trendy's
 /// keywords: `&&` for `and`, `->` for `implies`, `%` for `mod`, and so on.
 /// Longer ones come first, so that `&&` isn't two `&`.
-pub const FOREIGN_OPERATORS: [&str; 8] = ["&&", "->", "=>", "!", "&", "|", "^", "%"];
+pub const FOREIGN_OPERATORS: [&str; 10] = ["&&", "->", "=>", "==", "!=", "!", "&", "|", "^", "%"];
+
+/// The two-character punctuation `text` starts with, if any. It's tried
+/// before foreign operators, so that `||` isn't two `|`; none of these
+/// starts like a foreign operator.
+fn two_character_token(text: &str) -> Option<(SyntaxKind, usize)> {
+    let kind = match text.get(..2)? {
+        "||" => SyntaxKind::PipePipe,
+        "<>" => SyntaxKind::LtGt,
+        "<=" => SyntaxKind::LtEq,
+        ">=" => SyntaxKind::GtEq,
+        _ => return None,
+    };
+    Some((kind, 2))
+}
 
 /// The length of the foreign operator `text` starts with, if any.
 fn foreign_operator(text: &str) -> Option<usize> {
@@ -629,6 +645,28 @@ mod tests {
         assert_eq!(
             kinds("a/b%c"),
             [Ident, Slash, Ident, ForeignOperator, Ident]
+        );
+    }
+
+    #[test]
+    fn comparisons() {
+        assert_eq!(
+            kinds("a=b<>c<d<=e>f>=g"),
+            [
+                Ident, Eq, Ident, LtGt, Ident, Lt, Ident, LtEq, Ident, Gt, Ident, GtEq, Ident
+            ]
+        );
+        assert_eq!(
+            kinds("a==b!=c=>d"),
+            [
+                Ident,
+                ForeignOperator,
+                Ident,
+                ForeignOperator,
+                Ident,
+                ForeignOperator,
+                Ident
+            ]
         );
     }
 

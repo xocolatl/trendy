@@ -449,35 +449,84 @@ Concatenations of constants are done when compiling. One done while the
 program runs allocates memory for its result, and stops the program with
 `error: out of memory` if there is none.
 
+### Comparisons
+
+`a = b`, `a <> b`, `a < b`, `a <= b`, `a > b` and `a >= b` compare two
+values of the same built-in type, and are booleans. Every built-in type is
+ordered:
+
+| Type | Order |
+|---|---|
+| `boolean` | `false` before `true` |
+| `integer` | numerical |
+| `rational` | IEEE 754 totalOrder (see [Types](#types)): numerical, except that `-0.0` is before `0.0`, and they aren't equal |
+| `text` | by code point, which is also the order of the UTF-8 bytes. There is no collation: `"Z" < "a"`, and `"é" > "z"` |
+
+Two values are equal exactly when they are the same value, as *The Third
+Manifesto* requires (RM Prescription 8).
+
+```trendy
+var sorted := "apple" < "banana" and -1 < 0 and false < true;
+
+operator check{n: integer, name: text} [
+    call debug_value{v: n >= 0 and n <= 100};
+    call debug_value{v: name <> ""};
+];
+
+operator main{} [
+    call check{n: 42, name: "Ada"};
+];
+```
+
+The operands must have the same type, since values never convert
+implicitly: `1 = 1.0` is an error. Comparisons don't chain: `a < b < c` is
+an error, with a fix to `a < b and b < c` (E0015). To compare two
+comparisons, parenthesize them: `(a < b) = (c < d)`.
+
+```trendy,error
+var a := 1 < 2 < 3;
+
+operator main{} [];
+```
+
+Equality is `=`, and inequality `<>`, as in Tutorial D and SQL; `==` and
+`!=` get fixes. Assignment is `:=`.
+
 ### Precedence
 
 From tightest to loosest:
 
 | Operators | Grouping |
 |---|---|
-| prefix `-` and `+` | |
+| prefix `not`, `-` and `+` | |
 | `*`, `/`, `div`, `mod` | left |
 | `+`, `-`, `\|\|` | left |
-| `not` | |
+| `=`, `<>`, `<`, `<=`, `>`, `>=` | none: they don't chain |
 | `and` | left |
 | `xor` | left |
 | `or` | left |
 | `implies` | right |
 
-So `-a * b` is `(-a) * b`, and `not a + b` is `not (a + b)`.
+So `-a * b` is `(-a) * b`, `a + 1 < b` is `(a + 1) < b`, and, as with
+every prefix operator, `not a = b` is `(not a) = b`. To negate a
+comparison, parenthesize it: `not (n = 0)`. Writing `not n = 0` for an
+integer `n` is an error, since `not` takes a boolean, and its fix is that
+parenthesization; SQL and Python read it that way.
 `implies` groups from the right, as in logic: `a implies b implies c`
 means `a implies (b implies c)`. Parentheses group explicitly.
 
 ### Other languages' operators
 
-The symbols other languages use, such as `&&`, `|`, `!`, `^`, `->` and
-`%`, are not operators in trendy. `||` is concatenation, as in Tutorial D
-and SQL, so `a || b` on booleans is an error with a fix to `or`. Neither are capitalized spellings such as
-`AND` or `MOD`. The compiler suggests the keyword for each.
+The symbols other languages use, such as `&&`, `|`, `!`, `^`, `->`, `%`,
+`==` and `!=`, are not operators in trendy. Neither are capitalized
+spellings such as `AND` or `MOD`. The compiler suggests trendy's operator
+for each. `||` is concatenation, as in Tutorial D and SQL, so `a || b` on
+booleans is an error with a fix to `or`.
 
 ```trendy,error
 var a := true && false;
 var b := 7 % 3;
+var c := a == b;
 
 operator main{} [];
 ```
@@ -631,6 +680,8 @@ A trailing comma is kept or left out as written.
 | `a ^ b`, `a != b` for booleans | `a xor b` |
 | `a -> b`, `a => b` | `a implies b` |
 | `AND`, `Or`, `NOT` | `and`, `or`, `not` |
+| `a == b`, `a != b` | `a = b`, `a <> b` |
+| `a < b < c` | `a < b and b < c` |
 | `a / b` for integers | `a div b` |
 | `a % b` | `a mod b` |
 | `1 / 2` meaning one half | `1.0 / 2.0` |

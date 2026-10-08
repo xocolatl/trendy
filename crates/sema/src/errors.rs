@@ -191,6 +191,11 @@ pub(crate) fn type_mismatch(
         d = d.with_secondary(span, origin.label());
     }
 
+    // `not n = 0`: `not` binds tightest, so this negates `n`; the comparison
+    // was meant.
+    if let Some((message, edits)) = negated_comparison(origin, expr) {
+        d = d.with_suggestion(message, edits);
+    }
     // Rewriting the literal is the likelier fix when it is mechanical, so it
     // comes first; changing the declared type always works.
     // A literal, or a negative one such as `-1`.
@@ -224,6 +229,63 @@ pub(crate) fn type_mismatch(
         ),
         Origin::Heading(_) | Origin::Value(_) | Origin::Builtin | Origin::Operator(_) => d,
     }
+}
+
+/// The fix for `not` applied to a non-boolean `operand` that starts the left
+/// side of a comparison, as in `not n = 0`: negate the comparison instead,
+/// `not (n = 0)`, as SQL and Python read it.
+fn negated_comparison(origin: &Origin, operand: &Expr) -> Option<(String, Vec<Edit>)> {
+    let Origin::Operator(token) = origin else {
+        return None;
+    };
+    if token.kind() != trendy_syntax::SyntaxKind::NotKw {
+        return None;
+    }
+    // Up from `not`, through operators that bind tighter than a comparison,
+    // as long as `not` stays leftmost: `not n + 1 < 2` is
+    // `((not n) + 1) < 2`.
+    let mut node = token.parent()?;
+    let comparison = loop {
+        let parent = trendy_syntax::ast::BinaryExpr::cast(node.parent()?)?;
+        if parent.lhs().is_none_or(|lhs| *lhs.syntax() != node) {
+            return None;
+        }
+        let kind = parent.operator()?.kind();
+        if kind.is_comparison() {
+            break parent;
+        }
+        let tighter = matches!(
+            kind,
+            trendy_syntax::SyntaxKind::Plus
+                | trendy_syntax::SyntaxKind::Minus
+                | trendy_syntax::SyntaxKind::Star
+                | trendy_syntax::SyntaxKind::Slash
+                | trendy_syntax::SyntaxKind::DivKw
+                | trendy_syntax::SyntaxKind::ModKw
+                | trendy_syntax::SyntaxKind::PipePipe
+        );
+        if !tighter {
+            return None;
+        }
+        node = parent.syntax().clone();
+    };
+    let start = operand.span().start;
+    let end = comparison.span().end;
+    let whole = comparison.syntax().text().to_string();
+    let compared = &whole[start - comparison.span().start..];
+    Some((
+        format!("negate the comparison: `not ({compared})`"),
+        vec![
+            Edit {
+                span: Span::empty(start),
+                replacement: "(".to_string(),
+            },
+            Edit {
+                span: Span::empty(end),
+                replacement: ")".to_string(),
+            },
+        ],
+    ))
 }
 
 /// A literal of type `ty` for the same value as `value`, written `written`,

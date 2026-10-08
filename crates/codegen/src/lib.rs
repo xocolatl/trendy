@@ -240,7 +240,13 @@ impl Functions {
                 self.store(dst, result, frame, b)?;
             }
             lir::Inst::Binary { dst, op, lhs, rhs } => {
-                let ty = operand_type(op.operand());
+                // Rationals are compared by their bits.
+                let ty = match op {
+                    lir::BinaryOp::Compare(_, lir::Operand::Numeric(lir::Numeric::Rational)) => {
+                        types::I64
+                    }
+                    _ => operand_type(op.operand()),
+                };
                 let lhs = self.load(ty, lhs, frame, b)?;
                 let rhs = self.load(ty, rhs, frame, b)?;
                 let result = self.binary(*op, lhs, rhs, b)?;
@@ -275,6 +281,35 @@ impl Functions {
                 .map(|()| result)
         };
         Ok(match op {
+            lir::BinaryOp::Compare(comparison, operand) => {
+                let signed = |c| match c {
+                    lir::Comparison::Equal => IntCC::Equal,
+                    lir::Comparison::NotEqual => IntCC::NotEqual,
+                    lir::Comparison::Less => IntCC::SignedLessThan,
+                    lir::Comparison::LessOrEqual => IntCC::SignedLessThanOrEqual,
+                    lir::Comparison::Greater => IntCC::SignedGreaterThan,
+                    lir::Comparison::GreaterOrEqual => IntCC::SignedGreaterThanOrEqual,
+                };
+                match operand {
+                    // `false` and `true` are 0 and 1, so signed order is
+                    // their order.
+                    lir::Operand::Boolean | lir::Operand::Numeric(Integer) => {
+                        b.ins().icmp(signed(comparison), lhs, rhs)
+                    }
+                    // IEEE 754 totalOrder: flipping every bit but the sign
+                    // of a negative value's bits makes them order as signed
+                    // integers, and keeps distinct values distinct.
+                    lir::Operand::Numeric(Rational) => {
+                        let key = |b: &mut FunctionBuilder, bits| {
+                            let sign = b.ins().sshr_imm_u(bits, 63);
+                            let mask = b.ins().ushr_imm_u(sign, 1);
+                            b.ins().bxor(bits, mask)
+                        };
+                        let (lhs, rhs) = (key(b, lhs), key(b, rhs));
+                        b.ins().icmp(signed(comparison), lhs, rhs)
+                    }
+                }
+            }
             lir::BinaryOp::And => b.ins().band(lhs, rhs),
             lir::BinaryOp::Or => b.ins().bor(lhs, rhs),
             lir::BinaryOp::Xor => b.ins().bxor(lhs, rhs),

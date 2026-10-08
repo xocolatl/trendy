@@ -232,6 +232,39 @@ fn text() {
     );
 }
 
+#[test]
+fn comparisons() {
+    let (code, stderr) = run_example("comparisons");
+    assert_eq!(code, 0, "{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    // Evaluated when compiling.
+    assert_eq!(lines[..2], ["true", "true"]);
+    // Each call: `=`, `<>`, `<`, `<=`, `>`, `>=`, as 1 for true.
+    let rows: Vec<String> = lines[2..]
+        .chunks(6)
+        .map(|row| {
+            row.iter()
+                .map(|b| if *b == "true" { '1' } else { '0' })
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            "011100", // false, true
+            "100101", // true, true
+            "011100", // -2, 1
+            "100101", // 7, 7
+            "011100", // -0.0, 0.0: totalOrder
+            "010011", // 2.5, -1e300
+            "011100", // "Z", "a": by code point
+            "011100", // "é", "😀"
+            "010011", // "ab", "a"
+            "100101", // "", ""
+        ]
+    );
+}
+
 /// Compile `source`, run it, and return its exit code and stderr.
 fn run_source(name: &str, source: &str) -> (i32, String) {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));

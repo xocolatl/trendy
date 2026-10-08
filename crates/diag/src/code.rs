@@ -44,10 +44,11 @@ pub enum Code {
     Overflow,
     DivisionByZero,
     WrongOperandType,
+    ChainedComparison,
 }
 
 impl Code {
-    pub const ALL: [Code; 37] = [
+    pub const ALL: [Code; 38] = [
         Code::UnexpectedCharacter,
         Code::MissingToken,
         Code::WrongDelimiter,
@@ -85,6 +86,7 @@ impl Code {
         Code::Overflow,
         Code::DivisionByZero,
         Code::WrongOperandType,
+        Code::ChainedComparison,
     ];
 
     #[must_use]
@@ -127,6 +129,7 @@ impl Code {
             Code::Overflow => "E0122",
             Code::DivisionByZero => "E0123",
             Code::WrongOperandType => "E0124",
+            Code::ChainedComparison => "E0015",
         }
     }
 
@@ -179,6 +182,7 @@ impl Code {
             Code::Overflow => include_str!("../errors/E0122.md"),
             Code::DivisionByZero => include_str!("../errors/E0123.md"),
             Code::WrongOperandType => include_str!("../errors/E0124.md"),
+            Code::ChainedComparison => include_str!("../errors/E0015.md"),
         }
     }
 }

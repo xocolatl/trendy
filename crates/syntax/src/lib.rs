@@ -51,9 +51,14 @@ pub enum SyntaxKind {
     Colon,
     Comma,
     ColonEq,
-    /// Not in the grammar yet; lexed so that `=` written for `:=` can be
-    /// recognized and fixed.
+    /// Equality, and recognized where `:=` is meant, with a fix.
     Eq,
+    /// `<>`
+    LtGt,
+    Lt,
+    LtEq,
+    Gt,
+    GtEq,
     Semicolon,
     Plus,
     Minus,
@@ -131,7 +136,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 64] = [
+    pub const ALL: [SyntaxKind; 69] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Ident,
         SyntaxKind::OperatorKw,
@@ -159,6 +164,11 @@ impl SyntaxKind {
         SyntaxKind::Comma,
         SyntaxKind::ColonEq,
         SyntaxKind::Eq,
+        SyntaxKind::LtGt,
+        SyntaxKind::Lt,
+        SyntaxKind::LtEq,
+        SyntaxKind::Gt,
+        SyntaxKind::GtEq,
         SyntaxKind::Semicolon,
         SyntaxKind::Plus,
         SyntaxKind::Minus,
@@ -253,6 +263,21 @@ impl SyntaxKind {
                     | SyntaxKind::Slash
                     | SyntaxKind::PipePipe
             )
+            || self.is_comparison()
+    }
+
+    /// Whether this is a comparison operator, such as `<`.
+    #[must_use]
+    pub fn is_comparison(self) -> bool {
+        matches!(
+            self,
+            SyntaxKind::Eq
+                | SyntaxKind::LtGt
+                | SyntaxKind::Lt
+                | SyntaxKind::LtEq
+                | SyntaxKind::Gt
+                | SyntaxKind::GtEq
+        )
     }
 
     /// Whether this kind is a literal token: a number, text, or a boolean
@@ -312,6 +337,11 @@ impl SyntaxKind {
             SyntaxKind::Comma => ",",
             SyntaxKind::ColonEq => ":=",
             SyntaxKind::Eq => "=",
+            SyntaxKind::LtGt => "<>",
+            SyntaxKind::Lt => "<",
+            SyntaxKind::LtEq => "<=",
+            SyntaxKind::Gt => ">",
+            SyntaxKind::GtEq => ">=",
             SyntaxKind::Semicolon => ";",
             SyntaxKind::Plus => "+",
             SyntaxKind::Minus => "-",
@@ -354,6 +384,11 @@ impl SyntaxKind {
             SyntaxKind::Comma => "`,`",
             SyntaxKind::ColonEq => "`:=`",
             SyntaxKind::Eq => "`=`",
+            SyntaxKind::LtGt => "`<>`",
+            SyntaxKind::Lt => "`<`",
+            SyntaxKind::LtEq => "`<=`",
+            SyntaxKind::Gt => "`>`",
+            SyntaxKind::GtEq => "`>=`",
             SyntaxKind::Semicolon => "`;`",
             SyntaxKind::Plus => "`+`",
             SyntaxKind::Minus => "`-`",
