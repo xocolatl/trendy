@@ -1622,6 +1622,24 @@ SourceFile
     }
 
     #[test]
+    fn comments_go_anywhere_whitespace_does() {
+        let source = "/* a */ var /* b */ x /* c */ : /* d */ integer := /* e */ - /* f */ 1 + /* g */ (2) /* h */; /* i */\noperator main{ /* j */ } [ /* k */ call /* l */ f{ /* m */ v: 1 /* n */ } /* o */ ; ] /* p */ ;";
+        let parse = parse_str(source);
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        assert_eq!(parse.tree.syntax().to_string(), source, "lossless");
+        assert_eq!(
+            fix("var x := /* note */ 1 + ;"),
+            "var x := /* note */ 1 + ;",
+            "no mechanical fix for a missing operand"
+        );
+        // A missing `;` goes after the code, not after a comment.
+        assert_eq!(
+            fix("var x := 1 /* one */\nvar y := 2;"),
+            "var x := 1; /* one */\nvar y := 2;"
+        );
+    }
+
+    #[test]
     fn comparisons_dont_chain() {
         let errors = parse_str("var x := a < b + 1 <= c;").errors;
         assert_eq!(errors.len(), 1);

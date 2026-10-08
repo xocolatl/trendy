@@ -122,6 +122,7 @@ pub fn semantic_tokens_legend() -> SemanticTokensLegend {
             SemanticTokenType::PROPERTY,
             SemanticTokenType::PARAMETER,
             SemanticTokenType::OPERATOR,
+            SemanticTokenType::COMMENT,
         ],
         token_modifiers: vec![
             SemanticTokenModifier::DECLARATION,
@@ -143,6 +144,7 @@ fn token_type(class: Class) -> u32 {
         Class::Attribute => 6,
         Class::Parameter => 7,
         Class::ExprOperator => 8,
+        Class::Comment => 9,
     }
 }
 
@@ -157,25 +159,35 @@ pub fn semantic_tokens(source: &str) -> Vec<SemanticToken> {
     let mut previous = lsp_types::Position::new(0, 0);
     let mut tokens = Vec::new();
     for h in highlight::highlights(&parse.tree) {
-        let start = index.position(h.span.start);
-        let length = source[h.span.start..h.span.end].encode_utf16().count();
-        let delta_line = start.line - previous.line;
-        tokens.push(SemanticToken {
-            delta_line,
-            delta_start: if delta_line == 0 {
-                start.character - previous.character
-            } else {
-                start.character
-            },
-            length: u32::try_from(length).unwrap_or(u32::MAX),
-            token_type: token_type(h.class),
-            token_modifiers_bitset: if h.definition {
-                DEFINITION_MODIFIERS
-            } else {
-                0
-            },
-        });
-        previous = start;
+        // A token can't span lines, since clients needn't support it, so a
+        // multi-line comment is one token per line.
+        let mut offset = h.span.start;
+        for line in source[h.span.start..h.span.end].split_inclusive('\n') {
+            let text = line.trim_end_matches(['\n', '\r']);
+            let start = index.position(offset);
+            offset += line.len();
+            if text.is_empty() {
+                continue;
+            }
+            let length = text.encode_utf16().count();
+            let delta_line = start.line - previous.line;
+            tokens.push(SemanticToken {
+                delta_line,
+                delta_start: if delta_line == 0 {
+                    start.character - previous.character
+                } else {
+                    start.character
+                },
+                length: u32::try_from(length).unwrap_or(u32::MAX),
+                token_type: token_type(h.class),
+                token_modifiers_bitset: if h.definition {
+                    DEFINITION_MODIFIERS
+                } else {
+                    0
+                },
+            });
+            previous = start;
+        }
     }
     tokens
 }
@@ -308,6 +320,22 @@ mod tests {
                 token(2, 2, 8, 0, 0),
                 token(0, 9, 1, 1, DEFINITION_MODIFIERS),
             ]
+        );
+    }
+
+    #[test]
+    fn multi_line_comments_are_a_token_per_line() {
+        let token = |delta_line, delta_start, length| SemanticToken {
+            delta_line,
+            delta_start,
+            length,
+            token_type: token_type(Class::Comment),
+            token_modifiers_bitset: 0,
+        };
+        assert_eq!(
+            semantic_tokens("  /* a\r\n\n  bé */"),
+            [token(0, 2, 4), token(2, 0, 7)],
+            "blank lines in between have no token"
         );
     }
 

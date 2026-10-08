@@ -197,6 +197,16 @@ fn punctuation_patterns() -> Vec<Value> {
 
 /// Text literals: like the lexer, an unterminated literal ends at the end of
 /// the line.
+/// `/* … */`. Comments nest, so the rule includes itself.
+fn comment_rule() -> Value {
+    json!({
+        "begin": "/\\*",
+        "end": "\\*/",
+        "name": "comment.block.trendy",
+        "patterns": [{ "include": "#comment" }],
+    })
+}
+
 fn text_rule() -> Value {
     let simple_escapes: String = trendy_syntax::literal::SIMPLE_ESCAPES
         .iter()
@@ -246,6 +256,7 @@ fn generate(probed: &Probed) -> Value {
         "scopeName": "source.trendy",
         "comment": "Generated from the lexer by crates/lsp/tests/textmate.rs. Do not edit: run `UPDATE_TEXTMATE=1 cargo test -p trendy_lsp --test textmate`.",
         "patterns": [
+            { "include": "#comment" },
             { "include": "#operator-definition" },
             { "include": "#builtin-type" },
             { "include": "#call" },
@@ -300,6 +311,7 @@ fn generate(probed: &Probed) -> Value {
                     "2": { "name": "entity.name.function.trendy" },
                 },
             },
+            "comment": comment_rule(),
             "keywords": {
                 "match": format!("\\b(?:{})\\b", keywords.join("|")),
                 "name": "keyword.other.trendy",

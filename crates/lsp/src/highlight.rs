@@ -25,6 +25,7 @@ pub enum Class {
     Type,
     Number,
     Text,
+    Comment,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +56,7 @@ fn classify(token: &SyntaxToken) -> Option<Highlight> {
         .and_then(|p| p.parent())
         .map(|p| p.kind());
     let (class, definition) = match (token.kind(), parent, grandparent) {
+        (SyntaxKind::Comment, _, _) => (Class::Comment, false),
         (kind, _, _) if kind.is_operator() => (Class::ExprOperator, false),
         (kind, _, _) if kind.is_keyword() => (Class::Keyword, false),
         // The contextual keyword in `builtin type name;`.
@@ -166,6 +168,20 @@ mod tests {
                 ("b", Class::Variable, false),
                 ("mod", Class::ExprOperator, false),
                 ("2", Class::Number, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn comments() {
+        assert_eq!(
+            highlight("/* a /* b */ c */ var x := 1; /* d */"),
+            [
+                ("/* a /* b */ c */", Class::Comment, false),
+                ("var", Class::Keyword, false),
+                ("x", Class::Variable, true),
+                ("1", Class::Number, false),
+                ("/* d */", Class::Comment, false),
             ]
         );
     }

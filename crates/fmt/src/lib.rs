@@ -1,8 +1,8 @@
 //! The canonical source formatter.
 //!
 //! The formatter reprints the CST's tokens and decides the whitespace between
-//! them. It never adds or drops a token, so comments will survive formatting
-//! once the language has them. The only tokens it moves are the attributes of
+//! them. It never adds or drops a token, and keeps every comment, placed by
+//! where it was: on its own line, after code, or within a line. The only tokens it moves are the attributes of
 //! a relation's tuples, which it writes in the order of the relation's
 //! heading; attributes are unordered, so that never changes what a program
 //! means. This crate defines the language's layout: whatever it prints is the
@@ -22,36 +22,180 @@ use trendy_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 pub fn format(file: &SourceFile) -> String {
     let mut out = String::new();
     let mut prev: Option<SyntaxToken> = None;
-    // Whether the source has a blank line since the previous token.
+    // Since the previous significant token: whether the source has a blank
+    // line, and the comments, each with whether it starts its own line.
     let mut blank_line = false;
+    let mut comments: Vec<(SyntaxToken, bool)> = Vec::new();
+    // Whether the source has a line break, and a blank line, since the last
+    // token or comment.
+    let mut newline = false;
+    let mut blank_since = false;
     for token in order::tokens(file) {
-        if token.kind() == SyntaxKind::Whitespace {
-            blank_line |= token.text().matches('\n').count() >= 2;
-            continue;
-        }
-        if let Some(prev) = &prev {
-            if let Some(indent) = broken_line(prev, &token) {
-                out.push('\n');
-                out.push_str(&INDENT.repeat(indent));
-            } else {
-                let separator = separator(prev, &token, blank_line);
-                // Never let two tokens run together into others: the
-                // formatter must not change what the program means.
-                if separator.is_empty() && would_merge(prev, &token) {
-                    out.push(' ');
-                } else {
-                    out.push_str(separator);
-                }
+        match token.kind() {
+            SyntaxKind::Whitespace => {
+                let breaks = token.text().matches('\n').count();
+                blank_line |= breaks >= 2;
+                newline |= breaks >= 1;
+                blank_since |= breaks >= 2;
+                continue;
             }
+            SyntaxKind::Comment => {
+                comments.push((token, newline || prev.is_none()));
+                newline = false;
+                blank_since = false;
+                continue;
+            }
+            _ => {}
         }
+        let sep = match &prev {
+            Some(prev) => between(prev, &token, blank_line),
+            None => String::new(),
+        };
+        let gap = Gap {
+            sep: &sep,
+            prev: prev.as_ref(),
+            next: &token,
+            blank_after: blank_since,
+        };
+        gap.write(&std::mem::take(&mut comments), &mut out);
         out.push_str(token.text());
         prev = Some(token);
         blank_line = false;
+        newline = false;
+        blank_since = false;
     }
-    if prev.is_some() {
+    // Comments after the last token.
+    for (comment, own_line) in comments {
+        if !out.is_empty() {
+            out.push(if own_line { '\n' } else { ' ' });
+        }
+        out.push_str(comment.text());
+    }
+    if !out.is_empty() {
         out.push('\n');
     }
     out
+}
+
+/// The whitespace between two adjacent significant tokens.
+fn between(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> String {
+    if let Some(indent) = broken_line(prev, next) {
+        return format!("\n{}", INDENT.repeat(indent));
+    }
+    let separator = separator(prev, next, blank_line);
+    // Never let two tokens run together into others: the formatter must not
+    // change what the program means.
+    if separator.is_empty() && would_merge(prev, next) {
+        " ".to_string()
+    } else {
+        separator.to_string()
+    }
+}
+
+/// What goes between two significant tokens: `sep`, the layout's own
+/// whitespace, with any comments in the source between them.
+struct Gap<'a> {
+    sep: &'a str,
+    /// The tokens around the gap; there is none before the start of the
+    /// file.
+    prev: Option<&'a SyntaxToken>,
+    next: &'a SyntaxToken,
+    /// Whether the source has a blank line after the last comment.
+    blank_after: bool,
+}
+
+impl Gap<'_> {
+    fn at_start(&self) -> bool {
+        self.prev.is_none()
+    }
+
+    /// Whether the code before is an opening delimiter, which an inline
+    /// comment hugs, as in `f{/* none */}`.
+    fn after_opener(&self) -> bool {
+        self.prev.is_some_and(|p| {
+            matches!(
+                p.kind(),
+                SyntaxKind::LBrace | SyntaxKind::LBracket | SyntaxKind::LParen
+            )
+        })
+    }
+
+    /// Whether the code after is a closing delimiter, `,` or `;`, which
+    /// follows an inline comment directly.
+    fn before_closer(&self) -> bool {
+        matches!(
+            self.next.kind(),
+            SyntaxKind::RBrace
+                | SyntaxKind::RBracket
+                | SyntaxKind::RParen
+                | SyntaxKind::Comma
+                | SyntaxKind::Semicolon
+        )
+    }
+
+    /// Write the gap, with `comments`, each with whether it starts its own
+    /// line in the source. A comment on its own line keeps it where the
+    /// layout breaks the line anyway, indented like the code after it;
+    /// anywhere else a comment goes inline, which a block comment always
+    /// can.
+    fn write(&self, comments: &[(SyntaxToken, bool)], out: &mut String) {
+        if comments.is_empty() {
+            out.push_str(self.sep);
+            return;
+        }
+        let breaks = self.sep.contains('\n') || self.at_start();
+        let indent = self.sep.rsplit('\n').next().unwrap_or("");
+        // Between code and a comment beside it: the layout's space, or one
+        // where the code would be tight, except against delimiters.
+        let spaced = |tight: bool| {
+            if breaks || self.sep.is_empty() {
+                if tight { "" } else { " " }
+            } else {
+                self.sep
+            }
+        };
+        let before = spaced(self.after_opener());
+        let after = spaced(self.before_closer());
+        let mut sep_written = false;
+        let mut last_own_line = false;
+        for (i, (comment, own_line)) in comments.iter().enumerate() {
+            last_own_line = *own_line && breaks;
+            if last_own_line {
+                if sep_written || (self.at_start() && i == 0) {
+                    if i > 0 || !self.at_start() {
+                        out.push('\n');
+                        out.push_str(indent);
+                    }
+                } else {
+                    out.push_str(self.sep);
+                }
+                sep_written = true;
+            } else if i > 0 {
+                out.push(' ');
+            } else if !self.at_start() {
+                out.push_str(if breaks { " " } else { before });
+            }
+            out.push_str(comment.text());
+        }
+        if last_own_line {
+            out.push('\n');
+            if self.blank_after {
+                out.push('\n');
+            }
+            out.push_str(indent);
+        } else if breaks && !self.at_start() {
+            if sep_written {
+                out.push('\n');
+                out.push_str(indent);
+            } else {
+                out.push_str(self.sep);
+            }
+        } else if self.at_start() {
+            out.push(' ');
+        } else {
+            out.push_str(after);
+        }
+    }
 }
 
 const INDENT: &str = "    ";
@@ -451,6 +595,68 @@ mod tests {
             "var a := x <> -1 and (y >= 2) = (z <= 3);\n"
         );
         assert_eq!(fmt("var a := not-1;"), "var a := not -1;\n");
+    }
+
+    #[test]
+    fn comments() {
+        // A header, kept apart by its blank line.
+        assert_eq!(
+            fmt("/* header */\n\nvar a := 1;"),
+            "/* header */\n\nvar a := 1;\n"
+        );
+        // Own line between definitions, and trailing.
+        assert_eq!(
+            fmt("var a := 1;   /* one */\n/* about b */\nvar b := 2;"),
+            "var a := 1; /* one */\n/* about b */\nvar b := 2;\n"
+        );
+        // Inside a body: indented like the statement after it.
+        assert_eq!(
+            fmt("operator main{} [\n/* first */\ncall f{};\n    call g{}; /* last */\n];"),
+            "operator main{} [\n    /* first */\n    call f{};\n    call g{}; /* last */\n];\n"
+        );
+        // Inline, with the spacing the code has there.
+        assert_eq!(
+            fmt("var a:=1/* one */+  2 /* two */;"),
+            "var a := 1 /* one */ + 2 /* two */;\n"
+        );
+        assert_eq!(
+            fmt("operator main{} [ call f{/* none */}; ];"),
+            "operator main{} [\n    call f{/* none */};\n];\n"
+        );
+        // On its own line where the layout keeps one line: inline.
+        assert_eq!(
+            fmt("var t := tuple { a: 1,\n/* b next */\nb: 2 };"),
+            "var t := tuple { a: 1, /* b next */ b: 2 };\n"
+        );
+        // In a relation's lines.
+        assert_eq!(
+            fmt("var r := relation {\n{ a: 1 }, /* first */\n/* second */\n{ a: 2 }\n};"),
+            "var r := relation {\n    { a: 1 }, /* first */\n    /* second */\n    { a: 2 }\n};\n"
+        );
+        // Nested and multi-line comments are kept as written.
+        let nested = "/* a /* nested */\n   comment */\nvar a := 1;\n";
+        assert_eq!(fmt(nested), nested);
+        // At the end of the file.
+        assert_eq!(fmt("var a := 1;\n/* end */"), "var a := 1;\n/* end */\n");
+        assert_eq!(fmt("var a := 1; /* end */"), "var a := 1; /* end */\n");
+        assert_eq!(fmt("/* only */"), "/* only */\n");
+    }
+
+    #[test]
+    fn comments_are_idempotent_and_kept() {
+        let source = "/* h */\nvar a/*x*/:=1;/* t */\n\n/* o */\noperator main{}[/* e */\n/* s */\ncall f{v:a/*y*/};];/* z */";
+        let once = fmt(source);
+        assert_eq!(fmt(&once), once);
+        let comments = |s: &str| {
+            trendy_lexer::lex(s)
+                .tokens
+                .iter()
+                .filter(|t| t.kind == SyntaxKind::Comment)
+                .map(|t| s[t.span.start..t.span.end].to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(comments(&once), comments(source));
+        assert_eq!(significant_tokens(&once), significant_tokens(source));
     }
 
     #[test]

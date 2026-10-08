@@ -20,6 +20,8 @@ use trendy_diag::Span;
 pub enum SyntaxKind {
     // Trivia: tokens with no grammatical meaning.
     Whitespace,
+    /// `/* … */`, which nests: `/* a /* b */ c */` is one comment.
+    Comment,
 
     // Tokens.
     Ident,
@@ -136,8 +138,9 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 69] = [
+    pub const ALL: [SyntaxKind; 70] = [
         SyntaxKind::Whitespace,
+        SyntaxKind::Comment,
         SyntaxKind::Ident,
         SyntaxKind::OperatorKw,
         SyntaxKind::VarKw,
@@ -210,7 +213,7 @@ impl SyntaxKind {
 
     #[must_use]
     pub fn is_trivia(self) -> bool {
-        self == SyntaxKind::Whitespace
+        matches!(self, SyntaxKind::Whitespace | SyntaxKind::Comment)
     }
 
     #[must_use]
@@ -357,6 +360,7 @@ impl SyntaxKind {
     pub fn describe(self) -> &'static str {
         match self {
             SyntaxKind::Whitespace => "whitespace",
+            SyntaxKind::Comment => "comment",
             SyntaxKind::Ident => "identifier",
             SyntaxKind::OperatorKw => "`operator`",
             SyntaxKind::VarKw => "`var`",

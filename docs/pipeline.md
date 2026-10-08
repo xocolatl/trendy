@@ -99,8 +99,14 @@ unterminated text literal ends at the end of its line, or just before a final
 `;` on that line, which is most likely where the closing quote was meant to
 go.
 
-**Owns:** what counts as whitespace, identifiers, keywords, literals and
-punctuation.
+Comments are trivia, like whitespace: the parser skips them, and they stay
+in the CST. They nest, so the lexer counts `/*` and `*/` within one. An
+unterminated comment runs to the end of the source (E0012, with each
+unclosed nested opener labeled), and a `*/` outside a comment is an error
+(E0016), except in `*/*`, which is `*` followed by a comment.
+
+**Owns:** what counts as whitespace, comments, identifiers, keywords,
+literals and punctuation.
 **Must not:** know the grammar. It never looks at more than one token at a
 time to decide anything.
 
@@ -153,10 +159,14 @@ formatter looks at the original whitespace.
 Everything else goes on one line, except that a relation value with more than
 one tuple is broken across lines: each tuple on its own line, indented four
 spaces per level of nesting, with the closing brace on a line of its own.
+A tuple value, relation value or call's arguments with several items, one of
+them broken, puts each item on its own line too.
 
 The formatter reprints the CST's tokens and decides the whitespace between
-them. It never adds or drops a token, so it will keep comments intact once
-they exist. The only tokens it moves are the attributes of a relation's
+them. It never adds or drops a token, comments included. Comments are
+placed by where they were: one on its own line stays on its own line where
+the layout breaks the line anyway, and otherwise goes inline, which a block
+comment always can; one after code on the same line stays there. The only tokens it moves are the attributes of a relation's
 tuples, which it writes in the order of the relation's heading (the
 selector's own, else the expected type's, else the first tuple's).
 Attributes are unordered, so that can't change what a program means. It must

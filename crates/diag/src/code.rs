@@ -18,6 +18,7 @@ pub enum Code {
     InvalidRational,
     MiscasedKeyword,
     AttributeSeparator,
+    UnterminatedComment,
     MissingCall,
     ForeignOperator,
     DuplicateName,
@@ -45,10 +46,11 @@ pub enum Code {
     DivisionByZero,
     WrongOperandType,
     ChainedComparison,
+    StrayCommentEnd,
 }
 
 impl Code {
-    pub const ALL: [Code; 38] = [
+    pub const ALL: [Code; 40] = [
         Code::UnexpectedCharacter,
         Code::MissingToken,
         Code::WrongDelimiter,
@@ -60,6 +62,7 @@ impl Code {
         Code::InvalidRational,
         Code::MiscasedKeyword,
         Code::AttributeSeparator,
+        Code::UnterminatedComment,
         Code::MissingCall,
         Code::ForeignOperator,
         Code::DuplicateName,
@@ -87,6 +90,7 @@ impl Code {
         Code::DivisionByZero,
         Code::WrongOperandType,
         Code::ChainedComparison,
+        Code::StrayCommentEnd,
     ];
 
     #[must_use]
@@ -103,6 +107,7 @@ impl Code {
             Code::InvalidRational => "E0009",
             Code::MiscasedKeyword => "E0010",
             Code::AttributeSeparator => "E0011",
+            Code::UnterminatedComment => "E0012",
             Code::MissingCall => "E0013",
             Code::ForeignOperator => "E0014",
             Code::DuplicateName => "E0101",
@@ -130,6 +135,7 @@ impl Code {
             Code::DivisionByZero => "E0123",
             Code::WrongOperandType => "E0124",
             Code::ChainedComparison => "E0015",
+            Code::StrayCommentEnd => "E0016",
         }
     }
 
@@ -156,6 +162,7 @@ impl Code {
             Code::InvalidRational => include_str!("../errors/E0009.md"),
             Code::MiscasedKeyword => include_str!("../errors/E0010.md"),
             Code::AttributeSeparator => include_str!("../errors/E0011.md"),
+            Code::UnterminatedComment => include_str!("../errors/E0012.md"),
             Code::MissingCall => include_str!("../errors/E0013.md"),
             Code::ForeignOperator => include_str!("../errors/E0014.md"),
             Code::DuplicateName => include_str!("../errors/E0101.md"),
@@ -183,6 +190,7 @@ impl Code {
             Code::DivisionByZero => include_str!("../errors/E0123.md"),
             Code::WrongOperandType => include_str!("../errors/E0124.md"),
             Code::ChainedComparison => include_str!("../errors/E0015.md"),
+            Code::StrayCommentEnd => include_str!("../errors/E0016.md"),
         }
     }
 }

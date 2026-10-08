@@ -627,6 +627,33 @@ var path: text := "C:\data";
 operator main{} [];
 ```
 
+## Comments
+
+A comment is written `/* … */`, and can go anywhere whitespace can. There
+are no line comments.
+
+Comments nest: a `/*` inside a comment starts a nested comment, which needs
+its own `*/`. So code that contains comments can be commented out as it is.
+
+```trendy
+/* The answer, which /* for now */ is a constant. */
+var answer := 42; /* see below */
+
+operator main{} [
+    /* call debug_value{v: answer}; /* disabled */ */
+];
+```
+
+A comment without its `*/` runs to the end of the file, and is an error
+(E0012); so is a `*/` outside a comment (E0016).
+
+```trendy,error
+/* not closed /* */
+var answer := 42;
+
+operator main{} [];
+```
+
 ## Names
 
 Names are ASCII letters, digits and `_`, and don't start with a digit. They
@@ -677,6 +704,12 @@ operator main{} [];
   `-a * (b + 1)`.
 
 A trailing comma is kept or left out as written.
+
+Comments are kept exactly as written. A comment on a line of its own stays
+on its own line, indented like the code after it, where the layout breaks
+the line anyway; elsewhere it stays in the line, between the same code. A
+comment after code on the same line stays there, after one space. A blank
+line after a comment on its own line, such as a file's header, is kept.
 
 ## Coming from other languages
 

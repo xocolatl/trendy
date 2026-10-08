@@ -450,7 +450,7 @@ fn list_removal(item: &SyntaxNode) -> Span {
         // Up to the next element, so its spacing stays as it was.
         let end = comma
             .next_token()
-            .filter(|t| t.kind().is_trivia())
+            .filter(|t| t.kind() == SyntaxKind::Whitespace)
             .map_or_else(
                 || span(comma.text_range()).end,
                 |ws| span(ws.text_range()).end,

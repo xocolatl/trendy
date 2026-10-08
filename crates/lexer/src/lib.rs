@@ -51,6 +51,13 @@ pub fn lex(source: &str) -> Lexed {
                 }
                 (SyntaxKind::IntLiteral, end)
             }
+        } else if source[start..].starts_with("/*") {
+            (SyntaxKind::Comment, comment(source, start, &mut errors))
+        } else if source[start..].starts_with("*/") && !source[start..].starts_with("*/*") {
+            // `*/` can't be code, since `/` never starts an operand; but in
+            // `a*/* c */b` it is `*` and then a comment.
+            errors.push(stray_comment_end(Span::new(start, start + 2)));
+            (SyntaxKind::ErrorToken, start + 2)
         } else if c == '"' {
             (
                 SyntaxKind::TextLiteral,
@@ -223,6 +230,75 @@ fn unexpected_character(c: char, span: Span) -> Diagnostic {
     ))
     .with_suggestion(
         format!("remove `{shown}`"),
+        vec![Edit {
+            span,
+            replacement: String::new(),
+        }],
+    )
+}
+
+/// Scan the comment starting with the `/*` at `start`, report it if it is
+/// unterminated, and return where it ends. Comments nest, so each `/*`
+/// needs its own `*/`.
+fn comment(source: &str, start: usize, errors: &mut Vec<Diagnostic>) -> usize {
+    // Where each comment still open starts, outermost first.
+    let mut open = vec![start];
+    let mut at = start + 2;
+    while at < source.len() {
+        let rest = &source[at..];
+        if rest.starts_with("/*") {
+            open.push(at);
+            at += 2;
+        } else if rest.starts_with("*/") {
+            open.pop();
+            at += 2;
+            if open.is_empty() {
+                return at;
+            }
+        } else {
+            at += rest.chars().next().map_or(1, char::len_utf8);
+        }
+    }
+    errors.push(unterminated_comment(&open, source.len()));
+    source.len()
+}
+
+/// A comment whose openers at `open`, outermost first, have no `*/` before
+/// the end of the source, at `end`.
+fn unterminated_comment(open: &[usize], end: usize) -> Diagnostic {
+    let mut d = Diagnostic::error(
+        Code::UnterminatedComment,
+        "unterminated comment",
+        Span::new(open[0], open[0] + 2),
+        "this comment has no closing `*/`",
+    )
+    .with_note("comments nest: each `/*` inside a comment needs its own `*/`");
+    for &nested in &open[1..] {
+        d = d.with_secondary(
+            Span::new(nested, nested + 2),
+            "a nested comment, also unclosed",
+        );
+    }
+    d.with_suggestion(
+        "close it at the end of the file",
+        vec![Edit {
+            span: Span::empty(end),
+            replacement: "*/".repeat(open.len()),
+        }],
+    )
+}
+
+/// A `*/` at `span`, outside any comment.
+fn stray_comment_end(span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::StrayCommentEnd,
+        "`*/` outside a comment",
+        span,
+        "no comment to close",
+    )
+    .with_note("comments are written `/* … */`, and nest")
+    .with_suggestion(
+        "remove it",
         vec![Edit {
             span,
             replacement: String::new(),
@@ -668,6 +744,46 @@ mod tests {
                 Ident
             ]
         );
+    }
+
+    #[test]
+    fn comments() {
+        assert_eq!(
+            kinds("a/* x */+/**/b"),
+            [Ident, Comment, Plus, Comment, Ident]
+        );
+        // Nested: one comment.
+        let source = "a /* x /* y */ z */ b";
+        assert_eq!(
+            kinds(source),
+            [Ident, Whitespace, Comment, Whitespace, Ident]
+        );
+        assert_eq!(lex(source).tokens[2].span, Span::new(2, 19));
+        assert!(lex("/* é\n */").errors.is_empty());
+        assert_eq!(
+            kinds("a / b"),
+            [Ident, Whitespace, Slash, Whitespace, Ident]
+        );
+        assert_eq!(kinds("2*/* c */3"), [IntLiteral, Star, Comment, IntLiteral]);
+    }
+
+    #[test]
+    fn unterminated_comments() {
+        let source = "var a := 1; /* x /* y */";
+        let errors = lex(source).errors;
+        assert_eq!(codes(source), [Code::UnterminatedComment]);
+        assert_eq!(errors[0].span(), Span::new(12, 14));
+        assert!(errors[0].secondary.is_empty(), "the nested one is closed");
+        assert_eq!(fix(source), "var a := 1; /* x /* y */*/");
+        let errors = lex("/* a /* b").errors;
+        assert_eq!(errors[0].secondary[0].span, Span::new(5, 7));
+        assert_eq!(fix("/* a /* b"), "/* a /* b*/*/");
+    }
+
+    #[test]
+    fn stray_comment_end() {
+        assert_eq!(codes("var a := 1; */"), [Code::StrayCommentEnd]);
+        assert_eq!(fix("var a := 1 */;"), "var a := 1 ;");
     }
 
     #[test]

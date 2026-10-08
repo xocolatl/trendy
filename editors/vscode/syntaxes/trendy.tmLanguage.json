@@ -4,6 +4,9 @@
   "name": "trendy",
   "patterns": [
     {
+      "include": "#comment"
+    },
+    {
       "include": "#operator-definition"
     },
     {
@@ -63,6 +66,16 @@
         }
       },
       "match": "\\b(call)\\s+([A-Z_a-z][0-9A-Z_a-z]*)"
+    },
+    "comment": {
+      "begin": "/\\*",
+      "end": "\\*/",
+      "name": "comment.block.trendy",
+      "patterns": [
+        {
+          "include": "#comment"
+        }
+      ]
     },
     "keywords": {
       "match": "\\b(?:operator|var|tuple|relation|call|builtin)\\b",
