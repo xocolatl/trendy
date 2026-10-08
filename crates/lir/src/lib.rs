@@ -31,6 +31,12 @@
 //! builds that struct in a stack slot. A function without parameters takes
 //! nothing.
 //!
+//! # Failures
+//!
+//! An integer instruction whose result doesn't exist stops the program by
+//! calling [`RuntimeFn::Fail`], which writes the error to stderr and exits
+//! with status 1.
+//!
 //! # Type descriptors
 //!
 //! Runtime functions that accept any type, such as
@@ -117,6 +123,9 @@ pub enum Base {
 pub enum RuntimeFn {
     /// `trendy_rt_debug_value(value, descriptor)`.
     DebugValue,
+    /// `trendy_rt_fail(failure)`, which doesn't return. It takes a
+    /// [`Failure::code`] by value, not a place, so only codegen calls it.
+    Fail,
 }
 
 impl RuntimeFn {
@@ -125,6 +134,7 @@ impl RuntimeFn {
     pub fn symbol(self) -> &'static str {
         match self {
             RuntimeFn::DebugValue => "trendy_rt_debug_value",
+            RuntimeFn::Fail => "trendy_rt_fail",
         }
     }
 }
@@ -147,25 +157,73 @@ pub enum Inst {
         function: RuntimeFn,
         args: Vec<Place>,
     },
-    /// Store the negation of the boolean at `src` at `dst`.
-    Not { dst: Place, src: Place },
-    /// Store `lhs op rhs`, of booleans, at `dst`.
-    Bool {
+    /// Store `op src` at `dst`. Booleans and integers only.
+    Unary { dst: Place, op: UnaryOp, src: Place },
+    /// Store `lhs op rhs` at `dst`. Booleans and integers only.
+    Binary {
         dst: Place,
-        op: BoolOp,
+        op: BinaryOp,
         lhs: Place,
         rhs: Place,
     },
 }
 
-/// A dyadic operator on booleans.
+/// A monadic operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BoolOp {
+pub enum UnaryOp {
+    /// Of a boolean.
+    Not,
+    /// Of an integer; fails with [`Failure::Overflow`] for the smallest one.
+    Negate,
+}
+
+/// A dyadic operator. The integer operators are checked: a result that
+/// isn't an `i64` stops the program with a [`Failure`], as if the
+/// instruction were followed by a branch to a call to
+/// [`RuntimeFn::Fail`]. Codegen emits that branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinaryOp {
     And,
     Or,
     Xor,
     /// `!lhs || rhs`.
     Implies,
+    Add,
+    Subtract,
+    Multiply,
+    /// Truncating toward zero.
+    Div,
+    /// With the sign of the dividend. `i64::MIN mod -1` is 0.
+    Mod,
+}
+
+impl BinaryOp {
+    /// Whether the operands are integers, rather than booleans.
+    #[must_use]
+    pub fn is_integer(self) -> bool {
+        matches!(
+            self,
+            BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply | BinaryOp::Div | BinaryOp::Mod
+        )
+    }
+}
+
+/// Why a program stops: the argument of [`RuntimeFn::Fail`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Failure {
+    Overflow,
+    DivisionByZero,
+}
+
+impl Failure {
+    /// The `trendy_runtime::FAIL_` constant for this failure.
+    #[must_use]
+    pub fn code(self) -> u32 {
+        match self {
+            Failure::Overflow => 0,
+            Failure::DivisionByZero => 1,
+        }
+    }
 }
 
 /// Index into [`Function::blocks`].

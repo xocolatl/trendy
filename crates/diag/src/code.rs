@@ -41,10 +41,12 @@ pub enum Code {
     MainWithParams,
     NameInSelector,
     CyclicInitialValues,
+    IntegerOverflow,
+    DivisionByZero,
 }
 
 impl Code {
-    pub const ALL: [Code; 34] = [
+    pub const ALL: [Code; 36] = [
         Code::UnexpectedCharacter,
         Code::MissingToken,
         Code::WrongDelimiter,
@@ -79,6 +81,8 @@ impl Code {
         Code::MainWithParams,
         Code::NameInSelector,
         Code::CyclicInitialValues,
+        Code::IntegerOverflow,
+        Code::DivisionByZero,
     ];
 
     #[must_use]
@@ -118,6 +122,8 @@ impl Code {
             Code::MainWithParams => "E0119",
             Code::NameInSelector => "E0120",
             Code::CyclicInitialValues => "E0121",
+            Code::IntegerOverflow => "E0122",
+            Code::DivisionByZero => "E0123",
         }
     }
 
@@ -167,6 +173,8 @@ impl Code {
             Code::MainWithParams => include_str!("../errors/E0119.md"),
             Code::NameInSelector => include_str!("../errors/E0120.md"),
             Code::CyclicInitialValues => include_str!("../errors/E0121.md"),
+            Code::IntegerOverflow => include_str!("../errors/E0122.md"),
+            Code::DivisionByZero => include_str!("../errors/E0123.md"),
         }
     }
 }

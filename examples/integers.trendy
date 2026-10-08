@@ -1,0 +1,24 @@
+var seven := 1 + 2 * 3;
+var nine := (1 + 2) * 3;
+var smallest := -9223372036854775808;
+var largest := -(smallest + 1);
+
+operator arithmetic{a: integer, b: integer} [
+    call debug_value{v: -a};
+    call debug_value{v: a + b};
+    call debug_value{v: a - b};
+    call debug_value{v: a * b};
+    call debug_value{v: a div b};
+    call debug_value{v: a mod b};
+];
+
+operator main{} [
+    call debug_value{v: seven};
+    call debug_value{v: nine};
+    call debug_value{v: smallest};
+    call debug_value{v: largest};
+    call arithmetic{a: 7, b: 2};
+    call arithmetic{a: -7, b: 2};
+    call arithmetic{a: 7, b: -2};
+    call arithmetic{a: smallest + 1, b: -1};
+];

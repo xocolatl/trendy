@@ -215,7 +215,8 @@ impl Functions {
                 b.ins().call(callee, &args);
             }
             lir::Inst::CallRuntime { function, args } => {
-                let id = self.runtime_function(*function, args.len())?;
+                let pointers = vec![self.config.pointer_type(); args.len()];
+                let id = self.runtime_function(*function, &pointers)?;
                 let callee = self.module.declare_func_in_func(id, b.func);
                 let args = args
                     .iter()
@@ -223,41 +224,128 @@ impl Functions {
                     .collect::<Result<Vec<_>, _>>()?;
                 b.ins().call(callee, &args);
             }
-            lir::Inst::Not { dst, src } => {
-                let value = self.load_bool(src, frame, b)?;
-                let result = b.ins().bxor_imm_u(value, 1);
-                self.store_bool(dst, result, frame, b)?;
-            }
-            lir::Inst::Bool { dst, op, lhs, rhs } => {
-                let lhs = self.load_bool(lhs, frame, b)?;
-                let rhs = self.load_bool(rhs, frame, b)?;
-                let result = match op {
-                    lir::BoolOp::And => b.ins().band(lhs, rhs),
-                    lir::BoolOp::Or => b.ins().bor(lhs, rhs),
-                    lir::BoolOp::Xor => b.ins().bxor(lhs, rhs),
-                    lir::BoolOp::Implies => {
-                        let not_lhs = b.ins().bxor_imm_u(lhs, 1);
-                        b.ins().bor(not_lhs, rhs)
-                    }
+            lir::Inst::Unary { dst, op, src } => match op {
+                lir::UnaryOp::Not => {
+                    let value = self.load(types::I8, src, frame, b)?;
+                    let result = b.ins().bxor_imm_u(value, 1);
+                    self.store(dst, result, frame, b)?;
+                }
+                lir::UnaryOp::Negate => {
+                    let value = self.load(types::I64, src, frame, b)?;
+                    let zero = b.ins().iconst(types::I64, 0);
+                    let (result, overflow) = b.ins().ssub_overflow(zero, value);
+                    self.fail_if(overflow, lir::Failure::Overflow, b)?;
+                    self.store(dst, result, frame, b)?;
+                }
+            },
+            lir::Inst::Binary { dst, op, lhs, rhs } => {
+                let ty = if op.is_integer() {
+                    types::I64
+                } else {
+                    types::I8
                 };
-                self.store_bool(dst, result, frame, b)?;
+                let lhs = self.load(ty, lhs, frame, b)?;
+                let rhs = self.load(ty, rhs, frame, b)?;
+                let result = self.binary(*op, lhs, rhs, b)?;
+                self.store(dst, result, frame, b)?;
             }
         }
         Ok(())
     }
 
-    /// The boolean at `place`: `0` or `1`, as an `i8`.
-    fn load_bool(
+    /// `lhs op rhs`, failing the program where an integer result doesn't
+    /// exist.
+    fn binary(
         &mut self,
+        op: lir::BinaryOp,
+        lhs: Value,
+        rhs: Value,
+        b: &mut FunctionBuilder,
+    ) -> Result<Value, String> {
+        use cranelift_codegen::ir::condcodes::IntCC;
+        let checked = |this: &mut Self, (result, overflow), b: &mut FunctionBuilder| {
+            this.fail_if(overflow, lir::Failure::Overflow, b)
+                .map(|()| result)
+        };
+        Ok(match op {
+            lir::BinaryOp::And => b.ins().band(lhs, rhs),
+            lir::BinaryOp::Or => b.ins().bor(lhs, rhs),
+            lir::BinaryOp::Xor => b.ins().bxor(lhs, rhs),
+            lir::BinaryOp::Implies => {
+                let not_lhs = b.ins().bxor_imm_u(lhs, 1);
+                b.ins().bor(not_lhs, rhs)
+            }
+            lir::BinaryOp::Add => {
+                let sum = b.ins().sadd_overflow(lhs, rhs);
+                checked(self, sum, b)?
+            }
+            lir::BinaryOp::Subtract => {
+                let difference = b.ins().ssub_overflow(lhs, rhs);
+                checked(self, difference, b)?
+            }
+            lir::BinaryOp::Multiply => {
+                let product = b.ins().smul_overflow(lhs, rhs);
+                checked(self, product, b)?
+            }
+            lir::BinaryOp::Div | lir::BinaryOp::Mod => {
+                let zero = b.ins().icmp_imm_s(IntCC::Equal, rhs, 0);
+                self.fail_if(zero, lir::Failure::DivisionByZero, b)?;
+                if op == lir::BinaryOp::Mod {
+                    // Cranelift defines `srem` of the smallest integer by -1
+                    // as 0, which is the result.
+                    b.ins().srem(lhs, rhs)
+                } else {
+                    // The one quotient out of range: the smallest integer
+                    // divided by -1.
+                    let min = b.ins().icmp_imm_s(IntCC::Equal, lhs, i64::MIN);
+                    let minus_one = b.ins().icmp_imm_s(IntCC::Equal, rhs, -1);
+                    let overflow = b.ins().band(min, minus_one);
+                    self.fail_if(overflow, lir::Failure::Overflow, b)?;
+                    b.ins().sdiv(lhs, rhs)
+                }
+            }
+        })
+    }
+
+    /// Stop the program with `failure` when `condition` is nonzero, in a
+    /// cold block, and carry on in a new block otherwise.
+    fn fail_if(
+        &mut self,
+        condition: Value,
+        failure: lir::Failure,
+        b: &mut FunctionBuilder,
+    ) -> Result<(), String> {
+        let fail = b.create_block();
+        let carry_on = b.create_block();
+        b.set_cold_block(fail);
+        b.ins().brif(condition, fail, &[], carry_on, &[]);
+
+        b.switch_to_block(fail);
+        let id = self.runtime_function(lir::RuntimeFn::Fail, &[types::I32])?;
+        let callee = self.module.declare_func_in_func(id, b.func);
+        let code = b.ins().iconst(types::I32, i64::from(failure.code()));
+        b.ins().call(callee, &[code]);
+        // `trendy_rt_fail` doesn't return.
+        b.ins()
+            .trap(cranelift_codegen::ir::TrapCode::unwrap_user(1));
+
+        b.switch_to_block(carry_on);
+        Ok(())
+    }
+
+    /// The value of type `ty` at `place`.
+    fn load(
+        &mut self,
+        ty: cranelift_codegen::ir::Type,
         place: &lir::Place,
         frame: &Frame,
         b: &mut FunctionBuilder,
     ) -> Result<Value, String> {
         let address = self.address(place, frame, b)?;
-        Ok(b.ins().load(types::I8, MemFlagsData::trusted(), address, 0))
+        Ok(b.ins().load(ty, MemFlagsData::trusted(), address, 0))
     }
 
-    fn store_bool(
+    fn store(
         &mut self,
         place: &lir::Place,
         value: Value,
@@ -269,21 +357,19 @@ impl Functions {
         Ok(())
     }
 
-    /// Import a runtime function, which takes `params` pointers.
+    /// Import a runtime function, which takes parameters of types `params`.
     fn runtime_function(
         &mut self,
         function: lir::RuntimeFn,
-        params: usize,
+        params: &[cranelift_codegen::ir::Type],
     ) -> Result<FuncId, String> {
         if let Some(&id) = self.runtime.get(function.symbol()) {
             return Ok(id);
         }
         let mut signature = self.module.make_signature();
-        for _ in 0..params {
-            signature
-                .params
-                .push(AbiParam::new(self.config.pointer_type()));
-        }
+        signature
+            .params
+            .extend(params.iter().map(|&ty| AbiParam::new(ty)));
         let id = self
             .module
             .declare_function(function.symbol(), Linkage::Import, &signature)

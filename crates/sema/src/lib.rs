@@ -1,5 +1,6 @@
 mod body;
 mod errors;
+mod ops;
 mod prelude;
 mod types;
 
@@ -1292,7 +1293,7 @@ mod tests {
         );
         let origin = &errors[0].secondary[0];
         assert_eq!(&source[origin.span.start..origin.span.end], "not");
-        assert_eq!(origin.message, "`not` takes boolean operands");
+        assert_eq!(origin.message, "`not` takes a boolean operand");
         assert_eq!(
             fix(&source),
             format!(
@@ -1357,12 +1358,131 @@ mod tests {
     }
 
     #[test]
+    fn integer_initial_values() {
+        let int = hir::Value::Integer;
+        assert_eq!(init("var a := 1 + 2 * 3;", "a"), int(7));
+        assert_eq!(init("var a := (1 + 2) * 3;", "a"), int(9));
+        assert_eq!(init("var a := 10 - 3 - 2;", "a"), int(5));
+        assert_eq!(init("var a := -7 div 2;", "a"), int(-3));
+        assert_eq!(init("var a := -7 mod 2;", "a"), int(-1));
+        assert_eq!(init("var a := 7 mod -2;", "a"), int(1));
+        assert_eq!(init("var a := - -3 + +4;", "a"), int(7));
+        assert_eq!(init("var a := b * 2;\nvar b := 21;", "a"), int(42));
+        assert_eq!(init("var a := -9223372036854775808;", "a"), int(i64::MIN));
+        assert_eq!(
+            init("var a := -1.5;", "a"),
+            hir::Value::Rational(hir::Rational::new(-1.5))
+        );
+        assert_eq!(
+            init("var a := -0.0;", "a"),
+            hir::Value::Rational(hir::Rational::new(-0.0))
+        );
+    }
+
+    #[test]
+    fn integer_failures_when_compiling() {
+        let source = format!(
+            "var a := 9223372036854775807 + 1;\nvar b := -(-9223372036854775808);\nvar c := 1 div (2 - 2);\nvar d := -9223372036854775809;{MAIN}"
+        );
+        let errors = errors(&source);
+        let found: Vec<_> = errors
+            .iter()
+            .map(|e| (e.code, &source[e.span().start..e.span().end]))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (Code::IntegerOverflow, "9223372036854775807 + 1"),
+                (Code::IntegerOverflow, "-(-9223372036854775808)"),
+                (Code::DivisionByZero, "(2 - 2)"),
+                (Code::IntegerOutOfRange, "-9223372036854775809"),
+            ]
+        );
+    }
+
+    #[test]
+    fn integer_operand_types() {
+        let source = format!(
+            "var a := 1 + true;\nvar b := -\"x\";\nvar c: boolean := 1 * 2;\nvar d := not 1;\nvar e := 1.5 + 1;\nvar r: rational := -1;{MAIN}"
+        );
+        let errors = errors(&source);
+        let labels: Vec<_> = errors
+            .iter()
+            .map(|e| e.secondary.first().map_or("", |l| &l.message[..]))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "`+` takes integer operands",
+                "`-` takes an integer operand",
+                "expected because of this type",
+                "`not` takes a boolean operand",
+                "`+` takes integer operands",
+                "expected because of this type",
+            ]
+        );
+        assert!(
+            fix(&source).ends_with(&format!("var r: rational := -1.0;{MAIN}")),
+            "a negative literal is rewritten like any other"
+        );
+    }
+
+    #[test]
+    fn integer_simplification() {
+        let cases = [
+            ("n + 0", "n"),
+            ("0 + n", "n"),
+            ("n - 0", "n"),
+            ("0 - n", "-n"),
+            ("n * 1", "n"),
+            ("1 * n", "n"),
+            ("n * 0", "0"),
+            ("0 * n", "0"),
+            ("n * -1", "-n"),
+            ("n div 1", "n"),
+            ("n div -1", "-n"),
+            ("n mod 1", "0"),
+            ("n mod -1", "0"),
+            ("+n", "n"),
+            // An operand that can fail is kept, so that its failure isn't
+            // skipped.
+            ("(n + 1) * 0", "(n + 1) * 0"),
+            ("(n div m) mod 1", "(n div m) mod 1"),
+            ("- -n", "- -n"),
+            ("n + m", "n + m"),
+        ];
+        for (written, simplified) in cases {
+            let source = |e: &str| {
+                format!(
+                    "operator f{{n: integer, m: integer}} [ call debug_value{{v: {e}}}; ];\noperator main{{}} [];"
+                )
+            };
+            let body = |e: &str| {
+                let program = analyze_str(&source(e)).unwrap();
+                let f = program.operators.iter().find(|o| o.name == "f").unwrap();
+                let hir::OperatorKind::User { body } = &f.kind else {
+                    panic!("f is a user operator");
+                };
+                argument(&body[0]).clone()
+            };
+            assert_eq!(body(written), body(simplified), "{written}");
+        }
+        let errors = errors(
+            "operator f{n: integer} [ call debug_value{v: n mod 0}; ];\noperator main{} [];",
+        );
+        assert_eq!(errors[0].code, Code::DivisionByZero, "certain to fail");
+    }
+
+    #[test]
     fn expressions_in_bodies() {
         let body = main_body(
             "var b := true;\noperator main{} [\n    call debug_value{v: not b};\n    call debug_value{v: b and (true xor true)};\n    call debug_value{v: not (true implies false)};\n];",
         );
         let b = || Box::new(hir::Expr::Variable(hir::VariableId(0)));
-        assert_eq!(argument(&body[0]), &hir::Expr::Not(b()));
+        assert_eq!(
+            argument(&body[0]),
+            &hir::Expr::Unary(hir::UnaryOp::Not, b())
+        );
         assert_eq!(
             argument(&body[1]),
             &hir::Expr::Constant(hir::Value::Boolean(false)),

@@ -103,9 +103,9 @@ fn broken_line(prev: &SyntaxToken, next: &SyntaxToken) -> Option<usize> {
 /// whether the source has a blank line between them.
 fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'static str {
     use SyntaxKind::{
-        AndKw, BuiltinKw, BuiltinType, CallKw, Colon, ColonEq, Comma, Heading, Ident, ImpliesKw,
-        LBrace, LBracket, NotKw, OperatorKw, OrKw, RBrace, RelationKw, RelationLiteral, Semicolon,
-        TupleKw, TupleLiteral, VarDecl, VarKw, XorKw,
+        BuiltinKw, BuiltinType, CallKw, Colon, ColonEq, Comma, Heading, Ident, LBrace, LBracket,
+        Minus, NotKw, OperatorKw, Plus, RBrace, RelationKw, RelationLiteral, Semicolon, TupleKw,
+        TupleLiteral, VarDecl, VarKw,
     };
     if prev.kind() == Semicolon {
         // Between definitions: variable declarations in a row go on adjacent
@@ -139,17 +139,29 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
     let type_keyword = prev.kind() == Ident
         && prev.parent().is_some_and(|p| p.kind() == BuiltinType)
         && prev.text() == "type";
+    // A dyadic operator token, such as the `-` in `a - b`, as opposed to the
+    // prefix one in `-b`.
+    let dyadic = |token: &SyntaxToken| {
+        token.kind().is_operator()
+            && token
+                .parent()
+                .is_some_and(|p| p.kind() == SyntaxKind::BinaryExpr)
+    };
+    let sign = |token: &SyntaxToken| matches!(token.kind(), Plus | Minus);
     match (prev.kind(), next.kind()) {
         (LBrace, RBrace) if list_brace(prev) => "",
         (LBrace, _) if list_brace(prev) => " ",
         (_, RBrace) if list_brace(next) => " ",
         _ if type_keyword => " ",
+        _ if dyadic(prev) || dyadic(next) => " ",
+        // `- -a`, not `--a`.
+        _ if sign(prev) && sign(next) => " ",
         (
             OperatorKw | VarKw | TupleKw | RelationKw | CallKw | BuiltinKw | Colon | ColonEq
-            | Comma | NotKw | AndKw | OrKw | XorKw | ImpliesKw,
+            | Comma | NotKw,
             _,
         )
-        | (_, ColonEq | AndKw | OrKw | XorKw | ImpliesKw)
+        | (_, ColonEq)
         | (RBrace, LBracket | LBrace) => " ",
         _ => "",
     }
@@ -375,6 +387,16 @@ mod tests {
             fmt("operator main{}[call debug_value{v:( a or b )};];"),
             "operator main{} [\n    call debug_value{v: (a or b)};\n];\n"
         );
+    }
+
+    #[test]
+    fn arithmetic_operators() {
+        assert_eq!(
+            fmt("var a:=-1+2*-x div(3-+4)mod  5;"),
+            "var a := -1 + 2 * -x div (3 - +4) mod 5;\n"
+        );
+        assert_eq!(fmt("var a := - -1;"), "var a := - -1;\n");
+        assert_eq!(fmt("var a := not-1;"), "var a := not -1;\n");
     }
 
     #[test]

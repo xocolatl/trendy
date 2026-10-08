@@ -24,6 +24,35 @@ pub const KIND_TEXT: u8 = 3;
 pub const KIND_TUPLE: u8 = 4;
 pub const KIND_RELATION: u8 = 5;
 
+/// An integer result out of range.
+pub const FAIL_OVERFLOW: u32 = 0;
+/// `div` or `mod` by zero.
+pub const FAIL_DIVISION_BY_ZERO: u32 = 1;
+
+/// The line written to stderr for each `FAIL_` constant, with the
+/// compiler's error code, which `trendyc --explain` describes.
+#[must_use]
+pub fn failure_message(failure: u32) -> &'static str {
+    match failure {
+        FAIL_OVERFLOW => "error[E0122]: integer overflow\n",
+        FAIL_DIVISION_BY_ZERO => "error[E0123]: division by zero\n",
+        _ => "error: the program failed\n",
+    }
+}
+
+/// Stop the program because of `failure`, one of the `FAIL_` constants:
+/// write its message to stderr and exit with status 1.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn trendy_rt_fail(failure: u32) -> ! {
+    let mut out = Stderr::default();
+    // There is nowhere to report a failure to write to stderr.
+    let _ = out.write_str(failure_message(failure));
+    out.flush();
+    // SAFETY: `exit` has no preconditions.
+    unsafe { exit(1) }
+}
+
 /// A description of a type, emitted by the compiler.
 #[repr(C)]
 pub struct TypeDesc {
@@ -299,6 +328,8 @@ unsafe extern "C" {
     fn write(fd: i32, buf: *const u8, count: usize) -> isize;
     #[cfg(not(test))]
     fn abort() -> !;
+    #[cfg(not(test))]
+    fn exit(status: i32) -> !;
 }
 
 #[cfg(not(test))]

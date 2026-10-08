@@ -367,8 +367,12 @@ impl<'a> Parser<'a> {
     }
 
     /// An expression whose dyadic operators bind at least as tightly as
-    /// `min`, by precedence climbing: `implies` (1, grouping to the right),
-    /// then `or` (2), `xor` (3) and `and` (4), all grouping to the left.
+    /// `min`, by precedence climbing. From loosest to tightest: `implies`
+    /// (1, grouping to the right), `or` (2), `xor` (3), `and` (4), then
+    /// `+` and `-` (7), and `*`, `div` and `mod` (8), all grouping to the
+    /// left. Prefix `not` sits between them at 5, so `not a + b` negates
+    /// the sum, and prefix `-` and `+` bind tightest. Comparisons will take
+    /// 6, so that `not a = b` negates the comparison.
     fn binary(&mut self, min: u8) {
         self.peek();
         let start = self.builder.checkpoint();
@@ -403,29 +407,39 @@ impl<'a> Parser<'a> {
             SyntaxKind::OrKw => 2,
             SyntaxKind::XorKw => 3,
             SyntaxKind::AndKw => 4,
+            SyntaxKind::Plus | SyntaxKind::Minus => 7,
+            SyntaxKind::Star | SyntaxKind::DivKw | SyntaxKind::ModKw => 8,
             _ => return None,
         };
         Some((precedence, found, keyword))
     }
 
-    /// `not x`, or an operand.
+    /// A prefix operator and its operand, or an operand.
     fn unary(&mut self) {
-        let not = self.found().filter(|f| match f.kind {
-            SyntaxKind::NotKw => true,
-            SyntaxKind::ForeignOperator => {
-                errors::foreign_operator(f.text) == Some(SyntaxKind::NotKw)
-            }
-            SyntaxKind::Ident => errors::operator_spelling(f.text) == Some(SyntaxKind::NotKw),
-            _ => false,
+        let prefix = self.found().and_then(|f| {
+            let keyword = match f.kind {
+                SyntaxKind::ForeignOperator => errors::foreign_operator(f.text)?,
+                SyntaxKind::Ident => errors::operator_spelling(f.text)?,
+                kind => kind,
+            };
+            matches!(
+                keyword,
+                SyntaxKind::NotKw | SyntaxKind::Minus | SyntaxKind::Plus
+            )
+            .then_some((f, keyword))
         });
-        if let Some(found) = not {
-            self.start_node(SyntaxKind::UnaryExpr);
-            self.operator_token(found, SyntaxKind::NotKw);
-            self.unary();
-            self.builder.finish_node();
-        } else {
+        let Some((found, keyword)) = prefix else {
             self.primary();
+            return;
+        };
+        self.start_node(SyntaxKind::UnaryExpr);
+        self.operator_token(found, keyword);
+        if keyword == SyntaxKind::NotKw {
+            self.binary(5);
+        } else {
+            self.unary();
         }
+        self.builder.finish_node();
     }
 
     /// Consume an operator: `keyword` itself, or another spelling of it,
@@ -1513,7 +1527,11 @@ SourceFile
                     b.operator().unwrap().text(),
                     show(&b.rhs().unwrap())
                 ),
-                Expr::Unary(u) => format!("(not {})", show(&u.operand().unwrap())),
+                Expr::Unary(u) => format!(
+                    "({} {})",
+                    u.operator().unwrap().text(),
+                    show(&u.operand().unwrap())
+                ),
                 Expr::Paren(p) => show(&p.inner().unwrap()),
                 other => other.syntax().to_string().trim().to_string(),
             }
@@ -1548,6 +1566,22 @@ SourceFile
     }
 
     #[test]
+    fn arithmetic_precedence() {
+        assert_eq!(shape("a + b * c"), "(a + (b * c))");
+        assert_eq!(shape("a * b + c"), "((a * b) + c)");
+        assert_eq!(shape("a - b - c"), "((a - b) - c)");
+        assert_eq!(shape("a div b mod c"), "((a div b) mod c)");
+        assert_eq!(shape("-a * b"), "((- a) * b)");
+        assert_eq!(shape("- -a"), "(- (- a))");
+        assert_eq!(shape("+a - -1"), "((+ a) - (- 1))");
+        assert_eq!(shape("a - (b - c)"), "(a - (b - c))");
+        // Arithmetic binds tighter than every boolean operator, `not`
+        // included.
+        assert_eq!(shape("not a + b"), "(not (a + b))");
+        assert_eq!(shape("not a and b + c"), "((not a) and (b + c))");
+    }
+
+    #[test]
     fn foreign_and_miscased_operators() {
         let source = "var x := a && !b || c -> d;";
         let codes: Vec<_> = parse_str(source).errors.iter().map(|e| e.code).collect();
@@ -1557,6 +1591,20 @@ SourceFile
             fix("var x := a AND NOT b Or c;"),
             "var x := a and not b or c;"
         );
+    }
+
+    #[test]
+    fn foreign_arithmetic_operators() {
+        let source = "var x := a/b % c;";
+        let errors = parse_str(source).errors;
+        let codes: Vec<_> = errors.iter().map(|e| e.code).collect();
+        assert_eq!(codes, [Code::ForeignOperator; 2]);
+        assert_eq!(
+            errors[0].notes[0],
+            "integer division is the keyword `div`, and its remainder `mod`"
+        );
+        assert_eq!(fix(source), "var x := a div b mod c;");
+        assert_eq!(fix("var x := a DIV b Mod c;"), "var x := a div b mod c;");
     }
 
     #[test]

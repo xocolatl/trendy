@@ -44,7 +44,8 @@ impl Program {
                 ParamType::Type(ty) => ty.clone(),
                 ParamType::Any => unreachable!("only built-ins have `any` parameters"),
             },
-            Expr::Not(_) | Expr::Binary(..) => Type::Scalar(Scalar::Boolean),
+            Expr::Unary(op, _) => Type::Scalar(op.result()),
+            Expr::Binary(op, ..) => Type::Scalar(op.result()),
         }
     }
 }
@@ -144,31 +145,141 @@ pub enum Expr {
     Variable(VariableId),
     /// A parameter of the operator the expression is in.
     Parameter(String),
-    /// `not x`, of a boolean.
-    Not(Box<Expr>),
-    /// A dyadic boolean operator.
-    Binary(BoolOp, Box<Expr>, Box<Expr>),
+    /// A monadic operator: `not x` or `-x`.
+    Unary(UnaryOp, Box<Expr>),
+    /// A dyadic operator, such as `x and y` or `x + y`.
+    Binary(BinaryOp, Box<Expr>, Box<Expr>),
 }
 
-/// A dyadic boolean operator.
+/// Why an operator has no result: its result isn't an `integer`, or it
+/// divides by zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum BoolOp {
+pub enum Failure {
+    Overflow,
+    DivisionByZero,
+}
+
+/// A monadic operator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UnaryOp {
+    /// `not`, of a boolean.
+    Not,
+    /// `-`, of an integer.
+    Negate,
+}
+
+impl UnaryOp {
+    /// The type of the operand.
+    #[must_use]
+    pub fn operand(self) -> Scalar {
+        match self {
+            UnaryOp::Not => Scalar::Boolean,
+            UnaryOp::Negate => Scalar::Integer,
+        }
+    }
+
+    /// The type of the result.
+    #[must_use]
+    pub fn result(self) -> Scalar {
+        self.operand()
+    }
+
+    /// The result for `operand`, which has the operand type.
+    ///
+    /// # Errors
+    ///
+    /// Returns why there is no result: negating the smallest integer
+    /// overflows.
+    ///
+    /// # Panics
+    ///
+    /// If `operand` isn't of the operand type, which sema rules out.
+    pub fn apply(self, operand: &Value) -> Result<Value, Failure> {
+        match (self, operand) {
+            (UnaryOp::Not, Value::Boolean(b)) => Ok(Value::Boolean(!b)),
+            (UnaryOp::Negate, Value::Integer(n)) => {
+                n.checked_neg().map(Value::Integer).ok_or(Failure::Overflow)
+            }
+            _ => panic!("`{self:?}` of {operand:?}"),
+        }
+    }
+}
+
+/// A dyadic operator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BinaryOp {
     And,
     Or,
     /// Exactly one is true.
     Xor,
     /// False only when the left operand is true and the right is false.
     Implies,
+    Add,
+    Subtract,
+    Multiply,
+    /// Integer division, truncating toward zero.
+    Div,
+    /// The remainder of [`BinaryOp::Div`], with the sign of the dividend:
+    /// `a = (a div b) * b + a mod b`.
+    Mod,
 }
 
-impl BoolOp {
+impl BinaryOp {
+    /// The type of both operands.
     #[must_use]
-    pub fn apply(self, lhs: bool, rhs: bool) -> bool {
+    pub fn operand(self) -> Scalar {
         match self {
-            BoolOp::And => lhs && rhs,
-            BoolOp::Or => lhs || rhs,
-            BoolOp::Xor => lhs != rhs,
-            BoolOp::Implies => !lhs || rhs,
+            BinaryOp::And | BinaryOp::Or | BinaryOp::Xor | BinaryOp::Implies => Scalar::Boolean,
+            BinaryOp::Add
+            | BinaryOp::Subtract
+            | BinaryOp::Multiply
+            | BinaryOp::Div
+            | BinaryOp::Mod => Scalar::Integer,
+        }
+    }
+
+    /// The type of the result.
+    #[must_use]
+    pub fn result(self) -> Scalar {
+        self.operand()
+    }
+
+    /// The result for `lhs` and `rhs`, which have the operand type.
+    ///
+    /// # Errors
+    ///
+    /// Returns why there is no result: an integer result out of range, or a
+    /// division by zero.
+    ///
+    /// # Panics
+    ///
+    /// If an operand isn't of the operand type, which sema rules out.
+    pub fn apply(self, lhs: &Value, rhs: &Value) -> Result<Value, Failure> {
+        match (lhs, rhs) {
+            (Value::Boolean(a), Value::Boolean(b)) => Ok(Value::Boolean(match self {
+                BinaryOp::And => *a && *b,
+                BinaryOp::Or => *a || *b,
+                BinaryOp::Xor => a != b,
+                BinaryOp::Implies => !a || *b,
+                _ => panic!("`{self:?}` of booleans"),
+            })),
+            (&Value::Integer(a), &Value::Integer(b)) => {
+                let result = match self {
+                    BinaryOp::Add => a.checked_add(b),
+                    BinaryOp::Subtract => a.checked_sub(b),
+                    BinaryOp::Multiply => a.checked_mul(b),
+                    BinaryOp::Div | BinaryOp::Mod if b == 0 => {
+                        return Err(Failure::DivisionByZero);
+                    }
+                    BinaryOp::Div => a.checked_div(b),
+                    // The smallest integer `mod -1` is 0, though the matching
+                    // `div` overflows.
+                    BinaryOp::Mod => Some(a.wrapping_rem(b)),
+                    _ => panic!("`{self:?}` of integers"),
+                };
+                result.map(Value::Integer).ok_or(Failure::Overflow)
+            }
+            _ => panic!("`{self:?}` of {lhs:?} and {rhs:?}"),
         }
     }
 }
@@ -518,14 +629,52 @@ mod tests {
 
     #[test]
     fn boolean_operators() {
-        let table = |op: BoolOp| {
+        let table = |op: BinaryOp| {
             [(false, false), (false, true), (true, false), (true, true)]
-                .map(|(a, b)| op.apply(a, b))
+                .map(|(a, b)| op.apply(&Value::Boolean(a), &Value::Boolean(b)).unwrap())
+                .map(|v| v == Value::Boolean(true))
         };
-        assert_eq!(table(BoolOp::And), [false, false, false, true]);
-        assert_eq!(table(BoolOp::Or), [false, true, true, true]);
-        assert_eq!(table(BoolOp::Xor), [false, true, true, false]);
-        assert_eq!(table(BoolOp::Implies), [true, true, false, true]);
+        assert_eq!(table(BinaryOp::And), [false, false, false, true]);
+        assert_eq!(table(BinaryOp::Or), [false, true, true, true]);
+        assert_eq!(table(BinaryOp::Xor), [false, true, true, false]);
+        assert_eq!(table(BinaryOp::Implies), [true, true, false, true]);
+        assert_eq!(
+            UnaryOp::Not.apply(&Value::Boolean(true)),
+            Ok(Value::Boolean(false))
+        );
+    }
+
+    #[test]
+    fn integer_operators() {
+        let apply = |op: BinaryOp, a, b| op.apply(&Value::Integer(a), &Value::Integer(b));
+        let ok = |n| Ok(Value::Integer(n));
+        assert_eq!(apply(BinaryOp::Add, 2, 3), ok(5));
+        assert_eq!(apply(BinaryOp::Subtract, 2, 3), ok(-1));
+        assert_eq!(apply(BinaryOp::Multiply, -2, 3), ok(-6));
+        // Truncating: the quotient rounds toward zero, and the remainder has
+        // the dividend's sign.
+        assert_eq!(apply(BinaryOp::Div, -7, 2), ok(-3));
+        assert_eq!(apply(BinaryOp::Mod, -7, 2), ok(-1));
+        assert_eq!(apply(BinaryOp::Div, 7, -2), ok(-3));
+        assert_eq!(apply(BinaryOp::Mod, 7, -2), ok(1));
+        assert_eq!(apply(BinaryOp::Add, i64::MAX, 1), Err(Failure::Overflow));
+        assert_eq!(
+            apply(BinaryOp::Subtract, i64::MIN, 1),
+            Err(Failure::Overflow)
+        );
+        assert_eq!(
+            apply(BinaryOp::Multiply, i64::MAX, 2),
+            Err(Failure::Overflow)
+        );
+        assert_eq!(apply(BinaryOp::Div, i64::MIN, -1), Err(Failure::Overflow));
+        assert_eq!(apply(BinaryOp::Mod, i64::MIN, -1), ok(0));
+        assert_eq!(apply(BinaryOp::Div, 1, 0), Err(Failure::DivisionByZero));
+        assert_eq!(apply(BinaryOp::Mod, 1, 0), Err(Failure::DivisionByZero));
+        assert_eq!(
+            UnaryOp::Negate.apply(&Value::Integer(i64::MIN)),
+            Err(Failure::Overflow)
+        );
+        assert_eq!(UnaryOp::Negate.apply(&Value::Integer(5)), ok(-5));
     }
 
     #[test]

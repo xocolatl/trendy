@@ -10,12 +10,13 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use trendy_diag::{Diagnostic, Span, edit_distance};
 use trendy_hir as hir;
+use trendy_syntax::SyntaxToken;
 use trendy_syntax::ast::{
     self, AstNode, AttributeValue, Expr, Literal, LiteralError, LiteralValue, RelationLiteral,
     TupleLiteral, TypeExpr,
 };
-use trendy_syntax::{SyntaxKind, SyntaxToken};
 
+use crate::ops::{self, Operator};
 use crate::{Values, errors};
 
 /// Where an expected type comes from: for the secondary label of a
@@ -32,7 +33,7 @@ pub(crate) enum Origin {
     /// A built-in operator's parameter, declared in the prelude: there is no
     /// place in the program to point at.
     Builtin,
-    /// An operator such as `and`, whose operands are booleans.
+    /// An operator such as `and` or `+`, for its operands.
     Operator(SyntaxToken),
 }
 
@@ -54,7 +55,19 @@ impl Origin {
                 "expected because of this type".to_string()
             }
             Origin::Value(_) => "expected because of this value".to_string(),
-            Origin::Operator(token) => format!("`{}` takes boolean operands", token.text()),
+            Origin::Operator(token) => match Operator::of(token) {
+                Some(op) if op.is_prefix() => {
+                    let ty = op.operand().name();
+                    let article = if ty.starts_with(['a', 'e', 'i', 'o', 'u']) {
+                        "an"
+                    } else {
+                        "a"
+                    };
+                    format!("`{}` takes {article} {ty} operand", token.text())
+                }
+                Some(op) => format!("`{}` takes {} operands", token.text(), op.operand().name()),
+                None => "expected because of this operator".to_string(),
+            },
         }
     }
 
@@ -105,11 +118,11 @@ pub(crate) struct Expected {
 }
 
 impl Expected {
-    /// The expectation for an operand of the boolean operator `operator`.
-    pub(crate) fn operand(operator: SyntaxToken) -> Expected {
+    /// The expectation for an operand of `op`, written `token`.
+    pub(crate) fn operand(op: Operator, token: SyntaxToken) -> Expected {
         Expected {
-            ty: hir::Type::Scalar(hir::Scalar::Boolean),
-            origin: Origin::Operator(operator),
+            ty: hir::Type::Scalar(op.operand()),
+            origin: Origin::Operator(token),
         }
     }
 
@@ -136,32 +149,18 @@ pub(crate) trait Scope {
     -> Option<hir::Value>;
 }
 
-/// The operator a dyadic boolean operator keyword denotes. Sema sees only
-/// trees without syntax errors, so foreign spellings such as `&&` never reach
-/// it.
-pub(crate) fn bool_op(operator: &SyntaxToken) -> Option<hir::BoolOp> {
-    match operator.kind() {
-        SyntaxKind::AndKw => Some(hir::BoolOp::And),
-        SyntaxKind::OrKw => Some(hir::BoolOp::Or),
-        SyntaxKind::XorKw => Some(hir::BoolOp::Xor),
-        SyntaxKind::ImpliesKw => Some(hir::BoolOp::Implies),
-        _ => None,
-    }
-}
-
-/// Check that a boolean operator's result, written `expr`, is what the
-/// context expects; `None` after reporting that it isn't.
-pub(crate) fn boolean_result(
+/// Check that an operator's result, of type `result` and written `expr`,
+/// is what the context expects; `None` after reporting that it isn't.
+pub(crate) fn result_type(
     expected: Option<&Expected>,
+    result: hir::Scalar,
     expr: &Expr,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<()> {
-    let boolean = hir::Type::Scalar(hir::Scalar::Boolean);
+    let result = hir::Type::Scalar(result);
     match expected {
-        Some(e) if e.ty != boolean => {
-            errors.push(errors::type_mismatch(
-                &e.ty, &e.origin, &boolean, None, expr,
-            ));
+        Some(e) if e.ty != result => {
+            errors.push(errors::type_mismatch(&e.ty, &e.origin, &result, None, expr));
             None
         }
         _ => Some(()),
@@ -258,33 +257,51 @@ pub(crate) fn value(
         }
         Expr::Paren(paren) => value(&paren.inner()?, expected, scope, errors),
         Expr::Unary(unary) => {
-            let operator = unary.operator()?;
-            let operand = boolean(unary.operand(), operator, scope, errors);
-            boolean_result(expected, expr, errors)?;
-            Some(hir::Value::Boolean(!operand?))
+            if let Some(literal) = ops::negated_literal(unary) {
+                let value = ops::negative_value(&literal, expr, errors)?;
+                return matches(expected, value, expr, errors);
+            }
+            let token = unary.operator()?;
+            let op = Operator::of(&token)?;
+            let operand = unary.operand().and_then(|operand| {
+                value(&operand, Some(&Expected::operand(op, token)), scope, errors)
+            });
+            result_type(expected, op.result(), expr, errors)?;
+            let operand = operand?;
+            match op {
+                Operator::Plus => Some(operand),
+                Operator::Unary(op) => evaluated(op.apply(&operand), expr, None, errors),
+                Operator::Binary(_) => None,
+            }
         }
         Expr::Binary(binary) => {
-            let operator = binary.operator()?;
-            let op = bool_op(&operator)?;
-            let lhs = boolean(binary.lhs(), operator.clone(), scope, errors);
-            let rhs = boolean(binary.rhs(), operator, scope, errors);
-            boolean_result(expected, expr, errors)?;
-            Some(hir::Value::Boolean(op.apply(lhs?, rhs?)))
+            let token = binary.operator()?;
+            let Some(Operator::Binary(op)) = Operator::of(&token) else {
+                return None;
+            };
+            let expected_operand = Expected::operand(Operator::Binary(op), token);
+            let mut operand =
+                |side: Option<Expr>| value(&side?, Some(&expected_operand), scope, errors);
+            let lhs = operand(binary.lhs());
+            let rhs = operand(binary.rhs());
+            result_type(expected, op.result(), expr, errors)?;
+            evaluated(op.apply(&lhs?, &rhs?), expr, binary.rhs().as_ref(), errors)
         }
     }
 }
 
-/// The value of an operand of the boolean operator `operator`.
-fn boolean(
-    operand: Option<Expr>,
-    operator: SyntaxToken,
-    scope: &mut dyn Scope,
+/// An operator's result, written `expr`, or `None` after reporting why there
+/// is none. `divisor` is the right operand, where a division by zero is
+/// reported.
+pub(crate) fn evaluated<T>(
+    result: Result<T, hir::Failure>,
+    expr: &Expr,
+    divisor: Option<&Expr>,
     errors: &mut Vec<Diagnostic>,
-) -> Option<bool> {
-    match value(&operand?, Some(&Expected::operand(operator)), scope, errors)? {
-        hir::Value::Boolean(b) => Some(b),
-        _ => unreachable!("checked to be boolean"),
-    }
+) -> Option<T> {
+    result
+        .map_err(|failure| errors.push(errors::failure(failure, expr, divisor)))
+        .ok()
 }
 
 /// `value`, if it has the expected type; otherwise report the mismatch.

@@ -12,8 +12,8 @@ use trendy_syntax::{SyntaxKind, SyntaxToken};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Class {
     Keyword,
-    /// A boolean operator written as a keyword, such as `and`.
-    Logical,
+    /// An operator in an expression, such as `and` or `+`.
+    ExprOperator,
     /// An operator's name.
     Operator,
     /// A variable's name.
@@ -55,7 +55,7 @@ fn classify(token: &SyntaxToken) -> Option<Highlight> {
         .and_then(|p| p.parent())
         .map(|p| p.kind());
     let (class, definition) = match (token.kind(), parent, grandparent) {
-        (kind, _, _) if kind.is_operator_keyword() => (Class::Logical, false),
+        (kind, _, _) if kind.is_operator() => (Class::ExprOperator, false),
         (kind, _, _) if kind.is_keyword() => (Class::Keyword, false),
         // The contextual keyword in `builtin type name;`.
         (SyntaxKind::Ident, Some(SyntaxKind::BuiltinType), _) if token.text() == "type" => {
@@ -143,12 +143,29 @@ mod tests {
             [
                 ("var", Class::Keyword, false),
                 ("a", Class::Variable, true),
-                ("not", Class::Logical, false),
+                ("not", Class::ExprOperator, false),
                 ("b", Class::Variable, false),
-                ("and", Class::Logical, false),
+                ("and", Class::ExprOperator, false),
                 ("c", Class::Variable, false),
-                ("implies", Class::Logical, false),
+                ("implies", Class::ExprOperator, false),
                 ("true", Class::Keyword, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn arithmetic_operators() {
+        assert_eq!(
+            highlight("var a := -1 * b mod 2;"),
+            [
+                ("var", Class::Keyword, false),
+                ("a", Class::Variable, true),
+                ("-", Class::ExprOperator, false),
+                ("1", Class::Number, false),
+                ("*", Class::ExprOperator, false),
+                ("b", Class::Variable, false),
+                ("mod", Class::ExprOperator, false),
+                ("2", Class::Number, false),
             ]
         );
     }

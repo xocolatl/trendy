@@ -126,6 +126,94 @@ fn booleans() {
 }
 
 #[test]
+fn integers() {
+    let (code, stderr) = run_example("integers");
+    assert_eq!(code, 0, "{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    // Evaluated when compiling.
+    assert_eq!(
+        lines[..4],
+        ["7", "9", "-9223372036854775808", "9223372036854775807"]
+    );
+    // Each row: `-a`, `a + b`, `a - b`, `a * b`, `a div b`, `a mod b`.
+    let rows: Vec<_> = lines[4..].chunks(6).collect();
+    assert_eq!(
+        rows,
+        [
+            ["-7", "9", "5", "14", "3", "1"],
+            ["7", "-5", "-9", "-14", "-3", "-1"],
+            ["-7", "5", "9", "-14", "-3", "1"],
+            [
+                "9223372036854775807",
+                "-9223372036854775808",
+                "-9223372036854775806",
+                "9223372036854775807",
+                "9223372036854775807",
+                "0"
+            ],
+        ]
+    );
+}
+
+/// Compile `source`, run it, and return its exit code and stderr.
+fn run_source(name: &str, source: &str) -> (i32, String) {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let input = dir.join(format!("{name}.trendy"));
+    std::fs::write(&input, source).unwrap();
+    let output = dir.join(name);
+    let compile = Command::new(env!("CARGO_BIN_EXE_trendyc"))
+        .arg(&input)
+        .arg("-o")
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert!(
+        compile.status.success(),
+        "trendyc failed: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = Command::new(&output).output().unwrap();
+    (
+        run.status.code().unwrap(),
+        String::from_utf8(run.stderr).unwrap(),
+    )
+}
+
+#[test]
+fn run_time_failures_stop_the_program() {
+    use trendy_diag::Code;
+    let program = |call: &str| {
+        format!(
+            "operator f{{a: integer, b: integer}} [\n    call debug_value{{v: 1}};\n    call debug_value{{v: {call}}};\n    call debug_value{{v: 2}};\n];\n\noperator main{{}} [\n    call f{{a: 9223372036854775807, b: 0}};\n];\n"
+        )
+    };
+    let overflow = format!(
+        "1\nerror[{}]: integer overflow\n",
+        Code::IntegerOverflow.id()
+    );
+    let division = format!(
+        "1\nerror[{}]: division by zero\n",
+        Code::DivisionByZero.id()
+    );
+    let cases = [
+        ("add", "a + 1", &overflow),
+        ("subtract", "-a - 2", &overflow),
+        ("multiply", "a * 2", &overflow),
+        ("negate", "-(-a - 1)", &overflow),
+        ("divide_min", "(-a - 1) div -1", &overflow),
+        ("divide_zero", "a div b", &division),
+        ("mod_zero", "a mod b", &division),
+    ];
+    for (name, expr, expected) in cases {
+        let (code, stderr) = run_source(&format!("fail_{name}"), &program(expr));
+        assert_eq!((code, &stderr), (1, expected), "{expr}");
+    }
+    // The smallest integer `mod -1` has a result.
+    let (code, stderr) = run_source("mod_min", &program("(-a - 1) mod -1"));
+    assert_eq!((code, &stderr[..]), (0, "1\n0\n2\n"));
+}
+
+#[test]
 fn tuples() {
     assert_eq!(compile_and_run("tuples"), 0);
 }

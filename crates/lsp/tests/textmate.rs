@@ -31,6 +31,9 @@ fn punctuation_scope(kind: SyntaxKind) -> &'static str {
         SyntaxKind::ColonEq => "keyword.operator.assignment.trendy",
         SyntaxKind::Eq => "keyword.operator.comparison.trendy",
         SyntaxKind::Semicolon => "punctuation.terminator.trendy",
+        SyntaxKind::Plus | SyntaxKind::Minus | SyntaxKind::Star => {
+            "keyword.operator.arithmetic.trendy"
+        }
         other => panic!("choose a TextMate scope for the new punctuation {other:?}"),
     }
 }
@@ -216,7 +219,7 @@ fn generate(probed: &Probed) -> Value {
         .into_iter()
         .filter(|k| k.is_keyword())
         .partition(|k| k.is_literal());
-    // Operator keywords (`not`, `and`, …) are colored as operators.
+    // Operator keywords (`not`, `div`, …) are colored as operators.
     let (operator_keywords, keywords): (Vec<_>, Vec<_>) =
         keywords.into_iter().partition(|k| k.is_operator_keyword());
     let keywords: Vec<_> = keywords.into_iter().map(keyword).collect();
@@ -242,7 +245,7 @@ fn generate(probed: &Probed) -> Value {
             { "include": "#call" },
             { "include": "#variable-declaration" },
             { "include": "#keywords" },
-            { "include": "#logical" },
+            { "include": "#operator-word" },
             { "include": "#boolean" },
             { "include": "#number" },
             { "include": "#text" },
@@ -295,9 +298,9 @@ fn generate(probed: &Probed) -> Value {
                 "match": format!("\\b(?:{})\\b", keywords.join("|")),
                 "name": "keyword.other.trendy",
             },
-            "logical": {
+            "operator-word": {
                 "match": format!("\\b(?:{})\\b", operator_keywords.join("|")),
-                "name": "keyword.operator.logical.trendy",
+                "name": "keyword.operator.word.trendy",
             },
             "boolean": {
                 "match": format!("\\b(?:{})\\b", literal_keywords.join("|")),

@@ -72,6 +72,9 @@ pub fn lex(source: &str) -> Lexed {
                 ',' => SyntaxKind::Comma,
                 '=' => SyntaxKind::Eq,
                 ';' => SyntaxKind::Semicolon,
+                '+' => SyntaxKind::Plus,
+                '-' => SyntaxKind::Minus,
+                '*' => SyntaxKind::Star,
                 _ => {
                     let span = Span::new(start, start + c.len_utf8());
                     errors.push(unexpected_character(c, span));
@@ -91,11 +94,11 @@ pub fn lex(source: &str) -> Lexed {
 }
 
 /// Operators from other languages, which the parser replaces with trendy's
-/// keywords: `&&` for `and`, `->` for `implies`, and so on.
-pub const FOREIGN_OPERATORS: [&str; 8] = ["&&", "||", "->", "=>", "!", "&", "|", "^"];
+/// keywords: `&&` for `and`, `->` for `implies`, `/` for `div`, and so on.
+/// Longer ones come first, so that `&&` isn't two `&`.
+pub const FOREIGN_OPERATORS: [&str; 10] = ["&&", "||", "->", "=>", "!", "&", "|", "^", "/", "%"];
 
-/// The length of the foreign operator `text` starts with, if any. Longer
-/// ones are tried first, so that `&&` isn't two `&`.
+/// The length of the foreign operator `text` starts with, if any.
 fn foreign_operator(text: &str) -> Option<usize> {
     FOREIGN_OPERATORS
         .iter()
@@ -529,7 +532,7 @@ mod tests {
         );
         assert!(lex("0.0 0e0 1.5E-3 2e+2 17.5").errors.is_empty());
         assert_eq!(kinds("1e5;"), [RationalLiteral, Semicolon]);
-        assert_eq!(kinds("0x1E+5"), [IntLiteral, ErrorToken, IntLiteral]);
+        assert_eq!(kinds("0x1E+5"), [IntLiteral, Plus, IntLiteral]);
     }
 
     #[test]
@@ -592,6 +595,35 @@ mod tests {
                 NotKw, Whitespace, AndKw, Whitespace, OrKw, Whitespace, XorKw, Whitespace,
                 ImpliesKw
             ]
+        );
+    }
+
+    #[test]
+    fn arithmetic() {
+        assert_eq!(
+            kinds("-a+1*2-3e-2 div b mod c"),
+            [
+                Minus,
+                Ident,
+                Plus,
+                IntLiteral,
+                Star,
+                IntLiteral,
+                Minus,
+                RationalLiteral,
+                Whitespace,
+                DivKw,
+                Whitespace,
+                Ident,
+                Whitespace,
+                ModKw,
+                Whitespace,
+                Ident
+            ]
+        );
+        assert_eq!(
+            kinds("a/b%c"),
+            [Ident, ForeignOperator, Ident, ForeignOperator, Ident]
         );
     }
 

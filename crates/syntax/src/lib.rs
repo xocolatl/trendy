@@ -38,6 +38,8 @@ pub enum SyntaxKind {
     OrKw,
     XorKw,
     ImpliesKw,
+    DivKw,
+    ModKw,
     LBrace,
     RBrace,
     LBracket,
@@ -53,11 +55,14 @@ pub enum SyntaxKind {
     /// recognized and fixed.
     Eq,
     Semicolon,
-    /// Digits, possibly followed by other identifier characters. Malformed
-    /// literals keep this kind, so one mistake gives one error.
+    Plus,
+    Minus,
+    Star,
     /// An operator from another language, such as `&&` or `->`: lexed so it
     /// can be recognized and replaced by trendy's keyword.
     ForeignOperator,
+    /// Digits, possibly followed by other identifier characters. Malformed
+    /// literals keep this kind, so one mistake gives one error.
     IntLiteral,
     /// Digits with a decimal point, an exponent, or both. Malformed literals
     /// keep this kind too.
@@ -89,9 +94,9 @@ pub enum SyntaxKind {
     PositionalArg,
     /// A name used as an expression, or as the operator in a call.
     NameRef,
-    /// `not x`
+    /// `not x`, `-x` or `+x`
     UnaryExpr,
-    /// `x and y`, and the other dyadic operators.
+    /// `x and y`, `x + y`, and the other dyadic operators.
     BinaryExpr,
     /// `(x)`
     ParenExpr,
@@ -123,7 +128,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 57] = [
+    pub const ALL: [SyntaxKind; 62] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Ident,
         SyntaxKind::OperatorKw,
@@ -139,6 +144,8 @@ impl SyntaxKind {
         SyntaxKind::OrKw,
         SyntaxKind::XorKw,
         SyntaxKind::ImpliesKw,
+        SyntaxKind::DivKw,
+        SyntaxKind::ModKw,
         SyntaxKind::LBrace,
         SyntaxKind::RBrace,
         SyntaxKind::LBracket,
@@ -150,6 +157,9 @@ impl SyntaxKind {
         SyntaxKind::ColonEq,
         SyntaxKind::Eq,
         SyntaxKind::Semicolon,
+        SyntaxKind::Plus,
+        SyntaxKind::Minus,
+        SyntaxKind::Star,
         SyntaxKind::ForeignOperator,
         SyntaxKind::IntLiteral,
         SyntaxKind::RationalLiteral,
@@ -205,6 +215,8 @@ impl SyntaxKind {
                 | SyntaxKind::OrKw
                 | SyntaxKind::XorKw
                 | SyntaxKind::ImpliesKw
+                | SyntaxKind::DivKw
+                | SyntaxKind::ModKw
         )
     }
 
@@ -218,7 +230,20 @@ impl SyntaxKind {
                 | SyntaxKind::OrKw
                 | SyntaxKind::XorKw
                 | SyntaxKind::ImpliesKw
+                | SyntaxKind::DivKw
+                | SyntaxKind::ModKw
         )
+    }
+
+    /// Whether this is an operator: an operator keyword, or a symbol such as
+    /// `+`.
+    #[must_use]
+    pub fn is_operator(self) -> bool {
+        self.is_operator_keyword()
+            || matches!(
+                self,
+                SyntaxKind::Plus | SyntaxKind::Minus | SyntaxKind::Star
+            )
     }
 
     /// Whether this kind is a literal token: a number, text, or a boolean
@@ -266,6 +291,8 @@ impl SyntaxKind {
             SyntaxKind::OrKw => "or",
             SyntaxKind::XorKw => "xor",
             SyntaxKind::ImpliesKw => "implies",
+            SyntaxKind::DivKw => "div",
+            SyntaxKind::ModKw => "mod",
             SyntaxKind::LBrace => "{",
             SyntaxKind::RBrace => "}",
             SyntaxKind::LBracket => "[",
@@ -277,6 +304,9 @@ impl SyntaxKind {
             SyntaxKind::ColonEq => ":=",
             SyntaxKind::Eq => "=",
             SyntaxKind::Semicolon => ";",
+            SyntaxKind::Plus => "+",
+            SyntaxKind::Minus => "-",
+            SyntaxKind::Star => "*",
             _ => return None,
         })
     }
@@ -300,6 +330,8 @@ impl SyntaxKind {
             SyntaxKind::OrKw => "`or`",
             SyntaxKind::XorKw => "`xor`",
             SyntaxKind::ImpliesKw => "`implies`",
+            SyntaxKind::DivKw => "`div`",
+            SyntaxKind::ModKw => "`mod`",
             SyntaxKind::ForeignOperator => "operator",
             SyntaxKind::LBrace => "`{`",
             SyntaxKind::RBrace => "`}`",
@@ -312,6 +344,9 @@ impl SyntaxKind {
             SyntaxKind::ColonEq => "`:=`",
             SyntaxKind::Eq => "`=`",
             SyntaxKind::Semicolon => "`;`",
+            SyntaxKind::Plus => "`+`",
+            SyntaxKind::Minus => "`-`",
+            SyntaxKind::Star => "`*`",
             SyntaxKind::IntLiteral => "integer literal",
             SyntaxKind::RationalLiteral => "rational literal",
             SyntaxKind::TextLiteral => "text literal",

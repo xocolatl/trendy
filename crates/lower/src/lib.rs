@@ -280,11 +280,16 @@ impl FunctionBuilder<'_> {
                     path: vec![index],
                 }
             }
-            hir::Expr::Not(operand) => {
+            hir::Expr::Unary(op, operand) => {
                 let src = self.place(operand, cx);
-                let dst = self.slot(lir::Layout::U8);
-                self.insts.push(lir::Inst::Not {
+                let dst = self.slot(scalar_layout(op.result()));
+                let op = match op {
+                    hir::UnaryOp::Not => lir::UnaryOp::Not,
+                    hir::UnaryOp::Negate => lir::UnaryOp::Negate,
+                };
+                self.insts.push(lir::Inst::Unary {
                     dst: dst.clone(),
+                    op,
                     src,
                 });
                 dst
@@ -292,14 +297,19 @@ impl FunctionBuilder<'_> {
             hir::Expr::Binary(op, lhs, rhs) => {
                 let lhs = self.place(lhs, cx);
                 let rhs = self.place(rhs, cx);
-                let dst = self.slot(lir::Layout::U8);
+                let dst = self.slot(scalar_layout(op.result()));
                 let op = match op {
-                    hir::BoolOp::And => lir::BoolOp::And,
-                    hir::BoolOp::Or => lir::BoolOp::Or,
-                    hir::BoolOp::Xor => lir::BoolOp::Xor,
-                    hir::BoolOp::Implies => lir::BoolOp::Implies,
+                    hir::BinaryOp::And => lir::BinaryOp::And,
+                    hir::BinaryOp::Or => lir::BinaryOp::Or,
+                    hir::BinaryOp::Xor => lir::BinaryOp::Xor,
+                    hir::BinaryOp::Implies => lir::BinaryOp::Implies,
+                    hir::BinaryOp::Add => lir::BinaryOp::Add,
+                    hir::BinaryOp::Subtract => lir::BinaryOp::Subtract,
+                    hir::BinaryOp::Multiply => lir::BinaryOp::Multiply,
+                    hir::BinaryOp::Div => lir::BinaryOp::Div,
+                    hir::BinaryOp::Mod => lir::BinaryOp::Mod,
                 };
-                self.insts.push(lir::Inst::Bool {
+                self.insts.push(lir::Inst::Binary {
                     dst: dst.clone(),
                     op,
                     lhs,
@@ -316,6 +326,10 @@ impl FunctionBuilder<'_> {
         self.slots.push(layout);
         lir::Place::whole(lir::Base::Slot(slot))
     }
+}
+
+fn scalar_layout(scalar: hir::Scalar) -> lir::Layout {
+    layout(&hir::Type::Scalar(scalar))
 }
 
 /// The layout of a value of type `ty`.
@@ -467,7 +481,10 @@ mod tests {
         // `debug_value{v: not (a and b)}`, of two variables.
         let a = || Box::new(hir::Expr::Variable(hir::VariableId(0)));
         let b = || Box::new(hir::Expr::Variable(hir::VariableId(1)));
-        let expr = hir::Expr::Not(Box::new(hir::Expr::Binary(hir::BoolOp::And, a(), b())));
+        let expr = hir::Expr::Unary(
+            hir::UnaryOp::Not,
+            Box::new(hir::Expr::Binary(hir::BinaryOp::And, a(), b())),
+        );
         let lowered = lower(&program(
             vec![
                 debug_value(),
@@ -488,14 +505,15 @@ mod tests {
         assert_eq!(
             main.blocks[0].insts[..2],
             [
-                lir::Inst::Bool {
+                lir::Inst::Binary {
                     dst: slot(0),
-                    op: lir::BoolOp::And,
+                    op: lir::BinaryOp::And,
                     lhs: data(0),
                     rhs: data(1),
                 },
-                lir::Inst::Not {
+                lir::Inst::Unary {
                     dst: slot(1),
+                    op: lir::UnaryOp::Not,
                     src: slot(0),
                 },
             ]
@@ -504,6 +522,37 @@ mod tests {
             panic!("expected a runtime call");
         };
         assert_eq!(args[0], slot(1));
+    }
+
+    #[test]
+    fn integer_expressions_compute_into_integer_slots() {
+        let n = || Box::new(hir::Expr::Variable(hir::VariableId(0)));
+        let expr = hir::Expr::Unary(
+            hir::UnaryOp::Negate,
+            Box::new(hir::Expr::Binary(hir::BinaryOp::Mod, n(), n())),
+        );
+        let lowered = lower(&program(
+            vec![
+                debug_value(),
+                user("main", &[], vec![call(0, vec![("v", expr)])]),
+            ],
+            vec![variable("n", hir::Value::Integer(7))],
+        ));
+        let main = &lowered.functions[0];
+        assert_eq!(main.slots, [lir::Layout::I64, lir::Layout::I64]);
+        assert!(matches!(
+            main.blocks[0].insts[..2],
+            [
+                lir::Inst::Binary {
+                    op: lir::BinaryOp::Mod,
+                    ..
+                },
+                lir::Inst::Unary {
+                    op: lir::UnaryOp::Negate,
+                    ..
+                }
+            ]
+        ));
     }
 
     #[test]

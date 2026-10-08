@@ -193,10 +193,16 @@ pub(crate) fn type_mismatch(
 
     // Rewriting the literal is the likelier fix when it is mechanical, so it
     // comes first; changing the declared type always works.
-    if let (hir::Type::Scalar(scalar), Expr::Literal(literal), Some(value)) =
-        (declared, expr, value)
-    {
-        let written = literal.token().map(|t| t.text().to_string());
+    // A literal, or a negative one such as `-1`.
+    let written = match expr {
+        Expr::Literal(literal) => literal.token().map(|t| t.text().to_string()),
+        Expr::Unary(unary) => crate::ops::negated_literal(unary)
+            .and_then(|literal| literal.token())
+            .map(|t| format!("-{}", t.text())),
+        _ => None,
+    };
+    if let (hir::Type::Scalar(scalar), Some(written), Some(value)) = (declared, written, value) {
+        let written = Some(written);
         if let Some(replacement) = written.and_then(|w| rewrite_literal(*scalar, value, &w)) {
             d = d.with_suggestion(
                 format!("write it as `{declared}`: `{replacement}`"),
@@ -262,11 +268,11 @@ fn rewrite_literal(ty: hir::Scalar, value: &hir::Value, written: &str) -> Option
 fn source_text(value: &hir::Value) -> Option<String> {
     Some(match value {
         hir::Value::Boolean(b) => b.to_string(),
-        hir::Value::Integer(n) if *n >= 0 => n.to_string(),
+        hir::Value::Integer(n) => n.to_string(),
         hir::Value::Rational(r) => {
             let r = r.get();
             // Debug formatting always includes a point or an exponent.
-            (r.is_finite() && r.is_sign_positive()).then(|| format!("{r:?}"))?
+            r.is_finite().then(|| format!("{r:?}"))?
         }
         hir::Value::Text(text) => format!("\"{}\"", trendy_syntax::literal::escape_text(text)),
         hir::Value::Tuple(tuple) => {
@@ -297,7 +303,6 @@ fn source_text(value: &hir::Value) -> Option<String> {
                 format!("relation {} {{ {} }}", relation.heading, tuples.join(", "))
             }
         }
-        hir::Value::Integer(_) => return None,
     })
 }
 
@@ -668,10 +673,35 @@ pub(crate) fn integer_out_of_range(span: Span) -> Diagnostic {
         "doesn't fit in a 64-bit integer",
     )
     .with_note(format!(
-        "integers are 64-bit signed: the largest is {}",
+        "integers are 64-bit signed, from {} to {}",
+        i64::MIN,
         i64::MAX
     ))
-    .with_note("there are no negative literals yet, because there is no unary minus")
+}
+
+/// An operator written `expr` that has no result, because of `failure`.
+/// `divisor` is its right operand, where a division by zero is reported.
+pub(crate) fn failure(failure: hir::Failure, expr: &Expr, divisor: Option<&Expr>) -> Diagnostic {
+    match failure {
+        hir::Failure::Overflow => Diagnostic::error(
+            Code::IntegerOverflow,
+            "integer overflow",
+            expr.span(),
+            "the result doesn't fit in a 64-bit integer",
+        )
+        .with_note(format!(
+            "integers are 64-bit signed, from {} to {}; a result outside that range is an error, not wrapped around",
+            i64::MIN,
+            i64::MAX
+        )),
+        hir::Failure::DivisionByZero => Diagnostic::error(
+            Code::DivisionByZero,
+            "division by zero",
+            divisor.map_or(expr.span(), Expr::span),
+            "this is zero",
+        )
+        .with_note("`div` and `mod` have no result when the divisor is zero"),
+    }
 }
 
 /// A declaration of `name`, at `span`, with neither a type nor a value.

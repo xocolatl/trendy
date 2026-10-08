@@ -142,7 +142,7 @@ fn token_type(class: Class) -> u32 {
         Class::Text => 5,
         Class::Attribute => 6,
         Class::Parameter => 7,
-        Class::Logical => 8,
+        Class::ExprOperator => 8,
     }
 }
 

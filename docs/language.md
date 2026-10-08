@@ -331,11 +331,6 @@ operator main{} [];
 The operands must be booleans: there is no truthiness, so `not 0` and
 `"" or true` are errors.
 
-From tightest to loosest, the operators bind as `not`, `and`, `xor`, `or`,
-`implies`. `and`, `xor` and `or` group from the left, and `implies` from
-the right, as in logic: `a implies b implies c` means
-`a implies (b implies c)`. Parentheses group explicitly.
-
 ```trendy
 var a := true;
 var b := not a or a and false;
@@ -352,19 +347,102 @@ operator main{} [
 ];
 ```
 
-The symbols other languages use for these, such as `&&`, `||`, `!`, `^` and
-`->`, are not operators in trendy. Neither are capitalized spellings such as
-`AND`. The compiler suggests the keyword for each.
+### Integer operators
+
+| Operator | Result |
+|---|---|
+| `-a` | `a` negated |
+| `+a` | `a` |
+| `a + b`, `a - b`, `a * b` | the sum, difference and product |
+| `a div b` | the quotient, rounded toward zero: `-7 div 2` is `-3` |
+| `a mod b` | the remainder of `div`, with the sign of `a`: `-7 mod 2` is `-1`, and `7 mod -2` is `1` |
+
+`div` and `mod` always satisfy `a = (a div b) * b + a mod b`. The operands
+must be integers: there are no implicit conversions, so `1 + 1.5` and
+`1 + true` are errors.
+
+An operator whose result doesn't fit in 64 bits has no result, and neither
+does `div` or `mod` by zero. They never wrap around. When the operands are
+known while compiling, this is a compile error (E0122 for overflow, E0123
+for division by zero). Otherwise the program stops at that operator, writing
+the error to stderr, such as `error[E0122]: integer overflow`, and exits
+with status 1.
+
+```trendy
+var seven := 1 + 2 * 3;
+var smallest := -9223372036854775808;
+var largest := -(smallest + 1);
+
+operator show{a: integer, b: integer} [
+    call debug_value{v: -a + b * 2};
+    call debug_value{v: a div b};
+    call debug_value{v: a mod b};
+];
+
+operator main{} [
+    call show{a: seven, b: -2};
+];
+```
 
 ```trendy,error
-var a := true && false;
+var big := 9223372036854775807 + 1;
 
 operator main{} [];
 ```
 
-Whatever doesn't depend on parameters or variables is evaluated when
-compiling, and so is whatever a constant operand decides: `p and false` is
-just `false`, and `true and p` is just `p`.
+```trendy,error
+operator half{n: integer} [
+    call debug_value{v: n div 0};
+];
+
+operator main{} [];
+```
+
+A `-` written directly before a number literal makes a negative literal, so
+the smallest integer, `-9223372036854775808`, can be written, and so can
+negative rationals such as `-1.5` and `-0.0`. Rationals have no other
+operators yet.
+
+### Precedence
+
+From tightest to loosest:
+
+| Operators | Grouping |
+|---|---|
+| prefix `-` and `+` | |
+| `*`, `div`, `mod` | left |
+| `+`, `-` | left |
+| `not` | |
+| `and` | left |
+| `xor` | left |
+| `or` | left |
+| `implies` | right |
+
+So `-a * b` is `(-a) * b`, and `not a + b` is `not (a + b)`.
+`implies` groups from the right, as in logic: `a implies b implies c`
+means `a implies (b implies c)`. Parentheses group explicitly.
+
+### Other languages' operators
+
+The symbols other languages use, such as `&&`, `||`, `!`, `^`, `->`, `/`
+and `%`, are not operators in trendy. Neither are capitalized spellings
+such as `AND` or `MOD`. The compiler suggests the keyword for each.
+
+```trendy,error
+var a := true && false;
+var b := 7 / 2 % 3;
+
+operator main{} [];
+```
+
+### Evaluation
+
+Expressions have no side effects. Every operand is evaluated, so an error
+in one is never skipped. Whatever doesn't depend on parameters or variables
+is evaluated when compiling, and so is whatever a constant operand decides,
+when the other operand can't fail: `p and false` is just `false`,
+`true and p` is just `p`, and `n * 1` is just `n`. But `(n + 1) * 0` is
+still computed, since `n + 1` can overflow.
 
 ## Literals
 
@@ -378,9 +456,9 @@ operator main{} [];
 ```
 
 **Integer literals** are decimal digits, such as `0` or `42`, up to
-`9223372036854775807`. There are no digit separators (`1_000`), no radix
-prefixes (`0xFF`), and no negative literals yet, since there is no unary
-minus.
+`9223372036854775807`, or negative with a `-` before them, down to
+`-9223372036854775808`. There are no digit separators (`1_000`) and no
+radix prefixes (`0xFF`).
 
 **Rational literals** have digits on both sides of a decimal point, an
 exponent, or both, such as `0.5`, `17.0`, `0e0` or `1.5e-3`. The exponent
@@ -436,8 +514,8 @@ operator main{} [];
 
 Names are ASCII letters, digits and `_`, and don't start with a digit. They
 are case-sensitive. The keywords are `operator`, `var`, `call`, `builtin`,
-`tuple`, `relation`, `true`, `false`, `not`, `and`, `or`, `xor` and
-`implies`, all lowercase. `type` is a keyword
+`tuple`, `relation`, `true`, `false`, `not`, `and`, `or`, `xor`,
+`implies`, `div` and `mod`, all lowercase. `type` is a keyword
 only after `builtin`.
 
 Variables and operators share one namespace, so no two of them can have the
@@ -473,8 +551,9 @@ operator main{} [];
 - an operator's body has each statement on its own line, indented;
 - parameters and arguments are written without spaces inside their braces:
   `operator greet{name: text}`, `call greet{name: "Ada"}`;
-- single spaces around `and`, `or`, `xor` and `implies` and after `not`, and
-  none inside parentheses: `not (a and b)`.
+- single spaces around dyadic operators and after `not`, none after prefix
+  `-` and `+`, and none inside parentheses: `not (a and b)`,
+  `-a * (b + 1)`.
 
 A trailing comma is kept or left out as written.
 
@@ -501,6 +580,7 @@ A trailing comma is kept or left out as written.
 | `a ^ b`, `a != b` for booleans | `a xor b` |
 | `a -> b`, `a => b` | `a implies b` |
 | `AND`, `Or`, `NOT` | `and`, `or`, `not` |
+| `a / b`, `a % b` for integers | `a div b`, `a mod b` |
 
 The compiler recognizes each of these habits and suggests the fix.
 `trendyc --explain <code>` describes any error code in detail, and

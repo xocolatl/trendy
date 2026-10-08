@@ -7,6 +7,7 @@ use trendy_diag::{Diagnostic, Span, edit_distance};
 use trendy_hir as hir;
 use trendy_syntax::ast::{self, AstNode, AttributeValue, Expr};
 
+use crate::ops::{self, Operator};
 use crate::types::{self, Expected, Origin, Scope};
 use crate::{Kind, Values, errors};
 
@@ -253,7 +254,7 @@ fn arguments(
 }
 
 /// An expression in a body. Whatever doesn't depend on parameters or
-/// variables is evaluated now, to a constant.
+/// variables is evaluated now, to a constant, and the rest simplified.
 fn expr(
     expr: &Expr,
     expected: Option<&Expected>,
@@ -265,72 +266,48 @@ fn expr(
         Expr::Name(name_ref) => name(name_ref, expr, expected, within, cx, errors),
         Expr::Paren(paren) => self::expr(&paren.inner()?, expected, within, cx, errors),
         Expr::Unary(unary) => {
-            let operator = unary.operator()?;
+            if ops::negated_literal(unary).is_some() {
+                let mut scope = Selector { cx, within };
+                return types::value(expr, expected, &mut scope, errors).map(hir::Expr::Constant);
+            }
+            let token = unary.operator()?;
+            let op = Operator::of(&token)?;
             let operand = unary.operand().and_then(|operand| {
-                let expected = Expected::operand(operator);
+                let expected = Expected::operand(op, token);
                 self::expr(&operand, Some(&expected), within, cx, errors)
             });
-            types::boolean_result(expected, expr, errors)?;
-            Some(negation(operand?))
+            types::result_type(expected, op.result(), expr, errors)?;
+            match op {
+                Operator::Plus => operand,
+                Operator::Unary(op) => {
+                    types::evaluated(ops::unary(op, operand?), expr, None, errors)
+                }
+                Operator::Binary(_) => None,
+            }
         }
         Expr::Binary(binary) => {
-            let operator = binary.operator()?;
-            let op = types::bool_op(&operator)?;
+            let token = binary.operator()?;
+            let Some(Operator::Binary(op)) = Operator::of(&token) else {
+                return None;
+            };
+            let expected_operand = Expected::operand(Operator::Binary(op), token);
             let mut operand = |side: Option<Expr>| {
-                let expected = Expected::operand(operator.clone());
-                self::expr(&side?, Some(&expected), within, cx, errors)
+                self::expr(&side?, Some(&expected_operand), within, cx, errors)
             };
             let lhs = operand(binary.lhs());
             let rhs = operand(binary.rhs());
-            types::boolean_result(expected, expr, errors)?;
-            Some(dyadic(op, lhs?, rhs?))
+            types::result_type(expected, op.result(), expr, errors)?;
+            types::evaluated(
+                ops::binary(op, lhs?, rhs?),
+                expr,
+                binary.rhs().as_ref(),
+                errors,
+            )
         }
         Expr::Literal(_) | Expr::Tuple(_) | Expr::Relation(_) => {
             let mut scope = Selector { cx, within };
             types::value(expr, expected, &mut scope, errors).map(hir::Expr::Constant)
         }
-    }
-}
-
-/// The constant `b`, if `expr` is one.
-fn constant(expr: &hir::Expr) -> Option<bool> {
-    match expr {
-        hir::Expr::Constant(hir::Value::Boolean(b)) => Some(*b),
-        _ => None,
-    }
-}
-
-fn boolean(b: bool) -> hir::Expr {
-    hir::Expr::Constant(hir::Value::Boolean(b))
-}
-
-/// `not operand`, simplified. Expressions have no side effects, so whatever
-/// a constant operand decides needn't be computed.
-fn negation(operand: hir::Expr) -> hir::Expr {
-    match operand {
-        hir::Expr::Constant(hir::Value::Boolean(b)) => boolean(!b),
-        hir::Expr::Not(inner) => *inner,
-        operand => hir::Expr::Not(Box::new(operand)),
-    }
-}
-
-/// `lhs op rhs`, simplified as for [`negation`].
-fn dyadic(op: hir::BoolOp, lhs: hir::Expr, rhs: hir::Expr) -> hir::Expr {
-    use hir::BoolOp::{And, Implies, Or, Xor};
-    match (op, constant(&lhs), constant(&rhs)) {
-        (_, Some(a), Some(b)) => boolean(op.apply(a, b)),
-        // The constant leaves the other operand as it is,
-        (And | Implies, Some(true), None) | (Or | Xor, Some(false), None) => rhs,
-        (And, None, Some(true)) | (Or | Xor, None, Some(false)) => lhs,
-        // negates it,
-        (Xor, Some(true), None) => negation(rhs),
-        (Xor, None, Some(true)) | (Implies, None, Some(false)) => negation(lhs),
-        // or decides the result.
-        (And, Some(false), None) | (And, None, Some(false)) => boolean(false),
-        (Or, Some(true), None)
-        | (Or | Implies, None, Some(true))
-        | (Implies, Some(false), None) => boolean(true),
-        _ => hir::Expr::Binary(op, Box::new(lhs), Box::new(rhs)),
     }
 }
 

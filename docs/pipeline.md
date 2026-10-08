@@ -117,8 +117,10 @@ keyword (`operator` or `var`). In a variable declaration, a missing `:` or
 as `:=` and reported. Whitespace is attached to the innermost node that is open when it
 appears, so whitespace between definitions belongs to the file.
 
-Expressions use precedence climbing: `not` binds tightest, then `and`,
-`xor`, `or` and `implies`, with `implies` grouping to the right. Looking for
+Expressions use precedence climbing. From tightest to loosest: prefix `-`
+and `+`; `*`, `div` and `mod`; `+` and `-`; prefix `not`; `and`; `xor`;
+`or`; and `implies`, which groups to the right. Comparisons will go between
+the arithmetic operators and `not`. Looking for
 a dyadic operator after an operand uses a lookahead that leaves whitespace
 unattached, so whitespace after the last operand belongs to the node that
 continues, not to the expression. The symbols of other languages (`&&`,
@@ -215,8 +217,12 @@ cycle, reported once with a label at each reference in it (E0121).
 In an operator's body, expressions become `hir::Expr`. Whatever doesn't
 depend on parameters or variables is folded to a constant, and so is
 whatever a constant operand decides (`p and false` is `false`, `true and p`
-is `p`): expressions have no side effects, so this never changes what a
-program does. Tuple and relation values in bodies are still built when
+is `p`, and `n * 1` is `n`): expressions have no side effects, so this never
+changes what a program does. An operand is dropped only if it can't fail,
+so that every operand is evaluated and no run-time error is skipped. A
+constant overflow, or a division by a constant zero, is a compile error
+(E0122, E0123). `-` directly before a number literal makes a negative
+literal, so that the smallest integer can be written. Tuple and relation values in bodies are still built when
 compiling, so a parameter or variable inside one is an error (E0120).
 
 Checking is bidirectional: the expected type flows down into a value
@@ -237,7 +243,7 @@ with a rename that fixes both.
 
 **Provides:** the low-level IR. A function is a control-flow graph of basic
 blocks: each block is a list of instructions (`Copy`, `Call`, `CallRuntime`,
-and the boolean `Not` and `Bool`) ending in a terminator. Instructions refer to memory through places: a data
+and the boolean and integer `Unary` and `Binary`) ending in a terminator. Instructions refer to memory through places: a data
 object, a stack slot, or the parameter struct, plus a path through nested
 structs. Every value's shape is a `Layout`. There is no nesting and nothing
 implicit: every jump and return is spelled out.
@@ -286,7 +292,12 @@ produced with Cranelift.
   variables, and `trendy_const_<index>` for constants, all local;
 - laying out data for the target's byte order and pointer size, where every
   object occupies at least one byte;
-- calling conventions, and the C-ABI `main` entry shim.
+- calling conventions, and the C-ABI `main` entry shim;
+- the checks of integer instructions: overflow is detected with Cranelift's
+  `sadd_overflow` and its kin, and division by zero, or of the smallest
+  integer by -1, with explicit comparisons, each branching to a cold block
+  that calls `trendy_rt_fail`. That writes `error[E0122]: integer overflow`
+  or `error[E0123]: division by zero` to stderr and exits with status 1.
 
 The calling convention: a function with parameters takes one pointer, to a
 struct of its parameters in name order, because a call's arguments are a
