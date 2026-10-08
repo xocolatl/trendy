@@ -65,6 +65,7 @@ operator main{} [];
 
 | Type | Values | Default |
 |---|---|---|
+| `boolean` | `true` and `false` | `false` |
 | `integer` | 64-bit signed integers | `0` |
 | `rational` | Numbers with fractional parts, as 64-bit IEEE 754 binary floating point | `0.0` |
 | `text` | Sequences of Unicode characters, stored as UTF-8 | `""` |
@@ -95,6 +96,15 @@ operator main{} [];
 ```
 
 ## Literals
+
+**Boolean literals** are `true` and `false`, in lowercase.
+
+```trendy
+var done: boolean := false;
+var ready := true;
+
+operator main{} [];
+```
 
 **Integer literals** are decimal digits, such as `0` or `42`, up to
 `9223372036854775807`. There are no digit separators (`1_000`), no radix
@@ -154,7 +164,7 @@ operator main{} [];
 ## Names
 
 Names are ASCII letters, digits and `_`, and don't start with a digit. They
-are case-sensitive. The keywords are `operator` and `var`.
+are case-sensitive. The keywords are `operator`, `var`, `true` and `false`.
 
 Variables and operators share one namespace, so no two of them can have the
 same name. Types have their own namespace, so a variable can be named after a
@@ -189,6 +199,8 @@ operator main{} [];
 | `let`, `const`, `int x` | `var x` |
 | `x = 0` | `x := 0` |
 | `(params) { body }` | `{params} [body]` |
+| `bool` | `boolean` |
+| `True`, `TRUE`, `1` for true | `true` |
 | `int`, `long`, `i64` | `integer` |
 | `float`, `double`, `real`, `f64` | `rational` |
 | `.5`, `5.` | `0.5`, `5.0` |

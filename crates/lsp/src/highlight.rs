@@ -104,6 +104,18 @@ mod tests {
     }
 
     #[test]
+    fn boolean_literals_are_keywords() {
+        assert_eq!(
+            highlight("var b := true;"),
+            [
+                ("var", Class::Keyword, false),
+                ("b", Class::Variable, true),
+                ("true", Class::Keyword, false),
+            ]
+        );
+    }
+
+    #[test]
     fn works_on_broken_files() {
         assert_eq!(
             highlight("junk operator a{ operator b"),

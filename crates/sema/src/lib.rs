@@ -192,6 +192,7 @@ fn resolve_type(
 /// is reported here, or the lexer already reported it as malformed.
 fn literal_value(literal: &Literal, errors: &mut Vec<Diagnostic>) -> Option<hir::Value> {
     match literal.value() {
+        Ok(LiteralValue::Boolean(value)) => Some(hir::Value::Boolean(value)),
         Ok(LiteralValue::Integer(value)) => Some(hir::Value::Integer(value)),
         Ok(LiteralValue::Rational(value)) => Some(hir::Value::Rational(hir::Rational::new(value))),
         Ok(LiteralValue::Text(value)) => Some(hir::Value::Text(value)),
@@ -483,6 +484,33 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].code, Code::RationalOutOfRange);
         assert_eq!(errors[0].span(), Span::new(9, 14));
+    }
+
+    #[test]
+    fn booleans() {
+        let vars = variables("var a := true;\nvar b: boolean := false;\nvar c: boolean;");
+        let values: Vec<_> = vars.iter().map(|v| (v.ty, v.init.clone())).collect();
+        assert_eq!(
+            values,
+            [
+                (hir::Type::Boolean, hir::Value::Boolean(true)),
+                (hir::Type::Boolean, hir::Value::Boolean(false)),
+                (hir::Type::Boolean, hir::Value::Boolean(false)),
+            ]
+        );
+    }
+
+    #[test]
+    fn boolean_mismatch_fixes() {
+        let source = format!(
+            "var a: boolean := 1;\nvar b: boolean := \"false\";\nvar c: text := true;\nvar d: bool;\nvar e: boolean := 2;{MAIN}"
+        );
+        assert_eq!(
+            fix(&source),
+            format!(
+                "var a: boolean := true;\nvar b: boolean := false;\nvar c: text := \"true\";\nvar d: boolean;\nvar e: integer := 2;{MAIN}"
+            )
+        );
     }
 
     #[test]

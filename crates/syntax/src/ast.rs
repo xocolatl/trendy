@@ -113,6 +113,7 @@ impl TypeRef {
 /// What a literal stands for.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LiteralValue {
+    Boolean(bool),
     Integer(i64),
     Rational(f64),
     Text(String),
@@ -135,12 +136,7 @@ impl Literal {
         self.0
             .children_with_tokens()
             .filter_map(rowan::NodeOrToken::into_token)
-            .find(|t| {
-                matches!(
-                    t.kind(),
-                    SyntaxKind::IntLiteral | SyntaxKind::RationalLiteral | SyntaxKind::TextLiteral
-                )
-            })
+            .find(|t| t.kind().is_literal())
     }
 
     /// # Errors
@@ -150,6 +146,8 @@ impl Literal {
         let token = self.token().ok_or(LiteralError::Malformed)?;
         let text = token.text();
         match token.kind() {
+            SyntaxKind::TrueKw => return Ok(LiteralValue::Boolean(true)),
+            SyntaxKind::FalseKw => return Ok(LiteralValue::Boolean(false)),
             SyntaxKind::IntLiteral => {
                 literal::check_int(text).map_err(|_| LiteralError::Malformed)?;
                 return literal::int_value(text)

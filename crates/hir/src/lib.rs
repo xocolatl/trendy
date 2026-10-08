@@ -45,6 +45,8 @@ pub struct Variable {
 /// A built-in scalar type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Type {
+    /// `true` or `false`.
+    Boolean,
     /// A 64-bit signed integer.
     Integer,
     /// A number with a fractional part, implemented as a 64-bit IEEE 754
@@ -55,12 +57,14 @@ pub enum Type {
 }
 
 impl Type {
-    pub const ALL: [Type; 3] = [Type::Integer, Type::Rational, Type::Text];
+    /// In alphabetical order, as messages list them.
+    pub const ALL: [Type; 4] = [Type::Boolean, Type::Integer, Type::Rational, Type::Text];
 
     /// The type's name in source code.
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
+            Type::Boolean => "boolean",
             Type::Integer => "integer",
             Type::Rational => "rational",
             Type::Text => "text",
@@ -77,6 +81,7 @@ impl Type {
     #[must_use]
     pub fn default_value(self) -> Value {
         match self {
+            Type::Boolean => Value::Boolean(false),
             Type::Integer => Value::Integer(0),
             Type::Rational => Value::Rational(Rational::new(0.0)),
             Type::Text => Value::Text(String::new()),
@@ -86,6 +91,7 @@ impl Type {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Value {
+    Boolean(bool),
     Integer(i64),
     Rational(Rational),
     Text(String),
@@ -95,6 +101,7 @@ impl Value {
     #[must_use]
     pub fn ty(&self) -> Type {
         match self {
+            Value::Boolean(_) => Type::Boolean,
             Value::Integer(_) => Type::Integer,
             Value::Rational(_) => Type::Rational,
             Value::Text(_) => Type::Text,

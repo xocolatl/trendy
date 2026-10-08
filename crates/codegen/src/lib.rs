@@ -153,11 +153,12 @@ impl Layout {
             let field_align = match field {
                 lir::Field::I64(_) | lir::Field::F64Bits(_) => 8,
                 lir::Field::Usize(_) | lir::Field::Address(_) => self.pointer_bytes,
-                lir::Field::Bytes(_) => 1,
+                lir::Field::U8(_) | lir::Field::Bytes(_) => 1,
             };
             bytes.resize(bytes.len().next_multiple_of(field_align), 0);
             align = align.max(field_align);
             match field {
+                lir::Field::U8(n) => bytes.push(*n),
                 lir::Field::I64(n) => bytes.extend(self.in_target_order(n.to_le_bytes(), 8)),
                 lir::Field::F64Bits(bits) => {
                     bytes.extend(self.in_target_order(bits.to_le_bytes(), 8));
@@ -256,6 +257,7 @@ mod tests {
         let object_bytes = compile(&program(vec![
             variable("i", vec![lir::Field::I64(-2)]),
             variable("r", vec![lir::Field::F64Bits((-0.5_f64).to_bits())]),
+            variable("b", vec![lir::Field::U8(1)]),
             lir::Data {
                 kind: lir::DataKind::Constant,
                 writable: false,
@@ -263,7 +265,7 @@ mod tests {
             },
             variable(
                 "t",
-                vec![lir::Field::Address(lir::DataId(2)), lir::Field::Usize(3)],
+                vec![lir::Field::Address(lir::DataId(3)), lir::Field::Usize(3)],
             ),
         ]))
         .unwrap();
@@ -273,7 +275,9 @@ mod tests {
         assert_eq!(i, (-2_i64).to_le_bytes());
         let (r, _) = symbol_bytes(&object, "trendy_var_r", 8);
         assert_eq!(r, (-0.5_f64).to_le_bytes());
-        let (constant, _) = symbol_bytes(&object, "trendy_const_2", 3);
+        let (b, _) = symbol_bytes(&object, "trendy_var_b", 1);
+        assert_eq!(b, [1]);
+        let (constant, _) = symbol_bytes(&object, "trendy_const_3", 3);
         assert_eq!(constant, b"hey");
         let (t, relocated) = symbol_bytes(&object, "trendy_var_t", 16);
         assert!(relocated, "the text pointer needs a relocation");

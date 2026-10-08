@@ -148,7 +148,7 @@ impl<'a> Parser<'a> {
                 self.expression();
                 self.builder.finish_node();
             }
-            Some(found) if is_literal(found.kind) => {
+            Some(found) if found.kind.is_literal() => {
                 // `var i: integer 0`: the value is there but `:=` isn't.
                 self.builder.start_node(SyntaxKind::Initializer);
                 self.missing(SyntaxKind::ColonEq);
@@ -187,10 +187,20 @@ impl<'a> Parser<'a> {
 
     /// For now, the only expressions are literals.
     fn expression(&mut self) {
-        if self.peek().is_some_and(is_literal) {
+        if self.peek().is_some_and(SyntaxKind::is_literal) {
             self.builder.start_node(SyntaxKind::Literal);
             self.bump();
             self.builder.finish_node();
+        } else if let Some(found) = self
+            .found()
+            .filter(|f| f.kind == SyntaxKind::Ident && errors::boolean_spelling(f.text).is_some())
+        {
+            // `True` or `TRUE`: a boolean literal in the wrong case. It's kept
+            // as the literal it was meant to be, so nothing else cascades.
+            self.builder.start_node(SyntaxKind::Literal);
+            self.bump();
+            self.builder.finish_node();
+            self.errors.push(errors::miscased_boolean(found));
         } else {
             self.missing_with_help(
                 SyntaxKind::Literal,
@@ -377,13 +387,6 @@ impl<'a> Parser<'a> {
 
 fn is_skipped(kind: SyntaxKind) -> bool {
     kind.is_trivia() || kind == SyntaxKind::ErrorToken
-}
-
-fn is_literal(kind: SyntaxKind) -> bool {
-    matches!(
-        kind,
-        SyntaxKind::IntLiteral | SyntaxKind::RationalLiteral | SyntaxKind::TextLiteral
-    )
 }
 
 #[cfg(test)]
@@ -673,6 +676,24 @@ SourceFile
                 .initializer()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn boolean_literals() {
+        assert!(
+            parse_str("var a := true;\nvar b: boolean := false;")
+                .errors
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn miscased_booleans() {
+        let source = "var a := True;\nvar b := FALSE;";
+        let errors = parse_str(source).errors;
+        assert_eq!(errors.len(), 2);
+        assert_eq!(errors[0].code, Code::MiscasedBoolean);
+        assert_eq!(fix(source), "var a := true;\nvar b := false;");
     }
 
     #[test]

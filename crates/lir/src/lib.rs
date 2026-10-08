@@ -9,6 +9,7 @@
 //! target's byte order and pointer size.
 //!
 //! Value representations:
+//! - `boolean`: one [`Field::U8`], `0` for false and `1` for true.
 //! - `integer`: one [`Field::I64`].
 //! - `rational`: one [`Field::F64Bits`], a 64-bit IEEE 754 binary float.
 //! - `text`: an [`Field::Address`] of a read-only constant holding the UTF-8
@@ -73,6 +74,7 @@ pub enum DataKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Field {
+    U8(u8),
     I64(i64),
     /// A 64-bit IEEE 754 float, as its exact bit pattern, so that no value
     /// is ever compared or changed by float arithmetic on the way.

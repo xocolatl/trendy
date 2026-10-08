@@ -163,11 +163,13 @@ fn regex_escape(text: &str) -> String {
 fn generate(probed: &Probed) -> Value {
     let kinds = SyntaxKind::ALL;
     let keyword = |kind: SyntaxKind| regex_escape(kind.fixed_text().unwrap());
-    let keywords: Vec<_> = kinds
+    // Literal keywords (`true`, `false`) are colored as constants.
+    let (literal_keywords, keywords): (Vec<_>, Vec<_>) = kinds
         .into_iter()
         .filter(|k| k.is_keyword())
-        .map(keyword)
-        .collect();
+        .partition(|k| k.is_literal());
+    let keywords: Vec<_> = keywords.into_iter().map(keyword).collect();
+    let literal_keywords: Vec<_> = literal_keywords.into_iter().map(keyword).collect();
     let identifier = &probed.identifier;
 
     // Group punctuation by scope; longer tokens are tried first, so that
@@ -207,6 +209,7 @@ fn generate(probed: &Probed) -> Value {
             { "include": "#operator-definition" },
             { "include": "#variable-declaration" },
             { "include": "#keywords" },
+            { "include": "#boolean" },
             { "include": "#number" },
             { "include": "#text" },
             { "include": "#punctuation" },
@@ -235,6 +238,10 @@ fn generate(probed: &Probed) -> Value {
             "keywords": {
                 "match": format!("\\b(?:{})\\b", keywords.join("|")),
                 "name": "keyword.other.trendy",
+            },
+            "boolean": {
+                "match": format!("\\b(?:{})\\b", literal_keywords.join("|")),
+                "name": "constant.language.boolean.trendy",
             },
             "number": {
                 "match": format!("\\b{}", probed.number),

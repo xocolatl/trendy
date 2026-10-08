@@ -38,6 +38,7 @@ pub fn lower(program: &hir::Program) -> lir::Program {
 /// The fields representing `value`, adding any constants they point to.
 fn value_fields(value: &hir::Value, data: &mut Vec<lir::Data>) -> Vec<lir::Field> {
     match value {
+        hir::Value::Boolean(b) => vec![lir::Field::U8(u8::from(*b))],
         hir::Value::Integer(n) => vec![lir::Field::I64(*n)],
         hir::Value::Rational(r) => vec![lir::Field::F64Bits(r.to_bits())],
         hir::Value::Text(text) => {
@@ -104,6 +105,7 @@ mod tests {
                 variable("i", hir::Value::Integer(-7)),
                 variable("t", hir::Value::Text("hé".to_string())),
                 variable("r", hir::Value::Rational(hir::Rational::new(1.5))),
+                variable("b", hir::Value::Boolean(true)),
             ],
             entry: hir::OperatorId(0),
         });
@@ -135,6 +137,13 @@ mod tests {
                     },
                     writable: true,
                     fields: vec![lir::Field::F64Bits(1.5_f64.to_bits())],
+                },
+                lir::Data {
+                    kind: lir::DataKind::Variable {
+                        name: "b".to_string()
+                    },
+                    writable: true,
+                    fields: vec![lir::Field::U8(1)],
                 },
             ]
         );

@@ -140,6 +140,33 @@ pub(crate) fn wrong_delimiter(
     d.with_suggestion(format!("use `{right_open}{right_close}`"), edits)
 }
 
+/// The boolean literal `text` spells in some other case, if any.
+pub(crate) fn boolean_spelling(text: &str) -> Option<&'static str> {
+    [SyntaxKind::TrueKw, SyntaxKind::FalseKw]
+        .into_iter()
+        .filter_map(SyntaxKind::fixed_text)
+        .find(|literal| literal.eq_ignore_ascii_case(text))
+}
+
+/// `True` or `TRUE` where `true` belongs.
+pub(crate) fn miscased_boolean(found: Found) -> Diagnostic {
+    let literal = boolean_spelling(found.text).expect("checked by the caller");
+    Diagnostic::error(
+        Code::MiscasedBoolean,
+        format!("`{}` is not a boolean literal", found.text),
+        found.span,
+        "boolean literals are lowercase",
+    )
+    .with_note("the boolean literals are `true` and `false`; keywords are case-sensitive")
+    .with_suggestion(
+        format!("write `{literal}`"),
+        vec![Edit {
+            span: found.span,
+            replacement: literal.to_string(),
+        }],
+    )
+}
+
 /// `=` where `:=` belongs.
 pub(crate) fn assignment_with_eq(span: Span) -> Diagnostic {
     Diagnostic::error(

@@ -11,6 +11,8 @@ use crate::{Kind, Values};
 /// Type names from other languages, and the built-in type each one means.
 const TYPE_ALIASES: &[(&str, hir::Type)] = &[
     ("bigint", hir::Type::Integer),
+    ("bit", hir::Type::Boolean),
+    ("bool", hir::Type::Boolean),
     ("char", hir::Type::Text),
     ("decimal", hir::Type::Rational),
     ("double", hir::Type::Rational),
@@ -205,9 +207,15 @@ pub(crate) fn type_mismatch(
 fn rewrite_literal(ty: hir::Type, value: &hir::Value, written: &str) -> Option<String> {
     use trendy_syntax::literal;
     match (ty, value) {
-        (hir::Type::Text, hir::Value::Integer(_) | hir::Value::Rational(_)) => {
-            Some(format!("\"{written}\""))
-        }
+        (
+            hir::Type::Text,
+            hir::Value::Boolean(_) | hir::Value::Integer(_) | hir::Value::Rational(_),
+        ) => Some(format!("\"{written}\"")),
+        // `0` and `1` are the usual spellings of false and true elsewhere.
+        (hir::Type::Boolean, hir::Value::Integer(n @ (0 | 1))) => Some((*n == 1).to_string()),
+        (hir::Type::Boolean, hir::Value::Text(text)) => ["true", "false"]
+            .contains(&text.as_str())
+            .then(|| text.clone()),
         (hir::Type::Rational, hir::Value::Integer(_)) => Some(format!("{written}.0")),
         (hir::Type::Integer, hir::Value::Rational(r)) => {
             // Only exact integers within range; `{:.0}` prints them in full.

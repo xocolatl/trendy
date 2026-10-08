@@ -25,6 +25,10 @@ pub enum SyntaxKind {
     Ident,
     OperatorKw,
     VarKw,
+    /// `true`, a boolean literal.
+    TrueKw,
+    /// `false`, a boolean literal.
+    FalseKw,
     LBrace,
     RBrace,
     LBracket,
@@ -73,11 +77,13 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 29] = [
+    pub const ALL: [SyntaxKind; 31] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Ident,
         SyntaxKind::OperatorKw,
         SyntaxKind::VarKw,
+        SyntaxKind::TrueKw,
+        SyntaxKind::FalseKw,
         SyntaxKind::LBrace,
         SyntaxKind::RBrace,
         SyntaxKind::LBracket,
@@ -112,7 +118,24 @@ impl SyntaxKind {
 
     #[must_use]
     pub fn is_keyword(self) -> bool {
-        matches!(self, SyntaxKind::OperatorKw | SyntaxKind::VarKw)
+        matches!(
+            self,
+            SyntaxKind::OperatorKw | SyntaxKind::VarKw | SyntaxKind::TrueKw | SyntaxKind::FalseKw
+        )
+    }
+
+    /// Whether this kind is a literal token: a number, text, or a boolean
+    /// keyword.
+    #[must_use]
+    pub fn is_literal(self) -> bool {
+        matches!(
+            self,
+            SyntaxKind::IntLiteral
+                | SyntaxKind::RationalLiteral
+                | SyntaxKind::TextLiteral
+                | SyntaxKind::TrueKw
+                | SyntaxKind::FalseKw
+        )
     }
 
     /// The keyword spelled `text`, if it is one.
@@ -135,6 +158,8 @@ impl SyntaxKind {
         Some(match self {
             SyntaxKind::OperatorKw => "operator",
             SyntaxKind::VarKw => "var",
+            SyntaxKind::TrueKw => "true",
+            SyntaxKind::FalseKw => "false",
             SyntaxKind::LBrace => "{",
             SyntaxKind::RBrace => "}",
             SyntaxKind::LBracket => "[",
@@ -157,6 +182,8 @@ impl SyntaxKind {
             SyntaxKind::Ident => "identifier",
             SyntaxKind::OperatorKw => "`operator`",
             SyntaxKind::VarKw => "`var`",
+            SyntaxKind::TrueKw => "`true`",
+            SyntaxKind::FalseKw => "`false`",
             SyntaxKind::LBrace => "`{`",
             SyntaxKind::RBrace => "`}`",
             SyntaxKind::LBracket => "`[`",

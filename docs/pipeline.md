@@ -171,6 +171,7 @@ It also describes static data (`Data`) field by field, rather than as bytes,
 so the description doesn't depend on the target. Values are represented like
 this:
 
+- `boolean`: one byte, `0` for false and `1` for true.
 - `integer`: one 64-bit field.
 - `rational`: one 64-bit IEEE 754 binary floating-point field.
 - `text`: the address of a read-only constant holding the UTF-8 bytes,
