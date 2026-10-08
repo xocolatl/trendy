@@ -53,14 +53,23 @@ fn code_blocks(markdown: &str) -> Vec<(&str, String)> {
 fn explanation_examples_behave_as_documented() {
     for code in Code::ALL {
         let blocks = code_blocks(code.explanation());
-        assert!(
-            blocks.iter().any(|(info, _)| *info == "trendy,error"),
-            "{code} has no failing example"
-        );
-        assert!(
-            blocks.iter().any(|(info, _)| *info == "trendy"),
-            "{code} has no corrected example"
-        );
+        // A code the compiler never reports, such as running out of memory,
+        // can't have a program that produces it.
+        if code.reported_when_compiling() {
+            assert!(
+                blocks.iter().any(|(info, _)| *info == "trendy,error"),
+                "{code} has no failing example"
+            );
+            assert!(
+                blocks.iter().any(|(info, _)| *info == "trendy"),
+                "{code} has no corrected example"
+            );
+        } else {
+            assert!(
+                blocks.iter().all(|(info, _)| *info != "trendy,error"),
+                "{code} is never reported when compiling, so it can't have a failing example"
+            );
+        }
 
         for (info, source) in blocks {
             let errors = errors(&source);

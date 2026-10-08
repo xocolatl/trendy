@@ -40,7 +40,7 @@ var cities := relation {
    Tuple analog: building tuples from run-time values.
    Tutorial D: RELATION { TUPLE { NAME N, BORN B }, ... }
    Proposed: as now, but tuples and attribute values can be parameters,
-   variables and any other expression, not only constants (lifting E0120).
+   variables and any other expression, not only constants (lifting A0020).
    Duplicates are removed when the program runs, so the result can have
    fewer tuples than written.
 

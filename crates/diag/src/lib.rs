@@ -13,7 +13,7 @@ mod json;
 mod render;
 mod source;
 
-pub use code::Code;
+pub use code::{Code, CodeKind};
 pub use source::{LineCol, SourceMap};
 
 /// Byte range into the source text.

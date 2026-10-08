@@ -3,8 +3,12 @@ use std::fmt;
 /// A stable identifier for each kind of diagnostic.
 ///
 /// Codes are permanent: once released, a code keeps its meaning and is never
-/// reused. `E00xx` are syntax errors and `E01xx` are semantic errors. Each
-/// code's explanation lives in `crates/diag/errors/<code>.md`.
+/// reused. Its letter says what kind of problem it is, not which layer finds
+/// it: `P` the source doesn't parse, `A` it parses but analysis rejects it,
+/// `R` it fails while running, and `X` the compiler itself is wrong. Each
+/// letter's `0000` is reserved for a generic error of that kind. A rule that
+/// is broken at run time keeps its `R` code when the compiler catches it
+/// early. Each code's explanation lives in `crates/diag/errors/<code>.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Code {
     UnexpectedCharacter,
@@ -21,6 +25,8 @@ pub enum Code {
     UnterminatedComment,
     MissingCall,
     ForeignOperator,
+    ChainedComparison,
+    StrayCommentEnd,
     DuplicateName,
     MissingMain,
     UnknownType,
@@ -42,15 +48,28 @@ pub enum Code {
     MainWithParams,
     NameInSelector,
     CyclicInitialValues,
+    WrongOperandType,
     Overflow,
     DivisionByZero,
-    WrongOperandType,
-    ChainedComparison,
-    StrayCommentEnd,
+    OutOfMemory,
+    Internal,
+}
+
+/// What kind of problem a code is, from its letter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodeKind {
+    /// `P`: the source doesn't parse.
+    Parse,
+    /// `A`: it parses, but isn't a valid program.
+    Analysis,
+    /// `R`: it fails while running.
+    Run,
+    /// `X`: a bug in the compiler, never the program's fault.
+    Internal,
 }
 
 impl Code {
-    pub const ALL: [Code; 40] = [
+    pub const ALL: [Code; 42] = [
         Code::UnexpectedCharacter,
         Code::MissingToken,
         Code::WrongDelimiter,
@@ -65,6 +84,8 @@ impl Code {
         Code::UnterminatedComment,
         Code::MissingCall,
         Code::ForeignOperator,
+        Code::ChainedComparison,
+        Code::StrayCommentEnd,
         Code::DuplicateName,
         Code::MissingMain,
         Code::UnknownType,
@@ -86,60 +107,62 @@ impl Code {
         Code::MainWithParams,
         Code::NameInSelector,
         Code::CyclicInitialValues,
+        Code::WrongOperandType,
         Code::Overflow,
         Code::DivisionByZero,
-        Code::WrongOperandType,
-        Code::ChainedComparison,
-        Code::StrayCommentEnd,
+        Code::OutOfMemory,
+        Code::Internal,
     ];
 
     #[must_use]
     pub fn id(self) -> &'static str {
         match self {
-            Code::UnexpectedCharacter => "E0001",
-            Code::MissingToken => "E0002",
-            Code::WrongDelimiter => "E0003",
-            Code::ExpectedDefinition => "E0004",
-            Code::AssignmentWithEq => "E0005",
-            Code::UnterminatedText => "E0006",
-            Code::InvalidEscape => "E0007",
-            Code::InvalidInteger => "E0008",
-            Code::InvalidRational => "E0009",
-            Code::MiscasedKeyword => "E0010",
-            Code::AttributeSeparator => "E0011",
-            Code::UnterminatedComment => "E0012",
-            Code::MissingCall => "E0013",
-            Code::ForeignOperator => "E0014",
-            Code::DuplicateName => "E0101",
-            Code::MissingMain => "E0102",
-            Code::UnknownType => "E0103",
-            Code::TypeMismatch => "E0104",
-            Code::IntegerOutOfRange => "E0105",
-            Code::UntypedVariable => "E0106",
-            Code::RationalOutOfRange => "E0107",
-            Code::DuplicateAttribute => "E0108",
-            Code::MissingAttribute => "E0109",
-            Code::UnknownAttribute => "E0110",
-            Code::UnknownRelationHeading => "E0111",
-            Code::DuplicateTuple => "E0112",
-            Code::BuiltinOutsidePrelude => "E0113",
-            Code::AnyOutsideBuiltin => "E0114",
-            Code::UnknownName => "E0115",
-            Code::OperatorAsValue => "E0116",
-            Code::NotAnOperator => "E0117",
-            Code::PositionalArgument => "E0118",
-            Code::MainWithParams => "E0119",
-            Code::NameInSelector => "E0120",
-            Code::CyclicInitialValues => "E0121",
-            Code::Overflow => "E0122",
-            Code::DivisionByZero => "E0123",
-            Code::WrongOperandType => "E0124",
-            Code::ChainedComparison => "E0015",
-            Code::StrayCommentEnd => "E0016",
+            Code::UnexpectedCharacter => "P0001",
+            Code::MissingToken => "P0002",
+            Code::WrongDelimiter => "P0003",
+            Code::ExpectedDefinition => "P0004",
+            Code::AssignmentWithEq => "P0005",
+            Code::UnterminatedText => "P0006",
+            Code::InvalidEscape => "P0007",
+            Code::InvalidInteger => "P0008",
+            Code::InvalidRational => "P0009",
+            Code::MiscasedKeyword => "P0010",
+            Code::AttributeSeparator => "P0011",
+            Code::UnterminatedComment => "P0012",
+            Code::MissingCall => "P0013",
+            Code::ForeignOperator => "P0014",
+            Code::ChainedComparison => "P0015",
+            Code::StrayCommentEnd => "P0016",
+            Code::DuplicateName => "A0001",
+            Code::MissingMain => "A0002",
+            Code::UnknownType => "A0003",
+            Code::TypeMismatch => "A0004",
+            Code::IntegerOutOfRange => "A0005",
+            Code::UntypedVariable => "A0006",
+            Code::RationalOutOfRange => "A0007",
+            Code::DuplicateAttribute => "A0008",
+            Code::MissingAttribute => "A0009",
+            Code::UnknownAttribute => "A0010",
+            Code::UnknownRelationHeading => "A0011",
+            Code::DuplicateTuple => "A0012",
+            Code::BuiltinOutsidePrelude => "A0013",
+            Code::AnyOutsideBuiltin => "A0014",
+            Code::UnknownName => "A0015",
+            Code::OperatorAsValue => "A0016",
+            Code::NotAnOperator => "A0017",
+            Code::PositionalArgument => "A0018",
+            Code::MainWithParams => "A0019",
+            Code::NameInSelector => "A0020",
+            Code::CyclicInitialValues => "A0021",
+            Code::WrongOperandType => "A0022",
+            Code::Overflow => "R0001",
+            Code::DivisionByZero => "R0002",
+            Code::OutOfMemory => "R0003",
+            Code::Internal => "X0000",
         }
     }
 
-    /// The code with this id, such as `"E0002"`. Case-insensitive.
+    /// The code with this id, such as `"P0002"`. Case-insensitive.
     #[must_use]
     pub fn from_id(id: &str) -> Option<Self> {
         Code::ALL
@@ -147,50 +170,71 @@ impl Code {
             .find(|c| c.id().eq_ignore_ascii_case(id))
     }
 
+    #[must_use]
+    pub fn kind(self) -> CodeKind {
+        match self.id().as_bytes()[0] {
+            b'P' => CodeKind::Parse,
+            b'A' => CodeKind::Analysis,
+            b'R' => CodeKind::Run,
+            _ => CodeKind::Internal,
+        }
+    }
+
+    /// Whether the compiler can report this code, so that its explanation
+    /// can show a program that produces it. Run-time rules such as overflow
+    /// are reported while compiling when the compiler can tell they'll be
+    /// broken; running out of memory and internal errors never are.
+    #[must_use]
+    pub fn reported_when_compiling(self) -> bool {
+        !matches!(self, Code::OutOfMemory | Code::Internal)
+    }
+
     /// The Markdown explanation printed by `trendyc --explain`.
     #[must_use]
     pub fn explanation(self) -> &'static str {
         match self {
-            Code::UnexpectedCharacter => include_str!("../errors/E0001.md"),
-            Code::MissingToken => include_str!("../errors/E0002.md"),
-            Code::WrongDelimiter => include_str!("../errors/E0003.md"),
-            Code::ExpectedDefinition => include_str!("../errors/E0004.md"),
-            Code::AssignmentWithEq => include_str!("../errors/E0005.md"),
-            Code::UnterminatedText => include_str!("../errors/E0006.md"),
-            Code::InvalidEscape => include_str!("../errors/E0007.md"),
-            Code::InvalidInteger => include_str!("../errors/E0008.md"),
-            Code::InvalidRational => include_str!("../errors/E0009.md"),
-            Code::MiscasedKeyword => include_str!("../errors/E0010.md"),
-            Code::AttributeSeparator => include_str!("../errors/E0011.md"),
-            Code::UnterminatedComment => include_str!("../errors/E0012.md"),
-            Code::MissingCall => include_str!("../errors/E0013.md"),
-            Code::ForeignOperator => include_str!("../errors/E0014.md"),
-            Code::DuplicateName => include_str!("../errors/E0101.md"),
-            Code::MissingMain => include_str!("../errors/E0102.md"),
-            Code::UnknownType => include_str!("../errors/E0103.md"),
-            Code::TypeMismatch => include_str!("../errors/E0104.md"),
-            Code::IntegerOutOfRange => include_str!("../errors/E0105.md"),
-            Code::UntypedVariable => include_str!("../errors/E0106.md"),
-            Code::RationalOutOfRange => include_str!("../errors/E0107.md"),
-            Code::DuplicateAttribute => include_str!("../errors/E0108.md"),
-            Code::MissingAttribute => include_str!("../errors/E0109.md"),
-            Code::UnknownAttribute => include_str!("../errors/E0110.md"),
-            Code::UnknownRelationHeading => include_str!("../errors/E0111.md"),
-            Code::DuplicateTuple => include_str!("../errors/E0112.md"),
-            Code::BuiltinOutsidePrelude => include_str!("../errors/E0113.md"),
-            Code::AnyOutsideBuiltin => include_str!("../errors/E0114.md"),
-            Code::UnknownName => include_str!("../errors/E0115.md"),
-            Code::OperatorAsValue => include_str!("../errors/E0116.md"),
-            Code::NotAnOperator => include_str!("../errors/E0117.md"),
-            Code::PositionalArgument => include_str!("../errors/E0118.md"),
-            Code::MainWithParams => include_str!("../errors/E0119.md"),
-            Code::NameInSelector => include_str!("../errors/E0120.md"),
-            Code::CyclicInitialValues => include_str!("../errors/E0121.md"),
-            Code::Overflow => include_str!("../errors/E0122.md"),
-            Code::DivisionByZero => include_str!("../errors/E0123.md"),
-            Code::WrongOperandType => include_str!("../errors/E0124.md"),
-            Code::ChainedComparison => include_str!("../errors/E0015.md"),
-            Code::StrayCommentEnd => include_str!("../errors/E0016.md"),
+            Code::UnexpectedCharacter => include_str!("../errors/P0001.md"),
+            Code::MissingToken => include_str!("../errors/P0002.md"),
+            Code::WrongDelimiter => include_str!("../errors/P0003.md"),
+            Code::ExpectedDefinition => include_str!("../errors/P0004.md"),
+            Code::AssignmentWithEq => include_str!("../errors/P0005.md"),
+            Code::UnterminatedText => include_str!("../errors/P0006.md"),
+            Code::InvalidEscape => include_str!("../errors/P0007.md"),
+            Code::InvalidInteger => include_str!("../errors/P0008.md"),
+            Code::InvalidRational => include_str!("../errors/P0009.md"),
+            Code::MiscasedKeyword => include_str!("../errors/P0010.md"),
+            Code::AttributeSeparator => include_str!("../errors/P0011.md"),
+            Code::UnterminatedComment => include_str!("../errors/P0012.md"),
+            Code::MissingCall => include_str!("../errors/P0013.md"),
+            Code::ForeignOperator => include_str!("../errors/P0014.md"),
+            Code::ChainedComparison => include_str!("../errors/P0015.md"),
+            Code::StrayCommentEnd => include_str!("../errors/P0016.md"),
+            Code::DuplicateName => include_str!("../errors/A0001.md"),
+            Code::MissingMain => include_str!("../errors/A0002.md"),
+            Code::UnknownType => include_str!("../errors/A0003.md"),
+            Code::TypeMismatch => include_str!("../errors/A0004.md"),
+            Code::IntegerOutOfRange => include_str!("../errors/A0005.md"),
+            Code::UntypedVariable => include_str!("../errors/A0006.md"),
+            Code::RationalOutOfRange => include_str!("../errors/A0007.md"),
+            Code::DuplicateAttribute => include_str!("../errors/A0008.md"),
+            Code::MissingAttribute => include_str!("../errors/A0009.md"),
+            Code::UnknownAttribute => include_str!("../errors/A0010.md"),
+            Code::UnknownRelationHeading => include_str!("../errors/A0011.md"),
+            Code::DuplicateTuple => include_str!("../errors/A0012.md"),
+            Code::BuiltinOutsidePrelude => include_str!("../errors/A0013.md"),
+            Code::AnyOutsideBuiltin => include_str!("../errors/A0014.md"),
+            Code::UnknownName => include_str!("../errors/A0015.md"),
+            Code::OperatorAsValue => include_str!("../errors/A0016.md"),
+            Code::NotAnOperator => include_str!("../errors/A0017.md"),
+            Code::PositionalArgument => include_str!("../errors/A0018.md"),
+            Code::MainWithParams => include_str!("../errors/A0019.md"),
+            Code::NameInSelector => include_str!("../errors/A0020.md"),
+            Code::CyclicInitialValues => include_str!("../errors/A0021.md"),
+            Code::WrongOperandType => include_str!("../errors/A0022.md"),
+            Code::Overflow => include_str!("../errors/R0001.md"),
+            Code::DivisionByZero => include_str!("../errors/R0002.md"),
+            Code::OutOfMemory => include_str!("../errors/R0003.md"),
+            Code::Internal => include_str!("../errors/X0000.md"),
         }
     }
 }
@@ -232,6 +276,20 @@ mod tests {
             let name = entry.unwrap().file_name().into_string().unwrap();
             let id = name.strip_suffix(".md").unwrap();
             assert!(Code::from_id(id).is_some(), "{name} has no Code");
+        }
+    }
+
+    #[test]
+    fn kinds_follow_the_letter() {
+        assert_eq!(Code::MissingToken.kind(), CodeKind::Parse);
+        assert_eq!(Code::TypeMismatch.kind(), CodeKind::Analysis);
+        assert_eq!(Code::Overflow.kind(), CodeKind::Run);
+        assert_eq!(Code::Internal.kind(), CodeKind::Internal);
+        for code in Code::ALL {
+            assert!(
+                code.id().ends_with("0000") == (code == Code::Internal),
+                "{code}: 0000 is reserved"
+            );
         }
     }
 }

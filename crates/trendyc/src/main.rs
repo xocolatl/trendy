@@ -57,8 +57,8 @@ fn build(input: &Path, output: &Path, format: Format) -> Result<(), String> {
 
     // Past sema, every failure is a compiler bug, not a user error.
     let lir = trendy_lower::lower(&hir);
-    let object =
-        trendy_codegen::compile(&lir).map_err(|e| format!("internal compiler error: {e}"))?;
+    let object = trendy_codegen::compile(&lir)
+        .map_err(|e| format!("error[X0000]: internal compiler error: {e}"))?;
     link(&object, output)
 }
 
@@ -71,11 +71,11 @@ fn prelude() -> Result<trendy_sema::Prelude, String> {
         let rendered =
             trendy_diag::render_all(&parse.errors, Format::Human, trendy_prelude::PATH, source);
         return Err(format!(
-            "internal compiler error: the prelude doesn't parse\n{rendered}"
+            "error[X0000]: internal compiler error: the prelude doesn't parse\n{rendered}"
         ));
     }
     trendy_sema::Prelude::load(&parse.tree)
-        .map_err(|e| format!("internal compiler error: the prelude is invalid: {e}"))
+        .map_err(|e| format!("error[X0000]: internal compiler error: the prelude is invalid: {e}"))
 }
 
 /// Rendered diagnostics, plus for people a summary that says where to learn

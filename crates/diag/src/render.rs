@@ -1,7 +1,7 @@
 //! The human-readable diagnostic format.
 //!
 //! ```text
-//! error[E0002]: expected `]`, found `operator`
+//! error[P0002]: expected `]`, found `operator`
 //!  --> main.trendy:1:15
 //!   |
 //! 1 | operator a{} [
@@ -211,7 +211,7 @@ mod tests {
         assert_eq!(
             d.render("main.trendy", source),
             "\
-error[E0002]: expected `]`, found `operator`
+error[P0002]: expected `]`, found `operator`
  --> main.trendy:1:15
   |
 1 | operator a{} [
@@ -240,7 +240,7 @@ help: insert `]`
         assert_eq!(
             d.render("f.trendy", source),
             "\
-error[E0101]: operator `a` is defined more than once
+error[A0001]: operator `a` is defined more than once
  --> f.trendy:1:26
   |
 1 | operator a{}[]; operator a{}[];

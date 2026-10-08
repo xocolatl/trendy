@@ -1,7 +1,7 @@
 //! The machine-readable diagnostic format: one JSON object per diagnostic.
 //!
 //! ```json
-//! {"code":"E0002","message":"expected `]`, found `operator`","file":"main.trendy",
+//! {"code":"P0002","message":"expected `]`, found `operator`","file":"main.trendy",
 //!  "primary":{"start":{"offset":14,"line":1,"column":15},"end":{…},"label":"expected `]` here"},
 //!  "secondary":[…],"notes":[…],"help":[…],
 //!  "suggestions":[{"message":"insert `]`","edits":[{"start":{…},"end":{…},"replacement":"]"}]}]}
@@ -69,7 +69,7 @@ mod tests {
         assert_eq!(
             value,
             serde_json::json!({
-                "code": "E0002",
+                "code": "P0002",
                 "message": "msg",
                 "file": "f.trendy",
                 "primary": {

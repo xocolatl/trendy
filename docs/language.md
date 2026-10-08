@@ -364,7 +364,7 @@ Values never convert to another type implicitly, so both operands have the
 same type: `1 + 1.5` and `1 + true` are errors. The type comes from the
 context when it says, as in `var r: rational := 1 + 2;`, where `1` and `2`
 must be written `1.0` and `2.0`, and otherwise from the left operand. `/`
-doesn't divide integers, and `div` doesn't divide rationals (E0124).
+doesn't divide integers, and `div` doesn't divide rationals (A0022).
 
 ```trendy
 var seven := 1 + 2 * 3;
@@ -399,9 +399,9 @@ An operator whose result is out of range has no result: an integer outside
 division by zero, including by `-0.0`. Results never wrap around and never
 become infinities or NaN, so every rational is finite and can be written as
 a literal. When the operands are known while compiling, this is a compile
-error (E0122 for overflow, E0123 for division by zero). Otherwise the
+error (R0001 for overflow, R0002 for division by zero). Otherwise the
 program stops at that operator, writing the error to stderr, such as
-`error[E0122]: integer overflow`, and exits with status 1.
+`error[R0001]: integer overflow`, and exits with status 1.
 
 ```trendy,error
 var big := 9223372036854775807 + 1;
@@ -425,7 +425,7 @@ the smallest integer, `-9223372036854775808`, can be written, and so can
 
 `a || b` is the text `a` followed by the text `b`. Both operands must be
 text: `"n = " || 1` is an error, since values never convert implicitly, and
-`+` doesn't concatenate (E0124, with a fix to `||`).
+`+` doesn't concatenate (A0022, with a fix to `||`).
 
 ```trendy
 var greeting := "hello" || ", " || "world";
@@ -447,7 +447,7 @@ operator main{} [];
 
 Concatenations of constants are done when compiling. One done while the
 program runs allocates memory for its result, and stops the program with
-`error: out of memory` if there is none.
+`error[R0003]: out of memory` if there is none.
 
 ### Comparisons
 
@@ -467,7 +467,7 @@ Manifesto* requires (RM Prescription 8). Two tuples are equal when every
 attribute's values are equal, and two relations when they have the same
 tuples, in any order; the values inside are compared the same way, so
 `tuple { x: 0.0 } <> tuple { x: -0.0 }`. Tuples and relations have no
-order, so `<`, `<=`, `>` and `>=` don't apply to them (E0124).
+order, so `<`, `<=`, `>` and `>=` don't apply to them (A0022).
 
 The right operand of a tuple or relation comparison takes its heading
 from the left one, so `r = relation {}` asks whether `r` is empty.
@@ -499,7 +499,7 @@ operator main{} [];
 
 The operands must have the same type, since values never convert
 implicitly: `1 = 1.0` is an error. Comparisons don't chain: `a < b < c` is
-an error, with a fix to `a < b and b < c` (E0015). To compare two
+an error, with a fix to `a < b and b < c` (P0015). To compare two
 comparisons, parenthesize them: `(a < b) = (c < d)`.
 
 ```trendy,error
@@ -645,7 +645,7 @@ operator main{} [
 ```
 
 A comment without its `*/` runs to the end of the file, and is an error
-(E0012); so is a `*/` outside a comment (E0016).
+(P0012); so is a `*/` outside a comment (P0016).
 
 ```trendy,error
 /* not closed /* */

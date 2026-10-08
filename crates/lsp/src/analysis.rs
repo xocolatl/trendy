@@ -229,7 +229,7 @@ mod tests {
         assert_eq!(diags.len(), 1);
         assert_eq!(
             diags[0].code,
-            Some(NumberOrString::String("E0002".to_string()))
+            Some(NumberOrString::String("P0002".to_string()))
         );
         assert!(diags[0].message.starts_with("expected `]`, found `;`\n"));
         assert!(diags[0].message.ends_with("\nhelp: insert `]`"));

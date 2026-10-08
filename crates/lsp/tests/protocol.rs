@@ -120,7 +120,7 @@ fn diagnostics_follow_edits() {
         }),
     );
     let diagnostics = client.diagnostics();
-    assert_eq!(diagnostics[0]["code"], "E0002");
+    assert_eq!(diagnostics[0]["code"], "P0002");
     assert!(
         diagnostics[0]["message"]
             .as_str()

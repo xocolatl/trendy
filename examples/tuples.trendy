@@ -20,7 +20,7 @@ var addr := tuple { street: "1600 Pennsylvania Ave.", city: "Washington", state:
 /* Building tuples from run-time values (RM Prescription 9).
    Tutorial D: TUPLE { STREET S, CITY C, ... }
    Proposed: as now, but attribute values can be parameters, variables and
-   any other expression, not only constants (lifting E0120 for tuples).
+   any other expression, not only constants (lifting A0020 for tuples).
 
    operator moved{to: text} [
        call debug_value{v: tuple { street: to, city: "Washington" }};

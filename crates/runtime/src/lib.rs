@@ -38,11 +38,12 @@ pub const FAIL_OUT_OF_MEMORY: u32 = 3;
 #[must_use]
 pub fn failure_message(failure: u32) -> &'static str {
     match failure {
-        FAIL_INTEGER_OVERFLOW => "error[E0122]: integer overflow\n",
-        FAIL_DIVISION_BY_ZERO => "error[E0123]: division by zero\n",
-        FAIL_RATIONAL_OVERFLOW => "error[E0122]: rational overflow\n",
-        FAIL_OUT_OF_MEMORY => "error: out of memory\n",
-        _ => "error: the program failed\n",
+        FAIL_INTEGER_OVERFLOW => "error[R0001]: integer overflow\n",
+        FAIL_DIVISION_BY_ZERO => "error[R0002]: division by zero\n",
+        FAIL_RATIONAL_OVERFLOW => "error[R0001]: rational overflow\n",
+        FAIL_OUT_OF_MEMORY => "error[R0003]: out of memory\n",
+        // The compiler and the runtime disagree: a bug.
+        _ => "error[X0000]: internal error: unknown run-time failure\n",
     }
 }
 

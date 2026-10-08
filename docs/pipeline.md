@@ -101,9 +101,9 @@ go.
 
 Comments are trivia, like whitespace: the parser skips them, and they stay
 in the CST. They nest, so the lexer counts `/*` and `*/` within one. An
-unterminated comment runs to the end of the source (E0012, with each
+unterminated comment runs to the end of the source (P0012, with each
 unclosed nested opener labeled), and a `*/` outside a comment is an error
-(E0016), except in `*/*`, which is `*` followed by a comment.
+(P0016), except in `*/*`, which is `*` followed by a comment.
 
 **Owns:** what counts as whitespace, comments, identifiers, keywords,
 literals and punctuation.
@@ -125,7 +125,7 @@ appears, so whitespace between definitions belongs to the file.
 
 Expressions use precedence climbing. From tightest to loosest: the prefix
 operators `not`, `-` and `+`; `*`, `/`, `div` and `mod`; `+`, `-` and
-`||`; the comparisons, which don't chain (E0015, with a fix that compares
+`||`; the comparisons, which don't chain (P0015, with a fix that compares
 the middle operand twice); `and`; `xor`; `or`; and `implies`, which groups
 to the right. Since `not` binds tightest, `not n = 0` on an integer is a
 type error, whose fix negates the comparison instead: `not (n = 0)`. Looking for
@@ -224,7 +224,7 @@ Initial values are evaluated when compiling, so a HIR variable holds a
 `Value`, never an expression. An initial value can refer to any variable:
 each variable is evaluated when first needed, after the ones it refers to,
 and a variable referred to while it is itself being evaluated closes a
-cycle, reported once with a label at each reference in it (E0121).
+cycle, reported once with a label at each reference in it (A0021).
 
 In an operator's body, expressions become `hir::Expr`. Whatever doesn't
 depend on parameters or variables is folded to a constant, and so is
@@ -233,12 +233,12 @@ is `p`, and `n * 1` is `n`): expressions have no side effects, so this never
 changes what a program does. An operand is dropped only if it can't fail,
 so that every operand is evaluated and no run-time error is skipped. A
 constant overflow, or a division by a constant zero, is a compile error
-(E0122, E0123). `-` directly before a number literal makes a negative
+(R0001, R0002). `-` directly before a number literal makes a negative
 literal, so that the smallest integer can be written. Rational folding and
 simplification are exact IEEE 754 binary64, the same arithmetic the program
 does at run time, so folding never changes a result. Tuple and relation
 values in bodies are still built when compiling, so a parameter or variable
-inside one is an error (E0120).
+inside one is an error (A0020).
 
 The arithmetic operators are overloaded on integers and rationals
 (`ops::Operator` resolves to a typed `hir::BinaryOp`): the operand type
@@ -246,7 +246,7 @@ comes from the expected type when it is numeric, and otherwise from the
 first operand, which then sets the expectation for the second. `/`,
 `div` and `mod` resolve the same way, so that one applied to the wrong
 numeric type is reported at the operator, with a fix to the right one
-(E0124). Comparisons take their operand type from the first operand only,
+(A0022). Comparisons take their operand type from the first operand only,
 since the type expected of them is that of their boolean result.
 
 Comparisons follow one order per type (`hir::compare`): `false` before
@@ -337,7 +337,7 @@ produced with Cranelift.
 - calling conventions, and the C-ABI `main` entry shim;
 - the checks of arithmetic instructions, each branching to a cold block that
   calls `trendy_rt_fail`, which writes the error, such as
-  `error[E0122]: integer overflow`, to stderr and exits with status 1.
+  `error[R0001]: integer overflow`, to stderr and exits with status 1.
   Integer overflow is detected with Cranelift's `sadd_overflow` and its
   kin, and division by zero, or of the smallest integer by -1, with
   explicit comparisons. Rational operands are always finite, so a rational
@@ -360,8 +360,9 @@ the target's floating-point compare instructions, which would make `-0.0`
 equal to `0.0`. LIR carries rationals as exact bits (`Field::F64Bits`) for
 the same reason.
 
-**Must not:** see syntax, or produce user-facing errors. Any error it returns is a compiler bug, and the driver reports it as
-`internal compiler error`.
+**Must not:** see syntax, or produce user-facing errors. Any error it
+returns is a compiler bug, and the driver reports it as `X0000`, internal
+compiler error.
 
 ### Drivers
 
@@ -393,13 +394,26 @@ code by reading the diagnostics and editing. So diagnostics are a primary
 interface of the compiler, and every one of them must be actionable without
 guesswork.
 
-- **Stable code.** Every diagnostic has a `Code` (`E0002`). Codes are never
-  reused or renumbered. `E00xx` are syntax errors and `E01xx` are semantic
-  errors. Each code has an explanation in `crates/diag/errors/<code>.md`,
-  printed by `trendyc --explain <code>`. The explanation must contain a failing
+- **Stable code.** Every diagnostic has a `Code` (`P0002`). Codes are never
+  reused or renumbered. The letter says what kind of problem it is, not which
+  layer finds it, so a check can move between layers and keep its code:
+  - `P`: the source doesn't parse (lexer and parser);
+  - `A`: it parses, but analysis rejects it (sema);
+  - `R`: it fails while running. A run-time rule keeps its `R` code when
+    sema catches it early, as with `9223372036854775807 + 1`: one rule, one
+    code, one explanation;
+  - `X`: the compiler or runtime itself is wrong. `X0000`, internal compiler
+    error, is a bug, never the program's fault.
+
+  Each letter's `0000` is reserved for a generic error of that kind. Severity
+  is not part of the code: warnings, when they come, will have codes of these
+  same kinds. Each code has an explanation in
+  `crates/diag/errors/<code>.md`, printed by `trendyc --explain <code>`. The
+  explanation of a code the compiler can report must contain a failing
   example in a ```` ```trendy,error ```` block and a corrected one in a
   ```` ```trendy ```` block, and `crates/trendyc/tests/explanations.rs`
-  compiles both.
+  compiles both. A code it never reports, such as `R0003` (out of memory),
+  has no failing example.
 - **The primary label is where the fix goes.** For something missing, that is
   an empty span directly after the previous token, not the token where the
   parser noticed the problem.

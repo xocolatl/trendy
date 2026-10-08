@@ -375,7 +375,7 @@ fn human_errors() {
     assert_eq!(
         stderr,
         "\
-error[E0002]: expected `]`, found `;`
+error[P0002]: expected `]`, found `;`
  --> $TMP/human.trendy:2:4
   |
 2 |   [;
@@ -404,7 +404,7 @@ fn json_errors() {
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
     assert_eq!(errors.len(), 1);
-    assert_eq!(errors[0]["code"], "E0003");
+    assert_eq!(errors[0]["code"], "P0003");
     let edits = &errors[0]["suggestions"][0]["edits"];
     assert_eq!(edits[0]["replacement"], "{");
     assert_eq!(edits[0]["start"]["offset"], 13);
@@ -414,24 +414,24 @@ fn json_errors() {
 #[test]
 fn explain() {
     let out = Command::new(env!("CARGO_BIN_EXE_trendyc"))
-        .args(["--explain", "e0003"])
+        .args(["--explain", "p0003"])
         .output()
         .unwrap();
     assert!(out.status.success());
     assert!(
         String::from_utf8(out.stdout)
             .unwrap()
-            .starts_with("# E0003: wrong delimiters\n")
+            .starts_with("# P0003: wrong delimiters\n")
     );
 
     let out = Command::new(env!("CARGO_BIN_EXE_trendyc"))
-        .args(["--explain", "E9999"])
+        .args(["--explain", "P9999"])
         .output()
         .unwrap();
     assert!(!out.status.success());
     assert!(
         String::from_utf8(out.stderr)
             .unwrap()
-            .contains("known codes: E0001,")
+            .contains("known codes: P0001,")
     );
 }
