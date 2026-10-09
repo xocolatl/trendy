@@ -122,21 +122,21 @@ var addr := tuple { street: "1600 Pennsylvania Ave.", city: "Washington", state:
    with only the attributes named, or without them. Implemented: each
    result below is printed twice, folded when compiling and computed when
    running. */
-var located := addr project { state, zip };
-var unlocated := addr remove { city, street };
-var nothing := addr project {};
+var located := addr{state, zip};
+var unlocated := addr remove {city, street};
+var nothing := addr{};
 
 operator project_addr{a: tuple { street: text, city: text, state: text, zip: text }} [
-    call debug_value{v: a project { state, zip }};
-    call debug_value{v: a remove { city, street }};
-    call debug_value{v: a project {}};
-    call debug_value{v: x remove { c } project { a }};
+    call debug_value{v: a{state, zip}};
+    call debug_value{v: a remove {city, street}};
+    call debug_value{v: a{}};
+    call debug_value{v: x remove {c}{a}};
 ];
 
 operator main{} [
     call debug_value{v: located};
     call debug_value{v: unlocated};
     call debug_value{v: nothing};
-    call debug_value{v: x project { a }};
+    call debug_value{v: x{a}};
     call project_addr{a: addr};
 ];

@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 
 use trendy_diag::{Diagnostic, Span, edit_distance};
 use trendy_hir as hir;
-use trendy_syntax::ast::{self, Expr, Literal, LiteralError};
+use trendy_syntax::ast::{self, AstNode, Expr, Literal, LiteralError};
 use trendy_syntax::{SyntaxKind, SyntaxToken, literal};
 
 use crate::errors;
@@ -280,23 +280,59 @@ pub(crate) fn check_operands<T>(
     Some((resolved, checked))
 }
 
-/// The attributes `postfix`, a `project` or `remove` of `operand`, which is
-/// of type `ty`, removes: those named by `remove`, or those not named by
-/// `project`. `None` after reporting why there are none: the operand isn't
-/// a tuple or relation, or a name isn't one of its attributes, or appears
-/// twice, or `remove` names nothing.
+/// A projection, `r{a, b}`, or its complement, `r remove {c}`.
+#[derive(Clone, Copy)]
+pub(crate) enum Projection<'a> {
+    Project(&'a ast::ProjectExpr),
+    Remove(&'a ast::PostfixExpr),
+}
+
+impl Projection<'_> {
+    pub(crate) fn operand(self) -> Option<Expr> {
+        match self {
+            Projection::Project(p) => p.operand(),
+            Projection::Remove(r) => r.operand(),
+        }
+    }
+
+    fn names(self) -> Option<ast::NameList> {
+        match self {
+            Projection::Project(p) => p.names(),
+            Projection::Remove(r) => r.names(),
+        }
+    }
+
+    /// Where the operator is written: a projection's braces, or `remove`.
+    fn at(self) -> Option<Span> {
+        match self {
+            Projection::Project(p) => Some(p.names()?.span()),
+            Projection::Remove(r) => Some(trendy_syntax::span(r.operator()?.text_range())),
+        }
+    }
+}
+
+/// The attributes `projection` of `operand`, which is of type `ty`, removes:
+/// those named by `remove`, or those not named by a projection. `None`
+/// after reporting why there are none: the operand isn't a tuple or
+/// relation, or a name isn't one of its attributes, or appears twice, or
+/// `remove` names nothing.
 pub(crate) fn removed(
-    postfix: &ast::PostfixExpr,
+    projection: Projection,
     operand: &Expr,
     ty: &hir::Type,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<BTreeSet<String>> {
-    let token = postfix.operator()?;
     let (hir::Type::Tuple(heading) | hir::Type::Relation(heading)) = ty else {
-        errors.push(errors::not_projectable(&token, ty, operand));
+        let remove = matches!(projection, Projection::Remove(_));
+        errors.push(errors::not_projectable(
+            remove,
+            projection.at()?,
+            ty,
+            operand,
+        ));
         return None;
     };
-    let list = postfix.names()?;
+    let list = projection.names()?;
     let named: Vec<(ast::Name, String, Span)> = list
         .names()
         .filter_map(|name| {
@@ -350,16 +386,18 @@ pub(crate) fn removed(
         }
     }
     let listed: BTreeSet<String> = named.into_iter().map(|(_, n, _)| n).collect();
-    if token.kind() == SyntaxKind::RemoveKw && listed.is_empty() {
-        errors.push(errors::empty_remove(postfix, operand));
+    if let Projection::Remove(remove) = projection
+        && listed.is_empty()
+    {
+        errors.push(errors::empty_remove(remove, operand));
         return None;
     }
     if !ok {
         return None;
     }
-    Some(match token.kind() {
-        SyntaxKind::RemoveKw => listed,
-        _ => heading
+    Some(match projection {
+        Projection::Remove(_) => listed,
+        Projection::Project(_) => heading
             .attributes()
             .map(|(a, _)| a.to_string())
             .filter(|a| !listed.contains(a))

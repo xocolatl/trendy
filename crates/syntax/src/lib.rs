@@ -42,7 +42,6 @@ pub enum SyntaxKind {
     ImpliesKw,
     DivKw,
     ModKw,
-    ProjectKw,
     RemoveKw,
     LBrace,
     RBrace,
@@ -112,9 +111,11 @@ pub enum SyntaxKind {
     BinaryExpr,
     /// `(x)`
     ParenExpr,
-    /// `r project { a, b }` or `r remove { a, b }`
+    /// `r{a, b}`: a projection.
+    ProjectExpr,
+    /// `r remove {a, b}`
     PostfixExpr,
-    /// `{ a, b }`: attribute names, as in a projection.
+    /// `{a, b}`: attribute names, as in a projection.
     NameList,
     /// `: type`
     TypeAnnotation,
@@ -163,7 +164,6 @@ impl SyntaxKind {
         SyntaxKind::ImpliesKw,
         SyntaxKind::DivKw,
         SyntaxKind::ModKw,
-        SyntaxKind::ProjectKw,
         SyntaxKind::RemoveKw,
         SyntaxKind::LBrace,
         SyntaxKind::RBrace,
@@ -205,6 +205,7 @@ impl SyntaxKind {
         SyntaxKind::UnaryExpr,
         SyntaxKind::BinaryExpr,
         SyntaxKind::ParenExpr,
+        SyntaxKind::ProjectExpr,
         SyntaxKind::PostfixExpr,
         SyntaxKind::NameList,
         SyntaxKind::TypeAnnotation,
@@ -245,7 +246,6 @@ impl SyntaxKind {
                 | SyntaxKind::ImpliesKw
                 | SyntaxKind::DivKw
                 | SyntaxKind::ModKw
-                | SyntaxKind::ProjectKw
                 | SyntaxKind::RemoveKw
         )
     }
@@ -262,7 +262,6 @@ impl SyntaxKind {
                 | SyntaxKind::ImpliesKw
                 | SyntaxKind::DivKw
                 | SyntaxKind::ModKw
-                | SyntaxKind::ProjectKw
                 | SyntaxKind::RemoveKw
         )
     }
@@ -344,7 +343,6 @@ impl SyntaxKind {
             SyntaxKind::ImpliesKw => "implies",
             SyntaxKind::DivKw => "div",
             SyntaxKind::ModKw => "mod",
-            SyntaxKind::ProjectKw => "project",
             SyntaxKind::RemoveKw => "remove",
             SyntaxKind::LBrace => "{",
             SyntaxKind::RBrace => "}",
@@ -393,7 +391,6 @@ impl SyntaxKind {
             SyntaxKind::ImpliesKw => "`implies`",
             SyntaxKind::DivKw => "`div`",
             SyntaxKind::ModKw => "`mod`",
-            SyntaxKind::ProjectKw => "`project`",
             SyntaxKind::RemoveKw => "`remove`",
             SyntaxKind::ForeignOperator => "operator",
             SyntaxKind::LBrace => "`{`",
@@ -430,6 +427,7 @@ impl SyntaxKind {
             SyntaxKind::UnaryExpr
             | SyntaxKind::BinaryExpr
             | SyntaxKind::ParenExpr
+            | SyntaxKind::ProjectExpr
             | SyntaxKind::PostfixExpr => "expression",
             SyntaxKind::NameList => "attribute names",
             SyntaxKind::Body => "body",

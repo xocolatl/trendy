@@ -374,7 +374,7 @@ fn source_text(value: &hir::Value) -> Option<String> {
 pub(crate) enum Noun {
     Attribute,
     Argument,
-    /// An attribute named in a `project` or `remove`, which must be one of
+    /// An attribute named in a projection or `remove`, which must be one of
     /// its operand's.
     Projected,
 }
@@ -651,17 +651,30 @@ pub(crate) fn name_in_selector(name: &str, span: Span, what: &str) -> Diagnostic
     )
 }
 
-/// `project` or `remove`, written `token`, applied to a value of type `ty`,
-/// which isn't a tuple or relation.
-pub(crate) fn not_projectable(token: &SyntaxToken, ty: &hir::Type, operand: &Expr) -> Diagnostic {
-    Diagnostic::error(
-        Code::WrongOperandType,
-        format!("`{}` can't be applied to {}", token.text(), plural(ty)),
-        trendy_syntax::span(token.text_range()),
-        format!("`{}` takes a tuple or relation", token.text()),
-    )
-    .with_secondary(operand.span(), format!("this is `{ty}`"))
-    .with_note("`project` and `remove` choose among the attributes of a tuple or relation")
+/// A projection, or `remove` if `remove`, written at `at`, applied to a
+/// value of type `ty`, which isn't a tuple or relation.
+pub(crate) fn not_projectable(
+    remove: bool,
+    at: Span,
+    ty: &hir::Type,
+    operand: &Expr,
+) -> Diagnostic {
+    let (message, label) = if remove {
+        (
+            format!("`remove` can't be applied to {}", plural(ty)),
+            "`remove` takes a tuple or relation",
+        )
+    } else {
+        (
+            format!("{} can't be projected", plural(ty)),
+            "a projection takes a tuple or relation",
+        )
+    };
+    Diagnostic::error(Code::WrongOperandType, message, at, label)
+        .with_secondary(operand.span(), format!("this is `{ty}`"))
+        .with_note(
+            "a projection, `r{a, b}`, and `r remove {c}` choose among the attributes of a tuple or relation",
+        )
 }
 
 /// `remove {}`, written `postfix` after `operand`, which removes nothing.
@@ -680,7 +693,7 @@ pub(crate) fn empty_remove(
         "no attributes named",
     )
     .with_note("`remove` takes the attributes to drop; with none it would change nothing")
-    .with_help("to keep no attributes at all, write `project {}`")
+    .with_help("to keep no attributes at all, project on none: `r{}`")
     .with_suggestion(
         "drop the `remove {}`",
         vec![Edit {

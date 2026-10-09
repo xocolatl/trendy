@@ -72,7 +72,7 @@ var cities := relation {
    Proposed: keywords, since relations have no order and `<=` would suggest
    one: `subset`, `superset`, and `proper subset`, `proper superset`.
 
-   call debug_value{v: people project { name } subset cities project { name }};
+   call debug_value{v: people{name} subset cities{name}};
 */
 
 /* Renaming attributes (Algebra A's RENAME).
@@ -131,7 +131,7 @@ var cities := relation {
    attributes, to catch one that's there by mistake.
 
    call debug_value{v: people join cities};
-   call debug_value{v: people project { name } times relation { { year: 2024 } }};
+   call debug_value{v: people{name} times relation { { year: 2024 } }};
 */
 
 /* Compose: join, then remove the common attributes (Algebra A's COMPOSE).
@@ -177,7 +177,7 @@ var cities := relation {
    has no value, which is an error.
 
    call debug_value{v: count{r: people}};
-   call debug_value{v: max{r: people project { born }}};
+   call debug_value{v: max{r: people{born}}};
 */
 
 /* Summarize: aggregates per group of tuples.
@@ -231,31 +231,31 @@ var signs := relation {
     { x: 0.0, n: 4 },
     { x: -1.5, n: 5 },
 };
-var names := births project { name };
-var places := births remove { born, name };
-var by_year := births project { born, place };
-var xs := signs remove { n };
-var members := teams remove { team };
-var dee := births project {};
-var dum := empty project {};
+var names := births{name};
+var places := births remove {born, name};
+var by_year := births{born, place};
+var xs := signs remove {n};
+var members := teams remove {team};
+var dee := births{};
+var dum := empty{};
 
 operator project_births{r: relation { name: text, born: integer, place: text }} [
-    call debug_value{v: r project { name }};
-    call debug_value{v: r remove { born, name }};
-    call debug_value{v: r project { born, place }};
-    call debug_value{v: r project {}};
+    call debug_value{v: r{name}};
+    call debug_value{v: r remove {born, name}};
+    call debug_value{v: r{born, place}};
+    call debug_value{v: r{}};
 ];
 
 operator project_signs{r: relation { x: rational, n: integer }} [
-    call debug_value{v: r remove { n }};
+    call debug_value{v: r remove {n}};
 ];
 
 operator project_teams{r: relation { team: text, members: relation { name: text } }} [
-    call debug_value{v: r remove { team }};
+    call debug_value{v: r remove {team}};
 ];
 
 operator project_empty{r: relation { a: boolean, b: integer }} [
-    call debug_value{v: r project {}};
+    call debug_value{v: r{}};
 ];
 
 operator main{} [

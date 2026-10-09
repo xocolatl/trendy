@@ -251,10 +251,15 @@ pub(crate) fn value(
             matches(expected, value, expr, errors)
         }
         Expr::Paren(paren) => value(&paren.inner()?, expected, scope, errors),
-        Expr::Postfix(postfix) => {
-            let operand = postfix.operand()?;
+        Expr::Project(_) | Expr::Postfix(_) => {
+            let projection = match expr {
+                Expr::Project(p) => ops::Projection::Project(p),
+                Expr::Postfix(r) => ops::Projection::Remove(r),
+                _ => unreachable!("matched above"),
+            };
+            let operand = projection.operand()?;
             let value = value(&operand, None, scope, errors)?;
-            let names = ops::removed(postfix, &operand, &value.ty(), errors)?;
+            let names = ops::removed(projection, &operand, &value.ty(), errors)?;
             let result = if names.is_empty() {
                 value
             } else {

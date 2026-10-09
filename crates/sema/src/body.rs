@@ -307,11 +307,16 @@ fn expr(
                 errors,
             )
         }
-        Expr::Postfix(postfix) => {
-            let operand_expr = postfix.operand()?;
+        Expr::Project(_) | Expr::Postfix(_) => {
+            let projection = match expr {
+                Expr::Project(p) => ops::Projection::Project(p),
+                Expr::Postfix(r) => ops::Projection::Remove(r),
+                _ => unreachable!("matched above"),
+            };
+            let operand_expr = projection.operand()?;
             let operand = self::expr(&operand_expr, None, within, cx, errors)?;
             let ty = type_of(&operand, within, cx);
-            let names = ops::removed(postfix, &operand_expr, &ty, errors)?;
+            let names = ops::removed(projection, &operand_expr, &ty, errors)?;
             let result_ty = if names.is_empty() {
                 ty
             } else {

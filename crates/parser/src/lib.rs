@@ -356,7 +356,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// A keyword where a name goes, as in `var project := 1;`, followed by
+    /// A keyword where a name goes, as in `var remove := 1;`, followed by
     /// one of `follows`: parsed as the `node` it was meant to be, so nothing
     /// else cascades, and reported.
     fn keyword_as_name(&mut self, node: SyntaxKind, follows: &[SyntaxKind]) -> bool {
@@ -495,16 +495,27 @@ impl<'a> Parser<'a> {
         self.builder.finish_node();
     }
 
-    /// An operand, then the postfix operators `project` and `remove`, which
-    /// bind tighter than any other: `a join b project { x }` projects `b`.
+    /// An operand, then postfix operators, which bind tighter than any
+    /// other: projections, `r{a, b}`, and `remove`, `r remove {c}`. So
+    /// `a and b{x}` projects `b`.
     fn postfix(&mut self) {
         self.peek();
         let start = self.builder.checkpoint();
         self.primary();
-        while let Some((found, keyword)) = self.postfix_operator() {
-            self.builder.start_node_at(start, SyntaxKind::PostfixExpr);
-            self.operator_token(found, keyword);
-            self.name_list();
+        loop {
+            if self
+                .lookahead()
+                .is_some_and(|f| f.kind == SyntaxKind::LBrace)
+            {
+                self.builder.start_node_at(start, SyntaxKind::ProjectExpr);
+                self.name_list();
+            } else if let Some((found, keyword)) = self.postfix_operator() {
+                self.builder.start_node_at(start, SyntaxKind::PostfixExpr);
+                self.operator_token(found, keyword);
+                self.name_list();
+            } else {
+                break;
+            }
             self.builder.finish_node();
         }
     }
@@ -517,7 +528,7 @@ impl<'a> Parser<'a> {
             SyntaxKind::Ident => errors::operator_spelling(found.text)?,
             kind => kind,
         };
-        matches!(keyword, SyntaxKind::ProjectKw | SyntaxKind::RemoveKw).then_some((found, keyword))
+        (keyword == SyntaxKind::RemoveKw).then_some((found, keyword))
     }
 
     /// `{ a, b }`: attribute names.
@@ -1691,10 +1702,10 @@ SourceFile
 
     #[test]
     fn projections() {
-        let source = "var x := -a project { b, c } remove {c,} and b remove {};";
+        let source = "var x := -a{b, c} remove {c,} and b remove {} and c{};";
         let parse = parse_str(source);
         assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
-        let names = |kind| {
+        let nodes = |kind| {
             parse
                 .tree
                 .syntax()
@@ -1704,27 +1715,22 @@ SourceFile
                 .collect::<Vec<_>>()
         };
         // Postfix binds tightest: `-` and `and` take the projections.
+        assert_eq!(nodes(SyntaxKind::ProjectExpr), ["a{b, c}", "c{}"]);
         assert_eq!(
-            names(SyntaxKind::PostfixExpr),
-            [
-                "a project { b, c } remove {c,}",
-                "a project { b, c }",
-                "b remove {}"
-            ]
+            nodes(SyntaxKind::PostfixExpr),
+            ["a{b, c} remove {c,}", "b remove {}"]
         );
-        assert_eq!(names(SyntaxKind::NameList), ["{ b, c }", "{c,}", "{}"]);
-        assert_eq!(fix("var x := a project (b);"), "var x := a project {b};");
-        assert_eq!(
-            fix("var x := a PROJECT { b };"),
-            "var x := a project { b };"
-        );
-        assert_eq!(messages("var x := a project;"), ["expected `{`, found `;`"]);
+        assert_eq!(nodes(SyntaxKind::NameList), ["{b, c}", "{c,}", "{}", "{}"]);
+        assert_eq!(fix("var x := a REMOVE {b};"), "var x := a remove {b};");
+        assert_eq!(fix("var x := a remove (b);"), "var x := a remove {b};");
+        assert_eq!(messages("var x := a remove;"), ["expected `{`, found `;`"]);
+        // `project` is a name again.
+        assert!(parse_str("var project := a{b};").errors.is_empty());
     }
 
     #[test]
     fn keywords_as_names() {
-        let source =
-            "var project := 1;\noperator remove{} [];\noperator main{} [ call remove{}; ];";
+        let source = "var tuple := 1;\noperator remove{} [];\noperator main{} [ call remove{}; ];";
         let errors = parse_str(source).errors;
         let found: Vec<_> = errors.iter().map(|e| (e.code, &e.message[..])).collect();
         assert_eq!(
@@ -1732,7 +1738,7 @@ SourceFile
             [
                 (
                     Code::KeywordAsName,
-                    "`project` is a keyword, so it can't be a name"
+                    "`tuple` is a keyword, so it can't be a name"
                 ),
                 (
                     Code::KeywordAsName,

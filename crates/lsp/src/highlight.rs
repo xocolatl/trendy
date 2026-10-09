@@ -177,12 +177,11 @@ mod tests {
     #[test]
     fn projections() {
         assert_eq!(
-            highlight("var a := b project { c };"),
+            highlight("var a := b{c};"),
             [
                 ("var", Class::Keyword, false),
                 ("a", Class::Variable, true),
                 ("b", Class::Variable, false),
-                ("project", Class::ExprOperator, false),
                 ("c", Class::Attribute, false),
             ]
         );

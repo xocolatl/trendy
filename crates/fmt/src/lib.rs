@@ -325,7 +325,7 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
                     SyntaxKind::Operator | SyntaxKind::BuiltinOperator
                 )
             }),
-            TupleLiteral | RelationLiteral | SyntaxKind::NameList => true,
+            TupleLiteral | RelationLiteral => true,
             _ => false,
         })
     };
@@ -342,7 +342,14 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
                 .is_some_and(|p| p.kind() == SyntaxKind::BinaryExpr)
     };
     let sign = |token: &SyntaxToken| matches!(token.kind(), Plus | Minus);
+    // A projection's braces follow its operand directly: `r{a}{b}`.
+    let projection = next.kind() == LBrace
+        && next.parent().is_some_and(|list| {
+            list.parent()
+                .is_some_and(|p| p.kind() == SyntaxKind::ProjectExpr)
+        });
     match (prev.kind(), next.kind()) {
+        _ if projection => "",
         (LBrace, RBrace) if list_brace(prev) => "",
         (LBrace, _) if list_brace(prev) => " ",
         (_, RBrace) if list_brace(next) => " ",
@@ -361,11 +368,10 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
             | ColonEq
             | Comma
             | NotKw
-            | SyntaxKind::ProjectKw
             | SyntaxKind::RemoveKw,
             _,
         )
-        | (_, ColonEq | SyntaxKind::ProjectKw | SyntaxKind::RemoveKw)
+        | (_, ColonEq | SyntaxKind::RemoveKw)
         | (RBrace, LBracket | LBrace) => " ",
         _ => "",
     }
@@ -705,10 +711,11 @@ mod tests {
     #[test]
     fn projections() {
         assert_eq!(
-            fmt("var a:=b project{c,d}remove{  c }  ;"),
-            "var a := b project { c, d } remove { c };\n"
+            fmt("var a:=b { c,d }{c}remove{  c }  ;"),
+            "var a := b{c, d}{c} remove {c};\n"
         );
-        assert_eq!(fmt("var a := b project{};"), "var a := b project {};\n");
+        assert_eq!(fmt("var a := b{};"), "var a := b{};\n");
+        assert_eq!(fmt("var a := (b){ c };"), "var a := (b){c};\n");
     }
 
     #[test]

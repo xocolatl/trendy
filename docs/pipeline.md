@@ -323,7 +323,7 @@ there is no assignment and operators return nothing, so lowering releases
 each one with `trendy_rt_free` when its statement ends. Assignment and
 returned values will need a real ownership scheme.
 
-Removing attributes (`hir::Expr::Remove`, which `project` becomes) copies
+Removing attributes (`hir::Expr::Remove`, which a projection becomes) copies
 a tuple's kept attributes into a new slot. For a relation it calls
 `trendy_rt_remove`, which copies each tuple's kept attributes, sorts the
 results into the canonical order, and drops duplicates, into memory

@@ -48,6 +48,7 @@ ast_node!(NameRef);
 ast_node!(UnaryExpr);
 ast_node!(BinaryExpr);
 ast_node!(ParenExpr);
+ast_node!(ProjectExpr);
 ast_node!(PostfixExpr);
 ast_node!(NameList);
 ast_node!(VarDecl);
@@ -229,8 +230,20 @@ impl ParenExpr {
     }
 }
 
+impl ProjectExpr {
+    #[must_use]
+    pub fn operand(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+
+    #[must_use]
+    pub fn names(&self) -> Option<NameList> {
+        self.0.children().find_map(NameList::cast)
+    }
+}
+
 impl PostfixExpr {
-    /// The operator: `project` or `remove`.
+    /// The operator: `remove`.
     #[must_use]
     pub fn operator(&self) -> Option<SyntaxToken> {
         significant_tokens(&self.0).next()
@@ -336,6 +349,7 @@ pub enum Expr {
     Unary(UnaryExpr),
     Binary(BinaryExpr),
     Paren(ParenExpr),
+    Project(ProjectExpr),
     Postfix(PostfixExpr),
 }
 
@@ -350,6 +364,7 @@ impl Expr {
             .or_else(|| UnaryExpr::cast(node.clone()).map(Expr::Unary))
             .or_else(|| BinaryExpr::cast(node.clone()).map(Expr::Binary))
             .or_else(|| ParenExpr::cast(node.clone()).map(Expr::Paren))
+            .or_else(|| ProjectExpr::cast(node.clone()).map(Expr::Project))
             .or_else(|| PostfixExpr::cast(node).map(Expr::Postfix))
     }
 
@@ -363,6 +378,7 @@ impl Expr {
             Expr::Unary(e) => e.syntax(),
             Expr::Binary(e) => e.syntax(),
             Expr::Paren(e) => e.syntax(),
+            Expr::Project(e) => e.syntax(),
             Expr::Postfix(e) => e.syntax(),
         }
     }

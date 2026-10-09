@@ -151,7 +151,7 @@ pub enum Expr {
     /// A dyadic operator, such as `x and y` or `x + y`.
     Binary(BinaryOp, Box<Expr>, Box<Expr>),
     /// A tuple or relation without the named attributes (Algebra A's
-    /// REMOVE). `project` is remove of the attributes not named. The names
+    /// REMOVE). A projection is remove of the attributes not named. The names
     /// are attributes of the operand, and there is at least one.
     Remove(Box<Expr>, BTreeSet<String>),
 }

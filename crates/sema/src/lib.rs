@@ -1779,7 +1779,7 @@ mod tests {
     #[test]
     fn project_and_remove_constants() {
         let vars = variables(
-            "var p := relation { { name: \"Ada\", born: 1815 }, { name: \"Ada\", born: 1816 } };\nvar names := p project { name };\nvar years := p remove { name };\nvar dee := p project {};\nvar dum := relation { a: integer } {} project {};\nvar t := tuple { a: 1, b: 2 } remove { b };\nvar same := p project { born, name };",
+            "var p := relation { { name: \"Ada\", born: 1815 }, { name: \"Ada\", born: 1816 } };\nvar names := p{name};\nvar years := p remove {name};\nvar dee := p{};\nvar dum := relation { a: integer } {}{};\nvar t := tuple { a: 1, b: 2 } remove {b};\nvar same := p{born, name};",
         );
         let value = |name: &str| vars.iter().find(|v| v.name == name).unwrap();
         assert_eq!(value("names").ty.to_string(), "relation { name: text }");
@@ -1799,7 +1799,7 @@ mod tests {
     #[test]
     fn project_and_remove_errors() {
         let source = format!(
-            "var t := tuple {{ name: \"Ada\", born: 1815 }};\nvar a := t project {{ nam }};\nvar b := t remove {{ born, born }};\nvar c := t remove {{}};\nvar d := 1 project {{ x }};\nvar e: tuple {{ born: integer }} := t project {{ name }};{MAIN}"
+            "var t := tuple {{ name: \"Ada\", born: 1815 }};\nvar a := t{{nam}};\nvar b := t remove {{born, born}};\nvar c := t remove {{}};\nvar d := 1{{x}};\nvar e: tuple {{ born: integer }} := t{{name}};{MAIN}"
         );
         let errors = errors(&source);
         let found: Vec<_> = errors.iter().map(|e| (e.code, &e.message[..])).collect();
@@ -1812,10 +1812,7 @@ mod tests {
                     "attribute `born` is given more than once"
                 ),
                 (Code::EmptyRemove, "`remove {}` removes nothing"),
-                (
-                    Code::WrongOperandType,
-                    "`project` can't be applied to integers"
-                ),
+                (Code::WrongOperandType, "integers can't be projected"),
                 (
                     Code::TypeMismatch,
                     "mismatched types: expected `tuple { born: integer }`, found `tuple { name: text }`"
@@ -1825,14 +1822,14 @@ mod tests {
         assert_eq!(errors[0].suggestions[0].message, "rename it to `name`");
         assert!(errors[0].notes[0].contains("`born` and `name`"));
         let fixed = fix(&source);
-        assert!(fixed.contains("var a := t project { name };"), "{fixed}");
+        assert!(fixed.contains("var a := t{name};"), "{fixed}");
         assert!(fixed.contains("var c := t;"), "{fixed}");
     }
 
     #[test]
     fn project_and_remove_in_bodies() {
         let body = main_body(
-            "var t := tuple { a: 1, b: 2, c: 3 };\noperator main{} [\n    call debug_value{v: t remove { a } remove { b }};\n    call debug_value{v: t project { a, b, c }};\n];",
+            "var t := tuple { a: 1, b: 2, c: 3 };\noperator main{} [\n    call debug_value{v: t remove {a} remove {b}};\n    call debug_value{v: t{a, b, c}};\n];",
         );
         let t = || Box::new(hir::Expr::Variable(hir::VariableId(0)));
         let names = |n: &[&str]| n.iter().map(|s| (*s).to_string()).collect();
