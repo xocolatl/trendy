@@ -36,17 +36,6 @@ var addr := tuple { street: "1600 Pennsylvania Ave.", city: "Washington", state:
    call debug_value{v: x.a.b};
 */
 
-/* Projection, and its complement, remove (Algebra A's REMOVE): the tuple
-   with only the attributes named, or without them.
-   Tutorial D: ADDR { STATE, ZIP } and ADDR { ALL BUT CITY, STREET }
-   Decided: `project` and `remove` operators with a list of names. Bare
-   braces after an expression would read as a call of a read-only operator,
-   or as a selector's heading.
-
-   call debug_value{v: addr project { state, zip }};
-   call debug_value{v: addr remove { city, street }};
-*/
-
 /* Renaming attributes (Algebra A's RENAME).
    Tutorial D: ADDR RENAME ( ZIP AS POSTCODE ), and the prefix variant
    ADDR RENAME ( PREFIX 'ST' AS 'G' )
@@ -129,4 +118,25 @@ var addr := tuple { street: "1600 Pennsylvania Ave.", city: "Washington", state:
    update addr { zip: "20501" };
 */
 
-operator main{} [];
+/* Projection, and its complement, remove (Algebra A's REMOVE): the tuple
+   with only the attributes named, or without them. Implemented: each
+   result below is printed twice, folded when compiling and computed when
+   running. */
+var located := addr project { state, zip };
+var unlocated := addr remove { city, street };
+var nothing := addr project {};
+
+operator project_addr{a: tuple { street: text, city: text, state: text, zip: text }} [
+    call debug_value{v: a project { state, zip }};
+    call debug_value{v: a remove { city, street }};
+    call debug_value{v: a project {}};
+    call debug_value{v: x remove { c } project { a }};
+];
+
+operator main{} [
+    call debug_value{v: located};
+    call debug_value{v: unlocated};
+    call debug_value{v: nothing};
+    call debug_value{v: x project { a }};
+    call project_addr{a: addr};
+];

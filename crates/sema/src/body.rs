@@ -307,6 +307,30 @@ fn expr(
                 errors,
             )
         }
+        Expr::Postfix(postfix) => {
+            let operand_expr = postfix.operand()?;
+            let operand = self::expr(&operand_expr, None, within, cx, errors)?;
+            let ty = type_of(&operand, within, cx);
+            let names = ops::removed(postfix, &operand_expr, &ty, errors)?;
+            let result_ty = if names.is_empty() {
+                ty
+            } else {
+                ty.without(&names)
+            };
+            if let Some(expected) = expected
+                && expected.ty != result_ty
+            {
+                errors.push(errors::type_mismatch(
+                    &expected.ty,
+                    &expected.origin,
+                    &result_ty,
+                    None,
+                    expr,
+                ));
+                return None;
+            }
+            Some(ops::remove(operand, names))
+        }
         Expr::Literal(_) | Expr::Tuple(_) | Expr::Relation(_) => {
             let mut scope = Selector { cx, within };
             types::value(expr, expected, &mut scope, errors).map(hir::Expr::Constant)
@@ -349,6 +373,7 @@ fn type_of(expr: &hir::Expr, within: hir::OperatorId, cx: &Context) -> hir::Type
         },
         hir::Expr::Unary(op, _) => hir::Type::Scalar(op.result()),
         hir::Expr::Binary(op, ..) => hir::Type::Scalar(op.result()),
+        hir::Expr::Remove(operand, names) => type_of(operand, within, cx).without(names),
     }
 }
 

@@ -325,7 +325,7 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
                     SyntaxKind::Operator | SyntaxKind::BuiltinOperator
                 )
             }),
-            TupleLiteral | RelationLiteral => true,
+            TupleLiteral | RelationLiteral | SyntaxKind::NameList => true,
             _ => false,
         })
     };
@@ -351,11 +351,21 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
         // `- -a`, not `--a`.
         _ if sign(prev) && sign(next) => " ",
         (
-            OperatorKw | VarKw | TupleKw | RelationKw | CallKw | BuiltinKw | Colon | ColonEq
-            | Comma | NotKw,
+            OperatorKw
+            | VarKw
+            | TupleKw
+            | RelationKw
+            | CallKw
+            | BuiltinKw
+            | Colon
+            | ColonEq
+            | Comma
+            | NotKw
+            | SyntaxKind::ProjectKw
+            | SyntaxKind::RemoveKw,
             _,
         )
-        | (_, ColonEq)
+        | (_, ColonEq | SyntaxKind::ProjectKw | SyntaxKind::RemoveKw)
         | (RBrace, LBracket | LBrace) => " ",
         _ => "",
     }
@@ -690,6 +700,15 @@ mod tests {
         };
         assert_eq!(comments(&once), comments(source));
         assert_eq!(significant_tokens(&once), significant_tokens(source));
+    }
+
+    #[test]
+    fn projections() {
+        assert_eq!(
+            fmt("var a:=b project{c,d}remove{  c }  ;"),
+            "var a := b project { c, d } remove { c };\n"
+        );
+        assert_eq!(fmt("var a := b project{};"), "var a := b project {};\n");
     }
 
     #[test]

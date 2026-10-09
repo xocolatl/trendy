@@ -320,8 +320,22 @@ It also owns the lifetime of allocated values. A concatenation done at run
 time calls `trendy_rt_concat`, which allocates the result's bytes with
 `malloc`. No value can outlive the statement that computes it yet, since
 there is no assignment and operators return nothing, so lowering releases
-each one with `trendy_rt_free_text` when its statement ends. Assignment and
-returned values will need a real ownership scheme. Once relations arrive, this is where
+each one with `trendy_rt_free` when its statement ends. Assignment and
+returned values will need a real ownership scheme.
+
+Removing attributes (`hir::Expr::Remove`, which `project` becomes) copies
+a tuple's kept attributes into a new slot. For a relation it calls
+`trendy_rt_remove`, which copies each tuple's kept attributes, sorts the
+results into the canonical order, and drops duplicates, into memory
+released like a text's. Lowering passes it the result's descriptor and an
+array of each kept attribute's offset in the operand's tuples, so the
+runtime never matches attributes by name.
+
+The canonical order of a relation's tuples is `hir::Value`'s order, which
+the compiler uses for constants and the runtime reproduces
+(`trendy_runtime::order`). The two must agree, or equal relations would
+compare unequal; the examples check it by printing each result folded
+when compiling and computed when running. Once relations arrive, this is where
 relational operators get fused into loops over tuples with fixed layouts.
 
 ### codegen (`trendy_codegen`)

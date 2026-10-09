@@ -338,14 +338,50 @@ fn run_time_failures_stop_the_program() {
     assert_eq!((code, &stderr[..]), (0, "1\n0\n2\n"));
 }
 
+/// The lines `name` prints, which are each result twice: folded when
+/// compiling, then computed when running. The two halves must be equal.
+fn folded_and_run(name: &str) -> Vec<String> {
+    let (code, stderr) = run_example(name);
+    assert_eq!(code, 0, "{stderr}");
+    let lines: Vec<String> = stderr.lines().map(str::to_string).collect();
+    let (folded, run) = lines.split_at(lines.len() / 2);
+    assert_eq!(
+        folded, run,
+        "folded when compiling, and computed when running"
+    );
+    folded.to_vec()
+}
+
 #[test]
 fn tuples() {
-    assert_eq!(compile_and_run("tuples"), 0);
+    assert_eq!(
+        folded_and_run("tuples"),
+        [
+            r#"tuple { state: "DC", zip: "20500" }"#,
+            r#"tuple { state: "DC", zip: "20500" }"#,
+            "tuple {}",
+            "tuple { a: tuple { b: false } }",
+        ]
+    );
 }
 
 #[test]
 fn relations() {
-    assert_eq!(compile_and_run("relations"), 0);
+    assert_eq!(
+        folded_and_run("relations"),
+        [
+            // Duplicates dropped; text by code point, so `É` after `E`.
+            r#"relation { name: text } { { name: "Ada" }, { name: "Edgar" }, { name: "Édouard" } }"#,
+            r#"relation { place: text } { { place: "London" }, { place: "Paris" }, { place: "Portland" } }"#,
+            r#"relation { born: integer, place: text } { { born: 1815, place: "London" }, { born: 1815, place: "Paris" }, { born: 1816, place: "London" }, { born: 1923, place: "Portland" } }"#,
+            "relation {} { {} }",
+            // Rationals by totalOrder.
+            "relation { x: rational } { { x: -1.5 }, { x: -0.0 }, { x: 0.0 }, { x: 2.5 } }",
+            // Relations by their tuples: the empty one first.
+            r#"relation { members: relation { name: text } } { { members: relation { name: text } {} }, { members: relation { name: text } { { name: "Ada" }, { name: "Edgar" } } } }"#,
+            "relation {} {}",
+        ]
+    );
 }
 
 /// Run `trendyc` on `source` with `args`, returning (success, stdout, stderr).

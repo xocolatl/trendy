@@ -2,7 +2,7 @@
 //! turns statements into instructions, and builds the type descriptors that
 //! runtime functions taking `any` receive.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use trendy_hir as hir;
 use trendy_lir as lir;
@@ -210,7 +210,8 @@ struct FunctionBuilder<'a> {
     variable_data: &'a [lir::DataId],
     slots: Vec<lir::Layout>,
     insts: Vec<lir::Inst>,
-    /// Texts the current statement allocated, released when it ends. No
+    /// Texts and relations the current statement allocated, released when it
+    /// ends. No
     /// value outlives the statement that computes it, since there is no
     /// assignment yet and operators return nothing.
     owned: Vec<lir::Place>,
@@ -221,7 +222,7 @@ impl FunctionBuilder<'_> {
         self.call(statement, cx);
         for text in std::mem::take(&mut self.owned) {
             self.insts.push(lir::Inst::CallRuntime {
-                function: lir::RuntimeFn::FreeText,
+                function: lir::RuntimeFn::Free,
                 args: vec![text],
             });
         }
@@ -309,6 +310,11 @@ impl FunctionBuilder<'_> {
                 });
                 dst
             }
+            hir::Expr::Remove(operand, names) => {
+                let ty = self.program.type_of(operand, self.within);
+                let src = self.place(operand, cx);
+                self.remove(&ty, names, src, cx)
+            }
             hir::Expr::Binary(op, lhs, rhs) => {
                 let operand_ty = self.program.type_of(lhs, self.within);
                 let lhs = self.place(lhs, cx);
@@ -316,6 +322,65 @@ impl FunctionBuilder<'_> {
                 self.binary(*op, &operand_ty, lhs, rhs, cx)
             }
         }
+    }
+
+    /// The value at `src`, of type `ty`, without the attributes `names`,
+    /// computed into a new stack slot.
+    fn remove(
+        &mut self,
+        ty: &hir::Type,
+        names: &BTreeSet<String>,
+        src: lir::Place,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let result_ty = ty.without(names);
+        let (hir::Type::Tuple(heading) | hir::Type::Relation(heading)) = ty else {
+            unreachable!("sema removes only from tuples and relations");
+        };
+        // Each kept attribute's index in the operand's tuples, in the
+        // result's attribute order, which is name order too.
+        let kept: Vec<(usize, &hir::Type)> = heading
+            .attributes()
+            .enumerate()
+            .filter(|(_, (name, _))| !names.contains(*name))
+            .map(|(i, (_, ty))| (i, ty))
+            .collect();
+        let dst = self.slot(layout(&result_ty));
+        if let hir::Type::Tuple(_) = ty {
+            for (j, &(i, attr_ty)) in kept.iter().enumerate() {
+                let mut from = src.clone();
+                from.path.push(i);
+                self.insts.push(lir::Inst::Copy {
+                    dst: lir::Place {
+                        base: dst.base,
+                        path: vec![j],
+                    },
+                    src: from,
+                    layout: layout(attr_ty),
+                });
+            }
+            return dst;
+        }
+        let tuple_layout = layout(&hir::Type::Tuple(heading.clone()));
+        let offsets = cx.constant(
+            kept.iter()
+                .map(|&(i, _)| lir::Field::Offset(tuple_layout.clone(), i))
+                .collect(),
+        );
+        let result_desc = lir::Place::whole(lir::Base::Data(cx.descriptor(&result_ty)));
+        let source_desc = lir::Place::whole(lir::Base::Data(cx.descriptor(ty)));
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Remove,
+            args: vec![
+                dst.clone(),
+                src,
+                result_desc,
+                source_desc,
+                lir::Place::whole(lir::Base::Data(offsets)),
+            ],
+        });
+        self.owned.push(dst.clone());
+        dst
     }
 
     /// `lhs op rhs`, of operands of type `operand_ty`, computed into a new
@@ -705,8 +770,8 @@ mod tests {
                 (lir::RuntimeFn::Concat, slot(0)),
                 (lir::RuntimeFn::Concat, slot(1)),
                 (lir::RuntimeFn::DebugValue, slot(1)),
-                (lir::RuntimeFn::FreeText, slot(0)),
-                (lir::RuntimeFn::FreeText, slot(1)),
+                (lir::RuntimeFn::Free, slot(0)),
+                (lir::RuntimeFn::Free, slot(1)),
             ]
         );
     }

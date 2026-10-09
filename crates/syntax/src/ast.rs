@@ -48,6 +48,8 @@ ast_node!(NameRef);
 ast_node!(UnaryExpr);
 ast_node!(BinaryExpr);
 ast_node!(ParenExpr);
+ast_node!(PostfixExpr);
+ast_node!(NameList);
 ast_node!(VarDecl);
 ast_node!(Name);
 ast_node!(TypeRef);
@@ -227,6 +229,37 @@ impl ParenExpr {
     }
 }
 
+impl PostfixExpr {
+    /// The operator: `project` or `remove`.
+    #[must_use]
+    pub fn operator(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    #[must_use]
+    pub fn operand(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+
+    #[must_use]
+    pub fn names(&self) -> Option<NameList> {
+        self.0.children().find_map(NameList::cast)
+    }
+}
+
+impl NameList {
+    pub fn names(&self) -> impl Iterator<Item = Name> {
+        self.0.children().filter_map(Name::cast)
+    }
+
+    /// The span to delete to remove `name` from the list, with a comma that
+    /// separates it from a neighbor.
+    #[must_use]
+    pub fn removal(&self, name: &Name) -> Span {
+        list_removal(name.syntax())
+    }
+}
+
 impl NameRef {
     #[must_use]
     pub fn ident(&self) -> Option<SyntaxToken> {
@@ -303,6 +336,7 @@ pub enum Expr {
     Unary(UnaryExpr),
     Binary(BinaryExpr),
     Paren(ParenExpr),
+    Postfix(PostfixExpr),
 }
 
 impl Expr {
@@ -315,7 +349,8 @@ impl Expr {
             .or_else(|| NameRef::cast(node.clone()).map(Expr::Name))
             .or_else(|| UnaryExpr::cast(node.clone()).map(Expr::Unary))
             .or_else(|| BinaryExpr::cast(node.clone()).map(Expr::Binary))
-            .or_else(|| ParenExpr::cast(node).map(Expr::Paren))
+            .or_else(|| ParenExpr::cast(node.clone()).map(Expr::Paren))
+            .or_else(|| PostfixExpr::cast(node).map(Expr::Postfix))
     }
 
     #[must_use]
@@ -328,6 +363,7 @@ impl Expr {
             Expr::Unary(e) => e.syntax(),
             Expr::Binary(e) => e.syntax(),
             Expr::Paren(e) => e.syntax(),
+            Expr::Postfix(e) => e.syntax(),
         }
     }
 

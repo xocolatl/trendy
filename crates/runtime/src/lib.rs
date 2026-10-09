@@ -57,7 +57,7 @@ pub struct Text {
 }
 
 /// Store `lhs || rhs` at `dst`, in memory allocated for it, which
-/// [`trendy_rt_free_text`] releases. Stops the program if the memory can't
+/// [`trendy_rt_free`] releases. Stops the program if the memory can't
 /// be allocated.
 ///
 /// # Safety
@@ -73,11 +73,7 @@ pub unsafe extern "C" fn trendy_rt_concat(dst: *mut Text, lhs: *const Text, rhs:
         let Some(len) = lhs.len.checked_add(rhs.len) else {
             trendy_rt_fail(FAIL_OUT_OF_MEMORY)
         };
-        // At least one byte, so that even the empty text has an address.
-        let bytes = malloc(len.max(1));
-        if bytes.is_null() {
-            trendy_rt_fail(FAIL_OUT_OF_MEMORY);
-        }
+        let bytes = allocate::<u8>(len);
         core::ptr::copy_nonoverlapping(lhs.bytes, bytes, lhs.len);
         core::ptr::copy_nonoverlapping(rhs.bytes, bytes.add(lhs.len), rhs.len);
         dst.write_unaligned(Text { bytes, len });
@@ -180,17 +176,179 @@ unsafe fn text_bytes<'a>(text: Text) -> &'a [u8] {
     unsafe { core::slice::from_raw_parts(text.bytes, text.len) }
 }
 
-/// Release the memory of a text made by [`trendy_rt_concat`].
+/// Release the memory of a text or relation made by [`trendy_rt_concat`]
+/// or [`trendy_rt_remove`]. Both are a pointer and a length.
 ///
 /// # Safety
 ///
-/// `text` must point to a text value made by [`trendy_rt_concat`] and not
-/// yet released.
+/// `value` must point to such a value, not yet released.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn trendy_rt_free_text(text: *const Text) {
+pub unsafe extern "C" fn trendy_rt_free(value: *const Text) {
     // SAFETY: guaranteed by the caller.
-    unsafe { free(text.read_unaligned().bytes.cast_mut()) }
+    unsafe { free(value.read_unaligned().bytes.cast_mut().cast()) }
+}
+
+/// Memory for `count` values of type `T`, at least one byte, so that even
+/// an empty text or relation has an address. `malloc`'s memory is aligned
+/// for any type. Stops the program if there is none.
+#[cfg(not(test))]
+fn allocate<T>(count: usize) -> *mut T {
+    let Some(size) = count.checked_mul(size_of::<T>()) else {
+        trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+    };
+    // SAFETY: `malloc` has no preconditions.
+    let memory = unsafe { malloc(size.max(1)) };
+    if memory.is_null() {
+        trendy_rt_fail(FAIL_OUT_OF_MEMORY);
+    }
+    memory.cast()
+}
+
+/// Store at `dst` the relation at `src` with only the attributes `result`
+/// describes, in canonical order and without duplicates, in memory that
+/// [`trendy_rt_free`] releases. `source` describes `src`, and `offsets`
+/// gives, for each attribute of `result`, its offset in a tuple of `src`.
+///
+/// # Safety
+///
+/// `src` must point to a valid relation of the type `source` describes,
+/// `result` and `source` to valid relation descriptors, `offsets` to one
+/// offset per attribute of `result`, and `dst` to memory for a relation.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_remove(
+    dst: *mut Text,
+    src: *const u8,
+    result: *const TypeDesc,
+    source: *const TypeDesc,
+    offsets: *const usize,
+) {
+    // SAFETY: guaranteed by the caller; each size and offset is the layout
+    // of the value it describes.
+    unsafe {
+        let (result, source) = (&*result, &*source);
+        let (tuples, count) = read_slice(src);
+        let size = result.element_size;
+        let Some(bytes) = count.checked_mul(size) else {
+            trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+        };
+        let attributes = attributes(result);
+        let offsets = core::slice::from_raw_parts(offsets, attributes.len());
+        // Each tuple with only the kept attributes, in the source's order.
+        let projected = allocate::<u8>(bytes);
+        core::ptr::write_bytes(projected, 0, bytes);
+        for i in 0..count {
+            let from = tuples.add(i * source.element_size);
+            let to = projected.add(i * size);
+            for (attr, &offset) in attributes.iter().zip(offsets) {
+                core::ptr::copy_nonoverlapping(
+                    from.add(offset),
+                    to.add(attr.offset),
+                    (*attr.desc).size,
+                );
+            }
+        }
+        let canonical = canonical(projected, count, result);
+        free(projected.cast());
+        dst.write_unaligned(Text {
+            bytes: canonical.0,
+            len: canonical.1,
+        });
+    }
+}
+
+/// The `count` tuples at `tuples`, with the attributes of `desc`, sorted
+/// canonically and without duplicates, copied into new memory: the new
+/// memory and how many tuples it holds.
+///
+/// # Safety
+///
+/// As for [`trendy_rt_remove`]'s result.
+#[cfg(not(test))]
+unsafe fn canonical(tuples: *const u8, count: usize, desc: &TypeDesc) -> (*mut u8, usize) {
+    let size = desc.element_size;
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let order = core::slice::from_raw_parts_mut(allocate::<*const u8>(count), count);
+        for (i, tuple) in order.iter_mut().enumerate() {
+            *tuple = tuples.add(i * size);
+        }
+        order.sort_unstable_by(|a, b| compare_tuples(*a, *b, desc));
+        let out = allocate::<u8>(count * size);
+        let mut kept = 0;
+        for i in 0..count {
+            if i > 0 && compare_tuples(order[i - 1], order[i], desc).is_eq() {
+                continue;
+            }
+            core::ptr::copy_nonoverlapping(order[i], out.add(kept * size), size);
+            kept += 1;
+        }
+        free(order.as_mut_ptr().cast());
+        (out, kept)
+    }
+}
+
+/// The canonical order of two values of the type `desc` describes, which is
+/// the compiler's (`hir::Value`'s): `false` before `true`, integers
+/// numerically, rationals by IEEE 754 totalOrder, text by its bytes, tuples
+/// attribute by attribute in name order, and relations by their tuples,
+/// lexicographically.
+///
+/// # Safety
+///
+/// `lhs` and `rhs` must point to valid values of the type `desc` describes.
+#[must_use]
+pub unsafe fn order(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> core::cmp::Ordering {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        match desc.kind {
+            KIND_BOOLEAN => (*lhs).cmp(&*rhs),
+            KIND_INTEGER => lhs
+                .cast::<i64>()
+                .read_unaligned()
+                .cmp(&rhs.cast::<i64>().read_unaligned()),
+            KIND_RATIONAL => lhs
+                .cast::<f64>()
+                .read_unaligned()
+                .total_cmp(&rhs.cast::<f64>().read_unaligned()),
+            KIND_TEXT => {
+                let (a, b) = (read_slice(lhs), read_slice(rhs));
+                core::slice::from_raw_parts(a.0, a.1).cmp(core::slice::from_raw_parts(b.0, b.1))
+            }
+            KIND_TUPLE => compare_tuples(lhs, rhs, desc),
+            KIND_RELATION => {
+                let ((a, count), (b, other)) = (read_slice(lhs), read_slice(rhs));
+                for i in 0..count.min(other) {
+                    let offset = i * desc.element_size;
+                    let ordering = compare_tuples(a.add(offset), b.add(offset), desc);
+                    if ordering.is_ne() {
+                        return ordering;
+                    }
+                }
+                count.cmp(&other)
+            }
+            _ => core::cmp::Ordering::Equal,
+        }
+    }
+}
+
+/// The canonical order of two tuples with the attributes of `desc`.
+///
+/// # Safety
+///
+/// As for [`order`], with `desc` describing a tuple or relation.
+unsafe fn compare_tuples(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> core::cmp::Ordering {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        for attr in attributes(desc) {
+            let ordering = order(lhs.add(attr.offset), rhs.add(attr.offset), &*attr.desc);
+            if ordering.is_ne() {
+                return ordering;
+            }
+        }
+        core::cmp::Ordering::Equal
+    }
 }
 
 /// Stop the program because of `failure`, one of the `FAIL_` constants:
@@ -484,9 +642,9 @@ unsafe extern "C" {
     #[cfg(not(test))]
     fn exit(status: i32) -> !;
     #[cfg(not(test))]
-    fn malloc(size: usize) -> *mut u8;
+    fn malloc(size: usize) -> *mut core::ffi::c_void;
     #[cfg(not(test))]
-    fn free(pointer: *mut u8);
+    fn free(pointer: *mut core::ffi::c_void);
 }
 
 #[cfg(not(test))]

@@ -1777,6 +1777,78 @@ mod tests {
     }
 
     #[test]
+    fn project_and_remove_constants() {
+        let vars = variables(
+            "var p := relation { { name: \"Ada\", born: 1815 }, { name: \"Ada\", born: 1816 } };\nvar names := p project { name };\nvar years := p remove { name };\nvar dee := p project {};\nvar dum := relation { a: integer } {} project {};\nvar t := tuple { a: 1, b: 2 } remove { b };\nvar same := p project { born, name };",
+        );
+        let value = |name: &str| vars.iter().find(|v| v.name == name).unwrap();
+        assert_eq!(value("names").ty.to_string(), "relation { name: text }");
+        assert_eq!(
+            relation_value(value("names")).tuples.len(),
+            1,
+            "duplicates dropped"
+        );
+        assert_eq!(relation_value(value("years")).tuples.len(), 2);
+        assert_eq!(value("dee").ty.to_string(), "relation {}");
+        assert_eq!(relation_value(value("dee")).tuples.len(), 1, "table_dee");
+        assert!(relation_value(value("dum")).tuples.is_empty(), "table_dum");
+        assert_eq!(value("t").ty.to_string(), "tuple { a: integer }");
+        assert_eq!(value("same").init, value("p").init);
+    }
+
+    #[test]
+    fn project_and_remove_errors() {
+        let source = format!(
+            "var t := tuple {{ name: \"Ada\", born: 1815 }};\nvar a := t project {{ nam }};\nvar b := t remove {{ born, born }};\nvar c := t remove {{}};\nvar d := 1 project {{ x }};\nvar e: tuple {{ born: integer }} := t project {{ name }};{MAIN}"
+        );
+        let errors = errors(&source);
+        let found: Vec<_> = errors.iter().map(|e| (e.code, &e.message[..])).collect();
+        assert_eq!(
+            found,
+            [
+                (Code::UnknownAttribute, "unknown attribute `nam`"),
+                (
+                    Code::DuplicateAttribute,
+                    "attribute `born` is given more than once"
+                ),
+                (Code::EmptyRemove, "`remove {}` removes nothing"),
+                (
+                    Code::WrongOperandType,
+                    "`project` can't be applied to integers"
+                ),
+                (
+                    Code::TypeMismatch,
+                    "mismatched types: expected `tuple { born: integer }`, found `tuple { name: text }`"
+                ),
+            ]
+        );
+        assert_eq!(errors[0].suggestions[0].message, "rename it to `name`");
+        assert!(errors[0].notes[0].contains("`born` and `name`"));
+        let fixed = fix(&source);
+        assert!(fixed.contains("var a := t project { name };"), "{fixed}");
+        assert!(fixed.contains("var c := t;"), "{fixed}");
+    }
+
+    #[test]
+    fn project_and_remove_in_bodies() {
+        let body = main_body(
+            "var t := tuple { a: 1, b: 2, c: 3 };\noperator main{} [\n    call debug_value{v: t remove { a } remove { b }};\n    call debug_value{v: t project { a, b, c }};\n];",
+        );
+        let t = || Box::new(hir::Expr::Variable(hir::VariableId(0)));
+        let names = |n: &[&str]| n.iter().map(|s| (*s).to_string()).collect();
+        assert_eq!(
+            argument(&body[0]),
+            &hir::Expr::Remove(t(), names(&["a", "b"])),
+            "removals merge"
+        );
+        assert_eq!(
+            argument(&body[1]),
+            &*t(),
+            "projecting every attribute changes nothing"
+        );
+    }
+
+    #[test]
     fn not_before_a_comparison() {
         let source =
             format!("var n := 1;\nvar a := not n = 0 and true;\nvar b := not n + 1 < 2;{MAIN}");

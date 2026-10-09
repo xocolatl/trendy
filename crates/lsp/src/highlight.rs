@@ -95,9 +95,11 @@ fn classify(token: &SyntaxToken) -> Option<Highlight> {
         (SyntaxKind::Ident, Some(SyntaxKind::Name), Some(SyntaxKind::AttributeType)) => {
             (Class::Attribute, true)
         }
-        (SyntaxKind::Ident, Some(SyntaxKind::Name), Some(SyntaxKind::AttributeValue)) => {
-            (Class::Attribute, false)
-        }
+        (
+            SyntaxKind::Ident,
+            Some(SyntaxKind::Name),
+            Some(SyntaxKind::AttributeValue | SyntaxKind::NameList),
+        ) => (Class::Attribute, false),
         (SyntaxKind::Ident, Some(SyntaxKind::TypeRef), _) => (Class::Type, false),
         (SyntaxKind::IntLiteral | SyntaxKind::RationalLiteral, _, _) => (Class::Number, false),
         (SyntaxKind::TextLiteral, _, _) => (Class::Text, false),
@@ -168,6 +170,20 @@ mod tests {
                 ("b", Class::Variable, false),
                 ("mod", Class::ExprOperator, false),
                 ("2", Class::Number, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn projections() {
+        assert_eq!(
+            highlight("var a := b project { c };"),
+            [
+                ("var", Class::Keyword, false),
+                ("a", Class::Variable, true),
+                ("b", Class::Variable, false),
+                ("project", Class::ExprOperator, false),
+                ("c", Class::Attribute, false),
             ]
         );
     }

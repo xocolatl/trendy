@@ -374,19 +374,22 @@ fn source_text(value: &hir::Value) -> Option<String> {
 pub(crate) enum Noun {
     Attribute,
     Argument,
+    /// An attribute named in a `project` or `remove`, which must be one of
+    /// its operand's.
+    Projected,
 }
 
 impl Noun {
     fn one(self) -> &'static str {
         match self {
-            Noun::Attribute => "attribute",
+            Noun::Attribute | Noun::Projected => "attribute",
             Noun::Argument => "argument",
         }
     }
 
     fn many(self) -> &'static str {
         match self {
-            Noun::Attribute => "attributes",
+            Noun::Attribute | Noun::Projected => "attributes",
             Noun::Argument => "arguments",
         }
     }
@@ -397,6 +400,7 @@ impl Noun {
 pub(crate) fn duplicate_attribute(noun: Noun, name: &str, span: Span, first: Span) -> Diagnostic {
     let set = match noun {
         Noun::Attribute => "a tuple's attributes are a set, so each name can appear only once",
+        Noun::Projected => "each attribute is named once",
         Noun::Argument => "arguments are a tuple of the parameters, so each one is given once",
     };
     Diagnostic::error(
@@ -437,7 +441,7 @@ pub(crate) fn missing_attributes(
     )
     .with_note(context.to_string())
     .with_note(match noun {
-        Noun::Attribute => "a tuple value must have every attribute of its type",
+        Noun::Attribute | Noun::Projected => "a tuple value must have every attribute of its type",
         Noun::Argument => "every parameter needs an argument",
     });
 
@@ -472,6 +476,7 @@ pub(crate) fn unknown_attribute(
 ) -> Diagnostic {
     let label = match noun {
         Noun::Attribute => "not an attribute of the expected type",
+        Noun::Projected => "not an attribute of the operand",
         Noun::Argument => "not a parameter of this operator",
     };
     let mut d = Diagnostic::error(
@@ -643,6 +648,45 @@ pub(crate) fn name_in_selector(name: &str, span: Span, what: &str) -> Diagnostic
     )
     .with_help(
         "a variable's initial value can refer to other variables: declare one with this value, and use it here",
+    )
+}
+
+/// `project` or `remove`, written `token`, applied to a value of type `ty`,
+/// which isn't a tuple or relation.
+pub(crate) fn not_projectable(token: &SyntaxToken, ty: &hir::Type, operand: &Expr) -> Diagnostic {
+    Diagnostic::error(
+        Code::WrongOperandType,
+        format!("`{}` can't be applied to {}", token.text(), plural(ty)),
+        trendy_syntax::span(token.text_range()),
+        format!("`{}` takes a tuple or relation", token.text()),
+    )
+    .with_secondary(operand.span(), format!("this is `{ty}`"))
+    .with_note("`project` and `remove` choose among the attributes of a tuple or relation")
+}
+
+/// `remove {}`, written `postfix` after `operand`, which removes nothing.
+pub(crate) fn empty_remove(
+    postfix: &trendy_syntax::ast::PostfixExpr,
+    operand: &Expr,
+) -> Diagnostic {
+    let end = postfix.span().end;
+    let keyword = postfix.operator().map_or(operand.span().end, |t| {
+        trendy_syntax::span(t.text_range()).start
+    });
+    Diagnostic::error(
+        Code::EmptyRemove,
+        "`remove {}` removes nothing",
+        Span::new(keyword, end),
+        "no attributes named",
+    )
+    .with_note("`remove` takes the attributes to drop; with none it would change nothing")
+    .with_help("to keep no attributes at all, write `project {}`")
+    .with_suggestion(
+        "drop the `remove {}`",
+        vec![Edit {
+            span: Span::new(operand.span().end, end),
+            replacement: String::new(),
+        }],
     )
 }
 

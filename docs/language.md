@@ -511,12 +511,54 @@ operator main{} [];
 Equality is `=`, and inequality `<>`, as in Tutorial D and SQL; `==` and
 `!=` get fixes. Assignment is `:=`.
 
+### Projection
+
+`r project { a, b }` is the tuple or relation `r` with only the attributes
+`a` and `b`, and `r remove { a, b }` is `r` without them. They are the
+tuple and relational operators of *The Third Manifesto*'s projection, and
+`remove` is Algebra A's REMOVE (Appendix A), of which `project` is the
+complement.
+
+```trendy
+var people := relation {
+    { name: "Ada", born: 1815 },
+    { name: "Ada", born: 1816 },
+};
+var names := people project { name };
+var years := people remove { name };
+var ada := tuple { name: "Ada", born: 1815 } remove { born };
+
+operator main{} [
+    call debug_value{v: names};
+];
+```
+
+- **The result is a set.** Projecting a relation can make tuples equal,
+  and duplicates are dropped: `names` above has one tuple.
+- **The names must be the operand's attributes,** each named once. An
+  unknown name gets a fix renaming it to the closest attribute.
+- **`project {}` keeps nothing:** a tuple becomes `tuple {}`, and a relation
+  becomes `relation {} { {} }` (table_dee) if it has tuples, or
+  `relation {} {}` (table_dum) if not. `remove {}` removes nothing, and is
+  an error (A0023).
+- **They bind tighter than any other operator,** so `-t remove { x }`
+  negates the result. Chained, they apply left to right:
+  `r project { a, b } remove { b }`.
+
+```trendy,error
+var ada := tuple { name: "Ada", born: 1815 };
+var name := ada project { nmae };
+
+operator main{} [];
+```
+
 ### Precedence
 
 From tightest to loosest:
 
 | Operators | Grouping |
 |---|---|
+| postfix `project { … }` and `remove { … }` | left |
 | prefix `not`, `-` and `+` | |
 | `*`, `/`, `div`, `mod` | left |
 | `+`, `-`, `\|\|` | left |
@@ -659,8 +701,9 @@ operator main{} [];
 Names are ASCII letters, digits and `_`, and don't start with a digit. They
 are case-sensitive. The keywords are `operator`, `var`, `call`, `builtin`,
 `tuple`, `relation`, `true`, `false`, `not`, `and`, `or`, `xor`,
-`implies`, `div` and `mod`, all lowercase. `type` is a keyword
-only after `builtin`.
+`implies`, `div`, `mod`, `project` and `remove`, all lowercase, and a
+keyword can't be a name (P0017). `type` is a keyword only after
+`builtin`.
 
 Variables and operators share one namespace, so no two of them can have the
 same name. Types have their own namespace, so a variable can be named after a
@@ -738,6 +781,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `AND`, `Or`, `NOT` | `and`, `or`, `not` |
 | `a == b`, `a != b` | `a = b`, `a <> b` |
 | `a < b < c` | `a < b and b < c` |
+| `R { A, B }`, `R { ALL BUT C }` | `r project { a, b }`, `r remove { c }` |
 | `a / b` for integers | `a div b` |
 | `a % b` | `a mod b` |
 | `1 / 2` meaning one half | `1.0 / 2.0` |

@@ -9,6 +9,8 @@ use crate::Found;
 pub(crate) const OPERATOR_FORM: &str = "an operator definition has the form `operator name{} [];`";
 pub(crate) const HEADING_FORM: &str = "a heading lists attributes with their types: `{ name: type, … }`, as in `tuple { name: text }` or `relation { name: text }`";
 pub(crate) const RELATION_VALUE_FORM: &str = "a relation value has the form `relation { tuple, … }`, optionally with a heading first: `relation { name: type, … } { … }`";
+pub(crate) const PROJECTION_FORM: &str =
+    "`project` and `remove` take attribute names: `r project { a, b }`, `r remove { a, b }`";
 pub(crate) const TUPLE_VALUE_FORM: &str = "a tuple value has the form `tuple { name: value, … }`";
 pub(crate) const BUILTIN_FORM: &str = "built-ins are declared as `builtin type name;` or `builtin operator name{params};`, only in the prelude";
 pub(crate) const VARIABLE_FORM: &str = "a variable declaration has the form `var name: type := value;`, where either the type or the value may be left out";
@@ -207,6 +209,26 @@ pub(crate) fn wrong_attribute_separator(found: SyntaxKind, span: Span) -> Diagno
             replacement: ":".to_string(),
         }],
     )
+}
+
+/// The keyword `found`, used as a name.
+pub(crate) fn keyword_as_name(found: Found) -> Diagnostic {
+    let keywords: Vec<&str> = SyntaxKind::ALL
+        .into_iter()
+        .filter(|k| k.is_keyword())
+        .filter_map(SyntaxKind::fixed_text)
+        .collect();
+    Diagnostic::error(
+        Code::KeywordAsName,
+        format!("`{}` is a keyword, so it can't be a name", found.text),
+        found.span,
+        "a keyword",
+    )
+    .with_note(format!("the keywords are `{}`", keywords.join("`, `")))
+    .with_help(format!(
+        "choose another name, such as `{0}_` or `my_{0}`, and use it wherever this one is used",
+        found.text
+    ))
 }
 
 /// The keyword a foreign operator stands for: `&&` for `and`, `!` for

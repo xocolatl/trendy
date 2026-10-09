@@ -128,12 +128,19 @@ pub enum RuntimeFn {
     Fail,
     /// `trendy_rt_concat(dst, lhs, rhs)`: store the concatenation of two
     /// texts at `dst`, in allocated memory that must be released with
-    /// [`RuntimeFn::FreeText`]. It stops the program if the memory can't be
+    /// [`RuntimeFn::Free`]. It stops the program if the memory can't be
     /// allocated.
     Concat,
-    /// `trendy_rt_free_text(text)`: release a text made by
-    /// [`RuntimeFn::Concat`].
-    FreeText,
+    /// `trendy_rt_free(value)`: release the memory of a text or relation
+    /// made by [`RuntimeFn::Concat`] or [`RuntimeFn::Remove`].
+    Free,
+    /// `trendy_rt_remove(dst, src, result, source, offsets)`: store at `dst`
+    /// the relation `src` with only the attributes the descriptor `result`
+    /// describes, sorted canonically and without duplicates, in allocated
+    /// memory that must be released with [`RuntimeFn::Free`]. `source` is
+    /// the descriptor of `src`, and `offsets` an array of [`Field::Usize`]s:
+    /// for each attribute of `result`, its offset in a tuple of `src`.
+    Remove,
     /// `trendy_rt_compare_text(dst, lhs, rhs)`: store -1, 0 or 1 at `dst`,
     /// an [`Layout::I64`], as `lhs` is before, equal to or after `rhs` in
     /// code point order.
@@ -152,7 +159,8 @@ impl RuntimeFn {
             RuntimeFn::DebugValue => "trendy_rt_debug_value",
             RuntimeFn::Fail => "trendy_rt_fail",
             RuntimeFn::Concat => "trendy_rt_concat",
-            RuntimeFn::FreeText => "trendy_rt_free_text",
+            RuntimeFn::Free => "trendy_rt_free",
+            RuntimeFn::Remove => "trendy_rt_remove",
             RuntimeFn::CompareText => "trendy_rt_compare_text",
             RuntimeFn::Equal => "trendy_rt_equal",
         }

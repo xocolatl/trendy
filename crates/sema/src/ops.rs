@@ -1,7 +1,9 @@
 //! Operators in expressions: what each token denotes, checking operand
 //! types, and evaluating and simplifying what can be known when compiling.
 
-use trendy_diag::Diagnostic;
+use std::collections::BTreeSet;
+
+use trendy_diag::{Diagnostic, Span, edit_distance};
 use trendy_hir as hir;
 use trendy_syntax::ast::{self, Expr, Literal, LiteralError};
 use trendy_syntax::{SyntaxKind, SyntaxToken, literal};
@@ -278,6 +280,109 @@ pub(crate) fn check_operands<T>(
     Some((resolved, checked))
 }
 
+/// The attributes `postfix`, a `project` or `remove` of `operand`, which is
+/// of type `ty`, removes: those named by `remove`, or those not named by
+/// `project`. `None` after reporting why there are none: the operand isn't
+/// a tuple or relation, or a name isn't one of its attributes, or appears
+/// twice, or `remove` names nothing.
+pub(crate) fn removed(
+    postfix: &ast::PostfixExpr,
+    operand: &Expr,
+    ty: &hir::Type,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<BTreeSet<String>> {
+    let token = postfix.operator()?;
+    let (hir::Type::Tuple(heading) | hir::Type::Relation(heading)) = ty else {
+        errors.push(errors::not_projectable(&token, ty, operand));
+        return None;
+    };
+    let list = postfix.names()?;
+    let named: Vec<(ast::Name, String, Span)> = list
+        .names()
+        .filter_map(|name| {
+            let ident = name.ident()?;
+            let span = trendy_syntax::span(ident.text_range());
+            Some((name, ident.text().to_string(), span))
+        })
+        .collect();
+    let mut ok = true;
+    for (name, text, span) in &named {
+        if let Some(&(_, _, first)) = named.iter().find(|(_, n, _)| n == text)
+            && first != *span
+        {
+            errors.push(errors::duplicate_attribute(
+                errors::Noun::Projected,
+                text,
+                *span,
+                first,
+            ));
+            ok = false;
+        } else if heading.get(text).is_none() {
+            // The closest attribute not already named is probably the one
+            // meant.
+            let rename = heading
+                .attributes()
+                .map(|(a, _)| a)
+                .filter(|a| !named.iter().any(|(_, n, _)| n == a))
+                .filter(|a| edit_distance(a, text) <= 2)
+                .min_by_key(|a| edit_distance(a, text));
+            let attributes: Vec<String> = heading
+                .attributes()
+                .map(|(a, _)| format!("`{a}`"))
+                .collect();
+            let context = if attributes.is_empty() {
+                format!("the operand, of type `{ty}`, has no attributes")
+            } else {
+                format!(
+                    "the operand's attributes are {}",
+                    trendy_diag::conjoin(&attributes)
+                )
+            };
+            errors.push(errors::unknown_attribute(
+                errors::Noun::Projected,
+                text,
+                *span,
+                &context,
+                rename,
+                list.removal(name),
+            ));
+            ok = false;
+        }
+    }
+    let listed: BTreeSet<String> = named.into_iter().map(|(_, n, _)| n).collect();
+    if token.kind() == SyntaxKind::RemoveKw && listed.is_empty() {
+        errors.push(errors::empty_remove(postfix, operand));
+        return None;
+    }
+    if !ok {
+        return None;
+    }
+    Some(match token.kind() {
+        SyntaxKind::RemoveKw => listed,
+        _ => heading
+            .attributes()
+            .map(|(a, _)| a.to_string())
+            .filter(|a| !listed.contains(a))
+            .collect(),
+    })
+}
+
+/// `operand` without the attributes `names`, evaluated if it's a constant,
+/// and merged with a removal it already is.
+pub(crate) fn remove(operand: hir::Expr, names: BTreeSet<String>) -> hir::Expr {
+    if names.is_empty() {
+        return operand;
+    }
+    match operand {
+        hir::Expr::Constant(value) => hir::Expr::Constant(value.without(&names)),
+        hir::Expr::Remove(inner, mut earlier) => {
+            earlier.extend(names);
+            hir::Expr::Remove(inner, earlier)
+        }
+        operand => hir::Expr::Remove(Box::new(operand), names),
+    }
+}
+
 /// The number literal `unary` negates directly, as in `-1` or `-0.5`. Such a
 /// literal is a value of its own, so that the smallest integer can be
 /// written.
@@ -336,7 +441,10 @@ pub(crate) fn negative_value(
 fn can_fail(expr: &hir::Expr) -> bool {
     match expr {
         hir::Expr::Constant(_) | hir::Expr::Variable(_) | hir::Expr::Parameter(_) => false,
-        hir::Expr::Unary(hir::UnaryOp::Negate(hir::Numeric::Integer), _) => true,
+        // Negating the smallest integer overflows, and removing attributes
+        // from a relation allocates the result.
+        hir::Expr::Unary(hir::UnaryOp::Negate(hir::Numeric::Integer), _)
+        | hir::Expr::Remove(..) => true,
         hir::Expr::Unary(_, operand) => can_fail(operand),
         hir::Expr::Binary(op, lhs, rhs) => {
             // Arithmetic and concatenation can fail themselves; the boolean

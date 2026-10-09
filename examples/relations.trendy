@@ -75,16 +75,6 @@ var cities := relation {
    call debug_value{v: people project { name } subset cities project { name }};
 */
 
-/* Projection, and its complement, remove (Algebra A's REMOVE). The result
-   has no duplicates, so it can have fewer tuples.
-   Tuple analog: project and remove.
-   Tutorial D: PEOPLE { NAME } and PEOPLE { ALL BUT BORN }
-   Decided: `project` and `remove`, as for tuples.
-
-   call debug_value{v: people project { name }};
-   call debug_value{v: people remove { born }};
-*/
-
 /* Renaming attributes (Algebra A's RENAME).
    Tuple analog: rename.
    Tutorial D: PEOPLE RENAME ( NAME AS WHO )
@@ -224,4 +214,60 @@ var cities := relation {
    update people where name = "Ada" { born: 1815 };
 */
 
-operator main{} [];
+/* Projection, and its complement, remove (Algebra A's REMOVE). The result
+   has no duplicates, so it can have fewer tuples, and is in canonical
+   order. Implemented: each result below is printed twice, folded when
+   compiling and computed when running, and the two must agree. */
+var births := relation {
+    { name: "Ada", born: 1815, place: "London" },
+    { name: "Ada", born: 1816, place: "London" },
+    { name: "Édouard", born: 1815, place: "Paris" },
+    { name: "Edgar", born: 1923, place: "Portland" },
+};
+var signs := relation {
+    { x: 2.5, n: 1 },
+    { x: -0.0, n: 2 },
+    { x: -1.5, n: 3 },
+    { x: 0.0, n: 4 },
+    { x: -1.5, n: 5 },
+};
+var names := births project { name };
+var places := births remove { born, name };
+var by_year := births project { born, place };
+var xs := signs remove { n };
+var members := teams remove { team };
+var dee := births project {};
+var dum := empty project {};
+
+operator project_births{r: relation { name: text, born: integer, place: text }} [
+    call debug_value{v: r project { name }};
+    call debug_value{v: r remove { born, name }};
+    call debug_value{v: r project { born, place }};
+    call debug_value{v: r project {}};
+];
+
+operator project_signs{r: relation { x: rational, n: integer }} [
+    call debug_value{v: r remove { n }};
+];
+
+operator project_teams{r: relation { team: text, members: relation { name: text } }} [
+    call debug_value{v: r remove { team }};
+];
+
+operator project_empty{r: relation { a: boolean, b: integer }} [
+    call debug_value{v: r project {}};
+];
+
+operator main{} [
+    call debug_value{v: names};
+    call debug_value{v: places};
+    call debug_value{v: by_year};
+    call debug_value{v: dee};
+    call debug_value{v: xs};
+    call debug_value{v: members};
+    call debug_value{v: dum};
+    call project_births{r: births};
+    call project_signs{r: signs};
+    call project_teams{r: teams};
+    call project_empty{r: empty};
+];

@@ -251,6 +251,17 @@ pub(crate) fn value(
             matches(expected, value, expr, errors)
         }
         Expr::Paren(paren) => value(&paren.inner()?, expected, scope, errors),
+        Expr::Postfix(postfix) => {
+            let operand = postfix.operand()?;
+            let value = value(&operand, None, scope, errors)?;
+            let names = ops::removed(postfix, &operand, &value.ty(), errors)?;
+            let result = if names.is_empty() {
+                value
+            } else {
+                value.without(&names)
+            };
+            matches(expected, result, expr, errors)
+        }
         Expr::Unary(unary) => {
             if let Some(literal) = ops::negated_literal(unary) {
                 let value = ops::negative_value(&literal, expr, errors)?;

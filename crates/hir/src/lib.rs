@@ -46,6 +46,7 @@ impl Program {
             },
             Expr::Unary(op, _) => Type::Scalar(op.result()),
             Expr::Binary(op, ..) => Type::Scalar(op.result()),
+            Expr::Remove(operand, names) => self.type_of(operand, within).without(names),
         }
     }
 }
@@ -149,6 +150,10 @@ pub enum Expr {
     Unary(UnaryOp, Box<Expr>),
     /// A dyadic operator, such as `x and y` or `x + y`.
     Binary(BinaryOp, Box<Expr>, Box<Expr>),
+    /// A tuple or relation without the named attributes (Algebra A's
+    /// REMOVE). `project` is remove of the attributes not named. The names
+    /// are attributes of the operand, and there is at least one.
+    Remove(Box<Expr>, BTreeSet<String>),
 }
 
 /// Why an operator has no result: it is out of its type's range (for a
@@ -595,10 +600,27 @@ impl Heading {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    /// The heading without the attributes named.
+    #[must_use]
+    pub fn without(&self, names: &BTreeSet<String>) -> Heading {
+        Heading(
+            self.0
+                .iter()
+                .filter(|(name, _)| !names.contains(*name))
+                .map(|(name, ty)| (name.clone(), ty.clone()))
+                .collect(),
+        )
+    }
 }
 
 /// A value. Values are totally ordered, so that a relation's tuples form a
-/// sorted set; the order has no meaning in the language.
+/// sorted set. The order has no meaning in the language, but it is the
+/// canonical order of a relation's tuples in memory, which the runtime
+/// reproduces when it builds relations (`trendy_runtime::order`), so the
+/// two must agree: values of one type compare as `hir::compare` does for
+/// scalars, tuples attribute by attribute in name order, and relations by
+/// their sorted tuples, lexicographically.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Value {
     Boolean(bool),
@@ -656,6 +678,56 @@ pub struct RelationValue {
     pub heading: Heading,
     /// Sorted and without duplicates; the order has no meaning.
     pub tuples: BTreeSet<TupleValue>,
+}
+
+impl Value {
+    /// The tuple or relation without the attributes named, which it has.
+    /// A relation's tuples can become duplicates, which are dropped.
+    ///
+    /// # Panics
+    ///
+    /// If the value isn't a tuple or relation, which sema rules out.
+    #[must_use]
+    pub fn without(&self, names: &BTreeSet<String>) -> Value {
+        match self {
+            Value::Tuple(tuple) => Value::Tuple(tuple.without(names)),
+            Value::Relation(relation) => Value::Relation(RelationValue {
+                heading: relation.heading.without(names),
+                tuples: relation.tuples.iter().map(|t| t.without(names)).collect(),
+            }),
+            _ => panic!("removing attributes from {self:?}"),
+        }
+    }
+}
+
+impl TupleValue {
+    /// The tuple without the attributes named.
+    #[must_use]
+    pub fn without(&self, names: &BTreeSet<String>) -> TupleValue {
+        TupleValue(
+            self.0
+                .iter()
+                .filter(|(name, _)| !names.contains(*name))
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
+        )
+    }
+}
+
+impl Type {
+    /// The tuple or relation type without the attributes named.
+    ///
+    /// # Panics
+    ///
+    /// If the type isn't a tuple or relation type, which sema rules out.
+    #[must_use]
+    pub fn without(&self, names: &BTreeSet<String>) -> Type {
+        match self {
+            Type::Tuple(heading) => Type::Tuple(heading.without(names)),
+            Type::Relation(heading) => Type::Relation(heading.without(names)),
+            Type::Scalar(_) => panic!("removing attributes from {self}"),
+        }
+    }
 }
 
 /// A `rational` value: a 64-bit IEEE 754 binary floating-point number.
@@ -927,6 +999,47 @@ mod tests {
         assert_eq!(
             not_equal.apply(&ab, &relation(&[tuple(1, "x")])),
             Ok(Value::Boolean(true))
+        );
+    }
+
+    #[test]
+    fn remove() {
+        let names = |n: &[&str]| n.iter().map(|s| (*s).to_string()).collect::<BTreeSet<_>>();
+        let tuple = |a, b| {
+            TupleValue::new(
+                [
+                    ("a".to_string(), Value::Integer(a)),
+                    ("b".to_string(), Value::Integer(b)),
+                ]
+                .into(),
+            )
+        };
+        let relation = Value::Relation(RelationValue {
+            heading: Heading::new(
+                [
+                    ("a".to_string(), Type::Scalar(Scalar::Integer)),
+                    ("b".to_string(), Type::Scalar(Scalar::Integer)),
+                ]
+                .into(),
+            ),
+            tuples: [tuple(1, 1), tuple(1, 2), tuple(2, 1)].into(),
+        });
+        let Value::Relation(without_b) = relation.without(&names(&["b"])) else {
+            panic!("a relation");
+        };
+        assert_eq!(without_b.tuples.len(), 2, "duplicates are dropped");
+        assert_eq!(without_b.heading.attributes().count(), 1);
+        // Degree zero: table_dee, since there were tuples.
+        let Value::Relation(dee) = relation.without(&names(&["a", "b"])) else {
+            panic!("a relation");
+        };
+        assert_eq!(dee.tuples.len(), 1);
+        assert_eq!(
+            Value::Tuple(tuple(1, 2))
+                .without(&names(&["a"]))
+                .ty()
+                .to_string(),
+            "tuple { b: integer }"
         );
     }
 

@@ -103,7 +103,10 @@ impl<'a> Parser<'a> {
         self.form = errors::OPERATOR_FORM;
         self.start_node(SyntaxKind::Operator);
         self.bump();
-        self.name("add a name after `operator`, such as `operator main{} [];`");
+        self.name(
+            "add a name after `operator`, such as `operator main{} [];`",
+            &[SyntaxKind::LBrace, SyntaxKind::LParen],
+        );
         self.params();
         self.delimited(
             Some(SyntaxKind::Body),
@@ -131,7 +134,10 @@ impl<'a> Parser<'a> {
             self.start_node(SyntaxKind::BuiltinType);
             self.bump();
             self.bump();
-            self.name("add the type's name after `builtin type`");
+            self.name(
+                "add the type's name after `builtin type`",
+                &[SyntaxKind::Semicolon],
+            );
             self.expect(SyntaxKind::Semicolon);
             self.builder.finish_node();
             return;
@@ -139,7 +145,10 @@ impl<'a> Parser<'a> {
         self.start_node(SyntaxKind::BuiltinOperator);
         self.bump();
         self.expect(SyntaxKind::OperatorKw);
-        self.name("add a name after `operator`");
+        self.name(
+            "add a name after `operator`",
+            &[SyntaxKind::LBrace, SyntaxKind::LParen],
+        );
         self.params();
         self.expect(SyntaxKind::Semicolon);
         self.builder.finish_node();
@@ -231,7 +240,10 @@ impl<'a> Parser<'a> {
             self.start_node(SyntaxKind::NameRef);
             self.bump();
             self.builder.finish_node();
-        } else {
+        } else if !self.keyword_as_name(
+            SyntaxKind::NameRef,
+            &[SyntaxKind::LBrace, SyntaxKind::LParen],
+        ) {
             self.missing_with_help(SyntaxKind::Ident, "name the operator to call after `call`");
         }
         self.delimited(
@@ -282,7 +294,10 @@ impl<'a> Parser<'a> {
         self.form = errors::VARIABLE_FORM;
         self.start_node(SyntaxKind::VarDecl);
         self.bump();
-        self.name("add a name after `var`, such as `var count: integer := 0;`");
+        self.name(
+            "add a name after `var`, such as `var count: integer := 0;`",
+            &[SyntaxKind::Colon, SyntaxKind::ColonEq, SyntaxKind::Eq],
+        );
 
         let starts_type = |k| {
             matches!(
@@ -329,14 +344,36 @@ impl<'a> Parser<'a> {
     }
 
     /// A definition's name, or `help` on what to write if it's missing.
-    fn name(&mut self, help: &'static str) {
+    /// A name being defined. `follows` are the tokens that can come right
+    /// after it, which tell a keyword used as the name from a missing name.
+    fn name(&mut self, help: &'static str, follows: &[SyntaxKind]) {
         if self.at(SyntaxKind::Ident) {
             self.start_node(SyntaxKind::Name);
             self.bump();
             self.builder.finish_node();
-        } else {
+        } else if !self.keyword_as_name(SyntaxKind::Name, follows) {
             self.missing_with_help(SyntaxKind::Ident, help);
         }
+    }
+
+    /// A keyword where a name goes, as in `var project := 1;`, followed by
+    /// one of `follows`: parsed as the `node` it was meant to be, so nothing
+    /// else cascades, and reported.
+    fn keyword_as_name(&mut self, node: SyntaxKind, follows: &[SyntaxKind]) -> bool {
+        let Some(found) = self.found().filter(|f| f.kind.is_keyword()) else {
+            return false;
+        };
+        if !self
+            .found_after(1)
+            .is_some_and(|next| follows.contains(&next.kind))
+        {
+            return false;
+        }
+        self.start_node(node);
+        self.bump();
+        self.builder.finish_node();
+        self.errors.push(errors::keyword_as_name(found));
+        true
     }
 
     /// A named type, a tuple type, or a relation type.
@@ -449,13 +486,57 @@ impl<'a> Parser<'a> {
             .then_some((f, keyword))
         });
         let Some((found, keyword)) = prefix else {
-            self.primary();
+            self.postfix();
             return;
         };
         self.start_node(SyntaxKind::UnaryExpr);
         self.operator_token(found, keyword);
         self.unary();
         self.builder.finish_node();
+    }
+
+    /// An operand, then the postfix operators `project` and `remove`, which
+    /// bind tighter than any other: `a join b project { x }` projects `b`.
+    fn postfix(&mut self) {
+        self.peek();
+        let start = self.builder.checkpoint();
+        self.primary();
+        while let Some((found, keyword)) = self.postfix_operator() {
+            self.builder.start_node_at(start, SyntaxKind::PostfixExpr);
+            self.operator_token(found, keyword);
+            self.name_list();
+            self.builder.finish_node();
+        }
+    }
+
+    /// The postfix operator at the next token, if any, and the keyword it is
+    /// or stands for.
+    fn postfix_operator(&self) -> Option<(Found<'a>, SyntaxKind)> {
+        let found = self.lookahead()?;
+        let keyword = match found.kind {
+            SyntaxKind::Ident => errors::operator_spelling(found.text)?,
+            kind => kind,
+        };
+        matches!(keyword, SyntaxKind::ProjectKw | SyntaxKind::RemoveKw).then_some((found, keyword))
+    }
+
+    /// `{ a, b }`: attribute names.
+    fn name_list(&mut self) {
+        let outer_form = std::mem::replace(&mut self.form, errors::PROJECTION_FORM);
+        self.delimited(
+            Some(SyntaxKind::NameList),
+            "attribute names",
+            (SyntaxKind::LBrace, SyntaxKind::RBrace),
+            &[(SyntaxKind::LParen, SyntaxKind::RParen)],
+            |p| {
+                p.items(Self::at_attribute, |p| {
+                    p.start_node(SyntaxKind::Name);
+                    p.bump();
+                    p.builder.finish_node();
+                });
+            },
+        );
+        self.form = outer_form;
     }
 
     /// Consume an operator: `keyword` itself, or another spelling of it,
@@ -1605,6 +1686,69 @@ SourceFile
         assert_eq!(
             fix("var x := a AND NOT b Or c;"),
             "var x := a and not b or c;"
+        );
+    }
+
+    #[test]
+    fn projections() {
+        let source = "var x := -a project { b, c } remove {c,} and b remove {};";
+        let parse = parse_str(source);
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let names = |kind| {
+            parse
+                .tree
+                .syntax()
+                .descendants()
+                .filter(|n| n.kind() == kind)
+                .map(|n| n.to_string().trim().to_string())
+                .collect::<Vec<_>>()
+        };
+        // Postfix binds tightest: `-` and `and` take the projections.
+        assert_eq!(
+            names(SyntaxKind::PostfixExpr),
+            [
+                "a project { b, c } remove {c,}",
+                "a project { b, c }",
+                "b remove {}"
+            ]
+        );
+        assert_eq!(names(SyntaxKind::NameList), ["{ b, c }", "{c,}", "{}"]);
+        assert_eq!(fix("var x := a project (b);"), "var x := a project {b};");
+        assert_eq!(
+            fix("var x := a PROJECT { b };"),
+            "var x := a project { b };"
+        );
+        assert_eq!(messages("var x := a project;"), ["expected `{`, found `;`"]);
+    }
+
+    #[test]
+    fn keywords_as_names() {
+        let source =
+            "var project := 1;\noperator remove{} [];\noperator main{} [ call remove{}; ];";
+        let errors = parse_str(source).errors;
+        let found: Vec<_> = errors.iter().map(|e| (e.code, &e.message[..])).collect();
+        assert_eq!(
+            found,
+            [
+                (
+                    Code::KeywordAsName,
+                    "`project` is a keyword, so it can't be a name"
+                ),
+                (
+                    Code::KeywordAsName,
+                    "`remove` is a keyword, so it can't be a name"
+                ),
+                (
+                    Code::KeywordAsName,
+                    "`remove` is a keyword, so it can't be a name"
+                ),
+            ],
+            "and nothing cascades"
+        );
+        // A missing name before the next definition stays a missing name.
+        assert_eq!(
+            parse_str("operator\nvar x := 1;").errors[0].code,
+            Code::MissingToken
         );
     }
 
