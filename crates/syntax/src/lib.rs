@@ -43,6 +43,9 @@ pub enum SyntaxKind {
     DivKw,
     ModKw,
     RemoveKw,
+    RenameKw,
+    /// `as`, in `old as new`.
+    AsKw,
     LBrace,
     RBrace,
     LBracket,
@@ -113,10 +116,14 @@ pub enum SyntaxKind {
     ParenExpr,
     /// `r{a, b}`: a projection.
     ProjectExpr,
-    /// `r remove {a, b}`
+    /// `r remove {a, b}` or `r rename {a as b}`
     PostfixExpr,
     /// `{a, b}`: attribute names, as in a projection.
     NameList,
+    /// `{a as b, c as d}`, in a `rename`.
+    RenameList,
+    /// `a as b`
+    Renaming,
     /// `: type`
     TypeAnnotation,
     TypeRef,
@@ -145,7 +152,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 74] = [
+    pub const ALL: [SyntaxKind; 78] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -165,6 +172,8 @@ impl SyntaxKind {
         SyntaxKind::DivKw,
         SyntaxKind::ModKw,
         SyntaxKind::RemoveKw,
+        SyntaxKind::RenameKw,
+        SyntaxKind::AsKw,
         SyntaxKind::LBrace,
         SyntaxKind::RBrace,
         SyntaxKind::LBracket,
@@ -208,6 +217,8 @@ impl SyntaxKind {
         SyntaxKind::ProjectExpr,
         SyntaxKind::PostfixExpr,
         SyntaxKind::NameList,
+        SyntaxKind::RenameList,
+        SyntaxKind::Renaming,
         SyntaxKind::TypeAnnotation,
         SyntaxKind::TypeRef,
         SyntaxKind::Initializer,
@@ -247,6 +258,8 @@ impl SyntaxKind {
                 | SyntaxKind::DivKw
                 | SyntaxKind::ModKw
                 | SyntaxKind::RemoveKw
+                | SyntaxKind::RenameKw
+                | SyntaxKind::AsKw
         )
     }
 
@@ -263,6 +276,7 @@ impl SyntaxKind {
                 | SyntaxKind::DivKw
                 | SyntaxKind::ModKw
                 | SyntaxKind::RemoveKw
+                | SyntaxKind::RenameKw
         )
     }
 
@@ -344,6 +358,8 @@ impl SyntaxKind {
             SyntaxKind::DivKw => "div",
             SyntaxKind::ModKw => "mod",
             SyntaxKind::RemoveKw => "remove",
+            SyntaxKind::RenameKw => "rename",
+            SyntaxKind::AsKw => "as",
             SyntaxKind::LBrace => "{",
             SyntaxKind::RBrace => "}",
             SyntaxKind::LBracket => "[",
@@ -392,6 +408,8 @@ impl SyntaxKind {
             SyntaxKind::DivKw => "`div`",
             SyntaxKind::ModKw => "`mod`",
             SyntaxKind::RemoveKw => "`remove`",
+            SyntaxKind::RenameKw => "`rename`",
+            SyntaxKind::AsKw => "`as`",
             SyntaxKind::ForeignOperator => "operator",
             SyntaxKind::LBrace => "`{`",
             SyntaxKind::RBrace => "`}`",
@@ -430,6 +448,8 @@ impl SyntaxKind {
             | SyntaxKind::ProjectExpr
             | SyntaxKind::PostfixExpr => "expression",
             SyntaxKind::NameList => "attribute names",
+            SyntaxKind::RenameList => "renamings",
+            SyntaxKind::Renaming => "renaming",
             SyntaxKind::Body => "body",
             SyntaxKind::CallStmt => "call",
             SyntaxKind::Arguments => "arguments",

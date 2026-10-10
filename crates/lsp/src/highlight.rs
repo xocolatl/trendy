@@ -98,7 +98,7 @@ fn classify(token: &SyntaxToken) -> Option<Highlight> {
         (
             SyntaxKind::Ident,
             Some(SyntaxKind::Name),
-            Some(SyntaxKind::AttributeValue | SyntaxKind::NameList),
+            Some(SyntaxKind::AttributeValue | SyntaxKind::NameList | SyntaxKind::Renaming),
         ) => (Class::Attribute, false),
         (SyntaxKind::Ident, Some(SyntaxKind::TypeRef), _) => (Class::Type, false),
         (SyntaxKind::IntLiteral | SyntaxKind::RationalLiteral, _, _) => (Class::Number, false),
@@ -183,6 +183,22 @@ mod tests {
                 ("a", Class::Variable, true),
                 ("b", Class::Variable, false),
                 ("c", Class::Attribute, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn renamings() {
+        assert_eq!(
+            highlight("var a := b rename {c as d};"),
+            [
+                ("var", Class::Keyword, false),
+                ("a", Class::Variable, true),
+                ("b", Class::Variable, false),
+                ("rename", Class::ExprOperator, false),
+                ("c", Class::Attribute, false),
+                ("as", Class::Keyword, false),
+                ("d", Class::Attribute, false),
             ]
         );
     }

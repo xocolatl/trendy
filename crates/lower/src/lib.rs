@@ -2,7 +2,7 @@
 //! turns statements into instructions, and builds the type descriptors that
 //! runtime functions taking `any` receive.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 
 use trendy_hir as hir;
 use trendy_lir as lir;
@@ -313,7 +313,34 @@ impl FunctionBuilder<'_> {
             hir::Expr::Remove(operand, names) => {
                 let ty = self.program.type_of(operand, self.within);
                 let src = self.place(operand, cx);
-                self.remove(&ty, names, src, cx)
+                // The kept attributes, in their own order, which is the
+                // result's too.
+                let sources: Vec<usize> = attribute_names(&ty)
+                    .enumerate()
+                    .filter(|(_, name)| !names.contains(*name))
+                    .map(|(i, _)| i)
+                    .collect();
+                self.reshape(&ty, &ty.without(names), &sources, src, cx)
+            }
+            hir::Expr::Rename(operand, renamings) => {
+                let ty = self.program.type_of(operand, self.within);
+                let src = self.place(operand, cx);
+                let result_ty = ty.renamed(renamings);
+                // Each result attribute comes from the operand's attribute
+                // with its old name.
+                let old: Vec<&str> = attribute_names(&ty).collect();
+                let sources: Vec<usize> = attribute_names(&result_ty)
+                    .map(|new| {
+                        let before = renamings
+                            .iter()
+                            .find(|(_, after)| after.as_str() == new)
+                            .map_or(new, |(before, _)| before.as_str());
+                        old.iter()
+                            .position(|name| *name == before)
+                            .expect("sema renames only attributes the operand has")
+                    })
+                    .collect();
+                self.reshape(&ty, &result_ty, &sources, src, cx)
             }
             hir::Expr::Binary(op, lhs, rhs) => {
                 let operand_ty = self.program.type_of(lhs, self.within);
@@ -324,30 +351,25 @@ impl FunctionBuilder<'_> {
         }
     }
 
-    /// The value at `src`, of type `ty`, without the attributes `names`,
-    /// computed into a new stack slot.
-    fn remove(
+    /// The value at `src`, of type `ty`, reshaped into one of type
+    /// `result_ty`, computed into a new stack slot: each attribute of the
+    /// result, in name order, is the operand's attribute at the index in
+    /// `sources`. That is what removing and renaming attributes both are.
+    fn reshape(
         &mut self,
         ty: &hir::Type,
-        names: &BTreeSet<String>,
+        result_ty: &hir::Type,
+        sources: &[usize],
         src: lir::Place,
         cx: &mut Lowering,
     ) -> lir::Place {
-        let result_ty = ty.without(names);
         let (hir::Type::Tuple(heading) | hir::Type::Relation(heading)) = ty else {
-            unreachable!("sema removes only from tuples and relations");
+            unreachable!("sema reshapes only tuples and relations");
         };
-        // Each kept attribute's index in the operand's tuples, in the
-        // result's attribute order, which is name order too.
-        let kept: Vec<(usize, &hir::Type)> = heading
-            .attributes()
-            .enumerate()
-            .filter(|(_, (name, _))| !names.contains(*name))
-            .map(|(i, (_, ty))| (i, ty))
-            .collect();
-        let dst = self.slot(layout(&result_ty));
+        let attribute_types: Vec<&hir::Type> = heading.attributes().map(|(_, t)| t).collect();
+        let dst = self.slot(layout(result_ty));
         if let hir::Type::Tuple(_) = ty {
-            for (j, &(i, attr_ty)) in kept.iter().enumerate() {
+            for (j, &i) in sources.iter().enumerate() {
                 let mut from = src.clone();
                 from.path.push(i);
                 self.insts.push(lir::Inst::Copy {
@@ -356,21 +378,22 @@ impl FunctionBuilder<'_> {
                         path: vec![j],
                     },
                     src: from,
-                    layout: layout(attr_ty),
+                    layout: layout(attribute_types[i]),
                 });
             }
             return dst;
         }
         let tuple_layout = layout(&hir::Type::Tuple(heading.clone()));
         let offsets = cx.constant(
-            kept.iter()
-                .map(|&(i, _)| lir::Field::Offset(tuple_layout.clone(), i))
+            sources
+                .iter()
+                .map(|&i| lir::Field::Offset(tuple_layout.clone(), i))
                 .collect(),
         );
-        let result_desc = lir::Place::whole(lir::Base::Data(cx.descriptor(&result_ty)));
+        let result_desc = lir::Place::whole(lir::Base::Data(cx.descriptor(result_ty)));
         let source_desc = lir::Place::whole(lir::Base::Data(cx.descriptor(ty)));
         self.insts.push(lir::Inst::CallRuntime {
-            function: lir::RuntimeFn::Remove,
+            function: lir::RuntimeFn::Reshape,
             args: vec![
                 dst.clone(),
                 src,
@@ -504,6 +527,14 @@ fn lower_comparison(comparison: hir::Comparison) -> lir::Comparison {
         hir::Comparison::Greater => lir::Comparison::Greater,
         hir::Comparison::GreaterOrEqual => lir::Comparison::GreaterOrEqual,
     }
+}
+
+/// The attribute names of a tuple or relation type, in name order.
+fn attribute_names(ty: &hir::Type) -> impl Iterator<Item = &str> {
+    let (hir::Type::Tuple(heading) | hir::Type::Relation(heading)) = ty else {
+        unreachable!("only tuples and relations have attributes");
+    };
+    heading.attributes().map(|(name, _)| name)
 }
 
 fn lower_numeric(numeric: hir::Numeric) -> lir::Numeric {

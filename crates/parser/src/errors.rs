@@ -11,6 +11,8 @@ pub(crate) const HEADING_FORM: &str = "a heading lists attributes with their typ
 pub(crate) const RELATION_VALUE_FORM: &str = "a relation value has the form `relation { tuple, … }`, optionally with a heading first: `relation { name: type, … } { … }`";
 pub(crate) const PROJECTION_FORM: &str =
     "a projection and `remove` take attribute names: `r{a, b}`, `r remove {a, b}`";
+pub(crate) const RENAME_FORM: &str =
+    "`rename` takes renamings, each `old as new`: `r rename {zip as postcode}`";
 pub(crate) const TUPLE_VALUE_FORM: &str = "a tuple value has the form `tuple { name: value, … }`";
 pub(crate) const BUILTIN_FORM: &str = "built-ins are declared as `builtin type name;` or `builtin operator name{params};`, only in the prelude";
 pub(crate) const VARIABLE_FORM: &str = "a variable declaration has the form `var name: type := value;`, where either the type or the value may be left out";
@@ -229,6 +231,40 @@ pub(crate) fn keyword_as_name(found: Found) -> Diagnostic {
         "choose another name, such as `{0}_` or `my_{0}`, and use it wherever this one is used",
         found.text
     ))
+}
+
+/// `old: new`, `found` being the `:`, in a renaming. `neighbors` are the
+/// characters around it.
+pub(crate) fn colon_in_renaming(
+    found: Found,
+    neighbors: (Option<char>, Option<char>),
+) -> Diagnostic {
+    Diagnostic::error(
+        Code::RenameSeparator,
+        "a renaming is written `old as new`",
+        found.span,
+        "write `as` here",
+    )
+    .with_note("`rename` takes renamings, each `old as new`, so the direction is always clear")
+    .with_suggestion(
+        "write `as`, reading this as `old: new`",
+        vec![Edit {
+            span: found.span,
+            replacement: spaced_operator("as", neighbors),
+        }],
+    )
+}
+
+/// `text`, with a space on either side, unless whitespace is already there.
+fn spaced_operator(text: &str, (before, after): (Option<char>, Option<char>)) -> String {
+    let mut spaced = text.to_string();
+    if !before.is_some_and(char::is_whitespace) {
+        spaced.insert(0, ' ');
+    }
+    if !after.is_some_and(char::is_whitespace) {
+        spaced.push(' ');
+    }
+    spaced
 }
 
 /// The keyword a foreign operator stands for: `&&` for `and`, `!` for

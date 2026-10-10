@@ -91,7 +91,18 @@ pub fn format(file: &SourceFile) -> String {
 /// The whitespace between two adjacent significant tokens.
 fn between(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> String {
     if let Some(indent) = broken_line(prev, next) {
-        return format!("\n{}", INDENT.repeat(indent));
+        // Statements in a row go on adjacent lines, unless the source groups
+        // them with a blank line, which is kept; several become one.
+        let statement_end = prev.kind() == SyntaxKind::Semicolon
+            && prev
+                .parent()
+                .is_some_and(|p| p.kind() == SyntaxKind::CallStmt);
+        let blank = blank_line && statement_end && next.kind() != SyntaxKind::RBracket;
+        return format!(
+            "{}\n{}",
+            if blank { "\n" } else { "" },
+            INDENT.repeat(indent)
+        );
     }
     let separator = separator(prev, next, blank_line);
     // Never let two tokens run together into others: the formatter must not
@@ -368,10 +379,12 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
             | ColonEq
             | Comma
             | NotKw
-            | SyntaxKind::RemoveKw,
+            | SyntaxKind::RemoveKw
+            | SyntaxKind::RenameKw
+            | SyntaxKind::AsKw,
             _,
         )
-        | (_, ColonEq | SyntaxKind::RemoveKw)
+        | (_, ColonEq | SyntaxKind::RemoveKw | SyntaxKind::RenameKw | SyntaxKind::AsKw)
         | (RBrace, LBracket | LBrace) => " ",
         _ => "",
     }
@@ -716,6 +729,18 @@ mod tests {
         );
         assert_eq!(fmt("var a := b{};"), "var a := b{};\n");
         assert_eq!(fmt("var a := (b){ c };"), "var a := (b){c};\n");
+        assert_eq!(
+            fmt("var a:=b rename{ c  as d,e as f }{d};"),
+            "var a := b rename {c as d, e as f}{d};\n"
+        );
+    }
+
+    #[test]
+    fn blank_lines_group_statements() {
+        assert_eq!(
+            fmt("operator main{} [\ncall a{};\n\n\n\ncall b{};\ncall c{};\n\n];"),
+            "operator main{} [\n    call a{};\n\n    call b{};\n    call c{};\n];\n"
+        );
     }
 
     #[test]

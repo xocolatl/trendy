@@ -28,6 +28,7 @@ pub enum Code {
     ChainedComparison,
     StrayCommentEnd,
     KeywordAsName,
+    RenameSeparator,
     DuplicateName,
     MissingMain,
     UnknownType,
@@ -51,6 +52,7 @@ pub enum Code {
     CyclicInitialValues,
     WrongOperandType,
     EmptyRemove,
+    AttributeExists,
     Overflow,
     DivisionByZero,
     OutOfMemory,
@@ -71,7 +73,7 @@ pub enum CodeKind {
 }
 
 impl Code {
-    pub const ALL: [Code; 44] = [
+    pub const ALL: [Code; 46] = [
         Code::UnexpectedCharacter,
         Code::MissingToken,
         Code::WrongDelimiter,
@@ -89,6 +91,7 @@ impl Code {
         Code::ChainedComparison,
         Code::StrayCommentEnd,
         Code::KeywordAsName,
+        Code::RenameSeparator,
         Code::DuplicateName,
         Code::MissingMain,
         Code::UnknownType,
@@ -112,6 +115,7 @@ impl Code {
         Code::CyclicInitialValues,
         Code::WrongOperandType,
         Code::EmptyRemove,
+        Code::AttributeExists,
         Code::Overflow,
         Code::DivisionByZero,
         Code::OutOfMemory,
@@ -138,6 +142,7 @@ impl Code {
             Code::ChainedComparison => "P0015",
             Code::StrayCommentEnd => "P0016",
             Code::KeywordAsName => "P0017",
+            Code::RenameSeparator => "P0018",
             Code::DuplicateName => "A0001",
             Code::MissingMain => "A0002",
             Code::UnknownType => "A0003",
@@ -161,6 +166,7 @@ impl Code {
             Code::CyclicInitialValues => "A0021",
             Code::WrongOperandType => "A0022",
             Code::EmptyRemove => "A0023",
+            Code::AttributeExists => "A0024",
             Code::Overflow => "R0001",
             Code::DivisionByZero => "R0002",
             Code::OutOfMemory => "R0003",
@@ -216,6 +222,7 @@ impl Code {
             Code::ChainedComparison => include_str!("../errors/P0015.md"),
             Code::StrayCommentEnd => include_str!("../errors/P0016.md"),
             Code::KeywordAsName => include_str!("../errors/P0017.md"),
+            Code::RenameSeparator => include_str!("../errors/P0018.md"),
             Code::DuplicateName => include_str!("../errors/A0001.md"),
             Code::MissingMain => include_str!("../errors/A0002.md"),
             Code::UnknownType => include_str!("../errors/A0003.md"),
@@ -239,6 +246,7 @@ impl Code {
             Code::CyclicInitialValues => include_str!("../errors/A0021.md"),
             Code::WrongOperandType => include_str!("../errors/A0022.md"),
             Code::EmptyRemove => include_str!("../errors/A0023.md"),
+            Code::AttributeExists => include_str!("../errors/A0024.md"),
             Code::Overflow => include_str!("../errors/R0001.md"),
             Code::DivisionByZero => include_str!("../errors/R0002.md"),
             Code::OutOfMemory => include_str!("../errors/R0003.md"),

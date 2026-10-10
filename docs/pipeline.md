@@ -323,13 +323,16 @@ there is no assignment and operators return nothing, so lowering releases
 each one with `trendy_rt_free` when its statement ends. Assignment and
 returned values will need a real ownership scheme.
 
-Removing attributes (`hir::Expr::Remove`, which a projection becomes) copies
-a tuple's kept attributes into a new slot. For a relation it calls
-`trendy_rt_remove`, which copies each tuple's kept attributes, sorts the
-results into the canonical order, and drops duplicates, into memory
-released like a text's. Lowering passes it the result's descriptor and an
-array of each kept attribute's offset in the operand's tuples, so the
-runtime never matches attributes by name.
+Removing attributes (`hir::Expr::Remove`, which a projection becomes) and
+renaming them (`hir::Expr::Rename`) are both reshaping: each attribute of
+the result is one of the operand's. For a tuple, lowering copies each into
+a new slot. For a relation it calls `trendy_rt_reshape`, which copies each
+tuple's attributes into the result's layout, sorts the results into the
+canonical order, and drops duplicates, into memory released like a text's.
+Removing can make tuples equal, and renaming can change their order, since
+the canonical order follows attribute names. Lowering passes the runtime
+the result's descriptor and an array of each result attribute's offset in
+the operand's tuples, so the runtime never matches attributes by name.
 
 The canonical order of a relation's tuples is `hir::Value`'s order, which
 the compiler uses for constants and the runtime reproduces

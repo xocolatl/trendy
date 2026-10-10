@@ -1846,6 +1846,84 @@ mod tests {
     }
 
     #[test]
+    fn rename_constants() {
+        let vars = variables(
+            "var t := tuple { a: 1, b: \"x\" };\nvar moved := t rename {a as z};\nvar swapped := t rename {a as b, b as a};\nvar same := t rename {a as a};\nvar r := relation { { a: 2, b: 1 }, { a: 1, b: 2 } } rename {a as c};",
+        );
+        let value = |name: &str| vars.iter().find(|v| v.name == name).unwrap();
+        assert_eq!(
+            value("moved").ty.to_string(),
+            "tuple { b: text, z: integer }"
+        );
+        assert_eq!(
+            value("swapped").ty.to_string(),
+            "tuple { a: text, b: integer }"
+        );
+        assert_eq!(value("same").init, value("t").init);
+        assert_eq!(
+            value("r").ty.to_string(),
+            "relation { b: integer, c: integer }"
+        );
+    }
+
+    #[test]
+    fn rename_errors() {
+        let source = format!(
+            "var t := tuple {{ zip: \"20500\", city: \"Washington\" }};\nvar a := t rename {{zp as postcode}};\nvar b := t rename {{postcode as zip}};\nvar c := t rename {{zip as p, zip as q}};\nvar d := t rename {{zip as city}};\nvar e := t rename {{zip as x, city as x}};\nvar f := t rename {{}};\nvar g := 1 rename {{a as b}};{MAIN}"
+        );
+        let errors = errors(&source);
+        let found: Vec<_> = errors.iter().map(|e| (e.code, &e.message[..])).collect();
+        assert_eq!(
+            found,
+            [
+                (Code::UnknownAttribute, "unknown attribute `zp`"),
+                (Code::UnknownAttribute, "unknown attribute `postcode`"),
+                (
+                    Code::DuplicateAttribute,
+                    "attribute `zip` is given more than once"
+                ),
+                (Code::AttributeExists, "attribute `city` already exists"),
+                (Code::AttributeExists, "attribute `x` already exists"),
+                (Code::EmptyRemove, "`rename {}` renames nothing"),
+                (
+                    Code::WrongOperandType,
+                    "`rename` can't be applied to integers"
+                ),
+            ]
+        );
+        assert_eq!(
+            errors[1].suggestions[0].message,
+            "swap them: `zip as postcode`"
+        );
+        let fixed = fix(&source);
+        assert!(
+            fixed.contains("var a := t rename {zip as postcode};"),
+            "{fixed}"
+        );
+        assert!(
+            fixed.contains("var b := t rename {zip as postcode};"),
+            "{fixed}"
+        );
+        assert!(fixed.contains("var f := t;"), "{fixed}");
+        // A swap isn't a collision: both are renamed at once.
+        variables("var t := tuple { a: 1, b: 2 } rename {a as b, b as a};");
+    }
+
+    #[test]
+    fn rename_in_bodies() {
+        let body = main_body(
+            "var t := tuple { a: 1, b: 2 };\noperator main{} [\n    call debug_value{v: t rename {a as c, b as b}};\n    call debug_value{v: t rename {a as a}};\n];",
+        );
+        let t = || Box::new(hir::Expr::Variable(hir::VariableId(0)));
+        assert_eq!(
+            argument(&body[0]),
+            &hir::Expr::Rename(t(), [("a".to_string(), "c".to_string())].into()),
+            "renaming to the same name is dropped"
+        );
+        assert_eq!(argument(&body[1]), &*t());
+    }
+
+    #[test]
     fn not_before_a_comparison() {
         let source =
             format!("var n := 1;\nvar a := not n = 0 and true;\nvar b := not n + 1 < 2;{MAIN}");

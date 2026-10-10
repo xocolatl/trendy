@@ -512,7 +512,11 @@ impl<'a> Parser<'a> {
             } else if let Some((found, keyword)) = self.postfix_operator() {
                 self.builder.start_node_at(start, SyntaxKind::PostfixExpr);
                 self.operator_token(found, keyword);
-                self.name_list();
+                if keyword == SyntaxKind::RenameKw {
+                    self.rename_list();
+                } else {
+                    self.name_list();
+                }
             } else {
                 break;
             }
@@ -528,7 +532,58 @@ impl<'a> Parser<'a> {
             SyntaxKind::Ident => errors::operator_spelling(found.text)?,
             kind => kind,
         };
-        (keyword == SyntaxKind::RemoveKw).then_some((found, keyword))
+        matches!(keyword, SyntaxKind::RemoveKw | SyntaxKind::RenameKw).then_some((found, keyword))
+    }
+
+    /// `{a as b, c as d}`: renamings.
+    fn rename_list(&mut self) {
+        let outer_form = std::mem::replace(&mut self.form, errors::RENAME_FORM);
+        self.delimited(
+            Some(SyntaxKind::RenameList),
+            "renamings",
+            (SyntaxKind::LBrace, SyntaxKind::RBrace),
+            &[(SyntaxKind::LParen, SyntaxKind::RParen)],
+            |p| p.items(Self::at_attribute, Self::renaming),
+        );
+        self.form = outer_form;
+    }
+
+    /// `a as b`. `AS` is fixed to `as`, and `a: b`, a mapping from other
+    /// languages, to `a as b`.
+    fn renaming(&mut self) {
+        self.start_node(SyntaxKind::Renaming);
+        self.start_node(SyntaxKind::Name);
+        self.bump();
+        self.builder.finish_node();
+        match self.found() {
+            Some(found) if found.kind == SyntaxKind::AsKw => {
+                self.bump();
+            }
+            Some(found)
+                if found.kind == SyntaxKind::Ident && found.text.eq_ignore_ascii_case("as") =>
+            {
+                self.bump();
+                self.errors.push(errors::miscased_keyword(found, "as"));
+            }
+            Some(found) if found.kind == SyntaxKind::Colon => {
+                let neighbors = (
+                    self.source[..found.span.start].chars().next_back(),
+                    self.source[found.span.end..].chars().next(),
+                );
+                self.bump();
+                self.errors
+                    .push(errors::colon_in_renaming(found, neighbors));
+            }
+            _ => self.missing(SyntaxKind::AsKw),
+        }
+        if self.at(SyntaxKind::Ident) {
+            self.start_node(SyntaxKind::Name);
+            self.bump();
+            self.builder.finish_node();
+        } else {
+            self.missing_with_help(SyntaxKind::Ident, "write the new name after `as`");
+        }
+        self.builder.finish_node();
     }
 
     /// `{ a, b }`: attribute names.
@@ -1755,6 +1810,48 @@ SourceFile
         assert_eq!(
             parse_str("operator\nvar x := 1;").errors[0].code,
             Code::MissingToken
+        );
+    }
+
+    #[test]
+    fn renamings() {
+        let source = "var x := a rename {b as c, d as e} rename {c as b};";
+        let parse = parse_str(source);
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let renamings: Vec<_> = parse
+            .tree
+            .syntax()
+            .descendants()
+            .filter_map(trendy_syntax::ast::Renaming::cast)
+            .map(|r| {
+                let name = |n: Option<trendy_syntax::ast::Name>| n.unwrap().syntax().to_string();
+                (name(r.before()), name(r.after()))
+            })
+            .collect();
+        assert_eq!(
+            renamings,
+            [
+                ("b".into(), "c".into()),
+                ("d".into(), "e".into()),
+                ("c".into(), "b".into())
+            ]
+        );
+        // Habits from Tutorial D and from mappings.
+        assert_eq!(
+            fix("var x := a RENAME ( zip AS postcode );"),
+            "var x := a rename { zip as postcode };"
+        );
+        assert_eq!(
+            fix("var x := a rename {zip: postcode};"),
+            "var x := a rename {zip as postcode};"
+        );
+        assert_eq!(
+            fix("var x := a rename {zip:postcode};"),
+            "var x := a rename {zip as postcode};"
+        );
+        assert_eq!(
+            messages("var x := a rename {zip postcode};"),
+            ["expected `as`, found identifier `postcode`"]
         );
     }
 

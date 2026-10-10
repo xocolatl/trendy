@@ -307,40 +307,62 @@ fn expr(
                 errors,
             )
         }
-        Expr::Project(_) | Expr::Postfix(_) => {
-            let projection = match expr {
-                Expr::Project(p) => ops::Projection::Project(p),
-                Expr::Postfix(r) => ops::Projection::Remove(r),
-                _ => unreachable!("matched above"),
-            };
-            let operand_expr = projection.operand()?;
-            let operand = self::expr(&operand_expr, None, within, cx, errors)?;
-            let ty = type_of(&operand, within, cx);
-            let names = ops::removed(projection, &operand_expr, &ty, errors)?;
-            let result_ty = if names.is_empty() {
-                ty
-            } else {
-                ty.without(&names)
-            };
-            if let Some(expected) = expected
-                && expected.ty != result_ty
-            {
-                errors.push(errors::type_mismatch(
-                    &expected.ty,
-                    &expected.origin,
-                    &result_ty,
-                    None,
-                    expr,
-                ));
-                return None;
-            }
-            Some(ops::remove(operand, names))
-        }
+        Expr::Project(_) | Expr::Postfix(_) => reshaped(expr, expected, within, cx, errors),
         Expr::Literal(_) | Expr::Tuple(_) | Expr::Relation(_) => {
             let mut scope = Selector { cx, within };
             types::value(expr, expected, &mut scope, errors).map(hir::Expr::Constant)
         }
     }
+}
+
+/// A projection, `remove` or `rename`, written `expr`, in a body.
+fn reshaped(
+    expr: &Expr,
+    expected: Option<&Expected>,
+    within: hir::OperatorId,
+    cx: &Context,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<hir::Expr> {
+    let (operand_expr, rename) = match expr {
+        Expr::Project(project) => (project.operand()?, None),
+        Expr::Postfix(postfix) => (postfix.operand()?, Some(postfix)),
+        _ => unreachable!("only projections and postfix operators reshape"),
+    };
+    let operand = self::expr(&operand_expr, None, within, cx, errors)?;
+    let ty = type_of(&operand, within, cx);
+    let (result, result_ty) = match (expr, rename) {
+        (_, Some(postfix)) if ops::is_rename(postfix) => {
+            let renamings = ops::renamed(postfix, &operand_expr, &ty, errors)?;
+            let result_ty = ty.renamed(&renamings);
+            (ops::rename(operand, renamings), result_ty)
+        }
+        (Expr::Project(project), _) => {
+            let projection = ops::Projection::Project(project);
+            let names = ops::removed(projection, &operand_expr, &ty, errors)?;
+            let result_ty = ty.without(&names);
+            (ops::remove(operand, names), result_ty)
+        }
+        (_, Some(postfix)) => {
+            let projection = ops::Projection::Remove(postfix);
+            let names = ops::removed(projection, &operand_expr, &ty, errors)?;
+            let result_ty = ty.without(&names);
+            (ops::remove(operand, names), result_ty)
+        }
+        _ => unreachable!("matched above"),
+    };
+    if let Some(expected) = expected
+        && expected.ty != result_ty
+    {
+        errors.push(errors::type_mismatch(
+            &expected.ty,
+            &expected.origin,
+            &result_ty,
+            None,
+            expr,
+        ));
+        return None;
+    }
+    Some(result)
 }
 
 /// The operator written `token` and its checked `operands`.
@@ -379,6 +401,7 @@ fn type_of(expr: &hir::Expr, within: hir::OperatorId, cx: &Context) -> hir::Type
         hir::Expr::Unary(op, _) => hir::Type::Scalar(op.result()),
         hir::Expr::Binary(op, ..) => hir::Type::Scalar(op.result()),
         hir::Expr::Remove(operand, names) => type_of(operand, within, cx).without(names),
+        hir::Expr::Rename(operand, renamings) => type_of(operand, within, cx).renamed(renamings),
     }
 }
 

@@ -251,6 +251,17 @@ pub(crate) fn value(
             matches(expected, value, expr, errors)
         }
         Expr::Paren(paren) => value(&paren.inner()?, expected, scope, errors),
+        Expr::Postfix(postfix) if ops::is_rename(postfix) => {
+            let operand = postfix.operand()?;
+            let value = value(&operand, None, scope, errors)?;
+            let renamings = ops::renamed(postfix, &operand, &value.ty(), errors)?;
+            let result = if renamings.is_empty() {
+                value
+            } else {
+                value.renamed(&renamings)
+            };
+            matches(expected, result, expr, errors)
+        }
         Expr::Project(_) | Expr::Postfix(_) => {
             let projection = match expr {
                 Expr::Project(p) => ops::Projection::Project(p),

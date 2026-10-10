@@ -78,7 +78,7 @@
       ]
     },
     "keywords": {
-      "match": "\\b(?:operator|var|tuple|relation|call|builtin)\\b",
+      "match": "\\b(?:operator|var|tuple|relation|call|builtin|as)\\b",
       "name": "keyword.other.trendy"
     },
     "number": {
@@ -97,7 +97,7 @@
       "match": "\\b(operator)\\s+([A-Z_a-z][0-9A-Z_a-z]*)"
     },
     "operator-word": {
-      "match": "\\b(?:not|and|or|xor|implies|div|mod|remove)\\b",
+      "match": "\\b(?:not|and|or|xor|implies|div|mod|remove|rename)\\b",
       "name": "keyword.operator.word.trendy"
     },
     "punctuation": {
@@ -174,7 +174,7 @@
           "name": "entity.name.type.trendy"
         }
       },
-      "match": "\\b(var)\\s+([A-Z_a-z][0-9A-Z_a-z]*)(?:\\s*(\\:)\\s*(?!(?:operator|var|true|false|tuple|relation|call|builtin|not|and|or|xor|implies|div|mod|remove)\\b)([A-Z_a-z][0-9A-Z_a-z]*))?"
+      "match": "\\b(var)\\s+([A-Z_a-z][0-9A-Z_a-z]*)(?:\\s*(\\:)\\s*(?!(?:operator|var|true|false|tuple|relation|call|builtin|not|and|or|xor|implies|div|mod|remove|rename|as)\\b)([A-Z_a-z][0-9A-Z_a-z]*))?"
     }
   },
   "scopeName": "source.trendy"

@@ -177,7 +177,7 @@ unsafe fn text_bytes<'a>(text: Text) -> &'a [u8] {
 }
 
 /// Release the memory of a text or relation made by [`trendy_rt_concat`]
-/// or [`trendy_rt_remove`]. Both are a pointer and a length.
+/// or [`trendy_rt_reshape`]. Both are a pointer and a length.
 ///
 /// # Safety
 ///
@@ -205,10 +205,13 @@ fn allocate<T>(count: usize) -> *mut T {
     memory.cast()
 }
 
-/// Store at `dst` the relation at `src` with only the attributes `result`
-/// describes, in canonical order and without duplicates, in memory that
-/// [`trendy_rt_free`] releases. `source` describes `src`, and `offsets`
-/// gives, for each attribute of `result`, its offset in a tuple of `src`.
+/// Store at `dst` the relation at `src`, with each tuple reshaped into the
+/// attributes `result` describes, in canonical order and without
+/// duplicates, in memory that [`trendy_rt_free`] releases. `source`
+/// describes `src`, and `offsets` gives, for each attribute of `result`,
+/// the offset in a tuple of `src` of the attribute it comes from. Removing
+/// attributes is reshaping, and can make tuples equal; renaming is too, and
+/// can change their order.
 ///
 /// # Safety
 ///
@@ -217,7 +220,7 @@ fn allocate<T>(count: usize) -> *mut T {
 /// offset per attribute of `result`, and `dst` to memory for a relation.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn trendy_rt_remove(
+pub unsafe extern "C" fn trendy_rt_reshape(
     dst: *mut Text,
     src: *const u8,
     result: *const TypeDesc,
@@ -264,7 +267,7 @@ pub unsafe extern "C" fn trendy_rt_remove(
 ///
 /// # Safety
 ///
-/// As for [`trendy_rt_remove`]'s result.
+/// As for [`trendy_rt_reshape`]'s result.
 #[cfg(not(test))]
 unsafe fn canonical(tuples: *const u8, count: usize, desc: &TypeDesc) -> (*mut u8, usize) {
     let size = desc.element_size;

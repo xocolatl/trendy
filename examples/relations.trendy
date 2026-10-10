@@ -75,14 +75,6 @@ var cities := relation {
    call debug_value{v: people{name} subset cities{name}};
 */
 
-/* Renaming attributes (Algebra A's RENAME).
-   Tuple analog: rename.
-   Tutorial D: PEOPLE RENAME ( NAME AS WHO )
-   Decided: `rename` with `new: old` pairs, as for tuples.
-
-   call debug_value{v: people rename { who: name }};
-*/
-
 /* Restriction: the tuples for which a condition holds.
    Tutorial D: PEOPLE WHERE BORN < 1900
    Proposed: a `where` operator, whose condition is a boolean expression
@@ -154,18 +146,20 @@ var cities := relation {
    Tuple analog: wrap and unwrap.
    Tutorial D: PEOPLE WRAP ( { NAME, BORN } AS WHO ), PEOPLE UNWRAP ( WHO )
 
-   call debug_value{v: people wrap { who: { name, born } }};
+   Decided: with `as`, as for tuples.
+
+   call debug_value{v: people wrap {{name, born} as who}};
 */
 
 /* Group and ungroup: gather attributes into a relation-valued attribute,
    one tuple per value of the other attributes, and back.
    Tutorial D: CITIES GROUP ( { NAME } AS RESIDENTS ), and
    TEAMS UNGROUP ( MEMBERS )
-   Proposed: `group` and `ungroup` operators, with the new attribute's name
-   and the names it gathers, as for wrap.
+   Decided: `group` and `ungroup` operators, with the names gathered and
+   the new attribute's name, written with `as` as for wrap.
 
-   call debug_value{v: cities group { residents: { name } }};
-   call debug_value{v: teams ungroup { members }};
+   call debug_value{v: cities group {{name} as residents}};
+   call debug_value{v: teams ungroup {members}};
 */
 
 /* Aggregates (RM Prescription 18 and OO Prescription 6): count, sum, avg,
@@ -258,6 +252,20 @@ operator project_empty{r: relation { a: boolean, b: integer }} [
     call debug_value{v: r{}};
 ];
 
+/* Renaming attributes (Algebra A's RENAME), each `old as new`, all at
+   once. Renaming can change the attributes' order, so the tuples are sorted
+   again; printed twice like the projections. Tuple analog: rename. */
+var aliases := births rename {name as alias};
+var swapped := signs rename {x as n, n as x};
+
+operator rename_births{r: relation { name: text, born: integer, place: text }} [
+    call debug_value{v: r rename {name as alias}};
+];
+
+operator rename_signs{r: relation { x: rational, n: integer }} [
+    call debug_value{v: r rename {x as n, n as x}};
+];
+
 operator main{} [
     call debug_value{v: names};
     call debug_value{v: places};
@@ -266,8 +274,14 @@ operator main{} [
     call debug_value{v: xs};
     call debug_value{v: members};
     call debug_value{v: dum};
+    call debug_value{v: aliases};
+    call debug_value{v: swapped};
+
     call project_births{r: births};
     call project_signs{r: signs};
     call project_teams{r: teams};
     call project_empty{r: empty};
+
+    call rename_births{r: births};
+    call rename_signs{r: signs};
 ];

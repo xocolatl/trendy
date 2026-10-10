@@ -651,30 +651,109 @@ pub(crate) fn name_in_selector(name: &str, span: Span, what: &str) -> Diagnostic
     )
 }
 
-/// A projection, or `remove` if `remove`, written at `at`, applied to a
-/// value of type `ty`, which isn't a tuple or relation.
+/// A projection, or the `operator` such as `remove`, written at `at`,
+/// applied to a value of type `ty`, which isn't a tuple or relation.
 pub(crate) fn not_projectable(
-    remove: bool,
+    operator: Option<&str>,
     at: Span,
     ty: &hir::Type,
     operand: &Expr,
 ) -> Diagnostic {
-    let (message, label) = if remove {
-        (
-            format!("`remove` can't be applied to {}", plural(ty)),
-            "`remove` takes a tuple or relation",
-        )
-    } else {
-        (
+    let (message, label) = match operator {
+        Some(operator) => (
+            format!("`{operator}` can't be applied to {}", plural(ty)),
+            format!("`{operator}` takes a tuple or relation"),
+        ),
+        None => (
             format!("{} can't be projected", plural(ty)),
-            "a projection takes a tuple or relation",
-        )
+            "a projection takes a tuple or relation".to_string(),
+        ),
     };
     Diagnostic::error(Code::WrongOperandType, message, at, label)
         .with_secondary(operand.span(), format!("this is `{ty}`"))
         .with_note(
-            "a projection, `r{a, b}`, and `r remove {c}` choose among the attributes of a tuple or relation",
+            "a projection, `r{a, b}`, `r remove {c}` and `r rename {a as b}` work on the attributes of a tuple or relation",
         )
+}
+
+/// `rename {}`, written `postfix` after `operand`, which renames nothing.
+pub(crate) fn empty_rename(
+    postfix: &trendy_syntax::ast::PostfixExpr,
+    operand: &Expr,
+) -> Diagnostic {
+    let end = postfix.span().end;
+    let keyword = postfix.operator().map_or(operand.span().end, |t| {
+        trendy_syntax::span(t.text_range()).start
+    });
+    Diagnostic::error(
+        Code::EmptyRemove,
+        "`rename {}` renames nothing",
+        Span::new(keyword, end),
+        "no renamings",
+    )
+    .with_note("`rename` takes renamings, each `old as new`; with none it would change nothing")
+    .with_suggestion(
+        "drop the `rename {}`",
+        vec![Edit {
+            span: Span::new(operand.span().end, end),
+            replacement: String::new(),
+        }],
+    )
+}
+
+/// The renaming `before as after`, the wrong way around: `before` isn't an
+/// attribute, but `after` is. `context` names the attributes.
+pub(crate) fn reversed_renaming(
+    (before, before_span): (&str, Span),
+    (after, after_span): (&str, Span),
+    context: &str,
+) -> Diagnostic {
+    Diagnostic::error(
+        Code::UnknownAttribute,
+        format!("unknown attribute `{before}`"),
+        before_span,
+        "not an attribute of the operand",
+    )
+    .with_secondary(after_span, format!("but `{after}` is"))
+    .with_note(context.to_string())
+    .with_note("a renaming is `old as new`: the attribute's name now comes first")
+    .with_suggestion(
+        format!("swap them: `{after} as {before}`"),
+        vec![
+            Edit {
+                span: before_span,
+                replacement: after.to_string(),
+            },
+            Edit {
+                span: after_span,
+                replacement: before.to_string(),
+            },
+        ],
+    )
+}
+
+/// A renaming to `name`, at `span`, which is taken: by an attribute that
+/// keeps its name, or by an earlier renaming's new name, at `earlier`.
+pub(crate) fn attribute_exists(
+    name: &str,
+    span: Span,
+    earlier: Option<Span>,
+    context: &str,
+) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::AttributeExists,
+        format!("attribute `{name}` already exists"),
+        span,
+        "this name is taken",
+    );
+    let d = match earlier {
+        Some(earlier) => d.with_secondary(earlier, format!("`{name}` is the new name here too")),
+        None => d.with_note(context.to_string()),
+    };
+    d.with_note(
+        "attributes are a set, so names are unique; a new name must be free, unless the attribute that has it is renamed too",
+    )
+    .with_help("choose a free name, or rename the other attribute in the same `rename`")
 }
 
 /// `remove {}`, written `postfix` after `operand`, which removes nothing.

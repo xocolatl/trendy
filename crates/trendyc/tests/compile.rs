@@ -361,6 +361,9 @@ fn tuples() {
             r#"tuple { state: "DC", zip: "20500" }"#,
             "tuple {}",
             "tuple { a: tuple { b: false } }",
+            r#"tuple { city: "Washington", postcode: "20500", state: "DC", street: "1600 Pennsylvania Ave." }"#,
+            // All at once: a swap.
+            "tuple { x: 2.0, y: 1.0 }",
         ]
     );
 }
@@ -380,6 +383,9 @@ fn relations() {
             // Relations by their tuples: the empty one first.
             r#"relation { members: relation { name: text } } { { members: relation { name: text } {} }, { members: relation { name: text } { { name: "Ada" }, { name: "Edgar" } } } }"#,
             "relation {} {}",
+            // Renamed, and sorted again by the new first attribute.
+            r#"relation { alias: text, born: integer, place: text } { { alias: "Ada", born: 1815, place: "London" }, { alias: "Ada", born: 1816, place: "London" }, { alias: "Edgar", born: 1923, place: "Portland" }, { alias: "Édouard", born: 1815, place: "Paris" } }"#,
+            "relation { n: rational, x: integer } { { n: -1.5, x: 3 }, { n: -1.5, x: 5 }, { n: -0.0, x: 2 }, { n: 0.0, x: 4 }, { n: 2.5, x: 1 } }",
         ]
     );
 }

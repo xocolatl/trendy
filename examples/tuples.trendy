@@ -36,15 +36,12 @@ var addr := tuple { street: "1600 Pennsylvania Ave.", city: "Washington", state:
    call debug_value{v: x.a.b};
 */
 
-/* Renaming attributes (Algebra A's RENAME).
-   Tutorial D: ADDR RENAME ( ZIP AS POSTCODE ), and the prefix variant
-   ADDR RENAME ( PREFIX 'ST' AS 'G' )
-   Decided: a `rename` operator with `new: old` pairs, the name being
-   defined on the left as everywhere else: it's `extend { postcode: zip }`
-   with `zip` removed.
+/* Renaming by prefix, the rest of Algebra A's RENAME (see the renaming
+   below, which is implemented).
+   Tutorial D: ADDR RENAME ( PREFIX 'ST' AS 'G' )
+   Proposed: a `prefix` renaming, written like the others.
 
-   call debug_value{v: addr rename { postcode: zip }};
-   call debug_value{v: addr rename { prefix "g": "st" }};
+   call debug_value{v: addr rename {prefix "st" as "g"}};
 */
 
 /* Extension: the tuple with attributes added, computed from its own.
@@ -76,10 +73,10 @@ var addr := tuple { street: "1600 Pennsylvania Ave.", city: "Washington", state:
 /* Wrap: gather attributes into one tuple-valued attribute (RM Prescription
    6, item c: "nesting").
    Tutorial D: ADDR WRAP ( { STREET, CITY } AS PLACE )
-   Proposed: a `wrap` operator, with the new attribute's name and the names
-   it gathers.
+   Decided: a `wrap` operator, with the names it gathers and the new
+   attribute's name, written with `as` like a renaming.
 
-   call debug_value{v: addr wrap { place: { street, city } }};
+   call debug_value{v: addr wrap {{street, city} as place}};
 */
 
 /* Unwrap: replace a tuple-valued attribute with its attributes (RM
@@ -133,10 +130,24 @@ operator project_addr{a: tuple { street: text, city: text, state: text, zip: tex
     call debug_value{v: x remove {c}{a}};
 ];
 
+/* Renaming attributes (Algebra A's RENAME), each `old as new`, all at
+   once, so two attributes can swap names. Implemented, and printed twice
+   like the projections. */
+var moved := addr rename {zip as postcode};
+var swapped := q rename {x as y, y as x};
+
+operator rename_addr{a: tuple { street: text, city: text, state: text, zip: text }, p: tuple { x: rational, y: rational }} [
+    call debug_value{v: a rename {zip as postcode}};
+    call debug_value{v: p rename {x as y, y as x}};
+];
+
 operator main{} [
     call debug_value{v: located};
     call debug_value{v: unlocated};
     call debug_value{v: nothing};
     call debug_value{v: x{a}};
+    call debug_value{v: moved};
+    call debug_value{v: swapped};
     call project_addr{a: addr};
+    call rename_addr{a: addr, p: q};
 ];

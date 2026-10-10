@@ -51,6 +51,8 @@ ast_node!(ParenExpr);
 ast_node!(ProjectExpr);
 ast_node!(PostfixExpr);
 ast_node!(NameList);
+ast_node!(RenameList);
+ast_node!(Renaming);
 ast_node!(VarDecl);
 ast_node!(Name);
 ast_node!(TypeRef);
@@ -243,7 +245,7 @@ impl ProjectExpr {
 }
 
 impl PostfixExpr {
-    /// The operator: `remove`.
+    /// The operator: `remove` or `rename`.
     #[must_use]
     pub fn operator(&self) -> Option<SyntaxToken> {
         significant_tokens(&self.0).next()
@@ -257,6 +259,38 @@ impl PostfixExpr {
     #[must_use]
     pub fn names(&self) -> Option<NameList> {
         self.0.children().find_map(NameList::cast)
+    }
+
+    #[must_use]
+    pub fn renamings(&self) -> Option<RenameList> {
+        self.0.children().find_map(RenameList::cast)
+    }
+}
+
+impl RenameList {
+    pub fn renamings(&self) -> impl Iterator<Item = Renaming> {
+        self.0.children().filter_map(Renaming::cast)
+    }
+
+    /// The span to delete to remove `renaming` from the list, with a comma
+    /// that separates it from a neighbor.
+    #[must_use]
+    pub fn removal(&self, renaming: &Renaming) -> Span {
+        list_removal(renaming.syntax())
+    }
+}
+
+impl Renaming {
+    /// The attribute's name before renaming: the one before `as`.
+    #[must_use]
+    pub fn before(&self) -> Option<Name> {
+        self.0.children().find_map(Name::cast)
+    }
+
+    /// Its name after renaming: the one after `as`.
+    #[must_use]
+    pub fn after(&self) -> Option<Name> {
+        self.0.children().filter_map(Name::cast).nth(1)
     }
 }
 

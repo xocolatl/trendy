@@ -553,13 +553,46 @@ var name := ada{nmae};
 operator main{} [];
 ```
 
+### Renaming
+
+`r rename {zip as postcode, city as town}` is the tuple or relation `r`
+with its attributes renamed, each written `old as new`. It is Algebra A's
+RENAME.
+
+```trendy
+var addr := tuple { zip: "20500", city: "Washington" };
+var moved := addr rename {zip as postcode};
+var swapped := addr rename {zip as city, city as zip};
+
+operator main{} [
+    call debug_value{v: moved};
+];
+```
+
+- **All the renamings happen at once,** so attributes can swap names, as
+  in `swapped` above.
+- **The old names must be the operand's attributes,** each renamed once.
+  A renaming written the wrong way around, whose new name is the
+  attribute, gets a fix that swaps it.
+- **The new names must be free:** no attribute that keeps its name, and no
+  other renaming, can have it (A0024).
+- **`rename {}` renames nothing,** and is an error (A0023).
+- `old: new`, as in mappings elsewhere, is fixed to `old as new` (P0018).
+
+```trendy,error
+var addr := tuple { zip: "20500", city: "Washington" };
+var moved := addr rename {postcode as zip};
+
+operator main{} [];
+```
+
 ### Precedence
 
 From tightest to loosest:
 
 | Operators | Grouping |
 |---|---|
-| postfix projection `{…}` and `remove {…}` | left |
+| postfix projection `{…}`, `remove {…}` and `rename {…}` | left |
 | prefix `not`, `-` and `+` | |
 | `*`, `/`, `div`, `mod` | left |
 | `+`, `-`, `\|\|` | left |
@@ -702,7 +735,7 @@ operator main{} [];
 Names are ASCII letters, digits and `_`, and don't start with a digit. They
 are case-sensitive. The keywords are `operator`, `var`, `call`, `builtin`,
 `tuple`, `relation`, `true`, `false`, `not`, `and`, `or`, `xor`,
-`implies`, `div`, `mod` and `remove`, all lowercase, and a
+`implies`, `div`, `mod`, `remove`, `rename` and `as`, all lowercase, and a
 keyword can't be a name (P0017). `type` is a keyword only after
 `builtin`.
 
@@ -740,7 +773,9 @@ operator main{} [];
 - a relation's tuples list their attributes in the order of the relation's
   heading: the selector's own heading, else the declared type, else the first
   tuple's order;
-- an operator's body has each statement on its own line, indented;
+- an operator's body has each statement on its own line, indented, on
+  adjacent lines unless you separate them with a blank line to group them;
+  several blank lines become one;
 - parameters and arguments are written without spaces inside their braces:
   `operator greet{name: text}`, `call greet{name: "Ada"}`;
 - single spaces around dyadic operators and after `not`, none after prefix
@@ -783,6 +818,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `a == b`, `a != b` | `a = b`, `a <> b` |
 | `a < b < c` | `a < b and b < c` |
 | `R { A, B }`, `R { ALL BUT C }` | `r{a, b}`, `r remove {c}` |
+| `R RENAME ( A AS B )`, `rename(columns={'a': 'b'})` | `r rename {a as b}` |
 | `a / b` for integers | `a div b` |
 | `a % b` | `a mod b` |
 | `1 / 2` meaning one half | `1.0 / 2.0` |

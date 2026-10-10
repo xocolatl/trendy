@@ -47,6 +47,7 @@ impl Program {
             Expr::Unary(op, _) => Type::Scalar(op.result()),
             Expr::Binary(op, ..) => Type::Scalar(op.result()),
             Expr::Remove(operand, names) => self.type_of(operand, within).without(names),
+            Expr::Rename(operand, renamings) => self.type_of(operand, within).renamed(renamings),
         }
     }
 }
@@ -154,6 +155,11 @@ pub enum Expr {
     /// REMOVE). A projection is remove of the attributes not named. The names
     /// are attributes of the operand, and there is at least one.
     Remove(Box<Expr>, BTreeSet<String>),
+    /// A tuple or relation with attributes renamed (Algebra A's RENAME),
+    /// all at once, from each key to its value. The keys are attributes of
+    /// the operand, and the result's names are distinct; no renaming is to
+    /// the same name, and there is at least one.
+    Rename(Box<Expr>, BTreeMap<String, String>),
 }
 
 /// Why an operator has no result: it is out of its type's range (for a
@@ -601,6 +607,18 @@ impl Heading {
         self.0.is_empty()
     }
 
+    /// The heading with attributes renamed, all at once, from each key of
+    /// `renamings` to its value.
+    #[must_use]
+    pub fn renamed(&self, renamings: &BTreeMap<String, String>) -> Heading {
+        Heading(
+            self.0
+                .iter()
+                .map(|(name, ty)| (renamed(name, renamings), ty.clone()))
+                .collect(),
+        )
+    }
+
     /// The heading without the attributes named.
     #[must_use]
     pub fn without(&self, names: &BTreeSet<String>) -> Heading {
@@ -698,9 +716,50 @@ impl Value {
             _ => panic!("removing attributes from {self:?}"),
         }
     }
+
+    /// The tuple or relation with attributes renamed, as for
+    /// [`Heading::renamed`]. A relation's tuples are sorted again, since
+    /// renaming can change their attributes' order.
+    ///
+    /// # Panics
+    ///
+    /// If the value isn't a tuple or relation, which sema rules out.
+    #[must_use]
+    pub fn renamed(&self, renamings: &BTreeMap<String, String>) -> Value {
+        match self {
+            Value::Tuple(tuple) => Value::Tuple(tuple.renamed(renamings)),
+            Value::Relation(relation) => Value::Relation(RelationValue {
+                heading: relation.heading.renamed(renamings),
+                tuples: relation
+                    .tuples
+                    .iter()
+                    .map(|t| t.renamed(renamings))
+                    .collect(),
+            }),
+            _ => panic!("renaming attributes of {self:?}"),
+        }
+    }
+}
+
+/// `name`'s new name in `renamings`, or `name` if it isn't renamed.
+fn renamed(name: &str, renamings: &BTreeMap<String, String>) -> String {
+    renamings
+        .get(name)
+        .map_or_else(|| name.to_string(), Clone::clone)
 }
 
 impl TupleValue {
+    /// The tuple with attributes renamed, as for [`Heading::renamed`].
+    #[must_use]
+    pub fn renamed(&self, renamings: &BTreeMap<String, String>) -> TupleValue {
+        TupleValue(
+            self.0
+                .iter()
+                .map(|(name, value)| (renamed(name, renamings), value.clone()))
+                .collect(),
+        )
+    }
+
     /// The tuple without the attributes named.
     #[must_use]
     pub fn without(&self, names: &BTreeSet<String>) -> TupleValue {
@@ -726,6 +785,21 @@ impl Type {
             Type::Tuple(heading) => Type::Tuple(heading.without(names)),
             Type::Relation(heading) => Type::Relation(heading.without(names)),
             Type::Scalar(_) => panic!("removing attributes from {self}"),
+        }
+    }
+
+    /// The tuple or relation type with attributes renamed, as for
+    /// [`Heading::renamed`].
+    ///
+    /// # Panics
+    ///
+    /// If the type isn't a tuple or relation type, which sema rules out.
+    #[must_use]
+    pub fn renamed(&self, renamings: &BTreeMap<String, String>) -> Type {
+        match self {
+            Type::Tuple(heading) => Type::Tuple(heading.renamed(renamings)),
+            Type::Relation(heading) => Type::Relation(heading.renamed(renamings)),
+            Type::Scalar(_) => panic!("renaming attributes of {self}"),
         }
     }
 }
@@ -1040,6 +1114,34 @@ mod tests {
                 .ty()
                 .to_string(),
             "tuple { b: integer }"
+        );
+    }
+
+    #[test]
+    fn rename() {
+        let renamings = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(a, b)| ((*a).to_string(), (*b).to_string()))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let tuple = |pairs: &[(&str, i64)]| {
+            TupleValue::new(
+                pairs
+                    .iter()
+                    .map(|(n, v)| ((*n).to_string(), Value::Integer(*v)))
+                    .collect(),
+            )
+        };
+        let t = Value::Tuple(tuple(&[("a", 1), ("b", 2)]));
+        // All at once, so a swap is a swap.
+        assert_eq!(
+            t.renamed(&renamings(&[("a", "b"), ("b", "a")])),
+            Value::Tuple(tuple(&[("a", 2), ("b", 1)]))
+        );
+        assert_eq!(
+            t.renamed(&renamings(&[("a", "z")])).ty().to_string(),
+            "tuple { b: integer, z: integer }"
         );
     }
 

@@ -1,7 +1,7 @@
 //! Operators in expressions: what each token denotes, checking operand
 //! types, and evaluating and simplifying what can be known when compiling.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use trendy_diag::{Diagnostic, Span, edit_distance};
 use trendy_hir as hir;
@@ -323,9 +323,9 @@ pub(crate) fn removed(
     errors: &mut Vec<Diagnostic>,
 ) -> Option<BTreeSet<String>> {
     let (hir::Type::Tuple(heading) | hir::Type::Relation(heading)) = ty else {
-        let remove = matches!(projection, Projection::Remove(_));
+        let operator = matches!(projection, Projection::Remove(_)).then_some("remove");
         errors.push(errors::not_projectable(
-            remove,
+            operator,
             projection.at()?,
             ty,
             operand,
@@ -405,6 +405,146 @@ pub(crate) fn removed(
     })
 }
 
+/// The renamings of `postfix`, a `rename` of `operand`, which is of type
+/// `ty`: each attribute's name before, mapped to its name after, without
+/// those that keep their name. `None` after reporting why there are none:
+/// the operand isn't a tuple or relation, or an old name isn't one of its
+/// attributes, or is renamed twice, or a new name is taken, or nothing is
+/// renamed.
+pub(crate) fn renamed(
+    postfix: &ast::PostfixExpr,
+    operand: &Expr,
+    ty: &hir::Type,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<BTreeMap<String, String>> {
+    let token = postfix.operator()?;
+    let (hir::Type::Tuple(heading) | hir::Type::Relation(heading)) = ty else {
+        let at = trendy_syntax::span(token.text_range());
+        errors.push(errors::not_projectable(Some("rename"), at, ty, operand));
+        return None;
+    };
+    let list = postfix.renamings()?;
+    // Each renaming: its node, and the names before and after, with spans.
+    let name = |n: Option<ast::Name>| {
+        let ident = n?.ident()?;
+        Some((
+            ident.text().to_string(),
+            trendy_syntax::span(ident.text_range()),
+        ))
+    };
+    let entries: Vec<(ast::Renaming, NameAt, NameAt)> = list
+        .renamings()
+        .filter_map(|r| Some((r.clone(), name(r.before())?, name(r.after())?)))
+        .collect();
+    if list.renamings().next().is_none() {
+        errors.push(errors::empty_rename(postfix, operand));
+        return None;
+    }
+    let attributes: Vec<String> = heading
+        .attributes()
+        .map(|(a, _)| format!("`{a}`"))
+        .collect();
+    let context = if attributes.is_empty() {
+        format!("the operand, of type `{ty}`, has no attributes")
+    } else {
+        format!(
+            "the operand's attributes are {}",
+            trendy_diag::conjoin(&attributes)
+        )
+    };
+    let mut ok = true;
+    let mut renamings = BTreeMap::new();
+    for (renaming, (before, before_span), (after, after_span)) in &entries {
+        let first = entries
+            .iter()
+            .find(|(_, (b, _), _)| b == before)
+            .map(|(_, (_, s), _)| *s);
+        if let Some(first) = first.filter(|first| first != before_span) {
+            errors.push(errors::duplicate_attribute(
+                errors::Noun::Projected,
+                before,
+                *before_span,
+                first,
+            ));
+            ok = false;
+        } else if heading.get(before).is_none() {
+            if heading.get(after).is_some() {
+                // `postcode as zip` for `zip as postcode`: written the other
+                // way around.
+                errors.push(errors::reversed_renaming(
+                    (before, *before_span),
+                    (after, *after_span),
+                    &context,
+                ));
+            } else {
+                let rename = heading
+                    .attributes()
+                    .map(|(a, _)| a)
+                    .filter(|a| !entries.iter().any(|(_, (b, _), _)| b == a))
+                    .filter(|a| edit_distance(a, before) <= 2)
+                    .min_by_key(|a| edit_distance(a, before));
+                errors.push(errors::unknown_attribute(
+                    errors::Noun::Projected,
+                    before,
+                    *before_span,
+                    &context,
+                    rename,
+                    list.removal(renaming),
+                ));
+            }
+            ok = false;
+        } else if before != after {
+            renamings.insert(before.clone(), after.clone());
+        }
+    }
+    if !ok {
+        return None;
+    }
+    // Every new name must be free: no attribute that keeps its name has it,
+    // and no earlier renaming gives it.
+    for (i, (_, (before, _), (after, after_span))) in entries.iter().enumerate() {
+        if before == after {
+            continue;
+        }
+        let kept = heading.get(after).is_some() && !renamings.contains_key(after);
+        let earlier = entries[..i]
+            .iter()
+            .find(|(_, (b, _), (a, _))| a == after && b != a)
+            .map(|(_, _, (_, s))| *s);
+        if kept || earlier.is_some() {
+            errors.push(errors::attribute_exists(
+                after,
+                *after_span,
+                earlier,
+                &context,
+            ));
+            ok = false;
+        }
+    }
+    ok.then_some(renamings)
+}
+
+/// A name as written, and where.
+type NameAt = (String, Span);
+
+/// Whether `postfix` is a `rename`, rather than a `remove`.
+pub(crate) fn is_rename(postfix: &ast::PostfixExpr) -> bool {
+    postfix
+        .operator()
+        .is_some_and(|t| t.kind() == SyntaxKind::RenameKw)
+}
+
+/// `operand` with the attributes renamed, evaluated if it's a constant.
+pub(crate) fn rename(operand: hir::Expr, renamings: BTreeMap<String, String>) -> hir::Expr {
+    if renamings.is_empty() {
+        return operand;
+    }
+    match operand {
+        hir::Expr::Constant(value) => hir::Expr::Constant(value.renamed(&renamings)),
+        operand => hir::Expr::Rename(Box::new(operand), renamings),
+    }
+}
+
 /// `operand` without the attributes `names`, evaluated if it's a constant,
 /// and merged with a removal it already is.
 pub(crate) fn remove(operand: hir::Expr, names: BTreeSet<String>) -> hir::Expr {
@@ -479,10 +619,11 @@ pub(crate) fn negative_value(
 fn can_fail(expr: &hir::Expr) -> bool {
     match expr {
         hir::Expr::Constant(_) | hir::Expr::Variable(_) | hir::Expr::Parameter(_) => false,
-        // Negating the smallest integer overflows, and removing attributes
-        // from a relation allocates the result.
+        // Negating the smallest integer overflows, and removing or renaming
+        // attributes of a relation allocates the result.
         hir::Expr::Unary(hir::UnaryOp::Negate(hir::Numeric::Integer), _)
-        | hir::Expr::Remove(..) => true,
+        | hir::Expr::Remove(..)
+        | hir::Expr::Rename(..) => true,
         hir::Expr::Unary(_, operand) => can_fail(operand),
         hir::Expr::Binary(op, lhs, rhs) => {
             // Arithmetic and concatenation can fail themselves; the boolean
