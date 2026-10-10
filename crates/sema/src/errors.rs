@@ -634,23 +634,6 @@ pub(crate) fn main_with_params(params: &trendy_syntax::ast::Heading) -> Diagnost
     )
 }
 
-/// The name `name`, at `span`, of `what` (a parameter or a variable),
-/// inside a tuple or relation value in an operator's body.
-pub(crate) fn name_in_selector(name: &str, span: Span, what: &str) -> Diagnostic {
-    Diagnostic::error(
-        Code::NameInSelector,
-        format!("{what} can't be used inside a tuple or relation value here"),
-        span,
-        format!("`{name}` is known only when the program runs"),
-    )
-    .with_note(
-        "for now, tuple and relation values in an operator's body are built when compiling, so their attributes can't refer to parameters or variables",
-    )
-    .with_help(
-        "a variable's initial value can refer to other variables: declare one with this value, and use it here",
-    )
-}
-
 /// A projection, or the `operator` such as `remove`, written at `at`,
 /// applied to a value of type `ty`, which isn't a tuple or relation.
 pub(crate) fn not_projectable(

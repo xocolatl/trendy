@@ -1181,16 +1181,55 @@ mod tests {
     }
 
     #[test]
-    fn names_in_selectors_in_bodies() {
+    fn selectors_in_bodies() {
+        // Names in a selector are fine; an operator still isn't a value.
         assert_eq!(
             codes(
                 "var a := 1;\noperator show{p: integer} [ call debug_value{v: tuple { x: a, y: p, z: main }}; ];\noperator main{} [];"
             ),
-            [
-                Code::NameInSelector,
-                Code::NameInSelector,
-                Code::OperatorAsValue
-            ]
+            [Code::OperatorAsValue]
+        );
+        let body = |source: &str| {
+            let program = analyze_str(source).unwrap();
+            let f = program.operators.iter().find(|o| o.name == "f").unwrap();
+            let hir::OperatorKind::User { body } = &f.kind else {
+                panic!("f is a user operator");
+            };
+            body.clone()
+        };
+        let statements = body(
+            "operator f{p: integer} [\n    call debug_value{v: tuple { x: p, y: 1 }};\n    call debug_value{v: relation { { x: p }, { x: 1 } }};\n    call debug_value{v: tuple { x: 1 + 1 }};\n];\noperator main{} [];",
+        );
+        let p = || hir::Expr::Parameter("p".to_string());
+        let one = || hir::Expr::Constant(hir::Value::Integer(1));
+        assert_eq!(
+            argument(&statements[0]),
+            &hir::Expr::Tuple([("x".to_string(), p()), ("y".to_string(), one())].into())
+        );
+        let hir::Expr::Relation(heading, tuples) = argument(&statements[1]) else {
+            panic!("a relation built when running");
+        };
+        assert_eq!(heading.to_string(), "{ x: integer }");
+        assert_eq!(tuples.len(), 2);
+        assert!(
+            matches!(argument(&statements[2]), hir::Expr::Constant(_)),
+            "a selector of constants is folded"
+        );
+        // Tuples known when compiling must still be distinct; others may
+        // turn out equal, and become one.
+        assert_eq!(
+            codes(
+                "operator f{p: integer} [ call debug_value{v: relation { { x: 1 }, { x: p }, { x: 1 } }}; ];\noperator main{} [];"
+            ),
+            [Code::DuplicateTuple]
+        );
+        analyze_str("operator f{p: integer, q: integer} [ call debug_value{v: relation { { x: p }, { x: q } }}; ];\noperator main{} [];").unwrap();
+        // The checks are the same as for constants.
+        assert_eq!(
+            codes(
+                "operator f{p: integer} [ call debug_value{v: relation { { x: p }, { y: p } }}; ];\noperator main{} [];"
+            ),
+            [Code::UnknownAttribute]
         );
     }
 

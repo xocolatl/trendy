@@ -244,8 +244,10 @@ pub(crate) fn value(
             let value = literal_value(literal, errors)?;
             matches(expected, value, expr, errors)
         }
-        Expr::Tuple(tuple) => tuple_value(tuple, expected, scope, errors),
-        Expr::Relation(relation) => relation_value(relation, expected, scope, errors),
+        Expr::Tuple(tuple) => tuple_selector(tuple, expected, &mut Constants { scope }, errors),
+        Expr::Relation(relation) => {
+            relation_selector(relation, expected, &mut Constants { scope }, errors)
+        }
         Expr::Name(name) => {
             let value = scope.constant(name, errors)?;
             matches(expected, value, expr, errors)
@@ -385,6 +387,107 @@ fn matches(
 /// An error was already reported, so there is no result.
 struct Reported;
 
+/// What a selector's checks produce: values, where everything is known
+/// when compiling, or expressions, in an operator's body. The checks of
+/// tuple and relation selectors are written once, for both.
+pub(crate) trait Selectors {
+    type Out: Clone;
+
+    fn values(&self) -> &Values;
+
+    /// Check an attribute's value against `expected`.
+    fn check(
+        &mut self,
+        expr: &Expr,
+        expected: Option<&Expected>,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<Self::Out>;
+
+    fn ty(&self, out: &Self::Out) -> hir::Type;
+
+    /// The value `out` is, if it is known when compiling.
+    fn constant<'o>(&self, out: &'o Self::Out) -> Option<&'o hir::Value>;
+
+    /// A tuple of these attributes.
+    fn tuple(&self, attributes: BTreeMap<String, Self::Out>) -> Self::Out;
+
+    /// A relation with this heading and these tuples, which are distinct
+    /// where they are known when compiling.
+    fn relation(&self, heading: hir::Heading, tuples: Vec<Self::Out>) -> Self::Out;
+}
+
+/// Selectors whose values are all known when compiling, as in an initial
+/// value.
+struct Constants<'a> {
+    scope: &'a mut dyn Scope,
+}
+
+impl Selectors for Constants<'_> {
+    type Out = hir::Value;
+
+    fn values(&self) -> &Values {
+        self.scope.values()
+    }
+
+    fn check(
+        &mut self,
+        expr: &Expr,
+        expected: Option<&Expected>,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Value> {
+        value(expr, expected, self.scope, errors)
+    }
+
+    fn ty(&self, out: &hir::Value) -> hir::Type {
+        out.ty()
+    }
+
+    fn constant<'o>(&self, out: &'o hir::Value) -> Option<&'o hir::Value> {
+        Some(out)
+    }
+
+    fn tuple(&self, attributes: BTreeMap<String, hir::Value>) -> hir::Value {
+        hir::Value::Tuple(hir::TupleValue::new(attributes))
+    }
+
+    fn relation(&self, heading: hir::Heading, tuples: Vec<hir::Value>) -> hir::Value {
+        hir::Value::Relation(hir::RelationValue {
+            heading,
+            tuples: tuples
+                .into_iter()
+                .filter_map(|t| match t {
+                    hir::Value::Tuple(t) => Some(t),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>(),
+        })
+    }
+}
+
+/// `out`, if it has the expected type; otherwise report the mismatch.
+fn matches_selected<S: Selectors>(
+    selectors: &S,
+    expected: Option<&Expected>,
+    out: S::Out,
+    expr: &Expr,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<S::Out> {
+    let ty = selectors.ty(&out);
+    match expected {
+        Some(e) if ty != e.ty => {
+            errors.push(errors::type_mismatch(
+                &e.ty,
+                &e.origin,
+                &ty,
+                selectors.constant(&out),
+                expr,
+            ));
+            None
+        }
+        _ => Some(out),
+    }
+}
+
 /// A selector's own heading, which takes precedence over the context:
 /// `Ok(None)` if it has none.
 fn own_heading(
@@ -403,24 +506,37 @@ fn own_heading(
     }))
 }
 
-fn tuple_value(
+/// A tuple selector, checked against `expected` if given.
+pub(crate) fn tuple_selector<S: Selectors>(
     tuple: &TupleLiteral,
     expected: Option<&Expected>,
-    scope: &mut dyn Scope,
+    selectors: &mut S,
     errors: &mut Vec<Diagnostic>,
-) -> Option<hir::Value> {
-    let own = own_heading(tuple.heading(), hir::Type::Tuple, scope.values(), errors).ok()?;
+) -> Option<S::Out> {
+    let own = own_heading(
+        tuple.heading(),
+        hir::Type::Tuple,
+        selectors.values(),
+        errors,
+    )
+    .ok()?;
     let here = own.as_ref().or(expected);
     let heading = match here {
         Some(Expected {
             ty: hir::Type::Tuple(heading),
             ..
         }) => Some(heading),
-        // The context expects something else: evaluate the tuple on its own,
+        // The context expects something else: check the tuple on its own,
         // then report the mismatch for the whole of it.
         Some(_) => {
-            let value = tuple_value(tuple, None, scope, errors)?;
-            return matches(expected, value, &Expr::Tuple(tuple.clone()), errors);
+            let out = tuple_selector(tuple, None, selectors, errors)?;
+            return matches_selected(
+                selectors,
+                expected,
+                out,
+                &Expr::Tuple(tuple.clone()),
+                errors,
+            );
         }
         None => None,
     };
@@ -449,37 +565,21 @@ fn tuple_value(
             continue;
         };
         // Against the heading, if there is one; an attribute it doesn't
-        // have is reported instead of evaluated.
+        // have is reported instead of checked.
         let attr_expected = match here.zip(heading) {
             Some((here, heading)) => {
                 if let Some(attr_ty) = heading.get(name) {
                     Some(here.attribute(name, attr_ty))
                 } else {
                     ok = false;
-                    // An unknown attribute close to a missing one is probably
-                    // that one, misspelled; the rename resolves both problems.
-                    let renamed = missing
-                        .iter()
-                        .copied()
-                        .filter(|m| edit_distance(m, name) <= 2)
-                        .min_by_key(|m| edit_distance(m, name));
-                    if let Some(target) = renamed {
-                        missing.retain(|m| *m != target);
-                    }
-                    errors.push(errors::unknown_attribute(
-                        errors::Noun::Attribute,
-                        name,
-                        *span,
-                        &format!("the expected type is `{}`", here.ty),
-                        renamed,
-                        tuple.removal(attribute),
-                    ));
+                    let removal = tuple.removal(attribute);
+                    unknown_tuple_attribute(name, *span, here, &mut missing, removal, errors);
                     continue;
                 }
             }
             None => None,
         };
-        match value(&attr_expr, attr_expected.as_ref(), scope, errors) {
+        match selectors.check(&attr_expr, attr_expected.as_ref(), errors) {
             Some(v) => {
                 attributes.insert(name.clone(), v);
             }
@@ -503,24 +603,64 @@ fn tuple_value(
     if !ok {
         return None;
     }
-    let value = hir::Value::Tuple(hir::TupleValue::new(attributes));
+    let out = selectors.tuple(attributes);
     match &own {
         // Checked against its own heading; now against the context.
-        Some(_) => matches(expected, value, &Expr::Tuple(tuple.clone()), errors),
-        None => Some(value),
+        Some(_) => matches_selected(
+            selectors,
+            expected,
+            out,
+            &Expr::Tuple(tuple.clone()),
+            errors,
+        ),
+        None => Some(out),
     }
 }
 
-fn relation_value(
+/// Report the attribute `name`, at `span`, which the tuple type expected,
+/// `here`, doesn't have. `removal` is the span that removes it. An unknown
+/// attribute close to a `missing` one is probably that one, misspelled: the
+/// fix renames it, which resolves both problems, so the missing one is no
+/// longer reported.
+fn unknown_tuple_attribute(
+    name: &str,
+    span: Span,
+    here: &Expected,
+    missing: &mut Vec<&str>,
+    removal: Span,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let renamed = missing
+        .iter()
+        .copied()
+        .filter(|m| edit_distance(m, name) <= 2)
+        .min_by_key(|m| edit_distance(m, name));
+    if let Some(target) = renamed {
+        missing.retain(|m| *m != target);
+    }
+    errors.push(errors::unknown_attribute(
+        errors::Noun::Attribute,
+        name,
+        span,
+        &format!("the expected type is `{}`", here.ty),
+        renamed,
+        removal,
+    ));
+}
+
+/// A relation selector, checked against `expected` if given. Tuples known
+/// when compiling must be distinct; others become one when the program runs
+/// if they are equal.
+pub(crate) fn relation_selector<S: Selectors>(
     relation: &RelationLiteral,
     expected: Option<&Expected>,
-    scope: &mut dyn Scope,
+    selectors: &mut S,
     errors: &mut Vec<Diagnostic>,
-) -> Option<hir::Value> {
+) -> Option<S::Out> {
     let own = own_heading(
         relation.heading(),
         hir::Type::Relation,
-        scope.values(),
+        selectors.values(),
         errors,
     )
     .ok()?;
@@ -535,17 +675,23 @@ fn relation_value(
             origin: origin.element().unwrap_or_else(|| origin.clone()),
         }),
         Some(_) => {
-            let value = relation_value(relation, None, scope, errors)?;
-            return matches(expected, value, &Expr::Relation(relation.clone()), errors);
+            let out = relation_selector(relation, None, selectors, errors)?;
+            return matches_selected(
+                selectors,
+                expected,
+                out,
+                &Expr::Relation(relation.clone()),
+                errors,
+            );
         }
         None => None,
     };
 
-    let mut tuples: BTreeMap<hir::TupleValue, Span> = BTreeMap::new();
+    let mut tuples = Vec::new();
+    let mut known: BTreeMap<hir::TupleValue, Span> = BTreeMap::new();
     let mut ok = true;
     for tuple in relation.tuples() {
-        let Some(hir::Value::Tuple(value)) = tuple_value(&tuple, element.as_ref(), scope, errors)
-        else {
+        let Some(out) = tuple_selector(&tuple, element.as_ref(), selectors, errors) else {
             ok = false;
             continue;
         };
@@ -553,20 +699,23 @@ fn relation_value(
         // tuple sets it for the rest.
         if element.is_none() {
             element = Some(Expected {
-                ty: hir::Value::Tuple(value.clone()).ty(),
+                ty: selectors.ty(&out),
                 origin: Origin::Value(Expr::Tuple(tuple.clone())),
             });
         }
-        if let Some(&first) = tuples.get(&value) {
-            errors.push(errors::duplicate_tuple(
-                tuple.span(),
-                first,
-                relation.removal(&tuple),
-            ));
-            ok = false;
-            continue;
+        if let Some(hir::Value::Tuple(value)) = selectors.constant(&out) {
+            if let Some(&first) = known.get(value) {
+                errors.push(errors::duplicate_tuple(
+                    tuple.span(),
+                    first,
+                    relation.removal(&tuple),
+                ));
+                ok = false;
+                continue;
+            }
+            known.insert(value.clone(), tuple.span());
         }
-        tuples.insert(value, tuple.span());
+        tuples.push(out);
     }
 
     // A tuple with errors was already reported; it may be why there is no
@@ -582,13 +731,16 @@ fn relation_value(
         errors.push(errors::unknown_relation_heading(relation.span()));
         return None;
     };
-    let value = hir::Value::Relation(hir::RelationValue {
-        heading,
-        tuples: tuples.into_keys().collect::<BTreeSet<_>>(),
-    });
+    let out = selectors.relation(heading, tuples);
     match &own {
-        Some(_) => matches(expected, value, &Expr::Relation(relation.clone()), errors),
-        None => Some(value),
+        Some(_) => matches_selected(
+            selectors,
+            expected,
+            out,
+            &Expr::Relation(relation.clone()),
+            errors,
+        ),
+        None => Some(out),
     }
 }
 

@@ -261,6 +261,30 @@ pub unsafe extern "C" fn trendy_rt_reshape(
     }
 }
 
+/// Store at `dst` the relation `desc` describes whose tuples are the
+/// `*count` at `tuples`, one after another, in canonical order and without
+/// duplicates, in memory that [`trendy_rt_free`] releases.
+///
+/// # Safety
+///
+/// `tuples` must point to `*count` valid tuples of the relation's heading,
+/// `desc` to a valid relation descriptor, and `dst` to memory for a
+/// relation.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_relation(
+    dst: *mut Text,
+    tuples: *const u8,
+    count: *const usize,
+    desc: *const TypeDesc,
+) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let (bytes, len) = canonical(tuples, count.read_unaligned(), &*desc);
+        dst.write_unaligned(Text { bytes, len });
+    }
+}
+
 /// The `count` tuples at `tuples`, with the attributes of `desc`, sorted
 /// canonically and without duplicates, copied into new memory: the new
 /// memory and how many tuples it holds.

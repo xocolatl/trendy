@@ -80,18 +80,8 @@ operator main{} [
 ];
 ```
 
-For now, the attributes of a tuple or relation value in an operator's body
-can't refer to parameters or variables: those values are built when
-compiling. A variable's initial value can refer to other variables (see
-[Variables](#variables)), so declare one and use it instead.
-
-```trendy,error
-operator show{n: integer} [
-    call debug_value{v: tuple { n: n }};
-];
-
-operator main{} [];
-```
+A tuple or relation value's attributes can be any expression, names
+included, as in `tuple { n: n }`; see [Tuples](#tuples).
 
 ### Built-in operators
 
@@ -243,6 +233,10 @@ operator main{} [];
 - `tuple {}`, the tuple with no attributes, is a valid type with exactly one
   value.
 - A trailing comma after the last attribute is allowed.
+- **Attribute values can be any expression,** including parameters,
+  variables and other operators: `tuple { street: name || "!", n: n + 1 }`.
+  A tuple whose values are all known when compiling is built then; others
+  are built when the program runs.
 
 ```trendy
 var reordered: tuple { x: integer, y: integer } := tuple { y: 2, x: 1, };
@@ -294,6 +288,10 @@ operator main{} [];
   an error, even with its attributes in another order.
 - **Equality is set equality.** Two relations are equal when they have the
   same heading and the same tuples. Tuples have no order.
+- **Tuples that turn out equal become one.** A relation's tuples can be
+  built from values known only when the program runs, so
+  `relation { { x: a }, { x: b } }` has one tuple when `a = b`, and two
+  otherwise. Tuples known when compiling must still be distinct.
 - **Relations are values like any other.** A tuple's attribute can be a
   relation, and so can a relation's.
 

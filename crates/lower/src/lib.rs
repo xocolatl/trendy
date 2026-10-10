@@ -310,6 +310,13 @@ impl FunctionBuilder<'_> {
                 });
                 dst
             }
+            hir::Expr::Tuple(attributes) => {
+                let ty = self.program.type_of(expr, self.within);
+                let dst = self.slot(layout(&ty));
+                self.fill_tuple(attributes, &dst, cx);
+                dst
+            }
+            hir::Expr::Relation(heading, tuples) => self.relation(heading, tuples, cx),
             hir::Expr::Remove(operand, names) => {
                 let ty = self.program.type_of(operand, self.within);
                 let src = self.place(operand, cx);
@@ -349,6 +356,78 @@ impl FunctionBuilder<'_> {
                 self.binary(*op, &operand_ty, lhs, rhs, cx)
             }
         }
+    }
+
+    /// Copy each of `attributes`, in name order, into a field of the tuple
+    /// at `dst`.
+    fn fill_tuple(
+        &mut self,
+        attributes: &BTreeMap<String, hir::Expr>,
+        dst: &lir::Place,
+        cx: &mut Lowering,
+    ) {
+        for (i, value) in attributes.values().enumerate() {
+            let ty = self.program.type_of(value, self.within);
+            let src = self.place(value, cx);
+            let mut to = dst.clone();
+            to.path.push(i);
+            self.insts.push(lir::Inst::Copy {
+                dst: to,
+                src,
+                layout: layout(&ty),
+            });
+        }
+    }
+
+    /// A relation with `heading` and `tuples`, some known only when the
+    /// program runs: built one after another in a slot, then sorted and
+    /// rid of duplicates by the runtime, into memory released when the
+    /// statement ends.
+    fn relation(
+        &mut self,
+        heading: &hir::Heading,
+        tuples: &[hir::Expr],
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let tuple_layout = layout(&hir::Type::Tuple(heading.clone()));
+        // A struct of tuples with one layout is an array: each is padded to
+        // its alignment, so the stride is the tuple's size.
+        let array = self.slot(lir::Layout::Struct(vec![
+            tuple_layout.clone();
+            tuples.len()
+        ]));
+        for (k, tuple) in tuples.iter().enumerate() {
+            let mut element = array.clone();
+            element.path.push(k);
+            if let hir::Expr::Tuple(attributes) = tuple {
+                self.fill_tuple(attributes, &element, cx);
+            } else {
+                let src = self.place(tuple, cx);
+                self.insts.push(lir::Inst::Copy {
+                    dst: element,
+                    src,
+                    layout: tuple_layout.clone(),
+                });
+            }
+        }
+        let count = cx.constant(vec![lir::Field::Usize(tuples.len() as u64)]);
+        let ty = hir::Type::Relation(heading.clone());
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+        let dst = self.slot(layout(&ty));
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Relation,
+            args: vec![
+                dst.clone(),
+                array,
+                lir::Place {
+                    base: lir::Base::Data(count),
+                    path: vec![0],
+                },
+                descriptor,
+            ],
+        });
+        self.owned.push(dst.clone());
+        dst
     }
 
     /// The value at `src`, of type `ty`, reshaped into one of type

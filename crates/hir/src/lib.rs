@@ -46,6 +46,13 @@ impl Program {
             },
             Expr::Unary(op, _) => Type::Scalar(op.result()),
             Expr::Binary(op, ..) => Type::Scalar(op.result()),
+            Expr::Tuple(attributes) => Type::Tuple(Heading::new(
+                attributes
+                    .iter()
+                    .map(|(name, e)| (name.clone(), self.type_of(e, within)))
+                    .collect(),
+            )),
+            Expr::Relation(heading, _) => Type::Relation(heading.clone()),
             Expr::Remove(operand, names) => self.type_of(operand, within).without(names),
             Expr::Rename(operand, renamings) => self.type_of(operand, within).renamed(renamings),
         }
@@ -151,6 +158,13 @@ pub enum Expr {
     Unary(UnaryOp, Box<Expr>),
     /// A dyadic operator, such as `x and y` or `x + y`.
     Binary(BinaryOp, Box<Expr>, Box<Expr>),
+    /// A tuple selector whose attribute values aren't all known when
+    /// compiling.
+    Tuple(BTreeMap<String, Expr>),
+    /// A relation selector with this heading whose tuples aren't all known
+    /// when compiling: each tuple of the heading's tuple type. Tuples that
+    /// turn out equal become one when the program runs.
+    Relation(Heading, Vec<Expr>),
     /// A tuple or relation without the named attributes (Algebra A's
     /// REMOVE). A projection is remove of the attributes not named. The names
     /// are attributes of the operand, and there is at least one.

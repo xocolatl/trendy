@@ -2,8 +2,9 @@ use std::fmt;
 
 /// A stable identifier for each kind of diagnostic.
 ///
-/// Codes are permanent: once released, a code keeps its meaning and is never
-/// reused. Its letter says what kind of problem it is, not which layer finds
+/// Codes are permanent once the language is released: a code then keeps its
+/// meaning and is never reused. Until then, a code no longer reported is
+/// freed for the next new one; A0020 is free. Its letter says what kind of problem it is, not which layer finds
 /// it: `P` the source doesn't parse, `A` it parses but analysis rejects it,
 /// `R` it fails while running, and `X` the compiler itself is wrong. Each
 /// letter's `0000` is reserved for a generic error of that kind. A rule that
@@ -48,7 +49,6 @@ pub enum Code {
     NotAnOperator,
     PositionalArgument,
     MainWithParams,
-    NameInSelector,
     CyclicInitialValues,
     WrongOperandType,
     EmptyRemove,
@@ -73,7 +73,7 @@ pub enum CodeKind {
 }
 
 impl Code {
-    pub const ALL: [Code; 46] = [
+    pub const ALL: [Code; 45] = [
         Code::UnexpectedCharacter,
         Code::MissingToken,
         Code::WrongDelimiter,
@@ -111,7 +111,6 @@ impl Code {
         Code::NotAnOperator,
         Code::PositionalArgument,
         Code::MainWithParams,
-        Code::NameInSelector,
         Code::CyclicInitialValues,
         Code::WrongOperandType,
         Code::EmptyRemove,
@@ -162,7 +161,6 @@ impl Code {
             Code::NotAnOperator => "A0017",
             Code::PositionalArgument => "A0018",
             Code::MainWithParams => "A0019",
-            Code::NameInSelector => "A0020",
             Code::CyclicInitialValues => "A0021",
             Code::WrongOperandType => "A0022",
             Code::EmptyRemove => "A0023",
@@ -242,7 +240,6 @@ impl Code {
             Code::NotAnOperator => include_str!("../errors/A0017.md"),
             Code::PositionalArgument => include_str!("../errors/A0018.md"),
             Code::MainWithParams => include_str!("../errors/A0019.md"),
-            Code::NameInSelector => include_str!("../errors/A0020.md"),
             Code::CyclicInitialValues => include_str!("../errors/A0021.md"),
             Code::WrongOperandType => include_str!("../errors/A0022.md"),
             Code::EmptyRemove => include_str!("../errors/A0023.md"),

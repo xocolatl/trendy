@@ -36,19 +36,6 @@ var cities := relation {
    hand are in scope by name, and hide any variable or parameter of the
    same name. To use one of those, rename it first. */
 
-/* Building relations from run-time values (RM Prescription 10).
-   Tuple analog: building tuples from run-time values.
-   Tutorial D: RELATION { TUPLE { NAME N, BORN B }, ... }
-   Proposed: as now, but tuples and attribute values can be parameters,
-   variables and any other expression, not only constants (lifting A0020).
-   Duplicates are removed when the program runs, so the result can have
-   fewer tuples than written.
-
-   operator add{name: text, born: integer} [
-       call debug_value{v: relation { { name: name, born: born }, { name: "Ada", born: 1815 } }};
-   ];
-*/
-
 /* The empty relations of degree zero (RM Prescription 10): table_dee, with
    one tuple, which is true, and table_dum, with none, which is false.
    Tutorial D: TABLE_DEE and TABLE_DUM
@@ -266,6 +253,48 @@ operator rename_signs{r: relation { x: rational, n: integer }} [
     call debug_value{v: r rename {x as n, n as x}};
 ];
 
+/* Building relations from run-time values (RM Prescription 10). Tuples
+   that turn out equal become one, so the result can have fewer tuples than
+   written. Tuple analog: building tuples from run-time values.
+   Implemented, and printed twice like the projections. */
+var added := relation {
+    { name: "Grace", born: 1906 },
+    { name: "Ada", born: 1815 }
+};
+var collapsed := relation { { x: 1 } };
+var held := tuple {
+    who: "core",
+    members: relation {
+        { name: "Ada" },
+        { name: "Grace" }
+    }
+};
+
+operator build_people{name: text, born: integer} [
+    call debug_value{v: relation {
+        { name: name, born: born },
+        { name: "Ada", born: 1815 }
+    }};
+];
+
+operator build_duplicates{a: integer, b: integer} [
+    call debug_value{v: relation {
+        { x: a },
+        { x: b },
+        { x: 1 }
+    }};
+];
+
+operator build_nested{team: text, member: text} [
+    call debug_value{v: tuple {
+        who: team,
+        members: relation {
+            { name: member },
+            { name: "Ada" }
+        }
+    }};
+];
+
 operator main{} [
     call debug_value{v: names};
     call debug_value{v: places};
@@ -276,6 +305,9 @@ operator main{} [
     call debug_value{v: dum};
     call debug_value{v: aliases};
     call debug_value{v: swapped};
+    call debug_value{v: added};
+    call debug_value{v: collapsed};
+    call debug_value{v: held};
 
     call project_births{r: births};
     call project_signs{r: signs};
@@ -284,4 +316,8 @@ operator main{} [
 
     call rename_births{r: births};
     call rename_signs{r: signs};
+
+    call build_people{name: "Grace", born: 1906};
+    call build_duplicates{a: 1, b: 1};
+    call build_nested{team: "core", member: "Grace"};
 ];

@@ -236,9 +236,14 @@ constant overflow, or a division by a constant zero, is a compile error
 (R0001, R0002). `-` directly before a number literal makes a negative
 literal, so that the smallest integer can be written. Rational folding and
 simplification are exact IEEE 754 binary64, the same arithmetic the program
-does at run time, so folding never changes a result. Tuple and relation
-values in bodies are still built when compiling, so a parameter or variable
-inside one is an error (A0020).
+does at run time, so folding never changes a result.
+
+Tuple and relation selectors are checked once for both kinds of value
+(`types::Selectors`): in an initial value they produce `hir::Value`s, and
+in a body `hir::Expr`s, folded to a constant when every part is one. A
+selector with run-time parts becomes `hir::Expr::Tuple` or
+`hir::Expr::Relation`. Duplicate tuples are an error only when both are
+constants; tuples known only when running become one if they are equal.
 
 The arithmetic operators are overloaded on integers and rationals
 (`ops::Operator` resolves to a typed `hir::BinaryOp`): the operand type
@@ -322,6 +327,11 @@ time calls `trendy_rt_concat`, which allocates the result's bytes with
 there is no assignment and operators return nothing, so lowering releases
 each one with `trendy_rt_free` when its statement ends. Assignment and
 returned values will need a real ownership scheme.
+
+A tuple built at run time is a stack slot with each attribute copied into
+its field. A relation built at run time has its tuples built one after
+another in a stack slot, then `trendy_rt_relation` sorts them into the
+canonical order and drops duplicates, into memory released like a text's.
 
 Removing attributes (`hir::Expr::Remove`, which a projection becomes) and
 renaming them (`hir::Expr::Rename`) are both reshaping: each attribute of
@@ -411,8 +421,9 @@ code by reading the diagnostics and editing. So diagnostics are a primary
 interface of the compiler, and every one of them must be actionable without
 guesswork.
 
-- **Stable code.** Every diagnostic has a `Code` (`P0002`). Codes are never
-  reused or renumbered. The letter says what kind of problem it is, not which
+- **Stable code.** Every diagnostic has a `Code` (`P0002`). Once the
+  language is released, codes are never reused or renumbered; until then, a
+  code that is no longer reported is freed for the next new one. The letter says what kind of problem it is, not which
   layer finds it, so a check can move between layers and keep its code:
   - `P`: the source doesn't parse (lexer and parser);
   - `A`: it parses, but analysis rejects it (sema);

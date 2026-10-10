@@ -364,6 +364,8 @@ fn tuples() {
             r#"tuple { city: "Washington", postcode: "20500", state: "DC", street: "1600 Pennsylvania Ave." }"#,
             // All at once: a swap.
             "tuple { x: 2.0, y: 1.0 }",
+            // Built from run-time values.
+            r#"tuple { number: tuple { n: 13 }, street: "Elm Street!" }"#,
         ]
     );
 }
@@ -386,6 +388,11 @@ fn relations() {
             // Renamed, and sorted again by the new first attribute.
             r#"relation { alias: text, born: integer, place: text } { { alias: "Ada", born: 1815, place: "London" }, { alias: "Ada", born: 1816, place: "London" }, { alias: "Edgar", born: 1923, place: "Portland" }, { alias: "Édouard", born: 1815, place: "Paris" } }"#,
             "relation { n: rational, x: integer } { { n: -1.5, x: 3 }, { n: -1.5, x: 5 }, { n: -0.0, x: 2 }, { n: 0.0, x: 4 }, { n: 2.5, x: 1 } }",
+            // Built from run-time values, sorted, and with the tuples that
+            // turn out equal made one.
+            r#"relation { born: integer, name: text } { { born: 1815, name: "Ada" }, { born: 1906, name: "Grace" } }"#,
+            "relation { x: integer } { { x: 1 } }",
+            r#"tuple { members: relation { name: text } { { name: "Ada" }, { name: "Grace" } }, who: "core" }"#,
         ]
     );
 }

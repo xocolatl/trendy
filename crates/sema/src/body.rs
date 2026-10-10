@@ -1,14 +1,14 @@
 //! Operators: their parameters, and the statements and expressions in their
 //! bodies.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use trendy_diag::{Diagnostic, Span, edit_distance};
 use trendy_hir as hir;
 use trendy_syntax::ast::{self, AstNode, AttributeValue, Expr};
 
 use crate::ops::{self, Operator, Resolved};
-use crate::types::{self, Expected, Origin, Scope};
+use crate::types::{self, Expected, Origin, Scope, Selectors};
 use crate::{Kind, Values, errors};
 
 /// What a call needs to know about the operator it calls.
@@ -267,7 +267,7 @@ fn expr(
         Expr::Paren(paren) => self::expr(&paren.inner()?, expected, within, cx, errors),
         Expr::Unary(unary) => {
             if ops::negated_literal(unary).is_some() {
-                let mut scope = Selector { cx, within };
+                let mut scope = Literals { values: cx.values };
                 return types::value(expr, expected, &mut scope, errors).map(hir::Expr::Constant);
             }
             let token = unary.operator()?;
@@ -308,9 +308,15 @@ fn expr(
             )
         }
         Expr::Project(_) | Expr::Postfix(_) => reshaped(expr, expected, within, cx, errors),
-        Expr::Literal(_) | Expr::Tuple(_) | Expr::Relation(_) => {
-            let mut scope = Selector { cx, within };
+        Expr::Literal(_) => {
+            let mut scope = Literals { values: cx.values };
             types::value(expr, expected, &mut scope, errors).map(hir::Expr::Constant)
+        }
+        Expr::Tuple(tuple) => {
+            types::tuple_selector(tuple, expected, &mut Selected { cx, within }, errors)
+        }
+        Expr::Relation(relation) => {
+            types::relation_selector(relation, expected, &mut Selected { cx, within }, errors)
         }
     }
 }
@@ -400,6 +406,13 @@ fn type_of(expr: &hir::Expr, within: hir::OperatorId, cx: &Context) -> hir::Type
         },
         hir::Expr::Unary(op, _) => hir::Type::Scalar(op.result()),
         hir::Expr::Binary(op, ..) => hir::Type::Scalar(op.result()),
+        hir::Expr::Tuple(attributes) => hir::Type::Tuple(hir::Heading::new(
+            attributes
+                .iter()
+                .map(|(name, e)| (name.clone(), type_of(e, within, cx)))
+                .collect(),
+        )),
+        hir::Expr::Relation(heading, _) => hir::Type::Relation(heading.clone()),
         hir::Expr::Remove(operand, names) => type_of(operand, within, cx).without(names),
         hir::Expr::Rename(operand, renamings) => type_of(operand, within, cx).renamed(renamings),
     }
@@ -477,34 +490,82 @@ impl Context<'_> {
     }
 }
 
-/// A tuple or relation value in a body, which is built when compiling, so
-/// that its attributes can't refer to parameters or variables.
-struct Selector<'a, 'b> {
+/// Literals in a body, which have no names in them.
+struct Literals<'a> {
+    values: &'a Values,
+}
+
+impl Scope for Literals<'_> {
+    fn values(&self) -> &Values {
+        self.values
+    }
+
+    fn constant(&mut self, _: &ast::NameRef, _: &mut Vec<Diagnostic>) -> Option<hir::Value> {
+        unreachable!("a literal has no names")
+    }
+}
+
+/// Tuple and relation selectors in a body, whose values can be known only
+/// when the program runs.
+struct Selected<'a, 'b> {
     cx: &'a Context<'b>,
     within: hir::OperatorId,
 }
 
-impl Scope for Selector<'_, '_> {
+impl Selectors for Selected<'_, '_> {
+    type Out = hir::Expr;
+
     fn values(&self) -> &Values {
         self.cx.values
     }
 
-    fn constant(
+    fn check(
         &mut self,
-        name_ref: &ast::NameRef,
+        expr: &Expr,
+        expected: Option<&Expected>,
         errors: &mut Vec<Diagnostic>,
-    ) -> Option<hir::Value> {
-        let ident = name_ref.ident()?;
-        let name = ident.text();
-        let span = trendy_syntax::span(ident.text_range());
-        if self.cx.operators[self.within.0].params.contains_key(name) {
-            errors.push(errors::name_in_selector(name, span, "a parameter"));
-        } else if let Some((Kind::Variable, _)) = self.cx.values.get(name) {
-            errors.push(errors::name_in_selector(name, span, "a variable"));
-        } else {
-            self.cx.not_a_value(name, span, self.within, errors);
+    ) -> Option<hir::Expr> {
+        self::expr(expr, expected, self.within, self.cx, errors)
+    }
+
+    fn ty(&self, out: &hir::Expr) -> hir::Type {
+        type_of(out, self.within, self.cx)
+    }
+
+    fn constant<'o>(&self, out: &'o hir::Expr) -> Option<&'o hir::Value> {
+        match out {
+            hir::Expr::Constant(value) => Some(value),
+            _ => None,
         }
-        None
+    }
+
+    fn tuple(&self, attributes: BTreeMap<String, hir::Expr>) -> hir::Expr {
+        let constants: Option<BTreeMap<String, hir::Value>> = attributes
+            .iter()
+            .map(|(name, e)| Some((name.clone(), self.constant(e)?.clone())))
+            .collect();
+        match constants {
+            Some(constants) => {
+                hir::Expr::Constant(hir::Value::Tuple(hir::TupleValue::new(constants)))
+            }
+            None => hir::Expr::Tuple(attributes),
+        }
+    }
+
+    fn relation(&self, heading: hir::Heading, tuples: Vec<hir::Expr>) -> hir::Expr {
+        let constants: Option<BTreeSet<hir::TupleValue>> = tuples
+            .iter()
+            .map(|t| match self.constant(t)? {
+                hir::Value::Tuple(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        match constants {
+            Some(tuples) => {
+                hir::Expr::Constant(hir::Value::Relation(hir::RelationValue { heading, tuples }))
+            }
+            None => hir::Expr::Relation(heading, tuples),
+        }
     }
 }
 

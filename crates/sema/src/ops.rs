@@ -619,12 +619,14 @@ pub(crate) fn negative_value(
 fn can_fail(expr: &hir::Expr) -> bool {
     match expr {
         hir::Expr::Constant(_) | hir::Expr::Variable(_) | hir::Expr::Parameter(_) => false,
-        // Negating the smallest integer overflows, and removing or renaming
-        // attributes of a relation allocates the result.
+        // Negating the smallest integer overflows, and building a relation,
+        // or removing or renaming its attributes, allocates the result.
         hir::Expr::Unary(hir::UnaryOp::Negate(hir::Numeric::Integer), _)
         | hir::Expr::Remove(..)
-        | hir::Expr::Rename(..) => true,
+        | hir::Expr::Rename(..)
+        | hir::Expr::Relation(..) => true,
         hir::Expr::Unary(_, operand) => can_fail(operand),
+        hir::Expr::Tuple(attributes) => attributes.values().any(can_fail),
         hir::Expr::Binary(op, lhs, rhs) => {
             // Arithmetic and concatenation can fail themselves; the boolean
             // operators and comparisons can't.

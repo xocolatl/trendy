@@ -132,7 +132,8 @@ pub enum RuntimeFn {
     /// allocated.
     Concat,
     /// `trendy_rt_free(value)`: release the memory of a text or relation
-    /// made by [`RuntimeFn::Concat`] or [`RuntimeFn::Reshape`].
+    /// made by [`RuntimeFn::Concat`], [`RuntimeFn::Reshape`] or
+    /// [`RuntimeFn::Relation`].
     Free,
     /// `trendy_rt_reshape(dst, src, result, source, offsets)`: store at
     /// `dst` the relation `src` with its tuples reshaped into the
@@ -143,6 +144,12 @@ pub enum RuntimeFn {
     /// `result`, the offset in a tuple of `src` of the attribute it comes
     /// from. Removing and renaming attributes are both reshaping.
     Reshape,
+    /// `trendy_rt_relation(dst, tuples, count, descriptor)`: store at `dst`
+    /// the relation, of the type the descriptor describes, whose tuples are
+    /// the `count` (a [`Field::Usize`]) at `tuples`, one after another,
+    /// sorted canonically and without duplicates, in allocated memory that
+    /// must be released with [`RuntimeFn::Free`].
+    Relation,
     /// `trendy_rt_compare_text(dst, lhs, rhs)`: store -1, 0 or 1 at `dst`,
     /// an [`Layout::I64`], as `lhs` is before, equal to or after `rhs` in
     /// code point order.
@@ -163,6 +170,7 @@ impl RuntimeFn {
             RuntimeFn::Concat => "trendy_rt_concat",
             RuntimeFn::Free => "trendy_rt_free",
             RuntimeFn::Reshape => "trendy_rt_reshape",
+            RuntimeFn::Relation => "trendy_rt_relation",
             RuntimeFn::CompareText => "trendy_rt_compare_text",
             RuntimeFn::Equal => "trendy_rt_equal",
         }
