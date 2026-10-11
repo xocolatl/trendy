@@ -28,6 +28,7 @@ fn punctuation_scope(kind: SyntaxKind) -> &'static str {
         SyntaxKind::LParen | SyntaxKind::RParen => "punctuation.section.parens.trendy",
         SyntaxKind::Colon => "punctuation.separator.type.trendy",
         SyntaxKind::Comma => "punctuation.separator.comma.trendy",
+        SyntaxKind::Dot => "punctuation.accessor.trendy",
         SyntaxKind::ColonEq => "keyword.operator.assignment.trendy",
         SyntaxKind::Eq
         | SyntaxKind::LtGt

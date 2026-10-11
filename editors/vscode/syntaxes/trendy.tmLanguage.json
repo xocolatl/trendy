@@ -135,6 +135,10 @@
           "name": "punctuation.separator.comma.trendy"
         },
         {
+          "match": "\\.",
+          "name": "punctuation.accessor.trendy"
+        },
+        {
           "match": "\\;",
           "name": "punctuation.terminator.trendy"
         },

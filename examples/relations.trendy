@@ -96,7 +96,7 @@ var cities := relation {
    and n-adic UNION { R1, R2, R3 } and so on
    Proposed: `union`, `intersect`, `minus` and `disjoint union` operators.
 
-   call debug_value{v: people union relation { { name: "Grace", born: 1906 } }};
+   call debug_value{v: people union relation { { name: "李白", born: 701 } }};
    call debug_value{v: people minus people where born > 1900};
 */
 
@@ -189,8 +189,8 @@ var cities := relation {
    UPDATE R WHERE ... ( A := ... )
    Proposed: statements.
 
-   people := people union relation { { name: "Grace", born: 1906 } };
-   insert people relation { { name: "Grace", born: 1906 } };
+   people := people union relation { { name: "李白", born: 701 } };
+   insert people relation { { name: "李白", born: 701 } };
    delete people where born > 1900;
    update people where name = "Ada" { born: 1815 };
 */
@@ -258,7 +258,7 @@ operator rename_signs{r: relation { x: rational, n: integer }} [
    written. Tuple analog: building tuples from run-time values.
    Implemented, and printed twice like the projections. */
 var added := relation {
-    { name: "Grace", born: 1906 },
+    { name: "李白", born: 701 },
     { name: "Ada", born: 1815 }
 };
 var collapsed := relation { { x: 1 } };
@@ -266,7 +266,7 @@ var held := tuple {
     who: "core",
     members: relation {
         { name: "Ada" },
-        { name: "Grace" }
+        { name: "李白" }
     }
 };
 
@@ -317,7 +317,7 @@ operator main{} [
     call rename_births{r: births};
     call rename_signs{r: signs};
 
-    call build_people{name: "Grace", born: 1906};
+    call build_people{name: "李白", born: 701};
     call build_duplicates{a: 1, b: 1};
-    call build_nested{team: "core", member: "Grace"};
+    call build_nested{team: "core", member: "李白"};
 ];

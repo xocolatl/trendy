@@ -10,7 +10,12 @@
 
 mod order;
 
-use trendy_syntax::ast::{Arguments, AstNode, Body, RelationLiteral, SourceFile, TupleLiteral};
+use std::collections::HashSet;
+
+use trendy_syntax::ast::{
+    Arguments, AstNode, Body, Heading, NameList, RelationLiteral, RenameList, SourceFile,
+    TupleLiteral,
+};
 use trendy_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
 /// Render a file in canonical style.
@@ -20,6 +25,108 @@ use trendy_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 /// output ends with exactly one newline; an empty file formats as "".
 #[must_use]
 pub fn format(file: &SourceFile) -> String {
+    // Lay everything out flat but for the blocks the structure demands, then
+    // break the outermost list on the first line that's too long, until
+    // every line fits or nothing more can be broken.
+    let mut layout = Layout::default();
+    loop {
+        let (out, lines) = render(file, &layout);
+        match layout.too_long(&out, &lines) {
+            Some(list) => {
+                layout.broken.insert(list);
+            }
+            None => return out,
+        }
+    }
+}
+
+/// The widest a line may be, in characters, before the formatter breaks a
+/// list in it across lines.
+const MAX_WIDTH: usize = 100;
+
+/// Which lists are broken across lines beyond those the structure demands.
+#[derive(Default)]
+struct Layout {
+    broken: HashSet<SyntaxNode>,
+}
+
+impl Layout {
+    /// The outermost list that can still be broken on the first line of
+    /// `out` that is too long, given `lines`, the line each significant
+    /// token was written on.
+    fn too_long(&self, out: &str, lines: &[(SyntaxToken, usize)]) -> Option<SyntaxNode> {
+        for (line, text) in out.lines().enumerate() {
+            if text.chars().count() <= MAX_WIDTH {
+                continue;
+            }
+            let list = lines
+                .iter()
+                .filter(|(_, l)| *l == line)
+                .filter(|(token, _)| {
+                    matches!(token.kind(), SyntaxKind::LBrace | SyntaxKind::LBracket)
+                })
+                .filter_map(|(token, _)| token.parent())
+                .find(|node| is_list(node) && items(node) > 0 && !self.is_block(node));
+            if list.is_some() {
+                return list;
+            }
+        }
+        None
+    }
+
+    /// Whether a node is laid out one item per line, indented: a body with
+    /// statements, a relation value with more than one tuple, a list broken
+    /// because it was too long, and a list with several items, one of them
+    /// laid out across lines. So a value broken across lines is never
+    /// followed by more items on its last line; a single item stays hugged by
+    /// its braces, as in `call f{v: relation {` … `}};`.
+    fn is_block(&self, node: &SyntaxNode) -> bool {
+        self.own_block(node)
+            || (is_list(node)
+                && items(node) > 1
+                && node.descendants().skip(1).any(|n| self.own_block(&n)))
+    }
+
+    /// Whether `node` is a block in its own right, not because of what's in
+    /// it.
+    fn own_block(&self, node: &SyntaxNode) -> bool {
+        match node.kind() {
+            SyntaxKind::Body => {
+                Body::cast(node.clone()).is_some_and(|b| b.statements().next().is_some())
+            }
+            _ => is_multi_tuple_relation(node) || self.broken.contains(node),
+        }
+    }
+
+    /// How many blocks enclose `node`, not counting itself: the indentation
+    /// level of its own lines' start.
+    fn level(&self, node: &SyntaxNode) -> usize {
+        node.ancestors()
+            .skip(1)
+            .filter(|n| self.is_block(n))
+            .count()
+    }
+}
+
+/// Whether `node` is a list that can be broken across lines, one item per
+/// line: parameters, arguments, headings, tuple and relation values, and
+/// lists of names.
+fn is_list(node: &SyntaxNode) -> bool {
+    matches!(
+        node.kind(),
+        SyntaxKind::Heading
+            | SyntaxKind::Arguments
+            | SyntaxKind::TupleLiteral
+            | SyntaxKind::RelationLiteral
+            | SyntaxKind::NameList
+            | SyntaxKind::RenameList
+    )
+}
+
+/// The file laid out by `layout`, and the line each significant token is on.
+fn render(file: &SourceFile, layout: &Layout) -> (String, Vec<(SyntaxToken, usize)>) {
+    let mut lines = Vec::new();
+    let mut line = 0;
     let mut out = String::new();
     let mut prev: Option<SyntaxToken> = None;
     // Since the previous significant token: whether the source has a blank
@@ -52,7 +159,7 @@ pub fn format(file: &SourceFile) -> String {
             _ => {}
         }
         let sep = match &prev {
-            Some(prev) => between(prev, &token, blank_line),
+            Some(prev) => between(prev, &token, blank_line, layout),
             None => String::new(),
         };
         let gap = Gap {
@@ -61,7 +168,10 @@ pub fn format(file: &SourceFile) -> String {
             next: &token,
             blank_after: blank_since,
         };
+        let before = out.len();
         gap.write(&std::mem::take(&mut comments), &mut out);
+        line += out[before..].matches('\n').count();
+        lines.push((token.clone(), line));
         out.push_str(token.text());
         prev = Some(token);
         blank_line = false;
@@ -85,12 +195,12 @@ pub fn format(file: &SourceFile) -> String {
     if !out.is_empty() {
         out.push('\n');
     }
-    out
+    (out, lines)
 }
 
 /// The whitespace between two adjacent significant tokens.
-fn between(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> String {
-    if let Some(indent) = broken_line(prev, next) {
+fn between(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool, layout: &Layout) -> String {
+    if let Some(indent) = broken_line(prev, next, layout) {
         // Statements in a row go on adjacent lines, unless the source groups
         // them with a blank line, which is kept; several become one.
         let statement_end = prev.kind() == SyntaxKind::Semicolon
@@ -235,34 +345,11 @@ impl Gap<'_> {
 
 const INDENT: &str = "    ";
 
-/// Whether a node is laid out one item per line, indented: a body with
-/// statements, a relation value with more than one tuple, and a tuple value,
-/// relation value or call's arguments with several items, one of them laid
-/// out across lines. So a value broken across lines is never followed by
-/// more items on its last line; a single item stays hugged by its braces,
-/// as in `call f{v: relation {` … `}};`.
-fn is_block(node: &SyntaxNode) -> bool {
-    match node.kind() {
-        SyntaxKind::Body => {
-            Body::cast(node.clone()).is_some_and(|b| b.statements().next().is_some())
-        }
-        SyntaxKind::RelationLiteral | SyntaxKind::TupleLiteral | SyntaxKind::Arguments => {
-            is_multi_tuple_relation(node)
-                || (items(node) > 1
-                    && node
-                        .descendants()
-                        .skip(1)
-                        .any(|n| is_multi_tuple_relation(&n)))
-        }
-        _ => false,
-    }
-}
-
 fn is_multi_tuple_relation(node: &SyntaxNode) -> bool {
     RelationLiteral::cast(node.clone()).is_some_and(|r| r.tuples().nth(1).is_some())
 }
 
-/// How many items a tuple value, relation value or call's arguments lists.
+/// How many items a list has.
 fn items(node: &SyntaxNode) -> usize {
     if let Some(relation) = RelationLiteral::cast(node.clone()) {
         relation.tuples().count()
@@ -270,35 +357,35 @@ fn items(node: &SyntaxNode) -> usize {
         tuple.attributes().count()
     } else if let Some(args) = Arguments::cast(node.clone()) {
         args.named().count() + args.positional().count()
+    } else if let Some(heading) = Heading::cast(node.clone()) {
+        heading.attributes().count()
+    } else if let Some(names) = NameList::cast(node.clone()) {
+        names.names().count()
+    } else if let Some(renamings) = RenameList::cast(node.clone()) {
+        renamings.renamings().count()
     } else {
         0
     }
 }
 
-/// How many blocks enclose `node`, not counting itself: the indentation
-/// level of its own lines' start.
-fn level(node: &SyntaxNode) -> usize {
-    node.ancestors().skip(1).filter(is_block).count()
-}
-
 /// If a line break goes between `prev` and `next`, the indentation level of
 /// the new line. In a block, each item starts its own line, one level in,
 /// and the closing delimiter goes on a line of its own.
-fn broken_line(prev: &SyntaxToken, next: &SyntaxToken) -> Option<usize> {
-    let block = |token: &SyntaxToken| token.parent().filter(is_block);
+fn broken_line(prev: &SyntaxToken, next: &SyntaxToken, layout: &Layout) -> Option<usize> {
+    let block = |token: &SyntaxToken| token.parent().filter(|p| layout.is_block(p));
     if matches!(next.kind(), SyntaxKind::RBrace | SyntaxKind::RBracket)
         && let Some(block) = block(next)
     {
-        return Some(level(&block));
+        return Some(layout.level(&block));
     }
     match prev.kind() {
         SyntaxKind::LBrace | SyntaxKind::LBracket | SyntaxKind::Comma => {
-            block(prev).map(|b| level(&b) + 1)
+            block(prev).map(|b| layout.level(&b) + 1)
         }
         // A statement's `;`, inside a body.
         SyntaxKind::Semicolon => {
-            let body = prev.parent()?.parent().filter(is_block)?;
-            Some(level(&body) + 1)
+            let body = prev.parent()?.parent().filter(|p| layout.is_block(p))?;
+            Some(layout.level(&body) + 1)
         }
         _ => None,
     }
@@ -728,6 +815,10 @@ mod tests {
             "var a := b{c, d}{c} remove {c};\n"
         );
         assert_eq!(fmt("var a := b{};"), "var a := b{};\n");
+        assert_eq!(
+            fmt("var a := - t . b . c+u{ c }.c;"),
+            "var a := -t.b.c + u{c}.c;\n"
+        );
         assert_eq!(fmt("var a := (b){ c };"), "var a := (b){c};\n");
         assert_eq!(
             fmt("var a:=b rename{ c  as d,e as f }{d};"),
@@ -741,6 +832,26 @@ mod tests {
             fmt("operator main{} [\ncall a{};\n\n\n\ncall b{};\ncall c{};\n\n];"),
             "operator main{} [\n    call a{};\n\n    call b{};\n    call c{};\n];\n"
         );
+    }
+
+    #[test]
+    fn long_lines_break_their_outermost_list() {
+        let source = "operator extract{a: tuple { street: text, city: text, country: text, postal_code: text }, p: tuple { x: rational, y: rational }} [];";
+        let expected = "operator extract{\n    a: tuple { street: text, city: text, country: text, postal_code: text },\n    p: tuple { x: rational, y: rational }\n} [];\n";
+        assert_eq!(fmt(source), expected);
+        assert_eq!(fmt(expected), expected, "idempotent");
+        // Within a broken list, an item still too long breaks in turn.
+        let deep = fmt(
+            "var t := tuple { a: tuple { street: \"1 Rue de Rivoli\", city: \"Paris\", country: \"République française\", postal_code: \"75001\" }, b: 1 };",
+        );
+        assert_eq!(
+            deep,
+            "var t := tuple {\n    a: tuple {\n        street: \"1 Rue de Rivoli\",\n        city: \"Paris\",\n        country: \"République française\",\n        postal_code: \"75001\"\n    },\n    b: 1\n};\n"
+        );
+        assert!(deep.lines().all(|l| l.chars().count() <= MAX_WIDTH));
+        // A line with nothing to break stays as it is.
+        let text = format!("var t := \"{}\";", "Невский ".repeat(20));
+        assert_eq!(fmt(&text), format!("{text}\n"));
     }
 
     #[test]

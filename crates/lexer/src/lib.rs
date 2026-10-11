@@ -79,6 +79,7 @@ pub fn lex(source: &str) -> Lexed {
                 ')' => SyntaxKind::RParen,
                 ':' => SyntaxKind::Colon,
                 ',' => SyntaxKind::Comma,
+                '.' => SyntaxKind::Dot,
                 '=' => SyntaxKind::Eq,
                 '<' => SyntaxKind::Lt,
                 '>' => SyntaxKind::Gt,
@@ -643,8 +644,9 @@ mod tests {
     }
 
     #[test]
-    fn a_lone_point_is_still_unexpected() {
-        assert_eq!(codes("."), [Code::UnexpectedCharacter]);
+    fn a_lone_point_is_a_dot() {
+        assert_eq!(kinds("."), [Dot]);
+        assert!(codes(".").is_empty(), "the parser decides");
     }
 
     #[test]
@@ -744,6 +746,14 @@ mod tests {
                 Ident
             ]
         );
+    }
+
+    #[test]
+    fn dots() {
+        assert_eq!(kinds("t.a.b"), [Ident, Dot, Ident, Dot, Ident]);
+        assert_eq!(kinds("(t).a"), [LParen, Ident, RParen, Dot, Ident]);
+        // A leading point is still a malformed rational.
+        assert_eq!(kinds(".5"), [RationalLiteral]);
     }
 
     #[test]

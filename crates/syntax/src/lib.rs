@@ -56,6 +56,8 @@ pub enum SyntaxKind {
     RParen,
     Colon,
     Comma,
+    /// `.`, in `t.a`.
+    Dot,
     ColonEq,
     /// Equality, and recognized where `:=` is meant, with a fix.
     Eq,
@@ -114,6 +116,8 @@ pub enum SyntaxKind {
     BinaryExpr,
     /// `(x)`
     ParenExpr,
+    /// `t.a`: an attribute's value.
+    ExtractExpr,
     /// `r{a, b}`: a projection.
     ProjectExpr,
     /// `r remove {a, b}` or `r rename {a as b}`
@@ -152,7 +156,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 78] = [
+    pub const ALL: [SyntaxKind; 80] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -182,6 +186,7 @@ impl SyntaxKind {
         SyntaxKind::RParen,
         SyntaxKind::Colon,
         SyntaxKind::Comma,
+        SyntaxKind::Dot,
         SyntaxKind::ColonEq,
         SyntaxKind::Eq,
         SyntaxKind::LtGt,
@@ -214,6 +219,7 @@ impl SyntaxKind {
         SyntaxKind::UnaryExpr,
         SyntaxKind::BinaryExpr,
         SyntaxKind::ParenExpr,
+        SyntaxKind::ExtractExpr,
         SyntaxKind::ProjectExpr,
         SyntaxKind::PostfixExpr,
         SyntaxKind::NameList,
@@ -368,6 +374,7 @@ impl SyntaxKind {
             SyntaxKind::RParen => ")",
             SyntaxKind::Colon => ":",
             SyntaxKind::Comma => ",",
+            SyntaxKind::Dot => ".",
             SyntaxKind::ColonEq => ":=",
             SyntaxKind::Eq => "=",
             SyntaxKind::LtGt => "<>",
@@ -419,6 +426,7 @@ impl SyntaxKind {
             SyntaxKind::RParen => "`)`",
             SyntaxKind::Colon => "`:`",
             SyntaxKind::Comma => "`,`",
+            SyntaxKind::Dot => "`.`",
             SyntaxKind::ColonEq => "`:=`",
             SyntaxKind::Eq => "`=`",
             SyntaxKind::LtGt => "`<>`",
@@ -445,6 +453,7 @@ impl SyntaxKind {
             SyntaxKind::UnaryExpr
             | SyntaxKind::BinaryExpr
             | SyntaxKind::ParenExpr
+            | SyntaxKind::ExtractExpr
             | SyntaxKind::ProjectExpr
             | SyntaxKind::PostfixExpr => "expression",
             SyntaxKind::NameList => "attribute names",

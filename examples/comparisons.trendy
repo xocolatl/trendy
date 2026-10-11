@@ -48,12 +48,18 @@ operator tuples{a: tuple { name: text, born: integer }, b: tuple { name: text, b
     call debug_value{v: a <> b};
 ];
 
-operator relations{a: relation { name: text, born: integer }, b: relation { name: text, born: integer }} [
+operator relations{
+    a: relation { name: text, born: integer },
+    b: relation { name: text, born: integer }
+} [
     call debug_value{v: a = b};
     call debug_value{v: a <> b};
 ];
 
-operator nested{a: tuple { r: relation { x: rational } }, b: tuple { r: relation { x: rational } }} [
+operator nested{
+    a: tuple { r: relation { x: rational } },
+    b: tuple { r: relation { x: rational } }
+} [
     call debug_value{v: a = b};
     call debug_value{v: a <> b};
 ];

@@ -264,6 +264,16 @@ pub(crate) fn value(
             };
             matches(expected, result, expr, errors)
         }
+        Expr::Extract(extract) => {
+            let operand = extract.operand()?;
+            let value = value(&operand, None, scope, errors)?;
+            let name = ops::extracted(extract, &operand, &value.ty(), errors)?;
+            let hir::Value::Tuple(tuple) = value else {
+                unreachable!("checked to be a tuple");
+            };
+            let attribute = tuple.get(&name)?.clone();
+            matches(expected, attribute, expr, errors)
+        }
         Expr::Project(_) | Expr::Postfix(_) => {
             let projection = match expr {
                 Expr::Project(p) => ops::Projection::Project(p),
@@ -644,7 +654,7 @@ fn unknown_tuple_attribute(
         span,
         &format!("the expected type is `{}`", here.ty),
         renamed,
-        removal,
+        Some(removal),
     ));
 }
 

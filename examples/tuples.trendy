@@ -1,7 +1,12 @@
 var x: tuple { a: tuple { b: boolean }, c: text };
 var q := tuple { x: 1.0, y: 2.0 };
 var e: tuple {};
-var addr := tuple { street: "1600 Pennsylvania Ave.", city: "Washington", state: "DC", zip: "20500" };
+var addr := tuple {
+    street: "1 Rue de Rivoli",
+    city: "Paris",
+    country: "France",
+    postal_code: "75001"
+};
 
 /* Tuple operators, to design and then implement one at a time. Each comment
    is one operator: what The Third Manifesto asks for (RM Prescription 6
@@ -17,15 +22,6 @@ var addr := tuple { street: "1600 Pennsylvania Ave.", city: "Washington", state:
    and hide any variable or parameter of the same name. To use one of
    those, rename it first. */
 
-/* Attribute extraction (RM Prescription 6, item b).
-   Tutorial D: ZIP FROM ADDR
-   Proposed: dot notation, as Date and Darwen suggest themselves (ch. 6),
-   reaching into nested tuples too.
-
-   call debug_value{v: addr.zip};
-   call debug_value{v: x.a.b};
-*/
-
 /* Renaming by prefix, the rest of Algebra A's RENAME (see the renaming
    below, which is implemented).
    Tutorial D: ADDR RENAME ( PREFIX 'ST' AS 'G' )
@@ -35,21 +31,21 @@ var addr := tuple { street: "1600 Pennsylvania Ave.", city: "Washington", state:
 */
 
 /* Extension: the tuple with attributes added, computed from its own.
-   Tutorial D: EXTEND ADDR ADD ( 'USA' AS COUNTRY )
+   Tutorial D: EXTEND ADDR ADD ( 2 AS FLOOR )
    Proposed: an `extend` operator with attribute values, in which the
    tuple's own attributes are in scope by name.
 
-   call debug_value{v: addr extend { country: "USA" }};
+   call debug_value{v: addr extend { floor: 2 }};
    call debug_value{v: q extend { sum: x + y }};
 */
 
 /* Join, also called tuple union: the union of two tuples' attributes. Any
    attribute both have must have the same value in both.
-   Tutorial D: ADDR UNION TUPLE { NAME 'Clark Kent' }, and n-adic
+   Tutorial D: ADDR UNION TUPLE { NAME 'Ada' }, and n-adic
    UNION { T1, T2, T3 }
    Proposed: a `join` operator.
 
-   call debug_value{v: addr join tuple { name: "Clark Kent" }};
+   call debug_value{v: addr join tuple { name: "Ada" }};
 */
 
 /* Compose: join, then drop the attributes the operands have in common
@@ -57,7 +53,7 @@ var addr := tuple { street: "1600 Pennsylvania Ave.", city: "Washington", state:
    Tutorial D: T1 COMPOSE T2
    Proposed: a `compose` operator.
 
-   call debug_value{v: addr compose tuple { zip: "20500", plus4: "0003" }};
+   call debug_value{v: addr compose tuple { postal_code: "75001", district: "1st" }};
 */
 
 /* Wrap: gather attributes into one tuple-valued attribute (RM Prescription
@@ -80,11 +76,11 @@ var addr := tuple { street: "1600 Pennsylvania Ave.", city: "Washington", state:
 /* Substitute: the tuple with some attributes replaced, computed from its
    own (Tutorial D, beyond RM Prescription 6; shorthand for extend, project
    and rename).
-   Tutorial D: UPDATE ADDR ( ZIP := '20501' )
+   Tutorial D: UPDATE ADDR ( POSTAL_CODE := '75002' )
    Proposed: an `update` operator with attribute values, in which the
    tuple's own attributes are in scope by name.
 
-   call debug_value{v: addr update { zip: "20501" }};
+   call debug_value{v: addr update { postal_code: "75002" }};
    call debug_value{v: q update { x: x * 2.0 }};
 */
 
@@ -98,23 +94,23 @@ var addr := tuple { street: "1600 Pennsylvania Ave.", city: "Washington", state:
 
 /* Assignment and update (RM Prescription 21), once variables can be
    assigned at all.
-   Tutorial D: ADDR := TUPLE { ... }, and UPDATE ADDR ( ZIP := '20501' )
+   Tutorial D: ADDR := TUPLE { ... }, and UPDATE ADDR ( POSTAL_CODE := '75002' )
    Proposed: an assignment statement, and `update` as a statement.
 
-   addr := addr update { zip: "20501" };
-   update addr { zip: "20501" };
+   addr := addr update { postal_code: "75002" };
+   update addr { postal_code: "75002" };
 */
 
 /* Projection, and its complement, remove (Algebra A's REMOVE): the tuple
    with only the attributes named, or without them. Implemented: each
    result below is printed twice, folded when compiling and computed when
    running. */
-var located := addr{state, zip};
+var located := addr{country, postal_code};
 var unlocated := addr remove {city, street};
 var nothing := addr{};
 
-operator project_addr{a: tuple { street: text, city: text, state: text, zip: text }} [
-    call debug_value{v: a{state, zip}};
+operator project_addr{a: tuple { street: text, city: text, country: text, postal_code: text }} [
+    call debug_value{v: a{country, postal_code}};
     call debug_value{v: a remove {city, street}};
     call debug_value{v: a{}};
     call debug_value{v: x remove {c}{a}};
@@ -123,21 +119,42 @@ operator project_addr{a: tuple { street: text, city: text, state: text, zip: tex
 /* Renaming attributes (Algebra A's RENAME), each `old as new`, all at
    once, so two attributes can swap names. Implemented, and printed twice
    like the projections. */
-var moved := addr rename {zip as postcode};
+var moved := addr rename {postal_code as code};
 var swapped := q rename {x as y, y as x};
 
-operator rename_addr{a: tuple { street: text, city: text, state: text, zip: text }, p: tuple { x: rational, y: rational }} [
-    call debug_value{v: a rename {zip as postcode}};
+operator rename_addr{
+    a: tuple { street: text, city: text, country: text, postal_code: text },
+    p: tuple { x: rational, y: rational }
+} [
+    call debug_value{v: a rename {postal_code as code}};
     call debug_value{v: p rename {x as y, y as x}};
 ];
 
 /* Building tuples from run-time values (RM Prescription 9): attribute
    values can be any expression, not only constants. Implemented, and
    printed twice like the projections. */
-var built := tuple { street: "Elm Street!", number: tuple { n: 13 } };
+var built := tuple { street: "Невский проспект!", number: tuple { n: 13 } };
 
 operator build_addr{street: text, n: integer} [
     call debug_value{v: tuple { street: street || "!", number: tuple { n: n + 1 } }};
+];
+
+/* Attribute extraction (RM Prescription 6, item b): `t.a` is the value of
+   the attribute `a`, with dot notation as Date and Darwen suggest (ch. 6),
+   reaching into nested tuples too. Implemented, and printed twice like the
+   projections. */
+var code := addr.postal_code;
+var flag := x.a.b;
+var sum := q.x + q.y;
+
+operator extract{
+    a: tuple { street: text, city: text, country: text, postal_code: text },
+    t: tuple { a: tuple { b: boolean }, c: text },
+    p: tuple { x: rational, y: rational }
+} [
+    call debug_value{v: a.postal_code};
+    call debug_value{v: t.a.b};
+    call debug_value{v: p.x + p.y};
 ];
 
 operator main{} [
@@ -148,10 +165,15 @@ operator main{} [
     call debug_value{v: moved};
     call debug_value{v: swapped};
     call debug_value{v: built};
+    call debug_value{v: code};
+    call debug_value{v: flag};
+    call debug_value{v: sum};
 
     call project_addr{a: addr};
 
     call rename_addr{a: addr, p: q};
 
-    call build_addr{street: "Elm Street", n: 12};
+    call build_addr{street: "Невский проспект", n: 12};
+
+    call extract{a: addr, t: x, p: q};
 ];

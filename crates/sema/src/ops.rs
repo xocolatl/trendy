@@ -380,7 +380,7 @@ pub(crate) fn removed(
                 *span,
                 &context,
                 rename,
-                list.removal(name),
+                Some(list.removal(name)),
             ));
             ok = false;
         }
@@ -469,7 +469,7 @@ pub(crate) fn renamed(
             ok = false;
         } else if heading.get(before).is_none() {
             if heading.get(after).is_some() {
-                // `postcode as zip` for `zip as postcode`: written the other
+                // `code as postal_code` for `postal_code as code`: written the other
                 // way around.
                 errors.push(errors::reversed_renaming(
                     (before, *before_span),
@@ -489,7 +489,7 @@ pub(crate) fn renamed(
                     *before_span,
                     &context,
                     rename,
-                    list.removal(renaming),
+                    Some(list.removal(renaming)),
                 ));
             }
             ok = false;
@@ -526,6 +526,86 @@ pub(crate) fn renamed(
 
 /// A name as written, and where.
 type NameAt = (String, Span);
+
+/// The attribute `extract`, written after `operand`, which is of type `ty`,
+/// takes the value of. `None` after reporting why there is none: the
+/// operand isn't a tuple, or hasn't the attribute.
+pub(crate) fn extracted(
+    extract: &ast::ExtractExpr,
+    operand: &Expr,
+    ty: &hir::Type,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<String> {
+    let ident = extract.attribute()?.ident()?;
+    let name = ident.text().to_string();
+    let span = trendy_syntax::span(ident.text_range());
+    let hir::Type::Tuple(heading) = ty else {
+        errors.push(errors::not_extractable(&name, span, ty, operand));
+        return None;
+    };
+    if heading.get(&name).is_none() {
+        let rename = heading
+            .attributes()
+            .map(|(a, _)| a)
+            .filter(|a| edit_distance(a, &name) <= 2)
+            .min_by_key(|a| edit_distance(a, &name));
+        let attributes: Vec<String> = heading
+            .attributes()
+            .map(|(a, _)| format!("`{a}`"))
+            .collect();
+        let context = if attributes.is_empty() {
+            format!("the tuple, of type `{ty}`, has no attributes")
+        } else {
+            format!(
+                "the tuple's attributes are {}",
+                trendy_diag::conjoin(&attributes)
+            )
+        };
+        errors.push(errors::unknown_attribute(
+            errors::Noun::Projected,
+            &name,
+            span,
+            &context,
+            rename,
+            None,
+        ));
+        return None;
+    }
+    Some(name)
+}
+
+/// The value of `operand`'s attribute `name`: evaluated if the operand is a
+/// constant, and taken straight from a selector, a rename or a remove where
+/// nothing that can fail is dropped.
+pub(crate) fn extract(operand: hir::Expr, name: String) -> hir::Expr {
+    match operand {
+        hir::Expr::Constant(hir::Value::Tuple(tuple)) => hir::Expr::Constant(
+            tuple
+                .get(&name)
+                .cloned()
+                .expect("sema extracts only attributes the tuple has"),
+        ),
+        hir::Expr::Tuple(mut attributes)
+            if attributes
+                .iter()
+                .all(|(other, e)| *other == name || !can_fail(e)) =>
+        {
+            attributes
+                .remove(&name)
+                .expect("sema extracts only attributes the tuple has")
+        }
+        // A tuple's removals and renamings only move attributes around.
+        hir::Expr::Remove(tuple, _) => extract(*tuple, name),
+        hir::Expr::Rename(tuple, renamings) => {
+            let before = renamings
+                .iter()
+                .find(|(_, after)| **after == name)
+                .map_or(name.clone(), |(before, _)| before.clone());
+            extract(*tuple, before)
+        }
+        operand => hir::Expr::Extract(Box::new(operand), name),
+    }
+}
 
 /// Whether `postfix` is a `rename`, rather than a `remove`.
 pub(crate) fn is_rename(postfix: &ast::PostfixExpr) -> bool {
@@ -627,6 +707,7 @@ fn can_fail(expr: &hir::Expr) -> bool {
         | hir::Expr::Relation(..) => true,
         hir::Expr::Unary(_, operand) => can_fail(operand),
         hir::Expr::Tuple(attributes) => attributes.values().any(can_fail),
+        hir::Expr::Extract(tuple, _) => can_fail(tuple),
         hir::Expr::Binary(op, lhs, rhs) => {
             // Arithmetic and concatenation can fail themselves; the boolean
             // operators and comparisons can't.

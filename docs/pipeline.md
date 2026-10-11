@@ -160,7 +160,10 @@ Everything else goes on one line, except that a relation value with more than
 one tuple is broken across lines: each tuple on its own line, indented four
 spaces per level of nesting, with the closing brace on a line of its own.
 A tuple value, relation value or call's arguments with several items, one of
-them broken, puts each item on its own line too.
+them broken, puts each item on its own line too. Lines are at most 100
+characters: the formatter lays everything out, then breaks the outermost
+unbroken list on the first line that's too long, one item per line, and
+repeats until every line fits or none can be broken further.
 
 The formatter reprints the CST's tokens and decides the whitespace between
 them. It never adds or drops a token, comments included. Comments are
@@ -328,8 +331,11 @@ there is no assignment and operators return nothing, so lowering releases
 each one with `trendy_rt_free` when its statement ends. Assignment and
 returned values will need a real ownership scheme.
 
-A tuple built at run time is a stack slot with each attribute copied into
-its field. A relation built at run time has its tuples built one after
+An attribute's value, `t.a` (`hir::Expr::Extract`), is the tuple's place
+with the attribute's field added to its path, so it costs nothing; sema
+also takes it straight from a selector, a rename or a remove where that
+drops nothing that can fail. A tuple built at run time is a stack slot
+with each attribute copied into its field. A relation built at run time has its tuples built one after
 another in a stack slot, then `trendy_rt_relation` sorts them into the
 canonical order and drops duplicates, into memory released like a text's.
 

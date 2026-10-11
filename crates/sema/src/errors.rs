@@ -465,14 +465,15 @@ pub(crate) fn missing_attributes(
 
 /// An attribute or argument `name`, at `span`, that isn't expected.
 /// `context` is a note on what was expected; `rename` is the missing item it
-/// was probably meant to be, and `removal` the span that removes it.
+/// was probably meant to be, and `removal` the span that removes it, if
+/// removing it is a fix.
 pub(crate) fn unknown_attribute(
     noun: Noun,
     name: &str,
     span: Span,
     context: &str,
     rename: Option<&str>,
-    removal: Span,
+    removal: Option<Span>,
 ) -> Diagnostic {
     let label = match noun {
         Noun::Attribute => "not an attribute of the expected type",
@@ -495,13 +496,16 @@ pub(crate) fn unknown_attribute(
             }],
         );
     }
-    d.with_suggestion(
-        format!("remove `{name}`"),
-        vec![Edit {
-            span: removal,
-            replacement: String::new(),
-        }],
-    )
+    match removal {
+        Some(removal) => d.with_suggestion(
+            format!("remove `{name}`"),
+            vec![Edit {
+                span: removal,
+                replacement: String::new(),
+            }],
+        ),
+        None => d,
+    }
 }
 
 /// `builtin …`, the declaration `decl` with `keyword`, outside the prelude.
@@ -657,6 +661,25 @@ pub(crate) fn not_projectable(
         .with_note(
             "a projection, `r{a, b}`, `r remove {c}` and `r rename {a as b}` work on the attributes of a tuple or relation",
         )
+}
+
+/// `.name`, at `at`, applied to a value of type `ty`, which isn't a tuple.
+pub(crate) fn not_extractable(name: &str, at: Span, ty: &hir::Type, operand: &Expr) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::WrongOperandType,
+        format!("`.{name}` can't be applied to {}", plural(ty)),
+        at,
+        "only a tuple has an attribute's value",
+    )
+    .with_secondary(operand.span(), format!("this is `{ty}`"));
+    match ty {
+        hir::Type::Relation(_) => d
+            .with_note("a relation can have many tuples, so no one value for an attribute")
+            .with_help(format!(
+                "to keep only the attribute, project on it: `r{{{name}}}`"
+            )),
+        _ => d.with_note("`t.name` is the value of the attribute `name` of the tuple `t`"),
+    }
 }
 
 /// `rename {}`, written `postfix` after `operand`, which renames nothing.

@@ -496,17 +496,28 @@ impl<'a> Parser<'a> {
     }
 
     /// An operand, then postfix operators, which bind tighter than any
-    /// other: projections, `r{a, b}`, and `remove`, `r remove {c}`. So
-    /// `a and b{x}` projects `b`.
+    /// other: attribute extraction, `t.a`, projections, `r{a, b}`, `remove`
+    /// and `rename`. So `a and b{x}` projects `b`, and `-t.a` negates `t.a`.
     fn postfix(&mut self) {
         self.peek();
         let start = self.builder.checkpoint();
         self.primary();
         loop {
-            if self
-                .lookahead()
-                .is_some_and(|f| f.kind == SyntaxKind::LBrace)
-            {
+            let next = self.lookahead().map(|f| f.kind);
+            if next == Some(SyntaxKind::Dot) {
+                self.builder.start_node_at(start, SyntaxKind::ExtractExpr);
+                self.bump();
+                if self.at(SyntaxKind::Ident) {
+                    self.start_node(SyntaxKind::Name);
+                    self.bump();
+                    self.builder.finish_node();
+                } else {
+                    self.missing_with_help(
+                        SyntaxKind::Ident,
+                        "write the attribute's name after `.`, as in `t.name`",
+                    );
+                }
+            } else if next == Some(SyntaxKind::LBrace) {
                 self.builder.start_node_at(start, SyntaxKind::ProjectExpr);
                 self.name_list();
             } else if let Some((found, keyword)) = self.postfix_operator() {
@@ -1814,6 +1825,22 @@ SourceFile
     }
 
     #[test]
+    fn extractions() {
+        let parse = parse_str("var x := -t.a.b + u{c}.c;");
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let nodes: Vec<_> = parse
+            .tree
+            .syntax()
+            .descendants()
+            .filter(|n| n.kind() == SyntaxKind::ExtractExpr)
+            .map(|n| n.to_string().trim().to_string())
+            .collect();
+        assert_eq!(nodes, ["t.a.b", "t.a", "u{c}.c"]);
+        assert_eq!(shape("-t.a * 2"), "((- t.a) * 2)");
+        assert_eq!(messages("var x := t.;"), ["expected identifier, found `;`"]);
+    }
+
+    #[test]
     fn renamings() {
         let source = "var x := a rename {b as c, d as e} rename {c as b};";
         let parse = parse_str(source);
@@ -1838,20 +1865,20 @@ SourceFile
         );
         // Habits from Tutorial D and from mappings.
         assert_eq!(
-            fix("var x := a RENAME ( zip AS postcode );"),
-            "var x := a rename { zip as postcode };"
+            fix("var x := a RENAME ( postal_code AS code );"),
+            "var x := a rename { postal_code as code };"
         );
         assert_eq!(
-            fix("var x := a rename {zip: postcode};"),
-            "var x := a rename {zip as postcode};"
+            fix("var x := a rename {postal_code: code};"),
+            "var x := a rename {postal_code as code};"
         );
         assert_eq!(
-            fix("var x := a rename {zip:postcode};"),
-            "var x := a rename {zip as postcode};"
+            fix("var x := a rename {postal_code:code};"),
+            "var x := a rename {postal_code as code};"
         );
         assert_eq!(
-            messages("var x := a rename {zip postcode};"),
-            ["expected `as`, found identifier `postcode`"]
+            messages("var x := a rename {postal_code code};"),
+            ["expected `as`, found identifier `code`"]
         );
     }
 

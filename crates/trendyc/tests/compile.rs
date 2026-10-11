@@ -357,15 +357,19 @@ fn tuples() {
     assert_eq!(
         folded_and_run("tuples"),
         [
-            r#"tuple { state: "DC", zip: "20500" }"#,
-            r#"tuple { state: "DC", zip: "20500" }"#,
+            r#"tuple { country: "France", postal_code: "75001" }"#,
+            r#"tuple { country: "France", postal_code: "75001" }"#,
             "tuple {}",
             "tuple { a: tuple { b: false } }",
-            r#"tuple { city: "Washington", postcode: "20500", state: "DC", street: "1600 Pennsylvania Ave." }"#,
+            r#"tuple { city: "Paris", code: "75001", country: "France", street: "1 Rue de Rivoli" }"#,
             // All at once: a swap.
             "tuple { x: 2.0, y: 1.0 }",
             // Built from run-time values.
-            r#"tuple { number: tuple { n: 13 }, street: "Elm Street!" }"#,
+            r#"tuple { number: tuple { n: 13 }, street: "Невский проспект!" }"#,
+            // Attributes' values.
+            r#""75001""#,
+            "false",
+            "3.0",
         ]
     );
 }
@@ -390,9 +394,9 @@ fn relations() {
             "relation { n: rational, x: integer } { { n: -1.5, x: 3 }, { n: -1.5, x: 5 }, { n: -0.0, x: 2 }, { n: 0.0, x: 4 }, { n: 2.5, x: 1 } }",
             // Built from run-time values, sorted, and with the tuples that
             // turn out equal made one.
-            r#"relation { born: integer, name: text } { { born: 1815, name: "Ada" }, { born: 1906, name: "Grace" } }"#,
+            r#"relation { born: integer, name: text } { { born: 701, name: "李白" }, { born: 1815, name: "Ada" } }"#,
             "relation { x: integer } { { x: 1 } }",
-            r#"tuple { members: relation { name: text } { { name: "Ada" }, { name: "Grace" } }, who: "core" }"#,
+            r#"tuple { members: relation { name: text } { { name: "Ada" }, { name: "李白" } }, who: "core" }"#,
         ]
     );
 }

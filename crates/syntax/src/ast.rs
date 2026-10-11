@@ -48,6 +48,7 @@ ast_node!(NameRef);
 ast_node!(UnaryExpr);
 ast_node!(BinaryExpr);
 ast_node!(ParenExpr);
+ast_node!(ExtractExpr);
 ast_node!(ProjectExpr);
 ast_node!(PostfixExpr);
 ast_node!(NameList);
@@ -232,6 +233,19 @@ impl ParenExpr {
     }
 }
 
+impl ExtractExpr {
+    #[must_use]
+    pub fn operand(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+
+    /// The attribute's name, after the `.`.
+    #[must_use]
+    pub fn attribute(&self) -> Option<Name> {
+        self.0.children().find_map(Name::cast)
+    }
+}
+
 impl ProjectExpr {
     #[must_use]
     pub fn operand(&self) -> Option<Expr> {
@@ -383,6 +397,7 @@ pub enum Expr {
     Unary(UnaryExpr),
     Binary(BinaryExpr),
     Paren(ParenExpr),
+    Extract(ExtractExpr),
     Project(ProjectExpr),
     Postfix(PostfixExpr),
 }
@@ -398,6 +413,7 @@ impl Expr {
             .or_else(|| UnaryExpr::cast(node.clone()).map(Expr::Unary))
             .or_else(|| BinaryExpr::cast(node.clone()).map(Expr::Binary))
             .or_else(|| ParenExpr::cast(node.clone()).map(Expr::Paren))
+            .or_else(|| ExtractExpr::cast(node.clone()).map(Expr::Extract))
             .or_else(|| ProjectExpr::cast(node.clone()).map(Expr::Project))
             .or_else(|| PostfixExpr::cast(node).map(Expr::Postfix))
     }
@@ -412,6 +428,7 @@ impl Expr {
             Expr::Unary(e) => e.syntax(),
             Expr::Binary(e) => e.syntax(),
             Expr::Paren(e) => e.syntax(),
+            Expr::Extract(e) => e.syntax(),
             Expr::Project(e) => e.syntax(),
             Expr::Postfix(e) => e.syntax(),
         }

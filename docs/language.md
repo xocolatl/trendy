@@ -509,6 +509,36 @@ operator main{} [];
 Equality is `=`, and inequality `<>`, as in Tutorial D and SQL; `==` and
 `!=` get fixes. Assignment is `:=`.
 
+### Attribute values
+
+`t.a` is the value of the tuple `t`'s attribute `a`, and `t.a.b` reaches
+into a tuple-valued attribute. It's the *Manifesto*'s attribute extractor
+(RM Prescription 6), written with the dot Date and Darwen suggest.
+
+```trendy
+var addr := tuple { city: "Paris", place: tuple { postal_code: "75001" } };
+var city := addr.city;
+var code := addr.place.postal_code;
+
+operator main{} [
+    call debug_value{v: "FR-" || addr.place.postal_code};
+];
+```
+
+- **Only tuples have attribute values.** A relation can have many tuples,
+  so `r.a` is an error (A0022); to keep only the attribute, project on it:
+  `r{a}`.
+- **An unknown attribute** gets a fix to the closest one (A0010).
+- It binds tighter than any other operator, with projection, `remove` and
+  `rename`, so `-t.n` negates `t.n`, and `(t rename {a as b}).b` is `t.a`.
+
+```trendy,error
+var addr := tuple { city: "Paris" };
+var town := addr.cty;
+
+operator main{} [];
+```
+
 ### Projection
 
 `r{a, b}` is the tuple or relation `r` with only the attributes
@@ -553,14 +583,14 @@ operator main{} [];
 
 ### Renaming
 
-`r rename {zip as postcode, city as town}` is the tuple or relation `r`
+`r rename {postal_code as code, city as town}` is the tuple or relation `r`
 with its attributes renamed, each written `old as new`. It is Algebra A's
 RENAME.
 
 ```trendy
-var addr := tuple { zip: "20500", city: "Washington" };
-var moved := addr rename {zip as postcode};
-var swapped := addr rename {zip as city, city as zip};
+var addr := tuple { postal_code: "75001", city: "Paris" };
+var moved := addr rename {postal_code as code};
+var swapped := addr rename {postal_code as city, city as postal_code};
 
 operator main{} [
     call debug_value{v: moved};
@@ -578,8 +608,8 @@ operator main{} [
 - `old: new`, as in mappings elsewhere, is fixed to `old as new` (P0018).
 
 ```trendy,error
-var addr := tuple { zip: "20500", city: "Washington" };
-var moved := addr rename {postcode as zip};
+var addr := tuple { postal_code: "75001", city: "Paris" };
+var moved := addr rename {code as postal_code};
 
 operator main{} [];
 ```
@@ -590,7 +620,7 @@ From tightest to loosest:
 
 | Operators | Grouping |
 |---|---|
-| postfix projection `{…}`, `remove {…}` and `rename {…}` | left |
+| postfix `.a`, projection `{…}`, `remove {…}` and `rename {…}` | left |
 | prefix `not`, `-` and `+` | |
 | `*`, `/`, `div`, `mod` | left |
 | `+`, `-`, `\|\|` | left |
@@ -762,6 +792,10 @@ operator main{} [];
   them with a blank line to group them; several blank lines become one;
 - a blank line between other definitions;
 - single spaces around `:=` and after `:`;
+- lines are at most 100 characters where a list can be broken: a line
+  that would be longer has its outermost list, such as an operator's
+  parameters, a call's arguments, a heading or a tuple value, written one
+  item per line, until it fits;
 - a relation value with more than one tuple has each tuple on its own line,
   indented four spaces per level of nesting;
 - a tuple value, relation value or call's arguments with several items, one
@@ -815,6 +849,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `AND`, `Or`, `NOT` | `and`, `or`, `not` |
 | `a == b`, `a != b` | `a = b`, `a <> b` |
 | `a < b < c` | `a < b and b < c` |
+| `A FROM T`, `t["a"]` | `t.a` |
 | `R { A, B }`, `R { ALL BUT C }` | `r{a, b}`, `r remove {c}` |
 | `R RENAME ( A AS B )`, `rename(columns={'a': 'b'})` | `r rename {a as b}` |
 | `a / b` for integers | `a div b` |

@@ -46,6 +46,13 @@ impl Program {
             },
             Expr::Unary(op, _) => Type::Scalar(op.result()),
             Expr::Binary(op, ..) => Type::Scalar(op.result()),
+            Expr::Extract(tuple, name) => match self.type_of(tuple, within) {
+                Type::Tuple(heading) => heading
+                    .get(name)
+                    .cloned()
+                    .expect("sema extracts only attributes the tuple has"),
+                other => panic!("extracting `{name}` from {other}"),
+            },
             Expr::Tuple(attributes) => Type::Tuple(Heading::new(
                 attributes
                     .iter()
@@ -158,6 +165,9 @@ pub enum Expr {
     Unary(UnaryOp, Box<Expr>),
     /// A dyadic operator, such as `x and y` or `x + y`.
     Binary(BinaryOp, Box<Expr>, Box<Expr>),
+    /// The value of a tuple's attribute: `t.a`. The attribute is one of the
+    /// tuple's.
+    Extract(Box<Expr>, String),
     /// A tuple selector whose attribute values aren't all known when
     /// compiling.
     Tuple(BTreeMap<String, Expr>),
@@ -763,6 +773,11 @@ fn renamed(name: &str, renamings: &BTreeMap<String, String>) -> String {
 }
 
 impl TupleValue {
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<&Value> {
+        self.0.get(name)
+    }
+
     /// The tuple with attributes renamed, as for [`Heading::renamed`].
     #[must_use]
     pub fn renamed(&self, renamings: &BTreeMap<String, String>) -> TupleValue {

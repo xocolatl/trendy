@@ -208,7 +208,7 @@ fn arguments(
                 *span,
                 &format!("the parameters are {signature_text}"),
                 renamed,
-                args.removal(arg),
+                Some(args.removal(arg)),
             ));
             continue;
         };
@@ -306,6 +306,29 @@ fn expr(
                 binary.rhs().as_ref(),
                 errors,
             )
+        }
+        Expr::Extract(extract) => {
+            let operand_expr = extract.operand()?;
+            let operand = self::expr(&operand_expr, None, within, cx, errors)?;
+            let ty = type_of(&operand, within, cx);
+            let name = ops::extracted(extract, &operand_expr, &ty, errors)?;
+            let hir::Type::Tuple(heading) = &ty else {
+                unreachable!("checked to be a tuple");
+            };
+            let attribute_ty = heading.get(&name)?.clone();
+            if let Some(expected) = expected
+                && expected.ty != attribute_ty
+            {
+                errors.push(errors::type_mismatch(
+                    &expected.ty,
+                    &expected.origin,
+                    &attribute_ty,
+                    None,
+                    expr,
+                ));
+                return None;
+            }
+            Some(ops::extract(operand, name))
         }
         Expr::Project(_) | Expr::Postfix(_) => reshaped(expr, expected, within, cx, errors),
         Expr::Literal(_) => {
@@ -406,6 +429,13 @@ fn type_of(expr: &hir::Expr, within: hir::OperatorId, cx: &Context) -> hir::Type
         },
         hir::Expr::Unary(op, _) => hir::Type::Scalar(op.result()),
         hir::Expr::Binary(op, ..) => hir::Type::Scalar(op.result()),
+        hir::Expr::Extract(tuple, name) => match type_of(tuple, within, cx) {
+            hir::Type::Tuple(heading) => heading
+                .get(name)
+                .cloned()
+                .expect("sema extracts only attributes the tuple has"),
+            other => unreachable!("extracting from {other}"),
+        },
         hir::Expr::Tuple(attributes) => hir::Type::Tuple(hir::Heading::new(
             attributes
                 .iter()

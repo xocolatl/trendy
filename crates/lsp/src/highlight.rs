@@ -98,7 +98,12 @@ fn classify(token: &SyntaxToken) -> Option<Highlight> {
         (
             SyntaxKind::Ident,
             Some(SyntaxKind::Name),
-            Some(SyntaxKind::AttributeValue | SyntaxKind::NameList | SyntaxKind::Renaming),
+            Some(
+                SyntaxKind::AttributeValue
+                | SyntaxKind::NameList
+                | SyntaxKind::Renaming
+                | SyntaxKind::ExtractExpr,
+            ),
         ) => (Class::Attribute, false),
         (SyntaxKind::Ident, Some(SyntaxKind::TypeRef), _) => (Class::Type, false),
         (SyntaxKind::IntLiteral | SyntaxKind::RationalLiteral, _, _) => (Class::Number, false),
@@ -178,6 +183,19 @@ mod tests {
     fn projections() {
         assert_eq!(
             highlight("var a := b{c};"),
+            [
+                ("var", Class::Keyword, false),
+                ("a", Class::Variable, true),
+                ("b", Class::Variable, false),
+                ("c", Class::Attribute, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn extractions() {
+        assert_eq!(
+            highlight("var a := b.c;"),
             [
                 ("var", Class::Keyword, false),
                 ("a", Class::Variable, true),

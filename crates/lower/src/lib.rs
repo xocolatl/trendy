@@ -310,6 +310,16 @@ impl FunctionBuilder<'_> {
                 });
                 dst
             }
+            // The attribute's own place within the tuple: no copy.
+            hir::Expr::Extract(tuple, name) => {
+                let ty = self.program.type_of(tuple, self.within);
+                let index = attribute_names(&ty)
+                    .position(|a| a == name)
+                    .expect("sema extracts only attributes the tuple has");
+                let mut place = self.place(tuple, cx);
+                place.path.push(index);
+                place
+            }
             hir::Expr::Tuple(attributes) => {
                 let ty = self.program.type_of(expr, self.within);
                 let dst = self.slot(layout(&ty));

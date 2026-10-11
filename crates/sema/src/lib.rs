@@ -1885,6 +1885,70 @@ mod tests {
     }
 
     #[test]
+    fn extraction() {
+        let int = hir::Value::Integer;
+        assert_eq!(
+            init("var a := tuple { x: 1, y: tuple { z: 2 } }.y.z;", "a"),
+            int(2)
+        );
+        assert_eq!(
+            init("var a := t.x + 1;\nvar t := tuple { x: 41 };", "a"),
+            int(42)
+        );
+        assert_eq!(
+            init("var a := (tuple { x: 1 } rename {x as y}).y;", "a"),
+            int(1)
+        );
+        let source = format!(
+            "var t := tuple {{ postal_code: \"75001\" }};\nvar a := t.postal_cod;\nvar b := relation {{ {{ x: 1 }} }}.x;\nvar c := (1).x;\nvar d: integer := t.postal_code;{MAIN}"
+        );
+        let errors = errors(&source);
+        let found: Vec<_> = errors.iter().map(|e| (e.code, &e.message[..])).collect();
+        assert_eq!(
+            found,
+            [
+                (Code::UnknownAttribute, "unknown attribute `postal_cod`"),
+                (Code::WrongOperandType, "`.x` can't be applied to relations"),
+                (Code::WrongOperandType, "`.x` can't be applied to integers"),
+                (
+                    Code::TypeMismatch,
+                    "mismatched types: expected `integer`, found `text`"
+                ),
+            ]
+        );
+        assert_eq!(errors[0].suggestions.len(), 1, "rename it, no removal");
+        assert!(fix(&source).contains("var a := t.postal_code;"));
+        assert!(errors[1].help[0].contains("r{x}"));
+    }
+
+    #[test]
+    fn extraction_in_bodies() {
+        let body = |e: &str| {
+            let program = analyze_str(&format!(
+                "operator f{{t: tuple {{ a: integer, b: integer }}, n: integer}} [ call debug_value{{v: {e}}}; ];\noperator main{{}} [];"
+            ))
+            .unwrap();
+            let f = program.operators.iter().find(|o| o.name == "f").unwrap();
+            let hir::OperatorKind::User { body } = &f.kind else {
+                panic!("f is a user operator");
+            };
+            argument(&body[0]).clone()
+        };
+        let t = || Box::new(hir::Expr::Parameter("t".to_string()));
+        let n = || hir::Expr::Parameter("n".to_string());
+        assert_eq!(body("t.a"), hir::Expr::Extract(t(), "a".to_string()));
+        // Taken straight from what the tuple is made of.
+        assert_eq!(body("tuple { x: n, y: 1 }.x"), n());
+        assert_eq!(body("(t rename {a as z}).z"), body("t.a"));
+        assert_eq!(body("(t remove {b}).a"), body("t.a"));
+        // Unless that drops something that can fail.
+        assert!(matches!(
+            body("tuple { x: n, y: n + 1 }.x"),
+            hir::Expr::Extract(..)
+        ));
+    }
+
+    #[test]
     fn rename_constants() {
         let vars = variables(
             "var t := tuple { a: 1, b: \"x\" };\nvar moved := t rename {a as z};\nvar swapped := t rename {a as b, b as a};\nvar same := t rename {a as a};\nvar r := relation { { a: 2, b: 1 }, { a: 1, b: 2 } } rename {a as c};",
@@ -1908,18 +1972,18 @@ mod tests {
     #[test]
     fn rename_errors() {
         let source = format!(
-            "var t := tuple {{ zip: \"20500\", city: \"Washington\" }};\nvar a := t rename {{zp as postcode}};\nvar b := t rename {{postcode as zip}};\nvar c := t rename {{zip as p, zip as q}};\nvar d := t rename {{zip as city}};\nvar e := t rename {{zip as x, city as x}};\nvar f := t rename {{}};\nvar g := 1 rename {{a as b}};{MAIN}"
+            "var t := tuple {{ postal_code: \"75001\", city: \"Paris\" }};\nvar a := t rename {{postal_cod as code}};\nvar b := t rename {{code as postal_code}};\nvar c := t rename {{postal_code as p, postal_code as q}};\nvar d := t rename {{postal_code as city}};\nvar e := t rename {{postal_code as x, city as x}};\nvar f := t rename {{}};\nvar g := 1 rename {{a as b}};{MAIN}"
         );
         let errors = errors(&source);
         let found: Vec<_> = errors.iter().map(|e| (e.code, &e.message[..])).collect();
         assert_eq!(
             found,
             [
-                (Code::UnknownAttribute, "unknown attribute `zp`"),
-                (Code::UnknownAttribute, "unknown attribute `postcode`"),
+                (Code::UnknownAttribute, "unknown attribute `postal_cod`"),
+                (Code::UnknownAttribute, "unknown attribute `code`"),
                 (
                     Code::DuplicateAttribute,
-                    "attribute `zip` is given more than once"
+                    "attribute `postal_code` is given more than once"
                 ),
                 (Code::AttributeExists, "attribute `city` already exists"),
                 (Code::AttributeExists, "attribute `x` already exists"),
@@ -1932,15 +1996,15 @@ mod tests {
         );
         assert_eq!(
             errors[1].suggestions[0].message,
-            "swap them: `zip as postcode`"
+            "swap them: `postal_code as code`"
         );
         let fixed = fix(&source);
         assert!(
-            fixed.contains("var a := t rename {zip as postcode};"),
+            fixed.contains("var a := t rename {postal_code as code};"),
             "{fixed}"
         );
         assert!(
-            fixed.contains("var b := t rename {zip as postcode};"),
+            fixed.contains("var b := t rename {postal_code as code};"),
             "{fixed}"
         );
         assert!(fixed.contains("var f := t;"), "{fixed}");
