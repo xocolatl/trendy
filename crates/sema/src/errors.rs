@@ -687,13 +687,14 @@ pub(crate) fn not_joinable(token: &SyntaxToken, ty: &hir::Type, operand: &Expr) 
     .with_note("`join`, `times` and `compose` combine the tuples of two relations")
 }
 
-/// The join written `token` of `lhs` and `rhs`, whose common attribute
-/// `name` has type `lhs_ty` in one and `rhs_ty` in the other.
+/// The join written `token` of operands written at `lhs` and `rhs`, whose
+/// common attribute `name` has type `lhs_ty` in one and `rhs_ty` in the
+/// other.
 pub(crate) fn join_type_conflict(
     token: &SyntaxToken,
     name: &str,
-    (lhs, lhs_ty): (&Expr, &hir::Type),
-    (rhs, rhs_ty): (&Expr, &hir::Type),
+    (lhs, lhs_ty): (Span, &hir::Type),
+    (rhs, rhs_ty): (Span, &hir::Type),
 ) -> Diagnostic {
     let operator = token.text();
     Diagnostic::error(
@@ -704,8 +705,8 @@ pub(crate) fn join_type_conflict(
         trendy_syntax::span(token.text_range()),
         format!("`{operator}` matches tuples on `{name}`"),
     )
-    .with_secondary(lhs.span(), format!("`{name}` is `{lhs_ty}` here"))
-    .with_secondary(rhs.span(), format!("and `{rhs_ty}` here"))
+    .with_secondary(lhs, format!("`{name}` is `{lhs_ty}` here"))
+    .with_secondary(rhs, format!("and `{rhs_ty}` here"))
     .with_note(JOIN_RULE)
     .with_note("matched attributes must have the same type, since values never convert to another type implicitly")
     .with_help(format!(
@@ -713,38 +714,52 @@ pub(crate) fn join_type_conflict(
     ))
 }
 
-/// The join `join`, written `token`, of `operands`, each with its heading,
-/// whose common attributes are wrong for the operator. For `times`, `shared`
+/// An operand of a join, for its errors: where it is written, and its
+/// heading. For a step of `compose[…]`, the operands before it, composed.
+pub(crate) struct Operand<'a> {
+    pub(crate) span: Span,
+    pub(crate) heading: &'a hir::Heading,
+    pub(crate) composed: bool,
+}
+
+/// The join `join`, written `token`, of `operands`, whose common attributes
+/// are wrong for the operator. For `times`, `shared`
 /// are the attributes more than one operand has. For `join` and `compose`,
 /// `groups` gives each operand's group, the operands connected to each other
 /// through common attributes, and there is more than one.
 pub(crate) fn common_attributes(
     join: crate::ops::JoinKind,
     token: &SyntaxToken,
-    operands: &[(&Expr, &hir::Heading)],
+    operands: &[Operand],
     shared: &BTreeSet<String>,
     groups: &[usize],
 ) -> Diagnostic {
     use crate::ops::JoinKind;
     let operator = token.text();
     let span = trendy_syntax::span(token.text_range());
-    let attributes = |heading: &hir::Heading| {
-        let names: Vec<String> = heading
+    let attributes = |operand: &Operand| {
+        let names: Vec<String> = operand
+            .heading
             .attributes()
             .map(|(a, _)| format!("`{a}`"))
             .collect();
-        if names.is_empty() {
-            "this has no attributes".to_string()
+        let this = if operand.composed {
+            "composed, these have"
         } else {
-            format!("this has {}", trendy_diag::conjoin(&names))
+            "this has"
+        };
+        if names.is_empty() {
+            format!("{this} no attributes")
+        } else {
+            format!("{this} {}", trendy_diag::conjoin(&names))
         }
     };
     let labelled = |d: Diagnostic, shown: &dyn Fn(&hir::Heading) -> bool| {
         operands
             .iter()
-            .filter(|(_, heading)| shown(heading))
-            .fold(d, |d, (operand, heading)| {
-                d.with_secondary(operand.span(), attributes(heading))
+            .filter(|operand| shown(operand.heading))
+            .fold(d, |d, operand| {
+                d.with_secondary(operand.span, attributes(operand))
             })
     };
     if join == JoinKind::Times {
@@ -776,12 +791,12 @@ pub(crate) fn common_attributes(
     let near_miss = operands
         .iter()
         .zip(groups)
-        .flat_map(|((_, a), g)| {
+        .flat_map(|(Operand { heading: a, .. }, g)| {
             operands
                 .iter()
                 .zip(groups)
                 .filter(move |(_, h)| *h != g)
-                .flat_map(move |((_, b), _)| {
+                .flat_map(move |(Operand { heading: b, .. }, _)| {
                     a.attributes()
                         .flat_map(move |(x, _)| b.attributes().map(move |(y, _)| (x, y)))
                 })
@@ -823,33 +838,18 @@ pub(crate) fn common_attributes(
     })
 }
 
-/// `compose{…}`, `nary`, which has no form with a list of operands, since
-/// compose isn't associative.
-pub(crate) fn nary_compose(nary: &NaryExpr) -> Diagnostic {
-    let operands: Vec<Expr> = nary.operands().collect();
-    let d = Diagnostic::error(
-        Code::NaryCompose,
-        "`compose` takes two operands, not a list",
+/// `compose[]`, `nary`, which has no value: compose has no identity.
+pub(crate) fn empty_compose(nary: &NaryExpr) -> Diagnostic {
+    Diagnostic::error(
+        Code::EmptyCompose,
+        "`compose[]` composes nothing",
         nary.span(),
-        "compose has no form with a list of operands",
+        "compose needs at least one operand",
     )
     .with_note(
-        "compose isn't associative: `(r compose s) compose t` and `r compose (s compose t)` can differ, so a list of operands would have no one meaning",
-    );
-    match operands.as_slice() {
-        [lhs, rhs] => d.with_suggestion(
-            "write `compose` between them",
-            vec![Edit {
-                span: nary.span(),
-                replacement: format!(
-                    "{} compose {}",
-                    lhs.syntax().to_string().trim(),
-                    rhs.syntax().to_string().trim()
-                ),
-            }],
-        ),
-        _ => d.with_help("write the order you mean, as in `(r compose s) compose t`"),
-    }
+        "`join{}` and `times{}` are `relation {} { {} }`, which joins with anything to give it back; no relation composes with everything that way, so `compose[]` has no value",
+    )
+    .with_help("write the relations to compose, as in `compose[r, s, t]`")
 }
 
 /// `.name`, at `at`, applied to a value of type `ty`, which isn't a tuple.

@@ -732,7 +732,12 @@ operator main{} [
   with another, so that they all connect, and no two operands of
   `times{…}` may share one. `join{}` and `times{}` are
   `relation {} { {} }` (table_dee), which joins with anything to give it
-  back. Compose isn't associative, so `compose{…}` is an error (A0029).
+  back.
+- **Compose's list is in brackets,** since compose isn't associative and
+  the order matters: `compose[r, s, t]` is `(r compose s) compose t`. Each
+  step needs an attribute in common between what comes before and the
+  next operand. `compose[r]` is `r`, and `compose[]` has no value (A0029).
+  Braces and brackets are fixed to the ones each operator takes.
 
 ```trendy
 var cities := relation { { city: "Kumasi", country: "Ghana" } };
@@ -741,6 +746,7 @@ var continents := relation { { continent: "Africa", area: 30370000 } };
 var sizes := relation { { size: "small" }, { size: "large" } };
 var placed := join{cities, countries, continents};
 var everything := times{cities, sizes};
+var areas := compose[cities, countries, continents];
 
 operator main{} [
     call debug_value{v: placed};

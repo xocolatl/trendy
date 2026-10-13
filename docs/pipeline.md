@@ -144,9 +144,12 @@ reported with a fix. SQL's joins are recognized the same way (P0021):
 stand for and fixed to it, and the outer joins as `join`, with no fix,
 looking up to three tokens ahead. SQL's `on` condition or `using` list after a
 join's right operand is consumed into an error node, so the next join still
-parses, and reported. A join of a list, `join{r, s, t}` or `times{…}`, is an
-operand (`NaryExpr`), recognized where an operand starts by the keyword
-followed by `{`, or by `(`, which is fixed to braces.
+parses, and reported. A join of a list, `join{r, s, t}`, `times{…}` or
+`compose[…]`, is an operand (`NaryExpr`), recognized where an operand
+starts by the keyword followed by `{`, `[` or `(`. Braces enclose what can
+be in any order and brackets what can't, so join's and times's operands
+go in braces, and compose's in brackets; the others are fixed to them
+(P0003).
 
 **Must not:** resolve names, check meaning, or reject a program that is
 grammatically valid. For example, "no `main`", "duplicate name" and "unknown
@@ -290,15 +293,18 @@ numeric type is reported at the operator, with a fix to the right one
 since the type expected of them is that of their boolean result.
 
 `join`, `times` and `compose`, dyadic or of a list (`ops::Joining`), are
-checked by one function, `Joining::removed`: every operand must be a
+checked by one function, `Joining::combined`: every operand must be a
 relation (A0022), an attribute must have the same type in every operand
-that has it (A0027), the operands of `join` and `compose` must all connect
-through common attributes, and no two operands of `times` may share one
-(A0028, whose help names a near-miss attribute to rename). Compose has no
-list form, since it isn't associative (A0029). Each becomes nested
-`hir::Expr::And`s, and compose a `Remove` of one. A list's constant operands
-are joined together first, which AND's associativity and commutativity
-allow, and an empty list is table_dee, AND's identity.
+that has it (A0027), the operands of `join` must all connect through
+common attributes, and no two operands of `times` may share one (A0028,
+whose help names a near-miss attribute to rename). Join and times become
+nested `hir::Expr::And`s, with a list's constant operands joined together
+first, which AND's associativity and commutativity allow; an empty list is
+table_dee, AND's identity. Compose isn't associative, so it is checked and
+built from the left, one step per operand after the first: the AND of the
+result so far and the next operand, which must have an attribute in common
+(A0028), without those attributes (a `Remove`). `compose[]` has no value
+(A0029).
 
 Comparisons follow one order per type (`hir::compare`): `false` before
 `true`, integers numerically, rationals by IEEE 754 totalOrder, and text

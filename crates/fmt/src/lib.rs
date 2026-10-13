@@ -856,6 +856,10 @@ mod tests {
             fmt("var a:=join { b,c{x} ,times{d,e} }join f;"),
             "var a := join{b, c{x}, times{d, e}} join f;\n"
         );
+        assert_eq!(
+            fmt("var a := compose [ b,c ,d ];"),
+            "var a := compose[b, c, d];\n"
+        );
         let names: Vec<String> = (0..12).map(|i| format!("relation_number_{i}")).collect();
         assert_eq!(
             fmt(&format!("var r := join{{{}}};", names.join(", "))),

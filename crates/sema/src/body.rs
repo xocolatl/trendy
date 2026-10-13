@@ -418,14 +418,21 @@ fn joined(
         .iter()
         .map(|operand| type_of(operand, within, cx))
         .collect();
-    let removed = joining.removed(&types, errors)?;
-    let result_ty = types
-        .iter()
-        .fold(
+    let combined = joining.combined(&types, errors)?;
+    let result_ty = match &combined {
+        ops::Combined::And => types.iter().fold(
             hir::Type::Relation(hir::Heading::default()),
             |result, ty| result.and(ty),
-        )
-        .without(&removed);
+        ),
+        ops::Combined::Composed(steps) => {
+            let (first, rest) = types.split_first()?;
+            rest.iter()
+                .zip(steps)
+                .fold(first.clone(), |result, (ty, common)| {
+                    result.and(ty).without(common)
+                })
+        }
+    };
     if let Some(expected) = expected
         && expected.ty != result_ty
     {
@@ -438,7 +445,18 @@ fn joined(
         ));
         return None;
     }
-    Some(ops::remove(ops::and(operands), removed))
+    Some(match combined {
+        ops::Combined::And => ops::and(operands),
+        ops::Combined::Composed(steps) => {
+            let mut operands = operands.into_iter();
+            let first = operands.next()?;
+            operands
+                .zip(steps)
+                .fold(first, |result, (operand, common)| {
+                    ops::remove(ops::and(vec![result, operand]), common)
+                })
+        }
+    })
 }
 
 /// The operator written `token` and its checked `operands`.

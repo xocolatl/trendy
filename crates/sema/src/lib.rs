@@ -2255,7 +2255,7 @@ mod tests {
     #[test]
     fn join_of_lists_errors() {
         let source = format!(
-            "var a := relation {{ {{ x: 1 }} }};\nvar b := relation {{ {{ x: 1, y: 2 }} }};\nvar c := relation {{ {{ z: 1 }} }};\nvar t := relation {{ {{ x: \"1\" }} }};\nvar d := join{{a, b, c}};\nvar e := times{{a, c, b}};\nvar f := join{{a, b, t}};\nvar g := compose{{a, b}};\nvar h := compose{{a, b, c}};\nvar i := join{{a, 1}};{MAIN}"
+            "var a := relation {{ {{ x: 1 }} }};\nvar b := relation {{ {{ x: 1, y: 2 }} }};\nvar c := relation {{ {{ z: 1 }} }};\nvar t := relation {{ {{ x: \"1\" }} }};\nvar d := join{{a, b, c}};\nvar e := times{{a, c, b}};\nvar f := join{{a, b, t}};\nvar i := join{{a, 1}};{MAIN}"
         );
         let errors = errors(&source);
         let found: Vec<_> = errors.iter().map(|e| (e.code, &e.message[..])).collect();
@@ -2275,14 +2275,6 @@ mod tests {
                     "the operands of `join` both have an attribute `x`, of different types"
                 ),
                 (
-                    Code::NaryCompose,
-                    "`compose` takes two operands, not a list"
-                ),
-                (
-                    Code::NaryCompose,
-                    "`compose` takes two operands, not a list"
-                ),
-                (
                     Code::WrongOperandType,
                     "`join` can't be applied to integers"
                 ),
@@ -2290,8 +2282,54 @@ mod tests {
         );
         // Only the operands of `times` that share an attribute are labelled.
         assert_eq!(errors[1].secondary.len(), 2);
-        assert!(fix(&source).contains("var g := a compose b;"));
-        assert!(errors[4].suggestions.is_empty());
+    }
+
+    #[test]
+    fn compose_of_lists() {
+        let vars = variables(
+            "var a := relation { { x: 1, y: 2 }, { x: 3, y: 4 } };\nvar b := relation { { y: 2, z: 5 }, { y: 4, z: 6 } };\nvar c := relation { { z: 5, w: 7 } };\nvar listed := compose[a, b, c];\nvar nested := (a compose b) compose c;\nvar alone := compose[a];",
+        );
+        let value = |name: &str| &vars.iter().find(|v| v.name == name).unwrap().init;
+        assert_eq!(value("listed"), value("nested"));
+        assert_eq!(
+            value("listed").ty().to_string(),
+            "relation { w: integer, x: integer }"
+        );
+        assert_eq!(value("alone"), value("a"));
+
+        // Each step composes what comes before with the next operand, so
+        // `y`, removed by the first step, can't match the third operand.
+        let source = format!(
+            "var a := relation {{ {{ x: 1, y: 2 }} }};\nvar b := relation {{ {{ y: 2, z: 3 }} }};\nvar d := relation {{ {{ y: 2, w: 4 }} }};\nvar t := relation {{ {{ z: \"3\" }} }};\nvar e := compose[a, b, d];\nvar f := compose[a, b, t];\nvar g := compose[];{MAIN}"
+        );
+        let errors = errors(&source);
+        let found: Vec<_> = errors.iter().map(|e| (e.code, &e.message[..])).collect();
+        assert_eq!(
+            found,
+            [
+                (
+                    Code::CommonAttributes,
+                    "the operands of `compose` have no attributes in common"
+                ),
+                (
+                    Code::JoinTypeConflict,
+                    "the operands of `compose` both have an attribute `z`, of different types"
+                ),
+                (Code::EmptyCompose, "`compose[]` composes nothing"),
+            ]
+        );
+        let labels: Vec<_> = errors[0]
+            .secondary
+            .iter()
+            .map(|l| (&source[l.span.start..l.span.end], &l.message[..]))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                ("a, b", "composed, these have `x` and `z`"),
+                ("d", "this has `w` and `y`")
+            ]
+        );
     }
 
     #[test]

@@ -352,14 +352,18 @@ fn joined(
         .collect();
     let values: Vec<hir::Value> = values.into_iter().collect::<Option<_>>()?;
     let types: Vec<hir::Type> = values.iter().map(hir::Value::ty).collect();
-    let removed = joining.removed(&types, errors)?;
-    let result = values
-        .iter()
-        .fold(hir::Value::dee(), |result, value| result.and(value));
-    let result = if removed.is_empty() {
-        result
-    } else {
-        result.without(&removed)
+    let result = match joining.combined(&types, errors)? {
+        ops::Combined::And => values
+            .iter()
+            .fold(hir::Value::dee(), |result, value| result.and(value)),
+        ops::Combined::Composed(steps) => {
+            let (first, rest) = values.split_first()?;
+            rest.iter()
+                .zip(&steps)
+                .fold(first.clone(), |result, (value, common)| {
+                    result.and(value).without(common)
+                })
+        }
     };
     matches(expected, result, expr, errors)
 }

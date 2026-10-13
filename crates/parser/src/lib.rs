@@ -893,32 +893,41 @@ impl<'a> Parser<'a> {
 
     /// A join of any number of operands at the next token, if there is one:
     /// `join`, `times` or `compose`, in any case, followed by its operands
-    /// in braces, or in parentheses as a call elsewhere is written. The
-    /// token, and the keyword it is or stands for.
+    /// in braces or brackets, or in parentheses as a call elsewhere is
+    /// written. The token, and the keyword it is or stands for.
     fn at_nary(&mut self) -> Option<(Found<'a>, SyntaxKind)> {
         let found = self.found()?;
         let keyword = match found.kind {
             SyntaxKind::Ident => errors::operator_spelling(found.text)?,
             kind => kind,
         };
-        let list = self
-            .found_after(1)
-            .is_some_and(|f| matches!(f.kind, SyntaxKind::LBrace | SyntaxKind::LParen));
+        let list = self.found_after(1).is_some_and(|f| {
+            matches!(
+                f.kind,
+                SyntaxKind::LBrace | SyntaxKind::LBracket | SyntaxKind::LParen
+            )
+        });
         (keyword.is_join() && list).then_some((found, keyword))
     }
 
-    /// `join{r, s, t}`: the keyword, found as `found`, and the operands.
+    /// `join{r, s, t}`, `times{r, s, t}` or `compose[r, s, t]`: the keyword,
+    /// found as `found`, and the operands. Braces enclose what can be in any
+    /// order, and brackets what can't, so the others are fixed to them.
     fn nary(&mut self, found: Found<'a>, keyword: SyntaxKind) {
         let outer_form = std::mem::replace(&mut self.form, errors::NARY_FORM);
         self.start_node(SyntaxKind::NaryExpr);
         self.operator_token(found, keyword);
-        self.delimited(
-            None,
-            "operands",
-            (SyntaxKind::LBrace, SyntaxKind::RBrace),
-            &[(SyntaxKind::LParen, SyntaxKind::RParen)],
-            |p| p.items(Self::at_operand, Self::expression),
-        );
+        let braces = (SyntaxKind::LBrace, SyntaxKind::RBrace);
+        let brackets = (SyntaxKind::LBracket, SyntaxKind::RBracket);
+        let parens = (SyntaxKind::LParen, SyntaxKind::RParen);
+        let (delims, mistakes) = if keyword == SyntaxKind::ComposeKw {
+            (brackets, [braces, parens])
+        } else {
+            (braces, [brackets, parens])
+        };
+        self.delimited(None, "operands", delims, &mistakes, |p| {
+            p.items(Self::at_operand, Self::expression);
+        });
         self.builder.finish_node();
         self.form = outer_form;
     }
@@ -2282,8 +2291,11 @@ SourceFile
             messages("var x := join{a b};"),
             ["expected `,`, found identifier `b`"]
         );
-        // `compose{…}` parses; sema reports it.
-        assert!(parse_str("var x := compose{a, b};").errors.is_empty());
+        // Braces for what can be in any order, brackets for what can't.
+        assert_eq!(shape("compose[a, b, c]"), "compose[a, b, c]");
+        assert_eq!(fix("var x := compose{a, b};"), "var x := compose[a, b];");
+        assert_eq!(fix("var x := join[a, b];"), "var x := join{a, b};");
+        assert_eq!(fix("var x := compose(a, b);"), "var x := compose[a, b];");
     }
 
     #[test]

@@ -300,25 +300,35 @@ var years := relation {
     { year: 2025 }
 };
 var every_year := cities{city} times years;
-/* Of any number of relations: join{r, s, t} and times{r, s, t}, as join
-   and times are associative and commutative. join{} and times{} are
-   table_dee, AND's identity. Every operand of a join must connect to the
-   others through common attributes, and no two of times may share one.
-   Tutorial D: JOIN { R1, R2, R3 } and TIMES { R1, R2, R3 }. Compose isn't
-   associative, so it has no such form. */
+/* Of any number of relations: join{r, s, t} and times{r, s, t}, in
+   braces, since join and times are associative and commutative, and so
+   their operands can be in any order. join{} and times{} are table_dee,
+   AND's identity. Every operand of a join must connect to the others
+   through common attributes, and no two of times may share one. Tutorial
+   D: JOIN { R1, R2, R3 } and TIMES { R1, R2, R3 }. Compose isn't
+   associative, so its list is in brackets, since the order matters:
+   compose[r, s, t] is (r compose s) compose t. */
 var lived_born := join{people, cities, births{name, born}};
 var grid := times{cities{city}, years, people{born}};
+var countries := relation {
+    { city: "London", country: "United Kingdom" },
+    { city: "Nyeri", country: "Kenya" },
+    { city: "Portland", country: "United States" },
+};
+var born_where := compose[people, cities, countries];
 
 operator join_people{
     p: relation { name: text, born: integer },
     c: relation { name: text, city: text },
     y: relation { year: integer },
+    k: relation { city: text, country: text },
 } [
     call debug_value{v: p join c};
     call debug_value{v: p compose c};
     call debug_value{v: c{city} times y};
     call debug_value{v: join{p, c, p}};
     call debug_value{v: times{c{city}, y, p{born}}};
+    call debug_value{v: compose[p, c, k]};
 ];
 
 operator main{} [
@@ -339,6 +349,7 @@ operator main{} [
     call debug_value{v: every_year};
     call debug_value{v: lived_born};
     call debug_value{v: grid};
+    call debug_value{v: born_where};
 
     call project_births{r: births};
     call project_signs{r: signs};
@@ -352,5 +363,5 @@ operator main{} [
     call build_duplicates{a: 1, b: 1};
     call build_nested{team: "core", member: "李白"};
 
-    call join_people{p: people, c: cities, y: years};
+    call join_people{p: people, c: cities, y: years, k: countries};
 ];

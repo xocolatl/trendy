@@ -562,13 +562,24 @@ impl JoinKind {
     }
 }
 
-/// A join as written: dyadic, `r join s`, or of a list, `join{r, s, t}`.
+/// A join as written: dyadic, `r join s`, or of a list, `join{r, s, t}` or
+/// `compose[r, s, t]`.
 pub(crate) struct Joining {
     pub(crate) kind: JoinKind,
     pub(crate) token: SyntaxToken,
     pub(crate) operands: Vec<Expr>,
-    /// The list form, `join{…}`, if it's written that way.
+    /// The list form, if it's written that way.
     nary: Option<ast::NaryExpr>,
+}
+
+/// How a checked join combines its operands.
+pub(crate) enum Combined {
+    /// The AND of all of them, in any order: `join` and `times`.
+    And,
+    /// Compose, from the left: the first operand, then for each other the
+    /// AND of the result so far and it, without the attributes they have in
+    /// common, given here for each step.
+    Composed(Vec<BTreeSet<String>>),
 }
 
 impl Joining {
@@ -591,42 +602,45 @@ impl Joining {
         })
     }
 
-    /// The attributes the join removes from the AND of its operands, each
-    /// with its type in `types`: the common attributes for `compose`, and
-    /// none otherwise. `None` after reporting why there is no result:
-    /// compose of a list, an operand that isn't a relation, a common
-    /// attribute with different types in two operands, common attributes
-    /// where the operator takes none, or operands that don't all connect
-    /// through common attributes where it needs them to.
-    pub(crate) fn removed(
+    /// How the join combines its operands, each with its type in `types`.
+    /// `None` after reporting why there is no result: an operand that isn't
+    /// a relation, or an attribute of different types in two operands, or,
+    /// for `times`, a common attribute; for `join`, operands that don't all
+    /// connect through common attributes; and for `compose`, a step whose
+    /// operands have nothing in common, or no operands at all.
+    pub(crate) fn combined(
         &self,
         types: &[hir::Type],
         errors: &mut Vec<Diagnostic>,
-    ) -> Option<BTreeSet<String>> {
+    ) -> Option<Combined> {
         if self.kind == JoinKind::Compose
+            && self.operands.is_empty()
             && let Some(nary) = &self.nary
         {
-            errors.push(errors::nary_compose(nary));
+            errors.push(errors::empty_compose(nary));
             return None;
         }
         let mut operands = Vec::new();
         for (operand, ty) in self.operands.iter().zip(types) {
             match ty {
-                hir::Type::Relation(heading) => operands.push((operand, heading)),
+                hir::Type::Relation(heading) => operands.push((operand.span(), heading)),
                 _ => errors.push(errors::not_joinable(&self.token, ty, operand)),
             }
         }
         if operands.len() < self.operands.len() {
             return None;
         }
+        if self.kind == JoinKind::Compose {
+            return self.composed(&operands, errors).map(Combined::Composed);
+        }
         let mut ok = true;
         // Each attribute name, with the first operand that has it.
-        let mut first: BTreeMap<&str, (&Expr, &hir::Type)> = BTreeMap::new();
+        let mut first: BTreeMap<&str, (Span, &hir::Type)> = BTreeMap::new();
         let mut shared = BTreeSet::new();
-        for &(operand, heading) in &operands {
+        for &(span, heading) in &operands {
             for (name, ty) in heading.attributes() {
                 let Some(&(earlier, earlier_ty)) = first.get(name) else {
-                    first.insert(name, (operand, ty));
+                    first.insert(name, (span, ty));
                     continue;
                 };
                 shared.insert(name.to_string());
@@ -635,7 +649,7 @@ impl Joining {
                         &self.token,
                         name,
                         (earlier, earlier_ty),
-                        (operand, ty),
+                        (span, ty),
                     ));
                     ok = false;
                 }
@@ -649,6 +663,14 @@ impl Joining {
             JoinKind::Join | JoinKind::Compose => groups.iter().any(|&g| g != 0),
         };
         if wrong {
+            let operands: Vec<errors::Operand> = operands
+                .iter()
+                .map(|&(span, heading)| errors::Operand {
+                    span,
+                    heading,
+                    composed: false,
+                })
+                .collect();
             errors.push(errors::common_attributes(
                 self.kind,
                 &self.token,
@@ -658,10 +680,63 @@ impl Joining {
             ));
             ok = false;
         }
-        ok.then(|| match self.kind {
-            JoinKind::Compose => shared,
-            JoinKind::Join | JoinKind::Times => BTreeSet::new(),
-        })
+        ok.then_some(Combined::And)
+    }
+
+    /// The attributes each step of a compose of `operands`, each where it's
+    /// written and with its heading, removes: those the result so far and
+    /// the next operand have in common, which must be some, and of the same
+    /// types.
+    fn composed(
+        &self,
+        operands: &[(Span, &hir::Heading)],
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<Vec<BTreeSet<String>>> {
+        let (&(first_span, first), rest) = operands.split_first()?;
+        let (mut so_far, mut so_far_span) = (first.clone(), first_span);
+        let mut steps = Vec::new();
+        let mut ok = true;
+        for &(span, heading) in rest {
+            let common = so_far.common(heading);
+            for name in &common {
+                let (a, b) = (so_far.get(name)?, heading.get(name)?);
+                if a != b {
+                    errors.push(errors::join_type_conflict(
+                        &self.token,
+                        name,
+                        (so_far_span, a),
+                        (span, b),
+                    ));
+                    ok = false;
+                }
+            }
+            if common.is_empty() {
+                let operands = [
+                    errors::Operand {
+                        span: so_far_span,
+                        heading: &so_far,
+                        composed: so_far_span != first_span,
+                    },
+                    errors::Operand {
+                        span,
+                        heading,
+                        composed: false,
+                    },
+                ];
+                errors.push(errors::common_attributes(
+                    self.kind,
+                    &self.token,
+                    &operands,
+                    &common,
+                    &[0, 1],
+                ));
+                ok = false;
+            }
+            so_far = so_far.and(heading).without(&common);
+            so_far_span = Span::new(first_span.start, span.end);
+            steps.push(common);
+        }
+        ok.then_some(steps)
     }
 }
 

@@ -420,6 +420,8 @@ fn relations() {
             // Joins and times of lists.
             r#"relation { born: integer, city: text, name: text } { { born: 1815, city: "London", name: "Ada" }, { born: 1923, city: "Portland", name: "Edgar" } }"#,
             r#"relation { born: integer, city: text, year: integer } { { born: 1815, city: "London", year: 2024 }, { born: 1815, city: "London", year: 2025 }, { born: 1815, city: "Nyeri", year: 2024 }, { born: 1815, city: "Nyeri", year: 2025 }, { born: 1815, city: "Portland", year: 2024 }, { born: 1815, city: "Portland", year: 2025 }, { born: 1923, city: "London", year: 2024 }, { born: 1923, city: "London", year: 2025 }, { born: 1923, city: "Nyeri", year: 2024 }, { born: 1923, city: "Nyeri", year: 2025 }, { born: 1923, city: "Portland", year: 2024 }, { born: 1923, city: "Portland", year: 2025 } }"#,
+            // Composed from the left: on `name`, then on `city`.
+            r#"relation { born: integer, country: text } { { born: 1815, country: "United Kingdom" }, { born: 1923, country: "United States" } }"#,
         ]
     );
 }
