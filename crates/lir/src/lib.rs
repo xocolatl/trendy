@@ -132,8 +132,8 @@ pub enum RuntimeFn {
     /// allocated.
     Concat,
     /// `trendy_rt_free(value)`: release the memory of a text or relation
-    /// made by [`RuntimeFn::Concat`], [`RuntimeFn::Reshape`] or
-    /// [`RuntimeFn::Relation`].
+    /// made by [`RuntimeFn::Concat`], [`RuntimeFn::Reshape`],
+    /// [`RuntimeFn::Relation`] or [`RuntimeFn::And`].
     Free,
     /// `trendy_rt_reshape(dst, src, result, source, offsets)`: store at
     /// `dst` the relation `src` with its tuples reshaped into the
@@ -150,6 +150,19 @@ pub enum RuntimeFn {
     /// sorted canonically and without duplicates, in allocated memory that
     /// must be released with [`RuntimeFn::Free`].
     Relation,
+    /// `trendy_rt_and(dst, lhs, rhs, result, lhs_desc, rhs_desc, sources,
+    /// common, common_count)`: store at `dst` the relation, of the type the
+    /// descriptor `result` describes, of every tuple made of a tuple of
+    /// `lhs` and one of `rhs` that agree on their common attributes
+    /// (Algebra A's AND), sorted canonically, in allocated memory that must
+    /// be released with [`RuntimeFn::Free`]. `lhs_desc` and `rhs_desc`
+    /// describe the operands. `sources` is an array with, for each attribute
+    /// of `result`, a struct of a [`Field::Usize`], 1 if it comes from `rhs`
+    /// and 0 if from `lhs`, and its [`Field::Offset`] there. `common` is an
+    /// array of `common_count` (a [`Field::Usize`]) structs, one per common
+    /// attribute: its offset in a tuple of `lhs`, its offset in one of
+    /// `rhs`, and the [`Field::Address`] of its type's descriptor.
+    And,
     /// `trendy_rt_compare_text(dst, lhs, rhs)`: store -1, 0 or 1 at `dst`,
     /// an [`Layout::I64`], as `lhs` is before, equal to or after `rhs` in
     /// code point order.
@@ -171,6 +184,7 @@ impl RuntimeFn {
             RuntimeFn::Free => "trendy_rt_free",
             RuntimeFn::Reshape => "trendy_rt_reshape",
             RuntimeFn::Relation => "trendy_rt_relation",
+            RuntimeFn::And => "trendy_rt_and",
             RuntimeFn::CompareText => "trendy_rt_compare_text",
             RuntimeFn::Equal => "trendy_rt_equal",
         }

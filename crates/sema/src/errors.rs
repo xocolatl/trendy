@@ -670,6 +670,124 @@ pub(crate) fn not_projectable(
         )
 }
 
+/// What every join does with the operands' common attributes, for notes.
+const JOIN_RULE: &str = "`join` matches the tuples of its operands on all the attributes they have in common, by name; `times` is for operands with none in common, and `compose` is `join` without the common attributes";
+
+/// The join written `token` applied to `operand`, of type `ty`, which isn't
+/// a relation.
+pub(crate) fn not_joinable(token: &SyntaxToken, ty: &hir::Type, operand: &Expr) -> Diagnostic {
+    let operator = token.text();
+    Diagnostic::error(
+        Code::WrongOperandType,
+        format!("`{operator}` can't be applied to {}", plural(ty)),
+        trendy_syntax::span(token.text_range()),
+        format!("`{operator}` takes relations"),
+    )
+    .with_secondary(operand.span(), format!("this is `{ty}`"))
+    .with_note("`join`, `times` and `compose` combine the tuples of two relations")
+}
+
+/// The join written `token` of `lhs` and `rhs`, whose common attribute
+/// `name` has type `lhs_ty` in one and `rhs_ty` in the other.
+pub(crate) fn join_type_conflict(
+    token: &SyntaxToken,
+    name: &str,
+    (lhs, lhs_ty): (&Expr, &hir::Type),
+    (rhs, rhs_ty): (&Expr, &hir::Type),
+) -> Diagnostic {
+    let operator = token.text();
+    Diagnostic::error(
+        Code::JoinTypeConflict,
+        format!(
+            "the operands of `{operator}` both have an attribute `{name}`, of different types"
+        ),
+        trendy_syntax::span(token.text_range()),
+        format!("`{operator}` matches tuples on `{name}`"),
+    )
+    .with_secondary(lhs.span(), format!("`{name}` is `{lhs_ty}` here"))
+    .with_secondary(rhs.span(), format!("and `{rhs_ty}` here"))
+    .with_note(JOIN_RULE)
+    .with_note("matched attributes must have the same type, since values never convert to another type implicitly")
+    .with_help(format!(
+        "if the two `{name}`s mean different things, rename one: `… rename {{{name} as other_{name}}}`"
+    ))
+}
+
+/// The join `join`, written `token`, of `lhs`, whose heading is
+/// `lhs_heading`, and `rhs`, whose heading is `rhs_heading`, which have
+/// the attributes `common` in common, wrongly for the operator: none for
+/// `join` and `compose`, or some for `times`.
+pub(crate) fn common_attributes(
+    join: crate::ops::JoinKind,
+    token: &SyntaxToken,
+    (lhs, lhs_heading): (&Expr, &hir::Heading),
+    (rhs, rhs_heading): (&Expr, &hir::Heading),
+    common: &BTreeSet<String>,
+) -> Diagnostic {
+    use crate::ops::JoinKind;
+    let operator = token.text();
+    let span = trendy_syntax::span(token.text_range());
+    let attributes = |heading: &hir::Heading| {
+        let names: Vec<String> = heading
+            .attributes()
+            .map(|(a, _)| format!("`{a}`"))
+            .collect();
+        if names.is_empty() {
+            "this has no attributes".to_string()
+        } else {
+            format!("this has {}", trendy_diag::conjoin(&names))
+        }
+    };
+    if join == JoinKind::Times {
+        let names: Vec<String> = common.iter().map(|a| format!("`{a}`")).collect();
+        let first = common
+            .first()
+            .expect("times is reported with common attributes");
+        return Diagnostic::error(
+            Code::CommonAttributes,
+            format!(
+                "the operands of `{operator}` have {} in common",
+                trendy_diag::conjoin(&names)
+            ),
+            span,
+            format!("`{operator}` takes operands with no attributes in common"),
+        )
+        .with_secondary(lhs.span(), attributes(lhs_heading))
+        .with_secondary(rhs.span(), attributes(rhs_heading))
+        .with_note(JOIN_RULE)
+        .with_help(format!(
+            "to match tuples on them, write `join`; if they mean different things, rename one side's: `… rename {{{first} as other_{first}}}`"
+        ));
+    }
+    // An attribute of one operand that's a near miss for one of the other's
+    // was probably meant to match it. Short names are all near each other,
+    // so the difference must be small for their length too.
+    let near_miss = lhs_heading
+        .attributes()
+        .flat_map(|(a, _)| rhs_heading.attributes().map(move |(b, _)| (a, b)))
+        .filter(|(a, b)| {
+            let distance = edit_distance(a, b);
+            distance <= 2 && distance * 3 <= a.len().min(b.len())
+        })
+        .min_by_key(|(a, b)| edit_distance(a, b));
+    let d = Diagnostic::error(
+        Code::CommonAttributes,
+        format!("the operands of `{operator}` have no attributes in common"),
+        span,
+        format!("`{operator}` matches tuples on their common attributes"),
+    )
+    .with_secondary(lhs.span(), attributes(lhs_heading))
+    .with_secondary(rhs.span(), attributes(rhs_heading))
+    .with_note(JOIN_RULE);
+    let d = match near_miss {
+        Some((a, b)) => d.with_help(format!(
+            "if `{b}` is `{a}`, rename it so they match: `… rename {{{b} as {a}}}`"
+        )),
+        None => d,
+    };
+    d.with_help("to pair every tuple of one with every tuple of the other, write `times`")
+}
+
 /// `.name`, at `at`, applied to a value of type `ty`, which isn't a tuple.
 pub(crate) fn not_extractable(name: &str, at: Span, ty: &hir::Type, operand: &Expr) -> Diagnostic {
     let d = Diagnostic::error(

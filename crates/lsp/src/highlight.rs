@@ -224,6 +224,24 @@ mod tests {
     }
 
     #[test]
+    fn joins() {
+        assert_eq!(
+            highlight("var a := b join c times d compose e;"),
+            [
+                ("var", Class::Keyword, false),
+                ("a", Class::Variable, true),
+                ("b", Class::Variable, false),
+                ("join", Class::ExprOperator, false),
+                ("c", Class::Variable, false),
+                ("times", Class::ExprOperator, false),
+                ("d", Class::Variable, false),
+                ("compose", Class::ExprOperator, false),
+                ("e", Class::Variable, false),
+            ]
+        );
+    }
+
+    #[test]
     fn comments() {
         assert_eq!(
             highlight("/* a /* b */ c */ var x := 1; /* d */"),

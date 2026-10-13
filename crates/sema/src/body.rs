@@ -283,6 +283,9 @@ fn expr(
                 Resolved::Binary(_) => None,
             }
         }
+        Expr::Binary(binary) if ops::JoinKind::of(binary).is_some() => {
+            joined(binary, expr, expected, within, cx, errors)
+        }
         Expr::Binary(binary) => {
             let token = binary.operator()?;
             let (resolved, operands) = operands(
@@ -394,6 +397,44 @@ fn reshaped(
     Some(result)
 }
 
+/// A join, `binary`, written `expr`, in a body.
+fn joined(
+    binary: &ast::BinaryExpr,
+    expr: &Expr,
+    expected: Option<&Expected>,
+    within: hir::OperatorId,
+    cx: &Context,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<hir::Expr> {
+    let (join, token) = ops::JoinKind::of(binary)?;
+    let (lhs_expr, rhs_expr) = (binary.lhs()?, binary.rhs()?);
+    let lhs = self::expr(&lhs_expr, None, within, cx, errors);
+    let rhs = self::expr(&rhs_expr, None, within, cx, errors);
+    let (lhs, rhs) = (lhs?, rhs?);
+    let (lhs_ty, rhs_ty) = (type_of(&lhs, within, cx), type_of(&rhs, within, cx));
+    let removed = ops::joined(
+        join,
+        &token,
+        (&lhs_expr, &lhs_ty),
+        (&rhs_expr, &rhs_ty),
+        errors,
+    )?;
+    let result_ty = lhs_ty.and(&rhs_ty).without(&removed);
+    if let Some(expected) = expected
+        && expected.ty != result_ty
+    {
+        errors.push(errors::type_mismatch(
+            &expected.ty,
+            &expected.origin,
+            &result_ty,
+            None,
+            expr,
+        ));
+        return None;
+    }
+    Some(ops::remove(ops::and(lhs, rhs), removed))
+}
+
 /// The operator written `token` and its checked `operands`.
 fn operands(
     token: &trendy_syntax::SyntaxToken,
@@ -445,6 +486,7 @@ fn type_of(expr: &hir::Expr, within: hir::OperatorId, cx: &Context) -> hir::Type
         hir::Expr::Relation(heading, _) => hir::Type::Relation(heading.clone()),
         hir::Expr::Remove(operand, names) => type_of(operand, within, cx).without(names),
         hir::Expr::Rename(operand, renamings) => type_of(operand, within, cx).renamed(renamings),
+        hir::Expr::And(lhs, rhs) => type_of(lhs, within, cx).and(&type_of(rhs, within, cx)),
     }
 }
 

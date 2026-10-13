@@ -176,8 +176,9 @@ unsafe fn text_bytes<'a>(text: Text) -> &'a [u8] {
     unsafe { core::slice::from_raw_parts(text.bytes, text.len) }
 }
 
-/// Release the memory of a text or relation made by [`trendy_rt_concat`]
-/// or [`trendy_rt_reshape`]. Both are a pointer and a length.
+/// Release the memory of a text or relation made by [`trendy_rt_concat`],
+/// [`trendy_rt_reshape`], [`trendy_rt_relation`] or [`trendy_rt_and`]. Both
+/// are a pointer and a length.
 ///
 /// # Safety
 ///
@@ -282,6 +283,227 @@ pub unsafe extern "C" fn trendy_rt_relation(
     unsafe {
         let (bytes, len) = canonical(tuples, count.read_unaligned(), &*desc);
         dst.write_unaligned(Text { bytes, len });
+    }
+}
+
+/// An attribute the operands of [`trendy_rt_and`] have in common: where it
+/// is in a tuple of each, and its type. The compiler emits an array of
+/// these, laid out like this struct.
+#[repr(C)]
+pub struct Common {
+    pub lhs: usize,
+    pub rhs: usize,
+    pub desc: *const TypeDesc,
+}
+
+/// Where an attribute of [`trendy_rt_and`]'s result comes from: the right
+/// operand if `from_rhs` is 1, else the left, and where it is in a tuple of
+/// that operand. The compiler emits an array of these, laid out like this
+/// struct.
+#[repr(C)]
+pub struct Source {
+    pub from_rhs: usize,
+    pub offset: usize,
+}
+
+/// Tuples of [`trendy_rt_and`]'s operands that agree on the common
+/// attributes: those in `lhs` from `lhs_start` to `lhs_end`, and those in
+/// `rhs` from `rhs_start` to `rhs_end`, of the sorted tuples.
+#[cfg(not(test))]
+struct Group {
+    lhs_start: usize,
+    lhs_end: usize,
+    rhs_start: usize,
+    rhs_end: usize,
+}
+
+/// Store at `dst` the relation `result` describes whose tuples are each
+/// made of a tuple of the relation `lhs` and one of `rhs` that agree on
+/// their common attributes (Algebra A's AND), in canonical order, in memory
+/// that [`trendy_rt_free`] releases. `lhs_desc` and `rhs_desc` describe
+/// the operands. `sources` says where each attribute of `result` comes
+/// from, and `common` lists the `*common_count` common attributes.
+///
+/// Both operands' tuples are sorted on the common attributes, then merged:
+/// each run of tuples of one that agree on them pairs with the matching run
+/// of the other.
+///
+/// # Safety
+///
+/// `lhs` and `rhs` must point to valid relations of the types `lhs_desc`
+/// and `rhs_desc` describe, `result` to a valid descriptor of the relation
+/// type with the attributes of both, `sources` to one source per attribute
+/// of `result`, `common` to `*common_count` common attributes, and `dst`
+/// to memory for a relation.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_and(
+    dst: *mut Text,
+    lhs: *const u8,
+    rhs: *const u8,
+    result: *const TypeDesc,
+    lhs_desc: *const TypeDesc,
+    rhs_desc: *const TypeDesc,
+    sources: *const Source,
+    common: *const Common,
+    common_count: *const usize,
+) {
+    // SAFETY: guaranteed by the caller; each size and offset is the layout
+    // of the value it describes.
+    unsafe {
+        let (result, lhs_desc, rhs_desc) = (&*result, &*lhs_desc, &*rhs_desc);
+        let ((lhs, lhs_count), (rhs, rhs_count)) = (read_slice(lhs), read_slice(rhs));
+        let result_attrs = attributes(result);
+        let sources = array(sources, result_attrs.len());
+        let common = array(common, common_count.read_unaligned());
+        let lhs_sorted = sorted_on(common, true, lhs, lhs_count, lhs_desc.element_size);
+        let rhs_sorted = sorted_on(common, false, rhs, rhs_count, rhs_desc.element_size);
+        let (groups, total) = matching_runs(common, lhs_sorted, rhs_sorted);
+
+        let size = result.element_size;
+        let Some(bytes) = total.checked_mul(size) else {
+            trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+        };
+        let joined = allocate::<u8>(bytes);
+        core::ptr::write_bytes(joined, 0, bytes);
+        let mut k = 0;
+        for group in &*groups {
+            for &l in &lhs_sorted[group.lhs_start..group.lhs_end] {
+                for &r in &rhs_sorted[group.rhs_start..group.rhs_end] {
+                    let to = joined.add(k * size);
+                    for (attr, source) in result_attrs.iter().zip(sources) {
+                        let from = if source.from_rhs == 1 { r } else { l };
+                        core::ptr::copy_nonoverlapping(
+                            from.add(source.offset),
+                            to.add(attr.offset),
+                            (*attr.desc).size,
+                        );
+                    }
+                    k += 1;
+                }
+            }
+        }
+        let canonical = canonical(joined, total, result);
+        for memory in [
+            joined.cast(),
+            groups.as_mut_ptr().cast(),
+            lhs_sorted.as_mut_ptr().cast(),
+            rhs_sorted.as_mut_ptr().cast(),
+        ] {
+            free(memory);
+        }
+        dst.write_unaligned(Text {
+            bytes: canonical.0,
+            len: canonical.1,
+        });
+    }
+}
+
+/// The order of two tuples by their values for the `common` attributes,
+/// each tuple from the left operand of [`trendy_rt_and`] if its flag says
+/// so, and else from the right.
+///
+/// # Safety
+///
+/// `x` and `y` must point to valid tuples of the operands their flags say.
+#[cfg(not(test))]
+unsafe fn on_common(
+    common: &[Common],
+    (x, x_lhs): (*const u8, bool),
+    (y, y_lhs): (*const u8, bool),
+) -> core::cmp::Ordering {
+    for c in common {
+        let at = |lhs: bool| if lhs { c.lhs } else { c.rhs };
+        // SAFETY: guaranteed by the caller.
+        let ordering = unsafe { order(x.add(at(x_lhs)), y.add(at(y_lhs)), &*c.desc) };
+        if ordering.is_ne() {
+            return ordering;
+        }
+    }
+    core::cmp::Ordering::Equal
+}
+
+/// The `count` tuples at `tuples`, each `size` bytes, of the left operand
+/// of [`trendy_rt_and`] if `is_lhs`, and else the right, sorted by their
+/// values for the `common` attributes: an array of pointers to them, in
+/// new memory.
+///
+/// # Safety
+///
+/// `tuples` must point to `count` valid tuples of that operand.
+#[cfg(not(test))]
+unsafe fn sorted_on<'a>(
+    common: &[Common],
+    is_lhs: bool,
+    tuples: *const u8,
+    count: usize,
+    size: usize,
+) -> &'a mut [*const u8] {
+    // SAFETY: guaranteed by the caller; every pointer is written before
+    // the array is read.
+    unsafe {
+        let sorted = core::slice::from_raw_parts_mut(allocate::<*const u8>(count), count);
+        for (i, tuple) in sorted.iter_mut().enumerate() {
+            *tuple = tuples.add(i * size);
+        }
+        sorted.sort_unstable_by(|x, y| on_common(common, (*x, is_lhs), (*y, is_lhs)));
+        sorted
+    }
+}
+
+/// The runs of tuples of `lhs` and of `rhs`, both sorted on the `common`
+/// attributes, that agree on them, in new memory, and how many tuples they
+/// make: the size of each run of `lhs` times the size of its run of `rhs`.
+/// Stops the program if that is more than memory can hold.
+///
+/// # Safety
+///
+/// `lhs` and `rhs` must point to valid tuples of [`trendy_rt_and`]'s left
+/// and right operands.
+#[cfg(not(test))]
+unsafe fn matching_runs<'a>(
+    common: &[Common],
+    lhs: &[*const u8],
+    rhs: &[*const u8],
+) -> (&'a mut [Group], usize) {
+    use core::cmp::Ordering;
+    let groups = allocate::<Group>(lhs.len().min(rhs.len()));
+    let (mut count, mut total) = (0, 0usize);
+    let (mut i, mut j) = (0, 0);
+    // SAFETY: guaranteed by the caller; the array has room for a run per
+    // tuple of the shorter operand, and each run holds at least one.
+    unsafe {
+        while i < lhs.len() && j < rhs.len() {
+            match on_common(common, (lhs[i], true), (rhs[j], false)) {
+                Ordering::Less => i += 1,
+                Ordering::Greater => j += 1,
+                Ordering::Equal => {
+                    let run = |tuples: &[*const u8], start: usize, is_lhs: bool| {
+                        let same = |t: &*const u8| {
+                            on_common(common, (tuples[start], is_lhs), (*t, is_lhs)).is_eq()
+                        };
+                        start + 1 + tuples[start + 1..].iter().take_while(|t| same(t)).count()
+                    };
+                    let (lhs_end, rhs_end) = (run(lhs, i, true), run(rhs, j, false));
+                    let Some(sum) = (lhs_end - i)
+                        .checked_mul(rhs_end - j)
+                        .and_then(|n| n.checked_add(total))
+                    else {
+                        trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+                    };
+                    total = sum;
+                    groups.add(count).write(Group {
+                        lhs_start: i,
+                        lhs_end,
+                        rhs_start: j,
+                        rhs_end,
+                    });
+                    count += 1;
+                    (i, j) = (lhs_end, rhs_end);
+                }
+            }
+        }
+        (core::slice::from_raw_parts_mut(groups, count), total)
     }
 }
 
@@ -572,6 +794,21 @@ unsafe fn attributes(desc: &TypeDesc) -> &[Attr] {
     }
     // SAFETY: a valid descriptor's attributes point to `count` entries.
     unsafe { core::slice::from_raw_parts(desc.attributes, desc.count) }
+}
+
+/// The `len` values at `values`, which can be dangling, or misaligned
+/// for `T`, when there are none.
+///
+/// # Safety
+///
+/// If `len` isn't 0, `values` must point to `len` valid values.
+#[cfg(not(test))]
+unsafe fn array<'a, T>(values: *const T, len: usize) -> &'a [T] {
+    if len == 0 {
+        return &[];
+    }
+    // SAFETY: guaranteed by the caller.
+    unsafe { core::slice::from_raw_parts(values, len) }
 }
 
 /// # Safety

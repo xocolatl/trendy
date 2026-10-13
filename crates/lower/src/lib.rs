@@ -359,6 +359,13 @@ impl FunctionBuilder<'_> {
                     .collect();
                 self.reshape(&ty, &result_ty, &sources, src, cx)
             }
+            hir::Expr::And(lhs, rhs) => {
+                let lhs_ty = self.program.type_of(lhs, self.within);
+                let rhs_ty = self.program.type_of(rhs, self.within);
+                let lhs = self.place(lhs, cx);
+                let rhs = self.place(rhs, cx);
+                self.and(&lhs_ty, &rhs_ty, lhs, rhs, cx)
+            }
             hir::Expr::Binary(op, lhs, rhs) => {
                 let operand_ty = self.program.type_of(lhs, self.within);
                 let lhs = self.place(lhs, cx);
@@ -490,6 +497,80 @@ impl FunctionBuilder<'_> {
                 source_desc,
                 lir::Place::whole(lir::Base::Data(offsets)),
             ],
+        });
+        self.owned.push(dst.clone());
+        dst
+    }
+
+    /// The AND of the relations at `lhs` and `rhs`, of types `lhs_ty` and
+    /// `rhs_ty`, computed by the runtime into memory released when the
+    /// statement ends. Lowering works out where each attribute is, so the
+    /// runtime never matches attributes by name: for each attribute of the
+    /// result, which operand it comes from and its offset there, and for
+    /// each common attribute, its offset in each operand and its type.
+    fn and(
+        &mut self,
+        lhs_ty: &hir::Type,
+        rhs_ty: &hir::Type,
+        lhs: lir::Place,
+        rhs: lir::Place,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let (hir::Type::Relation(lhs_heading), hir::Type::Relation(rhs_heading)) = (lhs_ty, rhs_ty)
+        else {
+            unreachable!("sema joins only relations");
+        };
+        let result_ty = lhs_ty.and(rhs_ty);
+        let lhs_tuple = layout(&hir::Type::Tuple(lhs_heading.clone()));
+        let rhs_tuple = layout(&hir::Type::Tuple(rhs_heading.clone()));
+        let position =
+            |heading: &hir::Heading, name: &str| heading.attributes().position(|(a, _)| a == name);
+        let sources = attribute_names(&result_ty)
+            .map(|name| {
+                let (from_rhs, offset) = position(lhs_heading, name).map_or_else(
+                    || {
+                        let i = position(rhs_heading, name)
+                            .expect("each attribute of the result is an operand's");
+                        (1, lir::Field::Offset(rhs_tuple.clone(), i))
+                    },
+                    |i| (0, lir::Field::Offset(lhs_tuple.clone(), i)),
+                );
+                lir::Field::Struct(vec![lir::Field::Usize(from_rhs), offset])
+            })
+            .collect();
+        let common: Vec<lir::Field> = lhs_heading
+            .attributes()
+            .enumerate()
+            .filter_map(|(i, (name, ty))| {
+                let j = position(rhs_heading, name)?;
+                Some(lir::Field::Struct(vec![
+                    lir::Field::Offset(lhs_tuple.clone(), i),
+                    lir::Field::Offset(rhs_tuple.clone(), j),
+                    lir::Field::Address(cx.descriptor(ty)),
+                ]))
+            })
+            .collect();
+        let common_count = cx.constant(vec![lir::Field::Usize(len(common.len()))]);
+        let descriptor = |ty: &hir::Type, cx: &mut Lowering| {
+            lir::Place::whole(lir::Base::Data(cx.descriptor(ty)))
+        };
+        let args = vec![
+            lhs,
+            rhs,
+            descriptor(&result_ty, cx),
+            descriptor(lhs_ty, cx),
+            descriptor(rhs_ty, cx),
+            lir::Place::whole(lir::Base::Data(cx.constant(sources))),
+            lir::Place::whole(lir::Base::Data(cx.constant(common))),
+            lir::Place {
+                base: lir::Base::Data(common_count),
+                path: vec![0],
+            },
+        ];
+        let dst = self.slot(layout(&result_ty));
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::And,
+            args: [vec![dst.clone()], args].concat(),
         });
         self.owned.push(dst.clone());
         dst
@@ -902,6 +983,61 @@ mod tests {
                 (lir::RuntimeFn::Free, slot(0)),
                 (lir::RuntimeFn::Free, slot(1)),
             ]
+        );
+    }
+
+    #[test]
+    fn joins_call_the_runtime_with_where_each_attribute_is() {
+        let relation = |attributes: &[&str]| {
+            hir::Value::Relation(hir::RelationValue {
+                heading: hir::Heading::new(
+                    attributes
+                        .iter()
+                        .map(|a| ((*a).to_string(), integer()))
+                        .collect(),
+                ),
+                tuples: std::collections::BTreeSet::new(),
+            })
+        };
+        let var = |i| Box::new(hir::Expr::Variable(hir::VariableId(i)));
+        let lowered = lower(&program(
+            vec![
+                debug_value(),
+                user(
+                    "main",
+                    &[],
+                    vec![call(0, vec![("v", hir::Expr::And(var(0), var(1)))])],
+                ),
+            ],
+            vec![
+                variable("r", relation(&["a", "b"])),
+                variable("s", relation(&["b", "c"])),
+            ],
+        ));
+        let main = &lowered.functions[0];
+        let slot = lir::Place::whole(lir::Base::Slot(lir::SlotId(0)));
+        let lir::Inst::CallRuntime { function, args } = &main.blocks[0].insts[0] else {
+            panic!("{:?}", main.blocks[0].insts);
+        };
+        assert_eq!(*function, lir::RuntimeFn::And);
+        assert_eq!(args[0], slot);
+        assert_eq!(
+            args.len(),
+            9,
+            "dst, the operands, three descriptors, the sources and the common attributes"
+        );
+        let descriptors: Vec<_> = args[3..6].iter().map(|a| a.base).collect();
+        assert!(
+            descriptors[0] != descriptors[1] && descriptors[1] != descriptors[2],
+            "the result's and each operand's: {descriptors:?}"
+        );
+        let freed = main.blocks[0].insts.last().unwrap();
+        assert_eq!(
+            freed,
+            &lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::Free,
+                args: vec![slot],
+            }
         );
     }
 

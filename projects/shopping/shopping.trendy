@@ -58,25 +58,25 @@ var plan := relation {
 }
 key { recipe };
 
-/* The list, as it should read once the language has what it needs:
+/* Each planned meal with its recipe and ingredients. Joining with the
+   plan also leaves out the recipes not planned. */
+var planned := plan join recipes join ingredients;
 
-   1. Join, to match each planned meal with its recipe and ingredients.
-      Joining with the plan also leaves out the recipes not planned.
+/* The rest of the list, as it should read once the language has what it
+   needs, in the order the features are needed:
 
-        var planned := plan join recipes join ingredients;
-
-   2. Converting an integer to a rational, since values never convert
+   1. Converting an integer to a rational, since values never convert
       implicitly; spelled here as a read-only operator, which don't exist
       yet either.
 
-   3. Extension, to scale each quantity from the people the recipe serves
+   2. Extension, to scale each quantity from the people the recipe serves
       to the people it's cooked for.
 
         var scaled := planned extend {
             amount: quantity * rational{n: people} / rational{n: serves}
         };
 
-   4. Summarize with sum, to add up each ingredient across recipes. The sum
+   3. Summarize with sum, to add up each ingredient across recipes. The sum
       must be of the tuples in each group, not of their distinct amounts:
       cumin is 5 g in both shakshuka and dal tadka, and the list needs 10 g.
       So summarize can't project away `recipe` before it sums.
@@ -95,10 +95,10 @@ key { recipe };
    Later: a pantry to subtract what's already at home, which needs
    storage, and output for people rather than `debug_value`. */
 
-/* What can be said today: every ingredient ever bought, and in what unit. */
-var everything := ingredients{ingredient, unit};
+/* What can be said today: what to buy this week, without the amounts. */
+var needed := planned{ingredient, unit};
 
 operator main{} [
     call debug_value{v: plan};
-    call debug_value{v: everything};
+    call debug_value{v: needed};
 ];

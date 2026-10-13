@@ -216,6 +216,80 @@ pub(crate) fn sql_key(span: Span, text: &str) -> Diagnostic {
     )
 }
 
+/// What every join does with the operands' common attributes, for notes.
+const JOIN_RULE: &str = "`join` matches the tuples of its operands on all the attributes they have in common, by name; `times` is for operands with none in common, and `compose` is `join` without the common attributes";
+
+/// SQL's spelling of a join, `text`, at `span`, which stands for `keyword`:
+/// `natural join` and `inner join` are `join`, and `cross join` is `times`.
+/// An outer join has no equivalent.
+pub(crate) fn sql_join(span: Span, text: &str, keyword: SyntaxKind) -> Diagnostic {
+    let words: Vec<String> = text
+        .split_whitespace()
+        .map(str::to_ascii_lowercase)
+        .collect();
+    if ["left", "right", "full"].contains(&words[0].as_str()) {
+        return Diagnostic::error(
+            Code::SqlJoin,
+            format!("there is no `{}`", words.join(" ")),
+            span,
+            "SQL's outer join",
+        )
+        .with_note(
+            "an outer join fills the missing side with nulls, and trendy has no nulls: every attribute of every tuple has a value",
+        )
+        .with_help(
+            "join the tuples that match with `join`, and keep the others apart, as a relation of their own",
+        );
+    }
+    let spelled = keyword.fixed_text().expect("keywords have fixed text");
+    let d = Diagnostic::error(
+        Code::SqlJoin,
+        format!("a join is written `{spelled}`, not `{text}`"),
+        span,
+        "SQL's spelling",
+    );
+    let d = if keyword == SyntaxKind::TimesKw {
+        d.with_note(
+            "`times` pairs every tuple of one operand with every tuple of the other; the operands must have no attributes in common",
+        )
+    } else {
+        d.with_note(JOIN_RULE)
+    };
+    d.with_suggestion(
+        format!("write `{spelled}`"),
+        vec![Edit {
+            span,
+            replacement: spelled.to_string(),
+        }],
+    )
+}
+
+/// SQL's `on` or `using` clause, starting with `found`, at `clause`, after a
+/// join. `removal` deletes it with the whitespace before it.
+pub(crate) fn join_condition(found: Found, clause: Span, removal: Span) -> Diagnostic {
+    let word = found.text.to_ascii_lowercase();
+    let d = Diagnostic::error(
+        Code::SqlJoin,
+        format!("a join has no `{word}`"),
+        clause,
+        "SQL's join condition",
+    )
+    .with_note(JOIN_RULE);
+    if word == "using" {
+        d.with_suggestion(
+            "delete it: the common attributes are matched already",
+            vec![Edit {
+                span: removal,
+                replacement: String::new(),
+            }],
+        )
+    } else {
+        d.with_help(
+            "rename attributes so that the ones to match have the same name, and the others different names, as in `r join s rename {r_id as id}`",
+        )
+    }
+}
+
 /// Keys, at `keys` and written `text`, before a variable's initial value,
 /// which ends at `value_end`. `removal` deletes them with the whitespace
 /// before them.

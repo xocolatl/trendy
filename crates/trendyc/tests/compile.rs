@@ -412,6 +412,11 @@ fn relations() {
             r#"relation { born: integer, name: text } { { born: 701, name: "李白" }, { born: 1815, name: "Ada" } }"#,
             "relation { x: integer } { { x: 1 } }",
             r#"tuple { members: relation { name: text } { { name: "Ada" }, { name: "李白" } }, who: "core" }"#,
+            // Joined on `name`, which only Ada and Edgar have in both, and
+            // composed, without it.
+            r#"relation { born: integer, city: text, name: text } { { born: 1815, city: "London", name: "Ada" }, { born: 1923, city: "Portland", name: "Edgar" } }"#,
+            r#"relation { born: integer, city: text } { { born: 1815, city: "London" }, { born: 1923, city: "Portland" } }"#,
+            r#"relation { city: text, year: integer } { { city: "London", year: 2024 }, { city: "London", year: 2025 }, { city: "Nyeri", year: 2024 }, { city: "Nyeri", year: 2025 }, { city: "Portland", year: 2024 }, { city: "Portland", year: 2025 } }"#,
         ]
     );
 }
@@ -424,7 +429,8 @@ fn shopping() {
         stderr.lines().collect::<Vec<_>>(),
         [
             r#"relation { people: integer, recipe: text } { { people: 4, recipe: "dal tadka" }, { people: 4, recipe: "shakshuka" }, { people: 6, recipe: "mapo doufu" } }"#,
-            r#"relation { ingredient: text, unit: text } { { ingredient: "Sichuan pepper", unit: "g" }, { ingredient: "beetroot", unit: "g" }, { ingredient: "cabbage", unit: "g" }, { ingredient: "carrot", unit: "piece" }, { ingredient: "cumin", unit: "g" }, { ingredient: "doubanjiang", unit: "g" }, { ingredient: "egg", unit: "piece" }, { ingredient: "garlic", unit: "clove" }, { ingredient: "ghee", unit: "g" }, { ingredient: "ginger", unit: "g" }, { ingredient: "minced pork", unit: "g" }, { ingredient: "olive oil", unit: "ml" }, { ingredient: "onion", unit: "piece" }, { ingredient: "potato", unit: "g" }, { ingredient: "red lentils", unit: "g" }, { ingredient: "tofu", unit: "g" }, { ingredient: "tomato", unit: "g" } }"#,
+            // No borshch this week, so no beetroot, cabbage, carrot or potato.
+            r#"relation { ingredient: text, unit: text } { { ingredient: "Sichuan pepper", unit: "g" }, { ingredient: "cumin", unit: "g" }, { ingredient: "doubanjiang", unit: "g" }, { ingredient: "egg", unit: "piece" }, { ingredient: "garlic", unit: "clove" }, { ingredient: "ghee", unit: "g" }, { ingredient: "ginger", unit: "g" }, { ingredient: "minced pork", unit: "g" }, { ingredient: "olive oil", unit: "ml" }, { ingredient: "onion", unit: "piece" }, { ingredient: "red lentils", unit: "g" }, { ingredient: "tofu", unit: "g" }, { ingredient: "tomato", unit: "g" } }"#,
         ]
     );
 }

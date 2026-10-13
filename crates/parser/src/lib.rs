@@ -77,6 +77,20 @@ enum KeySpelling {
 
 /// The precedence of the comparison operators.
 const COMPARISON: u8 = 6;
+/// The precedence of `join`, `times` and `compose`.
+const JOIN: u8 = 7;
+
+/// A dyadic operator at the next token: its precedence, its first token,
+/// and the keyword it is or stands for.
+#[derive(Clone, Copy)]
+struct BinaryOperator<'a> {
+    precedence: u8,
+    found: Found<'a>,
+    keyword: SyntaxKind,
+    /// For SQL's spelling of a join, such as `natural join` or
+    /// `left outer join`: how many tokens it is.
+    sql: Option<usize>,
+}
 
 /// Something the parser found where it expected something else.
 #[derive(Clone, Copy)]
@@ -499,10 +513,10 @@ impl<'a> Parser<'a> {
     /// An expression whose dyadic operators bind at least as tightly as
     /// `min`, by precedence climbing. From loosest to tightest: `implies`
     /// (1, grouping to the right), `or` (2), `xor` (3), `and` (4), the
-    /// comparisons (6), which don't chain, `+`, `-` and `||` (7), and `*`,
-    /// `/`, `div` and `mod` (8), all grouping to the left. The prefix
-    /// operators, `not`, `-` and `+`, bind tightest, so `not a = b` is
-    /// `(not a) = b`.
+    /// comparisons (6), which don't chain, `join`, `times` and `compose`
+    /// (7), `+`, `-` and `||` (8), and `*`, `/`, `div` and `mod` (9), all
+    /// grouping to the left. The prefix operators, `not`, `-` and `+`, bind
+    /// tightest, so `not a = b` is `(not a) = b`.
     fn binary(&mut self, min: u8) {
         self.peek();
         let start = self.builder.checkpoint();
@@ -510,7 +524,13 @@ impl<'a> Parser<'a> {
         // The right operand of a comparison just parsed: comparisons don't
         // chain, so another one after it is reported, with a fix.
         let mut compared: Option<Span> = None;
-        while let Some((precedence, found, keyword)) = self.binary_operator() {
+        while let Some(operator) = self.binary_operator() {
+            let BinaryOperator {
+                precedence,
+                found,
+                keyword,
+                sql,
+            } = operator;
             if precedence < min {
                 break;
             }
@@ -523,7 +543,10 @@ impl<'a> Parser<'a> {
                 ));
             }
             self.builder.start_node_at(start, SyntaxKind::BinaryExpr);
-            self.operator_token(found, keyword);
+            match sql {
+                Some(tokens) => self.sql_join(found, keyword, tokens),
+                None => self.operator_token(found, keyword),
+            }
             let rhs_start = self.lookahead().map(|f| f.span.start);
             let right_grouping = keyword == SyntaxKind::ImpliesKw;
             self.binary(if right_grouping {
@@ -535,14 +558,24 @@ impl<'a> Parser<'a> {
                 (true, Some(start), Some(end)) if start < end => Some(Span::new(start, end)),
                 _ => None,
             };
+            if precedence == JOIN {
+                self.join_condition();
+            }
             self.builder.finish_node();
         }
     }
 
-    /// The dyadic operator at the next token, if any: its precedence, the
-    /// token, and the keyword it is or stands for.
-    fn binary_operator(&self) -> Option<(u8, Found<'a>, SyntaxKind)> {
-        let found = self.lookahead()?;
+    /// The dyadic operator at the next token, if any.
+    fn binary_operator(&self) -> Option<BinaryOperator<'a>> {
+        let found = self.lookahead_nth(0)?;
+        if let Some((keyword, tokens)) = self.sql_join_at() {
+            return Some(BinaryOperator {
+                precedence: JOIN,
+                found,
+                keyword,
+                sql: Some(tokens),
+            });
+        }
         let keyword = match found.kind {
             SyntaxKind::ForeignOperator => errors::foreign_operator(found.text)?,
             SyntaxKind::Ident => errors::operator_spelling(found.text)?,
@@ -554,11 +587,96 @@ impl<'a> Parser<'a> {
             SyntaxKind::XorKw => 3,
             SyntaxKind::AndKw => 4,
             kind if kind.is_comparison() => COMPARISON,
-            SyntaxKind::Plus | SyntaxKind::Minus | SyntaxKind::PipePipe => 7,
-            SyntaxKind::Star | SyntaxKind::Slash | SyntaxKind::DivKw | SyntaxKind::ModKw => 8,
+            kind if kind.is_join() => JOIN,
+            SyntaxKind::Plus | SyntaxKind::Minus | SyntaxKind::PipePipe => 8,
+            SyntaxKind::Star | SyntaxKind::Slash | SyntaxKind::DivKw | SyntaxKind::ModKw => 9,
             _ => return None,
         };
-        Some((precedence, found, keyword))
+        Some(BinaryOperator {
+            precedence,
+            found,
+            keyword,
+            sql: None,
+        })
+    }
+
+    /// SQL's spelling of a join at the next token, in any case: `natural
+    /// join` and `inner join`, which are `join`, `cross join`, which is
+    /// `times`, and the outer joins, `left`, `right` or `full`, optionally
+    /// followed by `outer`, then `join`, which have no equivalent. The
+    /// keyword it stands for, and how many tokens it is.
+    fn sql_join_at(&self) -> Option<(SyntaxKind, usize)> {
+        let word = |n: usize, word: &str| {
+            self.lookahead_nth(n)
+                .is_some_and(|f| f.text.eq_ignore_ascii_case(word))
+        };
+        let keyword = if word(0, "cross") {
+            SyntaxKind::TimesKw
+        } else if ["natural", "inner", "left", "right", "full"]
+            .into_iter()
+            .any(|w| word(0, w))
+        {
+            SyntaxKind::JoinKw
+        } else {
+            return None;
+        };
+        let outer = ["left", "right", "full"].into_iter().any(|w| word(0, w)) && word(1, "outer");
+        let tokens = if outer { 3 } else { 2 };
+        word(tokens - 1, "join").then_some((keyword, tokens))
+    }
+
+    /// SQL's spelling of a join, whose first token is `first`, `tokens`
+    /// long, standing for `keyword`: consumed as the operator, and reported.
+    fn sql_join(&mut self, first: Found<'a>, keyword: SyntaxKind, tokens: usize) {
+        let mut span = first.span;
+        for _ in 0..tokens {
+            span.end = self.bump().end;
+        }
+        let text = &self.source[span.start..span.end];
+        self.errors.push(errors::sql_join(span, text, keyword));
+    }
+
+    /// SQL's `on condition` or `using (a, b)` after a join's right operand:
+    /// consumed, so nothing else cascades, and reported.
+    fn join_condition(&mut self) {
+        let Some(found) = self
+            .lookahead_nth(0)
+            .filter(|f| f.kind == SyntaxKind::Ident)
+            .filter(|f| f.text.eq_ignore_ascii_case("on") || f.text.eq_ignore_ascii_case("using"))
+        else {
+            return;
+        };
+        let start = self.last_end.unwrap_or(found.span.start);
+        self.start_node(SyntaxKind::Error);
+        self.bump();
+        if found.text.eq_ignore_ascii_case("on") {
+            self.binary(JOIN + 1);
+            while self
+                .lookahead_nth(0)
+                .is_some_and(|f| f.kind.is_comparison() || f.kind == SyntaxKind::AndKw)
+            {
+                // `on a.x = b.y and a.z = b.w`: the whole condition.
+                self.bump();
+                self.binary(JOIN + 1);
+            }
+        } else if self.at(SyntaxKind::LParen) {
+            while !matches!(
+                self.peek(),
+                None | Some(SyntaxKind::RParen | SyntaxKind::Semicolon)
+            ) {
+                self.bump();
+            }
+            if self.at(SyntaxKind::RParen) {
+                self.bump();
+            }
+        }
+        self.builder.finish_node();
+        let end = self.last_end.unwrap_or(found.span.end);
+        self.errors.push(errors::join_condition(
+            found,
+            Span::new(found.span.start, end),
+            Span::new(start, end),
+        ));
     }
 
     /// A prefix operator and its operand, or an operand.
@@ -1100,7 +1218,15 @@ impl<'a> Parser<'a> {
     /// The next significant token, leaving the trivia before it for whichever
     /// node consumes it: a lookahead that may not take the token.
     fn lookahead(&self) -> Option<Found<'a>> {
-        let pos = (self.pos..self.tokens.len()).find(|&i| !is_skipped(self.tokens[i].kind))?;
+        self.lookahead_nth(0)
+    }
+
+    /// The significant token `n` after the next one, or the next one for 0,
+    /// as a lookahead.
+    fn lookahead_nth(&self, n: usize) -> Option<Found<'a>> {
+        let pos = (self.pos..self.tokens.len())
+            .filter(|&i| !is_skipped(self.tokens[i].kind))
+            .nth(n)?;
         Some(self.found_at(pos))
     }
 
@@ -1753,8 +1879,8 @@ SourceFile
     fn calls_and_parameters() {
         for source in [
             "var r: relation { a: boolean, b: integer } := relation {{a:true, b:3}, {b:25, a:false}};\n\nbuiltin operator debug_value{v:any};\n\noperator main{} [\n    call debug_value{v: r};\n];",
-            "operator greet{name: text, times: integer} [ call debug_value{v: name}; call debug_value{v: tuple { n: times }}; ];",
-            "operator main{} [ call greet{name: \"Ada\", times: 2,}; ];",
+            "operator greet{name: text, count: integer} [ call debug_value{v: name}; call debug_value{v: tuple { n: count }}; ];",
+            "operator main{} [ call greet{name: \"Ada\", count: 2,}; ];",
             "operator main{} [ call f{}; ];",
         ] {
             let parse = parse_str(source);
@@ -2067,6 +2193,50 @@ SourceFile
             fix("var x := a == b or c != d;"),
             "var x := a = b or c <> d;"
         );
+    }
+
+    #[test]
+    fn joins() {
+        assert_eq!(shape("a join b join c"), "((a join b) join c)");
+        assert_eq!(shape("a times b compose c"), "((a times b) compose c)");
+        assert_eq!(shape("a join b = c"), "((a join b) = c)");
+        assert_eq!(shape("a join b{x}"), "(a join b{x})");
+        assert_eq!(
+            shape("a join b rename {x as y}"),
+            "(a join b rename {x as y})"
+        );
+        assert_eq!(shape("a || b join c"), "((a || b) join c)");
+        assert_eq!(shape("a join (b join c)"), "(a join (b join c))");
+        assert_eq!(fix("var x := a JOIN b;"), "var x := a join b;");
+    }
+
+    #[test]
+    fn joins_as_sql_writes_them() {
+        assert_eq!(fix("var x := a natural join b;"), "var x := a join b;");
+        assert_eq!(fix("var x := a NATURAL JOIN b;"), "var x := a join b;");
+        assert_eq!(fix("var x := a inner join b;"), "var x := a join b;");
+        assert_eq!(fix("var x := a cross join b;"), "var x := a times b;");
+        assert_eq!(
+            fix("var x := a join b using (c, d) join e;"),
+            "var x := a join b join e;"
+        );
+        assert_eq!(
+            messages("var x := a left join b;"),
+            ["there is no `left join`"]
+        );
+        assert_eq!(
+            messages("var x := a full outer join b;"),
+            ["there is no `full outer join`"]
+        );
+        // The whole condition is consumed, so nothing else cascades, and a
+        // join after it is still parsed.
+        assert_eq!(
+            messages("var x := a join b on a.id = b.a_id and a.y = b.y join c on c.z = b.z;"),
+            ["a join has no `on`", "a join has no `on`"]
+        );
+        // Names that are SQL's words are still names elsewhere.
+        assert_eq!(shape("left join right"), "(left join right)");
+        assert_eq!(shape("natural join cross"), "(natural join cross)");
     }
 
     #[test]

@@ -62,6 +62,7 @@ impl Program {
             Expr::Relation(heading, _) => Type::Relation(heading.clone()),
             Expr::Remove(operand, names) => self.type_of(operand, within).without(names),
             Expr::Rename(operand, renamings) => self.type_of(operand, within).renamed(renamings),
+            Expr::And(lhs, rhs) => self.type_of(lhs, within).and(&self.type_of(rhs, within)),
         }
     }
 }
@@ -184,6 +185,11 @@ pub enum Expr {
     /// the operand, and the result's names are distinct; no renaming is to
     /// the same name, and there is at least one.
     Rename(Box<Expr>, BTreeMap<String, String>),
+    /// The relation of every tuple made of one tuple of each operand that
+    /// agree on their common attributes (Algebra A's AND, of relations):
+    /// what `join`, `times` and `compose` all are. The operands are
+    /// relations whose common attributes have the same types.
+    And(Box<Expr>, Box<Expr>),
 }
 
 /// Why an operator has no result: it is out of its type's range (for a
@@ -652,6 +658,25 @@ impl Heading {
         )
     }
 
+    /// The attributes of both headings, whose common attributes have the
+    /// same types.
+    #[must_use]
+    pub fn and(&self, other: &Heading) -> Heading {
+        let mut attributes = self.0.clone();
+        attributes.extend(other.0.iter().map(|(name, ty)| (name.clone(), ty.clone())));
+        Heading(attributes)
+    }
+
+    /// The names of the attributes both headings have.
+    #[must_use]
+    pub fn common(&self, other: &Heading) -> BTreeSet<String> {
+        self.0
+            .keys()
+            .filter(|name| other.0.contains_key(*name))
+            .cloned()
+            .collect()
+    }
+
     /// The heading without the attributes named.
     #[must_use]
     pub fn without(&self, names: &BTreeSet<String>) -> Heading {
@@ -774,6 +799,54 @@ impl Value {
     }
 }
 
+impl Value {
+    /// The AND of two relations, as for [`Expr::And`].
+    ///
+    /// # Panics
+    ///
+    /// If either value isn't a relation, which sema rules out.
+    #[must_use]
+    pub fn and(&self, other: &Value) -> Value {
+        let (Value::Relation(lhs), Value::Relation(rhs)) = (self, other) else {
+            panic!("the AND of {self:?} and {other:?}");
+        };
+        let common = lhs.heading.common(&rhs.heading);
+        let uncommon = |heading: &Heading| -> BTreeSet<String> {
+            heading
+                .attributes()
+                .map(|(name, _)| name.to_string())
+                .filter(|name| !common.contains(name))
+                .collect()
+        };
+        // The right operand's tuples, by their values for the common
+        // attributes.
+        let (lhs_only, rhs_only) = (uncommon(&lhs.heading), uncommon(&rhs.heading));
+        let mut matching: BTreeMap<TupleValue, Vec<&TupleValue>> = BTreeMap::new();
+        for tuple in &rhs.tuples {
+            matching
+                .entry(tuple.without(&rhs_only))
+                .or_default()
+                .push(tuple);
+        }
+        let mut tuples = BTreeSet::new();
+        for tuple in &lhs.tuples {
+            for other in matching
+                .get(&tuple.without(&lhs_only))
+                .into_iter()
+                .flatten()
+            {
+                let mut attributes = tuple.0.clone();
+                attributes.extend(other.0.iter().map(|(name, v)| (name.clone(), v.clone())));
+                tuples.insert(TupleValue(attributes));
+            }
+        }
+        Value::Relation(RelationValue {
+            heading: lhs.heading.and(&rhs.heading),
+            tuples,
+        })
+    }
+}
+
 /// `name`'s new name in `renamings`, or `name` if it isn't renamed.
 fn renamed(name: &str, renamings: &BTreeMap<String, String>) -> String {
     renamings
@@ -823,6 +896,20 @@ impl Type {
             Type::Tuple(heading) => Type::Tuple(heading.without(names)),
             Type::Relation(heading) => Type::Relation(heading.without(names)),
             Type::Scalar(_) => panic!("removing attributes from {self}"),
+        }
+    }
+
+    /// The type of the AND of relations of types `self` and `other`, as for
+    /// [`Expr::And`].
+    ///
+    /// # Panics
+    ///
+    /// If either type isn't a relation type, which sema rules out.
+    #[must_use]
+    pub fn and(&self, other: &Type) -> Type {
+        match (self, other) {
+            (Type::Relation(lhs), Type::Relation(rhs)) => Type::Relation(lhs.and(rhs)),
+            _ => panic!("the AND of {self} and {other}"),
         }
     }
 

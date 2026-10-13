@@ -43,7 +43,9 @@ var addr := tuple {
    attribute both have must have the same value in both.
    Tutorial D: ADDR UNION TUPLE { NAME 'Ada' }, and n-adic
    UNION { T1, T2, T3 }
-   Proposed: a `join` operator.
+   Proposed: `join`, as for relations (see relations.trendy). Unlike the
+   relations' join, it fails when the values differ, so it needs a
+   compile-time check or a run-time error.
 
    call debug_value{v: addr join tuple { name: "Ada" }};
 */
@@ -51,7 +53,7 @@ var addr := tuple {
 /* Compose: join, then drop the attributes the operands have in common
    (Algebra A's COMPOSE; Tutorial D, beyond RM Prescription 6).
    Tutorial D: T1 COMPOSE T2
-   Proposed: a `compose` operator.
+   Proposed: `compose`, as for relations.
 
    call debug_value{v: addr compose tuple { postal_code: "75001", district: "1st" }};
 */

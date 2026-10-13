@@ -25,6 +25,7 @@ key { team };
 var cities := relation {
     { name: "Ada", city: "London" },
     { name: "Edgar", city: "Portland" },
+    { name: "Wangari", city: "Nyeri" },
 }
 key { name };
 
@@ -106,26 +107,6 @@ key { name };
 
    call debug_value{v: people union relation { { name: "李白", born: 701 } }};
    call debug_value{v: people minus people where born > 1900};
-*/
-
-/* Join: the tuples of both, matched on their common attributes; with no
-   common attributes it's the Cartesian product, and with all of them,
-   intersection. A special case of Algebra A's AND.
-   Tuple analog: join.
-   Tutorial D: PEOPLE JOIN CITIES, and n-adic JOIN { R1, R2, R3 }; TIMES
-   is join with no common attributes
-   Proposed: a `join` operator, and `times`, which must have no common
-   attributes, to catch one that's there by mistake.
-
-   call debug_value{v: people join cities};
-   call debug_value{v: people{name} times relation { { year: 2024 } }};
-*/
-
-/* Compose: join, then remove the common attributes (Algebra A's COMPOSE).
-   Tuple analog: compose.
-   Tutorial D: PEOPLE COMPOSE CITIES
-
-   call debug_value{v: people compose cities};
 */
 
 /* Semijoin and semidifference: the tuples of the first that have, or
@@ -305,6 +286,31 @@ operator build_nested{team: text, member: text} [
     }};
 ];
 
+/* Join, times and compose, each Algebra A's AND: the tuples made of one
+   tuple of each operand that agree on their common attributes, by name.
+   Join needs at least one attribute in common, and times none, so that one
+   shared, or not, by mistake is caught; compose is join without the common
+   attributes. Tutorial D: PEOPLE JOIN CITIES, TIMES and COMPOSE.
+   Implemented, and printed twice like the projections. Tuple analog: join
+   and compose (see tuples.trendy). */
+var lived := people join cities;
+var born_in := people compose cities;
+var years := relation {
+    { year: 2024 },
+    { year: 2025 }
+};
+var every_year := cities{city} times years;
+
+operator join_people{
+    p: relation { name: text, born: integer },
+    c: relation { name: text, city: text },
+    y: relation { year: integer },
+} [
+    call debug_value{v: p join c};
+    call debug_value{v: p compose c};
+    call debug_value{v: c{city} times y};
+];
+
 operator main{} [
     call debug_value{v: names};
     call debug_value{v: places};
@@ -318,6 +324,9 @@ operator main{} [
     call debug_value{v: added};
     call debug_value{v: collapsed};
     call debug_value{v: held};
+    call debug_value{v: lived};
+    call debug_value{v: born_in};
+    call debug_value{v: every_year};
 
     call project_births{r: births};
     call project_signs{r: signs};
@@ -330,4 +339,6 @@ operator main{} [
     call build_people{name: "李白", born: 701};
     call build_duplicates{a: 1, b: 1};
     call build_nested{team: "core", member: "李白"};
+
+    call join_people{p: people, c: cities, y: years};
 ];

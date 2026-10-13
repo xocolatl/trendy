@@ -115,7 +115,8 @@ time to decide anything.
 **Input:** source text and `Lexed`. **Output:** `Parse`, the CST plus every
 lexer and parser error, ordered by position.
 
-**Owns:** the grammar, using recursive descent with one token of lookahead.
+**Owns:** the grammar, using recursive descent with one token of lookahead,
+and a few more only to recognize another language's spelling.
 It never fails. A missing token is reported and the parser carries on, and
 text that fits nowhere is wrapped in an error node, up to the next definition
 keyword (`operator` or `var`). In a variable declaration, a missing `:` or
@@ -129,7 +130,7 @@ appears, so whitespace between definitions belongs to the file.
 
 Expressions use precedence climbing. From tightest to loosest: the prefix
 operators `not`, `-` and `+`; `*`, `/`, `div` and `mod`; `+`, `-` and
-`||`; the comparisons, which don't chain (P0015, with a fix that compares
+`||`; the joins, `join`, `times` and `compose`; the comparisons, which don't chain (P0015, with a fix that compares
 the middle operand twice); `and`; `xor`; `or`; and `implies`, which groups
 to the right. Since `not` binds tightest, `not n = 0` on an integer is a
 type error, whose fix negates the comparison instead: `not (n = 0)`. Looking for
@@ -138,7 +139,12 @@ unattached, so whitespace after the last operand belongs to the node that
 continues, not to the expression. The symbols of other languages (`&&`,
 `!`, `->`, …) are lexed as `ForeignOperator` tokens, and they and
 capitalized keywords (`AND`) are parsed as the operator they stand for and
-reported with a fix.
+reported with a fix. SQL's joins are recognized the same way (P0021):
+`natural join`, `inner join` and `cross join` are parsed as the join they
+stand for and fixed to it, and the outer joins as `join`, with no fix,
+looking up to three tokens ahead. SQL's `on` condition or `using` list after a
+join's right operand is consumed into an error node, so the next join still
+parses, and reported.
 
 **Must not:** resolve names, check meaning, or reject a program that is
 grammatically valid. For example, "no `main`", "duplicate name" and "unknown
@@ -209,6 +215,11 @@ one has no tuples to take it from, and keeps its tuples in a sorted set.
 Values are totally ordered only so that they can be kept in sorted sets; the
 order has no meaning in the language.
 
+The relational operators are those of Algebra A (TTM Appendix A), so that
+the optimizer has few to rewrite: `Remove`, which projection also becomes,
+`Rename`, and `And`, which `join`, `times` and `compose` all become, with
+compose's common attributes then removed.
+
 Every type's equality must hold exactly when no operator can tell two values
 apart (TTM RM Prescription 8). For rationals, that is IEEE 754 totalOrder.
 `hir::Rational` implements it, and every comparison, ordering or hash of a
@@ -275,6 +286,13 @@ first operand, which then sets the expectation for the second. `/`,
 numeric type is reported at the operator, with a fix to the right one
 (A0022). Comparisons take their operand type from the first operand only,
 since the type expected of them is that of their boolean result.
+
+`join`, `times` and `compose` (`ops::Join`) are checked by one function,
+`ops::joined`: both operands must be relations (A0022), a common attribute
+must have the same type in both (A0027), and the operands must have common
+attributes for `join` and `compose`, and none for `times` (A0028, whose help
+names a near-miss attribute to rename). Each becomes `hir::Expr::And`, and
+compose a `Remove` of it, folded when both operands are constants.
 
 Comparisons follow one order per type (`hir::compare`): `false` before
 `true`, integers numerically, rationals by IEEE 754 totalOrder, and text
@@ -368,6 +386,14 @@ Removing can make tuples equal, and renaming can change their order, since
 the canonical order follows attribute names. Lowering passes the runtime
 the result's descriptor and an array of each result attribute's offset in
 the operand's tuples, so the runtime never matches attributes by name.
+
+An AND (`hir::Expr::And`) calls `trendy_rt_and`, which sorts both operands'
+tuples on their common attributes and merges them: each run of tuples of
+one that agree on them pairs with the matching run of the other. The
+results are sorted into the canonical order, into memory released like a
+text's. Lowering passes where each attribute of the result comes from, and
+each common attribute's offset in both operands and its type, so here too
+the runtime never matches attributes by name.
 
 The canonical order of a relation's tuples is `hir::Value`'s order, which
 the compiler uses for constants and the runtime reproduces

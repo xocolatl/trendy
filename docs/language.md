@@ -23,13 +23,13 @@ operator main{} [];
 ## Operators
 
 ```trendy
-operator greet{name: text, times: integer} [
+operator greet{name: text, count: integer} [
     call debug_value{v: name};
-    call debug_value{v: times};
+    call debug_value{v: count};
 ];
 
 operator main{} [
-    call greet{name: "Ada", times: 2};
+    call greet{name: "Ada", count: 2};
 ];
 ```
 
@@ -41,7 +41,7 @@ body in square brackets `[]`, and a closing `;`.
 - **A body is a list of statements,** each ending with `;`. For now, the only
   statement is `call`.
 - **Arguments are a tuple of the parameters:** `call greet{name: "Ada",
-  times: 2};`. Every argument is named, every parameter gets one, and the
+  count: 2};`. Every argument is named, every parameter gets one, and the
   order doesn't matter.
 
 Following *The Third Manifesto*, operators are either read-only operators,
@@ -683,6 +683,61 @@ var moved := addr rename {code as postal_code};
 operator main{} [];
 ```
 
+### Joins
+
+`r join s` is the relation of the tuples made of a tuple of `r` and a tuple
+of `s` that agree on their common attributes: those with the same name in
+both. `r times s` pairs every tuple of `r` with every tuple of `s`, and
+`r compose s` is `r join s` without the common attributes. All three are
+Algebra A's AND (*The Third Manifesto*, Appendix A); compose is Algebra A's
+COMPOSE. Each operator states what the operands have in common, so that an
+attribute shared, or not shared, by mistake is caught:
+
+- **`join` needs at least one common attribute,** which it matches on.
+- **`times` needs none,** so every tuple pairs with every other.
+- **`compose` needs at least one,** and the result doesn't have them.
+
+```trendy
+var cities := relation {
+    { city: "Kumasi", country: "Ghana" },
+    { city: "Osaka", country: "Japan" },
+    { city: "Lima", country: "Peru" },
+};
+var countries := relation {
+    { country: "Ghana", continent: "Africa" },
+    { country: "Japan", continent: "Asia" },
+};
+var sizes := relation { { size: "small" }, { size: "large" } };
+var placed := cities join countries;
+var continents := cities compose countries;
+var both := countries{continent} times sizes;
+
+operator main{} [
+    call debug_value{v: placed};
+];
+```
+
+- **The result is a set,** with the attributes of both operands. A tuple
+  that matches nothing, like Lima's above, isn't in the result.
+- **Common attributes must have the same type** in both operands (A0027),
+  since values never convert to another type implicitly.
+- **Rename to match:** to match attributes with different names, or keep
+  apart attributes with the same name, rename them first. `rename` binds
+  tighter than a join, so `r join s rename {id as r_id}` renames `s`'s
+  attribute.
+- **Joins take relations.** Joining tuples is not in the language yet.
+- **SQL's spellings** are recognized (P0021): `natural join` and
+  `inner join` are fixed to `join`, `cross join` to `times`, and `using`
+  is deleted. `on` and the outer joins have no equivalent.
+
+```trendy,error
+var cities := relation { { city: "Kumasi", country: "Ghana" } };
+var countries := relation { { county: "Ghana", continent: "Africa" } };
+var placed := cities join countries;
+
+operator main{} [];
+```
+
 ### Precedence
 
 From tightest to loosest:
@@ -693,6 +748,7 @@ From tightest to loosest:
 | prefix `not`, `-` and `+` | |
 | `*`, `/`, `div`, `mod` | left |
 | `+`, `-`, `\|\|` | left |
+| `join`, `times`, `compose` | left |
 | `=`, `<>`, `<`, `<=`, `>`, `>=` | none: they don't chain |
 | `and` | left |
 | `xor` | left |
@@ -705,7 +761,9 @@ comparison, parenthesize it: `not (n = 0)`. Writing `not n = 0` for an
 integer `n` is an error, since `not` takes a boolean, and its fix is that
 parenthesization; SQL and Python read it that way.
 `implies` groups from the right, as in logic: `a implies b implies c`
-means `a implies (b implies c)`. Parentheses group explicitly.
+means `a implies (b implies c)`. The joins bind looser than arithmetic,
+since their operands are relations, and tighter than the comparisons, so
+`r join s = t` compares the join. Parentheses group explicitly.
 
 ### Other languages' operators
 
@@ -832,9 +890,9 @@ operator main{} [];
 Names are ASCII letters, digits and `_`, and don't start with a digit. They
 are case-sensitive. The keywords are `operator`, `var`, `call`, `builtin`,
 `tuple`, `relation`, `true`, `false`, `not`, `and`, `or`, `xor`,
-`implies`, `div`, `mod`, `remove`, `rename` and `as`, all lowercase, and a
-keyword can't be a name (P0017). `type` is a keyword only after
-`builtin`, and `key` only where a variable's keys go.
+`implies`, `div`, `mod`, `remove`, `rename`, `join`, `times`, `compose`
+and `as`, all lowercase, and a keyword can't be a name (P0017). `type` is
+a keyword only after `builtin`, and `key` only where a variable's keys go.
 
 Variables and operators share one namespace, so no two of them can have the
 same name. Types have their own namespace, so a variable can be named after a
@@ -928,6 +986,10 @@ line after a comment on its own line, such as a file's header, is kept.
 | `R { A, B }`, `R { ALL BUT C }` | `r{a, b}`, `r remove {c}` |
 | `R RENAME ( A AS B )`, `rename(columns={'a': 'b'})` | `r rename {a as b}` |
 | `PRIMARY KEY (a)`, `UNIQUE (a)`, `KEY { A }` | `key { a }` |
+| `NATURAL JOIN`, `INNER JOIN`, `JOIN … USING (a)` | `join` |
+| `CROSS JOIN` | `times` |
+| `JOIN … ON r.a = s.b` | `r join s rename {b as a}` |
+| `LEFT JOIN`, `RIGHT JOIN`, `FULL JOIN` | none: there are no nulls |
 | `a / b` for integers | `a div b` |
 | `a % b` | `a mod b` |
 | `1 / 2` meaning one half | `1.0 / 2.0` |

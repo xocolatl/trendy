@@ -44,6 +44,9 @@ pub enum SyntaxKind {
     ModKw,
     RemoveKw,
     RenameKw,
+    JoinKw,
+    TimesKw,
+    ComposeKw,
     /// `as`, in `old as new`.
     AsKw,
     LBrace,
@@ -112,7 +115,7 @@ pub enum SyntaxKind {
     NameRef,
     /// `not x`, `-x` or `+x`
     UnaryExpr,
-    /// `x and y`, `x + y`, and the other dyadic operators.
+    /// `x and y`, `x + y`, `r join s`, and the other dyadic operators.
     BinaryExpr,
     /// `(x)`
     ParenExpr,
@@ -159,7 +162,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 81] = [
+    pub const ALL: [SyntaxKind; 84] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -180,6 +183,9 @@ impl SyntaxKind {
         SyntaxKind::ModKw,
         SyntaxKind::RemoveKw,
         SyntaxKind::RenameKw,
+        SyntaxKind::JoinKw,
+        SyntaxKind::TimesKw,
+        SyntaxKind::ComposeKw,
         SyntaxKind::AsKw,
         SyntaxKind::LBrace,
         SyntaxKind::RBrace,
@@ -269,6 +275,9 @@ impl SyntaxKind {
                 | SyntaxKind::ModKw
                 | SyntaxKind::RemoveKw
                 | SyntaxKind::RenameKw
+                | SyntaxKind::JoinKw
+                | SyntaxKind::TimesKw
+                | SyntaxKind::ComposeKw
                 | SyntaxKind::AsKw
         )
     }
@@ -287,6 +296,9 @@ impl SyntaxKind {
                 | SyntaxKind::ModKw
                 | SyntaxKind::RemoveKw
                 | SyntaxKind::RenameKw
+                | SyntaxKind::JoinKw
+                | SyntaxKind::TimesKw
+                | SyntaxKind::ComposeKw
         )
     }
 
@@ -317,6 +329,16 @@ impl SyntaxKind {
                 | SyntaxKind::LtEq
                 | SyntaxKind::Gt
                 | SyntaxKind::GtEq
+        )
+    }
+
+    /// Whether this is a join: `join`, `times` or `compose`, which all
+    /// match tuples on their common attributes.
+    #[must_use]
+    pub fn is_join(self) -> bool {
+        matches!(
+            self,
+            SyntaxKind::JoinKw | SyntaxKind::TimesKw | SyntaxKind::ComposeKw
         )
     }
 
@@ -369,6 +391,9 @@ impl SyntaxKind {
             SyntaxKind::ModKw => "mod",
             SyntaxKind::RemoveKw => "remove",
             SyntaxKind::RenameKw => "rename",
+            SyntaxKind::JoinKw => "join",
+            SyntaxKind::TimesKw => "times",
+            SyntaxKind::ComposeKw => "compose",
             SyntaxKind::AsKw => "as",
             SyntaxKind::LBrace => "{",
             SyntaxKind::RBrace => "}",
@@ -420,6 +445,9 @@ impl SyntaxKind {
             SyntaxKind::ModKw => "`mod`",
             SyntaxKind::RemoveKw => "`remove`",
             SyntaxKind::RenameKw => "`rename`",
+            SyntaxKind::JoinKw => "`join`",
+            SyntaxKind::TimesKw => "`times`",
+            SyntaxKind::ComposeKw => "`compose`",
             SyntaxKind::AsKw => "`as`",
             SyntaxKind::ForeignOperator => "operator",
             SyntaxKind::LBrace => "`{`",

@@ -2167,6 +2167,105 @@ mod tests {
     }
 
     #[test]
+    fn join_constants() {
+        let vars = variables(
+            "var cities := relation { { city: \"Kumasi\", country: \"Ghana\" }, { city: \"Osaka\", country: \"Japan\" }, { city: \"Lima\", country: \"Peru\" } };\nvar countries := relation { { country: \"Ghana\", continent: \"Africa\" }, { country: \"Japan\", continent: \"Asia\" } };\nvar sizes := relation { { size: 1 }, { size: 2 } };\nvar placed := cities join countries;\nvar continents := cities compose countries;\nvar pairs := countries{continent} times sizes;\nvar itself := cities join cities;",
+        );
+        let value = |name: &str| vars.iter().find(|v| v.name == name).unwrap();
+        let tuples = |name: &str| {
+            let hir::Value::Relation(r) = &value(name).init else {
+                panic!("{name} is a relation");
+            };
+            r.tuples.len()
+        };
+        assert_eq!(
+            value("placed").ty.to_string(),
+            "relation { city: text, continent: text, country: text }"
+        );
+        assert_eq!(tuples("placed"), 2, "Lima has no country to match");
+        assert_eq!(
+            value("continents").ty.to_string(),
+            "relation { city: text, continent: text }"
+        );
+        assert_eq!(tuples("continents"), 2);
+        assert_eq!(
+            value("pairs").ty.to_string(),
+            "relation { continent: text, size: integer }"
+        );
+        assert_eq!(tuples("pairs"), 4);
+        assert_eq!(value("itself").init, value("cities").init);
+    }
+
+    #[test]
+    fn join_errors() {
+        let source = format!(
+            "var cities := relation {{ {{ city: \"Kumasi\", country: \"Ghana\" }} }};\nvar countries := relation {{ {{ county: \"Ghana\", continent: \"Africa\" }} }};\nvar codes := relation {{ {{ country: 288 }} }};\nvar a := cities join countries;\nvar b := cities compose countries;\nvar c := cities times cities;\nvar d := cities join codes;\nvar e := tuple {{ country: \"Ghana\" }} join cities;\nvar f := cities join 1;{MAIN}"
+        );
+        let errors = errors(&source);
+        let found: Vec<_> = errors.iter().map(|e| (e.code, &e.message[..])).collect();
+        assert_eq!(
+            found,
+            [
+                (
+                    Code::CommonAttributes,
+                    "the operands of `join` have no attributes in common"
+                ),
+                (
+                    Code::CommonAttributes,
+                    "the operands of `compose` have no attributes in common"
+                ),
+                (
+                    Code::CommonAttributes,
+                    "the operands of `times` have `city` and `country` in common"
+                ),
+                (
+                    Code::JoinTypeConflict,
+                    "the operands of `join` both have an attribute `country`, of different types"
+                ),
+                (Code::WrongOperandType, "`join` can't be applied to tuples"),
+                (
+                    Code::WrongOperandType,
+                    "`join` can't be applied to integers"
+                ),
+            ]
+        );
+        assert_eq!(
+            errors[0].help[0],
+            "if `county` is `country`, rename it so they match: `… rename {county as country}`"
+        );
+    }
+
+    #[test]
+    fn joins_in_bodies() {
+        let program = analyze_str(
+            "var cities := relation { { city: \"Kumasi\", country: \"Ghana\" } };\noperator f{r: relation { country: text, continent: text }} [\n    call debug_value{v: cities join r};\n    call debug_value{v: cities compose r};\n    call debug_value{v: cities join r join cities};\n];\noperator main{} [];",
+        )
+        .unwrap();
+        let f = program.operators.iter().find(|o| o.name == "f").unwrap();
+        let hir::OperatorKind::User { body } = &f.kind else {
+            panic!("f is a user operator");
+        };
+        let cities = || Box::new(hir::Expr::Variable(hir::VariableId(0)));
+        let r = || Box::new(hir::Expr::Parameter("r".to_string()));
+        assert_eq!(argument(&body[0]), &hir::Expr::And(cities(), r()));
+        assert_eq!(
+            argument(&body[1]),
+            &hir::Expr::Remove(
+                Box::new(hir::Expr::And(cities(), r())),
+                ["country".to_string()].into()
+            )
+        );
+        assert_eq!(
+            argument(&body[2]),
+            &hir::Expr::And(Box::new(hir::Expr::And(cities(), r())), cities())
+        );
+        let errors = errors(
+            "var cities := relation { { city: \"Kumasi\", country: \"Ghana\" } };\noperator f{r: relation { size: integer }} [\n    call debug_value{v: cities join r};\n];\noperator main{} [];",
+        );
+        assert_eq!(errors[0].code, Code::CommonAttributes, "{errors:#?}");
+    }
+
+    #[test]
     fn not_before_a_comparison() {
         let source =
             format!("var n := 1;\nvar a := not n = 0 and true;\nvar b := not n + 1 < 2;{MAIN}");

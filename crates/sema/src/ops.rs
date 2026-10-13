@@ -538,6 +538,88 @@ pub(crate) fn renamed(
 /// A name as written, and where.
 type NameAt = (String, Span);
 
+/// A join: each is Algebra A's AND of two relations, and they differ in
+/// what they require of the operands' common attributes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JoinKind {
+    /// `join`, of operands with attributes in common.
+    Join,
+    /// `times`, of operands with none in common.
+    Times,
+    /// `compose`, of operands with attributes in common, which the result
+    /// doesn't have.
+    Compose,
+}
+
+impl JoinKind {
+    /// The join `binary` is, and its operator token, if it is one.
+    pub(crate) fn of(binary: &ast::BinaryExpr) -> Option<(JoinKind, SyntaxToken)> {
+        let token = binary.operator()?;
+        let join = match token.kind() {
+            SyntaxKind::JoinKw => JoinKind::Join,
+            SyntaxKind::TimesKw => JoinKind::Times,
+            SyntaxKind::ComposeKw => JoinKind::Compose,
+            _ => return None,
+        };
+        Some((join, token))
+    }
+}
+
+/// The attributes `join`, written `token`, removes from the AND of its
+/// operands, `lhs` and `rhs`, each with its type: the common attributes for
+/// `compose`, and none otherwise. `None` after reporting why there is no
+/// result: an operand isn't a relation, a common attribute has different
+/// types in the two, or the operands have common attributes where the
+/// operator takes none, or none where it needs some.
+pub(crate) fn joined(
+    join: JoinKind,
+    token: &SyntaxToken,
+    (lhs, lhs_ty): (&Expr, &hir::Type),
+    (rhs, rhs_ty): (&Expr, &hir::Type),
+    errors: &mut Vec<Diagnostic>,
+) -> Option<BTreeSet<String>> {
+    let mut headings = Vec::new();
+    for (operand, ty) in [(lhs, lhs_ty), (rhs, rhs_ty)] {
+        match ty {
+            hir::Type::Relation(heading) => headings.push(heading),
+            _ => errors.push(errors::not_joinable(token, ty, operand)),
+        }
+    }
+    let [lhs_heading, rhs_heading] = <[&hir::Heading; 2]>::try_from(headings).ok()?;
+    let common = lhs_heading.common(rhs_heading);
+    let mut ok = true;
+    for name in &common {
+        let (a, b) = (lhs_heading.get(name)?, rhs_heading.get(name)?);
+        if a != b {
+            errors.push(errors::join_type_conflict(token, name, (lhs, a), (rhs, b)));
+            ok = false;
+        }
+    }
+    if common.is_empty() != (join == JoinKind::Times) {
+        errors.push(errors::common_attributes(
+            join,
+            token,
+            (lhs, lhs_heading),
+            (rhs, rhs_heading),
+            &common,
+        ));
+        ok = false;
+    }
+    ok.then(|| match join {
+        JoinKind::Compose => common,
+        JoinKind::Join | JoinKind::Times => BTreeSet::new(),
+    })
+}
+
+/// The AND of the relations `lhs` and `rhs`, evaluated if both are
+/// constants.
+pub(crate) fn and(lhs: hir::Expr, rhs: hir::Expr) -> hir::Expr {
+    match (lhs, rhs) {
+        (hir::Expr::Constant(lhs), hir::Expr::Constant(rhs)) => hir::Expr::Constant(lhs.and(&rhs)),
+        (lhs, rhs) => hir::Expr::And(Box::new(lhs), Box::new(rhs)),
+    }
+}
+
 /// The attribute `extract`, written after `operand`, which is of type `ty`,
 /// takes the value of. `None` after reporting why there is none: the
 /// operand isn't a tuple, or hasn't the attribute.
@@ -711,10 +793,12 @@ fn can_fail(expr: &hir::Expr) -> bool {
     match expr {
         hir::Expr::Constant(_) | hir::Expr::Variable(_) | hir::Expr::Parameter(_) => false,
         // Negating the smallest integer overflows, and building a relation,
-        // or removing or renaming its attributes, allocates the result.
+        // removing or renaming its attributes, or joining it, allocates the
+        // result.
         hir::Expr::Unary(hir::UnaryOp::Negate(hir::Numeric::Integer), _)
         | hir::Expr::Remove(..)
         | hir::Expr::Rename(..)
+        | hir::Expr::And(..)
         | hir::Expr::Relation(..) => true,
         hir::Expr::Unary(_, operand) => can_fail(operand),
         hir::Expr::Tuple(attributes) => attributes.values().any(can_fail),

@@ -306,6 +306,9 @@ pub(crate) fn value(
                 Resolved::Binary(_) => None,
             }
         }
+        Expr::Binary(binary) if ops::JoinKind::of(binary).is_some() => {
+            joined(binary, expr, expected, scope, errors)
+        }
         Expr::Binary(binary) => {
             let token = binary.operator()?;
             let (resolved, operands) = operands(
@@ -330,6 +333,35 @@ pub(crate) fn value(
             )
         }
     }
+}
+
+/// The value of a join, `binary`, written `expr`.
+fn joined(
+    binary: &ast::BinaryExpr,
+    expr: &Expr,
+    expected: Option<&Expected>,
+    scope: &mut dyn Scope,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<hir::Value> {
+    let (join, token) = ops::JoinKind::of(binary)?;
+    let (lhs, rhs) = (binary.lhs()?, binary.rhs()?);
+    let lhs_value = value(&lhs, None, scope, errors);
+    let rhs_value = value(&rhs, None, scope, errors);
+    let (lhs_value, rhs_value) = (lhs_value?, rhs_value?);
+    let removed = ops::joined(
+        join,
+        &token,
+        (&lhs, &lhs_value.ty()),
+        (&rhs, &rhs_value.ty()),
+        errors,
+    )?;
+    let result = lhs_value.and(&rhs_value);
+    let result = if removed.is_empty() {
+        result
+    } else {
+        result.without(&removed)
+    };
+    matches(expected, result, expr, errors)
 }
 
 /// The operator written `token` and the values of its `operands`.

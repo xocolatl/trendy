@@ -848,6 +848,14 @@ mod tests {
     }
 
     #[test]
+    fn join_operators() {
+        assert_eq!(
+            fmt("var a:=b   join c{x}times(d\ncompose e rename{f as g});"),
+            "var a := b join c{x} times (d compose e rename {f as g});\n"
+        );
+    }
+
+    #[test]
     fn comments() {
         // A header, kept apart by its blank line.
         assert_eq!(
