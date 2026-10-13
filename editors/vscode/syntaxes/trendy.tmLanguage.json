@@ -19,6 +19,9 @@
       "include": "#variable-declaration"
     },
     {
+      "include": "#key"
+    },
+    {
       "include": "#keywords"
     },
     {
@@ -76,6 +79,14 @@
           "include": "#comment"
         }
       ]
+    },
+    "key": {
+      "captures": {
+        "1": {
+          "name": "keyword.other.trendy"
+        }
+      },
+      "match": "\\b(key)\\s*(?=\\{)"
     },
     "keywords": {
       "match": "\\b(?:operator|var|tuple|relation|call|builtin|as)\\b",

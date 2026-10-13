@@ -488,7 +488,16 @@ pub struct Variable {
     /// Always explicit: sema supplies the type's default when the source
     /// gives no value.
     pub init: Value,
+    /// A relation variable's keys (TTM RM Prescription 15), each a set of
+    /// attribute names, which `init` satisfies: no two tuples have the same
+    /// values for a key's attributes, and no key contains another. There is
+    /// always at least one: the whole heading when the source declares
+    /// none. Variables of other types have none.
+    pub keys: Vec<Key>,
 }
+
+/// A key: a set of a relation's attributes, by name.
+pub type Key = BTreeSet<String>;
 
 /// A type: a built-in scalar type, a tuple type, or a relation type.
 ///

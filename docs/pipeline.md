@@ -120,7 +120,11 @@ It never fails. A missing token is reported and the parser carries on, and
 text that fits nowhere is wrapped in an error node, up to the next definition
 keyword (`operator` or `var`). In a variable declaration, a missing `:` or
 `:=` is recognized from the type or value that follows it, and `=` is parsed
-as `:=` and reported. Whitespace is attached to the innermost node that is open when it
+as `:=` and reported. A variable's keys, `key { a, b }`, follow its value,
+or its type when it has none; `key` is a contextual keyword, recognized
+only there, before `{`. Keys written before the value are parsed and
+reported with a fix that moves them (P0020), and SQL's `primary key` and
+`unique` are parsed as keys and reported (P0019). Whitespace is attached to the innermost node that is open when it
 appears, so whitespace between definitions belongs to the file.
 
 Expressions use precedence climbing. From tightest to loosest: the prefix
@@ -156,6 +160,12 @@ blank line to group them, in which case one blank line is kept. Other
 definitions are always separated by a blank line. This is the only place the
 formatter looks at the original whitespace.
 
+A variable's keys stay on the line before them when they fit. After a
+value that spans lines, or when that line would be too long, each key goes
+on a line of its own, in the declaration's column, which is also the column
+of a relation value's closing brace, and a blank line follows them; a too
+long line breaks its keys before any list in it.
+
 Everything else goes on one line, except that a relation value with more than
 one tuple is broken across lines: each tuple on its own line, indented four
 spaces per level of nesting, with the closing brace on a line of its own.
@@ -184,7 +194,9 @@ will live here, and the optimizer will rewrite it.
 
 It holds the operators, the variables, and the built-in types (`Type`) and
 values (`Value`). Every variable has an explicit type and initial value: sema
-infers whichever one the source leaves out.
+infers whichever one the source leaves out. A relation variable also has
+its keys (TTM RM Prescription 15), at least one: the whole heading when the
+source declares none.
 
 Types are built-in scalars (`Scalar`), tuples (`Type::Tuple`) or relations
 (`Type::Relation`). A tuple or relation type's `Heading` maps attribute names
@@ -228,6 +240,13 @@ Initial values are evaluated when compiling, so a HIR variable holds a
 each variable is evaluated when first needed, after the ones it refers to,
 and a variable referred to while it is itself being evaluated closes a
 cycle, reported once with a label at each reference in it (A0021).
+
+A relation variable's keys must name its attributes, each once, and none
+may contain another, since a key is irreducible. Its initial value must
+satisfy them: two tuples with the same values for a key are an error. To
+point at the two tuples, sema evaluates each tuple of the initial value's
+relation selector again, only once a key is found violated; the value was
+already checked, so that can't fail.
 
 In an operator's body, expressions become `hir::Expr`. Whatever doesn't
 depend on parameters or variables is folded to a constant, and so is

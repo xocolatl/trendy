@@ -18,9 +18,24 @@ fn compile_and_run(name: &str) -> i32 {
 /// Compile `examples/<name>.trendy`, run the executable, and return its exit
 /// code and what it wrote to stderr.
 fn run_example(name: &str) -> (i32, String) {
-    let input = workspace_root()
-        .join("examples")
-        .join(format!("{name}.trendy"));
+    run_file(name, &Path::new("examples").join(format!("{name}.trendy")))
+}
+
+/// Compile `projects/<name>/<name>.trendy`, run the executable, and return
+/// its exit code and what it wrote to stderr.
+fn run_project(name: &str) -> (i32, String) {
+    run_file(
+        name,
+        &Path::new("projects")
+            .join(name)
+            .join(format!("{name}.trendy")),
+    )
+}
+
+/// Compile `path`, relative to the workspace root, run the executable, and
+/// return its exit code and what it wrote to stderr.
+fn run_file(name: &str, path: &Path) -> (i32, String) {
+    let input = workspace_root().join(path);
     // Each run gets its own executable, since tests run in parallel.
     let run = RUNS.fetch_add(1, Ordering::Relaxed);
     let output = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}-{run}"));
@@ -397,6 +412,19 @@ fn relations() {
             r#"relation { born: integer, name: text } { { born: 701, name: "李白" }, { born: 1815, name: "Ada" } }"#,
             "relation { x: integer } { { x: 1 } }",
             r#"tuple { members: relation { name: text } { { name: "Ada" }, { name: "李白" } }, who: "core" }"#,
+        ]
+    );
+}
+
+#[test]
+fn shopping() {
+    let (code, stderr) = run_project("shopping");
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            r#"relation { people: integer, recipe: text } { { people: 4, recipe: "dal tadka" }, { people: 4, recipe: "shakshuka" }, { people: 6, recipe: "mapo doufu" } }"#,
+            r#"relation { ingredient: text, unit: text } { { ingredient: "Sichuan pepper", unit: "g" }, { ingredient: "beetroot", unit: "g" }, { ingredient: "cabbage", unit: "g" }, { ingredient: "carrot", unit: "piece" }, { ingredient: "cumin", unit: "g" }, { ingredient: "doubanjiang", unit: "g" }, { ingredient: "egg", unit: "piece" }, { ingredient: "garlic", unit: "clove" }, { ingredient: "ghee", unit: "g" }, { ingredient: "ginger", unit: "g" }, { ingredient: "minced pork", unit: "g" }, { ingredient: "olive oil", unit: "ml" }, { ingredient: "onion", unit: "piece" }, { ingredient: "potato", unit: "g" }, { ingredient: "red lentils", unit: "g" }, { ingredient: "tofu", unit: "g" }, { ingredient: "tomato", unit: "g" } }"#,
         ]
     );
 }

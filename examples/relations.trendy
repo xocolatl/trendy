@@ -1,9 +1,14 @@
 var empty: relation { a: boolean, b: integer };
 var r := relation { a: integer } { { a: 1 } };
+/* Keys (RM Prescription 15): no two tuples have the same values for a
+   key's attributes. A variable can have several, and one without any has
+   its whole heading as its key. Implemented, and checked when compiling. */
 var people := relation {
     tuple { name: "Ada", born: 1815 },
     { name: "Edgar", born: 1923 },
-};
+}
+key { name };
+
 var nested: tuple { name: text, friends: relation { name: text } };
 var teams := relation {
     {
@@ -14,11 +19,14 @@ var teams := relation {
         }
     },
     { team: "docs", members: relation { name: text } {} },
-};
+}
+key { team };
+
 var cities := relation {
     { name: "Ada", city: "London" },
     { name: "Edgar", city: "Portland" },
-};
+}
+key { name };
 
 /* Relational operators, to design and then implement one at a time, each
    with its tuple analog where there is one (see tuples.trendy). Each
@@ -204,7 +212,9 @@ var births := relation {
     { name: "Ada", born: 1816, place: "London" },
     { name: "Édouard", born: 1815, place: "Paris" },
     { name: "Edgar", born: 1923, place: "Portland" },
-};
+}
+key { name, born };
+
 var signs := relation {
     { x: 2.5, n: 1 },
     { x: -0.0, n: 2 },

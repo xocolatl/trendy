@@ -61,7 +61,8 @@ in the "Diagnostics" section of `docs/pipeline.md`.
   - rustfmt-clean code;
   - zero warnings from rustc, clippy (including `clippy::pedantic`), and
     rustdoc;
-  - every file in `examples/` in canonical form (`trendyfmt --check`);
+  - every file in `examples/` and `projects/` in canonical form
+    (`trendyfmt --check`);
   - the generated TextMate grammar up to date;
   - a clean strict TypeScript check of the VS Code extension.
 

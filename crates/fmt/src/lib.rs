@@ -26,38 +26,61 @@ use trendy_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 #[must_use]
 pub fn format(file: &SourceFile) -> String {
     // Lay everything out flat but for the blocks the structure demands, then
-    // break the outermost list on the first line that's too long, until
-    // every line fits or nothing more can be broken.
+    // break the outermost list, or a variable's keys, on the first line
+    // that's too long, until every line fits or nothing more can be broken.
     let mut layout = Layout::default();
     loop {
         let (out, lines) = render(file, &layout);
         match layout.too_long(&out, &lines) {
-            Some(list) => {
+            Some(Break::List(list)) => {
                 layout.broken.insert(list);
+            }
+            Some(Break::Keys(decl)) => {
+                layout.broken_keys.insert(decl);
             }
             None => return out,
         }
     }
 }
 
+/// What to break across lines next.
+enum Break {
+    /// A list, one item per line.
+    List(SyntaxNode),
+    /// The keys of a variable declaration, each on a line of its own.
+    Keys(SyntaxNode),
+}
+
 /// The widest a line may be, in characters, before the formatter breaks a
 /// list in it across lines.
 const MAX_WIDTH: usize = 100;
 
-/// Which lists are broken across lines beyond those the structure demands.
+/// Which lists, and which variable declarations' keys, are broken across
+/// lines beyond those the structure demands.
 #[derive(Default)]
 struct Layout {
     broken: HashSet<SyntaxNode>,
+    broken_keys: HashSet<SyntaxNode>,
 }
 
 impl Layout {
-    /// The outermost list that can still be broken on the first line of
-    /// `out` that is too long, given `lines`, the line each significant
-    /// token was written on.
-    fn too_long(&self, out: &str, lines: &[(SyntaxToken, usize)]) -> Option<SyntaxNode> {
+    /// The outermost list or keys that can still be broken on the first
+    /// line of `out` that is too long, given `lines`, the line each
+    /// significant token was written on.
+    fn too_long(&self, out: &str, lines: &[(SyntaxToken, usize)]) -> Option<Break> {
         for (line, text) in out.lines().enumerate() {
             if text.chars().count() <= MAX_WIDTH {
                 continue;
+            }
+            // A variable's keys are the outermost thing that can break.
+            let keys = lines
+                .iter()
+                .filter(|(_, l)| *l == line)
+                .filter_map(|(token, _)| key_start(token))
+                .filter_map(|key| key.parent())
+                .find(|decl| !self.keys_broken(decl));
+            if let Some(decl) = keys {
+                return Some(Break::Keys(decl));
             }
             let list = lines
                 .iter()
@@ -67,8 +90,8 @@ impl Layout {
                 })
                 .filter_map(|(token, _)| token.parent())
                 .find(|node| is_list(node) && items(node) > 0 && !self.is_block(node));
-            if list.is_some() {
-                return list;
+            if let Some(list) = list {
+                return Some(Break::List(list));
             }
         }
         None
@@ -96,6 +119,17 @@ impl Layout {
             }
             _ => is_multi_tuple_relation(node) || self.broken.contains(node),
         }
+    }
+
+    /// Whether the keys of the variable declared by `decl` go on lines of
+    /// their own: when what comes before them spans lines, or when they
+    /// don't fit on its last line.
+    fn keys_broken(&self, decl: &SyntaxNode) -> bool {
+        self.broken_keys.contains(decl)
+            || decl
+                .children()
+                .filter(|n| n.kind() != SyntaxKind::Key)
+                .any(|n| n.descendants().any(|d| self.is_block(&d)))
     }
 
     /// How many blocks enclose `node`, not counting itself: the indentation
@@ -213,6 +247,17 @@ fn between(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool, layout: &La
             if blank { "\n" } else { "" },
             INDENT.repeat(indent)
         );
+    }
+    // Keys on lines of their own end with a blank line, so they don't run
+    // into the next definition.
+    if prev.kind() == SyntaxKind::Semicolon
+        && prev.parent().is_some_and(|decl| {
+            decl.kind() == SyntaxKind::VarDecl
+                && decl.children().any(|n| n.kind() == SyntaxKind::Key)
+                && layout.keys_broken(&decl)
+        })
+    {
+        return "\n\n".to_string();
     }
     let separator = separator(prev, next, blank_line);
     // Never let two tokens run together into others: the formatter must not
@@ -345,6 +390,13 @@ impl Gap<'_> {
 
 const INDENT: &str = "    ";
 
+/// The key that `token` starts, if it starts one.
+fn key_start(token: &SyntaxToken) -> Option<SyntaxNode> {
+    token
+        .parent()
+        .filter(|p| p.kind() == SyntaxKind::Key && p.first_token().as_ref() == Some(token))
+}
+
 fn is_multi_tuple_relation(node: &SyntaxNode) -> bool {
     RelationLiteral::cast(node.clone()).is_some_and(|r| r.tuples().nth(1).is_some())
 }
@@ -377,6 +429,14 @@ fn broken_line(prev: &SyntaxToken, next: &SyntaxToken, layout: &Layout) -> Optio
         && let Some(block) = block(next)
     {
         return Some(layout.level(&block));
+    }
+    // A variable's keys, when they don't stay on the line before, each on a
+    // line of its own, in the column of the declaration's start, and so of a
+    // relation value's closing brace.
+    if let Some(key) = key_start(next)
+        && key.parent().is_some_and(|decl| layout.keys_broken(&decl))
+    {
+        return Some(layout.level(&key));
     }
     match prev.kind() {
         SyntaxKind::LBrace | SyntaxKind::LBracket | SyntaxKind::Comma => {
@@ -424,13 +484,18 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
                 )
             }),
             TupleLiteral | RelationLiteral => true,
+            // A key's attributes, as in `key { a, b }`.
+            SyntaxKind::NameList => p.parent().is_some_and(|k| k.kind() == SyntaxKind::Key),
             _ => false,
         })
     };
-    // The contextual keyword in `builtin type name;`.
-    let type_keyword = prev.kind() == Ident
-        && prev.parent().is_some_and(|p| p.kind() == BuiltinType)
-        && prev.text() == "type";
+    // The contextual keywords: `type`, in `builtin type name;`, and `key`.
+    let contextual_keyword = prev.kind() == Ident
+        && prev.parent().is_some_and(|p| match p.kind() {
+            BuiltinType => prev.text() == "type",
+            SyntaxKind::Key => true,
+            _ => false,
+        });
     // A dyadic operator token, such as the `-` in `a - b`, as opposed to the
     // prefix one in `-b`.
     let dyadic = |token: &SyntaxToken| {
@@ -447,11 +512,12 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
                 .is_some_and(|p| p.kind() == SyntaxKind::ProjectExpr)
         });
     match (prev.kind(), next.kind()) {
+        _ if key_start(next).is_some() => " ",
         _ if projection => "",
         (LBrace, RBrace) if list_brace(prev) => "",
         (LBrace, _) if list_brace(prev) => " ",
         (_, RBrace) if list_brace(next) => " ",
-        _ if type_keyword => " ",
+        _ if contextual_keyword => " ",
         _ if dyadic(prev) || dyadic(next) => " ",
         // `- -a`, not `--a`.
         _ if sign(prev) && sign(next) => " ",
@@ -544,6 +610,50 @@ mod tests {
             fmt("var   i:integer:=0 ;var t :text;var u:=\"x\";\n\n\noperator main{}[];"),
             "var i: integer := 0;\nvar t: text;\nvar u := \"x\";\n\noperator main{} [];\n"
         );
+    }
+
+    #[test]
+    fn keys_stay_on_the_line_when_they_fit() {
+        assert_eq!(
+            fmt("var r:relation{a:integer,b:text}key{a}  key {b,a};var e:=relation{{a:1}}key{ };"),
+            "var r: relation { a: integer, b: text } key { a } key { b, a };\nvar e := relation { { a: 1 } } key {};\n"
+        );
+    }
+
+    #[test]
+    fn keys_after_a_value_on_several_lines_go_on_lines_of_their_own() {
+        assert_eq!(
+            fmt("var r := relation {{a: 1}, {a: 2}} key {a} key {b};var s := 1;"),
+            "var r := relation {\n    { a: 1 },\n    { a: 2 }\n}\nkey { a }\nkey { b };\n\nvar s := 1;\n"
+        );
+    }
+
+    #[test]
+    fn keys_that_dont_fit_go_on_lines_of_their_own() {
+        let heading: Vec<String> = (0..3).map(|i| format!("attribute_{i}: integer")).collect();
+        let source = format!(
+            "var r: relation {{ {} }} key {{ attribute_0 }} key {{ attribute_1 }};\nvar s := 1;",
+            heading.join(", ")
+        );
+        assert_eq!(
+            fmt(&source),
+            format!(
+                "var r: relation {{ {} }}\nkey {{ attribute_0 }}\nkey {{ attribute_1 }};\n\nvar s := 1;\n",
+                heading.join(", ")
+            )
+        );
+    }
+
+    #[test]
+    fn a_long_key_breaks_like_other_lists() {
+        let names: Vec<String> = (0..8).map(|i| format!("attribute_{i}")).collect();
+        let source = format!("var r := s key {{ {} }};", names.join(", "));
+        let items = names
+            .iter()
+            .map(|n| format!("    {n}"))
+            .collect::<Vec<_>>()
+            .join(",\n");
+        assert_eq!(fmt(&source), format!("var r := s\nkey {{\n{items}\n}};\n"));
     }
 
     #[test]

@@ -59,10 +59,12 @@ fn classify(token: &SyntaxToken) -> Option<Highlight> {
         (SyntaxKind::Comment, _, _) => (Class::Comment, false),
         (kind, _, _) if kind.is_operator() => (Class::ExprOperator, false),
         (kind, _, _) if kind.is_keyword() => (Class::Keyword, false),
-        // The contextual keyword in `builtin type name;`.
+        // The contextual keywords: `type`, in `builtin type name;`, and
+        // `key`.
         (SyntaxKind::Ident, Some(SyntaxKind::BuiltinType), _) if token.text() == "type" => {
             (Class::Keyword, false)
         }
+        (SyntaxKind::Ident, Some(SyntaxKind::Key), _) => (Class::Keyword, false),
         (SyntaxKind::Ident, Some(SyntaxKind::Name), Some(SyntaxKind::BuiltinType)) => {
             (Class::Type, true)
         }
@@ -338,6 +340,22 @@ mod tests {
                 ("debug_value", Class::Operator, true),
                 ("v", Class::Parameter, true),
                 ("any", Class::Type, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn keys() {
+        assert_eq!(
+            highlight("var key := relation { { key: 1 } }\n    key { key };"),
+            [
+                ("var", Class::Keyword, false),
+                ("key", Class::Variable, true),
+                ("relation", Class::Keyword, false),
+                ("key", Class::Attribute, false),
+                ("1", Class::Number, false),
+                ("key", Class::Keyword, false),
+                ("key", Class::Attribute, false),
             ]
         );
     }

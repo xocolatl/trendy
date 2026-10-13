@@ -1,5 +1,6 @@
 mod body;
 mod errors;
+mod keys;
 mod ops;
 mod prelude;
 mod types;
@@ -364,10 +365,12 @@ fn variable(
             (ty, value)
         }
     };
+    let keys = keys::keys(decl, ident.text(), &ty, &init, globals, errors)?;
     values.is_first(&ident).then(|| hir::Variable {
         name: ident.text().to_string(),
         ty,
         init,
+        keys,
     })
 }
 
@@ -444,11 +447,13 @@ mod tests {
                     name: "i".to_string(),
                     ty: hir::Type::Scalar(hir::Scalar::Integer),
                     init: hir::Value::Integer(7),
+                    keys: Vec::new(),
                 },
                 hir::Variable {
                     name: "t".to_string(),
                     ty: hir::Type::Scalar(hir::Scalar::Text),
                     init: hir::Value::Text("a\tb".to_string()),
+                    keys: Vec::new(),
                 },
             ]
         );
@@ -1057,6 +1062,141 @@ mod tests {
 
     fn codes(source: &str) -> Vec<Code> {
         errors(source).iter().map(|e| e.code).collect()
+    }
+
+    fn keys_of(source: &str) -> Vec<Vec<hir::Key>> {
+        variables(source).into_iter().map(|v| v.keys).collect()
+    }
+
+    fn key(names: &[&str]) -> hir::Key {
+        names.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn keys() {
+        assert_eq!(
+            keys_of(
+                "var r := relation { { a: 1, b: 2, c: 3 } }\n    key { a, b }\n    key { c, a };\nvar e: relation { a: integer }\n    key {};"
+            ),
+            [vec![key(&["a", "b"]), key(&["a", "c"])], vec![key(&[])]]
+        );
+    }
+
+    #[test]
+    fn without_a_key_the_whole_heading_is_one() {
+        assert_eq!(
+            keys_of("var r := relation { { a: 1, b: 2 } };\nvar t := tuple { a: 1 };\nvar n := 1;"),
+            [vec![key(&["a", "b"])], vec![], vec![]]
+        );
+    }
+
+    #[test]
+    fn keys_are_relations_attributes() {
+        let source = "var r := relation { { name: 1 } } key { nmae } key { name, name };";
+        assert_eq!(
+            codes(&format!("{source}{MAIN}")),
+            [Code::UnknownAttribute, Code::DuplicateAttribute]
+        );
+        assert_eq!(
+            fix(&format!(
+                "var r := relation {{ {{ name: 1 }} }} key {{ nmae }};{MAIN}"
+            )),
+            format!("var r := relation {{ {{ name: 1 }} }} key {{ name }};{MAIN}")
+        );
+    }
+
+    #[test]
+    fn only_relations_have_keys() {
+        let source = format!("var t := tuple {{ a: 1 }}\n    key {{ a }}\n    key {{}};{MAIN}");
+        assert_eq!(codes(&source), [Code::KeyNotRelation]);
+        assert_eq!(fix(&source), format!("var t := tuple {{ a: 1 }};{MAIN}"));
+    }
+
+    #[test]
+    fn redundant_keys() {
+        let declared_twice =
+            format!("var r := relation {{ {{ a: 1, b: 2 }} }} key {{ a }} key {{ a }};{MAIN}");
+        assert_eq!(messages(&declared_twice), ["key `{ a }` is declared twice"]);
+        assert_eq!(
+            fix(&declared_twice),
+            format!("var r := relation {{ {{ a: 1, b: 2 }} }} key {{ a }};{MAIN}")
+        );
+        // A key that contains another is reported whichever comes first.
+        let contains =
+            format!("var r := relation {{ {{ a: 1, b: 2 }} }} key {{ b, a }} key {{ a }};{MAIN}");
+        assert_eq!(
+            messages(&contains),
+            ["key `{ b, a }` contains key `{ a }`, so it isn't a key"]
+        );
+        assert_eq!(
+            fix(&contains),
+            format!("var r := relation {{ {{ a: 1, b: 2 }} }} key {{ a }};{MAIN}")
+        );
+        // Keys can share attributes.
+        assert!(analyze_str(&format!(
+            "var r := relation {{ {{ a: 1, b: 2, c: 3 }} }} key {{ a, b }} key {{ a, c }} key {{ b, c }};{MAIN}"
+        ))
+        .is_ok());
+    }
+
+    #[test]
+    fn values_must_satisfy_their_keys() {
+        let source = format!(
+            "var r := relation {{\n    {{ a: 1, b: 2 }},\n    {{ a: 2, b: 2 }},\n    {{ a: 1, b: 3 }}\n}}\n    key {{ a }}\n    key {{ b }};{MAIN}"
+        );
+        let errors = errors(&source);
+        assert_eq!(
+            errors.iter().map(|e| e.code).collect::<Vec<_>>(),
+            [Code::KeyViolated, Code::KeyViolated]
+        );
+        // Each at the later tuple, with the earlier one and the key.
+        let text = |span: Span| &source[span.start..span.end];
+        let places: Vec<(&str, Vec<&str>)> = errors
+            .iter()
+            .map(|e| {
+                (
+                    text(e.span()),
+                    e.secondary.iter().map(|l| text(l.span)).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            places,
+            [
+                ("{ a: 2, b: 2 }", vec!["{ a: 1, b: 2 }", "key { b }"]),
+                ("{ a: 1, b: 3 }", vec!["{ a: 1, b: 2 }", "key { a }"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn computed_values_must_satisfy_their_keys() {
+        let source = format!(
+            "var r := relation {{ {{ a: 1, b: 2 }}, {{ a: 1, b: 3 }} }};\nvar s := r{{a, b}} key {{ a }};{MAIN}"
+        );
+        let errors = errors(&source);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            &source[errors[0].span().start..errors[0].span().end],
+            "r{a, b}"
+        );
+        assert_eq!(errors[0].primary.message, "has two tuples with `a: 1`");
+    }
+
+    #[test]
+    fn the_empty_key_allows_one_tuple() {
+        assert!(
+            analyze_str(&format!(
+                "var r := relation {{ {{ a: 1 }} }} key {{}};{MAIN}"
+            ))
+            .is_ok()
+        );
+        assert_eq!(
+            codes(&format!(
+                "var r := relation {{ {{ a: 1 }}, {{ a: 2 }} }} key {{}};{MAIN}"
+            )),
+            [Code::KeyViolated]
+        );
     }
 
     #[test]

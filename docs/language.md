@@ -131,6 +131,9 @@ value may be left out, but not both:
 - Without a value, the variable starts at its type's default value.
 - Without a type, the variable has the type of its value.
 
+A relation variable can also declare keys, after its value or type; see
+[Keys](#keys).
+
 ```trendy,error
 var count;
 
@@ -310,6 +313,72 @@ operator main{} [];
 
 ```trendy,error
 var twice := relation { { a: 1 }, { a: 1 } };
+
+operator main{} [];
+```
+
+## Keys
+
+A relation variable can declare keys, each written `key { … }` after its
+value, or after its type when it has no value. A key is a set of the
+relation's attributes that no two of its tuples have the same values for: a
+country's name, a language's code. *The Third Manifesto* calls these
+candidate keys, and requires every relation variable to have at least one
+(RM Prescription 15).
+
+```trendy
+var countries := relation {
+    { name: "Kenya", code: "KE", capital: "Nairobi" },
+    { name: "Peru", code: "PE", capital: "Lima" },
+}
+key { name }
+key { code };
+
+var visits: relation { country: text, year: integer, days: integer } key { country, year };
+
+operator main{} [];
+```
+
+- **Keys can share attributes.** `key { day, gate } key { day, pilot }`
+  says that a gate has one flight per day, and so does a pilot.
+- **No key contains another.** A key is *irreducible*: no smaller set of its
+  attributes tells the tuples apart (Date and Darwen, chapter 2). If
+  `{ code }` does, `{ code, name }` isn't a key, so declaring both is an
+  error (A0025), and so is declaring one key twice.
+- **No key is primary.** Every key is a candidate key, and none is more
+  important than the others. SQL's `PRIMARY KEY` and `UNIQUE` are both
+  written `key` (P0019).
+- **A variable without a key has one anyway:** all of its attributes, since a
+  relation never has two equal tuples.
+- **`key {}` allows at most one tuple,** since every tuple has the same
+  values for no attributes.
+- **Only relation variables have keys,** not tuple or scalar variables
+  (A0020), and not types or values: a key is a rule about what a variable
+  can hold.
+- **An initial value must satisfy the keys.** It's checked when compiling,
+  and two tuples with the same values for a key are an error (A0026),
+  reported at the two tuples.
+- `key` is a keyword only there, so it can still be a name: an attribute or
+  a variable can be called `key`.
+
+```trendy,error
+var capitals := relation {
+    { country: "Kenya", city: "Nairobi" },
+    { country: "Kenya", city: "Mombasa" },
+}
+key { country };
+
+operator main{} [];
+```
+
+```trendy,error
+var languages := relation { { code: "sw", name: "Kiswahili" } } key { code } key { code, name };
+
+operator main{} [];
+```
+
+```trendy,error
+var rivers: relation { name: text } key { name } := relation { { name: "Mekong" } };
 
 operator main{} [];
 ```
@@ -765,7 +834,7 @@ are case-sensitive. The keywords are `operator`, `var`, `call`, `builtin`,
 `tuple`, `relation`, `true`, `false`, `not`, `and`, `or`, `xor`,
 `implies`, `div`, `mod`, `remove`, `rename` and `as`, all lowercase, and a
 keyword can't be a name (P0017). `type` is a keyword only after
-`builtin`.
+`builtin`, and `key` only where a variable's keys go.
 
 Variables and operators share one namespace, so no two of them can have the
 same name. Types have their own namespace, so a variable can be named after a
@@ -808,6 +877,12 @@ operator main{} [];
 - an operator's body has each statement on its own line, indented, on
   adjacent lines unless you separate them with a blank line to group them;
   several blank lines become one;
+- a variable's keys on the line before them, when they fit there, with
+  spaces inside their braces: `var r: relation { a: integer } key { a };`.
+  After a value that spans lines, or when they don't fit, each key goes on
+  a line of its own, starting in the same column as the declaration, and
+  so as a relation value's closing brace, and a blank line follows the
+  last;
 - parameters and arguments are written without spaces inside their braces:
   `operator greet{name: text}`, `call greet{name: "Ada"}`;
 - single spaces around dyadic operators and after `not`, none after prefix
@@ -852,6 +927,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `A FROM T`, `t["a"]` | `t.a` |
 | `R { A, B }`, `R { ALL BUT C }` | `r{a, b}`, `r remove {c}` |
 | `R RENAME ( A AS B )`, `rename(columns={'a': 'b'})` | `r rename {a as b}` |
+| `PRIMARY KEY (a)`, `UNIQUE (a)`, `KEY { A }` | `key { a }` |
 | `a / b` for integers | `a div b` |
 | `a % b` | `a mod b` |
 | `1 / 2` meaning one half | `1.0 / 2.0` |

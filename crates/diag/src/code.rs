@@ -4,9 +4,10 @@ use std::fmt;
 ///
 /// Codes are permanent once the language is released: a code then keeps its
 /// meaning and is never reused. Until then, a code no longer reported is
-/// freed for the next new one; A0020 is free. Its letter says what kind of problem it is, not which layer finds
-/// it: `P` the source doesn't parse, `A` it parses but analysis rejects it,
-/// `R` it fails while running, and `X` the compiler itself is wrong. Each
+/// freed for the next new one. Its letter says what kind of problem it is,
+/// not which layer finds it: `P` the source doesn't parse, `A` it parses
+/// but analysis rejects it, `R` it fails while running, and `X` the
+/// compiler itself is wrong. Each
 /// letter's `0000` is reserved for a generic error of that kind. A rule that
 /// is broken at run time keeps its `R` code when the compiler catches it
 /// early. Each code's explanation lives in `crates/diag/errors/<code>.md`.
@@ -30,6 +31,8 @@ pub enum Code {
     StrayCommentEnd,
     KeywordAsName,
     RenameSeparator,
+    KeySpelling,
+    KeyBeforeValue,
     DuplicateName,
     MissingMain,
     UnknownType,
@@ -53,6 +56,9 @@ pub enum Code {
     WrongOperandType,
     EmptyRemove,
     AttributeExists,
+    KeyNotRelation,
+    RedundantKey,
+    KeyViolated,
     Overflow,
     DivisionByZero,
     OutOfMemory,
@@ -73,7 +79,7 @@ pub enum CodeKind {
 }
 
 impl Code {
-    pub const ALL: [Code; 45] = [
+    pub const ALL: [Code; 50] = [
         Code::UnexpectedCharacter,
         Code::MissingToken,
         Code::WrongDelimiter,
@@ -92,6 +98,8 @@ impl Code {
         Code::StrayCommentEnd,
         Code::KeywordAsName,
         Code::RenameSeparator,
+        Code::KeySpelling,
+        Code::KeyBeforeValue,
         Code::DuplicateName,
         Code::MissingMain,
         Code::UnknownType,
@@ -115,6 +123,9 @@ impl Code {
         Code::WrongOperandType,
         Code::EmptyRemove,
         Code::AttributeExists,
+        Code::KeyNotRelation,
+        Code::RedundantKey,
+        Code::KeyViolated,
         Code::Overflow,
         Code::DivisionByZero,
         Code::OutOfMemory,
@@ -142,6 +153,8 @@ impl Code {
             Code::StrayCommentEnd => "P0016",
             Code::KeywordAsName => "P0017",
             Code::RenameSeparator => "P0018",
+            Code::KeySpelling => "P0019",
+            Code::KeyBeforeValue => "P0020",
             Code::DuplicateName => "A0001",
             Code::MissingMain => "A0002",
             Code::UnknownType => "A0003",
@@ -165,6 +178,9 @@ impl Code {
             Code::WrongOperandType => "A0022",
             Code::EmptyRemove => "A0023",
             Code::AttributeExists => "A0024",
+            Code::KeyNotRelation => "A0020",
+            Code::RedundantKey => "A0025",
+            Code::KeyViolated => "A0026",
             Code::Overflow => "R0001",
             Code::DivisionByZero => "R0002",
             Code::OutOfMemory => "R0003",
@@ -221,6 +237,8 @@ impl Code {
             Code::StrayCommentEnd => include_str!("../errors/P0016.md"),
             Code::KeywordAsName => include_str!("../errors/P0017.md"),
             Code::RenameSeparator => include_str!("../errors/P0018.md"),
+            Code::KeySpelling => include_str!("../errors/P0019.md"),
+            Code::KeyBeforeValue => include_str!("../errors/P0020.md"),
             Code::DuplicateName => include_str!("../errors/A0001.md"),
             Code::MissingMain => include_str!("../errors/A0002.md"),
             Code::UnknownType => include_str!("../errors/A0003.md"),
@@ -244,6 +262,9 @@ impl Code {
             Code::WrongOperandType => include_str!("../errors/A0022.md"),
             Code::EmptyRemove => include_str!("../errors/A0023.md"),
             Code::AttributeExists => include_str!("../errors/A0024.md"),
+            Code::KeyNotRelation => include_str!("../errors/A0020.md"),
+            Code::RedundantKey => include_str!("../errors/A0025.md"),
+            Code::KeyViolated => include_str!("../errors/A0026.md"),
             Code::Overflow => include_str!("../errors/R0001.md"),
             Code::DivisionByZero => include_str!("../errors/R0002.md"),
             Code::OutOfMemory => include_str!("../errors/R0003.md"),

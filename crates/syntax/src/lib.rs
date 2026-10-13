@@ -133,6 +133,9 @@ pub enum SyntaxKind {
     TypeRef,
     /// `:= value`
     Initializer,
+    /// `key { a, b }`, after a variable's type or value. `key` is a
+    /// contextual keyword, an identifier elsewhere.
+    Key,
     /// `{ name: type, … }`: the attributes of a tuple or relation type, or
     /// of a selector.
     Heading,
@@ -156,7 +159,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 80] = [
+    pub const ALL: [SyntaxKind; 81] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -228,6 +231,7 @@ impl SyntaxKind {
         SyntaxKind::TypeAnnotation,
         SyntaxKind::TypeRef,
         SyntaxKind::Initializer,
+        SyntaxKind::Key,
         SyntaxKind::Heading,
         SyntaxKind::AttributeType,
         SyntaxKind::TupleType,
@@ -466,6 +470,7 @@ impl SyntaxKind {
             SyntaxKind::TypeAnnotation => "type annotation",
             SyntaxKind::TypeRef => "type",
             SyntaxKind::Initializer => "initial value",
+            SyntaxKind::Key => "key",
             SyntaxKind::Heading => "heading",
             SyntaxKind::TupleType => "tuple type",
             SyntaxKind::RelationType => "relation type",

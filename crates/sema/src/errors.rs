@@ -1,10 +1,12 @@
 //! Sema's diagnostics. Each one says where the fix goes and, when the fix is
 //! mechanical, carries it.
 
+use std::collections::BTreeSet;
+
 use trendy_diag::{Code, Diagnostic, Edit, Span, edit_distance};
 use trendy_hir as hir;
 use trendy_syntax::SyntaxToken;
-use trendy_syntax::ast::{AstNode, Expr, SourceFile};
+use trendy_syntax::ast::{AstNode, Expr, Key, SourceFile};
 
 use crate::types::Origin;
 use crate::{Kind, Values};
@@ -377,19 +379,21 @@ pub(crate) enum Noun {
     /// An attribute named in a projection or `remove`, which must be one of
     /// its operand's.
     Projected,
+    /// An attribute named in a key, which must be one of the relation's.
+    Key,
 }
 
 impl Noun {
     fn one(self) -> &'static str {
         match self {
-            Noun::Attribute | Noun::Projected => "attribute",
+            Noun::Attribute | Noun::Projected | Noun::Key => "attribute",
             Noun::Argument => "argument",
         }
     }
 
     fn many(self) -> &'static str {
         match self {
-            Noun::Attribute | Noun::Projected => "attributes",
+            Noun::Attribute | Noun::Projected | Noun::Key => "attributes",
             Noun::Argument => "arguments",
         }
     }
@@ -400,7 +404,7 @@ impl Noun {
 pub(crate) fn duplicate_attribute(noun: Noun, name: &str, span: Span, first: Span) -> Diagnostic {
     let set = match noun {
         Noun::Attribute => "a tuple's attributes are a set, so each name can appear only once",
-        Noun::Projected => "each attribute is named once",
+        Noun::Projected | Noun::Key => "each attribute is named once",
         Noun::Argument => "arguments are a tuple of the parameters, so each one is given once",
     };
     Diagnostic::error(
@@ -441,7 +445,9 @@ pub(crate) fn missing_attributes(
     )
     .with_note(context.to_string())
     .with_note(match noun {
-        Noun::Attribute | Noun::Projected => "a tuple value must have every attribute of its type",
+        Noun::Attribute | Noun::Projected | Noun::Key => {
+            "a tuple value must have every attribute of its type"
+        }
         Noun::Argument => "every parameter needs an argument",
     });
 
@@ -478,6 +484,7 @@ pub(crate) fn unknown_attribute(
     let label = match noun {
         Noun::Attribute => "not an attribute of the expected type",
         Noun::Projected => "not an attribute of the operand",
+        Noun::Key => "not an attribute of the relation",
         Noun::Argument => "not a parameter of this operator",
     };
     let mut d = Diagnostic::error(
@@ -1015,4 +1022,128 @@ pub(crate) fn untyped_variable(name: &str, span: Span) -> Diagnostic {
     .with_help(format!(
         "give a type, as in `var {name}: integer;`, or a value, as in `var {name} := 0;`"
     ))
+}
+
+/// A key's attributes, in the order written: `{ a, b }`, or `{}`.
+fn key_text(key: &Key) -> String {
+    let names: Vec<String> = key.names().map_or_else(Vec::new, |list| {
+        list.names()
+            .filter_map(|name| Some(name.ident()?.text().to_string()))
+            .collect()
+    });
+    if names.is_empty() {
+        "{}".to_string()
+    } else {
+        format!("{{ {} }}", names.join(", "))
+    }
+}
+
+/// `keys`, on the variable `name` of type `ty`, which isn't a relation.
+pub(crate) fn key_not_relation(name: &str, ty: &hir::Type, keys: &[Key]) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::KeyNotRelation,
+        format!("`{name}` isn't a relation, so it can't have a key"),
+        keys[0].span(),
+        format!("a key on a variable of type `{ty}`"),
+    )
+    .with_note(
+        "a key says that no two tuples of a relation have the same values for its attributes, so only a relation variable has keys",
+    );
+    let removals = keys
+        .iter()
+        .map(|key| Edit {
+            span: key.removal(),
+            replacement: String::new(),
+        })
+        .collect();
+    let what = if keys.len() == 1 {
+        "the key"
+    } else {
+        "the keys"
+    };
+    d.with_suggestion(format!("remove {what}"), removals)
+}
+
+/// `key`, with the attributes `attributes`, which is redundant because of
+/// `other`, with the attributes `others`: the same, or a subset.
+pub(crate) fn redundant_key(
+    key: &Key,
+    attributes: &BTreeSet<String>,
+    other: &Key,
+    others: &BTreeSet<String>,
+) -> Diagnostic {
+    let (text, other_text) = (key_text(key), key_text(other));
+    let d = if attributes == others {
+        Diagnostic::error(
+            Code::RedundantKey,
+            format!("key `{text}` is declared twice"),
+            key.span(),
+            "declared again here",
+        )
+        .with_secondary(other.span(), "first declared here")
+        .with_note("each key is declared once")
+    } else {
+        Diagnostic::error(
+            Code::RedundantKey,
+            format!("key `{text}` contains key `{other_text}`, so it isn't a key"),
+            key.span(),
+            format!("contains `{other_text}`"),
+        )
+        .with_secondary(other.span(), "already a key")
+        .with_note(format!(
+            "a key is irreducible: no smaller set of its attributes tells the tuples apart, but `{other_text}` already does"
+        ))
+    };
+    d.with_suggestion(
+        format!("remove key `{text}`"),
+        vec![Edit {
+            span: key.removal(),
+            replacement: String::new(),
+        }],
+    )
+}
+
+/// Two tuples of the variable `name` with the same `value` for `key`:
+/// one at `at`, and the other at `first` if it has a place of its own.
+pub(crate) fn key_violated(
+    name: &str,
+    key: &Key,
+    value: &hir::TupleValue,
+    at: Span,
+    first: Option<Span>,
+) -> Diagnostic {
+    let attributes: Vec<String> = value
+        .attributes()
+        .map(|(a, v)| match source_text(v) {
+            Some(v) => format!("{a}: {v}"),
+            None => a.to_string(),
+        })
+        .collect();
+    let empty = attributes.is_empty();
+    let shared = format!("`{}`", attributes.join(", "));
+    let (label, first_label) = match (empty, first.is_some()) {
+        (true, true) => ("a second tuple".to_string(), "a first tuple".to_string()),
+        (true, false) => ("more than one tuple".to_string(), String::new()),
+        (false, true) => (
+            format!("has {shared} too"),
+            format!("first tuple with {shared}"),
+        ),
+        (false, false) => (format!("has two tuples with {shared}"), String::new()),
+    };
+    let mut d = Diagnostic::error(
+        Code::KeyViolated,
+        format!("two tuples of `{name}` have the same value for one of its keys"),
+        at,
+        label,
+    );
+    if let Some(first) = first {
+        d = d.with_secondary(first, first_label);
+    }
+    d.with_secondary(key.span(), "the key")
+        .with_note(if empty {
+            "`key {}` allows at most one tuple, since every tuple has the same values for no attributes"
+        } else {
+            "no two tuples can have the same values for a key's attributes"
+        })
+        .with_help("correct or remove one of these tuples, or declare the key that was meant")
 }

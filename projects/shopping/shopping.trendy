@@ -1,0 +1,104 @@
+/* A shopping list: the ingredients for the week's planned meals, each
+   recipe scaled to the number of people it's cooked for, and summed across
+   recipes.
+
+   The first project written in trendy, to find out what the language needs
+   by using it. What it can't say yet is written below as it should read,
+   in comments, in the order the features are needed. */
+
+/* Each recipe, its name in its own script, and how many people it serves
+   as written. */
+var recipes := relation {
+    { recipe: "shakshuka", native_name: "شكشوكة", serves: 4 },
+    { recipe: "dal tadka", native_name: "दाल तड़का", serves: 4 },
+    { recipe: "mapo doufu", native_name: "麻婆豆腐", serves: 3 },
+    { recipe: "borshch", native_name: "борщ", serves: 6 },
+}
+key { recipe }
+key { native_name };
+
+/* What each recipe needs, for the people it serves. An ingredient always
+   comes in one unit, so quantities of it can be added up. That is a
+   constraint too, but not a key, since it holds across recipes. */
+var ingredients := relation {
+    { recipe: "shakshuka", ingredient: "egg", quantity: 6.0, unit: "piece" },
+    { recipe: "shakshuka", ingredient: "tomato", quantity: 800.0, unit: "g" },
+    { recipe: "shakshuka", ingredient: "onion", quantity: 1.0, unit: "piece" },
+    { recipe: "shakshuka", ingredient: "garlic", quantity: 3.0, unit: "clove" },
+    { recipe: "shakshuka", ingredient: "cumin", quantity: 5.0, unit: "g" },
+    { recipe: "shakshuka", ingredient: "olive oil", quantity: 30.0, unit: "ml" },
+    { recipe: "dal tadka", ingredient: "red lentils", quantity: 250.0, unit: "g" },
+    { recipe: "dal tadka", ingredient: "tomato", quantity: 200.0, unit: "g" },
+    { recipe: "dal tadka", ingredient: "onion", quantity: 1.0, unit: "piece" },
+    { recipe: "dal tadka", ingredient: "garlic", quantity: 4.0, unit: "clove" },
+    { recipe: "dal tadka", ingredient: "ginger", quantity: 10.0, unit: "g" },
+    { recipe: "dal tadka", ingredient: "cumin", quantity: 5.0, unit: "g" },
+    { recipe: "dal tadka", ingredient: "ghee", quantity: 30.0, unit: "g" },
+    { recipe: "mapo doufu", ingredient: "tofu", quantity: 400.0, unit: "g" },
+    { recipe: "mapo doufu", ingredient: "minced pork", quantity: 150.0, unit: "g" },
+    { recipe: "mapo doufu", ingredient: "garlic", quantity: 3.0, unit: "clove" },
+    { recipe: "mapo doufu", ingredient: "ginger", quantity: 15.0, unit: "g" },
+    { recipe: "mapo doufu", ingredient: "doubanjiang", quantity: 30.0, unit: "g" },
+    { recipe: "mapo doufu", ingredient: "Sichuan pepper", quantity: 3.0, unit: "g" },
+    { recipe: "borshch", ingredient: "beetroot", quantity: 500.0, unit: "g" },
+    { recipe: "borshch", ingredient: "cabbage", quantity: 300.0, unit: "g" },
+    { recipe: "borshch", ingredient: "potato", quantity: 300.0, unit: "g" },
+    { recipe: "borshch", ingredient: "carrot", quantity: 1.0, unit: "piece" },
+    { recipe: "borshch", ingredient: "onion", quantity: 1.0, unit: "piece" },
+    { recipe: "borshch", ingredient: "garlic", quantity: 2.0, unit: "clove" },
+}
+key { recipe, ingredient };
+
+/* This week's meals, and how many people each is cooked for. No borshch
+   this week, so none of its ingredients belong on the list. */
+var plan := relation {
+    { recipe: "shakshuka", people: 4 },
+    { recipe: "dal tadka", people: 4 },
+    { recipe: "mapo doufu", people: 6 },
+}
+key { recipe };
+
+/* The list, as it should read once the language has what it needs:
+
+   1. Join, to match each planned meal with its recipe and ingredients.
+      Joining with the plan also leaves out the recipes not planned.
+
+        var planned := plan join recipes join ingredients;
+
+   2. Converting an integer to a rational, since values never convert
+      implicitly; spelled here as a read-only operator, which don't exist
+      yet either.
+
+   3. Extension, to scale each quantity from the people the recipe serves
+      to the people it's cooked for.
+
+        var scaled := planned extend {
+            amount: quantity * rational{n: people} / rational{n: serves}
+        };
+
+   4. Summarize with sum, to add up each ingredient across recipes. The sum
+      must be of the tuples in each group, not of their distinct amounts:
+      cumin is 5 g in both shakshuka and dal tadka, and the list needs 10 g.
+      So summarize can't project away `recipe` before it sums.
+
+        var list := scaled summarize by { ingredient, unit } {
+            total: sum{v: amount}
+        };
+
+   The list is then:
+
+        cumin 10 g, doubanjiang 60 g, egg 6 piece, garlic 13 clove,
+        ghee 30 g, ginger 40 g, minced pork 300 g, olive oil 30 ml,
+        onion 2 piece, red lentils 250 g, Sichuan pepper 6 g, tofu 800 g,
+        tomato 1000 g
+
+   Later: a pantry to subtract what's already at home, which needs
+   storage, and output for people rather than `debug_value`. */
+
+/* What can be said today: every ingredient ever bought, and in what unit. */
+var everything := ingredients{ingredient, unit};
+
+operator main{} [
+    call debug_value{v: plan};
+    call debug_value{v: everything};
+];

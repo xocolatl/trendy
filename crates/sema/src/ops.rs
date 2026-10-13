@@ -332,7 +332,52 @@ pub(crate) fn removed(
         ));
         return None;
     };
-    let list = projection.names()?;
+    let attributes: Vec<String> = heading
+        .attributes()
+        .map(|(a, _)| format!("`{a}`"))
+        .collect();
+    let context = if attributes.is_empty() {
+        format!("the operand, of type `{ty}`, has no attributes")
+    } else {
+        format!(
+            "the operand's attributes are {}",
+            trendy_diag::conjoin(&attributes)
+        )
+    };
+    let listed = listed(
+        &projection.names()?,
+        heading,
+        errors::Noun::Projected,
+        &context,
+        errors,
+    )?;
+    if let Projection::Remove(remove) = projection
+        && listed.is_empty()
+    {
+        errors.push(errors::empty_remove(remove, operand));
+        return None;
+    }
+    Some(match projection {
+        Projection::Remove(_) => listed,
+        Projection::Project(_) => heading
+            .attributes()
+            .map(|(a, _)| a.to_string())
+            .filter(|a| !listed.contains(a))
+            .collect(),
+    })
+}
+
+/// The attributes `list` names, each of which must be one of `heading`'s,
+/// named once. `None` after reporting each name that isn't, with
+/// `context`, a note on what the attributes are, and a fix to the closest
+/// attribute not already named.
+pub(crate) fn listed(
+    list: &ast::NameList,
+    heading: &hir::Heading,
+    noun: errors::Noun,
+    context: &str,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<BTreeSet<String>> {
     let named: Vec<(ast::Name, String, Span)> = list
         .names()
         .filter_map(|name| {
@@ -346,12 +391,7 @@ pub(crate) fn removed(
         if let Some(&(_, _, first)) = named.iter().find(|(_, n, _)| n == text)
             && first != *span
         {
-            errors.push(errors::duplicate_attribute(
-                errors::Noun::Projected,
-                text,
-                *span,
-                first,
-            ));
+            errors.push(errors::duplicate_attribute(noun, text, *span, first));
             ok = false;
         } else if heading.get(text).is_none() {
             // The closest attribute not already named is probably the one
@@ -362,47 +402,18 @@ pub(crate) fn removed(
                 .filter(|a| !named.iter().any(|(_, n, _)| n == a))
                 .filter(|a| edit_distance(a, text) <= 2)
                 .min_by_key(|a| edit_distance(a, text));
-            let attributes: Vec<String> = heading
-                .attributes()
-                .map(|(a, _)| format!("`{a}`"))
-                .collect();
-            let context = if attributes.is_empty() {
-                format!("the operand, of type `{ty}`, has no attributes")
-            } else {
-                format!(
-                    "the operand's attributes are {}",
-                    trendy_diag::conjoin(&attributes)
-                )
-            };
             errors.push(errors::unknown_attribute(
-                errors::Noun::Projected,
+                noun,
                 text,
                 *span,
-                &context,
+                context,
                 rename,
                 Some(list.removal(name)),
             ));
             ok = false;
         }
     }
-    let listed: BTreeSet<String> = named.into_iter().map(|(_, n, _)| n).collect();
-    if let Projection::Remove(remove) = projection
-        && listed.is_empty()
-    {
-        errors.push(errors::empty_remove(remove, operand));
-        return None;
-    }
-    if !ok {
-        return None;
-    }
-    Some(match projection {
-        Projection::Remove(_) => listed,
-        Projection::Project(_) => heading
-            .attributes()
-            .map(|(a, _)| a.to_string())
-            .filter(|a| !listed.contains(a))
-            .collect(),
-    })
+    ok.then(|| named.into_iter().map(|(_, n, _)| n).collect())
 }
 
 /// The renamings of `postfix`, a `rename` of `operand`, which is of type

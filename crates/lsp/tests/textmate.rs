@@ -198,6 +198,32 @@ fn punctuation_patterns() -> Vec<Value> {
 
 /// Text literals: like the lexer, an unterminated literal ends at the end of
 /// the line.
+/// `builtin type name`: `type` is a keyword only here, so it gets a rule of
+/// its own.
+fn builtin_type_rule(identifier: &str) -> Value {
+    json!({
+        "match": format!(
+            "\\b({})\\s+(type)\\s+({identifier})",
+            regex_escape(SyntaxKind::BuiltinKw.fixed_text().unwrap())
+        ),
+        "captures": {
+            "1": { "name": "keyword.other.trendy" },
+            "2": { "name": "keyword.other.trendy" },
+            "3": { "name": "entity.name.type.trendy" },
+        },
+    })
+}
+
+/// `key {`: `key` is a keyword only before a variable's key attributes,
+/// which a grammar can't tell from a projection of a variable named `key`;
+/// semantic highlighting can.
+fn key_rule() -> Value {
+    json!({
+        "match": "\\b(key)\\s*(?=\\{)",
+        "captures": { "1": { "name": "keyword.other.trendy" } },
+    })
+}
+
 /// `/* … */`. Comments nest, so the rule includes itself.
 fn comment_rule() -> Value {
     json!({
@@ -262,6 +288,7 @@ fn generate(probed: &Probed) -> Value {
             { "include": "#builtin-type" },
             { "include": "#call" },
             { "include": "#variable-declaration" },
+            { "include": "#key" },
             { "include": "#keywords" },
             { "include": "#operator-word" },
             { "include": "#boolean" },
@@ -293,18 +320,8 @@ fn generate(probed: &Probed) -> Value {
                     "4": { "name": "entity.name.type.trendy" },
                 },
             },
-            // `type` is a keyword only here, so it gets a rule of its own.
-            "builtin-type": {
-                "match": format!(
-                    "\\b({})\\s+(type)\\s+({identifier})",
-                    keyword(SyntaxKind::BuiltinKw)
-                ),
-                "captures": {
-                    "1": { "name": "keyword.other.trendy" },
-                    "2": { "name": "keyword.other.trendy" },
-                    "3": { "name": "entity.name.type.trendy" },
-                },
-            },
+            "builtin-type": builtin_type_rule(identifier),
+            "key": key_rule(),
             "call": {
                 "match": format!("\\b({})\\s+({identifier})", keyword(SyntaxKind::CallKw)),
                 "captures": {

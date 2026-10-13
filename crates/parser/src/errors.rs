@@ -11,6 +11,7 @@ pub(crate) const HEADING_FORM: &str = "a heading lists attributes with their typ
 pub(crate) const RELATION_VALUE_FORM: &str = "a relation value has the form `relation { tuple, … }`, optionally with a heading first: `relation { name: type, … } { … }`";
 pub(crate) const PROJECTION_FORM: &str =
     "a projection and `remove` take attribute names: `r{a, b}`, `r remove {a, b}`";
+pub(crate) const KEY_FORM: &str = "a key lists attributes after a relation variable's value, or after its type if it has no value: `var r := relation { … } key { a, b };`";
 pub(crate) const RENAME_FORM: &str =
     "`rename` takes renamings, each `old as new`: `r rename {postal_code as code}`";
 pub(crate) const TUPLE_VALUE_FORM: &str = "a tuple value has the form `tuple { name: value, … }`";
@@ -191,6 +192,58 @@ pub(crate) fn miscased_keyword(found: Found, keyword: &str) -> Diagnostic {
             span: found.span,
             replacement: keyword.to_string(),
         }],
+    )
+}
+
+/// A key spelled `text`, at `span`, as SQL spells one: `primary key` or
+/// `unique`.
+pub(crate) fn sql_key(span: Span, text: &str) -> Diagnostic {
+    Diagnostic::error(
+        Code::KeySpelling,
+        format!("a key is written `key`, not `{text}`"),
+        span,
+        "SQL's spelling",
+    )
+    .with_note(
+        "every key is a candidate key, and none is primary: a relation variable can have several, each written `key { … }`",
+    )
+    .with_suggestion(
+        "write `key`",
+        vec![Edit {
+            span,
+            replacement: "key".to_string(),
+        }],
+    )
+}
+
+/// Keys, at `keys` and written `text`, before a variable's initial value,
+/// which ends at `value_end`. `removal` deletes them with the whitespace
+/// before them.
+pub(crate) fn key_before_value(
+    keys: Span,
+    removal: Span,
+    text: &str,
+    value_end: usize,
+) -> Diagnostic {
+    Diagnostic::error(
+        Code::KeyBeforeValue,
+        "a key goes after the initial value",
+        keys,
+        "before the value",
+    )
+    .with_note(KEY_FORM)
+    .with_suggestion(
+        "move it after the value",
+        vec![
+            Edit {
+                span: removal,
+                replacement: String::new(),
+            },
+            Edit {
+                span: Span::empty(value_end),
+                replacement: format!(" {text}"),
+            },
+        ],
     )
 }
 

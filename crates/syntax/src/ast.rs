@@ -55,6 +55,7 @@ ast_node!(NameList);
 ast_node!(RenameList);
 ast_node!(Renaming);
 ast_node!(VarDecl);
+ast_node!(Key);
 ast_node!(Name);
 ast_node!(TypeRef);
 ast_node!(Literal);
@@ -352,6 +353,39 @@ impl VarDecl {
             .find(|n| n.kind() == SyntaxKind::Initializer)?
             .children()
             .find_map(Expr::cast)
+    }
+
+    /// The keys, `key { a, b }`, in source order.
+    pub fn keys(&self) -> impl Iterator<Item = Key> {
+        self.0.children().filter_map(Key::cast)
+    }
+}
+
+impl Key {
+    /// The words before the names: `key`, or another language's spelling,
+    /// such as SQL's `primary key` or `unique`, which the parser reports.
+    pub fn keywords(&self) -> impl Iterator<Item = SyntaxToken> {
+        significant_tokens(&self.0).filter(|t| t.kind() == SyntaxKind::Ident)
+    }
+
+    /// The attributes, `{ a, b }`.
+    #[must_use]
+    pub fn names(&self) -> Option<NameList> {
+        self.0.children().find_map(NameList::cast)
+    }
+
+    /// The span to delete to remove the key, with the whitespace before it,
+    /// up to the end of what comes before.
+    #[must_use]
+    pub fn removal(&self) -> Span {
+        let own = span(self.0.text_range());
+        let start = std::iter::successors(
+            self.0.prev_sibling_or_token(),
+            SyntaxElement::prev_sibling_or_token,
+        )
+        .find(|e| !e.kind().is_trivia())
+        .map_or(own.start, |e| span(e.text_range()).end);
+        Span::new(start, own.end)
     }
 }
 

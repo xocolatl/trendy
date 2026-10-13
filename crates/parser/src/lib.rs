@@ -66,6 +66,15 @@ struct Missing {
     help: Option<&'static str>,
 }
 
+/// How a key is spelled: trendy's `key`, or SQL's `primary key` or
+/// `unique`, which are reported with a fix.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KeySpelling {
+    Key,
+    PrimaryKey,
+    Unique,
+}
+
 /// The precedence of the comparison operators.
 const COMPARISON: u8 = 6;
 
@@ -305,7 +314,9 @@ impl<'a> Parser<'a> {
                 SyntaxKind::Ident | SyntaxKind::TupleKw | SyntaxKind::RelationKw
             )
         };
-        if self.at(SyntaxKind::Colon) || self.peek().is_some_and(starts_type) {
+        if self.at(SyntaxKind::Colon)
+            || (self.peek().is_some_and(starts_type) && self.at_key().is_none())
+        {
             self.start_node(SyntaxKind::TypeAnnotation);
             if self.at(SyntaxKind::Colon) {
                 self.bump();
@@ -317,7 +328,11 @@ impl<'a> Parser<'a> {
             self.builder.finish_node();
         }
 
-        match self.found() {
+        // Keys go after the value, but a variable without one has them right
+        // after its type, so a value added later can land after them.
+        let before_keys = self.last_end;
+        let early_keys = self.keys();
+        let initialized = match self.found() {
             Some(found) if matches!(found.kind, SyntaxKind::ColonEq | SyntaxKind::Eq) => {
                 self.start_node(SyntaxKind::Initializer);
                 let span = self.bump();
@@ -326,6 +341,7 @@ impl<'a> Parser<'a> {
                 }
                 self.expression();
                 self.builder.finish_node();
+                true
             }
             Some(found)
                 if found.kind.is_literal()
@@ -336,10 +352,84 @@ impl<'a> Parser<'a> {
                 self.missing(SyntaxKind::ColonEq);
                 self.expression();
                 self.builder.finish_node();
+                true
             }
-            _ => {}
+            _ => false,
+        };
+        if initialized
+            && let (Some(first), Some(last), Some(before), Some(value_end)) = (
+                early_keys.first(),
+                early_keys.last(),
+                before_keys,
+                self.last_end,
+            )
+        {
+            let keys = &self.source[first.start..last.end];
+            self.errors.push(errors::key_before_value(
+                Span::new(first.start, last.end),
+                Span::new(before, last.end),
+                keys,
+                value_end,
+            ));
         }
+        self.keys();
         self.expect(SyntaxKind::Semicolon);
+        self.builder.finish_node();
+    }
+
+    /// A variable's keys, each `key { a, b }`, and their spans.
+    fn keys(&mut self) -> Vec<Span> {
+        let mut spans = Vec::new();
+        while let Some(spelling) = self.at_key() {
+            let start = self.found().map_or(0, |f| f.span.start);
+            self.key(spelling);
+            spans.push(Span::new(start, self.last_end.unwrap_or(start)));
+        }
+        spans
+    }
+
+    /// How the key at the next token is spelled, if one is there: `key`
+    /// in any case, or SQL's `primary key` or `unique`, followed by its
+    /// attributes in braces, or in SQL's parentheses.
+    fn at_key(&mut self) -> Option<KeySpelling> {
+        let word = |found: Option<Found>, word: &str| {
+            found.is_some_and(|f| f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case(word))
+        };
+        let list = |found: Option<Found>| {
+            found.is_some_and(|f| matches!(f.kind, SyntaxKind::LBrace | SyntaxKind::LParen))
+        };
+        let next = self.found();
+        let after = self.found_after(1);
+        if word(next, "key") && list(after) {
+            Some(KeySpelling::Key)
+        } else if word(next, "primary") && word(after, "key") {
+            Some(KeySpelling::PrimaryKey)
+        } else if word(next, "unique") && list(after) {
+            Some(KeySpelling::Unique)
+        } else {
+            None
+        }
+    }
+
+    /// `key { a, b }`, spelled as `at_key` found it.
+    fn key(&mut self, spelling: KeySpelling) {
+        self.start_node(SyntaxKind::Key);
+        let first = self.found().expect("a key starts here");
+        let mut span = self.bump();
+        match spelling {
+            KeySpelling::Key if first.text != "key" => {
+                self.errors.push(errors::miscased_keyword(first, "key"));
+            }
+            KeySpelling::Key => {}
+            KeySpelling::PrimaryKey | KeySpelling::Unique => {
+                if spelling == KeySpelling::PrimaryKey {
+                    span.end = self.bump().end;
+                }
+                let text = &self.source[span.start..span.end];
+                self.errors.push(errors::sql_key(span, text));
+            }
+        }
+        self.names(errors::KEY_FORM);
         self.builder.finish_node();
     }
 
@@ -519,14 +609,14 @@ impl<'a> Parser<'a> {
                 }
             } else if next == Some(SyntaxKind::LBrace) {
                 self.builder.start_node_at(start, SyntaxKind::ProjectExpr);
-                self.name_list();
+                self.names(errors::PROJECTION_FORM);
             } else if let Some((found, keyword)) = self.postfix_operator() {
                 self.builder.start_node_at(start, SyntaxKind::PostfixExpr);
                 self.operator_token(found, keyword);
                 if keyword == SyntaxKind::RenameKw {
                     self.rename_list();
                 } else {
-                    self.name_list();
+                    self.names(errors::PROJECTION_FORM);
                 }
             } else {
                 break;
@@ -597,9 +687,9 @@ impl<'a> Parser<'a> {
         self.builder.finish_node();
     }
 
-    /// `{ a, b }`: attribute names.
-    fn name_list(&mut self) {
-        let outer_form = std::mem::replace(&mut self.form, errors::PROJECTION_FORM);
+    /// `{ a, b }`: attribute names, in a construct of the given `form`.
+    fn names(&mut self, form: &'static str) {
+        let outer_form = std::mem::replace(&mut self.form, form);
         self.delimited(
             Some(SyntaxKind::NameList),
             "attribute names",
@@ -1296,6 +1386,90 @@ SourceFile
     Semicolon \";\"
 "
         );
+    }
+
+    #[test]
+    fn keys_tree() {
+        let parse = parse_str("var r := s key { a, b } key {};");
+        assert!(parse.errors.is_empty());
+        let decl = parse.tree.variables().next().unwrap();
+        let keys: Vec<Vec<String>> = decl
+            .keys()
+            .map(|k| {
+                k.names()
+                    .unwrap()
+                    .names()
+                    .map(|n| n.ident().unwrap().text().to_string())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(keys, [vec!["a", "b"], vec![]]);
+        assert!(decl.initializer().is_some());
+    }
+
+    #[test]
+    fn keys_follow_the_type_or_the_value() {
+        for source in [
+            "var r: relation { a: integer } key { a };",
+            "var r := relation { { a: 1 } } key { a } key { a };",
+            "var r: relation { a: integer } := relation {} key { a };",
+            "var r := s{a} key { a };",
+        ] {
+            let parse = parse_str(source);
+            assert!(parse.errors.is_empty(), "{source}: {:#?}", parse.errors);
+            assert!(
+                parse
+                    .tree
+                    .variables()
+                    .next()
+                    .unwrap()
+                    .keys()
+                    .next()
+                    .is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn key_is_a_name_elsewhere() {
+        let parse =
+            parse_str("var key := relation { { key: 1 } } key { key };\nvar k := key{key};");
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let decls: Vec<_> = parse.tree.variables().collect();
+        assert_eq!(decls[0].keys().count(), 1);
+        assert_eq!(decls[1].keys().count(), 0);
+    }
+
+    #[test]
+    fn key_before_the_value_is_moved_after_it() {
+        let source = "var r: relation { a: integer } key { a } := relation {};";
+        assert_eq!(messages(source), ["a key goes after the initial value"]);
+        assert_eq!(
+            fix(source),
+            "var r: relation { a: integer } := relation {} key { a };"
+        );
+        let codes: Vec<Code> = parse_str("var r key { a } := s;")
+            .errors
+            .iter()
+            .map(|d| d.code)
+            .collect();
+        assert_eq!(codes, [Code::KeyBeforeValue]);
+    }
+
+    #[test]
+    fn keys_as_sql_writes_them() {
+        let source = "var r := s PRIMARY KEY (a) unique { b } KEY { c };";
+        let codes: Vec<Code> = parse_str(source).errors.iter().map(|d| d.code).collect();
+        assert_eq!(
+            codes,
+            [
+                Code::KeySpelling,
+                Code::WrongDelimiter,
+                Code::KeySpelling,
+                Code::MiscasedKeyword
+            ]
+        );
+        assert_eq!(fix(source), "var r := s key {a} key { b } key { c };");
     }
 
     #[test]

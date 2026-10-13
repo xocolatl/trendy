@@ -704,11 +704,20 @@ mod tests {
         }
     }
 
+    /// A variable with the value `init`, and for a relation, the key sema
+    /// gives one without any: its whole heading.
     fn variable(name: &str, init: hir::Value) -> hir::Variable {
+        let keys = match &init {
+            hir::Value::Relation(r) => {
+                vec![r.heading.attributes().map(|(a, _)| a.to_string()).collect()]
+            }
+            _ => Vec::new(),
+        };
         hir::Variable {
             name: name.to_string(),
             ty: init.ty(),
             init,
+            keys,
         }
     }
 
