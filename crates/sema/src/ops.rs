@@ -139,20 +139,20 @@ impl Operator {
             | Operator::Plus
             | Operator::Add
             | Operator::Subtract
-            | Operator::Multiply => "integers or rationals",
-            Operator::Divide => "rationals",
+            | Operator::Multiply => "integers or approximate numbers",
+            Operator::Divide => "approximate numbers",
             Operator::Div | Operator::Mod => "integers",
             Operator::Concatenate => "text",
             Operator::Compare(hir::Comparison::Equal | hir::Comparison::NotEqual) => {
                 "two values of the same type"
             }
-            Operator::Compare(_) => "booleans, integers, rationals or text",
+            Operator::Compare(_) => "booleans, integers, approximate numbers or text",
         }
     }
 
     /// The operator for operands of type `ty`, or `None` if it doesn't take
-    /// them: `/` doesn't take integers, nor `div` and `mod` rationals, and
-    /// tuples and relations only have `=` and `<>`.
+    /// them: `/` doesn't take integers, nor `div` and `mod` approximate
+    /// numbers, and tuples and relations only have `=` and `<>`.
     pub(crate) fn resolve(self, ty: &hir::Type) -> Option<Resolved> {
         use hir::BinaryOp as B;
         let hir::Type::Scalar(scalar) = *ty else {
@@ -178,7 +178,7 @@ impl Operator {
             (Operator::Add, Some(n)) => Resolved::Binary(B::Add(n)),
             (Operator::Subtract, Some(n)) => Resolved::Binary(B::Subtract(n)),
             (Operator::Multiply, Some(n)) => Resolved::Binary(B::Multiply(n)),
-            (Operator::Divide, Some(hir::Numeric::Rational)) => Resolved::Binary(B::Divide),
+            (Operator::Divide, Some(hir::Numeric::Approximate)) => Resolved::Binary(B::Divide),
             (Operator::Div, Some(hir::Numeric::Integer)) => Resolved::Binary(B::Div),
             (Operator::Mod, Some(hir::Numeric::Integer)) => Resolved::Binary(B::Mod),
             (Operator::Concatenate, None) if scalar == hir::Scalar::Text => {
@@ -918,7 +918,7 @@ pub(crate) fn negated_literal(unary: &ast::UnaryExpr) -> Option<Literal> {
             if literal.token().is_some_and(|t| {
                 matches!(
                     t.kind(),
-                    SyntaxKind::IntLiteral | SyntaxKind::RationalLiteral
+                    SyntaxKind::IntLiteral | SyntaxKind::ApproximateLiteral
                 )
             }) =>
         {
@@ -946,11 +946,11 @@ pub(crate) fn negative_value(
             value.map(hir::Value::Integer)
         }
         _ => match literal.value() {
-            Ok(ast::LiteralValue::Rational(r)) => {
-                Some(hir::Value::Rational(hir::Rational::new(-r)))
+            Ok(ast::LiteralValue::Approximate(r)) => {
+                Some(hir::Value::Approximate(hir::Approximate::new(-r)))
             }
-            Err(LiteralError::RationalTooLarge) => {
-                errors.push(errors::rational_out_of_range(expr.span()));
+            Err(LiteralError::ApproximateTooLarge) => {
+                errors.push(errors::approximate_out_of_range(expr.span()));
                 None
             }
             _ => None,
@@ -1017,7 +1017,7 @@ fn known(expr: &hir::Expr) -> Option<Known> {
         hir::Value::Integer(1) => Known::One,
         hir::Value::Integer(-1) => Known::MinusOne,
         hir::Value::Text(t) if t.is_empty() => Known::Empty,
-        hir::Value::Rational(r) => match r.get() {
+        hir::Value::Approximate(r) => match r.get() {
             r if r.to_bits() == 0.0_f64.to_bits() => Known::Zero,
             r if r.to_bits() == (-0.0_f64).to_bits() => Known::NegativeZero,
             1.0 => Known::One,
@@ -1039,12 +1039,12 @@ pub(crate) fn unary(op: hir::UnaryOp, operand: hir::Expr) -> Result<hir::Expr, h
         return op.apply(value).map(hir::Expr::Constant);
     }
     Ok(match (op, operand) {
-        // `-(-x)` is `x` for a rational, but not for an integer: for the
-        // smallest one, `-x` fails.
+        // `-(-x)` is `x` for an approximate number, but not for an integer:
+        // for the smallest one, `-x` fails.
         (hir::UnaryOp::Not, hir::Expr::Unary(hir::UnaryOp::Not, inner))
         | (
-            hir::UnaryOp::Negate(hir::Numeric::Rational),
-            hir::Expr::Unary(hir::UnaryOp::Negate(hir::Numeric::Rational), inner),
+            hir::UnaryOp::Negate(hir::Numeric::Approximate),
+            hir::Expr::Unary(hir::UnaryOp::Negate(hir::Numeric::Approximate), inner),
         ) => *inner,
         (op, operand) => hir::Expr::Unary(op, Box::new(operand)),
     })
@@ -1060,7 +1060,7 @@ enum Side {
 /// `lhs op rhs`, evaluated if both are constants, and otherwise simplified
 /// where a constant operand decides the result or leaves the other operand
 /// as it is. Expressions have no side effects, so this never changes what a
-/// program does. Rational simplifications follow IEEE 754 exactly, signed
+/// program does. Approximate simplifications follow IEEE 754 exactly, signed
 /// zeros included: `x + 0.0` is not `x` when `x` is `-0.0`.
 ///
 /// # Errors
@@ -1077,7 +1077,7 @@ pub(crate) fn binary(
         Add, And, Compare, Concatenate, Div, Divide, Implies, Mod, Multiply, Or, Subtract, Xor,
     };
     use hir::Comparison::{Equal, NotEqual};
-    use hir::Numeric::{Integer, Rational};
+    use hir::Numeric::{Approximate, Integer};
     if let (hir::Expr::Constant(a), hir::Expr::Constant(b)) = (&lhs, &rhs) {
         return op.apply(a, b).map(hir::Expr::Constant);
     }
@@ -1103,13 +1103,13 @@ pub(crate) fn binary(
         (And | Implies | Compare(Equal, _), Some(True), _)
         | (Or | Xor | Compare(NotEqual, _), Some(False), _)
         | (Add(Integer), Some(Zero), _)
-        | (Add(Rational), Some(NegativeZero), _)
+        | (Add(Approximate), Some(NegativeZero), _)
         | (Multiply(_), Some(One), _)
         | (Concatenate, Some(Empty), _) => rhs,
         (And | Compare(Equal, _), _, Some(True))
         | (Or | Xor | Compare(NotEqual, _), _, Some(False))
         | (Add(Integer) | Subtract(_), _, Some(Zero))
-        | (Add(Rational), _, Some(NegativeZero))
+        | (Add(Approximate), _, Some(NegativeZero))
         | (Multiply(_) | Div | Divide, _, Some(One))
         | (Concatenate, _, Some(Empty)) => lhs,
         // negates it,
@@ -1119,7 +1119,7 @@ pub(crate) fn binary(
         (Xor | Compare(NotEqual, _), _, Some(True))
         | (Compare(Equal, _) | Implies, _, Some(False)) => unary(hir::UnaryOp::Not, lhs)?,
         (Subtract(Integer), Some(Zero), _)
-        | (Subtract(Rational), Some(NegativeZero), _)
+        | (Subtract(Approximate), Some(NegativeZero), _)
         | (Multiply(_), Some(MinusOne), _) => negate(rhs)?,
         (Multiply(_) | Div | Divide, _, Some(MinusOne)) => negate(lhs)?,
         // or decides the result.

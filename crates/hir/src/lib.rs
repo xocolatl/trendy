@@ -192,10 +192,11 @@ pub enum Expr {
     And(Box<Expr>, Box<Expr>),
 }
 
-/// Why an operator has no result: it is out of its type's range (for a
-/// rational, beyond the largest finite magnitude), or it divides by zero.
-/// Rationals are therefore always finite: no operator produces an infinity
-/// or a NaN.
+/// Why an operator has no result: it is out of its type's range (for an
+/// approximate number, beyond the largest finite magnitude), or it divides by
+/// zero.
+/// Approximate numbers are therefore always finite: no operator produces an
+/// infinity or a NaN.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Failure {
     Overflow,
@@ -207,7 +208,7 @@ pub enum Failure {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Numeric {
     Integer,
-    Rational,
+    Approximate,
 }
 
 impl Numeric {
@@ -215,7 +216,7 @@ impl Numeric {
     pub fn scalar(self) -> Scalar {
         match self {
             Numeric::Integer => Scalar::Integer,
-            Numeric::Rational => Scalar::Rational,
+            Numeric::Approximate => Scalar::Approximate,
         }
     }
 
@@ -224,16 +225,16 @@ impl Numeric {
     pub fn of(scalar: Scalar) -> Option<Numeric> {
         match scalar {
             Scalar::Integer => Some(Numeric::Integer),
-            Scalar::Rational => Some(Numeric::Rational),
+            Scalar::Approximate => Some(Numeric::Approximate),
             Scalar::Boolean | Scalar::Text => None,
         }
     }
 }
 
-/// A finite rational result, or why there is none.
+/// A finite approximate result, or why there is none.
 fn finite(r: f64) -> Result<Value, Failure> {
     if r.is_finite() {
-        Ok(Value::Rational(Rational::new(r)))
+        Ok(Value::Approximate(Approximate::new(r)))
     } else {
         Err(Failure::Overflow)
     }
@@ -244,8 +245,8 @@ fn finite(r: f64) -> Result<Value, Failure> {
 pub enum UnaryOp {
     /// `not`, of a boolean.
     Not,
-    /// `-`. It never fails for a rational, and only for the smallest
-    /// integer.
+    /// `-`. It never fails for an approximate number, and only for the
+    /// smallest integer.
     Negate(Numeric),
 }
 
@@ -281,8 +282,8 @@ impl UnaryOp {
             (UnaryOp::Negate(Numeric::Integer), Value::Integer(n)) => {
                 n.checked_neg().map(Value::Integer).ok_or(Failure::Overflow)
             }
-            (UnaryOp::Negate(Numeric::Rational), Value::Rational(r)) => {
-                Ok(Value::Rational(Rational::new(-r.get())))
+            (UnaryOp::Negate(Numeric::Approximate), Value::Approximate(r)) => {
+                Ok(Value::Approximate(Approximate::new(-r.get())))
             }
             _ => panic!("`{self:?}` of {operand:?}"),
         }
@@ -301,7 +302,7 @@ pub enum BinaryOp {
     Add(Numeric),
     Subtract(Numeric),
     Multiply(Numeric),
-    /// `/`, of rationals.
+    /// `/`, of approximate numbers.
     Divide,
     /// Integer division, truncating toward zero.
     Div,
@@ -366,9 +367,10 @@ impl Comparison {
 }
 
 /// The order of two values of the same scalar type: `false` before `true`,
-/// integers numerically, rationals by IEEE 754 totalOrder (so `-0.0` before
-/// `0.0`, and two rationals are equal exactly when they are the same value),
-/// and text by code point, which is the order of its UTF-8 bytes.
+/// integers numerically, approximate numbers by IEEE 754 totalOrder (so
+/// `-0.0` before `0.0`, and two approximate numbers are equal exactly when
+/// they are the same value), and text by code point, which is the order of
+/// its UTF-8 bytes.
 ///
 /// # Panics
 ///
@@ -378,7 +380,7 @@ pub fn compare(lhs: &Value, rhs: &Value) -> std::cmp::Ordering {
     match (lhs, rhs) {
         (Value::Boolean(a), Value::Boolean(b)) => a.cmp(b),
         (Value::Integer(a), Value::Integer(b)) => a.cmp(b),
-        (Value::Rational(a), Value::Rational(b)) => a.cmp(b),
+        (Value::Approximate(a), Value::Approximate(b)) => a.cmp(b),
         (Value::Text(a), Value::Text(b)) => a.as_bytes().cmp(b.as_bytes()),
         _ => panic!("comparing {lhs:?} with {rhs:?}"),
     }
@@ -398,7 +400,7 @@ impl BinaryOp {
             BinaryOp::Add(numeric) | BinaryOp::Subtract(numeric) | BinaryOp::Multiply(numeric) => {
                 numeric.scalar()
             }
-            BinaryOp::Divide => Scalar::Rational,
+            BinaryOp::Divide => Scalar::Approximate,
             BinaryOp::Div | BinaryOp::Mod => Scalar::Integer,
             BinaryOp::Concatenate => Scalar::Text,
             BinaryOp::Compare(_, Compared::Scalar(scalar)) => scalar,
@@ -417,9 +419,9 @@ impl BinaryOp {
         }
     }
 
-    /// The result for `lhs` and `rhs`, which have the operand type. Rational
-    /// results are rounded as IEEE 754 binary64 arithmetic rounds them, to
-    /// nearest, ties to even.
+    /// The result for `lhs` and `rhs`, which have the operand type.
+    /// Approximate results are rounded as IEEE 754 binary64 arithmetic rounds
+    /// them, to nearest, ties to even.
     ///
     /// # Errors
     ///
@@ -468,7 +470,7 @@ impl BinaryOp {
             (Value::Text(a), Value::Text(b)) if self == BinaryOp::Concatenate => {
                 Ok(Value::Text(format!("{a}{b}")))
             }
-            (Value::Rational(a), Value::Rational(b)) => {
+            (Value::Approximate(a), Value::Approximate(b)) => {
                 let (a, b) = (a.get(), b.get());
                 match self {
                     BinaryOp::Add(_) => finite(a + b),
@@ -477,7 +479,7 @@ impl BinaryOp {
                     // Either zero.
                     BinaryOp::Divide if b == 0.0 => Err(Failure::DivisionByZero),
                     BinaryOp::Divide => finite(a / b),
-                    _ => panic!("`{self:?}` of rationals"),
+                    _ => panic!("`{self:?}` of approximate numbers"),
                 }
             }
             _ => panic!("`{self:?}` of {lhs:?} and {rhs:?}"),
@@ -577,7 +579,7 @@ pub enum Scalar {
     Integer,
     /// A number with a fractional part, implemented as a 64-bit IEEE 754
     /// binary floating-point number.
-    Rational,
+    Approximate,
     /// A sequence of Unicode characters, stored as UTF-8.
     Text,
 }
@@ -587,7 +589,7 @@ impl Scalar {
     pub const ALL: [Scalar; 4] = [
         Scalar::Boolean,
         Scalar::Integer,
-        Scalar::Rational,
+        Scalar::Approximate,
         Scalar::Text,
     ];
 
@@ -597,7 +599,7 @@ impl Scalar {
         match self {
             Scalar::Boolean => "boolean",
             Scalar::Integer => "integer",
-            Scalar::Rational => "rational",
+            Scalar::Approximate => "approximate",
             Scalar::Text => "text",
         }
     }
@@ -613,7 +615,7 @@ impl Scalar {
         match self {
             Scalar::Boolean => Value::Boolean(false),
             Scalar::Integer => Value::Integer(0),
-            Scalar::Rational => Value::Rational(Rational::new(0.0)),
+            Scalar::Approximate => Value::Approximate(Approximate::new(0.0)),
             Scalar::Text => Value::Text(String::new()),
         }
     }
@@ -701,7 +703,7 @@ impl Heading {
 pub enum Value {
     Boolean(bool),
     Integer(i64),
-    Rational(Rational),
+    Approximate(Approximate),
     Text(String),
     Tuple(TupleValue),
     Relation(RelationValue),
@@ -714,7 +716,7 @@ impl Value {
         match self {
             Value::Boolean(_) => scalar(Scalar::Boolean),
             Value::Integer(_) => scalar(Scalar::Integer),
-            Value::Rational(_) => scalar(Scalar::Rational),
+            Value::Approximate(_) => scalar(Scalar::Approximate),
             Value::Text(_) => scalar(Scalar::Text),
             Value::Tuple(tuple) => Type::Tuple(Heading(
                 tuple
@@ -939,25 +941,25 @@ impl Type {
     }
 }
 
-/// A `rational` value: a 64-bit IEEE 754 binary floating-point number.
+/// An `approximate` value: a 64-bit IEEE 754 binary floating-point number.
 ///
 /// *The Third Manifesto* requires `=` to hold exactly when two values can't
 /// be told apart by any operator (RM Prescription 8). Float equality breaks
 /// that: NaN is not equal to itself, and `-0.0` equals `0.0` although `1/x`
-/// tells them apart. So rationals are compared by IEEE 754 totalOrder
-/// instead. Two rationals are equal exactly when their bits are identical,
-/// and they sort as
+/// tells them apart. So approximate numbers are compared by IEEE 754
+/// totalOrder instead. Two approximate numbers are equal exactly when their
+/// bits are identical, and they sort as
 /// `-NaN < -∞ < … < -0.0 < 0.0 < … < ∞ < NaN`.
 ///
-/// Every comparison, ordering and hash of a rational must go through this
-/// type, never through `f64` operators.
+/// Every comparison, ordering and hash of an approximate number must go
+/// through this type, never through `f64` operators.
 #[derive(Debug, Clone, Copy)]
-pub struct Rational(f64);
+pub struct Approximate(f64);
 
-impl Rational {
+impl Approximate {
     #[must_use]
     pub fn new(value: f64) -> Self {
-        Rational(value)
+        Approximate(value)
     }
 
     #[must_use]
@@ -970,29 +972,38 @@ impl Rational {
     pub fn to_bits(self) -> u64 {
         self.0.to_bits()
     }
+
+    /// The value as a literal, which always has an exponent: the shortest
+    /// one that reads back as the same value, as in `1e0`, `2.5e0`, `5e-1`
+    /// or `-0e0`. The runtime writes values the same way. `None` for an
+    /// infinity or a NaN, which no operator produces.
+    #[must_use]
+    pub fn literal(self) -> Option<String> {
+        self.0.is_finite().then(|| format!("{:e}", self.0))
+    }
 }
 
-impl PartialEq for Rational {
+impl PartialEq for Approximate {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other) == std::cmp::Ordering::Equal
     }
 }
 
-impl Eq for Rational {}
+impl Eq for Approximate {}
 
-impl PartialOrd for Rational {
+impl PartialOrd for Approximate {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for Rational {
+impl Ord for Approximate {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.0.total_cmp(&other.0)
     }
 }
 
-impl std::hash::Hash for Rational {
+impl std::hash::Hash for Approximate {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         // Equal exactly when the bits are, so hashing the bits is consistent.
         self.to_bits().hash(state);
@@ -1086,11 +1097,11 @@ mod tests {
     }
 
     #[test]
-    fn rational_operators() {
-        let r = |x| Value::Rational(Rational::new(x));
+    fn approximate_operators() {
+        let r = |x| Value::Approximate(Approximate::new(x));
         let apply = |op: BinaryOp, a, b| op.apply(&r(a), &r(b));
         assert_eq!(
-            apply(BinaryOp::Add(Numeric::Rational), 0.5, 0.25),
+            apply(BinaryOp::Add(Numeric::Approximate), 0.5, 0.25),
             Ok(r(0.75))
         );
         assert_eq!(apply(BinaryOp::Divide, 1.0, 4.0), Ok(r(0.25)));
@@ -1103,7 +1114,7 @@ mod tests {
             Err(Failure::DivisionByZero)
         );
         assert_eq!(
-            apply(BinaryOp::Multiply(Numeric::Rational), 1e300, 1e10),
+            apply(BinaryOp::Multiply(Numeric::Approximate), 1e300, 1e10),
             Err(Failure::Overflow)
         );
         assert_eq!(
@@ -1112,15 +1123,15 @@ mod tests {
         );
         // IEEE 754 sign rules: these are different values.
         assert_eq!(
-            apply(BinaryOp::Add(Numeric::Rational), -0.0, 0.0),
+            apply(BinaryOp::Add(Numeric::Approximate), -0.0, 0.0),
             Ok(r(0.0))
         );
         assert_eq!(
-            apply(BinaryOp::Multiply(Numeric::Rational), -5.0, 0.0),
+            apply(BinaryOp::Multiply(Numeric::Approximate), -5.0, 0.0),
             Ok(r(-0.0))
         );
         assert_eq!(
-            UnaryOp::Negate(Numeric::Rational).apply(&r(0.0)),
+            UnaryOp::Negate(Numeric::Approximate).apply(&r(0.0)),
             Ok(r(-0.0))
         );
     }
@@ -1133,7 +1144,7 @@ mod tests {
             };
             BinaryOp::Compare(c, Compared::Scalar(scalar)).apply(&a, &b) == Ok(Value::Boolean(true))
         };
-        let r = |x| Value::Rational(Rational::new(x));
+        let r = |x| Value::Approximate(Approximate::new(x));
         let t = |s: &str| Value::Text(s.to_string());
         assert!(holds(
             Comparison::Less,
@@ -1327,14 +1338,14 @@ mod tests {
     }
 
     #[test]
-    fn rational_equality_is_identity() {
-        assert_ne!(Rational::new(-0.0), Rational::new(0.0));
-        assert_eq!(Rational::new(f64::NAN), Rational::new(f64::NAN));
-        assert_eq!(Rational::new(1.5), Rational::new(1.5));
+    fn approximate_equality_is_identity() {
+        assert_ne!(Approximate::new(-0.0), Approximate::new(0.0));
+        assert_eq!(Approximate::new(f64::NAN), Approximate::new(f64::NAN));
+        assert_eq!(Approximate::new(1.5), Approximate::new(1.5));
     }
 
     #[test]
-    fn rationals_sort_by_total_order() {
+    fn approximates_sort_by_total_order() {
         let mut values = [
             f64::NAN,
             1.0,
@@ -1344,9 +1355,9 @@ mod tests {
             f64::NEG_INFINITY,
             -f64::NAN,
         ]
-        .map(Rational::new);
+        .map(Approximate::new);
         values.sort();
-        let bits = values.map(Rational::to_bits);
+        let bits = values.map(Approximate::to_bits);
         let expected = [
             -f64::NAN,
             f64::NEG_INFINITY,

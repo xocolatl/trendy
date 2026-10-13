@@ -197,11 +197,11 @@ var births := relation {
 key { name, born };
 
 var signs := relation {
-    { x: 2.5, n: 1 },
-    { x: -0.0, n: 2 },
-    { x: -1.5, n: 3 },
-    { x: 0.0, n: 4 },
-    { x: -1.5, n: 5 },
+    { x: 2.5e0, n: 1 },
+    { x: -0e0, n: 2 },
+    { x: -1.5e0, n: 3 },
+    { x: 0e0, n: 4 },
+    { x: -1.5e0, n: 5 },
 };
 var names := births{name};
 var places := births remove {born, name};
@@ -218,7 +218,7 @@ operator project_births{r: relation { name: text, born: integer, place: text }} 
     call debug_value{v: r{}};
 ];
 
-operator project_signs{r: relation { x: rational, n: integer }} [
+operator project_signs{r: relation { x: approximate, n: integer }} [
     call debug_value{v: r remove {n}};
 ];
 
@@ -240,7 +240,7 @@ operator rename_births{r: relation { name: text, born: integer, place: text }} [
     call debug_value{v: r rename {name as alias}};
 ];
 
-operator rename_signs{r: relation { x: rational, n: integer }} [
+operator rename_signs{r: relation { x: approximate, n: integer }} [
     call debug_value{v: r rename {x as n, n as x}};
 ];
 

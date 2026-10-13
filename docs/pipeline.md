@@ -93,7 +93,8 @@ fails: an unrecognized character becomes an error token, and lexing
 continues.
 
 **A malformed literal keeps the kind it was meant to have.** For example,
-`1_000` is still an integer literal and `"abc` is still a text literal, so the
+`1_000` is still an integer literal, `1.5`, which lacks an exponent, is
+still an approximate literal, and `"abc` is still a text literal, so the
 parser accepts them, and the mistake gives one error, not a cascade. An
 unterminated text literal ends at the end of its line, or just before a final
 `;` on that line, which is most likely where the closing quote was meant to
@@ -226,9 +227,10 @@ the optimizer has few to rewrite: `Remove`, which projection also becomes,
 compose's common attributes then removed.
 
 Every type's equality must hold exactly when no operator can tell two values
-apart (TTM RM Prescription 8). For rationals, that is IEEE 754 totalOrder.
-`hir::Rational` implements it, and every comparison, ordering or hash of a
-rational goes through that type, never through `f64` operators.
+apart (TTM RM Prescription 8). For approximate numbers, that is IEEE 754
+totalOrder. `hir::Approximate` implements it, and every comparison, ordering
+or hash of an approximate number goes through that type, never through `f64`
+operators.
 
 **Must not:** refer to syntax: no tokens, no CST, no spans. When debug info
 arrives, source locations come back as a separate, explicit HIR field rather
@@ -272,7 +274,7 @@ changes what a program does. An operand is dropped only if it can't fail,
 so that every operand is evaluated and no run-time error is skipped. A
 constant overflow, or a division by a constant zero, is a compile error
 (R0001, R0002). `-` directly before a number literal makes a negative
-literal, so that the smallest integer can be written. Rational folding and
+literal, so that the smallest integer can be written. Approximate folding and
 simplification are exact IEEE 754 binary64, the same arithmetic the program
 does at run time, so folding never changes a result.
 
@@ -283,7 +285,7 @@ selector with run-time parts becomes `hir::Expr::Tuple` or
 `hir::Expr::Relation`. Duplicate tuples are an error only when both are
 constants; tuples known only when running become one if they are equal.
 
-The arithmetic operators are overloaded on integers and rationals
+The arithmetic operators are overloaded on integers and approximate numbers
 (`ops::Operator` resolves to a typed `hir::BinaryOp`): the operand type
 comes from the expected type when it is numeric, and otherwise from the
 first operand, which then sets the expectation for the second. `/`,
@@ -306,16 +308,16 @@ result so far and the next operand, which must have an attribute in common
 (A0028), without those attributes (a `Remove`). `compose[]` has no value
 (A0029).
 
-Comparisons follow one order per type (`hir::compare`): `false` before
-`true`, integers numerically, rationals by IEEE 754 totalOrder, and text
-by code point. Tuples and relations have only `=` and `<>`
-(`hir::Compared`), by value equality: when folding, `hir::Value`'s, and at
-run time `trendy_rt_equal`, which walks the type descriptor. A relation's
-tuples are always in one canonical order, so equal relations have equal
-arrays; building relations at run time must keep that order. Codegen compares rationals as integers, after flipping every
-bit but the sign of a negative value's bits, which is totalOrder; text is
-compared by `trendy_rt_compare_text`, since UTF-8 byte order is code point
-order.
+Comparisons follow one order per type (`hir::compare`): `false` before `true`,
+integers numerically, approximate numbers by IEEE 754 totalOrder, and text by
+code point. Tuples and relations have only `=` and `<>` (`hir::Compared`), by
+value equality: when folding, `hir::Value`'s, and at run time
+`trendy_rt_equal`, which walks the type descriptor. A relation's tuples are
+always in one canonical order, so equal relations have equal arrays; building
+relations at run time must keep that order. Codegen compares approximate
+numbers as integers, after flipping every bit but the sign of a negative
+value's bits, which is totalOrder; text is compared by
+`trendy_rt_compare_text`, since UTF-8 byte order is code point order.
 
 Checking is bidirectional: the expected type flows down into a value
 (`types::Expected`), along with where it came from (`types::Origin`): a
@@ -346,7 +348,7 @@ this:
 
 - `boolean`: one byte, `0` for false and `1` for true.
 - `integer`: one 64-bit field.
-- `rational`: one 64-bit IEEE 754 binary floating-point field.
+- `approximate`: one 64-bit IEEE 754 binary floating-point field.
 - a tuple: a `Struct` of its attributes' fields, in name order.
 - a relation: the address of a read-only array of its tuples, in sorted
   order, followed by the number of tuples.
@@ -428,11 +430,11 @@ produced with Cranelift.
 - the checks of arithmetic instructions, each branching to a cold block that
   calls `trendy_rt_fail`, which writes the error, such as
   `error[R0001]: integer overflow`, to stderr and exits with status 1.
-  Integer overflow is detected with Cranelift's `sadd_overflow` and its
-  kin, and division by zero, or of the smallest integer by -1, with
-  explicit comparisons. Rational operands are always finite, so a rational
-  result overflowed exactly when it is infinite, and there is never a NaN;
-  a division is checked for a zero divisor first.
+  Integer overflow is detected with Cranelift's `sadd_overflow` and its kin,
+  and division by zero, or of the smallest integer by -1, with explicit
+  comparisons. Approximate operands are always finite, so an approximate
+  result overflowed exactly when it is infinite, and there is never a NaN; a
+  division is checked for a zero divisor first.
 
 The calling convention: a function with parameters takes one pointer, to a
 struct of its parameters in name order, because a call's arguments are a
@@ -444,10 +446,10 @@ fields. Its sizes and offsets are LIR's `Size` and `Offset` fields, which
 codegen resolves with the same layout engine as everything else, so the
 runtime never repeats the layout rules.
 
-Rational comparisons compile to totalOrder (an integer comparison on the
-bits, after flipping every bit but the sign of negative values), never to
-the target's floating-point compare instructions, which would make `-0.0`
-equal to `0.0`. LIR carries rationals as exact bits (`Field::F64Bits`) for
+Approximate comparisons compile to totalOrder (an integer comparison on the
+bits, after flipping every bit but the sign of negative values), never to the
+target's floating-point compare instructions, which would make `-0e0` equal to
+`0e0`. LIR carries approximate numbers as exact bits (`Field::F64Bits`) for
 the same reason.
 
 **Must not:** see syntax, or produce user-facing errors. Any error it

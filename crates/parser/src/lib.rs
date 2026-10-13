@@ -1730,8 +1730,8 @@ SourceFile
     }
 
     #[test]
-    fn rational_initializer() {
-        let parse = parse_str("var r: rational := 1.5e-3;");
+    fn approximate_initializer() {
+        let parse = parse_str("var r: approximate := 1.5e-3;");
         assert!(parse.errors.is_empty());
         assert!(
             parse
@@ -1803,7 +1803,7 @@ SourceFile
     fn tuples_nest_in_types_and_values() {
         for source in [
             "var x: tuple { a: tuple { b: boolean }, c: text };",
-            "var q := tuple { x: 1.0, y: tuple { z: \"\" } };",
+            "var q := tuple { x: 1e0, y: tuple { z: \"\" } };",
             "var e: tuple {} := tuple {};",
             "var t: tuple { a: integer } := tuple { a: 1, };",
         ] {
@@ -1820,8 +1820,8 @@ SourceFile
         };
         // Tutorial D: no colon.
         one_fix(
-            "var p: tuple { x rational };",
-            "var p: tuple { x: rational };",
+            "var p: tuple { x approximate };",
+            "var p: tuple { x: approximate };",
         );
         // Missing comma.
         one_fix(
@@ -1843,7 +1843,7 @@ SourceFile
             parse_str(source).errors.iter().map(|e| e.code).collect()
         };
         assert_eq!(
-            codes("var p: TUPLE { x: rational };"),
+            codes("var p: TUPLE { x: approximate };"),
             [Code::MiscasedKeyword]
         );
         assert_eq!(fix("var p := Tuple { x: 1 };"), "var p := tuple { x: 1 };");
@@ -1863,8 +1863,8 @@ SourceFile
             "var r := relation {};",
             "var r := relation {} {};",
             "var t := tuple { a: integer } { a: 1 };",
-            "var n: tuple { r: relation { x: rational } };",
-            "var n := relation { { r: relation { { x: 1.0 } } } };",
+            "var n: tuple { r: relation { x: approximate } };",
+            "var n := relation { { r: relation { { x: 1e0 } } } };",
         ] {
             let parse = parse_str(source);
             assert!(parse.errors.is_empty(), "{source}: {:#?}", parse.errors);
@@ -2366,7 +2366,11 @@ SourceFile
         let source = "var x := a/b % c;";
         let errors = parse_str(source).errors;
         let codes: Vec<_> = errors.iter().map(|e| e.code).collect();
-        assert_eq!(codes, [Code::ForeignOperator], "`/` is rational division");
+        assert_eq!(
+            codes,
+            [Code::ForeignOperator],
+            "`/` is approximate division"
+        );
         assert_eq!(
             errors[0].notes[0],
             "the remainder of integer division is the keyword `mod`"

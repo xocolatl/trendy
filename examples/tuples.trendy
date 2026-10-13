@@ -1,5 +1,5 @@
 var x: tuple { a: tuple { b: boolean }, c: text };
-var q := tuple { x: 1.0, y: 2.0 };
+var q := tuple { x: 1e0, y: 2e0 };
 var e: tuple {};
 var addr := tuple {
     street: "1 Rue de Rivoli",
@@ -83,7 +83,7 @@ var addr := tuple {
    tuple's own attributes are in scope by name.
 
    call debug_value{v: addr update { postal_code: "75002" }};
-   call debug_value{v: q update { x: x * 2.0 }};
+   call debug_value{v: q update { x: x * 2e0 }};
 */
 
 /* Tuple extraction: the one tuple of a relation with exactly one, else a
@@ -126,7 +126,7 @@ var swapped := q rename {x as y, y as x};
 
 operator rename_addr{
     a: tuple { street: text, city: text, country: text, postal_code: text },
-    p: tuple { x: rational, y: rational }
+    p: tuple { x: approximate, y: approximate }
 } [
     call debug_value{v: a rename {postal_code as code}};
     call debug_value{v: p rename {x as y, y as x}};
@@ -152,7 +152,7 @@ var sum := q.x + q.y;
 operator extract{
     a: tuple { street: text, city: text, country: text, postal_code: text },
     t: tuple { a: tuple { b: boolean }, c: text },
-    p: tuple { x: rational, y: rational }
+    p: tuple { x: approximate, y: approximate }
 } [
     call debug_value{v: a.postal_code};
     call debug_value{v: t.a.b};

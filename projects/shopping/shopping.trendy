@@ -21,31 +21,31 @@ key { native_name };
    comes in one unit, so quantities of it can be added up. That is a
    constraint too, but not a key, since it holds across recipes. */
 var ingredients := relation {
-    { recipe: "shakshuka", ingredient: "egg", quantity: 6.0, unit: "piece" },
-    { recipe: "shakshuka", ingredient: "tomato", quantity: 800.0, unit: "g" },
-    { recipe: "shakshuka", ingredient: "onion", quantity: 1.0, unit: "piece" },
-    { recipe: "shakshuka", ingredient: "garlic", quantity: 3.0, unit: "clove" },
-    { recipe: "shakshuka", ingredient: "cumin", quantity: 5.0, unit: "g" },
-    { recipe: "shakshuka", ingredient: "olive oil", quantity: 30.0, unit: "ml" },
-    { recipe: "dal tadka", ingredient: "red lentils", quantity: 250.0, unit: "g" },
-    { recipe: "dal tadka", ingredient: "tomato", quantity: 200.0, unit: "g" },
-    { recipe: "dal tadka", ingredient: "onion", quantity: 1.0, unit: "piece" },
-    { recipe: "dal tadka", ingredient: "garlic", quantity: 4.0, unit: "clove" },
-    { recipe: "dal tadka", ingredient: "ginger", quantity: 10.0, unit: "g" },
-    { recipe: "dal tadka", ingredient: "cumin", quantity: 5.0, unit: "g" },
-    { recipe: "dal tadka", ingredient: "ghee", quantity: 30.0, unit: "g" },
-    { recipe: "mapo doufu", ingredient: "tofu", quantity: 400.0, unit: "g" },
-    { recipe: "mapo doufu", ingredient: "minced pork", quantity: 150.0, unit: "g" },
-    { recipe: "mapo doufu", ingredient: "garlic", quantity: 3.0, unit: "clove" },
-    { recipe: "mapo doufu", ingredient: "ginger", quantity: 15.0, unit: "g" },
-    { recipe: "mapo doufu", ingredient: "doubanjiang", quantity: 30.0, unit: "g" },
-    { recipe: "mapo doufu", ingredient: "Sichuan pepper", quantity: 3.0, unit: "g" },
-    { recipe: "borshch", ingredient: "beetroot", quantity: 500.0, unit: "g" },
-    { recipe: "borshch", ingredient: "cabbage", quantity: 300.0, unit: "g" },
-    { recipe: "borshch", ingredient: "potato", quantity: 300.0, unit: "g" },
-    { recipe: "borshch", ingredient: "carrot", quantity: 1.0, unit: "piece" },
-    { recipe: "borshch", ingredient: "onion", quantity: 1.0, unit: "piece" },
-    { recipe: "borshch", ingredient: "garlic", quantity: 2.0, unit: "clove" },
+    { recipe: "shakshuka", ingredient: "egg", quantity: 6e0, unit: "piece" },
+    { recipe: "shakshuka", ingredient: "tomato", quantity: 800e0, unit: "g" },
+    { recipe: "shakshuka", ingredient: "onion", quantity: 1e0, unit: "piece" },
+    { recipe: "shakshuka", ingredient: "garlic", quantity: 3e0, unit: "clove" },
+    { recipe: "shakshuka", ingredient: "cumin", quantity: 5e0, unit: "g" },
+    { recipe: "shakshuka", ingredient: "olive oil", quantity: 30e0, unit: "ml" },
+    { recipe: "dal tadka", ingredient: "red lentils", quantity: 250e0, unit: "g" },
+    { recipe: "dal tadka", ingredient: "tomato", quantity: 200e0, unit: "g" },
+    { recipe: "dal tadka", ingredient: "onion", quantity: 1e0, unit: "piece" },
+    { recipe: "dal tadka", ingredient: "garlic", quantity: 4e0, unit: "clove" },
+    { recipe: "dal tadka", ingredient: "ginger", quantity: 10e0, unit: "g" },
+    { recipe: "dal tadka", ingredient: "cumin", quantity: 5e0, unit: "g" },
+    { recipe: "dal tadka", ingredient: "ghee", quantity: 30e0, unit: "g" },
+    { recipe: "mapo doufu", ingredient: "tofu", quantity: 400e0, unit: "g" },
+    { recipe: "mapo doufu", ingredient: "minced pork", quantity: 150e0, unit: "g" },
+    { recipe: "mapo doufu", ingredient: "garlic", quantity: 3e0, unit: "clove" },
+    { recipe: "mapo doufu", ingredient: "ginger", quantity: 15e0, unit: "g" },
+    { recipe: "mapo doufu", ingredient: "doubanjiang", quantity: 30e0, unit: "g" },
+    { recipe: "mapo doufu", ingredient: "Sichuan pepper", quantity: 3e0, unit: "g" },
+    { recipe: "borshch", ingredient: "beetroot", quantity: 500e0, unit: "g" },
+    { recipe: "borshch", ingredient: "cabbage", quantity: 300e0, unit: "g" },
+    { recipe: "borshch", ingredient: "potato", quantity: 300e0, unit: "g" },
+    { recipe: "borshch", ingredient: "carrot", quantity: 1e0, unit: "piece" },
+    { recipe: "borshch", ingredient: "onion", quantity: 1e0, unit: "piece" },
+    { recipe: "borshch", ingredient: "garlic", quantity: 2e0, unit: "clove" },
 }
 key { recipe, ingredient };
 
@@ -65,15 +65,15 @@ var planned := join{plan, recipes, ingredients};
 /* The rest of the list, as it should read once the language has what it
    needs, in the order the features are needed:
 
-   1. Converting an integer to a rational, since values never convert
-      implicitly; spelled here as a read-only operator, which don't exist
-      yet either.
+   1. Converting an integer to an approximate number, since values never
+      convert implicitly; spelled here as a read-only operator, which don't
+      exist yet either.
 
    2. Extension, to scale each quantity from the people the recipe serves
       to the people it's cooked for.
 
         var scaled := planned extend {
-            amount: quantity * rational{n: people} / rational{n: serves}
+            amount: quantity * approximate{n: people} / approximate{n: serves}
         };
 
    3. Summarize with sum, to add up each ingredient across recipes. The sum

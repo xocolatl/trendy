@@ -11,7 +11,7 @@
 //! Value representations, each a single field with the matching [`Layout`]:
 //! - `boolean`: [`Field::U8`], `0` for false and `1` for true.
 //! - `integer`: [`Field::I64`].
-//! - `rational`: [`Field::F64Bits`], a 64-bit IEEE 754 binary float.
+//! - `approximate`: [`Field::F64Bits`], a 64-bit IEEE 754 binary float.
 //! - `text`: a [`Field::Struct`] of the [`Field::Address`] of a read-only
 //!   constant holding the UTF-8 bytes, and a [`Field::Usize`] with their
 //!   length.
@@ -226,7 +226,7 @@ pub enum Numeric {
     /// [`Layout::I64`].
     Integer,
     /// [`Layout::F64Bits`].
-    Rational,
+    Approximate,
 }
 
 /// What an instruction's operands are.
@@ -243,7 +243,7 @@ pub enum UnaryOp {
     /// Of a boolean.
     Not,
     /// Fails with [`Failure::IntegerOverflow`] for the smallest integer;
-    /// never fails for a rational.
+    /// never fails for an approximate number.
     Negate(Numeric),
 }
 
@@ -260,7 +260,7 @@ impl UnaryOp {
 /// A dyadic operator. Arithmetic is checked: a result that doesn't exist
 /// stops the program with a [`Failure`], as if the instruction were
 /// followed by a branch to a call to [`RuntimeFn::Fail`]. Codegen emits
-/// that branch. Rational results are rounded as IEEE 754 binary64 rounds
+/// that branch. Approximate results are rounded as IEEE 754 binary64 rounds
 /// them, and must be finite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
@@ -272,16 +272,17 @@ pub enum BinaryOp {
     Add(Numeric),
     Subtract(Numeric),
     Multiply(Numeric),
-    /// Of rationals. Fails with [`Failure::DivisionByZero`] for either zero.
+    /// Of approximate numbers. Fails with [`Failure::DivisionByZero`] for
+    /// either zero.
     Divide,
     /// Of integers, truncating toward zero.
     Div,
     /// Of integers, with the sign of the dividend. `i64::MIN mod -1` is 0.
     Mod,
     /// A comparison, whose result is a boolean: `false` before `true`,
-    /// integers numerically, and rationals by IEEE 754 totalOrder. Texts
-    /// are compared by [`RuntimeFn::CompareText`], and tuples and relations
-    /// by [`RuntimeFn::Equal`].
+    /// integers numerically, and approximate numbers by IEEE 754 totalOrder.
+    /// Texts are compared by [`RuntimeFn::CompareText`], and tuples and
+    /// relations by [`RuntimeFn::Equal`].
     Compare(Comparison, Operand),
 }
 
@@ -304,7 +305,7 @@ impl BinaryOp {
             BinaryOp::Add(numeric) | BinaryOp::Subtract(numeric) | BinaryOp::Multiply(numeric) => {
                 Operand::Numeric(numeric)
             }
-            BinaryOp::Divide => Operand::Numeric(Numeric::Rational),
+            BinaryOp::Divide => Operand::Numeric(Numeric::Approximate),
             BinaryOp::Div | BinaryOp::Mod => Operand::Numeric(Numeric::Integer),
             BinaryOp::Compare(_, operand) => operand,
         }
@@ -316,7 +317,7 @@ impl BinaryOp {
 pub enum Failure {
     IntegerOverflow,
     DivisionByZero,
-    RationalOverflow,
+    ApproximateOverflow,
 }
 
 impl Failure {
@@ -326,7 +327,7 @@ impl Failure {
         match self {
             Failure::IntegerOverflow => 0,
             Failure::DivisionByZero => 1,
-            Failure::RationalOverflow => 2,
+            Failure::ApproximateOverflow => 2,
         }
     }
 }

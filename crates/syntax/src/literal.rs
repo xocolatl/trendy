@@ -169,22 +169,24 @@ pub fn int_value(text: &str) -> Option<i64> {
     text.parse().ok()
 }
 
-/// The letters that start an exponent in a rational literal.
+/// The letters that start an exponent in an approximate literal.
 pub const EXPONENT_MARKERS: [char; 2] = ['e', 'E'];
 
-/// Whether a number token is a rational literal: it has a decimal point or
-/// an exponent. Radix-prefixed tokens like `0x1E` are integers, malformed.
+/// Whether a number token is an approximate literal: it has a decimal point
+/// or an exponent. One with a point but no exponent, such as `1.5`, is a
+/// malformed approximate literal. Radix-prefixed tokens like `0x1E` are
+/// integers, malformed.
 #[must_use]
-pub fn is_rational(text: &str) -> bool {
+pub fn is_approximate(text: &str) -> bool {
     let radix_prefixed = ["0x", "0o", "0b", "0X", "0O", "0B"]
         .iter()
         .any(|p| text.starts_with(p));
     !radix_prefixed && text.contains(|c| c == '.' || EXPONENT_MARKERS.contains(&c))
 }
 
-/// Why a rational literal token isn't in canonical form.
+/// Why an approximate literal token isn't in canonical form.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RationalProblem {
+pub enum ApproximateProblem {
     /// Close to a valid literal: `fixed` is the valid form, and `reason`
     /// completes "this literal …", as in "has digit separators".
     Fixable { fixed: String, reason: &'static str },
@@ -192,16 +194,17 @@ pub enum RationalProblem {
     Invalid { reason: &'static str },
 }
 
-/// Check a rational literal token's text: digits, then an optional `.` and
-/// digits, then an optional exponent (`e` or `E`, an optional sign, and
-/// digits), with at least a point or an exponent.
+/// Check an approximate literal token's text: digits, then an optional `.`
+/// and digits, then an exponent (`e` or `E`, an optional sign, and digits).
+/// The exponent is required: a decimal number without one, such as `1.5`,
+/// is reserved for an exact type.
 ///
 /// # Errors
 ///
 /// Returns what is wrong with a malformed literal, and the fix if there is
 /// one.
-pub fn check_rational(text: &str) -> Result<(), RationalProblem> {
-    if is_canonical_rational(text) {
+pub fn check_approximate(text: &str) -> Result<(), ApproximateProblem> {
+    if is_canonical_approximate(text) {
         return Ok(());
     }
     // Repairs, in order; the first one that applies gives the reason.
@@ -217,11 +220,21 @@ pub fn check_rational(text: &str) -> Result<(), RationalProblem> {
         fixed.insert(point + 1, '0');
         reason.get_or_insert("has no digits after the decimal point");
     }
-    match reason {
-        Some(reason) if is_canonical_rational(&fixed) => {
-            Err(RationalProblem::Fixable { fixed, reason })
+    if !fixed.contains(EXPONENT_MARKERS) {
+        // `1.0` is `1e0`, and `1.5` is `1.5e0`.
+        if let Some(point) = fixed.find('.')
+            && fixed[point + 1..].bytes().all(|b| b == b'0')
+        {
+            fixed.truncate(point);
         }
-        _ => Err(RationalProblem::Invalid {
+        fixed.push_str("e0");
+        reason.get_or_insert("has no exponent");
+    }
+    match reason {
+        Some(reason) if is_canonical_approximate(&fixed) => {
+            Err(ApproximateProblem::Fixable { fixed, reason })
+        }
+        _ => Err(ApproximateProblem::Invalid {
             reason: if fixed
                 .trim_end_matches(['+', '-'])
                 .ends_with(EXPONENT_MARKERS)
@@ -234,7 +247,7 @@ pub fn check_rational(text: &str) -> Result<(), RationalProblem> {
     }
 }
 
-fn is_canonical_rational(text: &str) -> bool {
+fn is_canonical_approximate(text: &str) -> bool {
     fn digits(s: &str) -> usize {
         s.bytes().take_while(u8::is_ascii_digit).count()
     }
@@ -243,17 +256,12 @@ fn is_canonical_rational(text: &str) -> bool {
         return false;
     }
     let mut rest = &text[whole..];
-    let mut has_point = false;
     if let Some(after) = rest.strip_prefix('.') {
         let fraction = digits(after);
         if fraction == 0 {
             return false;
         }
-        has_point = true;
         rest = &after[fraction..];
-    }
-    if rest.is_empty() {
-        return has_point;
     }
     let Some(exponent) = rest.strip_prefix(EXPONENT_MARKERS) else {
         return false;
@@ -262,10 +270,10 @@ fn is_canonical_rational(text: &str) -> bool {
     !exponent.is_empty() && digits(exponent) == exponent.len()
 }
 
-/// The value of a well-formed rational literal, or `None` if it is too
+/// The value of a well-formed approximate literal, or `None` if it is too
 /// large to represent.
 #[must_use]
-pub fn rational_value(text: &str) -> Option<f64> {
+pub fn approximate_value(text: &str) -> Option<f64> {
     text.parse::<f64>().ok().filter(|v| v.is_finite())
 }
 
@@ -371,34 +379,40 @@ mod tests {
     }
 
     #[test]
-    fn rationals() {
+    fn approximate_numbers() {
         for valid in [
-            "0.0", "5.0", "17.5", "0e0", "1E10", "1.5e-3", "2.5E+2", "007.5",
+            "0e0", "5e0", "1.75e1", "1E10", "1.5e-3", "2.5E+2", "007.5e0",
         ] {
-            assert_eq!(check_rational(valid), Ok(()), "{valid}");
-            assert!(is_rational(valid), "{valid}");
+            assert_eq!(check_approximate(valid), Ok(()), "{valid}");
+            assert!(is_approximate(valid), "{valid}");
         }
-        assert!(!is_rational("42"));
-        assert!(!is_rational("0x1E"));
+        assert!(!is_approximate("42"));
+        assert!(!is_approximate("0x1E"));
     }
 
     #[test]
-    fn rational_fixes() {
-        let fixed = |text: &str| match check_rational(text) {
-            Err(RationalProblem::Fixable { fixed, reason }) => (fixed, reason),
+    fn approximate_fixes() {
+        let fixed = |text: &str| match check_approximate(text) {
+            Err(ApproximateProblem::Fixable { fixed, reason }) => (fixed, reason),
             other => panic!("{text}: {other:?}"),
         };
+        assert_eq!(fixed("1.5"), ("1.5e0".to_string(), "has no exponent"));
+        assert_eq!(fixed("1.0"), ("1e0".to_string(), "has no exponent"));
+        assert_eq!(fixed("0.00"), ("0e0".to_string(), "has no exponent"));
         assert_eq!(
             fixed("5."),
-            ("5.0".to_string(), "has no digits after the decimal point")
+            ("5e0".to_string(), "has no digits after the decimal point")
         );
         assert_eq!(
             fixed(".5"),
-            ("0.5".to_string(), "has no digits before the decimal point")
+            (
+                "0.5e0".to_string(),
+                "has no digits before the decimal point"
+            )
         );
         assert_eq!(
             fixed("1_000.5"),
-            ("1000.5".to_string(), "has digit separators")
+            ("1000.5e0".to_string(), "has digit separators")
         );
         assert_eq!(
             fixed("5.e3"),
@@ -407,9 +421,9 @@ mod tests {
     }
 
     #[test]
-    fn invalid_rationals() {
-        let reason = |text: &str| match check_rational(text) {
-            Err(RationalProblem::Invalid { reason }) => reason,
+    fn invalid_approximates() {
+        let reason = |text: &str| match check_approximate(text) {
+            Err(ApproximateProblem::Invalid { reason }) => reason,
             other => panic!("{text}: {other:?}"),
         };
         assert_eq!(reason("1e"), "has an exponent with no digits");
@@ -419,10 +433,10 @@ mod tests {
     }
 
     #[test]
-    fn rational_values() {
-        assert_eq!(rational_value("17.5"), Some(17.5));
-        assert_eq!(rational_value("1.5e-3"), Some(0.0015));
-        assert_eq!(rational_value("1e400"), None);
+    fn approximate_values() {
+        assert_eq!(approximate_value("1.75e1"), Some(17.5));
+        assert_eq!(approximate_value("1.5e-3"), Some(0.0015));
+        assert_eq!(approximate_value("1e400"), None);
     }
 
     #[test]

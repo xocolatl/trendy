@@ -98,7 +98,7 @@ impl Lowering {
         match value {
             hir::Value::Boolean(b) => lir::Field::U8(u8::from(*b)),
             hir::Value::Integer(n) => lir::Field::I64(*n),
-            hir::Value::Rational(r) => lir::Field::F64Bits(r.to_bits()),
+            hir::Value::Approximate(r) => lir::Field::F64Bits(r.to_bits()),
             hir::Value::Text(text) => {
                 let bytes = self.constant(vec![lir::Field::Bytes(text.as_bytes().to_vec())]);
                 lir::Field::Struct(vec![
@@ -138,7 +138,7 @@ impl Lowering {
         let (kind, heading, element) = match ty {
             hir::Type::Scalar(hir::Scalar::Boolean) => (KIND_BOOLEAN, None, None),
             hir::Type::Scalar(hir::Scalar::Integer) => (KIND_INTEGER, None, None),
-            hir::Type::Scalar(hir::Scalar::Rational) => (KIND_RATIONAL, None, None),
+            hir::Type::Scalar(hir::Scalar::Approximate) => (KIND_APPROXIMATE, None, None),
             hir::Type::Scalar(hir::Scalar::Text) => (KIND_TEXT, None, None),
             hir::Type::Tuple(heading) => (KIND_TUPLE, Some(heading), None),
             hir::Type::Relation(heading) => (
@@ -196,7 +196,7 @@ impl Lowering {
 // The `trendy_runtime::KIND_` constants.
 const KIND_BOOLEAN: u8 = 0;
 const KIND_INTEGER: u8 = 1;
-const KIND_RATIONAL: u8 = 2;
+const KIND_APPROXIMATE: u8 = 2;
 const KIND_TEXT: u8 = 3;
 const KIND_TUPLE: u8 = 4;
 const KIND_RELATION: u8 = 5;
@@ -636,7 +636,7 @@ impl FunctionBuilder<'_> {
             op => match op.operand() {
                 lir::Operand::Boolean => lir::Layout::U8,
                 lir::Operand::Numeric(lir::Numeric::Integer) => lir::Layout::I64,
-                lir::Operand::Numeric(lir::Numeric::Rational) => lir::Layout::F64Bits,
+                lir::Operand::Numeric(lir::Numeric::Approximate) => lir::Layout::F64Bits,
             },
         });
         self.insts.push(lir::Inst::Binary {
@@ -676,8 +676,8 @@ fn lower_binary_op(op: hir::BinaryOp) -> lir::BinaryOp {
                 hir::Compared::Scalar(hir::Scalar::Integer) => {
                     lir::Operand::Numeric(lir::Numeric::Integer)
                 }
-                hir::Compared::Scalar(hir::Scalar::Rational) => {
-                    lir::Operand::Numeric(lir::Numeric::Rational)
+                hir::Compared::Scalar(hir::Scalar::Approximate) => {
+                    lir::Operand::Numeric(lir::Numeric::Approximate)
                 }
                 hir::Compared::Scalar(hir::Scalar::Text)
                 | hir::Compared::Tuple
@@ -710,7 +710,7 @@ fn attribute_names(ty: &hir::Type) -> impl Iterator<Item = &str> {
 fn lower_numeric(numeric: hir::Numeric) -> lir::Numeric {
     match numeric {
         hir::Numeric::Integer => lir::Numeric::Integer,
-        hir::Numeric::Rational => lir::Numeric::Rational,
+        hir::Numeric::Approximate => lir::Numeric::Approximate,
     }
 }
 
@@ -723,7 +723,7 @@ fn layout(ty: &hir::Type) -> lir::Layout {
     match ty {
         hir::Type::Scalar(hir::Scalar::Boolean) => lir::Layout::U8,
         hir::Type::Scalar(hir::Scalar::Integer) => lir::Layout::I64,
-        hir::Type::Scalar(hir::Scalar::Rational) => lir::Layout::F64Bits,
+        hir::Type::Scalar(hir::Scalar::Approximate) => lir::Layout::F64Bits,
         hir::Type::Scalar(hir::Scalar::Text) | hir::Type::Relation(_) => {
             lir::Layout::Struct(vec![lir::Layout::Address, lir::Layout::Usize])
         }

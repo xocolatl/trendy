@@ -19,7 +19,7 @@ use core::fmt::{self, Write};
 
 pub const KIND_BOOLEAN: u8 = 0;
 pub const KIND_INTEGER: u8 = 1;
-pub const KIND_RATIONAL: u8 = 2;
+pub const KIND_APPROXIMATE: u8 = 2;
 pub const KIND_TEXT: u8 = 3;
 pub const KIND_TUPLE: u8 = 4;
 pub const KIND_RELATION: u8 = 5;
@@ -28,8 +28,8 @@ pub const KIND_RELATION: u8 = 5;
 pub const FAIL_INTEGER_OVERFLOW: u32 = 0;
 /// `/`, `div` or `mod` by zero.
 pub const FAIL_DIVISION_BY_ZERO: u32 = 1;
-/// A rational result beyond the largest finite magnitude.
-pub const FAIL_RATIONAL_OVERFLOW: u32 = 2;
+/// An approximate result beyond the largest finite magnitude.
+pub const FAIL_APPROXIMATE_OVERFLOW: u32 = 2;
 /// Memory for a result couldn't be allocated.
 pub const FAIL_OUT_OF_MEMORY: u32 = 3;
 
@@ -40,7 +40,7 @@ pub fn failure_message(failure: u32) -> &'static str {
     match failure {
         FAIL_INTEGER_OVERFLOW => "error[R0001]: integer overflow\n",
         FAIL_DIVISION_BY_ZERO => "error[R0002]: division by zero\n",
-        FAIL_RATIONAL_OVERFLOW => "error[R0001]: rational overflow\n",
+        FAIL_APPROXIMATE_OVERFLOW => "error[R0001]: approximate overflow\n",
         FAIL_OUT_OF_MEMORY => "error[R0003]: out of memory\n",
         // The compiler and the runtime disagree: a bug.
         _ => "error[X0000]: internal error: unknown run-time failure\n",
@@ -82,10 +82,10 @@ pub unsafe extern "C" fn trendy_rt_concat(dst: *mut Text, lhs: *const Text, rhs:
 
 /// Store at `dst` 1 if `lhs` and `rhs`, of the type `desc` describes, are
 /// equal, and 0 if not. Two values are equal exactly when they are the same
-/// value: rationals when they have the same bits (IEEE 754 totalOrder),
-/// tuples attribute by attribute, and relations when they have the same
-/// tuples. The compiler keeps every relation's tuples in one canonical
-/// order, so equal relations have equal arrays.
+/// value: approximate numbers when they have the same bits (IEEE 754
+/// totalOrder), tuples attribute by attribute, and relations when they have
+/// the same tuples. The compiler keeps every relation's tuples in one
+/// canonical order, so equal relations have equal arrays.
 ///
 /// # Safety
 ///
@@ -114,7 +114,7 @@ pub unsafe fn equal(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> bool {
     unsafe {
         match desc.kind {
             KIND_BOOLEAN => *lhs == *rhs,
-            KIND_INTEGER | KIND_RATIONAL => {
+            KIND_INTEGER | KIND_APPROXIMATE => {
                 lhs.cast::<u64>().read_unaligned() == rhs.cast::<u64>().read_unaligned()
             }
             KIND_TEXT => {
@@ -540,9 +540,9 @@ unsafe fn canonical(tuples: *const u8, count: usize, desc: &TypeDesc) -> (*mut u
 
 /// The canonical order of two values of the type `desc` describes, which is
 /// the compiler's (`hir::Value`'s): `false` before `true`, integers
-/// numerically, rationals by IEEE 754 totalOrder, text by its bytes, tuples
-/// attribute by attribute in name order, and relations by their tuples,
-/// lexicographically.
+/// numerically, approximate numbers by IEEE 754 totalOrder, text by its
+/// bytes, tuples attribute by attribute in name order, and relations by their
+/// tuples, lexicographically.
 ///
 /// # Safety
 ///
@@ -557,7 +557,7 @@ pub unsafe fn order(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> core::cm
                 .cast::<i64>()
                 .read_unaligned()
                 .cmp(&rhs.cast::<i64>().read_unaligned()),
-            KIND_RATIONAL => lhs
+            KIND_APPROXIMATE => lhs
                 .cast::<f64>()
                 .read_unaligned()
                 .total_cmp(&rhs.cast::<f64>().read_unaligned()),
@@ -675,7 +675,9 @@ pub unsafe fn write_value(out: &mut impl Write, value: *const u8, desc: &TypeDes
         match desc.kind {
             KIND_BOOLEAN => out.write_str(if *value == 0 { "false" } else { "true" }),
             KIND_INTEGER => write!(out, "{}", value.cast::<i64>().read_unaligned()),
-            KIND_RATIONAL => write!(out, "{:?}", value.cast::<f64>().read_unaligned()),
+            // The shortest exponent form that reads back as the same value,
+            // as `hir::Approximate::literal` writes it.
+            KIND_APPROXIMATE => write!(out, "{:e}", value.cast::<f64>().read_unaligned()),
             KIND_TEXT => {
                 let text = read_text(value);
                 out.write_char('"')?;
@@ -717,7 +719,7 @@ unsafe fn write_type(out: &mut impl Write, desc: &TypeDesc) -> fmt::Result {
     match desc.kind {
         KIND_BOOLEAN => out.write_str("boolean"),
         KIND_INTEGER => out.write_str("integer"),
-        KIND_RATIONAL => out.write_str("rational"),
+        KIND_APPROXIMATE => out.write_str("approximate"),
         KIND_TEXT => out.write_str("text"),
         KIND_TUPLE => {
             out.write_str("tuple ")?;
@@ -955,20 +957,22 @@ mod tests {
             print((-42_i64).to_ne_bytes().as_ptr(), &scalar(KIND_INTEGER, 8)),
             "-42"
         );
-        let rational = |r: f64| print(r.to_ne_bytes().as_ptr(), &scalar(KIND_RATIONAL, 8));
-        assert_eq!(rational(0.0), "0.0");
-        assert_eq!(rational(1.5e-3), "0.0015");
-        assert_eq!(rational(1e300), "1e300");
+        let approximate = |r: f64| print(r.to_ne_bytes().as_ptr(), &scalar(KIND_APPROXIMATE, 8));
+        assert_eq!(approximate(0.0), "0e0");
+        assert_eq!(approximate(1.5e-3), "1.5e-3");
+        assert_eq!(approximate(-0.0), "-0e0");
+        assert_eq!(approximate(0.1 + 0.2), "3.0000000000000004e-1");
+        assert_eq!(approximate(1e300), "1e300");
     }
 
     #[test]
     fn equality() {
-        let rational = scalar(KIND_RATIONAL, 8);
+        let approximate = scalar(KIND_APPROXIMATE, 8);
         let same = |a: f64, b: f64| unsafe {
             equal(
                 a.to_ne_bytes().as_ptr(),
                 b.to_ne_bytes().as_ptr(),
-                &rational,
+                &approximate,
             )
         };
         assert!(same(1.5, 1.5));

@@ -136,8 +136,12 @@ fn probe_range(range: std::ops::Range<u32>) -> [CharClass; 4] {
         tokens.len() == 1 && want(tokens[0].kind)
     };
     let is_word = |kind: SyntaxKind| kind == SyntaxKind::Ident || kind.is_keyword();
-    let is_number =
-        |kind: SyntaxKind| matches!(kind, SyntaxKind::IntLiteral | SyntaxKind::RationalLiteral);
+    let is_number = |kind: SyntaxKind| {
+        matches!(
+            kind,
+            SyntaxKind::IntLiteral | SyntaxKind::ApproximateLiteral
+        )
+    };
     let mut classes: [CharClass; 4] = Default::default();
     for c in range.filter_map(char::from_u32) {
         let alone = c.to_string();

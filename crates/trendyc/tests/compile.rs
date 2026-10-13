@@ -77,10 +77,10 @@ fn debug_value_prints_every_type() {
         stderr,
         r#"true
 42
-0.0015
+1.5e-3
 1e300
 "say \"hi\"\n\ttab \\ é"
-tuple { x: 1.0, y: tuple { z: false } }
+tuple { x: 1e0, y: tuple { z: false } }
 tuple {}
 relation { name: text } {}
 relation { born: integer, name: text } { { born: 1815, name: "Ada" }, { born: 1923, name: "Edgar" } }
@@ -171,55 +171,58 @@ fn integers() {
 }
 
 #[test]
-fn rationals() {
-    let (code, stderr) = run_example("rationals");
+fn approximate_numbers() {
+    let (code, stderr) = run_example("approximate");
     assert_eq!(code, 0, "{stderr}");
     let lines: Vec<&str> = stderr.lines().collect();
     // Evaluated when compiling.
-    assert_eq!(lines[..4], ["0.5", "18.75", "-0.0", "1e-310"]);
+    assert_eq!(lines[..4], ["5e-1", "1.875e1", "-0e0", "1e-310"]);
     // Each row: `-a`, `a + b`, `a - b`, `a * b`, `a / b`, rounded as IEEE
     // 754 rounds them, signed zeros included.
     let rows: Vec<_> = lines[4..].chunks(5).collect();
     assert_eq!(
         rows,
         [
-            ["-7.0", "9.0", "5.0", "14.0", "3.5"],
+            ["-7e0", "9e0", "5e0", "1.4e1", "3.5e0"],
             [
-                "-0.1",
-                "0.30000000000000004",
-                "-0.1",
-                "0.020000000000000004",
-                "0.5"
+                "-1e-1",
+                "3.0000000000000004e-1",
+                "-1e-1",
+                "2.0000000000000004e-2",
+                "5e-1"
             ],
-            ["-0.0", "-1.0", "1.0", "-0.0", "-0.0"],
+            ["-0e0", "-1e0", "1e0", "-0e0", "-0e0"],
             ["-1e300", "1e300", "1e300", "1e292", "1e308"],
         ]
     );
 }
 
 #[test]
-fn rational_failures_stop_the_program() {
+fn approximate_failures_stop_the_program() {
     use trendy_diag::Code;
     let program = |call: &str| {
         format!(
-            "operator f{{a: rational, b: rational}} [\n    call debug_value{{v: 1.0}};\n    call debug_value{{v: {call}}};\n];\n\noperator main{{}} [\n    call f{{a: 1e308, b: 0.0}};\n];\n"
+            "operator f{{a: approximate, b: approximate}} [\n    call debug_value{{v: 1e0}};\n    call debug_value{{v: {call}}};\n];\n\noperator main{{}} [\n    call f{{a: 1e308, b: 0e0}};\n];\n"
         )
     };
-    let overflow = format!("1.0\nerror[{}]: rational overflow\n", Code::Overflow.id());
+    let overflow = format!(
+        "1e0\nerror[{}]: approximate overflow\n",
+        Code::Overflow.id()
+    );
     let division = format!(
-        "1.0\nerror[{}]: division by zero\n",
+        "1e0\nerror[{}]: division by zero\n",
         Code::DivisionByZero.id()
     );
     let cases = [
         ("add", "a + a", &overflow),
         ("subtract", "-a - a", &overflow),
-        ("multiply", "a * 10.0", &overflow),
-        ("divide", "a / 0.1", &overflow),
+        ("multiply", "a * 10e0", &overflow),
+        ("divide", "a / 0.1e0", &overflow),
         ("divide_zero", "a / b", &division),
         ("divide_negative_zero", "a / -b", &division),
     ];
     for (name, expr, expected) in cases {
-        let (code, stderr) = run_source(&format!("rational_{name}"), &program(expr));
+        let (code, stderr) = run_source(&format!("approximate_{name}"), &program(expr));
         assert_eq!((code, &stderr), (1, expected), "{expr}");
     }
 }
@@ -378,13 +381,13 @@ fn tuples() {
             "tuple { a: tuple { b: false } }",
             r#"tuple { city: "Paris", code: "75001", country: "France", street: "1 Rue de Rivoli" }"#,
             // All at once: a swap.
-            "tuple { x: 2.0, y: 1.0 }",
+            "tuple { x: 2e0, y: 1e0 }",
             // Built from run-time values.
             r#"tuple { number: tuple { n: 13 }, street: "Невский проспект!" }"#,
             // Attributes' values.
             r#""75001""#,
             "false",
-            "3.0",
+            "3e0",
         ]
     );
 }
@@ -399,14 +402,14 @@ fn relations() {
             r#"relation { place: text } { { place: "London" }, { place: "Paris" }, { place: "Portland" } }"#,
             r#"relation { born: integer, place: text } { { born: 1815, place: "London" }, { born: 1815, place: "Paris" }, { born: 1816, place: "London" }, { born: 1923, place: "Portland" } }"#,
             "relation {} { {} }",
-            // Rationals by totalOrder.
-            "relation { x: rational } { { x: -1.5 }, { x: -0.0 }, { x: 0.0 }, { x: 2.5 } }",
+            // Approximate numbers by totalOrder.
+            "relation { x: approximate } { { x: -1.5e0 }, { x: -0e0 }, { x: 0e0 }, { x: 2.5e0 } }",
             // Relations by their tuples: the empty one first.
             r#"relation { members: relation { name: text } } { { members: relation { name: text } {} }, { members: relation { name: text } { { name: "Ada" }, { name: "Edgar" } } } }"#,
             "relation {} {}",
             // Renamed, and sorted again by the new first attribute.
             r#"relation { alias: text, born: integer, place: text } { { alias: "Ada", born: 1815, place: "London" }, { alias: "Ada", born: 1816, place: "London" }, { alias: "Edgar", born: 1923, place: "Portland" }, { alias: "Édouard", born: 1815, place: "Paris" } }"#,
-            "relation { n: rational, x: integer } { { n: -1.5, x: 3 }, { n: -1.5, x: 5 }, { n: -0.0, x: 2 }, { n: 0.0, x: 4 }, { n: 2.5, x: 1 } }",
+            "relation { n: approximate, x: integer } { { n: -1.5e0, x: 3 }, { n: -1.5e0, x: 5 }, { n: -0e0, x: 2 }, { n: 0e0, x: 4 }, { n: 2.5e0, x: 1 } }",
             // Built from run-time values, sorted, and with the tuples that
             // turn out equal made one.
             r#"relation { born: integer, name: text } { { born: 701, name: "李白" }, { born: 1815, name: "Ada" } }"#,

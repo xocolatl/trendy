@@ -95,7 +95,7 @@ operators that accept a value of every type.
 builtin type any;
 builtin type boolean;
 builtin type integer;
-builtin type rational;
+builtin type approximate;
 builtin type text;
 
 builtin operator debug_value{v: any};
@@ -178,7 +178,7 @@ operator main{} [];
 |---|---|---|
 | `boolean` | `true` and `false` | `false` |
 | `integer` | 64-bit signed integers | `0` |
-| `rational` | Numbers with fractional parts, as 64-bit IEEE 754 binary floating point | `0.0` |
+| `approximate` | Numbers with fractional parts, as 64-bit IEEE 754 binary floating point | `0e0` |
 | `text` | Sequences of Unicode characters, stored as UTF-8 | `""` |
 
 Type names are case-sensitive, and other languages' names such as `int`,
@@ -186,22 +186,22 @@ Type names are case-sensitive, and other languages' names such as `int`,
 
 Every type has equality, and two values are equal exactly when no operator
 can tell them apart, as *The Third Manifesto* requires (RM Prescription 8).
-For `rational`, that means IEEE 754 totalOrder rather than the usual
+For `approximate`, that means IEEE 754 totalOrder rather than the usual
 floating-point comparison:
 
-- two rationals are equal exactly when they are the same bits;
-- `-0.0` and `0.0` are different values, because `1/x` tells them apart;
+- two approximate numbers are equal exactly when they are the same bits;
+- `-0e0` and `0e0` are different values, because `1/x` tells them apart;
 - every NaN is equal to itself.
 
 Ordering and sorting use the same total order:
-`-NaN < -∞ < … < -0.0 < 0.0 < … < ∞ < NaN`.
+`-NaN < -∞ < … < -0e0 < 0e0 < … < ∞ < NaN`.
 
 Values never convert to another type implicitly, as *The Third Manifesto*
-requires. An integer literal can't initialize a `rational`: write `1.0`, not
-`1`.
+requires. An integer literal can't initialize an `approximate`: write `1e0`,
+not `1`.
 
 ```trendy,error
-var ratio: rational := 1;
+var ratio: approximate := 1;
 
 operator main{} [];
 ```
@@ -213,7 +213,7 @@ A tuple type is written `tuple { name: type, … }`, and a tuple value
 can itself be a tuple, and a variable can hold one.
 
 ```trendy
-var point: tuple { x: rational, y: rational } := tuple { x: 1.0, y: 2.0 };
+var point: tuple { x: approximate, y: approximate } := tuple { x: 1e0, y: 2e0 };
 var person := tuple { name: "Ada", born: tuple { year: 1815, month: 12 } };
 var unit: tuple {};
 
@@ -221,8 +221,9 @@ operator main{} [];
 ```
 
 - **Attributes are unordered.** A tuple's attributes are a set, so
-  `tuple { x: rational, y: rational }` and `tuple { y: rational, x: rational }`
-  are the same type, and a value can list its attributes in any order.
+  `tuple { x: approximate, y: approximate }` and
+  `tuple { y: approximate, x: approximate }` are the same type, and a value
+  can list its attributes in any order.
 - **Types are structural.** Two tuple types with the same attribute names and
   types are the same type, wherever they are written.
 - **Defaults are attribute-wise.** A tuple variable declared without a value
@@ -248,7 +249,7 @@ operator main{} [];
 ```
 
 ```trendy,error
-var point: tuple { x: rational, y: rational } := tuple { x: 1.0 };
+var point: tuple { x: approximate, y: approximate } := tuple { x: 1e0 };
 
 operator main{} [];
 ```
@@ -418,26 +419,26 @@ operator main{} [
 
 | Operator | Operands | Result |
 |---|---|---|
-| `-a` | integer or rational | `a` negated |
-| `+a` | integer or rational | `a` |
-| `a + b`, `a - b`, `a * b` | two integers or two rationals | the sum, difference and product |
-| `a / b` | rationals | the quotient |
+| `-a` | integer or approximate | `a` negated |
+| `+a` | integer or approximate | `a` |
+| `a + b`, `a - b`, `a * b` | two integers or two approximate numbers | the sum, difference and product |
+| `a / b` | approximate numbers | the quotient |
 | `a div b` | integers | the quotient, rounded toward zero: `-7 div 2` is `-3` |
 | `a mod b` | integers | the remainder of `div`, with the sign of `a`: `-7 mod 2` is `-1`, and `7 mod -2` is `1` |
 
 `div` and `mod` always satisfy `a = (a div b) * b + a mod b`.
 
 Values never convert to another type implicitly, so both operands have the
-same type: `1 + 1.5` and `1 + true` are errors. The type comes from the
-context when it says, as in `var r: rational := 1 + 2;`, where `1` and `2`
-must be written `1.0` and `2.0`, and otherwise from the left operand. `/`
-doesn't divide integers, and `div` doesn't divide rationals (A0022).
+same type: `1 + 1.5e0` and `1 + true` are errors. The type comes from the
+context when it says, as in `var r: approximate := 1 + 2;`, where `1` and `2`
+must be written `1e0` and `2e0`, and otherwise from the left operand. `/`
+doesn't divide integers, and `div` doesn't divide approximate numbers (A0022).
 
 ```trendy
 var seven := 1 + 2 * 3;
 var smallest := -9223372036854775808;
 var largest := -(smallest + 1);
-var half := 1.0 / 2.0;
+var half := 1e0 / 2e0;
 
 operator show{a: integer, b: integer} [
     call debug_value{v: -a + b * 2};
@@ -447,7 +448,7 @@ operator show{a: integer, b: integer} [
 
 operator main{} [
     call show{a: seven, b: -2};
-    call debug_value{v: half * 3.0};
+    call debug_value{v: half * 3e0};
 ];
 ```
 
@@ -457,18 +458,18 @@ var half := 7 / 2;
 operator main{} [];
 ```
 
-Rational arithmetic is IEEE 754 binary64 arithmetic, rounded to nearest:
-`0.1 + 0.2` is `0.30000000000000004`, and signed zeros follow its rules, so
-`0.0 * -1.0` is `-0.0`.
+Approximate arithmetic is IEEE 754 binary64 arithmetic, rounded to nearest:
+`0.1e0 + 0.2e0` is `0.30000000000000004e0`, and signed zeros follow its rules, so
+`0e0 * -1e0` is `-0e0`.
 
-An operator whose result is out of range has no result: an integer outside
-64 bits, or a rational beyond about `1.8e308` in magnitude. Neither does
-division by zero, including by `-0.0`. Results never wrap around and never
-become infinities or NaN, so every rational is finite and can be written as
-a literal. When the operands are known while compiling, this is a compile
-error (R0001 for overflow, R0002 for division by zero). Otherwise the
-program stops at that operator, writing the error to stderr, such as
-`error[R0001]: integer overflow`, and exits with status 1.
+An operator whose result is out of range has no result: an integer outside 64
+bits, or an approximate number beyond about `1.8e308` in magnitude. Neither
+does division by zero, including by `-0e0`. Results never wrap around and
+never become infinities or NaN, so every approximate number is finite and
+can be written as a literal. When the operands are known while compiling,
+this is a compile error (R0001 for overflow, R0002 for division by zero).
+Otherwise the program stops at that operator, writing the error to stderr,
+such as `error[R0001]: integer overflow`, and exits with status 1.
 
 ```trendy,error
 var big := 9223372036854775807 + 1;
@@ -477,8 +478,8 @@ operator main{} [];
 ```
 
 ```trendy,error
-operator inverse{x: rational} [
-    call debug_value{v: x / 0.0};
+operator inverse{x: approximate} [
+    call debug_value{v: x / 0e0};
 ];
 
 operator main{} [];
@@ -486,7 +487,7 @@ operator main{} [];
 
 A `-` written directly before a number literal makes a negative literal, so
 the smallest integer, `-9223372036854775808`, can be written, and so can
-`-0.0`.
+`-0e0`.
 
 ### Text
 
@@ -526,14 +527,14 @@ The built-in types are also ordered:
 |---|---|
 | `boolean` | `false` before `true` |
 | `integer` | numerical |
-| `rational` | IEEE 754 totalOrder (see [Types](#types)): numerical, except that `-0.0` is before `0.0`, and they aren't equal |
+| `approximate` | IEEE 754 totalOrder (see [Types](#types)): numerical, except that `-0e0` is before `0e0`, and they aren't equal |
 | `text` | by code point, which is also the order of the UTF-8 bytes. There is no collation: `"Z" < "a"`, and `"é" > "z"` |
 
 Two values are equal exactly when they are the same value, as *The Third
 Manifesto* requires (RM Prescription 8). Two tuples are equal when every
 attribute's values are equal, and two relations when they have the same
 tuples, in any order; the values inside are compared the same way, so
-`tuple { x: 0.0 } <> tuple { x: -0.0 }`. Tuples and relations have no
+`tuple { x: 0e0 } <> tuple { x: -0e0 }`. Tuples and relations have no
 order, so `<`, `<=`, `>` and `>=` don't apply to them (A0022).
 
 The right operand of a tuple or relation comparison takes its heading
@@ -565,7 +566,7 @@ operator main{} [];
 ```
 
 The operands must have the same type, since values never convert
-implicitly: `1 = 1.0` is an error. Comparisons don't chain: `a < b < c` is
+implicitly: `1 = 1e0` is an error. Comparisons don't chain: `a < b < c` is
 an error, with a fix to `a < b and b < c` (P0015). To compare two
 comparisons, parenthesize them: `(a < b) = (c < d)`.
 
@@ -809,14 +810,14 @@ operator main{} [];
 
 ### Evaluation
 
-Expressions have no side effects. Every operand is evaluated, so an error
-in one is never skipped. Whatever doesn't depend on parameters or variables
-is evaluated when compiling, and so is whatever a constant operand decides,
-when the other operand can't fail: `p and false` is just `false`,
-`true and p` is just `p`, and `n * 1` is just `n`. But `(n + 1) * 0` is
-still computed, since `n + 1` can overflow. Rationals are simplified only
-where IEEE 754 makes it exact, signed zeros included: `x * 1.0` is `x`, but
-`x + 0.0` isn't, since `-0.0 + 0.0` is `0.0`.
+Expressions have no side effects. Every operand is evaluated, so an error in
+one is never skipped. Whatever doesn't depend on parameters or variables is
+evaluated when compiling, and so is whatever a constant operand decides, when
+the other operand can't fail: `p and false` is just `false`, `true and p` is
+just `p`, and `n * 1` is just `n`. But `(n + 1) * 0` is still computed, since
+`n + 1` can overflow. Approximate numbers are simplified only where IEEE 754
+makes it exact, signed zeros included: `x * 1e0` is `x`, but `x + 0e0` isn't,
+since `-0e0 + 0e0` is `0e0`.
 
 ## Literals
 
@@ -834,15 +835,19 @@ operator main{} [];
 `-9223372036854775808`. There are no digit separators (`1_000`) and no
 radix prefixes (`0xFF`).
 
-**Rational literals** have digits on both sides of a decimal point, an
-exponent, or both, such as `0.5`, `17.0`, `0e0` or `1.5e-3`. The exponent
-starts with `e` or `E`, and its sign is optional. A bare leading or trailing
-point (`.5`, `5.`) is not allowed, so each number has one spelling.
-Magnitudes up to about `1.8e308` can be written.
+**Approximate literals** always have an exponent, which starts with `e` or
+`E` and has an optional sign, such as `1e0`, `0e0`, `2.5e0` or `1.5e-3`. A
+decimal point is optional, with digits on both sides of it; a bare leading
+or trailing point (`.5`, `5.`) is not allowed. A decimal number without an
+exponent, such as `2.5`, is not an approximate literal: it is reserved for
+exact numbers, which `approximate` isn't, since `1e-1` has no exact binary
+representation. Magnitudes up to about `1.8e308` can be written. Values are
+printed the same way, with the shortest exponent form that reads back as the
+same value, so `0.5` prints as `5e-1`.
 
 ```trendy
-var zero: rational := 0.0;
-var also_zero: rational := 0e0;
+var zero: approximate := 0e0;
+var half: approximate := 5e-1;
 var small := 1.5e-3;
 var large := 2.5E+10;
 
@@ -850,7 +855,7 @@ operator main{} [];
 ```
 
 ```trendy,error
-var half: rational := .5;
+var half: approximate := 0.5;
 
 operator main{} [];
 ```
@@ -993,8 +998,8 @@ line after a comment on its own line, such as a file's header, is kept.
 | `bool` | `boolean` |
 | `True`, `TRUE`, `1` for true | `true` |
 | `int`, `long`, `i64` | `integer` |
-| `float`, `double`, `real`, `f64` | `rational` |
-| `.5`, `5.` | `0.5`, `5.0` |
+| `float`, `double`, `real`, `f64` | `approximate` |
+| `0.5`, `.5`, `5.` | `0.5e0`, `5e0` |
 | `string`, `str`, `varchar` | `text` |
 | `{ x: 1 }`, `TUPLE { X 1 }` | `tuple { x: 1 }` |
 | `tuple { x = 1 }` | `tuple { x: 1 }` |
@@ -1019,8 +1024,8 @@ line after a comment on its own line, such as a file's header, is kept.
 | `LEFT JOIN`, `RIGHT JOIN`, `FULL JOIN` | none: there are no nulls |
 | `a / b` for integers | `a div b` |
 | `a % b` | `a mod b` |
-| `1 / 2` meaning one half | `1.0 / 2.0` |
-| `inf`, `NaN`, `1.0 / 0.0` | an error: rationals are finite |
+| `1 / 2` meaning one half | `1e0 / 2e0` |
+| `inf`, `NaN`, `1e0 / 0e0` | an error: approximate numbers are finite |
 
 The compiler recognizes each of these habits and suggests the fix.
 `trendyc --explain <code>` describes any error code in detail, and

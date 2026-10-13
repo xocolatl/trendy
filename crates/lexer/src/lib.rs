@@ -1,6 +1,6 @@
 use trendy_diag::{Code, Diagnostic, Edit, Span};
 use trendy_syntax::SyntaxKind;
-use trendy_syntax::literal::{self, IntProblem, RationalProblem, TextProblem};
+use trendy_syntax::literal::{self, ApproximateProblem, IntProblem, TextProblem};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Token {
@@ -40,11 +40,11 @@ pub fn lex(source: &str) -> Lexed {
             let end = number_end(source, start);
             let text = &source[start..end];
             let span = Span::new(start, end);
-            if literal::is_rational(text) {
-                if let Err(problem) = literal::check_rational(text) {
-                    errors.push(invalid_rational(&problem, text, span));
+            if literal::is_approximate(text) {
+                if let Err(problem) = literal::check_approximate(text) {
+                    errors.push(invalid_approximate(&problem, text, span));
                 }
-                (SyntaxKind::RationalLiteral, end)
+                (SyntaxKind::ApproximateLiteral, end)
             } else {
                 if let Err(problem) = literal::check_int(text) {
                     errors.push(invalid_integer(&problem, text, span));
@@ -134,7 +134,7 @@ fn foreign_operator(text: &str) -> Option<usize> {
 }
 
 /// Whether `text` starts with a decimal point followed by a digit, like
-/// `.5`: a malformed rational literal, reported with its fix.
+/// `.5`: a malformed approximate literal, reported with its fix.
 fn is_leading_point(text: &str) -> bool {
     let mut chars = text.chars();
     chars.next() == Some('.') && chars.next().is_some_and(|c| c.is_ascii_digit())
@@ -148,7 +148,7 @@ fn number_end(source: &str, start: usize) -> usize {
     for (i, c) in source[start..].char_indices() {
         let exponent_sign = matches!(c, '+' | '-')
             && prev.is_some_and(|p| literal::EXPONENT_MARKERS.contains(&p))
-            && literal::is_rational(&source[start..start + i]);
+            && literal::is_approximate(&source[start..start + i]);
         if !(is_ident_continue(c) || c == '.' || exponent_sign) {
             return start + i;
         }
@@ -362,28 +362,30 @@ fn invalid_escape(problem: &TextProblem, body: &str, offset: usize) -> Diagnosti
     }
 }
 
-fn invalid_rational(problem: &RationalProblem, text: &str, span: Span) -> Diagnostic {
+fn invalid_approximate(problem: &ApproximateProblem, text: &str, span: Span) -> Diagnostic {
     let reason = match problem {
-        RationalProblem::Fixable { reason, .. } | RationalProblem::Invalid { reason } => reason,
+        ApproximateProblem::Fixable { reason, .. } | ApproximateProblem::Invalid { reason } => {
+            reason
+        }
     };
     let d = Diagnostic::error(
-        Code::InvalidRational,
-        format!("invalid rational literal `{text}`"),
+        Code::InvalidApproximate,
+        format!("invalid approximate literal `{text}`"),
         span,
         format!("this literal {reason}"),
     )
     .with_note(
-        "rational literals have digits on both sides of the decimal point, an exponent, or both, such as `0.5`, `5.0` or `1e10`",
+        "an approximate literal has an exponent, and digits on both sides of a decimal point if it has one, such as `1e0`, `2.5e0` or `1e-10`; a decimal number without an exponent, such as `2.5`, is reserved for exact numbers",
     );
     match problem {
-        RationalProblem::Fixable { fixed, .. } => d.with_suggestion(
+        ApproximateProblem::Fixable { fixed, .. } => d.with_suggestion(
             format!("write `{fixed}`"),
             vec![Edit {
                 span,
                 replacement: fixed.clone(),
             }],
         ),
-        RationalProblem::Invalid { .. } => d,
+        ApproximateProblem::Invalid { .. } => d,
     }
 }
 
@@ -613,30 +615,33 @@ mod tests {
     }
 
     #[test]
-    fn rational_literals() {
+    fn approximate_literals() {
         assert_eq!(
-            kinds("0.0 0e0 1.5E-3 2e+2"),
+            kinds("1e0 0e0 1.5E-3 2e+2"),
             [
-                RationalLiteral,
+                ApproximateLiteral,
                 Whitespace,
-                RationalLiteral,
+                ApproximateLiteral,
                 Whitespace,
-                RationalLiteral,
+                ApproximateLiteral,
                 Whitespace,
-                RationalLiteral
+                ApproximateLiteral
             ]
         );
-        assert!(lex("0.0 0e0 1.5E-3 2e+2 17.5").errors.is_empty());
-        assert_eq!(kinds("1e5;"), [RationalLiteral, Semicolon]);
+        assert!(lex("1e0 0e0 1.5E-3 2e+2 17.5e0").errors.is_empty());
+        assert_eq!(kinds("1e5;"), [ApproximateLiteral, Semicolon]);
         assert_eq!(kinds("0x1E+5"), [IntLiteral, Plus, IntLiteral]);
     }
 
     #[test]
-    fn malformed_rationals_keep_their_kind() {
-        assert_eq!(kinds(".5"), [RationalLiteral]);
-        assert_eq!(kinds("5."), [RationalLiteral]);
-        assert_eq!(codes("5. .5 1_000.5 1e"), [Code::InvalidRational; 4]);
-        assert_eq!(fix("5. .5 1_000.5 1e"), "5.0 0.5 1000.5 1e");
+    fn malformed_approximates_keep_their_kind() {
+        assert_eq!(kinds(".5"), [ApproximateLiteral]);
+        assert_eq!(kinds("5."), [ApproximateLiteral]);
+        assert_eq!(codes("5. .5 1_000.5 1e"), [Code::InvalidApproximate; 4]);
+        assert_eq!(fix("5. .5 1_000.5 1e"), "5e0 0.5e0 1000.5e0 1e");
+        // A decimal number needs an exponent to be approximate.
+        assert_eq!(codes("1.5 1.0"), [Code::InvalidApproximate; 2]);
+        assert_eq!(fix("1.5 1.0"), "1.5e0 1e0");
         assert_eq!(
             lex("1e").errors[0].primary.message,
             "this literal has an exponent with no digits"
@@ -709,7 +714,7 @@ mod tests {
                 Star,
                 IntLiteral,
                 Minus,
-                RationalLiteral,
+                ApproximateLiteral,
                 Whitespace,
                 DivKw,
                 Whitespace,
@@ -752,8 +757,8 @@ mod tests {
     fn dots() {
         assert_eq!(kinds("t.a.b"), [Ident, Dot, Ident, Dot, Ident]);
         assert_eq!(kinds("(t).a"), [LParen, Ident, RParen, Dot, Ident]);
-        // A leading point is still a malformed rational.
-        assert_eq!(kinds(".5"), [RationalLiteral]);
+        // A leading point is still a malformed approximate literal.
+        assert_eq!(kinds(".5"), [ApproximateLiteral]);
     }
 
     #[test]

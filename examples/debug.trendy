@@ -3,7 +3,7 @@ var count := 42;
 var ratio := 1.5e-3;
 var big := 1e300;
 var greeting := "say \"hi\"\n\ttab \\ é";
-var point := tuple { x: 1.0, y: tuple { z: false } };
+var point := tuple { x: 1e0, y: tuple { z: false } };
 var unit := tuple {};
 var nobody: relation { name: text };
 var people := relation {

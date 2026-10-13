@@ -666,7 +666,7 @@ impl TypeRef {
 pub enum LiteralValue {
     Boolean(bool),
     Integer(i64),
-    Rational(f64),
+    Approximate(f64),
     Text(String),
 }
 
@@ -675,8 +675,8 @@ pub enum LiteralValue {
 pub enum LiteralError {
     /// An integer literal that doesn't fit in 64 bits.
     IntegerTooLarge,
-    /// A rational literal too large to represent.
-    RationalTooLarge,
+    /// An approximate literal too large to represent.
+    ApproximateTooLarge,
     /// A literal the lexer already reported as malformed.
     Malformed,
 }
@@ -705,11 +705,11 @@ impl Literal {
                     .map(LiteralValue::Integer)
                     .ok_or(LiteralError::IntegerTooLarge);
             }
-            SyntaxKind::RationalLiteral => {
-                literal::check_rational(text).map_err(|_| LiteralError::Malformed)?;
-                return literal::rational_value(text)
-                    .map(LiteralValue::Rational)
-                    .ok_or(LiteralError::RationalTooLarge);
+            SyntaxKind::ApproximateLiteral => {
+                literal::check_approximate(text).map_err(|_| LiteralError::Malformed)?;
+                return literal::approximate_value(text)
+                    .map(LiteralValue::Approximate)
+                    .ok_or(LiteralError::ApproximateTooLarge);
             }
             _ => {}
         }

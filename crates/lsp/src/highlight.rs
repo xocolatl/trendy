@@ -108,7 +108,7 @@ fn classify(token: &SyntaxToken) -> Option<Highlight> {
             ),
         ) => (Class::Attribute, false),
         (SyntaxKind::Ident, Some(SyntaxKind::TypeRef), _) => (Class::Type, false),
-        (SyntaxKind::IntLiteral | SyntaxKind::RationalLiteral, _, _) => (Class::Number, false),
+        (SyntaxKind::IntLiteral | SyntaxKind::ApproximateLiteral, _, _) => (Class::Number, false),
         (SyntaxKind::TextLiteral, _, _) => (Class::Text, false),
         _ => return None,
     };
@@ -314,16 +314,16 @@ mod tests {
     #[test]
     fn tuples() {
         assert_eq!(
-            highlight("var p: tuple { x: rational } := tuple { x: 1.0 };"),
+            highlight("var p: tuple { x: approximate } := tuple { x: 1e0 };"),
             [
                 ("var", Class::Keyword, false),
                 ("p", Class::Variable, true),
                 ("tuple", Class::Keyword, false),
                 ("x", Class::Attribute, true),
-                ("rational", Class::Type, false),
+                ("approximate", Class::Type, false),
                 ("tuple", Class::Keyword, false),
                 ("x", Class::Attribute, false),
-                ("1.0", Class::Number, false),
+                ("1e0", Class::Number, false),
             ]
         );
     }

@@ -83,9 +83,10 @@ pub enum SyntaxKind {
     /// Digits, possibly followed by other identifier characters. Malformed
     /// literals keep this kind, so one mistake gives one error.
     IntLiteral,
-    /// Digits with a decimal point, an exponent, or both. Malformed literals
-    /// keep this kind too.
-    RationalLiteral,
+    /// Digits with an exponent, and optionally a decimal point. A number
+    /// with a point but no exponent, such as `1.5`, is a malformed one, and
+    /// malformed literals keep this kind too.
+    ApproximateLiteral,
     /// `"…"`, including an unterminated one.
     TextLiteral,
     /// A character the lexer does not recognize.
@@ -214,7 +215,7 @@ impl SyntaxKind {
         SyntaxKind::PipePipe,
         SyntaxKind::ForeignOperator,
         SyntaxKind::IntLiteral,
-        SyntaxKind::RationalLiteral,
+        SyntaxKind::ApproximateLiteral,
         SyntaxKind::TextLiteral,
         SyntaxKind::ErrorToken,
         SyntaxKind::SourceFile,
@@ -353,7 +354,7 @@ impl SyntaxKind {
         matches!(
             self,
             SyntaxKind::IntLiteral
-                | SyntaxKind::RationalLiteral
+                | SyntaxKind::ApproximateLiteral
                 | SyntaxKind::TextLiteral
                 | SyntaxKind::TrueKw
                 | SyntaxKind::FalseKw
@@ -477,7 +478,7 @@ impl SyntaxKind {
             SyntaxKind::Slash => "`/`",
             SyntaxKind::PipePipe => "`||`",
             SyntaxKind::IntLiteral => "integer literal",
-            SyntaxKind::RationalLiteral => "rational literal",
+            SyntaxKind::ApproximateLiteral => "approximate literal",
             SyntaxKind::TextLiteral => "text literal",
             SyntaxKind::ErrorToken => "unrecognized character",
             SyntaxKind::SourceFile => "source file",

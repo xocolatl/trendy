@@ -679,9 +679,9 @@ mod tests {
     fn tuples() {
         assert_eq!(
             fmt(
-                "var x:tuple{a:tuple{b:boolean},c:text};var e:tuple{ };var q:=tuple{x:1.0,y:2.0,};operator main{}[];"
+                "var x:tuple{a:tuple{b:boolean},c:text};var e:tuple{ };var q:=tuple{x:1e0,y:2e0,};operator main{}[];"
             ),
-            "var x: tuple { a: tuple { b: boolean }, c: text };\nvar e: tuple {};\nvar q := tuple { x: 1.0, y: 2.0, };\n\noperator main{} [];\n"
+            "var x: tuple { a: tuple { b: boolean }, c: text };\nvar e: tuple {};\nvar q := tuple { x: 1e0, y: 2e0, };\n\noperator main{} [];\n"
         );
     }
 
@@ -841,7 +841,7 @@ mod tests {
             "var a := -1 + 2 * -x div (3 - +4) mod 5;\n"
         );
         assert_eq!(fmt("var a := - -1;"), "var a := - -1;\n");
-        assert_eq!(fmt("var a := 1.0/-2.0;"), "var a := 1.0 / -2.0;\n");
+        assert_eq!(fmt("var a := 1e0/-2e0;"), "var a := 1e0 / -2e0;\n");
         assert_eq!(fmt("var a := \"a\"||b;"), "var a := \"a\" || b;\n");
         assert_eq!(
             fmt("var a := x<>-1 and (y>=2)=(z<=3);"),
@@ -974,8 +974,8 @@ mod tests {
 
     #[test]
     fn long_lines_break_their_outermost_list() {
-        let source = "operator extract{a: tuple { street: text, city: text, country: text, postal_code: text }, p: tuple { x: rational, y: rational }} [];";
-        let expected = "operator extract{\n    a: tuple { street: text, city: text, country: text, postal_code: text },\n    p: tuple { x: rational, y: rational }\n} [];\n";
+        let source = "operator extract{a: tuple { street: text, city: text, country: text, postal_code: text }, p: tuple { x: approximate, y: approximate }} [];";
+        let expected = "operator extract{\n    a: tuple { street: text, city: text, country: text, postal_code: text },\n    p: tuple { x: approximate, y: approximate }\n} [];\n";
         assert_eq!(fmt(source), expected);
         assert_eq!(fmt(expected), expected, "idempotent");
         // Within a broken list, an item still too long breaks in turn.

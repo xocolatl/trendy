@@ -595,9 +595,9 @@ mod tests {
     }
 
     #[test]
-    fn rationals() {
+    fn approximate_numbers() {
         let vars = variables(
-            "var a: rational := 0.0;\nvar b: rational := 0e0;\nvar c := 1.5e-3;\nvar d: rational;",
+            "var a: approximate := 0e0;\nvar b: approximate := 0e0;\nvar c := 1.5e-3;\nvar d: approximate;",
         );
         let values: Vec<_> = vars
             .iter()
@@ -607,65 +607,67 @@ mod tests {
             values,
             [
                 (
-                    hir::Type::Scalar(hir::Scalar::Rational),
-                    hir::Value::Rational(hir::Rational::new(0.0))
+                    hir::Type::Scalar(hir::Scalar::Approximate),
+                    hir::Value::Approximate(hir::Approximate::new(0.0))
                 ),
                 (
-                    hir::Type::Scalar(hir::Scalar::Rational),
-                    hir::Value::Rational(hir::Rational::new(0.0))
+                    hir::Type::Scalar(hir::Scalar::Approximate),
+                    hir::Value::Approximate(hir::Approximate::new(0.0))
                 ),
                 (
-                    hir::Type::Scalar(hir::Scalar::Rational),
-                    hir::Value::Rational(hir::Rational::new(0.0015))
+                    hir::Type::Scalar(hir::Scalar::Approximate),
+                    hir::Value::Approximate(hir::Approximate::new(0.0015))
                 ),
                 (
-                    hir::Type::Scalar(hir::Scalar::Rational),
-                    hir::Value::Rational(hir::Rational::new(0.0))
+                    hir::Type::Scalar(hir::Scalar::Approximate),
+                    hir::Value::Approximate(hir::Approximate::new(0.0))
                 ),
             ]
         );
     }
 
     #[test]
-    fn no_implicit_integer_to_rational() {
-        let source = format!("var r: rational := 1;{MAIN}");
+    fn no_implicit_integer_to_approximate() {
+        let source = format!("var r: approximate := 1;{MAIN}");
         let errors = errors(&source);
         assert_eq!(errors[0].code, Code::TypeMismatch);
         assert_eq!(
             errors[0].suggestions[0].message,
-            "write it as `rational`: `1.0`"
+            "write it as `approximate`: `1e0`"
         );
-        assert_eq!(fix(&source), format!("var r: rational := 1.0;{MAIN}"));
+        assert_eq!(fix(&source), format!("var r: approximate := 1e0;{MAIN}"));
     }
 
     #[test]
-    fn rational_mismatch_fixes() {
+    fn approximate_mismatch_fixes() {
         let source = format!(
-            "var a: integer := 5.0;\nvar b: integer := 2.5;\nvar c: text := 1e3;\nvar d: rational := \"7\";\nvar e: rational := \"0.5\";{MAIN}"
+            "var a: integer := 5e0;\nvar b: integer := 2.5e0;\nvar c: text := 1e3;\nvar d: approximate := \"7\";\nvar e: approximate := \"0.5\";{MAIN}"
         );
         assert_eq!(
             fix(&source),
             format!(
-                "var a: integer := 5;\nvar b: rational := 2.5;\nvar c: text := \"1e3\";\nvar d: rational := 7.0;\nvar e: rational := 0.5;{MAIN}"
+                "var a: integer := 5;\nvar b: approximate := 2.5e0;\nvar c: text := \"1e3\";\nvar d: approximate := 7e0;\nvar e: approximate := 0.5e0;{MAIN}"
             )
         );
     }
 
     #[test]
-    fn rational_type_aliases() {
+    fn approximate_type_aliases() {
         let source =
-            format!("var a: float;\nvar b: double;\nvar c: Rational;\nvar d: rationl;{MAIN}");
+            format!("var a: float;\nvar b: double;\nvar c: Approximate;\nvar d: aproximate;{MAIN}");
         assert_eq!(
             fix(&source),
-            format!("var a: rational;\nvar b: rational;\nvar c: rational;\nvar d: rational;{MAIN}")
+            format!(
+                "var a: approximate;\nvar b: approximate;\nvar c: approximate;\nvar d: approximate;{MAIN}"
+            )
         );
     }
 
     #[test]
-    fn rational_out_of_range() {
+    fn approximate_out_of_range() {
         let errors = errors(&format!("var r := 1e400;{MAIN}"));
         assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].code, Code::RationalOutOfRange);
+        assert_eq!(errors[0].code, Code::ApproximateOutOfRange);
         assert_eq!(errors[0].span(), Span::new(9, 14));
     }
 
@@ -743,9 +745,12 @@ mod tests {
     #[test]
     fn tuple_inference_and_unordered_attributes() {
         let vars = variables(
-            "var q := tuple { y: 2.0, x: 1.0 };\nvar p: tuple { a: integer, b: text } := tuple { b: \"x\", a: 1, };\nvar e: tuple {};\nvar f := tuple {};",
+            "var q := tuple { y: 2e0, x: 1e0 };\nvar p: tuple { a: integer, b: text } := tuple { b: \"x\", a: 1, };\nvar e: tuple {};\nvar f := tuple {};",
         );
-        assert_eq!(vars[0].ty.to_string(), "tuple { x: rational, y: rational }");
+        assert_eq!(
+            vars[0].ty.to_string(),
+            "tuple { x: approximate, y: approximate }"
+        );
         assert_eq!(vars[1].ty.to_string(), "tuple { a: integer, b: text }");
         assert_eq!(vars[2].ty, tuple_type(&[]));
         assert_eq!(vars[3].ty, tuple_type(&[]));
@@ -786,7 +791,7 @@ mod tests {
     #[test]
     fn missing_attributes() {
         let source = format!(
-            "var p: tuple {{ x: rational, y: rational, z: text }} := tuple {{ x: 1.0 }};{MAIN}"
+            "var p: tuple {{ x: approximate, y: approximate, z: text }} := tuple {{ x: 1e0 }};{MAIN}"
         );
         let errors = errors(&source);
         assert_eq!(errors.len(), 1);
@@ -795,7 +800,7 @@ mod tests {
         assert_eq!(
             fix(&source),
             format!(
-                "var p: tuple {{ x: rational, y: rational, z: text }} := tuple {{ x: 1.0, y: 0.0, z: \"\" }};{MAIN}"
+                "var p: tuple {{ x: approximate, y: approximate, z: text }} := tuple {{ x: 1e0, y: 0e0, z: \"\" }};{MAIN}"
             )
         );
         assert_eq!(
@@ -815,7 +820,7 @@ mod tests {
     #[test]
     fn unknown_attributes() {
         let source = format!(
-            "var p: tuple {{ x: rational, y: rational }} := tuple {{ x: 1.0, why: 2.0 }};{MAIN}"
+            "var p: tuple {{ x: approximate, y: approximate }} := tuple {{ x: 1e0, why: 2e0 }};{MAIN}"
         );
         let errors = errors(&source);
         assert_eq!(
@@ -828,7 +833,7 @@ mod tests {
         assert_eq!(
             fix(&source),
             format!(
-                "var p: tuple {{ x: rational, y: rational }} := tuple {{ x: 1.0, y: 2.0 }};{MAIN}"
+                "var p: tuple {{ x: approximate, y: approximate }} := tuple {{ x: 1e0, y: 2e0 }};{MAIN}"
             )
         );
         assert_eq!(
@@ -978,7 +983,7 @@ mod tests {
     #[test]
     fn nested_relations() {
         let vars = variables(
-            "var n: tuple { r: relation { x: rational } };\nvar m := tuple { r: relation { { x: 1.0 } } };\nvar rr := relation { { inner: relation { { x: 1 } } } };",
+            "var n: tuple { r: relation { x: approximate } };\nvar m := tuple { r: relation { { x: 1e0 } } };\nvar rr := relation { { inner: relation { { x: 1 } } } };",
         );
         assert_eq!(vars[0].ty, vars[1].ty);
         assert_eq!(
@@ -1549,12 +1554,12 @@ mod tests {
         assert_eq!(init("var a := b * 2;\nvar b := 21;", "a"), int(42));
         assert_eq!(init("var a := -9223372036854775808;", "a"), int(i64::MIN));
         assert_eq!(
-            init("var a := -1.5;", "a"),
-            hir::Value::Rational(hir::Rational::new(-1.5))
+            init("var a := -1.5e0;", "a"),
+            hir::Value::Approximate(hir::Approximate::new(-1.5))
         );
         assert_eq!(
-            init("var a := -0.0;", "a"),
-            hir::Value::Rational(hir::Rational::new(-0.0))
+            init("var a := -0e0;", "a"),
+            hir::Value::Approximate(hir::Approximate::new(-0.0))
         );
     }
 
@@ -1582,7 +1587,7 @@ mod tests {
     #[test]
     fn integer_operand_types() {
         let source = format!(
-            "var a := 1 + true;\nvar b := -\"x\";\nvar c: boolean := 1 * 2;\nvar d := not 1;\nvar e := 1.5 + 1;\nvar r: rational := -1;{MAIN}"
+            "var a := 1 + true;\nvar b := -\"x\";\nvar c: boolean := 1 * 2;\nvar d := not 1;\nvar e := 1.5e0 + 1;\nvar r: approximate := -1;{MAIN}"
         );
         let errors = errors(&source);
         let labels: Vec<_> = errors
@@ -1603,30 +1608,33 @@ mod tests {
             ]
         );
         let fixed = fix(&source);
-        assert!(fixed.contains("var e := 1.5 + 1.0;"), "{fixed}");
+        assert!(fixed.contains("var e := 1.5e0 + 1e0;"), "{fixed}");
         assert!(
-            fixed.ends_with(&format!("var r: rational := -1.0;{MAIN}")),
+            fixed.ends_with(&format!("var r: approximate := -1e0;{MAIN}")),
             "a negative literal is rewritten like any other"
         );
     }
 
     #[test]
-    fn rational_initial_values() {
-        let r = |x| hir::Value::Rational(hir::Rational::new(x));
-        assert_eq!(init("var a := 1.5 + 2.25 * 2.0;", "a"), r(6.0));
-        assert_eq!(init("var a := 1.0 / 4.0 - 0.5;", "a"), r(-0.25));
-        assert_eq!(init("var a := -(0.0);", "a"), r(-0.0));
-        assert_eq!(init("var a := +2.5;", "a"), r(2.5));
-        assert_eq!(init("var a := b / 2.0;\nvar b := 3.0;", "a"), r(1.5));
+    fn approximate_initial_values() {
+        let r = |x| hir::Value::Approximate(hir::Approximate::new(x));
+        assert_eq!(init("var a := 1.5e0 + 2.25e0 * 2e0;", "a"), r(6.0));
+        assert_eq!(init("var a := 1e0 / 4e0 - 0.5e0;", "a"), r(-0.25));
+        assert_eq!(init("var a := -(0e0);", "a"), r(-0.0));
+        assert_eq!(init("var a := +2.5e0;", "a"), r(2.5));
+        assert_eq!(init("var a := b / 2e0;\nvar b := 3e0;", "a"), r(1.5));
         // The context sets the operand type, so the literal is what's wrong.
-        let source = format!("var a: rational := 1 + 2;{MAIN}");
-        assert_eq!(fix(&source), format!("var a: rational := 1.0 + 2.0;{MAIN}"));
+        let source = format!("var a: approximate := 1 + 2;{MAIN}");
+        assert_eq!(
+            fix(&source),
+            format!("var a: approximate := 1e0 + 2e0;{MAIN}")
+        );
     }
 
     #[test]
-    fn rational_failures_when_compiling() {
+    fn approximate_failures_when_compiling() {
         let source = format!(
-            "var a := 1e300 * 1e300;\nvar b := 1.0 / 0.0;\nvar c := 1.0 / -0.0;\nvar d := -1e308 - 1e308;{MAIN}"
+            "var a := 1e300 * 1e300;\nvar b := 1e0 / 0e0;\nvar c := 1e0 / -0e0;\nvar d := -1e308 - 1e308;{MAIN}"
         );
         let errors = errors(&source);
         let found: Vec<_> = errors
@@ -1642,10 +1650,10 @@ mod tests {
         assert_eq!(
             found,
             [
-                (Code::Overflow, "rational overflow", "1e300 * 1e300"),
-                (Code::DivisionByZero, "division by zero", "0.0"),
-                (Code::DivisionByZero, "division by zero", "-0.0"),
-                (Code::Overflow, "rational overflow", "-1e308 - 1e308"),
+                (Code::Overflow, "approximate overflow", "1e300 * 1e300"),
+                (Code::DivisionByZero, "division by zero", "0e0"),
+                (Code::DivisionByZero, "division by zero", "-0e0"),
+                (Code::Overflow, "approximate overflow", "-1e308 - 1e308"),
             ]
         );
     }
@@ -1653,7 +1661,7 @@ mod tests {
     #[test]
     fn division_operators_by_type() {
         let source = format!(
-            "var a := 7 / 2;\nvar b := 7.0 div 2.0;\nvar c := 7.0 mod 2.0;\nvar d: integer := 1/2;{MAIN}"
+            "var a := 7 / 2;\nvar b := 7e0 div 2e0;\nvar c := 7e0 mod 2e0;\nvar d: integer := 1/2;{MAIN}"
         );
         let errors = errors(&source);
         let found: Vec<_> = errors
@@ -1676,12 +1684,12 @@ mod tests {
                 ),
                 (
                     Code::WrongOperandType,
-                    "`div` can't be applied to rationals",
+                    "`div` can't be applied to approximate numbers",
                     "div"
                 ),
                 (
                     Code::WrongOperandType,
-                    "`mod` can't be applied to rationals",
+                    "`mod` can't be applied to approximate numbers",
                     "mod"
                 ),
                 (
@@ -1694,38 +1702,38 @@ mod tests {
         assert_eq!(
             fix(&source),
             format!(
-                "var a := 7 div 2;\nvar b := 7.0 / 2.0;\nvar c := 7.0 mod 2.0;\nvar d: integer := 1 div 2;{MAIN}"
+                "var a := 7 div 2;\nvar b := 7e0 / 2e0;\nvar c := 7e0 mod 2e0;\nvar d: integer := 1 div 2;{MAIN}"
             )
         );
         assert_eq!(
-            codes(&format!("var a := 1 + 1.5;\nvar b := true + 1;{MAIN}")),
+            codes(&format!("var a := 1 + 1.5e0;\nvar b := true + 1;{MAIN}")),
             [Code::TypeMismatch, Code::WrongOperandType]
         );
     }
 
     #[test]
-    fn rational_simplification() {
+    fn approximate_simplification() {
         let cases = [
-            ("x * 1.0", "x"),
-            ("1.0 * x", "x"),
-            ("x / 1.0", "x"),
-            ("x - 0.0", "x"),
-            ("x + -0.0", "x"),
-            ("-0.0 + x", "x"),
-            ("-0.0 - x", "-x"),
-            ("x * -1.0", "-x"),
-            ("x / -1.0", "-x"),
+            ("x * 1e0", "x"),
+            ("1e0 * x", "x"),
+            ("x / 1e0", "x"),
+            ("x - 0e0", "x"),
+            ("x + -0e0", "x"),
+            ("-0e0 + x", "x"),
+            ("-0e0 - x", "-x"),
+            ("x * -1e0", "-x"),
+            ("x / -1e0", "-x"),
             ("- -x", "x"),
             ("+x", "x"),
             // IEEE 754 signed zeros: these aren't the identity.
-            ("x + 0.0", "x + 0.0"),
-            ("0.0 - x", "0.0 - x"),
-            ("x * 0.0", "x * 0.0"),
+            ("x + 0e0", "x + 0e0"),
+            ("0e0 - x", "0e0 - x"),
+            ("x * 0e0", "x * 0e0"),
         ];
         for (written, simplified) in cases {
             let source = |e: &str| {
                 format!(
-                    "operator f{{x: rational}} [ call debug_value{{v: {e}}}; ];\noperator main{{}} [];"
+                    "operator f{{x: approximate}} [ call debug_value{{v: {e}}}; ];\noperator main{{}} [];"
                 )
             };
             let body = |e: &str| {
@@ -1740,7 +1748,7 @@ mod tests {
         }
         let x = || Box::new(hir::Expr::Parameter("x".to_string()));
         let program = analyze_str(
-            "operator f{x: rational} [ call debug_value{v: x + 0.0}; ];\noperator main{} [];",
+            "operator f{x: approximate} [ call debug_value{v: x + 0e0}; ];\noperator main{} [];",
         )
         .unwrap();
         let f = program.operators.iter().find(|o| o.name == "f").unwrap();
@@ -1750,16 +1758,16 @@ mod tests {
         assert_eq!(
             argument(&body[0]),
             &hir::Expr::Binary(
-                hir::BinaryOp::Add(hir::Numeric::Rational),
+                hir::BinaryOp::Add(hir::Numeric::Approximate),
                 x(),
-                Box::new(hir::Expr::Constant(hir::Value::Rational(
-                    hir::Rational::new(0.0)
+                Box::new(hir::Expr::Constant(hir::Value::Approximate(
+                    hir::Approximate::new(0.0)
                 )))
             )
         );
         assert_eq!(
             codes(
-                "operator f{x: rational} [ call debug_value{v: x / 0.0}; ];\noperator main{} [];"
+                "operator f{x: approximate} [ call debug_value{v: x / 0e0}; ];\noperator main{} [];"
             ),
             [Code::DivisionByZero]
         );
@@ -1838,8 +1846,8 @@ mod tests {
         let no = hir::Value::Boolean(false);
         assert_eq!(init("var a := false < true;", "a"), yes);
         assert_eq!(init("var a := 1 + 1 = 2;", "a"), yes);
-        assert_eq!(init("var a := -0.0 < 0.0;", "a"), yes);
-        assert_eq!(init("var a := -0.0 = 0.0;", "a"), no);
+        assert_eq!(init("var a := -0e0 < 0e0;", "a"), yes);
+        assert_eq!(init("var a := -0e0 = 0e0;", "a"), no);
         assert_eq!(init("var a := \"Z\" < \"a\";", "a"), yes);
         assert_eq!(init("var a := \"é\" > \"z\";", "a"), yes);
         assert_eq!(init("var a := not (1 >= 2);", "a"), yes);
@@ -1853,7 +1861,7 @@ mod tests {
     #[test]
     fn comparison_operand_types() {
         let source = format!(
-            "var a := 1 = 1.0;\nvar b: integer := 1 < 2;\nvar c := tuple {{}} < tuple {{}};\nvar d: boolean := 1 = 2;{MAIN}"
+            "var a := 1 = 1e0;\nvar b: integer := 1 < 2;\nvar c := tuple {{}} < tuple {{}};\nvar d: boolean := 1 = 2;{MAIN}"
         );
         let errors = errors(&source);
         let found: Vec<_> = errors.iter().map(|e| (e.code, &e.message[..])).collect();
@@ -1862,7 +1870,7 @@ mod tests {
             [
                 (
                     Code::TypeMismatch,
-                    "mismatched types: expected `integer`, found `rational`"
+                    "mismatched types: expected `integer`, found `approximate`"
                 ),
                 (
                     Code::TypeMismatch,
@@ -1902,7 +1910,7 @@ mod tests {
         );
         assert_eq!(
             init(
-                "var a := tuple { r: relation { { x: -0.0 } } } = tuple { r: relation { { x: 0.0 } } };",
+                "var a := tuple { r: relation { { x: -0e0 } } } = tuple { r: relation { { x: 0e0 } } };",
                 "a"
             ),
             no,

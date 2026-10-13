@@ -17,19 +17,19 @@ const TYPE_ALIASES: &[(&str, hir::Scalar)] = &[
     ("bit", hir::Scalar::Boolean),
     ("bool", hir::Scalar::Boolean),
     ("char", hir::Scalar::Text),
-    ("decimal", hir::Scalar::Rational),
-    ("double", hir::Scalar::Rational),
-    ("f32", hir::Scalar::Rational),
-    ("f64", hir::Scalar::Rational),
-    ("float", hir::Scalar::Rational),
-    ("float64", hir::Scalar::Rational),
+    ("decimal", hir::Scalar::Approximate),
+    ("double", hir::Scalar::Approximate),
+    ("f32", hir::Scalar::Approximate),
+    ("f64", hir::Scalar::Approximate),
+    ("float", hir::Scalar::Approximate),
+    ("float64", hir::Scalar::Approximate),
     ("i64", hir::Scalar::Integer),
     ("int", hir::Scalar::Integer),
     ("int64", hir::Scalar::Integer),
     ("long", hir::Scalar::Integer),
-    ("number", hir::Scalar::Rational),
-    ("numeric", hir::Scalar::Rational),
-    ("real", hir::Scalar::Rational),
+    ("number", hir::Scalar::Approximate),
+    ("numeric", hir::Scalar::Approximate),
+    ("real", hir::Scalar::Approximate),
     ("str", hir::Scalar::Text),
     ("string", hir::Scalar::Text),
     ("varchar", hir::Scalar::Text),
@@ -291,22 +291,22 @@ fn negated_comparison(origin: &Origin, operand: &Expr) -> Option<(String, Vec<Ed
 }
 
 /// A literal of type `ty` for the same value as `value`, written `written`,
-/// when there is an obvious one: `1` as a rational is `1.0`, and `"5"` as an
-/// integer is `5`.
+/// when there is an obvious one: `1` as an approximate number is `1e0`, and
+/// `"5"` as an integer is `5`.
 fn rewrite_literal(ty: hir::Scalar, value: &hir::Value, written: &str) -> Option<String> {
     use trendy_syntax::literal;
     match (ty, value) {
         (
             hir::Scalar::Text,
-            hir::Value::Boolean(_) | hir::Value::Integer(_) | hir::Value::Rational(_),
+            hir::Value::Boolean(_) | hir::Value::Integer(_) | hir::Value::Approximate(_),
         ) => Some(format!("\"{written}\"")),
         // `0` and `1` are the usual spellings of false and true elsewhere.
         (hir::Scalar::Boolean, hir::Value::Integer(n @ (0 | 1))) => Some((*n == 1).to_string()),
         (hir::Scalar::Boolean, hir::Value::Text(text)) => ["true", "false"]
             .contains(&text.as_str())
             .then(|| text.clone()),
-        (hir::Scalar::Rational, hir::Value::Integer(_)) => Some(format!("{written}.0")),
-        (hir::Scalar::Integer, hir::Value::Rational(r)) => {
+        (hir::Scalar::Approximate, hir::Value::Integer(_)) => Some(format!("{written}e0")),
+        (hir::Scalar::Integer, hir::Value::Approximate(r)) => {
             // Only exact integers within range; `{:.0}` prints them in full.
             let r = r.get();
             let exact = r.fract() == 0.0 && r.abs() < 2_f64.powi(63);
@@ -315,11 +315,15 @@ fn rewrite_literal(ty: hir::Scalar, value: &hir::Value, written: &str) -> Option
         (hir::Scalar::Integer, hir::Value::Text(text)) => {
             (!text.is_empty() && literal::check_int(text).is_ok()).then(|| text.clone())
         }
-        (hir::Scalar::Rational, hir::Value::Text(text)) => {
-            if literal::is_rational(text) && literal::check_rational(text).is_ok() {
-                Some(text.clone())
+        (hir::Scalar::Approximate, hir::Value::Text(text)) => {
+            if literal::is_approximate(text) {
+                match literal::check_approximate(text) {
+                    Ok(()) => Some(text.clone()),
+                    Err(literal::ApproximateProblem::Fixable { fixed, .. }) => Some(fixed),
+                    Err(literal::ApproximateProblem::Invalid { .. }) => None,
+                }
             } else if !text.is_empty() && literal::check_int(text).is_ok() {
-                Some(format!("{text}.0"))
+                Some(format!("{text}e0"))
             } else {
                 None
             }
@@ -333,11 +337,7 @@ fn source_text(value: &hir::Value) -> Option<String> {
     Some(match value {
         hir::Value::Boolean(b) => b.to_string(),
         hir::Value::Integer(n) => n.to_string(),
-        hir::Value::Rational(r) => {
-            let r = r.get();
-            // Debug formatting always includes a point or an exponent.
-            r.is_finite().then(|| format!("{r:?}"))?
-        }
+        hir::Value::Approximate(r) => r.literal()?,
         hir::Value::Text(text) => format!("\"{}\"", trendy_syntax::literal::escape_text(text)),
         hir::Value::Tuple(tuple) => {
             let attributes = tuple
@@ -1045,15 +1045,15 @@ pub(crate) fn unknown_relation_heading(span: Span) -> Diagnostic {
     .with_help("write the heading, as in `relation { name: text } {}`, or declare the variable's type, as in `var r: relation { name: text } := relation {};`")
 }
 
-pub(crate) fn rational_out_of_range(span: Span) -> Diagnostic {
+pub(crate) fn approximate_out_of_range(span: Span) -> Diagnostic {
     Diagnostic::error(
-        Code::RationalOutOfRange,
-        "rational literal is too large",
+        Code::ApproximateOutOfRange,
+        "approximate literal is too large",
         span,
         "too large for a 64-bit floating-point number",
     )
     .with_note(format!(
-        "`rational` is a 64-bit IEEE 754 binary floating-point number: the largest is about {:e}",
+        "`approximate` is a 64-bit IEEE 754 binary floating-point number: the largest is about {:e}",
         f64::MAX
     ))
 }
@@ -1082,14 +1082,14 @@ pub(crate) fn failure(
     divisor: Option<&Expr>,
 ) -> Diagnostic {
     match (failure, result) {
-        (hir::Failure::Overflow, hir::Scalar::Rational) => Diagnostic::error(
+        (hir::Failure::Overflow, hir::Scalar::Approximate) => Diagnostic::error(
             Code::Overflow,
-            "rational overflow",
+            "approximate overflow",
             expr.span(),
-            "the result is too large for a rational",
+            "the result is too large for an approximate number",
         )
         .with_note(format!(
-            "rationals are finite, up to about {:e} in magnitude; a larger result is an error, not an infinity",
+            "approximate numbers are finite, up to about {:e} in magnitude; a larger result is an error, not an infinity",
             f64::MAX
         )),
         (hir::Failure::Overflow, _) => Diagnostic::error(
@@ -1118,7 +1118,7 @@ fn plural(ty: &hir::Type) -> &'static str {
     match ty {
         hir::Type::Scalar(hir::Scalar::Boolean) => "booleans",
         hir::Type::Scalar(hir::Scalar::Integer) => "integers",
-        hir::Type::Scalar(hir::Scalar::Rational) => "rationals",
+        hir::Type::Scalar(hir::Scalar::Approximate) => "approximate numbers",
         hir::Type::Scalar(hir::Scalar::Text) => "text",
         hir::Type::Tuple(_) => "tuples",
         hir::Type::Relation(_) => "relations",
@@ -1165,18 +1165,18 @@ pub(crate) fn wrong_operand_type(
     match (op, scalar) {
         (Operator::Divide, hir::Scalar::Integer) => replace(
             d.with_note(
-                "`/` divides rationals; integer division is `div`, which truncates toward zero",
+                "`/` divides approximate numbers; integer division is `div`, which truncates toward zero",
             ),
             "div",
             "use integer division: `div`",
         ),
-        (Operator::Div, hir::Scalar::Rational) => replace(
-            d.with_note("`div` is integer division; rationals divide with `/`"),
+        (Operator::Div, hir::Scalar::Approximate) => replace(
+            d.with_note("`div` is integer division; approximate numbers divide with `/`"),
             "/",
-            "use rational division: `/`",
+            "use approximate division: `/`",
         ),
-        (Operator::Mod, hir::Scalar::Rational) => d.with_note(
-            "`mod` is the remainder of integer division; rationals have no remainder operator",
+        (Operator::Mod, hir::Scalar::Approximate) => d.with_note(
+            "`mod` is the remainder of integer division; approximate numbers have no remainder operator",
         ),
         (Operator::Concatenate, hir::Scalar::Boolean) => replace(
             d.with_note("`||` concatenates text; the boolean operator is `or`"),

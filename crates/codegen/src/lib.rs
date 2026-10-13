@@ -235,14 +235,14 @@ impl Functions {
                         result
                     }
                     // Exact: only the sign changes.
-                    lir::UnaryOp::Negate(lir::Numeric::Rational) => b.ins().fneg(value),
+                    lir::UnaryOp::Negate(lir::Numeric::Approximate) => b.ins().fneg(value),
                 };
                 self.store(dst, result, frame, b)?;
             }
             lir::Inst::Binary { dst, op, lhs, rhs } => {
-                // Rationals are compared by their bits.
+                // Approximate numbers are compared by their bits.
                 let ty = match op {
-                    lir::BinaryOp::Compare(_, lir::Operand::Numeric(lir::Numeric::Rational)) => {
+                    lir::BinaryOp::Compare(_, lir::Operand::Numeric(lir::Numeric::Approximate)) => {
                         types::I64
                     }
                     _ => operand_type(op.operand()),
@@ -266,7 +266,7 @@ impl Functions {
         b: &mut FunctionBuilder,
     ) -> Result<Value, String> {
         use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
-        use lir::Numeric::{Integer, Rational};
+        use lir::Numeric::{Approximate, Integer};
         let checked = |this: &mut Self, (result, overflow), b: &mut FunctionBuilder| {
             this.fail_if(overflow, lir::Failure::IntegerOverflow, b)
                 .map(|()| result)
@@ -277,7 +277,7 @@ impl Functions {
             let magnitude = b.ins().fabs(result);
             let infinity = b.ins().f64const(f64::INFINITY);
             let overflow = b.ins().fcmp(FloatCC::Equal, magnitude, infinity);
-            this.fail_if(overflow, lir::Failure::RationalOverflow, b)
+            this.fail_if(overflow, lir::Failure::ApproximateOverflow, b)
                 .map(|()| result)
         };
         Ok(match op {
@@ -299,7 +299,7 @@ impl Functions {
                     // IEEE 754 totalOrder: flipping every bit but the sign
                     // of a negative value's bits makes them order as signed
                     // integers, and keeps distinct values distinct.
-                    lir::Operand::Numeric(Rational) => {
+                    lir::Operand::Numeric(Approximate) => {
                         let key = |b: &mut FunctionBuilder, bits| {
                             let sign = b.ins().sshr_imm_u(bits, 63);
                             let mask = b.ins().ushr_imm_u(sign, 1);
@@ -329,15 +329,15 @@ impl Functions {
                 let product = b.ins().smul_overflow(lhs, rhs);
                 checked(self, product, b)?
             }
-            lir::BinaryOp::Add(Rational) => {
+            lir::BinaryOp::Add(Approximate) => {
                 let sum = b.ins().fadd(lhs, rhs);
                 finite(self, sum, b)?
             }
-            lir::BinaryOp::Subtract(Rational) => {
+            lir::BinaryOp::Subtract(Approximate) => {
                 let difference = b.ins().fsub(lhs, rhs);
                 finite(self, difference, b)?
             }
-            lir::BinaryOp::Multiply(Rational) => {
+            lir::BinaryOp::Multiply(Approximate) => {
                 let product = b.ins().fmul(lhs, rhs);
                 finite(self, product, b)?
             }
@@ -486,7 +486,7 @@ fn operand_type(operand: lir::Operand) -> cranelift_codegen::ir::Type {
     match operand {
         lir::Operand::Boolean => types::I8,
         lir::Operand::Numeric(lir::Numeric::Integer) => types::I64,
-        lir::Operand::Numeric(lir::Numeric::Rational) => types::F64,
+        lir::Operand::Numeric(lir::Numeric::Approximate) => types::F64,
     }
 }
 

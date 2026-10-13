@@ -1,5 +1,5 @@
 var folded := 1 < 2 and "a" < "b" and false < true;
-var signed_zeros := -0.0 < 0.0 and -0.0 <> 0.0;
+var signed_zeros := -0e0 < 0e0 and -0e0 <> 0e0;
 var ada := tuple { name: "Ada", born: 1815 };
 var people := relation {
     { name: "Ada", born: 1815 },
@@ -25,7 +25,7 @@ operator integers{a: integer, b: integer} [
     call debug_value{v: a >= b};
 ];
 
-operator rationals{a: rational, b: rational} [
+operator approximate_numbers{a: approximate, b: approximate} [
     call debug_value{v: a = b};
     call debug_value{v: a <> b};
     call debug_value{v: a < b};
@@ -57,8 +57,8 @@ operator relations{
 ];
 
 operator nested{
-    a: tuple { r: relation { x: rational } },
-    b: tuple { r: relation { x: rational } }
+    a: tuple { r: relation { x: approximate } },
+    b: tuple { r: relation { x: approximate } }
 } [
     call debug_value{v: a = b};
     call debug_value{v: a <> b};
@@ -72,8 +72,8 @@ operator main{} [
     call booleans{a: true, b: true};
     call integers{a: -2, b: 1};
     call integers{a: 7, b: 7};
-    call rationals{a: -0.0, b: 0.0};
-    call rationals{a: 2.5, b: -1e300};
+    call approximate_numbers{a: -0e0, b: 0e0};
+    call approximate_numbers{a: 2.5e0, b: -1e300};
     call texts{a: "Z", b: "a"};
     call texts{a: "é", b: "😀"};
     call texts{a: "ab", b: "a"};
@@ -91,15 +91,15 @@ operator main{} [
     call relations{a: people, b: relation { { name: "Ada", born: 1815 } }};
     call relations{a: people, b: relation {}};
     call relations{a: relation {}, b: relation {}};
-    call nested{a: tuple { r: relation { { x: 0.0 } } }, b: tuple { r: relation { { x: -0.0 } } }};
+    call nested{a: tuple { r: relation { { x: 0e0 } } }, b: tuple { r: relation { { x: -0e0 } } }};
     call nested{
         a: tuple { r: relation {
-            { x: 1.5 },
-            { x: 2.5 }
+            { x: 1.5e0 },
+            { x: 2.5e0 }
         } },
         b: tuple { r: relation {
-            { x: 2.5 },
-            { x: 1.5 }
+            { x: 2.5e0 },
+            { x: 1.5e0 }
         } }
     };
 ];

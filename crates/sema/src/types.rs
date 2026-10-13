@@ -794,14 +794,16 @@ fn literal_value(literal: &Literal, errors: &mut Vec<Diagnostic>) -> Option<hir:
     match literal.value() {
         Ok(LiteralValue::Boolean(value)) => Some(hir::Value::Boolean(value)),
         Ok(LiteralValue::Integer(value)) => Some(hir::Value::Integer(value)),
-        Ok(LiteralValue::Rational(value)) => Some(hir::Value::Rational(hir::Rational::new(value))),
+        Ok(LiteralValue::Approximate(value)) => {
+            Some(hir::Value::Approximate(hir::Approximate::new(value)))
+        }
         Ok(LiteralValue::Text(value)) => Some(hir::Value::Text(value)),
         Err(LiteralError::IntegerTooLarge) => {
             errors.push(errors::integer_out_of_range(literal.span()));
             None
         }
-        Err(LiteralError::RationalTooLarge) => {
-            errors.push(errors::rational_out_of_range(literal.span()));
+        Err(LiteralError::ApproximateTooLarge) => {
+            errors.push(errors::approximate_out_of_range(literal.span()));
             None
         }
         Err(LiteralError::Malformed) => None,
