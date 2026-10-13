@@ -860,6 +860,8 @@ impl<'a> Parser<'a> {
             self.start_node(SyntaxKind::Literal);
             self.bump();
             self.builder.finish_node();
+        } else if let Some((found, keyword)) = self.at_nary() {
+            self.nary(found, keyword);
         } else if self.at_keyword(SyntaxKind::RelationKw) {
             self.relation_literal();
         } else if self.at_keyword(SyntaxKind::TupleKw) || self.at(SyntaxKind::LBrace) {
@@ -887,6 +889,52 @@ impl<'a> Parser<'a> {
                 "write a value, such as `0`, `\"\"`, `tuple { name: \"x\" }` or `relation { { name: \"x\" } }`",
             );
         }
+    }
+
+    /// A join of any number of operands at the next token, if there is one:
+    /// `join`, `times` or `compose`, in any case, followed by its operands
+    /// in braces, or in parentheses as a call elsewhere is written. The
+    /// token, and the keyword it is or stands for.
+    fn at_nary(&mut self) -> Option<(Found<'a>, SyntaxKind)> {
+        let found = self.found()?;
+        let keyword = match found.kind {
+            SyntaxKind::Ident => errors::operator_spelling(found.text)?,
+            kind => kind,
+        };
+        let list = self
+            .found_after(1)
+            .is_some_and(|f| matches!(f.kind, SyntaxKind::LBrace | SyntaxKind::LParen));
+        (keyword.is_join() && list).then_some((found, keyword))
+    }
+
+    /// `join{r, s, t}`: the keyword, found as `found`, and the operands.
+    fn nary(&mut self, found: Found<'a>, keyword: SyntaxKind) {
+        let outer_form = std::mem::replace(&mut self.form, errors::NARY_FORM);
+        self.start_node(SyntaxKind::NaryExpr);
+        self.operator_token(found, keyword);
+        self.delimited(
+            None,
+            "operands",
+            (SyntaxKind::LBrace, SyntaxKind::RBrace),
+            &[(SyntaxKind::LParen, SyntaxKind::RParen)],
+            |p| p.items(Self::at_operand, Self::expression),
+        );
+        self.builder.finish_node();
+        self.form = outer_form;
+    }
+
+    /// Whether an operand can start at the next token, in a list of them.
+    fn at_operand(&mut self) -> bool {
+        !matches!(
+            self.peek(),
+            None | Some(
+                SyntaxKind::RBrace
+                    | SyntaxKind::RParen
+                    | SyntaxKind::RBracket
+                    | SyntaxKind::Comma
+                    | SyntaxKind::Semicolon
+            )
+        )
     }
 
     /// `tuple [heading] { name: value, … }`. In a relation, the `tuple`
@@ -1134,7 +1182,7 @@ impl<'a> Parser<'a> {
         }
         if used != delims {
             self.errors.push(errors::wrong_delimiter(
-                what, delims, used, open_span, close_span,
+                what, self.form, delims, used, open_span, close_span,
             ));
         }
         if close_span.is_none() {
@@ -2208,6 +2256,34 @@ SourceFile
         assert_eq!(shape("a || b join c"), "((a || b) join c)");
         assert_eq!(shape("a join (b join c)"), "(a join (b join c))");
         assert_eq!(fix("var x := a JOIN b;"), "var x := a join b;");
+    }
+
+    #[test]
+    fn joins_of_lists() {
+        assert_eq!(shape("join{a, b, c}"), "join{a, b, c}");
+        assert_eq!(shape("join{a, b} join c"), "(join{a, b} join c)");
+        assert_eq!(shape("a join times{b, c}"), "(a join times{b, c})");
+        assert_eq!(shape("join{}"), "join{}");
+        assert_eq!(shape("times{a,}"), "times{a,}");
+        assert_eq!(shape("join{a, b}{x}"), "join{a, b}{x}");
+        let parse = parse_str("var x := join{a, b join c, (d)};");
+        let nary = parse
+            .tree
+            .syntax()
+            .descendants()
+            .find_map(trendy_syntax::ast::NaryExpr::cast)
+            .unwrap();
+        assert_eq!(nary.operator().unwrap().kind(), SyntaxKind::JoinKw);
+        assert_eq!(nary.operands().count(), 3);
+        // Tutorial D's capitals, and a call's parentheses.
+        assert_eq!(fix("var x := JOIN { a, b };"), "var x := join { a, b };");
+        assert_eq!(fix("var x := times(a, b);"), "var x := times{a, b};");
+        assert_eq!(
+            messages("var x := join{a b};"),
+            ["expected `,`, found identifier `b`"]
+        );
+        // `compose{…}` parses; sema reports it.
+        assert!(parse_str("var x := compose{a, b};").errors.is_empty());
     }
 
     #[test]

@@ -62,6 +62,7 @@ pub enum Code {
     KeyViolated,
     JoinTypeConflict,
     CommonAttributes,
+    NaryCompose,
     Overflow,
     DivisionByZero,
     OutOfMemory,
@@ -82,7 +83,7 @@ pub enum CodeKind {
 }
 
 impl Code {
-    pub const ALL: [Code; 53] = [
+    pub const ALL: [Code; 54] = [
         Code::UnexpectedCharacter,
         Code::MissingToken,
         Code::WrongDelimiter,
@@ -132,6 +133,7 @@ impl Code {
         Code::KeyViolated,
         Code::JoinTypeConflict,
         Code::CommonAttributes,
+        Code::NaryCompose,
         Code::Overflow,
         Code::DivisionByZero,
         Code::OutOfMemory,
@@ -190,6 +192,7 @@ impl Code {
             Code::KeyViolated => "A0026",
             Code::JoinTypeConflict => "A0027",
             Code::CommonAttributes => "A0028",
+            Code::NaryCompose => "A0029",
             Code::Overflow => "R0001",
             Code::DivisionByZero => "R0002",
             Code::OutOfMemory => "R0003",
@@ -277,6 +280,7 @@ impl Code {
             Code::KeyViolated => include_str!("../errors/A0026.md"),
             Code::JoinTypeConflict => include_str!("../errors/A0027.md"),
             Code::CommonAttributes => include_str!("../errors/A0028.md"),
+            Code::NaryCompose => include_str!("../errors/A0029.md"),
             Code::Overflow => include_str!("../errors/R0001.md"),
             Code::DivisionByZero => include_str!("../errors/R0002.md"),
             Code::OutOfMemory => include_str!("../errors/R0003.md"),

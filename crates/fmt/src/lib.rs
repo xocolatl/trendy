@@ -13,7 +13,7 @@ mod order;
 use std::collections::HashSet;
 
 use trendy_syntax::ast::{
-    Arguments, AstNode, Body, Heading, NameList, RelationLiteral, RenameList, SourceFile,
+    Arguments, AstNode, Body, Heading, NameList, NaryExpr, RelationLiteral, RenameList, SourceFile,
     TupleLiteral,
 };
 use trendy_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
@@ -143,8 +143,8 @@ impl Layout {
 }
 
 /// Whether `node` is a list that can be broken across lines, one item per
-/// line: parameters, arguments, headings, tuple and relation values, and
-/// lists of names.
+/// line: parameters, arguments, headings, tuple and relation values, lists
+/// of names, and the operands of `join{…}` and `times{…}`.
 fn is_list(node: &SyntaxNode) -> bool {
     matches!(
         node.kind(),
@@ -154,6 +154,7 @@ fn is_list(node: &SyntaxNode) -> bool {
             | SyntaxKind::RelationLiteral
             | SyntaxKind::NameList
             | SyntaxKind::RenameList
+            | SyntaxKind::NaryExpr
     )
 }
 
@@ -415,6 +416,8 @@ fn items(node: &SyntaxNode) -> usize {
         names.names().count()
     } else if let Some(renamings) = RenameList::cast(node.clone()) {
         renamings.renamings().count()
+    } else if let Some(nary) = NaryExpr::cast(node.clone()) {
+        nary.operands().count()
     } else {
         0
     }
@@ -845,6 +848,19 @@ mod tests {
             "var a := x <> -1 and (y >= 2) = (z <= 3);\n"
         );
         assert_eq!(fmt("var a := not-1;"), "var a := not -1;\n");
+    }
+
+    #[test]
+    fn joins_of_lists() {
+        assert_eq!(
+            fmt("var a:=join { b,c{x} ,times{d,e} }join f;"),
+            "var a := join{b, c{x}, times{d, e}} join f;\n"
+        );
+        let names: Vec<String> = (0..12).map(|i| format!("relation_number_{i}")).collect();
+        assert_eq!(
+            fmt(&format!("var r := join{{{}}};", names.join(", "))),
+            format!("var r := join{{\n    {}\n}};\n", names.join(",\n    "))
+        );
     }
 
     #[test]

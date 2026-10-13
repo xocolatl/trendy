@@ -51,6 +51,7 @@ ast_node!(ParenExpr);
 ast_node!(ExtractExpr);
 ast_node!(ProjectExpr);
 ast_node!(PostfixExpr);
+ast_node!(NaryExpr);
 ast_node!(NameList);
 ast_node!(RenameList);
 ast_node!(Renaming);
@@ -282,6 +283,18 @@ impl PostfixExpr {
     }
 }
 
+impl NaryExpr {
+    /// The operator: `join`, `times` or `compose`.
+    #[must_use]
+    pub fn operator(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    pub fn operands(&self) -> impl Iterator<Item = Expr> {
+        self.0.children().filter_map(Expr::cast)
+    }
+}
+
 impl RenameList {
     pub fn renamings(&self) -> impl Iterator<Item = Renaming> {
         self.0.children().filter_map(Renaming::cast)
@@ -434,6 +447,7 @@ pub enum Expr {
     Extract(ExtractExpr),
     Project(ProjectExpr),
     Postfix(PostfixExpr),
+    Nary(NaryExpr),
 }
 
 impl Expr {
@@ -449,7 +463,8 @@ impl Expr {
             .or_else(|| ParenExpr::cast(node.clone()).map(Expr::Paren))
             .or_else(|| ExtractExpr::cast(node.clone()).map(Expr::Extract))
             .or_else(|| ProjectExpr::cast(node.clone()).map(Expr::Project))
-            .or_else(|| PostfixExpr::cast(node).map(Expr::Postfix))
+            .or_else(|| PostfixExpr::cast(node.clone()).map(Expr::Postfix))
+            .or_else(|| NaryExpr::cast(node).map(Expr::Nary))
     }
 
     #[must_use]
@@ -465,6 +480,7 @@ impl Expr {
             Expr::Extract(e) => e.syntax(),
             Expr::Project(e) => e.syntax(),
             Expr::Postfix(e) => e.syntax(),
+            Expr::Nary(e) => e.syntax(),
         }
     }
 

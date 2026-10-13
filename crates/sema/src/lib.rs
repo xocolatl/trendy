@@ -2236,6 +2236,65 @@ mod tests {
     }
 
     #[test]
+    fn joins_of_lists() {
+        let vars = variables(
+            "var a := relation { { x: 1, y: 2 }, { x: 3, y: 4 } };\nvar b := relation { { y: 2, z: 5 } };\nvar c := relation { { z: 5, w: 6 } };\nvar s := relation { { size: 1 }, { size: 2 } };\nvar all := join{a, b, c};\nvar nested := a join b join c;\nvar any_order := join{c, a, b};\nvar pairs := times{s, c, a{x}};\nvar dee := join{};\nvar also_dee := times{};\nvar alone := join{a};",
+        );
+        let value = |name: &str| &vars.iter().find(|v| v.name == name).unwrap().init;
+        assert_eq!(value("all"), value("nested"));
+        assert_eq!(value("all"), value("any_order"));
+        assert_eq!(
+            value("pairs").ty().to_string(),
+            "relation { size: integer, w: integer, x: integer, z: integer }"
+        );
+        assert_eq!(value("dee"), &hir::Value::dee());
+        assert_eq!(value("also_dee"), &hir::Value::dee());
+        assert_eq!(value("alone"), value("a"));
+    }
+
+    #[test]
+    fn join_of_lists_errors() {
+        let source = format!(
+            "var a := relation {{ {{ x: 1 }} }};\nvar b := relation {{ {{ x: 1, y: 2 }} }};\nvar c := relation {{ {{ z: 1 }} }};\nvar t := relation {{ {{ x: \"1\" }} }};\nvar d := join{{a, b, c}};\nvar e := times{{a, c, b}};\nvar f := join{{a, b, t}};\nvar g := compose{{a, b}};\nvar h := compose{{a, b, c}};\nvar i := join{{a, 1}};{MAIN}"
+        );
+        let errors = errors(&source);
+        let found: Vec<_> = errors.iter().map(|e| (e.code, &e.message[..])).collect();
+        assert_eq!(
+            found,
+            [
+                (
+                    Code::CommonAttributes,
+                    "some operands of `join` have no attributes in common with the others"
+                ),
+                (
+                    Code::CommonAttributes,
+                    "the operands of `times` have `x` in common"
+                ),
+                (
+                    Code::JoinTypeConflict,
+                    "the operands of `join` both have an attribute `x`, of different types"
+                ),
+                (
+                    Code::NaryCompose,
+                    "`compose` takes two operands, not a list"
+                ),
+                (
+                    Code::NaryCompose,
+                    "`compose` takes two operands, not a list"
+                ),
+                (
+                    Code::WrongOperandType,
+                    "`join` can't be applied to integers"
+                ),
+            ]
+        );
+        // Only the operands of `times` that share an attribute are labelled.
+        assert_eq!(errors[1].secondary.len(), 2);
+        assert!(fix(&source).contains("var g := a compose b;"));
+        assert!(errors[4].suggestions.is_empty());
+    }
+
+    #[test]
     fn joins_in_bodies() {
         let program = analyze_str(
             "var cities := relation { { city: \"Kumasi\", country: \"Ghana\" } };\noperator f{r: relation { country: text, continent: text }} [\n    call debug_value{v: cities join r};\n    call debug_value{v: cities compose r};\n    call debug_value{v: cities join r join cities};\n];\noperator main{} [];",
@@ -2259,6 +2318,28 @@ mod tests {
             argument(&body[2]),
             &hir::Expr::And(Box::new(hir::Expr::And(cities(), r())), cities())
         );
+        // In a list, the constant operands are joined together when
+        // compiling, and the result joined with the others when running.
+        let program = analyze_str(
+            "operator f{r: relation { z: integer }} [\n    call debug_value{v: join{relation { { x: 1, y: 2 } }, r, relation { { y: 2, z: 3 } }}};\n    call debug_value{v: join{r}};\n];\noperator main{} [];",
+        )
+        .unwrap();
+        let f = program.operators.iter().find(|o| o.name == "f").unwrap();
+        let hir::OperatorKind::User { body } = &f.kind else {
+            panic!("f is a user operator");
+        };
+        let hir::Expr::And(constant, parameter) = argument(&body[0]) else {
+            panic!("{:?}", argument(&body[0]));
+        };
+        let hir::Expr::Constant(constant) = &**constant else {
+            panic!("{constant:?}");
+        };
+        assert_eq!(
+            constant.ty().to_string(),
+            "relation { x: integer, y: integer, z: integer }"
+        );
+        assert_eq!(**parameter, *r());
+        assert_eq!(argument(&body[1]), &*r());
         let errors = errors(
             "var cities := relation { { city: \"Kumasi\", country: \"Ghana\" } };\noperator f{r: relation { size: integer }} [\n    call debug_value{v: cities join r};\n];\noperator main{} [];",
         );

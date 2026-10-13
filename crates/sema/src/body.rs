@@ -283,9 +283,10 @@ fn expr(
                 Resolved::Binary(_) => None,
             }
         }
-        Expr::Binary(binary) if ops::JoinKind::of(binary).is_some() => {
-            joined(binary, expr, expected, within, cx, errors)
+        Expr::Binary(_) | Expr::Nary(_) if ops::Joining::of(expr).is_some() => {
+            joined(expr, expected, within, cx, errors)
         }
+        Expr::Nary(_) => None,
         Expr::Binary(binary) => {
             let token = binary.operator()?;
             let (resolved, operands) = operands(
@@ -397,29 +398,34 @@ fn reshaped(
     Some(result)
 }
 
-/// A join, `binary`, written `expr`, in a body.
+/// `expr`, a join, in a body.
 fn joined(
-    binary: &ast::BinaryExpr,
     expr: &Expr,
     expected: Option<&Expected>,
     within: hir::OperatorId,
     cx: &Context,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Expr> {
-    let (join, token) = ops::JoinKind::of(binary)?;
-    let (lhs_expr, rhs_expr) = (binary.lhs()?, binary.rhs()?);
-    let lhs = self::expr(&lhs_expr, None, within, cx, errors);
-    let rhs = self::expr(&rhs_expr, None, within, cx, errors);
-    let (lhs, rhs) = (lhs?, rhs?);
-    let (lhs_ty, rhs_ty) = (type_of(&lhs, within, cx), type_of(&rhs, within, cx));
-    let removed = ops::joined(
-        join,
-        &token,
-        (&lhs_expr, &lhs_ty),
-        (&rhs_expr, &rhs_ty),
-        errors,
-    )?;
-    let result_ty = lhs_ty.and(&rhs_ty).without(&removed);
+    let joining = ops::Joining::of(expr)?;
+    // Every operand is checked, so that each one's errors are reported.
+    let operands: Vec<Option<hir::Expr>> = joining
+        .operands
+        .iter()
+        .map(|operand| self::expr(operand, None, within, cx, errors))
+        .collect();
+    let operands: Vec<hir::Expr> = operands.into_iter().collect::<Option<_>>()?;
+    let types: Vec<hir::Type> = operands
+        .iter()
+        .map(|operand| type_of(operand, within, cx))
+        .collect();
+    let removed = joining.removed(&types, errors)?;
+    let result_ty = types
+        .iter()
+        .fold(
+            hir::Type::Relation(hir::Heading::default()),
+            |result, ty| result.and(ty),
+        )
+        .without(&removed);
     if let Some(expected) = expected
         && expected.ty != result_ty
     {
@@ -432,7 +438,7 @@ fn joined(
         ));
         return None;
     }
-    Some(ops::remove(ops::and(lhs, rhs), removed))
+    Some(ops::remove(ops::and(operands), removed))
 }
 
 /// The operator written `token` and its checked `operands`.

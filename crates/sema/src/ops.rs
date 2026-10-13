@@ -552,72 +552,169 @@ pub(crate) enum JoinKind {
 }
 
 impl JoinKind {
-    /// The join `binary` is, and its operator token, if it is one.
-    pub(crate) fn of(binary: &ast::BinaryExpr) -> Option<(JoinKind, SyntaxToken)> {
-        let token = binary.operator()?;
-        let join = match token.kind() {
+    fn of(token: &SyntaxToken) -> Option<JoinKind> {
+        Some(match token.kind() {
             SyntaxKind::JoinKw => JoinKind::Join,
             SyntaxKind::TimesKw => JoinKind::Times,
             SyntaxKind::ComposeKw => JoinKind::Compose,
             _ => return None,
-        };
-        Some((join, token))
+        })
     }
 }
 
-/// The attributes `join`, written `token`, removes from the AND of its
-/// operands, `lhs` and `rhs`, each with its type: the common attributes for
-/// `compose`, and none otherwise. `None` after reporting why there is no
-/// result: an operand isn't a relation, a common attribute has different
-/// types in the two, or the operands have common attributes where the
-/// operator takes none, or none where it needs some.
-pub(crate) fn joined(
-    join: JoinKind,
-    token: &SyntaxToken,
-    (lhs, lhs_ty): (&Expr, &hir::Type),
-    (rhs, rhs_ty): (&Expr, &hir::Type),
-    errors: &mut Vec<Diagnostic>,
-) -> Option<BTreeSet<String>> {
-    let mut headings = Vec::new();
-    for (operand, ty) in [(lhs, lhs_ty), (rhs, rhs_ty)] {
-        match ty {
-            hir::Type::Relation(heading) => headings.push(heading),
-            _ => errors.push(errors::not_joinable(token, ty, operand)),
-        }
+/// A join as written: dyadic, `r join s`, or of a list, `join{r, s, t}`.
+pub(crate) struct Joining {
+    pub(crate) kind: JoinKind,
+    pub(crate) token: SyntaxToken,
+    pub(crate) operands: Vec<Expr>,
+    /// The list form, `join{…}`, if it's written that way.
+    nary: Option<ast::NaryExpr>,
+}
+
+impl Joining {
+    /// The join `expr` is, if it is one.
+    pub(crate) fn of(expr: &Expr) -> Option<Joining> {
+        let (token, operands, nary) = match expr {
+            Expr::Binary(binary) => (binary.operator()?, vec![binary.lhs()?, binary.rhs()?], None),
+            Expr::Nary(nary) => (
+                nary.operator()?,
+                nary.operands().collect(),
+                Some(nary.clone()),
+            ),
+            _ => return None,
+        };
+        Some(Joining {
+            kind: JoinKind::of(&token)?,
+            token,
+            operands,
+            nary,
+        })
     }
-    let [lhs_heading, rhs_heading] = <[&hir::Heading; 2]>::try_from(headings).ok()?;
-    let common = lhs_heading.common(rhs_heading);
-    let mut ok = true;
-    for name in &common {
-        let (a, b) = (lhs_heading.get(name)?, rhs_heading.get(name)?);
-        if a != b {
-            errors.push(errors::join_type_conflict(token, name, (lhs, a), (rhs, b)));
+
+    /// The attributes the join removes from the AND of its operands, each
+    /// with its type in `types`: the common attributes for `compose`, and
+    /// none otherwise. `None` after reporting why there is no result:
+    /// compose of a list, an operand that isn't a relation, a common
+    /// attribute with different types in two operands, common attributes
+    /// where the operator takes none, or operands that don't all connect
+    /// through common attributes where it needs them to.
+    pub(crate) fn removed(
+        &self,
+        types: &[hir::Type],
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<BTreeSet<String>> {
+        if self.kind == JoinKind::Compose
+            && let Some(nary) = &self.nary
+        {
+            errors.push(errors::nary_compose(nary));
+            return None;
+        }
+        let mut operands = Vec::new();
+        for (operand, ty) in self.operands.iter().zip(types) {
+            match ty {
+                hir::Type::Relation(heading) => operands.push((operand, heading)),
+                _ => errors.push(errors::not_joinable(&self.token, ty, operand)),
+            }
+        }
+        if operands.len() < self.operands.len() {
+            return None;
+        }
+        let mut ok = true;
+        // Each attribute name, with the first operand that has it.
+        let mut first: BTreeMap<&str, (&Expr, &hir::Type)> = BTreeMap::new();
+        let mut shared = BTreeSet::new();
+        for &(operand, heading) in &operands {
+            for (name, ty) in heading.attributes() {
+                let Some(&(earlier, earlier_ty)) = first.get(name) else {
+                    first.insert(name, (operand, ty));
+                    continue;
+                };
+                shared.insert(name.to_string());
+                if earlier_ty != ty {
+                    errors.push(errors::join_type_conflict(
+                        &self.token,
+                        name,
+                        (earlier, earlier_ty),
+                        (operand, ty),
+                    ));
+                    ok = false;
+                }
+            }
+        }
+        let headings: Vec<&hir::Heading> = operands.iter().map(|&(_, h)| h).collect();
+        let groups = groups(&headings);
+        let wrong = match self.kind {
+            JoinKind::Times => !shared.is_empty(),
+            // With a list, `join{}` and `join{r}` have nothing to connect.
+            JoinKind::Join | JoinKind::Compose => groups.iter().any(|&g| g != 0),
+        };
+        if wrong {
+            errors.push(errors::common_attributes(
+                self.kind,
+                &self.token,
+                &operands,
+                &shared,
+                &groups,
+            ));
             ok = false;
         }
+        ok.then(|| match self.kind {
+            JoinKind::Compose => shared,
+            JoinKind::Join | JoinKind::Times => BTreeSet::new(),
+        })
     }
-    if common.is_empty() != (join == JoinKind::Times) {
-        errors.push(errors::common_attributes(
-            join,
-            token,
-            (lhs, lhs_heading),
-            (rhs, rhs_heading),
-            &common,
-        ));
-        ok = false;
-    }
-    ok.then(|| match join {
-        JoinKind::Compose => common,
-        JoinKind::Join | JoinKind::Times => BTreeSet::new(),
-    })
 }
 
-/// The AND of the relations `lhs` and `rhs`, evaluated if both are
-/// constants.
-pub(crate) fn and(lhs: hir::Expr, rhs: hir::Expr) -> hir::Expr {
-    match (lhs, rhs) {
-        (hir::Expr::Constant(lhs), hir::Expr::Constant(rhs)) => hir::Expr::Constant(lhs.and(&rhs)),
-        (lhs, rhs) => hir::Expr::And(Box::new(lhs), Box::new(rhs)),
+/// For each heading, which group it is in: those connected to each other
+/// through common attributes, numbered from 0 in order of their first
+/// heading.
+fn groups(headings: &[&hir::Heading]) -> Vec<usize> {
+    let mut group: Vec<Option<usize>> = vec![None; headings.len()];
+    let mut count = 0;
+    for start in 0..headings.len() {
+        if group[start].is_some() {
+            continue;
+        }
+        group[start] = Some(count);
+        let mut pending = vec![start];
+        while let Some(i) = pending.pop() {
+            for j in 0..headings.len() {
+                if group[j].is_none() && !headings[i].common(headings[j]).is_empty() {
+                    group[j] = Some(count);
+                    pending.push(j);
+                }
+            }
+        }
+        count += 1;
     }
+    group.into_iter().map(|g| g.unwrap_or(0)).collect()
+}
+
+/// The AND of the relations `operands`, with the constant ones evaluated
+/// together first: AND is associative and commutative, so the order
+/// doesn't change the result. The AND of no relations is `relation {} {{}}`,
+/// which is AND's identity.
+pub(crate) fn and(operands: Vec<hir::Expr>) -> hir::Expr {
+    let (constants, others): (Vec<_>, Vec<_>) = operands
+        .into_iter()
+        .partition(|e| matches!(e, hir::Expr::Constant(_)));
+    let constant = constants
+        .into_iter()
+        .filter_map(|e| match e {
+            hir::Expr::Constant(value) => Some(value),
+            _ => None,
+        })
+        .reduce(|lhs, rhs| lhs.and(&rhs));
+    let mut others = others.into_iter();
+    let first = match constant {
+        Some(value) => hir::Expr::Constant(value),
+        None => others
+            .next()
+            .unwrap_or_else(|| hir::Expr::Constant(hir::Value::dee())),
+    };
+    others.fold(first, |lhs, rhs| {
+        hir::Expr::And(Box::new(lhs), Box::new(rhs))
+    })
 }
 
 /// The attribute `extract`, written after `operand`, which is of type `ty`,

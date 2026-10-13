@@ -306,9 +306,10 @@ pub(crate) fn value(
                 Resolved::Binary(_) => None,
             }
         }
-        Expr::Binary(binary) if ops::JoinKind::of(binary).is_some() => {
-            joined(binary, expr, expected, scope, errors)
+        Expr::Binary(_) | Expr::Nary(_) if ops::Joining::of(expr).is_some() => {
+            joined(expr, expected, scope, errors)
         }
+        Expr::Nary(_) => None,
         Expr::Binary(binary) => {
             let token = binary.operator()?;
             let (resolved, operands) = operands(
@@ -335,27 +336,26 @@ pub(crate) fn value(
     }
 }
 
-/// The value of a join, `binary`, written `expr`.
+/// The value of `expr`, a join.
 fn joined(
-    binary: &ast::BinaryExpr,
     expr: &Expr,
     expected: Option<&Expected>,
     scope: &mut dyn Scope,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Value> {
-    let (join, token) = ops::JoinKind::of(binary)?;
-    let (lhs, rhs) = (binary.lhs()?, binary.rhs()?);
-    let lhs_value = value(&lhs, None, scope, errors);
-    let rhs_value = value(&rhs, None, scope, errors);
-    let (lhs_value, rhs_value) = (lhs_value?, rhs_value?);
-    let removed = ops::joined(
-        join,
-        &token,
-        (&lhs, &lhs_value.ty()),
-        (&rhs, &rhs_value.ty()),
-        errors,
-    )?;
-    let result = lhs_value.and(&rhs_value);
+    let joining = ops::Joining::of(expr)?;
+    // Every operand is checked, so that each one's errors are reported.
+    let values: Vec<Option<hir::Value>> = joining
+        .operands
+        .iter()
+        .map(|operand| value(operand, None, scope, errors))
+        .collect();
+    let values: Vec<hir::Value> = values.into_iter().collect::<Option<_>>()?;
+    let types: Vec<hir::Type> = values.iter().map(hir::Value::ty).collect();
+    let removed = joining.removed(&types, errors)?;
+    let result = values
+        .iter()
+        .fold(hir::Value::dee(), |result, value| result.and(value));
     let result = if removed.is_empty() {
         result
     } else {

@@ -242,6 +242,20 @@ mod tests {
     }
 
     #[test]
+    fn joins_of_lists() {
+        assert_eq!(
+            highlight("var a := join{b, c};"),
+            [
+                ("var", Class::Keyword, false),
+                ("a", Class::Variable, true),
+                ("join", Class::ExprOperator, false),
+                ("b", Class::Variable, false),
+                ("c", Class::Variable, false),
+            ]
+        );
+    }
+
+    #[test]
     fn comments() {
         assert_eq!(
             highlight("/* a /* b */ c */ var x := 1; /* d */"),

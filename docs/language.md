@@ -726,6 +726,26 @@ operator main{} [
   tighter than a join, so `r join s rename {id as r_id}` renames `s`'s
   attribute.
 - **Joins take relations.** Joining tuples is not in the language yet.
+- **Lists:** `join{r, s, t}` and `times{r, s, t}` take any number of
+  operands, in any order, since join and times are associative and
+  commutative. Each operand of `join{…}` must have an attribute in common
+  with another, so that they all connect, and no two operands of
+  `times{…}` may share one. `join{}` and `times{}` are
+  `relation {} { {} }` (table_dee), which joins with anything to give it
+  back. Compose isn't associative, so `compose{…}` is an error (A0029).
+
+```trendy
+var cities := relation { { city: "Kumasi", country: "Ghana" } };
+var countries := relation { { country: "Ghana", continent: "Africa" } };
+var continents := relation { { continent: "Africa", area: 30370000 } };
+var sizes := relation { { size: "small" }, { size: "large" } };
+var placed := join{cities, countries, continents};
+var everything := times{cities, sizes};
+
+operator main{} [
+    call debug_value{v: placed};
+];
+```
 - **SQL's spellings** are recognized (P0021): `natural join` and
   `inner join` are fixed to `join`, `cross join` to `times`, and `using`
   is deleted. `on` and the outer joins have no equivalent.
@@ -988,6 +1008,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `PRIMARY KEY (a)`, `UNIQUE (a)`, `KEY { A }` | `key { a }` |
 | `NATURAL JOIN`, `INNER JOIN`, `JOIN … USING (a)` | `join` |
 | `CROSS JOIN` | `times` |
+| `JOIN { R1, R2, R3 }` | `join{r1, r2, r3}` |
 | `JOIN … ON r.a = s.b` | `r join s rename {b as a}` |
 | `LEFT JOIN`, `RIGHT JOIN`, `FULL JOIN` | none: there are no nulls |
 | `a / b` for integers | `a div b` |

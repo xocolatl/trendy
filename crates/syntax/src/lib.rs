@@ -125,6 +125,9 @@ pub enum SyntaxKind {
     ProjectExpr,
     /// `r remove {a, b}` or `r rename {a as b}`
     PostfixExpr,
+    /// `join{r, s, t}` or `times{r, s, t}`: a join of any number of
+    /// relations.
+    NaryExpr,
     /// `{a, b}`: attribute names, as in a projection.
     NameList,
     /// `{a as b, c as d}`, in a `rename`.
@@ -162,7 +165,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 84] = [
+    pub const ALL: [SyntaxKind; 85] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -231,6 +234,7 @@ impl SyntaxKind {
         SyntaxKind::ExtractExpr,
         SyntaxKind::ProjectExpr,
         SyntaxKind::PostfixExpr,
+        SyntaxKind::NaryExpr,
         SyntaxKind::NameList,
         SyntaxKind::RenameList,
         SyntaxKind::Renaming,
@@ -487,7 +491,8 @@ impl SyntaxKind {
             | SyntaxKind::ParenExpr
             | SyntaxKind::ExtractExpr
             | SyntaxKind::ProjectExpr
-            | SyntaxKind::PostfixExpr => "expression",
+            | SyntaxKind::PostfixExpr
+            | SyntaxKind::NaryExpr => "expression",
             SyntaxKind::NameList => "attribute names",
             SyntaxKind::RenameList => "renamings",
             SyntaxKind::Renaming => "renaming",

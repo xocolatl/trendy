@@ -417,6 +417,9 @@ fn relations() {
             r#"relation { born: integer, city: text, name: text } { { born: 1815, city: "London", name: "Ada" }, { born: 1923, city: "Portland", name: "Edgar" } }"#,
             r#"relation { born: integer, city: text } { { born: 1815, city: "London" }, { born: 1923, city: "Portland" } }"#,
             r#"relation { city: text, year: integer } { { city: "London", year: 2024 }, { city: "London", year: 2025 }, { city: "Nyeri", year: 2024 }, { city: "Nyeri", year: 2025 }, { city: "Portland", year: 2024 }, { city: "Portland", year: 2025 } }"#,
+            // Joins and times of lists.
+            r#"relation { born: integer, city: text, name: text } { { born: 1815, city: "London", name: "Ada" }, { born: 1923, city: "Portland", name: "Edgar" } }"#,
+            r#"relation { born: integer, city: text, year: integer } { { born: 1815, city: "London", year: 2024 }, { born: 1815, city: "London", year: 2025 }, { born: 1815, city: "Nyeri", year: 2024 }, { born: 1815, city: "Nyeri", year: 2025 }, { born: 1815, city: "Portland", year: 2024 }, { born: 1815, city: "Portland", year: 2025 }, { born: 1923, city: "London", year: 2024 }, { born: 1923, city: "London", year: 2025 }, { born: 1923, city: "Nyeri", year: 2024 }, { born: 1923, city: "Nyeri", year: 2025 }, { born: 1923, city: "Portland", year: 2024 }, { born: 1923, city: "Portland", year: 2025 } }"#,
         ]
     );
 }

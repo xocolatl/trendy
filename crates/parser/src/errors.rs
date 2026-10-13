@@ -11,6 +11,8 @@ pub(crate) const HEADING_FORM: &str = "a heading lists attributes with their typ
 pub(crate) const RELATION_VALUE_FORM: &str = "a relation value has the form `relation { tuple, … }`, optionally with a heading first: `relation { name: type, … } { … }`";
 pub(crate) const PROJECTION_FORM: &str =
     "a projection and `remove` take attribute names: `r{a, b}`, `r remove {a, b}`";
+pub(crate) const NARY_FORM: &str =
+    "a join of any number of relations lists them in braces: `join{r, s, t}` or `times{r, s, t}`";
 pub(crate) const KEY_FORM: &str = "a key lists attributes after a relation variable's value, or after its type if it has no value: `var r := relation { … } key { a, b };`";
 pub(crate) const RENAME_FORM: &str =
     "`rename` takes renamings, each `old as new`: `r rename {postal_code as code}`";
@@ -131,9 +133,10 @@ fn describe_sequence(kinds: &[SyntaxKind]) -> String {
 }
 
 /// A `what` (such as "parameter list") enclosed in `wrong` delimiters
-/// instead of `right` ones.
+/// instead of `right` ones, in a construct of the given `form`.
 pub(crate) fn wrong_delimiter(
     what: &str,
+    form: &str,
     right: (SyntaxKind, SyntaxKind),
     wrong: (SyntaxKind, SyntaxKind),
     open: Span,
@@ -156,9 +159,7 @@ pub(crate) fn wrong_delimiter(
         open,
         format!("expected `{right_open}`"),
     )
-    .with_note(
-        "trendy encloses parameter and argument lists in `{}` and bodies in `[]`, unlike C-family languages",
-    );
+    .with_note(form);
     if let Some(close) = close {
         d = d.with_secondary(close, format!("expected `{right_close}`"));
         edits.push(Edit {

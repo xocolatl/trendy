@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use trendy_diag::{Code, Diagnostic, Edit, Span, edit_distance};
 use trendy_hir as hir;
 use trendy_syntax::SyntaxToken;
-use trendy_syntax::ast::{AstNode, Expr, Key, SourceFile};
+use trendy_syntax::ast::{AstNode, Expr, Key, NaryExpr, SourceFile};
 
 use crate::types::Origin;
 use crate::{Kind, Values};
@@ -713,16 +713,17 @@ pub(crate) fn join_type_conflict(
     ))
 }
 
-/// The join `join`, written `token`, of `lhs`, whose heading is
-/// `lhs_heading`, and `rhs`, whose heading is `rhs_heading`, which have
-/// the attributes `common` in common, wrongly for the operator: none for
-/// `join` and `compose`, or some for `times`.
+/// The join `join`, written `token`, of `operands`, each with its heading,
+/// whose common attributes are wrong for the operator. For `times`, `shared`
+/// are the attributes more than one operand has. For `join` and `compose`,
+/// `groups` gives each operand's group, the operands connected to each other
+/// through common attributes, and there is more than one.
 pub(crate) fn common_attributes(
     join: crate::ops::JoinKind,
     token: &SyntaxToken,
-    (lhs, lhs_heading): (&Expr, &hir::Heading),
-    (rhs, rhs_heading): (&Expr, &hir::Heading),
-    common: &BTreeSet<String>,
+    operands: &[(&Expr, &hir::Heading)],
+    shared: &BTreeSet<String>,
+    groups: &[usize],
 ) -> Diagnostic {
     use crate::ops::JoinKind;
     let operator = token.text();
@@ -738,12 +739,20 @@ pub(crate) fn common_attributes(
             format!("this has {}", trendy_diag::conjoin(&names))
         }
     };
+    let labelled = |d: Diagnostic, shown: &dyn Fn(&hir::Heading) -> bool| {
+        operands
+            .iter()
+            .filter(|(_, heading)| shown(heading))
+            .fold(d, |d, (operand, heading)| {
+                d.with_secondary(operand.span(), attributes(heading))
+            })
+    };
     if join == JoinKind::Times {
-        let names: Vec<String> = common.iter().map(|a| format!("`{a}`")).collect();
-        let first = common
+        let names: Vec<String> = shared.iter().map(|a| format!("`{a}`")).collect();
+        let first = shared
             .first()
             .expect("times is reported with common attributes");
-        return Diagnostic::error(
+        let d = Diagnostic::error(
             Code::CommonAttributes,
             format!(
                 "the operands of `{operator}` have {} in common",
@@ -751,41 +760,96 @@ pub(crate) fn common_attributes(
             ),
             span,
             format!("`{operator}` takes operands with no attributes in common"),
-        )
-        .with_secondary(lhs.span(), attributes(lhs_heading))
-        .with_secondary(rhs.span(), attributes(rhs_heading))
+        );
+        // Only the operands that share something, in a long list.
+        return labelled(d, &|heading| {
+            operands.len() == 2 || shared.iter().any(|a| heading.get(a).is_some())
+        })
         .with_note(JOIN_RULE)
         .with_help(format!(
             "to match tuples on them, write `join`; if they mean different things, rename one side's: `… rename {{{first} as other_{first}}}`"
         ));
     }
-    // An attribute of one operand that's a near miss for one of the other's
-    // was probably meant to match it. Short names are all near each other,
-    // so the difference must be small for their length too.
-    let near_miss = lhs_heading
-        .attributes()
-        .flat_map(|(a, _)| rhs_heading.attributes().map(move |(b, _)| (a, b)))
+    // An attribute of one group that's a near miss for one of another's was
+    // probably meant to match it. Short names are all near each other, so
+    // the difference must be small for their length too.
+    let near_miss = operands
+        .iter()
+        .zip(groups)
+        .flat_map(|((_, a), g)| {
+            operands
+                .iter()
+                .zip(groups)
+                .filter(move |(_, h)| *h != g)
+                .flat_map(move |((_, b), _)| {
+                    a.attributes()
+                        .flat_map(move |(x, _)| b.attributes().map(move |(y, _)| (x, y)))
+                })
+        })
         .filter(|(a, b)| {
             let distance = edit_distance(a, b);
             distance <= 2 && distance * 3 <= a.len().min(b.len())
         })
-        .min_by_key(|(a, b)| edit_distance(a, b));
+        .min_by_key(|(a, b)| (edit_distance(a, b), *a, *b));
+    let message = if operands.len() == 2 {
+        format!("the operands of `{operator}` have no attributes in common")
+    } else {
+        format!("some operands of `{operator}` have no attributes in common with the others")
+    };
     let d = Diagnostic::error(
         Code::CommonAttributes,
-        format!("the operands of `{operator}` have no attributes in common"),
+        message,
         span,
         format!("`{operator}` matches tuples on their common attributes"),
-    )
-    .with_secondary(lhs.span(), attributes(lhs_heading))
-    .with_secondary(rhs.span(), attributes(rhs_heading))
-    .with_note(JOIN_RULE);
+    );
+    let d = labelled(d, &|_| true).with_note(JOIN_RULE);
+    let d = if operands.len() == 2 {
+        d
+    } else {
+        d.with_note(format!(
+            "each operand of `{operator}{{…}}` must have an attribute in common with another, so that they all connect, and none is paired with every tuple of the rest by mistake"
+        ))
+    };
     let d = match near_miss {
         Some((a, b)) => d.with_help(format!(
             "if `{b}` is `{a}`, rename it so they match: `… rename {{{b} as {a}}}`"
         )),
         None => d,
     };
-    d.with_help("to pair every tuple of one with every tuple of the other, write `times`")
+    d.with_help(if operands.len() == 2 {
+        "to pair every tuple of one with every tuple of the other, write `times`"
+    } else {
+        "to pair every tuple of some operands with every tuple of others, join each group, and combine the groups with `times`"
+    })
+}
+
+/// `compose{…}`, `nary`, which has no form with a list of operands, since
+/// compose isn't associative.
+pub(crate) fn nary_compose(nary: &NaryExpr) -> Diagnostic {
+    let operands: Vec<Expr> = nary.operands().collect();
+    let d = Diagnostic::error(
+        Code::NaryCompose,
+        "`compose` takes two operands, not a list",
+        nary.span(),
+        "compose has no form with a list of operands",
+    )
+    .with_note(
+        "compose isn't associative: `(r compose s) compose t` and `r compose (s compose t)` can differ, so a list of operands would have no one meaning",
+    );
+    match operands.as_slice() {
+        [lhs, rhs] => d.with_suggestion(
+            "write `compose` between them",
+            vec![Edit {
+                span: nary.span(),
+                replacement: format!(
+                    "{} compose {}",
+                    lhs.syntax().to_string().trim(),
+                    rhs.syntax().to_string().trim()
+                ),
+            }],
+        ),
+        _ => d.with_help("write the order you mean, as in `(r compose s) compose t`"),
+    }
 }
 
 /// `.name`, at `at`, applied to a value of type `ty`, which isn't a tuple.

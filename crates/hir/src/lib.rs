@@ -800,6 +800,16 @@ impl Value {
 }
 
 impl Value {
+    /// `relation {} { {} }`, the relation with no attributes and one tuple
+    /// (Tutorial D's `TABLE_DEE`), which is the identity of AND.
+    #[must_use]
+    pub fn dee() -> Value {
+        Value::Relation(RelationValue {
+            heading: Heading::default(),
+            tuples: BTreeSet::from([TupleValue::default()]),
+        })
+    }
+
     /// The AND of two relations, as for [`Expr::And`].
     ///
     /// # Panics

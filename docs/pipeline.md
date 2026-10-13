@@ -144,7 +144,9 @@ reported with a fix. SQL's joins are recognized the same way (P0021):
 stand for and fixed to it, and the outer joins as `join`, with no fix,
 looking up to three tokens ahead. SQL's `on` condition or `using` list after a
 join's right operand is consumed into an error node, so the next join still
-parses, and reported.
+parses, and reported. A join of a list, `join{r, s, t}` or `times{…}`, is an
+operand (`NaryExpr`), recognized where an operand starts by the keyword
+followed by `{`, or by `(`, which is fixed to braces.
 
 **Must not:** resolve names, check meaning, or reject a program that is
 grammatically valid. For example, "no `main`", "duplicate name" and "unknown
@@ -287,12 +289,16 @@ numeric type is reported at the operator, with a fix to the right one
 (A0022). Comparisons take their operand type from the first operand only,
 since the type expected of them is that of their boolean result.
 
-`join`, `times` and `compose` (`ops::Join`) are checked by one function,
-`ops::joined`: both operands must be relations (A0022), a common attribute
-must have the same type in both (A0027), and the operands must have common
-attributes for `join` and `compose`, and none for `times` (A0028, whose help
-names a near-miss attribute to rename). Each becomes `hir::Expr::And`, and
-compose a `Remove` of it, folded when both operands are constants.
+`join`, `times` and `compose`, dyadic or of a list (`ops::Joining`), are
+checked by one function, `Joining::removed`: every operand must be a
+relation (A0022), an attribute must have the same type in every operand
+that has it (A0027), the operands of `join` and `compose` must all connect
+through common attributes, and no two operands of `times` may share one
+(A0028, whose help names a near-miss attribute to rename). Compose has no
+list form, since it isn't associative (A0029). Each becomes nested
+`hir::Expr::And`s, and compose a `Remove` of one. A list's constant operands
+are joined together first, which AND's associativity and commutativity
+allow, and an empty list is table_dee, AND's identity.
 
 Comparisons follow one order per type (`hir::compare`): `false` before
 `true`, integers numerically, rationals by IEEE 754 totalOrder, and text

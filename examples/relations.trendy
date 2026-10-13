@@ -300,6 +300,14 @@ var years := relation {
     { year: 2025 }
 };
 var every_year := cities{city} times years;
+/* Of any number of relations: join{r, s, t} and times{r, s, t}, as join
+   and times are associative and commutative. join{} and times{} are
+   table_dee, AND's identity. Every operand of a join must connect to the
+   others through common attributes, and no two of times may share one.
+   Tutorial D: JOIN { R1, R2, R3 } and TIMES { R1, R2, R3 }. Compose isn't
+   associative, so it has no such form. */
+var lived_born := join{people, cities, births{name, born}};
+var grid := times{cities{city}, years, people{born}};
 
 operator join_people{
     p: relation { name: text, born: integer },
@@ -309,6 +317,8 @@ operator join_people{
     call debug_value{v: p join c};
     call debug_value{v: p compose c};
     call debug_value{v: c{city} times y};
+    call debug_value{v: join{p, c, p}};
+    call debug_value{v: times{c{city}, y, p{born}}};
 ];
 
 operator main{} [
@@ -327,6 +337,8 @@ operator main{} [
     call debug_value{v: lived};
     call debug_value{v: born_in};
     call debug_value{v: every_year};
+    call debug_value{v: lived_born};
+    call debug_value{v: grid};
 
     call project_births{r: births};
     call project_signs{r: signs};

@@ -60,7 +60,7 @@ key { recipe };
 
 /* Each planned meal with its recipe and ingredients. Joining with the
    plan also leaves out the recipes not planned. */
-var planned := plan join recipes join ingredients;
+var planned := join{plan, recipes, ingredients};
 
 /* The rest of the list, as it should read once the language has what it
    needs, in the order the features are needed:
