@@ -547,6 +547,7 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
             | SyntaxKind::ExtendKw
             | SyntaxKind::ReplaceKw
             | SyntaxKind::GroupKw
+            | SyntaxKind::UngroupKw
             | SyntaxKind::AsKw,
             _,
         )
@@ -558,6 +559,7 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
             | SyntaxKind::ExtendKw
             | SyntaxKind::ReplaceKw
             | SyntaxKind::GroupKw
+            | SyntaxKind::UngroupKw
             | SyntaxKind::AsKw,
         )
         | (RBrace, LBracket | LBrace) => " ",
@@ -903,6 +905,14 @@ mod tests {
         assert_eq!(
             fmt("var a:=r   group{g:={ x,y },h :={z}};"),
             "var a := r group { g := {x, y}, h := {z} };\n"
+        );
+    }
+
+    #[test]
+    fn ungroupings() {
+        assert_eq!(
+            fmt("var a:=r   ungroup{ g,h }ungroup {i};"),
+            "var a := r ungroup {g, h} ungroup {i};\n"
         );
     }
 

@@ -356,6 +356,11 @@ each tuple at hand it refers to is shifted one `Extend` further out
 (`ops::deeper`, which shifts every `Current` in it, as for a name resolved
 outside).
 
+`ungroup` is the one relational operator that isn't Algebra A's: Appendix
+A defines UNGROUP with an infinite relation, which no program can hold.
+So it has its own HIR node, `Ungroup`, folded when its operand is a
+constant (`Value::ungrouped`), and computed by the runtime otherwise.
+
 The arithmetic operators are overloaded on integers and approximate numbers
 (`ops::Operator` resolves to a typed `hir::BinaryOp`): the operand type
 comes from the expected type when it is numeric, and otherwise from the
@@ -495,10 +500,14 @@ goes through the operand's, with the address of the tuple at hand in a
 slot (`Base::Indirect`), building each result tuple the same way; and
 `trendy_rt_sort` puts them in the canonical order, making one of the
 tuples a `replace` made equal. A failure inside the loop stops the program
-as anywhere else. An image relation in the loop builds the one-tuple
-relation and joins it with `trendy_rt_and` for each tuple: correct, but a
-join per tuple, until an optimizer rewrites it into one join and a
-grouping.
+as anywhere else. `Ungroup` is a call to `trendy_rt_ungroup`, with, as for
+`And`, where each attribute of the result comes from, the outer tuple or
+the tuple of which ungrouped relation, and each ungrouped attribute's
+offset and its relation's tuple size; it makes every combination, then
+sorts them into the canonical order, making one of any that turn out equal.
+An image relation in the loop builds the one-tuple relation and joins it
+with `trendy_rt_and` for each tuple: correct, but a join per tuple, until
+an optimizer rewrites it into one join and a grouping.
 
 The canonical order of a relation's tuples is `hir::Value`'s order, which
 the compiler uses for constants and the runtime reproduces

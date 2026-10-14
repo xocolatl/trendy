@@ -176,6 +176,9 @@ impl<'a> Checker<'a> {
                 let name = ops::extracted(extract, &operand_expr, &ty, errors)?;
                 self.matched(expected, ops::extract(operand, name), expr, errors)
             }
+            Expr::Postfix(postfix) if ops::is_ungroup(postfix) => {
+                self.ungrouped(postfix, expr, expected, errors)
+            }
             Expr::Postfix(postfix) if ops::is_group(postfix) => {
                 self.grouped(postfix, expr, expected, errors)
             }
@@ -342,7 +345,7 @@ impl<'a> Checker<'a> {
         let ty = self.ty(&operand);
         let keyword = trendy_syntax::span(postfix.operator()?.text_range());
         let hir::Type::Relation(heading) = &ty else {
-            errors.push(errors::not_groupable(keyword, &ty, &operand_expr));
+            errors.push(errors::not_relational("group", keyword, &ty, &operand_expr));
             return None;
         };
         let list = postfix.groupings()?;
@@ -379,6 +382,83 @@ impl<'a> Checker<'a> {
                 None
             }
         }
+    }
+
+    /// `postfix`, an `ungroup`, written `expr`: each tuple of the operand
+    /// replaced by one for each combination of a tuple of each named
+    /// relation-valued attribute, with its attributes in place of them.
+    fn ungrouped(
+        &mut self,
+        postfix: &ast::PostfixExpr,
+        expr: &Expr,
+        expected: Option<&Expected>,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let operand_expr = postfix.operand()?;
+        let operand = self.expr(&operand_expr, None, errors)?;
+        let ty = self.ty(&operand);
+        let keyword = trendy_syntax::span(postfix.operator()?.text_range());
+        let hir::Type::Relation(heading) = &ty else {
+            errors.push(errors::not_relational(
+                "ungroup",
+                keyword,
+                &ty,
+                &operand_expr,
+            ));
+            return None;
+        };
+        let list = postfix.names()?;
+        if list.names().next().is_none() {
+            errors.push(errors::empty_ungroup(postfix, &operand_expr));
+            return None;
+        }
+        let attributes: Vec<String> = heading
+            .attributes()
+            .map(|(a, _)| format!("`{a}`"))
+            .collect();
+        let context = format!(
+            "the operand's attributes are {}",
+            trendy_diag::conjoin(&attributes)
+        );
+        let names = ops::listed(&list, heading, errors::Noun::Projected, &context, errors)?;
+        let mut ok = true;
+        // Where each attribute of the result comes from: kept, or which
+        // ungrouped attribute's relation.
+        let mut placed: BTreeMap<String, Option<String>> = heading
+            .without(&names)
+            .attributes()
+            .map(|(a, _)| (a.to_string(), None))
+            .collect();
+        for name in list.names() {
+            let Some(ident) = name.ident() else {
+                continue;
+            };
+            let span = trendy_syntax::span(ident.text_range());
+            let ungrouped = ident.text();
+            let Some(hir::Type::Relation(inner)) = heading.get(ungrouped) else {
+                let attribute_ty = heading.get(ungrouped)?;
+                errors.push(errors::not_ungroupable(ungrouped, span, attribute_ty));
+                ok = false;
+                continue;
+            };
+            for (attribute, _) in inner.attributes() {
+                if let Some(from) = placed.get(attribute) {
+                    errors.push(errors::ungroup_clash(
+                        attribute,
+                        span,
+                        ungrouped,
+                        from.as_deref(),
+                    ));
+                    ok = false;
+                } else {
+                    placed.insert(attribute.to_string(), Some(ungrouped.to_string()));
+                }
+            }
+        }
+        if !ok {
+            return None;
+        }
+        self.matched(expected, ops::ungroup(operand, names), expr, errors)
     }
 
     /// `image`, written `expr`: the image relation of the tuple at hand in

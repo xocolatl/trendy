@@ -179,6 +179,14 @@ pub enum Expr {
     /// does both. The heading is the computed attributes': an empty relation
     /// has no tuple to compute them from, but the result still has them.
     Extend(Box<Expr>, Heading, BTreeMap<String, Expr>),
+    /// A relation with relation-valued attributes replaced by their
+    /// attributes (`ungroup`): for each tuple, one tuple for each
+    /// combination of a tuple of each named attribute's relation, so a tuple
+    /// with an empty one has none. The names are relation-valued attributes
+    /// of the operand, at least one, and no two attributes of the result
+    /// share a name. Not Algebra A's: Appendix A defines it with an infinite
+    /// relation, which no program can hold.
+    Ungroup(Box<Expr>, BTreeSet<String>),
     /// The tuple at hand, with this heading: the one an `Extend` is computing
     /// attributes for, `depth` `Extend`s out from here, counting the
     /// innermost as 0. Its attributes are in scope by name in the source,
@@ -223,6 +231,7 @@ impl Expr {
                     .map(|(name, ty)| (name.to_string(), ty.clone())),
             ),
             Expr::Current(_, heading) => Type::Tuple(heading.clone()),
+            Expr::Ungroup(operand, names) => operand.type_with(leaf).ungrouped(names),
         }
     }
 }
@@ -695,6 +704,24 @@ impl Heading {
         )
     }
 
+    /// The heading with the relation-valued attributes named replaced by
+    /// their own attributes, as for [`Expr::Ungroup`].
+    ///
+    /// # Panics
+    ///
+    /// If a name isn't a relation-valued attribute, which sema rules out.
+    #[must_use]
+    pub fn ungrouped(&self, names: &BTreeSet<String>) -> Heading {
+        let mut attributes = self.without(names).0;
+        for name in names {
+            let Some(Type::Relation(inner)) = self.get(name) else {
+                panic!("ungrouping `{name}`, which isn't relation-valued");
+            };
+            attributes.extend(inner.0.iter().map(|(a, ty)| (a.clone(), ty.clone())));
+        }
+        Heading(attributes)
+    }
+
     /// The attributes of both headings, whose common attributes have the
     /// same types.
     #[must_use]
@@ -810,6 +837,40 @@ impl Value {
             }),
             _ => panic!("removing attributes from {self:?}"),
         }
+    }
+
+    /// The relation with the relation-valued attributes named replaced by
+    /// their attributes, as for [`Expr::Ungroup`].
+    ///
+    /// # Panics
+    ///
+    /// If the value isn't a relation with those attributes, which sema rules
+    /// out.
+    #[must_use]
+    pub fn ungrouped(&self, names: &BTreeSet<String>) -> Value {
+        let Value::Relation(relation) = self else {
+            panic!("ungrouping {self:?}");
+        };
+        let mut tuples = BTreeSet::new();
+        for tuple in &relation.tuples {
+            // Each combination of a tuple of each ungrouped relation, built
+            // up one relation at a time.
+            let mut combined = vec![tuple.without(names)];
+            for name in names {
+                let Some(Value::Relation(inner)) = tuple.get(name) else {
+                    panic!("ungrouping `{name}`, which isn't relation-valued");
+                };
+                combined = combined
+                    .iter()
+                    .flat_map(|t| inner.tuples.iter().map(move |i| t.with(i.0.clone())))
+                    .collect();
+            }
+            tuples.extend(combined);
+        }
+        Value::Relation(RelationValue {
+            heading: relation.heading.ungrouped(names),
+            tuples,
+        })
     }
 
     /// The tuple or relation with attributes renamed, as for
@@ -951,6 +1012,20 @@ impl Type {
             Type::Tuple(heading) => Type::Tuple(heading.without(names)),
             Type::Relation(heading) => Type::Relation(heading.without(names)),
             Type::Scalar(_) => panic!("removing attributes from {self}"),
+        }
+    }
+
+    /// The relation type with the relation-valued attributes named replaced
+    /// by their attributes, as for [`Expr::Ungroup`].
+    ///
+    /// # Panics
+    ///
+    /// If the type isn't a relation type, which sema rules out.
+    #[must_use]
+    pub fn ungrouped(&self, names: &BTreeSet<String>) -> Type {
+        match self {
+            Type::Relation(heading) => Type::Relation(heading.ungrouped(names)),
+            _ => panic!("ungrouping {self}"),
         }
     }
 

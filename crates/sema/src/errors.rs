@@ -988,23 +988,11 @@ pub(crate) fn empty_rename(
     postfix: &trendy_syntax::ast::PostfixExpr,
     operand: &Expr,
 ) -> Diagnostic {
-    let end = postfix.span().end;
-    let keyword = postfix.operator().map_or(operand.span().end, |t| {
-        trendy_syntax::span(t.text_range()).start
-    });
-    Diagnostic::error(
-        Code::EmptyRemove,
-        "`rename {}` renames nothing",
-        Span::new(keyword, end),
-        "no renamings",
-    )
-    .with_note("`rename` takes renamings, each `old as new`; with none it would change nothing")
-    .with_suggestion(
-        "drop the `rename {}`",
-        vec![Edit {
-            span: Span::new(operand.span().end, end),
-            replacement: String::new(),
-        }],
+    empty_list(
+        postfix,
+        operand,
+        ("renames nothing", "no renamings"),
+        "`rename` takes renamings, each `old as new`; with none it would change nothing",
     )
 }
 
@@ -1070,32 +1058,20 @@ pub(crate) fn empty_assign(
     postfix: &trendy_syntax::ast::PostfixExpr,
     operand: &Expr,
 ) -> Diagnostic {
-    let end = postfix.span().end;
-    let keyword = postfix.operator().map_or(operand.span().end, |t| {
-        trendy_syntax::span(t.text_range()).start
-    });
-    let (message, label, note) = match assigning {
-        crate::ops::Assigning::Extend => (
-            "`extend {}` adds nothing",
-            "no new attributes",
+    match assigning {
+        crate::ops::Assigning::Extend => empty_list(
+            postfix,
+            operand,
+            ("adds nothing", "no new attributes"),
             "`extend` takes new attributes, each `name := value`; with none it would change nothing",
         ),
-        crate::ops::Assigning::Replace => (
-            "`replace {}` replaces nothing",
-            "no attributes",
+        crate::ops::Assigning::Replace => empty_list(
+            postfix,
+            operand,
+            ("replaces nothing", "no attributes"),
             "`replace` takes attributes the operand has, each `name := value`; with none it would change nothing",
         ),
-    };
-    let spelled = assigning.keyword();
-    Diagnostic::error(Code::EmptyRemove, message, Span::new(keyword, end), label)
-        .with_note(note)
-        .with_suggestion(
-            format!("drop the `{spelled} {{}}`"),
-            vec![Edit {
-                span: Span::new(operand.span().end, end),
-                replacement: String::new(),
-            }],
-        )
+    }
 }
 
 /// The new attribute `name`, at `span`, which `operand`, of type `ty`,
@@ -1172,40 +1148,98 @@ pub(crate) fn replaced_unknown(
     }
 }
 
-/// `group`, at `span`, applied to `operand`, of type `ty`, which isn't a
-/// relation.
-pub(crate) fn not_groupable(span: Span, ty: &hir::Type, operand: &Expr) -> Diagnostic {
+/// `operator`, `group` or `ungroup`, at `span`, applied to `operand`, of
+/// type `ty`, which isn't a relation.
+pub(crate) fn not_relational(
+    operator: &str,
+    span: Span,
+    ty: &hir::Type,
+    operand: &Expr,
+) -> Diagnostic {
+    let note = if operator == "group" {
+        "`group` gathers attributes of the tuples that share the others into a relation; a tuple has no other tuples to gather with"
+    } else {
+        "`ungroup` replaces each tuple of a relation with one for each tuple of its relation-valued attributes; a tuple's result would be a relation"
+    };
     Diagnostic::error(
         Code::WrongOperandType,
-        format!("`group` can't be applied to {}", plural(ty)),
+        format!("`{operator}` can't be applied to {}", plural(ty)),
         span,
-        "`group` takes a relation",
+        format!("`{operator}` takes a relation"),
     )
     .with_secondary(operand.span(), format!("this is `{ty}`"))
-    .with_note("`group` gathers attributes of the tuples that share the others into a relation; a tuple has no other tuples to gather with")
+    .with_note(note)
+}
+
+/// The attribute `name`, at `span`, named in an `ungroup`, of type `ty`,
+/// which isn't a relation.
+pub(crate) fn not_ungroupable(name: &str, span: Span, ty: &hir::Type) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::WrongOperandType,
+        format!("`{name}` can't be ungrouped: it is `{ty}`"),
+        span,
+        "not relation-valued",
+    )
+    .with_note("`ungroup` replaces a relation-valued attribute with the attributes of its relation's tuples");
+    if matches!(ty, hir::Type::Tuple(_)) {
+        d.with_help(format!(
+            "a tuple-valued attribute is unpacked with `unwrap`: `… unwrap {{{name}}}`"
+        ))
+    } else {
+        d
+    }
+}
+
+/// The attribute `attribute` of the relation-valued attribute `ungrouped`,
+/// written at `span`, which the result of an `ungroup` already has: kept,
+/// if `other` is `None`, or from the relation of `other`.
+pub(crate) fn ungroup_clash(
+    attribute: &str,
+    span: Span,
+    ungrouped: &str,
+    other: Option<&str>,
+) -> Diagnostic {
+    let from = match other {
+        Some(other) => format!("`{other}`'s tuples have it too"),
+        None => "the result keeps an attribute of that name".to_string(),
+    };
+    Diagnostic::error(
+        Code::AttributeExists,
+        format!("ungrouping `{ungrouped}` would give two attributes `{attribute}`"),
+        span,
+        format!("its tuples have `{attribute}`, and {from}"),
+    )
+    .with_note("attributes are a set, so each name can appear only once in the result")
+    .with_help(match other {
+        None => format!(
+            "rename the kept one first: `… rename {{{attribute} as other_{attribute}}} ungroup {{{ungrouped}}}`"
+        ),
+        Some(other) => format!(
+            "ungroup one, rename what it gave, then ungroup the other: `… ungroup {{{other}}} rename {{{attribute} as {other}_{attribute}}} ungroup {{{ungrouped}}}`"
+        ),
+    })
 }
 
 /// `group {}`, written `postfix` after `operand`, which gathers nothing.
 pub(crate) fn empty_group(postfix: &trendy_syntax::ast::PostfixExpr, operand: &Expr) -> Diagnostic {
-    let end = postfix.span().end;
-    let keyword = postfix.operator().map_or(operand.span().end, |t| {
-        trendy_syntax::span(t.text_range()).start
-    });
-    Diagnostic::error(
-        Code::EmptyRemove,
-        "`group {}` gathers nothing",
-        Span::new(keyword, end),
-        "no groupings",
-    )
-    .with_note(
+    empty_list(
+        postfix,
+        operand,
+        ("gathers nothing", "no groupings"),
         "`group` takes groupings, each `name := {attributes}`; with none it would change nothing",
     )
-    .with_suggestion(
-        "drop the `group {}`",
-        vec![Edit {
-            span: Span::new(operand.span().end, end),
-            replacement: String::new(),
-        }],
+}
+
+/// `ungroup {}`, written `postfix` after `operand`, which ungroups nothing.
+pub(crate) fn empty_ungroup(
+    postfix: &trendy_syntax::ast::PostfixExpr,
+    operand: &Expr,
+) -> Diagnostic {
+    empty_list(
+        postfix,
+        operand,
+        ("ungroups nothing", "no attributes named"),
+        "`ungroup` takes the relation-valued attributes to replace with their attributes; with none it would change nothing",
     )
 }
 
@@ -1263,20 +1297,42 @@ pub(crate) fn empty_remove(
     postfix: &trendy_syntax::ast::PostfixExpr,
     operand: &Expr,
 ) -> Diagnostic {
+    empty_list(
+        postfix,
+        operand,
+        ("removes nothing", "no attributes named"),
+        "`remove` takes the attributes to drop; with none it would change nothing",
+    )
+    .with_help("to keep no attributes at all, project on none: `r{}`")
+}
+
+/// The postfix operator `postfix`, written after `operand` with an empty
+/// list, which would leave the operand as it is: what it does, `does.0`,
+/// and the label, `does.1`, with `note` on what its list takes. The fix
+/// drops it.
+fn empty_list(
+    postfix: &trendy_syntax::ast::PostfixExpr,
+    operand: &Expr,
+    does: (&str, &str),
+    note: &str,
+) -> Diagnostic {
     let end = postfix.span().end;
-    let keyword = postfix.operator().map_or(operand.span().end, |t| {
+    let keyword = postfix.operator();
+    let start = keyword.as_ref().map_or(operand.span().end, |t| {
         trendy_syntax::span(t.text_range()).start
     });
+    let spelled = keyword
+        .and_then(|t| t.kind().fixed_text())
+        .unwrap_or("this");
     Diagnostic::error(
         Code::EmptyRemove,
-        "`remove {}` removes nothing",
-        Span::new(keyword, end),
-        "no attributes named",
+        format!("`{spelled} {{}}` {}", does.0),
+        Span::new(start, end),
+        does.1,
     )
-    .with_note("`remove` takes the attributes to drop; with none it would change nothing")
-    .with_help("to keep no attributes at all, project on none: `r{}`")
+    .with_note(note.to_string())
     .with_suggestion(
-        "drop the `remove {}`",
+        format!("drop the `{spelled} {{}}`"),
         vec![Edit {
             span: Span::new(operand.span().end, end),
             replacement: String::new(),

@@ -765,6 +765,7 @@ impl<'a> Parser<'a> {
                     SyntaxKind::RenameKw => self.rename_list(),
                     SyntaxKind::ExtendKw | SyntaxKind::ReplaceKw => self.assign_list(keyword),
                     SyntaxKind::GroupKw => self.group_list(),
+                    SyntaxKind::UngroupKw => self.ungrouped(),
                     _ => self.names(errors::PROJECTION_FORM),
                 }
             } else {
@@ -789,6 +790,7 @@ impl<'a> Parser<'a> {
                 | SyntaxKind::ExtendKw
                 | SyntaxKind::ReplaceKw
                 | SyntaxKind::GroupKw
+                | SyntaxKind::UngroupKw
         )
         .then_some((found, keyword))
     }
@@ -1029,6 +1031,21 @@ impl<'a> Parser<'a> {
             self.names(errors::GROUP_FORM);
         }
         self.builder.finish_node();
+    }
+
+    /// `{g, h}`: the relation-valued attributes to ungroup. A bare name, as
+    /// in `ungroup g`, is put in braces.
+    fn ungrouped(&mut self) {
+        if let Some(found) = self.found().filter(|f| f.kind == SyntaxKind::Ident) {
+            self.start_node(SyntaxKind::NameList);
+            self.start_node(SyntaxKind::Name);
+            self.bump();
+            self.builder.finish_node();
+            self.builder.finish_node();
+            self.errors.push(errors::bare_ungrouped(found));
+            return;
+        }
+        self.names(errors::UNGROUP_FORM);
     }
 
     /// `{ a, b }`: attribute names, in a construct of the given `form`.
@@ -2631,6 +2648,19 @@ SourceFile
         assert_eq!(
             messages("var x := r group { {a} };"),
             ["a grouping needs a name"]
+        );
+    }
+
+    #[test]
+    fn ungroupings() {
+        let parse = parse_str("var x := r ungroup {g, h};");
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        // Tutorial D's parentheses and capitals, and a bare name.
+        assert_eq!(fix("var x := r UNGROUP (g);"), "var x := r ungroup {g};");
+        assert_eq!(fix("var x := r ungroup g;"), "var x := r ungroup {g};");
+        assert_eq!(
+            messages("var x := r ungroup g;"),
+            ["`ungroup` takes its attributes in braces: `{g}`"]
         );
     }
 

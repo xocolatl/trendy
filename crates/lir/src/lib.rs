@@ -170,6 +170,19 @@ pub enum RuntimeFn {
     /// attribute: its offset in a tuple of `lhs`, its offset in one of
     /// `rhs`, and the [`Field::Address`] of its type's descriptor.
     And,
+    /// `trendy_rt_ungroup(dst, src, result, source, sources, ungrouped,
+    /// ungrouped_count)`: store at `dst` the relation, of the type the
+    /// descriptor `result` describes, of every tuple made of a tuple of
+    /// `src` and one tuple of each of its relation-valued attributes in
+    /// `ungrouped`, sorted canonically, in memory the statement owns.
+    /// `source` describes `src`. `sources` is an array with, for each
+    /// attribute of `result`, a struct of a [`Field::Usize`], 0 if it comes
+    /// from the tuple of `src` and `k` if from the tuple of the `k`th
+    /// ungrouped relation, and its [`Field::Offset`] there. `ungrouped` is
+    /// an array of `ungrouped_count` (a [`Field::Usize`]) structs, one per
+    /// ungrouped attribute: its offset in a tuple of `src`, and the
+    /// [`Field::Size`] of its relation's tuples.
+    Ungroup,
     /// `trendy_rt_allocate(dst, count, descriptor)`: store at `dst` a
     /// relation, of the type the descriptor describes, of `count` (a
     /// [`Layout::Usize`]) tuples, zeroed, in memory the statement owns, for
@@ -202,6 +215,7 @@ impl RuntimeFn {
             RuntimeFn::Reshape => "trendy_rt_reshape",
             RuntimeFn::Relation => "trendy_rt_relation",
             RuntimeFn::And => "trendy_rt_and",
+            RuntimeFn::Ungroup => "trendy_rt_ungroup",
             RuntimeFn::Allocate => "trendy_rt_allocate",
             RuntimeFn::Sort => "trendy_rt_sort",
             RuntimeFn::CompareText => "trendy_rt_compare_text",

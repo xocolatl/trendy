@@ -111,14 +111,6 @@ key { name };
    call debug_value{v: people wrap { who := {name, born} }};
 */
 
-/* Ungroup: replace a relation-valued attribute with its attributes, one
-   tuple for each tuple in it; a tuple whose relation is empty has none.
-   Tutorial D: TEAMS UNGROUP ( MEMBERS )
-   Decided: an `ungroup` operator, with the names to ungroup.
-
-   call debug_value{v: teams ungroup {members}};
-*/
-
 /* Aggregates (RM Prescription 18 and OO Prescription 6): count, sum, avg,
    max, min, and, or, xor, exactly, union, disjoint union and intersect,
    of a relation, or of one of its attributes.
@@ -395,6 +387,24 @@ operator group_births{
     call debug_value{v: t extend { roster := members group { names := {name} } }};
 ];
 
+/* Ungrouping: replace relation-valued attributes with their attributes,
+   one tuple for each combination of a tuple of each, so a tuple whose
+   relation is empty has none: below, the docs team, with no members. Of
+   several attributes, the order doesn't matter, as the braces say. It
+   undoes `group`: grouping then ungrouping gives the relation back.
+   Tutorial D: TEAMS UNGROUP ( MEMBERS ). Implemented, and printed twice
+   like the projections. */
+var memberships := teams ungroup {members};
+var regrouped := births group { births := {name, born} } ungroup {births};
+
+operator ungroup_teams{
+    t: relation { team: text, members: relation { name: text } },
+    b: relation { name: text, born: integer, place: text },
+} [
+    call debug_value{v: t ungroup {members}};
+    call debug_value{v: b group { births := {name, born} } ungroup {births}};
+];
+
 operator main{} [
     call debug_value{v: names};
     call debug_value{v: places};
@@ -423,6 +433,8 @@ operator main{} [
     call debug_value{v: by_place};
     call debug_value{v: names_years};
     call debug_value{v: rosters_by};
+    call debug_value{v: memberships};
+    call debug_value{v: regrouped};
 
     call project_births{r: births};
     call project_signs{r: signs};
@@ -445,4 +457,6 @@ operator main{} [
     call image_births{b: births, c: cities};
 
     call group_births{b: births, t: teams};
+
+    call ungroup_teams{t: teams, b: births};
 ];

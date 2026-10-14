@@ -818,6 +818,22 @@ pub(crate) fn relation(heading: hir::Heading, tuples: Vec<hir::Expr>) -> hir::Ex
     }
 }
 
+/// `operand` with the relation-valued attributes `names` replaced by their
+/// attributes: evaluated if the operand is a constant.
+pub(crate) fn ungroup(operand: hir::Expr, names: BTreeSet<String>) -> hir::Expr {
+    match operand {
+        hir::Expr::Constant(value) => hir::Expr::Constant(value.ungrouped(&names)),
+        operand => hir::Expr::Ungroup(Box::new(operand), names),
+    }
+}
+
+/// Whether `postfix` is an `ungroup`.
+pub(crate) fn is_ungroup(postfix: &ast::PostfixExpr) -> bool {
+    postfix
+        .operator()
+        .is_some_and(|t| t.kind() == SyntaxKind::UngroupKw)
+}
+
 /// Whether `postfix` is a `group`.
 pub(crate) fn is_group(postfix: &ast::PostfixExpr) -> bool {
     postfix
@@ -889,6 +905,7 @@ fn shifted(expr: hir::Expr, cutoff: usize) -> hir::Expr {
         hir::Expr::Remove(operand, names) => hir::Expr::Remove(shift(operand), names),
         hir::Expr::Rename(operand, renamings) => hir::Expr::Rename(shift(operand), renamings),
         hir::Expr::And(lhs, rhs) => hir::Expr::And(shift(lhs), shift(rhs)),
+        hir::Expr::Ungroup(operand, names) => hir::Expr::Ungroup(shift(operand), names),
         // The values are one `Extend` further in.
         hir::Expr::Extend(operand, computed, attributes) => hir::Expr::Extend(
             shift(operand),
@@ -1038,6 +1055,7 @@ fn substitute(
         hir::Expr::Remove(operand, names) => remove(sub(operand)?, names),
         hir::Expr::Rename(operand, renamings) => rename(sub(operand)?, renamings),
         hir::Expr::And(lhs, rhs) => and(vec![sub(lhs)?, sub(rhs)?]),
+        hir::Expr::Ungroup(operand, names) => ungroup(sub(operand)?, names),
         hir::Expr::Extend(operand, computed, attributes) => {
             // The values are one `Extend` further in.
             let attributes = attributes
@@ -1239,12 +1257,14 @@ fn can_fail(expr: &hir::Expr) -> bool {
         | hir::Expr::Parameter(_)
         | hir::Expr::Current(..) => false,
         // Negating the smallest integer overflows, and building a relation,
-        // removing, renaming or adding attributes, or joining it, allocates
-        // the result; adding attributes computes them, which can fail too.
+        // removing, renaming or adding attributes, joining or ungrouping it,
+        // allocates the result; adding attributes computes them, which can
+        // fail too.
         hir::Expr::Unary(hir::UnaryOp::Negate(hir::Numeric::Integer), _)
         | hir::Expr::Remove(..)
         | hir::Expr::Rename(..)
         | hir::Expr::And(..)
+        | hir::Expr::Ungroup(..)
         | hir::Expr::Extend(..)
         | hir::Expr::Relation(..) => true,
         hir::Expr::Unary(_, operand) => can_fail(operand),

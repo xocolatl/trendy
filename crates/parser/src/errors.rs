@@ -16,6 +16,7 @@ pub(crate) const EXTEND_FORM: &str = "`extend` takes new attributes, each `name 
 pub(crate) const REPLACE_FORM: &str = "`replace` takes attributes the operand has, each `name := value`, where the new value is computed from the tuple's own attributes: `r replace { price := price * 2 }`";
 pub(crate) const IMAGE_FORM: &str = "in an `extend`'s or a `replace`'s values, `!!r` is the tuples of `r` that match the tuple at hand on their common attributes, without those attributes; `r` is a name, or an expression in parentheses";
 pub(crate) const GROUP_FORM: &str = "`group` gathers attributes into new relation-valued attributes, each `name := {attributes}`: `r group { residents := {name} }`";
+pub(crate) const UNGROUP_FORM: &str = "`ungroup` takes the relation-valued attributes to replace with their attributes: `r ungroup {members}`";
 pub(crate) const KEY_FORM: &str = "a key lists attributes after a relation variable's value, or after its type if it has no value: `var r := relation { … } key { a, b };`";
 pub(crate) const RENAME_FORM: &str =
     "`rename` takes renamings, each `old as new`: `r rename {postal_code as code}`";
@@ -688,6 +689,25 @@ pub(crate) fn bracketed_list(
             }],
         )
     }
+}
+
+/// A bare name, `found`, after `ungroup`, where a list in braces goes.
+pub(crate) fn bare_ungrouped(found: Found) -> Diagnostic {
+    Diagnostic::error(
+        Code::WrongDelimiter,
+        format!("`ungroup` takes its attributes in braces: `{{{}}}`", found.text),
+        found.span,
+        "not in braces",
+    )
+    .with_note(UNGROUP_FORM)
+    .with_note("like `remove`, `ungroup` takes a list of attribute names, in braces since their order doesn't matter")
+    .with_suggestion(
+        "put it in braces",
+        vec![Edit {
+            span: found.span,
+            replacement: format!("{{{}}}", found.text),
+        }],
+    )
 }
 
 /// The keyword a foreign operator stands for: `&&` for `and`, `!` for

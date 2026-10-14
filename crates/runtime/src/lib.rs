@@ -336,13 +336,15 @@ pub struct Common {
     pub desc: *const TypeDesc,
 }
 
-/// Where an attribute of [`trendy_rt_and`]'s result comes from: the right
-/// operand if `from_rhs` is 1, else the left, and where it is in a tuple of
-/// that operand. The compiler emits an array of these, laid out like this
+/// Where an attribute of a result comes from: which tuple, `from`, and
+/// where it is in that tuple. For [`trendy_rt_and`], `from` is 0 for the
+/// left operand and 1 for the right; for [`trendy_rt_ungroup`], 0 for the
+/// tuple being ungrouped and `k` for the tuple of its `k`th ungrouped
+/// relation. The compiler emits an array of these, laid out like this
 /// struct.
 #[repr(C)]
 pub struct Source {
-    pub from_rhs: usize,
+    pub from: usize,
     pub offset: usize,
 }
 
@@ -412,7 +414,7 @@ pub unsafe extern "C" fn trendy_rt_and(
                 for &r in &rhs_sorted[group.rhs_start..group.rhs_end] {
                     let to = joined.add(k * size);
                     for (attr, source) in result_attrs.iter().zip(sources) {
-                        let from = if source.from_rhs == 1 { r } else { l };
+                        let from = if source.from == 1 { r } else { l };
                         core::ptr::copy_nonoverlapping(
                             from.add(source.offset),
                             to.add(attr.offset),
@@ -432,6 +434,120 @@ pub unsafe extern "C" fn trendy_rt_and(
         ] {
             free(memory);
         }
+        dst.write_unaligned(Text {
+            bytes: canonical.0,
+            len: canonical.1,
+        });
+    }
+}
+
+/// A relation-valued attribute that [`trendy_rt_ungroup`] ungroups: where it
+/// is in a tuple of the relation being ungrouped, and the size of the
+/// tuples of its own relation. The compiler emits an array of these, laid
+/// out like this struct.
+#[repr(C)]
+pub struct Ungrouped {
+    pub offset: usize,
+    pub element_size: usize,
+}
+
+/// Store at `dst` the relation `result` describes whose tuples are, for
+/// each tuple of the relation `src`, which `source` describes, one for each
+/// combination of a tuple of each of its `*ungrouped_count` relation-valued
+/// attributes in `ungrouped`, in canonical order, in memory that
+/// [`trendy_rt_release`] releases. A tuple with an empty one has none.
+/// `sources` says where each attribute of `result` comes from.
+///
+/// # Safety
+///
+/// `src` must point to a valid relation of the type `source` describes,
+/// `result` and `source` to valid descriptors, `sources` to one [`Source`]
+/// for each attribute of `result`, `ungrouped` to `*ungrouped_count`
+/// [`Ungrouped`]s, each naming a relation-valued attribute of `src`'s
+/// tuples, and `dst` to memory for a relation.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_ungroup(
+    dst: *mut Text,
+    src: *const u8,
+    result: *const TypeDesc,
+    source: *const TypeDesc,
+    sources: *const Source,
+    ungrouped: *const Ungrouped,
+    ungrouped_count: *const usize,
+) {
+    // SAFETY: guaranteed by the caller; each size and offset is the layout
+    // of the value it describes.
+    unsafe {
+        let (result, source) = (&*result, &*source);
+        let (tuples, count) = read_slice(src);
+        let result_attrs = attributes(result);
+        let sources = array(sources, result_attrs.len());
+        let ungrouped = array(ungrouped, ungrouped_count.read_unaligned());
+        let tuple = |i: usize| tuples.add(i * source.element_size);
+        let total = (0..count)
+            .map(|i| {
+                ungrouped.iter().try_fold(1usize, |product, u| {
+                    product.checked_mul(read_slice(tuple(i).add(u.offset)).1)
+                })
+            })
+            .try_fold(0usize, |sum, n| sum.checked_add(n?));
+        let size = result.element_size;
+        let Some((total, bytes)) = total.and_then(|total| Some((total, total.checked_mul(size)?)))
+        else {
+            trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+        };
+        let made = allocate::<u8>(bytes);
+        core::ptr::write_bytes(made, 0, bytes);
+        // For the tuple at hand, the index in each ungrouped relation of the
+        // tuple being combined, counted up like an odometer.
+        let at =
+            core::slice::from_raw_parts_mut(allocate::<usize>(ungrouped.len()), ungrouped.len());
+        let mut k = 0;
+        for i in 0..count {
+            let outer = tuple(i);
+            if ungrouped
+                .iter()
+                .any(|u| read_slice(outer.add(u.offset)).1 == 0)
+            {
+                continue;
+            }
+            at.fill(0);
+            loop {
+                let to = made.add(k * size);
+                for (attr, source) in result_attrs.iter().zip(sources) {
+                    let from = match source.from {
+                        0 => outer,
+                        n => {
+                            let u = &ungrouped[n - 1];
+                            read_slice(outer.add(u.offset))
+                                .0
+                                .add(at[n - 1] * u.element_size)
+                        }
+                    };
+                    core::ptr::copy_nonoverlapping(
+                        from.add(source.offset),
+                        to.add(attr.offset),
+                        (*attr.desc).size,
+                    );
+                }
+                k += 1;
+                // The next combination, or the end of this tuple's.
+                let next = ungrouped
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find(|&(j, u)| at[j] + 1 < read_slice(outer.add(u.offset)).1);
+                let Some((j, _)) = next else {
+                    break;
+                };
+                at[j] += 1;
+                at[j + 1..].fill(0);
+            }
+        }
+        let canonical = canonical(made, total, result);
+        free(made.cast());
+        free(at.as_mut_ptr().cast());
         dst.write_unaligned(Text {
             bytes: canonical.0,
             len: canonical.1,

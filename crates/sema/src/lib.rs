@@ -2569,6 +2569,79 @@ mod tests {
     }
 
     #[test]
+    fn ungroup_constants() {
+        let vars = variables(
+            "var r := relation { { k: 1, g: relation { { a: 1 }, { a: 2 } }, h: relation { { b: true }, { b: false } } }, { k: 2, g: relation { a: integer } {}, h: relation { { b: true } } } };\nvar one := r ungroup {g};\nvar both := r ungroup {g, h};\nvar dup := relation { { k: 1, g: relation { { a: 1 } } }, { k: 1, g: relation { { a: 1 }, { a: 2 } } } } ungroup {g};\nvar flat := relation { { k: 1, a: 1 }, { k: 1, a: 2 }, { k: 2, a: 1 } };\nvar back := flat group { g := {a} } ungroup {g};",
+        );
+        let value = |name: &str| &vars.iter().find(|v| v.name == name).unwrap().init;
+        let tuples = |name: &str| match value(name) {
+            hir::Value::Relation(r) => r.tuples.len(),
+            other => panic!("a relation: {other:?}"),
+        };
+        // `k: 2` has an empty `g`, so it has no tuples.
+        assert_eq!(tuples("one"), 2);
+        assert_eq!(
+            value("one").ty().to_string(),
+            "relation { a: integer, h: relation { b: boolean }, k: integer }"
+        );
+        // Every combination of a tuple of each.
+        assert_eq!(tuples("both"), 4);
+        // Tuples that turn out equal are one.
+        assert_eq!(tuples("dup"), 2);
+        // Grouping then ungrouping gives the relation back.
+        assert_eq!(value("back"), value("flat"));
+    }
+
+    #[test]
+    fn ungroup_errors() {
+        let source = format!(
+            "var r := relation {{ {{ k: 1, a: 2, g: relation {{ {{ a: 1 }} }}, h: relation {{ {{ b: 1 }} }}, i: relation {{ {{ b: 2 }} }}, t: tuple {{ c: 1 }} }} }};\nvar b := r ungroup {{gg}};\nvar c := r ungroup {{k}};\nvar d := r ungroup {{t}};\nvar e := r ungroup {{g}};\nvar f := r ungroup {{h, i}};\nvar j := r ungroup {{}};\nvar l := tuple {{ g: relation {{ {{ a: 1 }} }} }} ungroup {{g}};{MAIN}"
+        );
+        let errors = errors(&source);
+        let found: Vec<_> = errors.iter().map(|e| (e.code, &e.message[..])).collect();
+        assert_eq!(
+            found,
+            [
+                (Code::UnknownAttribute, "unknown attribute `gg`"),
+                (
+                    Code::WrongOperandType,
+                    "`k` can't be ungrouped: it is `integer`"
+                ),
+                (
+                    Code::WrongOperandType,
+                    "`t` can't be ungrouped: it is `tuple { c: integer }`"
+                ),
+                (
+                    Code::AttributeExists,
+                    "ungrouping `g` would give two attributes `a`"
+                ),
+                (
+                    Code::AttributeExists,
+                    "ungrouping `i` would give two attributes `b`"
+                ),
+                (Code::EmptyRemove, "`ungroup {}` ungroups nothing"),
+                (
+                    Code::WrongOperandType,
+                    "`ungroup` can't be applied to tuples"
+                ),
+            ]
+        );
+        assert_eq!(
+            errors[2].help,
+            ["a tuple-valued attribute is unpacked with `unwrap`: `… unwrap {t}`"]
+        );
+        assert_eq!(
+            errors[4].help,
+            [
+                "ungroup one, rename what it gave, then ungroup the other: `… ungroup {h} rename {b as h_b} ungroup {i}`"
+            ]
+        );
+        let fixed = fix(&source);
+        assert!(fixed.contains("r ungroup {g}"), "{fixed}");
+        assert!(fixed.contains("var j := r;"), "{fixed}");
+    }
+
+    #[test]
     fn group_in_bodies() {
         let program = analyze_str(
             "operator f{r: relation { k: integer, a: text }} [\n    call debug_value{v: r group { g := {a} }};\n];\noperator main{} [];",

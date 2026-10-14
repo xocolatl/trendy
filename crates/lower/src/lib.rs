@@ -2,7 +2,7 @@
 //! turns statements into instructions, and builds the type descriptors that
 //! runtime functions taking `any` receive.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use trendy_hir as hir;
 use trendy_lir as lir;
@@ -397,6 +397,7 @@ impl FunctionBuilder<'_> {
                 let rhs = self.place(rhs, cx);
                 self.and(&lhs_ty, &rhs_ty, lhs, rhs, cx)
             }
+            hir::Expr::Ungroup(operand, names) => self.ungroup(operand, names, cx),
             hir::Expr::Current(depth, _) => self.tuples[self.tuples.len() - 1 - depth].clone(),
             hir::Expr::Extend(operand, _, attributes) => self.extend(expr, operand, attributes, cx),
             hir::Expr::Binary(op, lhs, rhs) => {
@@ -757,6 +758,93 @@ impl FunctionBuilder<'_> {
         self.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::And,
             args: [vec![dst.clone()], args].concat(),
+        });
+        self.allocates = true;
+        dst
+    }
+
+    /// The relation `operand` with the relation-valued attributes `names`
+    /// ungrouped, computed by the runtime into a new stack slot. Lowering
+    /// says where each attribute of the result comes from, so the runtime
+    /// never matches attributes by name.
+    fn ungroup(
+        &mut self,
+        operand: &hir::Expr,
+        names: &BTreeSet<String>,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let ty = &self.program.type_of(operand, self.within);
+        let src = self.place(operand, cx);
+        let hir::Type::Relation(heading) = ty else {
+            unreachable!("sema ungroups only relations");
+        };
+        let result_ty = ty.ungrouped(names);
+        let outer = layout(&hir::Type::Tuple(heading.clone()));
+        let position =
+            |heading: &hir::Heading, name: &str| heading.attributes().position(|(a, _)| a == name);
+        // Each ungrouped attribute's position in the outer tuple, and the
+        // heading and layout of its relation's tuples.
+        let inner: Vec<(usize, &hir::Heading, lir::Layout)> = names
+            .iter()
+            .map(|name| {
+                let Some(hir::Type::Relation(inner)) = heading.get(name) else {
+                    unreachable!("sema ungroups only relation-valued attributes");
+                };
+                let at = position(heading, name).expect("an ungrouped attribute is the operand's");
+                (at, inner, layout(&hir::Type::Tuple(inner.clone())))
+            })
+            .collect();
+        let sources = attribute_names(&result_ty)
+            .map(|name| {
+                let (from, offset) = match position(&heading.without(names), name) {
+                    Some(_) => (
+                        0,
+                        lir::Field::Offset(
+                            outer.clone(),
+                            position(heading, name).expect("a kept attribute is the operand's"),
+                        ),
+                    ),
+                    None => inner
+                        .iter()
+                        .enumerate()
+                        .find_map(|(k, (_, inner, tuple))| {
+                            let i = position(inner, name)?;
+                            Some((len(k + 1), lir::Field::Offset(tuple.clone(), i)))
+                        })
+                        .expect("each attribute of the result is kept or ungrouped"),
+                };
+                lir::Field::Struct(vec![lir::Field::Usize(from), offset])
+            })
+            .collect();
+        let ungrouped: Vec<lir::Field> = inner
+            .iter()
+            .map(|(at, _, tuple)| {
+                lir::Field::Struct(vec![
+                    lir::Field::Offset(outer.clone(), *at),
+                    lir::Field::Size(tuple.clone()),
+                ])
+            })
+            .collect();
+        let count = cx.constant(vec![lir::Field::Usize(len(ungrouped.len()))]);
+        let descriptor = |ty: &hir::Type, cx: &mut Lowering| {
+            lir::Place::whole(lir::Base::Data(cx.descriptor(ty)))
+        };
+        let dst = self.slot(layout(&result_ty));
+        let args = vec![
+            dst.clone(),
+            src,
+            descriptor(&result_ty, cx),
+            descriptor(ty, cx),
+            lir::Place::whole(lir::Base::Data(cx.constant(sources))),
+            lir::Place::whole(lir::Base::Data(cx.constant(ungrouped))),
+            lir::Place {
+                base: lir::Base::Data(count),
+                path: vec![0],
+            },
+        ];
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Ungroup,
+            args,
         });
         self.allocates = true;
         dst

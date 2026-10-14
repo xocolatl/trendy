@@ -902,6 +902,46 @@ var by_place := births group ({name, born} as births);
 operator main{} [];
 ```
 
+### Ungrouping
+
+`r ungroup {g}` replaces the relation-valued attribute `g` with its
+attributes: each tuple of `r` becomes one tuple for each tuple of its `g`.
+It is *The Third Manifesto*'s UNGROUP, and undoes `group`.
+
+```trendy
+var teams := relation {
+    { team: "core", members: relation { { name: "Ada" }, { name: "Edgar" } } },
+    { team: "docs", members: relation { name: text } {} },
+};
+var memberships := teams ungroup {members};
+
+operator main{} [
+    call debug_value{v: memberships};
+];
+```
+
+- **A tuple whose relation is empty has no tuples:** above, the docs
+  team isn't in the result. So grouping then ungrouping gives the
+  relation back, but ungrouping then grouping loses the empty groups.
+- **Several attributes at once** give each combination of a tuple of
+  each: `r ungroup {g, h}`. The order doesn't matter, as the braces say.
+- **Names must stay distinct:** an attribute of `g`'s tuples can't have
+  the name of one the result keeps, or of another ungrouped relation's
+  (A0024); the help says what to rename. Tuples that turn out equal are
+  one.
+- **Only relation-valued attributes,** of a relation (A0022): a
+  tuple-valued attribute is unpacked by `unwrap`. `ungroup {}` is an
+  error (A0023), and so is an unknown attribute (A0010).
+- Tutorial D's `UNGROUP ( G )` is fixed to `ungroup {g}`, and so is a bare
+  `ungroup g` (P0003).
+
+```trendy,error
+var teams := relation { { team: "core", members: relation { { name: "Ada" } } } };
+var memberships := teams ungroup members;
+
+operator main{} [];
+```
+
 ### Joins
 
 `r join s` is the relation of the tuples made of a tuple of `r` and a tuple
@@ -990,7 +1030,7 @@ From tightest to loosest:
 | Operators | Grouping |
 |---|---|
 | `!!`, of a name or a parenthesized expression | none: see below |
-| postfix `.a`, projection `{…}`, `remove {…}`, `rename {…}`, `extend {…}`, `replace {…}` and `group {…}` | left |
+| postfix `.a`, projection `{…}`, `remove {…}`, `rename {…}`, `extend {…}`, `replace {…}`, `group {…}` and `ungroup {…}` | left |
 | prefix `not`, `-` and `+` | |
 | `*`, `/`, `div`, `mod` | left |
 | `+`, `-`, `\|\|` | left |
@@ -1162,8 +1202,8 @@ Names are ASCII letters, digits and `_`, and don't start with a digit. They
 are case-sensitive. The keywords are `operator`, `var`, `call`, `builtin`,
 `tuple`, `relation`, `true`, `false`, `not`, `and`, `or`, `xor`,
 `implies`, `div`, `mod`, `remove`, `rename`, `extend`, `replace`, `group`,
-`join`, `times`, `compose` and `as`, all lowercase, and a keyword can't be
-a name (P0017).
+`ungroup`, `join`, `times`, `compose` and `as`, all lowercase, and a
+keyword can't be a name (P0017).
 `type` is a keyword only after `builtin`, and `key` only where a variable's
 keys go.
 
@@ -1261,6 +1301,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `EXTEND R ADD ( X AS B )`, `SELECT *, x AS b` | `r extend { b := x }` |
 | `UPDATE R ( A := X )`, as an expression | `r replace { a := x }` |
 | `R GROUP ( { B, C } AS G )` | `r group { g := {b, c} }` |
+| `R UNGROUP ( G )` | `r ungroup {g}` |
 | `GROUP BY a` with the group's rows | `r group { rows := {…every attribute but a…} }` |
 | `PRIMARY KEY (a)`, `UNIQUE (a)`, `KEY { A }` | `key { a }` |
 | `NATURAL JOIN`, `INNER JOIN`, `JOIN … USING (a)` | `join` |

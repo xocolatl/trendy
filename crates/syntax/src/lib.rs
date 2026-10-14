@@ -47,6 +47,7 @@ pub enum SyntaxKind {
     ExtendKw,
     ReplaceKw,
     GroupKw,
+    UngroupKw,
     JoinKw,
     TimesKw,
     ComposeKw,
@@ -130,7 +131,8 @@ pub enum SyntaxKind {
     /// `r{a, b}`: a projection.
     ProjectExpr,
     /// `r remove {a, b}`, `r rename {a as b}`, `r extend { c := a + b }`,
-    /// `r replace { a := a + 1 }` or `r group { g := {a, b} }`
+    /// `r replace { a := a + 1 }`, `r group { g := {a, b} }` or
+    /// `r ungroup {g}`
     PostfixExpr,
     /// `join{r, s, t}` or `times{r, s, t}`: a join of any number of
     /// relations.
@@ -184,7 +186,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 94] = [
+    pub const ALL: [SyntaxKind; 95] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -208,6 +210,7 @@ impl SyntaxKind {
         SyntaxKind::ExtendKw,
         SyntaxKind::ReplaceKw,
         SyntaxKind::GroupKw,
+        SyntaxKind::UngroupKw,
         SyntaxKind::JoinKw,
         SyntaxKind::TimesKw,
         SyntaxKind::ComposeKw,
@@ -310,6 +313,7 @@ impl SyntaxKind {
                 | SyntaxKind::ExtendKw
                 | SyntaxKind::ReplaceKw
                 | SyntaxKind::GroupKw
+                | SyntaxKind::UngroupKw
                 | SyntaxKind::JoinKw
                 | SyntaxKind::TimesKw
                 | SyntaxKind::ComposeKw
@@ -334,6 +338,7 @@ impl SyntaxKind {
                 | SyntaxKind::ExtendKw
                 | SyntaxKind::ReplaceKw
                 | SyntaxKind::GroupKw
+                | SyntaxKind::UngroupKw
                 | SyntaxKind::JoinKw
                 | SyntaxKind::TimesKw
                 | SyntaxKind::ComposeKw
@@ -433,6 +438,7 @@ impl SyntaxKind {
             SyntaxKind::ExtendKw => "extend",
             SyntaxKind::ReplaceKw => "replace",
             SyntaxKind::GroupKw => "group",
+            SyntaxKind::UngroupKw => "ungroup",
             SyntaxKind::JoinKw => "join",
             SyntaxKind::TimesKw => "times",
             SyntaxKind::ComposeKw => "compose",
@@ -491,6 +497,7 @@ impl SyntaxKind {
             SyntaxKind::ExtendKw => "`extend`",
             SyntaxKind::ReplaceKw => "`replace`",
             SyntaxKind::GroupKw => "`group`",
+            SyntaxKind::UngroupKw => "`ungroup`",
             SyntaxKind::JoinKw => "`join`",
             SyntaxKind::TimesKw => "`times`",
             SyntaxKind::ComposeKw => "`compose`",

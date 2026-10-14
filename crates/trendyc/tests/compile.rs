@@ -449,6 +449,10 @@ fn relations() {
             r#"relation { births: relation { born: integer, name: text }, place: text } { { births: relation { born: integer, name: text } { { born: 1815, name: "Ada" }, { born: 1816, name: "Ada" } }, place: "London" }, { births: relation { born: integer, name: text } { { born: 1815, name: "Édouard" } }, place: "Paris" }, { births: relation { born: integer, name: text } { { born: 1923, name: "Edgar" } }, place: "Portland" } }"#,
             r#"relation { names: relation { name: text }, place: text, years: relation { born: integer } } { { names: relation { name: text } { { name: "Ada" } }, place: "London", years: relation { born: integer } { { born: 1815 }, { born: 1816 } } }, { names: relation { name: text } { { name: "Edgar" } }, place: "Portland", years: relation { born: integer } { { born: 1923 } } }, { names: relation { name: text } { { name: "Édouard" } }, place: "Paris", years: relation { born: integer } { { born: 1815 } } } }"#,
             r#"relation { members: relation { name: text }, roster: relation { names: relation { name: text } }, team: text } { { members: relation { name: text } {}, roster: relation { names: relation { name: text } } {}, team: "docs" }, { members: relation { name: text } { { name: "Ada" }, { name: "Edgar" } }, roster: relation { names: relation { name: text } } { { names: relation { name: text } { { name: "Ada" }, { name: "Edgar" } } } }, team: "core" } }"#,
+            // Ungrouped: the docs team, with no members, has no tuples; and
+            // grouping then ungrouping gives the births back.
+            r#"relation { name: text, team: text } { { name: "Ada", team: "core" }, { name: "Edgar", team: "core" } }"#,
+            r#"relation { born: integer, name: text, place: text } { { born: 1815, name: "Ada", place: "London" }, { born: 1815, name: "Édouard", place: "Paris" }, { born: 1816, name: "Ada", place: "London" }, { born: 1923, name: "Edgar", place: "Portland" } }"#,
         ]
     );
 }
