@@ -1,4 +1,5 @@
 mod errors;
+mod sequences;
 mod unordered;
 
 use trendy_diag::{Diagnostic, Span};
@@ -6,6 +7,7 @@ use trendy_lexer::{Lexed, Token};
 use trendy_syntax::ast::{AstNode, SourceFile};
 use trendy_syntax::{SyntaxKind, TreeBuilder};
 
+use crate::sequences::bracketed_lists;
 use crate::unordered::unordered_operators;
 
 /// The parser's output: a complete tree, even for invalid input, plus every
@@ -39,6 +41,7 @@ pub fn parse(source: &str, lexed: Lexed) -> Parse {
     let tree = parser.builder.finish();
     let mut errors = parser.errors;
     errors.extend(unordered_operators(tree.syntax()));
+    errors.extend(bracketed_lists(tree.syntax()));
     errors.sort_by_key(|d| d.span().start);
     Parse { tree, errors }
 }
@@ -761,6 +764,7 @@ impl<'a> Parser<'a> {
                 match keyword {
                     SyntaxKind::RenameKw => self.rename_list(),
                     SyntaxKind::ExtendKw | SyntaxKind::ReplaceKw => self.assign_list(keyword),
+                    SyntaxKind::GroupKw => self.group_list(),
                     _ => self.names(errors::PROJECTION_FORM),
                 }
             } else {
@@ -784,6 +788,7 @@ impl<'a> Parser<'a> {
                 | SyntaxKind::RenameKw
                 | SyntaxKind::ExtendKw
                 | SyntaxKind::ReplaceKw
+                | SyntaxKind::GroupKw
         )
         .then_some((found, keyword))
     }
@@ -839,15 +844,28 @@ impl<'a> Parser<'a> {
         self.builder.finish_node();
     }
 
+    /// The delimiters of an `extend`'s, a `replace`'s or a `group`'s list:
+    /// braces, since its items apply all at once. Brackets, which would
+    /// mean in order, are parsed as they are, and reported with the chain
+    /// of the operator that applies them in order (`sequences`).
+    fn list_delimiters(&mut self) -> (SyntaxKind, SyntaxKind) {
+        if self.at(SyntaxKind::LBracket) {
+            (SyntaxKind::LBracket, SyntaxKind::RBracket)
+        } else {
+            (SyntaxKind::LBrace, SyntaxKind::RBrace)
+        }
+    }
+
     /// `{ a := x, b := y }`: attributes and their values, after `keyword`,
     /// `extend` or `replace`.
     fn assign_list(&mut self, keyword: SyntaxKind) {
         let assigning = errors::Assigning::of(keyword);
         let outer_form = std::mem::replace(&mut self.form, assigning.form());
+        let delimiters = self.list_delimiters();
         self.delimited(
             Some(SyntaxKind::AssignList),
             assigning.list(),
-            (SyntaxKind::LBrace, SyntaxKind::RBrace),
+            delimiters,
             &[(SyntaxKind::LParen, SyntaxKind::RParen)],
             move |p| p.items(Self::at_operand, move |p| p.assign(assigning)),
         );
@@ -914,6 +932,101 @@ impl<'a> Parser<'a> {
                     ));
                 }
             }
+        }
+        self.builder.finish_node();
+    }
+
+    /// `{ g := {a, b}, h := {c} }`: groupings. SQL's `group by {a}`, which
+    /// names the attributes kept rather than gathered, is reported.
+    fn group_list(&mut self) {
+        let outer_form = std::mem::replace(&mut self.form, errors::GROUP_FORM);
+        if let Some(by) = self
+            .found()
+            .filter(|f| f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case("by"))
+        {
+            self.start_node(SyntaxKind::Error);
+            self.bump();
+            if self.at(SyntaxKind::LBrace) {
+                self.names(errors::GROUP_FORM);
+            }
+            self.builder.finish_node();
+            let end = self.last_end.unwrap_or(by.span.end);
+            self.errors
+                .push(errors::group_by(Span::new(by.span.start, end)));
+            self.form = outer_form;
+            return;
+        }
+        let delimiters = self.list_delimiters();
+        self.delimited(
+            Some(SyntaxKind::GroupList),
+            "groupings",
+            delimiters,
+            &[(SyntaxKind::LParen, SyntaxKind::RParen)],
+            |p| p.items(Self::at_grouping, Self::grouping),
+        );
+        self.form = outer_form;
+    }
+
+    fn at_grouping(&mut self) -> bool {
+        matches!(self.peek(), Some(SyntaxKind::Ident | SyntaxKind::LBrace))
+    }
+
+    /// `g := {a, b}`. `g: {a, b}` and `g = {a, b}` are fixed to `:=`, and
+    /// Tutorial D's `{a, b} as g` to `g := {a, b}`.
+    fn grouping(&mut self) {
+        self.start_node(SyntaxKind::Grouping);
+        if self.at(SyntaxKind::LBrace) {
+            let start = self.found().map_or(0, |f| f.span.start);
+            self.names(errors::GROUP_FORM);
+            let list_end = self.last_end.unwrap_or(start);
+            match self.found() {
+                Some(found)
+                    if found.kind == SyntaxKind::AsKw
+                        || (found.kind == SyntaxKind::Ident
+                            && found.text.eq_ignore_ascii_case("as")) =>
+                {
+                    self.bump();
+                    if let Some(name) = self.found().filter(|f| f.kind == SyntaxKind::Ident) {
+                        self.start_node(SyntaxKind::Name);
+                        self.bump();
+                        self.builder.finish_node();
+                        let list = &self.source[start..list_end];
+                        self.errors.push(errors::grouping_as(
+                            Span::new(start, name.span.end),
+                            name.text,
+                            list,
+                        ));
+                    } else {
+                        self.missing_with_help(
+                            SyntaxKind::Ident,
+                            "write the new attribute's name before the attributes, as in `residents := {name}`",
+                        );
+                    }
+                }
+                _ => self
+                    .errors
+                    .push(errors::unnamed_grouping(Span::new(start, list_end))),
+            }
+        } else {
+            self.start_node(SyntaxKind::Name);
+            self.bump();
+            self.builder.finish_node();
+            match self.found() {
+                Some(found) if found.kind == SyntaxKind::ColonEq => {
+                    self.bump();
+                }
+                Some(found) if matches!(found.kind, SyntaxKind::Colon | SyntaxKind::Eq) => {
+                    let neighbors = (
+                        self.source[..found.span.start].chars().next_back(),
+                        self.source[found.span.end..].chars().next(),
+                    );
+                    let span = self.bump();
+                    self.errors
+                        .push(errors::grouping_separator(found.kind, span, neighbors));
+                }
+                _ => self.missing(SyntaxKind::ColonEq),
+            }
+            self.names(errors::GROUP_FORM);
         }
         self.builder.finish_node();
     }
@@ -2476,6 +2589,85 @@ SourceFile
             messages("var x := r replace { 5 };"),
             ["an attribute's new value needs the attribute's name"]
         );
+    }
+
+    #[test]
+    fn groupings() {
+        let parse = parse_str("var x := r group { g := {a, b}, h := {c} };");
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let groupings: Vec<_> = parse
+            .tree
+            .syntax()
+            .descendants()
+            .filter_map(trendy_syntax::ast::Grouping::cast)
+            .map(|g| {
+                (
+                    g.name().unwrap().syntax().to_string(),
+                    g.names().unwrap().names().count(),
+                )
+            })
+            .collect();
+        assert_eq!(groupings, [("g".into(), 2), ("h".into(), 1)]);
+        // A tuple's `:` and keyword arguments' `=`, Tutorial D's `AS`, and
+        // capitals.
+        assert_eq!(
+            fix("var x := r group { g: {a}, h = {b} };"),
+            "var x := r group { g := {a}, h := {b} };"
+        );
+        assert_eq!(
+            fix("var x := r GROUP ({a, b} AS g);"),
+            "var x := r group {g := {a, b}};"
+        );
+        // A missing `:=` is inserted; the formatter spaces it.
+        assert_eq!(
+            fix("var x := r group { g {a} };"),
+            "var x := r group { g:= {a} };"
+        );
+        // SQL's `group by` names the other attributes: no mechanical fix.
+        assert_eq!(
+            messages("var x := r group by {c};"),
+            ["`group` names the attributes to gather, not those to group by"]
+        );
+        assert_eq!(
+            messages("var x := r group { {a} };"),
+            ["a grouping needs a name"]
+        );
+    }
+
+    #[test]
+    fn lists_in_brackets() {
+        // Brackets ask for an order: the fix is the chain that applies the
+        // items in order, not braces, which would apply them all at once.
+        for (source, fixed) in [
+            (
+                "var x := r group [g := {a}, h := {b}];",
+                "var x := r group { g := {a} } group { h := {b} };",
+            ),
+            (
+                "var x := r extend [a := 1, b := a];",
+                "var x := r extend { a := 1 } extend { b := a };",
+            ),
+            (
+                "var x := r replace [a := b, b := a];",
+                "var x := r replace { a := b } replace { b := a };",
+            ),
+            // One item has no order to keep.
+            (
+                "var x := r group [g := {a}];",
+                "var x := r group { g := {a} };",
+            ),
+        ] {
+            assert_eq!(
+                messages(source)[0],
+                format!(
+                    "`{}` takes its list in braces, applied all at once",
+                    source.split_whitespace().nth(4).unwrap()
+                ),
+                "{source}"
+            );
+            assert_eq!(fix(source), fixed);
+            assert!(parse_str(fixed).errors.is_empty(), "{fixed}");
+        }
     }
 
     #[test]

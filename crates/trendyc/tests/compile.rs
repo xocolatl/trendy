@@ -443,6 +443,12 @@ fn relations() {
             // of each.
             r#"relation { city: text, natives: relation { born: integer, name: text } } { { city: "London", natives: relation { born: integer, name: text } { { born: 1815, name: "Ada" }, { born: 1816, name: "Ada" } } }, { city: "Nyeri", natives: relation { born: integer, name: text } {} }, { city: "Portland", natives: relation { born: integer, name: text } { { born: 1923, name: "Edgar" } } } }"#,
             r#"relation { name: text, only_london: boolean } { { name: "Ada", only_london: true }, { name: "Edgar", only_london: false }, { name: "Édouard", only_london: false } }"#,
+            // Grouped: one tuple per place; two groupings at once, each of
+            // the same births; and every attribute of each team's members,
+            // so one tuple, or none for a team without members.
+            r#"relation { births: relation { born: integer, name: text }, place: text } { { births: relation { born: integer, name: text } { { born: 1815, name: "Ada" }, { born: 1816, name: "Ada" } }, place: "London" }, { births: relation { born: integer, name: text } { { born: 1815, name: "Édouard" } }, place: "Paris" }, { births: relation { born: integer, name: text } { { born: 1923, name: "Edgar" } }, place: "Portland" } }"#,
+            r#"relation { names: relation { name: text }, place: text, years: relation { born: integer } } { { names: relation { name: text } { { name: "Ada" } }, place: "London", years: relation { born: integer } { { born: 1815 }, { born: 1816 } } }, { names: relation { name: text } { { name: "Edgar" } }, place: "Portland", years: relation { born: integer } { { born: 1923 } } }, { names: relation { name: text } { { name: "Édouard" } }, place: "Paris", years: relation { born: integer } { { born: 1815 } } } }"#,
+            r#"relation { members: relation { name: text }, roster: relation { names: relation { name: text } }, team: text } { { members: relation { name: text } {}, roster: relation { names: relation { name: text } } {}, team: "docs" }, { members: relation { name: text } { { name: "Ada" }, { name: "Edgar" } }, roster: relation { names: relation { name: text } } { { names: relation { name: text } { { name: "Ada" }, { name: "Edgar" } } } }, team: "core" } }"#,
         ]
     );
 }

@@ -684,6 +684,23 @@ var moved := addr rename {code as postal_code};
 operator main{} [];
 ```
 
+### Names and values: `:`, `:=` and `as`
+
+Three separators pair a name with something, each with one meaning:
+
+- **`name: value`** pairs a name with what is given: a tuple's attribute
+  with its value, a heading's with its type, a parameter with its
+  argument.
+- **`name := …`** defines a new name by what follows: a variable by its
+  initial value, an attribute by the value `extend` or `replace` computes
+  for each tuple, or by the attributes `group` gathers. The new name comes
+  first.
+- **`old as new`** gives something that exists another name, in `rename`.
+  The new name comes last, and nothing is computed.
+
+Tutorial D writes `AS` for all three kinds of new attribute, the value
+first; SQL does the same. trendy fixes those habits to `:=` (P0011).
+
 ### Extension
 
 `r extend { total := price * quantity }` is the tuple, or each tuple of the
@@ -711,7 +728,9 @@ operator main{} [
   the inner tuple's attributes hide the outer's.
 - **The values see only the operand's attributes,** not each other's, so
   their order doesn't matter: `extend { a := 1, b := a }` is an error
-  unless the operand has an `a`.
+  unless the operand has an `a`. To use one in the next, chain them:
+  `extend { a := 1 } extend { b := a }`. Brackets, `extend [a := 1, b := a]`,
+  would ask for that order, and are fixed to the chain (P0003).
 - **New names must be new.** An attribute the operand already has is an
   error (A0024): to give it a new value, use [`replace`](#substitution).
   A name given twice is an error (A0008), and so is `extend {}`, which
@@ -755,7 +774,9 @@ operator main{} [
 
 - **The values are computed from the old tuple, all at once,** as RM
   Prescription 21 has multiple assignment do: `replace { x := y, y := x }`
-  swaps `x` and `y`.
+  swaps `x` and `y`. One after the other is a chain:
+  `replace { x := y } replace { y := x }` makes both `y`. Brackets are
+  fixed to the chain (P0003).
 - **The attributes must exist, and keep their types.** An attribute the
   operand hasn't is an error (A0010): to add one, use `extend`. A value of
   another type is an error (A0004): to change an attribute's type, compute
@@ -825,6 +846,58 @@ operator main{} [
 var births := relation { { name: "Ada", place: "London" } };
 var places := relation { { place: "London" } };
 var names := places extend { names := !!births{name, place} };
+
+operator main{} [];
+```
+
+### Grouping
+
+`r group { g := {a, b} }` gathers the attributes `a` and `b` into a
+relation-valued attribute `g`: the result has one tuple for each value of
+the attributes no grouping names, and in each, `g` is the `a` and `b` of
+the tuples of `r` with that value. It is *The Third Manifesto*'s GROUP.
+
+```trendy
+var births := relation {
+    { name: "Ada", born: 1815, place: "London" },
+    { name: "Ada", born: 1816, place: "London" },
+    { name: "Edgar", born: 1923, place: "Portland" },
+};
+var by_place := births group { births := {name, born} };
+var names_years := births group { names := {name}, years := {born} };
+
+operator main{} [
+    call debug_value{v: by_place};
+];
+```
+
+- **It names what's gathered,** not what's kept, the opposite of SQL's
+  `GROUP BY`. SQL's `group by {…}` is reported (P0021), but can't be
+  fixed mechanically, since the gathered attributes and the new name
+  aren't written.
+- **Several groupings are simultaneous:** each gathers from the same
+  tuples, so their order doesn't matter, as the braces say. Above,
+  London's `names` is Ada, and its `years` 1815 and 1816. Tutorial D
+  applies its groupings in turn instead, where the order can change the
+  result; in trendy, that is a chain, `r group { x := {a} } group { y := {b} }`,
+  and brackets, `r group [x := {a}, y := {b}]`, are fixed to it (P0003).
+  Each attribute goes into one grouping (A0008).
+- **It is an extend with image relations:**
+  `births group { births := {name, born} }` is
+  `births{place} extend { births := !!births }`. Every group comes from a
+  tuple of `r`, so none is empty; for groups that may be empty, such as
+  places with no births, extend another relation with `!!`.
+- **Names:** a new attribute's name can't be one the result keeps
+  (A0024), but can be one it gathers, as `births` is above. Gathering
+  every attribute gives one tuple, holding all of `r`, or none if `r` is
+  empty. `g := {}` gathers nothing, so each tuple gets `relation { {} }`.
+  `group {}` is an error (A0023), and so is `group` of a tuple (A0022).
+- Tutorial D's `{a, b} as g`, a tuple's `g: {a, b}` and `g = {a, b}` are
+  fixed to `g := {a, b}` (P0011).
+
+```trendy,error
+var births := relation { { name: "Ada", born: 1815, place: "London" } };
+var by_place := births group ({name, born} as births);
 
 operator main{} [];
 ```
@@ -917,7 +990,7 @@ From tightest to loosest:
 | Operators | Grouping |
 |---|---|
 | `!!`, of a name or a parenthesized expression | none: see below |
-| postfix `.a`, projection `{…}`, `remove {…}`, `rename {…}`, `extend {…}` and `replace {…}` | left |
+| postfix `.a`, projection `{…}`, `remove {…}`, `rename {…}`, `extend {…}`, `replace {…}` and `group {…}` | left |
 | prefix `not`, `-` and `+` | |
 | `*`, `/`, `div`, `mod` | left |
 | `+`, `-`, `\|\|` | left |
@@ -1088,9 +1161,9 @@ operator main{} [];
 Names are ASCII letters, digits and `_`, and don't start with a digit. They
 are case-sensitive. The keywords are `operator`, `var`, `call`, `builtin`,
 `tuple`, `relation`, `true`, `false`, `not`, `and`, `or`, `xor`,
-`implies`, `div`, `mod`, `remove`, `rename`, `extend`, `replace`, `join`,
-`times`, `compose`, `image`, `in` and `as`, all lowercase, and a keyword
-can't be a name (P0017).
+`implies`, `div`, `mod`, `remove`, `rename`, `extend`, `replace`, `group`,
+`join`, `times`, `compose` and `as`, all lowercase, and a keyword can't be
+a name (P0017).
 `type` is a keyword only after `builtin`, and `key` only where a variable's
 keys go.
 
@@ -1187,7 +1260,8 @@ line after a comment on its own line, such as a file's header, is kept.
 | `R RENAME ( A AS B )`, `rename(columns={'a': 'b'})` | `r rename {a as b}` |
 | `EXTEND R ADD ( X AS B )`, `SELECT *, x AS b` | `r extend { b := x }` |
 | `UPDATE R ( A := X )`, as an expression | `r replace { a := x }` |
-| `GROUP BY a` with the group's rows | `r{a} extend { group := !!r }` |
+| `R GROUP ( { B, C } AS G )` | `r group { g := {b, c} }` |
+| `GROUP BY a` with the group's rows | `r group { rows := {…every attribute but a…} }` |
 | `PRIMARY KEY (a)`, `UNIQUE (a)`, `KEY { A }` | `key { a }` |
 | `NATURAL JOIN`, `INNER JOIN`, `JOIN … USING (a)` | `join` |
 | `CROSS JOIN` | `times` |

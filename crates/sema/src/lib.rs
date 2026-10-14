@@ -2495,6 +2495,99 @@ mod tests {
     }
 
     #[test]
+    fn group_constants() {
+        let vars = variables(
+            "var r := relation { { k: 1, a: \"x\", b: true }, { k: 1, a: \"y\", b: false }, { k: 2, a: \"x\", b: true } };\nvar one := r group { g := {a, b} };\nvar two := r group { xs := {a}, ys := {b} };\nvar all := r group { g := {k, a, b} };\nvar none := r{k} group { g := {} };\nvar same := r group { a := {a} };\nvar empty := relation { k: integer, a: text } {} group { g := {a} };",
+        );
+        let value = |name: &str| &vars.iter().find(|v| v.name == name).unwrap().init;
+        let expected = |source: &str| variables(source).remove(0).init;
+        assert_eq!(
+            value("one"),
+            &expected(
+                "var e := relation { { k: 1, g: relation { { a: \"x\", b: true }, { a: \"y\", b: false } } }, { k: 2, g: relation { { a: \"x\", b: true } } } };"
+            )
+        );
+        // Simultaneous: each grouping is of the same matching tuples.
+        assert_eq!(
+            value("two"),
+            &expected(
+                "var e := relation { { k: 1, xs: relation { { a: \"x\" }, { a: \"y\" } }, ys: relation { { b: true }, { b: false } } }, { k: 2, xs: relation { { a: \"x\" } }, ys: relation { { b: true } } } };"
+            )
+        );
+        // Every attribute: one tuple, of the whole relation.
+        let hir::Value::Relation(all) = value("all") else {
+            panic!("a relation");
+        };
+        assert_eq!(all.tuples.len(), 1);
+        // No attribute: each tuple with `relation { {} }`.
+        let hir::Value::Relation(none) = value("none") else {
+            panic!("a relation");
+        };
+        assert!(
+            none.tuples
+                .iter()
+                .all(|t| t.get("g") == Some(&hir::Value::dee()))
+        );
+        // A name it gathers is free.
+        assert_eq!(
+            value("same").ty().to_string(),
+            "relation { a: relation { a: text }, b: boolean, k: integer }"
+        );
+        assert_eq!(
+            value("empty").ty().to_string(),
+            "relation { g: relation { a: text }, k: integer }"
+        );
+    }
+
+    #[test]
+    fn group_errors() {
+        let source = format!(
+            "var r := relation {{ {{ k: 1, a: \"x\", b: true }} }};\nvar c := r group {{ g := {{aa}} }};\nvar d := r group {{ g := {{a}}, h := {{a, b}} }};\nvar e := r group {{ g := {{a}}, g := {{b}} }};\nvar f := r group {{ k := {{a}} }};\nvar h := r group {{}};\nvar i := tuple {{ a: 1 }} group {{ g := {{a}} }};{MAIN}"
+        );
+        let errors = errors(&source);
+        let found: Vec<_> = errors.iter().map(|e| (e.code, &e.message[..])).collect();
+        assert_eq!(
+            found,
+            [
+                (Code::UnknownAttribute, "unknown attribute `aa`"),
+                (
+                    Code::DuplicateAttribute,
+                    "attribute `a` is gathered into both `g` and `h`"
+                ),
+                (
+                    Code::DuplicateAttribute,
+                    "attribute `g` is given more than once"
+                ),
+                (Code::AttributeExists, "attribute `k` already exists"),
+                (Code::EmptyRemove, "`group {}` gathers nothing"),
+                (Code::WrongOperandType, "`group` can't be applied to tuples"),
+            ]
+        );
+        let fixed = fix(&source);
+        assert!(fixed.contains("r group { g := {a} }"), "{fixed}");
+        assert!(fixed.contains("var h := r;"), "{fixed}");
+    }
+
+    #[test]
+    fn group_in_bodies() {
+        let program = analyze_str(
+            "operator f{r: relation { k: integer, a: text }} [\n    call debug_value{v: r group { g := {a} }};\n];\noperator main{} [];",
+        )
+        .unwrap();
+        let f = program.operators.iter().find(|o| o.name == "f").unwrap();
+        let hir::OperatorKind::User { body } = &f.kind else {
+            panic!("f is a user operator");
+        };
+        // An extend of the kept attributes, each with its image in `r`.
+        let hir::Expr::Extend(operand, computed, values) = argument(&body[0]) else {
+            panic!("an extend: {:?}", argument(&body[0]));
+        };
+        assert!(matches!(**operand, hir::Expr::Remove(..)));
+        assert_eq!(computed.to_string(), "{ g: relation { a: text } }");
+        assert!(matches!(values["g"], hir::Expr::Remove(..)));
+    }
+
+    #[test]
     fn image_errors() {
         let source = format!(
             "var r := relation {{ {{ a: 1, b: \"x\" }} }};\nvar s := relation {{ {{ c: 1 }} }};\nvar t := relation {{ {{ a: \"y\" }} }};\nvar u := !!r;\nvar v := r extend {{ w := !!s }};\nvar x := r extend {{ w := !!t }};\nvar y := r extend {{ w := !!1 }};\nvar z := r extend {{ w := !!q }};{MAIN}"

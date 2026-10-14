@@ -15,6 +15,7 @@ pub(crate) const NARY_FORM: &str = "`{}` encloses what can be in any order, and 
 pub(crate) const EXTEND_FORM: &str = "`extend` takes new attributes, each `name := value`, where the value is computed from the tuple's own attributes: `r extend { total := price * quantity }`";
 pub(crate) const REPLACE_FORM: &str = "`replace` takes attributes the operand has, each `name := value`, where the new value is computed from the tuple's own attributes: `r replace { price := price * 2 }`";
 pub(crate) const IMAGE_FORM: &str = "in an `extend`'s or a `replace`'s values, `!!r` is the tuples of `r` that match the tuple at hand on their common attributes, without those attributes; `r` is a name, or an expression in parentheses";
+pub(crate) const GROUP_FORM: &str = "`group` gathers attributes into new relation-valued attributes, each `name := {attributes}`: `r group { residents := {name} }`";
 pub(crate) const KEY_FORM: &str = "a key lists attributes after a relation variable's value, or after its type if it has no value: `var r := relation { … } key { a, b };`";
 pub(crate) const RENAME_FORM: &str =
     "`rename` takes renamings, each `old as new`: `r rename {postal_code as code}`";
@@ -232,7 +233,7 @@ pub(crate) fn sql_join(span: Span, text: &str, keyword: SyntaxKind) -> Diagnosti
         .collect();
     if ["left", "right", "full"].contains(&words[0].as_str()) {
         return Diagnostic::error(
-            Code::SqlJoin,
+            Code::SqlRelational,
             format!("there is no `{}`", words.join(" ")),
             span,
             "SQL's outer join",
@@ -246,7 +247,7 @@ pub(crate) fn sql_join(span: Span, text: &str, keyword: SyntaxKind) -> Diagnosti
     }
     let spelled = keyword.fixed_text().expect("keywords have fixed text");
     let d = Diagnostic::error(
-        Code::SqlJoin,
+        Code::SqlRelational,
         format!("a join is written `{spelled}`, not `{text}`"),
         span,
         "SQL's spelling",
@@ -272,7 +273,7 @@ pub(crate) fn sql_join(span: Span, text: &str, keyword: SyntaxKind) -> Diagnosti
 pub(crate) fn join_condition(found: Found, clause: Span, removal: Span) -> Diagnostic {
     let word = found.text.to_ascii_lowercase();
     let d = Diagnostic::error(
-        Code::SqlJoin,
+        Code::SqlRelational,
         format!("a join has no `{word}`"),
         clause,
         "SQL's join condition",
@@ -570,6 +571,123 @@ pub(crate) fn unordered_image(
         };
     }
     d
+}
+
+/// `:` or `=`, `found` at `span`, between a grouping's name and its
+/// attributes, where `:=` goes. `neighbors` are the characters around it.
+pub(crate) fn grouping_separator(
+    found: SyntaxKind,
+    span: Span,
+    neighbors: (Option<char>, Option<char>),
+) -> Diagnostic {
+    let text = found.fixed_text().expect("separators have fixed text");
+    Diagnostic::error(
+        Code::AttributeSeparator,
+        format!("expected `:=` after the new attribute's name, found `{text}`"),
+        span,
+        "groupings are written `name := {attributes}`",
+    )
+    .with_note("in `group`, each new attribute is defined by the attributes it gathers, with `:=`, as an `extend` defines one; `:` pairs a name with a given value in a tuple")
+    .with_suggestion(
+        "write `:=`",
+        vec![Edit {
+            span,
+            replacement: spaced_operator(":=", neighbors),
+        }],
+    )
+}
+
+/// `{…} as name`, at `span`, in a `group`, as Tutorial D writes a grouping,
+/// where `list` is the attributes as written.
+pub(crate) fn grouping_as(span: Span, name: &str, list: &str) -> Diagnostic {
+    Diagnostic::error(
+        Code::AttributeSeparator,
+        format!("a grouping is written `{name} := {list}`, not `{list} as {name}`"),
+        span,
+        "the name goes first",
+    )
+    .with_note(GROUP_FORM)
+    .with_note("`as` only renames; a new attribute is defined with `:=`, its name first")
+    .with_suggestion(
+        format!("write `{name} := {list}`"),
+        vec![Edit {
+            span,
+            replacement: format!("{name} := {list}"),
+        }],
+    )
+}
+
+/// Attributes, at `span`, in a `group`, with no name for the new attribute.
+pub(crate) fn unnamed_grouping(span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::MissingToken,
+        "a grouping needs a name",
+        span,
+        "these attributes have no name to be gathered into",
+    )
+    .with_note(GROUP_FORM)
+    .with_help("write the new attribute's name and `:=` before the attributes, as in `residents := {name}`")
+}
+
+/// SQL's `by {…}`, at `span`, after `group`, which names the attributes
+/// kept rather than those gathered.
+pub(crate) fn group_by(span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::SqlRelational,
+        "`group` names the attributes to gather, not those to group by",
+        span,
+        "SQL's `GROUP BY` names the others",
+    )
+    .with_note(GROUP_FORM)
+    .with_note("the attributes not gathered are the ones each group shares, as SQL's `GROUP BY` lists")
+    .with_help("list the other attributes, and name the new attribute: `r group by {city}` is `r group { members := {…every attribute but city…} }`")
+}
+
+/// The list of `operator`, `extend`, `replace` or `group`, at `list`, in
+/// brackets opening at `open`, with `items` as written. Its items apply all
+/// at once, in braces; in order, they are a chain of the operator, which is
+/// the fix, since brackets ask for an order.
+pub(crate) fn bracketed_list(
+    operator: &str,
+    open: Span,
+    list: Span,
+    items: &[String],
+) -> Diagnostic {
+    let replacement = if items.is_empty() {
+        "{}".to_string()
+    } else {
+        items
+            .iter()
+            .map(|item| format!("{{ {item} }}"))
+            .collect::<Vec<_>>()
+            .join(&format!(" {operator} "))
+    };
+    let d = Diagnostic::error(
+        Code::WrongDelimiter,
+        format!("`{operator}` takes its list in braces, applied all at once"),
+        open,
+        "brackets would mean in order",
+    )
+    .with_note(format!(
+        "braces enclose what can be in any order, and brackets what can't; the items of one `{operator}` apply all at once, so to apply them in order, chain `{operator}`s"
+    ));
+    if items.len() > 1 {
+        d.with_suggestion(
+            format!("apply them in order: `r {operator} {{ … }} {operator} {{ … }}`"),
+            vec![Edit {
+                span: list,
+                replacement,
+            }],
+        )
+    } else {
+        d.with_suggestion(
+            "use `{}`",
+            vec![Edit {
+                span: list,
+                replacement,
+            }],
+        )
+    }
 }
 
 /// The keyword a foreign operator stands for: `&&` for `and`, `!` for

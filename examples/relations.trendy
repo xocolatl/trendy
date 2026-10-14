@@ -105,19 +105,17 @@ key { name };
    Tuple analog: wrap and unwrap.
    Tutorial D: PEOPLE WRAP ( { NAME, BORN } AS WHO ), PEOPLE UNWRAP ( WHO )
 
-   Decided: with `as`, as for tuples.
+   Decided: with `:=`, as for tuples: a new attribute is defined, its name
+   first, and `as` only renames.
 
-   call debug_value{v: people wrap {{name, born} as who}};
+   call debug_value{v: people wrap { who := {name, born} }};
 */
 
-/* Group and ungroup: gather attributes into a relation-valued attribute,
-   one tuple per value of the other attributes, and back.
-   Tutorial D: CITIES GROUP ( { NAME } AS RESIDENTS ), and
-   TEAMS UNGROUP ( MEMBERS )
-   Decided: `group` and `ungroup` operators, with the names gathered and
-   the new attribute's name, written with `as` as for wrap.
+/* Ungroup: replace a relation-valued attribute with its attributes, one
+   tuple for each tuple in it; a tuple whose relation is empty has none.
+   Tutorial D: TEAMS UNGROUP ( MEMBERS )
+   Decided: an `ungroup` operator, with the names to ungroup.
 
-   call debug_value{v: cities group {{name} as residents}};
    call debug_value{v: teams ungroup {members}};
 */
 
@@ -375,6 +373,28 @@ operator image_births{
     call debug_value{v: b{name} extend { only_london := (!!b){place} = london }};
 ];
 
+/* Grouping: gather attributes into a relation-valued attribute, one tuple
+   for each value of the attributes no grouping gathers, each
+   `name := {attributes}`. Several groupings are simultaneous, each of the
+   same matching tuples, so their order doesn't matter, unlike Tutorial
+   D's, which apply in turn. It is an extend of the kept attributes with
+   image relations: `cities group { residents := {name} }` is
+   `cities{city} extend { residents := !!cities }`.
+   Tutorial D: CITIES GROUP ( { NAME } AS RESIDENTS ). Implemented, and
+   printed twice like the projections. */
+var by_place := births group { births := {name, born} };
+var names_years := births group { names := {name}, years := {born} };
+var rosters_by := teams extend { roster := members group { names := {name} } };
+
+operator group_births{
+    b: relation { name: text, born: integer, place: text },
+    t: relation { team: text, members: relation { name: text } },
+} [
+    call debug_value{v: b group { births := {name, born} }};
+    call debug_value{v: b group { names := {name}, years := {born} }};
+    call debug_value{v: t extend { roster := members group { names := {name} } }};
+];
+
 operator main{} [
     call debug_value{v: names};
     call debug_value{v: places};
@@ -400,6 +420,9 @@ operator main{} [
     call debug_value{v: millennia};
     call debug_value{v: natives};
     call debug_value{v: london_only};
+    call debug_value{v: by_place};
+    call debug_value{v: names_years};
+    call debug_value{v: rosters_by};
 
     call project_births{r: births};
     call project_signs{r: signs};
@@ -420,4 +443,6 @@ operator main{} [
     call replace_people{p: people};
 
     call image_births{b: births, c: cities};
+
+    call group_births{b: births, t: teams};
 ];

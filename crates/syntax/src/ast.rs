@@ -56,6 +56,8 @@ ast_node!(ImageExpr);
 ast_node!(NameList);
 ast_node!(RenameList);
 ast_node!(Renaming);
+ast_node!(GroupList);
+ast_node!(Grouping);
 ast_node!(AssignList);
 ast_node!(Assign);
 ast_node!(VarDecl);
@@ -285,10 +287,36 @@ impl PostfixExpr {
         self.0.children().find_map(RenameList::cast)
     }
 
+    /// The groupings of a `group`.
+    #[must_use]
+    pub fn groupings(&self) -> Option<GroupList> {
+        self.0.children().find_map(GroupList::cast)
+    }
+
     /// The attribute assignments of an `extend` or a `replace`.
     #[must_use]
     pub fn assignments(&self) -> Option<AssignList> {
         self.0.children().find_map(AssignList::cast)
+    }
+}
+
+impl GroupList {
+    pub fn groupings(&self) -> impl Iterator<Item = Grouping> {
+        self.0.children().filter_map(Grouping::cast)
+    }
+}
+
+impl Grouping {
+    /// The new relation-valued attribute's name.
+    #[must_use]
+    pub fn name(&self) -> Option<Name> {
+        self.0.children().find_map(Name::cast)
+    }
+
+    /// The attributes it gathers.
+    #[must_use]
+    pub fn names(&self) -> Option<NameList> {
+        self.0.children().find_map(NameList::cast)
     }
 }
 

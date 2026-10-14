@@ -818,6 +818,13 @@ pub(crate) fn relation(heading: hir::Heading, tuples: Vec<hir::Expr>) -> hir::Ex
     }
 }
 
+/// Whether `postfix` is a `group`.
+pub(crate) fn is_group(postfix: &ast::PostfixExpr) -> bool {
+    postfix
+        .operator()
+        .is_some_and(|t| t.kind() == SyntaxKind::GroupKw)
+}
+
 /// What an `extend` or a `replace` does with its attribute assignments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Assigning {
@@ -846,17 +853,73 @@ impl Assigning {
     }
 }
 
-/// `expr`, which a name in an `extend`'s or a `replace`'s value resolved to
-/// outside it, as
-/// seen from inside: the tuple at hand it refers to is one `Extend` further
-/// out. A name resolves to a variable, a parameter, a constant, or an
-/// attribute of a tuple at hand.
+/// `expr`, written outside an `Extend`, as seen from inside its values:
+/// each tuple at hand it refers to is one `Extend` further out. As for a
+/// name that resolved outside, or an operand repeated inside, as `group`
+/// repeats its own.
 pub(crate) fn deeper(expr: hir::Expr) -> hir::Expr {
+    shifted(expr, 0)
+}
+
+/// `expr` with each tuple at hand `cutoff` or more `Extend`s out from it
+/// one further out; those nearer are inside it, and stay.
+fn shifted(expr: hir::Expr, cutoff: usize) -> hir::Expr {
+    let shift = |e: Box<hir::Expr>| Box::new(shifted(*e, cutoff));
     match expr {
-        hir::Expr::Current(depth, heading) => hir::Expr::Current(depth + 1, heading),
-        hir::Expr::Extract(tuple, name) => hir::Expr::Extract(Box::new(deeper(*tuple)), name),
-        other => other,
+        hir::Expr::Current(depth, heading) if depth >= cutoff => {
+            hir::Expr::Current(depth + 1, heading)
+        }
+        hir::Expr::Current(..)
+        | hir::Expr::Constant(_)
+        | hir::Expr::Variable(_)
+        | hir::Expr::Parameter(_) => expr,
+        hir::Expr::Unary(op, operand) => hir::Expr::Unary(op, shift(operand)),
+        hir::Expr::Binary(op, lhs, rhs) => hir::Expr::Binary(op, shift(lhs), shift(rhs)),
+        hir::Expr::Extract(operand, name) => hir::Expr::Extract(shift(operand), name),
+        hir::Expr::Tuple(attributes) => hir::Expr::Tuple(
+            attributes
+                .into_iter()
+                .map(|(name, e)| (name, shifted(e, cutoff)))
+                .collect(),
+        ),
+        hir::Expr::Relation(heading, tuples) => hir::Expr::Relation(
+            heading,
+            tuples.into_iter().map(|t| shifted(t, cutoff)).collect(),
+        ),
+        hir::Expr::Remove(operand, names) => hir::Expr::Remove(shift(operand), names),
+        hir::Expr::Rename(operand, renamings) => hir::Expr::Rename(shift(operand), renamings),
+        hir::Expr::And(lhs, rhs) => hir::Expr::And(shift(lhs), shift(rhs)),
+        // The values are one `Extend` further in.
+        hir::Expr::Extend(operand, computed, attributes) => hir::Expr::Extend(
+            shift(operand),
+            computed,
+            attributes
+                .into_iter()
+                .map(|(name, e)| (name, shifted(e, cutoff + 1)))
+                .collect(),
+        ),
     }
+}
+
+/// The image relation of the tuple at hand, with heading `at_hand`, in
+/// `relation`, with `heading`: its tuples that match the tuple at hand on
+/// their common attributes, without those attributes. That is `relation`
+/// joined with the tuple at hand projected on the common attributes, then
+/// without them. With none in common, it is all of `relation`.
+pub(crate) fn image(
+    relation: hir::Expr,
+    heading: &hir::Heading,
+    at_hand: &hir::Heading,
+) -> hir::Expr {
+    let common = heading.common(at_hand);
+    let others: BTreeSet<String> = at_hand
+        .attributes()
+        .map(|(name, _)| name.to_string())
+        .filter(|name| !common.contains(name))
+        .collect();
+    let matched = remove(hir::Expr::Current(0, at_hand.clone()), others.clone());
+    let matching = self::relation(at_hand.without(&others), vec![matched]);
+    remove(and(vec![relation, matching]), common)
 }
 
 /// Why an `extend` of constants has no value: computing `attribute` for

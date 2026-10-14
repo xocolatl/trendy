@@ -145,7 +145,12 @@ reported with a fix. SQL's joins are recognized the same way (P0021):
 stand for and fixed to it, and the outer joins as `join`, with no fix,
 looking up to three tokens ahead. SQL's `on` condition or `using` list after a
 join's right operand is consumed into an error node, so the next join still
-parses, and reported. A join of a list, `join{r, s, t}`, `times{…}` or
+parses, and reported. SQL's `group by {…}` after `group` is consumed into
+an error node the same way, with no fix. The list of an `extend`, a
+`replace` or a `group` in brackets is parsed as it is, and a check of the
+finished tree (`sequences`) reports it: its items apply all at once, so
+the fix for an order asked for with brackets is a chain of the operator,
+not braces, which would change the meaning. A join of a list, `join{r, s, t}`, `times{…}` or
 `compose[…]`, is an operand (`NaryExpr`), recognized where an operand
 starts by the keyword followed by `{`, `[` or `(`. Braces enclose what can
 be in any order and brackets what can't, so join's and times's operands
@@ -339,6 +344,17 @@ projected on their common attributes, then `Remove` of those attributes.
 The common attributes are checked as for `join`: at least one (A0028),
 each of one type (A0027). Folding and lowering then need nothing new, and
 an optimizer will see the join it is.
+
+`group` is rewritten into HIR the same way, as Appendix A defines GROUP:
+the operand projected on the attributes no grouping gathers, extended with
+the image relation of each of its tuples in the operand
+(`ops::image`, with nothing in common when every attribute is gathered),
+projected on each grouping's attributes. Several groupings are of the
+same image, so they are simultaneous, unlike Tutorial D's sequence. The
+operand is written once but appears again inside the extend's values, so
+each tuple at hand it refers to is shifted one `Extend` further out
+(`ops::deeper`, which shifts every `Current` in it, as for a name resolved
+outside).
 
 The arithmetic operators are overloaded on integers and approximate numbers
 (`ops::Operator` resolves to a typed `hir::BinaryOp`): the operand type

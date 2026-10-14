@@ -13,8 +13,8 @@ mod order;
 use std::collections::HashSet;
 
 use trendy_syntax::ast::{
-    Arguments, AssignList, AstNode, Body, Heading, NameList, NaryExpr, RelationLiteral, RenameList,
-    SourceFile, TupleLiteral,
+    Arguments, AssignList, AstNode, Body, GroupList, Heading, NameList, NaryExpr, RelationLiteral,
+    RenameList, SourceFile, TupleLiteral,
 };
 use trendy_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
@@ -155,6 +155,7 @@ fn is_list(node: &SyntaxNode) -> bool {
             | SyntaxKind::NameList
             | SyntaxKind::RenameList
             | SyntaxKind::AssignList
+            | SyntaxKind::GroupList
             | SyntaxKind::NaryExpr
     )
 }
@@ -419,6 +420,8 @@ fn items(node: &SyntaxNode) -> usize {
         renamings.renamings().count()
     } else if let Some(assignments) = AssignList::cast(node.clone()) {
         assignments.assignments().count()
+    } else if let Some(groupings) = GroupList::cast(node.clone()) {
+        groupings.groupings().count()
     } else if let Some(nary) = NaryExpr::cast(node.clone()) {
         nary.operands().count()
     } else {
@@ -490,7 +493,7 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
                     SyntaxKind::Operator | SyntaxKind::BuiltinOperator
                 )
             }),
-            TupleLiteral | RelationLiteral | SyntaxKind::AssignList => true,
+            TupleLiteral | RelationLiteral | SyntaxKind::AssignList | SyntaxKind::GroupList => true,
             // A key's attributes, as in `key { a, b }`.
             SyntaxKind::NameList => p.parent().is_some_and(|k| k.kind() == SyntaxKind::Key),
             _ => false,
@@ -543,6 +546,7 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
             | SyntaxKind::RenameKw
             | SyntaxKind::ExtendKw
             | SyntaxKind::ReplaceKw
+            | SyntaxKind::GroupKw
             | SyntaxKind::AsKw,
             _,
         )
@@ -553,6 +557,7 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
             | SyntaxKind::RenameKw
             | SyntaxKind::ExtendKw
             | SyntaxKind::ReplaceKw
+            | SyntaxKind::GroupKw
             | SyntaxKind::AsKw,
         )
         | (RBrace, LBracket | LBrace) => " ",
@@ -890,6 +895,14 @@ mod tests {
         assert_eq!(
             fmt("var a:=r   replace{t:=t+1};"),
             "var a := r replace { t := t + 1 };\n"
+        );
+    }
+
+    #[test]
+    fn groupings() {
+        assert_eq!(
+            fmt("var a:=r   group{g:={ x,y },h :={z}};"),
+            "var a := r group { g := {x, y}, h := {z} };\n"
         );
     }
 

@@ -176,6 +176,9 @@ impl<'a> Checker<'a> {
                 let name = ops::extracted(extract, &operand_expr, &ty, errors)?;
                 self.matched(expected, ops::extract(operand, name), expr, errors)
             }
+            Expr::Postfix(postfix) if ops::is_group(postfix) => {
+                self.grouped(postfix, expr, expected, errors)
+            }
             Expr::Postfix(postfix) if let Some(assigning) = ops::Assigning::of(postfix) => {
                 self.assigned(postfix, assigning, expr, expected, errors)
             }
@@ -320,6 +323,64 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// `postfix`, a `group`, written `expr`: the operand's tuples, one for
+    /// each value of the attributes no grouping gathers, each with a new
+    /// relation-valued attribute for each grouping, of its attributes of
+    /// the tuples with that value. The groupings are simultaneous: each is
+    /// of the same matching tuples. That is an `extend` of the projection
+    /// on the kept attributes, with the image relation of each of its
+    /// tuples in the operand, projected on each grouping's attributes.
+    fn grouped(
+        &mut self,
+        postfix: &ast::PostfixExpr,
+        expr: &Expr,
+        expected: Option<&Expected>,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let operand_expr = postfix.operand()?;
+        let operand = self.expr(&operand_expr, None, errors)?;
+        let ty = self.ty(&operand);
+        let keyword = trendy_syntax::span(postfix.operator()?.text_range());
+        let hir::Type::Relation(heading) = &ty else {
+            errors.push(errors::not_groupable(keyword, &ty, &operand_expr));
+            return None;
+        };
+        let list = postfix.groupings()?;
+        if list.groupings().next().is_none() {
+            errors.push(errors::empty_group(postfix, &operand_expr));
+            return None;
+        }
+        let groups = groupings(&list, &ty, &operand_expr, errors)?;
+        let all: BTreeSet<String> = groups.iter().flat_map(|(_, set)| set.clone()).collect();
+        let kept = heading.without(&all);
+        // Each group is computed inside the extend's values, one tuple at
+        // hand further in than the operand was written.
+        let image = ops::image(ops::deeper(operand.clone()), heading, &kept);
+        let mut types = BTreeMap::new();
+        let mut values = BTreeMap::new();
+        for (name, set) in groups {
+            // The image has every gathered attribute; each group, its own.
+            let others: BTreeSet<String> = all.difference(&set).cloned().collect();
+            let unlisted: BTreeSet<String> = heading
+                .attributes()
+                .map(|(a, _)| a.to_string())
+                .filter(|a| !set.contains(a))
+                .collect();
+            types.insert(
+                name.clone(),
+                hir::Type::Relation(heading.without(&unlisted)),
+            );
+            values.insert(name, ops::remove(image.clone(), others));
+        }
+        match ops::extend(ops::remove(operand, all), hir::Heading::new(types), values) {
+            Ok(result) => self.matched(expected, result, expr, errors),
+            Err(failure) => {
+                errors.push(errors::extension_failure(&failure, &operand_expr));
+                None
+            }
+        }
+    }
+
     /// `image`, written `expr`: the image relation of the tuple at hand in
     /// the operand, which is the operand joined with the tuple at hand
     /// projected on their common attributes, then without them.
@@ -370,14 +431,7 @@ impl<'a> Checker<'a> {
         if !ok {
             return None;
         }
-        let others: BTreeSet<String> = at_hand
-            .attributes()
-            .map(|(name, _)| name.to_string())
-            .filter(|name| !common.contains(name))
-            .collect();
-        let matched = ops::remove(hir::Expr::Current(0, at_hand.clone()), others.clone());
-        let matching = ops::relation(at_hand.without(&others), vec![matched]);
-        let result = ops::remove(ops::and(vec![operand, matching]), common);
+        let result = ops::image(operand, &heading, &at_hand);
         self.matched(expected, result, expr, errors)
     }
 
@@ -470,6 +524,100 @@ fn assigned_name(
             (false, None)
         }
     }
+}
+
+/// The groupings of a `group` in `list`, of an operand of type `ty`,
+/// written `operand`: each new attribute's name and the attributes it
+/// gathers. `None` after reporting each that is wrong: an unknown
+/// attribute, a name given twice, an attribute gathered twice, or a new
+/// name that the result keeps.
+fn groupings(
+    list: &ast::GroupList,
+    ty: &hir::Type,
+    operand: &Expr,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<Vec<(String, BTreeSet<String>)>> {
+    let (hir::Type::Tuple(heading) | hir::Type::Relation(heading)) = ty else {
+        unreachable!("only tuples and relations have attributes to group");
+    };
+    let attributes: Vec<String> = heading
+        .attributes()
+        .map(|(a, _)| format!("`{a}`"))
+        .collect();
+    let context = format!(
+        "the operand's attributes are {}",
+        trendy_diag::conjoin(&attributes)
+    );
+    let mut ok = true;
+    // Each attribute gathered, with the grouping that gathers it and
+    // where.
+    let mut gathered: BTreeMap<String, (String, Span)> = BTreeMap::new();
+    let mut groups: Vec<(String, Span, BTreeSet<String>)> = Vec::new();
+    for grouping in list.groupings() {
+        let Some(ident) = grouping.name().and_then(|n| n.ident()) else {
+            ok = false;
+            continue;
+        };
+        let (name, span) = (
+            ident.text().to_string(),
+            trendy_syntax::span(ident.text_range()),
+        );
+        if let Some((_, first, _)) = groups.iter().find(|(n, _, _)| *n == name) {
+            errors.push(errors::duplicate_attribute(
+                errors::Noun::Attribute,
+                &name,
+                span,
+                *first,
+            ));
+            ok = false;
+            continue;
+        }
+        let Some(names) = grouping.names() else {
+            ok = false;
+            continue;
+        };
+        let Some(set) = ops::listed(&names, heading, errors::Noun::Projected, &context, errors)
+        else {
+            ok = false;
+            continue;
+        };
+        for attribute in names.names() {
+            let Some(ident) = attribute.ident() else {
+                continue;
+            };
+            let at = trendy_syntax::span(ident.text_range());
+            match gathered.get(ident.text()) {
+                Some((other, first)) if *other != name => {
+                    errors.push(errors::gathered_twice(
+                        ident.text(),
+                        at,
+                        (other, *first),
+                        &name,
+                    ));
+                    ok = false;
+                }
+                Some(_) => {}
+                None => {
+                    gathered.insert(ident.text().to_string(), (name.clone(), at));
+                }
+            }
+        }
+        groups.push((name, span, set));
+    }
+    let all: BTreeSet<String> = gathered.keys().cloned().collect();
+    let kept = heading.without(&all);
+    for (name, span, _) in &groups {
+        if kept.get(name).is_some() {
+            errors.push(errors::grouping_exists(name, *span, ty, operand));
+            ok = false;
+        }
+    }
+    ok.then(|| {
+        groups
+            .into_iter()
+            .map(|(name, _, set)| (name, set))
+            .collect()
+    })
 }
 
 /// Names in the values an `extend` or a `replace` computes: the attributes of the tuple at

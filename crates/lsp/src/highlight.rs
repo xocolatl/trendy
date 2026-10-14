@@ -94,9 +94,11 @@ fn classify(token: &SyntaxToken) -> Option<Highlight> {
         (SyntaxKind::Ident, Some(SyntaxKind::Name), Some(SyntaxKind::VarDecl)) => {
             (Class::Variable, true)
         }
-        (SyntaxKind::Ident, Some(SyntaxKind::Name), Some(SyntaxKind::AttributeType)) => {
-            (Class::Attribute, true)
-        }
+        (
+            SyntaxKind::Ident,
+            Some(SyntaxKind::Name),
+            Some(SyntaxKind::AttributeType | SyntaxKind::Grouping),
+        ) => (Class::Attribute, true),
         // A new attribute in an `extend`, or an existing one in a `replace`.
         (SyntaxKind::Ident, Some(SyntaxKind::Name), Some(SyntaxKind::Assign)) => {
             (Class::Attribute, !is_replaced(token))
@@ -278,6 +280,21 @@ mod tests {
                 ("replace", Class::ExprOperator, false),
                 ("c", Class::Attribute, false),
                 ("d", Class::Variable, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn groupings() {
+        assert_eq!(
+            highlight("var a := b group { c := {d} };"),
+            [
+                ("var", Class::Keyword, false),
+                ("a", Class::Variable, true),
+                ("b", Class::Variable, false),
+                ("group", Class::ExprOperator, false),
+                ("c", Class::Attribute, true),
+                ("d", Class::Attribute, false),
             ]
         );
     }

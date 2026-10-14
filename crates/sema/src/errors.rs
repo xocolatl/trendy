@@ -1172,6 +1172,81 @@ pub(crate) fn replaced_unknown(
     }
 }
 
+/// `group`, at `span`, applied to `operand`, of type `ty`, which isn't a
+/// relation.
+pub(crate) fn not_groupable(span: Span, ty: &hir::Type, operand: &Expr) -> Diagnostic {
+    Diagnostic::error(
+        Code::WrongOperandType,
+        format!("`group` can't be applied to {}", plural(ty)),
+        span,
+        "`group` takes a relation",
+    )
+    .with_secondary(operand.span(), format!("this is `{ty}`"))
+    .with_note("`group` gathers attributes of the tuples that share the others into a relation; a tuple has no other tuples to gather with")
+}
+
+/// `group {}`, written `postfix` after `operand`, which gathers nothing.
+pub(crate) fn empty_group(postfix: &trendy_syntax::ast::PostfixExpr, operand: &Expr) -> Diagnostic {
+    let end = postfix.span().end;
+    let keyword = postfix.operator().map_or(operand.span().end, |t| {
+        trendy_syntax::span(t.text_range()).start
+    });
+    Diagnostic::error(
+        Code::EmptyRemove,
+        "`group {}` gathers nothing",
+        Span::new(keyword, end),
+        "no groupings",
+    )
+    .with_note(
+        "`group` takes groupings, each `name := {attributes}`; with none it would change nothing",
+    )
+    .with_suggestion(
+        "drop the `group {}`",
+        vec![Edit {
+            span: Span::new(operand.span().end, end),
+            replacement: String::new(),
+        }],
+    )
+}
+
+/// The attribute `name`, at `span`, which grouping `grouping` gathers, and
+/// grouping `first.0` already does, at `first.1`.
+pub(crate) fn gathered_twice(
+    name: &str,
+    span: Span,
+    first: (&str, Span),
+    grouping: &str,
+) -> Diagnostic {
+    Diagnostic::error(
+        Code::DuplicateAttribute,
+        format!("attribute `{name}` is gathered into both `{}` and `{grouping}`", first.0),
+        span,
+        format!("gathered into `{grouping}` here"),
+    )
+    .with_secondary(first.1, format!("and into `{}` here", first.0))
+    .with_note("each attribute goes into one grouping; the attributes no grouping names are the ones each group shares")
+    .with_help(format!("gather `{name}` in one of the groupings only"))
+}
+
+/// The grouping `name`, at `span`, whose new attribute's name is one that
+/// `operand`, of type `ty`, keeps.
+pub(crate) fn grouping_exists(
+    name: &str,
+    span: Span,
+    ty: &hir::Type,
+    operand: &Expr,
+) -> Diagnostic {
+    Diagnostic::error(
+        Code::AttributeExists,
+        format!("attribute `{name}` already exists"),
+        span,
+        "the result keeps an attribute of this name",
+    )
+    .with_secondary(operand.span(), format!("this is `{ty}`"))
+    .with_note("`group` keeps the attributes no grouping gathers, so a new attribute needs a name other than theirs; a name it gathers is free")
+    .with_help(format!("choose another name, or rename `{name}` first"))
+}
+
 /// Computing a new attribute, whose value is written `value`, fails for a
 /// tuple of a constant operand, as `failure` says.
 pub(crate) fn extension_failure(failure: &crate::ops::ExtendFailure, value: &Expr) -> Diagnostic {
