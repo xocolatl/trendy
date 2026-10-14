@@ -480,8 +480,8 @@ impl FunctionBuilder<'_> {
         dst
     }
 
-    /// `expr`, `operand` extended with `attributes`, computed into a new
-    /// stack slot.
+    /// `expr`, `operand` with `attributes` added or replaced, computed into
+    /// a new stack slot.
     fn extend(
         &mut self,
         expr: &hir::Expr,
@@ -505,9 +505,9 @@ impl FunctionBuilder<'_> {
         }
     }
 
-    /// Build at `dst` the tuple at `src`, with `heading`, extended with
-    /// `attributes`: each attribute of `result`, in name order, is copied
-    /// from `src`, or computed with `src` as the tuple at hand.
+    /// Build at `dst` the tuple at `src`, with `heading`, with `attributes`
+    /// added or replaced: each attribute of `result`, in name order, is
+    /// computed with `src` as the tuple at hand, or else copied from `src`.
     fn extended(
         &mut self,
         heading: &hir::Heading,
@@ -542,10 +542,11 @@ impl FunctionBuilder<'_> {
         self.tuples.pop();
     }
 
-    /// The relation at `src`, with `heading`, with each tuple extended with
-    /// `attributes` into one with the attributes of `result`: a loop over
-    /// the tuples, building each extended tuple in a new relation, which the
-    /// runtime allocates and then sorts into the canonical order.
+    /// The relation at `src`, with `heading`, with `attributes` added to or
+    /// replaced in each tuple, making one with the attributes of `result`: a
+    /// loop over the tuples, building each new tuple in a new relation,
+    /// which the runtime allocates and then sorts into the canonical order,
+    /// without the duplicates a `replace` can make.
     fn extend_relation(
         &mut self,
         heading: &hir::Heading,

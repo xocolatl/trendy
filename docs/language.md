@@ -713,8 +713,9 @@ operator main{} [
   their order doesn't matter: `extend { a := 1, b := a }` is an error
   unless the operand has an `a`.
 - **New names must be new.** An attribute the operand already has is an
-  error (A0024), and so is a name given twice (A0008). `extend {}` adds
-  nothing, and is an error (A0023).
+  error (A0024): to give it a new value, use [`replace`](#substitution).
+  A name given twice is an error (A0008), and so is `extend {}`, which
+  adds nothing (A0023).
 - **The values are computed for each tuple** when the program runs, or when
   compiling if the operand is known then. An empty relation has no tuple
   to compute them for, but the result still has the new attributes.
@@ -725,6 +726,51 @@ operator main{} [
 ```trendy,error
 var items := relation { { name: "tea", price: 3, quantity: 4 } };
 var totals := items extend { total: price * quantity };
+
+operator main{} [];
+```
+
+### Substitution
+
+`r replace { price := price * 2 }` is the tuple, or each tuple of the
+relation, `r` with attributes it has given new values, each written
+`name := value`. The values are computed from the tuple's own attributes,
+in scope by name as in `extend`. It is Tutorial D's read-only `UPDATE`
+(*The Third Manifesto*, chapter 5), which is shorthand for `extend` under
+new names, `remove` of the old ones, and `rename` of the new.
+
+```trendy
+var items := relation {
+    { name: "tea", price: 3 },
+    { name: "rice", price: 2 },
+};
+var doubled := items replace { price := price * 2 };
+var point := tuple { x: 1, y: 2 } replace { x := y, y := x };
+
+operator main{} [
+    call debug_value{v: doubled};
+    call debug_value{v: point};
+];
+```
+
+- **The values are computed from the old tuple, all at once,** as RM
+  Prescription 21 has multiple assignment do: `replace { x := y, y := x }`
+  swaps `x` and `y`.
+- **The attributes must exist, and keep their types.** An attribute the
+  operand hasn't is an error (A0010): to add one, use `extend`. A value of
+  another type is an error (A0004): to change an attribute's type, compute
+  it under another name with `extend`, then `remove` the old one and
+  `rename` the new. A name given twice is an error (A0008), and so is
+  `replace {}`, which replaces nothing (A0023).
+- **Tuples that become equal are one,** since a relation is a set: the
+  result can have fewer tuples than the operand.
+- Assignments are written as in `extend`, and the same habits are fixed
+  (P0011). `replace` is not an update: it changes no variable, and leaves
+  the operand as it was.
+
+```trendy,error
+var items := relation { { name: "tea", price: 3 } };
+var doubled := items replace { price := price * 2e0 };
 
 operator main{} [];
 ```
@@ -816,7 +862,7 @@ From tightest to loosest:
 
 | Operators | Grouping |
 |---|---|
-| postfix `.a`, projection `{…}`, `remove {…}`, `rename {…}` and `extend {…}` | left |
+| postfix `.a`, projection `{…}`, `remove {…}`, `rename {…}`, `extend {…}` and `replace {…}` | left |
 | prefix `not`, `-` and `+` | |
 | `*`, `/`, `div`, `mod` | left |
 | `+`, `-`, `\|\|` | left |
@@ -966,8 +1012,8 @@ operator main{} [];
 Names are ASCII letters, digits and `_`, and don't start with a digit. They
 are case-sensitive. The keywords are `operator`, `var`, `call`, `builtin`,
 `tuple`, `relation`, `true`, `false`, `not`, `and`, `or`, `xor`,
-`implies`, `div`, `mod`, `remove`, `rename`, `extend`, `join`, `times`,
-`compose` and `as`, all lowercase, and a keyword can't be a name (P0017).
+`implies`, `div`, `mod`, `remove`, `rename`, `extend`, `replace`, `join`,
+`times`, `compose` and `as`, all lowercase, and a keyword can't be a name (P0017).
 `type` is a keyword only after `builtin`, and `key` only where a variable's
 keys go.
 
@@ -1063,6 +1109,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `R { A, B }`, `R { ALL BUT C }` | `r{a, b}`, `r remove {c}` |
 | `R RENAME ( A AS B )`, `rename(columns={'a': 'b'})` | `r rename {a as b}` |
 | `EXTEND R ADD ( X AS B )`, `SELECT *, x AS b` | `r extend { b := x }` |
+| `UPDATE R ( A := X )`, as an expression | `r replace { a := x }` |
 | `PRIMARY KEY (a)`, `UNIQUE (a)`, `KEY { A }` | `key { a }` |
 | `NATURAL JOIN`, `INNER JOIN`, `JOIN … USING (a)` | `join` |
 | `CROSS JOIN` | `times` |

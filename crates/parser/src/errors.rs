@@ -13,6 +13,7 @@ pub(crate) const PROJECTION_FORM: &str =
     "a projection and `remove` take attribute names: `r{a, b}`, `r remove {a, b}`";
 pub(crate) const NARY_FORM: &str = "`{}` encloses what can be in any order, and `[]` what can't: `join{r, s, t}` and `times{r, s, t}` can be in any order, while `compose[r, s, t]` is `(r compose s) compose t`";
 pub(crate) const EXTEND_FORM: &str = "`extend` takes new attributes, each `name := value`, where the value is computed from the tuple's own attributes: `r extend { total := price * quantity }`";
+pub(crate) const REPLACE_FORM: &str = "`replace` takes attributes the operand has, each `name := value`, where the new value is computed from the tuple's own attributes: `r replace { price := price * 2 }`";
 pub(crate) const KEY_FORM: &str = "a key lists attributes after a relation variable's value, or after its type if it has no value: `var r := relation { … } key { a, b };`";
 pub(crate) const RENAME_FORM: &str =
     "`rename` takes renamings, each `old as new`: `r rename {postal_code as code}`";
@@ -341,24 +342,86 @@ pub(crate) fn wrong_attribute_separator(found: SyntaxKind, span: Span) -> Diagno
     )
 }
 
-/// `:` or `=`, `found` at `span`, between a new attribute's name and its
-/// value in an `extend`, where `:=` goes. `neighbors` are the characters
-/// around it.
-pub(crate) fn extension_separator(
+/// What a list of attribute assignments does: `extend` adds attributes,
+/// and `replace` gives existing ones new values.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Assigning {
+    Extend,
+    Replace,
+}
+
+impl Assigning {
+    /// What `keyword`'s assignments do.
+    pub(crate) fn of(keyword: SyntaxKind) -> Assigning {
+        match keyword {
+            SyntaxKind::ExtendKw => Assigning::Extend,
+            SyntaxKind::ReplaceKw => Assigning::Replace,
+            _ => unreachable!("only `extend` and `replace` assign attributes"),
+        }
+    }
+
+    pub(crate) fn form(self) -> &'static str {
+        match self {
+            Assigning::Extend => EXTEND_FORM,
+            Assigning::Replace => REPLACE_FORM,
+        }
+    }
+
+    /// What the list is called when it is missing.
+    pub(crate) fn list(self) -> &'static str {
+        match self {
+            Assigning::Extend => "new attributes",
+            Assigning::Replace => "attributes and their new values",
+        }
+    }
+
+    /// The attribute each assignment names.
+    fn attribute(self) -> &'static str {
+        match self {
+            Assigning::Extend => "new attribute",
+            Assigning::Replace => "attribute",
+        }
+    }
+
+    /// Help for a value with no name before it.
+    pub(crate) fn name_help(self) -> &'static str {
+        match self {
+            Assigning::Extend => {
+                "write the new attribute's name and `:=` before the value, as in `total := a + b`"
+            }
+            Assigning::Replace => {
+                "write the name of the attribute it replaces and `:=` before the value, as in `price := price * 2`"
+            }
+        }
+    }
+}
+
+/// `:` or `=`, `found` at `span`, between an attribute's name and its value
+/// in an `extend` or a `replace`, as `assigning` says, where `:=` goes.
+/// `neighbors` are the characters around it.
+pub(crate) fn assign_separator(
+    assigning: Assigning,
     found: SyntaxKind,
     span: Span,
     neighbors: (Option<char>, Option<char>),
 ) -> Diagnostic {
     let text = found.fixed_text().expect("separators have fixed text");
+    let attribute = assigning.attribute();
+    let note = match assigning {
+        Assigning::Extend => {
+            "in `extend`, each new attribute is defined as a value computed from the tuple, with `:=`, as a variable is; `:` pairs a name with a given value in a tuple"
+        }
+        Assigning::Replace => {
+            "in `replace`, each attribute is given a new value computed from the tuple, with `:=`, as a variable is; `:` pairs a name with a given value in a tuple, and `=` compares"
+        }
+    };
     Diagnostic::error(
         Code::AttributeSeparator,
-        format!("expected `:=` after the new attribute's name, found `{text}`"),
+        format!("expected `:=` after the {attribute}'s name, found `{text}`"),
         span,
-        "new attributes are written `name := value`",
+        format!("{attribute}s are written `name := value` here"),
     )
-    .with_note(
-        "in `extend`, each new attribute is defined as a value computed from the tuple, with `:=`, as a variable is; `:` pairs a name with a given value in a tuple",
-    )
+    .with_note(note)
     .with_suggestion(
         "write `:=`",
         vec![Edit {
@@ -368,28 +431,35 @@ pub(crate) fn extension_separator(
     )
 }
 
-/// A value, at `span`, in an `extend`, with no name for the new attribute.
-pub(crate) fn unnamed_extension(span: Span) -> Diagnostic {
-    Diagnostic::error(
-        Code::MissingToken,
-        "a new attribute needs a name",
-        span,
-        "this value has no name",
-    )
-    .with_note(EXTEND_FORM)
-    .with_help("write the new attribute's name and `:=` before the value, as in `total := a + b`")
+/// A value, at `span`, in an `extend` or a `replace`, as `assigning` says,
+/// with no attribute name.
+pub(crate) fn unnamed_assign(assigning: Assigning, span: Span) -> Diagnostic {
+    let message = match assigning {
+        Assigning::Extend => "a new attribute needs a name",
+        Assigning::Replace => "an attribute's new value needs the attribute's name",
+    };
+    Diagnostic::error(Code::MissingToken, message, span, "this value has no name")
+        .with_note(assigning.form())
+        .with_help(assigning.name_help())
 }
 
-/// `value as name`, at `span`, in an `extend`, as SQL writes a computed
-/// column and Tutorial D's `EXTEND … ADD` a new attribute.
-pub(crate) fn extension_as(span: Span, name: &str, value: &str) -> Diagnostic {
+/// `value as name`, at `span`, in an `extend` or a `replace`, as
+/// `assigning` says, as SQL writes a computed column and Tutorial D's
+/// `EXTEND … ADD` a new attribute.
+pub(crate) fn assign_as(assigning: Assigning, span: Span, name: &str, value: &str) -> Diagnostic {
     Diagnostic::error(
         Code::AttributeSeparator,
-        format!("a new attribute is written `{name} := …`, not `… as {name}`"),
+        format!(
+            "an {} is written `{name} := …`, not `… as {name}`",
+            match assigning {
+                Assigning::Extend => "new attribute",
+                Assigning::Replace => "attribute's new value",
+            }
+        ),
         span,
         "the name goes first",
     )
-    .with_note(EXTEND_FORM)
+    .with_note(assigning.form())
     .with_suggestion(
         format!("write `{name} := …`"),
         vec![Edit {

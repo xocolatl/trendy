@@ -229,6 +229,9 @@ pub(crate) fn type_mismatch(
                 replacement: found.to_string(),
             }],
         ),
+        Origin::Replaced(_, name) => d.with_note(format!(
+            "`replace` keeps each attribute's type; to change `{name}`'s, compute it under another name with `extend`, then remove the old one and rename the new: `… extend {{ new_{name} := … }} remove {{{name}}} rename {{new_{name} as {name}}}`"
+        )),
         Origin::Heading(_) | Origin::Value(_) | Origin::Builtin | Origin::Operator(_) => d,
     }
 }
@@ -666,7 +669,7 @@ pub(crate) fn not_projectable(
     Diagnostic::error(Code::WrongOperandType, message, at, label)
         .with_secondary(operand.span(), format!("this is `{ty}`"))
         .with_note(
-            "a projection, `r{a, b}`, `r remove {c}`, `r rename {a as b}` and `r extend { d := … }` work on the attributes of a tuple or relation",
+            "a projection, `r{a, b}`, `r remove {c}`, `r rename {a as b}`, `r extend { d := … }` and `r replace { a := … }` work on the attributes of a tuple or relation",
         )
 }
 
@@ -951,8 +954,10 @@ pub(crate) fn attribute_exists(
     .with_help("choose a free name, or rename the other attribute in the same `rename`")
 }
 
-/// `extend {}`, written `postfix` after `operand`, which adds nothing.
-pub(crate) fn empty_extend(
+/// `extend {}` or `replace {}`, as `assigning` says, written `postfix`
+/// after `operand`, which changes nothing.
+pub(crate) fn empty_assign(
+    assigning: crate::ops::Assigning,
     postfix: &trendy_syntax::ast::PostfixExpr,
     operand: &Expr,
 ) -> Diagnostic {
@@ -960,43 +965,102 @@ pub(crate) fn empty_extend(
     let keyword = postfix.operator().map_or(operand.span().end, |t| {
         trendy_syntax::span(t.text_range()).start
     });
-    Diagnostic::error(
-        Code::EmptyRemove,
-        "`extend {}` adds nothing",
-        Span::new(keyword, end),
-        "no new attributes",
-    )
-    .with_note(
-        "`extend` takes new attributes, each `name := value`; with none it would change nothing",
-    )
-    .with_suggestion(
-        "drop the `extend {}`",
-        vec![Edit {
-            span: Span::new(operand.span().end, end),
-            replacement: String::new(),
-        }],
-    )
+    let (message, label, note) = match assigning {
+        crate::ops::Assigning::Extend => (
+            "`extend {}` adds nothing",
+            "no new attributes",
+            "`extend` takes new attributes, each `name := value`; with none it would change nothing",
+        ),
+        crate::ops::Assigning::Replace => (
+            "`replace {}` replaces nothing",
+            "no attributes",
+            "`replace` takes attributes the operand has, each `name := value`; with none it would change nothing",
+        ),
+    };
+    let spelled = assigning.keyword();
+    Diagnostic::error(Code::EmptyRemove, message, Span::new(keyword, end), label)
+        .with_note(note)
+        .with_suggestion(
+            format!("drop the `{spelled} {{}}`"),
+            vec![Edit {
+                span: Span::new(operand.span().end, end),
+                replacement: String::new(),
+            }],
+        )
 }
 
 /// The new attribute `name`, at `span`, which `operand`, of type `ty`,
-/// already has.
+/// already has. `replace` is the `extend` keyword's span, if every
+/// attribute the `extend` names exists, so that `replace` is likely meant.
 pub(crate) fn extension_exists(
     name: &str,
     span: Span,
     ty: &hir::Type,
     operand: &Expr,
+    replace: Option<Span>,
 ) -> Diagnostic {
-    Diagnostic::error(
+    let d = Diagnostic::error(
         Code::AttributeExists,
         format!("attribute `{name}` already exists"),
         span,
         "this name is taken",
     )
     .with_secondary(operand.span(), format!("this is `{ty}`"))
-    .with_note("`extend` adds attributes; attributes are a set, so a new one needs a name the operand doesn't have")
-    .with_help(format!(
-        "to compute a new value for `{name}`, add it under another name, then remove the old one and rename the new: `… extend {{ new_{name} := … }} remove {{{name}}} rename {{new_{name} as {name}}}`"
-    ))
+    .with_note("`extend` adds attributes; attributes are a set, so a new one needs a name the operand doesn't have");
+    match replace {
+        Some(keyword) => d.with_suggestion(
+            format!("to give `{name}` a new value of the same type, write `replace`"),
+            vec![Edit {
+                span: keyword,
+                replacement: "replace".to_string(),
+            }],
+        ),
+        None => d.with_help(format!(
+            "to give `{name}` a new value of the same type, use `replace` for it: `… replace {{ {name} := … }}`; to add an attribute, choose a free name"
+        )),
+    }
+}
+
+/// The attribute `name`, at `span`, which a `replace` gives a new value but
+/// `operand`, of type `ty`, hasn't. `extend` is the `replace` keyword's
+/// span, if no attribute the `replace` names exists, so that `extend` is
+/// likely meant.
+pub(crate) fn replaced_unknown(
+    name: &str,
+    span: Span,
+    ty: &hir::Type,
+    operand: &Expr,
+    extend: Option<Span>,
+) -> Diagnostic {
+    let (hir::Type::Tuple(heading) | hir::Type::Relation(heading)) = ty else {
+        unreachable!("only tuples and relations have attributes to replace");
+    };
+    let rename = heading
+        .attributes()
+        .map(|(a, _)| a)
+        .filter(|a| edit_distance(a, name) <= 2)
+        .min_by_key(|a| edit_distance(a, name));
+    let d = unknown_attribute(
+        Noun::Projected,
+        name,
+        span,
+        "`replace` gives attributes the operand has new values of the same types; it adds none",
+        rename,
+        None,
+    )
+    .with_secondary(operand.span(), format!("this is `{ty}`"));
+    match extend {
+        Some(keyword) => d.with_suggestion(
+            format!("to add `{name}` as a new attribute, write `extend`"),
+            vec![Edit {
+                span: keyword,
+                replacement: "extend".to_string(),
+            }],
+        ),
+        None => d.with_help(format!(
+            "to add `{name}` as a new attribute, use `extend` for it: `… extend {{ {name} := … }}`"
+        )),
+    }
 }
 
 /// Computing a new attribute, whose value is written `value`, fails for a

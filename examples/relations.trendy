@@ -41,7 +41,7 @@ key { name };
    terms of them. Not, the complement, can be infinite, so it is only used
    underneath, never written.
 
-   In where, extend, update and summarize, the attributes of the tuple at
+   In where, extend, replace and summarize, the attributes of the tuple at
    hand are in scope by name, and hide any variable or parameter of the
    same name. To use one of those, rename it first. */
 
@@ -79,15 +79,6 @@ key { name };
 
    call debug_value{v: people where born < 1900};
    call debug_value{v: people where born < 1900 and name <> "Ada"};
-*/
-
-/* Substitution: each tuple with some attributes replaced, computed from
-   its own (dropped in Tutorial D version 2).
-   Tuple analog: update.
-   Tutorial D: UPDATE PEOPLE ( BORN := BORN + 1 )
-   Proposed: an `update` operator, as for tuples.
-
-   call debug_value{v: people update { born := born + 1 }};
 */
 
 /* Union, intersection and difference, of relations with the same heading,
@@ -341,6 +332,20 @@ operator extend_people{
     call debug_value{v: t extend { roster := members extend { role := "member" } }};
 ];
 
+/* Substitution: each tuple with attributes the relation has given new
+   values of the same types, each `name := value`, computed from the old
+   ones, all at once. Tuples that become equal are one: the result can
+   have fewer. Tuple analog: replace. Tutorial D: UPDATE PEOPLE ( BORN :=
+   BORN + 1 ), the read-only operator, which its version 2 folded into
+   EXTEND. Implemented, and printed twice like the projections. */
+var older := people replace { born := born + 1 };
+var millennia := people{born} replace { born := born div 1000 };
+
+operator replace_people{p: relation { name: text, born: integer }} [
+    call debug_value{v: p replace { born := born + 1 }};
+    call debug_value{v: p{born} replace { born := born div 1000 }};
+];
+
 operator main{} [
     call debug_value{v: names};
     call debug_value{v: places};
@@ -362,6 +367,8 @@ operator main{} [
     call debug_value{v: born_where};
     call debug_value{v: ages};
     call debug_value{v: rosters};
+    call debug_value{v: older};
+    call debug_value{v: millennia};
 
     call project_births{r: births};
     call project_signs{r: signs};
@@ -378,4 +385,6 @@ operator main{} [
     call join_people{p: people, c: cities, y: years, k: countries};
 
     call extend_people{p: people, t: teams};
+
+    call replace_people{p: people};
 ];

@@ -170,8 +170,8 @@ impl<'a> Checker<'a> {
                 let name = ops::extracted(extract, &operand_expr, &ty, errors)?;
                 self.matched(expected, ops::extract(operand, name), expr, errors)
             }
-            Expr::Postfix(postfix) if ops::is_extend(postfix) => {
-                self.extended(postfix, expr, expected, errors)
+            Expr::Postfix(postfix) if let Some(assigning) = ops::Assigning::of(postfix) => {
+                self.assigned(postfix, assigning, expr, expected, errors)
             }
             Expr::Project(_) | Expr::Postfix(_) => self.reshaped(expr, expected, errors),
             Expr::Tuple(tuple) => types::tuple_selector(tuple, expected, self, errors),
@@ -213,11 +213,15 @@ impl<'a> Checker<'a> {
         self.matched(expected, result, expr, errors)
     }
 
-    /// `postfix`, an `extend`, written `expr`: each new attribute's value is
-    /// checked with the attributes of the tuple at hand in scope.
-    fn extended(
+    /// `postfix`, an `extend` or a `replace`, as `assigning` says, written
+    /// `expr`: each attribute's value is checked with the attributes of the
+    /// tuple at hand in scope. A `replace`'s values have the types of the
+    /// attributes they replace, and are computed from the old values, all
+    /// at once.
+    fn assigned(
         &mut self,
         postfix: &ast::PostfixExpr,
+        assigning: ops::Assigning,
         expr: &Expr,
         expected: Option<&Expected>,
         errors: &mut Vec<Diagnostic>,
@@ -225,34 +229,44 @@ impl<'a> Checker<'a> {
         let operand_expr = postfix.operand()?;
         let operand = self.expr(&operand_expr, None, errors)?;
         let ty = self.ty(&operand);
+        let keyword = postfix.operator()?;
         let (hir::Type::Tuple(heading) | hir::Type::Relation(heading)) = &ty else {
-            let at = trendy_syntax::span(postfix.operator()?.text_range());
+            let at = trendy_syntax::span(keyword.text_range());
             errors.push(errors::not_projectable(
-                Some("extend"),
+                Some(assigning.keyword()),
                 at,
                 &ty,
                 &operand_expr,
             ));
             return None;
         };
-        let list = postfix.extensions()?;
-        let extensions: Vec<(ast::Extension, String, Span)> = list
-            .extensions()
-            .filter_map(|extension| {
-                let ident = extension.name()?.ident()?;
+        let list = postfix.assignments()?;
+        let assignments: Vec<(ast::Assign, String, Span)> = list
+            .assignments()
+            .filter_map(|assign| {
+                let ident = assign.name()?.ident()?;
                 let span = trendy_syntax::span(ident.text_range());
-                Some((extension, ident.text().to_string(), span))
+                Some((assign, ident.text().to_string(), span))
             })
             .collect();
-        if list.extensions().next().is_none() {
-            errors.push(errors::empty_extend(postfix, &operand_expr));
+        if list.assignments().next().is_none() {
+            errors.push(errors::empty_assign(assigning, postfix, &operand_expr));
             return None;
         }
+        // When every name is wrong for this operator, the other one is
+        // likely what was meant.
+        let keyword = trendy_syntax::span(keyword.text_range());
+        let other = assignments
+            .iter()
+            .all(|(_, name, _)| {
+                heading.get(name).is_some() == (assigning == ops::Assigning::Extend)
+            })
+            .then_some(keyword);
         let mut ok = true;
         let mut values = BTreeMap::new();
-        let mut added = BTreeMap::new();
-        for (extension, name, span) in &extensions {
-            if let Some(&(_, _, first)) = extensions.iter().find(|(_, n, _)| n == name)
+        let mut types = BTreeMap::new();
+        for (assign, name, span) in &assignments {
+            if let Some(&(_, _, first)) = assignments.iter().find(|(_, n, _)| n == name)
                 && first != *span
             {
                 errors.push(errors::duplicate_attribute(
@@ -264,21 +278,20 @@ impl<'a> Checker<'a> {
                 ok = false;
                 continue;
             }
-            if heading.get(name).is_some() {
-                errors.push(errors::extension_exists(name, *span, &ty, &operand_expr));
-                ok = false;
-            }
+            let (valid, expected) =
+                assigned_name(assigning, name, *span, &ty, &operand_expr, other, errors);
+            ok &= valid;
             let mut names = TupleNames {
                 outer: &mut *self.names,
                 heading: heading.clone(),
             };
             let mut checker = Checker::new(&mut names);
-            match extension
+            match assign
                 .value()
-                .and_then(|v| checker.expr(&v, None, errors))
+                .and_then(|v| checker.expr(&v, expected.as_ref(), errors))
             {
                 Some(value) => {
-                    added.insert(name.clone(), checker.ty(&value));
+                    types.insert(name.clone(), checker.ty(&value));
                     values.insert(name.clone(), value);
                 }
                 None => ok = false,
@@ -287,13 +300,13 @@ impl<'a> Checker<'a> {
         if !ok {
             return None;
         }
-        match ops::extend(operand, hir::Heading::new(added), values) {
+        match ops::extend(operand, hir::Heading::new(types), values) {
             Ok(result) => self.matched(expected, result, expr, errors),
             Err(failure) => {
-                let value = extensions
+                let value = assignments
                     .iter()
                     .find(|(_, name, _)| *name == failure.attribute)
-                    .and_then(|(extension, _, _)| extension.value())?;
+                    .and_then(|(assign, _, _)| assign.value())?;
                 errors.push(errors::extension_failure(&failure, &value));
                 None
             }
@@ -355,7 +368,43 @@ impl<'a> Checker<'a> {
     }
 }
 
-/// Names in the values an `extend` computes: the attributes of the tuple at
+/// Whether `name`, at `span`, is right for `assigning` in an operand of type
+/// `ty`, written `operand`, after reporting why not: new for an `extend`,
+/// existing for a `replace`. `other` is the keyword's span, if every name
+/// is wrong for it. Also the type a `replace`'s value must have.
+fn assigned_name(
+    assigning: ops::Assigning,
+    name: &str,
+    span: Span,
+    ty: &hir::Type,
+    operand: &Expr,
+    other: Option<Span>,
+    errors: &mut Vec<Diagnostic>,
+) -> (bool, Option<Expected>) {
+    let (hir::Type::Tuple(heading) | hir::Type::Relation(heading)) = ty else {
+        unreachable!("only tuples and relations have attributes to assign");
+    };
+    match (assigning, heading.get(name)) {
+        (ops::Assigning::Extend, None) => (true, None),
+        (ops::Assigning::Extend, Some(_)) => {
+            errors.push(errors::extension_exists(name, span, ty, operand, other));
+            (false, None)
+        }
+        (ops::Assigning::Replace, Some(replaced)) => (
+            true,
+            Some(Expected {
+                ty: replaced.clone(),
+                origin: types::Origin::Replaced(operand.clone(), name.to_string()),
+            }),
+        ),
+        (ops::Assigning::Replace, None) => {
+            errors.push(errors::replaced_unknown(name, span, ty, operand, other));
+            (false, None)
+        }
+    }
+}
+
+/// Names in the values an `extend` or a `replace` computes: the attributes of the tuple at
 /// hand, with `heading`, which hide the names around them, in `outer`.
 struct TupleNames<'a> {
     outer: &'a mut dyn Names,

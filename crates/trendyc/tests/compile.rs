@@ -391,6 +391,9 @@ fn tuples() {
             // Extended.
             r#"tuple { city: "Paris", country: "France", floor: 2, line: "1 Rue de Rivoli, Paris", postal_code: "75001", street: "1 Rue de Rivoli" }"#,
             "tuple { outer: tuple { inner: 1e0 }, total: 3e0, x: 1e0, y: 2e0 }",
+            // Replaced, each value computed from the old tuple.
+            r#"tuple { city: "Paris", country: "France", postal_code: "75002", street: "1 Rue de Rivoli" }"#,
+            "tuple { x: 4e0, y: 1e0 }",
         ]
     );
 }
@@ -432,6 +435,10 @@ fn relations() {
             // attribute extended in turn, empty or not.
             r#"relation { age: integer, born: integer, greeting: text, name: text } { { age: 101, born: 1923, greeting: "Hi, Edgar", name: "Edgar" }, { age: 209, born: 1815, greeting: "Hi, Ada", name: "Ada" } }"#,
             r#"relation { members: relation { name: text }, roster: relation { name: text, role: text }, team: text } { { members: relation { name: text } {}, roster: relation { name: text, role: text } {}, team: "docs" }, { members: relation { name: text } { { name: "Ada" }, { name: "Edgar" } }, roster: relation { name: text, role: text } { { name: "Ada", role: "member" }, { name: "Edgar", role: "member" } }, team: "core" } }"#,
+            // Replaced, each tuple computing its own; tuples that become
+            // equal are one.
+            r#"relation { born: integer, name: text } { { born: 1816, name: "Ada" }, { born: 1924, name: "Edgar" } }"#,
+            "relation { born: integer } { { born: 1 } }",
         ]
     );
 }

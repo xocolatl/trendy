@@ -94,11 +94,13 @@ fn classify(token: &SyntaxToken) -> Option<Highlight> {
         (SyntaxKind::Ident, Some(SyntaxKind::Name), Some(SyntaxKind::VarDecl)) => {
             (Class::Variable, true)
         }
-        (
-            SyntaxKind::Ident,
-            Some(SyntaxKind::Name),
-            Some(SyntaxKind::AttributeType | SyntaxKind::Extension),
-        ) => (Class::Attribute, true),
+        (SyntaxKind::Ident, Some(SyntaxKind::Name), Some(SyntaxKind::AttributeType)) => {
+            (Class::Attribute, true)
+        }
+        // A new attribute in an `extend`, or an existing one in a `replace`.
+        (SyntaxKind::Ident, Some(SyntaxKind::Name), Some(SyntaxKind::Assign)) => {
+            (Class::Attribute, !is_replaced(token))
+        }
         (
             SyntaxKind::Ident,
             Some(SyntaxKind::Name),
@@ -135,6 +137,17 @@ fn is_parameter(token: &SyntaxToken) -> bool {
                     .is_some_and(|i| i.text() == token.text())
             })
         })
+}
+
+/// Whether the name `token`, in an attribute assignment, names an existing
+/// attribute that a `replace` gives a new value, rather than defining a new
+/// one in an `extend`.
+fn is_replaced(token: &SyntaxToken) -> bool {
+    token
+        .parent_ancestors()
+        .find_map(trendy_syntax::ast::PostfixExpr::cast)
+        .and_then(|postfix| postfix.operator())
+        .is_some_and(|keyword| keyword.kind() == SyntaxKind::ReplaceKw)
 }
 
 #[cfg(test)]
@@ -244,7 +257,7 @@ mod tests {
     }
 
     #[test]
-    fn extensions() {
+    fn assignments() {
         assert_eq!(
             highlight("var a := b extend { c := d };"),
             [
@@ -253,6 +266,17 @@ mod tests {
                 ("b", Class::Variable, false),
                 ("extend", Class::ExprOperator, false),
                 ("c", Class::Attribute, true),
+                ("d", Class::Variable, false),
+            ]
+        );
+        assert_eq!(
+            highlight("var a := b replace { c := d };"),
+            [
+                ("var", Class::Keyword, false),
+                ("a", Class::Variable, true),
+                ("b", Class::Variable, false),
+                ("replace", Class::ExprOperator, false),
+                ("c", Class::Attribute, false),
                 ("d", Class::Variable, false),
             ]
         );

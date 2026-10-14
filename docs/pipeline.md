@@ -152,10 +152,11 @@ be in any order and brackets what can't, so join's and times's operands
 go in braces, and compose's in brackets; the others are fixed to them
 (P0003).
 
-`extend`, like `remove` and `rename`, is postfix, and takes a list of new
-attributes, each `name := value` (`Extension`). A tuple's `name: value`
-and keyword arguments' `name = value` are parsed as the extension meant and
-fixed to `:=`, and SQL's and Tutorial D's `value as name` to
+`extend` and `replace`, like `remove` and `rename`, are postfix, and take a
+list of attribute assignments, each `name := value` (`Assign`), new
+attributes for `extend` and existing ones for `replace`. A tuple's
+`name: value` and keyword arguments' `name = value` are parsed as the
+assignment meant and fixed to `:=`, and SQL's and Tutorial D's `value as name` to
 `name := value` (P0011). A value with no name is reported without a fix,
 since the name can't be guessed.
 
@@ -231,12 +232,15 @@ order has no meaning in the language.
 The relational operators are those of Algebra A (TTM Appendix A), so that
 the optimizer has few to rewrite: `Remove`, which projection also becomes,
 `Rename`, and `And`, which `join`, `times` and `compose` all become, with
-compose's common attributes then removed. `Extend` adds attributes, each
-computed by an expression from the tuple at hand, `Current(depth, …)`: the
-tuple of the `Extend` `depth` levels out, so that a nested `extend` can
-refer to an outer tuple's attributes. `Extend` carries the added
-attributes' heading, since an empty relation has no tuple to take their
-types from.
+compose's common attributes then removed. `Extend` adds attributes, or
+replaces them with new values of the same types, each computed by an
+expression from the tuple at hand, `Current(depth, …)`: the tuple of the
+`Extend` `depth` levels out, so that a nested `extend` can refer to an
+outer tuple's attributes. Both `extend` and `replace` become it, as both
+are Tutorial D Version 2's `EXTEND`; `replace` is then not extend, remove
+and rename under fresh names, which HIR would have to invent. `Extend`
+carries the computed attributes' heading, since an empty relation has no
+tuple to take their types from.
 
 Every type's equality must hold exactly when no operator can tell two values
 apart (TTM RM Prescription 8). For approximate numbers, that is IEEE 754
@@ -300,12 +304,15 @@ one with run-time parts becomes `hir::Expr::Tuple` or
 `hir::Expr::Relation`. Duplicate tuples are an error only when both are
 constants; tuples known only when running become one if they are equal.
 
-In an `extend`'s values, names resolve first to the attributes of the tuple
+In an `extend`'s or a `replace`'s values, names resolve first to the attributes of the tuple
 at hand (`check::TupleNames`), as `Current(0, …)`'s attributes, and then to
 whatever they name around the `extend`, one `Current` level deeper. An
 unknown name is reported with the attributes among the candidates, so a
-misspelled attribute gets a fix. A new attribute must not be the operand's
-(A0024) and is given once (A0008). When the operand is a constant, the
+misspelled attribute gets a fix. An attribute is given once (A0008). An
+`extend`'s must not be the operand's (A0024), and a `replace`'s must be
+(A0010), with its value checked against the attribute's type, so a
+mismatch (A0004) points at the operand. When every name is wrong for the
+keyword, the fix is the other keyword. When the operand is a constant, the
 values are computed for each of its tuples by substituting it for the
 tuple at hand and folding again (`ops::extend`), so a failure, such as an
 overflow for one tuple, is a compile error, with a note on the tuple.
@@ -447,7 +454,8 @@ the operand or computed, with the operand's place as the tuple at hand.
 For a relation, `trendy_rt_allocate` makes the result's tuples; a loop then
 goes through the operand's, with the address of the tuple at hand in a
 slot (`Base::Indirect`), building each result tuple the same way; and
-`trendy_rt_sort` puts them in the canonical order. A failure inside the
+`trendy_rt_sort` puts them in the canonical order, making one of the
+tuples a `replace` made equal. A failure inside the
 loop stops the program as anywhere else.
 
 The canonical order of a relation's tuples is `hir::Value`'s order, which

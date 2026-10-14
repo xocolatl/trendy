@@ -2420,9 +2420,90 @@ mod tests {
         let fixed = fix(&source);
         assert!(fixed.contains("total := quantity * 2"), "{fixed}");
         assert!(fixed.contains("var e := r;"), "{fixed}");
+        // Every attribute it names exists, so `replace` is likely meant.
+        assert!(fixed.contains("r replace { quantity := 2 }"), "{fixed}");
         assert_eq!(
             errors[5].notes[1],
             "computing `m` for `tuple { n: 9223372036854775807 }`, which the operand has"
+        );
+    }
+
+    #[test]
+    fn replace_constants() {
+        let vars = variables(
+            "var items := relation { { name: \"tea\", price: 3 }, { name: \"rice\", price: 2 } };\nvar doubled := items replace { price := price * 2 };\nvar point := tuple { x: 1, y: 2 } replace { x := y, y := x };\nvar same := items replace { price := 1 };\nvar none := relation { price: integer } {} replace { price := price + 1 };",
+        );
+        let value = |name: &str| &vars.iter().find(|v| v.name == name).unwrap().init;
+        assert_eq!(
+            value("doubled"),
+            &variables(
+                "var t := relation { { name: \"tea\", price: 6 }, { name: \"rice\", price: 4 } };"
+            )[0]
+            .init
+        );
+        // Every value is computed from the old tuple, all at once.
+        assert_eq!(
+            value("point"),
+            &variables("var p := tuple { x: 2, y: 1 };")[0].init
+        );
+        // Tuples that become equal are one tuple.
+        let hir::Value::Relation(same) = value("same") else {
+            panic!("a relation");
+        };
+        assert_eq!(same.tuples.len(), 2, "the names still differ");
+        assert_eq!(
+            value("none").ty().to_string(),
+            "relation { price: integer }"
+        );
+        let vars =
+            variables("var r := relation { { a: 1, b: 1 }, { a: 2, b: 1 } } replace { a := b };");
+        let hir::Value::Relation(r) = &vars[0].init else {
+            panic!("a relation");
+        };
+        assert_eq!(r.tuples.len(), 1);
+    }
+
+    #[test]
+    fn replace_errors() {
+        let source = format!(
+            "var r := relation {{ {{ price: 1, name: \"tea\" }} }};\nvar a := r replace {{ prise := 2 }};\nvar b := r replace {{ total := price * 2 }};\nvar c := r replace {{ price := 2, total := 3 }};\nvar d := r replace {{ price := 2e0 }};\nvar e := r replace {{ price := 1, price := 2 }};\nvar f := r replace {{}};\nvar g := 1 replace {{ h := 2 }};{MAIN}"
+        );
+        let errors = errors(&source);
+        let found: Vec<_> = errors.iter().map(|e| (e.code, &e.message[..])).collect();
+        assert_eq!(
+            found,
+            [
+                (Code::UnknownAttribute, "unknown attribute `prise`"),
+                (Code::UnknownAttribute, "unknown attribute `total`"),
+                (Code::UnknownAttribute, "unknown attribute `total`"),
+                (
+                    Code::TypeMismatch,
+                    "mismatched types: expected `integer`, found `approximate`"
+                ),
+                (
+                    Code::DuplicateAttribute,
+                    "attribute `price` is given more than once"
+                ),
+                (Code::EmptyRemove, "`replace {}` replaces nothing"),
+                (
+                    Code::WrongOperandType,
+                    "`replace` can't be applied to integers"
+                ),
+            ]
+        );
+        let fixed = fix(&source);
+        // A misspelling is fixed; when no attribute named exists, `extend`
+        // is likely meant; with some that do, there's no mechanical fix.
+        assert!(fixed.contains("r replace { price := 2 }"), "{fixed}");
+        assert!(fixed.contains("r extend { total := price * 2 }"), "{fixed}");
+        assert!(
+            fixed.contains("r replace { price := 2, total := 3 }"),
+            "{fixed}"
+        );
+        assert!(fixed.contains("var f := r;"), "{fixed}");
+        assert_eq!(
+            errors[3].notes[1],
+            "`replace` keeps each attribute's type; to change `price`'s, compute it under another name with `extend`, then remove the old one and rename the new: `… extend { new_price := … } remove {price} rename {new_price as price}`"
         );
     }
 

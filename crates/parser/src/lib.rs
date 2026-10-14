@@ -733,7 +733,7 @@ impl<'a> Parser<'a> {
                 self.operator_token(found, keyword);
                 match keyword {
                     SyntaxKind::RenameKw => self.rename_list(),
-                    SyntaxKind::ExtendKw => self.extend_list(),
+                    SyntaxKind::ExtendKw | SyntaxKind::ReplaceKw => self.assign_list(keyword),
                     _ => self.names(errors::PROJECTION_FORM),
                 }
             } else {
@@ -753,7 +753,10 @@ impl<'a> Parser<'a> {
         };
         matches!(
             keyword,
-            SyntaxKind::RemoveKw | SyntaxKind::RenameKw | SyntaxKind::ExtendKw
+            SyntaxKind::RemoveKw
+                | SyntaxKind::RenameKw
+                | SyntaxKind::ExtendKw
+                | SyntaxKind::ReplaceKw
         )
         .then_some((found, keyword))
     }
@@ -809,15 +812,17 @@ impl<'a> Parser<'a> {
         self.builder.finish_node();
     }
 
-    /// `{ a := x, b := y }`: new attributes and their values.
-    fn extend_list(&mut self) {
-        let outer_form = std::mem::replace(&mut self.form, errors::EXTEND_FORM);
+    /// `{ a := x, b := y }`: attributes and their values, after `keyword`,
+    /// `extend` or `replace`.
+    fn assign_list(&mut self, keyword: SyntaxKind) {
+        let assigning = errors::Assigning::of(keyword);
+        let outer_form = std::mem::replace(&mut self.form, assigning.form());
         self.delimited(
-            Some(SyntaxKind::ExtendList),
-            "new attributes",
+            Some(SyntaxKind::AssignList),
+            assigning.list(),
             (SyntaxKind::LBrace, SyntaxKind::RBrace),
             &[(SyntaxKind::LParen, SyntaxKind::RParen)],
-            |p| p.items(Self::at_operand, Self::extension),
+            move |p| p.items(Self::at_operand, move |p| p.assign(assigning)),
         );
         self.form = outer_form;
     }
@@ -825,8 +830,8 @@ impl<'a> Parser<'a> {
     /// `a := x`. `a: x` and `a = x`, as a tuple and as keyword arguments
     /// are written, are fixed to `a := x`, and `x as a`, as SQL and Tutorial
     /// D's `ADD` write it, to `a := x`.
-    fn extension(&mut self) {
-        self.start_node(SyntaxKind::Extension);
+    fn assign(&mut self, assigning: errors::Assigning) {
+        self.start_node(SyntaxKind::Assign);
         let separator = self.found_after(1).map(|f| f.kind);
         let named = self.at(SyntaxKind::Ident)
             && matches!(
@@ -844,8 +849,9 @@ impl<'a> Parser<'a> {
             );
             let span = self.bump();
             if found.kind != SyntaxKind::ColonEq {
-                self.errors
-                    .push(errors::extension_separator(found.kind, span, neighbors));
+                self.errors.push(errors::assign_separator(
+                    assigning, found.kind, span, neighbors,
+                ));
             }
             self.expression();
         } else {
@@ -864,21 +870,21 @@ impl<'a> Parser<'a> {
                         self.bump();
                         self.builder.finish_node();
                         let value = &self.source[start..value_end];
-                        self.errors.push(errors::extension_as(
+                        self.errors.push(errors::assign_as(
+                            assigning,
                             Span::new(start, name.span.end),
                             name.text,
                             value,
                         ));
                     } else {
-                        self.missing_with_help(
-                            SyntaxKind::Ident,
-                            "write the new attribute's name before the value, as in `total := a + b`",
-                        );
+                        self.missing_with_help(SyntaxKind::Ident, assigning.name_help());
                     }
                 }
                 _ => {
-                    self.errors
-                        .push(errors::unnamed_extension(Span::new(start, value_end)));
+                    self.errors.push(errors::unnamed_assign(
+                        assigning,
+                        Span::new(start, value_end),
+                    ));
                 }
             }
         }
@@ -1117,7 +1123,7 @@ impl<'a> Parser<'a> {
 
     /// Comma-separated items, with an optional trailing comma. `starts_item`
     /// says whether an item starts at the next token, and `item` parses one.
-    fn items(&mut self, starts_item: fn(&mut Self) -> bool, item: fn(&mut Self)) {
+    fn items(&mut self, starts_item: fn(&mut Self) -> bool, item: impl Fn(&mut Self)) {
         while starts_item(self) {
             item(self);
             if self.at(SyntaxKind::Comma) {
@@ -1248,7 +1254,7 @@ impl<'a> Parser<'a> {
         what: &'static str,
         delims: (SyntaxKind, SyntaxKind),
         mistakes: &[(SyntaxKind, SyntaxKind)],
-        contents: fn(&mut Self),
+        contents: impl FnOnce(&mut Self),
     ) {
         let (open, close) = delims;
         let used = if self.at(open) {
@@ -2379,15 +2385,15 @@ SourceFile
     }
 
     #[test]
-    fn extensions() {
+    fn assignments() {
         let source = "var x := r extend { total := price * quantity, label := name || \"!\" };";
         let parse = parse_str(source);
         assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
-        let extensions: Vec<_> = parse
+        let assignments: Vec<_> = parse
             .tree
             .syntax()
             .descendants()
-            .filter_map(trendy_syntax::ast::Extension::cast)
+            .filter_map(trendy_syntax::ast::Assign::cast)
             .map(|e| {
                 (
                     e.name().unwrap().syntax().to_string(),
@@ -2396,7 +2402,7 @@ SourceFile
             })
             .collect();
         assert_eq!(
-            extensions,
+            assignments,
             [
                 ("total".into(), "price * quantity".into()),
                 ("label".into(), "name || \"!\"".into())
@@ -2429,6 +2435,19 @@ SourceFile
             fix("var x := r extend { a + b };"),
             "var x := r extend { a + b };",
             "no mechanical fix for a missing name"
+        );
+        // `replace` takes the same assignments, to attributes that exist.
+        assert_eq!(
+            shape("a join b replace { c := 1 }"),
+            "(a join b replace { c := 1 })"
+        );
+        assert_eq!(
+            fix("var x := r REPLACE (a = 5);"),
+            "var x := r replace {a := 5};"
+        );
+        assert_eq!(
+            messages("var x := r replace { 5 };"),
+            ["an attribute's new value needs the attribute's name"]
         );
     }
 

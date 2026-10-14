@@ -18,7 +18,7 @@ var addr := tuple {
    relations. The others are defined in terms of them; project, for one,
    is remove of the attributes not named.
 
-   In extend and update, the tuple's own attributes are in scope by name,
+   In extend and replace, the tuple's own attributes are in scope by name,
    and hide any variable or parameter of the same name. To use one of
    those, rename it first. */
 
@@ -66,17 +66,6 @@ var addr := tuple {
    call debug_value{v: x unwrap { a }};
 */
 
-/* Substitute: the tuple with some attributes replaced, computed from its
-   own (Tutorial D, beyond RM Prescription 6; shorthand for extend, project
-   and rename).
-   Tutorial D: UPDATE ADDR ( POSTAL_CODE := '75002' )
-   Proposed: an `update` operator with attribute values, in which the
-   tuple's own attributes are in scope by name.
-
-   call debug_value{v: addr update { postal_code := "75002" }};
-   call debug_value{v: q update { x := x * 2e0 }};
-*/
-
 /* Tuple extraction: the one tuple of a relation with exactly one, else a
    run-time error (RM Prescription 7's relation operators).
    Tutorial D: TUPLE FROM R
@@ -90,7 +79,7 @@ var addr := tuple {
    Tutorial D: ADDR := TUPLE { ... }, and UPDATE ADDR ( POSTAL_CODE := '75002' )
    Proposed: an assignment statement, and `update` as a statement.
 
-   addr := addr update { postal_code := "75002" };
+   addr := addr replace { postal_code := "75002" };
    update addr { postal_code := "75002" };
 */
 
@@ -166,6 +155,23 @@ operator extend_addr{
     call debug_value{v: p extend { total := x + y, outer := tuple { inner: x } }};
 ];
 
+/* Substitution: the tuple with attributes it has given new values of the
+   same types, each `name := value`, computed from the old ones, all at
+   once, so `y := x` takes the old `x` (Tutorial D, beyond RM Prescription
+   6; shorthand for extend, remove and rename). Tutorial D: UPDATE ADDR (
+   POSTAL_CODE := '75002' ). Implemented, and printed twice like the
+   projections. */
+var recoded := addr replace { postal_code := "75002" };
+var flipped := q replace { x := y * 2e0, y := x };
+
+operator replace_addr{
+    a: tuple { street: text, city: text, country: text, postal_code: text },
+    p: tuple { x: approximate, y: approximate }
+} [
+    call debug_value{v: a replace { postal_code := "75002" }};
+    call debug_value{v: p replace { x := y * 2e0, y := x }};
+];
+
 operator main{} [
     call debug_value{v: located};
     call debug_value{v: unlocated};
@@ -179,6 +185,8 @@ operator main{} [
     call debug_value{v: sum};
     call debug_value{v: floored};
     call debug_value{v: summed};
+    call debug_value{v: recoded};
+    call debug_value{v: flipped};
 
     call project_addr{a: addr};
 
@@ -189,4 +197,6 @@ operator main{} [
     call extract{a: addr, t: x, p: q};
 
     call extend_addr{a: addr, p: q};
+
+    call replace_addr{a: addr, p: q};
 ];

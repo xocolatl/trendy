@@ -36,6 +36,9 @@ pub(crate) enum Origin {
     Builtin,
     /// An operator such as `and` or `+`, for its operands.
     Operator(SyntaxToken),
+    /// The attribute named, of the operand written here, which a `replace`
+    /// gives a new value of the same type.
+    Replaced(Expr, String),
 }
 
 impl Origin {
@@ -44,7 +47,7 @@ impl Origin {
         match self {
             Origin::Type(t) => Some(t.span()),
             Origin::Heading(h) => Some(h.span()),
-            Origin::Value(v) => Some(v.span()),
+            Origin::Value(v) | Origin::Replaced(v, _) => Some(v.span()),
             Origin::Builtin => None,
             Origin::Operator(token) => Some(trendy_syntax::span(token.text_range())),
         }
@@ -56,6 +59,7 @@ impl Origin {
                 "expected because of this type".to_string()
             }
             Origin::Value(_) => "expected because of this value".to_string(),
+            Origin::Replaced(_, name) => format!("`{name}` has the expected type here"),
             // Only operators with a fixed operand type are origins.
             Origin::Operator(token) => match Operator::of(token).map(|op| (op, op.operands())) {
                 Some((op, Operands::Fixed(scalar))) if op.is_prefix() => {

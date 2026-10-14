@@ -55,8 +55,8 @@ ast_node!(NaryExpr);
 ast_node!(NameList);
 ast_node!(RenameList);
 ast_node!(Renaming);
-ast_node!(ExtendList);
-ast_node!(Extension);
+ast_node!(AssignList);
+ast_node!(Assign);
 ast_node!(VarDecl);
 ast_node!(Key);
 ast_node!(Name);
@@ -284,27 +284,28 @@ impl PostfixExpr {
         self.0.children().find_map(RenameList::cast)
     }
 
+    /// The attribute assignments of an `extend` or a `replace`.
     #[must_use]
-    pub fn extensions(&self) -> Option<ExtendList> {
-        self.0.children().find_map(ExtendList::cast)
+    pub fn assignments(&self) -> Option<AssignList> {
+        self.0.children().find_map(AssignList::cast)
     }
 }
 
-impl ExtendList {
-    pub fn extensions(&self) -> impl Iterator<Item = Extension> {
-        self.0.children().filter_map(Extension::cast)
+impl AssignList {
+    pub fn assignments(&self) -> impl Iterator<Item = Assign> {
+        self.0.children().filter_map(Assign::cast)
     }
 
-    /// The span to delete to remove `extension` from the list, with a comma
+    /// The span to delete to remove `assign` from the list, with a comma
     /// that separates it from a neighbor.
     #[must_use]
-    pub fn removal(&self, extension: &Extension) -> Span {
-        list_removal(extension.syntax())
+    pub fn removal(&self, assign: &Assign) -> Span {
+        list_removal(assign.syntax())
     }
 }
 
-impl Extension {
-    /// The new attribute's name.
+impl Assign {
+    /// The attribute's name.
     #[must_use]
     pub fn name(&self) -> Option<Name> {
         self.0.children().find_map(Name::cast)

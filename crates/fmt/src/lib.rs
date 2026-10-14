@@ -13,7 +13,7 @@ mod order;
 use std::collections::HashSet;
 
 use trendy_syntax::ast::{
-    Arguments, AstNode, Body, ExtendList, Heading, NameList, NaryExpr, RelationLiteral, RenameList,
+    Arguments, AssignList, AstNode, Body, Heading, NameList, NaryExpr, RelationLiteral, RenameList,
     SourceFile, TupleLiteral,
 };
 use trendy_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
@@ -154,7 +154,7 @@ fn is_list(node: &SyntaxNode) -> bool {
             | SyntaxKind::RelationLiteral
             | SyntaxKind::NameList
             | SyntaxKind::RenameList
-            | SyntaxKind::ExtendList
+            | SyntaxKind::AssignList
             | SyntaxKind::NaryExpr
     )
 }
@@ -417,8 +417,8 @@ fn items(node: &SyntaxNode) -> usize {
         names.names().count()
     } else if let Some(renamings) = RenameList::cast(node.clone()) {
         renamings.renamings().count()
-    } else if let Some(extensions) = ExtendList::cast(node.clone()) {
-        extensions.extensions().count()
+    } else if let Some(assignments) = AssignList::cast(node.clone()) {
+        assignments.assignments().count()
     } else if let Some(nary) = NaryExpr::cast(node.clone()) {
         nary.operands().count()
     } else {
@@ -490,7 +490,7 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
                     SyntaxKind::Operator | SyntaxKind::BuiltinOperator
                 )
             }),
-            TupleLiteral | RelationLiteral | SyntaxKind::ExtendList => true,
+            TupleLiteral | RelationLiteral | SyntaxKind::AssignList => true,
             // A key's attributes, as in `key { a, b }`.
             SyntaxKind::NameList => p.parent().is_some_and(|k| k.kind() == SyntaxKind::Key),
             _ => false,
@@ -542,6 +542,7 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
             | SyntaxKind::RemoveKw
             | SyntaxKind::RenameKw
             | SyntaxKind::ExtendKw
+            | SyntaxKind::ReplaceKw
             | SyntaxKind::AsKw,
             _,
         )
@@ -551,6 +552,7 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
             | SyntaxKind::RemoveKw
             | SyntaxKind::RenameKw
             | SyntaxKind::ExtendKw
+            | SyntaxKind::ReplaceKw
             | SyntaxKind::AsKw,
         )
         | (RBrace, LBracket | LBrace) => " ",

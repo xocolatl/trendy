@@ -818,14 +818,36 @@ pub(crate) fn relation(heading: hir::Heading, tuples: Vec<hir::Expr>) -> hir::Ex
     }
 }
 
-/// Whether `postfix` is an `extend`.
-pub(crate) fn is_extend(postfix: &ast::PostfixExpr) -> bool {
-    postfix
-        .operator()
-        .is_some_and(|t| t.kind() == SyntaxKind::ExtendKw)
+/// What an `extend` or a `replace` does with its attribute assignments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Assigning {
+    /// Adds attributes the operand doesn't have.
+    Extend,
+    /// Gives attributes the operand has new values of the same types.
+    Replace,
 }
 
-/// `expr`, which a name in an `extend`'s value resolved to outside it, as
+impl Assigning {
+    /// What `postfix` assigns, if it is an `extend` or a `replace`.
+    pub(crate) fn of(postfix: &ast::PostfixExpr) -> Option<Assigning> {
+        match postfix.operator()?.kind() {
+            SyntaxKind::ExtendKw => Some(Assigning::Extend),
+            SyntaxKind::ReplaceKw => Some(Assigning::Replace),
+            _ => None,
+        }
+    }
+
+    /// The keyword.
+    pub(crate) fn keyword(self) -> &'static str {
+        match self {
+            Assigning::Extend => "extend",
+            Assigning::Replace => "replace",
+        }
+    }
+}
+
+/// `expr`, which a name in an `extend`'s or a `replace`'s value resolved to
+/// outside it, as
 /// seen from inside: the tuple at hand it refers to is one `Extend` further
 /// out. A name resolves to a variable, a parameter, a constant, or an
 /// attribute of a tuple at hand.
@@ -847,8 +869,8 @@ pub(crate) struct ExtendFailure {
     pub(crate) tuple: hir::TupleValue,
 }
 
-/// `operand` with `attributes`, of the types in `added`, added, each
-/// computed from the tuple at hand. Evaluated when the operand is a constant
+/// `operand` with `attributes`, of the types in `computed`, added or
+/// replaced, each computed from the tuple at hand. Evaluated when the operand is a constant
 /// and every attribute then is, for each of its tuples.
 ///
 /// # Errors
@@ -856,7 +878,7 @@ pub(crate) struct ExtendFailure {
 /// Returns why computing an attribute of a constant tuple fails.
 pub(crate) fn extend(
     operand: hir::Expr,
-    added: hir::Heading,
+    computed: hir::Heading,
     attributes: BTreeMap<String, hir::Expr>,
 ) -> Result<hir::Expr, ExtendFailure> {
     let folded = match &operand {
@@ -876,7 +898,7 @@ pub(crate) fn extend(
             }
             all.then(|| {
                 hir::Value::Relation(hir::RelationValue {
-                    heading: relation.heading.and(&added),
+                    heading: relation.heading.and(&computed),
                     tuples,
                 })
             })
@@ -885,21 +907,21 @@ pub(crate) fn extend(
     };
     Ok(match folded {
         Some(value) => hir::Expr::Constant(value),
-        None => hir::Expr::Extend(Box::new(operand), added, attributes),
+        None => hir::Expr::Extend(Box::new(operand), computed, attributes),
     })
 }
 
-/// `tuple` with `attributes` added, each computed with `tuple` as the tuple
-/// at hand, if every one is then a constant.
+/// `tuple` with `attributes` added or replaced, each computed with `tuple`
+/// as the tuple at hand, if every one is then a constant.
 fn extended(
     tuple: &hir::TupleValue,
     attributes: &BTreeMap<String, hir::Expr>,
 ) -> Result<Option<hir::TupleValue>, ExtendFailure> {
-    let mut added = BTreeMap::new();
+    let mut computed = BTreeMap::new();
     for (name, value) in attributes {
         match substitute(value.clone(), 0, tuple) {
             Ok(hir::Expr::Constant(value)) => {
-                added.insert(name.clone(), value);
+                computed.insert(name.clone(), value);
             }
             Ok(_) => return Ok(None),
             Err((failure, scalar)) => {
@@ -912,7 +934,7 @@ fn extended(
             }
         }
     }
-    Ok(Some(tuple.with(added)))
+    Ok(Some(tuple.with(computed)))
 }
 
 /// `expr` with the tuple at hand `depth` `Extend`s out replaced by `tuple`,
@@ -953,13 +975,13 @@ fn substitute(
         hir::Expr::Remove(operand, names) => remove(sub(operand)?, names),
         hir::Expr::Rename(operand, renamings) => rename(sub(operand)?, renamings),
         hir::Expr::And(lhs, rhs) => and(vec![sub(lhs)?, sub(rhs)?]),
-        hir::Expr::Extend(operand, added, attributes) => {
+        hir::Expr::Extend(operand, computed, attributes) => {
             // The values are one `Extend` further in.
             let attributes = attributes
                 .into_iter()
                 .map(|(name, e)| Ok((name, substitute(e, depth + 1, tuple)?)))
                 .collect::<Result<_, _>>()?;
-            extend(sub(operand)?, added, attributes).map_err(|f| (f.failure, f.scalar))?
+            extend(sub(operand)?, computed, attributes).map_err(|f| (f.failure, f.scalar))?
         }
     })
 }

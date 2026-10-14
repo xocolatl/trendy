@@ -171,11 +171,13 @@ pub enum Expr {
     /// what `join`, `times` and `compose` all are. The operands are
     /// relations whose common attributes have the same types.
     And(Box<Expr>, Box<Expr>),
-    /// A tuple, or each tuple of a relation, with attributes added (`extend`),
-    /// each computed by its expression from the tuple at hand, which is
-    /// `Current(0, …)` in it. The heading is the added attributes', whose
-    /// names are new to the operand: an empty relation has no tuple to
-    /// compute them from, but the result still has them.
+    /// A tuple, or each tuple of a relation, with attributes computed, each
+    /// by its expression from the tuple at hand, which is `Current(0, …)` in
+    /// it. An attribute the operand hasn't is added (`extend`); one it has
+    /// gets a new value of the same type (`replace`), computed from the old
+    /// ones, all at once. This is Tutorial D Version 2's `EXTEND`, which
+    /// does both. The heading is the computed attributes': an empty relation
+    /// has no tuple to compute them from, but the result still has them.
     Extend(Box<Expr>, Heading, BTreeMap<String, Expr>),
     /// The tuple at hand, with this heading: the one an `Extend` is computing
     /// attributes for, `depth` `Extend`s out from here, counting the
@@ -215,8 +217,8 @@ impl Expr {
             Expr::Remove(operand, names) => operand.type_with(leaf).without(names),
             Expr::Rename(operand, renamings) => operand.type_with(leaf).renamed(renamings),
             Expr::And(lhs, rhs) => lhs.type_with(leaf).and(&rhs.type_with(leaf)),
-            Expr::Extend(operand, added, _) => operand.type_with(leaf).with(
-                added
+            Expr::Extend(operand, computed, _) => operand.type_with(leaf).with(
+                computed
                     .attributes()
                     .map(|(name, ty)| (name.to_string(), ty.clone())),
             ),
@@ -916,7 +918,7 @@ impl TupleValue {
         )
     }
 
-    /// The tuple with `attributes` added, which it doesn't have.
+    /// The tuple with `attributes` added, or replacing those it has.
     #[must_use]
     pub fn with(&self, attributes: impl IntoIterator<Item = (String, Value)>) -> TupleValue {
         let mut all = self.0.clone();
@@ -952,8 +954,8 @@ impl Type {
         }
     }
 
-    /// The tuple or relation type with `attributes` added, which it doesn't
-    /// have.
+    /// The tuple or relation type with `attributes` added, or replacing
+    /// those it has.
     ///
     /// # Panics
     ///

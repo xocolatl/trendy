@@ -45,6 +45,7 @@ pub enum SyntaxKind {
     RemoveKw,
     RenameKw,
     ExtendKw,
+    ReplaceKw,
     JoinKw,
     TimesKw,
     ComposeKw,
@@ -125,7 +126,8 @@ pub enum SyntaxKind {
     ExtractExpr,
     /// `r{a, b}`: a projection.
     ProjectExpr,
-    /// `r remove {a, b}`, `r rename {a as b}` or `r extend { c := a + b }`
+    /// `r remove {a, b}`, `r rename {a as b}`, `r extend { c := a + b }` or
+    /// `r replace { a := a + 1 }`
     PostfixExpr,
     /// `join{r, s, t}` or `times{r, s, t}`: a join of any number of
     /// relations.
@@ -136,10 +138,11 @@ pub enum SyntaxKind {
     RenameList,
     /// `a as b`
     Renaming,
-    /// `{ a := x, b := y }`, in an `extend`.
-    ExtendList,
-    /// `a := x`: a new attribute and its value.
-    Extension,
+    /// `{ a := x, b := y }`, in an `extend` or a `replace`.
+    AssignList,
+    /// `a := x`: an attribute and its value, new in an `extend`, replacing
+    /// the old one in a `replace`.
+    Assign,
     /// `: type`
     TypeAnnotation,
     TypeRef,
@@ -171,7 +174,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 88] = [
+    pub const ALL: [SyntaxKind; 89] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -193,6 +196,7 @@ impl SyntaxKind {
         SyntaxKind::RemoveKw,
         SyntaxKind::RenameKw,
         SyntaxKind::ExtendKw,
+        SyntaxKind::ReplaceKw,
         SyntaxKind::JoinKw,
         SyntaxKind::TimesKw,
         SyntaxKind::ComposeKw,
@@ -245,8 +249,8 @@ impl SyntaxKind {
         SyntaxKind::NameList,
         SyntaxKind::RenameList,
         SyntaxKind::Renaming,
-        SyntaxKind::ExtendList,
-        SyntaxKind::Extension,
+        SyntaxKind::AssignList,
+        SyntaxKind::Assign,
         SyntaxKind::TypeAnnotation,
         SyntaxKind::TypeRef,
         SyntaxKind::Initializer,
@@ -289,6 +293,7 @@ impl SyntaxKind {
                 | SyntaxKind::RemoveKw
                 | SyntaxKind::RenameKw
                 | SyntaxKind::ExtendKw
+                | SyntaxKind::ReplaceKw
                 | SyntaxKind::JoinKw
                 | SyntaxKind::TimesKw
                 | SyntaxKind::ComposeKw
@@ -311,6 +316,7 @@ impl SyntaxKind {
                 | SyntaxKind::RemoveKw
                 | SyntaxKind::RenameKw
                 | SyntaxKind::ExtendKw
+                | SyntaxKind::ReplaceKw
                 | SyntaxKind::JoinKw
                 | SyntaxKind::TimesKw
                 | SyntaxKind::ComposeKw
@@ -407,6 +413,7 @@ impl SyntaxKind {
             SyntaxKind::RemoveKw => "remove",
             SyntaxKind::RenameKw => "rename",
             SyntaxKind::ExtendKw => "extend",
+            SyntaxKind::ReplaceKw => "replace",
             SyntaxKind::JoinKw => "join",
             SyntaxKind::TimesKw => "times",
             SyntaxKind::ComposeKw => "compose",
@@ -462,6 +469,7 @@ impl SyntaxKind {
             SyntaxKind::RemoveKw => "`remove`",
             SyntaxKind::RenameKw => "`rename`",
             SyntaxKind::ExtendKw => "`extend`",
+            SyntaxKind::ReplaceKw => "`replace`",
             SyntaxKind::JoinKw => "`join`",
             SyntaxKind::TimesKw => "`times`",
             SyntaxKind::ComposeKw => "`compose`",
@@ -509,8 +517,8 @@ impl SyntaxKind {
             SyntaxKind::NameList => "attribute names",
             SyntaxKind::RenameList => "renamings",
             SyntaxKind::Renaming => "renaming",
-            SyntaxKind::ExtendList => "new attributes",
-            SyntaxKind::Extension => "new attribute",
+            SyntaxKind::AssignList => "attribute assignments",
+            SyntaxKind::Assign => "attribute assignment",
             SyntaxKind::Body => "body",
             SyntaxKind::CallStmt => "call",
             SyntaxKind::Arguments => "arguments",
