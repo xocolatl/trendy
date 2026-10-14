@@ -793,6 +793,50 @@ pub(crate) enum Failed {
     NotOne(usize),
 }
 
+/// The tuples of `operand` for which `condition`, computed from the tuple at
+/// hand, is true: evaluated if the operand is a constant and the condition
+/// then is for each of its tuples. A condition that is true whatever the
+/// tuple keeps them all.
+///
+/// # Errors
+///
+/// Returns why evaluating the condition for a tuple of a constant operand
+/// fails.
+pub(crate) fn restrict(
+    operand: hir::Expr,
+    condition: hir::Expr,
+) -> Result<hir::Expr, TupleFailure> {
+    if condition == hir::Expr::Constant(hir::Value::Boolean(true)) {
+        return Ok(operand);
+    }
+    let hir::Expr::Constant(hir::Value::Relation(relation)) = &operand else {
+        return Ok(hir::Expr::Restrict(Box::new(operand), Box::new(condition)));
+    };
+    let mut kept = BTreeSet::new();
+    for tuple in &relation.tuples {
+        match substitute(condition.clone(), 0, tuple) {
+            Ok(hir::Expr::Constant(hir::Value::Boolean(true))) => {
+                kept.insert(tuple.clone());
+            }
+            Ok(hir::Expr::Constant(hir::Value::Boolean(false))) => {}
+            Ok(_) => return Ok(hir::Expr::Restrict(Box::new(operand), Box::new(condition))),
+            Err(failed) => {
+                return Err(TupleFailure {
+                    failed,
+                    attribute: None,
+                    tuple: tuple.clone(),
+                });
+            }
+        }
+    }
+    Ok(hir::Expr::Constant(hir::Value::Relation(
+        hir::RelationValue {
+            heading: relation.heading.clone(),
+            tuples: kept,
+        },
+    )))
+}
+
 /// The only tuple of the relation `operand`: evaluated if it is a constant.
 ///
 /// # Errors
@@ -932,7 +976,7 @@ pub(crate) fn group(
     operand: hir::Expr,
     heading: &hir::Heading,
     groups: Vec<(String, BTreeSet<String>)>,
-) -> Result<hir::Expr, ExtendFailure> {
+) -> Result<hir::Expr, TupleFailure> {
     let all: BTreeSet<String> = groups.iter().flat_map(|(_, set)| set.clone()).collect();
     let kept = heading.without(&all);
     // Each group is computed inside the extend's values, one tuple at hand
@@ -1090,6 +1134,10 @@ fn shifted(expr: hir::Expr, cutoff: usize) -> hir::Expr {
         hir::Expr::And(lhs, rhs) => hir::Expr::And(shift(lhs), shift(rhs)),
         hir::Expr::Ungroup(operand, names) => hir::Expr::Ungroup(shift(operand), names),
         hir::Expr::Only(operand) => hir::Expr::Only(shift(operand)),
+        // The condition is one tuple at hand further in.
+        hir::Expr::Restrict(operand, condition) => {
+            hir::Expr::Restrict(shift(operand), Box::new(shifted(*condition, cutoff + 1)))
+        }
         // The values are one `Extend` further in.
         hir::Expr::Extend(operand, computed, attributes) => hir::Expr::Extend(
             shift(operand),
@@ -1125,11 +1173,11 @@ pub(crate) fn image(
     remove(joined, common)
 }
 
-/// Why an `extend` of constants has no value: computing `attribute` for
-/// `tuple` fails.
-pub(crate) struct ExtendFailure {
+/// Why an `extend` or a `where` of constants has no value: computing
+/// `attribute` for `tuple`, or, with none, the condition, fails.
+pub(crate) struct TupleFailure {
     pub(crate) failed: Failed,
-    pub(crate) attribute: String,
+    pub(crate) attribute: Option<String>,
     pub(crate) tuple: hir::TupleValue,
 }
 
@@ -1144,7 +1192,7 @@ pub(crate) fn extend(
     operand: hir::Expr,
     computed: hir::Heading,
     attributes: BTreeMap<String, hir::Expr>,
-) -> Result<hir::Expr, ExtendFailure> {
+) -> Result<hir::Expr, TupleFailure> {
     let folded = match &operand {
         hir::Expr::Constant(hir::Value::Tuple(tuple)) => {
             extended(tuple, &attributes)?.map(hir::Value::Tuple)
@@ -1180,7 +1228,7 @@ pub(crate) fn extend(
 fn extended(
     tuple: &hir::TupleValue,
     attributes: &BTreeMap<String, hir::Expr>,
-) -> Result<Option<hir::TupleValue>, ExtendFailure> {
+) -> Result<Option<hir::TupleValue>, TupleFailure> {
     let mut computed = BTreeMap::new();
     for (name, value) in attributes {
         match substitute(value.clone(), 0, tuple) {
@@ -1189,9 +1237,9 @@ fn extended(
             }
             Ok(_) => return Ok(None),
             Err(failed) => {
-                return Err(ExtendFailure {
+                return Err(TupleFailure {
                     failed,
-                    attribute: name.clone(),
+                    attribute: Some(name.clone()),
                     tuple: tuple.clone(),
                 });
             }
@@ -1238,6 +1286,11 @@ fn substitute(expr: hir::Expr, depth: usize, tuple: &hir::TupleValue) -> Result<
         hir::Expr::And(lhs, rhs) => and(vec![sub(lhs)?, sub(rhs)?])?,
         hir::Expr::Ungroup(operand, names) => ungroup(sub(operand)?, names),
         hir::Expr::Only(operand) => only(sub(operand)?)?,
+        // The condition is one tuple at hand further in.
+        hir::Expr::Restrict(operand, condition) => {
+            let condition = substitute(*condition, depth + 1, tuple)?;
+            restrict(sub(operand)?, condition).map_err(|f| f.failed)?
+        }
         hir::Expr::Extend(operand, computed, attributes) => {
             // The values are one `Extend` further in.
             let attributes = attributes
@@ -1437,6 +1490,7 @@ fn can_fail(expr: &hir::Expr) -> bool {
         | hir::Expr::And(..)
         | hir::Expr::Ungroup(..)
         | hir::Expr::Only(..)
+        | hir::Expr::Restrict(..)
         | hir::Expr::Extend(..)
         | hir::Expr::Relation(..) => true,
         hir::Expr::Unary(_, operand) => can_fail(operand),

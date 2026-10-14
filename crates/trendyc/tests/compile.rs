@@ -346,6 +346,8 @@ fn run_time_failures_stop_the_program() {
         ("divide_min", "(-a - 1) div -1", &overflow),
         ("divide_zero", "a div b", &division),
         ("mod_zero", "a mod b", &division),
+        // In a condition, computed for each tuple.
+        ("where", "relation { { n: a } } where n + 1 > 0", &overflow),
     ];
     for (name, expr, expected) in cases {
         let (code, stderr) = run_source(&format!("fail_{name}"), &program(expr));
@@ -437,7 +439,7 @@ fn tuples() {
             "tuple { x: 4e0, y: 1e0 }",
             // Wrapped, wrapped again into another, and unwrapped back.
             r#"tuple { country: "France", place: tuple { city: "Paris", street: "1 Rue de Rivoli" }, postal_code: "75001" }"#,
-            r#"tuple { postal_code: "75001", where: tuple { country: "France", place: tuple { city: "Paris", street: "1 Rue de Rivoli" } } }"#,
+            r#"tuple { location: tuple { country: "France", place: tuple { city: "Paris", street: "1 Rue de Rivoli" } }, postal_code: "75001" }"#,
             r#"tuple { city: "Paris", country: "France", postal_code: "75001", street: "1 Rue de Rivoli" }"#,
             // Joined, composed, times, and a list joined.
             r#"tuple { city: "Paris", country: "France", district: "1st", postal_code: "75001", street: "1 Rue de Rivoli" }"#,
@@ -509,6 +511,10 @@ fn relations() {
             // Wrapped, and unwrapped back.
             r#"relation { place: text, who: tuple { born: integer, name: text } } { { place: "London", who: tuple { born: 1815, name: "Ada" } }, { place: "London", who: tuple { born: 1816, name: "Ada" } }, { place: "Paris", who: tuple { born: 1815, name: "Édouard" } }, { place: "Portland", who: tuple { born: 1923, name: "Edgar" } } }"#,
             r#"relation { born: integer, name: text, place: text } { { born: 1815, name: "Ada", place: "London" }, { born: 1815, name: "Édouard", place: "Paris" }, { born: 1816, name: "Ada", place: "London" }, { born: 1923, name: "Edgar", place: "Portland" } }"#,
+            // Restricted, by a condition, by two, and of a join.
+            r#"relation { born: integer, name: text, place: text } { { born: 1815, name: "Ada", place: "London" }, { born: 1815, name: "Édouard", place: "Paris" }, { born: 1816, name: "Ada", place: "London" } }"#,
+            r#"relation { born: integer, name: text, place: text } { { born: 1815, name: "Édouard", place: "Paris" } }"#,
+            r#"relation { born: integer, city: text, name: text, place: text } { { born: 1815, city: "London", name: "Ada", place: "London" }, { born: 1816, city: "London", name: "Ada", place: "London" }, { born: 1923, city: "Portland", name: "Edgar", place: "Portland" } }"#,
         ]
     );
 }

@@ -71,16 +71,6 @@ key { name };
    call debug_value{v: people{name} subset cities{name}};
 */
 
-/* Restriction: the tuples for which a condition holds.
-   Tutorial D: PEOPLE WHERE BORN < 1900
-   Proposed: a `where` operator, whose condition is a boolean expression
-   in which the tuple's attributes are in scope. Its condition takes the
-   rest of the expression, so it binds loosest, or needs parentheses.
-
-   call debug_value{v: people where born < 1900};
-   call debug_value{v: people where born < 1900 and name <> "Ada"};
-*/
-
 /* Union, intersection and difference, of relations with the same heading,
    and disjoint union, where the operands must have no tuple in common.
    Union is a special case of Algebra A's OR, intersection of its AND.
@@ -134,13 +124,6 @@ key { name };
    Tutorial D: TCLOSE R
 
    call debug_value{v: tclose relation { { from: 1, to: 2 }, { from: 2, to: 3 } }};
-*/
-
-/* Tuple extraction: the one tuple of a relation with exactly one, else a
-   run-time error. Listed with the tuple operators too.
-   Tutorial D: TUPLE FROM R
-
-   call debug_value{v: tuple from (people where name = "Ada")};
 */
 
 /* Assignment, and its shorthands (RM Prescription 21), once variables can
@@ -407,6 +390,26 @@ operator wrap_births{b: relation { name: text, born: integer, place: text }} [
     call debug_value{v: b wrap { who := {name, born} } unwrap {who}};
 ];
 
+/* Restriction: the tuples for which a condition holds, a boolean in which
+   the tuple's attributes are in scope by name. `where` binds loosest, so
+   its condition is the rest of the expression, and what comes before it is
+   restricted: below, the people who live where they were born. The tuples that pass
+   stay in order, so none are sorted again.
+   Tutorial D: PEOPLE WHERE BORN < 1900. Implemented, and printed twice like
+   the projections. */
+var early := births where born < 1900;
+var early_not_ada := births where born < 1900 and name <> "Ada";
+var at_home := births join cities where place = city;
+
+operator restrict_births{
+    b: relation { name: text, born: integer, place: text },
+    c: relation { name: text, city: text },
+} [
+    call debug_value{v: b where born < 1900};
+    call debug_value{v: b where born < 1900 and name <> "Ada"};
+    call debug_value{v: b join c where place = city};
+];
+
 operator main{} [
     call debug_value{v: names};
     call debug_value{v: places};
@@ -439,6 +442,9 @@ operator main{} [
     call debug_value{v: regrouped};
     call debug_value{v: who_where};
     call debug_value{v: unwrapped};
+    call debug_value{v: early};
+    call debug_value{v: early_not_ada};
+    call debug_value{v: at_home};
 
     call project_births{r: births};
     call project_signs{r: signs};
@@ -465,4 +471,6 @@ operator main{} [
     call ungroup_teams{t: teams, b: births};
 
     call wrap_births{b: births};
+
+    call restrict_births{b: births, c: cities};
 ];

@@ -2941,6 +2941,69 @@ mod tests {
     }
 
     #[test]
+    fn restrict_constants() {
+        let vars = variables(
+            "var people := 1;\nvar cities := relation { { city: \"Paris\", people: 2100000 }, { city: \"Lyon\", people: 520000 } };\nvar big := cities where people > 1000000;\nvar all := cities where people > 0 or true;\nvar none := cities where false;\nvar paris := tuple from cities where city = \"Paris\";\nvar matched := cities where !!cities = relation { {} };",
+        );
+        let value = |name: &str| &vars.iter().find(|v| v.name == name).unwrap().init;
+        let tuples = |name: &str| match value(name) {
+            hir::Value::Relation(r) => r.tuples.len(),
+            other => panic!("a relation: {other:?}"),
+        };
+        // The attribute `people` hides the variable.
+        assert_eq!(tuples("big"), 1);
+        assert_eq!(tuples("all"), 2);
+        assert_eq!(tuples("none"), 0);
+        assert_eq!(
+            value("paris"),
+            &variables("var e := tuple { city: \"Paris\", people: 2100000 };")[0].init
+        );
+        // Image relations work in a condition.
+        assert_eq!(tuples("matched"), 2);
+    }
+
+    #[test]
+    fn restrict_errors() {
+        let source = format!(
+            "var cities := relation {{ {{ city: \"Paris\", people: 2100000 }} }};\nvar a := cities where people;\nvar b := cities where people * 9000000000000 > 0;\nvar c := tuple {{ x: 1 }} where x = 1;\nvar d := cities where citty = \"Paris\";{MAIN}"
+        );
+        let errors = errors(&source);
+        let found: Vec<_> = errors.iter().map(|e| (e.code, &e.message[..])).collect();
+        assert_eq!(
+            found,
+            [
+                (
+                    Code::TypeMismatch,
+                    "mismatched types: expected `boolean`, found `integer`"
+                ),
+                (Code::Overflow, "integer overflow"),
+                (Code::WrongOperandType, "`where` can't be applied to tuples"),
+                (Code::UnknownName, "unknown value `citty`"),
+            ]
+        );
+        assert_eq!(
+            errors[1].notes[1],
+            "evaluating the condition for `tuple { city: \"Paris\", people: 2100000 }`, which the operand has"
+        );
+        assert!(fix(&source).contains("cities where city = \"Paris\""));
+    }
+
+    #[test]
+    fn restrict_in_bodies() {
+        let program = analyze_str(
+            "operator f{r: relation { n: integer }} [\n    call debug_value{v: r where n > 1};\n    call debug_value{v: r where true};\n];\noperator main{} [];",
+        )
+        .unwrap();
+        let f = program.operators.iter().find(|o| o.name == "f").unwrap();
+        let hir::OperatorKind::User { body } = &f.kind else {
+            panic!("f is a user operator");
+        };
+        assert!(matches!(argument(&body[0]), hir::Expr::Restrict(..)));
+        // A condition true of every tuple keeps them all.
+        assert_eq!(argument(&body[1]), &hir::Expr::Parameter("r".to_string()));
+    }
+
+    #[test]
     fn taken_constants() {
         let vars = variables(
             "var people := relation { { name: \"Ada\", born: 1815 }, { name: \"Edgar\", born: 1923 } };\nvar ada := tuple from (people join relation { { name: \"Ada\" } });\nvar born := value from (people join relation { { name: \"Ada\" } }){born};\nvar value := value from relation { { from: 1 } };",

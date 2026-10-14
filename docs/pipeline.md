@@ -367,10 +367,23 @@ type in sema. `group` and `wrap` share their list's syntax (`GatherList`)
 and checks (`check::gatherings`), as `ungroup` and `unwrap` share theirs
 (`check::unpackings`).
 
+`where` is the loosest dyadic operator (`BinaryExpr`), so its condition
+is all that follows. Sema checks the condition as a boolean with the
+tuple at hand in scope, as `extend`'s values are, and it becomes
+`Restrict`: not Algebra A's AND with the relation of the tuples that
+satisfy it, which is usually infinite. Folding substitutes each tuple of
+a constant operand, so a failure names the tuple; a condition true of
+every tuple keeps the operand. Lowering loops over the tuples, as for
+`extend` (`each_tuple`), copying those that pass into a relation
+allocated for all of them, then setting its count: they stay in the
+canonical order, so they need no sorting.
+
 `tuple from` and `value from` (`FromExpr`) are prefix operators whose
 `value` and `from` are contextual keywords, recognized by a `tuple`
 keyword or the word `value` followed by the word `from`, which no other
-parse allows. Both become `Only`, the only tuple of a relation, folded
+parse allows. Their operand is a relation's expression, as Tutorial D's
+`TUPLE FROM` takes: down to the joins, and a `where` with its condition.
+Both become `Only`, the only tuple of a relation, folded
 when it is a constant, where no tuple or several is an error (R0005);
 `value from` is the extraction of the only attribute from it. Lowering
 compares the count with one, ending the block with `Terminator::Fail`

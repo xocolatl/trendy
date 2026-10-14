@@ -60,6 +60,9 @@ impl Origin {
             }
             Origin::Value(_) => "expected because of this value".to_string(),
             Origin::Replaced(_, name) => format!("`{name}` has the expected type here"),
+            Origin::Operator(token) if token.kind() == trendy_syntax::SyntaxKind::WhereKw => {
+                "`where` takes a boolean condition".to_string()
+            }
             // Only operators with a fixed operand type are origins.
             Origin::Operator(token) => match Operator::of(token).map(|op| (op, op.operands())) {
                 Some((op, Operands::Fixed(scalar))) if op.is_prefix() => {

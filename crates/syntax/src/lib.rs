@@ -53,6 +53,8 @@ pub enum SyntaxKind {
     JoinKw,
     TimesKw,
     ComposeKw,
+    /// `where`, in `r where condition`.
+    WhereKw,
     /// `as`, in `old as new`.
     AsKw,
     LBrace,
@@ -124,7 +126,8 @@ pub enum SyntaxKind {
     NameRef,
     /// `not x`, `-x` or `+x`
     UnaryExpr,
-    /// `x and y`, `x + y`, `r join s`, and the other dyadic operators.
+    /// `x and y`, `x + y`, `r join s`, `r where p`, and the other dyadic
+    /// operators.
     BinaryExpr,
     /// `(x)`
     ParenExpr,
@@ -192,7 +195,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 98] = [
+    pub const ALL: [SyntaxKind; 99] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -222,6 +225,7 @@ impl SyntaxKind {
         SyntaxKind::JoinKw,
         SyntaxKind::TimesKw,
         SyntaxKind::ComposeKw,
+        SyntaxKind::WhereKw,
         SyntaxKind::AsKw,
         SyntaxKind::LBrace,
         SyntaxKind::RBrace,
@@ -328,6 +332,7 @@ impl SyntaxKind {
                 | SyntaxKind::JoinKw
                 | SyntaxKind::TimesKw
                 | SyntaxKind::ComposeKw
+                | SyntaxKind::WhereKw
                 | SyntaxKind::AsKw
         )
     }
@@ -355,6 +360,7 @@ impl SyntaxKind {
                 | SyntaxKind::JoinKw
                 | SyntaxKind::TimesKw
                 | SyntaxKind::ComposeKw
+                | SyntaxKind::WhereKw
         )
     }
 
@@ -457,6 +463,7 @@ impl SyntaxKind {
             SyntaxKind::JoinKw => "join",
             SyntaxKind::TimesKw => "times",
             SyntaxKind::ComposeKw => "compose",
+            SyntaxKind::WhereKw => "where",
             SyntaxKind::AsKw => "as",
             SyntaxKind::LBrace => "{",
             SyntaxKind::RBrace => "}",
@@ -518,6 +525,7 @@ impl SyntaxKind {
             SyntaxKind::JoinKw => "`join`",
             SyntaxKind::TimesKw => "`times`",
             SyntaxKind::ComposeKw => "`compose`",
+            SyntaxKind::WhereKw => "`where`",
             SyntaxKind::AsKw => "`as`",
             SyntaxKind::ForeignOperator => "operator",
             SyntaxKind::LBrace => "`{`",

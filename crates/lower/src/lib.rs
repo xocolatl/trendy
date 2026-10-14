@@ -393,6 +393,7 @@ impl FunctionBuilder<'_> {
             hir::Expr::And(lhs, rhs) => self.joined(lhs, rhs, cx),
             hir::Expr::Ungroup(operand, names) => self.ungroup(operand, names, cx),
             hir::Expr::Only(operand) => self.only(operand, cx),
+            hir::Expr::Restrict(operand, condition) => self.restrict(operand, condition, cx),
             hir::Expr::Current(depth, _) => self.tuples[self.tuples.len() - 1 - depth].clone(),
             hir::Expr::Extend(operand, _, attributes) => self.extend(expr, operand, attributes, cx),
             hir::Expr::Binary(op, lhs, rhs) => {
@@ -495,7 +496,7 @@ impl FunctionBuilder<'_> {
                 dst
             }
             (hir::Type::Relation(heading), hir::Type::Relation(result)) => {
-                self.extend_relation(heading, src, attributes, result, cx)
+                self.extend_relation(heading, &src, attributes, result, cx)
             }
             _ => unreachable!("sema extends only tuples and relations"),
         }
@@ -546,7 +547,7 @@ impl FunctionBuilder<'_> {
     fn extend_relation(
         &mut self,
         heading: &hir::Heading,
-        src: lir::Place,
+        src: &lir::Place,
         attributes: &BTreeMap<String, hir::Expr>,
         result: &hir::Heading,
         cx: &mut Lowering,
@@ -554,27 +555,115 @@ impl FunctionBuilder<'_> {
         let tuple = layout(&hir::Type::Tuple(heading.clone()));
         let result_tuple = layout(&hir::Type::Tuple(result.clone()));
         let result_ty = hir::Type::Relation(result.clone());
-        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&result_ty)));
         let mut count = src.clone();
         count.path.push(1);
-        let dst = self.slot(layout(&result_ty));
-        self.insts.push(lir::Inst::CallRuntime {
-            function: lir::RuntimeFn::Allocate,
-            args: vec![dst.clone(), count.clone(), descriptor.clone()],
+        let dst = self.allocated(&result_ty, count, cx);
+        self.each_tuple(src, tuple, cx, |this, at_hand, index, cx| {
+            let to = this.element(&dst, index, result_tuple);
+            this.extended(heading, &at_hand, attributes, result, &to, cx);
         });
-        self.allocates = true;
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&result_ty)));
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Sort,
+            args: vec![dst.clone(), descriptor],
+        });
+        dst
+    }
 
-        let index = self.slot(lir::Layout::Usize);
-        let zero = cx.constant(vec![lir::Field::Usize(0)]);
+    /// The tuples of the relation `operand` for which `condition`, computed
+    /// with each as the tuple at hand, is true, copied into a new relation.
+    /// They stay in the canonical order, so need no sorting; the relation's
+    /// count is then the number copied.
+    fn restrict(
+        &mut self,
+        operand: &hir::Expr,
+        condition: &hir::Expr,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let ty = self.program.type_of(operand, self.within);
+        let hir::Type::Relation(heading) = &ty else {
+            unreachable!("sema restricts only relations");
+        };
+        let tuple = layout(&hir::Type::Tuple(heading.clone()));
+        let src = self.place(operand, cx);
+        let mut count = src.clone();
+        count.path.push(1);
+        let dst = self.allocated(&ty, count, cx);
+        let kept = self.slot(lir::Layout::Usize);
+        let zero = usize_constant(0, cx);
         self.insts.push(lir::Inst::Copy {
-            dst: index.clone(),
-            src: lir::Place {
-                base: lir::Base::Data(zero),
-                path: vec![0],
-            },
+            dst: kept.clone(),
+            src: zero,
             layout: lir::Layout::Usize,
         });
-        let (head, body, done) = (self.new_block(), self.new_block(), self.new_block());
+        self.each_tuple(&src, tuple.clone(), cx, |this, at_hand, _, cx| {
+            this.tuples.push(at_hand.clone());
+            let keep = this.place(condition, cx);
+            this.tuples.pop();
+            let (copy, next) = (this.new_block(), this.new_block());
+            this.end_block(
+                lir::Terminator::Branch {
+                    condition: keep,
+                    then: copy,
+                    otherwise: next,
+                },
+                copy,
+            );
+            let to = this.element(&dst, &kept, tuple.clone());
+            this.insts.push(lir::Inst::Copy {
+                dst: to,
+                src: at_hand,
+                layout: tuple,
+            });
+            this.insts.push(lir::Inst::Increment {
+                place: kept.clone(),
+            });
+            this.end_block(lir::Terminator::Jump(next), next);
+        });
+        let mut len = dst.clone();
+        len.path.push(1);
+        self.insts.push(lir::Inst::Copy {
+            dst: len,
+            src: kept,
+            layout: lir::Layout::Usize,
+        });
+        dst
+    }
+
+    /// A new relation of type `ty` with room for `count` tuples, a
+    /// [`lir::Layout::Usize`], zeroed, which the runtime allocates for the
+    /// statement.
+    fn allocated(&mut self, ty: &hir::Type, count: lir::Place, cx: &mut Lowering) -> lir::Place {
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(ty)));
+        let dst = self.slot(layout(ty));
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Allocate,
+            args: vec![dst.clone(), count, descriptor],
+        });
+        self.allocates = true;
+        dst
+    }
+
+    /// A loop over the tuples of the relation at `src`, each laid out as
+    /// `tuple`: `body` is lowered once, with the place of the tuple at
+    /// hand and of its index, and the loop goes on after it.
+    fn each_tuple(
+        &mut self,
+        src: &lir::Place,
+        tuple: lir::Layout,
+        cx: &mut Lowering,
+        body: impl FnOnce(&mut Self, lir::Place, &lir::Place, &mut Lowering),
+    ) {
+        let mut count = src.clone();
+        count.path.push(1);
+        let index = self.slot(lir::Layout::Usize);
+        let zero = usize_constant(0, cx);
+        self.insts.push(lir::Inst::Copy {
+            dst: index.clone(),
+            src: zero,
+            layout: lir::Layout::Usize,
+        });
+        let (head, first, done) = (self.new_block(), self.new_block(), self.new_block());
         self.end_block(lir::Terminator::Jump(head), head);
         let more = self.slot(lir::Layout::U8);
         self.insts.push(lir::Inst::Binary {
@@ -586,41 +675,36 @@ impl FunctionBuilder<'_> {
         self.end_block(
             lir::Terminator::Branch {
                 condition: more,
-                then: body,
+                then: first,
                 otherwise: done,
             },
-            body,
+            first,
         );
-        let from = self.pointer_slot();
-        let to = self.pointer_slot();
+        let at_hand = self.element(src, &index, tuple);
+        body(self, at_hand, &index, cx);
+        self.insts.push(lir::Inst::Increment { place: index });
+        self.end_block(lir::Terminator::Jump(head), done);
+    }
+
+    /// The tuple at `index` of the relation at `relation`, laid out as
+    /// `tuple`: its address in a new slot, as a place.
+    fn element(
+        &mut self,
+        relation: &lir::Place,
+        index: &lir::Place,
+        tuple: lir::Layout,
+    ) -> lir::Place {
+        let slot = self.pointer_slot();
         self.insts.push(lir::Inst::Element {
-            dst: lir::Place::whole(lir::Base::Slot(from)),
-            relation: src,
+            dst: lir::Place::whole(lir::Base::Slot(slot)),
+            relation: relation.clone(),
             index: index.clone(),
             tuple: tuple.clone(),
         });
-        self.insts.push(lir::Inst::Element {
-            dst: lir::Place::whole(lir::Base::Slot(to)),
-            relation: dst.clone(),
-            index: index.clone(),
-            tuple: result_tuple.clone(),
-        });
-        let indirect = |slot, pointee| lir::Place::whole(lir::Base::Indirect { slot, pointee });
-        self.extended(
-            heading,
-            &indirect(from, tuple),
-            attributes,
-            result,
-            &indirect(to, result_tuple),
-            cx,
-        );
-        self.insts.push(lir::Inst::Increment { place: index });
-        self.end_block(lir::Terminator::Jump(head), done);
-        self.insts.push(lir::Inst::CallRuntime {
-            function: lir::RuntimeFn::Sort,
-            args: vec![dst.clone(), descriptor],
-        });
-        dst
+        lir::Place::whole(lir::Base::Indirect {
+            slot,
+            pointee: tuple,
+        })
     }
 
     /// The only tuple of the relation `operand`, copied into a new stack
@@ -633,10 +717,6 @@ impl FunctionBuilder<'_> {
         let src = self.place(operand, cx);
         let mut count = src.clone();
         count.path.push(1);
-        let usize_constant = |n: u64, cx: &mut Lowering| lir::Place {
-            base: lir::Base::Data(cx.constant(vec![lir::Field::Usize(n)])),
-            path: vec![0],
-        };
         let (one, zero) = (usize_constant(1, cx), usize_constant(0, cx));
         let compare = |this: &mut Self, rhs: &lir::Place| {
             let equal = this.slot(lir::Layout::U8);
@@ -671,20 +751,11 @@ impl FunctionBuilder<'_> {
         self.end_block(lir::Terminator::Fail(lir::Failure::NoTuple), several);
         self.end_block(lir::Terminator::Fail(lir::Failure::SeveralTuples), single);
         let tuple = layout(&hir::Type::Tuple(heading.clone()));
-        let pointer = self.pointer_slot();
-        self.insts.push(lir::Inst::Element {
-            dst: lir::Place::whole(lir::Base::Slot(pointer)),
-            relation: src,
-            index: zero,
-            tuple: tuple.clone(),
-        });
+        let only = self.element(&src, &zero, tuple.clone());
         let dst = self.slot(tuple.clone());
         self.insts.push(lir::Inst::Copy {
             dst: dst.clone(),
-            src: lir::Place::whole(lir::Base::Indirect {
-                slot: pointer,
-                pointee: tuple.clone(),
-            }),
+            src: only,
             layout: tuple,
         });
         dst
@@ -1115,6 +1186,14 @@ fn lower_comparison(comparison: hir::Comparison) -> lir::Comparison {
 }
 
 /// The attribute names of a tuple or relation type, in name order.
+/// A pointer-sized constant `n`, as a place.
+fn usize_constant(n: u64, cx: &mut Lowering) -> lir::Place {
+    lir::Place {
+        base: lir::Base::Data(cx.constant(vec![lir::Field::Usize(n)])),
+        path: vec![0],
+    }
+}
+
 fn attribute_names(ty: &hir::Type) -> impl Iterator<Item = &str> {
     let (hir::Type::Tuple(heading) | hir::Type::Relation(heading)) = ty else {
         unreachable!("only tuples and relations have attributes");

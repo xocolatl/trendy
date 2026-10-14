@@ -956,7 +956,7 @@ Manifesto*'s WRAP and UNWRAP (RM Prescriptions 6 and 7).
 ```trendy
 var addr := tuple { street: "1 Rue de Rivoli", city: "Paris", country: "France" };
 var placed := addr wrap { place := {street, city} };
-var nested := placed wrap { where := {place, country} };
+var nested := placed wrap { location := {place, country} };
 var flat := placed unwrap {place};
 
 operator main{} [
@@ -988,19 +988,59 @@ var placed := addr wrap ({street, city} as place);
 operator main{} [];
 ```
 
+### Restriction
+
+`r where p` is the tuples of the relation `r` for which the condition `p`
+is true. The condition is a boolean, computed for each tuple, with the
+tuple's attributes in scope by name, as in `extend`'s values. It is
+Tutorial D's `WHERE`.
+
+```trendy
+var cities := relation {
+    { city: "Paris", country: "France", people: 2100000 },
+    { city: "Kumasi", country: "Ghana", people: 3600000 },
+    { city: "Lyon", country: "France", people: 520000 },
+};
+var french := cities where country = "France";
+var big_french := cities where country = "France" and people > 1000000;
+
+operator main{} [
+    call debug_value{v: big_french};
+];
+```
+
+- **`where` binds loosest:** its condition is all that follows, and what
+  comes before it is restricted, so `r join s where p` restricts the join.
+  Parenthesize a `where` to use its result in a larger expression.
+- **The condition is a boolean** (A0004), of a relation's tuples: a tuple
+  satisfies a condition or doesn't, so `where` takes relations (A0022).
+- **The tuple's attributes hide other names,** as in `extend`, and
+  `!!s` is its image relation in `s`.
+- **Computed for each tuple** when the program runs, or when compiling if
+  the relation is known then, where a failure names the tuple.
+- Other languages' operators, such as `==` and `&&`, are fixed, as
+  everywhere.
+
+```trendy,error
+var cities := relation { { city: "Paris", people: 2100000 } };
+var big := cities where people;
+
+operator main{} [];
+```
+
 ### Taking the only tuple
 
 `tuple from r` is the only tuple of the relation `r`, and `value from r`
 is the only value of it, for a relation of one attribute. It is Tutorial
-D's `TUPLE FROM R`. Typically, the relation is narrowed down first:
+D's `TUPLE FROM R`. Typically, the relation is restricted first:
 
 ```trendy
 var cities := relation {
     { city: "Paris", country: "France" },
     { city: "Kumasi", country: "Ghana" },
 };
-var paris := tuple from (cities join relation { { city: "Paris" } });
-var country := value from (cities join relation { { city: "Paris" } }){country};
+var paris := tuple from cities where city = "Paris";
+var country := value from (cities where city = "Paris"){country};
 
 operator main{} [
     call debug_value{v: country};
@@ -1013,8 +1053,12 @@ operator main{} [
 - **`value from` takes one attribute:** project on it, as in
   `value from r{country}`. A relation of several attributes is an error
   (A0022), with a fix for each attribute.
-- **It is a prefix operator,** like `not`, so postfix operators bind
-  tighter: `value from r{country}` takes from `r{country}`.
+- **It takes a relation's expression,** as Tutorial D's does: the rest of
+  it down to the joins, and a `where` with its condition, so
+  `tuple from r where p` is of `r where p`. Postfix operators bind tighter,
+  so `value from r{country}` takes from `r{country}`; to project after a
+  `where`, parenthesize it, as above. A comparison binds more loosely, so
+  `tuple from r = t` compares the tuple.
 - **`value` and `from` are names elsewhere:** they are keywords only in
   `tuple from` and `value from`, as `key` is only where keys go.
   Tutorial D's capitals, `TUPLE FROM R`, are fixed.
@@ -1150,6 +1194,7 @@ From tightest to loosest:
 | `xor` | left |
 | `or` | left |
 | `implies` | right |
+| `where`, whose condition is all that follows | left |
 
 So `-a * b` is `(-a) * b`, `a + 1 < b` is `(a + 1) < b`, and, as with
 every prefix operator, `not a = b` is `(not a) = b`. To negate a
@@ -1312,8 +1357,8 @@ Names are ASCII letters, digits and `_`, and don't start with a digit. They
 are case-sensitive. The keywords are `operator`, `var`, `call`, `builtin`,
 `tuple`, `relation`, `true`, `false`, `not`, `and`, `or`, `xor`,
 `implies`, `div`, `mod`, `remove`, `rename`, `extend`, `replace`, `group`,
-`ungroup`, `wrap`, `unwrap`, `join`, `times`, `compose` and `as`, all
-lowercase, and a keyword can't be a name (P0017).
+`ungroup`, `wrap`, `unwrap`, `join`, `times`, `compose`, `where` and `as`,
+all lowercase, and a keyword can't be a name (P0017).
 `type` is a keyword only after `builtin`, `key` only where a variable's
 keys go, and `value` and `from` only in `tuple from` and `value from`.
 
@@ -1410,8 +1455,9 @@ line after a comment on its own line, such as a file's header, is kept.
 | `R RENAME ( A AS B )`, `rename(columns={'a': 'b'})` | `r rename {a as b}` |
 | `EXTEND R ADD ( X AS B )`, `SELECT *, x AS b` | `r extend { b := x }` |
 | `UPDATE R ( A := X )`, as an expression | `r replace { a := x }` |
+| `R WHERE P`, `SELECT * FROM r WHERE p` | `r where p` |
 | `TUPLE FROM R` | `tuple from r` |
-| `(SELECT b FROM r WHERE …)`, a scalar subquery | `value from (…){b}` |
+| `(SELECT b FROM r WHERE p)`, a scalar subquery | `value from (r where p){b}` |
 | `R GROUP ( { B, C } AS G )` | `r group { g := {b, c} }` |
 | `R UNGROUP ( G )` | `r ungroup {g}` |
 | `R WRAP ( { B, C } AS W )`, `R UNWRAP ( W )` | `r wrap { w := {b, c} }`, `r unwrap {w}` |

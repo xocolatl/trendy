@@ -1184,6 +1184,25 @@ pub(crate) fn replaced_unknown(
     }
 }
 
+/// `where`, at `span`, applied to `operand`, of type `ty`, which isn't a
+/// relation.
+pub(crate) fn not_restrictable(span: Span, ty: &hir::Type, operand: &Expr) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::WrongOperandType,
+        format!("`where` can't be applied to {}", plural(ty)),
+        span,
+        "`where` takes a relation",
+    )
+    .with_secondary(operand.span(), format!("this is `{ty}`"))
+    .with_note("`r where p` is the tuples of the relation `r` for which the condition `p` is true");
+    match ty {
+        hir::Type::Tuple(_) => d.with_help(
+            "a tuple satisfies a condition or doesn't: the condition itself, with `t.a` for its attributes, is that boolean",
+        ),
+        _ => d,
+    }
+}
+
 /// `operator`, `group`, `ungroup`, `tuple from` or `value from`, at `span`,
 /// applied to `operand`, of type `ty`, which isn't a relation.
 pub(crate) fn not_relational(
@@ -1398,15 +1417,17 @@ pub(crate) fn gathering_exists(
     .with_help(format!("choose another name, or rename `{name}` first"))
 }
 
-/// Computing a new attribute, whose value is written `value`, fails for a
+/// Computing a new attribute, or a condition, written `value`, fails for a
 /// tuple of a constant operand, as `failure` says.
-pub(crate) fn extension_failure(failure: &crate::ops::ExtendFailure, value: &Expr) -> Diagnostic {
+pub(crate) fn extension_failure(failure: &crate::ops::TupleFailure, value: &Expr) -> Diagnostic {
     let tuple = source_text(&hir::Value::Tuple(failure.tuple.clone()))
         .map_or_else(|| "a tuple".to_string(), |t| format!("`{t}`"));
-    failed(&failure.failed, value).with_note(format!(
-        "computing `{}` for {tuple}, which the operand has",
-        failure.attribute
-    ))
+    let computing = match &failure.attribute {
+        Some(attribute) => format!("computing `{attribute}`"),
+        None => "evaluating the condition".to_string(),
+    };
+    failed(&failure.failed, value)
+        .with_note(format!("{computing} for {tuple}, which the operand has"))
 }
 
 /// Why `expr`, of constants, has no value, as `failed` says.
@@ -1433,7 +1454,7 @@ fn not_one_tuple(count: usize, expr: &Expr) -> Diagnostic {
         format!("this relation has {has}"),
     )
     .with_note("`tuple from r` is the only tuple of `r`, and `value from r` the only value of it, so `r` must have exactly one")
-    .with_help("narrow the relation to the one tuple meant first, such as by joining it with the tuple that identifies it")
+    .with_help("restrict the relation to the one tuple meant first, as in `tuple from r where key = …`")
 }
 
 /// `tuple from` or `value from`, as `taken` says, at `span`, written

@@ -80,6 +80,9 @@ enum KeySpelling {
     Unique,
 }
 
+/// The precedence of `where`, the loosest operator: its condition is a
+/// whole boolean expression.
+const WHERE: u8 = 0;
 /// The precedence of the comparison operators.
 const COMPARISON: u8 = 6;
 /// The precedence of `join`, `times` and `compose`.
@@ -516,8 +519,9 @@ impl<'a> Parser<'a> {
     }
 
     /// An expression whose dyadic operators bind at least as tightly as
-    /// `min`, by precedence climbing. From loosest to tightest: `implies`
-    /// (1, grouping to the right), `or` (2), `xor` (3), `and` (4), the
+    /// `min`, by precedence climbing. From loosest to tightest: `where` (0),
+    /// whose condition is all that follows, `implies` (1, grouping to the
+    /// right), `or` (2), `xor` (3), `and` (4), the
     /// comparisons (6), which don't chain, `join`, `times` and `compose`
     /// (7), `+`, `-` and `||` (8), and `*`, `/`, `div` and `mod` (9), all
     /// grouping to the left. The prefix operators, `not`, `-` and `+`, bind
@@ -587,6 +591,7 @@ impl<'a> Parser<'a> {
             kind => kind,
         };
         let precedence = match keyword {
+            SyntaxKind::WhereKw => WHERE,
             SyntaxKind::ImpliesKw => 1,
             SyntaxKind::OrKw => 2,
             SyntaxKind::XorKw => 3,
@@ -750,7 +755,7 @@ impl<'a> Parser<'a> {
             }
         }
         if self.at_operand() {
-            self.unary();
+            self.relation_expression();
         } else {
             self.missing_with_help(
                 SyntaxKind::Ident,
@@ -758,6 +763,25 @@ impl<'a> Parser<'a> {
             );
         }
         self.builder.finish_node();
+    }
+
+    /// A relation's expression, as Tutorial D's `TUPLE FROM` takes: its
+    /// operators down to the joins, and a `where` with its condition. So
+    /// `tuple from r where p` is of `r where p`, while
+    /// `(tuple from r) = t` compares, as a comparison binds more loosely.
+    fn relation_expression(&mut self) {
+        self.peek();
+        let start = self.builder.checkpoint();
+        self.binary(JOIN);
+        if let Some(operator) = self
+            .binary_operator()
+            .filter(|o| o.keyword == SyntaxKind::WhereKw)
+        {
+            self.builder.start_node_at(start, SyntaxKind::BinaryExpr);
+            self.operator_token(operator.found, operator.keyword);
+            self.binary(WHERE + 1);
+            self.builder.finish_node();
+        }
     }
 
     /// `!!r`, Tutorial D's image relation, whose operand is a single one: a
@@ -2674,6 +2698,37 @@ SourceFile
             messages("var x := r replace { 5 };"),
             ["an attribute's new value needs the attribute's name"]
         );
+    }
+
+    #[test]
+    fn restrictions() {
+        // The loosest operator: the condition is all that follows, and a
+        // join before it is restricted.
+        assert_eq!(
+            shape("r join s where a = 1 and b or c"),
+            "((r join s) where (((a = 1) and b) or c))"
+        );
+        assert_eq!(shape("r where a where b"), "((r where a) where b)");
+        assert_eq!(fix("var x := r WHERE a = 1;"), "var x := r where a = 1;");
+        // `tuple from` takes a relation's expression, `where` included,
+        // but not a comparison after it.
+        let from = |source: &str| {
+            parse_str(source)
+                .tree
+                .syntax()
+                .descendants()
+                .find_map(trendy_syntax::ast::FromExpr::cast)
+                .unwrap()
+                .operand()
+                .unwrap()
+                .syntax()
+                .to_string()
+        };
+        assert_eq!(
+            from("var x := tuple from r join s where a = 1 and b;"),
+            "r join s where a = 1 and b"
+        );
+        assert_eq!(from("var x := tuple from r = t;"), "r");
     }
 
     #[test]

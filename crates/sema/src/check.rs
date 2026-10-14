@@ -147,6 +147,13 @@ impl<'a> Checker<'a> {
                     Resolved::Binary(_) => None,
                 }
             }
+            Expr::Binary(binary)
+                if binary
+                    .operator()
+                    .is_some_and(|t| t.kind() == trendy_syntax::SyntaxKind::WhereKw) =>
+            {
+                self.restricted(binary, expr, expected, errors)
+            }
             Expr::Binary(_) | Expr::Nary(_) if ops::Joining::of(expr).is_some() => {
                 self.joined(expr, expected, errors)
             }
@@ -319,7 +326,7 @@ impl<'a> Checker<'a> {
             Err(failure) => {
                 let value = assignments
                     .iter()
-                    .find(|(_, name, _)| *name == failure.attribute)
+                    .find(|(_, name, _)| Some(name) == failure.attribute.as_ref())
                     .and_then(|(assign, _, _)| assign.value())?;
                 errors.push(errors::extension_failure(&failure, &value));
                 None
@@ -499,6 +506,44 @@ impl<'a> Checker<'a> {
             None => tuple,
         };
         self.matched(expected, result, expr, errors)
+    }
+
+    /// `binary`, a `where`, written `expr`: the tuples of its operand, a
+    /// relation, for which its condition, a boolean checked with the
+    /// attributes of the tuple at hand in scope, is true.
+    fn restricted(
+        &mut self,
+        binary: &ast::BinaryExpr,
+        expr: &Expr,
+        expected: Option<&Expected>,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let operand_expr = binary.lhs()?;
+        let operand = self.expr(&operand_expr, None, errors)?;
+        let token = binary.operator()?;
+        let ty = self.ty(&operand);
+        let hir::Type::Relation(heading) = ty else {
+            let span = trendy_syntax::span(token.text_range());
+            errors.push(errors::not_restrictable(span, &ty, &operand_expr));
+            return None;
+        };
+        let condition_expr = binary.rhs()?;
+        let boolean = Expected {
+            ty: hir::Type::Scalar(hir::Scalar::Boolean),
+            origin: types::Origin::Operator(token),
+        };
+        let mut names = TupleNames {
+            outer: &mut *self.names,
+            heading,
+        };
+        let condition = Checker::new(&mut names).expr(&condition_expr, Some(&boolean), errors)?;
+        match ops::restrict(operand, condition) {
+            Ok(result) => self.matched(expected, result, expr, errors),
+            Err(failure) => {
+                errors.push(errors::extension_failure(&failure, &condition_expr));
+                None
+            }
+        }
     }
 
     /// `image`, written `expr`: the image relation of the tuple at hand in
