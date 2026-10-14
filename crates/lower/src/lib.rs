@@ -392,6 +392,7 @@ impl FunctionBuilder<'_> {
             }
             hir::Expr::And(lhs, rhs) => self.joined(lhs, rhs, cx),
             hir::Expr::Ungroup(operand, names) => self.ungroup(operand, names, cx),
+            hir::Expr::Only(operand) => self.only(operand, cx),
             hir::Expr::Current(depth, _) => self.tuples[self.tuples.len() - 1 - depth].clone(),
             hir::Expr::Extend(operand, _, attributes) => self.extend(expr, operand, attributes, cx),
             hir::Expr::Binary(op, lhs, rhs) => {
@@ -618,6 +619,73 @@ impl FunctionBuilder<'_> {
         self.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::Sort,
             args: vec![dst.clone(), descriptor],
+        });
+        dst
+    }
+
+    /// The only tuple of the relation `operand`, copied into a new stack
+    /// slot. The program stops if the relation has none, or several.
+    fn only(&mut self, operand: &hir::Expr, cx: &mut Lowering) -> lir::Place {
+        let ty = self.program.type_of(operand, self.within);
+        let hir::Type::Relation(heading) = &ty else {
+            unreachable!("sema takes the only tuple of relations only");
+        };
+        let src = self.place(operand, cx);
+        let mut count = src.clone();
+        count.path.push(1);
+        let usize_constant = |n: u64, cx: &mut Lowering| lir::Place {
+            base: lir::Base::Data(cx.constant(vec![lir::Field::Usize(n)])),
+            path: vec![0],
+        };
+        let (one, zero) = (usize_constant(1, cx), usize_constant(0, cx));
+        let compare = |this: &mut Self, rhs: &lir::Place| {
+            let equal = this.slot(lir::Layout::U8);
+            this.insts.push(lir::Inst::Binary {
+                dst: equal.clone(),
+                op: lir::BinaryOp::Compare(lir::Comparison::Equal, lir::Operand::Usize),
+                lhs: count.clone(),
+                rhs: rhs.clone(),
+            });
+            equal
+        };
+        let is_one = compare(self, &one);
+        let (single, other) = (self.new_block(), self.new_block());
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: is_one,
+                then: single,
+                otherwise: other,
+            },
+            other,
+        );
+        let is_zero = compare(self, &zero);
+        let (none, several) = (self.new_block(), self.new_block());
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: is_zero,
+                then: none,
+                otherwise: several,
+            },
+            none,
+        );
+        self.end_block(lir::Terminator::Fail(lir::Failure::NoTuple), several);
+        self.end_block(lir::Terminator::Fail(lir::Failure::SeveralTuples), single);
+        let tuple = layout(&hir::Type::Tuple(heading.clone()));
+        let pointer = self.pointer_slot();
+        self.insts.push(lir::Inst::Element {
+            dst: lir::Place::whole(lir::Base::Slot(pointer)),
+            relation: src,
+            index: zero,
+            tuple: tuple.clone(),
+        });
+        let dst = self.slot(tuple.clone());
+        self.insts.push(lir::Inst::Copy {
+            dst: dst.clone(),
+            src: lir::Place::whole(lir::Base::Indirect {
+                slot: pointer,
+                pointee: tuple.clone(),
+            }),
+            layout: tuple,
         });
         dst
     }

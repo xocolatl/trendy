@@ -64,7 +64,9 @@ fn classify(token: &SyntaxToken) -> Option<Highlight> {
         (SyntaxKind::Ident, Some(SyntaxKind::BuiltinType), _) if token.text() == "type" => {
             (Class::Keyword, false)
         }
-        (SyntaxKind::Ident, Some(SyntaxKind::Key), _) => (Class::Keyword, false),
+        (SyntaxKind::Ident, Some(SyntaxKind::Key | SyntaxKind::FromExpr), _) => {
+            (Class::Keyword, false)
+        }
         (SyntaxKind::Ident, Some(SyntaxKind::Name), Some(SyntaxKind::BuiltinType)) => {
             (Class::Type, true)
         }
@@ -295,6 +297,20 @@ mod tests {
                 ("group", Class::ExprOperator, false),
                 ("c", Class::Attribute, true),
                 ("d", Class::Attribute, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn taken() {
+        assert_eq!(
+            highlight("var value := value from from;"),
+            [
+                ("var", Class::Keyword, false),
+                ("value", Class::Variable, true),
+                ("value", Class::Keyword, false),
+                ("from", Class::Keyword, false),
+                ("from", Class::Variable, false),
             ]
         );
     }

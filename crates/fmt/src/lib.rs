@@ -501,11 +501,12 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
             _ => false,
         })
     };
-    // The contextual keywords: `type`, in `builtin type name;`, and `key`.
+    // The contextual keywords: `type`, in `builtin type name;`, `key`, and
+    // `value` and `from`, in `tuple from r` and `value from r`.
     let contextual_keyword = prev.kind() == Ident
         && prev.parent().is_some_and(|p| match p.kind() {
             BuiltinType => prev.text() == "type",
-            SyntaxKind::Key => true,
+            SyntaxKind::Key | SyntaxKind::FromExpr => true,
             _ => false,
         });
     // A dyadic operator token, such as the `-` in `a - b`, as opposed to the
@@ -927,6 +928,14 @@ mod tests {
         assert_eq!(
             fmt("var a:=r   wrap{w:={ x,y }}unwrap { w };"),
             "var a := r wrap { w := {x, y} } unwrap {w};\n"
+        );
+    }
+
+    #[test]
+    fn taken() {
+        assert_eq!(
+            fmt("var a:=tuple   from r;var b:=value  from(r{x});"),
+            "var a := tuple from r;\nvar b := value from (r{x});\n"
         );
     }
 

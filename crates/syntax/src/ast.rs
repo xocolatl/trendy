@@ -53,6 +53,7 @@ ast_node!(ProjectExpr);
 ast_node!(PostfixExpr);
 ast_node!(NaryExpr);
 ast_node!(ImageExpr);
+ast_node!(FromExpr);
 ast_node!(NameList);
 ast_node!(RenameList);
 ast_node!(Renaming);
@@ -373,6 +374,37 @@ impl ImageExpr {
     }
 }
 
+/// What a `from` expression takes from a relation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Taken {
+    /// `tuple from r`: its only tuple.
+    Tuple,
+    /// `value from r`: the only attribute's value of its only tuple.
+    Value,
+}
+
+impl FromExpr {
+    /// What it takes: a tuple, after `tuple`, or a value, after `value`.
+    #[must_use]
+    pub fn taken(&self) -> Taken {
+        match significant_tokens(&self.0).next().map(|t| t.kind()) {
+            Some(SyntaxKind::TupleKw) => Taken::Tuple,
+            _ => Taken::Value,
+        }
+    }
+
+    /// The words before the operand: `tuple from` or `value from`.
+    pub fn keywords(&self) -> impl Iterator<Item = SyntaxToken> {
+        significant_tokens(&self.0)
+    }
+
+    /// The relation it takes from.
+    #[must_use]
+    pub fn operand(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+}
+
 impl RenameList {
     pub fn renamings(&self) -> impl Iterator<Item = Renaming> {
         self.0.children().filter_map(Renaming::cast)
@@ -527,6 +559,7 @@ pub enum Expr {
     Postfix(PostfixExpr),
     Nary(NaryExpr),
     Image(ImageExpr),
+    From(FromExpr),
 }
 
 impl Expr {
@@ -544,7 +577,8 @@ impl Expr {
             .or_else(|| ProjectExpr::cast(node.clone()).map(Expr::Project))
             .or_else(|| PostfixExpr::cast(node.clone()).map(Expr::Postfix))
             .or_else(|| NaryExpr::cast(node.clone()).map(Expr::Nary))
-            .or_else(|| ImageExpr::cast(node).map(Expr::Image))
+            .or_else(|| ImageExpr::cast(node.clone()).map(Expr::Image))
+            .or_else(|| FromExpr::cast(node).map(Expr::From))
     }
 
     #[must_use]
@@ -562,6 +596,7 @@ impl Expr {
             Expr::Postfix(e) => e.syntax(),
             Expr::Nary(e) => e.syntax(),
             Expr::Image(e) => e.syntax(),
+            Expr::From(e) => e.syntax(),
         }
     }
 

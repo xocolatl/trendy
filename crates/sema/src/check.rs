@@ -187,6 +187,7 @@ impl<'a> Checker<'a> {
             }
             Expr::Project(_) | Expr::Postfix(_) => self.reshaped(expr, expected, errors),
             Expr::Image(image) => self.image(image, expr, expected, errors),
+            Expr::From(from) => self.taken(from, expr, expected, errors),
             Expr::Tuple(tuple) => types::tuple_selector(tuple, expected, self, errors),
             Expr::Relation(relation) => types::relation_selector(relation, expected, self, errors),
         }
@@ -434,6 +435,68 @@ impl<'a> Checker<'a> {
         let result = match unpacking {
             ops::Unpacking::Ungroup => ops::ungroup(operand, names),
             ops::Unpacking::Unwrap => ops::unwrap(operand, heading, &names),
+        };
+        self.matched(expected, result, expr, errors)
+    }
+
+    /// `from`, a `tuple from` or a `value from`, written `expr`: the only
+    /// tuple of its operand, a relation, or the value of that tuple's only
+    /// attribute.
+    fn taken(
+        &mut self,
+        from: &ast::FromExpr,
+        expr: &Expr,
+        expected: Option<&Expected>,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let operand_expr = from.operand()?;
+        let operand = self.expr(&operand_expr, None, errors)?;
+        let ty = self.ty(&operand);
+        let keywords = from.keywords().map(|t| trendy_syntax::span(t.text_range()));
+        let span = keywords.reduce(|a, b| Span::new(a.start, b.end))?;
+        let taken = from.taken();
+        let operator = match taken {
+            ast::Taken::Tuple => "tuple from",
+            ast::Taken::Value => "value from",
+        };
+        let heading = match &ty {
+            hir::Type::Relation(heading) => heading,
+            hir::Type::Tuple(heading) => {
+                errors.push(errors::taken_from_tuple(
+                    taken,
+                    span,
+                    expr,
+                    &operand_expr,
+                    heading,
+                ));
+                return None;
+            }
+            hir::Type::Scalar(_) => {
+                errors.push(errors::not_relational(operator, span, &ty, &operand_expr));
+                return None;
+            }
+        };
+        let attribute = match taken {
+            ast::Taken::Tuple => None,
+            ast::Taken::Value => {
+                let mut names = heading.attributes().map(|(a, _)| a.to_string());
+                let (Some(name), None) = (names.next(), names.next()) else {
+                    errors.push(errors::not_one_attribute(span, &operand_expr, heading));
+                    return None;
+                };
+                Some(name)
+            }
+        };
+        let tuple = match ops::only(operand) {
+            Ok(tuple) => tuple,
+            Err(failed) => {
+                errors.push(errors::failed(&failed, expr));
+                return None;
+            }
+        };
+        let result = match attribute {
+            Some(name) => ops::extract(tuple, name),
+            None => tuple,
         };
         self.matched(expected, result, expr, errors)
     }

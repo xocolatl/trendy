@@ -789,6 +789,27 @@ pub(crate) enum Failed {
     Scalar(hir::Failure, hir::Scalar),
     /// Tuples being joined disagree on a common attribute.
     Mismatch(hir::Mismatch),
+    /// A relation whose only tuple is taken has this many, not one.
+    NotOne(usize),
+}
+
+/// The only tuple of the relation `operand`: evaluated if it is a constant.
+///
+/// # Errors
+///
+/// Returns how many tuples a constant relation has, if not one.
+pub(crate) fn only(operand: hir::Expr) -> Result<hir::Expr, Failed> {
+    match operand {
+        hir::Expr::Constant(hir::Value::Relation(relation)) => {
+            let mut tuples = relation.tuples.into_iter();
+            match (tuples.next(), tuples.len()) {
+                (Some(tuple), 0) => Ok(hir::Expr::Constant(hir::Value::Tuple(tuple))),
+                (None, _) => Err(Failed::NotOne(0)),
+                (Some(_), more) => Err(Failed::NotOne(more + 1)),
+            }
+        }
+        operand => Ok(hir::Expr::Only(Box::new(operand))),
+    }
 }
 
 /// A tuple of these attributes, a constant if they all are.
@@ -922,7 +943,7 @@ pub(crate) fn group(
     for (name, set) in groups {
         // The image has every gathered attribute; each group, its own.
         let others: BTreeSet<String> = all.difference(&set).cloned().collect();
-        types.insert(name.clone(), hir::Type::Relation(only(heading, &set)));
+        types.insert(name.clone(), hir::Type::Relation(restricted(heading, &set)));
         values.insert(name, remove(image.clone(), others));
     }
     extend(remove(operand, all), hir::Heading::new(types), values)
@@ -946,7 +967,7 @@ pub(crate) fn wrap(
             .iter()
             .map(|a| (a.clone(), extract(tuple(), a.clone())))
             .collect();
-        types.insert(name.clone(), hir::Type::Tuple(only(heading, &set)));
+        types.insert(name.clone(), hir::Type::Tuple(restricted(heading, &set)));
         values.insert(name, self::tuple(attributes));
         wrapped.extend(set);
     }
@@ -994,7 +1015,7 @@ pub(crate) fn unwrap(
 }
 
 /// `heading` with only the attributes in `names`.
-fn only(heading: &hir::Heading, names: &BTreeSet<String>) -> hir::Heading {
+fn restricted(heading: &hir::Heading, names: &BTreeSet<String>) -> hir::Heading {
     let others = heading
         .attributes()
         .map(|(a, _)| a.to_string())
@@ -1068,6 +1089,7 @@ fn shifted(expr: hir::Expr, cutoff: usize) -> hir::Expr {
         hir::Expr::Rename(operand, renamings) => hir::Expr::Rename(shift(operand), renamings),
         hir::Expr::And(lhs, rhs) => hir::Expr::And(shift(lhs), shift(rhs)),
         hir::Expr::Ungroup(operand, names) => hir::Expr::Ungroup(shift(operand), names),
+        hir::Expr::Only(operand) => hir::Expr::Only(shift(operand)),
         // The values are one `Extend` further in.
         hir::Expr::Extend(operand, computed, attributes) => hir::Expr::Extend(
             shift(operand),
@@ -1215,6 +1237,7 @@ fn substitute(expr: hir::Expr, depth: usize, tuple: &hir::TupleValue) -> Result<
         hir::Expr::Rename(operand, renamings) => rename(sub(operand)?, renamings),
         hir::Expr::And(lhs, rhs) => and(vec![sub(lhs)?, sub(rhs)?])?,
         hir::Expr::Ungroup(operand, names) => ungroup(sub(operand)?, names),
+        hir::Expr::Only(operand) => only(sub(operand)?)?,
         hir::Expr::Extend(operand, computed, attributes) => {
             // The values are one `Extend` further in.
             let attributes = attributes
@@ -1413,6 +1436,7 @@ fn can_fail(expr: &hir::Expr) -> bool {
         | hir::Expr::Rename(..)
         | hir::Expr::And(..)
         | hir::Expr::Ungroup(..)
+        | hir::Expr::Only(..)
         | hir::Expr::Extend(..)
         | hir::Expr::Relation(..) => true,
         hir::Expr::Unary(_, operand) => can_fail(operand),

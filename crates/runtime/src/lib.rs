@@ -34,6 +34,10 @@ pub const FAIL_APPROXIMATE_OVERFLOW: u32 = 2;
 pub const FAIL_OUT_OF_MEMORY: u32 = 3;
 /// Tuples being joined disagree on a common attribute.
 pub const FAIL_TUPLE_MISMATCH: u32 = 4;
+/// A relation has no tuples, where its only one is taken.
+pub const FAIL_NO_TUPLE: u32 = 5;
+/// A relation has several tuples, where its only one is taken.
+pub const FAIL_SEVERAL_TUPLES: u32 = 6;
 
 /// The line written to stderr for each `FAIL_` constant, with the
 /// compiler's error code, which `trendyc --explain` describes.
@@ -45,6 +49,10 @@ pub fn failure_message(failure: u32) -> &'static str {
         FAIL_APPROXIMATE_OVERFLOW => "error[R0001]: approximate overflow\n",
         FAIL_OUT_OF_MEMORY => "error[R0003]: out of memory\n",
         FAIL_TUPLE_MISMATCH => "error[R0004]: tuples disagree on a common attribute\n",
+        FAIL_NO_TUPLE => "error[R0005]: the relation has no tuples, but exactly one was taken\n",
+        FAIL_SEVERAL_TUPLES => {
+            "error[R0005]: the relation has several tuples, but exactly one was taken\n"
+        }
         // The compiler and the runtime disagree: a bug.
         _ => "error[X0000]: internal error: unknown run-time failure\n",
     }

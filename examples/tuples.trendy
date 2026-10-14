@@ -22,14 +22,6 @@ var addr := tuple {
    and hide any variable or parameter of the same name. To use one of
    those, rename it first. */
 
-/* Tuple extraction: the one tuple of a relation with exactly one, else a
-   run-time error (RM Prescription 7's relation operators).
-   Tutorial D: TUPLE FROM R
-   Proposed: a `tuple from` prefix, as in Tutorial D.
-
-   call debug_value{v: tuple from relation { { name: "Ada" } }};
-*/
-
 /* Assignment and update (RM Prescription 21), once variables can be
    assigned at all.
    Tutorial D: ADDR := TUPLE { ... }, and UPDATE ADDR ( POSTAL_CODE := '75002' )
@@ -174,6 +166,26 @@ operator join_addr{
     call debug_value{v: join{a, d, tuple { city: "Paris", region: "Île-de-France" }}};
 ];
 
+/* Tuple extraction: `tuple from r` is the only tuple of a relation, and
+   `value from r` the only value of it, of a relation of one attribute;
+   with no tuples or several, it is an error, when compiling if the
+   relation is known then, and otherwise when running (R0005). Postfix
+   operators bind tighter, so `value from r{a}` takes `a` (RM Prescription
+   7's relation operators). `value` and `from` are names elsewhere.
+   Tutorial D: TUPLE FROM R. Implemented, and printed twice like the
+   projections. */
+var cities := relation {
+    { city: "Paris", country: "France" },
+    { city: "Kumasi", country: "Ghana" }
+};
+var paris := tuple from (cities join relation { { city: "Paris" } });
+var country := value from (cities join relation { { city: "Paris" } }){country};
+
+operator take_city{c: relation { city: text, country: text }} [
+    call debug_value{v: tuple from (c join relation { { city: "Paris" } })};
+    call debug_value{v: value from (c join relation { { city: "Paris" } }){country}};
+];
+
 operator main{} [
     call debug_value{v: located};
     call debug_value{v: unlocated};
@@ -196,6 +208,8 @@ operator main{} [
     call debug_value{v: district};
     call debug_value{v: dated};
     call debug_value{v: regioned};
+    call debug_value{v: paris};
+    call debug_value{v: country};
 
     call project_addr{a: addr};
 
@@ -212,4 +226,6 @@ operator main{} [
     call wrap_addr{a: addr};
 
     call join_addr{a: addr, d: tuple { postal_code: "75001", district: "1st" }};
+
+    call take_city{c: cities};
 ];

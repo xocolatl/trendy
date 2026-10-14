@@ -1184,18 +1184,22 @@ pub(crate) fn replaced_unknown(
     }
 }
 
-/// `operator`, `group` or `ungroup`, at `span`, applied to `operand`, of
-/// type `ty`, which isn't a relation.
+/// `operator`, `group`, `ungroup`, `tuple from` or `value from`, at `span`,
+/// applied to `operand`, of type `ty`, which isn't a relation.
 pub(crate) fn not_relational(
     operator: &str,
     span: Span,
     ty: &hir::Type,
     operand: &Expr,
 ) -> Diagnostic {
-    let note = if operator == "group" {
-        "`group` gathers attributes of the tuples that share the others into a relation; a tuple has no other tuples to gather with"
-    } else {
-        "`ungroup` replaces each tuple of a relation with one for each tuple of its relation-valued attributes; a tuple's result would be a relation"
+    let note = match operator {
+        "group" => {
+            "`group` gathers attributes of the tuples that share the others into a relation; a tuple has no other tuples to gather with"
+        }
+        "ungroup" => {
+            "`ungroup` replaces each tuple of a relation with one for each tuple of its relation-valued attributes; a tuple's result would be a relation"
+        }
+        _ => "`tuple from` and `value from` take the only tuple of a relation",
     };
     Diagnostic::error(
         Code::WrongOperandType,
@@ -1410,7 +1414,116 @@ pub(crate) fn failed(failed: &crate::ops::Failed, expr: &Expr) -> Diagnostic {
     match failed {
         crate::ops::Failed::Scalar(failure, scalar) => self::failure(*failure, *scalar, expr, None),
         crate::ops::Failed::Mismatch(mismatch) => tuple_mismatch(mismatch, expr),
+        crate::ops::Failed::NotOne(count) => not_one_tuple(*count, expr),
     }
+}
+
+/// `tuple from` or `value from`, written `expr`, of a relation with
+/// `count` tuples, not one.
+fn not_one_tuple(count: usize, expr: &Expr) -> Diagnostic {
+    let has = if count == 0 {
+        "no tuples".to_string()
+    } else {
+        format!("{count} tuples")
+    };
+    Diagnostic::error(
+        Code::NotOneTuple,
+        format!("the relation has {has}, but exactly one is taken"),
+        expr.span(),
+        format!("this relation has {has}"),
+    )
+    .with_note("`tuple from r` is the only tuple of `r`, and `value from r` the only value of it, so `r` must have exactly one")
+    .with_help("narrow the relation to the one tuple meant first, such as by joining it with the tuple that identifies it")
+}
+
+/// `tuple from` or `value from`, as `taken` says, at `span`, written
+/// `expr`, of `operand`, a tuple with `heading` rather than a relation. The
+/// fix is the tuple itself, or its only attribute's value.
+pub(crate) fn taken_from_tuple(
+    taken: trendy_syntax::ast::Taken,
+    span: Span,
+    expr: &Expr,
+    operand: &Expr,
+    heading: &hir::Heading,
+) -> Diagnostic {
+    use trendy_syntax::ast::Taken;
+    let operator = match taken {
+        Taken::Tuple => "tuple from",
+        Taken::Value => "value from",
+    };
+    let d = Diagnostic::error(
+        Code::WrongOperandType,
+        format!("`{operator}` can't be applied to tuples"),
+        span,
+        format!("`{operator}` takes a relation"),
+    )
+    .with_secondary(operand.span(), "this is already a tuple")
+    .with_note("`tuple from r` and `value from r` take the only tuple out of a relation; a tuple's attributes are taken with `.`, as in `t.a`");
+    let written = operand.syntax().text().to_string();
+    let mut names = heading.attributes().map(|(a, _)| a);
+    match (taken, names.next(), names.next()) {
+        (Taken::Tuple, ..) => d.with_suggestion(
+            "use the tuple itself",
+            vec![Edit {
+                span: expr.span(),
+                replacement: written,
+            }],
+        ),
+        (Taken::Value, Some(name), None) => {
+            // `.` binds tighter than a prefix or dyadic operator.
+            let base = match operand {
+                Expr::Unary(_) | Expr::Image(_) | Expr::From(_) | Expr::Binary(_) => {
+                    format!("({written})")
+                }
+                _ => written,
+            };
+            d.with_suggestion(
+                format!("take its attribute `{name}`"),
+                vec![Edit {
+                    span: expr.span(),
+                    replacement: format!("{base}.{name}"),
+                }],
+            )
+        }
+        (Taken::Value, ..) => d.with_help("take the attribute meant with `.`, as in `t.a`"),
+    }
+}
+
+/// `value from`, at `span`, of `operand`, a relation with `heading`, which
+/// hasn't exactly one attribute.
+pub(crate) fn not_one_attribute(span: Span, operand: &Expr, heading: &hir::Heading) -> Diagnostic {
+    let names: Vec<&str> = heading.attributes().map(|(a, _)| a).collect();
+    let has = if names.is_empty() {
+        "no attributes".to_string()
+    } else {
+        let listed: Vec<String> = names.iter().map(|a| format!("`{a}`")).collect();
+        trendy_diag::conjoin(&listed)
+    };
+    let d = Diagnostic::error(
+        Code::WrongOperandType,
+        "`value from` takes a relation of one attribute",
+        span,
+        "no single value to take",
+    )
+    .with_secondary(operand.span(), format!("this has {has}"))
+    .with_note("`value from r` is the value of the only attribute of the only tuple of `r`; `tuple from r` takes the whole tuple");
+    // Projecting on one attribute is the fix, and which is a choice, so
+    // each is offered. A prefix operand is parenthesized first, since a
+    // projection would bind tighter.
+    let written = operand.syntax().text().to_string();
+    let base = match operand {
+        Expr::Unary(_) | Expr::Image(_) | Expr::From(_) | Expr::Binary(_) => format!("({written})"),
+        _ => written,
+    };
+    names.iter().fold(d, |d, name| {
+        d.with_suggestion(
+            format!("take `{name}`"),
+            vec![Edit {
+                span: operand.span(),
+                replacement: format!("{base}{{{name}}}"),
+            }],
+        )
+    })
 }
 
 /// The join `expr` of tuples that disagree on an attribute, as `mismatch`

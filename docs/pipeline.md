@@ -367,6 +367,15 @@ type in sema. `group` and `wrap` share their list's syntax (`GatherList`)
 and checks (`check::gatherings`), as `ungroup` and `unwrap` share theirs
 (`check::unpackings`).
 
+`tuple from` and `value from` (`FromExpr`) are prefix operators whose
+`value` and `from` are contextual keywords, recognized by a `tuple`
+keyword or the word `value` followed by the word `from`, which no other
+parse allows. Both become `Only`, the only tuple of a relation, folded
+when it is a constant, where no tuple or several is an error (R0005);
+`value from` is the extraction of the only attribute from it. Lowering
+compares the count with one, ending the block with `Terminator::Fail`
+for none or several, then copies the tuple.
+
 `ungroup` is the one relational operator that isn't Algebra A's: Appendix
 A defines UNGROUP with an infinite relation, which no program can hold.
 So it has its own HIR node, `Ungroup`, folded when its operand is a

@@ -2941,6 +2941,65 @@ mod tests {
     }
 
     #[test]
+    fn taken_constants() {
+        let vars = variables(
+            "var people := relation { { name: \"Ada\", born: 1815 }, { name: \"Edgar\", born: 1923 } };\nvar ada := tuple from (people join relation { { name: \"Ada\" } });\nvar born := value from (people join relation { { name: \"Ada\" } }){born};\nvar value := value from relation { { from: 1 } };",
+        );
+        let value = |name: &str| &vars.iter().find(|v| v.name == name).unwrap().init;
+        let expected = |source: &str| variables(source).remove(0).init;
+        assert_eq!(
+            value("ada"),
+            &expected("var e := tuple { born: 1815, name: \"Ada\" };")
+        );
+        assert_eq!(value("born"), &hir::Value::Integer(1815));
+        // `value` and `from` are names elsewhere.
+        assert_eq!(value("value"), &hir::Value::Integer(1));
+    }
+
+    #[test]
+    fn taken_errors() {
+        let source = format!(
+            "var people := relation {{ {{ name: \"Ada\", born: 1815 }}, {{ name: \"Edgar\", born: 1923 }} }};\nvar empty := relation {{ name: text }} {{}};\nvar a := tuple from empty;\nvar b := tuple from people;\nvar c := value from people;\nvar d := tuple from tuple {{ x: 1 }};{MAIN}"
+        );
+        let errors = errors(&source);
+        let found: Vec<_> = errors.iter().map(|e| (e.code, &e.message[..])).collect();
+        assert_eq!(
+            found,
+            [
+                (
+                    Code::NotOneTuple,
+                    "the relation has no tuples, but exactly one is taken"
+                ),
+                (
+                    Code::NotOneTuple,
+                    "the relation has 2 tuples, but exactly one is taken"
+                ),
+                (
+                    Code::WrongOperandType,
+                    "`value from` takes a relation of one attribute"
+                ),
+                (
+                    Code::WrongOperandType,
+                    "`tuple from` can't be applied to tuples"
+                ),
+            ]
+        );
+        // Each attribute is offered, projected on.
+        let offered: Vec<_> = errors[2]
+            .suggestions
+            .iter()
+            .map(|s| s.edits[0].replacement.as_str())
+            .collect();
+        assert_eq!(offered, ["people{born}", "people{name}"]);
+        // From a tuple: the tuple itself, or its only attribute's value.
+        let fixed = fix(&format!(
+            "var t := tuple {{ x: 1 }};\nvar a := tuple from t;\nvar b := value from t;{MAIN}"
+        ));
+        assert!(fixed.contains("var a := t;"), "{fixed}");
+        assert!(fixed.contains("var b := t.x;"), "{fixed}");
+    }
+
+    #[test]
     fn relations_of_tuple_expressions() {
         let vars = variables(
             "var ada := tuple { name: \"Ada\", born: 1815 };\nvar people := relation { ada, { name: \"Edgar\", born: 1923 } };",

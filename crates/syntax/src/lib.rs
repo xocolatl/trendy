@@ -141,6 +141,10 @@ pub enum SyntaxKind {
     NaryExpr,
     /// `!!r`: the tuples of `r` that match the tuple at hand.
     ImageExpr,
+    /// `tuple from r` or `value from r`: the only tuple of a relation, or
+    /// the only value of its only tuple. `value` and `from` are contextual
+    /// keywords, identifiers elsewhere.
+    FromExpr,
     /// `{a, b}`: attribute names, as in a projection.
     NameList,
     /// `{a as b, c as d}`, in a `rename`.
@@ -188,7 +192,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 97] = [
+    pub const ALL: [SyntaxKind; 98] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -266,6 +270,7 @@ impl SyntaxKind {
         SyntaxKind::PostfixExpr,
         SyntaxKind::NaryExpr,
         SyntaxKind::ImageExpr,
+        SyntaxKind::FromExpr,
         SyntaxKind::NameList,
         SyntaxKind::RenameList,
         SyntaxKind::Renaming,
@@ -555,7 +560,8 @@ impl SyntaxKind {
             | SyntaxKind::ProjectExpr
             | SyntaxKind::PostfixExpr
             | SyntaxKind::NaryExpr
-            | SyntaxKind::ImageExpr => "expression",
+            | SyntaxKind::ImageExpr
+            | SyntaxKind::FromExpr => "expression",
             SyntaxKind::NameList => "attribute names",
             SyntaxKind::RenameList => "renamings",
             SyntaxKind::Renaming => "renaming",

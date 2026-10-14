@@ -368,6 +368,10 @@ pub enum Failure {
     ApproximateOverflow,
     /// Tuples being joined disagree on a common attribute.
     TupleMismatch,
+    /// A relation has no tuples, where its only one is taken.
+    NoTuple,
+    /// A relation has several tuples, where its only one is taken.
+    SeveralTuples,
 }
 
 impl Failure {
@@ -379,6 +383,8 @@ impl Failure {
             Failure::DivisionByZero => 1,
             Failure::ApproximateOverflow => 2,
             Failure::TupleMismatch => 4,
+            Failure::NoTuple => 5,
+            Failure::SeveralTuples => 6,
         }
     }
 }

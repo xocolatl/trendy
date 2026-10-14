@@ -686,6 +686,10 @@ impl<'a> Parser<'a> {
 
     /// A prefix operator and its operand, or an operand.
     fn unary(&mut self) {
+        if let Some(taken) = self.at_taken() {
+            self.taken(taken);
+            return;
+        }
         let prefix = self.found().and_then(|f| {
             let keyword = match f.kind {
                 SyntaxKind::ForeignOperator => errors::foreign_operator(f.text)?,
@@ -705,6 +709,54 @@ impl<'a> Parser<'a> {
         self.start_node(SyntaxKind::UnaryExpr);
         self.operator_token(found, keyword);
         self.unary();
+        self.builder.finish_node();
+    }
+
+    /// What a `from` expression starting here takes: `tuple from` or
+    /// `value from`, in any case. `value` and `from` are contextual
+    /// keywords: a name followed by another can't be anything else.
+    fn at_taken(&mut self) -> Option<trendy_syntax::ast::Taken> {
+        let first = self.found()?;
+        let from = self.found_after(1)?;
+        if from.kind != SyntaxKind::Ident || !from.text.eq_ignore_ascii_case("from") {
+            return None;
+        }
+        match first.kind {
+            SyntaxKind::TupleKw => Some(trendy_syntax::ast::Taken::Tuple),
+            SyntaxKind::Ident if first.text.eq_ignore_ascii_case("tuple") => {
+                Some(trendy_syntax::ast::Taken::Tuple)
+            }
+            SyntaxKind::Ident if first.text.eq_ignore_ascii_case("value") => {
+                Some(trendy_syntax::ast::Taken::Value)
+            }
+            _ => None,
+        }
+    }
+
+    /// `tuple from r` or `value from r`, a prefix operator, so postfix
+    /// operators bind tighter: `value from r{a}` is of `r{a}`. Capitals, as
+    /// in Tutorial D's `TUPLE FROM R`, are fixed.
+    fn taken(&mut self, taken: trendy_syntax::ast::Taken) {
+        self.start_node(SyntaxKind::FromExpr);
+        let word = match taken {
+            trendy_syntax::ast::Taken::Tuple => "tuple",
+            trendy_syntax::ast::Taken::Value => "value",
+        };
+        for expected in [word, "from"] {
+            let found = self.found().expect("at `tuple from` or `value from`");
+            self.bump();
+            if found.text != expected {
+                self.errors.push(errors::miscased_keyword(found, expected));
+            }
+        }
+        if self.at_operand() {
+            self.unary();
+        } else {
+            self.missing_with_help(
+                SyntaxKind::Ident,
+                "write the relation after `from`, as in `tuple from r`",
+            );
+        }
         self.builder.finish_node();
     }
 
@@ -1256,7 +1308,9 @@ impl<'a> Parser<'a> {
                 // A tuple selector, its `tuple` keyword optional here, or
                 // any expression of a tuple, such as a variable.
                 p.items(Self::at_operand, |p| {
-                    if p.at(SyntaxKind::LBrace) || p.at_keyword(SyntaxKind::TupleKw) {
+                    let selector = p.at(SyntaxKind::LBrace)
+                        || (p.at_keyword(SyntaxKind::TupleKw) && p.at_taken().is_none());
+                    if selector {
                         p.tuple_literal(true);
                     } else {
                         p.expression();
@@ -2620,6 +2674,32 @@ SourceFile
             messages("var x := r replace { 5 };"),
             ["an attribute's new value needs the attribute's name"]
         );
+    }
+
+    #[test]
+    fn taken() {
+        for source in [
+            "var x := tuple from r;",
+            "var x := value from r{a};",
+            "var x := relation { tuple from r, { a: 1 } };",
+            // `value` and `from` are names elsewhere.
+            "var value := relation { { from: 1 } };",
+        ] {
+            assert!(parse_str(source).errors.is_empty(), "{source}");
+        }
+        // A prefix operator: postfix operators bind tighter.
+        let parse = parse_str("var x := value from r{a};");
+        let from = parse
+            .tree
+            .syntax()
+            .descendants()
+            .find_map(trendy_syntax::ast::FromExpr::cast)
+            .unwrap();
+        assert_eq!(from.operand().unwrap().syntax().to_string(), "r{a}");
+        assert_eq!(from.taken(), trendy_syntax::ast::Taken::Value);
+        // Tutorial D's capitals.
+        assert_eq!(fix("var x := TUPLE FROM r;"), "var x := tuple from r;");
+        assert_eq!(fix("var x := Value From r;"), "var x := value from r;");
     }
 
     #[test]

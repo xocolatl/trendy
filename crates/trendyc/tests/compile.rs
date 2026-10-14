@@ -354,6 +354,32 @@ fn run_time_failures_stop_the_program() {
     // The smallest integer `mod -1` has a result.
     let (code, stderr) = run_source("mod_min", &program("(-a - 1) mod -1"));
     assert_eq!((code, &stderr[..]), (0, "1\n0\n2\n"));
+    // A relation with no tuples, or several, has no only tuple.
+    for (name, expr, what) in [
+        (
+            "fail_no_tuple",
+            "tuple from (relation { { n: a } } join relation { { n: b } })",
+            "no tuples",
+        ),
+        (
+            "fail_several_tuples",
+            "value from relation { { n: a }, { n: b } }",
+            "several tuples",
+        ),
+    ] {
+        let (code, stderr) = run_source(name, &program(expr));
+        assert_eq!(
+            (code, &stderr[..]),
+            (
+                1,
+                &*format!(
+                    "1\nerror[{}]: the relation has {what}, but exactly one was taken\n",
+                    Code::NotOneTuple.id()
+                )
+            ),
+            "{expr}"
+        );
+    }
     // Tuples that disagree on a common attribute have no join.
     let (code, stderr) = run_source(
         "fail_tuple_join",
@@ -418,6 +444,9 @@ fn tuples() {
             r#"tuple { city: "Paris", country: "France", district: "1st", street: "1 Rue de Rivoli" }"#,
             r#"tuple { city: "Paris", country: "France", postal_code: "75001", street: "1 Rue de Rivoli", year: 2024 }"#,
             r#"tuple { city: "Paris", country: "France", district: "1st", postal_code: "75001", region: "Île-de-France", street: "1 Rue de Rivoli" }"#,
+            // The only tuple, and the only value of it.
+            r#"tuple { city: "Paris", country: "France" }"#,
+            r#""France""#,
         ]
     );
 }

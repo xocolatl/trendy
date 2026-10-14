@@ -988,6 +988,44 @@ var placed := addr wrap ({street, city} as place);
 operator main{} [];
 ```
 
+### Taking the only tuple
+
+`tuple from r` is the only tuple of the relation `r`, and `value from r`
+is the only value of it, for a relation of one attribute. It is Tutorial
+D's `TUPLE FROM R`. Typically, the relation is narrowed down first:
+
+```trendy
+var cities := relation {
+    { city: "Paris", country: "France" },
+    { city: "Kumasi", country: "Ghana" },
+};
+var paris := tuple from (cities join relation { { city: "Paris" } });
+var country := value from (cities join relation { { city: "Paris" } }){country};
+
+operator main{} [
+    call debug_value{v: country};
+];
+```
+
+- **Exactly one tuple:** with none or several, it is an error, when
+  compiling if the relation is known then, and otherwise when the program
+  runs (R0005).
+- **`value from` takes one attribute:** project on it, as in
+  `value from r{country}`. A relation of several attributes is an error
+  (A0022), with a fix for each attribute.
+- **It is a prefix operator,** like `not`, so postfix operators bind
+  tighter: `value from r{country}` takes from `r{country}`.
+- **`value` and `from` are names elsewhere:** they are keywords only in
+  `tuple from` and `value from`, as `key` is only where keys go.
+  Tutorial D's capitals, `TUPLE FROM R`, are fixed.
+
+```trendy,error
+var people := relation { { name: "Ada" }, { name: "Edgar" } };
+var somebody := value from people;
+
+operator main{} [];
+```
+
 ### Joins
 
 `r join s` is the relation of the tuples made of a tuple of `r` and a tuple
@@ -1103,7 +1141,7 @@ From tightest to loosest:
 |---|---|
 | `!!`, of a name or a parenthesized expression | none: see below |
 | postfix `.a`, projection `{…}`, `remove {…}`, `rename {…}`, `extend {…}`, `replace {…}`, `group {…}`, `ungroup {…}`, `wrap {…}` and `unwrap {…}` | left |
-| prefix `not`, `-` and `+` | |
+| prefix `not`, `-`, `+`, `tuple from` and `value from` | |
 | `*`, `/`, `div`, `mod` | left |
 | `+`, `-`, `\|\|` | left |
 | `join`, `times`, `compose` | left |
@@ -1276,8 +1314,8 @@ are case-sensitive. The keywords are `operator`, `var`, `call`, `builtin`,
 `implies`, `div`, `mod`, `remove`, `rename`, `extend`, `replace`, `group`,
 `ungroup`, `wrap`, `unwrap`, `join`, `times`, `compose` and `as`, all
 lowercase, and a keyword can't be a name (P0017).
-`type` is a keyword only after `builtin`, and `key` only where a variable's
-keys go.
+`type` is a keyword only after `builtin`, `key` only where a variable's
+keys go, and `value` and `from` only in `tuple from` and `value from`.
 
 Variables and operators share one namespace, so no two of them can have the
 same name. Types have their own namespace, so a variable can be named after a
@@ -1372,6 +1410,8 @@ line after a comment on its own line, such as a file's header, is kept.
 | `R RENAME ( A AS B )`, `rename(columns={'a': 'b'})` | `r rename {a as b}` |
 | `EXTEND R ADD ( X AS B )`, `SELECT *, x AS b` | `r extend { b := x }` |
 | `UPDATE R ( A := X )`, as an expression | `r replace { a := x }` |
+| `TUPLE FROM R` | `tuple from r` |
+| `(SELECT b FROM r WHERE …)`, a scalar subquery | `value from (…){b}` |
 | `R GROUP ( { B, C } AS G )` | `r group { g := {b, c} }` |
 | `R UNGROUP ( G )` | `r ungroup {g}` |
 | `R WRAP ( { B, C } AS W )`, `R UNWRAP ( W )` | `r wrap { w := {b, c} }`, `r unwrap {w}` |

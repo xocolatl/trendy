@@ -191,6 +191,10 @@ pub enum Expr {
     /// share a name. Not Algebra A's: Appendix A defines it with an infinite
     /// relation, which no program can hold.
     Ungroup(Box<Expr>, BTreeSet<String>),
+    /// The only tuple of a relation (`tuple from`), which fails if it has
+    /// none or several. `value from` is the extraction of its only
+    /// attribute.
+    Only(Box<Expr>),
     /// The tuple at hand, with this heading: the one an `Extend` is computing
     /// attributes for, `depth` `Extend`s out from here, counting the
     /// innermost as 0. Its attributes are in scope by name in the source,
@@ -236,6 +240,10 @@ impl Expr {
             ),
             Expr::Current(_, heading) => Type::Tuple(heading.clone()),
             Expr::Ungroup(operand, names) => operand.type_with(leaf).ungrouped(names),
+            Expr::Only(operand) => match operand.type_with(leaf) {
+                Type::Relation(heading) => Type::Tuple(heading),
+                other => panic!("the only tuple of {other}"),
+            },
         }
     }
 }
