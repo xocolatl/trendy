@@ -190,6 +190,12 @@ pub enum RuntimeFn {
     /// canonically, in memory the statement owns. The other arguments are
     /// as for [`RuntimeFn::And`]'s.
     Matching,
+    /// `trendy_rt_combine(dst, lhs, rhs, descriptor, minus)`: store at
+    /// `dst` the relation of the tuples of `lhs` and `rhs`, of the type the
+    /// descriptor describes, or, if `minus` (a [`Field::Usize`]) is 1, those
+    /// of `lhs` that aren't in `rhs`, sorted canonically, in memory the
+    /// statement owns.
+    Combine,
     /// `trendy_rt_allocate(dst, count, descriptor)`: store at `dst` a
     /// relation, of the type the descriptor describes, of `count` (a
     /// [`Layout::Usize`]) tuples, zeroed, in memory the statement owns, for
@@ -224,6 +230,7 @@ impl RuntimeFn {
             RuntimeFn::And => "trendy_rt_and",
             RuntimeFn::Ungroup => "trendy_rt_ungroup",
             RuntimeFn::Matching => "trendy_rt_matching",
+            RuntimeFn::Combine => "trendy_rt_combine",
             RuntimeFn::Allocate => "trendy_rt_allocate",
             RuntimeFn::Sort => "trendy_rt_sort",
             RuntimeFn::CompareText => "trendy_rt_compare_text",

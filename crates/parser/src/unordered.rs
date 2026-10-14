@@ -3,11 +3,16 @@
 //! guess. Precedence is a partial order: these pairs could each be read
 //! either way, so the reader must say which with parentheses.
 //!
-//! The one such operator so far is `!!`. Its operand is a relation,
-//! and a postfix operator or a join after it could apply to that relation
-//! as well as to the image: `!!r rename {a as b}` and
-//! `!!r join s` both read two ways. The parser builds them as
-//! applying to the image, and this check reports them.
+//! One is `!!`. Its operand is a relation, and a postfix operator, a join or
+//! a set operator after it could apply to that relation as well as to the
+//! image: `!!r rename {a as b}` and `!!r join s` both read two ways. The
+//! parser builds them as applying to the image, and this check reports
+//! them.
+//!
+//! The other is `union` with a `minus` after it: `r union s minus t` is
+//! `r union (s minus t)` in the algebra, where `minus` is an AND and binds
+//! like the joins, but `(r union s) minus t` in SQL, which reads set
+//! operators from the left.
 
 use trendy_diag::Diagnostic;
 use trendy_syntax::ast::{self, AstNode};
@@ -15,9 +20,41 @@ use trendy_syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
 
 use crate::errors;
 
-/// An error for each `!!` in the tree at `root` that a postfix
-/// operator or a join follows.
+/// An error for each `!!` in the tree at `root` that a postfix operator, a
+/// join or a set operator follows, and for each `union` whose right operand
+/// is a `minus`.
 pub(crate) fn unordered_operators(root: &SyntaxNode) -> Vec<Diagnostic> {
+    let mut errors = images(root);
+    errors.extend(root.descendants().filter_map(union_minus));
+    errors
+}
+
+/// `node`, if it is `r union s minus t`, parsed as `r union (s minus t)`:
+/// the error, with a fix for each reading.
+fn union_minus(node: SyntaxNode) -> Option<Diagnostic> {
+    let union = ast::BinaryExpr::cast(node)?;
+    let operator = union.operator()?;
+    if operator.kind() != SyntaxKind::UnionKw {
+        return None;
+    }
+    let (lhs, ast::Expr::Binary(minus)) = (union.lhs()?, union.rhs()?) else {
+        return None;
+    };
+    let minus_token = minus.operator()?;
+    if minus_token.kind() != SyntaxKind::MinusKw {
+        return None;
+    }
+    Some(errors::union_minus(
+        trendy_syntax::span(minus_token.text_range()),
+        lhs.span().start,
+        minus.lhs()?.span().end,
+        minus.span(),
+    ))
+}
+
+/// An error for each `!!` in the tree at `root` that a postfix operator, a
+/// join or a set operator follows.
+fn images(root: &SyntaxNode) -> Vec<Diagnostic> {
     root.descendants()
         .filter_map(ast::ImageExpr::cast)
         .filter_map(|image| {
@@ -93,7 +130,7 @@ fn applies_to(parent: &SyntaxNode, child: &SyntaxNode) -> bool {
             is_first
                 && ast::BinaryExpr::cast(parent.clone())
                     .and_then(|b| b.operators().last())
-                    .is_some_and(|op| op.kind().is_join())
+                    .is_some_and(|op| op.kind().is_join() || op.kind().is_set_operator())
         }
         _ => false,
     }

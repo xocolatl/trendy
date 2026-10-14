@@ -525,6 +525,14 @@ pub(crate) enum JoinKind {
     Matching,
     /// `not matching`, the antijoin: those that have none.
     NotMatching,
+    /// `union`, of relations of one heading: the tuples of either.
+    Union,
+    /// `intersect`, of relations of one heading: the tuples of both, which
+    /// is their AND.
+    Intersect,
+    /// `minus`, of relations of one heading: the tuples of the left that
+    /// aren't in the right, from the left in a list.
+    Minus,
 }
 
 impl JoinKind {
@@ -537,14 +545,31 @@ impl JoinKind {
             [SyntaxKind::ComposeKw] => JoinKind::Compose,
             [SyntaxKind::MatchingKw] => JoinKind::Matching,
             [SyntaxKind::NotKw, SyntaxKind::MatchingKw] => JoinKind::NotMatching,
+            [SyntaxKind::UnionKw] => JoinKind::Union,
+            [SyntaxKind::IntersectKw] => JoinKind::Intersect,
+            [SyntaxKind::MinusKw] => JoinKind::Minus,
             _ => return None,
         })
     }
 
-    /// Whether it is `matching` or `not matching`, which take relations
-    /// only and give the left operand's tuples.
-    fn is_matching(self) -> bool {
-        matches!(self, JoinKind::Matching | JoinKind::NotMatching)
+    /// Whether it takes relations only, not tuples: all but `join`, `times`
+    /// and `compose`.
+    fn relations_only(self) -> bool {
+        !matches!(self, JoinKind::Join | JoinKind::Times | JoinKind::Compose)
+    }
+
+    /// Whether it is a set operator, of relations of one heading.
+    pub(crate) fn is_set(self) -> bool {
+        matches!(
+            self,
+            JoinKind::Union | JoinKind::Intersect | JoinKind::Minus
+        )
+    }
+
+    /// Whether a list of none has a value: the identity of `join` and
+    /// `times`, `relation {} { {} }`.
+    fn has_identity(self) -> bool {
+        matches!(self, JoinKind::Join | JoinKind::Times)
     }
 
     /// How the operator is written.
@@ -555,6 +580,9 @@ impl JoinKind {
             JoinKind::Compose => "compose",
             JoinKind::Matching => "matching",
             JoinKind::NotMatching => "not matching",
+            JoinKind::Union => "union",
+            JoinKind::Intersect => "intersect",
+            JoinKind::Minus => "minus",
         }
     }
 }
@@ -578,6 +606,11 @@ pub(crate) enum Combined {
     /// The tuples of the left operand that have a match in the right, or,
     /// if `negated`, those that have none: `matching` and `not matching`.
     Matching { negated: bool },
+    /// The tuples of any of them: `union`.
+    Union,
+    /// From the left: the first operand, without the tuples of each other
+    /// in turn: `minus`.
+    Minus,
     /// Compose, from the left: the first operand, then for each other the
     /// AND of the result so far and it, without the attributes they have in
     /// common, given here for each step.
@@ -629,47 +662,19 @@ impl Joining {
         types: &[hir::Type],
         errors: &mut Vec<Diagnostic>,
     ) -> Option<Combined> {
-        if self.kind == JoinKind::Compose
+        if !self.kind.has_identity()
             && self.operands.is_empty()
             && let Some(nary) = &self.nary
         {
-            errors.push(errors::empty_compose(nary));
+            errors.push(errors::empty_operands(self.kind, nary));
             return None;
         }
-        // Relations join with relations, and tuples with tuples; with
-        // both, the tuples are the odd ones out.
-        let relations = types.iter().any(|ty| matches!(ty, hir::Type::Relation(_)));
-        let mut operands = Vec::new();
-        for (operand, ty) in self.operands.iter().zip(types) {
-            match ty {
-                hir::Type::Relation(heading) => operands.push((operand.span(), heading)),
-                hir::Type::Tuple(heading) if !relations && !self.kind.is_matching() => {
-                    operands.push((operand.span(), heading));
-                }
-                hir::Type::Tuple(_) if self.kind.is_matching() => {
-                    errors.push(errors::not_joinable(
-                        self.kind,
-                        self.operator(),
-                        ty,
-                        operand,
-                    ));
-                }
-                hir::Type::Tuple(_) => {
-                    errors.push(errors::tuple_among_relations(self.kind.keyword(), operand));
-                }
-                hir::Type::Scalar(_) => errors.push(errors::not_joinable(
-                    self.kind,
-                    self.operator(),
-                    ty,
-                    operand,
-                )),
-            }
-        }
-        if operands.len() < self.operands.len() {
-            return None;
-        }
+        let operands = self.headings(types, errors)?;
         if self.kind == JoinKind::Compose {
             return self.composed(&operands, errors).map(Combined::Composed);
+        }
+        if self.kind.is_set() {
+            return self.same_headings(&operands, errors);
         }
         let mut ok = true;
         // Each attribute name, with the first operand that has it.
@@ -701,6 +706,9 @@ impl Joining {
             JoinKind::Join | JoinKind::Compose | JoinKind::Matching | JoinKind::NotMatching => {
                 groups.iter().any(|&g| g != 0)
             }
+            JoinKind::Union | JoinKind::Intersect | JoinKind::Minus => {
+                unreachable!("the set operators' headings are checked above")
+            }
         };
         if wrong {
             let operands: Vec<errors::Operand> = operands
@@ -724,6 +732,90 @@ impl Joining {
             JoinKind::Matching => Combined::Matching { negated: false },
             JoinKind::NotMatching => Combined::Matching { negated: true },
             JoinKind::Join | JoinKind::Times | JoinKind::Compose => Combined::And,
+            JoinKind::Union | JoinKind::Intersect | JoinKind::Minus => {
+                unreachable!("the set operators' headings are checked above")
+            }
+        })
+    }
+
+    /// The heading of each operand, of type in `types`, with where it is
+    /// written, if each is one the operator takes: relations, or, for the
+    /// joins, tuples, all of one kind. `None` after reporting each that
+    /// isn't.
+    fn headings<'t>(
+        &self,
+        types: &'t [hir::Type],
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<Vec<(Span, &'t hir::Heading)>> {
+        // Tutorial D's tuple union is a join.
+        if self.kind == JoinKind::Union
+            && !types.is_empty()
+            && types.iter().all(|ty| matches!(ty, hir::Type::Tuple(_)))
+        {
+            errors.push(errors::tuple_union(self.span));
+            return None;
+        }
+        // Relations join with relations, and tuples with tuples; with
+        // both, the tuples are the odd ones out.
+        let relations = types.iter().any(|ty| matches!(ty, hir::Type::Relation(_)));
+        let mut operands = Vec::new();
+        let mut reported_tuple = false;
+        for (operand, ty) in self.operands.iter().zip(types) {
+            match ty {
+                hir::Type::Relation(heading) => operands.push((operand.span(), heading)),
+                hir::Type::Tuple(heading) if !relations && !self.kind.relations_only() => {
+                    operands.push((operand.span(), heading));
+                }
+                // One tuple is reported, for operators of relations only.
+                hir::Type::Tuple(_) if self.kind.relations_only() => {
+                    if !reported_tuple {
+                        errors.push(errors::not_joinable(
+                            self.kind,
+                            self.operator(),
+                            ty,
+                            operand,
+                        ));
+                        reported_tuple = true;
+                    }
+                }
+                hir::Type::Tuple(_) => {
+                    errors.push(errors::tuple_among_relations(self.kind.keyword(), operand));
+                }
+                hir::Type::Scalar(_) => errors.push(errors::not_joinable(
+                    self.kind,
+                    self.operator(),
+                    ty,
+                    operand,
+                )),
+            }
+        }
+        (operands.len() == self.operands.len()).then_some(operands)
+    }
+
+    /// How a set operator of `operands`, each with its heading, combines
+    /// them, if each has the first's heading; otherwise reported.
+    fn same_headings(
+        &self,
+        operands: &[(Span, &hir::Heading)],
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<Combined> {
+        let mut ok = true;
+        if let (Some(&(_, first)), Some(first_expr)) = (operands.first(), self.operands.first()) {
+            for (&(_, heading), expr) in operands.iter().zip(&self.operands).skip(1) {
+                if heading != first {
+                    errors.push(errors::heading_mismatch(
+                        self.operator(),
+                        (first_expr, first),
+                        (expr, heading),
+                    ));
+                    ok = false;
+                }
+            }
+        }
+        ok.then_some(match self.kind {
+            JoinKind::Union => Combined::Union,
+            JoinKind::Minus => Combined::Minus,
+            _ => Combined::And,
         })
     }
 
@@ -898,6 +990,19 @@ pub(crate) fn restrict(
             tuples: kept,
         },
     )))
+}
+
+/// The tuples of the relations `lhs` and `rhs`, of one heading, or, if
+/// `minus`, those of `lhs` that aren't in `rhs`: evaluated if both are
+/// constants.
+pub(crate) fn combined(lhs: hir::Expr, rhs: hir::Expr, minus: bool) -> hir::Expr {
+    match (lhs, rhs) {
+        (hir::Expr::Constant(lhs), hir::Expr::Constant(rhs)) => {
+            hir::Expr::Constant(lhs.combined(&rhs, minus))
+        }
+        (lhs, rhs) if minus => hir::Expr::Minus(Box::new(lhs), Box::new(rhs)),
+        (lhs, rhs) => hir::Expr::Union(Box::new(lhs), Box::new(rhs)),
+    }
 }
 
 /// The tuples of the relation `lhs` that have a match in `rhs`, or, if
@@ -1210,6 +1315,8 @@ fn shifted(expr: hir::Expr, cutoff: usize) -> hir::Expr {
         hir::Expr::Ungroup(operand, names) => hir::Expr::Ungroup(shift(operand), names),
         hir::Expr::Only(operand) => hir::Expr::Only(shift(operand)),
         hir::Expr::Semijoin(lhs, rhs) => hir::Expr::Semijoin(shift(lhs), shift(rhs)),
+        hir::Expr::Union(lhs, rhs) => hir::Expr::Union(shift(lhs), shift(rhs)),
+        hir::Expr::Minus(lhs, rhs) => hir::Expr::Minus(shift(lhs), shift(rhs)),
         hir::Expr::Antijoin(lhs, rhs) => hir::Expr::Antijoin(shift(lhs), shift(rhs)),
         // The condition is one tuple at hand further in.
         hir::Expr::Restrict(operand, condition) => {
@@ -1364,6 +1471,8 @@ fn substitute(expr: hir::Expr, depth: usize, tuple: &hir::TupleValue) -> Result<
         hir::Expr::Ungroup(operand, names) => ungroup(sub(operand)?, names),
         hir::Expr::Only(operand) => only(sub(operand)?)?,
         hir::Expr::Semijoin(lhs, rhs) => matching(sub(lhs)?, sub(rhs)?, false),
+        hir::Expr::Union(lhs, rhs) => combined(sub(lhs)?, sub(rhs)?, false),
+        hir::Expr::Minus(lhs, rhs) => combined(sub(lhs)?, sub(rhs)?, true),
         hir::Expr::Antijoin(lhs, rhs) => matching(sub(lhs)?, sub(rhs)?, true),
         // The condition is one tuple at hand further in.
         hir::Expr::Restrict(operand, condition) => {
@@ -1572,6 +1681,8 @@ fn can_fail(expr: &hir::Expr) -> bool {
         | hir::Expr::Restrict(..)
         | hir::Expr::Semijoin(..)
         | hir::Expr::Antijoin(..)
+        | hir::Expr::Union(..)
+        | hir::Expr::Minus(..)
         | hir::Expr::Extend(..)
         | hir::Expr::Relation(..) => true,
         hir::Expr::Unary(_, operand) => can_fail(operand),

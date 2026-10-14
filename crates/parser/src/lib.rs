@@ -85,8 +85,12 @@ enum KeySpelling {
 const WHERE: u8 = 0;
 /// The precedence of the comparison operators.
 const COMPARISON: u8 = 6;
-/// The precedence of `join`, `times` and `compose`.
-const JOIN: u8 = 7;
+/// The precedence of `union`, Algebra A's OR, looser than the AND of the
+/// joins, as `or` is than `and`.
+const UNION: u8 = 7;
+/// The precedence of the joins, `join`, `times`, `compose` and the
+/// matchings, and of `intersect` and `minus`, which are AND too.
+const JOIN: u8 = 8;
 
 /// A dyadic operator at the next token: its precedence, its first token,
 /// and the keyword it is or stands for.
@@ -108,9 +112,9 @@ enum Words {
     /// SQL's spelling of a join, such as `natural join` or
     /// `left outer join`, this many tokens long.
     Sql(usize),
-    /// A name from the literature: `semijoin` for `matching`, or, if
-    /// `negated`, `semiminus` or `antijoin` for `not matching`.
-    Semi { negated: bool },
+    /// Another language's name for it, such as the literature's `semijoin`
+    /// for `matching` or SQL's `except` for `minus`, fixed to `spelled`.
+    Renamed { spelled: &'static str },
 }
 
 /// Something the parser found where it expected something else.
@@ -534,9 +538,9 @@ impl<'a> Parser<'a> {
     /// An expression whose dyadic operators bind at least as tightly as
     /// `min`, by precedence climbing. From loosest to tightest: `where` (0),
     /// whose condition is all that follows, `implies` (1, grouping to the
-    /// right), `or` (2), `xor` (3), `and` (4), the
-    /// comparisons (6), which don't chain, `join`, `times` and `compose`
-    /// (7), `+`, `-` and `||` (8), and `*`, `/`, `div` and `mod` (9), all
+    /// right), `or` (2), `xor` (3), `and` (4), the comparisons (6), which
+    /// don't chain, `union` (7), the joins, `intersect` and `minus` (8),
+    /// `+`, `-` and `||` (9), and `*`, `/`, `div` and `mod` (10), all
     /// grouping to the left. The prefix operators, `not`, `-` and `+`, bind
     /// tightest, so `not a = b` is `(not a) = b`.
     fn binary(&mut self, min: u8) {
@@ -573,10 +577,13 @@ impl<'a> Parser<'a> {
                     self.operator_token(matching, SyntaxKind::MatchingKw);
                 }
                 Words::Sql(tokens) => self.sql_join(found, keyword, tokens),
-                Words::Semi { negated } => {
+                Words::Renamed { spelled } => {
                     self.bump();
-                    self.errors.push(errors::semijoin_word(found, negated));
+                    self.errors.push(errors::renamed_operator(found, spelled));
                 }
+            }
+            if keyword.is_set_operator() {
+                self.set_quantifier();
             }
             let rhs_start = self.lookahead().map(|f| f.span.start);
             let right_grouping = keyword == SyntaxKind::ImpliesKw;
@@ -608,13 +615,17 @@ impl<'a> Parser<'a> {
             });
         }
         if found.kind == SyntaxKind::Ident
-            && let Some(negated) = errors::semijoin_spelling(found.text)
+            && let Some((keyword, spelled)) = errors::operator_name(found.text)
         {
             return Some(BinaryOperator {
-                precedence: JOIN,
+                precedence: if keyword == SyntaxKind::UnionKw {
+                    UNION
+                } else {
+                    JOIN
+                },
                 found,
-                keyword: SyntaxKind::MatchingKw,
-                words: Words::Semi { negated },
+                keyword,
+                words: Words::Renamed { spelled },
             });
         }
         let keyword = match found.kind {
@@ -642,9 +653,11 @@ impl<'a> Parser<'a> {
             SyntaxKind::XorKw => 3,
             SyntaxKind::AndKw => 4,
             kind if kind.is_comparison() => COMPARISON,
+            SyntaxKind::UnionKw => UNION,
             kind if kind.is_join() => JOIN,
-            SyntaxKind::Plus | SyntaxKind::Minus | SyntaxKind::PipePipe => 8,
-            SyntaxKind::Star | SyntaxKind::Slash | SyntaxKind::DivKw | SyntaxKind::ModKw => 9,
+            SyntaxKind::IntersectKw | SyntaxKind::MinusKw => JOIN,
+            SyntaxKind::Plus | SyntaxKind::Minus | SyntaxKind::PipePipe => 9,
+            SyntaxKind::Star | SyntaxKind::Slash | SyntaxKind::DivKw | SyntaxKind::ModKw => 10,
             _ => return None,
         };
         Some(BinaryOperator {
@@ -678,6 +691,26 @@ impl<'a> Parser<'a> {
         let outer = ["left", "right", "full"].into_iter().any(|w| word(0, w)) && word(1, "outer");
         let tokens = if outer { 3 } else { 2 };
         word(tokens - 1, "join").then_some((keyword, tokens))
+    }
+
+    /// SQL's `all` or `distinct` after a set operator, as in `union all`:
+    /// consumed, so the right operand still parses, and reported. A relation
+    /// has no duplicates, so neither changes anything.
+    fn set_quantifier(&mut self) {
+        let Some(found) = self.lookahead_nth(0).filter(|f| {
+            f.kind == SyntaxKind::Ident
+                && (f.text.eq_ignore_ascii_case("all") || f.text.eq_ignore_ascii_case("distinct"))
+        }) else {
+            return;
+        };
+        let start = self.last_end.unwrap_or(found.span.start);
+        self.start_node(SyntaxKind::Error);
+        self.bump();
+        self.builder.finish_node();
+        self.errors.push(errors::set_quantifier(
+            found,
+            Span::new(start, found.span.end),
+        ));
     }
 
     /// SQL's spelling of a join, whose first token is `first`, `tokens`
@@ -817,7 +850,7 @@ impl<'a> Parser<'a> {
     fn relation_expression(&mut self) {
         self.peek();
         let start = self.builder.checkpoint();
-        self.binary(JOIN);
+        self.binary(UNION);
         if let Some(operator) = self
             .binary_operator()
             .filter(|o| o.keyword == SyntaxKind::WhereKw)
@@ -1280,14 +1313,20 @@ impl<'a> Parser<'a> {
         // `matching` isn't commutative, so it has no list.
         let nary = matches!(
             keyword,
-            SyntaxKind::JoinKw | SyntaxKind::TimesKw | SyntaxKind::ComposeKw
+            SyntaxKind::JoinKw
+                | SyntaxKind::TimesKw
+                | SyntaxKind::ComposeKw
+                | SyntaxKind::UnionKw
+                | SyntaxKind::IntersectKw
+                | SyntaxKind::MinusKw
         );
         (nary && list).then_some((found, keyword))
     }
 
-    /// `join{r, s, t}`, `times{r, s, t}` or `compose[r, s, t]`: the keyword,
-    /// found as `found`, and the operands. Braces enclose what can be in any
-    /// order, and brackets what can't, so the others are fixed to them.
+    /// `join{r, s, t}`, `times{…}`, `union{…}`, `intersect{…}`,
+    /// `compose[r, s, t]` or `minus[…]`: the keyword, found as `found`, and
+    /// the operands. Braces enclose what can be in any order, and brackets
+    /// what can't, the left folds, so the others are fixed to them.
     fn nary(&mut self, found: Found<'a>, keyword: SyntaxKind) {
         let outer_form = std::mem::replace(&mut self.form, errors::NARY_FORM);
         self.start_node(SyntaxKind::NaryExpr);
@@ -1295,7 +1334,8 @@ impl<'a> Parser<'a> {
         let braces = (SyntaxKind::LBrace, SyntaxKind::RBrace);
         let brackets = (SyntaxKind::LBracket, SyntaxKind::RBracket);
         let parens = (SyntaxKind::LParen, SyntaxKind::RParen);
-        let (delims, mistakes) = if keyword == SyntaxKind::ComposeKw {
+        let ordered = matches!(keyword, SyntaxKind::ComposeKw | SyntaxKind::MinusKw);
+        let (delims, mistakes) = if ordered {
             (brackets, [braces, parens])
         } else {
             (braces, [brackets, parens])
@@ -2747,6 +2787,41 @@ SourceFile
         assert_eq!(
             messages("var x := r replace { 5 };"),
             ["an attribute's new value needs the attribute's name"]
+        );
+    }
+
+    #[test]
+    fn set_operators() {
+        // `union` binds more loosely than the joins, `intersect` and `minus`
+        // like them.
+        assert_eq!(shape("r union s join t"), "(r union (s join t))");
+        assert_eq!(shape("r intersect s join t"), "((r intersect s) join t)");
+        assert_eq!(shape("r minus s union t"), "((r minus s) union t)");
+        // Lists: braces for the commutative ones, brackets for `minus`.
+        for source in [
+            "var x := union{r, s, t};",
+            "var x := intersect{r, s};",
+            "var x := minus[r, s, t];",
+        ] {
+            assert!(parse_str(source).errors.is_empty(), "{source}");
+        }
+        assert_eq!(fix("var x := minus{r, s};"), "var x := minus[r, s];");
+        assert_eq!(fix("var x := union[r, s];"), "var x := union{r, s};");
+        // SQL's spellings.
+        assert_eq!(fix("var x := r EXCEPT s;"), "var x := r minus s;");
+        assert_eq!(fix("var x := r union all s;"), "var x := r union s;");
+        assert_eq!(fix("var x := r UNION s;"), "var x := r union s;");
+        // `r union s minus t` reads two ways.
+        let source = "var x := r union s minus t;";
+        assert_eq!(
+            messages(source),
+            ["`union` and `minus` need parentheses to say which applies first"]
+        );
+        assert_eq!(fix(source), "var x := (r union s) minus t;");
+        // `!!` before a set operator, too.
+        assert_eq!(
+            messages("var x := t extend { y := !!r union s };"),
+            ["`!!` and `union` need parentheses to say which applies first"]
         );
     }
 

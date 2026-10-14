@@ -1221,6 +1221,51 @@ var elsewhere := people antijoin kenyan;
 operator main{} [];
 ```
 
+### Union, intersection and difference
+
+`r union s` is the tuples of either relation, `r intersect s` the tuples
+of both, and `r minus s` the tuples of `r` that aren't in `s`. The
+relations must have the same heading. They are Tutorial D's `UNION`,
+`INTERSECT` and `MINUS`, and SQL's `UNION`, `INTERSECT` and `EXCEPT`.
+
+```trendy
+var born := relation { { name: "Ada" }, { name: "Édouard" } };
+var listed := relation { { name: "Ada" }, { name: "Wangari" } };
+var anyone := born union listed;
+var both := born intersect listed;
+var unlisted := born minus listed;
+var everyone := union{born, listed, relation { { name: "Edgar" } }};
+var only_born := minus[born, listed, relation { { name: "Edgar" } }];
+
+operator main{} [
+    call debug_value{v: anyone};
+];
+```
+
+- **One heading:** the same attributes, of the same types (A0031). When
+  each operand has one attribute the other lacks, of one type, the fix
+  renames it. They take relations; `union` of tuples, Tutorial D's tuple
+  union, is fixed to `join`.
+- **Precedence:** `intersect` and `minus` are ANDs in Algebra A and bind
+  like the joins, while `union` is an OR and binds more loosely, as `or`
+  does than `and`: `r union s join t` is `r union (s join t)`. SQL reads
+  set operators from the left, so `r union s minus t`, which the algebra
+  would read as `r union (s minus t)`, needs parentheses (P0022).
+- **Lists:** `union{…}` and `intersect{…}` in braces, since their
+  operands can be in any order, and `minus[…]` in brackets, from the left:
+  `minus[r, s, t]` is `(r minus s) minus t`. None has a value with no
+  operands (A0029).
+- SQL's `except` is fixed to `minus`, and `union all`'s `all` is removed,
+  since a relation has no duplicates (P0021).
+
+```trendy,error
+var born := relation { { name: "Ada" } };
+var listed := relation { { name: "Wangari" } };
+var unlisted := born except listed;
+
+operator main{} [];
+```
+
 ### Precedence
 
 From tightest to loosest:
@@ -1232,7 +1277,8 @@ From tightest to loosest:
 | prefix `not`, `-`, `+`, `tuple from` and `value from` | |
 | `*`, `/`, `div`, `mod` | left |
 | `+`, `-`, `\|\|` | left |
-| `join`, `times`, `compose`, `matching`, `not matching` | left |
+| `join`, `times`, `compose`, `matching`, `not matching`, `intersect`, `minus` | left |
+| `union` | left |
 | `=`, `<>`, `<`, `<=`, `>`, `>=` | none: they don't chain |
 | `and` | left |
 | `xor` | left |
@@ -1402,7 +1448,8 @@ are case-sensitive. The keywords are `operator`, `var`, `call`, `builtin`,
 `tuple`, `relation`, `true`, `false`, `not`, `and`, `or`, `xor`,
 `implies`, `div`, `mod`, `remove`, `rename`, `extend`, `replace`, `group`,
 `ungroup`, `wrap`, `unwrap`, `join`, `times`, `compose`, `matching`,
-`where` and `as`, all lowercase, and a keyword can't be a name (P0017).
+`union`, `intersect`, `minus`, `where` and `as`, all lowercase, and a
+keyword can't be a name (P0017).
 `type` is a keyword only after `builtin`, `key` only where a variable's
 keys go, and `value` and `from` only in `tuple from` and `value from`.
 
@@ -1510,6 +1557,10 @@ line after a comment on its own line, such as a file's header, is kept.
 | `NATURAL JOIN`, `INNER JOIN`, `JOIN … USING (a)` | `join` |
 | `CROSS JOIN` | `times` |
 | `JOIN { R1, R2, R3 }` | `join{r1, r2, r3}` |
+| `R UNION S`, `UNION { R, S, T }` | `r union s`, `union{r, s, t}` |
+| `R INTERSECT S`, SQL's `INTERSECT` | `r intersect s` |
+| `R MINUS S`, SQL's `EXCEPT` | `r minus s` |
+| `UNION ALL` | `union`: a relation has no duplicates |
 | `R MATCHING S`, `R SEMIJOIN S`, `WHERE EXISTS (…)` | `r matching s` |
 | `R NOT MATCHING S`, `R SEMIMINUS S`, `WHERE NOT EXISTS (…)` | `r not matching s` |
 | `T1 UNION T2`, of tuples (tuple union) | `t1 join t2` |

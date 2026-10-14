@@ -2343,7 +2343,7 @@ mod tests {
                     Code::JoinTypeConflict,
                     "the operands of `compose` both have an attribute `z`, of different types"
                 ),
-                (Code::EmptyCompose, "`compose[]` composes nothing"),
+                (Code::EmptyList, "`compose[]` has no value"),
             ]
         );
         let labels: Vec<_> = errors[0]
@@ -2936,6 +2936,65 @@ mod tests {
             self::errors(&fixed)
                 .iter()
                 .all(|e| e.code != Code::WrongOperandType || !e.message.contains("combine")),
+            "{fixed}"
+        );
+    }
+
+    #[test]
+    fn set_constants() {
+        let vars = variables(
+            "var a := relation { { n: 1 }, { n: 2 } };\nvar b := relation { { n: 2 }, { n: 3 } };\nvar c := relation { { n: 3 } };\nvar u := a union b;\nvar i := a intersect b;\nvar m := a minus b;\nvar ul := union{a, b, c};\nvar ml := minus[union{a, b}, c, relation { { n: 1 } }];",
+        );
+        let value = |name: &str| &vars.iter().find(|v| v.name == name).unwrap().init;
+        let ns = |name: &str| match value(name) {
+            hir::Value::Relation(r) => r
+                .tuples
+                .iter()
+                .map(|t| t.get("n").cloned().unwrap())
+                .collect::<Vec<_>>(),
+            other => panic!("a relation: {other:?}"),
+        };
+        let ints = |ns: &[i64]| {
+            ns.iter()
+                .map(|&n| hir::Value::Integer(n))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ns("u"), ints(&[1, 2, 3]));
+        assert_eq!(ns("i"), ints(&[2]));
+        assert_eq!(ns("m"), ints(&[1]));
+        assert_eq!(ns("ul"), ints(&[1, 2, 3]));
+        assert_eq!(ns("ml"), ints(&[2]));
+    }
+
+    #[test]
+    fn set_errors() {
+        let source = format!(
+            "var people := relation {{ {{ name: \"Ada\", city: \"London\" }} }};\nvar more := relation {{ {{ name: \"Wangari\", town: \"Nyeri\" }} }};\nvar a := people union more;\nvar b := union{{}};\nvar c := tuple {{ x: 1 }} union tuple {{ y: 1 }};\nvar d := people intersect relation {{ {{ name: 1, city: \"x\" }} }};{MAIN}"
+        );
+        let errors = errors(&source);
+        let found: Vec<_> = errors.iter().map(|e| (e.code, &e.message[..])).collect();
+        assert_eq!(
+            found,
+            [
+                (
+                    Code::HeadingMismatch,
+                    "the operands of `union` have different headings"
+                ),
+                (Code::EmptyList, "`union{}` has no value"),
+                (Code::WrongOperandType, "`union` can't be applied to tuples"),
+                (
+                    Code::HeadingMismatch,
+                    "the operands of `intersect` have different headings"
+                ),
+            ]
+        );
+        let fixed = fix(&source);
+        assert!(
+            fixed.contains("people union more rename {town as city}"),
+            "{fixed}"
+        );
+        assert!(
+            fixed.contains("tuple { x: 1 } join tuple { y: 1 }"),
             "{fixed}"
         );
     }

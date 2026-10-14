@@ -813,6 +813,12 @@ pub(crate) fn not_joinable(
             "relations",
             "`matching` and `not matching` keep the tuples of a relation that have a match in another relation, or none; of tuples, compare them with `=`",
         ),
+        crate::ops::JoinKind::Union
+        | crate::ops::JoinKind::Intersect
+        | crate::ops::JoinKind::Minus => (
+            "relations of one heading",
+            "`union`, `intersect` and `minus` combine the tuples of relations; Tutorial D's tuple union, of the attributes of tuples, is `join`",
+        ),
         _ => (
             "relations, or tuples",
             "`join`, `times` and `compose` combine the tuples of relations, or the attributes of tuples",
@@ -826,6 +832,24 @@ pub(crate) fn not_joinable(
     )
     .with_secondary(operand.span(), format!("this is `{ty}`"))
     .with_note(note)
+}
+
+/// `union`, at `span`, of tuples: Tutorial D's tuple union, which is `join`.
+pub(crate) fn tuple_union(span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::WrongOperandType,
+        "`union` can't be applied to tuples",
+        span,
+        "`union` takes relations of one heading",
+    )
+    .with_note("Tutorial D's tuple union, a tuple of both tuples' attributes, is `join` in trendy; `union` is of the tuples of relations")
+    .with_suggestion(
+        "write `join`",
+        vec![Edit {
+            span,
+            replacement: "join".to_string(),
+        }],
+    )
 }
 
 /// The tuple `operand` in the join `operator` of relations.
@@ -1000,18 +1024,115 @@ pub(crate) fn common_attributes(
     })
 }
 
-/// `compose[]`, `nary`, which has no value: compose has no identity.
-pub(crate) fn empty_compose(nary: &NaryExpr) -> Diagnostic {
+/// A list of the operator `join`, written in the brackets it takes: in
+/// brackets for the left folds, and braces for the others.
+fn list_of(join: crate::ops::JoinKind) -> String {
+    use crate::ops::JoinKind;
+    let operator = join.keyword();
+    match join {
+        JoinKind::Compose | JoinKind::Minus => format!("{operator}[r, s, t]"),
+        _ => format!("{operator}{{r, s, t}}"),
+    }
+}
+
+/// `expr`, written so that a postfix operator applies to all of it: in
+/// parentheses if it is a prefix or dyadic operator's, which a postfix one
+/// would bind tighter than.
+fn postfix_operand(expr: &Expr) -> String {
+    let written = expr.syntax().text().to_string();
+    match expr {
+        Expr::Unary(_) | Expr::Image(_) | Expr::From(_) | Expr::Binary(_) => format!("({written})"),
+        _ => written,
+    }
+}
+
+/// The set operator `operator`, written at `span`, of operands whose
+/// headings differ: the first, written at `first.0` with heading `first.1`,
+/// and another, at `other.0` with `other.1`. When one attribute of each is
+/// named differently, with the same type, the fix renames the other's.
+pub(crate) fn heading_mismatch(
+    (operator, span): (&str, Span),
+    first: (&Expr, &hir::Heading),
+    other: (&Expr, &hir::Heading),
+) -> Diagnostic {
+    let only = |a: &hir::Heading, b: &hir::Heading| -> Vec<(String, hir::Type)> {
+        a.attributes()
+            .filter(|(name, ty)| b.get(name) != Some(ty))
+            .map(|(name, ty)| (name.to_string(), ty.clone()))
+            .collect()
+    };
+    let (first_only, other_only) = (only(first.1, other.1), only(other.1, first.1));
+    let listed = |attributes: &[(String, hir::Type)]| {
+        let names: Vec<String> = attributes
+            .iter()
+            .map(|(name, ty)| format!("`{name}: {ty}`"))
+            .collect();
+        if names.is_empty() {
+            "nothing else".to_string()
+        } else {
+            trendy_diag::conjoin(&names)
+        }
+    };
+    let d = Diagnostic::error(
+        Code::HeadingMismatch,
+        format!("the operands of `{operator}` have different headings"),
+        span,
+        format!("`{operator}` takes relations of one heading"),
+    )
+    .with_secondary(first.0.span(), format!("this has {}", listed(&first_only)))
+    .with_secondary(other.0.span(), format!("and this {}", listed(&other_only)))
+    .with_note(format!(
+        "`{operator}` combines tuples, so they must have the same attributes, of the same types; rename or project an operand to match"
+    ));
+    match (&first_only[..], &other_only[..]) {
+        ([(want, want_ty)], [(have, have_ty)]) if want_ty == have_ty && want != have => d
+            .with_suggestion(
+                format!("rename `{have}` to `{want}`"),
+                vec![Edit {
+                    span: other.0.span(),
+                    replacement: format!(
+                        "{} rename {{{have} as {want}}}",
+                        postfix_operand(other.0)
+                    ),
+                }],
+            ),
+        _ => d,
+    }
+}
+
+/// `nary`, a list of the operator `join` with nothing in it, which has no
+/// value, since the operator has no identity.
+pub(crate) fn empty_operands(join: crate::ops::JoinKind, nary: &NaryExpr) -> Diagnostic {
+    use crate::ops::JoinKind;
+    let operator = join.keyword();
+    let (written, why) = match join {
+        JoinKind::Minus => (
+            "minus[]",
+            "`minus[r, s, t]` removes from `r`, so it needs an `r`",
+        ),
+        JoinKind::Union => (
+            "union{}",
+            "`union{}` would have no heading to be a relation of",
+        ),
+        JoinKind::Intersect => (
+            "intersect{}",
+            "`intersect{}` would be every tuple of a heading that isn't known, and that is usually infinitely many",
+        ),
+        _ => (
+            "compose[]",
+            "no relation composes with everything to give it back, since compose needs a common attribute and removes it",
+        ),
+    };
     Diagnostic::error(
-        Code::EmptyCompose,
-        "`compose[]` composes nothing",
+        Code::EmptyList,
+        format!("`{written}` has no value"),
         nary.span(),
-        "compose needs at least one operand",
+        format!("`{operator}` needs at least one operand"),
     )
-    .with_note(
-        "`join{}` and `times{}` are `relation {} { {} }`, which joins with anything to give it back; no relation composes with everything that way, so `compose[]` has no value",
-    )
-    .with_help("write the relations to compose, as in `compose[r, s, t]`")
+    .with_note(format!(
+        "`join{{}}` and `times{{}}` are `relation {{}} {{ {{}} }}`, which joins with anything to give it back; {why}"
+    ))
+    .with_help(format!("write the relations, as in `{}`", list_of(join)))
 }
 
 /// `.name`, at `at`, applied to a value of type `ty`, which isn't a tuple.
@@ -1505,13 +1626,7 @@ pub(crate) fn taken_from_tuple(
             }],
         ),
         (Taken::Value, Some(name), None) => {
-            // `.` binds tighter than a prefix or dyadic operator.
-            let base = match operand {
-                Expr::Unary(_) | Expr::Image(_) | Expr::From(_) | Expr::Binary(_) => {
-                    format!("({written})")
-                }
-                _ => written,
-            };
+            let base = postfix_operand(operand);
             d.with_suggestion(
                 format!("take its attribute `{name}`"),
                 vec![Edit {
@@ -1545,11 +1660,7 @@ pub(crate) fn not_one_attribute(span: Span, operand: &Expr, heading: &hir::Headi
     // Projecting on one attribute is the fix, and which is a choice, so
     // each is offered. A prefix operand is parenthesized first, since a
     // projection would bind tighter.
-    let written = operand.syntax().text().to_string();
-    let base = match operand {
-        Expr::Unary(_) | Expr::Image(_) | Expr::From(_) | Expr::Binary(_) => format!("({written})"),
-        _ => written,
-    };
+    let base = postfix_operand(operand);
     names.iter().fold(d, |d, name| {
         d.with_suggestion(
             format!("take `{name}`"),

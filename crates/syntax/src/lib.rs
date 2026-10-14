@@ -55,6 +55,9 @@ pub enum SyntaxKind {
     ComposeKw,
     /// `matching`, in `r matching s` and `r not matching s`.
     MatchingKw,
+    UnionKw,
+    IntersectKw,
+    MinusKw,
     /// `where`, in `r where condition`.
     WhereKw,
     /// `as`, in `old as new`.
@@ -141,8 +144,8 @@ pub enum SyntaxKind {
     /// `r replace { a := a + 1 }`, `r group { g := {a, b} }`,
     /// `r ungroup {g}`, `r wrap { w := {a, b} }` or `r unwrap {w}`
     PostfixExpr,
-    /// `join{r, s, t}` or `times{r, s, t}`: a join of any number of
-    /// relations.
+    /// `join{r, s, t}`, `union{r, s, t}`, `compose[r, s, t]` and the like:
+    /// an operator of any number of operands.
     NaryExpr,
     /// `!!r`: the tuples of `r` that match the tuple at hand.
     ImageExpr,
@@ -197,7 +200,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 100] = [
+    pub const ALL: [SyntaxKind; 103] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -228,6 +231,9 @@ impl SyntaxKind {
         SyntaxKind::TimesKw,
         SyntaxKind::ComposeKw,
         SyntaxKind::MatchingKw,
+        SyntaxKind::UnionKw,
+        SyntaxKind::IntersectKw,
+        SyntaxKind::MinusKw,
         SyntaxKind::WhereKw,
         SyntaxKind::AsKw,
         SyntaxKind::LBrace,
@@ -336,6 +342,9 @@ impl SyntaxKind {
                 | SyntaxKind::TimesKw
                 | SyntaxKind::ComposeKw
                 | SyntaxKind::MatchingKw
+                | SyntaxKind::UnionKw
+                | SyntaxKind::IntersectKw
+                | SyntaxKind::MinusKw
                 | SyntaxKind::WhereKw
                 | SyntaxKind::AsKw
         )
@@ -365,6 +374,9 @@ impl SyntaxKind {
                 | SyntaxKind::TimesKw
                 | SyntaxKind::ComposeKw
                 | SyntaxKind::MatchingKw
+                | SyntaxKind::UnionKw
+                | SyntaxKind::IntersectKw
+                | SyntaxKind::MinusKw
                 | SyntaxKind::WhereKw
         )
     }
@@ -397,6 +409,16 @@ impl SyntaxKind {
                 | SyntaxKind::LtEq
                 | SyntaxKind::Gt
                 | SyntaxKind::GtEq
+        )
+    }
+
+    /// Whether this is a set operator: `union`, `intersect` or `minus`, of
+    /// relations with the same heading.
+    #[must_use]
+    pub fn is_set_operator(self) -> bool {
+        matches!(
+            self,
+            SyntaxKind::UnionKw | SyntaxKind::IntersectKw | SyntaxKind::MinusKw
         )
     }
 
@@ -472,6 +494,9 @@ impl SyntaxKind {
             SyntaxKind::TimesKw => "times",
             SyntaxKind::ComposeKw => "compose",
             SyntaxKind::MatchingKw => "matching",
+            SyntaxKind::UnionKw => "union",
+            SyntaxKind::IntersectKw => "intersect",
+            SyntaxKind::MinusKw => "minus",
             SyntaxKind::WhereKw => "where",
             SyntaxKind::AsKw => "as",
             SyntaxKind::LBrace => "{",
@@ -502,9 +527,20 @@ impl SyntaxKind {
     }
 
     /// How the kind is named in error messages.
+    ///
+    /// # Panics
+    ///
+    /// If the kind has no description, which a test rules out.
     #[must_use]
     pub fn describe(self) -> &'static str {
-        match self {
+        self.describe_token()
+            .or_else(|| self.describe_node())
+            .expect("every kind is described")
+    }
+
+    /// How a token kind is named in error messages.
+    fn describe_token(self) -> Option<&'static str> {
+        Some(match self {
             SyntaxKind::Whitespace => "whitespace",
             SyntaxKind::Comment => "comment",
             SyntaxKind::Ident => "identifier",
@@ -535,6 +571,9 @@ impl SyntaxKind {
             SyntaxKind::TimesKw => "`times`",
             SyntaxKind::ComposeKw => "`compose`",
             SyntaxKind::MatchingKw => "`matching`",
+            SyntaxKind::UnionKw => "`union`",
+            SyntaxKind::IntersectKw => "`intersect`",
+            SyntaxKind::MinusKw => "`minus`",
             SyntaxKind::WhereKw => "`where`",
             SyntaxKind::AsKw => "`as`",
             SyntaxKind::ForeignOperator => "operator",
@@ -565,6 +604,13 @@ impl SyntaxKind {
             SyntaxKind::ApproximateLiteral => "approximate literal",
             SyntaxKind::TextLiteral => "text literal",
             SyntaxKind::ErrorToken => "unrecognized character",
+            _ => return None,
+        })
+    }
+
+    /// How a node kind is named in error messages.
+    fn describe_node(self) -> Option<&'static str> {
+        Some(match self {
             SyntaxKind::SourceFile => "source file",
             SyntaxKind::Operator => "operator definition",
             SyntaxKind::BuiltinOperator => "built-in operator declaration",
@@ -603,7 +649,8 @@ impl SyntaxKind {
             SyntaxKind::AttributeType | SyntaxKind::AttributeValue => "attribute",
             SyntaxKind::Literal => "value",
             SyntaxKind::Error => "error",
-        }
+            _ => return None,
+        })
     }
 }
 
@@ -724,6 +771,18 @@ mod tests {
             assert_eq!(SyntaxKind::keyword(text), Some(kind));
         }
         assert_eq!(SyntaxKind::keyword("main"), None);
+    }
+
+    #[test]
+    fn every_kind_is_described() {
+        for kind in SyntaxKind::ALL {
+            assert!(
+                kind.describe_token()
+                    .or_else(|| kind.describe_node())
+                    .is_some(),
+                "{kind:?} has no description"
+            );
+        }
     }
 
     #[test]

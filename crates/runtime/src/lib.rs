@@ -566,6 +566,84 @@ pub unsafe extern "C" fn trendy_rt_ungroup(
     }
 }
 
+/// Store at `dst` the tuples of the relations `lhs` and `rhs`, of the one
+/// type `desc` describes, or, if `*minus` is 1, those of `lhs` that aren't
+/// in `rhs` (union and difference), in canonical order, in memory that
+/// [`trendy_rt_release`] releases. Both operands are in canonical order, so
+/// one pass merges them, and the result needs no sorting.
+///
+/// # Safety
+///
+/// `lhs` and `rhs` must point to valid relations of the type `desc`
+/// describes, `minus` to 0 or 1, and `dst` to memory for a relation.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_combine(
+    dst: *mut Text,
+    lhs: *const u8,
+    rhs: *const u8,
+    desc: *const TypeDesc,
+    minus: *const usize,
+) {
+    use core::cmp::Ordering;
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let desc = &*desc;
+        let ((lhs, lhs_count), (rhs, rhs_count)) = (read_slice(lhs), read_slice(rhs));
+        let minus = minus.read_unaligned() == 1;
+        let size = desc.element_size;
+        let Some(room) = lhs_count.checked_add(rhs_count) else {
+            trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+        };
+        let Some(bytes) = room.checked_mul(size) else {
+            trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+        };
+        let out = allocate_owned(bytes);
+        let mut count = 0;
+        let mut keep = |tuple: *const u8| {
+            core::ptr::copy_nonoverlapping(tuple, out.add(count * size), size);
+            count += 1;
+        };
+        let (mut i, mut j) = (0, 0);
+        while i < lhs_count {
+            let l = lhs.add(i * size);
+            let order = if j < rhs_count {
+                compare_tuples(l, rhs.add(j * size), desc)
+            } else {
+                Ordering::Less
+            };
+            match order {
+                Ordering::Less => {
+                    keep(l);
+                    i += 1;
+                }
+                Ordering::Equal => {
+                    if !minus {
+                        keep(l);
+                    }
+                    i += 1;
+                    j += 1;
+                }
+                Ordering::Greater => {
+                    if !minus {
+                        keep(rhs.add(j * size));
+                    }
+                    j += 1;
+                }
+            }
+        }
+        if !minus {
+            for k in j..rhs_count {
+                keep(rhs.add(k * size));
+            }
+        }
+        dst.write_unaligned(Text {
+            bytes: out,
+            len: count,
+        });
+    }
+}
+
 /// Store at `dst` the tuples of the relation `lhs`, which `lhs_desc`
 /// describes, that have a match in the relation `rhs`, which `rhs_desc`
 /// describes, on the `*common_count` attributes in `common`, or, if

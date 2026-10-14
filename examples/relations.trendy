@@ -71,15 +71,12 @@ key { name };
    call debug_value{v: people{name} subset cities{name}};
 */
 
-/* Union, intersection and difference, of relations with the same heading,
-   and disjoint union, where the operands must have no tuple in common.
-   Union is a special case of Algebra A's OR, intersection of its AND.
-   Tutorial D: R1 UNION R2, R1 INTERSECT R2, R1 MINUS R2, R1 D_UNION R2,
-   and n-adic UNION { R1, R2, R3 } and so on
-   Proposed: `union`, `intersect`, `minus` and `disjoint union` operators.
+/* Disjoint union: union, where the operands must have no tuple in common,
+   or the program fails.
+   Tutorial D: R1 D_UNION R2, and D_UNION { R1, R2, R3 }
+   Proposed: a `disjoint union` operator.
 
-   call debug_value{v: people union relation { { name: "李白", born: 701 } }};
-   call debug_value{v: people minus people where born > 1900};
+   call debug_value{v: people disjoint union relation { { name: "李白", born: 701 } }};
 */
 
 /* Aggregates (RM Prescription 18 and OO Prescription 6): count, sum, avg,
@@ -421,6 +418,32 @@ operator matching_people{
     call debug_value{v: (b rename {place as city} not matching c{city}) remove {city}};
 ];
 
+/* Union, intersection and difference, of relations of one heading: the
+   tuples of either, of both, and of the first but not the second. Union
+   is Algebra A's OR, and binds more loosely than the joins, which are AND,
+   as intersection and difference are. Of lists: `union{…}` and
+   `intersect{…}`, in any order, and `minus[…]`, from the left.
+   Tutorial D: R1 UNION R2, R1 INTERSECT R2, R1 MINUS R2, and
+   UNION { R1, R2, R3 }. Implemented, and printed twice like the
+   projections. */
+var named := births{name} union cities{name};
+var both := births{name} intersect cities{name};
+var unlisted := births{name} minus cities{name};
+var everyone := union{births{name}, cities{name}, people{name}};
+var nobody_else := minus[births{name}, cities{name}, people{name}];
+
+operator set_names{
+    b: relation { name: text, born: integer, place: text },
+    c: relation { name: text, city: text },
+    p: relation { name: text, born: integer },
+} [
+    call debug_value{v: b{name} union c{name}};
+    call debug_value{v: b{name} intersect c{name}};
+    call debug_value{v: b{name} minus c{name}};
+    call debug_value{v: union{b{name}, c{name}, p{name}}};
+    call debug_value{v: minus[b{name}, c{name}, p{name}]};
+];
+
 operator main{} [
     call debug_value{v: names};
     call debug_value{v: places};
@@ -458,6 +481,11 @@ operator main{} [
     call debug_value{v: at_home};
     call debug_value{v: listed};
     call debug_value{v: born_elsewhere};
+    call debug_value{v: named};
+    call debug_value{v: both};
+    call debug_value{v: unlisted};
+    call debug_value{v: everyone};
+    call debug_value{v: nobody_else};
 
     call project_births{r: births};
     call project_signs{r: signs};
@@ -488,4 +516,6 @@ operator main{} [
     call restrict_births{b: births, c: cities};
 
     call matching_people{p: people, b: births, c: cities};
+
+    call set_names{b: births, c: cities, p: people};
 ];

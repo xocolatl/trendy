@@ -394,6 +394,8 @@ impl FunctionBuilder<'_> {
             hir::Expr::Ungroup(operand, names) => self.ungroup(operand, names, cx),
             hir::Expr::Only(operand) => self.only(operand, cx),
             hir::Expr::Semijoin(lhs, rhs) => self.matching(lhs, rhs, false, cx),
+            hir::Expr::Union(lhs, rhs) => self.combine(lhs, rhs, false, cx),
+            hir::Expr::Minus(lhs, rhs) => self.combine(lhs, rhs, true, cx),
             hir::Expr::Antijoin(lhs, rhs) => self.matching(lhs, rhs, true, cx),
             hir::Expr::Restrict(operand, condition) => self.restrict(operand, condition, cx),
             hir::Expr::Current(depth, _) => self.tuples[self.tuples.len() - 1 - depth].clone(),
@@ -926,6 +928,30 @@ impl FunctionBuilder<'_> {
         self.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::Matching,
             args,
+        });
+        self.allocates = true;
+        dst
+    }
+
+    /// The tuples of the relations `lhs` and `rhs`, of one type, or, if
+    /// `minus`, those of `lhs` that aren't in `rhs`, computed by the runtime
+    /// into a new stack slot.
+    fn combine(
+        &mut self,
+        lhs: &hir::Expr,
+        rhs: &hir::Expr,
+        minus: bool,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let ty = self.program.type_of(lhs, self.within);
+        let lhs = self.place(lhs, cx);
+        let rhs = self.place(rhs, cx);
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+        let minus = usize_constant(u64::from(minus), cx);
+        let dst = self.slot(layout(&ty));
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Combine,
+            args: vec![dst.clone(), lhs, rhs, descriptor, minus],
         });
         self.allocates = true;
         dst

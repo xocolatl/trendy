@@ -174,6 +174,13 @@ pub enum Expr {
     /// operands are both relations or both tuples, whose common attributes
     /// have the same types.
     And(Box<Expr>, Box<Expr>),
+    /// The tuples of either relation, of the same heading (`union`, Algebra
+    /// A's OR of relations with the same heading). `intersect` is an
+    /// `And`, of relations with all their attributes in common.
+    Union(Box<Expr>, Box<Expr>),
+    /// The tuples of the left relation that aren't in the right, of the
+    /// same heading (`minus`, Algebra A's AND with the NOT of the right).
+    Minus(Box<Expr>, Box<Expr>),
     /// The tuples of the left relation that have a match in the right, on
     /// their common attributes (`matching`, the semijoin): the result has
     /// the left's heading. The operands' common attributes have the same
@@ -254,6 +261,8 @@ impl Expr {
             Expr::Current(_, heading) => Type::Tuple(heading.clone()),
             Expr::Ungroup(operand, names) => operand.type_with(leaf).ungrouped(names),
             Expr::Restrict(operand, _)
+            | Expr::Union(operand, _)
+            | Expr::Minus(operand, _)
             | Expr::Semijoin(operand, _)
             | Expr::Antijoin(operand, _) => operand.type_with(leaf),
             Expr::Only(operand) => match operand.type_with(leaf) {
@@ -874,6 +883,29 @@ impl Value {
             }),
             _ => panic!("removing attributes from {self:?}"),
         }
+    }
+
+    /// The tuples of this relation and `other`, of the same heading, or,
+    /// if `minus`, those of this one that aren't in `other`, as for
+    /// [`Expr::Union`] and [`Expr::Minus`].
+    ///
+    /// # Panics
+    ///
+    /// If either value isn't a relation, which sema rules out.
+    #[must_use]
+    pub fn combined(&self, other: &Value, minus: bool) -> Value {
+        let (Value::Relation(lhs), Value::Relation(rhs)) = (self, other) else {
+            panic!("combining {self:?} with {other:?}");
+        };
+        let tuples = if minus {
+            lhs.tuples.difference(&rhs.tuples).cloned().collect()
+        } else {
+            lhs.tuples.union(&rhs.tuples).cloned().collect()
+        };
+        Value::Relation(RelationValue {
+            heading: lhs.heading.clone(),
+            tuples,
+        })
     }
 
     /// The tuples of this relation that have a match in `other` on their

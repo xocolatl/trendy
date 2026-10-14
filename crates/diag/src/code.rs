@@ -63,8 +63,9 @@ pub enum Code {
     KeyViolated,
     JoinTypeConflict,
     CommonAttributes,
-    EmptyCompose,
+    EmptyList,
     ImageOutsideTuple,
+    HeadingMismatch,
     Overflow,
     DivisionByZero,
     OutOfMemory,
@@ -87,7 +88,7 @@ pub enum CodeKind {
 }
 
 impl Code {
-    pub const ALL: [Code; 58] = [
+    pub const ALL: [Code; 59] = [
         Code::UnexpectedCharacter,
         Code::MissingToken,
         Code::WrongDelimiter,
@@ -138,8 +139,9 @@ impl Code {
         Code::KeyViolated,
         Code::JoinTypeConflict,
         Code::CommonAttributes,
-        Code::EmptyCompose,
+        Code::EmptyList,
         Code::ImageOutsideTuple,
+        Code::HeadingMismatch,
         Code::Overflow,
         Code::DivisionByZero,
         Code::OutOfMemory,
@@ -201,8 +203,9 @@ impl Code {
             Code::KeyViolated => "A0026",
             Code::JoinTypeConflict => "A0027",
             Code::CommonAttributes => "A0028",
-            Code::EmptyCompose => "A0029",
+            Code::EmptyList => "A0029",
             Code::ImageOutsideTuple => "A0030",
+            Code::HeadingMismatch => "A0031",
             Code::Overflow => "R0001",
             Code::DivisionByZero => "R0002",
             Code::OutOfMemory => "R0003",
@@ -293,8 +296,9 @@ impl Code {
             Code::KeyViolated => include_str!("../errors/A0026.md"),
             Code::JoinTypeConflict => include_str!("../errors/A0027.md"),
             Code::CommonAttributes => include_str!("../errors/A0028.md"),
-            Code::EmptyCompose => include_str!("../errors/A0029.md"),
+            Code::EmptyList => include_str!("../errors/A0029.md"),
             Code::ImageOutsideTuple => include_str!("../errors/A0030.md"),
+            Code::HeadingMismatch => include_str!("../errors/A0031.md"),
             Code::Overflow => include_str!("../errors/R0001.md"),
             Code::DivisionByZero => include_str!("../errors/R0002.md"),
             Code::OutOfMemory => include_str!("../errors/R0003.md"),

@@ -616,8 +616,17 @@ impl<'a> Checker<'a> {
             .collect();
         let operands: Vec<hir::Expr> = operands.into_iter().collect::<Option<_>>()?;
         let types: Vec<hir::Type> = operands.iter().map(|o| self.ty(o)).collect();
-        let result = match joining.combined(&types, errors)? {
+        let combined = joining.combined(&types, errors)?;
+        let result = match combined {
             ops::Combined::And => ops::and(operands),
+            ops::Combined::Union | ops::Combined::Minus => {
+                let minus = matches!(combined, ops::Combined::Minus);
+                let mut operands = operands.into_iter();
+                let first = operands.next()?;
+                Ok(operands.fold(first, |result, operand| {
+                    ops::combined(result, operand, minus)
+                }))
+            }
             ops::Combined::Matching { negated } => {
                 let mut operands = operands.into_iter();
                 let (lhs, rhs) = (operands.next()?, operands.next()?);

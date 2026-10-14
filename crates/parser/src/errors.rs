@@ -817,34 +817,90 @@ pub(crate) fn bare_unpacked(unpacking: Unpacking, found: Found) -> Diagnostic {
     )
 }
 
-/// Whether `text` is a name for a semijoin from the literature: `semijoin`,
-/// which is `matching`, or, negated, `semiminus` or `antijoin`, which are
-/// `not matching`. In any case.
-pub(crate) fn semijoin_spelling(text: &str) -> Option<bool> {
+/// The dyadic operator another language's name `text`, in any case, stands
+/// for, and how trendy spells it: the literature's `semijoin` for
+/// `matching`, `semiminus` and `antijoin` for `not matching`, and SQL's
+/// `except` for `minus`.
+pub(crate) fn operator_name(text: &str) -> Option<(SyntaxKind, &'static str)> {
     let lower = text.to_ascii_lowercase();
-    match lower.as_str() {
-        "semijoin" => Some(false),
-        "semiminus" | "antijoin" => Some(true),
-        _ => None,
-    }
+    Some(match lower.as_str() {
+        "semijoin" => (SyntaxKind::MatchingKw, "matching"),
+        "semiminus" | "antijoin" => (SyntaxKind::MatchingKw, "not matching"),
+        "except" => (SyntaxKind::MinusKw, "minus"),
+        _ => return None,
+    })
 }
 
-/// `found`, a name for a semijoin, or for an antijoin if `negated`, where
-/// trendy writes `matching` or `not matching`.
-pub(crate) fn semijoin_word(found: Found, negated: bool) -> Diagnostic {
-    let spelled = if negated { "not matching" } else { "matching" };
+/// `found`, another language's name for the operator trendy writes
+/// `spelled`.
+pub(crate) fn renamed_operator(found: Found, spelled: &str) -> Diagnostic {
+    let (code, note) = if spelled == "minus" {
+        (
+            Code::SqlRelational,
+            "`r minus s` is the tuples of `r` that aren't in `s`, of the same heading: SQL's `except`",
+        )
+    } else {
+        (
+            Code::ForeignOperator,
+            "`r matching s` is the tuples of `r` that have a match in `s` on their common attributes, and `r not matching s` those that have none: the semijoin and the antijoin",
+        )
+    };
     Diagnostic::error(
-        Code::ForeignOperator,
+        code,
         format!("`{}` is written `{spelled}`", found.text),
         found.span,
         format!("trendy writes this `{spelled}`"),
     )
-    .with_note("`r matching s` is the tuples of `r` that have a match in `s` on their common attributes, and `r not matching s` those that have none: the semijoin and the antijoin")
+    .with_note(note)
     .with_suggestion(
         format!("write `{spelled}`"),
         vec![Edit {
             span: found.span,
             replacement: spelled.to_string(),
+        }],
+    )
+}
+
+/// `r union s minus t`, whose `minus` is at `span`: `r` starts at `start`,
+/// `s` ends at `s_end`, and `s minus t` is at `minus`. The fixes are each
+/// reading, the minus first or last.
+pub(crate) fn union_minus(span: Span, start: usize, s_end: usize, minus: Span) -> Diagnostic {
+    let insert = |at: usize, text: &str| Edit {
+        span: Span::new(at, at),
+        replacement: text.to_string(),
+    };
+    Diagnostic::error(
+        Code::UnorderedOperators,
+        "`union` and `minus` need parentheses to say which applies first",
+        span,
+        "this could apply to the union, or to its right operand only",
+    )
+    .with_note("`minus` binds like the joins, as an AND, so `r union s minus t` would be `r union (s minus t)`; SQL reads set operators from the left, as `(r union s) minus t`, so neither is assumed")
+    .with_suggestion(
+        "remove from the union: `(r union s) minus t`",
+        vec![insert(start, "("), insert(s_end, ")")],
+    )
+    .with_suggestion(
+        "remove from the right operand: `r union (s minus t)`",
+        vec![insert(minus.start, "("), insert(minus.end, ")")],
+    )
+}
+
+/// SQL's `all` or `distinct`, `found`, after a set operator, which `span`
+/// removes with the space before it.
+pub(crate) fn set_quantifier(found: Found, span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::SqlRelational,
+        format!("there is no `{}` here", found.text.to_ascii_lowercase()),
+        found.span,
+        "SQL's set quantifier",
+    )
+    .with_note("a relation is a set, so it has no duplicates to keep or remove: `union`, `intersect` and `minus` give sets")
+    .with_suggestion(
+        format!("remove `{}`", found.text),
+        vec![Edit {
+            span,
+            replacement: String::new(),
         }],
     )
 }
