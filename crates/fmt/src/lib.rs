@@ -13,8 +13,8 @@ mod order;
 use std::collections::HashSet;
 
 use trendy_syntax::ast::{
-    Arguments, AstNode, Body, Heading, NameList, NaryExpr, RelationLiteral, RenameList, SourceFile,
-    TupleLiteral,
+    Arguments, AstNode, Body, ExtendList, Heading, NameList, NaryExpr, RelationLiteral, RenameList,
+    SourceFile, TupleLiteral,
 };
 use trendy_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
@@ -144,7 +144,7 @@ impl Layout {
 
 /// Whether `node` is a list that can be broken across lines, one item per
 /// line: parameters, arguments, headings, tuple and relation values, lists
-/// of names, and the operands of `join{…}` and `times{…}`.
+/// of names, new attributes, and the operands of `join{…}` and `times{…}`.
 fn is_list(node: &SyntaxNode) -> bool {
     matches!(
         node.kind(),
@@ -154,6 +154,7 @@ fn is_list(node: &SyntaxNode) -> bool {
             | SyntaxKind::RelationLiteral
             | SyntaxKind::NameList
             | SyntaxKind::RenameList
+            | SyntaxKind::ExtendList
             | SyntaxKind::NaryExpr
     )
 }
@@ -416,6 +417,8 @@ fn items(node: &SyntaxNode) -> usize {
         names.names().count()
     } else if let Some(renamings) = RenameList::cast(node.clone()) {
         renamings.renamings().count()
+    } else if let Some(extensions) = ExtendList::cast(node.clone()) {
+        extensions.extensions().count()
     } else if let Some(nary) = NaryExpr::cast(node.clone()) {
         nary.operands().count()
     } else {
@@ -475,9 +478,10 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
             "\n\n"
         };
     }
-    // Braces with spaces inside: a heading, a tuple or a relation, as in
-    // `tuple { a: integer }`. Parameters and arguments are written without,
-    // as in `greet{name: text}`, and so is an operator's empty `{}`.
+    // Braces with spaces inside: a heading, a tuple, a relation or new
+    // attributes, as in `tuple { a: integer }` and `r extend { b := 1 }`.
+    // Parameters and arguments are written without, as in
+    // `greet{name: text}`, and so is an operator's empty `{}`.
     let list_brace = |token: &SyntaxToken| {
         token.parent().is_some_and(|p| match p.kind() {
             Heading => p.parent().is_none_or(|owner| {
@@ -486,7 +490,7 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
                     SyntaxKind::Operator | SyntaxKind::BuiltinOperator
                 )
             }),
-            TupleLiteral | RelationLiteral => true,
+            TupleLiteral | RelationLiteral | SyntaxKind::ExtendList => true,
             // A key's attributes, as in `key { a, b }`.
             SyntaxKind::NameList => p.parent().is_some_and(|k| k.kind() == SyntaxKind::Key),
             _ => false,
@@ -537,10 +541,18 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
             | NotKw
             | SyntaxKind::RemoveKw
             | SyntaxKind::RenameKw
+            | SyntaxKind::ExtendKw
             | SyntaxKind::AsKw,
             _,
         )
-        | (_, ColonEq | SyntaxKind::RemoveKw | SyntaxKind::RenameKw | SyntaxKind::AsKw)
+        | (
+            _,
+            ColonEq
+            | SyntaxKind::RemoveKw
+            | SyntaxKind::RenameKw
+            | SyntaxKind::ExtendKw
+            | SyntaxKind::AsKw,
+        )
         | (RBrace, LBracket | LBrace) => " ",
         _ => "",
     }
@@ -864,6 +876,14 @@ mod tests {
         assert_eq!(
             fmt(&format!("var r := join{{{}}};", names.join(", "))),
             format!("var r := join{{\n    {}\n}};\n", names.join(",\n    "))
+        );
+    }
+
+    #[test]
+    fn extensions() {
+        assert_eq!(
+            fmt("var a:=r   extend{t:=x+1,u :=r{y}extend{z:=2}};"),
+            "var a := r extend { t := x + 1, u := r{y} extend { z := 2 } };\n"
         );
     }
 

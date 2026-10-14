@@ -1,0 +1,392 @@
+//! Checking expressions: types, operators and names, into `hir::Expr`.
+//!
+//! One checker serves initial values and operator bodies alike. What a name
+//! refers to is all that differs between them ([`Names`]): in an initial
+//! value, a variable's value, evaluated when compiling; in a body, a
+//! parameter or a variable, known only when running. Whatever doesn't
+//! depend on what is known only when running is evaluated now, to a
+//! constant, and the rest simplified, so an initial value always checks to
+//! a constant.
+
+use std::collections::BTreeMap;
+
+use trendy_diag::{Diagnostic, Span};
+use trendy_hir as hir;
+use trendy_syntax::ast::{self, Expr};
+
+use crate::ops::{self, Operator, Resolved};
+use crate::types::{self, Expected};
+use crate::{Values, errors};
+
+/// What a name refers to.
+pub(crate) enum Lookup {
+    Found(hir::Expr),
+    /// Something that can't be used here, already reported.
+    Reported,
+    /// Nothing, which the checker reports with the names that are in scope.
+    Unknown,
+}
+
+/// What names in an expression refer to.
+pub(crate) trait Names {
+    fn values(&self) -> &Values;
+
+    /// What `name`, written at `span`, refers to.
+    fn resolve(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup;
+
+    /// The names in scope, which a name that refers to nothing may be a
+    /// misspelling of.
+    fn candidates(&self) -> Vec<String>;
+
+    /// The type of `leaf`, a variable or parameter that [`Names::resolve`]
+    /// gave.
+    fn leaf_type(&self, leaf: &hir::Expr) -> hir::Type;
+}
+
+/// Checks expressions whose names `names` resolves.
+pub(crate) struct Checker<'a> {
+    names: &'a mut dyn Names,
+}
+
+impl<'a> Checker<'a> {
+    pub(crate) fn new(names: &'a mut dyn Names) -> Self {
+        Checker { names }
+    }
+
+    pub(crate) fn values(&self) -> &Values {
+        self.names.values()
+    }
+
+    /// The type of `expr`, which this checker produced.
+    pub(crate) fn ty(&self, expr: &hir::Expr) -> hir::Type {
+        expr.type_with(&|leaf| self.names.leaf_type(leaf))
+    }
+
+    /// The value `expr` is, if it is known when compiling.
+    pub(crate) fn constant(expr: &hir::Expr) -> Option<&hir::Value> {
+        match expr {
+            hir::Expr::Constant(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// `out`, written `expr`, if it has the expected type; otherwise report
+    /// the mismatch.
+    pub(crate) fn matched(
+        &self,
+        expected: Option<&Expected>,
+        out: hir::Expr,
+        expr: &Expr,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let ty = self.ty(&out);
+        match expected {
+            Some(e) if ty != e.ty => {
+                errors.push(errors::type_mismatch(
+                    &e.ty,
+                    &e.origin,
+                    &ty,
+                    Self::constant(&out),
+                    expr,
+                ));
+                None
+            }
+            _ => Some(out),
+        }
+    }
+
+    /// `expr`, checked against `expected` if given, or `None` after
+    /// reporting why it has no valid value.
+    pub(crate) fn expr(
+        &mut self,
+        expr: &Expr,
+        expected: Option<&Expected>,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        match expr {
+            Expr::Literal(literal) => {
+                let value = types::literal_value(literal, errors)?;
+                self.matched(expected, hir::Expr::Constant(value), expr, errors)
+            }
+            Expr::Name(name_ref) => {
+                let ident = name_ref.ident()?;
+                let (name, span) = (ident.text(), trendy_syntax::span(ident.text_range()));
+                match self.names.resolve(name, span, errors) {
+                    Lookup::Found(resolved) => self.matched(expected, resolved, expr, errors),
+                    Lookup::Reported => None,
+                    Lookup::Unknown => {
+                        let candidates = self.names.candidates();
+                        let candidates: Vec<&str> = candidates.iter().map(String::as_str).collect();
+                        errors.push(errors::unknown_name(name, span, "value", &candidates));
+                        None
+                    }
+                }
+            }
+            Expr::Paren(paren) => self.expr(&paren.inner()?, expected, errors),
+            Expr::Unary(unary) => {
+                if let Some(literal) = ops::negated_literal(unary) {
+                    let value = ops::negative_value(&literal, expr, errors)?;
+                    return self.matched(expected, hir::Expr::Constant(value), expr, errors);
+                }
+                let token = unary.operator()?;
+                let (resolved, operands) =
+                    self.operands(&token, vec![unary.operand()], expected, errors)?;
+                types::result_type(expected, resolved.result(), expr, errors)?;
+                let [operand] = <[hir::Expr; 1]>::try_from(operands).ok()?;
+                match resolved {
+                    Resolved::Identity(_) => Some(operand),
+                    Resolved::Unary(op) => {
+                        types::evaluated(ops::unary(op, operand), resolved, expr, None, errors)
+                    }
+                    Resolved::Binary(_) => None,
+                }
+            }
+            Expr::Binary(_) | Expr::Nary(_) if ops::Joining::of(expr).is_some() => {
+                self.joined(expr, expected, errors)
+            }
+            Expr::Nary(_) => None,
+            Expr::Binary(binary) => {
+                let token = binary.operator()?;
+                let (resolved, operands) =
+                    self.operands(&token, vec![binary.lhs(), binary.rhs()], expected, errors)?;
+                types::result_type(expected, resolved.result(), expr, errors)?;
+                let (Resolved::Binary(op), Ok([lhs, rhs])) =
+                    (resolved, <[hir::Expr; 2]>::try_from(operands))
+                else {
+                    return None;
+                };
+                types::evaluated(
+                    ops::binary(op, lhs, rhs),
+                    resolved,
+                    expr,
+                    binary.rhs().as_ref(),
+                    errors,
+                )
+            }
+            Expr::Extract(extract) => {
+                let operand_expr = extract.operand()?;
+                let operand = self.expr(&operand_expr, None, errors)?;
+                let ty = self.ty(&operand);
+                let name = ops::extracted(extract, &operand_expr, &ty, errors)?;
+                self.matched(expected, ops::extract(operand, name), expr, errors)
+            }
+            Expr::Postfix(postfix) if ops::is_extend(postfix) => {
+                self.extended(postfix, expr, expected, errors)
+            }
+            Expr::Project(_) | Expr::Postfix(_) => self.reshaped(expr, expected, errors),
+            Expr::Tuple(tuple) => types::tuple_selector(tuple, expected, self, errors),
+            Expr::Relation(relation) => types::relation_selector(relation, expected, self, errors),
+        }
+    }
+
+    /// A projection, `remove` or `rename`, written `expr`.
+    fn reshaped(
+        &mut self,
+        expr: &Expr,
+        expected: Option<&Expected>,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let (operand_expr, postfix) = match expr {
+            Expr::Project(project) => (project.operand()?, None),
+            Expr::Postfix(postfix) => (postfix.operand()?, Some(postfix)),
+            _ => unreachable!("only projections and postfix operators reshape"),
+        };
+        let operand = self.expr(&operand_expr, None, errors)?;
+        let ty = self.ty(&operand);
+        let result = match (expr, postfix) {
+            (_, Some(postfix)) if ops::is_rename(postfix) => {
+                let renamings = ops::renamed(postfix, &operand_expr, &ty, errors)?;
+                ops::rename(operand, renamings)
+            }
+            (Expr::Project(project), _) => {
+                let projection = ops::Projection::Project(project);
+                let names = ops::removed(projection, &operand_expr, &ty, errors)?;
+                ops::remove(operand, names)
+            }
+            (_, Some(postfix)) => {
+                let projection = ops::Projection::Remove(postfix);
+                let names = ops::removed(projection, &operand_expr, &ty, errors)?;
+                ops::remove(operand, names)
+            }
+            _ => unreachable!("matched above"),
+        };
+        self.matched(expected, result, expr, errors)
+    }
+
+    /// `postfix`, an `extend`, written `expr`: each new attribute's value is
+    /// checked with the attributes of the tuple at hand in scope.
+    fn extended(
+        &mut self,
+        postfix: &ast::PostfixExpr,
+        expr: &Expr,
+        expected: Option<&Expected>,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let operand_expr = postfix.operand()?;
+        let operand = self.expr(&operand_expr, None, errors)?;
+        let ty = self.ty(&operand);
+        let (hir::Type::Tuple(heading) | hir::Type::Relation(heading)) = &ty else {
+            let at = trendy_syntax::span(postfix.operator()?.text_range());
+            errors.push(errors::not_projectable(
+                Some("extend"),
+                at,
+                &ty,
+                &operand_expr,
+            ));
+            return None;
+        };
+        let list = postfix.extensions()?;
+        let extensions: Vec<(ast::Extension, String, Span)> = list
+            .extensions()
+            .filter_map(|extension| {
+                let ident = extension.name()?.ident()?;
+                let span = trendy_syntax::span(ident.text_range());
+                Some((extension, ident.text().to_string(), span))
+            })
+            .collect();
+        if list.extensions().next().is_none() {
+            errors.push(errors::empty_extend(postfix, &operand_expr));
+            return None;
+        }
+        let mut ok = true;
+        let mut values = BTreeMap::new();
+        let mut added = BTreeMap::new();
+        for (extension, name, span) in &extensions {
+            if let Some(&(_, _, first)) = extensions.iter().find(|(_, n, _)| n == name)
+                && first != *span
+            {
+                errors.push(errors::duplicate_attribute(
+                    errors::Noun::Attribute,
+                    name,
+                    *span,
+                    first,
+                ));
+                ok = false;
+                continue;
+            }
+            if heading.get(name).is_some() {
+                errors.push(errors::extension_exists(name, *span, &ty, &operand_expr));
+                ok = false;
+            }
+            let mut names = TupleNames {
+                outer: &mut *self.names,
+                heading: heading.clone(),
+            };
+            let mut checker = Checker::new(&mut names);
+            match extension
+                .value()
+                .and_then(|v| checker.expr(&v, None, errors))
+            {
+                Some(value) => {
+                    added.insert(name.clone(), checker.ty(&value));
+                    values.insert(name.clone(), value);
+                }
+                None => ok = false,
+            }
+        }
+        if !ok {
+            return None;
+        }
+        match ops::extend(operand, hir::Heading::new(added), values) {
+            Ok(result) => self.matched(expected, result, expr, errors),
+            Err(failure) => {
+                let value = extensions
+                    .iter()
+                    .find(|(_, name, _)| *name == failure.attribute)
+                    .and_then(|(extension, _, _)| extension.value())?;
+                errors.push(errors::extension_failure(&failure, &value));
+                None
+            }
+        }
+    }
+
+    /// `expr`, a join.
+    fn joined(
+        &mut self,
+        expr: &Expr,
+        expected: Option<&Expected>,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let joining = ops::Joining::of(expr)?;
+        // Every operand is checked, so that each one's errors are reported.
+        let operands: Vec<Option<hir::Expr>> = joining
+            .operands
+            .iter()
+            .map(|operand| self.expr(operand, None, errors))
+            .collect();
+        let operands: Vec<hir::Expr> = operands.into_iter().collect::<Option<_>>()?;
+        let types: Vec<hir::Type> = operands.iter().map(|o| self.ty(o)).collect();
+        let result = match joining.combined(&types, errors)? {
+            ops::Combined::And => ops::and(operands),
+            ops::Combined::Composed(steps) => {
+                let mut operands = operands.into_iter();
+                let first = operands.next()?;
+                operands
+                    .zip(steps)
+                    .fold(first, |result, (operand, common)| {
+                        ops::remove(ops::and(vec![result, operand]), common)
+                    })
+            }
+        };
+        self.matched(expected, result, expr, errors)
+    }
+
+    /// The operator written `token` and its checked `operands`.
+    fn operands(
+        &mut self,
+        token: &trendy_syntax::SyntaxToken,
+        operands: Vec<Option<Expr>>,
+        expected: Option<&Expected>,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<(Resolved, Vec<hir::Expr>)> {
+        let op = Operator::of(token)?;
+        ops::check_operands(
+            op,
+            token,
+            operands,
+            expected,
+            &mut |operand, expected, errors| {
+                let checked = self.expr(operand, expected, errors)?;
+                let ty = self.ty(&checked);
+                Some((checked, ty))
+            },
+            errors,
+        )
+    }
+}
+
+/// Names in the values an `extend` computes: the attributes of the tuple at
+/// hand, with `heading`, which hide the names around them, in `outer`.
+struct TupleNames<'a> {
+    outer: &'a mut dyn Names,
+    heading: hir::Heading,
+}
+
+impl Names for TupleNames<'_> {
+    fn values(&self) -> &Values {
+        self.outer.values()
+    }
+
+    fn resolve(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {
+        if self.heading.get(name).is_some() {
+            let tuple = hir::Expr::Current(0, self.heading.clone());
+            return Lookup::Found(hir::Expr::Extract(Box::new(tuple), name.to_string()));
+        }
+        match self.outer.resolve(name, span, errors) {
+            Lookup::Found(expr) => Lookup::Found(ops::deeper(expr)),
+            other => other,
+        }
+    }
+
+    fn candidates(&self) -> Vec<String> {
+        self.heading
+            .attributes()
+            .map(|(name, _)| name.to_string())
+            .chain(self.outer.candidates())
+            .collect()
+    }
+
+    fn leaf_type(&self, leaf: &hir::Expr) -> hir::Type {
+        self.outer.leaf_type(leaf)
+    }
+}

@@ -6,7 +6,7 @@
 //! problem is reported at the innermost place it occurs, with a label at
 //! where the expectation came from.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 
 use trendy_diag::{Diagnostic, Span, edit_distance};
 use trendy_hir as hir;
@@ -16,7 +16,8 @@ use trendy_syntax::ast::{
     TupleLiteral, TypeExpr,
 };
 
-use crate::ops::{self, Operands, Operator, Resolved};
+use crate::check::{Checker, Names};
+use crate::ops::{Operands, Operator, Resolved};
 use crate::{Values, errors};
 
 /// Where an expected type comes from: for the secondary label of a
@@ -133,17 +134,6 @@ impl Expected {
     }
 }
 
-/// What names in a value can refer to, where its value must be known when
-/// compiling.
-pub(crate) trait Scope {
-    fn values(&self) -> &Values;
-
-    /// The value `name` refers to, or `None` after reporting why it has none
-    /// that is known when compiling.
-    fn constant(&mut self, name: &ast::NameRef, errors: &mut Vec<Diagnostic>)
-    -> Option<hir::Value>;
-}
-
 /// Check that an operator's result, of type `result` and written `expr`,
 /// is what the context expects; `None` after reporting that it isn't.
 pub(crate) fn result_type(
@@ -231,164 +221,19 @@ pub(crate) fn resolve_heading(
 }
 
 /// The value `expr` denotes, evaluated when compiling and checked against
-/// `expected` if given. Returns `None` after reporting why there is no valid
+/// `expected` if given, where `names` gives what names refer to, all known
+/// when compiling. Returns `None` after reporting why there is no valid
 /// value (or if the lexer already reported it as malformed).
 pub(crate) fn value(
     expr: &Expr,
     expected: Option<&Expected>,
-    scope: &mut dyn Scope,
+    names: &mut dyn Names,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Value> {
-    match expr {
-        Expr::Literal(literal) => {
-            let value = literal_value(literal, errors)?;
-            matches(expected, value, expr, errors)
-        }
-        Expr::Tuple(tuple) => tuple_selector(tuple, expected, &mut Constants { scope }, errors),
-        Expr::Relation(relation) => {
-            relation_selector(relation, expected, &mut Constants { scope }, errors)
-        }
-        Expr::Name(name) => {
-            let value = scope.constant(name, errors)?;
-            matches(expected, value, expr, errors)
-        }
-        Expr::Paren(paren) => value(&paren.inner()?, expected, scope, errors),
-        Expr::Postfix(postfix) if ops::is_rename(postfix) => {
-            let operand = postfix.operand()?;
-            let value = value(&operand, None, scope, errors)?;
-            let renamings = ops::renamed(postfix, &operand, &value.ty(), errors)?;
-            let result = if renamings.is_empty() {
-                value
-            } else {
-                value.renamed(&renamings)
-            };
-            matches(expected, result, expr, errors)
-        }
-        Expr::Extract(extract) => {
-            let operand = extract.operand()?;
-            let value = value(&operand, None, scope, errors)?;
-            let name = ops::extracted(extract, &operand, &value.ty(), errors)?;
-            let hir::Value::Tuple(tuple) = value else {
-                unreachable!("checked to be a tuple");
-            };
-            let attribute = tuple.get(&name)?.clone();
-            matches(expected, attribute, expr, errors)
-        }
-        Expr::Project(_) | Expr::Postfix(_) => {
-            let projection = match expr {
-                Expr::Project(p) => ops::Projection::Project(p),
-                Expr::Postfix(r) => ops::Projection::Remove(r),
-                _ => unreachable!("matched above"),
-            };
-            let operand = projection.operand()?;
-            let value = value(&operand, None, scope, errors)?;
-            let names = ops::removed(projection, &operand, &value.ty(), errors)?;
-            let result = if names.is_empty() {
-                value
-            } else {
-                value.without(&names)
-            };
-            matches(expected, result, expr, errors)
-        }
-        Expr::Unary(unary) => {
-            if let Some(literal) = ops::negated_literal(unary) {
-                let value = ops::negative_value(&literal, expr, errors)?;
-                return matches(expected, value, expr, errors);
-            }
-            let token = unary.operator()?;
-            let (resolved, operands) =
-                operands(&token, vec![unary.operand()], expected, scope, errors)?;
-            result_type(expected, resolved.result(), expr, errors)?;
-            let [operand] = <[hir::Value; 1]>::try_from(operands).ok()?;
-            match resolved {
-                Resolved::Identity(_) => Some(operand),
-                Resolved::Unary(op) => evaluated(op.apply(&operand), resolved, expr, None, errors),
-                Resolved::Binary(_) => None,
-            }
-        }
-        Expr::Binary(_) | Expr::Nary(_) if ops::Joining::of(expr).is_some() => {
-            joined(expr, expected, scope, errors)
-        }
-        Expr::Nary(_) => None,
-        Expr::Binary(binary) => {
-            let token = binary.operator()?;
-            let (resolved, operands) = operands(
-                &token,
-                vec![binary.lhs(), binary.rhs()],
-                expected,
-                scope,
-                errors,
-            )?;
-            result_type(expected, resolved.result(), expr, errors)?;
-            let (Resolved::Binary(op), [lhs, rhs]) =
-                (resolved, <[hir::Value; 2]>::try_from(operands).ok()?)
-            else {
-                return None;
-            };
-            evaluated(
-                op.apply(&lhs, &rhs),
-                resolved,
-                expr,
-                binary.rhs().as_ref(),
-                errors,
-            )
-        }
+    match Checker::new(names).expr(expr, expected, errors)? {
+        hir::Expr::Constant(value) => Some(value),
+        other => unreachable!("an expression of constants folds to a constant: {other:?}"),
     }
-}
-
-/// The value of `expr`, a join.
-fn joined(
-    expr: &Expr,
-    expected: Option<&Expected>,
-    scope: &mut dyn Scope,
-    errors: &mut Vec<Diagnostic>,
-) -> Option<hir::Value> {
-    let joining = ops::Joining::of(expr)?;
-    // Every operand is checked, so that each one's errors are reported.
-    let values: Vec<Option<hir::Value>> = joining
-        .operands
-        .iter()
-        .map(|operand| value(operand, None, scope, errors))
-        .collect();
-    let values: Vec<hir::Value> = values.into_iter().collect::<Option<_>>()?;
-    let types: Vec<hir::Type> = values.iter().map(hir::Value::ty).collect();
-    let result = match joining.combined(&types, errors)? {
-        ops::Combined::And => values
-            .iter()
-            .fold(hir::Value::dee(), |result, value| result.and(value)),
-        ops::Combined::Composed(steps) => {
-            let (first, rest) = values.split_first()?;
-            rest.iter()
-                .zip(&steps)
-                .fold(first.clone(), |result, (value, common)| {
-                    result.and(value).without(common)
-                })
-        }
-    };
-    matches(expected, result, expr, errors)
-}
-
-/// The operator written `token` and the values of its `operands`.
-fn operands(
-    token: &SyntaxToken,
-    operands: Vec<Option<Expr>>,
-    expected: Option<&Expected>,
-    scope: &mut dyn Scope,
-    errors: &mut Vec<Diagnostic>,
-) -> Option<(Resolved, Vec<hir::Value>)> {
-    let op = Operator::of(token)?;
-    ops::check_operands(
-        op,
-        token,
-        operands,
-        expected,
-        &mut |operand, expected, errors| {
-            let value = value(operand, expected, scope, errors)?;
-            let ty = value.ty();
-            Some((value, ty))
-        },
-        errors,
-    )
 }
 
 /// An operator's result, written `expr`, or `None` after reporting why there
@@ -408,131 +253,8 @@ pub(crate) fn evaluated<T>(
         .ok()
 }
 
-/// `value`, if it has the expected type; otherwise report the mismatch.
-fn matches(
-    expected: Option<&Expected>,
-    value: hir::Value,
-    expr: &Expr,
-    errors: &mut Vec<Diagnostic>,
-) -> Option<hir::Value> {
-    match expected {
-        Some(e) if value.ty() != e.ty => {
-            errors.push(errors::type_mismatch(
-                &e.ty,
-                &e.origin,
-                &value.ty(),
-                Some(&value),
-                expr,
-            ));
-            None
-        }
-        _ => Some(value),
-    }
-}
-
 /// An error was already reported, so there is no result.
 struct Reported;
-
-/// What a selector's checks produce: values, where everything is known
-/// when compiling, or expressions, in an operator's body. The checks of
-/// tuple and relation selectors are written once, for both.
-pub(crate) trait Selectors {
-    type Out: Clone;
-
-    fn values(&self) -> &Values;
-
-    /// Check an attribute's value against `expected`.
-    fn check(
-        &mut self,
-        expr: &Expr,
-        expected: Option<&Expected>,
-        errors: &mut Vec<Diagnostic>,
-    ) -> Option<Self::Out>;
-
-    fn ty(&self, out: &Self::Out) -> hir::Type;
-
-    /// The value `out` is, if it is known when compiling.
-    fn constant<'o>(&self, out: &'o Self::Out) -> Option<&'o hir::Value>;
-
-    /// A tuple of these attributes.
-    fn tuple(&self, attributes: BTreeMap<String, Self::Out>) -> Self::Out;
-
-    /// A relation with this heading and these tuples, which are distinct
-    /// where they are known when compiling.
-    fn relation(&self, heading: hir::Heading, tuples: Vec<Self::Out>) -> Self::Out;
-}
-
-/// Selectors whose values are all known when compiling, as in an initial
-/// value.
-struct Constants<'a> {
-    scope: &'a mut dyn Scope,
-}
-
-impl Selectors for Constants<'_> {
-    type Out = hir::Value;
-
-    fn values(&self) -> &Values {
-        self.scope.values()
-    }
-
-    fn check(
-        &mut self,
-        expr: &Expr,
-        expected: Option<&Expected>,
-        errors: &mut Vec<Diagnostic>,
-    ) -> Option<hir::Value> {
-        value(expr, expected, self.scope, errors)
-    }
-
-    fn ty(&self, out: &hir::Value) -> hir::Type {
-        out.ty()
-    }
-
-    fn constant<'o>(&self, out: &'o hir::Value) -> Option<&'o hir::Value> {
-        Some(out)
-    }
-
-    fn tuple(&self, attributes: BTreeMap<String, hir::Value>) -> hir::Value {
-        hir::Value::Tuple(hir::TupleValue::new(attributes))
-    }
-
-    fn relation(&self, heading: hir::Heading, tuples: Vec<hir::Value>) -> hir::Value {
-        hir::Value::Relation(hir::RelationValue {
-            heading,
-            tuples: tuples
-                .into_iter()
-                .filter_map(|t| match t {
-                    hir::Value::Tuple(t) => Some(t),
-                    _ => None,
-                })
-                .collect::<BTreeSet<_>>(),
-        })
-    }
-}
-
-/// `out`, if it has the expected type; otherwise report the mismatch.
-fn matches_selected<S: Selectors>(
-    selectors: &S,
-    expected: Option<&Expected>,
-    out: S::Out,
-    expr: &Expr,
-    errors: &mut Vec<Diagnostic>,
-) -> Option<S::Out> {
-    let ty = selectors.ty(&out);
-    match expected {
-        Some(e) if ty != e.ty => {
-            errors.push(errors::type_mismatch(
-                &e.ty,
-                &e.origin,
-                &ty,
-                selectors.constant(&out),
-                expr,
-            ));
-            None
-        }
-        _ => Some(out),
-    }
-}
 
 /// A selector's own heading, which takes precedence over the context:
 /// `Ok(None)` if it has none.
@@ -553,19 +275,13 @@ fn own_heading(
 }
 
 /// A tuple selector, checked against `expected` if given.
-pub(crate) fn tuple_selector<S: Selectors>(
+pub(crate) fn tuple_selector(
     tuple: &TupleLiteral,
     expected: Option<&Expected>,
-    selectors: &mut S,
+    checker: &mut Checker,
     errors: &mut Vec<Diagnostic>,
-) -> Option<S::Out> {
-    let own = own_heading(
-        tuple.heading(),
-        hir::Type::Tuple,
-        selectors.values(),
-        errors,
-    )
-    .ok()?;
+) -> Option<hir::Expr> {
+    let own = own_heading(tuple.heading(), hir::Type::Tuple, checker.values(), errors).ok()?;
     let here = own.as_ref().or(expected);
     let heading = match here {
         Some(Expected {
@@ -575,14 +291,8 @@ pub(crate) fn tuple_selector<S: Selectors>(
         // The context expects something else: check the tuple on its own,
         // then report the mismatch for the whole of it.
         Some(_) => {
-            let out = tuple_selector(tuple, None, selectors, errors)?;
-            return matches_selected(
-                selectors,
-                expected,
-                out,
-                &Expr::Tuple(tuple.clone()),
-                errors,
-            );
+            let out = tuple_selector(tuple, None, checker, errors)?;
+            return checker.matched(expected, out, &Expr::Tuple(tuple.clone()), errors);
         }
         None => None,
     };
@@ -625,7 +335,7 @@ pub(crate) fn tuple_selector<S: Selectors>(
             }
             None => None,
         };
-        match selectors.check(&attr_expr, attr_expected.as_ref(), errors) {
+        match checker.expr(&attr_expr, attr_expected.as_ref(), errors) {
             Some(v) => {
                 attributes.insert(name.clone(), v);
             }
@@ -649,16 +359,10 @@ pub(crate) fn tuple_selector<S: Selectors>(
     if !ok {
         return None;
     }
-    let out = selectors.tuple(attributes);
+    let out = crate::ops::tuple(attributes);
     match &own {
         // Checked against its own heading; now against the context.
-        Some(_) => matches_selected(
-            selectors,
-            expected,
-            out,
-            &Expr::Tuple(tuple.clone()),
-            errors,
-        ),
+        Some(_) => checker.matched(expected, out, &Expr::Tuple(tuple.clone()), errors),
         None => Some(out),
     }
 }
@@ -697,16 +401,16 @@ fn unknown_tuple_attribute(
 /// A relation selector, checked against `expected` if given. Tuples known
 /// when compiling must be distinct; others become one when the program runs
 /// if they are equal.
-pub(crate) fn relation_selector<S: Selectors>(
+pub(crate) fn relation_selector(
     relation: &RelationLiteral,
     expected: Option<&Expected>,
-    selectors: &mut S,
+    checker: &mut Checker,
     errors: &mut Vec<Diagnostic>,
-) -> Option<S::Out> {
+) -> Option<hir::Expr> {
     let own = own_heading(
         relation.heading(),
         hir::Type::Relation,
-        selectors.values(),
+        checker.values(),
         errors,
     )
     .ok()?;
@@ -721,14 +425,8 @@ pub(crate) fn relation_selector<S: Selectors>(
             origin: origin.element().unwrap_or_else(|| origin.clone()),
         }),
         Some(_) => {
-            let out = relation_selector(relation, None, selectors, errors)?;
-            return matches_selected(
-                selectors,
-                expected,
-                out,
-                &Expr::Relation(relation.clone()),
-                errors,
-            );
+            let out = relation_selector(relation, None, checker, errors)?;
+            return checker.matched(expected, out, &Expr::Relation(relation.clone()), errors);
         }
         None => None,
     };
@@ -737,7 +435,7 @@ pub(crate) fn relation_selector<S: Selectors>(
     let mut known: BTreeMap<hir::TupleValue, Span> = BTreeMap::new();
     let mut ok = true;
     for tuple in relation.tuples() {
-        let Some(out) = tuple_selector(&tuple, element.as_ref(), selectors, errors) else {
+        let Some(out) = tuple_selector(&tuple, element.as_ref(), checker, errors) else {
             ok = false;
             continue;
         };
@@ -745,11 +443,11 @@ pub(crate) fn relation_selector<S: Selectors>(
         // tuple sets it for the rest.
         if element.is_none() {
             element = Some(Expected {
-                ty: selectors.ty(&out),
+                ty: checker.ty(&out),
                 origin: Origin::Value(Expr::Tuple(tuple.clone())),
             });
         }
-        if let Some(hir::Value::Tuple(value)) = selectors.constant(&out) {
+        if let Some(hir::Value::Tuple(value)) = Checker::constant(&out) {
             if let Some(&first) = known.get(value) {
                 errors.push(errors::duplicate_tuple(
                     tuple.span(),
@@ -777,20 +475,14 @@ pub(crate) fn relation_selector<S: Selectors>(
         errors.push(errors::unknown_relation_heading(relation.span()));
         return None;
     };
-    let out = selectors.relation(heading, tuples);
+    let out = crate::ops::relation(heading, tuples);
     match &own {
-        Some(_) => matches_selected(
-            selectors,
-            expected,
-            out,
-            &Expr::Relation(relation.clone()),
-            errors,
-        ),
+        Some(_) => checker.matched(expected, out, &Expr::Relation(relation.clone()), errors),
         None => Some(out),
     }
 }
 
-fn literal_value(literal: &Literal, errors: &mut Vec<Diagnostic>) -> Option<hir::Value> {
+pub(crate) fn literal_value(literal: &Literal, errors: &mut Vec<Diagnostic>) -> Option<hir::Value> {
     match literal.value() {
         Ok(LiteralValue::Boolean(value)) => Some(hir::Value::Boolean(value)),
         Ok(LiteralValue::Integer(value)) => Some(hir::Value::Integer(value)),

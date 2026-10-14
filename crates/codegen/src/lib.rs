@@ -172,9 +172,23 @@ impl Functions {
             for inst in &block.insts {
                 self.inst(inst, &frame, &mut b)?;
             }
-            match block.terminator {
-                lir::Terminator::Return => b.ins().return_(&[]),
-            };
+            match &block.terminator {
+                lir::Terminator::Return => {
+                    b.ins().return_(&[]);
+                }
+                lir::Terminator::Jump(target) => {
+                    b.ins().jump(blocks[target.0], &[]);
+                }
+                lir::Terminator::Branch {
+                    condition,
+                    then,
+                    otherwise,
+                } => {
+                    let condition = self.load(types::I8, condition, &frame, &mut b)?;
+                    b.ins()
+                        .brif(condition, blocks[then.0], &[], blocks[otherwise.0], &[]);
+                }
+            }
         }
         b.seal_all_blocks();
         b.finalize(self.config);
@@ -239,12 +253,33 @@ impl Functions {
                 };
                 self.store(dst, result, frame, b)?;
             }
+            lir::Inst::Element {
+                dst,
+                relation,
+                index,
+                tuple,
+            } => {
+                let pointer = self.config.pointer_type();
+                let tuples = self.load(pointer, relation, frame, b)?;
+                let index = self.load(pointer, index, frame, b)?;
+                let size = i64::try_from(self.target.size(tuple)).map_err(|e| e.to_string())?;
+                let offset = b.ins().imul_imm_s(index, size);
+                let address = b.ins().iadd(tuples, offset);
+                self.store(dst, address, frame, b)?;
+            }
+            lir::Inst::Increment { place } => {
+                let pointer = self.config.pointer_type();
+                let value = self.load(pointer, place, frame, b)?;
+                let next = b.ins().iadd_imm_s(value, 1);
+                self.store(place, next, frame, b)?;
+            }
             lir::Inst::Binary { dst, op, lhs, rhs } => {
                 // Approximate numbers are compared by their bits.
                 let ty = match op {
                     lir::BinaryOp::Compare(_, lir::Operand::Numeric(lir::Numeric::Approximate)) => {
                         types::I64
                     }
+                    lir::BinaryOp::Compare(_, lir::Operand::Usize) => self.config.pointer_type(),
                     _ => operand_type(op.operand()),
                 };
                 let lhs = self.load(ty, lhs, frame, b)?;
@@ -282,20 +317,14 @@ impl Functions {
         };
         Ok(match op {
             lir::BinaryOp::Compare(comparison, operand) => {
-                let signed = |c| match c {
-                    lir::Comparison::Equal => IntCC::Equal,
-                    lir::Comparison::NotEqual => IntCC::NotEqual,
-                    lir::Comparison::Less => IntCC::SignedLessThan,
-                    lir::Comparison::LessOrEqual => IntCC::SignedLessThanOrEqual,
-                    lir::Comparison::Greater => IntCC::SignedGreaterThan,
-                    lir::Comparison::GreaterOrEqual => IntCC::SignedGreaterThanOrEqual,
-                };
+                let signed = condition(comparison, true);
                 match operand {
                     // `false` and `true` are 0 and 1, so signed order is
                     // their order.
                     lir::Operand::Boolean | lir::Operand::Numeric(Integer) => {
-                        b.ins().icmp(signed(comparison), lhs, rhs)
+                        b.ins().icmp(signed, lhs, rhs)
                     }
+                    lir::Operand::Usize => b.ins().icmp(condition(comparison, false), lhs, rhs),
                     // IEEE 754 totalOrder: flipping every bit but the sign
                     // of a negative value's bits makes them order as signed
                     // integers, and keeps distinct values distinct.
@@ -306,7 +335,7 @@ impl Functions {
                             b.ins().bxor(bits, mask)
                         };
                         let (lhs, rhs) = (key(b, lhs), key(b, rhs));
-                        b.ins().icmp(signed(comparison), lhs, rhs)
+                        b.ins().icmp(signed, lhs, rhs)
                     }
                 }
             }
@@ -448,7 +477,7 @@ impl Functions {
         b: &mut FunctionBuilder,
     ) -> Result<Value, String> {
         let pointer = self.config.pointer_type();
-        let base_layout = match place.base {
+        let base_layout = match &place.base {
             lir::Base::Data(id) => &self.data_layouts[id.0],
             lir::Base::Slot(slot) => &frame.function.slots[slot.0],
             lir::Base::Params => frame
@@ -456,10 +485,11 @@ impl Functions {
                 .params
                 .as_ref()
                 .ok_or("parameters used in a function without them")?,
+            lir::Base::Indirect { pointee, .. } => pointee,
         };
         let offset = i64::try_from(self.target.path_offset(base_layout, &place.path)?)
             .map_err(|e| e.to_string())?;
-        Ok(match place.base {
+        Ok(match &place.base {
             lir::Base::Data(id) => {
                 let global = self
                     .module
@@ -477,7 +507,29 @@ impl Functions {
                     .ok_or("parameters used in a function without them")?;
                 b.ins().iadd_imm_s(base, offset)
             }
+            lir::Base::Indirect { slot, .. } => {
+                let base = b.ins().stack_load(pointer, pointer, frame.slots[slot.0], 0);
+                b.ins().iadd_imm_s(base, offset)
+            }
         })
+    }
+}
+
+/// The integer comparison `comparison`, of signed integers if `signed`, and
+/// of unsigned ones otherwise.
+fn condition(comparison: lir::Comparison, signed: bool) -> cranelift_codegen::ir::condcodes::IntCC {
+    use cranelift_codegen::ir::condcodes::IntCC;
+    match (comparison, signed) {
+        (lir::Comparison::Equal, _) => IntCC::Equal,
+        (lir::Comparison::NotEqual, _) => IntCC::NotEqual,
+        (lir::Comparison::Less, true) => IntCC::SignedLessThan,
+        (lir::Comparison::LessOrEqual, true) => IntCC::SignedLessThanOrEqual,
+        (lir::Comparison::Greater, true) => IntCC::SignedGreaterThan,
+        (lir::Comparison::GreaterOrEqual, true) => IntCC::SignedGreaterThanOrEqual,
+        (lir::Comparison::Less, false) => IntCC::UnsignedLessThan,
+        (lir::Comparison::LessOrEqual, false) => IntCC::UnsignedLessThanOrEqual,
+        (lir::Comparison::Greater, false) => IntCC::UnsignedGreaterThan,
+        (lir::Comparison::GreaterOrEqual, false) => IntCC::UnsignedGreaterThanOrEqual,
     }
 }
 
@@ -487,6 +539,7 @@ fn operand_type(operand: lir::Operand) -> cranelift_codegen::ir::Type {
         lir::Operand::Boolean => types::I8,
         lir::Operand::Numeric(lir::Numeric::Integer) => types::I64,
         lir::Operand::Numeric(lir::Numeric::Approximate) => types::F64,
+        lir::Operand::Usize => unreachable!("only comparisons take indexes, as pointer-sized"),
     }
 }
 

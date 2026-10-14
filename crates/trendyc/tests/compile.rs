@@ -388,6 +388,9 @@ fn tuples() {
             r#""75001""#,
             "false",
             "3e0",
+            // Extended.
+            r#"tuple { city: "Paris", country: "France", floor: 2, line: "1 Rue de Rivoli, Paris", postal_code: "75001", street: "1 Rue de Rivoli" }"#,
+            "tuple { outer: tuple { inner: 1e0 }, total: 3e0, x: 1e0, y: 2e0 }",
         ]
     );
 }
@@ -425,6 +428,10 @@ fn relations() {
             r#"relation { born: integer, city: text, year: integer } { { born: 1815, city: "London", year: 2024 }, { born: 1815, city: "London", year: 2025 }, { born: 1815, city: "Nyeri", year: 2024 }, { born: 1815, city: "Nyeri", year: 2025 }, { born: 1815, city: "Portland", year: 2024 }, { born: 1815, city: "Portland", year: 2025 }, { born: 1923, city: "London", year: 2024 }, { born: 1923, city: "London", year: 2025 }, { born: 1923, city: "Nyeri", year: 2024 }, { born: 1923, city: "Nyeri", year: 2025 }, { born: 1923, city: "Portland", year: 2024 }, { born: 1923, city: "Portland", year: 2025 } }"#,
             // Composed from the left: on `name`, then on `city`.
             r#"relation { born: integer, country: text } { { born: 1815, country: "United Kingdom" }, { born: 1923, country: "United States" } }"#,
+            // Extended, each tuple computing its own; a relation-valued
+            // attribute extended in turn, empty or not.
+            r#"relation { age: integer, born: integer, greeting: text, name: text } { { age: 101, born: 1923, greeting: "Hi, Edgar", name: "Edgar" }, { age: 209, born: 1815, greeting: "Hi, Ada", name: "Ada" } }"#,
+            r#"relation { members: relation { name: text }, roster: relation { name: text, role: text }, team: text } { { members: relation { name: text } {}, roster: relation { name: text, role: text } {}, team: "docs" }, { members: relation { name: text } { { name: "Ada" }, { name: "Edgar" } }, roster: relation { name: text, role: text } { { name: "Ada", role: "member" }, { name: "Edgar", role: "member" } }, team: "core" } }"#,
         ]
     );
 }

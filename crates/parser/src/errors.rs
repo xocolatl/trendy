@@ -12,6 +12,7 @@ pub(crate) const RELATION_VALUE_FORM: &str = "a relation value has the form `rel
 pub(crate) const PROJECTION_FORM: &str =
     "a projection and `remove` take attribute names: `r{a, b}`, `r remove {a, b}`";
 pub(crate) const NARY_FORM: &str = "`{}` encloses what can be in any order, and `[]` what can't: `join{r, s, t}` and `times{r, s, t}` can be in any order, while `compose[r, s, t]` is `(r compose s) compose t`";
+pub(crate) const EXTEND_FORM: &str = "`extend` takes new attributes, each `name := value`, where the value is computed from the tuple's own attributes: `r extend { total := price * quantity }`";
 pub(crate) const KEY_FORM: &str = "a key lists attributes after a relation variable's value, or after its type if it has no value: `var r := relation { … } key { a, b };`";
 pub(crate) const RENAME_FORM: &str =
     "`rename` takes renamings, each `old as new`: `r rename {postal_code as code}`";
@@ -336,6 +337,64 @@ pub(crate) fn wrong_attribute_separator(found: SyntaxKind, span: Span) -> Diagno
         vec![Edit {
             span,
             replacement: ":".to_string(),
+        }],
+    )
+}
+
+/// `:` or `=`, `found` at `span`, between a new attribute's name and its
+/// value in an `extend`, where `:=` goes. `neighbors` are the characters
+/// around it.
+pub(crate) fn extension_separator(
+    found: SyntaxKind,
+    span: Span,
+    neighbors: (Option<char>, Option<char>),
+) -> Diagnostic {
+    let text = found.fixed_text().expect("separators have fixed text");
+    Diagnostic::error(
+        Code::AttributeSeparator,
+        format!("expected `:=` after the new attribute's name, found `{text}`"),
+        span,
+        "new attributes are written `name := value`",
+    )
+    .with_note(
+        "in `extend`, each new attribute is defined as a value computed from the tuple, with `:=`, as a variable is; `:` pairs a name with a given value in a tuple",
+    )
+    .with_suggestion(
+        "write `:=`",
+        vec![Edit {
+            span,
+            replacement: spaced_operator(":=", neighbors),
+        }],
+    )
+}
+
+/// A value, at `span`, in an `extend`, with no name for the new attribute.
+pub(crate) fn unnamed_extension(span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::MissingToken,
+        "a new attribute needs a name",
+        span,
+        "this value has no name",
+    )
+    .with_note(EXTEND_FORM)
+    .with_help("write the new attribute's name and `:=` before the value, as in `total := a + b`")
+}
+
+/// `value as name`, at `span`, in an `extend`, as SQL writes a computed
+/// column and Tutorial D's `EXTEND … ADD` a new attribute.
+pub(crate) fn extension_as(span: Span, name: &str, value: &str) -> Diagnostic {
+    Diagnostic::error(
+        Code::AttributeSeparator,
+        format!("a new attribute is written `{name} := …`, not `… as {name}`"),
+        span,
+        "the name goes first",
+    )
+    .with_note(EXTEND_FORM)
+    .with_suggestion(
+        format!("write `{name} := …`"),
+        vec![Edit {
+            span,
+            replacement: format!("{name} := {value}"),
         }],
     )
 }

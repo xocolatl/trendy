@@ -684,6 +684,51 @@ var moved := addr rename {code as postal_code};
 operator main{} [];
 ```
 
+### Extension
+
+`r extend { total := price * quantity }` is the tuple, or each tuple of the
+relation, `r` with new attributes added, each written `name := value`. The
+value is computed from the tuple's own attributes, which are in scope by
+name. It is *The Third Manifesto*'s EXTEND, written as the definition it is:
+`:=` defines a new attribute, as it defines a variable.
+
+```trendy
+var items := relation {
+    { name: "tea", price: 3, quantity: 4 },
+    { name: "rice", price: 2, quantity: 10 },
+};
+var totals := items extend { total := price * quantity, label := name || "!" };
+var point := tuple { x: 1, y: 2 } extend { sum := x + y };
+
+operator main{} [
+    call debug_value{v: totals};
+];
+```
+
+- **The tuple's attributes hide other names.** Inside the values, `price`
+  is the attribute, even if a variable or parameter is named `price` too;
+  to use one of those, rename the attribute first. In a nested `extend`,
+  the inner tuple's attributes hide the outer's.
+- **The values see only the operand's attributes,** not each other's, so
+  their order doesn't matter: `extend { a := 1, b := a }` is an error
+  unless the operand has an `a`.
+- **New names must be new.** An attribute the operand already has is an
+  error (A0024), and so is a name given twice (A0008). `extend {}` adds
+  nothing, and is an error (A0023).
+- **The values are computed for each tuple** when the program runs, or when
+  compiling if the operand is known then. An empty relation has no tuple
+  to compute them for, but the result still has the new attributes.
+- `name: value`, as in a tuple, and `name = value` are fixed to
+  `name := value`, and `value as name`, as SQL and Tutorial D's
+  `EXTEND … ADD` write it, to `name := value` (P0011).
+
+```trendy,error
+var items := relation { { name: "tea", price: 3, quantity: 4 } };
+var totals := items extend { total: price * quantity };
+
+operator main{} [];
+```
+
 ### Joins
 
 `r join s` is the relation of the tuples made of a tuple of `r` and a tuple
@@ -771,7 +816,7 @@ From tightest to loosest:
 
 | Operators | Grouping |
 |---|---|
-| postfix `.a`, projection `{…}`, `remove {…}` and `rename {…}` | left |
+| postfix `.a`, projection `{…}`, `remove {…}`, `rename {…}` and `extend {…}` | left |
 | prefix `not`, `-` and `+` | |
 | `*`, `/`, `div`, `mod` | left |
 | `+`, `-`, `\|\|` | left |
@@ -921,9 +966,10 @@ operator main{} [];
 Names are ASCII letters, digits and `_`, and don't start with a digit. They
 are case-sensitive. The keywords are `operator`, `var`, `call`, `builtin`,
 `tuple`, `relation`, `true`, `false`, `not`, `and`, `or`, `xor`,
-`implies`, `div`, `mod`, `remove`, `rename`, `join`, `times`, `compose`
-and `as`, all lowercase, and a keyword can't be a name (P0017). `type` is
-a keyword only after `builtin`, and `key` only where a variable's keys go.
+`implies`, `div`, `mod`, `remove`, `rename`, `extend`, `join`, `times`,
+`compose` and `as`, all lowercase, and a keyword can't be a name (P0017).
+`type` is a keyword only after `builtin`, and `key` only where a variable's
+keys go.
 
 Variables and operators share one namespace, so no two of them can have the
 same name. Types have their own namespace, so a variable can be named after a
@@ -1016,6 +1062,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `A FROM T`, `t["a"]` | `t.a` |
 | `R { A, B }`, `R { ALL BUT C }` | `r{a, b}`, `r remove {c}` |
 | `R RENAME ( A AS B )`, `rename(columns={'a': 'b'})` | `r rename {a as b}` |
+| `EXTEND R ADD ( X AS B )`, `SELECT *, x AS b` | `r extend { b := x }` |
 | `PRIMARY KEY (a)`, `UNIQUE (a)`, `KEY { A }` | `key { a }` |
 | `NATURAL JOIN`, `INNER JOIN`, `JOIN … USING (a)` | `join` |
 | `CROSS JOIN` | `times` |

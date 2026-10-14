@@ -1,4 +1,5 @@
 mod body;
+mod check;
 mod errors;
 mod keys;
 mod ops;
@@ -10,7 +11,7 @@ use std::collections::HashMap;
 use trendy_diag::{Diagnostic, Span};
 use trendy_hir as hir;
 use trendy_syntax::SyntaxToken;
-use trendy_syntax::ast::{AstNode, Item, NameRef, SourceFile, VarDecl};
+use trendy_syntax::ast::{AstNode, Item, SourceFile, VarDecl};
 
 pub use prelude::Prelude;
 
@@ -283,27 +284,43 @@ impl<'a> Globals<'a> {
     }
 }
 
-impl types::Scope for Globals<'_> {
+impl check::Names for Globals<'_> {
     fn values(&self) -> &Values {
         self.values
     }
 
-    fn constant(&mut self, name_ref: &NameRef, errors: &mut Vec<Diagnostic>) -> Option<hir::Value> {
-        let ident = name_ref.ident()?;
-        let name = ident.text();
-        let span = trendy_syntax::span(ident.text_range());
+    fn resolve(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> check::Lookup {
         match self.values.get(name) {
-            Some((Kind::Variable, _)) => {}
+            Some((Kind::Variable, _)) => match self.constant(name, span, errors) {
+                Some(value) => check::Lookup::Found(hir::Expr::Constant(value)),
+                None => check::Lookup::Reported,
+            },
             Some((Kind::Operator | Kind::Builtin, _)) => {
                 errors.push(errors::operator_as_value(name, span));
-                return None;
+                check::Lookup::Reported
             }
-            None => {
-                let variables: Vec<&str> = self.decls.keys().map(String::as_str).collect();
-                errors.push(errors::unknown_name(name, span, "value", &variables));
-                return None;
-            }
+            None => check::Lookup::Unknown,
         }
+    }
+
+    fn candidates(&self) -> Vec<String> {
+        self.decls.keys().cloned().collect()
+    }
+
+    fn leaf_type(&self, leaf: &hir::Expr) -> hir::Type {
+        unreachable!("an initial value's names are constants, not {leaf:?}")
+    }
+}
+
+impl Globals<'_> {
+    /// The value of the variable `name`, referred to at `span`, evaluated if
+    /// it isn't yet, or `None` after reporting why it has none.
+    fn constant(
+        &mut self,
+        name: &str,
+        span: Span,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Value> {
         if let Some(State::Evaluating) = self.states.get(name) {
             let start = self.stack.iter().position(|(n, _, _)| n == name)?;
             let mut cycle = self.stack[start..].to_vec();
@@ -2338,6 +2355,123 @@ mod tests {
                 ("d", "this has `w` and `y`")
             ]
         );
+    }
+
+    #[test]
+    fn extend_constants() {
+        let vars = variables(
+            "var price := 100;\nvar items := relation { { name: \"tea\", price: 3, quantity: 4 }, { name: \"rice\", price: 2, quantity: 10 } };\nvar none := relation { price: integer } {};\nvar totals := items extend { total := price * quantity };\nvar point := tuple { x: 1, y: 2 } extend { sum := x + y, outside := price };\nvar empty := none extend { double := price * 2 };\nvar nested := items{name} extend { others := items{name} extend { mine := name } };",
+        );
+        let value = |name: &str| &vars.iter().find(|v| v.name == name).unwrap().init;
+        // The attribute `price` hides the variable.
+        assert_eq!(
+            value("totals"),
+            &variables(
+                "var t := relation { { name: \"tea\", price: 3, quantity: 4, total: 12 }, { name: \"rice\", price: 2, quantity: 10, total: 20 } };"
+            )[0]
+            .init
+        );
+        assert_eq!(
+            value("point"),
+            &variables("var p := tuple { outside: 100, sum: 3, x: 1, y: 2 };")[0].init
+        );
+        // An empty relation still has the new attribute.
+        assert_eq!(
+            value("empty").ty().to_string(),
+            "relation { double: integer, price: integer }"
+        );
+        // Inside a nested `extend`, `name` is the inner tuple's.
+        let hir::Value::Relation(nested) = value("nested") else {
+            panic!("a relation");
+        };
+        for tuple in &nested.tuples {
+            let Some(hir::Value::Relation(others)) = tuple.get("others") else {
+                panic!("a relation-valued attribute");
+            };
+            assert!(others.tuples.iter().all(|t| t.get("mine") == t.get("name")));
+        }
+    }
+
+    #[test]
+    fn extend_errors() {
+        let source = format!(
+            "var r := relation {{ {{ quantity: 1 }} }};\nvar a := r extend {{ total := quantty * 2 }};\nvar b := r extend {{ quantity := 2 }};\nvar c := r extend {{ d := 1, d := 2 }};\nvar e := r extend {{}};\nvar f := 1 extend {{ g := 2 }};\nvar h := relation {{ {{ n: 9223372036854775807 }} }} extend {{ m := n + 1 }};{MAIN}"
+        );
+        let errors = errors(&source);
+        let found: Vec<_> = errors.iter().map(|e| (e.code, &e.message[..])).collect();
+        assert_eq!(
+            found,
+            [
+                (Code::UnknownName, "unknown value `quantty`"),
+                (Code::AttributeExists, "attribute `quantity` already exists"),
+                (
+                    Code::DuplicateAttribute,
+                    "attribute `d` is given more than once"
+                ),
+                (Code::EmptyRemove, "`extend {}` adds nothing"),
+                (
+                    Code::WrongOperandType,
+                    "`extend` can't be applied to integers"
+                ),
+                (Code::Overflow, "integer overflow"),
+            ]
+        );
+        // The misspelled attribute is suggested, though not a variable.
+        let fixed = fix(&source);
+        assert!(fixed.contains("total := quantity * 2"), "{fixed}");
+        assert!(fixed.contains("var e := r;"), "{fixed}");
+        assert_eq!(
+            errors[5].notes[1],
+            "computing `m` for `tuple { n: 9223372036854775807 }`, which the operand has"
+        );
+    }
+
+    #[test]
+    fn extend_in_bodies() {
+        let program = analyze_str(
+            "var factor := 3;\noperator f{r: relation { n: integer }, t: tuple { n: integer }} [\n    call debug_value{v: r extend { m := n * factor }};\n    call debug_value{v: t extend { m := n }};\n    call debug_value{v: relation { { n: 2 } } extend { m := n * 2 }};\n];\noperator main{} [];",
+        )
+        .unwrap();
+        let f = program.operators.iter().find(|o| o.name == "f").unwrap();
+        let hir::OperatorKind::User { body } = &f.kind else {
+            panic!("f is a user operator");
+        };
+        let heading =
+            hir::Heading::new([("n".to_string(), hir::Type::Scalar(hir::Scalar::Integer))].into());
+        let n = || {
+            Box::new(hir::Expr::Extract(
+                Box::new(hir::Expr::Current(0, heading.clone())),
+                "n".to_string(),
+            ))
+        };
+        let added =
+            hir::Heading::new([("m".to_string(), hir::Type::Scalar(hir::Scalar::Integer))].into());
+        assert_eq!(
+            argument(&body[0]),
+            &hir::Expr::Extend(
+                Box::new(hir::Expr::Parameter("r".to_string())),
+                added.clone(),
+                [(
+                    "m".to_string(),
+                    hir::Expr::Binary(
+                        hir::BinaryOp::Multiply(hir::Numeric::Integer),
+                        n(),
+                        Box::new(hir::Expr::Variable(hir::VariableId(0)))
+                    )
+                )]
+                .into()
+            )
+        );
+        assert_eq!(
+            argument(&body[1]),
+            &hir::Expr::Extend(
+                Box::new(hir::Expr::Parameter("t".to_string())),
+                added,
+                [("m".to_string(), *n())].into()
+            )
+        );
+        // A constant operand is extended when compiling.
+        assert!(matches!(argument(&body[2]), hir::Expr::Constant(_)));
     }
 
     #[test]

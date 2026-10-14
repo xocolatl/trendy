@@ -81,21 +81,13 @@ key { name };
    call debug_value{v: people where born < 1900 and name <> "Ada"};
 */
 
-/* Extension: each tuple with attributes added, computed from its own.
-   Tuple analog: extend.
-   Tutorial D: EXTEND PEOPLE ADD ( 2024 - BORN AS AGE )
-   Proposed: an `extend` operator, as for tuples.
-
-   call debug_value{v: people extend { age: 2024 - born }};
-*/
-
 /* Substitution: each tuple with some attributes replaced, computed from
    its own (dropped in Tutorial D version 2).
    Tuple analog: update.
    Tutorial D: UPDATE PEOPLE ( BORN := BORN + 1 )
    Proposed: an `update` operator, as for tuples.
 
-   call debug_value{v: people update { born: born + 1 }};
+   call debug_value{v: people update { born := born + 1 }};
 */
 
 /* Union, intersection and difference, of relations with the same heading,
@@ -155,7 +147,7 @@ key { name };
    Proposed: a `summarize` operator with a `by` list and the aggregates to
    add, as extend adds attributes.
 
-   call debug_value{v: people join cities summarize by { city } { n: count{} }};
+   call debug_value{v: people join cities summarize by { city } { n := count{} }};
 */
 
 /* Transitive closure, of a relation of degree two whose attributes have
@@ -331,6 +323,24 @@ operator join_people{
     call debug_value{v: compose[p, c, k]};
 ];
 
+/* Extension: each tuple with attributes added, each `name := value`,
+   computed from the tuple's own attributes, which are in scope by name
+   and hide variables and parameters of the same name. The values are
+   computed for each tuple when the program runs, unless the relation is
+   known when compiling. Tuple analog: extend. Tutorial D: EXTEND PEOPLE
+   ADD ( 2024 - BORN AS AGE ). Implemented, and printed twice like the
+   projections. */
+var ages := people extend { age := 2024 - born, greeting := "Hi, " || name };
+var rosters := teams extend { roster := members extend { role := "member" } };
+
+operator extend_people{
+    p: relation { name: text, born: integer },
+    t: relation { team: text, members: relation { name: text } },
+} [
+    call debug_value{v: p extend { age := 2024 - born, greeting := "Hi, " || name }};
+    call debug_value{v: t extend { roster := members extend { role := "member" } }};
+];
+
 operator main{} [
     call debug_value{v: names};
     call debug_value{v: places};
@@ -350,6 +360,8 @@ operator main{} [
     call debug_value{v: lived_born};
     call debug_value{v: grid};
     call debug_value{v: born_where};
+    call debug_value{v: ages};
+    call debug_value{v: rosters};
 
     call project_births{r: births};
     call project_signs{r: signs};
@@ -364,4 +376,6 @@ operator main{} [
     call build_nested{team: "core", member: "李白"};
 
     call join_people{p: people, c: cities, y: years, k: countries};
+
+    call extend_people{p: people, t: teams};
 ];

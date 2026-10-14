@@ -37,33 +37,14 @@ impl Program {
     /// `any`, which sema never produces.
     #[must_use]
     pub fn type_of(&self, expr: &Expr, within: OperatorId) -> Type {
-        match expr {
-            Expr::Constant(value) => value.ty(),
+        expr.type_with(&|leaf| match leaf {
             Expr::Variable(id) => self.variable(*id).ty.clone(),
             Expr::Parameter(name) => match &self.operator(within).params[name] {
                 ParamType::Type(ty) => ty.clone(),
                 ParamType::Any => unreachable!("only built-ins have `any` parameters"),
             },
-            Expr::Unary(op, _) => Type::Scalar(op.result()),
-            Expr::Binary(op, ..) => Type::Scalar(op.result()),
-            Expr::Extract(tuple, name) => match self.type_of(tuple, within) {
-                Type::Tuple(heading) => heading
-                    .get(name)
-                    .cloned()
-                    .expect("sema extracts only attributes the tuple has"),
-                other => panic!("extracting `{name}` from {other}"),
-            },
-            Expr::Tuple(attributes) => Type::Tuple(Heading::new(
-                attributes
-                    .iter()
-                    .map(|(name, e)| (name.clone(), self.type_of(e, within)))
-                    .collect(),
-            )),
-            Expr::Relation(heading, _) => Type::Relation(heading.clone()),
-            Expr::Remove(operand, names) => self.type_of(operand, within).without(names),
-            Expr::Rename(operand, renamings) => self.type_of(operand, within).renamed(renamings),
-            Expr::And(lhs, rhs) => self.type_of(lhs, within).and(&self.type_of(rhs, within)),
-        }
+            _ => unreachable!("only variables and parameters are leaves"),
+        })
     }
 }
 
@@ -190,6 +171,58 @@ pub enum Expr {
     /// what `join`, `times` and `compose` all are. The operands are
     /// relations whose common attributes have the same types.
     And(Box<Expr>, Box<Expr>),
+    /// A tuple, or each tuple of a relation, with attributes added (`extend`),
+    /// each computed by its expression from the tuple at hand, which is
+    /// `Current(0, …)` in it. The heading is the added attributes', whose
+    /// names are new to the operand: an empty relation has no tuple to
+    /// compute them from, but the result still has them.
+    Extend(Box<Expr>, Heading, BTreeMap<String, Expr>),
+    /// The tuple at hand, with this heading: the one an `Extend` is computing
+    /// attributes for, `depth` `Extend`s out from here, counting the
+    /// innermost as 0. Its attributes are in scope by name in the source,
+    /// and are extracted from it here.
+    Current(usize, Heading),
+}
+
+impl Expr {
+    /// The expression's type, where `leaf` gives the type of each variable
+    /// and parameter in it.
+    ///
+    /// # Panics
+    ///
+    /// If the expression isn't well typed, which sema rules out.
+    #[must_use]
+    pub fn type_with(&self, leaf: &dyn Fn(&Expr) -> Type) -> Type {
+        match self {
+            Expr::Constant(value) => value.ty(),
+            Expr::Variable(_) | Expr::Parameter(_) => leaf(self),
+            Expr::Unary(op, _) => Type::Scalar(op.result()),
+            Expr::Binary(op, ..) => Type::Scalar(op.result()),
+            Expr::Extract(tuple, name) => match tuple.type_with(leaf) {
+                Type::Tuple(heading) => heading
+                    .get(name)
+                    .cloned()
+                    .expect("sema extracts only attributes the tuple has"),
+                other => panic!("extracting `{name}` from {other}"),
+            },
+            Expr::Tuple(attributes) => Type::Tuple(Heading::new(
+                attributes
+                    .iter()
+                    .map(|(name, e)| (name.clone(), e.type_with(leaf)))
+                    .collect(),
+            )),
+            Expr::Relation(heading, _) => Type::Relation(heading.clone()),
+            Expr::Remove(operand, names) => operand.type_with(leaf).without(names),
+            Expr::Rename(operand, renamings) => operand.type_with(leaf).renamed(renamings),
+            Expr::And(lhs, rhs) => lhs.type_with(leaf).and(&rhs.type_with(leaf)),
+            Expr::Extend(operand, added, _) => operand.type_with(leaf).with(
+                added
+                    .attributes()
+                    .map(|(name, ty)| (name.to_string(), ty.clone())),
+            ),
+            Expr::Current(_, heading) => Type::Tuple(heading.clone()),
+        }
+    }
 }
 
 /// Why an operator has no result: it is out of its type's range (for an
@@ -883,6 +916,14 @@ impl TupleValue {
         )
     }
 
+    /// The tuple with `attributes` added, which it doesn't have.
+    #[must_use]
+    pub fn with(&self, attributes: impl IntoIterator<Item = (String, Value)>) -> TupleValue {
+        let mut all = self.0.clone();
+        all.extend(attributes);
+        TupleValue(all)
+    }
+
     /// The tuple without the attributes named.
     #[must_use]
     pub fn without(&self, names: &BTreeSet<String>) -> TupleValue {
@@ -908,6 +949,26 @@ impl Type {
             Type::Tuple(heading) => Type::Tuple(heading.without(names)),
             Type::Relation(heading) => Type::Relation(heading.without(names)),
             Type::Scalar(_) => panic!("removing attributes from {self}"),
+        }
+    }
+
+    /// The tuple or relation type with `attributes` added, which it doesn't
+    /// have.
+    ///
+    /// # Panics
+    ///
+    /// If the type isn't a tuple or relation type, which sema rules out.
+    #[must_use]
+    pub fn with(&self, attributes: impl IntoIterator<Item = (String, Type)>) -> Type {
+        let added = |heading: &Heading| {
+            let mut all = heading.0.clone();
+            all.extend(attributes);
+            Heading(all)
+        };
+        match self {
+            Type::Tuple(heading) => Type::Tuple(added(heading)),
+            Type::Relation(heading) => Type::Relation(added(heading)),
+            Type::Scalar(_) => panic!("adding attributes to {self}"),
         }
     }
 

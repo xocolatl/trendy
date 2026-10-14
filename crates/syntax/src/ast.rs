@@ -55,6 +55,8 @@ ast_node!(NaryExpr);
 ast_node!(NameList);
 ast_node!(RenameList);
 ast_node!(Renaming);
+ast_node!(ExtendList);
+ast_node!(Extension);
 ast_node!(VarDecl);
 ast_node!(Key);
 ast_node!(Name);
@@ -261,7 +263,7 @@ impl ProjectExpr {
 }
 
 impl PostfixExpr {
-    /// The operator: `remove` or `rename`.
+    /// The operator: `remove`, `rename` or `extend`.
     #[must_use]
     pub fn operator(&self) -> Option<SyntaxToken> {
         significant_tokens(&self.0).next()
@@ -280,6 +282,38 @@ impl PostfixExpr {
     #[must_use]
     pub fn renamings(&self) -> Option<RenameList> {
         self.0.children().find_map(RenameList::cast)
+    }
+
+    #[must_use]
+    pub fn extensions(&self) -> Option<ExtendList> {
+        self.0.children().find_map(ExtendList::cast)
+    }
+}
+
+impl ExtendList {
+    pub fn extensions(&self) -> impl Iterator<Item = Extension> {
+        self.0.children().filter_map(Extension::cast)
+    }
+
+    /// The span to delete to remove `extension` from the list, with a comma
+    /// that separates it from a neighbor.
+    #[must_use]
+    pub fn removal(&self, extension: &Extension) -> Span {
+        list_removal(extension.syntax())
+    }
+}
+
+impl Extension {
+    /// The new attribute's name.
+    #[must_use]
+    pub fn name(&self) -> Option<Name> {
+        self.0.children().find_map(Name::cast)
+    }
+
+    /// Its value.
+    #[must_use]
+    pub fn value(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
     }
 }
 

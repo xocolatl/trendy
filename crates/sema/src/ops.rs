@@ -288,13 +288,6 @@ pub(crate) enum Projection<'a> {
 }
 
 impl Projection<'_> {
-    pub(crate) fn operand(self) -> Option<Expr> {
-        match self {
-            Projection::Project(p) => p.operand(),
-            Projection::Remove(r) => r.operand(),
-        }
-    }
-
     fn names(self) -> Option<ast::NameList> {
         match self {
             Projection::Project(p) => p.names(),
@@ -792,6 +785,199 @@ pub(crate) fn and(operands: Vec<hir::Expr>) -> hir::Expr {
     })
 }
 
+/// A tuple of these attributes, a constant if they all are.
+pub(crate) fn tuple(attributes: BTreeMap<String, hir::Expr>) -> hir::Expr {
+    let constants: Option<BTreeMap<String, hir::Value>> = attributes
+        .iter()
+        .map(|(name, e)| match e {
+            hir::Expr::Constant(value) => Some((name.clone(), value.clone())),
+            _ => None,
+        })
+        .collect();
+    match constants {
+        Some(constants) => hir::Expr::Constant(hir::Value::Tuple(hir::TupleValue::new(constants))),
+        None => hir::Expr::Tuple(attributes),
+    }
+}
+
+/// A relation with this heading and these tuples, a constant if they all
+/// are; tuples that are equal become one.
+pub(crate) fn relation(heading: hir::Heading, tuples: Vec<hir::Expr>) -> hir::Expr {
+    let constants: Option<BTreeSet<hir::TupleValue>> = tuples
+        .iter()
+        .map(|t| match t {
+            hir::Expr::Constant(hir::Value::Tuple(t)) => Some(t.clone()),
+            _ => None,
+        })
+        .collect();
+    match constants {
+        Some(tuples) => {
+            hir::Expr::Constant(hir::Value::Relation(hir::RelationValue { heading, tuples }))
+        }
+        None => hir::Expr::Relation(heading, tuples),
+    }
+}
+
+/// Whether `postfix` is an `extend`.
+pub(crate) fn is_extend(postfix: &ast::PostfixExpr) -> bool {
+    postfix
+        .operator()
+        .is_some_and(|t| t.kind() == SyntaxKind::ExtendKw)
+}
+
+/// `expr`, which a name in an `extend`'s value resolved to outside it, as
+/// seen from inside: the tuple at hand it refers to is one `Extend` further
+/// out. A name resolves to a variable, a parameter, a constant, or an
+/// attribute of a tuple at hand.
+pub(crate) fn deeper(expr: hir::Expr) -> hir::Expr {
+    match expr {
+        hir::Expr::Current(depth, heading) => hir::Expr::Current(depth + 1, heading),
+        hir::Expr::Extract(tuple, name) => hir::Expr::Extract(Box::new(deeper(*tuple)), name),
+        other => other,
+    }
+}
+
+/// Why an `extend` of constants has no value: computing `attribute` for
+/// `tuple` fails.
+pub(crate) struct ExtendFailure {
+    pub(crate) failure: hir::Failure,
+    /// The type of the operator that fails.
+    pub(crate) scalar: hir::Scalar,
+    pub(crate) attribute: String,
+    pub(crate) tuple: hir::TupleValue,
+}
+
+/// `operand` with `attributes`, of the types in `added`, added, each
+/// computed from the tuple at hand. Evaluated when the operand is a constant
+/// and every attribute then is, for each of its tuples.
+///
+/// # Errors
+///
+/// Returns why computing an attribute of a constant tuple fails.
+pub(crate) fn extend(
+    operand: hir::Expr,
+    added: hir::Heading,
+    attributes: BTreeMap<String, hir::Expr>,
+) -> Result<hir::Expr, ExtendFailure> {
+    let folded = match &operand {
+        hir::Expr::Constant(hir::Value::Tuple(tuple)) => {
+            extended(tuple, &attributes)?.map(hir::Value::Tuple)
+        }
+        hir::Expr::Constant(hir::Value::Relation(relation)) => {
+            let mut tuples = BTreeSet::new();
+            let mut all = true;
+            for tuple in &relation.tuples {
+                match extended(tuple, &attributes)? {
+                    Some(tuple) => {
+                        tuples.insert(tuple);
+                    }
+                    None => all = false,
+                }
+            }
+            all.then(|| {
+                hir::Value::Relation(hir::RelationValue {
+                    heading: relation.heading.and(&added),
+                    tuples,
+                })
+            })
+        }
+        _ => None,
+    };
+    Ok(match folded {
+        Some(value) => hir::Expr::Constant(value),
+        None => hir::Expr::Extend(Box::new(operand), added, attributes),
+    })
+}
+
+/// `tuple` with `attributes` added, each computed with `tuple` as the tuple
+/// at hand, if every one is then a constant.
+fn extended(
+    tuple: &hir::TupleValue,
+    attributes: &BTreeMap<String, hir::Expr>,
+) -> Result<Option<hir::TupleValue>, ExtendFailure> {
+    let mut added = BTreeMap::new();
+    for (name, value) in attributes {
+        match substitute(value.clone(), 0, tuple) {
+            Ok(hir::Expr::Constant(value)) => {
+                added.insert(name.clone(), value);
+            }
+            Ok(_) => return Ok(None),
+            Err((failure, scalar)) => {
+                return Err(ExtendFailure {
+                    failure,
+                    scalar,
+                    attribute: name.clone(),
+                    tuple: tuple.clone(),
+                });
+            }
+        }
+    }
+    Ok(Some(tuple.with(added)))
+}
+
+/// `expr` with the tuple at hand `depth` `Extend`s out replaced by `tuple`,
+/// and simplified as when it was checked, so that what then depends only on
+/// constants is evaluated.
+///
+/// # Errors
+///
+/// Returns why an operator now known to fail fails, and its type.
+fn substitute(
+    expr: hir::Expr,
+    depth: usize,
+    tuple: &hir::TupleValue,
+) -> Result<hir::Expr, (hir::Failure, hir::Scalar)> {
+    let sub = |e: Box<hir::Expr>| substitute(*e, depth, tuple);
+    Ok(match expr {
+        hir::Expr::Current(d, _) if d == depth => {
+            hir::Expr::Constant(hir::Value::Tuple(tuple.clone()))
+        }
+        hir::Expr::Current(d, heading) if d > depth => hir::Expr::Current(d - 1, heading),
+        hir::Expr::Current(..)
+        | hir::Expr::Constant(_)
+        | hir::Expr::Variable(_)
+        | hir::Expr::Parameter(_) => expr,
+        hir::Expr::Unary(op, operand) => unary(op, sub(operand)?).map_err(|f| (f, op.result()))?,
+        hir::Expr::Binary(op, lhs, rhs) => {
+            binary(op, sub(lhs)?, sub(rhs)?).map_err(|f| (f, op.result()))?
+        }
+        hir::Expr::Extract(operand, name) => extract(sub(operand)?, name),
+        hir::Expr::Tuple(attributes) => tuple_of(attributes, depth, tuple)?,
+        hir::Expr::Relation(heading, tuples) => relation(
+            heading,
+            tuples
+                .into_iter()
+                .map(|t| substitute(t, depth, tuple))
+                .collect::<Result<_, _>>()?,
+        ),
+        hir::Expr::Remove(operand, names) => remove(sub(operand)?, names),
+        hir::Expr::Rename(operand, renamings) => rename(sub(operand)?, renamings),
+        hir::Expr::And(lhs, rhs) => and(vec![sub(lhs)?, sub(rhs)?]),
+        hir::Expr::Extend(operand, added, attributes) => {
+            // The values are one `Extend` further in.
+            let attributes = attributes
+                .into_iter()
+                .map(|(name, e)| Ok((name, substitute(e, depth + 1, tuple)?)))
+                .collect::<Result<_, _>>()?;
+            extend(sub(operand)?, added, attributes).map_err(|f| (f.failure, f.scalar))?
+        }
+    })
+}
+
+/// A tuple selector's `attributes`, substituted as for [`substitute`].
+fn tuple_of(
+    attributes: BTreeMap<String, hir::Expr>,
+    depth: usize,
+    tuple: &hir::TupleValue,
+) -> Result<hir::Expr, (hir::Failure, hir::Scalar)> {
+    Ok(self::tuple(
+        attributes
+            .into_iter()
+            .map(|(name, e)| Ok((name, substitute(e, depth, tuple)?)))
+            .collect::<Result<_, _>>()?,
+    ))
+}
+
 /// The attribute `extract`, written after `operand`, which is of type `ty`,
 /// takes the value of. `None` after reporting why there is none: the
 /// operand isn't a tuple, or hasn't the attribute.
@@ -963,14 +1149,18 @@ pub(crate) fn negative_value(
 /// and its failure never skipped.
 fn can_fail(expr: &hir::Expr) -> bool {
     match expr {
-        hir::Expr::Constant(_) | hir::Expr::Variable(_) | hir::Expr::Parameter(_) => false,
+        hir::Expr::Constant(_)
+        | hir::Expr::Variable(_)
+        | hir::Expr::Parameter(_)
+        | hir::Expr::Current(..) => false,
         // Negating the smallest integer overflows, and building a relation,
-        // removing or renaming its attributes, or joining it, allocates the
-        // result.
+        // removing, renaming or adding attributes, or joining it, allocates
+        // the result; adding attributes computes them, which can fail too.
         hir::Expr::Unary(hir::UnaryOp::Negate(hir::Numeric::Integer), _)
         | hir::Expr::Remove(..)
         | hir::Expr::Rename(..)
         | hir::Expr::And(..)
+        | hir::Expr::Extend(..)
         | hir::Expr::Relation(..) => true,
         hir::Expr::Unary(_, operand) => can_fail(operand),
         hir::Expr::Tuple(attributes) => attributes.values().any(can_fail),

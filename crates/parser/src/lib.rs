@@ -731,10 +731,10 @@ impl<'a> Parser<'a> {
             } else if let Some((found, keyword)) = self.postfix_operator() {
                 self.builder.start_node_at(start, SyntaxKind::PostfixExpr);
                 self.operator_token(found, keyword);
-                if keyword == SyntaxKind::RenameKw {
-                    self.rename_list();
-                } else {
-                    self.names(errors::PROJECTION_FORM);
+                match keyword {
+                    SyntaxKind::RenameKw => self.rename_list(),
+                    SyntaxKind::ExtendKw => self.extend_list(),
+                    _ => self.names(errors::PROJECTION_FORM),
                 }
             } else {
                 break;
@@ -751,7 +751,11 @@ impl<'a> Parser<'a> {
             SyntaxKind::Ident => errors::operator_spelling(found.text)?,
             kind => kind,
         };
-        matches!(keyword, SyntaxKind::RemoveKw | SyntaxKind::RenameKw).then_some((found, keyword))
+        matches!(
+            keyword,
+            SyntaxKind::RemoveKw | SyntaxKind::RenameKw | SyntaxKind::ExtendKw
+        )
+        .then_some((found, keyword))
     }
 
     /// `{a as b, c as d}`: renamings.
@@ -801,6 +805,82 @@ impl<'a> Parser<'a> {
             self.builder.finish_node();
         } else {
             self.missing_with_help(SyntaxKind::Ident, "write the new name after `as`");
+        }
+        self.builder.finish_node();
+    }
+
+    /// `{ a := x, b := y }`: new attributes and their values.
+    fn extend_list(&mut self) {
+        let outer_form = std::mem::replace(&mut self.form, errors::EXTEND_FORM);
+        self.delimited(
+            Some(SyntaxKind::ExtendList),
+            "new attributes",
+            (SyntaxKind::LBrace, SyntaxKind::RBrace),
+            &[(SyntaxKind::LParen, SyntaxKind::RParen)],
+            |p| p.items(Self::at_operand, Self::extension),
+        );
+        self.form = outer_form;
+    }
+
+    /// `a := x`. `a: x` and `a = x`, as a tuple and as keyword arguments
+    /// are written, are fixed to `a := x`, and `x as a`, as SQL and Tutorial
+    /// D's `ADD` write it, to `a := x`.
+    fn extension(&mut self) {
+        self.start_node(SyntaxKind::Extension);
+        let separator = self.found_after(1).map(|f| f.kind);
+        let named = self.at(SyntaxKind::Ident)
+            && matches!(
+                separator,
+                Some(SyntaxKind::ColonEq | SyntaxKind::Colon | SyntaxKind::Eq)
+            );
+        if named {
+            self.start_node(SyntaxKind::Name);
+            self.bump();
+            self.builder.finish_node();
+            let found = self.found().expect("a separator is next");
+            let neighbors = (
+                self.source[..found.span.start].chars().next_back(),
+                self.source[found.span.end..].chars().next(),
+            );
+            let span = self.bump();
+            if found.kind != SyntaxKind::ColonEq {
+                self.errors
+                    .push(errors::extension_separator(found.kind, span, neighbors));
+            }
+            self.expression();
+        } else {
+            let start = self.found().map_or(0, |f| f.span.start);
+            self.expression();
+            let value_end = self.last_end.unwrap_or(start);
+            match self.found() {
+                Some(found)
+                    if found.kind == SyntaxKind::AsKw
+                        || (found.kind == SyntaxKind::Ident
+                            && found.text.eq_ignore_ascii_case("as")) =>
+                {
+                    self.bump();
+                    if let Some(name) = self.found().filter(|f| f.kind == SyntaxKind::Ident) {
+                        self.start_node(SyntaxKind::Name);
+                        self.bump();
+                        self.builder.finish_node();
+                        let value = &self.source[start..value_end];
+                        self.errors.push(errors::extension_as(
+                            Span::new(start, name.span.end),
+                            name.text,
+                            value,
+                        ));
+                    } else {
+                        self.missing_with_help(
+                            SyntaxKind::Ident,
+                            "write the new attribute's name before the value, as in `total := a + b`",
+                        );
+                    }
+                }
+                _ => {
+                    self.errors
+                        .push(errors::unnamed_extension(Span::new(start, value_end)));
+                }
+            }
         }
         self.builder.finish_node();
     }
@@ -2296,6 +2376,60 @@ SourceFile
         assert_eq!(fix("var x := compose{a, b};"), "var x := compose[a, b];");
         assert_eq!(fix("var x := join[a, b];"), "var x := join{a, b};");
         assert_eq!(fix("var x := compose(a, b);"), "var x := compose[a, b];");
+    }
+
+    #[test]
+    fn extensions() {
+        let source = "var x := r extend { total := price * quantity, label := name || \"!\" };";
+        let parse = parse_str(source);
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let extensions: Vec<_> = parse
+            .tree
+            .syntax()
+            .descendants()
+            .filter_map(trendy_syntax::ast::Extension::cast)
+            .map(|e| {
+                (
+                    e.name().unwrap().syntax().to_string(),
+                    e.value().unwrap().syntax().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            extensions,
+            [
+                ("total".into(), "price * quantity".into()),
+                ("label".into(), "name || \"!\"".into())
+            ]
+        );
+        // Postfix, binding tightest, like `rename`.
+        assert_eq!(
+            shape("a join b extend { c := 1 }"),
+            "(a join b extend { c := 1 })"
+        );
+        // Tuples' `:`, keyword arguments' `=`, and SQL's and Tutorial D's
+        // `AS`.
+        assert_eq!(
+            fix("var x := r extend { t: a, u = b };"),
+            "var x := r extend { t := a, u := b };"
+        );
+        assert_eq!(
+            fix("var x := r extend { a + b as t, c AS u };"),
+            "var x := r extend { t := a + b, u := c };"
+        );
+        assert_eq!(
+            fix("var x := r EXTEND (t := a);"),
+            "var x := r extend {t := a};"
+        );
+        assert_eq!(
+            messages("var x := r extend { a + b };"),
+            ["a new attribute needs a name"]
+        );
+        assert_eq!(
+            fix("var x := r extend { a + b };"),
+            "var x := r extend { a + b };",
+            "no mechanical fix for a missing name"
+        );
     }
 
     #[test]

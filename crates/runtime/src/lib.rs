@@ -57,7 +57,7 @@ pub struct Text {
 }
 
 /// Store `lhs || rhs` at `dst`, in memory allocated for it, which
-/// [`trendy_rt_free`] releases. Stops the program if the memory can't
+/// [`trendy_rt_release`] releases. Stops the program if the memory can't
 /// be allocated.
 ///
 /// # Safety
@@ -73,7 +73,7 @@ pub unsafe extern "C" fn trendy_rt_concat(dst: *mut Text, lhs: *const Text, rhs:
         let Some(len) = lhs.len.checked_add(rhs.len) else {
             trendy_rt_fail(FAIL_OUT_OF_MEMORY)
         };
-        let bytes = allocate::<u8>(len);
+        let bytes = allocate_owned(len);
         core::ptr::copy_nonoverlapping(lhs.bytes, bytes, lhs.len);
         core::ptr::copy_nonoverlapping(rhs.bytes, bytes.add(lhs.len), rhs.len);
         dst.write_unaligned(Text { bytes, len });
@@ -176,18 +176,58 @@ unsafe fn text_bytes<'a>(text: Text) -> &'a [u8] {
     unsafe { core::slice::from_raw_parts(text.bytes, text.len) }
 }
 
-/// Release the memory of a text or relation made by [`trendy_rt_concat`],
-/// [`trendy_rt_reshape`], [`trendy_rt_relation`] or [`trendy_rt_and`]. Both
-/// are a pointer and a length.
-///
-/// # Safety
-///
-/// `value` must point to such a value, not yet released.
+/// The header of a block of memory that the current statement owns: a text
+/// or relation a runtime function made and handed to compiled code. Blocks
+/// are kept in a list, newest first, and all released when the statement
+/// ends, so a value never needs freeing on its own, however many times a
+/// loop made one. Its alignment keeps the memory after it aligned for any
+/// value.
+#[cfg(not(test))]
+#[repr(C, align(16))]
+struct Owned {
+    next: *mut Owned,
+}
+
+/// The current statement's blocks, newest first.
+#[cfg(not(test))]
+static OWNED: core::sync::atomic::AtomicPtr<Owned> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
+/// Memory for `bytes` bytes, owned by the current statement and released
+/// by [`trendy_rt_release`]. Stops the program if there is none.
+#[cfg(not(test))]
+fn allocate_owned(bytes: usize) -> *mut u8 {
+    use core::sync::atomic::Ordering::Relaxed;
+    // In units of the header: one for it, then enough for the bytes.
+    let units = bytes.div_ceil(size_of::<Owned>()) + 1;
+    let block = allocate::<Owned>(units);
+    // SAFETY: `block` has room for the header and `bytes` more.
+    unsafe {
+        block.write(Owned {
+            next: OWNED.load(Relaxed),
+        });
+        OWNED.store(block, Relaxed);
+        block.add(1).cast::<u8>()
+    }
+}
+
+/// Release every text and relation that runtime functions made during the
+/// current statement: the end of their lifetime, since no value outlives
+/// the statement that computes it.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn trendy_rt_free(value: *const Text) {
-    // SAFETY: guaranteed by the caller.
-    unsafe { free(value.read_unaligned().bytes.cast_mut().cast()) }
+pub extern "C" fn trendy_rt_release() {
+    use core::sync::atomic::Ordering::Relaxed;
+    let mut block = OWNED.swap(core::ptr::null_mut(), Relaxed);
+    while !block.is_null() {
+        // SAFETY: every block in the list was allocated by
+        // `allocate_owned`, and is released only here, once.
+        unsafe {
+            let next = (*block).next;
+            free(block.cast());
+            block = next;
+        }
+    }
 }
 
 /// Memory for `count` values of type `T`, at least one byte, so that even
@@ -208,7 +248,7 @@ fn allocate<T>(count: usize) -> *mut T {
 
 /// Store at `dst` the relation at `src`, with each tuple reshaped into the
 /// attributes `result` describes, in canonical order and without
-/// duplicates, in memory that [`trendy_rt_free`] releases. `source`
+/// duplicates, in memory that [`trendy_rt_release`] releases. `source`
 /// describes `src`, and `offsets` gives, for each attribute of `result`,
 /// the offset in a tuple of `src` of the attribute it comes from. Removing
 /// attributes is reshaping, and can make tuples equal; renaming is too, and
@@ -264,7 +304,7 @@ pub unsafe extern "C" fn trendy_rt_reshape(
 
 /// Store at `dst` the relation `desc` describes whose tuples are the
 /// `*count` at `tuples`, one after another, in canonical order and without
-/// duplicates, in memory that [`trendy_rt_free`] releases.
+/// duplicates, in memory that [`trendy_rt_release`] releases.
 ///
 /// # Safety
 ///
@@ -320,7 +360,7 @@ struct Group {
 /// Store at `dst` the relation `result` describes whose tuples are each
 /// made of a tuple of the relation `lhs` and one of `rhs` that agree on
 /// their common attributes (Algebra A's AND), in canonical order, in memory
-/// that [`trendy_rt_free`] releases. `lhs_desc` and `rhs_desc` describe
+/// that [`trendy_rt_release`] releases. `lhs_desc` and `rhs_desc` describe
 /// the operands. `sources` says where each attribute of `result` comes
 /// from, and `common` lists the `*common_count` common attributes.
 ///
@@ -507,9 +547,59 @@ unsafe fn matching_runs<'a>(
     }
 }
 
+/// Store at `dst` a relation of the type `desc` describes with `*count`
+/// tuples, all zero bytes, in memory the statement owns, for compiled code to
+/// fill in: a loop that computes each tuple of its result. Zeroing leaves
+/// the padding in tuples zero, as everywhere else.
+///
+/// # Safety
+///
+/// `count` must point to a `usize`, `desc` to a valid relation descriptor,
+/// and `dst` to memory for a relation.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_allocate(
+    dst: *mut Text,
+    count: *const usize,
+    desc: *const TypeDesc,
+) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let count = count.read_unaligned();
+        let Some(bytes) = count.checked_mul((*desc).element_size) else {
+            trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+        };
+        let tuples = allocate_owned(bytes);
+        core::ptr::write_bytes(tuples, 0, bytes);
+        dst.write_unaligned(Text {
+            bytes: tuples,
+            len: count,
+        });
+    }
+}
+
+/// Put the tuples of the relation at `relation`, of the type `desc`
+/// describes, in the canonical order, without duplicates: it then holds
+/// them, in memory the statement owns.
+///
+/// # Safety
+///
+/// `relation` must point to a valid relation of the type `desc` describes,
+/// whose tuples may be in any order.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_sort(relation: *mut Text, desc: *const TypeDesc) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let (tuples, count) = read_slice(relation.cast());
+        let (bytes, len) = canonical(tuples, count, &*desc);
+        relation.write_unaligned(Text { bytes, len });
+    }
+}
+
 /// The `count` tuples at `tuples`, with the attributes of `desc`, sorted
-/// canonically and without duplicates, copied into new memory: the new
-/// memory and how many tuples it holds.
+/// canonically and without duplicates, copied into memory the current
+/// statement owns: that memory and how many tuples it holds.
 ///
 /// # Safety
 ///
@@ -524,7 +614,7 @@ unsafe fn canonical(tuples: *const u8, count: usize, desc: &TypeDesc) -> (*mut u
             *tuple = tuples.add(i * size);
         }
         order.sort_unstable_by(|a, b| compare_tuples(*a, *b, desc));
-        let out = allocate::<u8>(count * size);
+        let out = allocate_owned(count * size);
         let mut kept = 0;
         for i in 0..count {
             if i > 0 && compare_tuples(order[i - 1], order[i], desc).is_eq() {

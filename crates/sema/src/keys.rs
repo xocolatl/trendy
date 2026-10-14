@@ -7,7 +7,8 @@ use trendy_diag::{Diagnostic, Span};
 use trendy_hir as hir;
 use trendy_syntax::ast::{AstNode, Expr, Key, VarDecl};
 
-use crate::types::{self, Expected, Origin, Scope};
+use crate::check::Names;
+use crate::types::{self, Expected, Origin};
 use crate::{errors, ops};
 
 /// The keys of the variable `decl`, named `name`, of type `ty`, whose
@@ -19,7 +20,7 @@ pub(crate) fn keys(
     name: &str,
     ty: &hir::Type,
     init: &hir::Value,
-    scope: &mut dyn Scope,
+    scope: &mut dyn Names,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<Vec<hir::Key>> {
     let written: Vec<Key> = decl.keys().collect();
@@ -120,7 +121,7 @@ fn key_value(tuple: &hir::TupleValue, attributes: &BTreeSet<String>) -> hir::Tup
 fn tuple_places(
     decl: &VarDecl,
     heading: &hir::Heading,
-    scope: &mut dyn Scope,
+    scope: &mut dyn Names,
 ) -> Vec<(hir::TupleValue, Span)> {
     let Some(Expr::Relation(relation)) = decl.initializer() else {
         return Vec::new();

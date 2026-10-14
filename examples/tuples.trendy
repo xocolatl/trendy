@@ -30,15 +30,6 @@ var addr := tuple {
    call debug_value{v: addr rename {prefix "st" as "g"}};
 */
 
-/* Extension: the tuple with attributes added, computed from its own.
-   Tutorial D: EXTEND ADDR ADD ( 2 AS FLOOR )
-   Proposed: an `extend` operator with attribute values, in which the
-   tuple's own attributes are in scope by name.
-
-   call debug_value{v: addr extend { floor: 2 }};
-   call debug_value{v: q extend { sum: x + y }};
-*/
-
 /* Join, also called tuple union: the union of two tuples' attributes. Any
    attribute both have must have the same value in both.
    Tutorial D: ADDR UNION TUPLE { NAME 'Ada' }, and n-adic
@@ -82,8 +73,8 @@ var addr := tuple {
    Proposed: an `update` operator with attribute values, in which the
    tuple's own attributes are in scope by name.
 
-   call debug_value{v: addr update { postal_code: "75002" }};
-   call debug_value{v: q update { x: x * 2e0 }};
+   call debug_value{v: addr update { postal_code := "75002" }};
+   call debug_value{v: q update { x := x * 2e0 }};
 */
 
 /* Tuple extraction: the one tuple of a relation with exactly one, else a
@@ -99,8 +90,8 @@ var addr := tuple {
    Tutorial D: ADDR := TUPLE { ... }, and UPDATE ADDR ( POSTAL_CODE := '75002' )
    Proposed: an assignment statement, and `update` as a statement.
 
-   addr := addr update { postal_code: "75002" };
-   update addr { postal_code: "75002" };
+   addr := addr update { postal_code := "75002" };
+   update addr { postal_code := "75002" };
 */
 
 /* Projection, and its complement, remove (Algebra A's REMOVE): the tuple
@@ -159,6 +150,22 @@ operator extract{
     call debug_value{v: p.x + p.y};
 ];
 
+/* Extension: the tuple with attributes added, each `name := value`, where
+   the value is computed from the tuple's own attributes, which are in scope
+   by name and hide variables and parameters of the same name. Tutorial D:
+   EXTEND ADDR ADD ( 2 AS FLOOR ). Implemented, and printed twice like the
+   projections. */
+var floored := addr extend { floor := 2, line := street || ", " || city };
+var summed := q extend { total := x + y, outer := tuple { inner: x } };
+
+operator extend_addr{
+    a: tuple { street: text, city: text, country: text, postal_code: text },
+    p: tuple { x: approximate, y: approximate }
+} [
+    call debug_value{v: a extend { floor := 2, line := street || ", " || city }};
+    call debug_value{v: p extend { total := x + y, outer := tuple { inner: x } }};
+];
+
 operator main{} [
     call debug_value{v: located};
     call debug_value{v: unlocated};
@@ -170,6 +177,8 @@ operator main{} [
     call debug_value{v: code};
     call debug_value{v: flag};
     call debug_value{v: sum};
+    call debug_value{v: floored};
+    call debug_value{v: summed};
 
     call project_addr{a: addr};
 
@@ -178,4 +187,6 @@ operator main{} [
     call build_addr{street: "Невский проспект", n: 12};
 
     call extract{a: addr, t: x, p: q};
+
+    call extend_addr{a: addr, p: q};
 ];

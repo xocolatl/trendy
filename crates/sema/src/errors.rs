@@ -666,7 +666,7 @@ pub(crate) fn not_projectable(
     Diagnostic::error(Code::WrongOperandType, message, at, label)
         .with_secondary(operand.span(), format!("this is `{ty}`"))
         .with_note(
-            "a projection, `r{a, b}`, `r remove {c}` and `r rename {a as b}` work on the attributes of a tuple or relation",
+            "a projection, `r{a, b}`, `r remove {c}`, `r rename {a as b}` and `r extend { d := … }` work on the attributes of a tuple or relation",
         )
 }
 
@@ -949,6 +949,65 @@ pub(crate) fn attribute_exists(
         "attributes are a set, so names are unique; a new name must be free, unless the attribute that has it is renamed too",
     )
     .with_help("choose a free name, or rename the other attribute in the same `rename`")
+}
+
+/// `extend {}`, written `postfix` after `operand`, which adds nothing.
+pub(crate) fn empty_extend(
+    postfix: &trendy_syntax::ast::PostfixExpr,
+    operand: &Expr,
+) -> Diagnostic {
+    let end = postfix.span().end;
+    let keyword = postfix.operator().map_or(operand.span().end, |t| {
+        trendy_syntax::span(t.text_range()).start
+    });
+    Diagnostic::error(
+        Code::EmptyRemove,
+        "`extend {}` adds nothing",
+        Span::new(keyword, end),
+        "no new attributes",
+    )
+    .with_note(
+        "`extend` takes new attributes, each `name := value`; with none it would change nothing",
+    )
+    .with_suggestion(
+        "drop the `extend {}`",
+        vec![Edit {
+            span: Span::new(operand.span().end, end),
+            replacement: String::new(),
+        }],
+    )
+}
+
+/// The new attribute `name`, at `span`, which `operand`, of type `ty`,
+/// already has.
+pub(crate) fn extension_exists(
+    name: &str,
+    span: Span,
+    ty: &hir::Type,
+    operand: &Expr,
+) -> Diagnostic {
+    Diagnostic::error(
+        Code::AttributeExists,
+        format!("attribute `{name}` already exists"),
+        span,
+        "this name is taken",
+    )
+    .with_secondary(operand.span(), format!("this is `{ty}`"))
+    .with_note("`extend` adds attributes; attributes are a set, so a new one needs a name the operand doesn't have")
+    .with_help(format!(
+        "to compute a new value for `{name}`, add it under another name, then remove the old one and rename the new: `… extend {{ new_{name} := … }} remove {{{name}}} rename {{new_{name} as {name}}}`"
+    ))
+}
+
+/// Computing a new attribute, whose value is written `value`, fails for a
+/// tuple of a constant operand, as `failure` says.
+pub(crate) fn extension_failure(failure: &crate::ops::ExtendFailure, value: &Expr) -> Diagnostic {
+    let tuple = source_text(&hir::Value::Tuple(failure.tuple.clone()))
+        .map_or_else(|| "a tuple".to_string(), |t| format!("`{t}`"));
+    self::failure(failure.failure, failure.scalar, value, None).with_note(format!(
+        "computing `{}` for {tuple}, which the operand has",
+        failure.attribute
+    ))
 }
 
 /// `remove {}`, written `postfix` after `operand`, which removes nothing.

@@ -73,7 +73,7 @@ var planned := join{plan, recipes, ingredients};
       to the people it's cooked for.
 
         var scaled := planned extend {
-            amount: quantity * approximate{n: people} / approximate{n: serves}
+            amount := quantity * approximate{n: people} / approximate{n: serves}
         };
 
    3. Summarize with sum, to add up each ingredient across recipes. The sum
@@ -82,7 +82,7 @@ var planned := join{plan, recipes, ingredients};
       So summarize can't project away `recipe` before it sums.
 
         var list := scaled summarize by { ingredient, unit } {
-            total: sum{v: amount}
+            total := sum{v: amount}
         };
 
    The list is then:

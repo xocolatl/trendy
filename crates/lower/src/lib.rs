@@ -46,20 +46,21 @@ pub fn lower(program: &hir::Program) -> lir::Program {
             function_ids: &function_ids,
             variable_data: &variable_data,
             slots: Vec::new(),
+            blocks: vec![placeholder()],
+            current: lir::BlockId(0),
             insts: Vec::new(),
-            owned: Vec::new(),
+            allocates: false,
+            tuples: Vec::new(),
         };
         for statement in body {
             function.statement(statement, &mut cx);
         }
+        function.end_block(lir::Terminator::Return, lir::BlockId(0));
         functions.push(lir::Function {
             name: op.name.clone(),
             params: params_layout(&op.params),
             slots: function.slots,
-            blocks: vec![lir::Block {
-                insts: function.insts,
-                terminator: lir::Terminator::Return,
-            }],
+            blocks: function.blocks,
         });
     }
 
@@ -209,21 +210,51 @@ struct FunctionBuilder<'a> {
     function_ids: &'a HashMap<hir::OperatorId, lir::FunctionId>,
     variable_data: &'a [lir::DataId],
     slots: Vec<lir::Layout>,
+    /// The blocks, those not ended yet placeholders.
+    blocks: Vec<lir::Block>,
+    /// The block being built, whose instructions are `insts`.
+    current: lir::BlockId,
     insts: Vec<lir::Inst>,
-    /// Texts and relations the current statement allocated, released when it
-    /// ends. No
-    /// value outlives the statement that computes it, since there is no
+    /// Whether the current statement calls a runtime function that makes a
+    /// text or relation, which the statement owns until it ends. No value
+    /// outlives the statement that computes it, since there is no
     /// assignment yet and operators return nothing.
-    owned: Vec<lir::Place>,
+    allocates: bool,
+    /// Where each tuple at hand is, innermost last: what `Current` refers
+    /// to, inside an `Extend`'s values.
+    tuples: Vec<lir::Place>,
+}
+
+/// A block not built yet.
+fn placeholder() -> lir::Block {
+    lir::Block {
+        insts: Vec::new(),
+        terminator: lir::Terminator::Return,
+    }
 }
 
 impl FunctionBuilder<'_> {
+    /// A new block, to be built later.
+    fn new_block(&mut self) -> lir::BlockId {
+        self.blocks.push(placeholder());
+        lir::BlockId(self.blocks.len() - 1)
+    }
+
+    /// End the current block with `terminator`, and go on building `next`.
+    fn end_block(&mut self, terminator: lir::Terminator, next: lir::BlockId) {
+        self.blocks[self.current.0] = lir::Block {
+            insts: std::mem::take(&mut self.insts),
+            terminator,
+        };
+        self.current = next;
+    }
+
     fn statement(&mut self, statement: &hir::Statement, cx: &mut Lowering) {
         self.call(statement, cx);
-        for text in std::mem::take(&mut self.owned) {
+        if std::mem::take(&mut self.allocates) {
             self.insts.push(lir::Inst::CallRuntime {
-                function: lir::RuntimeFn::Free,
-                args: vec![text],
+                function: lir::RuntimeFn::Release,
+                args: Vec::new(),
             });
         }
     }
@@ -251,7 +282,7 @@ impl FunctionBuilder<'_> {
                         let src = self.place(&args[name], cx);
                         self.insts.push(lir::Inst::Copy {
                             dst: lir::Place {
-                                base: slot.base,
+                                base: slot.base.clone(),
                                 path: vec![i],
                             },
                             src,
@@ -366,6 +397,8 @@ impl FunctionBuilder<'_> {
                 let rhs = self.place(rhs, cx);
                 self.and(&lhs_ty, &rhs_ty, lhs, rhs, cx)
             }
+            hir::Expr::Current(depth, _) => self.tuples[self.tuples.len() - 1 - depth].clone(),
+            hir::Expr::Extend(operand, _, attributes) => self.extend(expr, operand, attributes, cx),
             hir::Expr::Binary(op, lhs, rhs) => {
                 let operand_ty = self.program.type_of(lhs, self.within);
                 let lhs = self.place(lhs, cx);
@@ -443,8 +476,160 @@ impl FunctionBuilder<'_> {
                 descriptor,
             ],
         });
-        self.owned.push(dst.clone());
+        self.allocates = true;
         dst
+    }
+
+    /// `expr`, `operand` extended with `attributes`, computed into a new
+    /// stack slot.
+    fn extend(
+        &mut self,
+        expr: &hir::Expr,
+        operand: &hir::Expr,
+        attributes: &BTreeMap<String, hir::Expr>,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let ty = self.program.type_of(operand, self.within);
+        let result_ty = self.program.type_of(expr, self.within);
+        let src = self.place(operand, cx);
+        match (&ty, &result_ty) {
+            (hir::Type::Tuple(heading), hir::Type::Tuple(result)) => {
+                let dst = self.slot(layout(&result_ty));
+                self.extended(heading, &src, attributes, result, &dst, cx);
+                dst
+            }
+            (hir::Type::Relation(heading), hir::Type::Relation(result)) => {
+                self.extend_relation(heading, src, attributes, result, cx)
+            }
+            _ => unreachable!("sema extends only tuples and relations"),
+        }
+    }
+
+    /// Build at `dst` the tuple at `src`, with `heading`, extended with
+    /// `attributes`: each attribute of `result`, in name order, is copied
+    /// from `src`, or computed with `src` as the tuple at hand.
+    fn extended(
+        &mut self,
+        heading: &hir::Heading,
+        src: &lir::Place,
+        attributes: &BTreeMap<String, hir::Expr>,
+        result: &hir::Heading,
+        dst: &lir::Place,
+        cx: &mut Lowering,
+    ) {
+        let own: Vec<&str> = heading.attributes().map(|(name, _)| name).collect();
+        self.tuples.push(src.clone());
+        for (j, (name, ty)) in result.attributes().enumerate() {
+            let from = if let Some(value) = attributes.get(name) {
+                self.place(value, cx)
+            } else {
+                let i = own
+                    .iter()
+                    .position(|a| *a == name)
+                    .expect("an attribute is the operand's or added");
+                let mut from = src.clone();
+                from.path.push(i);
+                from
+            };
+            let mut to = dst.clone();
+            to.path.push(j);
+            self.insts.push(lir::Inst::Copy {
+                dst: to,
+                src: from,
+                layout: layout(ty),
+            });
+        }
+        self.tuples.pop();
+    }
+
+    /// The relation at `src`, with `heading`, with each tuple extended with
+    /// `attributes` into one with the attributes of `result`: a loop over
+    /// the tuples, building each extended tuple in a new relation, which the
+    /// runtime allocates and then sorts into the canonical order.
+    fn extend_relation(
+        &mut self,
+        heading: &hir::Heading,
+        src: lir::Place,
+        attributes: &BTreeMap<String, hir::Expr>,
+        result: &hir::Heading,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let tuple = layout(&hir::Type::Tuple(heading.clone()));
+        let result_tuple = layout(&hir::Type::Tuple(result.clone()));
+        let result_ty = hir::Type::Relation(result.clone());
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&result_ty)));
+        let mut count = src.clone();
+        count.path.push(1);
+        let dst = self.slot(layout(&result_ty));
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Allocate,
+            args: vec![dst.clone(), count.clone(), descriptor.clone()],
+        });
+        self.allocates = true;
+
+        let index = self.slot(lir::Layout::Usize);
+        let zero = cx.constant(vec![lir::Field::Usize(0)]);
+        self.insts.push(lir::Inst::Copy {
+            dst: index.clone(),
+            src: lir::Place {
+                base: lir::Base::Data(zero),
+                path: vec![0],
+            },
+            layout: lir::Layout::Usize,
+        });
+        let (head, body, done) = (self.new_block(), self.new_block(), self.new_block());
+        self.end_block(lir::Terminator::Jump(head), head);
+        let more = self.slot(lir::Layout::U8);
+        self.insts.push(lir::Inst::Binary {
+            dst: more.clone(),
+            op: lir::BinaryOp::Compare(lir::Comparison::Less, lir::Operand::Usize),
+            lhs: index.clone(),
+            rhs: count,
+        });
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: more,
+                then: body,
+                otherwise: done,
+            },
+            body,
+        );
+        let from = self.pointer_slot();
+        let to = self.pointer_slot();
+        self.insts.push(lir::Inst::Element {
+            dst: lir::Place::whole(lir::Base::Slot(from)),
+            relation: src,
+            index: index.clone(),
+            tuple: tuple.clone(),
+        });
+        self.insts.push(lir::Inst::Element {
+            dst: lir::Place::whole(lir::Base::Slot(to)),
+            relation: dst.clone(),
+            index: index.clone(),
+            tuple: result_tuple.clone(),
+        });
+        let indirect = |slot, pointee| lir::Place::whole(lir::Base::Indirect { slot, pointee });
+        self.extended(
+            heading,
+            &indirect(from, tuple),
+            attributes,
+            result,
+            &indirect(to, result_tuple),
+            cx,
+        );
+        self.insts.push(lir::Inst::Increment { place: index });
+        self.end_block(lir::Terminator::Jump(head), done);
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Sort,
+            args: vec![dst.clone(), descriptor],
+        });
+        dst
+    }
+
+    /// A new stack slot holding an address.
+    fn pointer_slot(&mut self) -> lir::SlotId {
+        self.slots.push(lir::Layout::Address);
+        lir::SlotId(self.slots.len() - 1)
     }
 
     /// The value at `src`, of type `ty`, reshaped into one of type
@@ -470,7 +655,7 @@ impl FunctionBuilder<'_> {
                 from.path.push(i);
                 self.insts.push(lir::Inst::Copy {
                     dst: lir::Place {
-                        base: dst.base,
+                        base: dst.base.clone(),
                         path: vec![j],
                     },
                     src: from,
@@ -498,7 +683,7 @@ impl FunctionBuilder<'_> {
                 lir::Place::whole(lir::Base::Data(offsets)),
             ],
         });
-        self.owned.push(dst.clone());
+        self.allocates = true;
         dst
     }
 
@@ -572,7 +757,7 @@ impl FunctionBuilder<'_> {
             function: lir::RuntimeFn::And,
             args: [vec![dst.clone()], args].concat(),
         });
-        self.owned.push(dst.clone());
+        self.allocates = true;
         dst
     }
 
@@ -611,7 +796,7 @@ impl FunctionBuilder<'_> {
                     function: lir::RuntimeFn::Concat,
                     args: vec![dst.clone(), lhs, rhs],
                 });
-                self.owned.push(dst.clone());
+                self.allocates = true;
                 return dst;
             }
             hir::BinaryOp::Compare(comparison, hir::Compared::Scalar(hir::Scalar::Text)) => {
@@ -637,6 +822,7 @@ impl FunctionBuilder<'_> {
                 lir::Operand::Boolean => lir::Layout::U8,
                 lir::Operand::Numeric(lir::Numeric::Integer) => lir::Layout::I64,
                 lir::Operand::Numeric(lir::Numeric::Approximate) => lir::Layout::F64Bits,
+                lir::Operand::Usize => unreachable!("only comparisons take indexes"),
             },
         });
         self.insts.push(lir::Inst::Binary {
@@ -970,18 +1156,18 @@ mod tests {
             .insts
             .iter()
             .map(|inst| match inst {
-                lir::Inst::CallRuntime { function, args } => (*function, args[0].clone()),
+                lir::Inst::CallRuntime { function, args } => (*function, args.first().cloned()),
                 other => panic!("unexpected {other:?}"),
             })
             .collect();
+        // Released together, once, when the statement ends.
         assert_eq!(
             runtime,
             [
-                (lir::RuntimeFn::Concat, slot(0)),
-                (lir::RuntimeFn::Concat, slot(1)),
-                (lir::RuntimeFn::DebugValue, slot(1)),
-                (lir::RuntimeFn::Free, slot(0)),
-                (lir::RuntimeFn::Free, slot(1)),
+                (lir::RuntimeFn::Concat, Some(slot(0))),
+                (lir::RuntimeFn::Concat, Some(slot(1))),
+                (lir::RuntimeFn::DebugValue, Some(slot(1))),
+                (lir::RuntimeFn::Release, None),
             ]
         );
     }
@@ -1026,19 +1212,92 @@ mod tests {
             9,
             "dst, the operands, three descriptors, the sources and the common attributes"
         );
-        let descriptors: Vec<_> = args[3..6].iter().map(|a| a.base).collect();
+        let descriptors: Vec<_> = args[3..6].iter().map(|a| &a.base).collect();
         assert!(
             descriptors[0] != descriptors[1] && descriptors[1] != descriptors[2],
             "the result's and each operand's: {descriptors:?}"
         );
-        let freed = main.blocks[0].insts.last().unwrap();
+        let released = main.blocks[0].insts.last().unwrap();
         assert_eq!(
-            freed,
+            released,
             &lir::Inst::CallRuntime {
-                function: lir::RuntimeFn::Free,
-                args: vec![slot],
+                function: lir::RuntimeFn::Release,
+                args: Vec::new(),
             }
         );
+    }
+
+    #[test]
+    fn extending_a_relation_loops_over_its_tuples() {
+        let heading = hir::Heading::new([("n".to_string(), integer())].into());
+        let n = hir::Expr::Extract(
+            Box::new(hir::Expr::Current(0, heading.clone())),
+            "n".to_string(),
+        );
+        let added = hir::Heading::new([("m".to_string(), integer())].into());
+        let extend = hir::Expr::Extend(
+            Box::new(hir::Expr::Variable(hir::VariableId(0))),
+            added,
+            [("m".to_string(), n)].into(),
+        );
+        let lowered = lower(&program(
+            vec![
+                debug_value(),
+                user("main", &[], vec![call(0, vec![("v", extend)])]),
+            ],
+            vec![variable(
+                "r",
+                hir::Value::Relation(hir::RelationValue {
+                    heading,
+                    tuples: std::collections::BTreeSet::new(),
+                }),
+            )],
+        ));
+        let main = &lowered.functions[0];
+        let [entry, head, body, done] = &main.blocks[..] else {
+            panic!("{:#?}", main.blocks);
+        };
+        let runtime = |block: &lir::Block| -> Vec<lir::RuntimeFn> {
+            block
+                .insts
+                .iter()
+                .filter_map(|inst| match inst {
+                    lir::Inst::CallRuntime { function, .. } => Some(*function),
+                    _ => None,
+                })
+                .collect()
+        };
+        // The result is allocated, then each tuple computed into it, then
+        // sorted.
+        assert_eq!(runtime(entry), [lir::RuntimeFn::Allocate]);
+        assert_eq!(entry.terminator, lir::Terminator::Jump(lir::BlockId(1)));
+        assert!(matches!(
+            head.terminator,
+            lir::Terminator::Branch {
+                then: lir::BlockId(2),
+                otherwise: lir::BlockId(3),
+                ..
+            }
+        ));
+        assert!(
+            body.insts
+                .iter()
+                .any(|inst| matches!(inst, lir::Inst::Element { .. }))
+        );
+        assert!(matches!(
+            body.insts.last(),
+            Some(lir::Inst::Increment { .. })
+        ));
+        assert_eq!(body.terminator, lir::Terminator::Jump(lir::BlockId(1)));
+        assert_eq!(
+            runtime(done),
+            [
+                lir::RuntimeFn::Sort,
+                lir::RuntimeFn::DebugValue,
+                lir::RuntimeFn::Release
+            ]
+        );
+        assert_eq!(done.terminator, lir::Terminator::Return);
     }
 
     #[test]

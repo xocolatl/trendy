@@ -152,6 +152,13 @@ be in any order and brackets what can't, so join's and times's operands
 go in braces, and compose's in brackets; the others are fixed to them
 (P0003).
 
+`extend`, like `remove` and `rename`, is postfix, and takes a list of new
+attributes, each `name := value` (`Extension`). A tuple's `name: value`
+and keyword arguments' `name = value` are parsed as the extension meant and
+fixed to `:=`, and SQL's and Tutorial D's `value as name` to
+`name := value` (P0011). A value with no name is reported without a fix,
+since the name can't be guessed.
+
 **Must not:** resolve names, check meaning, or reject a program that is
 grammatically valid. For example, "no `main`", "duplicate name" and "unknown
 type" are sema errors, not parse errors.
@@ -224,7 +231,12 @@ order has no meaning in the language.
 The relational operators are those of Algebra A (TTM Appendix A), so that
 the optimizer has few to rewrite: `Remove`, which projection also becomes,
 `Rename`, and `And`, which `join`, `times` and `compose` all become, with
-compose's common attributes then removed.
+compose's common attributes then removed. `Extend` adds attributes, each
+computed by an expression from the tuple at hand, `Current(depth, …)`: the
+tuple of the `Extend` `depth` levels out, so that a nested `extend` can
+refer to an outer tuple's attributes. `Extend` carries the added
+attributes' heading, since an empty relation has no tuple to take their
+types from.
 
 Every type's equality must hold exactly when no operator can tell two values
 apart (TTM RM Prescription 8). For approximate numbers, that is IEEE 754
@@ -266,8 +278,13 @@ point at the two tuples, sema evaluates each tuple of the initial value's
 relation selector again, only once a key is found violated; the value was
 already checked, so that can't fail.
 
-In an operator's body, expressions become `hir::Expr`. Whatever doesn't
-depend on parameters or variables is folded to a constant, and so is
+Expressions are checked into `hir::Expr` by one checker (`check::Checker`),
+for initial values and operator bodies alike; only what names refer to
+differs (`check::Names`). In an initial value, a name is a variable's value,
+evaluated when compiling, so the whole expression folds to a constant; in a
+body, it is a parameter, which hides a variable of the same name, or a
+variable. Whatever doesn't depend on parameters or variables is folded to a
+constant, and so is
 whatever a constant operand decides (`p and false` is `false`, `true and p`
 is `p`, and `n * 1` is `n`): expressions have no side effects, so this never
 changes what a program does. An operand is dropped only if it can't fail,
@@ -278,12 +295,20 @@ literal, so that the smallest integer can be written. Approximate folding and
 simplification are exact IEEE 754 binary64, the same arithmetic the program
 does at run time, so folding never changes a result.
 
-Tuple and relation selectors are checked once for both kinds of value
-(`types::Selectors`): in an initial value they produce `hir::Value`s, and
-in a body `hir::Expr`s, folded to a constant when every part is one. A
-selector with run-time parts becomes `hir::Expr::Tuple` or
+A tuple or relation selector folds to a constant when every part is one;
+one with run-time parts becomes `hir::Expr::Tuple` or
 `hir::Expr::Relation`. Duplicate tuples are an error only when both are
 constants; tuples known only when running become one if they are equal.
+
+In an `extend`'s values, names resolve first to the attributes of the tuple
+at hand (`check::TupleNames`), as `Current(0, …)`'s attributes, and then to
+whatever they name around the `extend`, one `Current` level deeper. An
+unknown name is reported with the attributes among the candidates, so a
+misspelled attribute gets a fix. A new attribute must not be the operand's
+(A0024) and is given once (A0008). When the operand is a constant, the
+values are computed for each of its tuples by substituting it for the
+tuple at hand and folding again (`ops::extend`), so a failure, such as an
+overflow for one tuple, is a compile error, with a note on the tuple.
 
 The arithmetic operators are overloaded on integers and approximate numbers
 (`ops::Operator` resolves to a typed `hir::BinaryOp`): the operand type
@@ -336,11 +361,14 @@ with a rename that fixes both.
 ### lir (`trendy_lir`)
 
 **Provides:** the low-level IR. A function is a control-flow graph of basic
-blocks: each block is a list of instructions (`Copy`, `Call`, `CallRuntime`,
-and the boolean and integer `Unary` and `Binary`) ending in a terminator. Instructions refer to memory through places: a data
-object, a stack slot, or the parameter struct, plus a path through nested
-structs. Every value's shape is a `Layout`. There is no nesting and nothing
-implicit: every jump and return is spelled out.
+blocks: each block is a list of instructions (`Copy`, `Call`,
+`CallRuntime`, the boolean and integer `Unary` and `Binary`, and `Element`
+and `Increment` for loops) ending in a terminator: `Return`, `Jump` or
+`Branch`. Instructions refer to memory through places: a data object, a
+stack slot, the parameter struct, or what the address in a slot points to
+(`Base::Indirect`, such as the tuple a loop is at), plus a path through
+nested structs. Every value's shape is a `Layout`. There is no nesting and
+nothing implicit: every jump and return is spelled out.
 
 It also describes static data (`Data`) field by field, rather than as bytes,
 so the description doesn't depend on the target. Values are represented like
@@ -377,10 +405,13 @@ then reads.
 
 It also owns the lifetime of allocated values. A concatenation done at run
 time calls `trendy_rt_concat`, which allocates the result's bytes with
-`malloc`. No value can outlive the statement that computes it yet, since
-there is no assignment and operators return nothing, so lowering releases
-each one with `trendy_rt_free` when its statement ends. Assignment and
-returned values will need a real ownership scheme.
+`malloc`, as do the runtime functions that make relations. No value can
+outlive the statement that computes it yet, since there is no assignment
+and operators return nothing. So the statement owns them all: the runtime
+keeps a list of what it made, and a statement that made anything ends with
+`trendy_rt_release`, which frees the list. That holds however many values a
+loop made, which per-value freeing couldn't track. Assignment and returned
+values will need a real ownership scheme.
 
 An attribute's value, `t.a` (`hir::Expr::Extract`), is the tuple's place
 with the attribute's field added to its path, so it costs nothing; sema
@@ -408,6 +439,16 @@ results are sorted into the canonical order, into memory released like a
 text's. Lowering passes where each attribute of the result comes from, and
 each common attribute's offset in both operands and its type, so here too
 the runtime never matches attributes by name.
+
+An extension (`hir::Expr::Extend`) is the first relational operator that
+computes compiled expressions for each tuple, so it becomes a loop. For a
+tuple, lowering builds the result in a slot: each attribute copied from
+the operand or computed, with the operand's place as the tuple at hand.
+For a relation, `trendy_rt_allocate` makes the result's tuples; a loop then
+goes through the operand's, with the address of the tuple at hand in a
+slot (`Base::Indirect`), building each result tuple the same way; and
+`trendy_rt_sort` puts them in the canonical order. A failure inside the
+loop stops the program as anywhere else.
 
 The canonical order of a relation's tuples is `hir::Value`'s order, which
 the compiler uses for constants and the runtime reproduces

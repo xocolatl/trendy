@@ -94,9 +94,11 @@ fn classify(token: &SyntaxToken) -> Option<Highlight> {
         (SyntaxKind::Ident, Some(SyntaxKind::Name), Some(SyntaxKind::VarDecl)) => {
             (Class::Variable, true)
         }
-        (SyntaxKind::Ident, Some(SyntaxKind::Name), Some(SyntaxKind::AttributeType)) => {
-            (Class::Attribute, true)
-        }
+        (
+            SyntaxKind::Ident,
+            Some(SyntaxKind::Name),
+            Some(SyntaxKind::AttributeType | SyntaxKind::Extension),
+        ) => (Class::Attribute, true),
         (
             SyntaxKind::Ident,
             Some(SyntaxKind::Name),
@@ -237,6 +239,21 @@ mod tests {
                 ("d", Class::Variable, false),
                 ("compose", Class::ExprOperator, false),
                 ("e", Class::Variable, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn extensions() {
+        assert_eq!(
+            highlight("var a := b extend { c := d };"),
+            [
+                ("var", Class::Keyword, false),
+                ("a", Class::Variable, true),
+                ("b", Class::Variable, false),
+                ("extend", Class::ExprOperator, false),
+                ("c", Class::Attribute, true),
+                ("d", Class::Variable, false),
             ]
         );
     }

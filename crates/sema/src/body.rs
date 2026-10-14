@@ -1,14 +1,14 @@
 //! Operators: their parameters, and the statements and expressions in their
 //! bodies.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 
 use trendy_diag::{Diagnostic, Span, edit_distance};
 use trendy_hir as hir;
-use trendy_syntax::ast::{self, AstNode, AttributeValue, Expr};
+use trendy_syntax::ast::{self, AstNode, AttributeValue};
 
-use crate::ops::{self, Operator, Resolved};
-use crate::types::{self, Expected, Origin, Scope, Selectors};
+use crate::check::{Checker, Lookup, Names};
+use crate::types::{self, Expected, Origin};
 use crate::{Kind, Values, errors};
 
 /// What a call needs to know about the operator it calls.
@@ -221,7 +221,7 @@ fn arguments(
         };
         match arg
             .value()
-            .and_then(|v| expr(&v, expected.as_ref(), within, cx, errors))
+            .and_then(|v| checked(&v, expected.as_ref(), within, cx, errors))
         {
             Some(value) => {
                 result.insert(name.clone(), value);
@@ -253,414 +253,64 @@ fn arguments(
     ok.then_some(result)
 }
 
-/// An expression in a body. Whatever doesn't depend on parameters or
-/// variables is evaluated now, to a constant, and the rest simplified.
-fn expr(
-    expr: &Expr,
+/// `expr`, in the body of `within`, checked against `expected` if given.
+fn checked(
+    expr: &ast::Expr,
     expected: Option<&Expected>,
     within: hir::OperatorId,
     cx: &Context,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Expr> {
-    match expr {
-        Expr::Name(name_ref) => name(name_ref, expr, expected, within, cx, errors),
-        Expr::Paren(paren) => self::expr(&paren.inner()?, expected, within, cx, errors),
-        Expr::Unary(unary) => {
-            if ops::negated_literal(unary).is_some() {
-                let mut scope = Literals { values: cx.values };
-                return types::value(expr, expected, &mut scope, errors).map(hir::Expr::Constant);
-            }
-            let token = unary.operator()?;
-            let (resolved, operands) =
-                operands(&token, vec![unary.operand()], expected, within, cx, errors)?;
-            types::result_type(expected, resolved.result(), expr, errors)?;
-            let [operand] = <[hir::Expr; 1]>::try_from(operands).ok()?;
-            match resolved {
-                Resolved::Identity(_) => Some(operand),
-                Resolved::Unary(op) => {
-                    types::evaluated(ops::unary(op, operand), resolved, expr, None, errors)
-                }
-                Resolved::Binary(_) => None,
-            }
-        }
-        Expr::Binary(_) | Expr::Nary(_) if ops::Joining::of(expr).is_some() => {
-            joined(expr, expected, within, cx, errors)
-        }
-        Expr::Nary(_) => None,
-        Expr::Binary(binary) => {
-            let token = binary.operator()?;
-            let (resolved, operands) = operands(
-                &token,
-                vec![binary.lhs(), binary.rhs()],
-                expected,
-                within,
-                cx,
-                errors,
-            )?;
-            types::result_type(expected, resolved.result(), expr, errors)?;
-            let (Resolved::Binary(op), Ok([lhs, rhs])) =
-                (resolved, <[hir::Expr; 2]>::try_from(operands))
-            else {
-                return None;
-            };
-            types::evaluated(
-                ops::binary(op, lhs, rhs),
-                resolved,
-                expr,
-                binary.rhs().as_ref(),
-                errors,
-            )
-        }
-        Expr::Extract(extract) => {
-            let operand_expr = extract.operand()?;
-            let operand = self::expr(&operand_expr, None, within, cx, errors)?;
-            let ty = type_of(&operand, within, cx);
-            let name = ops::extracted(extract, &operand_expr, &ty, errors)?;
-            let hir::Type::Tuple(heading) = &ty else {
-                unreachable!("checked to be a tuple");
-            };
-            let attribute_ty = heading.get(&name)?.clone();
-            if let Some(expected) = expected
-                && expected.ty != attribute_ty
-            {
-                errors.push(errors::type_mismatch(
-                    &expected.ty,
-                    &expected.origin,
-                    &attribute_ty,
-                    None,
-                    expr,
-                ));
-                return None;
-            }
-            Some(ops::extract(operand, name))
-        }
-        Expr::Project(_) | Expr::Postfix(_) => reshaped(expr, expected, within, cx, errors),
-        Expr::Literal(_) => {
-            let mut scope = Literals { values: cx.values };
-            types::value(expr, expected, &mut scope, errors).map(hir::Expr::Constant)
-        }
-        Expr::Tuple(tuple) => {
-            types::tuple_selector(tuple, expected, &mut Selected { cx, within }, errors)
-        }
-        Expr::Relation(relation) => {
-            types::relation_selector(relation, expected, &mut Selected { cx, within }, errors)
-        }
-    }
+    Checker::new(&mut BodyNames { cx, within }).expr(expr, expected, errors)
 }
 
-/// A projection, `remove` or `rename`, written `expr`, in a body.
-fn reshaped(
-    expr: &Expr,
-    expected: Option<&Expected>,
-    within: hir::OperatorId,
-    cx: &Context,
-    errors: &mut Vec<Diagnostic>,
-) -> Option<hir::Expr> {
-    let (operand_expr, rename) = match expr {
-        Expr::Project(project) => (project.operand()?, None),
-        Expr::Postfix(postfix) => (postfix.operand()?, Some(postfix)),
-        _ => unreachable!("only projections and postfix operators reshape"),
-    };
-    let operand = self::expr(&operand_expr, None, within, cx, errors)?;
-    let ty = type_of(&operand, within, cx);
-    let (result, result_ty) = match (expr, rename) {
-        (_, Some(postfix)) if ops::is_rename(postfix) => {
-            let renamings = ops::renamed(postfix, &operand_expr, &ty, errors)?;
-            let result_ty = ty.renamed(&renamings);
-            (ops::rename(operand, renamings), result_ty)
-        }
-        (Expr::Project(project), _) => {
-            let projection = ops::Projection::Project(project);
-            let names = ops::removed(projection, &operand_expr, &ty, errors)?;
-            let result_ty = ty.without(&names);
-            (ops::remove(operand, names), result_ty)
-        }
-        (_, Some(postfix)) => {
-            let projection = ops::Projection::Remove(postfix);
-            let names = ops::removed(projection, &operand_expr, &ty, errors)?;
-            let result_ty = ty.without(&names);
-            (ops::remove(operand, names), result_ty)
-        }
-        _ => unreachable!("matched above"),
-    };
-    if let Some(expected) = expected
-        && expected.ty != result_ty
-    {
-        errors.push(errors::type_mismatch(
-            &expected.ty,
-            &expected.origin,
-            &result_ty,
-            None,
-            expr,
-        ));
-        return None;
-    }
-    Some(result)
-}
-
-/// `expr`, a join, in a body.
-fn joined(
-    expr: &Expr,
-    expected: Option<&Expected>,
-    within: hir::OperatorId,
-    cx: &Context,
-    errors: &mut Vec<Diagnostic>,
-) -> Option<hir::Expr> {
-    let joining = ops::Joining::of(expr)?;
-    // Every operand is checked, so that each one's errors are reported.
-    let operands: Vec<Option<hir::Expr>> = joining
-        .operands
-        .iter()
-        .map(|operand| self::expr(operand, None, within, cx, errors))
-        .collect();
-    let operands: Vec<hir::Expr> = operands.into_iter().collect::<Option<_>>()?;
-    let types: Vec<hir::Type> = operands
-        .iter()
-        .map(|operand| type_of(operand, within, cx))
-        .collect();
-    let combined = joining.combined(&types, errors)?;
-    let result_ty = match &combined {
-        ops::Combined::And => types.iter().fold(
-            hir::Type::Relation(hir::Heading::default()),
-            |result, ty| result.and(ty),
-        ),
-        ops::Combined::Composed(steps) => {
-            let (first, rest) = types.split_first()?;
-            rest.iter()
-                .zip(steps)
-                .fold(first.clone(), |result, (ty, common)| {
-                    result.and(ty).without(common)
-                })
-        }
-    };
-    if let Some(expected) = expected
-        && expected.ty != result_ty
-    {
-        errors.push(errors::type_mismatch(
-            &expected.ty,
-            &expected.origin,
-            &result_ty,
-            None,
-            expr,
-        ));
-        return None;
-    }
-    Some(match combined {
-        ops::Combined::And => ops::and(operands),
-        ops::Combined::Composed(steps) => {
-            let mut operands = operands.into_iter();
-            let first = operands.next()?;
-            operands
-                .zip(steps)
-                .fold(first, |result, (operand, common)| {
-                    ops::remove(ops::and(vec![result, operand]), common)
-                })
-        }
-    })
-}
-
-/// The operator written `token` and its checked `operands`.
-fn operands(
-    token: &trendy_syntax::SyntaxToken,
-    operands: Vec<Option<Expr>>,
-    expected: Option<&Expected>,
-    within: hir::OperatorId,
-    cx: &Context,
-    errors: &mut Vec<Diagnostic>,
-) -> Option<(Resolved, Vec<hir::Expr>)> {
-    let op = Operator::of(token)?;
-    ops::check_operands(
-        op,
-        token,
-        operands,
-        expected,
-        &mut |operand, expected, errors| {
-            let checked = self::expr(operand, expected, within, cx, errors)?;
-            let ty = type_of(&checked, within, cx);
-            Some((checked, ty))
-        },
-        errors,
-    )
-}
-
-/// The type of `expr`, in the body of `within`.
-fn type_of(expr: &hir::Expr, within: hir::OperatorId, cx: &Context) -> hir::Type {
-    match expr {
-        hir::Expr::Constant(value) => value.ty(),
-        hir::Expr::Variable(id) => cx.variables[id.0].ty.clone(),
-        hir::Expr::Parameter(name) => match &cx.operators[within.0].params[name] {
-            hir::ParamType::Type(ty) => ty.clone(),
-            hir::ParamType::Any => unreachable!("only built-ins have `any` parameters"),
-        },
-        hir::Expr::Unary(op, _) => hir::Type::Scalar(op.result()),
-        hir::Expr::Binary(op, ..) => hir::Type::Scalar(op.result()),
-        hir::Expr::Extract(tuple, name) => match type_of(tuple, within, cx) {
-            hir::Type::Tuple(heading) => heading
-                .get(name)
-                .cloned()
-                .expect("sema extracts only attributes the tuple has"),
-            other => unreachable!("extracting from {other}"),
-        },
-        hir::Expr::Tuple(attributes) => hir::Type::Tuple(hir::Heading::new(
-            attributes
-                .iter()
-                .map(|(name, e)| (name.clone(), type_of(e, within, cx)))
-                .collect(),
-        )),
-        hir::Expr::Relation(heading, _) => hir::Type::Relation(heading.clone()),
-        hir::Expr::Remove(operand, names) => type_of(operand, within, cx).without(names),
-        hir::Expr::Rename(operand, renamings) => type_of(operand, within, cx).renamed(renamings),
-        hir::Expr::And(lhs, rhs) => type_of(lhs, within, cx).and(&type_of(rhs, within, cx)),
-    }
-}
-
-/// A name in a body: a parameter, or else a variable.
-fn name(
-    name_ref: &ast::NameRef,
-    expr: &Expr,
-    expected: Option<&Expected>,
-    within: hir::OperatorId,
-    cx: &Context,
-    errors: &mut Vec<Diagnostic>,
-) -> Option<hir::Expr> {
-    let ident = name_ref.ident()?;
-    let name = ident.text();
-    let span = trendy_syntax::span(ident.text_range());
-    let params = &cx.operators[within.0].params;
-
-    // Parameters hide variables of the same name.
-    let (resolved, ty) = if let Some(param) = params.get(name) {
-        let hir::ParamType::Type(ty) = param else {
-            unreachable!("only built-ins have `any` parameters");
-        };
-        (hir::Expr::Parameter(name.to_string()), ty.clone())
-    } else if let Some(&id) = cx.variable_ids.get(name) {
-        (hir::Expr::Variable(id), cx.variables[id.0].ty.clone())
-    } else {
-        // A variable with errors in its declaration is already reported.
-        if cx
-            .values
-            .get(name)
-            .is_none_or(|(kind, _)| kind != Kind::Variable)
-        {
-            cx.not_a_value(name, span, within, errors);
-        }
-        return None;
-    };
-    if let Some(expected) = expected
-        && ty != expected.ty
-    {
-        errors.push(errors::type_mismatch(
-            &expected.ty,
-            &expected.origin,
-            &ty,
-            None,
-            expr,
-        ));
-        return None;
-    }
-    Some(resolved)
-}
-
-impl Context<'_> {
-    /// Report the name `name`, at `span`, which is neither a parameter of
-    /// `within` nor a variable.
-    fn not_a_value(
-        &self,
-        name: &str,
-        span: Span,
-        within: hir::OperatorId,
-        errors: &mut Vec<Diagnostic>,
-    ) {
-        if let Some((Kind::Operator | Kind::Builtin, _)) = self.values.get(name) {
-            errors.push(errors::operator_as_value(name, span));
-            return;
-        }
-        let candidates: Vec<&str> = self.operators[within.0]
-            .params
-            .keys()
-            .map(String::as_str)
-            .chain(self.variable_ids.keys().map(String::as_str))
-            .collect();
-        errors.push(errors::unknown_name(name, span, "value", &candidates));
-    }
-}
-
-/// Literals in a body, which have no names in them.
-struct Literals<'a> {
-    values: &'a Values,
-}
-
-impl Scope for Literals<'_> {
-    fn values(&self) -> &Values {
-        self.values
-    }
-
-    fn constant(&mut self, _: &ast::NameRef, _: &mut Vec<Diagnostic>) -> Option<hir::Value> {
-        unreachable!("a literal has no names")
-    }
-}
-
-/// Tuple and relation selectors in a body, whose values can be known only
-/// when the program runs.
-struct Selected<'a, 'b> {
+/// Names in the body of `within`: its parameters, which hide variables of
+/// the same name, and the variables.
+struct BodyNames<'a, 'b> {
     cx: &'a Context<'b>,
     within: hir::OperatorId,
 }
 
-impl Selectors for Selected<'_, '_> {
-    type Out = hir::Expr;
-
+impl Names for BodyNames<'_, '_> {
     fn values(&self) -> &Values {
         self.cx.values
     }
 
-    fn check(
-        &mut self,
-        expr: &Expr,
-        expected: Option<&Expected>,
-        errors: &mut Vec<Diagnostic>,
-    ) -> Option<hir::Expr> {
-        self::expr(expr, expected, self.within, self.cx, errors)
-    }
-
-    fn ty(&self, out: &hir::Expr) -> hir::Type {
-        type_of(out, self.within, self.cx)
-    }
-
-    fn constant<'o>(&self, out: &'o hir::Expr) -> Option<&'o hir::Value> {
-        match out {
-            hir::Expr::Constant(value) => Some(value),
-            _ => None,
+    fn resolve(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {
+        if self.cx.operators[self.within.0].params.contains_key(name) {
+            return Lookup::Found(hir::Expr::Parameter(name.to_string()));
+        }
+        if let Some(&id) = self.cx.variable_ids.get(name) {
+            return Lookup::Found(hir::Expr::Variable(id));
+        }
+        match self.cx.values.get(name) {
+            // A variable with errors in its declaration is already reported.
+            Some((Kind::Variable, _)) => Lookup::Reported,
+            Some((Kind::Operator | Kind::Builtin, _)) => {
+                errors.push(errors::operator_as_value(name, span));
+                Lookup::Reported
+            }
+            None => Lookup::Unknown,
         }
     }
 
-    fn tuple(&self, attributes: BTreeMap<String, hir::Expr>) -> hir::Expr {
-        let constants: Option<BTreeMap<String, hir::Value>> = attributes
-            .iter()
-            .map(|(name, e)| Some((name.clone(), self.constant(e)?.clone())))
-            .collect();
-        match constants {
-            Some(constants) => {
-                hir::Expr::Constant(hir::Value::Tuple(hir::TupleValue::new(constants)))
-            }
-            None => hir::Expr::Tuple(attributes),
-        }
+    fn candidates(&self) -> Vec<String> {
+        self.cx.operators[self.within.0]
+            .params
+            .keys()
+            .chain(self.cx.variable_ids.keys())
+            .cloned()
+            .collect()
     }
 
-    fn relation(&self, heading: hir::Heading, tuples: Vec<hir::Expr>) -> hir::Expr {
-        let constants: Option<BTreeSet<hir::TupleValue>> = tuples
-            .iter()
-            .map(|t| match self.constant(t)? {
-                hir::Value::Tuple(t) => Some(t.clone()),
-                _ => None,
-            })
-            .collect();
-        match constants {
-            Some(tuples) => {
-                hir::Expr::Constant(hir::Value::Relation(hir::RelationValue { heading, tuples }))
-            }
-            None => hir::Expr::Relation(heading, tuples),
+    fn leaf_type(&self, leaf: &hir::Expr) -> hir::Type {
+        match leaf {
+            hir::Expr::Variable(id) => self.cx.variables[id.0].ty.clone(),
+            hir::Expr::Parameter(name) => match &self.cx.operators[self.within.0].params[name] {
+                hir::ParamType::Type(ty) => ty.clone(),
+                hir::ParamType::Any => unreachable!("only built-ins have `any` parameters"),
+            },
+            _ => unreachable!("only variables and parameters are leaves"),
         }
     }
 }

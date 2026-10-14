@@ -1,8 +1,10 @@
 //! Low-level IR: what codegen consumes.
 //!
 //! Functions are control-flow graphs of basic blocks. There is no nesting and
-//! nothing implicit: every jump and return is spelled out. Relational
-//! operators will arrive here already fused into explicit loops.
+//! nothing implicit: every jump and return is spelled out. A relational
+//! operator that computes something for each tuple, such as `extend`,
+//! arrives here as an explicit loop over the tuples; the others are runtime
+//! calls.
 //!
 //! Static data is described field by field rather than as bytes, so the
 //! description doesn't depend on the target: codegen lays fields out with the
@@ -109,13 +111,20 @@ impl Place {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Base {
     /// A data object, whose layout is the struct of its fields.
     Data(DataId),
     Slot(SlotId),
     /// The current function's parameter struct.
     Params,
+    /// The value with layout `pointee` at the address in `slot`, a
+    /// [`Layout::Address`]: such as a relation's tuple, as a loop goes
+    /// through them.
+    Indirect {
+        slot: SlotId,
+        pointee: Layout,
+    },
 }
 
 /// A function in the runtime library.
@@ -127,19 +136,18 @@ pub enum RuntimeFn {
     /// [`Failure::code`] by value, not a place, so only codegen calls it.
     Fail,
     /// `trendy_rt_concat(dst, lhs, rhs)`: store the concatenation of two
-    /// texts at `dst`, in allocated memory that must be released with
-    /// [`RuntimeFn::Free`]. It stops the program if the memory can't be
+    /// texts at `dst`, in memory the statement owns (see
+    /// [`RuntimeFn::Release`]). It stops the program if the memory can't be
     /// allocated.
     Concat,
-    /// `trendy_rt_free(value)`: release the memory of a text or relation
-    /// made by [`RuntimeFn::Concat`], [`RuntimeFn::Reshape`],
-    /// [`RuntimeFn::Relation`] or [`RuntimeFn::And`].
-    Free,
+    /// `trendy_rt_release()`: release the memory of every text and relation
+    /// that runtime functions made since the last release, which a
+    /// statement owns until it ends.
+    Release,
     /// `trendy_rt_reshape(dst, src, result, source, offsets)`: store at
     /// `dst` the relation `src` with its tuples reshaped into the
     /// attributes the descriptor `result` describes, sorted canonically and
-    /// without duplicates, in allocated memory that must be released with
-    /// [`RuntimeFn::Free`]. `source` is the descriptor of `src`, and
+    /// without duplicates, in memory the statement owns. `source` is the descriptor of `src`, and
     /// `offsets` an array of [`Field::Offset`]s: for each attribute of
     /// `result`, the offset in a tuple of `src` of the attribute it comes
     /// from. Removing and renaming attributes are both reshaping.
@@ -147,15 +155,14 @@ pub enum RuntimeFn {
     /// `trendy_rt_relation(dst, tuples, count, descriptor)`: store at `dst`
     /// the relation, of the type the descriptor describes, whose tuples are
     /// the `count` (a [`Field::Usize`]) at `tuples`, one after another,
-    /// sorted canonically and without duplicates, in allocated memory that
-    /// must be released with [`RuntimeFn::Free`].
+    /// sorted canonically and without duplicates, in memory the statement
+    /// owns.
     Relation,
     /// `trendy_rt_and(dst, lhs, rhs, result, lhs_desc, rhs_desc, sources,
     /// common, common_count)`: store at `dst` the relation, of the type the
     /// descriptor `result` describes, of every tuple made of a tuple of
     /// `lhs` and one of `rhs` that agree on their common attributes
-    /// (Algebra A's AND), sorted canonically, in allocated memory that must
-    /// be released with [`RuntimeFn::Free`]. `lhs_desc` and `rhs_desc`
+    /// (Algebra A's AND), sorted canonically, in memory the statement owns. `lhs_desc` and `rhs_desc`
     /// describe the operands. `sources` is an array with, for each attribute
     /// of `result`, a struct of a [`Field::Usize`], 1 if it comes from `rhs`
     /// and 0 if from `lhs`, and its [`Field::Offset`] there. `common` is an
@@ -163,6 +170,16 @@ pub enum RuntimeFn {
     /// attribute: its offset in a tuple of `lhs`, its offset in one of
     /// `rhs`, and the [`Field::Address`] of its type's descriptor.
     And,
+    /// `trendy_rt_allocate(dst, count, descriptor)`: store at `dst` a
+    /// relation, of the type the descriptor describes, of `count` (a
+    /// [`Layout::Usize`]) tuples, zeroed, in memory the statement owns, for
+    /// compiled code to fill in. [`RuntimeFn::Sort`] then puts them in the
+    /// canonical order.
+    Allocate,
+    /// `trendy_rt_sort(relation, descriptor)`: sort the tuples of the
+    /// relation at `relation`, of the type the descriptor describes, into the
+    /// canonical order, in place, and drop duplicates, shortening it.
+    Sort,
     /// `trendy_rt_compare_text(dst, lhs, rhs)`: store -1, 0 or 1 at `dst`,
     /// an [`Layout::I64`], as `lhs` is before, equal to or after `rhs` in
     /// code point order.
@@ -181,10 +198,12 @@ impl RuntimeFn {
             RuntimeFn::DebugValue => "trendy_rt_debug_value",
             RuntimeFn::Fail => "trendy_rt_fail",
             RuntimeFn::Concat => "trendy_rt_concat",
-            RuntimeFn::Free => "trendy_rt_free",
+            RuntimeFn::Release => "trendy_rt_release",
             RuntimeFn::Reshape => "trendy_rt_reshape",
             RuntimeFn::Relation => "trendy_rt_relation",
             RuntimeFn::And => "trendy_rt_and",
+            RuntimeFn::Allocate => "trendy_rt_allocate",
+            RuntimeFn::Sort => "trendy_rt_sort",
             RuntimeFn::CompareText => "trendy_rt_compare_text",
             RuntimeFn::Equal => "trendy_rt_equal",
         }
@@ -218,6 +237,18 @@ pub enum Inst {
         lhs: Place,
         rhs: Place,
     },
+    /// Store at `dst`, a [`Layout::Address`], the address of tuple number
+    /// `index` (a [`Layout::Usize`]) of the relation at `relation`, whose
+    /// tuples have layout `tuple`.
+    Element {
+        dst: Place,
+        relation: Place,
+        index: Place,
+        tuple: Layout,
+    },
+    /// Add 1 to the [`Layout::Usize`] at `place`, which counts a loop's
+    /// iterations, and so never overflows.
+    Increment { place: Place },
 }
 
 /// The type an arithmetic operator works on.
@@ -235,6 +266,9 @@ pub enum Operand {
     /// [`Layout::U8`], `0` or `1`.
     Boolean,
     Numeric(Numeric),
+    /// [`Layout::Usize`], such as a loop's index, compared unsigned. Only
+    /// comparisons take it.
+    Usize,
 }
 
 /// A monadic operator.
@@ -345,6 +379,14 @@ pub struct Block {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Terminator {
     Return,
+    Jump(BlockId),
+    /// To `then` if the [`Layout::U8`] at `condition` is 1, and to
+    /// `otherwise` if it is 0.
+    Branch {
+        condition: Place,
+        then: BlockId,
+        otherwise: BlockId,
+    },
 }
 
 /// Index into [`Program::data`].
