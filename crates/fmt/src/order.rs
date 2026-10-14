@@ -3,7 +3,7 @@
 //! Attributes are unordered, so this never changes what a program means.
 
 use trendy_syntax::ast::{
-    AstNode, AttributeValue, Heading, Operator, RelationLiteral, SourceFile, TupleLiteral,
+    AstNode, AttributeValue, Expr, Heading, Operator, RelationLiteral, SourceFile, TupleLiteral,
     TypeExpr, VarDecl,
 };
 use trendy_syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
@@ -61,12 +61,15 @@ fn reorder(children: &mut [SyntaxElement], order: &[String]) {
 }
 
 /// The attribute order of `relation`'s tuples: its heading's if there is
-/// one, else its first tuple's.
+/// one, else its first tuple selector's.
 fn relation_order(relation: &RelationLiteral, file: &SourceFile) -> Option<Vec<String>> {
     if let Some(heading) = relation_heading(relation, file) {
         return Some(names(&heading));
     }
-    let first = relation.tuples().next()?;
+    let first = relation.elements().find_map(|element| match element {
+        Expr::Tuple(tuple) => Some(tuple),
+        _ => None,
+    })?;
     Some(
         first
             .attributes()

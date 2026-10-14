@@ -32,6 +32,8 @@ pub const FAIL_DIVISION_BY_ZERO: u32 = 1;
 pub const FAIL_APPROXIMATE_OVERFLOW: u32 = 2;
 /// Memory for a result couldn't be allocated.
 pub const FAIL_OUT_OF_MEMORY: u32 = 3;
+/// Tuples being joined disagree on a common attribute.
+pub const FAIL_TUPLE_MISMATCH: u32 = 4;
 
 /// The line written to stderr for each `FAIL_` constant, with the
 /// compiler's error code, which `trendyc --explain` describes.
@@ -42,6 +44,7 @@ pub fn failure_message(failure: u32) -> &'static str {
         FAIL_DIVISION_BY_ZERO => "error[R0002]: division by zero\n",
         FAIL_APPROXIMATE_OVERFLOW => "error[R0001]: approximate overflow\n",
         FAIL_OUT_OF_MEMORY => "error[R0003]: out of memory\n",
+        FAIL_TUPLE_MISMATCH => "error[R0004]: tuples disagree on a common attribute\n",
         // The compiler and the runtime disagree: a bug.
         _ => "error[X0000]: internal error: unknown run-time failure\n",
     }

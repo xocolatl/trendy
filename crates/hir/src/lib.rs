@@ -168,8 +168,11 @@ pub enum Expr {
     Rename(Box<Expr>, BTreeMap<String, String>),
     /// The relation of every tuple made of one tuple of each operand that
     /// agree on their common attributes (Algebra A's AND, of relations):
-    /// what `join`, `times` and `compose` all are. The operands are
-    /// relations whose common attributes have the same types.
+    /// what `join`, `times` and `compose` all are. Of tuples, the tuple of
+    /// both operands' attributes (tuple join, or tuple union), which fails
+    /// if they disagree on a common attribute, since no tuple would do. The
+    /// operands are both relations or both tuples, whose common attributes
+    /// have the same types.
     And(Box<Expr>, Box<Expr>),
     /// A tuple, or each tuple of a relation, with attributes computed, each
     /// by its expression from the tuple at hand, which is `Current(0, …)` in
@@ -246,6 +249,15 @@ impl Expr {
 pub enum Failure {
     Overflow,
     DivisionByZero,
+}
+
+/// Why tuples have no join: they disagree on `attribute`, whose value is
+/// `lhs` in one and `rhs` in the other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mismatch {
+    pub attribute: String,
+    pub lhs: Box<Value>,
+    pub rhs: Box<Value>,
 }
 
 /// The type an arithmetic operator works on: both operands and the result
@@ -909,15 +921,22 @@ impl Value {
         })
     }
 
-    /// The AND of two relations, as for [`Expr::And`].
+    /// The AND of two relations, or the join of two tuples, as for
+    /// [`Expr::And`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the attribute two tuples disagree on, with both values.
     ///
     /// # Panics
     ///
-    /// If either value isn't a relation, which sema rules out.
-    #[must_use]
-    pub fn and(&self, other: &Value) -> Value {
-        let (Value::Relation(lhs), Value::Relation(rhs)) = (self, other) else {
-            panic!("the AND of {self:?} and {other:?}");
+    /// If the values aren't both relations or both tuples, which sema rules
+    /// out.
+    pub fn and(&self, other: &Value) -> Result<Value, Mismatch> {
+        let (lhs, rhs) = match (self, other) {
+            (Value::Relation(lhs), Value::Relation(rhs)) => (lhs, rhs),
+            (Value::Tuple(lhs), Value::Tuple(rhs)) => return lhs.join(rhs).map(Value::Tuple),
+            _ => panic!("the AND of {self:?} and {other:?}"),
         };
         let common = lhs.heading.common(&rhs.heading);
         let uncommon = |heading: &Heading| -> BTreeSet<String> {
@@ -949,10 +968,10 @@ impl Value {
                 tuples.insert(TupleValue(attributes));
             }
         }
-        Value::Relation(RelationValue {
+        Ok(Value::Relation(RelationValue {
             heading: lhs.heading.and(&rhs.heading),
             tuples,
-        })
+        }))
     }
 }
 
@@ -986,6 +1005,27 @@ impl TupleValue {
         let mut all = self.0.clone();
         all.extend(attributes);
         TupleValue(all)
+    }
+
+    /// The tuple of both tuples' attributes, as for [`Expr::And`], or the
+    /// first attribute they disagree on.
+    ///
+    /// # Errors
+    ///
+    /// Returns the common attribute whose values differ, and both values.
+    pub fn join(&self, other: &TupleValue) -> Result<TupleValue, Mismatch> {
+        for (attribute, value) in &self.0 {
+            if let Some(theirs) = other.0.get(attribute)
+                && theirs != value
+            {
+                return Err(Mismatch {
+                    attribute: attribute.clone(),
+                    lhs: Box::new(value.clone()),
+                    rhs: Box::new(theirs.clone()),
+                });
+            }
+        }
+        Ok(self.with(other.0.clone()))
     }
 
     /// The tuple without the attributes named.
@@ -1060,6 +1100,7 @@ impl Type {
     pub fn and(&self, other: &Type) -> Type {
         match (self, other) {
             (Type::Relation(lhs), Type::Relation(rhs)) => Type::Relation(lhs.and(rhs)),
+            (Type::Tuple(lhs), Type::Tuple(rhs)) => Type::Tuple(lhs.and(rhs)),
             _ => panic!("the AND of {self} and {other}"),
         }
     }

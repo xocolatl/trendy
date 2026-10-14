@@ -296,6 +296,10 @@ operator main{} [];
   built from values known only when the program runs, so
   `relation { { x: a }, { x: b } }` has one tuple when `a = b`, and two
   otherwise. Tuples known when compiling must still be distinct.
+- **Any tuple can be an element,** not only a tuple selector: a variable,
+  a parameter, or any expression of a tuple, as in
+  `relation { ada, { name: "Edgar", born: 1923 } }`. Each must have the
+  relation's heading; one that isn't a tuple is an error (A0004).
 - **Relations are values like any other.** A tuple's attribute can be a
   relation, and so can a relation's.
 
@@ -1026,7 +1030,14 @@ operator main{} [
   apart attributes with the same name, rename them first. `rename` binds
   tighter than a join, so `r join s rename {id as r_id}` renames `s`'s
   attribute.
-- **Joins take relations.** Joining tuples is not in the language yet.
+- **Tuples join too:** `t join s` is the tuple of both tuples'
+  attributes, with the same rules for common attributes, lists and
+  `compose`; it is *The Third Manifesto*'s tuple union, also called tuple
+  join. Tuples that disagree on a common attribute have no join: that is
+  an error, when compiling if both are known then, and otherwise when the
+  program runs (R0004). `times` of tuples never fails. A join takes
+  relations, or tuples, but not both; a tuple among relations is fixed to
+  a relation of it, `relation { t }`.
 - **Lists:** `join{r, s, t}` and `times{r, s, t}` take any number of
   operands, in any order, since join and times are associative and
   commutative. Each operand of `join{…}` must have an attribute in common
@@ -1053,6 +1064,25 @@ operator main{} [
     call debug_value{v: placed};
 ];
 ```
+```trendy
+var ada := tuple { name: "Ada", born: 1815 };
+var place := tuple { name: "Ada", city: "London" };
+var joined := ada join place;
+var dated := ada times tuple { year: 2024 };
+
+operator main{} [
+    call debug_value{v: joined};
+];
+```
+
+```trendy,error
+var ada := tuple { name: "Ada", born: 1815 };
+var place := tuple { name: "Ada Lovelace", city: "London" };
+var joined := ada join place;
+
+operator main{} [];
+```
+
 - **SQL's spellings** are recognized (P0021): `natural join` and
   `inner join` are fixed to `join`, `cross join` to `times`, and `using`
   is deleted. `on` and the outer joins have no equivalent.
@@ -1350,6 +1380,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `NATURAL JOIN`, `INNER JOIN`, `JOIN … USING (a)` | `join` |
 | `CROSS JOIN` | `times` |
 | `JOIN { R1, R2, R3 }` | `join{r1, r2, r3}` |
+| `T1 UNION T2`, of tuples (tuple union) | `t1 join t2` |
 | `JOIN … ON r.a = s.b` | `r join s rename {b as a}` |
 | `LEFT JOIN`, `RIGHT JOIN`, `FULL JOIN` | none: there are no nulls |
 | `a / b` for integers | `a div b` |

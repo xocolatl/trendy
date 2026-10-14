@@ -401,13 +401,13 @@ fn key_start(token: &SyntaxToken) -> Option<SyntaxNode> {
 }
 
 fn is_multi_tuple_relation(node: &SyntaxNode) -> bool {
-    RelationLiteral::cast(node.clone()).is_some_and(|r| r.tuples().nth(1).is_some())
+    RelationLiteral::cast(node.clone()).is_some_and(|r| r.elements().nth(1).is_some())
 }
 
 /// How many items a list has.
 fn items(node: &SyntaxNode) -> usize {
     if let Some(relation) = RelationLiteral::cast(node.clone()) {
-        relation.tuples().count()
+        relation.elements().count()
     } else if let Some(tuple) = TupleLiteral::cast(node.clone()) {
         tuple.attributes().count()
     } else if let Some(args) = Arguments::cast(node.clone()) {

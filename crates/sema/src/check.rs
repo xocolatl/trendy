@@ -515,12 +515,18 @@ impl<'a> Checker<'a> {
                 let first = operands.next()?;
                 operands
                     .zip(steps)
-                    .fold(first, |result, (operand, common)| {
-                        ops::remove(ops::and(vec![result, operand]), common)
+                    .try_fold(first, |result, (operand, common)| {
+                        Ok(ops::remove(ops::and(vec![result, operand])?, common))
                     })
             }
         };
-        self.matched(expected, result, expr, errors)
+        match result {
+            Ok(result) => self.matched(expected, result, expr, errors),
+            Err(failed) => {
+                errors.push(errors::failed(&failed, expr));
+                None
+            }
+        }
     }
 
     /// The operator written `token` and its checked `operands`.

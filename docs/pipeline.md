@@ -150,7 +150,8 @@ an error node the same way, with no fix. The list of an `extend`, a
 `replace` or a `group` in brackets is parsed as it is, and a check of the
 finished tree (`sequences`) reports it: its items apply all at once, so
 the fix for an order asked for with brackets is a chain of the operator,
-not braces, which would change the meaning. A join of a list, `join{r, s, t}`, `times{…}` or
+not braces, which would change the meaning. A relation selector's elements are any expressions, a bare `{` or `tuple`
+starting a tuple selector, as Tutorial D's take any tuple expressions. A join of a list, `join{r, s, t}`, `times{…}` or
 `compose[…]`, is an operand (`NaryExpr`), recognized where an operand
 starts by the keyword followed by `{`, `[` or `(`. Braces enclose what can
 be in any order and brackets what can't, so join's and times's operands
@@ -500,6 +501,14 @@ results are sorted into the canonical order, into memory released like a
 text's. Lowering passes where each attribute of the result comes from, and
 each common attribute's offset in both operands and its type, so here too
 the runtime never matches attributes by name.
+
+`And` of tuples is the tuple join: lowering compares each common
+attribute and ends the block with `Terminator::Fail` if they differ, so
+the program stops with R0004, then copies each attribute from the operand
+that has it. Sema folds it for constants (`TupleValue::join`), reporting a
+mismatch when compiling; `ops::Failed` carries why constants have no
+value, an operator's failure or a mismatch, so that an `extend`'s values
+report either.
 
 An extension (`hir::Expr::Extend`) is the first relational operator that
 computes compiled expressions for each tuple, so it becomes a loop. For a

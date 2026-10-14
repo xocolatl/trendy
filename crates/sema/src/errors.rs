@@ -785,18 +785,54 @@ pub(crate) fn image_type_conflict(
     ))
 }
 
+/// The element `expr` of a relation selector, of type `found`, which isn't
+/// a tuple.
+pub(crate) fn not_a_tuple(found: &hir::Type, expr: &Expr) -> Diagnostic {
+    Diagnostic::error(
+        Code::TypeMismatch,
+        format!("mismatched types: expected a tuple, found `{found}`"),
+        expr.span(),
+        format!("this is `{found}`"),
+    )
+    .with_note(
+        "a relation's elements are tuples: tuple selectors, `{ a: 1 }`, or expressions of tuples",
+    )
+}
+
 /// The join written `token` applied to `operand`, of type `ty`, which isn't
-/// a relation.
+/// a relation or a tuple.
 pub(crate) fn not_joinable(token: &SyntaxToken, ty: &hir::Type, operand: &Expr) -> Diagnostic {
     let operator = token.text();
     Diagnostic::error(
         Code::WrongOperandType,
         format!("`{operator}` can't be applied to {}", plural(ty)),
         trendy_syntax::span(token.text_range()),
-        format!("`{operator}` takes relations"),
+        format!("`{operator}` takes relations, or tuples"),
     )
     .with_secondary(operand.span(), format!("this is `{ty}`"))
-    .with_note("`join`, `times` and `compose` combine the tuples of two relations")
+    .with_note("`join`, `times` and `compose` combine the tuples of relations, or the attributes of tuples")
+}
+
+/// The tuple `operand` in the join written `token` of relations.
+pub(crate) fn tuple_among_relations(token: &SyntaxToken, operand: &Expr) -> Diagnostic {
+    let operator = token.text();
+    let written = operand.syntax().text().to_string();
+    Diagnostic::error(
+        Code::WrongOperandType,
+        format!("`{operator}` can't combine a tuple with relations"),
+        operand.span(),
+        "this is a tuple",
+    )
+    .with_note(format!(
+        "`{operator}` takes relations, or tuples, but not both; a relation of one tuple joins like the tuple"
+    ))
+    .with_suggestion(
+        "make it a relation of one tuple",
+        vec![Edit {
+            span: operand.span(),
+            replacement: format!("relation {{ {written} }}"),
+        }],
+    )
 }
 
 /// The join written `token` of operands written at `lhs` and `rhs`, whose
@@ -1363,9 +1399,39 @@ pub(crate) fn gathering_exists(
 pub(crate) fn extension_failure(failure: &crate::ops::ExtendFailure, value: &Expr) -> Diagnostic {
     let tuple = source_text(&hir::Value::Tuple(failure.tuple.clone()))
         .map_or_else(|| "a tuple".to_string(), |t| format!("`{t}`"));
-    self::failure(failure.failure, failure.scalar, value, None).with_note(format!(
+    failed(&failure.failed, value).with_note(format!(
         "computing `{}` for {tuple}, which the operand has",
         failure.attribute
+    ))
+}
+
+/// Why `expr`, of constants, has no value, as `failed` says.
+pub(crate) fn failed(failed: &crate::ops::Failed, expr: &Expr) -> Diagnostic {
+    match failed {
+        crate::ops::Failed::Scalar(failure, scalar) => self::failure(*failure, *scalar, expr, None),
+        crate::ops::Failed::Mismatch(mismatch) => tuple_mismatch(mismatch, expr),
+    }
+}
+
+/// The join `expr` of tuples that disagree on an attribute, as `mismatch`
+/// says.
+fn tuple_mismatch(mismatch: &hir::Mismatch, expr: &Expr) -> Diagnostic {
+    let value =
+        |v: &hir::Value| source_text(v).map_or_else(|| "a value".to_string(), |t| format!("`{t}`"));
+    let name = &mismatch.attribute;
+    Diagnostic::error(
+        Code::TupleMismatch,
+        format!("the tuples disagree on `{name}`, so they have no join"),
+        expr.span(),
+        format!(
+            "`{name}` is {} in one and {} in the other",
+            value(&mismatch.lhs),
+            value(&mismatch.rhs)
+        ),
+    )
+    .with_note("tuples join when they agree on every attribute they have in common; a join of relations would just have no tuple, but there is no tuple to be here")
+    .with_help(format!(
+        "if the two `{name}`s mean different things, rename one: `… rename {{{name} as other_{name}}}`; to keep only matching tuples, join relations of them instead"
     ))
 }
 

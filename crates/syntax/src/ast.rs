@@ -639,15 +639,16 @@ impl RelationLiteral {
         self.0.children().find_map(Heading::cast)
     }
 
-    pub fn tuples(&self) -> impl Iterator<Item = TupleLiteral> {
-        self.0.children().filter_map(TupleLiteral::cast)
+    /// The tuples: tuple selectors, or any expressions of tuples.
+    pub fn elements(&self) -> impl Iterator<Item = Expr> {
+        self.0.children().filter_map(Expr::cast)
     }
 
-    /// The span to delete to remove `tuple`, including the comma that
+    /// The span to delete to remove `element`, including the comma that
     /// separates it from a neighbor.
     #[must_use]
-    pub fn removal(&self, tuple: &TupleLiteral) -> Span {
-        list_removal(tuple.syntax())
+    pub fn removal(&self, element: &Expr) -> Span {
+        list_removal(element.syntax())
     }
 }
 

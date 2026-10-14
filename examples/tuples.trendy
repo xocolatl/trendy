@@ -22,25 +22,6 @@ var addr := tuple {
    and hide any variable or parameter of the same name. To use one of
    those, rename it first. */
 
-/* Join, also called tuple union: the union of two tuples' attributes. Any
-   attribute both have must have the same value in both.
-   Tutorial D: ADDR UNION TUPLE { NAME 'Ada' }, and n-adic
-   UNION { T1, T2, T3 }
-   Proposed: `join`, as for relations (see relations.trendy). Unlike the
-   relations' join, it fails when the values differ, so it needs a
-   compile-time check or a run-time error.
-
-   call debug_value{v: addr join tuple { name: "Ada" }};
-*/
-
-/* Compose: join, then drop the attributes the operands have in common
-   (Algebra A's COMPOSE; Tutorial D, beyond RM Prescription 6).
-   Tutorial D: T1 COMPOSE T2
-   Proposed: `compose`, as for relations.
-
-   call debug_value{v: addr compose tuple { postal_code: "75001", district: "1st" }};
-*/
-
 /* Tuple extraction: the one tuple of a relation with exactly one, else a
    run-time error (RM Prescription 7's relation operators).
    Tutorial D: TUPLE FROM R
@@ -164,6 +145,35 @@ operator wrap_addr{a: tuple { street: text, city: text, country: text, postal_co
     call debug_value{v: a wrap { place := {street, city} } unwrap {place}};
 ];
 
+/* Joins: `join` gives a tuple both tuples' attributes, which must agree
+   on those they have in common; `times`, of tuples with none in common,
+   never fails; `compose` joins, then drops the common ones. The same
+   operators as for relations (see relations.trendy), with the same rules
+   for common attributes, and lists: join{t1, t2, t3}. Tuples that
+   disagree have no join, which is an error: when compiling if both are
+   known then, and otherwise when running (R0004).
+   Tutorial D: ADDR UNION TUPLE { NAME 'Ada' } (tuple union, also called
+   tuple join), T1 COMPOSE T2. Implemented, and printed twice like the
+   projections. */
+var districted := addr join tuple { postal_code: "75001", district: "1st" };
+var district := addr compose tuple { postal_code: "75001", district: "1st" };
+var dated := addr times tuple { year: 2024 };
+var regioned := join{
+    addr,
+    tuple { postal_code: "75001", district: "1st" },
+    tuple { city: "Paris", region: "Île-de-France" }
+};
+
+operator join_addr{
+    a: tuple { street: text, city: text, country: text, postal_code: text },
+    d: tuple { postal_code: text, district: text },
+} [
+    call debug_value{v: a join d};
+    call debug_value{v: a compose d};
+    call debug_value{v: a times tuple { year: 2024 }};
+    call debug_value{v: join{a, d, tuple { city: "Paris", region: "Île-de-France" }}};
+];
+
 operator main{} [
     call debug_value{v: located};
     call debug_value{v: unlocated};
@@ -182,6 +192,10 @@ operator main{} [
     call debug_value{v: placed};
     call debug_value{v: nested};
     call debug_value{v: unplaced};
+    call debug_value{v: districted};
+    call debug_value{v: district};
+    call debug_value{v: dated};
+    call debug_value{v: regioned};
 
     call project_addr{a: addr};
 
@@ -196,4 +210,6 @@ operator main{} [
     call replace_addr{a: addr, p: q};
 
     call wrap_addr{a: addr};
+
+    call join_addr{a: addr, d: tuple { postal_code: "75001", district: "1st" }};
 ];

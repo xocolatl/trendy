@@ -1253,10 +1253,15 @@ impl<'a> Parser<'a> {
             (SyntaxKind::LBrace, SyntaxKind::RBrace),
             &[],
             |p| {
-                p.items(
-                    |p| p.at(SyntaxKind::LBrace) || p.at_keyword(SyntaxKind::TupleKw),
-                    |p| p.tuple_literal(true),
-                );
+                // A tuple selector, its `tuple` keyword optional here, or
+                // any expression of a tuple, such as a variable.
+                p.items(Self::at_operand, |p| {
+                    if p.at(SyntaxKind::LBrace) || p.at_keyword(SyntaxKind::TupleKw) {
+                        p.tuple_literal(true);
+                    } else {
+                        p.expression();
+                    }
+                });
             },
         );
         self.builder.finish_node();
@@ -2131,10 +2136,13 @@ SourceFile
         };
         let with_heading = literal("var r := relation { a: integer } { { a: 1 } };");
         assert!(with_heading.heading().is_some());
-        assert_eq!(with_heading.tuples().count(), 1);
+        assert_eq!(with_heading.elements().count(), 1);
         let without = literal("var r := relation { { a: 1 }, { a: 2 } };");
         assert!(without.heading().is_none());
-        assert_eq!(without.tuples().count(), 2);
+        assert_eq!(without.elements().count(), 2);
+        // Any expression of a tuple, such as a variable, is an element.
+        let parse = parse_str("var r := relation { t, { a: 1 }, (u) };");
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
     }
 
     #[test]

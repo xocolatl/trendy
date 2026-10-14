@@ -2247,7 +2247,10 @@ mod tests {
                     Code::JoinTypeConflict,
                     "the operands of `join` both have an attribute `country`, of different types"
                 ),
-                (Code::WrongOperandType, "`join` can't be applied to tuples"),
+                (
+                    Code::WrongOperandType,
+                    "`join` can't combine a tuple with relations"
+                ),
                 (
                     Code::WrongOperandType,
                     "`join` can't be applied to integers"
@@ -2859,6 +2862,113 @@ mod tests {
         );
         // A constant operand is extended when compiling.
         assert!(matches!(argument(&body[2]), hir::Expr::Constant(_)));
+    }
+
+    #[test]
+    fn tuple_joins() {
+        let vars = variables(
+            "var ada := tuple { name: \"Ada\", born: 1815 };\nvar place := tuple { name: \"Ada\", city: \"London\" };\nvar joined := ada join place;\nvar composed := ada compose place;\nvar timed := ada times tuple { year: 2024 };\nvar listed := join{ada, place, tuple { city: \"London\", country: \"UK\" }};",
+        );
+        let value = |name: &str| &vars.iter().find(|v| v.name == name).unwrap().init;
+        let expected = |source: &str| variables(source).remove(0).init;
+        assert_eq!(
+            value("joined"),
+            &expected("var e := tuple { born: 1815, city: \"London\", name: \"Ada\" };")
+        );
+        assert_eq!(
+            value("composed"),
+            &expected("var e := tuple { born: 1815, city: \"London\" };")
+        );
+        assert_eq!(
+            value("timed").ty().to_string(),
+            "tuple { born: integer, name: text, year: integer }"
+        );
+        assert_eq!(
+            value("listed").ty().to_string(),
+            "tuple { born: integer, city: text, country: text, name: text }"
+        );
+    }
+
+    #[test]
+    fn tuple_join_errors() {
+        let source = format!(
+            "var ada := tuple {{ name: \"Ada\", born: 1815 }};\nvar place := tuple {{ name: \"Ada Lovelace\", city: \"London\" }};\nvar a := ada join place;\nvar b := ada compose place;\nvar r := relation {{ {{ name: \"Ada\" }} }};\nvar c := r join ada;\nvar d := ada times place;\nvar e := ada join 1;\nvar f := ada extend {{ g := place join ada }};{MAIN}"
+        );
+        let errors = errors(&source);
+        let found: Vec<_> = errors.iter().map(|e| (e.code, &e.message[..])).collect();
+        assert_eq!(
+            found,
+            [
+                (
+                    Code::TupleMismatch,
+                    "the tuples disagree on `name`, so they have no join"
+                ),
+                (
+                    Code::TupleMismatch,
+                    "the tuples disagree on `name`, so they have no join"
+                ),
+                (
+                    Code::WrongOperandType,
+                    "`join` can't combine a tuple with relations"
+                ),
+                (
+                    Code::CommonAttributes,
+                    "the operands of `times` have `name` in common"
+                ),
+                (
+                    Code::WrongOperandType,
+                    "`join` can't be applied to integers"
+                ),
+                (
+                    Code::TupleMismatch,
+                    "the tuples disagree on `name`, so they have no join"
+                ),
+            ]
+        );
+        assert_eq!(
+            errors[0].primary.message,
+            "`name` is `\"Ada\"` in one and `\"Ada Lovelace\"` in the other"
+        );
+        // The fix makes a relation of the tuple, which joins.
+        let fixed = fix(&source);
+        assert!(fixed.contains("r join relation { ada }"), "{fixed}");
+        assert!(
+            self::errors(&fixed)
+                .iter()
+                .all(|e| e.code != Code::WrongOperandType || !e.message.contains("combine")),
+            "{fixed}"
+        );
+    }
+
+    #[test]
+    fn relations_of_tuple_expressions() {
+        let vars = variables(
+            "var ada := tuple { name: \"Ada\", born: 1815 };\nvar people := relation { ada, { name: \"Edgar\", born: 1923 } };",
+        );
+        let hir::Value::Relation(people) = &vars[1].init else {
+            panic!("a relation");
+        };
+        assert_eq!(people.tuples.len(), 2);
+        let found: Vec<_> = errors(&format!(
+            "var a := tuple {{ x: 1 }};\nvar r := relation {{ 1 }};\nvar s := relation {{ a, tuple {{ y: 2 }} }};\nvar t := relation {{ a, a }};{MAIN}"
+        ))
+        .into_iter()
+        .map(|e| (e.code, e.message))
+        .collect();
+        assert_eq!(
+            found,
+            [
+                (
+                    Code::TypeMismatch,
+                    "mismatched types: expected a tuple, found `integer`".to_string()
+                ),
+                (Code::UnknownAttribute, "unknown attribute `y`".to_string()),
+                (
+                    Code::DuplicateTuple,
+                    "duplicate tuple in a relation value".to_string()
+                ),
+            ]
+        );
     }
 
     #[test]

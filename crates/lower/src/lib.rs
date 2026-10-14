@@ -390,13 +390,7 @@ impl FunctionBuilder<'_> {
                     .collect();
                 self.reshape(&ty, &result_ty, &sources, src, cx)
             }
-            hir::Expr::And(lhs, rhs) => {
-                let lhs_ty = self.program.type_of(lhs, self.within);
-                let rhs_ty = self.program.type_of(rhs, self.within);
-                let lhs = self.place(lhs, cx);
-                let rhs = self.place(rhs, cx);
-                self.and(&lhs_ty, &rhs_ty, lhs, rhs, cx)
-            }
+            hir::Expr::And(lhs, rhs) => self.joined(lhs, rhs, cx),
             hir::Expr::Ungroup(operand, names) => self.ungroup(operand, names, cx),
             hir::Expr::Current(depth, _) => self.tuples[self.tuples.len() - 1 - depth].clone(),
             hir::Expr::Extend(operand, _, attributes) => self.extend(expr, operand, attributes, cx),
@@ -847,6 +841,84 @@ impl FunctionBuilder<'_> {
             args,
         });
         self.allocates = true;
+        dst
+    }
+
+    /// `lhs` and `rhs` joined, computed into a new stack slot: the AND of
+    /// relations, by the runtime, or the join of tuples.
+    fn joined(&mut self, lhs: &hir::Expr, rhs: &hir::Expr, cx: &mut Lowering) -> lir::Place {
+        let lhs_ty = self.program.type_of(lhs, self.within);
+        let rhs_ty = self.program.type_of(rhs, self.within);
+        let lhs = self.place(lhs, cx);
+        let rhs = self.place(rhs, cx);
+        match lhs_ty {
+            hir::Type::Tuple(_) => self.tuple_join(&lhs_ty, &rhs_ty, &lhs, &rhs, cx),
+            _ => self.and(&lhs_ty, &rhs_ty, lhs, rhs, cx),
+        }
+    }
+
+    /// The join of the tuples at `lhs` and `rhs`, of types `lhs_ty` and
+    /// `rhs_ty`, computed into a new stack slot: each common attribute is
+    /// compared first, and the program stops if they differ, since no
+    /// tuple would do; then each attribute is copied from the operand that
+    /// has it.
+    fn tuple_join(
+        &mut self,
+        lhs_ty: &hir::Type,
+        rhs_ty: &hir::Type,
+        lhs: &lir::Place,
+        rhs: &lir::Place,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let (hir::Type::Tuple(lhs_heading), hir::Type::Tuple(rhs_heading)) = (lhs_ty, rhs_ty)
+        else {
+            unreachable!("a tuple join is of tuples");
+        };
+        let field = |place: &lir::Place, i: usize| {
+            let mut field = place.clone();
+            field.path.push(i);
+            field
+        };
+        let position =
+            |heading: &hir::Heading, name: &str| heading.attributes().position(|(a, _)| a == name);
+        for (i, (name, ty)) in lhs_heading.attributes().enumerate() {
+            let Some(j) = position(rhs_heading, name) else {
+                continue;
+            };
+            let compared = hir::Compared::of(ty);
+            let op = hir::BinaryOp::Compare(hir::Comparison::Equal, compared);
+            let equal = self.binary(op, ty, field(lhs, i), field(rhs, j), cx);
+            let (agree, mismatch) = (self.new_block(), self.new_block());
+            self.end_block(
+                lir::Terminator::Branch {
+                    condition: equal,
+                    then: agree,
+                    otherwise: mismatch,
+                },
+                mismatch,
+            );
+            self.end_block(lir::Terminator::Fail(lir::Failure::TupleMismatch), agree);
+        }
+        let result_ty = lhs_ty.and(rhs_ty);
+        let hir::Type::Tuple(result) = &result_ty else {
+            unreachable!("a tuple join is a tuple");
+        };
+        let dst = self.slot(layout(&result_ty));
+        for (k, (name, ty)) in result.attributes().enumerate() {
+            let src = position(lhs_heading, name).map_or_else(
+                || {
+                    let j = position(rhs_heading, name)
+                        .expect("each attribute of the join is an operand's");
+                    field(rhs, j)
+                },
+                |i| field(lhs, i),
+            );
+            self.insts.push(lir::Inst::Copy {
+                dst: field(&dst, k),
+                src,
+                layout: layout(ty),
+            });
+        }
         dst
     }
 

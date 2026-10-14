@@ -110,9 +110,7 @@ impl Origin {
         match self {
             Origin::Type(TypeExpr::Relation(r)) => r.heading().map(Origin::Heading),
             Origin::Heading(h) => Some(Origin::Heading(h.clone())),
-            Origin::Value(Expr::Relation(r)) => {
-                r.tuples().next().map(|t| Origin::Value(Expr::Tuple(t)))
-            }
+            Origin::Value(Expr::Relation(r)) => r.elements().next().map(Origin::Value),
             _ => None,
         }
     }
@@ -438,17 +436,23 @@ pub(crate) fn relation_selector(
     let mut tuples = Vec::new();
     let mut known: BTreeMap<hir::TupleValue, Span> = BTreeMap::new();
     let mut ok = true;
-    for tuple in relation.tuples() {
-        let Some(out) = tuple_selector(&tuple, element.as_ref(), checker, errors) else {
+    for tuple in relation.elements() {
+        let Some(out) = checker.expr(&tuple, element.as_ref(), errors) else {
             ok = false;
             continue;
         };
         // Without a heading from the selector or the context, the first
         // tuple sets it for the rest.
         if element.is_none() {
+            let ty = checker.ty(&out);
+            if !matches!(ty, hir::Type::Tuple(_)) {
+                errors.push(errors::not_a_tuple(&ty, &tuple));
+                ok = false;
+                continue;
+            }
             element = Some(Expected {
-                ty: checker.ty(&out),
-                origin: Origin::Value(Expr::Tuple(tuple.clone())),
+                ty,
+                origin: Origin::Value(tuple.clone()),
             });
         }
         if let Some(hir::Value::Tuple(value)) = Checker::constant(&out) {

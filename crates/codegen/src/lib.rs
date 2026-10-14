@@ -188,6 +188,7 @@ impl Functions {
                     b.ins()
                         .brif(condition, blocks[then.0], &[], blocks[otherwise.0], &[]);
                 }
+                lir::Terminator::Fail(failure) => self.fail(*failure, &mut b)?,
             }
         }
         b.seal_all_blocks();
@@ -412,6 +413,14 @@ impl Functions {
         b.ins().brif(condition, fail, &[], carry_on, &[]);
 
         b.switch_to_block(fail);
+        self.fail(failure, b)?;
+
+        b.switch_to_block(carry_on);
+        Ok(())
+    }
+
+    /// End the current block by stopping the program because of `failure`.
+    fn fail(&mut self, failure: lir::Failure, b: &mut FunctionBuilder) -> Result<(), String> {
         let id = self.runtime_function(lir::RuntimeFn::Fail, &[types::I32])?;
         let callee = self.module.declare_func_in_func(id, b.func);
         let code = b.ins().iconst(types::I32, i64::from(failure.code()));
@@ -419,8 +428,6 @@ impl Functions {
         // `trendy_rt_fail` doesn't return.
         b.ins()
             .trap(cranelift_codegen::ir::TrapCode::unwrap_user(1));
-
-        b.switch_to_block(carry_on);
         Ok(())
     }
 

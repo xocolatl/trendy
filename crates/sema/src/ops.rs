@@ -575,7 +575,8 @@ impl Joining {
 
     /// How the join combines its operands, each with its type in `types`.
     /// `None` after reporting why there is no result: an operand that isn't
-    /// a relation, or an attribute of different types in two operands, or,
+    /// a relation or a tuple, or a tuple among relations, or an attribute of
+    /// different types in two operands, or,
     /// for `times`, a common attribute; for `join`, operands that don't all
     /// connect through common attributes; and for `compose`, a step whose
     /// operands have nothing in common, or no operands at all.
@@ -591,11 +592,20 @@ impl Joining {
             errors.push(errors::empty_compose(nary));
             return None;
         }
+        // Relations join with relations, and tuples with tuples; with
+        // both, the tuples are the odd ones out.
+        let relations = types.iter().any(|ty| matches!(ty, hir::Type::Relation(_)));
         let mut operands = Vec::new();
         for (operand, ty) in self.operands.iter().zip(types) {
             match ty {
                 hir::Type::Relation(heading) => operands.push((operand.span(), heading)),
-                _ => errors.push(errors::not_joinable(&self.token, ty, operand)),
+                hir::Type::Tuple(heading) if !relations => {
+                    operands.push((operand.span(), heading));
+                }
+                hir::Type::Tuple(_) => {
+                    errors.push(errors::tuple_among_relations(&self.token, operand));
+                }
+                hir::Type::Scalar(_) => errors.push(errors::not_joinable(&self.token, ty, operand)),
             }
         }
         if operands.len() < self.operands.len() {
@@ -736,21 +746,30 @@ fn groups(headings: &[&hir::Heading]) -> Vec<usize> {
     group.into_iter().map(|g| g.unwrap_or(0)).collect()
 }
 
-/// The AND of the relations `operands`, with the constant ones evaluated
-/// together first: AND is associative and commutative, so the order
-/// doesn't change the result. The AND of no relations is `relation {} {{}}`,
-/// which is AND's identity.
-pub(crate) fn and(operands: Vec<hir::Expr>) -> hir::Expr {
+/// The AND of the relations, or the join of the tuples, `operands`, with
+/// the constant ones evaluated together first: AND is associative and
+/// commutative, so the order doesn't change the result. The AND of no
+/// relations is `relation {} {{}}`, which is AND's identity.
+///
+/// # Errors
+///
+/// Returns why constant tuples have no join: an attribute they disagree on.
+pub(crate) fn and(operands: Vec<hir::Expr>) -> Result<hir::Expr, Failed> {
     let (constants, others): (Vec<_>, Vec<_>) = operands
         .into_iter()
         .partition(|e| matches!(e, hir::Expr::Constant(_)));
-    let constant = constants
-        .into_iter()
-        .filter_map(|e| match e {
-            hir::Expr::Constant(value) => Some(value),
-            _ => None,
-        })
-        .reduce(|lhs, rhs| lhs.and(&rhs));
+    let mut constants = constants.into_iter().filter_map(|e| match e {
+        hir::Expr::Constant(value) => Some(value),
+        _ => None,
+    });
+    let constant = match constants.next() {
+        Some(first) => Some(
+            constants
+                .try_fold(first, |lhs, rhs| lhs.and(&rhs))
+                .map_err(Failed::Mismatch)?,
+        ),
+        None => None,
+    };
     let mut others = others.into_iter();
     let first = match constant {
         Some(value) => hir::Expr::Constant(value),
@@ -758,9 +777,18 @@ pub(crate) fn and(operands: Vec<hir::Expr>) -> hir::Expr {
             .next()
             .unwrap_or_else(|| hir::Expr::Constant(hir::Value::dee())),
     };
-    others.fold(first, |lhs, rhs| {
+    Ok(others.fold(first, |lhs, rhs| {
         hir::Expr::And(Box::new(lhs), Box::new(rhs))
-    })
+    }))
+}
+
+/// Why an expression of constants has no value.
+#[derive(Debug, Clone)]
+pub(crate) enum Failed {
+    /// An operator whose result is of this type fails.
+    Scalar(hir::Failure, hir::Scalar),
+    /// Tuples being joined disagree on a common attribute.
+    Mismatch(hir::Mismatch),
 }
 
 /// A tuple of these attributes, a constant if they all are.
@@ -1070,15 +1098,15 @@ pub(crate) fn image(
         .collect();
     let matched = remove(hir::Expr::Current(0, at_hand.clone()), others.clone());
     let matching = self::relation(at_hand.without(&others), vec![matched]);
-    remove(and(vec![relation, matching]), common)
+    let joined = and(vec![relation, matching])
+        .unwrap_or_else(|_| unreachable!("relations always have an AND"));
+    remove(joined, common)
 }
 
 /// Why an `extend` of constants has no value: computing `attribute` for
 /// `tuple` fails.
 pub(crate) struct ExtendFailure {
-    pub(crate) failure: hir::Failure,
-    /// The type of the operator that fails.
-    pub(crate) scalar: hir::Scalar,
+    pub(crate) failed: Failed,
     pub(crate) attribute: String,
     pub(crate) tuple: hir::TupleValue,
 }
@@ -1138,10 +1166,9 @@ fn extended(
                 computed.insert(name.clone(), value);
             }
             Ok(_) => return Ok(None),
-            Err((failure, scalar)) => {
+            Err(failed) => {
                 return Err(ExtendFailure {
-                    failure,
-                    scalar,
+                    failed,
                     attribute: name.clone(),
                     tuple: tuple.clone(),
                 });
@@ -1158,11 +1185,7 @@ fn extended(
 /// # Errors
 ///
 /// Returns why an operator now known to fail fails, and its type.
-fn substitute(
-    expr: hir::Expr,
-    depth: usize,
-    tuple: &hir::TupleValue,
-) -> Result<hir::Expr, (hir::Failure, hir::Scalar)> {
+fn substitute(expr: hir::Expr, depth: usize, tuple: &hir::TupleValue) -> Result<hir::Expr, Failed> {
     let sub = |e: Box<hir::Expr>| substitute(*e, depth, tuple);
     Ok(match expr {
         hir::Expr::Current(d, _) if d == depth => {
@@ -1173,9 +1196,11 @@ fn substitute(
         | hir::Expr::Constant(_)
         | hir::Expr::Variable(_)
         | hir::Expr::Parameter(_) => expr,
-        hir::Expr::Unary(op, operand) => unary(op, sub(operand)?).map_err(|f| (f, op.result()))?,
+        hir::Expr::Unary(op, operand) => {
+            unary(op, sub(operand)?).map_err(|f| Failed::Scalar(f, op.result()))?
+        }
         hir::Expr::Binary(op, lhs, rhs) => {
-            binary(op, sub(lhs)?, sub(rhs)?).map_err(|f| (f, op.result()))?
+            binary(op, sub(lhs)?, sub(rhs)?).map_err(|f| Failed::Scalar(f, op.result()))?
         }
         hir::Expr::Extract(operand, name) => extract(sub(operand)?, name),
         hir::Expr::Tuple(attributes) => tuple_of(attributes, depth, tuple)?,
@@ -1188,7 +1213,7 @@ fn substitute(
         ),
         hir::Expr::Remove(operand, names) => remove(sub(operand)?, names),
         hir::Expr::Rename(operand, renamings) => rename(sub(operand)?, renamings),
-        hir::Expr::And(lhs, rhs) => and(vec![sub(lhs)?, sub(rhs)?]),
+        hir::Expr::And(lhs, rhs) => and(vec![sub(lhs)?, sub(rhs)?])?,
         hir::Expr::Ungroup(operand, names) => ungroup(sub(operand)?, names),
         hir::Expr::Extend(operand, computed, attributes) => {
             // The values are one `Extend` further in.
@@ -1196,7 +1221,7 @@ fn substitute(
                 .into_iter()
                 .map(|(name, e)| Ok((name, substitute(e, depth + 1, tuple)?)))
                 .collect::<Result<_, _>>()?;
-            extend(sub(operand)?, computed, attributes).map_err(|f| (f.failure, f.scalar))?
+            extend(sub(operand)?, computed, attributes).map_err(|f| f.failed)?
         }
     })
 }
@@ -1206,7 +1231,7 @@ fn tuple_of(
     attributes: BTreeMap<String, hir::Expr>,
     depth: usize,
     tuple: &hir::TupleValue,
-) -> Result<hir::Expr, (hir::Failure, hir::Scalar)> {
+) -> Result<hir::Expr, Failed> {
     Ok(self::tuple(
         attributes
             .into_iter()

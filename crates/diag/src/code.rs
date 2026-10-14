@@ -68,6 +68,7 @@ pub enum Code {
     Overflow,
     DivisionByZero,
     OutOfMemory,
+    TupleMismatch,
     Internal,
 }
 
@@ -85,7 +86,7 @@ pub enum CodeKind {
 }
 
 impl Code {
-    pub const ALL: [Code; 56] = [
+    pub const ALL: [Code; 57] = [
         Code::UnexpectedCharacter,
         Code::MissingToken,
         Code::WrongDelimiter,
@@ -141,6 +142,7 @@ impl Code {
         Code::Overflow,
         Code::DivisionByZero,
         Code::OutOfMemory,
+        Code::TupleMismatch,
         Code::Internal,
     ];
 
@@ -202,6 +204,7 @@ impl Code {
             Code::Overflow => "R0001",
             Code::DivisionByZero => "R0002",
             Code::OutOfMemory => "R0003",
+            Code::TupleMismatch => "R0004",
             Code::Internal => "X0000",
         }
     }
@@ -292,6 +295,7 @@ impl Code {
             Code::Overflow => include_str!("../errors/R0001.md"),
             Code::DivisionByZero => include_str!("../errors/R0002.md"),
             Code::OutOfMemory => include_str!("../errors/R0003.md"),
+            Code::TupleMismatch => include_str!("../errors/R0004.md"),
             Code::Internal => include_str!("../errors/X0000.md"),
         }
     }

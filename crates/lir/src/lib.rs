@@ -366,6 +366,8 @@ pub enum Failure {
     IntegerOverflow,
     DivisionByZero,
     ApproximateOverflow,
+    /// Tuples being joined disagree on a common attribute.
+    TupleMismatch,
 }
 
 impl Failure {
@@ -376,6 +378,7 @@ impl Failure {
             Failure::IntegerOverflow => 0,
             Failure::DivisionByZero => 1,
             Failure::ApproximateOverflow => 2,
+            Failure::TupleMismatch => 4,
         }
     }
 }
@@ -401,6 +404,9 @@ pub enum Terminator {
         then: BlockId,
         otherwise: BlockId,
     },
+    /// Stop the program because of this failure, by calling
+    /// [`RuntimeFn::Fail`].
+    Fail(Failure),
 }
 
 /// Index into [`Program::data`].

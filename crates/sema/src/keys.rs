@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use trendy_diag::{Diagnostic, Span};
 use trendy_hir as hir;
-use trendy_syntax::ast::{AstNode, Expr, Key, VarDecl};
+use trendy_syntax::ast::{Expr, Key, VarDecl};
 
 use crate::check::Names;
 use crate::types::{self, Expected, Origin};
@@ -131,16 +131,11 @@ fn tuple_places(
         origin: Origin::Value(Expr::Relation(relation.clone())),
     };
     relation
-        .tuples()
-        .filter_map(|tuple| {
-            let value = types::value(
-                &Expr::Tuple(tuple.clone()),
-                Some(&expected),
-                scope,
-                &mut Vec::new(),
-            )?;
+        .elements()
+        .filter_map(|element| {
+            let value = types::value(&element, Some(&expected), scope, &mut Vec::new())?;
             match value {
-                hir::Value::Tuple(value) => Some((value, tuple.span())),
+                hir::Value::Tuple(value) => Some((value, element.span())),
                 _ => None,
             }
         })

@@ -354,6 +354,21 @@ fn run_time_failures_stop_the_program() {
     // The smallest integer `mod -1` has a result.
     let (code, stderr) = run_source("mod_min", &program("(-a - 1) mod -1"));
     assert_eq!((code, &stderr[..]), (0, "1\n0\n2\n"));
+    // Tuples that disagree on a common attribute have no join.
+    let (code, stderr) = run_source(
+        "fail_tuple_join",
+        &program("tuple { n: a, m: 1 } join tuple { n: b }"),
+    );
+    assert_eq!(
+        (code, &stderr[..]),
+        (
+            1,
+            &*format!(
+                "1\nerror[{}]: tuples disagree on a common attribute\n",
+                Code::TupleMismatch.id()
+            )
+        )
+    );
 }
 
 /// The lines `name` prints, which are each result twice: folded when
@@ -398,6 +413,11 @@ fn tuples() {
             r#"tuple { country: "France", place: tuple { city: "Paris", street: "1 Rue de Rivoli" }, postal_code: "75001" }"#,
             r#"tuple { postal_code: "75001", where: tuple { country: "France", place: tuple { city: "Paris", street: "1 Rue de Rivoli" } } }"#,
             r#"tuple { city: "Paris", country: "France", postal_code: "75001", street: "1 Rue de Rivoli" }"#,
+            // Joined, composed, times, and a list joined.
+            r#"tuple { city: "Paris", country: "France", district: "1st", postal_code: "75001", street: "1 Rue de Rivoli" }"#,
+            r#"tuple { city: "Paris", country: "France", district: "1st", street: "1 Rue de Rivoli" }"#,
+            r#"tuple { city: "Paris", country: "France", postal_code: "75001", street: "1 Rue de Rivoli", year: 2024 }"#,
+            r#"tuple { city: "Paris", country: "France", district: "1st", postal_code: "75001", region: "Île-de-France", street: "1 Rue de Rivoli" }"#,
         ]
     );
 }
