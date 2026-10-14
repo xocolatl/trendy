@@ -2967,6 +2967,41 @@ mod tests {
     }
 
     #[test]
+    fn checked_set_operators() {
+        let vars = variables(
+            "var a := relation { { n: 1 }, { n: 2 } };\nvar u := a d_union relation { { n: 3 } };\nvar m := a i_minus relation { { n: 1 } };\nvar ul := d_union{a, relation { { n: 3 } }, relation { { n: 4 } }};",
+        );
+        let value = |name: &str| &vars.iter().find(|v| v.name == name).unwrap().init;
+        let count = |name: &str| match value(name) {
+            hir::Value::Relation(r) => r.tuples.len(),
+            other => panic!("a relation: {other:?}"),
+        };
+        assert_eq!(count("u"), 3);
+        assert_eq!(count("m"), 1);
+        assert_eq!(count("ul"), 4);
+        let found: Vec<_> = errors(&format!(
+            "var a := relation {{ {{ n: 1 }} }};\nvar b := a d_union a;\nvar c := a i_minus relation {{ {{ n: 2 }} }};\nvar d := i_minus[];{MAIN}"
+        ))
+        .into_iter()
+        .map(|e| (e.code, e.message))
+        .collect();
+        assert_eq!(
+            found,
+            [
+                (
+                    Code::SharedTuple,
+                    "the operands of `d_union` have a tuple in common".to_string()
+                ),
+                (
+                    Code::MissingTuple,
+                    "`i_minus` removes a tuple that isn't there".to_string()
+                ),
+                (Code::EmptyList, "`i_minus[]` has no value".to_string()),
+            ]
+        );
+    }
+
+    #[test]
     fn set_errors() {
         let source = format!(
             "var people := relation {{ {{ name: \"Ada\", city: \"London\" }} }};\nvar more := relation {{ {{ name: \"Wangari\", town: \"Nyeri\" }} }};\nvar a := people union more;\nvar b := union{{}};\nvar c := tuple {{ x: 1 }} union tuple {{ y: 1 }};\nvar d := people intersect relation {{ {{ name: 1, city: \"x\" }} }};{MAIN}"

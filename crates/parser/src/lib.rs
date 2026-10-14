@@ -653,9 +653,9 @@ impl<'a> Parser<'a> {
             SyntaxKind::XorKw => 3,
             SyntaxKind::AndKw => 4,
             kind if kind.is_comparison() => COMPARISON,
-            SyntaxKind::UnionKw => UNION,
+            SyntaxKind::UnionKw | SyntaxKind::DUnionKw => UNION,
             kind if kind.is_join() => JOIN,
-            SyntaxKind::IntersectKw | SyntaxKind::MinusKw => JOIN,
+            SyntaxKind::IntersectKw | SyntaxKind::MinusKw | SyntaxKind::IMinusKw => JOIN,
             SyntaxKind::Plus | SyntaxKind::Minus | SyntaxKind::PipePipe => 9,
             SyntaxKind::Star | SyntaxKind::Slash | SyntaxKind::DivKw | SyntaxKind::ModKw => 10,
             _ => return None,
@@ -1317,8 +1317,10 @@ impl<'a> Parser<'a> {
                 | SyntaxKind::TimesKw
                 | SyntaxKind::ComposeKw
                 | SyntaxKind::UnionKw
+                | SyntaxKind::DUnionKw
                 | SyntaxKind::IntersectKw
                 | SyntaxKind::MinusKw
+                | SyntaxKind::IMinusKw
         );
         (nary && list).then_some((found, keyword))
     }
@@ -1334,7 +1336,10 @@ impl<'a> Parser<'a> {
         let braces = (SyntaxKind::LBrace, SyntaxKind::RBrace);
         let brackets = (SyntaxKind::LBracket, SyntaxKind::RBracket);
         let parens = (SyntaxKind::LParen, SyntaxKind::RParen);
-        let ordered = matches!(keyword, SyntaxKind::ComposeKw | SyntaxKind::MinusKw);
+        let ordered = matches!(
+            keyword,
+            SyntaxKind::ComposeKw | SyntaxKind::MinusKw | SyntaxKind::IMinusKw
+        );
         let (delims, mistakes) = if ordered {
             (brackets, [braces, parens])
         } else {
@@ -2818,6 +2823,16 @@ SourceFile
             ["`union` and `minus` need parentheses to say which applies first"]
         );
         assert_eq!(fix(source), "var x := (r union s) minus t;");
+        // The checked ones bind and list as their plain forms do.
+        assert_eq!(shape("r d_union s join t"), "(r d_union (s join t))");
+        assert_eq!(shape("r i_minus s join t"), "((r i_minus s) join t)");
+        assert_eq!(fix("var x := i_minus{r, s};"), "var x := i_minus[r, s];");
+        assert!(parse_str("var x := d_union{r, s, t};").errors.is_empty());
+        assert_eq!(fix("var x := r D_UNION s;"), "var x := r d_union s;");
+        assert_eq!(
+            messages("var x := r d_union s i_minus t;"),
+            ["`d_union` and `i_minus` need parentheses to say which applies first"]
+        );
         // `!!` before a set operator, too.
         assert_eq!(
             messages("var x := t extend { y := !!r union s };"),

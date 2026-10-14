@@ -190,11 +190,13 @@ pub enum RuntimeFn {
     /// canonically, in memory the statement owns. The other arguments are
     /// as for [`RuntimeFn::And`]'s.
     Matching,
-    /// `trendy_rt_combine(dst, lhs, rhs, descriptor, minus)`: store at
-    /// `dst` the relation of the tuples of `lhs` and `rhs`, of the type the
-    /// descriptor describes, or, if `minus` (a [`Field::Usize`]) is 1, those
-    /// of `lhs` that aren't in `rhs`, sorted canonically, in memory the
-    /// statement owns.
+    /// `trendy_rt_combine(dst, lhs, rhs, descriptor, combination)`: store
+    /// at `dst` the relations `lhs` and `rhs`, of the type the descriptor
+    /// describes, combined as `combination` (a [`Field::Usize`], a
+    /// [`Combination::code`]) says, sorted canonically, in
+    /// memory the statement owns. It stops the program if a disjoint
+    /// union's operands share a tuple, or an included minus's right operand
+    /// has one the left lacks.
     Combine,
     /// `trendy_rt_allocate(dst, count, descriptor)`: store at `dst` a
     /// relation, of the type the descriptor describes, of `count` (a
@@ -400,6 +402,31 @@ impl Failure {
             Failure::TupleMismatch => 4,
             Failure::NoTuple => 5,
             Failure::SeveralTuples => 6,
+        }
+    }
+}
+
+/// How [`RuntimeFn::Combine`] combines two relations: the argument it
+/// takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Combination {
+    Union,
+    /// A union that fails if the operands share a tuple.
+    DisjointUnion,
+    Minus,
+    /// A minus that fails if the right operand has a tuple the left lacks.
+    IncludedMinus,
+}
+
+impl Combination {
+    /// The `trendy_runtime::COMBINE_` constant for this combination.
+    #[must_use]
+    pub fn code(self) -> u64 {
+        match self {
+            Combination::Union => 0,
+            Combination::DisjointUnion => 1,
+            Combination::Minus => 2,
+            Combination::IncludedMinus => 3,
         }
     }
 }

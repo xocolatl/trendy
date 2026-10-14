@@ -1236,6 +1236,8 @@ var both := born intersect listed;
 var unlisted := born minus listed;
 var everyone := union{born, listed, relation { { name: "Edgar" } }};
 var only_born := minus[born, listed, relation { { name: "Edgar" } }];
+var partition := (born minus listed) d_union listed;
+var checked := born i_minus (born intersect listed);
 
 operator main{} [
     call debug_value{v: anyone};
@@ -1255,6 +1257,13 @@ operator main{} [
   operands can be in any order, and `minus[…]` in brackets, from the left:
   `minus[r, s, t]` is `(r minus s) minus t`. None has a value with no
   operands (A0029).
+- **Checked forms:** `r d_union s` is a union of operands with no tuple in
+  common, and `r i_minus s` a minus whose right operand's tuples are all
+  in the left. Each states what the plain form would quietly accept, and
+  fails if it doesn't hold: when compiling if the relations are known
+  then, naming the tuple, and otherwise when the program runs (R0006,
+  R0007). They bind and list as `union` and `minus` do: `d_union{…}`,
+  `i_minus[…]`.
 - SQL's `except` is fixed to `minus`, and `union all`'s `all` is removed,
   since a relation has no duplicates (P0021).
 
@@ -1277,8 +1286,8 @@ From tightest to loosest:
 | prefix `not`, `-`, `+`, `tuple from` and `value from` | |
 | `*`, `/`, `div`, `mod` | left |
 | `+`, `-`, `\|\|` | left |
-| `join`, `times`, `compose`, `matching`, `not matching`, `intersect`, `minus` | left |
-| `union` | left |
+| `join`, `times`, `compose`, `matching`, `not matching`, `intersect`, `minus`, `i_minus` | left |
+| `union`, `d_union` | left |
 | `=`, `<>`, `<`, `<=`, `>`, `>=` | none: they don't chain |
 | `and` | left |
 | `xor` | left |
@@ -1448,8 +1457,8 @@ are case-sensitive. The keywords are `operator`, `var`, `call`, `builtin`,
 `tuple`, `relation`, `true`, `false`, `not`, `and`, `or`, `xor`,
 `implies`, `div`, `mod`, `remove`, `rename`, `extend`, `replace`, `group`,
 `ungroup`, `wrap`, `unwrap`, `join`, `times`, `compose`, `matching`,
-`union`, `intersect`, `minus`, `where` and `as`, all lowercase, and a
-keyword can't be a name (P0017).
+`union`, `d_union`, `intersect`, `minus`, `i_minus`, `where` and `as`, all
+lowercase, and a keyword can't be a name (P0017).
 `type` is a keyword only after `builtin`, `key` only where a variable's
 keys go, and `value` and `from` only in `tuple from` and `value from`.
 
@@ -1561,6 +1570,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `R INTERSECT S`, SQL's `INTERSECT` | `r intersect s` |
 | `R MINUS S`, SQL's `EXCEPT` | `r minus s` |
 | `UNION ALL` | `union`: a relation has no duplicates |
+| `R D_UNION S`, `R I_MINUS S` | `r d_union s`, `r i_minus s` |
 | `R MATCHING S`, `R SEMIJOIN S`, `WHERE EXISTS (…)` | `r matching s` |
 | `R NOT MATCHING S`, `R SEMIMINUS S`, `WHERE NOT EXISTS (…)` | `r not matching s` |
 | `T1 UNION T2`, of tuples (tuple union) | `t1 join t2` |

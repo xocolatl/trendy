@@ -71,6 +71,8 @@ pub enum Code {
     OutOfMemory,
     TupleMismatch,
     NotOneTuple,
+    SharedTuple,
+    MissingTuple,
     Internal,
 }
 
@@ -88,7 +90,7 @@ pub enum CodeKind {
 }
 
 impl Code {
-    pub const ALL: [Code; 59] = [
+    pub const ALL: [Code; 61] = [
         Code::UnexpectedCharacter,
         Code::MissingToken,
         Code::WrongDelimiter,
@@ -147,6 +149,8 @@ impl Code {
         Code::OutOfMemory,
         Code::TupleMismatch,
         Code::NotOneTuple,
+        Code::SharedTuple,
+        Code::MissingTuple,
         Code::Internal,
     ];
 
@@ -211,6 +215,8 @@ impl Code {
             Code::OutOfMemory => "R0003",
             Code::TupleMismatch => "R0004",
             Code::NotOneTuple => "R0005",
+            Code::SharedTuple => "R0006",
+            Code::MissingTuple => "R0007",
             Code::Internal => "X0000",
         }
     }
@@ -304,6 +310,8 @@ impl Code {
             Code::OutOfMemory => include_str!("../errors/R0003.md"),
             Code::TupleMismatch => include_str!("../errors/R0004.md"),
             Code::NotOneTuple => include_str!("../errors/R0005.md"),
+            Code::SharedTuple => include_str!("../errors/R0006.md"),
+            Code::MissingTuple => include_str!("../errors/R0007.md"),
             Code::Internal => include_str!("../errors/X0000.md"),
         }
     }

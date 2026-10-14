@@ -527,12 +527,17 @@ pub(crate) enum JoinKind {
     NotMatching,
     /// `union`, of relations of one heading: the tuples of either.
     Union,
+    /// `d_union`: a union whose operands must have no tuple in common.
+    DisjointUnion,
     /// `intersect`, of relations of one heading: the tuples of both, which
     /// is their AND.
     Intersect,
     /// `minus`, of relations of one heading: the tuples of the left that
     /// aren't in the right, from the left in a list.
     Minus,
+    /// `i_minus`: a minus whose right operand's tuples must all be in the
+    /// left.
+    IncludedMinus,
 }
 
 impl JoinKind {
@@ -546,8 +551,10 @@ impl JoinKind {
             [SyntaxKind::MatchingKw] => JoinKind::Matching,
             [SyntaxKind::NotKw, SyntaxKind::MatchingKw] => JoinKind::NotMatching,
             [SyntaxKind::UnionKw] => JoinKind::Union,
+            [SyntaxKind::DUnionKw] => JoinKind::DisjointUnion,
             [SyntaxKind::IntersectKw] => JoinKind::Intersect,
             [SyntaxKind::MinusKw] => JoinKind::Minus,
+            [SyntaxKind::IMinusKw] => JoinKind::IncludedMinus,
             _ => return None,
         })
     }
@@ -562,7 +569,19 @@ impl JoinKind {
     pub(crate) fn is_set(self) -> bool {
         matches!(
             self,
-            JoinKind::Union | JoinKind::Intersect | JoinKind::Minus
+            JoinKind::Union
+                | JoinKind::DisjointUnion
+                | JoinKind::Intersect
+                | JoinKind::Minus
+                | JoinKind::IncludedMinus
+        )
+    }
+
+    /// Whether its list is in brackets, a left fold whose order matters.
+    pub(crate) fn is_ordered(self) -> bool {
+        matches!(
+            self,
+            JoinKind::Compose | JoinKind::Minus | JoinKind::IncludedMinus
         )
     }
 
@@ -581,8 +600,10 @@ impl JoinKind {
             JoinKind::Matching => "matching",
             JoinKind::NotMatching => "not matching",
             JoinKind::Union => "union",
+            JoinKind::DisjointUnion => "d_union",
             JoinKind::Intersect => "intersect",
             JoinKind::Minus => "minus",
+            JoinKind::IncludedMinus => "i_minus",
         }
     }
 }
@@ -606,11 +627,9 @@ pub(crate) enum Combined {
     /// The tuples of the left operand that have a match in the right, or,
     /// if `negated`, those that have none: `matching` and `not matching`.
     Matching { negated: bool },
-    /// The tuples of any of them: `union`.
-    Union,
-    /// From the left: the first operand, without the tuples of each other
-    /// in turn: `minus`.
-    Minus,
+    /// From the left: the first operand combined with each other in turn,
+    /// as `union`, `d_union`, `minus` and `i_minus` do.
+    Combine(hir::Combination),
     /// Compose, from the left: the first operand, then for each other the
     /// AND of the result so far and it, without the attributes they have in
     /// common, given here for each step.
@@ -706,7 +725,11 @@ impl Joining {
             JoinKind::Join | JoinKind::Compose | JoinKind::Matching | JoinKind::NotMatching => {
                 groups.iter().any(|&g| g != 0)
             }
-            JoinKind::Union | JoinKind::Intersect | JoinKind::Minus => {
+            JoinKind::Union
+            | JoinKind::DisjointUnion
+            | JoinKind::Intersect
+            | JoinKind::Minus
+            | JoinKind::IncludedMinus => {
                 unreachable!("the set operators' headings are checked above")
             }
         };
@@ -732,7 +755,11 @@ impl Joining {
             JoinKind::Matching => Combined::Matching { negated: false },
             JoinKind::NotMatching => Combined::Matching { negated: true },
             JoinKind::Join | JoinKind::Times | JoinKind::Compose => Combined::And,
-            JoinKind::Union | JoinKind::Intersect | JoinKind::Minus => {
+            JoinKind::Union
+            | JoinKind::DisjointUnion
+            | JoinKind::Intersect
+            | JoinKind::Minus
+            | JoinKind::IncludedMinus => {
                 unreachable!("the set operators' headings are checked above")
             }
         })
@@ -813,8 +840,10 @@ impl Joining {
             }
         }
         ok.then_some(match self.kind {
-            JoinKind::Union => Combined::Union,
-            JoinKind::Minus => Combined::Minus,
+            JoinKind::Union => Combined::Combine(hir::Combination::Union),
+            JoinKind::DisjointUnion => Combined::Combine(hir::Combination::DisjointUnion),
+            JoinKind::Minus => Combined::Combine(hir::Combination::Minus),
+            JoinKind::IncludedMinus => Combined::Combine(hir::Combination::IncludedMinus),
             _ => Combined::And,
         })
     }
@@ -946,6 +975,8 @@ pub(crate) enum Failed {
     Mismatch(hir::Mismatch),
     /// A relation whose only tuple is taken has this many, not one.
     NotOne(usize),
+    /// A tuple breaks a disjoint union's or an included minus's condition.
+    Broken(Box<hir::Broken>),
 }
 
 /// The tuples of `operand` for which `condition`, computed from the tuple at
@@ -992,16 +1023,28 @@ pub(crate) fn restrict(
     )))
 }
 
-/// The tuples of the relations `lhs` and `rhs`, of one heading, or, if
-/// `minus`, those of `lhs` that aren't in `rhs`: evaluated if both are
-/// constants.
-pub(crate) fn combined(lhs: hir::Expr, rhs: hir::Expr, minus: bool) -> hir::Expr {
+/// The relations `lhs` and `rhs`, of one heading, combined as
+/// `combination` says: evaluated if both are constants.
+///
+/// # Errors
+///
+/// Returns a tuple of constants that breaks a disjoint union's or an
+/// included minus's condition.
+pub(crate) fn combined(
+    lhs: hir::Expr,
+    rhs: hir::Expr,
+    combination: hir::Combination,
+) -> Result<hir::Expr, Failed> {
     match (lhs, rhs) {
-        (hir::Expr::Constant(lhs), hir::Expr::Constant(rhs)) => {
-            hir::Expr::Constant(lhs.combined(&rhs, minus))
-        }
-        (lhs, rhs) if minus => hir::Expr::Minus(Box::new(lhs), Box::new(rhs)),
-        (lhs, rhs) => hir::Expr::Union(Box::new(lhs), Box::new(rhs)),
+        (hir::Expr::Constant(lhs), hir::Expr::Constant(rhs)) => lhs
+            .combined(&rhs, combination)
+            .map(hir::Expr::Constant)
+            .map_err(Failed::Broken),
+        (lhs, rhs) => Ok(hir::Expr::Combine(
+            combination,
+            Box::new(lhs),
+            Box::new(rhs),
+        )),
     }
 }
 
@@ -1315,8 +1358,9 @@ fn shifted(expr: hir::Expr, cutoff: usize) -> hir::Expr {
         hir::Expr::Ungroup(operand, names) => hir::Expr::Ungroup(shift(operand), names),
         hir::Expr::Only(operand) => hir::Expr::Only(shift(operand)),
         hir::Expr::Semijoin(lhs, rhs) => hir::Expr::Semijoin(shift(lhs), shift(rhs)),
-        hir::Expr::Union(lhs, rhs) => hir::Expr::Union(shift(lhs), shift(rhs)),
-        hir::Expr::Minus(lhs, rhs) => hir::Expr::Minus(shift(lhs), shift(rhs)),
+        hir::Expr::Combine(combination, lhs, rhs) => {
+            hir::Expr::Combine(combination, shift(lhs), shift(rhs))
+        }
         hir::Expr::Antijoin(lhs, rhs) => hir::Expr::Antijoin(shift(lhs), shift(rhs)),
         // The condition is one tuple at hand further in.
         hir::Expr::Restrict(operand, condition) => {
@@ -1471,8 +1515,7 @@ fn substitute(expr: hir::Expr, depth: usize, tuple: &hir::TupleValue) -> Result<
         hir::Expr::Ungroup(operand, names) => ungroup(sub(operand)?, names),
         hir::Expr::Only(operand) => only(sub(operand)?)?,
         hir::Expr::Semijoin(lhs, rhs) => matching(sub(lhs)?, sub(rhs)?, false),
-        hir::Expr::Union(lhs, rhs) => combined(sub(lhs)?, sub(rhs)?, false),
-        hir::Expr::Minus(lhs, rhs) => combined(sub(lhs)?, sub(rhs)?, true),
+        hir::Expr::Combine(combination, lhs, rhs) => combined(sub(lhs)?, sub(rhs)?, combination)?,
         hir::Expr::Antijoin(lhs, rhs) => matching(sub(lhs)?, sub(rhs)?, true),
         // The condition is one tuple at hand further in.
         hir::Expr::Restrict(operand, condition) => {
@@ -1681,8 +1724,7 @@ fn can_fail(expr: &hir::Expr) -> bool {
         | hir::Expr::Restrict(..)
         | hir::Expr::Semijoin(..)
         | hir::Expr::Antijoin(..)
-        | hir::Expr::Union(..)
-        | hir::Expr::Minus(..)
+        | hir::Expr::Combine(..)
         | hir::Expr::Extend(..)
         | hir::Expr::Relation(..) => true,
         hir::Expr::Unary(_, operand) => can_fail(operand),

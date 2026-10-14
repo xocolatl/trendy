@@ -864,24 +864,30 @@ pub(crate) fn renamed_operator(found: Found, spelled: &str) -> Diagnostic {
 /// `r union s minus t`, whose `minus` is at `span`: `r` starts at `start`,
 /// `s` ends at `s_end`, and `s minus t` is at `minus`. The fixes are each
 /// reading, the minus first or last.
-pub(crate) fn union_minus(span: Span, start: usize, s_end: usize, minus: Span) -> Diagnostic {
+pub(crate) fn union_minus(
+    (union, minus_word): (&str, &str),
+    span: Span,
+    start: usize,
+    s_end: usize,
+    minus: Span,
+) -> Diagnostic {
     let insert = |at: usize, text: &str| Edit {
         span: Span::new(at, at),
         replacement: text.to_string(),
     };
     Diagnostic::error(
         Code::UnorderedOperators,
-        "`union` and `minus` need parentheses to say which applies first",
+        format!("`{union}` and `{minus_word}` need parentheses to say which applies first"),
         span,
         "this could apply to the union, or to its right operand only",
     )
-    .with_note("`minus` binds like the joins, as an AND, so `r union s minus t` would be `r union (s minus t)`; SQL reads set operators from the left, as `(r union s) minus t`, so neither is assumed")
+    .with_note(format!("`{minus_word}` binds like the joins, as an AND, so `r {union} s {minus_word} t` would be `r {union} (s {minus_word} t)`; SQL reads set operators from the left, as `(r {union} s) {minus_word} t`, so neither is assumed"))
     .with_suggestion(
-        "remove from the union: `(r union s) minus t`",
+        format!("remove from the union: `(r {union} s) {minus_word} t`"),
         vec![insert(start, "("), insert(s_end, ")")],
     )
     .with_suggestion(
-        "remove from the right operand: `r union (s minus t)`",
+        format!("remove from the right operand: `r {union} (s {minus_word} t)`"),
         vec![insert(minus.start, "("), insert(minus.end, ")")],
     )
 }

@@ -813,11 +813,9 @@ pub(crate) fn not_joinable(
             "relations",
             "`matching` and `not matching` keep the tuples of a relation that have a match in another relation, or none; of tuples, compare them with `=`",
         ),
-        crate::ops::JoinKind::Union
-        | crate::ops::JoinKind::Intersect
-        | crate::ops::JoinKind::Minus => (
+        kind if kind.is_set() => (
             "relations of one heading",
-            "`union`, `intersect` and `minus` combine the tuples of relations; Tutorial D's tuple union, of the attributes of tuples, is `join`",
+            "`union`, `d_union`, `intersect`, `minus` and `i_minus` combine the tuples of relations; Tutorial D's tuple union, of the attributes of tuples, is `join`",
         ),
         _ => (
             "relations, or tuples",
@@ -1027,11 +1025,11 @@ pub(crate) fn common_attributes(
 /// A list of the operator `join`, written in the brackets it takes: in
 /// brackets for the left folds, and braces for the others.
 fn list_of(join: crate::ops::JoinKind) -> String {
-    use crate::ops::JoinKind;
     let operator = join.keyword();
-    match join {
-        JoinKind::Compose | JoinKind::Minus => format!("{operator}[r, s, t]"),
-        _ => format!("{operator}{{r, s, t}}"),
+    if join.is_ordered() {
+        format!("{operator}[r, s, t]")
+    } else {
+        format!("{operator}{{r, s, t}}")
     }
 }
 
@@ -1112,7 +1110,15 @@ pub(crate) fn empty_operands(join: crate::ops::JoinKind, nary: &NaryExpr) -> Dia
         ),
         JoinKind::Union => (
             "union{}",
-            "`union{}` would have no heading to be a relation of",
+            "a union of nothing would have no heading to be a relation of",
+        ),
+        JoinKind::DisjointUnion => (
+            "d_union{}",
+            "a union of nothing would have no heading to be a relation of",
+        ),
+        JoinKind::IncludedMinus => (
+            "i_minus[]",
+            "`i_minus[r, s, t]` removes from `r`, so it needs an `r`",
         ),
         JoinKind::Intersect => (
             "intersect{}",
@@ -1571,6 +1577,32 @@ pub(crate) fn failed(failed: &crate::ops::Failed, expr: &Expr) -> Diagnostic {
         crate::ops::Failed::Scalar(failure, scalar) => self::failure(*failure, *scalar, expr, None),
         crate::ops::Failed::Mismatch(mismatch) => tuple_mismatch(mismatch, expr),
         crate::ops::Failed::NotOne(count) => not_one_tuple(*count, expr),
+        crate::ops::Failed::Broken(broken) => broken_combination(broken, expr),
+    }
+}
+
+/// `expr`, a disjoint union or an included minus of constants, which a
+/// tuple breaks, as `broken` says.
+fn broken_combination(broken: &hir::Broken, expr: &Expr) -> Diagnostic {
+    let tuple = source_text(&hir::Value::Tuple(broken.tuple.clone()))
+        .map_or_else(|| "a tuple".to_string(), |t| format!("`{t}`"));
+    match broken.combination {
+        hir::Combination::IncludedMinus => Diagnostic::error(
+            Code::MissingTuple,
+            "`i_minus` removes a tuple that isn't there",
+            expr.span(),
+            format!("the right operand has {tuple}, which the left doesn't"),
+        )
+        .with_note("`r i_minus s` is `r minus s` where every tuple of `s` is in `r`: it fails if one isn't, which `minus` would ignore")
+        .with_help("if removing what isn't there is fine, write `minus`"),
+        _ => Diagnostic::error(
+            Code::SharedTuple,
+            "the operands of `d_union` have a tuple in common",
+            expr.span(),
+            format!("both have {tuple}"),
+        )
+        .with_note("`r d_union s` is `r union s` where the operands have no tuple in common: it fails if they do, which `union` would allow")
+        .with_help("if tuples in common are fine, write `union`"),
     }
 }
 

@@ -56,8 +56,12 @@ pub enum SyntaxKind {
     /// `matching`, in `r matching s` and `r not matching s`.
     MatchingKw,
     UnionKw,
+    /// `d_union`, disjoint union.
+    DUnionKw,
     IntersectKw,
     MinusKw,
+    /// `i_minus`, included minus.
+    IMinusKw,
     /// `where`, in `r where condition`.
     WhereKw,
     /// `as`, in `old as new`.
@@ -200,7 +204,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 103] = [
+    pub const ALL: [SyntaxKind; 105] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -232,8 +236,10 @@ impl SyntaxKind {
         SyntaxKind::ComposeKw,
         SyntaxKind::MatchingKw,
         SyntaxKind::UnionKw,
+        SyntaxKind::DUnionKw,
         SyntaxKind::IntersectKw,
         SyntaxKind::MinusKw,
+        SyntaxKind::IMinusKw,
         SyntaxKind::WhereKw,
         SyntaxKind::AsKw,
         SyntaxKind::LBrace,
@@ -343,8 +349,10 @@ impl SyntaxKind {
                 | SyntaxKind::ComposeKw
                 | SyntaxKind::MatchingKw
                 | SyntaxKind::UnionKw
+                | SyntaxKind::DUnionKw
                 | SyntaxKind::IntersectKw
                 | SyntaxKind::MinusKw
+                | SyntaxKind::IMinusKw
                 | SyntaxKind::WhereKw
                 | SyntaxKind::AsKw
         )
@@ -375,8 +383,10 @@ impl SyntaxKind {
                 | SyntaxKind::ComposeKw
                 | SyntaxKind::MatchingKw
                 | SyntaxKind::UnionKw
+                | SyntaxKind::DUnionKw
                 | SyntaxKind::IntersectKw
                 | SyntaxKind::MinusKw
+                | SyntaxKind::IMinusKw
                 | SyntaxKind::WhereKw
         )
     }
@@ -412,13 +422,17 @@ impl SyntaxKind {
         )
     }
 
-    /// Whether this is a set operator: `union`, `intersect` or `minus`, of
-    /// relations with the same heading.
+    /// Whether this is a set operator: `union`, `d_union`, `intersect`,
+    /// `minus` or `i_minus`, of relations with the same heading.
     #[must_use]
     pub fn is_set_operator(self) -> bool {
         matches!(
             self,
-            SyntaxKind::UnionKw | SyntaxKind::IntersectKw | SyntaxKind::MinusKw
+            SyntaxKind::UnionKw
+                | SyntaxKind::DUnionKw
+                | SyntaxKind::IntersectKw
+                | SyntaxKind::MinusKw
+                | SyntaxKind::IMinusKw
         )
     }
 
@@ -495,8 +509,10 @@ impl SyntaxKind {
             SyntaxKind::ComposeKw => "compose",
             SyntaxKind::MatchingKw => "matching",
             SyntaxKind::UnionKw => "union",
+            SyntaxKind::DUnionKw => "d_union",
             SyntaxKind::IntersectKw => "intersect",
             SyntaxKind::MinusKw => "minus",
+            SyntaxKind::IMinusKw => "i_minus",
             SyntaxKind::WhereKw => "where",
             SyntaxKind::AsKw => "as",
             SyntaxKind::LBrace => "{",
@@ -572,8 +588,10 @@ impl SyntaxKind {
             SyntaxKind::ComposeKw => "`compose`",
             SyntaxKind::MatchingKw => "`matching`",
             SyntaxKind::UnionKw => "`union`",
+            SyntaxKind::DUnionKw => "`d_union`",
             SyntaxKind::IntersectKw => "`intersect`",
             SyntaxKind::MinusKw => "`minus`",
+            SyntaxKind::IMinusKw => "`i_minus`",
             SyntaxKind::WhereKw => "`where`",
             SyntaxKind::AsKw => "`as`",
             SyntaxKind::ForeignOperator => "operator",

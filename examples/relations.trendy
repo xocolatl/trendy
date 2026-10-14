@@ -71,14 +71,6 @@ key { name };
    call debug_value{v: people{name} subset cities{name}};
 */
 
-/* Disjoint union: union, where the operands must have no tuple in common,
-   or the program fails.
-   Tutorial D: R1 D_UNION R2, and D_UNION { R1, R2, R3 }
-   Proposed: a `disjoint union` operator.
-
-   call debug_value{v: people disjoint union relation { { name: "李白", born: 701 } }};
-*/
-
 /* Aggregates (RM Prescription 18 and OO Prescription 6): count, sum, avg,
    max, min, and, or, xor, exactly, union, disjoint union and intersect,
    of a relation, or of one of its attributes.
@@ -444,6 +436,26 @@ operator set_names{
     call debug_value{v: minus[b{name}, c{name}, p{name}]};
 ];
 
+/* Checked union and difference: `d_union` is `union` of operands with no
+   tuple in common, and `i_minus` is `minus` of a right operand whose
+   tuples are all in the left. Each states what the plain form would
+   quietly accept, and fails if it doesn't hold: when compiling if the
+   relations are known then, and otherwise when running (R0006, R0007).
+   Of lists: `d_union{…}` and `i_minus[…]`.
+   Tutorial D: R1 D_UNION R2, D_UNION { R1, R2, R3 }, and, in its later
+   versions, R1 I_MINUS R2. Implemented, and printed twice like the
+   projections. */
+var whole := (births{name} minus cities{name}) d_union cities{name};
+var others := births{name} i_minus (births{name} intersect cities{name});
+
+operator checked_names{
+    b: relation { name: text, born: integer, place: text },
+    c: relation { name: text, city: text },
+} [
+    call debug_value{v: (b{name} minus c{name}) d_union c{name}};
+    call debug_value{v: b{name} i_minus (b{name} intersect c{name})};
+];
+
 operator main{} [
     call debug_value{v: names};
     call debug_value{v: places};
@@ -486,6 +498,8 @@ operator main{} [
     call debug_value{v: unlisted};
     call debug_value{v: everyone};
     call debug_value{v: nobody_else};
+    call debug_value{v: whole};
+    call debug_value{v: others};
 
     call project_births{r: births};
     call project_signs{r: signs};
@@ -518,4 +532,6 @@ operator main{} [
     call matching_people{p: people, b: births, c: cities};
 
     call set_names{b: births, c: cities, p: people};
+
+    call checked_names{b: births, c: cities};
 ];

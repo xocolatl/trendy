@@ -29,22 +29,27 @@ pub(crate) fn unordered_operators(root: &SyntaxNode) -> Vec<Diagnostic> {
     errors
 }
 
-/// `node`, if it is `r union s minus t`, parsed as `r union (s minus t)`:
+/// `node`, if it is `r union s minus t`, or with `d_union` or `i_minus`,
+/// parsed as `r union (s minus t)`:
 /// the error, with a fix for each reading.
 fn union_minus(node: SyntaxNode) -> Option<Diagnostic> {
     let union = ast::BinaryExpr::cast(node)?;
     let operator = union.operator()?;
-    if operator.kind() != SyntaxKind::UnionKw {
+    if !matches!(operator.kind(), SyntaxKind::UnionKw | SyntaxKind::DUnionKw) {
         return None;
     }
     let (lhs, ast::Expr::Binary(minus)) = (union.lhs()?, union.rhs()?) else {
         return None;
     };
     let minus_token = minus.operator()?;
-    if minus_token.kind() != SyntaxKind::MinusKw {
+    if !matches!(
+        minus_token.kind(),
+        SyntaxKind::MinusKw | SyntaxKind::IMinusKw
+    ) {
         return None;
     }
     Some(errors::union_minus(
+        (operator.text(), minus_token.text()),
         trendy_syntax::span(minus_token.text_range()),
         lhs.span().start,
         minus.lhs()?.span().end,

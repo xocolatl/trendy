@@ -619,13 +619,12 @@ impl<'a> Checker<'a> {
         let combined = joining.combined(&types, errors)?;
         let result = match combined {
             ops::Combined::And => ops::and(operands),
-            ops::Combined::Union | ops::Combined::Minus => {
-                let minus = matches!(combined, ops::Combined::Minus);
+            ops::Combined::Combine(combination) => {
                 let mut operands = operands.into_iter();
                 let first = operands.next()?;
-                Ok(operands.fold(first, |result, operand| {
-                    ops::combined(result, operand, minus)
-                }))
+                operands.try_fold(first, |result, operand| {
+                    ops::combined(result, operand, combination)
+                })
             }
             ops::Combined::Matching { negated } => {
                 let mut operands = operands.into_iter();

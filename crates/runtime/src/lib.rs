@@ -34,6 +34,10 @@ pub const FAIL_APPROXIMATE_OVERFLOW: u32 = 2;
 pub const FAIL_OUT_OF_MEMORY: u32 = 3;
 /// Tuples being joined disagree on a common attribute.
 pub const FAIL_TUPLE_MISMATCH: u32 = 4;
+/// The operands of a disjoint union have a tuple in common.
+pub const FAIL_SHARED_TUPLE: u32 = 7;
+/// The right operand of an included minus has a tuple the left lacks.
+pub const FAIL_MISSING_TUPLE: u32 = 8;
 /// A relation has no tuples, where its only one is taken.
 pub const FAIL_NO_TUPLE: u32 = 5;
 /// A relation has several tuples, where its only one is taken.
@@ -49,6 +53,8 @@ pub fn failure_message(failure: u32) -> &'static str {
         FAIL_APPROXIMATE_OVERFLOW => "error[R0001]: approximate overflow\n",
         FAIL_OUT_OF_MEMORY => "error[R0003]: out of memory\n",
         FAIL_TUPLE_MISMATCH => "error[R0004]: tuples disagree on a common attribute\n",
+        FAIL_SHARED_TUPLE => "error[R0006]: the operands of d_union have a tuple in common\n",
+        FAIL_MISSING_TUPLE => "error[R0007]: i_minus removes a tuple that isn't there\n",
         FAIL_NO_TUPLE => "error[R0005]: the relation has no tuples, but exactly one was taken\n",
         FAIL_SEVERAL_TUPLES => {
             "error[R0005]: the relation has several tuples, but exactly one was taken\n"
@@ -566,16 +572,29 @@ pub unsafe extern "C" fn trendy_rt_ungroup(
     }
 }
 
-/// Store at `dst` the tuples of the relations `lhs` and `rhs`, of the one
-/// type `desc` describes, or, if `*minus` is 1, those of `lhs` that aren't
-/// in `rhs` (union and difference), in canonical order, in memory that
-/// [`trendy_rt_release`] releases. Both operands are in canonical order, so
-/// one pass merges them, and the result needs no sorting.
+/// [`trendy_rt_combine`]'s union.
+pub const COMBINE_UNION: usize = 0;
+/// [`trendy_rt_combine`]'s union of operands with no tuple in common.
+pub const COMBINE_DISJOINT_UNION: usize = 1;
+/// [`trendy_rt_combine`]'s difference.
+pub const COMBINE_MINUS: usize = 2;
+/// [`trendy_rt_combine`]'s difference whose right operand is included in
+/// the left.
+pub const COMBINE_INCLUDED_MINUS: usize = 3;
+
+/// Store at `dst` the relations `lhs` and `rhs`, of the one type `desc`
+/// describes, combined as `*combination`, a `COMBINE_` constant, says: the
+/// tuples of either, or of `lhs` but not `rhs`, in canonical order, in
+/// memory that [`trendy_rt_release`] releases. Both operands are in
+/// canonical order, so one pass merges them, and the result needs no
+/// sorting. Stops the program if a disjoint union's operands share a
+/// tuple, or an included minus's right operand has one the left lacks.
 ///
 /// # Safety
 ///
 /// `lhs` and `rhs` must point to valid relations of the type `desc`
-/// describes, `minus` to 0 or 1, and `dst` to memory for a relation.
+/// describes, `combination` to a `COMBINE_` constant, and `dst` to memory
+/// for a relation.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn trendy_rt_combine(
@@ -583,14 +602,15 @@ pub unsafe extern "C" fn trendy_rt_combine(
     lhs: *const u8,
     rhs: *const u8,
     desc: *const TypeDesc,
-    minus: *const usize,
+    combination: *const usize,
 ) {
     use core::cmp::Ordering;
     // SAFETY: guaranteed by the caller.
     unsafe {
         let desc = &*desc;
         let ((lhs, lhs_count), (rhs, rhs_count)) = (read_slice(lhs), read_slice(rhs));
-        let minus = minus.read_unaligned() == 1;
+        let combination = combination.read_unaligned();
+        let minus = matches!(combination, COMBINE_MINUS | COMBINE_INCLUDED_MINUS);
         let size = desc.element_size;
         let Some(room) = lhs_count.checked_add(rhs_count) else {
             trendy_rt_fail(FAIL_OUT_OF_MEMORY)
@@ -618,6 +638,9 @@ pub unsafe extern "C" fn trendy_rt_combine(
                     i += 1;
                 }
                 Ordering::Equal => {
+                    if combination == COMBINE_DISJOINT_UNION {
+                        trendy_rt_fail(FAIL_SHARED_TUPLE);
+                    }
                     if !minus {
                         keep(l);
                     }
@@ -625,12 +648,19 @@ pub unsafe extern "C" fn trendy_rt_combine(
                     j += 1;
                 }
                 Ordering::Greater => {
+                    if combination == COMBINE_INCLUDED_MINUS {
+                        trendy_rt_fail(FAIL_MISSING_TUPLE);
+                    }
                     if !minus {
                         keep(rhs.add(j * size));
                     }
                     j += 1;
                 }
             }
+        }
+        // What is left of `rhs` is in no tuple of `lhs`.
+        if combination == COMBINE_INCLUDED_MINUS && j < rhs_count {
+            trendy_rt_fail(FAIL_MISSING_TUPLE);
         }
         if !minus {
             for k in j..rhs_count {

@@ -174,13 +174,12 @@ pub enum Expr {
     /// operands are both relations or both tuples, whose common attributes
     /// have the same types.
     And(Box<Expr>, Box<Expr>),
-    /// The tuples of either relation, of the same heading (`union`, Algebra
-    /// A's OR of relations with the same heading). `intersect` is an
-    /// `And`, of relations with all their attributes in common.
-    Union(Box<Expr>, Box<Expr>),
-    /// The tuples of the left relation that aren't in the right, of the
-    /// same heading (`minus`, Algebra A's AND with the NOT of the right).
-    Minus(Box<Expr>, Box<Expr>),
+    /// Two relations of the same heading combined, as the `Combination`
+    /// says: the tuples of either, or of the left that aren't in the right,
+    /// where the checked ones fail if a tuple breaks their condition.
+    /// `intersect` is an `And`, of relations with all their attributes in
+    /// common.
+    Combine(Combination, Box<Expr>, Box<Expr>),
     /// The tuples of the left relation that have a match in the right, on
     /// their common attributes (`matching`, the semijoin): the result has
     /// the left's heading. The operands' common attributes have the same
@@ -261,8 +260,7 @@ impl Expr {
             Expr::Current(_, heading) => Type::Tuple(heading.clone()),
             Expr::Ungroup(operand, names) => operand.type_with(leaf).ungrouped(names),
             Expr::Restrict(operand, _)
-            | Expr::Union(operand, _)
-            | Expr::Minus(operand, _)
+            | Expr::Combine(_, operand, _)
             | Expr::Semijoin(operand, _)
             | Expr::Antijoin(operand, _) => operand.type_with(leaf),
             Expr::Only(operand) => match operand.type_with(leaf) {
@@ -282,6 +280,39 @@ impl Expr {
 pub enum Failure {
     Overflow,
     DivisionByZero,
+}
+
+/// How relations of one heading are combined, by [`Expr::Combine`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Combination {
+    /// The tuples of either (`union`, Algebra A's OR).
+    Union,
+    /// The tuples of either, which must have none in common (`d_union`).
+    DisjointUnion,
+    /// The tuples of the left that aren't in the right (`minus`, Algebra
+    /// A's AND with the NOT of the right).
+    Minus,
+    /// The tuples of the left that aren't in the right, all of whose tuples
+    /// must be in the left (`i_minus`).
+    IncludedMinus,
+}
+
+impl Combination {
+    /// Whether it removes the right's tuples from the left's, rather than
+    /// adding them.
+    #[must_use]
+    pub fn removes(self) -> bool {
+        matches!(self, Combination::Minus | Combination::IncludedMinus)
+    }
+}
+
+/// A tuple that breaks a checked [`Combination`]'s condition: one both
+/// operands of a disjoint union have, or one of the right operand of an
+/// included minus that the left lacks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Broken {
+    pub combination: Combination,
+    pub tuple: TupleValue,
 }
 
 /// Why tuples have no join: they disagree on `attribute`, whose value is
@@ -885,27 +916,49 @@ impl Value {
         }
     }
 
-    /// The tuples of this relation and `other`, of the same heading, or,
-    /// if `minus`, those of this one that aren't in `other`, as for
-    /// [`Expr::Union`] and [`Expr::Minus`].
+    /// This relation and `other`, of the same heading, combined as
+    /// `combination` says, as for [`Expr::Combine`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a tuple that breaks a disjoint union's or an included
+    /// minus's condition.
     ///
     /// # Panics
     ///
     /// If either value isn't a relation, which sema rules out.
-    #[must_use]
-    pub fn combined(&self, other: &Value, minus: bool) -> Value {
+    pub fn combined(&self, other: &Value, combination: Combination) -> Result<Value, Box<Broken>> {
         let (Value::Relation(lhs), Value::Relation(rhs)) = (self, other) else {
             panic!("combining {self:?} with {other:?}");
         };
-        let tuples = if minus {
+        let broken = |tuple: &TupleValue| {
+            Box::new(Broken {
+                combination,
+                tuple: tuple.clone(),
+            })
+        };
+        match combination {
+            Combination::DisjointUnion => {
+                if let Some(shared) = lhs.tuples.intersection(&rhs.tuples).next() {
+                    return Err(broken(shared));
+                }
+            }
+            Combination::IncludedMinus => {
+                if let Some(missing) = rhs.tuples.difference(&lhs.tuples).next() {
+                    return Err(broken(missing));
+                }
+            }
+            Combination::Union | Combination::Minus => {}
+        }
+        let tuples = if combination.removes() {
             lhs.tuples.difference(&rhs.tuples).cloned().collect()
         } else {
             lhs.tuples.union(&rhs.tuples).cloned().collect()
         };
-        Value::Relation(RelationValue {
+        Ok(Value::Relation(RelationValue {
             heading: lhs.heading.clone(),
             tuples,
-        })
+        }))
     }
 
     /// The tuples of this relation that have a match in `other` on their

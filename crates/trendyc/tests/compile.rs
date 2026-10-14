@@ -382,6 +382,29 @@ fn run_time_failures_stop_the_program() {
             "{expr}"
         );
     }
+    // A disjoint union whose operands share a tuple, and an included minus
+    // that removes one that isn't there.
+    for (name, expr, failure) in [
+        (
+            "fail_d_union",
+            "relation { { n: a } } d_union relation { { n: a } }",
+            format!(
+                "error[{}]: the operands of d_union have a tuple in common",
+                Code::SharedTuple.id()
+            ),
+        ),
+        (
+            "fail_i_minus",
+            "relation { { n: a } } i_minus relation { { n: b } }",
+            format!(
+                "error[{}]: i_minus removes a tuple that isn't there",
+                Code::MissingTuple.id()
+            ),
+        ),
+    ] {
+        let (code, stderr) = run_source(name, &program(expr));
+        assert_eq!((code, stderr), (1, format!("1\n{failure}\n")), "{expr}");
+    }
     // Tuples that disagree on a common attribute have no join.
     let (code, stderr) = run_source(
         "fail_tuple_join",
@@ -522,6 +545,9 @@ fn relations() {
             r#"relation { name: text } { { name: "Ada" }, { name: "Edgar" }, { name: "Wangari" }, { name: "Édouard" } }"#,
             r#"relation { name: text } { { name: "Ada" }, { name: "Edgar" } }"#,
             r#"relation { name: text } { { name: "Édouard" } }"#,
+            r#"relation { name: text } { { name: "Ada" }, { name: "Edgar" }, { name: "Wangari" }, { name: "Édouard" } }"#,
+            r#"relation { name: text } { { name: "Édouard" } }"#,
+            // A disjoint union, and an included minus.
             r#"relation { name: text } { { name: "Ada" }, { name: "Edgar" }, { name: "Wangari" }, { name: "Édouard" } }"#,
             r#"relation { name: text } { { name: "Édouard" } }"#,
         ]
