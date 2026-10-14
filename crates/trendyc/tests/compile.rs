@@ -394,6 +394,10 @@ fn tuples() {
             // Replaced, each value computed from the old tuple.
             r#"tuple { city: "Paris", country: "France", postal_code: "75002", street: "1 Rue de Rivoli" }"#,
             "tuple { x: 4e0, y: 1e0 }",
+            // Wrapped, wrapped again into another, and unwrapped back.
+            r#"tuple { country: "France", place: tuple { city: "Paris", street: "1 Rue de Rivoli" }, postal_code: "75001" }"#,
+            r#"tuple { postal_code: "75001", where: tuple { country: "France", place: tuple { city: "Paris", street: "1 Rue de Rivoli" } } }"#,
+            r#"tuple { city: "Paris", country: "France", postal_code: "75001", street: "1 Rue de Rivoli" }"#,
         ]
     );
 }
@@ -452,6 +456,9 @@ fn relations() {
             // Ungrouped: the docs team, with no members, has no tuples; and
             // grouping then ungrouping gives the births back.
             r#"relation { name: text, team: text } { { name: "Ada", team: "core" }, { name: "Edgar", team: "core" } }"#,
+            r#"relation { born: integer, name: text, place: text } { { born: 1815, name: "Ada", place: "London" }, { born: 1815, name: "Édouard", place: "Paris" }, { born: 1816, name: "Ada", place: "London" }, { born: 1923, name: "Edgar", place: "Portland" } }"#,
+            // Wrapped, and unwrapped back.
+            r#"relation { place: text, who: tuple { born: integer, name: text } } { { place: "London", who: tuple { born: 1815, name: "Ada" } }, { place: "London", who: tuple { born: 1816, name: "Ada" } }, { place: "Paris", who: tuple { born: 1815, name: "Édouard" } }, { place: "Portland", who: tuple { born: 1923, name: "Edgar" } } }"#,
             r#"relation { born: integer, name: text, place: text } { { born: 1815, name: "Ada", place: "London" }, { born: 1815, name: "Édouard", place: "Paris" }, { born: 1816, name: "Ada", place: "London" }, { born: 1923, name: "Edgar", place: "Portland" } }"#,
         ]
     );

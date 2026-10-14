@@ -356,6 +356,16 @@ each tuple at hand it refers to is shifted one `Extend` further out
 (`ops::deeper`, which shifts every `Current` in it, as for a name resolved
 outside).
 
+`wrap` and `unwrap` are rewritten the same way, as Appendix A defines them:
+an `Extend` that computes each new attribute from the tuple at hand, a
+tuple of the wrapped attributes or an attribute of the unwrapped tuple,
+then a `Remove` of what was wrapped or unwrapped. A new attribute can have
+the name of one that goes, which the `Extend` replaces with a value of
+another type; that is why `Extend` allows it, while `replace` checks the
+type in sema. `group` and `wrap` share their list's syntax (`GatherList`)
+and checks (`check::gatherings`), as `ungroup` and `unwrap` share theirs
+(`check::unpackings`).
+
 `ungroup` is the one relational operator that isn't Algebra A's: Appendix
 A defines UNGROUP with an infinite relation, which no program can hold.
 So it has its own HIR node, `Ungroup`, folded when its operand is a

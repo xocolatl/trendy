@@ -2642,6 +2642,82 @@ mod tests {
     }
 
     #[test]
+    fn wrap_constants() {
+        let vars = variables(
+            "var t := tuple { a: 1, b: 2, c: 3 };\nvar one := t wrap { w := {a, b} };\nvar same := t wrap { a := {a, b} };\nvar two := t wrap { v := {a}, w := {b} };\nvar back := t wrap { w := {a, b} } unwrap {w};\nvar inner := tuple { w: tuple { w: 1, x: 2 } } unwrap {w};\nvar r := relation { { a: 1, b: 2 }, { a: 3, b: 4 } };\nvar rs := r wrap { w := {a} };\nvar rback := r wrap { w := {a} } unwrap {w};",
+        );
+        let value = |name: &str| &vars.iter().find(|v| v.name == name).unwrap().init;
+        let expected = |source: &str| variables(source).remove(0).init;
+        assert_eq!(
+            value("one"),
+            &expected("var e := tuple { c: 3, w: tuple { a: 1, b: 2 } };")
+        );
+        // A new name can be one it wraps.
+        assert_eq!(
+            value("same"),
+            &expected("var e := tuple { a: tuple { a: 1, b: 2 }, c: 3 };")
+        );
+        assert_eq!(
+            value("two"),
+            &expected("var e := tuple { c: 3, v: tuple { a: 1 }, w: tuple { b: 2 } };")
+        );
+        // Unwrapping undoes wrapping, and an attribute can have the name of
+        // the one it came from.
+        assert_eq!(value("back"), value("t"));
+        assert_eq!(value("inner"), &expected("var e := tuple { w: 1, x: 2 };"));
+        assert_eq!(
+            value("rs").ty().to_string(),
+            "relation { b: integer, w: tuple { a: integer } }"
+        );
+        assert_eq!(value("rback"), value("r"));
+    }
+
+    #[test]
+    fn wrap_errors() {
+        let source = format!(
+            "var t := tuple {{ a: 1, b: 2, w: tuple {{ a: 3 }}, g: relation {{ {{ c: 1 }} }} }};\nvar c := t wrap {{ v := {{a}}, x := {{a, b}} }};\nvar d := t wrap {{ b := {{a}} }};\nvar e := t wrap {{}};\nvar f := 1 wrap {{ v := {{a}} }};\nvar h := t unwrap {{w}};\nvar i := t unwrap {{g}};\nvar j := t unwrap {{a}};\nvar k := t unwrap {{}};{MAIN}"
+        );
+        let errors = errors(&source);
+        let found: Vec<_> = errors.iter().map(|e| (e.code, &e.message[..])).collect();
+        assert_eq!(
+            found,
+            [
+                (
+                    Code::DuplicateAttribute,
+                    "attribute `a` is gathered into both `v` and `x`"
+                ),
+                (Code::AttributeExists, "attribute `b` already exists"),
+                (Code::EmptyRemove, "`wrap {}` gathers nothing"),
+                (
+                    Code::WrongOperandType,
+                    "`wrap` can't be applied to integers"
+                ),
+                (
+                    Code::AttributeExists,
+                    "unwrapping `w` would give two attributes `a`"
+                ),
+                (
+                    Code::WrongOperandType,
+                    "`g` can't be unwrapped: it is `relation { c: integer }`"
+                ),
+                (
+                    Code::WrongOperandType,
+                    "`a` can't be unwrapped: it is `integer`"
+                ),
+                (Code::EmptyRemove, "`unwrap {}` unwraps nothing"),
+            ]
+        );
+        assert_eq!(
+            errors[5].help,
+            ["a relation-valued attribute is unpacked with `ungroup`: `… ungroup {g}`"]
+        );
+        assert_eq!(
+            errors[4].help,
+            ["rename the kept one first: `… rename {a as other_a} unwrap {w}`"]
+        );
+    }
+
+    #[test]
     fn group_in_bodies() {
         let program = analyze_str(
             "operator f{r: relation { k: integer, a: text }} [\n    call debug_value{v: r group { g := {a} }};\n];\noperator main{} [];",

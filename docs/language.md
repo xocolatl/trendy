@@ -693,8 +693,8 @@ Three separators pair a name with something, each with one meaning:
   argument.
 - **`name := …`** defines a new name by what follows: a variable by its
   initial value, an attribute by the value `extend` or `replace` computes
-  for each tuple, or by the attributes `group` gathers. The new name comes
-  first.
+  for each tuple, or by the attributes `group` or `wrap` gathers. The new
+  name comes first.
 - **`old as new`** gives something that exists another name, in `rename`.
   The new name comes last, and nothing is computed.
 
@@ -942,6 +942,48 @@ var memberships := teams ungroup members;
 operator main{} [];
 ```
 
+### Wrapping
+
+`t wrap { w := {a, b} }` gathers the attributes `a` and `b` of a tuple, or
+of each tuple of a relation, into a tuple-valued attribute `w`, and
+`t unwrap {w}` replaces it with its attributes again. They are *The Third
+Manifesto*'s WRAP and UNWRAP (RM Prescriptions 6 and 7).
+
+```trendy
+var addr := tuple { street: "1 Rue de Rivoli", city: "Paris", country: "France" };
+var placed := addr wrap { place := {street, city} };
+var nested := placed wrap { where := {place, country} };
+var flat := placed unwrap {place};
+
+operator main{} [
+    call debug_value{v: nested};
+];
+```
+
+- **Written like `group`,** each wrapping `name := {attributes}`; a new
+  name can be one it gathers, but not one the result keeps (A0024), and
+  each attribute goes into one wrapping (A0008). Several wrappings are
+  simultaneous; to wrap one into another, chain them, as `nested` does.
+  Brackets, `wrap [v := {a}, w := {v, b}]`, are fixed to that chain
+  (P0003).
+- **`unwrap` is written like `ungroup`,** of tuple-valued attributes
+  (A0022; a relation-valued one is `ungroup`'s). An attribute of the
+  unwrapped tuple can't have the name of one the result keeps, or of
+  another unwrapped tuple's (A0024).
+- **Each undoes the other:** unwrapping what was wrapped gives the tuple
+  back, and so does wrapping what was unwrapped. Both are an `extend`
+  followed by a `remove`, as Appendix A defines them.
+- Tutorial D's `WRAP ( {A, B} AS W )` is fixed to `wrap { w := {a, b} }`
+  (P0011), and `UNWRAP ( W )` and a bare `unwrap w` to `unwrap {w}`
+  (P0003).
+
+```trendy,error
+var addr := tuple { street: "1 Rue de Rivoli", city: "Paris" };
+var placed := addr wrap ({street, city} as place);
+
+operator main{} [];
+```
+
 ### Joins
 
 `r join s` is the relation of the tuples made of a tuple of `r` and a tuple
@@ -1030,7 +1072,7 @@ From tightest to loosest:
 | Operators | Grouping |
 |---|---|
 | `!!`, of a name or a parenthesized expression | none: see below |
-| postfix `.a`, projection `{…}`, `remove {…}`, `rename {…}`, `extend {…}`, `replace {…}`, `group {…}` and `ungroup {…}` | left |
+| postfix `.a`, projection `{…}`, `remove {…}`, `rename {…}`, `extend {…}`, `replace {…}`, `group {…}`, `ungroup {…}`, `wrap {…}` and `unwrap {…}` | left |
 | prefix `not`, `-` and `+` | |
 | `*`, `/`, `div`, `mod` | left |
 | `+`, `-`, `\|\|` | left |
@@ -1202,8 +1244,8 @@ Names are ASCII letters, digits and `_`, and don't start with a digit. They
 are case-sensitive. The keywords are `operator`, `var`, `call`, `builtin`,
 `tuple`, `relation`, `true`, `false`, `not`, `and`, `or`, `xor`,
 `implies`, `div`, `mod`, `remove`, `rename`, `extend`, `replace`, `group`,
-`ungroup`, `join`, `times`, `compose` and `as`, all lowercase, and a
-keyword can't be a name (P0017).
+`ungroup`, `wrap`, `unwrap`, `join`, `times`, `compose` and `as`, all
+lowercase, and a keyword can't be a name (P0017).
 `type` is a keyword only after `builtin`, and `key` only where a variable's
 keys go.
 
@@ -1302,6 +1344,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `UPDATE R ( A := X )`, as an expression | `r replace { a := x }` |
 | `R GROUP ( { B, C } AS G )` | `r group { g := {b, c} }` |
 | `R UNGROUP ( G )` | `r ungroup {g}` |
+| `R WRAP ( { B, C } AS W )`, `R UNWRAP ( W )` | `r wrap { w := {b, c} }`, `r unwrap {w}` |
 | `GROUP BY a` with the group's rows | `r group { rows := {…every attribute but a…} }` |
 | `PRIMARY KEY (a)`, `UNIQUE (a)`, `KEY { A }` | `key { a }` |
 | `NATURAL JOIN`, `INNER JOIN`, `JOIN … USING (a)` | `join` |

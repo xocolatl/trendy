@@ -764,8 +764,8 @@ impl<'a> Parser<'a> {
                 match keyword {
                     SyntaxKind::RenameKw => self.rename_list(),
                     SyntaxKind::ExtendKw | SyntaxKind::ReplaceKw => self.assign_list(keyword),
-                    SyntaxKind::GroupKw => self.group_list(),
-                    SyntaxKind::UngroupKw => self.ungrouped(),
+                    SyntaxKind::GroupKw | SyntaxKind::WrapKw => self.gather_list(keyword),
+                    SyntaxKind::UngroupKw | SyntaxKind::UnwrapKw => self.unpacked(keyword),
                     _ => self.names(errors::PROJECTION_FORM),
                 }
             } else {
@@ -791,6 +791,8 @@ impl<'a> Parser<'a> {
                 | SyntaxKind::ReplaceKw
                 | SyntaxKind::GroupKw
                 | SyntaxKind::UngroupKw
+                | SyntaxKind::WrapKw
+                | SyntaxKind::UnwrapKw
         )
         .then_some((found, keyword))
     }
@@ -938,18 +940,21 @@ impl<'a> Parser<'a> {
         self.builder.finish_node();
     }
 
-    /// `{ g := {a, b}, h := {c} }`: groupings. SQL's `group by {a}`, which
-    /// names the attributes kept rather than gathered, is reported.
-    fn group_list(&mut self) {
-        let outer_form = std::mem::replace(&mut self.form, errors::GROUP_FORM);
-        if let Some(by) = self
-            .found()
-            .filter(|f| f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case("by"))
-        {
+    /// `{ g := {a, b}, h := {c} }`: gatherings, after `keyword`, `group` or
+    /// `wrap`. SQL's `group by {a}`, which names the attributes kept rather
+    /// than gathered, is reported.
+    fn gather_list(&mut self, keyword: SyntaxKind) {
+        let gathering = errors::Gathering::of(keyword);
+        let outer_form = std::mem::replace(&mut self.form, gathering.form());
+        if let Some(by) = self.found().filter(|f| {
+            gathering == errors::Gathering::Group
+                && f.kind == SyntaxKind::Ident
+                && f.text.eq_ignore_ascii_case("by")
+        }) {
             self.start_node(SyntaxKind::Error);
             self.bump();
             if self.at(SyntaxKind::LBrace) {
-                self.names(errors::GROUP_FORM);
+                self.names(gathering.form());
             }
             self.builder.finish_node();
             let end = self.last_end.unwrap_or(by.span.end);
@@ -960,26 +965,26 @@ impl<'a> Parser<'a> {
         }
         let delimiters = self.list_delimiters();
         self.delimited(
-            Some(SyntaxKind::GroupList),
-            "groupings",
+            Some(SyntaxKind::GatherList),
+            gathering.list(),
             delimiters,
             &[(SyntaxKind::LParen, SyntaxKind::RParen)],
-            |p| p.items(Self::at_grouping, Self::grouping),
+            move |p| p.items(Self::at_gathering, move |p| p.gathering(gathering)),
         );
         self.form = outer_form;
     }
 
-    fn at_grouping(&mut self) -> bool {
+    fn at_gathering(&mut self) -> bool {
         matches!(self.peek(), Some(SyntaxKind::Ident | SyntaxKind::LBrace))
     }
 
     /// `g := {a, b}`. `g: {a, b}` and `g = {a, b}` are fixed to `:=`, and
     /// Tutorial D's `{a, b} as g` to `g := {a, b}`.
-    fn grouping(&mut self) {
-        self.start_node(SyntaxKind::Grouping);
+    fn gathering(&mut self, gathering: errors::Gathering) {
+        self.start_node(SyntaxKind::Gathering);
         if self.at(SyntaxKind::LBrace) {
             let start = self.found().map_or(0, |f| f.span.start);
-            self.names(errors::GROUP_FORM);
+            self.names(gathering.form());
             let list_end = self.last_end.unwrap_or(start);
             match self.found() {
                 Some(found)
@@ -993,21 +998,20 @@ impl<'a> Parser<'a> {
                         self.bump();
                         self.builder.finish_node();
                         let list = &self.source[start..list_end];
-                        self.errors.push(errors::grouping_as(
+                        self.errors.push(errors::gathering_as(
+                            gathering,
                             Span::new(start, name.span.end),
                             name.text,
                             list,
                         ));
                     } else {
-                        self.missing_with_help(
-                            SyntaxKind::Ident,
-                            "write the new attribute's name before the attributes, as in `residents := {name}`",
-                        );
+                        self.missing_with_help(SyntaxKind::Ident, gathering.name_help());
                     }
                 }
-                _ => self
-                    .errors
-                    .push(errors::unnamed_grouping(Span::new(start, list_end))),
+                _ => self.errors.push(errors::unnamed_gathering(
+                    gathering,
+                    Span::new(start, list_end),
+                )),
             }
         } else {
             self.start_node(SyntaxKind::Name);
@@ -1023,29 +1027,31 @@ impl<'a> Parser<'a> {
                         self.source[found.span.end..].chars().next(),
                     );
                     let span = self.bump();
-                    self.errors
-                        .push(errors::grouping_separator(found.kind, span, neighbors));
+                    self.errors.push(errors::gathering_separator(
+                        gathering, found.kind, span, neighbors,
+                    ));
                 }
                 _ => self.missing(SyntaxKind::ColonEq),
             }
-            self.names(errors::GROUP_FORM);
+            self.names(gathering.form());
         }
         self.builder.finish_node();
     }
 
-    /// `{g, h}`: the relation-valued attributes to ungroup. A bare name, as
-    /// in `ungroup g`, is put in braces.
-    fn ungrouped(&mut self) {
+    /// `{g, h}`: the attributes to unpack, after `keyword`, `ungroup` or
+    /// `unwrap`. A bare name, as in `ungroup g`, is put in braces.
+    fn unpacked(&mut self, keyword: SyntaxKind) {
+        let unpacking = errors::Unpacking::of(keyword);
         if let Some(found) = self.found().filter(|f| f.kind == SyntaxKind::Ident) {
             self.start_node(SyntaxKind::NameList);
             self.start_node(SyntaxKind::Name);
             self.bump();
             self.builder.finish_node();
             self.builder.finish_node();
-            self.errors.push(errors::bare_ungrouped(found));
+            self.errors.push(errors::bare_unpacked(unpacking, found));
             return;
         }
-        self.names(errors::UNGROUP_FORM);
+        self.names(unpacking.form());
     }
 
     /// `{ a, b }`: attribute names, in a construct of the given `form`.
@@ -2616,7 +2622,7 @@ SourceFile
             .tree
             .syntax()
             .descendants()
-            .filter_map(trendy_syntax::ast::Grouping::cast)
+            .filter_map(trendy_syntax::ast::Gathering::cast)
             .map(|g| {
                 (
                     g.name().unwrap().syntax().to_string(),
@@ -2661,6 +2667,36 @@ SourceFile
         assert_eq!(
             messages("var x := r ungroup g;"),
             ["`ungroup` takes its attributes in braces: `{g}`"]
+        );
+    }
+
+    #[test]
+    fn wrappings() {
+        let parse = parse_str("var x := r wrap { w := {a, b} } unwrap {w};");
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        // Tutorial D's `AS`, parentheses and capitals, and a bare name.
+        assert_eq!(
+            fix("var x := r WRAP ({a, b} AS w);"),
+            "var x := r wrap {w := {a, b}};"
+        );
+        assert_eq!(fix("var x := r UNWRAP (w);"), "var x := r unwrap {w};");
+        assert_eq!(fix("var x := r unwrap w;"), "var x := r unwrap {w};");
+        assert_eq!(
+            messages("var x := r wrap { w: {a} };"),
+            ["expected `:=` after the new attribute's name, found `:`"]
+        );
+        assert_eq!(
+            messages("var x := r wrap { {a} };"),
+            ["a wrapping needs a name"]
+        );
+        // SQL's `by` belongs to `group` only.
+        assert_eq!(
+            messages("var x := r wrap by {a};")[0],
+            "expected `{`, found identifier `by`"
+        );
+        assert_eq!(
+            fix("var x := r wrap [v := {a}, w := {v, b}];"),
+            "var x := r wrap { v := {a} } wrap { w := {v, b} };"
         );
     }
 

@@ -23,13 +23,13 @@ pub(crate) fn bracketed_lists(root: &SyntaxNode) -> Vec<Diagnostic> {
             let list = postfix
                 .syntax()
                 .children()
-                .find(|n| matches!(n.kind(), SyntaxKind::AssignList | SyntaxKind::GroupList))?;
+                .find(|n| matches!(n.kind(), SyntaxKind::AssignList | SyntaxKind::GatherList))?;
             let open = list
                 .first_token()
                 .filter(|t| t.kind() == SyntaxKind::LBracket)?;
             let items: Vec<String> = list
                 .children()
-                .filter(|n| matches!(n.kind(), SyntaxKind::Assign | SyntaxKind::Grouping))
+                .filter(|n| matches!(n.kind(), SyntaxKind::Assign | SyntaxKind::Gathering))
                 .map(|n| n.text().to_string())
                 .collect();
             let operator = keyword.kind().fixed_text()?;

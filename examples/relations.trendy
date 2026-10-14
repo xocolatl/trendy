@@ -101,16 +101,6 @@ key { name };
    call debug_value{v: people not matching cities};
 */
 
-/* Wrap and unwrap, of each tuple (RM Prescription 7: nesting).
-   Tuple analog: wrap and unwrap.
-   Tutorial D: PEOPLE WRAP ( { NAME, BORN } AS WHO ), PEOPLE UNWRAP ( WHO )
-
-   Decided: with `:=`, as for tuples: a new attribute is defined, its name
-   first, and `as` only renames.
-
-   call debug_value{v: people wrap { who := {name, born} }};
-*/
-
 /* Aggregates (RM Prescription 18 and OO Prescription 6): count, sum, avg,
    max, min, and, or, xor, exactly, union, disjoint union and intersect,
    of a relation, or of one of its attributes.
@@ -405,6 +395,18 @@ operator ungroup_teams{
     call debug_value{v: b group { births := {name, born} } ungroup {births}};
 ];
 
+/* Wrapping and unwrapping, of each tuple (RM Prescription 7: nesting).
+   Tuple analog: wrap and unwrap (see tuples.trendy).
+   Tutorial D: PEOPLE WRAP ( { NAME, BORN } AS WHO ), PEOPLE UNWRAP ( WHO ).
+   Implemented, and printed twice like the projections. */
+var who_where := births wrap { who := {name, born} };
+var unwrapped := births wrap { who := {name, born} } unwrap {who};
+
+operator wrap_births{b: relation { name: text, born: integer, place: text }} [
+    call debug_value{v: b wrap { who := {name, born} }};
+    call debug_value{v: b wrap { who := {name, born} } unwrap {who}};
+];
+
 operator main{} [
     call debug_value{v: names};
     call debug_value{v: places};
@@ -435,6 +437,8 @@ operator main{} [
     call debug_value{v: rosters_by};
     call debug_value{v: memberships};
     call debug_value{v: regrouped};
+    call debug_value{v: who_where};
+    call debug_value{v: unwrapped};
 
     call project_births{r: births};
     call project_signs{r: signs};
@@ -459,4 +463,6 @@ operator main{} [
     call group_births{b: births, t: teams};
 
     call ungroup_teams{t: teams, b: births};
+
+    call wrap_births{b: births};
 ];

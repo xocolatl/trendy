@@ -13,7 +13,7 @@ mod order;
 use std::collections::HashSet;
 
 use trendy_syntax::ast::{
-    Arguments, AssignList, AstNode, Body, GroupList, Heading, NameList, NaryExpr, RelationLiteral,
+    Arguments, AssignList, AstNode, Body, GatherList, Heading, NameList, NaryExpr, RelationLiteral,
     RenameList, SourceFile, TupleLiteral,
 };
 use trendy_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
@@ -155,7 +155,7 @@ fn is_list(node: &SyntaxNode) -> bool {
             | SyntaxKind::NameList
             | SyntaxKind::RenameList
             | SyntaxKind::AssignList
-            | SyntaxKind::GroupList
+            | SyntaxKind::GatherList
             | SyntaxKind::NaryExpr
     )
 }
@@ -420,8 +420,8 @@ fn items(node: &SyntaxNode) -> usize {
         renamings.renamings().count()
     } else if let Some(assignments) = AssignList::cast(node.clone()) {
         assignments.assignments().count()
-    } else if let Some(groupings) = GroupList::cast(node.clone()) {
-        groupings.groupings().count()
+    } else if let Some(gatherings) = GatherList::cast(node.clone()) {
+        gatherings.gatherings().count()
     } else if let Some(nary) = NaryExpr::cast(node.clone()) {
         nary.operands().count()
     } else {
@@ -493,7 +493,9 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
                     SyntaxKind::Operator | SyntaxKind::BuiltinOperator
                 )
             }),
-            TupleLiteral | RelationLiteral | SyntaxKind::AssignList | SyntaxKind::GroupList => true,
+            TupleLiteral | RelationLiteral | SyntaxKind::AssignList | SyntaxKind::GatherList => {
+                true
+            }
             // A key's attributes, as in `key { a, b }`.
             SyntaxKind::NameList => p.parent().is_some_and(|k| k.kind() == SyntaxKind::Key),
             _ => false,
@@ -548,6 +550,8 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
             | SyntaxKind::ReplaceKw
             | SyntaxKind::GroupKw
             | SyntaxKind::UngroupKw
+            | SyntaxKind::WrapKw
+            | SyntaxKind::UnwrapKw
             | SyntaxKind::AsKw,
             _,
         )
@@ -560,6 +564,8 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
             | SyntaxKind::ReplaceKw
             | SyntaxKind::GroupKw
             | SyntaxKind::UngroupKw
+            | SyntaxKind::WrapKw
+            | SyntaxKind::UnwrapKw
             | SyntaxKind::AsKw,
         )
         | (RBrace, LBracket | LBrace) => " ",
@@ -913,6 +919,14 @@ mod tests {
         assert_eq!(
             fmt("var a:=r   ungroup{ g,h }ungroup {i};"),
             "var a := r ungroup {g, h} ungroup {i};\n"
+        );
+    }
+
+    #[test]
+    fn wrappings() {
+        assert_eq!(
+            fmt("var a:=r   wrap{w:={ x,y }}unwrap { w };"),
+            "var a := r wrap { w := {x, y} } unwrap {w};\n"
         );
     }
 

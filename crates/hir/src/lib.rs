@@ -174,9 +174,10 @@ pub enum Expr {
     /// A tuple, or each tuple of a relation, with attributes computed, each
     /// by its expression from the tuple at hand, which is `Current(0, …)` in
     /// it. An attribute the operand hasn't is added (`extend`); one it has
-    /// gets a new value of the same type (`replace`), computed from the old
-    /// ones, all at once. This is Tutorial D Version 2's `EXTEND`, which
-    /// does both. The heading is the computed attributes': an empty relation
+    /// gets a new value, computed from the old ones, all at once, of the
+    /// same type for `replace`, or of another for `wrap`, which replaces an
+    /// attribute it wraps with the tuple of them. This is Tutorial D
+    /// Version 2's `EXTEND`, which does both. The heading is the computed attributes': an empty relation
     /// has no tuple to compute them from, but the result still has them.
     Extend(Box<Expr>, Heading, BTreeMap<String, Expr>),
     /// A relation with relation-valued attributes replaced by their

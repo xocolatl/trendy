@@ -16,7 +16,9 @@ pub(crate) const EXTEND_FORM: &str = "`extend` takes new attributes, each `name 
 pub(crate) const REPLACE_FORM: &str = "`replace` takes attributes the operand has, each `name := value`, where the new value is computed from the tuple's own attributes: `r replace { price := price * 2 }`";
 pub(crate) const IMAGE_FORM: &str = "in an `extend`'s or a `replace`'s values, `!!r` is the tuples of `r` that match the tuple at hand on their common attributes, without those attributes; `r` is a name, or an expression in parentheses";
 pub(crate) const GROUP_FORM: &str = "`group` gathers attributes into new relation-valued attributes, each `name := {attributes}`: `r group { residents := {name} }`";
+pub(crate) const WRAP_FORM: &str = "`wrap` gathers attributes into new tuple-valued attributes, each `name := {attributes}`: `r wrap { address := {street, city} }`";
 pub(crate) const UNGROUP_FORM: &str = "`ungroup` takes the relation-valued attributes to replace with their attributes: `r ungroup {members}`";
+pub(crate) const UNWRAP_FORM: &str = "`unwrap` takes the tuple-valued attributes to replace with their attributes: `r unwrap {address}`";
 pub(crate) const KEY_FORM: &str = "a key lists attributes after a relation variable's value, or after its type if it has no value: `var r := relation { … } key { a, b };`";
 pub(crate) const RENAME_FORM: &str =
     "`rename` takes renamings, each `old as new`: `r rename {postal_code as code}`";
@@ -574,9 +576,71 @@ pub(crate) fn unordered_image(
     d
 }
 
-/// `:` or `=`, `found` at `span`, between a grouping's name and its
+/// What a list of gatherings makes: `group` new relation-valued
+/// attributes, and `wrap` new tuple-valued ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Gathering {
+    Group,
+    Wrap,
+}
+
+impl Gathering {
+    /// What `keyword`'s gatherings make.
+    pub(crate) fn of(keyword: SyntaxKind) -> Gathering {
+        match keyword {
+            SyntaxKind::GroupKw => Gathering::Group,
+            SyntaxKind::WrapKw => Gathering::Wrap,
+            _ => unreachable!("only `group` and `wrap` gather attributes"),
+        }
+    }
+
+    fn keyword(self) -> &'static str {
+        match self {
+            Gathering::Group => "group",
+            Gathering::Wrap => "wrap",
+        }
+    }
+
+    pub(crate) fn form(self) -> &'static str {
+        match self {
+            Gathering::Group => GROUP_FORM,
+            Gathering::Wrap => WRAP_FORM,
+        }
+    }
+
+    /// What the list is called when it is missing.
+    pub(crate) fn list(self) -> &'static str {
+        match self {
+            Gathering::Group => "groupings",
+            Gathering::Wrap => "wrappings",
+        }
+    }
+
+    /// One of the list's items.
+    fn item(self) -> &'static str {
+        match self {
+            Gathering::Group => "grouping",
+            Gathering::Wrap => "wrapping",
+        }
+    }
+
+    /// Help for attributes with no name before them.
+    pub(crate) fn name_help(self) -> &'static str {
+        match self {
+            Gathering::Group => {
+                "write the new attribute's name and `:=` before the attributes, as in `residents := {name}`"
+            }
+            Gathering::Wrap => {
+                "write the new attribute's name and `:=` before the attributes, as in `address := {street, city}`"
+            }
+        }
+    }
+}
+
+/// `:` or `=`, `found` at `span`, between a gathering's name and its
 /// attributes, where `:=` goes. `neighbors` are the characters around it.
-pub(crate) fn grouping_separator(
+pub(crate) fn gathering_separator(
+    gathering: Gathering,
     found: SyntaxKind,
     span: Span,
     neighbors: (Option<char>, Option<char>),
@@ -586,9 +650,12 @@ pub(crate) fn grouping_separator(
         Code::AttributeSeparator,
         format!("expected `:=` after the new attribute's name, found `{text}`"),
         span,
-        "groupings are written `name := {attributes}`",
+        format!("{}s are written `name := {{attributes}}`", gathering.item()),
     )
-    .with_note("in `group`, each new attribute is defined by the attributes it gathers, with `:=`, as an `extend` defines one; `:` pairs a name with a given value in a tuple")
+    .with_note(format!(
+        "in `{}`, each new attribute is defined by the attributes it gathers, with `:=`, as an `extend` defines one; `:` pairs a name with a given value in a tuple",
+        gathering.keyword()
+    ))
     .with_suggestion(
         "write `:=`",
         vec![Edit {
@@ -598,16 +665,19 @@ pub(crate) fn grouping_separator(
     )
 }
 
-/// `{…} as name`, at `span`, in a `group`, as Tutorial D writes a grouping,
-/// where `list` is the attributes as written.
-pub(crate) fn grouping_as(span: Span, name: &str, list: &str) -> Diagnostic {
+/// `{…} as name`, at `span`, in a `group` or a `wrap`, as Tutorial D writes
+/// one, where `list` is the attributes as written.
+pub(crate) fn gathering_as(gathering: Gathering, span: Span, name: &str, list: &str) -> Diagnostic {
     Diagnostic::error(
         Code::AttributeSeparator,
-        format!("a grouping is written `{name} := {list}`, not `{list} as {name}`"),
+        format!(
+            "a {} is written `{name} := {list}`, not `{list} as {name}`",
+            gathering.item()
+        ),
         span,
         "the name goes first",
     )
-    .with_note(GROUP_FORM)
+    .with_note(gathering.form())
     .with_note("`as` only renames; a new attribute is defined with `:=`, its name first")
     .with_suggestion(
         format!("write `{name} := {list}`"),
@@ -618,16 +688,17 @@ pub(crate) fn grouping_as(span: Span, name: &str, list: &str) -> Diagnostic {
     )
 }
 
-/// Attributes, at `span`, in a `group`, with no name for the new attribute.
-pub(crate) fn unnamed_grouping(span: Span) -> Diagnostic {
+/// Attributes, at `span`, in a `group` or a `wrap`, with no name for the
+/// new attribute.
+pub(crate) fn unnamed_gathering(gathering: Gathering, span: Span) -> Diagnostic {
     Diagnostic::error(
         Code::MissingToken,
-        "a grouping needs a name",
+        format!("a {} needs a name", gathering.item()),
         span,
         "these attributes have no name to be gathered into",
     )
-    .with_note(GROUP_FORM)
-    .with_help("write the new attribute's name and `:=` before the attributes, as in `residents := {name}`")
+    .with_note(gathering.form())
+    .with_help(gathering.name_help())
 }
 
 /// SQL's `by {…}`, at `span`, after `group`, which names the attributes
@@ -644,7 +715,8 @@ pub(crate) fn group_by(span: Span) -> Diagnostic {
     .with_help("list the other attributes, and name the new attribute: `r group by {city}` is `r group { members := {…every attribute but city…} }`")
 }
 
-/// The list of `operator`, `extend`, `replace` or `group`, at `list`, in
+/// The list of `operator`, `extend`, `replace`, `group` or `wrap`, at
+/// `list`, in
 /// brackets opening at `open`, with `items` as written. Its items apply all
 /// at once, in braces; in order, they are a chain of the operator, which is
 /// the fix, since brackets ask for an order.
@@ -691,16 +763,51 @@ pub(crate) fn bracketed_list(
     }
 }
 
-/// A bare name, `found`, after `ungroup`, where a list in braces goes.
-pub(crate) fn bare_ungrouped(found: Found) -> Diagnostic {
+/// What a list of attributes to unpack holds: relation-valued ones, for
+/// `ungroup`, and tuple-valued ones, for `unwrap`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Unpacking {
+    Ungroup,
+    Unwrap,
+}
+
+impl Unpacking {
+    /// What `keyword` unpacks.
+    pub(crate) fn of(keyword: SyntaxKind) -> Unpacking {
+        match keyword {
+            SyntaxKind::UngroupKw => Unpacking::Ungroup,
+            SyntaxKind::UnwrapKw => Unpacking::Unwrap,
+            _ => unreachable!("only `ungroup` and `unwrap` unpack attributes"),
+        }
+    }
+
+    fn keyword(self) -> &'static str {
+        match self {
+            Unpacking::Ungroup => "ungroup",
+            Unpacking::Unwrap => "unwrap",
+        }
+    }
+
+    pub(crate) fn form(self) -> &'static str {
+        match self {
+            Unpacking::Ungroup => UNGROUP_FORM,
+            Unpacking::Unwrap => UNWRAP_FORM,
+        }
+    }
+}
+
+/// A bare name, `found`, after `ungroup` or `unwrap`, where a list in
+/// braces goes.
+pub(crate) fn bare_unpacked(unpacking: Unpacking, found: Found) -> Diagnostic {
+    let keyword = unpacking.keyword();
     Diagnostic::error(
         Code::WrongDelimiter,
-        format!("`ungroup` takes its attributes in braces: `{{{}}}`", found.text),
+        format!("`{keyword}` takes its attributes in braces: `{{{}}}`", found.text),
         found.span,
         "not in braces",
     )
-    .with_note(UNGROUP_FORM)
-    .with_note("like `remove`, `ungroup` takes a list of attribute names, in braces since their order doesn't matter")
+    .with_note(unpacking.form())
+    .with_note(format!("like `remove`, `{keyword}` takes a list of attribute names, in braces since their order doesn't matter"))
     .with_suggestion(
         "put it in braces",
         vec![Edit {

@@ -49,24 +49,6 @@ var addr := tuple {
    call debug_value{v: addr compose tuple { postal_code: "75001", district: "1st" }};
 */
 
-/* Wrap: gather attributes into one tuple-valued attribute (RM Prescription
-   6, item c: "nesting").
-   Tutorial D: ADDR WRAP ( { STREET, CITY } AS PLACE )
-   Decided: a `wrap` operator, with the new attribute's name and the names
-   it gathers, written with `:=` like `group`: a new attribute is defined,
-   its name first, and `as` only renames.
-
-   call debug_value{v: addr wrap { place := {street, city} }};
-*/
-
-/* Unwrap: replace a tuple-valued attribute with its attributes (RM
-   Prescription 6, item c: "unnesting").
-   Tutorial D: X UNWRAP ( A )
-   Proposed: an `unwrap` operator, with the names to unwrap.
-
-   call debug_value{v: x unwrap { a }};
-*/
-
 /* Tuple extraction: the one tuple of a relation with exactly one, else a
    run-time error (RM Prescription 7's relation operators).
    Tutorial D: TUPLE FROM R
@@ -173,6 +155,23 @@ operator replace_addr{
     call debug_value{v: p replace { x := y * 2e0, y := x }};
 ];
 
+/* Wrapping: gather attributes into a tuple-valued attribute, each
+   `name := {attributes}` (RM Prescription 6, item c: "nesting"). Several
+   wrappings are simultaneous; to wrap one into another, chain `wrap`s. A
+   new name can be one it gathers. Unwrapping replaces tuple-valued
+   attributes with their attributes ("unnesting"), and undoes it.
+   Tutorial D: ADDR WRAP ( { STREET, CITY } AS PLACE ), and
+   X UNWRAP ( A ). Implemented, and printed twice like the projections. */
+var placed := addr wrap { place := {street, city} };
+var nested := addr wrap { place := {street, city} } wrap { where := {place, country} };
+var unplaced := placed unwrap {place};
+
+operator wrap_addr{a: tuple { street: text, city: text, country: text, postal_code: text }} [
+    call debug_value{v: a wrap { place := {street, city} }};
+    call debug_value{v: a wrap { place := {street, city} } wrap { where := {place, country} }};
+    call debug_value{v: a wrap { place := {street, city} } unwrap {place}};
+];
+
 operator main{} [
     call debug_value{v: located};
     call debug_value{v: unlocated};
@@ -188,6 +187,9 @@ operator main{} [
     call debug_value{v: summed};
     call debug_value{v: recoded};
     call debug_value{v: flipped};
+    call debug_value{v: placed};
+    call debug_value{v: nested};
+    call debug_value{v: unplaced};
 
     call project_addr{a: addr};
 
@@ -200,4 +202,6 @@ operator main{} [
     call extend_addr{a: addr, p: q};
 
     call replace_addr{a: addr, p: q};
+
+    call wrap_addr{a: addr};
 ];

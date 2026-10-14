@@ -325,18 +325,7 @@ pub(crate) fn removed(
         ));
         return None;
     };
-    let attributes: Vec<String> = heading
-        .attributes()
-        .map(|(a, _)| format!("`{a}`"))
-        .collect();
-    let context = if attributes.is_empty() {
-        format!("the operand, of type `{ty}`, has no attributes")
-    } else {
-        format!(
-            "the operand's attributes are {}",
-            trendy_diag::conjoin(&attributes)
-        )
-    };
+    let context = errors::attributes_note("operand", ty);
     let listed = listed(
         &projection.names()?,
         heading,
@@ -444,18 +433,7 @@ pub(crate) fn renamed(
         errors.push(errors::empty_rename(postfix, operand));
         return None;
     }
-    let attributes: Vec<String> = heading
-        .attributes()
-        .map(|(a, _)| format!("`{a}`"))
-        .collect();
-    let context = if attributes.is_empty() {
-        format!("the operand, of type `{ty}`, has no attributes")
-    } else {
-        format!(
-            "the operand's attributes are {}",
-            trendy_diag::conjoin(&attributes)
-        )
-    };
+    let context = errors::attributes_note("operand", ty);
     let mut ok = true;
     let mut renamings = BTreeMap::new();
     for (renaming, (before, before_span), (after, after_span)) in &entries {
@@ -827,18 +805,174 @@ pub(crate) fn ungroup(operand: hir::Expr, names: BTreeSet<String>) -> hir::Expr 
     }
 }
 
-/// Whether `postfix` is an `ungroup`.
-pub(crate) fn is_ungroup(postfix: &ast::PostfixExpr) -> bool {
-    postfix
-        .operator()
-        .is_some_and(|t| t.kind() == SyntaxKind::UngroupKw)
+/// What a `group` or a `wrap` makes of the attributes each of its
+/// gatherings names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Gathering {
+    /// A relation-valued attribute, of the tuples that share the rest.
+    Group,
+    /// A tuple-valued attribute, of each tuple's own.
+    Wrap,
 }
 
-/// Whether `postfix` is a `group`.
-pub(crate) fn is_group(postfix: &ast::PostfixExpr) -> bool {
-    postfix
-        .operator()
-        .is_some_and(|t| t.kind() == SyntaxKind::GroupKw)
+impl Gathering {
+    /// What `postfix` gathers, if it is a `group` or a `wrap`.
+    pub(crate) fn of(postfix: &ast::PostfixExpr) -> Option<Gathering> {
+        match postfix.operator()?.kind() {
+            SyntaxKind::GroupKw => Some(Gathering::Group),
+            SyntaxKind::WrapKw => Some(Gathering::Wrap),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn keyword(self) -> &'static str {
+        match self {
+            Gathering::Group => "group",
+            Gathering::Wrap => "wrap",
+        }
+    }
+}
+
+/// What an `ungroup` or an `unwrap` replaces with its attributes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Unpacking {
+    /// Relation-valued attributes.
+    Ungroup,
+    /// Tuple-valued attributes.
+    Unwrap,
+}
+
+impl Unpacking {
+    /// What `postfix` unpacks, if it is an `ungroup` or an `unwrap`.
+    pub(crate) fn of(postfix: &ast::PostfixExpr) -> Option<Unpacking> {
+        match postfix.operator()?.kind() {
+            SyntaxKind::UngroupKw => Some(Unpacking::Ungroup),
+            SyntaxKind::UnwrapKw => Some(Unpacking::Unwrap),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn keyword(self) -> &'static str {
+        match self {
+            Unpacking::Ungroup => "ungroup",
+            Unpacking::Unwrap => "unwrap",
+        }
+    }
+
+    /// The heading of the attribute of type `ty` it unpacks, if it is the
+    /// kind it unpacks.
+    pub(crate) fn inner(self, ty: &hir::Type) -> Option<&hir::Heading> {
+        match (self, ty) {
+            (Unpacking::Ungroup, hir::Type::Relation(inner))
+            | (Unpacking::Unwrap, hir::Type::Tuple(inner)) => Some(inner),
+            _ => None,
+        }
+    }
+}
+
+/// `operand`, a relation with `heading`, grouped: projected on the
+/// attributes no grouping gathers, and extended with the image relation of
+/// each of its tuples in the operand, projected on each grouping's
+/// attributes, as Appendix A defines GROUP. The groupings are simultaneous:
+/// each is of the same image.
+///
+/// # Errors
+///
+/// Returns why computing a group of a constant operand fails.
+pub(crate) fn group(
+    operand: hir::Expr,
+    heading: &hir::Heading,
+    groups: Vec<(String, BTreeSet<String>)>,
+) -> Result<hir::Expr, ExtendFailure> {
+    let all: BTreeSet<String> = groups.iter().flat_map(|(_, set)| set.clone()).collect();
+    let kept = heading.without(&all);
+    // Each group is computed inside the extend's values, one tuple at hand
+    // further in than the operand was written.
+    let image = image(deeper(operand.clone()), heading, &kept);
+    let mut types = BTreeMap::new();
+    let mut values = BTreeMap::new();
+    for (name, set) in groups {
+        // The image has every gathered attribute; each group, its own.
+        let others: BTreeSet<String> = all.difference(&set).cloned().collect();
+        types.insert(name.clone(), hir::Type::Relation(only(heading, &set)));
+        values.insert(name, remove(image.clone(), others));
+    }
+    extend(remove(operand, all), hir::Heading::new(types), values)
+}
+
+/// `operand`, a tuple or relation with `heading`, wrapped: each wrapping's
+/// attributes replaced by a tuple-valued attribute of them, as Appendix A
+/// defines WRAP: an extend, then a remove of what was wrapped. A new name
+/// can be one it wraps, which the extend then replaces.
+pub(crate) fn wrap(
+    operand: hir::Expr,
+    heading: &hir::Heading,
+    wraps: Vec<(String, BTreeSet<String>)>,
+) -> hir::Expr {
+    let tuple = || hir::Expr::Current(0, heading.clone());
+    let mut wrapped = BTreeSet::new();
+    let mut types = BTreeMap::new();
+    let mut values = BTreeMap::new();
+    for (name, set) in wraps {
+        let attributes = set
+            .iter()
+            .map(|a| (a.clone(), extract(tuple(), a.clone())))
+            .collect();
+        types.insert(name.clone(), hir::Type::Tuple(only(heading, &set)));
+        values.insert(name, self::tuple(attributes));
+        wrapped.extend(set);
+    }
+    let gone = wrapped
+        .difference(&types.keys().cloned().collect())
+        .cloned()
+        .collect();
+    let extended = extend(operand, hir::Heading::new(types), values)
+        .unwrap_or_else(|_| unreachable!("wrapping only extracts, which can't fail"));
+    remove(extended, gone)
+}
+
+/// `operand`, a tuple or relation with `heading`, with the tuple-valued
+/// attributes `names` replaced by their attributes, as Appendix A defines
+/// UNWRAP: an extend with each of them, then a remove of what was
+/// unwrapped. An attribute can have the name of one it unwraps, which the
+/// extend then replaces.
+pub(crate) fn unwrap(
+    operand: hir::Expr,
+    heading: &hir::Heading,
+    names: &BTreeSet<String>,
+) -> hir::Expr {
+    let tuple = || hir::Expr::Current(0, heading.clone());
+    let mut types = BTreeMap::new();
+    let mut values = BTreeMap::new();
+    for name in names {
+        let Some(hir::Type::Tuple(inner)) = heading.get(name) else {
+            unreachable!("sema unwraps only tuple-valued attributes");
+        };
+        for (attribute, ty) in inner.attributes() {
+            types.insert(attribute.to_string(), ty.clone());
+            values.insert(
+                attribute.to_string(),
+                extract(extract(tuple(), name.clone()), attribute.to_string()),
+            );
+        }
+    }
+    let gone = names
+        .difference(&types.keys().cloned().collect())
+        .cloned()
+        .collect();
+    let extended = extend(operand, hir::Heading::new(types), values)
+        .unwrap_or_else(|_| unreachable!("unwrapping only extracts, which can't fail"));
+    remove(extended, gone)
+}
+
+/// `heading` with only the attributes in `names`.
+fn only(heading: &hir::Heading, names: &BTreeSet<String>) -> hir::Heading {
+    let others = heading
+        .attributes()
+        .map(|(a, _)| a.to_string())
+        .filter(|a| !names.contains(a))
+        .collect();
+    heading.without(&others)
 }
 
 /// What an `extend` or a `replace` does with its attribute assignments.
@@ -1103,18 +1237,7 @@ pub(crate) fn extracted(
             .map(|(a, _)| a)
             .filter(|a| edit_distance(a, &name) <= 2)
             .min_by_key(|a| edit_distance(a, &name));
-        let attributes: Vec<String> = heading
-            .attributes()
-            .map(|(a, _)| format!("`{a}`"))
-            .collect();
-        let context = if attributes.is_empty() {
-            format!("the tuple, of type `{ty}`, has no attributes")
-        } else {
-            format!(
-                "the tuple's attributes are {}",
-                trendy_diag::conjoin(&attributes)
-            )
-        };
+        let context = errors::attributes_note("tuple", ty);
         errors.push(errors::unknown_attribute(
             errors::Noun::Projected,
             &name,

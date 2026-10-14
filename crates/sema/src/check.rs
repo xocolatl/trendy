@@ -176,11 +176,11 @@ impl<'a> Checker<'a> {
                 let name = ops::extracted(extract, &operand_expr, &ty, errors)?;
                 self.matched(expected, ops::extract(operand, name), expr, errors)
             }
-            Expr::Postfix(postfix) if ops::is_ungroup(postfix) => {
-                self.ungrouped(postfix, expr, expected, errors)
+            Expr::Postfix(postfix) if let Some(gathering) = ops::Gathering::of(postfix) => {
+                self.gathered(postfix, gathering, expr, expected, errors)
             }
-            Expr::Postfix(postfix) if ops::is_group(postfix) => {
-                self.grouped(postfix, expr, expected, errors)
+            Expr::Postfix(postfix) if let Some(unpacking) = ops::Unpacking::of(postfix) => {
+                self.unpacked(postfix, unpacking, expr, expected, errors)
             }
             Expr::Postfix(postfix) if let Some(assigning) = ops::Assigning::of(postfix) => {
                 self.assigned(postfix, assigning, expr, expected, errors)
@@ -326,16 +326,16 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// `postfix`, a `group`, written `expr`: the operand's tuples, one for
-    /// each value of the attributes no grouping gathers, each with a new
-    /// relation-valued attribute for each grouping, of its attributes of
-    /// the tuples with that value. The groupings are simultaneous: each is
-    /// of the same matching tuples. That is an `extend` of the projection
-    /// on the kept attributes, with the image relation of each of its
-    /// tuples in the operand, projected on each grouping's attributes.
-    fn grouped(
+    /// `postfix`, a `group` or a `wrap`, as `gathering` says, written
+    /// `expr`: each gathering's attributes made into a new attribute. A
+    /// `group` makes relation-valued ones, of the tuples that share the
+    /// attributes no grouping gathers, and takes a relation; a `wrap`
+    /// makes tuple-valued ones, of each tuple's own, and takes a tuple or a
+    /// relation. Several gatherings are simultaneous.
+    fn gathered(
         &mut self,
         postfix: &ast::PostfixExpr,
+        gathering: ops::Gathering,
         expr: &Expr,
         expected: Option<&Expected>,
         errors: &mut Vec<Diagnostic>,
@@ -344,52 +344,54 @@ impl<'a> Checker<'a> {
         let operand = self.expr(&operand_expr, None, errors)?;
         let ty = self.ty(&operand);
         let keyword = trendy_syntax::span(postfix.operator()?.text_range());
-        let hir::Type::Relation(heading) = &ty else {
-            errors.push(errors::not_relational("group", keyword, &ty, &operand_expr));
-            return None;
-        };
-        let list = postfix.groupings()?;
-        if list.groupings().next().is_none() {
-            errors.push(errors::empty_group(postfix, &operand_expr));
-            return None;
-        }
-        let groups = groupings(&list, &ty, &operand_expr, errors)?;
-        let all: BTreeSet<String> = groups.iter().flat_map(|(_, set)| set.clone()).collect();
-        let kept = heading.without(&all);
-        // Each group is computed inside the extend's values, one tuple at
-        // hand further in than the operand was written.
-        let image = ops::image(ops::deeper(operand.clone()), heading, &kept);
-        let mut types = BTreeMap::new();
-        let mut values = BTreeMap::new();
-        for (name, set) in groups {
-            // The image has every gathered attribute; each group, its own.
-            let others: BTreeSet<String> = all.difference(&set).cloned().collect();
-            let unlisted: BTreeSet<String> = heading
-                .attributes()
-                .map(|(a, _)| a.to_string())
-                .filter(|a| !set.contains(a))
-                .collect();
-            types.insert(
-                name.clone(),
-                hir::Type::Relation(heading.without(&unlisted)),
-            );
-            values.insert(name, ops::remove(image.clone(), others));
-        }
-        match ops::extend(ops::remove(operand, all), hir::Heading::new(types), values) {
-            Ok(result) => self.matched(expected, result, expr, errors),
-            Err(failure) => {
-                errors.push(errors::extension_failure(&failure, &operand_expr));
-                None
+        let heading = match (gathering, &ty) {
+            (ops::Gathering::Group, hir::Type::Relation(heading))
+            | (ops::Gathering::Wrap, hir::Type::Tuple(heading) | hir::Type::Relation(heading)) => {
+                heading
             }
+            (ops::Gathering::Group, hir::Type::Tuple(_)) => {
+                errors.push(errors::not_relational("group", keyword, &ty, &operand_expr));
+                return None;
+            }
+            _ => {
+                let operator = Some(gathering.keyword());
+                errors.push(errors::not_projectable(
+                    operator,
+                    keyword,
+                    &ty,
+                    &operand_expr,
+                ));
+                return None;
+            }
+        };
+        let list = postfix.gatherings()?;
+        if list.gatherings().next().is_none() {
+            errors.push(errors::empty_gathering(gathering, postfix, &operand_expr));
+            return None;
         }
+        let gathered = gatherings(gathering, &list, &ty, &operand_expr, errors)?;
+        let result = match gathering {
+            ops::Gathering::Group => match ops::group(operand, heading, gathered) {
+                Ok(result) => result,
+                Err(failure) => {
+                    errors.push(errors::extension_failure(&failure, &operand_expr));
+                    return None;
+                }
+            },
+            ops::Gathering::Wrap => ops::wrap(operand, heading, gathered),
+        };
+        self.matched(expected, result, expr, errors)
     }
 
-    /// `postfix`, an `ungroup`, written `expr`: each tuple of the operand
-    /// replaced by one for each combination of a tuple of each named
-    /// relation-valued attribute, with its attributes in place of them.
-    fn ungrouped(
+    /// `postfix`, an `ungroup` or an `unwrap`, as `unpacking` says, written
+    /// `expr`: the named attributes replaced by their own attributes. An
+    /// `ungroup` takes a relation and relation-valued attributes, and gives
+    /// each tuple one for each combination of a tuple of each; an `unwrap`
+    /// takes a tuple or a relation and tuple-valued attributes.
+    fn unpacked(
         &mut self,
         postfix: &ast::PostfixExpr,
+        unpacking: ops::Unpacking,
         expr: &Expr,
         expected: Option<&Expected>,
         errors: &mut Vec<Diagnostic>,
@@ -398,67 +400,42 @@ impl<'a> Checker<'a> {
         let operand = self.expr(&operand_expr, None, errors)?;
         let ty = self.ty(&operand);
         let keyword = trendy_syntax::span(postfix.operator()?.text_range());
-        let hir::Type::Relation(heading) = &ty else {
-            errors.push(errors::not_relational(
-                "ungroup",
-                keyword,
-                &ty,
-                &operand_expr,
-            ));
-            return None;
+        let heading = match (unpacking, &ty) {
+            (ops::Unpacking::Ungroup, hir::Type::Relation(heading))
+            | (ops::Unpacking::Unwrap, hir::Type::Tuple(heading) | hir::Type::Relation(heading)) => {
+                heading
+            }
+            (ops::Unpacking::Ungroup, hir::Type::Tuple(_)) => {
+                errors.push(errors::not_relational(
+                    "ungroup",
+                    keyword,
+                    &ty,
+                    &operand_expr,
+                ));
+                return None;
+            }
+            _ => {
+                let operator = Some(unpacking.keyword());
+                errors.push(errors::not_projectable(
+                    operator,
+                    keyword,
+                    &ty,
+                    &operand_expr,
+                ));
+                return None;
+            }
         };
         let list = postfix.names()?;
         if list.names().next().is_none() {
-            errors.push(errors::empty_ungroup(postfix, &operand_expr));
+            errors.push(errors::empty_unpacking(unpacking, postfix, &operand_expr));
             return None;
         }
-        let attributes: Vec<String> = heading
-            .attributes()
-            .map(|(a, _)| format!("`{a}`"))
-            .collect();
-        let context = format!(
-            "the operand's attributes are {}",
-            trendy_diag::conjoin(&attributes)
-        );
-        let names = ops::listed(&list, heading, errors::Noun::Projected, &context, errors)?;
-        let mut ok = true;
-        // Where each attribute of the result comes from: kept, or which
-        // ungrouped attribute's relation.
-        let mut placed: BTreeMap<String, Option<String>> = heading
-            .without(&names)
-            .attributes()
-            .map(|(a, _)| (a.to_string(), None))
-            .collect();
-        for name in list.names() {
-            let Some(ident) = name.ident() else {
-                continue;
-            };
-            let span = trendy_syntax::span(ident.text_range());
-            let ungrouped = ident.text();
-            let Some(hir::Type::Relation(inner)) = heading.get(ungrouped) else {
-                let attribute_ty = heading.get(ungrouped)?;
-                errors.push(errors::not_ungroupable(ungrouped, span, attribute_ty));
-                ok = false;
-                continue;
-            };
-            for (attribute, _) in inner.attributes() {
-                if let Some(from) = placed.get(attribute) {
-                    errors.push(errors::ungroup_clash(
-                        attribute,
-                        span,
-                        ungrouped,
-                        from.as_deref(),
-                    ));
-                    ok = false;
-                } else {
-                    placed.insert(attribute.to_string(), Some(ungrouped.to_string()));
-                }
-            }
-        }
-        if !ok {
-            return None;
-        }
-        self.matched(expected, ops::ungroup(operand, names), expr, errors)
+        let names = unpackings(unpacking, &list, &ty, errors)?;
+        let result = match unpacking {
+            ops::Unpacking::Ungroup => ops::ungroup(operand, names),
+            ops::Unpacking::Unwrap => ops::unwrap(operand, heading, &names),
+        };
+        self.matched(expected, result, expr, errors)
     }
 
     /// `image`, written `expr`: the image relation of the tuple at hand in
@@ -606,35 +583,29 @@ fn assigned_name(
     }
 }
 
-/// The groupings of a `group` in `list`, of an operand of type `ty`,
-/// written `operand`: each new attribute's name and the attributes it
-/// gathers. `None` after reporting each that is wrong: an unknown
-/// attribute, a name given twice, an attribute gathered twice, or a new
-/// name that the result keeps.
-fn groupings(
-    list: &ast::GroupList,
+/// The gatherings of a `group` or a `wrap`, as `gathering` says, in
+/// `list`, of an operand of type `ty`, written `operand`: each new
+/// attribute's name and the attributes it gathers. `None` after reporting
+/// each that is wrong: an unknown attribute, a name given twice, an
+/// attribute gathered twice, or a new name that the result keeps.
+fn gatherings(
+    gathering: ops::Gathering,
+    list: &ast::GatherList,
     ty: &hir::Type,
     operand: &Expr,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<Vec<(String, BTreeSet<String>)>> {
     let (hir::Type::Tuple(heading) | hir::Type::Relation(heading)) = ty else {
-        unreachable!("only tuples and relations have attributes to group");
+        unreachable!("only tuples and relations have attributes to gather");
     };
-    let attributes: Vec<String> = heading
-        .attributes()
-        .map(|(a, _)| format!("`{a}`"))
-        .collect();
-    let context = format!(
-        "the operand's attributes are {}",
-        trendy_diag::conjoin(&attributes)
-    );
+    let context = errors::attributes_note("operand", ty);
     let mut ok = true;
-    // Each attribute gathered, with the grouping that gathers it and
+    // Each attribute gathered, with the gathering that gathers it and
     // where.
     let mut gathered: BTreeMap<String, (String, Span)> = BTreeMap::new();
-    let mut groups: Vec<(String, Span, BTreeSet<String>)> = Vec::new();
-    for grouping in list.groupings() {
-        let Some(ident) = grouping.name().and_then(|n| n.ident()) else {
+    let mut gathered_items: Vec<(String, Span, BTreeSet<String>)> = Vec::new();
+    for item in list.gatherings() {
+        let Some(ident) = item.name().and_then(|n| n.ident()) else {
             ok = false;
             continue;
         };
@@ -642,7 +613,7 @@ fn groupings(
             ident.text().to_string(),
             trendy_syntax::span(ident.text_range()),
         );
-        if let Some((_, first, _)) = groups.iter().find(|(n, _, _)| *n == name) {
+        if let Some((_, first, _)) = gathered_items.iter().find(|(n, _, _)| *n == name) {
             errors.push(errors::duplicate_attribute(
                 errors::Noun::Attribute,
                 &name,
@@ -652,7 +623,7 @@ fn groupings(
             ok = false;
             continue;
         }
-        let Some(names) = grouping.names() else {
+        let Some(names) = item.names() else {
             ok = false;
             continue;
         };
@@ -669,6 +640,7 @@ fn groupings(
             match gathered.get(ident.text()) {
                 Some((other, first)) if *other != name => {
                     errors.push(errors::gathered_twice(
+                        gathering,
                         ident.text(),
                         at,
                         (other, *first),
@@ -682,22 +654,82 @@ fn groupings(
                 }
             }
         }
-        groups.push((name, span, set));
+        gathered_items.push((name, span, set));
     }
     let all: BTreeSet<String> = gathered.keys().cloned().collect();
     let kept = heading.without(&all);
-    for (name, span, _) in &groups {
+    for (name, span, _) in &gathered_items {
         if kept.get(name).is_some() {
-            errors.push(errors::grouping_exists(name, *span, ty, operand));
+            errors.push(errors::gathering_exists(
+                gathering, name, *span, ty, operand,
+            ));
             ok = false;
         }
     }
     ok.then(|| {
-        groups
+        gathered_items
             .into_iter()
             .map(|(name, _, set)| (name, set))
             .collect()
     })
+}
+
+/// The attributes an `ungroup` or an `unwrap`, as `unpacking` says, names in
+/// `list`, of an operand of type `ty`. `None` after reporting each that is
+/// wrong: unknown, named twice, not the kind it unpacks, or with an
+/// attribute that the result would have twice.
+fn unpackings(
+    unpacking: ops::Unpacking,
+    list: &ast::NameList,
+    ty: &hir::Type,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<BTreeSet<String>> {
+    let (hir::Type::Tuple(heading) | hir::Type::Relation(heading)) = ty else {
+        unreachable!("only tuples and relations have attributes to unpack");
+    };
+    let context = errors::attributes_note("operand", ty);
+    let names = ops::listed(list, heading, errors::Noun::Projected, &context, errors)?;
+    let mut ok = true;
+    // Where each attribute of the result comes from: kept, or which
+    // unpacked attribute.
+    let mut placed: BTreeMap<String, Option<String>> = heading
+        .without(&names)
+        .attributes()
+        .map(|(a, _)| (a.to_string(), None))
+        .collect();
+    for name in list.names() {
+        let Some(ident) = name.ident() else {
+            continue;
+        };
+        let span = trendy_syntax::span(ident.text_range());
+        let unpacked = ident.text();
+        let attribute_ty = heading.get(unpacked)?;
+        let Some(inner) = unpacking.inner(attribute_ty) else {
+            errors.push(errors::not_unpackable(
+                unpacking,
+                unpacked,
+                span,
+                attribute_ty,
+            ));
+            ok = false;
+            continue;
+        };
+        for (attribute, _) in inner.attributes() {
+            if let Some(from) = placed.get(attribute) {
+                errors.push(errors::unpack_clash(
+                    unpacking,
+                    attribute,
+                    span,
+                    unpacked,
+                    from.as_deref(),
+                ));
+                ok = false;
+            } else {
+                placed.insert(attribute.to_string(), Some(unpacked.to_string()));
+            }
+        }
+    }
+    ok.then_some(names)
 }
 
 /// Names in the values an `extend` or a `replace` computes: the attributes of the tuple at

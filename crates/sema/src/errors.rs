@@ -669,7 +669,7 @@ pub(crate) fn not_projectable(
     Diagnostic::error(Code::WrongOperandType, message, at, label)
         .with_secondary(operand.span(), format!("this is `{ty}`"))
         .with_note(
-            "a projection, `r{a, b}`, `r remove {c}`, `r rename {a as b}`, `r extend { d := … }` and `r replace { a := … }` work on the attributes of a tuple or relation",
+            "a projection, `r{a, b}`, `r remove {c}`, `r rename {a as b}`, `r extend { d := … }`, `r replace { a := … }`, `r wrap { w := {a} }` and `r unwrap {w}` work on the attributes of a tuple or relation",
         )
 }
 
@@ -1171,105 +1171,182 @@ pub(crate) fn not_relational(
     .with_note(note)
 }
 
-/// The attribute `name`, at `span`, named in an `ungroup`, of type `ty`,
-/// which isn't a relation.
-pub(crate) fn not_ungroupable(name: &str, span: Span, ty: &hir::Type) -> Diagnostic {
-    let d = Diagnostic::error(
-        Code::WrongOperandType,
-        format!("`{name}` can't be ungrouped: it is `{ty}`"),
-        span,
-        "not relation-valued",
-    )
-    .with_note("`ungroup` replaces a relation-valued attribute with the attributes of its relation's tuples");
-    if matches!(ty, hir::Type::Tuple(_)) {
-        d.with_help(format!(
-            "a tuple-valued attribute is unpacked with `unwrap`: `… unwrap {{{name}}}`"
-        ))
+/// A note on the attributes of `whose`, "operand" or "tuple", of type
+/// `ty`, a tuple or relation type: what they are, or that there are none.
+pub(crate) fn attributes_note(whose: &str, ty: &hir::Type) -> String {
+    let (hir::Type::Tuple(heading) | hir::Type::Relation(heading)) = ty else {
+        unreachable!("only tuples and relations have attributes");
+    };
+    let attributes: Vec<String> = heading
+        .attributes()
+        .map(|(a, _)| format!("`{a}`"))
+        .collect();
+    if attributes.is_empty() {
+        format!("the {whose}, of type `{ty}`, has no attributes")
     } else {
-        d
+        format!(
+            "the {whose}'s attributes are {}",
+            trendy_diag::conjoin(&attributes)
+        )
     }
 }
 
-/// The attribute `attribute` of the relation-valued attribute `ungrouped`,
-/// written at `span`, which the result of an `ungroup` already has: kept,
-/// if `other` is `None`, or from the relation of `other`.
-pub(crate) fn ungroup_clash(
+/// The attribute `name`, at `span`, named in an `ungroup` or an `unwrap`,
+/// as `unpacking` says, of type `ty`, which isn't the kind it unpacks.
+pub(crate) fn not_unpackable(
+    unpacking: crate::ops::Unpacking,
+    name: &str,
+    span: Span,
+    ty: &hir::Type,
+) -> Diagnostic {
+    use crate::ops::Unpacking;
+    let (done, kind, note) = match unpacking {
+        Unpacking::Ungroup => (
+            "ungrouped",
+            "relation-valued",
+            "`ungroup` replaces a relation-valued attribute with the attributes of its relation's tuples",
+        ),
+        Unpacking::Unwrap => (
+            "unwrapped",
+            "tuple-valued",
+            "`unwrap` replaces a tuple-valued attribute with its tuple's attributes",
+        ),
+    };
+    let d = Diagnostic::error(
+        Code::WrongOperandType,
+        format!("`{name}` can't be {done}: it is `{ty}`"),
+        span,
+        format!("not {kind}"),
+    )
+    .with_note(note);
+    match (unpacking, ty) {
+        (Unpacking::Ungroup, hir::Type::Tuple(_)) => d.with_help(format!(
+            "a tuple-valued attribute is unpacked with `unwrap`: `… unwrap {{{name}}}`"
+        )),
+        (Unpacking::Unwrap, hir::Type::Relation(_)) => d.with_help(format!(
+            "a relation-valued attribute is unpacked with `ungroup`: `… ungroup {{{name}}}`"
+        )),
+        _ => d,
+    }
+}
+
+/// The attribute `attribute` of the attribute `unpacked`, written at
+/// `span`, which the result of an `ungroup` or an `unwrap`, as `unpacking`
+/// says, already has: kept, if `other` is `None`, or from `other`.
+pub(crate) fn unpack_clash(
+    unpacking: crate::ops::Unpacking,
     attribute: &str,
     span: Span,
-    ungrouped: &str,
+    unpacked: &str,
     other: Option<&str>,
 ) -> Diagnostic {
+    let keyword = unpacking.keyword();
+    let (doing, its) = match unpacking {
+        crate::ops::Unpacking::Ungroup => ("ungrouping", "its tuples have"),
+        crate::ops::Unpacking::Unwrap => ("unwrapping", "it has"),
+    };
     let from = match other {
-        Some(other) => format!("`{other}`'s tuples have it too"),
+        Some(other) => format!("`{other}` has it too"),
         None => "the result keeps an attribute of that name".to_string(),
     };
     Diagnostic::error(
         Code::AttributeExists,
-        format!("ungrouping `{ungrouped}` would give two attributes `{attribute}`"),
+        format!("{doing} `{unpacked}` would give two attributes `{attribute}`"),
         span,
-        format!("its tuples have `{attribute}`, and {from}"),
+        format!("{its} `{attribute}`, and {from}"),
     )
     .with_note("attributes are a set, so each name can appear only once in the result")
     .with_help(match other {
         None => format!(
-            "rename the kept one first: `… rename {{{attribute} as other_{attribute}}} ungroup {{{ungrouped}}}`"
+            "rename the kept one first: `… rename {{{attribute} as other_{attribute}}} {keyword} {{{unpacked}}}`"
         ),
         Some(other) => format!(
-            "ungroup one, rename what it gave, then ungroup the other: `… ungroup {{{other}}} rename {{{attribute} as {other}_{attribute}}} ungroup {{{ungrouped}}}`"
+            "{keyword} one, rename what it gave, then {keyword} the other: `… {keyword} {{{other}}} rename {{{attribute} as {other}_{attribute}}} {keyword} {{{unpacked}}}`"
         ),
     })
 }
 
-/// `group {}`, written `postfix` after `operand`, which gathers nothing.
-pub(crate) fn empty_group(postfix: &trendy_syntax::ast::PostfixExpr, operand: &Expr) -> Diagnostic {
-    empty_list(
-        postfix,
-        operand,
-        ("gathers nothing", "no groupings"),
-        "`group` takes groupings, each `name := {attributes}`; with none it would change nothing",
-    )
-}
-
-/// `ungroup {}`, written `postfix` after `operand`, which ungroups nothing.
-pub(crate) fn empty_ungroup(
+/// `group {}` or `wrap {}`, as `gathering` says, written `postfix` after
+/// `operand`, which gathers nothing.
+pub(crate) fn empty_gathering(
+    gathering: crate::ops::Gathering,
     postfix: &trendy_syntax::ast::PostfixExpr,
     operand: &Expr,
 ) -> Diagnostic {
-    empty_list(
-        postfix,
-        operand,
-        ("ungroups nothing", "no attributes named"),
-        "`ungroup` takes the relation-valued attributes to replace with their attributes; with none it would change nothing",
-    )
+    let (label, note) = match gathering {
+        crate::ops::Gathering::Group => (
+            "no groupings",
+            "`group` takes groupings, each `name := {attributes}`; with none it would change nothing",
+        ),
+        crate::ops::Gathering::Wrap => (
+            "no wrappings",
+            "`wrap` takes wrappings, each `name := {attributes}`; with none it would change nothing",
+        ),
+    };
+    empty_list(postfix, operand, ("gathers nothing", label), note)
 }
 
-/// The attribute `name`, at `span`, which grouping `grouping` gathers, and
-/// grouping `first.0` already does, at `first.1`.
+/// `ungroup {}` or `unwrap {}`, as `unpacking` says, written `postfix`
+/// after `operand`, which changes nothing.
+pub(crate) fn empty_unpacking(
+    unpacking: crate::ops::Unpacking,
+    postfix: &trendy_syntax::ast::PostfixExpr,
+    operand: &Expr,
+) -> Diagnostic {
+    let (does, note) = match unpacking {
+        crate::ops::Unpacking::Ungroup => (
+            "ungroups nothing",
+            "`ungroup` takes the relation-valued attributes to replace with their attributes; with none it would change nothing",
+        ),
+        crate::ops::Unpacking::Unwrap => (
+            "unwraps nothing",
+            "`unwrap` takes the tuple-valued attributes to replace with their attributes; with none it would change nothing",
+        ),
+    };
+    empty_list(postfix, operand, (does, "no attributes named"), note)
+}
+
+/// The attribute `name`, at `span`, which gathering `gathering` gathers,
+/// and gathering `first.0` already does, at `first.1`, in a `group` or a
+/// `wrap`, as `kind` says.
 pub(crate) fn gathered_twice(
+    kind: crate::ops::Gathering,
     name: &str,
     span: Span,
     first: (&str, Span),
-    grouping: &str,
+    gathering: &str,
 ) -> Diagnostic {
+    let note = match kind {
+        crate::ops::Gathering::Group => {
+            "each attribute goes into one grouping; the attributes no grouping names are the ones each group shares"
+        }
+        crate::ops::Gathering::Wrap => "each attribute goes into one wrapping",
+    };
     Diagnostic::error(
         Code::DuplicateAttribute,
-        format!("attribute `{name}` is gathered into both `{}` and `{grouping}`", first.0),
+        format!(
+            "attribute `{name}` is gathered into both `{}` and `{gathering}`",
+            first.0
+        ),
         span,
-        format!("gathered into `{grouping}` here"),
+        format!("gathered into `{gathering}` here"),
     )
     .with_secondary(first.1, format!("and into `{}` here", first.0))
-    .with_note("each attribute goes into one grouping; the attributes no grouping names are the ones each group shares")
-    .with_help(format!("gather `{name}` in one of the groupings only"))
+    .with_note(note)
+    .with_help(format!("gather `{name}` into only one of them"))
 }
 
-/// The grouping `name`, at `span`, whose new attribute's name is one that
-/// `operand`, of type `ty`, keeps.
-pub(crate) fn grouping_exists(
+/// The gathering `name`, at `span`, of a `group` or a `wrap`, as
+/// `gathering` says, whose new attribute's name is one that `operand`, of
+/// type `ty`, keeps.
+pub(crate) fn gathering_exists(
+    gathering: crate::ops::Gathering,
     name: &str,
     span: Span,
     ty: &hir::Type,
     operand: &Expr,
 ) -> Diagnostic {
+    let keyword = gathering.keyword();
     Diagnostic::error(
         Code::AttributeExists,
         format!("attribute `{name}` already exists"),
@@ -1277,7 +1354,7 @@ pub(crate) fn grouping_exists(
         "the result keeps an attribute of this name",
     )
     .with_secondary(operand.span(), format!("this is `{ty}`"))
-    .with_note("`group` keeps the attributes no grouping gathers, so a new attribute needs a name other than theirs; a name it gathers is free")
+    .with_note(format!("`{keyword}` keeps the attributes it doesn't gather, so a new attribute needs a name other than theirs; a name it gathers is free"))
     .with_help(format!("choose another name, or rename `{name}` first"))
 }
 

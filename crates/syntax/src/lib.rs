@@ -48,6 +48,8 @@ pub enum SyntaxKind {
     ReplaceKw,
     GroupKw,
     UngroupKw,
+    WrapKw,
+    UnwrapKw,
     JoinKw,
     TimesKw,
     ComposeKw,
@@ -131,8 +133,8 @@ pub enum SyntaxKind {
     /// `r{a, b}`: a projection.
     ProjectExpr,
     /// `r remove {a, b}`, `r rename {a as b}`, `r extend { c := a + b }`,
-    /// `r replace { a := a + 1 }`, `r group { g := {a, b} }` or
-    /// `r ungroup {g}`
+    /// `r replace { a := a + 1 }`, `r group { g := {a, b} }`,
+    /// `r ungroup {g}`, `r wrap { w := {a, b} }` or `r unwrap {w}`
     PostfixExpr,
     /// `join{r, s, t}` or `times{r, s, t}`: a join of any number of
     /// relations.
@@ -145,11 +147,11 @@ pub enum SyntaxKind {
     RenameList,
     /// `a as b`
     Renaming,
-    /// `{ g := {a, b}, h := {c} }`, in a `group`.
-    GroupList,
-    /// `g := {a, b}`: a new relation-valued attribute and the attributes
-    /// it gathers.
-    Grouping,
+    /// `{ g := {a, b}, h := {c} }`, in a `group` or a `wrap`.
+    GatherList,
+    /// `g := {a, b}`: a new attribute, relation-valued in a `group` and
+    /// tuple-valued in a `wrap`, and the attributes it gathers.
+    Gathering,
     /// `{ a := x, b := y }`, in an `extend` or a `replace`.
     AssignList,
     /// `a := x`: an attribute and its value, new in an `extend`, replacing
@@ -186,7 +188,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 95] = [
+    pub const ALL: [SyntaxKind; 97] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -211,6 +213,8 @@ impl SyntaxKind {
         SyntaxKind::ReplaceKw,
         SyntaxKind::GroupKw,
         SyntaxKind::UngroupKw,
+        SyntaxKind::WrapKw,
+        SyntaxKind::UnwrapKw,
         SyntaxKind::JoinKw,
         SyntaxKind::TimesKw,
         SyntaxKind::ComposeKw,
@@ -265,8 +269,8 @@ impl SyntaxKind {
         SyntaxKind::NameList,
         SyntaxKind::RenameList,
         SyntaxKind::Renaming,
-        SyntaxKind::GroupList,
-        SyntaxKind::Grouping,
+        SyntaxKind::GatherList,
+        SyntaxKind::Gathering,
         SyntaxKind::AssignList,
         SyntaxKind::Assign,
         SyntaxKind::TypeAnnotation,
@@ -314,6 +318,8 @@ impl SyntaxKind {
                 | SyntaxKind::ReplaceKw
                 | SyntaxKind::GroupKw
                 | SyntaxKind::UngroupKw
+                | SyntaxKind::WrapKw
+                | SyntaxKind::UnwrapKw
                 | SyntaxKind::JoinKw
                 | SyntaxKind::TimesKw
                 | SyntaxKind::ComposeKw
@@ -339,6 +345,8 @@ impl SyntaxKind {
                 | SyntaxKind::ReplaceKw
                 | SyntaxKind::GroupKw
                 | SyntaxKind::UngroupKw
+                | SyntaxKind::WrapKw
+                | SyntaxKind::UnwrapKw
                 | SyntaxKind::JoinKw
                 | SyntaxKind::TimesKw
                 | SyntaxKind::ComposeKw
@@ -439,6 +447,8 @@ impl SyntaxKind {
             SyntaxKind::ReplaceKw => "replace",
             SyntaxKind::GroupKw => "group",
             SyntaxKind::UngroupKw => "ungroup",
+            SyntaxKind::WrapKw => "wrap",
+            SyntaxKind::UnwrapKw => "unwrap",
             SyntaxKind::JoinKw => "join",
             SyntaxKind::TimesKw => "times",
             SyntaxKind::ComposeKw => "compose",
@@ -498,6 +508,8 @@ impl SyntaxKind {
             SyntaxKind::ReplaceKw => "`replace`",
             SyntaxKind::GroupKw => "`group`",
             SyntaxKind::UngroupKw => "`ungroup`",
+            SyntaxKind::WrapKw => "`wrap`",
+            SyntaxKind::UnwrapKw => "`unwrap`",
             SyntaxKind::JoinKw => "`join`",
             SyntaxKind::TimesKw => "`times`",
             SyntaxKind::ComposeKw => "`compose`",
@@ -547,8 +559,8 @@ impl SyntaxKind {
             SyntaxKind::NameList => "attribute names",
             SyntaxKind::RenameList => "renamings",
             SyntaxKind::Renaming => "renaming",
-            SyntaxKind::GroupList => "groupings",
-            SyntaxKind::Grouping => "grouping",
+            SyntaxKind::GatherList => "gatherings",
+            SyntaxKind::Gathering => "gathering",
             SyntaxKind::AssignList => "attribute assignments",
             SyntaxKind::Assign => "attribute assignment",
             SyntaxKind::Body => "body",

@@ -97,7 +97,7 @@ fn classify(token: &SyntaxToken) -> Option<Highlight> {
         (
             SyntaxKind::Ident,
             Some(SyntaxKind::Name),
-            Some(SyntaxKind::AttributeType | SyntaxKind::Grouping),
+            Some(SyntaxKind::AttributeType | SyntaxKind::Gathering),
         ) => (Class::Attribute, true),
         // A new attribute in an `extend`, or an existing one in a `replace`.
         (SyntaxKind::Ident, Some(SyntaxKind::Name), Some(SyntaxKind::Assign)) => {

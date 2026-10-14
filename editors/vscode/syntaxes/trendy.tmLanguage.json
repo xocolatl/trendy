@@ -108,7 +108,7 @@
       "match": "\\b(operator)\\s+([A-Z_a-z][0-9A-Z_a-z]*)"
     },
     "operator-word": {
-      "match": "\\b(?:not|and|or|xor|implies|div|mod|remove|rename|extend|replace|group|ungroup|join|times|compose)\\b",
+      "match": "\\b(?:not|and|or|xor|implies|div|mod|remove|rename|extend|replace|group|ungroup|wrap|unwrap|join|times|compose)\\b",
       "name": "keyword.operator.word.trendy"
     },
     "punctuation": {
@@ -193,7 +193,7 @@
           "name": "entity.name.type.trendy"
         }
       },
-      "match": "\\b(var)\\s+([A-Z_a-z][0-9A-Z_a-z]*)(?:\\s*(\\:)\\s*(?!(?:operator|var|true|false|tuple|relation|call|builtin|not|and|or|xor|implies|div|mod|remove|rename|extend|replace|group|ungroup|join|times|compose|as)\\b)([A-Z_a-z][0-9A-Z_a-z]*))?"
+      "match": "\\b(var)\\s+([A-Z_a-z][0-9A-Z_a-z]*)(?:\\s*(\\:)\\s*(?!(?:operator|var|true|false|tuple|relation|call|builtin|not|and|or|xor|implies|div|mod|remove|rename|extend|replace|group|ungroup|wrap|unwrap|join|times|compose|as)\\b)([A-Z_a-z][0-9A-Z_a-z]*))?"
     }
   },
   "scopeName": "source.trendy"
