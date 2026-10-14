@@ -618,6 +618,11 @@ impl<'a> Checker<'a> {
         let types: Vec<hir::Type> = operands.iter().map(|o| self.ty(o)).collect();
         let result = match joining.combined(&types, errors)? {
             ops::Combined::And => ops::and(operands),
+            ops::Combined::Matching { negated } => {
+                let mut operands = operands.into_iter();
+                let (lhs, rhs) = (operands.next()?, operands.next()?);
+                Ok(ops::matching(lhs, rhs, negated))
+            }
             ops::Combined::Composed(steps) => {
                 let mut operands = operands.into_iter();
                 let first = operands.next()?;

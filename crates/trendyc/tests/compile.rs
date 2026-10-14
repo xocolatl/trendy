@@ -515,6 +515,9 @@ fn relations() {
             r#"relation { born: integer, name: text, place: text } { { born: 1815, name: "Ada", place: "London" }, { born: 1815, name: "Édouard", place: "Paris" }, { born: 1816, name: "Ada", place: "London" } }"#,
             r#"relation { born: integer, name: text, place: text } { { born: 1815, name: "Édouard", place: "Paris" } }"#,
             r#"relation { born: integer, city: text, name: text, place: text } { { born: 1815, city: "London", name: "Ada", place: "London" }, { born: 1816, city: "London", name: "Ada", place: "London" }, { born: 1923, city: "Portland", name: "Edgar", place: "Portland" } }"#,
+            // Matching, and not matching without the common attribute.
+            r#"relation { born: integer, name: text } { { born: 1815, name: "Ada" }, { born: 1923, name: "Edgar" } }"#,
+            r#"relation { born: integer, name: text } { { born: 1815, name: "Édouard" } }"#,
         ]
     );
 }

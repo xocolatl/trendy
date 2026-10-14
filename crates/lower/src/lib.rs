@@ -393,6 +393,8 @@ impl FunctionBuilder<'_> {
             hir::Expr::And(lhs, rhs) => self.joined(lhs, rhs, cx),
             hir::Expr::Ungroup(operand, names) => self.ungroup(operand, names, cx),
             hir::Expr::Only(operand) => self.only(operand, cx),
+            hir::Expr::Semijoin(lhs, rhs) => self.matching(lhs, rhs, false, cx),
+            hir::Expr::Antijoin(lhs, rhs) => self.matching(lhs, rhs, true, cx),
             hir::Expr::Restrict(operand, condition) => self.restrict(operand, condition, cx),
             hir::Expr::Current(depth, _) => self.tuples[self.tuples.len() - 1 - depth].clone(),
             hir::Expr::Extend(operand, _, attributes) => self.extend(expr, operand, attributes, cx),
@@ -858,18 +860,7 @@ impl FunctionBuilder<'_> {
                 lir::Field::Struct(vec![lir::Field::Usize(from_rhs), offset])
             })
             .collect();
-        let common: Vec<lir::Field> = lhs_heading
-            .attributes()
-            .enumerate()
-            .filter_map(|(i, (name, ty))| {
-                let j = position(rhs_heading, name)?;
-                Some(lir::Field::Struct(vec![
-                    lir::Field::Offset(lhs_tuple.clone(), i),
-                    lir::Field::Offset(rhs_tuple.clone(), j),
-                    lir::Field::Address(cx.descriptor(ty)),
-                ]))
-            })
-            .collect();
+        let common = common_attributes(lhs_heading, rhs_heading, cx);
         let common_count = cx.constant(vec![lir::Field::Usize(len(common.len()))]);
         let descriptor = |ty: &hir::Type, cx: &mut Lowering| {
             lir::Place::whole(lir::Base::Data(cx.descriptor(ty)))
@@ -891,6 +882,50 @@ impl FunctionBuilder<'_> {
         self.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::And,
             args: [vec![dst.clone()], args].concat(),
+        });
+        self.allocates = true;
+        dst
+    }
+
+    /// The tuples of the relation `lhs` that have a match in `rhs`, or, if
+    /// `negated`, those that have none, computed by the runtime into a new
+    /// stack slot.
+    fn matching(
+        &mut self,
+        lhs: &hir::Expr,
+        rhs: &hir::Expr,
+        negated: bool,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let lhs_ty = self.program.type_of(lhs, self.within);
+        let rhs_ty = self.program.type_of(rhs, self.within);
+        let (hir::Type::Relation(lhs_heading), hir::Type::Relation(rhs_heading)) =
+            (&lhs_ty, &rhs_ty)
+        else {
+            unreachable!("sema matches only relations");
+        };
+        let common = common_attributes(lhs_heading, rhs_heading, cx);
+        let common_count = usize_constant(len(common.len()), cx);
+        let negated = usize_constant(u64::from(negated), cx);
+        let lhs = self.place(lhs, cx);
+        let rhs = self.place(rhs, cx);
+        let descriptor = |ty: &hir::Type, cx: &mut Lowering| {
+            lir::Place::whole(lir::Base::Data(cx.descriptor(ty)))
+        };
+        let dst = self.slot(layout(&lhs_ty));
+        let args = vec![
+            dst.clone(),
+            lhs,
+            rhs,
+            descriptor(&lhs_ty, cx),
+            descriptor(&rhs_ty, cx),
+            lir::Place::whole(lir::Base::Data(cx.constant(common))),
+            common_count,
+            negated,
+        ];
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Matching,
+            args,
         });
         self.allocates = true;
         dst
@@ -1186,6 +1221,25 @@ fn lower_comparison(comparison: hir::Comparison) -> lir::Comparison {
 }
 
 /// The attribute names of a tuple or relation type, in name order.
+/// For each attribute the relations with `lhs` and `rhs` have in common, a
+/// struct of its offset in a tuple of each and the address of its type's
+/// descriptor, as the runtime's joins take them.
+fn common_attributes(lhs: &hir::Heading, rhs: &hir::Heading, cx: &mut Lowering) -> Vec<lir::Field> {
+    let lhs_tuple = layout(&hir::Type::Tuple(lhs.clone()));
+    let rhs_tuple = layout(&hir::Type::Tuple(rhs.clone()));
+    lhs.attributes()
+        .enumerate()
+        .filter_map(|(i, (name, ty))| {
+            let j = rhs.attributes().position(|(a, _)| a == name)?;
+            Some(lir::Field::Struct(vec![
+                lir::Field::Offset(lhs_tuple.clone(), i),
+                lir::Field::Offset(rhs_tuple.clone(), j),
+                lir::Field::Address(cx.descriptor(ty)),
+            ]))
+        })
+        .collect()
+}
+
 /// A pointer-sized constant `n`, as a place.
 fn usize_constant(n: u64, cx: &mut Lowering) -> lir::Place {
     lir::Place {

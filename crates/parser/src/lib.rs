@@ -95,9 +95,22 @@ struct BinaryOperator<'a> {
     precedence: u8,
     found: Found<'a>,
     keyword: SyntaxKind,
-    /// For SQL's spelling of a join, such as `natural join` or
-    /// `left outer join`: how many tokens it is.
-    sql: Option<usize>,
+    words: Words,
+}
+
+/// How a dyadic operator is written.
+#[derive(Clone, Copy)]
+enum Words {
+    /// As one token: the keyword, or another spelling of it.
+    One,
+    /// `not matching`, two keywords.
+    NotMatching,
+    /// SQL's spelling of a join, such as `natural join` or
+    /// `left outer join`, this many tokens long.
+    Sql(usize),
+    /// A name from the literature: `semijoin` for `matching`, or, if
+    /// `negated`, `semiminus` or `antijoin` for `not matching`.
+    Semi { negated: bool },
 }
 
 /// Something the parser found where it expected something else.
@@ -538,7 +551,7 @@ impl<'a> Parser<'a> {
                 precedence,
                 found,
                 keyword,
-                sql,
+                words,
             } = operator;
             if precedence < min {
                 break;
@@ -552,9 +565,18 @@ impl<'a> Parser<'a> {
                 ));
             }
             self.builder.start_node_at(start, SyntaxKind::BinaryExpr);
-            match sql {
-                Some(tokens) => self.sql_join(found, keyword, tokens),
-                None => self.operator_token(found, keyword),
+            match words {
+                Words::One => self.operator_token(found, keyword),
+                Words::NotMatching => {
+                    self.operator_token(found, SyntaxKind::NotKw);
+                    let matching = self.found().expect("`matching` follows `not`");
+                    self.operator_token(matching, SyntaxKind::MatchingKw);
+                }
+                Words::Sql(tokens) => self.sql_join(found, keyword, tokens),
+                Words::Semi { negated } => {
+                    self.bump();
+                    self.errors.push(errors::semijoin_word(found, negated));
+                }
             }
             let rhs_start = self.lookahead().map(|f| f.span.start);
             let right_grouping = keyword == SyntaxKind::ImpliesKw;
@@ -582,7 +604,17 @@ impl<'a> Parser<'a> {
                 precedence: JOIN,
                 found,
                 keyword,
-                sql: Some(tokens),
+                words: Words::Sql(tokens),
+            });
+        }
+        if found.kind == SyntaxKind::Ident
+            && let Some(negated) = errors::semijoin_spelling(found.text)
+        {
+            return Some(BinaryOperator {
+                precedence: JOIN,
+                found,
+                keyword: SyntaxKind::MatchingKw,
+                words: Words::Semi { negated },
             });
         }
         let keyword = match found.kind {
@@ -590,6 +622,19 @@ impl<'a> Parser<'a> {
             SyntaxKind::Ident => errors::operator_spelling(found.text)?,
             kind => kind,
         };
+        // `not matching`: `not` is otherwise a prefix operator only.
+        let matching = |f: Found| {
+            f.kind == SyntaxKind::MatchingKw
+                || (f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case("matching"))
+        };
+        if keyword == SyntaxKind::NotKw && self.lookahead_nth(1).is_some_and(matching) {
+            return Some(BinaryOperator {
+                precedence: JOIN,
+                found,
+                keyword: SyntaxKind::MatchingKw,
+                words: Words::NotMatching,
+            });
+        }
         let precedence = match keyword {
             SyntaxKind::WhereKw => WHERE,
             SyntaxKind::ImpliesKw => 1,
@@ -606,7 +651,7 @@ impl<'a> Parser<'a> {
             precedence,
             found,
             keyword,
-            sql: None,
+            words: Words::One,
         })
     }
 
@@ -1232,7 +1277,12 @@ impl<'a> Parser<'a> {
                 SyntaxKind::LBrace | SyntaxKind::LBracket | SyntaxKind::LParen
             )
         });
-        (keyword.is_join() && list).then_some((found, keyword))
+        // `matching` isn't commutative, so it has no list.
+        let nary = matches!(
+            keyword,
+            SyntaxKind::JoinKw | SyntaxKind::TimesKw | SyntaxKind::ComposeKw
+        );
+        (nary && list).then_some((found, keyword))
     }
 
     /// `join{r, s, t}`, `times{r, s, t}` or `compose[r, s, t]`: the keyword,
@@ -2698,6 +2748,26 @@ SourceFile
             messages("var x := r replace { 5 };"),
             ["an attribute's new value needs the attribute's name"]
         );
+    }
+
+    #[test]
+    fn matchings() {
+        // With the joins' precedence; `not matching` is one operator.
+        assert_eq!(shape("r matching s join t"), "((r matching s) join t)");
+        let parse = parse_str("var x := r not matching s where a;");
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        // Tutorial D's capitals, and the literature's names.
+        assert_eq!(
+            fix("var x := r NOT MATCHING s;"),
+            "var x := r not matching s;"
+        );
+        assert_eq!(fix("var x := r semijoin s;"), "var x := r matching s;");
+        assert_eq!(fix("var x := r SemiMinus s;"), "var x := r not matching s;");
+        assert_eq!(fix("var x := r antijoin s;"), "var x := r not matching s;");
+        // No list form: `matching` isn't commutative.
+        assert!(!parse_str("var x := matching{r, s};").errors.is_empty());
+        // A prefix `not` is still a prefix.
+        assert!(parse_str("var x := not a;").errors.is_empty());
     }
 
     #[test]

@@ -183,6 +183,13 @@ pub enum RuntimeFn {
     /// ungrouped attribute: its offset in a tuple of `src`, and the
     /// [`Field::Size`] of its relation's tuples.
     Ungroup,
+    /// `trendy_rt_matching(dst, lhs, rhs, lhs_desc, rhs_desc, common,
+    /// common_count, negated)`: store at `dst` the relation of the tuples
+    /// of `lhs` that have a match in `rhs` on their common attributes, or,
+    /// if `negated` (a [`Field::Usize`]) is 1, those that have none, sorted
+    /// canonically, in memory the statement owns. The other arguments are
+    /// as for [`RuntimeFn::And`]'s.
+    Matching,
     /// `trendy_rt_allocate(dst, count, descriptor)`: store at `dst` a
     /// relation, of the type the descriptor describes, of `count` (a
     /// [`Layout::Usize`]) tuples, zeroed, in memory the statement owns, for
@@ -216,6 +223,7 @@ impl RuntimeFn {
             RuntimeFn::Relation => "trendy_rt_relation",
             RuntimeFn::And => "trendy_rt_and",
             RuntimeFn::Ungroup => "trendy_rt_ungroup",
+            RuntimeFn::Matching => "trendy_rt_matching",
             RuntimeFn::Allocate => "trendy_rt_allocate",
             RuntimeFn::Sort => "trendy_rt_sort",
             RuntimeFn::CompareText => "trendy_rt_compare_text",

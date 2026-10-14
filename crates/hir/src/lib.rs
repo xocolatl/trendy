@@ -174,6 +174,14 @@ pub enum Expr {
     /// operands are both relations or both tuples, whose common attributes
     /// have the same types.
     And(Box<Expr>, Box<Expr>),
+    /// The tuples of the left relation that have a match in the right, on
+    /// their common attributes (`matching`, the semijoin): the result has
+    /// the left's heading. The operands' common attributes have the same
+    /// types.
+    Semijoin(Box<Expr>, Box<Expr>),
+    /// The tuples of the left relation that have no match in the right
+    /// (`not matching`, the antijoin), otherwise as for `Semijoin`.
+    Antijoin(Box<Expr>, Box<Expr>),
     /// A tuple, or each tuple of a relation, with attributes computed, each
     /// by its expression from the tuple at hand, which is `Current(0, …)` in
     /// it. An attribute the operand hasn't is added (`extend`); one it has
@@ -245,7 +253,9 @@ impl Expr {
             ),
             Expr::Current(_, heading) => Type::Tuple(heading.clone()),
             Expr::Ungroup(operand, names) => operand.type_with(leaf).ungrouped(names),
-            Expr::Restrict(operand, _) => operand.type_with(leaf),
+            Expr::Restrict(operand, _)
+            | Expr::Semijoin(operand, _)
+            | Expr::Antijoin(operand, _) => operand.type_with(leaf),
             Expr::Only(operand) => match operand.type_with(leaf) {
                 Type::Relation(heading) => Type::Tuple(heading),
                 other => panic!("the only tuple of {other}"),
@@ -864,6 +874,40 @@ impl Value {
             }),
             _ => panic!("removing attributes from {self:?}"),
         }
+    }
+
+    /// The tuples of this relation that have a match in `other` on their
+    /// common attributes, or, if `negated`, those that have none, as for
+    /// [`Expr::Semijoin`] and [`Expr::Antijoin`].
+    ///
+    /// # Panics
+    ///
+    /// If either value isn't a relation, which sema rules out.
+    #[must_use]
+    pub fn matching(&self, other: &Value, negated: bool) -> Value {
+        let (Value::Relation(lhs), Value::Relation(rhs)) = (self, other) else {
+            panic!("matching {self:?} with {other:?}");
+        };
+        let common = lhs.heading.common(&rhs.heading);
+        let key = |heading: &Heading, tuple: &TupleValue| {
+            let others: BTreeSet<String> = heading
+                .attributes()
+                .map(|(name, _)| name.to_string())
+                .filter(|name| !common.contains(name))
+                .collect();
+            tuple.without(&others)
+        };
+        let matched: BTreeSet<TupleValue> =
+            rhs.tuples.iter().map(|t| key(&rhs.heading, t)).collect();
+        Value::Relation(RelationValue {
+            heading: lhs.heading.clone(),
+            tuples: lhs
+                .tuples
+                .iter()
+                .filter(|t| matched.contains(&key(&lhs.heading, t)) != negated)
+                .cloned()
+                .collect(),
+        })
     }
 
     /// The relation with the relation-valued attributes named replaced by

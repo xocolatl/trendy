@@ -389,6 +389,14 @@ when it is a constant, where no tuple or several is an error (R0005);
 compares the count with one, ending the block with `Terminator::Fail`
 for none or several, then copies the tuple.
 
+`matching` and `not matching` are parsed as the joins are, `not matching`
+as one operator of two words (`Words::NotMatching`), and checked as `join`
+is, of relations only. They become `Semijoin` and `Antijoin`, rather than
+`And` with the right operand projected, and a difference, which would
+compute the left operand twice. Lowering calls `trendy_rt_matching`, with
+the common attributes as for `And`; it sorts both operands on them and
+keeps the left's tuples that do, or don't, have a match, in one pass.
+
 `ungroup` is the one relational operator that isn't Algebra A's: Appendix
 A defines UNGROUP with an infinite relation, which no program can hold.
 So it has its own HIR node, `Ungroup`, folded when its operand is a

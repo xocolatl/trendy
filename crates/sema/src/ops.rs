@@ -520,16 +520,42 @@ pub(crate) enum JoinKind {
     /// `compose`, of operands with attributes in common, which the result
     /// doesn't have.
     Compose,
+    /// `matching`, the semijoin: the tuples of the left operand that have a
+    /// match in the right, on attributes in common.
+    Matching,
+    /// `not matching`, the antijoin: those that have none.
+    NotMatching,
 }
 
 impl JoinKind {
-    fn of(token: &SyntaxToken) -> Option<JoinKind> {
-        Some(match token.kind() {
-            SyntaxKind::JoinKw => JoinKind::Join,
-            SyntaxKind::TimesKw => JoinKind::Times,
-            SyntaxKind::ComposeKw => JoinKind::Compose,
+    /// The join written with the operator `tokens`, if they are one.
+    fn of(tokens: &[SyntaxToken]) -> Option<JoinKind> {
+        let kinds: Vec<SyntaxKind> = tokens.iter().map(SyntaxToken::kind).collect();
+        Some(match kinds[..] {
+            [SyntaxKind::JoinKw] => JoinKind::Join,
+            [SyntaxKind::TimesKw] => JoinKind::Times,
+            [SyntaxKind::ComposeKw] => JoinKind::Compose,
+            [SyntaxKind::MatchingKw] => JoinKind::Matching,
+            [SyntaxKind::NotKw, SyntaxKind::MatchingKw] => JoinKind::NotMatching,
             _ => return None,
         })
+    }
+
+    /// Whether it is `matching` or `not matching`, which take relations
+    /// only and give the left operand's tuples.
+    fn is_matching(self) -> bool {
+        matches!(self, JoinKind::Matching | JoinKind::NotMatching)
+    }
+
+    /// How the operator is written.
+    pub(crate) fn keyword(self) -> &'static str {
+        match self {
+            JoinKind::Join => "join",
+            JoinKind::Times => "times",
+            JoinKind::Compose => "compose",
+            JoinKind::Matching => "matching",
+            JoinKind::NotMatching => "not matching",
+        }
     }
 }
 
@@ -537,7 +563,9 @@ impl JoinKind {
 /// `compose[r, s, t]`.
 pub(crate) struct Joining {
     pub(crate) kind: JoinKind,
-    pub(crate) token: SyntaxToken,
+    /// Where the operator is written: one keyword, or two, as in
+    /// `not matching`.
+    span: Span,
     pub(crate) operands: Vec<Expr>,
     /// The list form, if it's written that way.
     nary: Option<ast::NaryExpr>,
@@ -547,6 +575,9 @@ pub(crate) struct Joining {
 pub(crate) enum Combined {
     /// The AND of all of them, in any order: `join` and `times`.
     And,
+    /// The tuples of the left operand that have a match in the right, or,
+    /// if `negated`, those that have none: `matching` and `not matching`.
+    Matching { negated: bool },
     /// Compose, from the left: the first operand, then for each other the
     /// AND of the result so far and it, without the attributes they have in
     /// common, given here for each step.
@@ -556,21 +587,34 @@ pub(crate) enum Combined {
 impl Joining {
     /// The join `expr` is, if it is one.
     pub(crate) fn of(expr: &Expr) -> Option<Joining> {
-        let (token, operands, nary) = match expr {
-            Expr::Binary(binary) => (binary.operator()?, vec![binary.lhs()?, binary.rhs()?], None),
+        let (tokens, operands, nary) = match expr {
+            Expr::Binary(binary) => (
+                binary.operators().collect::<Vec<_>>(),
+                vec![binary.lhs()?, binary.rhs()?],
+                None,
+            ),
             Expr::Nary(nary) => (
-                nary.operator()?,
+                vec![nary.operator()?],
                 nary.operands().collect(),
                 Some(nary.clone()),
             ),
             _ => return None,
         };
+        let span = tokens
+            .iter()
+            .map(|t| trendy_syntax::span(t.text_range()))
+            .reduce(|a, b| Span::new(a.start, b.end))?;
         Some(Joining {
-            kind: JoinKind::of(&token)?,
-            token,
+            kind: JoinKind::of(&tokens)?,
+            span,
             operands,
             nary,
         })
+    }
+
+    /// The operator, as written canonically, and where it is written.
+    fn operator(&self) -> (&'static str, Span) {
+        (self.kind.keyword(), self.span)
     }
 
     /// How the join combines its operands, each with its type in `types`.
@@ -599,13 +643,26 @@ impl Joining {
         for (operand, ty) in self.operands.iter().zip(types) {
             match ty {
                 hir::Type::Relation(heading) => operands.push((operand.span(), heading)),
-                hir::Type::Tuple(heading) if !relations => {
+                hir::Type::Tuple(heading) if !relations && !self.kind.is_matching() => {
                     operands.push((operand.span(), heading));
                 }
-                hir::Type::Tuple(_) => {
-                    errors.push(errors::tuple_among_relations(&self.token, operand));
+                hir::Type::Tuple(_) if self.kind.is_matching() => {
+                    errors.push(errors::not_joinable(
+                        self.kind,
+                        self.operator(),
+                        ty,
+                        operand,
+                    ));
                 }
-                hir::Type::Scalar(_) => errors.push(errors::not_joinable(&self.token, ty, operand)),
+                hir::Type::Tuple(_) => {
+                    errors.push(errors::tuple_among_relations(self.kind.keyword(), operand));
+                }
+                hir::Type::Scalar(_) => errors.push(errors::not_joinable(
+                    self.kind,
+                    self.operator(),
+                    ty,
+                    operand,
+                )),
             }
         }
         if operands.len() < self.operands.len() {
@@ -627,7 +684,7 @@ impl Joining {
                 shared.insert(name.to_string());
                 if earlier_ty != ty {
                     errors.push(errors::join_type_conflict(
-                        &self.token,
+                        self.operator(),
                         name,
                         (earlier, earlier_ty),
                         (span, ty),
@@ -641,7 +698,9 @@ impl Joining {
         let wrong = match self.kind {
             JoinKind::Times => !shared.is_empty(),
             // With a list, `join{}` and `join{r}` have nothing to connect.
-            JoinKind::Join | JoinKind::Compose => groups.iter().any(|&g| g != 0),
+            JoinKind::Join | JoinKind::Compose | JoinKind::Matching | JoinKind::NotMatching => {
+                groups.iter().any(|&g| g != 0)
+            }
         };
         if wrong {
             let operands: Vec<errors::Operand> = operands
@@ -654,14 +713,18 @@ impl Joining {
                 .collect();
             errors.push(errors::common_attributes(
                 self.kind,
-                &self.token,
+                self.operator(),
                 &operands,
                 &shared,
                 &groups,
             ));
             ok = false;
         }
-        ok.then_some(Combined::And)
+        ok.then_some(match self.kind {
+            JoinKind::Matching => Combined::Matching { negated: false },
+            JoinKind::NotMatching => Combined::Matching { negated: true },
+            JoinKind::Join | JoinKind::Times | JoinKind::Compose => Combined::And,
+        })
     }
 
     /// The attributes each step of a compose of `operands`, each where it's
@@ -683,7 +746,7 @@ impl Joining {
                 let (a, b) = (so_far.get(name)?, heading.get(name)?);
                 if a != b {
                     errors.push(errors::join_type_conflict(
-                        &self.token,
+                        self.operator(),
                         name,
                         (so_far_span, a),
                         (span, b),
@@ -706,7 +769,7 @@ impl Joining {
                 ];
                 errors.push(errors::common_attributes(
                     self.kind,
-                    &self.token,
+                    self.operator(),
                     &operands,
                     &common,
                     &[0, 1],
@@ -835,6 +898,18 @@ pub(crate) fn restrict(
             tuples: kept,
         },
     )))
+}
+
+/// The tuples of the relation `lhs` that have a match in `rhs`, or, if
+/// `negated`, those that have none: evaluated if both are constants.
+pub(crate) fn matching(lhs: hir::Expr, rhs: hir::Expr, negated: bool) -> hir::Expr {
+    match (lhs, rhs) {
+        (hir::Expr::Constant(lhs), hir::Expr::Constant(rhs)) => {
+            hir::Expr::Constant(lhs.matching(&rhs, negated))
+        }
+        (lhs, rhs) if negated => hir::Expr::Antijoin(Box::new(lhs), Box::new(rhs)),
+        (lhs, rhs) => hir::Expr::Semijoin(Box::new(lhs), Box::new(rhs)),
+    }
 }
 
 /// The only tuple of the relation `operand`: evaluated if it is a constant.
@@ -1134,6 +1209,8 @@ fn shifted(expr: hir::Expr, cutoff: usize) -> hir::Expr {
         hir::Expr::And(lhs, rhs) => hir::Expr::And(shift(lhs), shift(rhs)),
         hir::Expr::Ungroup(operand, names) => hir::Expr::Ungroup(shift(operand), names),
         hir::Expr::Only(operand) => hir::Expr::Only(shift(operand)),
+        hir::Expr::Semijoin(lhs, rhs) => hir::Expr::Semijoin(shift(lhs), shift(rhs)),
+        hir::Expr::Antijoin(lhs, rhs) => hir::Expr::Antijoin(shift(lhs), shift(rhs)),
         // The condition is one tuple at hand further in.
         hir::Expr::Restrict(operand, condition) => {
             hir::Expr::Restrict(shift(operand), Box::new(shifted(*condition, cutoff + 1)))
@@ -1286,6 +1363,8 @@ fn substitute(expr: hir::Expr, depth: usize, tuple: &hir::TupleValue) -> Result<
         hir::Expr::And(lhs, rhs) => and(vec![sub(lhs)?, sub(rhs)?])?,
         hir::Expr::Ungroup(operand, names) => ungroup(sub(operand)?, names),
         hir::Expr::Only(operand) => only(sub(operand)?)?,
+        hir::Expr::Semijoin(lhs, rhs) => matching(sub(lhs)?, sub(rhs)?, false),
+        hir::Expr::Antijoin(lhs, rhs) => matching(sub(lhs)?, sub(rhs)?, true),
         // The condition is one tuple at hand further in.
         hir::Expr::Restrict(operand, condition) => {
             let condition = substitute(*condition, depth + 1, tuple)?;
@@ -1491,6 +1570,8 @@ fn can_fail(expr: &hir::Expr) -> bool {
         | hir::Expr::Ungroup(..)
         | hir::Expr::Only(..)
         | hir::Expr::Restrict(..)
+        | hir::Expr::Semijoin(..)
+        | hir::Expr::Antijoin(..)
         | hir::Expr::Extend(..)
         | hir::Expr::Relation(..) => true,
         hir::Expr::Unary(_, operand) => can_fail(operand),

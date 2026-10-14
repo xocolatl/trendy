@@ -2941,6 +2941,55 @@ mod tests {
     }
 
     #[test]
+    fn matching_constants() {
+        let vars = variables(
+            "var people := relation { { name: \"Ada\", city: \"London\" }, { name: \"Wangari\", city: \"Nyeri\" } };\nvar kenyan := relation { { city: \"Nyeri\", country: \"Kenya\" } };\nvar a := people matching kenyan;\nvar b := people not matching kenyan;\nvar c := (people not matching kenyan) remove {city};",
+        );
+        let value = |name: &str| &vars.iter().find(|v| v.name == name).unwrap().init;
+        let expected = |source: &str| variables(source).remove(0).init;
+        assert_eq!(
+            value("a"),
+            &expected("var e := relation { { name: \"Wangari\", city: \"Nyeri\" } };")
+        );
+        assert_eq!(
+            value("b"),
+            &expected("var e := relation { { name: \"Ada\", city: \"London\" } };")
+        );
+        assert_eq!(
+            value("c"),
+            &expected("var e := relation { { name: \"Ada\" } };")
+        );
+    }
+
+    #[test]
+    fn matching_errors() {
+        let source = format!(
+            "var a := relation {{ {{ x: 1 }} }};\nvar b := a matching relation {{ {{ y: 1 }} }};\nvar c := tuple {{ x: 1 }} matching a;\nvar d := a not matching relation {{ {{ x: \"one\" }} }};{MAIN}"
+        );
+        let errors = errors(&source);
+        let found: Vec<_> = errors.iter().map(|e| (e.code, &e.message[..])).collect();
+        assert_eq!(
+            found,
+            [
+                (
+                    Code::CommonAttributes,
+                    "the operands of `matching` have no attributes in common"
+                ),
+                (
+                    Code::WrongOperandType,
+                    "`matching` can't be applied to tuples"
+                ),
+                (
+                    Code::JoinTypeConflict,
+                    "the operands of `not matching` both have an attribute `x`, of different types"
+                ),
+            ]
+        );
+        // `times` is no fix for a semijoin.
+        assert!(errors[0].help.iter().all(|h| !h.contains("times")));
+    }
+
+    #[test]
     fn restrict_constants() {
         let vars = variables(
             "var people := 1;\nvar cities := relation { { city: \"Paris\", people: 2100000 }, { city: \"Lyon\", people: 520000 } };\nvar big := cities where people > 1000000;\nvar all := cities where people > 0 or true;\nvar none := cities where false;\nvar paris := tuple from cities where city = \"Paris\";\nvar matched := cities where !!cities = relation { {} };",

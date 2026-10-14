@@ -1177,6 +1177,50 @@ var placed := cities join countries;
 operator main{} [];
 ```
 
+### Matching
+
+`r matching s` is the tuples of `r` that have a match in `s`, on their
+common attributes, and `r not matching s` those that have none: the
+semijoin and the antijoin. The result has `r`'s attributes only. They
+are Tutorial D's `MATCHING` and `NOT MATCHING`.
+
+```trendy
+var people := relation {
+    { name: "Ada", city: "London" },
+    { name: "Wangari", city: "Nyeri" },
+};
+var kenyan := relation { { city: "Nyeri", country: "Kenya" } };
+var in_kenya := people matching kenyan;
+var elsewhere := people not matching kenyan;
+var names_elsewhere := (people not matching kenyan) remove {city};
+
+operator main{} [
+    call debug_value{v: elsewhere};
+];
+```
+
+- **Written like the joins,** with their precedence, and their rules for
+  common attributes: at least one (A0028), of the same type (A0027). They
+  take relations only (A0022), and have no list form, since the order of
+  the operands matters.
+- **To match several relations, chain them:** `r matching s matching t`
+  is the tuples of `r` with a match in `s` and a match in `t`, since the
+  joins group to the left. That differs from `r matching (s join t)`,
+  which needs one tuple of the join of `s` and `t` to match.
+- **To drop the common attributes,** remove them, as `names_elsewhere`
+  does; for `matching`, `r compose s{a}` is the same, with `s` projected on
+  the attributes to match.
+- The literature's `semijoin`, `semiminus` and `antijoin` are fixed to
+  them (P0014), and so are Tutorial D's capitals.
+
+```trendy,error
+var people := relation { { name: "Ada", city: "London" } };
+var kenyan := relation { { city: "Nyeri" } };
+var elsewhere := people antijoin kenyan;
+
+operator main{} [];
+```
+
 ### Precedence
 
 From tightest to loosest:
@@ -1188,7 +1232,7 @@ From tightest to loosest:
 | prefix `not`, `-`, `+`, `tuple from` and `value from` | |
 | `*`, `/`, `div`, `mod` | left |
 | `+`, `-`, `\|\|` | left |
-| `join`, `times`, `compose` | left |
+| `join`, `times`, `compose`, `matching`, `not matching` | left |
 | `=`, `<>`, `<`, `<=`, `>`, `>=` | none: they don't chain |
 | `and` | left |
 | `xor` | left |
@@ -1357,8 +1401,8 @@ Names are ASCII letters, digits and `_`, and don't start with a digit. They
 are case-sensitive. The keywords are `operator`, `var`, `call`, `builtin`,
 `tuple`, `relation`, `true`, `false`, `not`, `and`, `or`, `xor`,
 `implies`, `div`, `mod`, `remove`, `rename`, `extend`, `replace`, `group`,
-`ungroup`, `wrap`, `unwrap`, `join`, `times`, `compose`, `where` and `as`,
-all lowercase, and a keyword can't be a name (P0017).
+`ungroup`, `wrap`, `unwrap`, `join`, `times`, `compose`, `matching`,
+`where` and `as`, all lowercase, and a keyword can't be a name (P0017).
 `type` is a keyword only after `builtin`, `key` only where a variable's
 keys go, and `value` and `from` only in `tuple from` and `value from`.
 
@@ -1466,6 +1510,8 @@ line after a comment on its own line, such as a file's header, is kept.
 | `NATURAL JOIN`, `INNER JOIN`, `JOIN … USING (a)` | `join` |
 | `CROSS JOIN` | `times` |
 | `JOIN { R1, R2, R3 }` | `join{r1, r2, r3}` |
+| `R MATCHING S`, `R SEMIJOIN S`, `WHERE EXISTS (…)` | `r matching s` |
+| `R NOT MATCHING S`, `R SEMIMINUS S`, `WHERE NOT EXISTS (…)` | `r not matching s` |
 | `T1 UNION T2`, of tuples (tuple union) | `t1 join t2` |
 | `JOIN … ON r.a = s.b` | `r join s rename {b as a}` |
 | `LEFT JOIN`, `RIGHT JOIN`, `FULL JOIN` | none: there are no nulls |

@@ -674,7 +674,7 @@ pub(crate) fn not_projectable(
 }
 
 /// What every join does with the operands' common attributes, for notes.
-const JOIN_RULE: &str = "`join` matches the tuples of its operands on all the attributes they have in common, by name; `times` is for operands with none in common, and `compose` is `join` without the common attributes";
+const JOIN_RULE: &str = "`join` matches the tuples of its operands on all the attributes they have in common, by name; `times` is for operands with none in common, `compose` is `join` without the common attributes, and `matching` and `not matching` keep the left operand's tuples that have a match, or none";
 
 const IMAGE_RULE: &str = "`!!r` is the image relation of the tuple at hand in `r`: the tuples of `r` that match it on their common attributes, by name, without those attributes";
 
@@ -799,23 +799,37 @@ pub(crate) fn not_a_tuple(found: &hir::Type, expr: &Expr) -> Diagnostic {
     )
 }
 
-/// The join written `token` applied to `operand`, of type `ty`, which isn't
-/// a relation or a tuple.
-pub(crate) fn not_joinable(token: &SyntaxToken, ty: &hir::Type, operand: &Expr) -> Diagnostic {
-    let operator = token.text();
+/// The join `join`, `operator` written at `span`, applied to `operand`, of
+/// type `ty`, which it doesn't take: a scalar, or, for `matching` and
+/// `not matching`, a tuple.
+pub(crate) fn not_joinable(
+    join: crate::ops::JoinKind,
+    (operator, span): (&str, Span),
+    ty: &hir::Type,
+    operand: &Expr,
+) -> Diagnostic {
+    let (takes, note) = match join {
+        crate::ops::JoinKind::Matching | crate::ops::JoinKind::NotMatching => (
+            "relations",
+            "`matching` and `not matching` keep the tuples of a relation that have a match in another relation, or none; of tuples, compare them with `=`",
+        ),
+        _ => (
+            "relations, or tuples",
+            "`join`, `times` and `compose` combine the tuples of relations, or the attributes of tuples",
+        ),
+    };
     Diagnostic::error(
         Code::WrongOperandType,
         format!("`{operator}` can't be applied to {}", plural(ty)),
-        trendy_syntax::span(token.text_range()),
-        format!("`{operator}` takes relations, or tuples"),
+        span,
+        format!("`{operator}` takes {takes}"),
     )
     .with_secondary(operand.span(), format!("this is `{ty}`"))
-    .with_note("`join`, `times` and `compose` combine the tuples of relations, or the attributes of tuples")
+    .with_note(note)
 }
 
-/// The tuple `operand` in the join written `token` of relations.
-pub(crate) fn tuple_among_relations(token: &SyntaxToken, operand: &Expr) -> Diagnostic {
-    let operator = token.text();
+/// The tuple `operand` in the join `operator` of relations.
+pub(crate) fn tuple_among_relations(operator: &str, operand: &Expr) -> Diagnostic {
     let written = operand.syntax().text().to_string();
     Diagnostic::error(
         Code::WrongOperandType,
@@ -835,22 +849,21 @@ pub(crate) fn tuple_among_relations(token: &SyntaxToken, operand: &Expr) -> Diag
     )
 }
 
-/// The join written `token` of operands written at `lhs` and `rhs`, whose
-/// common attribute `name` has type `lhs_ty` in one and `rhs_ty` in the
-/// other.
+/// The join `operator`, written at `span`, of operands written at `lhs` and
+/// `rhs`, whose common attribute `name` has type `lhs_ty` in one and
+/// `rhs_ty` in the other.
 pub(crate) fn join_type_conflict(
-    token: &SyntaxToken,
+    (operator, span): (&str, Span),
     name: &str,
     (lhs, lhs_ty): (Span, &hir::Type),
     (rhs, rhs_ty): (Span, &hir::Type),
 ) -> Diagnostic {
-    let operator = token.text();
     Diagnostic::error(
         Code::JoinTypeConflict,
         format!(
             "the operands of `{operator}` both have an attribute `{name}`, of different types"
         ),
-        trendy_syntax::span(token.text_range()),
+        span,
         format!("`{operator}` matches tuples on `{name}`"),
     )
     .with_secondary(lhs, format!("`{name}` is `{lhs_ty}` here"))
@@ -870,21 +883,19 @@ pub(crate) struct Operand<'a> {
     pub(crate) composed: bool,
 }
 
-/// The join `join`, written `token`, of `operands`, whose common attributes
-/// are wrong for the operator. For `times`, `shared`
+/// The join `join`, `operator` written at `span`, of `operands`, whose
+/// common attributes are wrong for the operator. For `times`, `shared`
 /// are the attributes more than one operand has. For `join` and `compose`,
 /// `groups` gives each operand's group, the operands connected to each other
 /// through common attributes, and there is more than one.
 pub(crate) fn common_attributes(
     join: crate::ops::JoinKind,
-    token: &SyntaxToken,
+    (operator, span): (&str, Span),
     operands: &[Operand],
     shared: &BTreeSet<String>,
     groups: &[usize],
 ) -> Diagnostic {
     use crate::ops::JoinKind;
-    let operator = token.text();
-    let span = trendy_syntax::span(token.text_range());
     let attributes = |operand: &Operand| {
         let names: Vec<String> = operand
             .heading
@@ -979,6 +990,9 @@ pub(crate) fn common_attributes(
         )),
         None => d,
     };
+    if matches!(join, JoinKind::Matching | JoinKind::NotMatching) {
+        return d;
+    }
     d.with_help(if operands.len() == 2 {
         "to pair every tuple of one with every tuple of the other, write `times`"
     } else {

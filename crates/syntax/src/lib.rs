@@ -53,6 +53,8 @@ pub enum SyntaxKind {
     JoinKw,
     TimesKw,
     ComposeKw,
+    /// `matching`, in `r matching s` and `r not matching s`.
+    MatchingKw,
     /// `where`, in `r where condition`.
     WhereKw,
     /// `as`, in `old as new`.
@@ -195,7 +197,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 99] = [
+    pub const ALL: [SyntaxKind; 100] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -225,6 +227,7 @@ impl SyntaxKind {
         SyntaxKind::JoinKw,
         SyntaxKind::TimesKw,
         SyntaxKind::ComposeKw,
+        SyntaxKind::MatchingKw,
         SyntaxKind::WhereKw,
         SyntaxKind::AsKw,
         SyntaxKind::LBrace,
@@ -332,6 +335,7 @@ impl SyntaxKind {
                 | SyntaxKind::JoinKw
                 | SyntaxKind::TimesKw
                 | SyntaxKind::ComposeKw
+                | SyntaxKind::MatchingKw
                 | SyntaxKind::WhereKw
                 | SyntaxKind::AsKw
         )
@@ -360,6 +364,7 @@ impl SyntaxKind {
                 | SyntaxKind::JoinKw
                 | SyntaxKind::TimesKw
                 | SyntaxKind::ComposeKw
+                | SyntaxKind::MatchingKw
                 | SyntaxKind::WhereKw
         )
     }
@@ -395,13 +400,16 @@ impl SyntaxKind {
         )
     }
 
-    /// Whether this is a join: `join`, `times` or `compose`, which all
-    /// match tuples on their common attributes.
+    /// Whether this is a join: `join`, `times`, `compose` or `matching`,
+    /// which all match tuples on their common attributes.
     #[must_use]
     pub fn is_join(self) -> bool {
         matches!(
             self,
-            SyntaxKind::JoinKw | SyntaxKind::TimesKw | SyntaxKind::ComposeKw
+            SyntaxKind::JoinKw
+                | SyntaxKind::TimesKw
+                | SyntaxKind::ComposeKw
+                | SyntaxKind::MatchingKw
         )
     }
 
@@ -463,6 +471,7 @@ impl SyntaxKind {
             SyntaxKind::JoinKw => "join",
             SyntaxKind::TimesKw => "times",
             SyntaxKind::ComposeKw => "compose",
+            SyntaxKind::MatchingKw => "matching",
             SyntaxKind::WhereKw => "where",
             SyntaxKind::AsKw => "as",
             SyntaxKind::LBrace => "{",
@@ -525,6 +534,7 @@ impl SyntaxKind {
             SyntaxKind::JoinKw => "`join`",
             SyntaxKind::TimesKw => "`times`",
             SyntaxKind::ComposeKw => "`compose`",
+            SyntaxKind::MatchingKw => "`matching`",
             SyntaxKind::WhereKw => "`where`",
             SyntaxKind::AsKw => "`as`",
             SyntaxKind::ForeignOperator => "operator",

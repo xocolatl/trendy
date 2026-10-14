@@ -817,6 +817,38 @@ pub(crate) fn bare_unpacked(unpacking: Unpacking, found: Found) -> Diagnostic {
     )
 }
 
+/// Whether `text` is a name for a semijoin from the literature: `semijoin`,
+/// which is `matching`, or, negated, `semiminus` or `antijoin`, which are
+/// `not matching`. In any case.
+pub(crate) fn semijoin_spelling(text: &str) -> Option<bool> {
+    let lower = text.to_ascii_lowercase();
+    match lower.as_str() {
+        "semijoin" => Some(false),
+        "semiminus" | "antijoin" => Some(true),
+        _ => None,
+    }
+}
+
+/// `found`, a name for a semijoin, or for an antijoin if `negated`, where
+/// trendy writes `matching` or `not matching`.
+pub(crate) fn semijoin_word(found: Found, negated: bool) -> Diagnostic {
+    let spelled = if negated { "not matching" } else { "matching" };
+    Diagnostic::error(
+        Code::ForeignOperator,
+        format!("`{}` is written `{spelled}`", found.text),
+        found.span,
+        format!("trendy writes this `{spelled}`"),
+    )
+    .with_note("`r matching s` is the tuples of `r` that have a match in `s` on their common attributes, and `r not matching s` those that have none: the semijoin and the antijoin")
+    .with_suggestion(
+        format!("write `{spelled}`"),
+        vec![Edit {
+            span: found.span,
+            replacement: spelled.to_string(),
+        }],
+    )
+}
+
 /// The keyword a foreign operator stands for: `&&` for `and`, `!` for
 /// `not`, and so on.
 pub(crate) fn foreign_operator(text: &str) -> Option<SyntaxKind> {

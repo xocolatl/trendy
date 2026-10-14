@@ -566,6 +566,69 @@ pub unsafe extern "C" fn trendy_rt_ungroup(
     }
 }
 
+/// Store at `dst` the tuples of the relation `lhs`, which `lhs_desc`
+/// describes, that have a match in the relation `rhs`, which `rhs_desc`
+/// describes, on the `*common_count` attributes in `common`, or, if
+/// `*negated` is 1, those that have none (the semijoin and the antijoin), in
+/// canonical order, in memory that [`trendy_rt_release`] releases.
+///
+/// # Safety
+///
+/// As for [`trendy_rt_and`], with `negated` pointing to 0 or 1.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_matching(
+    dst: *mut Text,
+    lhs: *const u8,
+    rhs: *const u8,
+    lhs_desc: *const TypeDesc,
+    rhs_desc: *const TypeDesc,
+    common: *const Common,
+    common_count: *const usize,
+    negated: *const usize,
+) {
+    // SAFETY: guaranteed by the caller; each size and offset is the layout
+    // of the value it describes.
+    unsafe {
+        let (lhs_desc, rhs_desc) = (&*lhs_desc, &*rhs_desc);
+        let ((lhs, lhs_count), (rhs, rhs_count)) = (read_slice(lhs), read_slice(rhs));
+        let common = array(common, common_count.read_unaligned());
+        let negated = negated.read_unaligned() == 1;
+        let lhs_sorted = sorted_on(common, true, lhs, lhs_count, lhs_desc.element_size);
+        let rhs_sorted = sorted_on(common, false, rhs, rhs_count, rhs_desc.element_size);
+        let size = lhs_desc.element_size;
+        let kept = allocate::<u8>(lhs_count * size);
+        let (mut count, mut j) = (0, 0);
+        // Both sorted on the common attributes, so each tuple of `lhs` is
+        // matched by moving forward through `rhs`.
+        for &tuple in &*lhs_sorted {
+            while j < rhs_sorted.len()
+                && on_common(common, (rhs_sorted[j], false), (tuple, true)).is_lt()
+            {
+                j += 1;
+            }
+            let matched = j < rhs_sorted.len()
+                && on_common(common, (rhs_sorted[j], false), (tuple, true)).is_eq();
+            if matched != negated {
+                core::ptr::copy_nonoverlapping(tuple, kept.add(count * size), size);
+                count += 1;
+            }
+        }
+        let canonical = canonical(kept, count, lhs_desc);
+        for memory in [
+            kept.cast(),
+            lhs_sorted.as_mut_ptr().cast(),
+            rhs_sorted.as_mut_ptr().cast(),
+        ] {
+            free(memory);
+        }
+        dst.write_unaligned(Text {
+            bytes: canonical.0,
+            len: canonical.1,
+        });
+    }
+}
+
 /// The order of two tuples by their values for the `common` attributes,
 /// each tuple from the left operand of [`trendy_rt_and`] if its flag says
 /// so, and else from the right.

@@ -218,9 +218,15 @@ impl UnaryExpr {
 
 impl BinaryExpr {
     /// The operator: a keyword such as `and`, or a foreign spelling of one.
+    /// For `not matching`, its first word.
     #[must_use]
     pub fn operator(&self) -> Option<SyntaxToken> {
         significant_tokens(&self.0).next()
+    }
+
+    /// The operator's words: one, or two for `not matching`.
+    pub fn operators(&self) -> impl Iterator<Item = SyntaxToken> {
+        significant_tokens(&self.0)
     }
 
     #[must_use]

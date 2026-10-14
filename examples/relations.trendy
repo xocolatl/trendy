@@ -82,15 +82,6 @@ key { name };
    call debug_value{v: people minus people where born > 1900};
 */
 
-/* Semijoin and semidifference: the tuples of the first that have, or
-   don't have, a match in the second.
-   Tutorial D: PEOPLE MATCHING CITIES and PEOPLE NOT MATCHING CITIES
-   Proposed: `matching` and `not matching` operators.
-
-   call debug_value{v: people matching cities where city = "London"};
-   call debug_value{v: people not matching cities};
-*/
-
 /* Aggregates (RM Prescription 18 and OO Prescription 6): count, sum, avg,
    max, min, and, or, xor, exactly, union, disjoint union and intersect,
    of a relation, or of one of its attributes.
@@ -410,6 +401,26 @@ operator restrict_births{
     call debug_value{v: b join c where place = city};
 ];
 
+/* Semijoin and antijoin: the tuples of the first relation that have a
+   match in the second, on their common attributes, or that have none. The
+   result has the first's attributes only; below, with the common one
+   removed, the births in a place that isn't one of `cities`' cities.
+   Written like the joins, with their precedence and rules for common
+   attributes.
+   Tutorial D: PEOPLE MATCHING CITIES and PEOPLE NOT MATCHING CITIES.
+   Implemented, and printed twice like the projections. */
+var listed := people matching cities;
+var born_elsewhere := (births rename {place as city} not matching cities{city}) remove {city};
+
+operator matching_people{
+    p: relation { name: text, born: integer },
+    b: relation { name: text, born: integer, place: text },
+    c: relation { name: text, city: text },
+} [
+    call debug_value{v: p matching c};
+    call debug_value{v: (b rename {place as city} not matching c{city}) remove {city}};
+];
+
 operator main{} [
     call debug_value{v: names};
     call debug_value{v: places};
@@ -445,6 +456,8 @@ operator main{} [
     call debug_value{v: early};
     call debug_value{v: early_not_ada};
     call debug_value{v: at_home};
+    call debug_value{v: listed};
+    call debug_value{v: born_elsewhere};
 
     call project_births{r: births};
     call project_signs{r: signs};
@@ -473,4 +486,6 @@ operator main{} [
     call wrap_births{b: births};
 
     call restrict_births{b: births, c: cities};
+
+    call matching_people{p: people, b: births, c: cities};
 ];

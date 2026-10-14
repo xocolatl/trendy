@@ -89,9 +89,10 @@ fn applies_to(parent: &SyntaxNode, child: &SyntaxNode) -> bool {
     match parent.kind() {
         SyntaxKind::ExtractExpr | SyntaxKind::ProjectExpr | SyntaxKind::PostfixExpr => is_first,
         SyntaxKind::BinaryExpr => {
+            // The last word, for `not matching`.
             is_first
                 && ast::BinaryExpr::cast(parent.clone())
-                    .and_then(|b| b.operator())
+                    .and_then(|b| b.operators().last())
                     .is_some_and(|op| op.kind().is_join())
         }
         _ => false,
