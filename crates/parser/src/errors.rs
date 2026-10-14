@@ -14,6 +14,7 @@ pub(crate) const PROJECTION_FORM: &str =
 pub(crate) const NARY_FORM: &str = "`{}` encloses what can be in any order, and `[]` what can't: `join{r, s, t}` and `times{r, s, t}` can be in any order, while `compose[r, s, t]` is `(r compose s) compose t`";
 pub(crate) const EXTEND_FORM: &str = "`extend` takes new attributes, each `name := value`, where the value is computed from the tuple's own attributes: `r extend { total := price * quantity }`";
 pub(crate) const REPLACE_FORM: &str = "`replace` takes attributes the operand has, each `name := value`, where the new value is computed from the tuple's own attributes: `r replace { price := price * 2 }`";
+pub(crate) const IMAGE_FORM: &str = "in an `extend`'s or a `replace`'s values, `!!r` is the tuples of `r` that match the tuple at hand on their common attributes, without those attributes; `r` is a name, or an expression in parentheses";
 pub(crate) const KEY_FORM: &str = "a key lists attributes after a relation variable's value, or after its type if it has no value: `var r := relation { … } key { a, b };`";
 pub(crate) const RENAME_FORM: &str =
     "`rename` takes renamings, each `old as new`: `r rename {postal_code as code}`";
@@ -521,6 +522,54 @@ fn spaced_operator(text: &str, (before, after): (Option<char>, Option<char>)) ->
         spaced.push(' ');
     }
     spaced
+}
+
+/// The operator `name`, at `span`, directly after the image relation at
+/// `image`, whose operand starts at `operand`, which could apply to the
+/// image or to its operand. `steps` are the operators that follow, in
+/// order, each with where the expression it makes ends: the image can be
+/// taken before any of them, or after all, and each is a suggestion.
+pub(crate) fn unordered_image(
+    name: &str,
+    span: Span,
+    image: Span,
+    operand: usize,
+    steps: &[(&str, usize)],
+) -> Diagnostic {
+    let insert = |at: usize, text: &str| Edit {
+        span: Span::new(at, at),
+        replacement: text.to_string(),
+    };
+    let mut d = Diagnostic::error(
+        Code::UnorderedOperators,
+        format!("`!!` and {name} need parentheses to say which applies first"),
+        span,
+        "this could apply to the image, or to the relation it is of",
+    )
+    .with_note("`!!` takes a single operand: a name, or an expression in parentheses")
+    .with_note("an operator after it could apply to either, so neither is assumed: postfix operators and joins there need parentheses");
+    d = d.with_suggestion(
+        "take the image first: `(!!r) …`",
+        vec![insert(image.start, "("), insert(image.end, ")")],
+    );
+    for (k, &(name, end)) in steps.iter().enumerate() {
+        d = if k + 1 == steps.len() {
+            d.with_suggestion(
+                "take the image last: `!!(r …)`",
+                vec![insert(operand, "("), insert(end, ")")],
+            )
+        } else {
+            d.with_suggestion(
+                format!("take the image after {name}: `(!!(r …)) …`"),
+                vec![
+                    insert(image.start, "("),
+                    insert(operand, "("),
+                    insert(end, "))"),
+                ],
+            )
+        };
+    }
+    d
 }
 
 /// The keyword a foreign operator stands for: `&&` for `and`, `!` for

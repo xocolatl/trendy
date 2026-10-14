@@ -439,6 +439,10 @@ fn relations() {
             // equal are one.
             r#"relation { born: integer, name: text } { { born: 1816, name: "Ada" }, { born: 1924, name: "Edgar" } }"#,
             "relation { born: integer } { { born: 1 } }",
+            // Image relations: Nyeri's is empty; and a relation comparison
+            // of each.
+            r#"relation { city: text, natives: relation { born: integer, name: text } } { { city: "London", natives: relation { born: integer, name: text } { { born: 1815, name: "Ada" }, { born: 1816, name: "Ada" } } }, { city: "Nyeri", natives: relation { born: integer, name: text } {} }, { city: "Portland", natives: relation { born: integer, name: text } { { born: 1923, name: "Edgar" } } } }"#,
+            r#"relation { name: text, only_london: boolean } { { name: "Ada", only_london: true }, { name: "Edgar", only_london: false }, { name: "Édouard", only_london: false } }"#,
         ]
     );
 }
@@ -451,8 +455,9 @@ fn shopping() {
         stderr.lines().collect::<Vec<_>>(),
         [
             r#"relation { people: integer, recipe: text } { { people: 4, recipe: "dal tadka" }, { people: 4, recipe: "shakshuka" }, { people: 6, recipe: "mapo doufu" } }"#,
-            // No borshch this week, so no beetroot, cabbage, carrot or potato.
-            r#"relation { ingredient: text, unit: text } { { ingredient: "Sichuan pepper", unit: "g" }, { ingredient: "cumin", unit: "g" }, { ingredient: "doubanjiang", unit: "g" }, { ingredient: "egg", unit: "piece" }, { ingredient: "garlic", unit: "clove" }, { ingredient: "ghee", unit: "g" }, { ingredient: "ginger", unit: "g" }, { ingredient: "minced pork", unit: "g" }, { ingredient: "olive oil", unit: "ml" }, { ingredient: "onion", unit: "piece" }, { ingredient: "red lentils", unit: "g" }, { ingredient: "tofu", unit: "g" }, { ingredient: "tomato", unit: "g" } }"#,
+            // No borshch this week, so no beetroot, cabbage, carrot or
+            // potato; each ingredient with the recipes that need it.
+            r#"relation { ingredient: text, recipes: relation { recipe: text }, unit: text } { { ingredient: "Sichuan pepper", recipes: relation { recipe: text } { { recipe: "mapo doufu" } }, unit: "g" }, { ingredient: "cumin", recipes: relation { recipe: text } { { recipe: "dal tadka" }, { recipe: "shakshuka" } }, unit: "g" }, { ingredient: "doubanjiang", recipes: relation { recipe: text } { { recipe: "mapo doufu" } }, unit: "g" }, { ingredient: "egg", recipes: relation { recipe: text } { { recipe: "shakshuka" } }, unit: "piece" }, { ingredient: "garlic", recipes: relation { recipe: text } { { recipe: "dal tadka" }, { recipe: "mapo doufu" }, { recipe: "shakshuka" } }, unit: "clove" }, { ingredient: "ghee", recipes: relation { recipe: text } { { recipe: "dal tadka" } }, unit: "g" }, { ingredient: "ginger", recipes: relation { recipe: text } { { recipe: "dal tadka" }, { recipe: "mapo doufu" } }, unit: "g" }, { ingredient: "minced pork", recipes: relation { recipe: text } { { recipe: "mapo doufu" } }, unit: "g" }, { ingredient: "olive oil", recipes: relation { recipe: text } { { recipe: "shakshuka" } }, unit: "ml" }, { ingredient: "onion", recipes: relation { recipe: text } { { recipe: "dal tadka" }, { recipe: "shakshuka" } }, unit: "piece" }, { ingredient: "red lentils", recipes: relation { recipe: text } { { recipe: "dal tadka" } }, unit: "g" }, { ingredient: "tofu", recipes: relation { recipe: text } { { recipe: "mapo doufu" } }, unit: "g" }, { ingredient: "tomato", recipes: relation { recipe: text } { { recipe: "dal tadka" }, { recipe: "shakshuka" } }, unit: "g" } }"#,
         ]
     );
 }

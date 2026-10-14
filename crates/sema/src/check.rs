@@ -8,7 +8,7 @@
 //! constant, and the rest simplified, so an initial value always checks to
 //! a constant.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use trendy_diag::{Diagnostic, Span};
 use trendy_hir as hir;
@@ -41,6 +41,12 @@ pub(crate) trait Names {
     /// The type of `leaf`, a variable or parameter that [`Names::resolve`]
     /// gave.
     fn leaf_type(&self, leaf: &hir::Expr) -> hir::Type;
+
+    /// The heading of the tuple at hand, `Current(0, …)`, if there is one:
+    /// in the values of an `extend` or a `replace`.
+    fn tuple_at_hand(&self) -> Option<&hir::Heading> {
+        None
+    }
 }
 
 /// Checks expressions whose names `names` resolves.
@@ -174,6 +180,7 @@ impl<'a> Checker<'a> {
                 self.assigned(postfix, assigning, expr, expected, errors)
             }
             Expr::Project(_) | Expr::Postfix(_) => self.reshaped(expr, expected, errors),
+            Expr::Image(image) => self.image(image, expr, expected, errors),
             Expr::Tuple(tuple) => types::tuple_selector(tuple, expected, self, errors),
             Expr::Relation(relation) => types::relation_selector(relation, expected, self, errors),
         }
@@ -313,6 +320,67 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// `image`, written `expr`: the image relation of the tuple at hand in
+    /// the operand, which is the operand joined with the tuple at hand
+    /// projected on their common attributes, then without them.
+    fn image(
+        &mut self,
+        image: &ast::ImageExpr,
+        expr: &Expr,
+        expected: Option<&Expected>,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let operand_expr = image.operand()?;
+        let operand = self.expr(&operand_expr, None, errors);
+        let Some(at_hand) = self.names.tuple_at_hand().cloned() else {
+            errors.push(errors::image_outside(image));
+            return None;
+        };
+        let operand = operand?;
+        let span = trendy_syntax::span(image.operator()?.text_range());
+        let hir::Type::Relation(heading) = self.ty(&operand) else {
+            let ty = self.ty(&operand);
+            errors.push(errors::image_not_relation(span, &ty, &operand_expr));
+            return None;
+        };
+        let common = heading.common(&at_hand);
+        if common.is_empty() {
+            errors.push(errors::image_unrelated(
+                span,
+                &operand_expr,
+                &heading,
+                &at_hand,
+            ));
+            return None;
+        }
+        let mut ok = true;
+        for name in &common {
+            let (ty, at_hand_ty) = (heading.get(name)?, at_hand.get(name)?);
+            if ty != at_hand_ty {
+                errors.push(errors::image_type_conflict(
+                    span,
+                    &operand_expr,
+                    name,
+                    ty,
+                    at_hand_ty,
+                ));
+                ok = false;
+            }
+        }
+        if !ok {
+            return None;
+        }
+        let others: BTreeSet<String> = at_hand
+            .attributes()
+            .map(|(name, _)| name.to_string())
+            .filter(|name| !common.contains(name))
+            .collect();
+        let matched = ops::remove(hir::Expr::Current(0, at_hand.clone()), others.clone());
+        let matching = ops::relation(at_hand.without(&others), vec![matched]);
+        let result = ops::remove(ops::and(vec![operand, matching]), common);
+        self.matched(expected, result, expr, errors)
+    }
+
     /// `expr`, a join.
     fn joined(
         &mut self,
@@ -437,5 +505,9 @@ impl Names for TupleNames<'_> {
 
     fn leaf_type(&self, leaf: &hir::Expr) -> hir::Type {
         self.outer.leaf_type(leaf)
+    }
+
+    fn tuple_at_hand(&self) -> Option<&hir::Heading> {
+        Some(&self.heading)
     }
 }

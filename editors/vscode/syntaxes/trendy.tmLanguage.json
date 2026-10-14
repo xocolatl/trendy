@@ -126,6 +126,10 @@
           "name": "keyword.operator.concatenation.trendy"
         },
         {
+          "match": "\\!\\!",
+          "name": "keyword.operator.image.trendy"
+        },
+        {
           "match": "\\{|\\}",
           "name": "punctuation.section.braces.trendy"
         },

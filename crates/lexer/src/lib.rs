@@ -117,6 +117,8 @@ pub const FOREIGN_OPERATORS: [&str; 10] = ["&&", "->", "=>", "==", "!=", "!", "&
 fn two_character_token(text: &str) -> Option<(SyntaxKind, usize)> {
     let kind = match text.get(..2)? {
         "||" => SyntaxKind::PipePipe,
+        // Tutorial D's image relation; a lone `!` is a foreign `not`.
+        "!!" => SyntaxKind::BangBang,
         "<>" => SyntaxKind::LtGt,
         "<=" => SyntaxKind::LtEq,
         ">=" => SyntaxKind::GtEq,
@@ -689,6 +691,17 @@ mod tests {
             kinds("x = 1"),
             [Ident, Whitespace, Eq, Whitespace, IntLiteral]
         );
+    }
+
+    #[test]
+    fn image_relations() {
+        // Two `!`s together are an image relation; apart, each is C's `not`.
+        assert_eq!(kinds("!!r"), [BangBang, Ident]);
+        assert_eq!(
+            kinds("! !r"),
+            [ForeignOperator, Whitespace, ForeignOperator, Ident]
+        );
+        assert_eq!(kinds("!="), [ForeignOperator]);
     }
 
     #[test]

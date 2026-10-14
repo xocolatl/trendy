@@ -160,6 +160,21 @@ assignment meant and fixed to `:=`, and SQL's and Tutorial D's `value as name` t
 `name := value` (P0011). A value with no name is reported without a fix,
 since the name can't be guessed.
 
+`!!r` (`ImageExpr`), Tutorial D's image relation, takes a single operand:
+a name, a literal or a parenthesized expression. The lexer makes `!!` one
+token only when the two `!`s are together; a lone `!` is C's `not`, fixed
+to `not` (P0014). C's `!!x` never means an image by mistake, since its
+operand is a boolean, which an image relation's never is.
+
+Precedence is a partial order. Where a pair of operators could be read
+either way, the grammar still builds one reading, so recovery goes on,
+and a check of the finished tree (`unordered`) reports the pair (P0022),
+with a suggestion for each reading. So far that is `!!` followed by
+a postfix operator or a join, which could apply to the image or to its
+operand; chained comparisons (P0015) are reported as they are parsed.
+An operator that could make a new such pair, such as a prefix relational
+operator, is checked against this when it is added.
+
 **Must not:** resolve names, check meaning, or reject a program that is
 grammatically valid. For example, "no `main`", "duplicate name" and "unknown
 type" are sema errors, not parse errors.
@@ -304,8 +319,8 @@ one with run-time parts becomes `hir::Expr::Tuple` or
 `hir::Expr::Relation`. Duplicate tuples are an error only when both are
 constants; tuples known only when running become one if they are equal.
 
-In an `extend`'s or a `replace`'s values, names resolve first to the attributes of the tuple
-at hand (`check::TupleNames`), as `Current(0, …)`'s attributes, and then to
+In an `extend`'s or a `replace`'s values, names resolve first to the
+attributes of the tuple at hand (`check::TupleNames`), as `Current(0, …)`'s attributes, and then to
 whatever they name around the `extend`, one `Current` level deeper. An
 unknown name is reported with the attributes among the candidates, so a
 misspelled attribute gets a fix. An attribute is given once (A0008). An
@@ -316,6 +331,14 @@ keyword, the fix is the other keyword. When the operand is a constant, the
 values are computed for each of its tuples by substituting it for the
 tuple at hand and folding again (`ops::extend`), so a failure, such as an
 overflow for one tuple, is a compile error, with a note on the tuple.
+
+`!!r` needs a tuple at hand (`Names::tuple_at_hand`), which only
+`TupleNames` has (A0030). It has no HIR node of its own: it becomes Algebra
+A's operators, `r` `And` a one-tuple relation of the tuple at hand
+projected on their common attributes, then `Remove` of those attributes.
+The common attributes are checked as for `join`: at least one (A0028),
+each of one type (A0027). Folding and lowering then need nothing new, and
+an optimizer will see the join it is.
 
 The arithmetic operators are overloaded on integers and approximate numbers
 (`ops::Operator` resolves to a typed `hir::BinaryOp`): the operand type
@@ -455,8 +478,11 @@ For a relation, `trendy_rt_allocate` makes the result's tuples; a loop then
 goes through the operand's, with the address of the tuple at hand in a
 slot (`Base::Indirect`), building each result tuple the same way; and
 `trendy_rt_sort` puts them in the canonical order, making one of the
-tuples a `replace` made equal. A failure inside the
-loop stops the program as anywhere else.
+tuples a `replace` made equal. A failure inside the loop stops the program
+as anywhere else. An image relation in the loop builds the one-tuple
+relation and joins it with `trendy_rt_and` for each tuple: correct, but a
+join per tuple, until an optimizer rewrites it into one join and a
+grouping.
 
 The canonical order of a relation's tuples is `hir::Value`'s order, which
 the compiler uses for constants and the runtime reproduces

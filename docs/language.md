@@ -775,6 +775,60 @@ var doubled := items replace { price := price * 2e0 };
 operator main{} [];
 ```
 
+### Image relations
+
+In the values of an `extend` or a `replace`, `!!r` is the image
+relation of the tuple at hand in the relation `r`: the tuples of `r` that
+match it on their common attributes, without those attributes. A tuple of
+departments, say, has as its image in a relation of employees the
+department's employees. It is Tutorial D's image relation, with its
+syntax, from Date and Darwen's *Database Explorations*; it is the one
+relational operator written with symbols rather than a word, as the
+literature writes it.
+
+```trendy
+var cities := relation {
+    { city: "Kumasi", country: "Ghana" },
+    { city: "Accra", country: "Ghana" },
+    { city: "Osaka", country: "Japan" },
+};
+var countries := relation { { country: "Ghana" }, { country: "Japan" }, { country: "Peru" } };
+var by_country := countries extend { cities := !!cities };
+var listed := countries extend { has_cities := !!(cities{country}) = relation { {} } };
+
+operator main{} [
+    call debug_value{v: by_country};
+];
+```
+
+- **It is a join, then a remove:** `r` joined with the tuple at hand,
+  projected on their common attributes, then without them. So, as in
+  `join`, the relation must have an attribute in common with the tuple at
+  hand (A0028), with the same type (A0027).
+- **A tuple with no match has an empty image,** so every tuple at hand
+  gets one: above, Peru's `cities` is empty, and so its `has_cities` is
+  false, since its image in `cities{country}` isn't `relation { {} }`.
+  This is grouping without SQL's GROUP BY, which loses the empty groups;
+  with aggregate operators, it will also be how to summarize.
+- **The tuple at hand is the innermost one:** in a nested `extend`, the
+  inner tuple's. There is none outside an `extend`'s or a `replace`'s
+  values, so `!!` there is an error (A0030).
+- **Its operand is a single one:** a name, or an expression in
+  parentheses. A postfix operator or a join right after it could apply
+  to the image or to its operand, so it needs parentheses to say which
+  (P0022): the image of `r{a}` is `!!(r{a})`, and the image
+  projected is `(!!r){a}`.
+- **`!!` is one token, the two `!`s together.** A lone `!` is C's `not`,
+  fixed to `not` (P0014), so `! !r` is two of those, not an image.
+
+```trendy,error
+var births := relation { { name: "Ada", place: "London" } };
+var places := relation { { place: "London" } };
+var names := places extend { names := !!births{name, place} };
+
+operator main{} [];
+```
+
 ### Joins
 
 `r join s` is the relation of the tuples made of a tuple of `r` and a tuple
@@ -862,6 +916,7 @@ From tightest to loosest:
 
 | Operators | Grouping |
 |---|---|
+| `!!`, of a name or a parenthesized expression | none: see below |
 | postfix `.a`, projection `{…}`, `remove {…}`, `rename {…}`, `extend {…}` and `replace {…}` | left |
 | prefix `not`, `-` and `+` | |
 | `*`, `/`, `div`, `mod` | left |
@@ -882,6 +937,27 @@ parenthesization; SQL and Python read it that way.
 means `a implies (b implies c)`. The joins bind looser than arithmetic,
 since their operands are relations, and tighter than the comparisons, so
 `r join s = t` compares the join. Parentheses group explicitly.
+
+Precedence is a partial order: where a pair of operators could reasonably
+be read either way, neither reading is assumed, and parentheses must say
+which is meant. These pairs are:
+
+- **A comparison and another comparison,** since `a < b < c` doesn't
+  chain (P0015).
+- **`!!` and a postfix operator or a join after it:**
+  `!!r rename {a as b}` could be the image of the renamed relation
+  or the image renamed, and `!!r join s` could be the image of the
+  join or the image joined. Write `!!(r rename {a as b})` or
+  `(!!r) rename {a as b}` (P0022). Before it, there's no
+  ambiguity: `s join !!r` joins `s` with the image.
+
+```trendy,error
+var births := relation { { name: "Ada", place: "London" } };
+var cities := relation { { city: "London" } };
+var natives := cities extend { natives := !!births rename {place as city} };
+
+operator main{} [];
+```
 
 ### Other languages' operators
 
@@ -1013,7 +1089,8 @@ Names are ASCII letters, digits and `_`, and don't start with a digit. They
 are case-sensitive. The keywords are `operator`, `var`, `call`, `builtin`,
 `tuple`, `relation`, `true`, `false`, `not`, `and`, `or`, `xor`,
 `implies`, `div`, `mod`, `remove`, `rename`, `extend`, `replace`, `join`,
-`times`, `compose` and `as`, all lowercase, and a keyword can't be a name (P0017).
+`times`, `compose`, `image`, `in` and `as`, all lowercase, and a keyword
+can't be a name (P0017).
 `type` is a keyword only after `builtin`, and `key` only where a variable's
 keys go.
 
@@ -1110,6 +1187,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `R RENAME ( A AS B )`, `rename(columns={'a': 'b'})` | `r rename {a as b}` |
 | `EXTEND R ADD ( X AS B )`, `SELECT *, x AS b` | `r extend { b := x }` |
 | `UPDATE R ( A := X )`, as an expression | `r replace { a := x }` |
+| `GROUP BY a` with the group's rows | `r{a} extend { group := !!r }` |
 | `PRIMARY KEY (a)`, `UNIQUE (a)`, `KEY { A }` | `key { a }` |
 | `NATURAL JOIN`, `INNER JOIN`, `JOIN … USING (a)` | `join` |
 | `CROSS JOIN` | `times` |

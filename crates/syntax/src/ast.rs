@@ -52,6 +52,7 @@ ast_node!(ExtractExpr);
 ast_node!(ProjectExpr);
 ast_node!(PostfixExpr);
 ast_node!(NaryExpr);
+ast_node!(ImageExpr);
 ast_node!(NameList);
 ast_node!(RenameList);
 ast_node!(Renaming);
@@ -330,6 +331,20 @@ impl NaryExpr {
     }
 }
 
+impl ImageExpr {
+    /// The operator, `!!`.
+    #[must_use]
+    pub fn operator(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    /// The relation whose tuples are matched.
+    #[must_use]
+    pub fn operand(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+}
+
 impl RenameList {
     pub fn renamings(&self) -> impl Iterator<Item = Renaming> {
         self.0.children().filter_map(Renaming::cast)
@@ -483,6 +498,7 @@ pub enum Expr {
     Project(ProjectExpr),
     Postfix(PostfixExpr),
     Nary(NaryExpr),
+    Image(ImageExpr),
 }
 
 impl Expr {
@@ -499,7 +515,8 @@ impl Expr {
             .or_else(|| ExtractExpr::cast(node.clone()).map(Expr::Extract))
             .or_else(|| ProjectExpr::cast(node.clone()).map(Expr::Project))
             .or_else(|| PostfixExpr::cast(node.clone()).map(Expr::Postfix))
-            .or_else(|| NaryExpr::cast(node).map(Expr::Nary))
+            .or_else(|| NaryExpr::cast(node.clone()).map(Expr::Nary))
+            .or_else(|| ImageExpr::cast(node).map(Expr::Image))
     }
 
     #[must_use]
@@ -516,6 +533,7 @@ impl Expr {
             Expr::Project(e) => e.syntax(),
             Expr::Postfix(e) => e.syntax(),
             Expr::Nary(e) => e.syntax(),
+            Expr::Image(e) => e.syntax(),
         }
     }
 

@@ -76,13 +76,15 @@ var planned := join{plan, recipes, ingredients};
             amount := quantity * approximate{n: people} / approximate{n: serves}
         };
 
-   3. Summarize with sum, to add up each ingredient across recipes. The sum
-      must be of the tuples in each group, not of their distinct amounts:
-      cumin is 5 g in both shakshuka and dal tadka, and the list needs 10 g.
-      So summarize can't project away `recipe` before it sums.
+   3. Image relations and sum, to add up each ingredient across recipes:
+      each ingredient and unit, extended with the sum of the amounts in its
+      image relation in `scaled`, the tuples for that ingredient. The sum
+      must be of those tuples, not of their distinct amounts: cumin is 5 g
+      in both shakshuka and dal tadka, and the list needs 10 g. The image
+      relation keeps `recipe`, so both are there.
 
-        var list := scaled summarize by { ingredient, unit } {
-            total := sum{v: amount}
+        var list := scaled{ingredient, unit} extend {
+            total := sum{r: !!scaled, a: amount}
         };
 
    The list is then:
@@ -95,8 +97,9 @@ var planned := join{plan, recipes, ingredients};
    Later: a pantry to subtract what's already at home, which needs
    storage, and output for people rather than `debug_value`. */
 
-/* What can be said today: what to buy this week, without the amounts. */
-var needed := planned{ingredient, unit};
+/* What can be said today: what to buy this week, without the amounts,
+   and which recipes need each, from its image relation in `planned`. */
+var needed := planned{ingredient, unit} extend { recipes := (!!planned){recipe} };
 
 operator main{} [
     call debug_value{v: plan};

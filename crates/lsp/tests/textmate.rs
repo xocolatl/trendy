@@ -41,6 +41,7 @@ fn punctuation_scope(kind: SyntaxKind) -> &'static str {
             "keyword.operator.arithmetic.trendy"
         }
         SyntaxKind::PipePipe => "keyword.operator.concatenation.trendy",
+        SyntaxKind::BangBang => "keyword.operator.image.trendy",
         other => panic!("choose a TextMate scope for the new punctuation {other:?}"),
     }
 }

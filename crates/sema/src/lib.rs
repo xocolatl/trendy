@@ -2464,6 +2464,70 @@ mod tests {
     }
 
     #[test]
+    fn image_constants() {
+        let vars = variables(
+            "var people := relation { { name: \"Ada\", city: \"London\" }, { name: \"Mary\", city: \"London\" }, { name: \"Edgar\", city: \"Portland\" } };\nvar cities := relation { { city: \"London\" }, { city: \"Nyeri\" } };\nvar residents := cities extend { residents := !!people };\nvar selves := people extend { me := !!people };\nvar pairs := people extend { others := !!(people rename {name as other}) };",
+        );
+        let value = |name: &str| &vars.iter().find(|v| v.name == name).unwrap().init;
+        // Nyeri has no residents, so its image is empty.
+        assert_eq!(
+            value("residents"),
+            &variables(
+                "var r := relation { { city: \"London\", residents: relation { { name: \"Ada\" }, { name: \"Mary\" } } }, { city: \"Nyeri\", residents: relation { name: text } {} } };"
+            )[0]
+            .init
+        );
+        // Matching on every attribute leaves the tuple itself, without them:
+        // the image is `relation {} { {} }`.
+        let hir::Value::Relation(selves) = value("selves") else {
+            panic!("a relation");
+        };
+        assert!(
+            selves
+                .tuples
+                .iter()
+                .all(|t| t.get("me") == Some(&hir::Value::dee()))
+        );
+        assert_eq!(
+            value("pairs").ty().to_string(),
+            "relation { city: text, name: text, others: relation { other: text } }"
+        );
+    }
+
+    #[test]
+    fn image_errors() {
+        let source = format!(
+            "var r := relation {{ {{ a: 1, b: \"x\" }} }};\nvar s := relation {{ {{ c: 1 }} }};\nvar t := relation {{ {{ a: \"y\" }} }};\nvar u := !!r;\nvar v := r extend {{ w := !!s }};\nvar x := r extend {{ w := !!t }};\nvar y := r extend {{ w := !!1 }};\nvar z := r extend {{ w := !!q }};{MAIN}"
+        );
+        let errors = errors(&source);
+        let found: Vec<_> = errors.iter().map(|e| (e.code, &e.message[..])).collect();
+        assert_eq!(
+            found,
+            [
+                (Code::ImageOutsideTuple, "`!!` has no tuple at hand here"),
+                (
+                    Code::CommonAttributes,
+                    "`!!` needs an attribute in common with the tuple at hand"
+                ),
+                (
+                    Code::JoinTypeConflict,
+                    "the relation and the tuple at hand both have an attribute `a`, of different types"
+                ),
+                (Code::WrongOperandType, "`!!` can't be applied to integers"),
+                (Code::UnknownName, "unknown value `q`"),
+            ]
+        );
+        assert_eq!(errors[1].notes[0], "the tuple at hand has `a` and `b`");
+        let fixed = fix(
+            "var r := relation { { country: \"GH\" } };\nvar s := relation { { county: \"GH\", city: \"Kumasi\" } };\nvar t := r extend { cities := !!s };\n\noperator main{} [];",
+        );
+        assert!(
+            fixed.contains("!!(s rename {county as country})"),
+            "{fixed}"
+        );
+    }
+
+    #[test]
     fn replace_errors() {
         let source = format!(
             "var r := relation {{ {{ price: 1, name: \"tea\" }} }};\nvar a := r replace {{ prise := 2 }};\nvar b := r replace {{ total := price * 2 }};\nvar c := r replace {{ price := 2, total := 3 }};\nvar d := r replace {{ price := 2e0 }};\nvar e := r replace {{ price := 1, price := 2 }};\nvar f := r replace {{}};\nvar g := 1 replace {{ h := 2 }};{MAIN}"

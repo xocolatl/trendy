@@ -79,6 +79,8 @@ pub enum SyntaxKind {
     Slash,
     /// `||`, text concatenation.
     PipePipe,
+    /// `!!`, in `!!r`: an image relation.
+    BangBang,
     /// An operator from another language, such as `&&` or `->`: lexed so it
     /// can be recognized and replaced by trendy's keyword.
     ForeignOperator,
@@ -132,6 +134,8 @@ pub enum SyntaxKind {
     /// `join{r, s, t}` or `times{r, s, t}`: a join of any number of
     /// relations.
     NaryExpr,
+    /// `!!r`: the tuples of `r` that match the tuple at hand.
+    ImageExpr,
     /// `{a, b}`: attribute names, as in a projection.
     NameList,
     /// `{a as b, c as d}`, in a `rename`.
@@ -174,7 +178,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 89] = [
+    pub const ALL: [SyntaxKind; 91] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -223,6 +227,7 @@ impl SyntaxKind {
         SyntaxKind::Star,
         SyntaxKind::Slash,
         SyntaxKind::PipePipe,
+        SyntaxKind::BangBang,
         SyntaxKind::ForeignOperator,
         SyntaxKind::IntLiteral,
         SyntaxKind::ApproximateLiteral,
@@ -246,6 +251,7 @@ impl SyntaxKind {
         SyntaxKind::ProjectExpr,
         SyntaxKind::PostfixExpr,
         SyntaxKind::NaryExpr,
+        SyntaxKind::ImageExpr,
         SyntaxKind::NameList,
         SyntaxKind::RenameList,
         SyntaxKind::Renaming,
@@ -335,6 +341,7 @@ impl SyntaxKind {
                     | SyntaxKind::Star
                     | SyntaxKind::Slash
                     | SyntaxKind::PipePipe
+                    | SyntaxKind::BangBang
             )
             || self.is_comparison()
     }
@@ -440,6 +447,7 @@ impl SyntaxKind {
             SyntaxKind::Star => "*",
             SyntaxKind::Slash => "/",
             SyntaxKind::PipePipe => "||",
+            SyntaxKind::BangBang => "!!",
             _ => return None,
         })
     }
@@ -497,6 +505,7 @@ impl SyntaxKind {
             SyntaxKind::Star => "`*`",
             SyntaxKind::Slash => "`/`",
             SyntaxKind::PipePipe => "`||`",
+            SyntaxKind::BangBang => "`!!`",
             SyntaxKind::IntLiteral => "integer literal",
             SyntaxKind::ApproximateLiteral => "approximate literal",
             SyntaxKind::TextLiteral => "text literal",
@@ -513,7 +522,8 @@ impl SyntaxKind {
             | SyntaxKind::ExtractExpr
             | SyntaxKind::ProjectExpr
             | SyntaxKind::PostfixExpr
-            | SyntaxKind::NaryExpr => "expression",
+            | SyntaxKind::NaryExpr
+            | SyntaxKind::ImageExpr => "expression",
             SyntaxKind::NameList => "attribute names",
             SyntaxKind::RenameList => "renamings",
             SyntaxKind::Renaming => "renaming",

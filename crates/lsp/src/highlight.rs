@@ -283,6 +283,22 @@ mod tests {
     }
 
     #[test]
+    fn images() {
+        assert_eq!(
+            highlight("var a := b extend { c := !!d };"),
+            [
+                ("var", Class::Keyword, false),
+                ("a", Class::Variable, true),
+                ("b", Class::Variable, false),
+                ("extend", Class::ExprOperator, false),
+                ("c", Class::Attribute, true),
+                ("!!", Class::ExprOperator, false),
+                ("d", Class::Variable, false),
+            ]
+        );
+    }
+
+    #[test]
     fn joins_of_lists() {
         assert_eq!(
             highlight("var a := join{b, c};"),

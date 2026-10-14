@@ -882,10 +882,22 @@ mod tests {
     }
 
     #[test]
-    fn extensions() {
+    fn assignments() {
         assert_eq!(
             fmt("var a:=r   extend{t:=x+1,u :=r{y}extend{z:=2}};"),
             "var a := r extend { t := x + 1, u := r{y} extend { z := 2 } };\n"
+        );
+        assert_eq!(
+            fmt("var a:=r   replace{t:=t+1};"),
+            "var a := r replace { t := t + 1 };\n"
+        );
+    }
+
+    #[test]
+    fn images() {
+        assert_eq!(
+            fmt("var a:=r extend{t:=!!  (s rename{x as y}),u:=(!! s)join s,v:=s join!!s};"),
+            "var a := r extend { t := !!(s rename {x as y}), u := (!!s) join s, v := s join !!s };\n"
         );
     }
 

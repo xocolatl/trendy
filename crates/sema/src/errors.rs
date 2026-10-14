@@ -676,6 +676,115 @@ pub(crate) fn not_projectable(
 /// What every join does with the operands' common attributes, for notes.
 const JOIN_RULE: &str = "`join` matches the tuples of its operands on all the attributes they have in common, by name; `times` is for operands with none in common, and `compose` is `join` without the common attributes";
 
+const IMAGE_RULE: &str = "`!!r` is the image relation of the tuple at hand in `r`: the tuples of `r` that match it on their common attributes, by name, without those attributes";
+
+/// The attributes of `heading`, for a label or note.
+fn listed(heading: &hir::Heading) -> String {
+    let names: Vec<String> = heading
+        .attributes()
+        .map(|(a, _)| format!("`{a}`"))
+        .collect();
+    if names.is_empty() {
+        "no attributes".to_string()
+    } else {
+        trendy_diag::conjoin(&names)
+    }
+}
+
+/// `!!`, written `image`, where there is no tuple at hand.
+pub(crate) fn image_outside(image: &trendy_syntax::ast::ImageExpr) -> Diagnostic {
+    let span = image
+        .operator()
+        .map_or_else(|| image.span(), |k| trendy_syntax::span(k.text_range()));
+    Diagnostic::error(
+        Code::ImageOutsideTuple,
+        "`!!` has no tuple at hand here",
+        span,
+        "no tuple to match",
+    )
+    .with_note(IMAGE_RULE)
+    .with_note("there is a tuple at hand only in the values of an `extend` or a `replace`")
+    .with_help("compute it for each tuple of another relation: `groups extend { members := !!r }`")
+}
+
+/// `!!`, at `span`, applied to `operand`, of type `ty`, which isn't a
+/// relation.
+pub(crate) fn image_not_relation(span: Span, ty: &hir::Type, operand: &Expr) -> Diagnostic {
+    Diagnostic::error(
+        Code::WrongOperandType,
+        format!("`!!` can't be applied to {}", plural(ty)),
+        span,
+        "`!!` takes a relation",
+    )
+    .with_secondary(operand.span(), format!("this is `{ty}`"))
+    .with_note(IMAGE_RULE)
+}
+
+/// `!!`, at `span`, applied to `operand`, a relation with `heading`,
+/// which has no attribute in common with the tuple at hand, which has
+/// `at_hand`.
+pub(crate) fn image_unrelated(
+    span: Span,
+    operand: &Expr,
+    heading: &hir::Heading,
+    at_hand: &hir::Heading,
+) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::CommonAttributes,
+        "`!!` needs an attribute in common with the tuple at hand",
+        span,
+        "nothing to match on",
+    )
+    .with_secondary(operand.span(), format!("this has {}", listed(heading)))
+    .with_note(format!("the tuple at hand has {}", listed(at_hand)))
+    .with_note(IMAGE_RULE);
+    // An attribute named a little differently on each side is likely the
+    // one to match on.
+    let close = heading
+        .attributes()
+        .flat_map(|(a, _)| at_hand.attributes().map(move |(b, _)| (a, b)))
+        .filter(|(a, b)| edit_distance(a, b) <= 2)
+        .min_by_key(|(a, b)| (edit_distance(a, b), *a, *b));
+    match close {
+        Some((a, b)) => d.with_suggestion(
+            format!("rename `{a}` to `{b}`, to match on it"),
+            vec![Edit {
+                span: operand.span(),
+                replacement: format!("({} rename {{{a} as {b}}})", operand.syntax().text()),
+            }],
+        ),
+        None => d.with_help(
+            "if an attribute means the same in both but is named differently, rename it: `!!(r rename {a as b})`",
+        ),
+    }
+}
+
+/// `!!`, at `span`, applied to `operand`, whose attribute `name` has
+/// type `ty`, which is `at_hand` in the tuple at hand.
+pub(crate) fn image_type_conflict(
+    span: Span,
+    operand: &Expr,
+    name: &str,
+    ty: &hir::Type,
+    at_hand: &hir::Type,
+) -> Diagnostic {
+    Diagnostic::error(
+        Code::JoinTypeConflict,
+        format!(
+            "the relation and the tuple at hand both have an attribute `{name}`, of different types"
+        ),
+        span,
+        format!("`!!` matches tuples on `{name}`"),
+    )
+    .with_secondary(operand.span(), format!("`{name}` is `{ty}` here"))
+    .with_note(format!("in the tuple at hand, `{name}` is `{at_hand}`"))
+    .with_note(IMAGE_RULE)
+    .with_note("matched attributes must have the same type, since values never convert to another type implicitly")
+    .with_help(format!(
+        "if the two `{name}`s mean different things, rename one: `!!(r rename {{{name} as other_{name}}})`"
+    ))
+}
+
 /// The join written `token` applied to `operand`, of type `ty`, which isn't
 /// a relation.
 pub(crate) fn not_joinable(token: &SyntaxToken, ty: &hir::Type, operand: &Expr) -> Diagnostic {

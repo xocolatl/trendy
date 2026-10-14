@@ -41,9 +41,9 @@ key { name };
    terms of them. Not, the complement, can be infinite, so it is only used
    underneath, never written.
 
-   In where, extend, replace and summarize, the attributes of the tuple at
-   hand are in scope by name, and hide any variable or parameter of the
-   same name. To use one of those, rename it first. */
+   In where, extend and replace, the attributes of the tuple at hand are in
+   scope by name, and hide any variable or parameter of the same name. To
+   use one of those, rename it first. So are its image relations, below. */
 
 /* The empty relations of degree zero (RM Prescription 10): table_dee, with
    one tuple, which is true, and table_dum, with none, which is false.
@@ -133,14 +133,22 @@ key { name };
    call debug_value{v: max{r: people{born}}};
 */
 
-/* Summarize: aggregates per group of tuples.
-   Tutorial D: SUMMARIZE PEOPLE BY { CITY } ADD ( COUNT() AS N )
-   Proposed: a `summarize` operator with a `by` list and the aggregates to
-   add, as extend adds attributes.
+/* Aggregates per group: an extend of the groups, each with an aggregate
+   of its image relation (see the image relations below), so trendy has
+   no summarize. A group with no tuples is still there, with a count of 0,
+   unlike with SQL's GROUP BY; and an aggregate is of the image relation's
+   tuples, so equal values in different tuples all count.
+   Tutorial D: EXTEND CITIES { CITY } : { N := COUNT ( !!PEOPLE ) }, from
+   Date and Darwen's Database Explorations, replacing SUMMARIZE PER and BY;
+   TTM's Appendix A expands SUMMARIZE into EXTEND the same way.
+   Needs the aggregate operators above, so read-only operators.
 
-   call debug_value{v: people join cities summarize by { city } { n := count{} }};
+   Per city, how many people live there: Nyeri has none, so its n is 0.
+   call debug_value{v: cities{city} extend { n := count{r: !!(people join cities)} }};
+
+   Who was born in the same year as someone else.
+   call debug_value{v: people where count{r: !!(people rename {name as other})} > 1};
 */
-
 /* Transitive closure, of a relation of degree two whose attributes have
    the same type (RM Very Strong Suggestion 6).
    Tutorial D: TCLOSE R
@@ -346,6 +354,27 @@ operator replace_people{p: relation { name: text, born: integer }} [
     call debug_value{v: p{born} replace { born := born div 1000 }};
 ];
 
+/* Image relations: in the values of an extend or a replace, `!!r`
+   is the image relation of the tuple at hand in r: the tuples of r that
+   match it on their common attributes, without those attributes. It is
+   r joined with the tuple at hand, projected on the attributes they have
+   in common, which it must have, then without them. A tuple with no match
+   has an empty image, so every group is there, unlike with SQL's GROUP BY.
+   Tutorial D: !!R, from Date and Darwen's Database Explorations, which
+   trendy writes the same way.
+   Implemented, and printed twice like the projections. */
+var natives := cities{city} extend { natives := !!(births rename {place as city}) };
+var london := relation { { place: "London" } };
+var london_only := births{name} extend { only_london := (!!births){place} = london };
+
+operator image_births{
+    b: relation { name: text, born: integer, place: text },
+    c: relation { name: text, city: text },
+} [
+    call debug_value{v: c{city} extend { natives := !!(b rename {place as city}) }};
+    call debug_value{v: b{name} extend { only_london := (!!b){place} = london }};
+];
+
 operator main{} [
     call debug_value{v: names};
     call debug_value{v: places};
@@ -369,6 +398,8 @@ operator main{} [
     call debug_value{v: rosters};
     call debug_value{v: older};
     call debug_value{v: millennia};
+    call debug_value{v: natives};
+    call debug_value{v: london_only};
 
     call project_births{r: births};
     call project_signs{r: signs};
@@ -387,4 +418,6 @@ operator main{} [
     call extend_people{p: people, t: teams};
 
     call replace_people{p: people};
+
+    call image_births{b: births, c: cities};
 ];

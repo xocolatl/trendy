@@ -1,9 +1,12 @@
 mod errors;
+mod unordered;
 
 use trendy_diag::{Diagnostic, Span};
 use trendy_lexer::{Lexed, Token};
-use trendy_syntax::ast::SourceFile;
+use trendy_syntax::ast::{AstNode, SourceFile};
 use trendy_syntax::{SyntaxKind, TreeBuilder};
+
+use crate::unordered::unordered_operators;
 
 /// The parser's output: a complete tree, even for invalid input, plus every
 /// lexer and parser error, ordered by position.
@@ -33,12 +36,11 @@ pub fn parse(source: &str, lexed: Lexed) -> Parse {
     parser.source_file();
     parser.flush_missing();
 
+    let tree = parser.builder.finish();
     let mut errors = parser.errors;
+    errors.extend(unordered_operators(tree.syntax()));
     errors.sort_by_key(|d| d.span().start);
-    Parse {
-        tree: parser.builder.finish(),
-        errors,
-    }
+    Parse { tree, errors }
 }
 
 struct Parser<'a> {
@@ -703,13 +705,38 @@ impl<'a> Parser<'a> {
         self.builder.finish_node();
     }
 
+    /// `!!r`, Tutorial D's image relation, whose operand is a single one: a
+    /// name, a literal or a parenthesized expression. An operator after it
+    /// could apply to the operand or to the image, so a postfix operator or
+    /// a join there is reported (`unordered_operators`), and parsed as
+    /// applying to the image.
+    fn image(&mut self) {
+        self.start_node(SyntaxKind::ImageExpr);
+        self.bump();
+        if self.at_operand() {
+            self.primary();
+        } else {
+            let outer_form = std::mem::replace(&mut self.form, errors::IMAGE_FORM);
+            self.missing_with_help(
+                SyntaxKind::Ident,
+                "write the relation after `!!`, as in `!!shipments`",
+            );
+            self.form = outer_form;
+        }
+        self.builder.finish_node();
+    }
+
     /// An operand, then postfix operators, which bind tighter than any
     /// other: attribute extraction, `t.a`, projections, `r{a, b}`, `remove`
     /// and `rename`. So `a and b{x}` projects `b`, and `-t.a` negates `t.a`.
     fn postfix(&mut self) {
         self.peek();
         let start = self.builder.checkpoint();
-        self.primary();
+        if self.at(SyntaxKind::BangBang) {
+            self.image();
+        } else {
+            self.primary();
+        }
         loop {
             let next = self.lookahead().map(|f| f.kind);
             if next == Some(SyntaxKind::Dot) {
@@ -2448,6 +2475,81 @@ SourceFile
         assert_eq!(
             messages("var x := r replace { 5 };"),
             ["an attribute's new value needs the attribute's name"]
+        );
+    }
+
+    #[test]
+    fn images() {
+        let parse = parse_str("var x := r extend { y := !!s };");
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let image = parse
+            .tree
+            .syntax()
+            .descendants()
+            .find_map(trendy_syntax::ast::ImageExpr::cast)
+            .unwrap();
+        assert_eq!(image.operand().unwrap().syntax().to_string(), "s");
+        // Its operand is a single one; an operator after it that could
+        // apply to either the image or the operand needs parentheses.
+        for (source, applied) in [
+            ("!!r{a}", "a projection"),
+            ("!!r.a", "attribute extraction, `.`,"),
+            ("!!r rename {a as b}", "`rename`"),
+            ("!!r join s", "`join`"),
+            ("!!r remove {a} times s", "`remove`"),
+        ] {
+            let source = format!("var x := t extend {{ y := {source} }};");
+            assert_eq!(
+                messages(&source),
+                [format!(
+                    "`!!` and {applied} need parentheses to say which applies first"
+                )],
+                "{source}"
+            );
+        }
+        let source = "var x := t extend { y := !!r remove {a} times s };";
+        let fixes: Vec<_> = parse_str(source).errors[0]
+            .suggestions
+            .iter()
+            .map(|suggestion| {
+                let mut fixed = source.to_string();
+                for edit in suggestion.edits.iter().rev() {
+                    fixed.replace_range(edit.span.start..edit.span.end, &edit.replacement);
+                }
+                fixed
+            })
+            .collect();
+        // One reading for each place the image can be taken.
+        assert_eq!(
+            fixes,
+            [
+                "var x := t extend { y := (!!r) remove {a} times s };",
+                "var x := t extend { y := (!!(r remove {a})) times s };",
+                "var x := t extend { y := !!(r remove {a} times s) };",
+            ]
+        );
+        for fixed in &fixes {
+            assert!(parse_str(fixed).errors.is_empty(), "{fixed}");
+        }
+        // Parenthesized either way, and with comparisons, which can only
+        // apply to the image, it's clear.
+        for source in [
+            "var x := t extend { y := (!!r){a} };",
+            "var x := t extend { y := !!(r{a}) };",
+            "var x := t extend { y := !!r = s };",
+            "var x := t extend { y := s join !!r };",
+        ] {
+            assert!(parse_str(source).errors.is_empty(), "{source}");
+        }
+        // `!!` is one token only with the `!`s together: apart, each is C's
+        // `not`.
+        assert_eq!(
+            fix("var x := r extend { y := ! !s };"),
+            "var x := r extend { y := not not s };"
+        );
+        assert_eq!(
+            messages("var x := r extend { y := !! };"),
+            ["expected identifier, found `}`"]
         );
     }
 

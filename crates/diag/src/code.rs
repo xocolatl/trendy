@@ -34,6 +34,7 @@ pub enum Code {
     KeySpelling,
     KeyBeforeValue,
     SqlJoin,
+    UnorderedOperators,
     DuplicateName,
     MissingMain,
     UnknownType,
@@ -63,6 +64,7 @@ pub enum Code {
     JoinTypeConflict,
     CommonAttributes,
     EmptyCompose,
+    ImageOutsideTuple,
     Overflow,
     DivisionByZero,
     OutOfMemory,
@@ -83,7 +85,7 @@ pub enum CodeKind {
 }
 
 impl Code {
-    pub const ALL: [Code; 54] = [
+    pub const ALL: [Code; 56] = [
         Code::UnexpectedCharacter,
         Code::MissingToken,
         Code::WrongDelimiter,
@@ -105,6 +107,7 @@ impl Code {
         Code::KeySpelling,
         Code::KeyBeforeValue,
         Code::SqlJoin,
+        Code::UnorderedOperators,
         Code::DuplicateName,
         Code::MissingMain,
         Code::UnknownType,
@@ -134,6 +137,7 @@ impl Code {
         Code::JoinTypeConflict,
         Code::CommonAttributes,
         Code::EmptyCompose,
+        Code::ImageOutsideTuple,
         Code::Overflow,
         Code::DivisionByZero,
         Code::OutOfMemory,
@@ -164,6 +168,7 @@ impl Code {
             Code::KeySpelling => "P0019",
             Code::KeyBeforeValue => "P0020",
             Code::SqlJoin => "P0021",
+            Code::UnorderedOperators => "P0022",
             Code::DuplicateName => "A0001",
             Code::MissingMain => "A0002",
             Code::UnknownType => "A0003",
@@ -193,6 +198,7 @@ impl Code {
             Code::JoinTypeConflict => "A0027",
             Code::CommonAttributes => "A0028",
             Code::EmptyCompose => "A0029",
+            Code::ImageOutsideTuple => "A0030",
             Code::Overflow => "R0001",
             Code::DivisionByZero => "R0002",
             Code::OutOfMemory => "R0003",
@@ -252,6 +258,7 @@ impl Code {
             Code::KeySpelling => include_str!("../errors/P0019.md"),
             Code::KeyBeforeValue => include_str!("../errors/P0020.md"),
             Code::SqlJoin => include_str!("../errors/P0021.md"),
+            Code::UnorderedOperators => include_str!("../errors/P0022.md"),
             Code::DuplicateName => include_str!("../errors/A0001.md"),
             Code::MissingMain => include_str!("../errors/A0002.md"),
             Code::UnknownType => include_str!("../errors/A0003.md"),
@@ -281,6 +288,7 @@ impl Code {
             Code::JoinTypeConflict => include_str!("../errors/A0027.md"),
             Code::CommonAttributes => include_str!("../errors/A0028.md"),
             Code::EmptyCompose => include_str!("../errors/A0029.md"),
+            Code::ImageOutsideTuple => include_str!("../errors/A0030.md"),
             Code::Overflow => include_str!("../errors/R0001.md"),
             Code::DivisionByZero => include_str!("../errors/R0002.md"),
             Code::OutOfMemory => include_str!("../errors/R0003.md"),
