@@ -22,14 +22,6 @@ var addr := tuple {
    and hide any variable or parameter of the same name. To use one of
    those, rename it first. */
 
-/* Renaming by prefix, the rest of Algebra A's RENAME (see the renaming
-   below, which is implemented).
-   Tutorial D: ADDR RENAME ( PREFIX 'ST' AS 'G' )
-   Proposed: a `prefix` renaming, written like the others.
-
-   call debug_value{v: addr rename {prefix "st" as "g"}};
-*/
-
 /* Join, also called tuple union: the union of two tuples' attributes. Any
    attribute both have must have the same value in both.
    Tutorial D: ADDR UNION TUPLE { NAME 'Ada' }, and n-adic
