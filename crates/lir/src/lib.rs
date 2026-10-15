@@ -413,6 +413,8 @@ pub enum Combination {
     Union,
     /// A union that fails if the operands share a tuple.
     DisjointUnion,
+    /// The tuples of exactly one operand.
+    ExclusiveUnion,
     Minus,
     /// A minus that fails if the right operand has a tuple the left lacks.
     IncludedMinus,
@@ -427,6 +429,7 @@ impl Combination {
             Combination::DisjointUnion => 1,
             Combination::Minus => 2,
             Combination::IncludedMinus => 3,
+            Combination::ExclusiveUnion => 4,
         }
     }
 }

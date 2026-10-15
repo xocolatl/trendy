@@ -815,7 +815,7 @@ pub(crate) fn not_joinable(
         ),
         kind if kind.is_set() => (
             "relations of one heading",
-            "`union`, `d_union`, `intersect`, `minus` and `i_minus` combine the tuples of relations; Tutorial D's tuple union, of the attributes of tuples, is `join`",
+            "`union`, `d_union`, `xunion`, `intersect`, `minus` and `i_minus` combine the tuples of relations; Tutorial D's tuple union, of the attributes of tuples, is `join`",
         ),
         _ => (
             "relations, or tuples",
@@ -1114,6 +1114,10 @@ pub(crate) fn empty_operands(join: crate::ops::JoinKind, nary: &NaryExpr) -> Dia
         ),
         JoinKind::DisjointUnion => (
             "d_union{}",
+            "a union of nothing would have no heading to be a relation of",
+        ),
+        JoinKind::ExclusiveUnion => (
+            "xunion{}",
             "a union of nothing would have no heading to be a relation of",
         ),
         JoinKind::IncludedMinus => (

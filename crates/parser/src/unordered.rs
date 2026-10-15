@@ -35,7 +35,10 @@ pub(crate) fn unordered_operators(root: &SyntaxNode) -> Vec<Diagnostic> {
 fn union_minus(node: SyntaxNode) -> Option<Diagnostic> {
     let union = ast::BinaryExpr::cast(node)?;
     let operator = union.operator()?;
-    if !matches!(operator.kind(), SyntaxKind::UnionKw | SyntaxKind::DUnionKw) {
+    if !matches!(
+        operator.kind(),
+        SyntaxKind::UnionKw | SyntaxKind::DUnionKw | SyntaxKind::XUnionKw
+    ) {
         return None;
     }
     let (lhs, ast::Expr::Binary(minus)) = (union.lhs()?, union.rhs()?) else {

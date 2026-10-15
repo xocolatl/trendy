@@ -948,6 +948,7 @@ impl FunctionBuilder<'_> {
         let combination = match combination {
             hir::Combination::Union => lir::Combination::Union,
             hir::Combination::DisjointUnion => lir::Combination::DisjointUnion,
+            hir::Combination::ExclusiveUnion => lir::Combination::ExclusiveUnion,
             hir::Combination::Minus => lir::Combination::Minus,
             hir::Combination::IncludedMinus => lir::Combination::IncludedMinus,
         };

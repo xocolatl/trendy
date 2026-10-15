@@ -397,17 +397,18 @@ compute the left operand twice. Lowering calls `trendy_rt_matching`, with
 the common attributes as for `And`; it sorts both operands on them and
 keeps the left's tuples that do, or don't, have a match, in one pass.
 
-`union`, `d_union`, `intersect`, `minus` and `i_minus` are joins to sema
-(`JoinKind`), with their own rule: operands of one heading (A0031).
-`intersect` becomes `And`, which of relations with all their attributes
-in common is their intersection, and the others become `Combine`, with
-the `Combination`, computed by `trendy_rt_combine`: both operands are in
-canonical order, so one pass merges them into a result that needs no
-sorting, and finds a tuple that breaks `d_union`'s or `i_minus`'s
-condition (R0006, R0007), which folding reports when compiling. In the parser, `union`
-binds more loosely than the joins, an OR to their AND, while `intersect`
-and `minus` bind like them; `r union s minus t`, which SQL reads the other
-way, is reported (P0022), and SQL's `except` and `union all` are fixed.
+`union`, `d_union`, `xunion`, `intersect`, `minus` and `i_minus` are joins
+to sema (`JoinKind`), with their own rule: operands of one heading
+(A0031). `intersect` becomes `And`, which of relations with all their
+attributes in common is their intersection, and the others become
+`Combine`, with the `Combination`, computed by `trendy_rt_combine`: both
+operands are in canonical order, so one pass merges them into a result
+that needs no sorting, and finds a tuple that breaks `d_union`'s or
+`i_minus`'s condition (R0006, R0007), which folding reports when
+compiling. In the parser, `union` binds more loosely than the joins, an OR
+to their AND, while `intersect` and `minus` bind like them;
+`r union s minus t`, which SQL reads the other way, is reported (P0022),
+and SQL's `except` and `union all` are fixed.
 
 `ungroup` is the one relational operator that isn't Algebra A's: Appendix
 A defines UNGROUP with an infinite relation, which no program can hold.

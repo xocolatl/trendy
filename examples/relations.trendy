@@ -413,8 +413,10 @@ operator matching_people{
 /* Union, intersection and difference, of relations of one heading: the
    tuples of either, of both, and of the first but not the second. Union
    is Algebra A's OR, and binds more loosely than the joins, which are AND,
-   as intersection and difference are. Of lists: `union{…}` and
-   `intersect{…}`, in any order, and `minus[…]`, from the left.
+   as intersection and difference are. `xunion` is the tuples of exactly
+   one, as `xor` is of booleans, and binds as `union` does. Of lists:
+   `union{…}`, `xunion{…}` and `intersect{…}`, in any order, and
+   `minus[…]`, from the left.
    Tutorial D: R1 UNION R2, R1 INTERSECT R2, R1 MINUS R2, and
    UNION { R1, R2, R3 }. Implemented, and printed twice like the
    projections. */
@@ -423,6 +425,7 @@ var both := births{name} intersect cities{name};
 var unlisted := births{name} minus cities{name};
 var everyone := union{births{name}, cities{name}, people{name}};
 var nobody_else := minus[births{name}, cities{name}, people{name}];
+var in_one := births{name} xunion cities{name};
 
 operator set_names{
     b: relation { name: text, born: integer, place: text },
@@ -434,6 +437,7 @@ operator set_names{
     call debug_value{v: b{name} minus c{name}};
     call debug_value{v: union{b{name}, c{name}, p{name}}};
     call debug_value{v: minus[b{name}, c{name}, p{name}]};
+    call debug_value{v: b{name} xunion c{name}};
 ];
 
 /* Checked union and difference: `d_union` is `union` of operands with no
@@ -498,6 +502,7 @@ operator main{} [
     call debug_value{v: unlisted};
     call debug_value{v: everyone};
     call debug_value{v: nobody_else};
+    call debug_value{v: in_one};
     call debug_value{v: whole};
     call debug_value{v: others};
 

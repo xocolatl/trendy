@@ -1224,7 +1224,8 @@ operator main{} [];
 ### Union, intersection and difference
 
 `r union s` is the tuples of either relation, `r intersect s` the tuples
-of both, and `r minus s` the tuples of `r` that aren't in `s`. The
+of both, `r minus s` the tuples of `r` that aren't in `s`, and
+`r xunion s` the tuples of exactly one, as `xor` is of booleans. The
 relations must have the same heading. They are Tutorial D's `UNION`,
 `INTERSECT` and `MINUS`, and SQL's `UNION`, `INTERSECT` and `EXCEPT`.
 
@@ -1234,6 +1235,7 @@ var listed := relation { { name: "Ada" }, { name: "Wangari" } };
 var anyone := born union listed;
 var both := born intersect listed;
 var unlisted := born minus listed;
+var in_one := born xunion listed;
 var everyone := union{born, listed, relation { { name: "Edgar" } }};
 var only_born := minus[born, listed, relation { { name: "Edgar" } }];
 var partition := (born minus listed) d_union listed;
@@ -1250,11 +1252,13 @@ operator main{} [
   union, is fixed to `join`.
 - **Precedence:** `intersect` and `minus` are ANDs in Algebra A and bind
   like the joins, while `union` is an OR and binds more loosely, as `or`
-  does than `and`: `r union s join t` is `r union (s join t)`. SQL reads
+  does than `and`: `r union s join t` is `r union (s join t)`. `xunion`
+  binds as `union` does. `xunion{r, s, t}` is the tuples of an odd number
+  of them, as a chain of `xor`s is true of an odd number of operands. SQL reads
   set operators from the left, so `r union s minus t`, which the algebra
   would read as `r union (s minus t)`, needs parentheses (P0022).
-- **Lists:** `union{…}` and `intersect{…}` in braces, since their
-  operands can be in any order, and `minus[…]` in brackets, from the left:
+- **Lists:** `union{…}`, `xunion{…}` and `intersect{…}` in braces, since
+  their operands can be in any order, and `minus[…]` in brackets, from the left:
   `minus[r, s, t]` is `(r minus s) minus t`. None has a value with no
   operands (A0029).
 - **Checked forms:** `r d_union s` is a union of operands with no tuple in
@@ -1287,7 +1291,7 @@ From tightest to loosest:
 | `*`, `/`, `div`, `mod` | left |
 | `+`, `-`, `\|\|` | left |
 | `join`, `times`, `compose`, `matching`, `not matching`, `intersect`, `minus`, `i_minus` | left |
-| `union`, `d_union` | left |
+| `union`, `d_union`, `xunion` | left |
 | `=`, `<>`, `<`, `<=`, `>`, `>=` | none: they don't chain |
 | `and` | left |
 | `xor` | left |
@@ -1457,8 +1461,8 @@ are case-sensitive. The keywords are `operator`, `var`, `call`, `builtin`,
 `tuple`, `relation`, `true`, `false`, `not`, `and`, `or`, `xor`,
 `implies`, `div`, `mod`, `remove`, `rename`, `extend`, `replace`, `group`,
 `ungroup`, `wrap`, `unwrap`, `join`, `times`, `compose`, `matching`,
-`union`, `d_union`, `intersect`, `minus`, `i_minus`, `where` and `as`, all
-lowercase, and a keyword can't be a name (P0017).
+`union`, `d_union`, `xunion`, `intersect`, `minus`, `i_minus`, `where` and
+`as`, all lowercase, and a keyword can't be a name (P0017).
 `type` is a keyword only after `builtin`, `key` only where a variable's
 keys go, and `value` and `from` only in `tuple from` and `value from`.
 
@@ -1571,6 +1575,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `R MINUS S`, SQL's `EXCEPT` | `r minus s` |
 | `UNION ALL` | `union`: a relation has no duplicates |
 | `R D_UNION S`, `R I_MINUS S` | `r d_union s`, `r i_minus s` |
+| symmetric difference, Python's `s ^ t` | `r xunion s` |
 | `R MATCHING S`, `R SEMIJOIN S`, `WHERE EXISTS (…)` | `r matching s` |
 | `R NOT MATCHING S`, `R SEMIMINUS S`, `WHERE NOT EXISTS (…)` | `r not matching s` |
 | `T1 UNION T2`, of tuples (tuple union) | `t1 join t2` |

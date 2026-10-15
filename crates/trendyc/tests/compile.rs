@@ -541,12 +541,14 @@ fn relations() {
             // Matching, and not matching without the common attribute.
             r#"relation { born: integer, name: text } { { born: 1815, name: "Ada" }, { born: 1923, name: "Edgar" } }"#,
             r#"relation { born: integer, name: text } { { born: 1815, name: "Édouard" } }"#,
-            // Union, intersection, difference, and of lists.
+            // Union, intersection, difference, of lists, and an exclusive
+            // union.
             r#"relation { name: text } { { name: "Ada" }, { name: "Edgar" }, { name: "Wangari" }, { name: "Édouard" } }"#,
             r#"relation { name: text } { { name: "Ada" }, { name: "Edgar" } }"#,
             r#"relation { name: text } { { name: "Édouard" } }"#,
             r#"relation { name: text } { { name: "Ada" }, { name: "Edgar" }, { name: "Wangari" }, { name: "Édouard" } }"#,
             r#"relation { name: text } { { name: "Édouard" } }"#,
+            r#"relation { name: text } { { name: "Wangari" }, { name: "Édouard" } }"#,
             // A disjoint union, and an included minus.
             r#"relation { name: text } { { name: "Ada" }, { name: "Edgar" }, { name: "Wangari" }, { name: "Édouard" } }"#,
             r#"relation { name: text } { { name: "Édouard" } }"#,

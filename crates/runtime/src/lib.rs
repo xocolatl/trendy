@@ -581,10 +581,14 @@ pub const COMBINE_MINUS: usize = 2;
 /// [`trendy_rt_combine`]'s difference whose right operand is included in
 /// the left.
 pub const COMBINE_INCLUDED_MINUS: usize = 3;
+/// [`trendy_rt_combine`]'s symmetric difference: the tuples of exactly one
+/// operand.
+pub const COMBINE_EXCLUSIVE_UNION: usize = 4;
 
 /// Store at `dst` the relations `lhs` and `rhs`, of the one type `desc`
 /// describes, combined as `*combination`, a `COMBINE_` constant, says: the
-/// tuples of either, or of `lhs` but not `rhs`, in canonical order, in
+/// tuples of either, of exactly one, or of `lhs` but not `rhs`, in
+/// canonical order, in
 /// memory that [`trendy_rt_release`] releases. Both operands are in
 /// canonical order, so one pass merges them, and the result needs no
 /// sorting. Stops the program if a disjoint union's operands share a
@@ -641,7 +645,9 @@ pub unsafe extern "C" fn trendy_rt_combine(
                     if combination == COMBINE_DISJOINT_UNION {
                         trendy_rt_fail(FAIL_SHARED_TUPLE);
                     }
-                    if !minus {
+                    // A tuple of both is in an exclusive union's result
+                    // no more than in a minus's.
+                    if !minus && combination != COMBINE_EXCLUSIVE_UNION {
                         keep(l);
                     }
                     i += 1;

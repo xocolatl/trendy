@@ -289,21 +289,15 @@ pub enum Combination {
     Union,
     /// The tuples of either, which must have none in common (`d_union`).
     DisjointUnion,
+    /// The tuples of exactly one (`xunion`, the symmetric difference, as
+    /// `xor` is of booleans).
+    ExclusiveUnion,
     /// The tuples of the left that aren't in the right (`minus`, Algebra
     /// A's AND with the NOT of the right).
     Minus,
     /// The tuples of the left that aren't in the right, all of whose tuples
     /// must be in the left (`i_minus`).
     IncludedMinus,
-}
-
-impl Combination {
-    /// Whether it removes the right's tuples from the left's, rather than
-    /// adding them.
-    #[must_use]
-    pub fn removes(self) -> bool {
-        matches!(self, Combination::Minus | Combination::IncludedMinus)
-    }
 }
 
 /// A tuple that breaks a checked [`Combination`]'s condition: one both
@@ -948,12 +942,20 @@ impl Value {
                     return Err(broken(missing));
                 }
             }
-            Combination::Union | Combination::Minus => {}
+            Combination::Union | Combination::ExclusiveUnion | Combination::Minus => {}
         }
-        let tuples = if combination.removes() {
-            lhs.tuples.difference(&rhs.tuples).cloned().collect()
-        } else {
-            lhs.tuples.union(&rhs.tuples).cloned().collect()
+        let tuples = match combination {
+            Combination::Minus | Combination::IncludedMinus => {
+                lhs.tuples.difference(&rhs.tuples).cloned().collect()
+            }
+            Combination::ExclusiveUnion => lhs
+                .tuples
+                .symmetric_difference(&rhs.tuples)
+                .cloned()
+                .collect(),
+            Combination::Union | Combination::DisjointUnion => {
+                lhs.tuples.union(&rhs.tuples).cloned().collect()
+            }
         };
         Ok(Value::Relation(RelationValue {
             heading: lhs.heading.clone(),

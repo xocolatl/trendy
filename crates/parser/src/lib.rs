@@ -653,7 +653,7 @@ impl<'a> Parser<'a> {
             SyntaxKind::XorKw => 3,
             SyntaxKind::AndKw => 4,
             kind if kind.is_comparison() => COMPARISON,
-            SyntaxKind::UnionKw | SyntaxKind::DUnionKw => UNION,
+            SyntaxKind::UnionKw | SyntaxKind::DUnionKw | SyntaxKind::XUnionKw => UNION,
             kind if kind.is_join() => JOIN,
             SyntaxKind::IntersectKw | SyntaxKind::MinusKw | SyntaxKind::IMinusKw => JOIN,
             SyntaxKind::Plus | SyntaxKind::Minus | SyntaxKind::PipePipe => 9,
@@ -1318,6 +1318,7 @@ impl<'a> Parser<'a> {
                 | SyntaxKind::ComposeKw
                 | SyntaxKind::UnionKw
                 | SyntaxKind::DUnionKw
+                | SyntaxKind::XUnionKw
                 | SyntaxKind::IntersectKw
                 | SyntaxKind::MinusKw
                 | SyntaxKind::IMinusKw
@@ -2823,6 +2824,14 @@ SourceFile
             ["`union` and `minus` need parentheses to say which applies first"]
         );
         assert_eq!(fix(source), "var x := (r union s) minus t;");
+        // `xunion` binds and lists as `union` does.
+        assert_eq!(shape("r xunion s join t"), "(r xunion (s join t))");
+        assert!(parse_str("var x := xunion{r, s, t};").errors.is_empty());
+        assert_eq!(fix("var x := xunion[r, s];"), "var x := xunion{r, s};");
+        assert_eq!(
+            messages("var x := r xunion s minus t;"),
+            ["`xunion` and `minus` need parentheses to say which applies first"]
+        );
         // The checked ones bind and list as their plain forms do.
         assert_eq!(shape("r d_union s join t"), "(r d_union (s join t))");
         assert_eq!(shape("r i_minus s join t"), "((r i_minus s) join t)");

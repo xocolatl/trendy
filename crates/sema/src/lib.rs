@@ -2964,6 +2964,20 @@ mod tests {
         assert_eq!(ns("m"), ints(&[1]));
         assert_eq!(ns("ul"), ints(&[1, 2, 3]));
         assert_eq!(ns("ml"), ints(&[2]));
+        // The tuples of exactly one operand, or of an odd number of a list.
+        let vars = variables(
+            "var a := relation { { n: 1 }, { n: 2 } };\nvar b := relation { { n: 2 }, { n: 3 } };\nvar x := a xunion b;\nvar xl := xunion{a, b, relation { { n: 3 }, { n: 4 } }};",
+        );
+        let xs = |name: &str| match &vars.iter().find(|v| v.name == name).unwrap().init {
+            hir::Value::Relation(r) => r
+                .tuples
+                .iter()
+                .map(|t| t.get("n").cloned().unwrap())
+                .collect::<Vec<_>>(),
+            other => panic!("a relation: {other:?}"),
+        };
+        assert_eq!(xs("x"), [hir::Value::Integer(1), hir::Value::Integer(3)]);
+        assert_eq!(xs("xl"), [hir::Value::Integer(1), hir::Value::Integer(4)]);
     }
 
     #[test]

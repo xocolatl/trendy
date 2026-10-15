@@ -529,6 +529,9 @@ pub(crate) enum JoinKind {
     Union,
     /// `d_union`: a union whose operands must have no tuple in common.
     DisjointUnion,
+    /// `xunion`: the tuples of exactly one operand, as `xor` is of
+    /// booleans.
+    ExclusiveUnion,
     /// `intersect`, of relations of one heading: the tuples of both, which
     /// is their AND.
     Intersect,
@@ -552,6 +555,7 @@ impl JoinKind {
             [SyntaxKind::NotKw, SyntaxKind::MatchingKw] => JoinKind::NotMatching,
             [SyntaxKind::UnionKw] => JoinKind::Union,
             [SyntaxKind::DUnionKw] => JoinKind::DisjointUnion,
+            [SyntaxKind::XUnionKw] => JoinKind::ExclusiveUnion,
             [SyntaxKind::IntersectKw] => JoinKind::Intersect,
             [SyntaxKind::MinusKw] => JoinKind::Minus,
             [SyntaxKind::IMinusKw] => JoinKind::IncludedMinus,
@@ -571,6 +575,7 @@ impl JoinKind {
             self,
             JoinKind::Union
                 | JoinKind::DisjointUnion
+                | JoinKind::ExclusiveUnion
                 | JoinKind::Intersect
                 | JoinKind::Minus
                 | JoinKind::IncludedMinus
@@ -601,6 +606,7 @@ impl JoinKind {
             JoinKind::NotMatching => "not matching",
             JoinKind::Union => "union",
             JoinKind::DisjointUnion => "d_union",
+            JoinKind::ExclusiveUnion => "xunion",
             JoinKind::Intersect => "intersect",
             JoinKind::Minus => "minus",
             JoinKind::IncludedMinus => "i_minus",
@@ -628,7 +634,7 @@ pub(crate) enum Combined {
     /// if `negated`, those that have none: `matching` and `not matching`.
     Matching { negated: bool },
     /// From the left: the first operand combined with each other in turn,
-    /// as `union`, `d_union`, `minus` and `i_minus` do.
+    /// as `union`, `d_union`, `xunion`, `minus` and `i_minus` do.
     Combine(hir::Combination),
     /// Compose, from the left: the first operand, then for each other the
     /// AND of the result so far and it, without the attributes they have in
@@ -727,6 +733,7 @@ impl Joining {
             }
             JoinKind::Union
             | JoinKind::DisjointUnion
+            | JoinKind::ExclusiveUnion
             | JoinKind::Intersect
             | JoinKind::Minus
             | JoinKind::IncludedMinus => {
@@ -757,6 +764,7 @@ impl Joining {
             JoinKind::Join | JoinKind::Times | JoinKind::Compose => Combined::And,
             JoinKind::Union
             | JoinKind::DisjointUnion
+            | JoinKind::ExclusiveUnion
             | JoinKind::Intersect
             | JoinKind::Minus
             | JoinKind::IncludedMinus => {
@@ -842,6 +850,7 @@ impl Joining {
         ok.then_some(match self.kind {
             JoinKind::Union => Combined::Combine(hir::Combination::Union),
             JoinKind::DisjointUnion => Combined::Combine(hir::Combination::DisjointUnion),
+            JoinKind::ExclusiveUnion => Combined::Combine(hir::Combination::ExclusiveUnion),
             JoinKind::Minus => Combined::Combine(hir::Combination::Minus),
             JoinKind::IncludedMinus => Combined::Combine(hir::Combination::IncludedMinus),
             _ => Combined::And,

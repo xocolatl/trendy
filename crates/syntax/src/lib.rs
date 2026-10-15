@@ -58,6 +58,8 @@ pub enum SyntaxKind {
     UnionKw,
     /// `d_union`, disjoint union.
     DUnionKw,
+    /// `xunion`, exclusive union: the tuples of exactly one operand.
+    XUnionKw,
     IntersectKw,
     MinusKw,
     /// `i_minus`, included minus.
@@ -204,7 +206,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 105] = [
+    pub const ALL: [SyntaxKind; 106] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -237,6 +239,7 @@ impl SyntaxKind {
         SyntaxKind::MatchingKw,
         SyntaxKind::UnionKw,
         SyntaxKind::DUnionKw,
+        SyntaxKind::XUnionKw,
         SyntaxKind::IntersectKw,
         SyntaxKind::MinusKw,
         SyntaxKind::IMinusKw,
@@ -350,6 +353,7 @@ impl SyntaxKind {
                 | SyntaxKind::MatchingKw
                 | SyntaxKind::UnionKw
                 | SyntaxKind::DUnionKw
+                | SyntaxKind::XUnionKw
                 | SyntaxKind::IntersectKw
                 | SyntaxKind::MinusKw
                 | SyntaxKind::IMinusKw
@@ -384,6 +388,7 @@ impl SyntaxKind {
                 | SyntaxKind::MatchingKw
                 | SyntaxKind::UnionKw
                 | SyntaxKind::DUnionKw
+                | SyntaxKind::XUnionKw
                 | SyntaxKind::IntersectKw
                 | SyntaxKind::MinusKw
                 | SyntaxKind::IMinusKw
@@ -422,14 +427,15 @@ impl SyntaxKind {
         )
     }
 
-    /// Whether this is a set operator: `union`, `d_union`, `intersect`,
-    /// `minus` or `i_minus`, of relations with the same heading.
+    /// Whether this is a set operator: `union`, `d_union`, `xunion`,
+    /// `intersect`, `minus` or `i_minus`, of relations with the same heading.
     #[must_use]
     pub fn is_set_operator(self) -> bool {
         matches!(
             self,
             SyntaxKind::UnionKw
                 | SyntaxKind::DUnionKw
+                | SyntaxKind::XUnionKw
                 | SyntaxKind::IntersectKw
                 | SyntaxKind::MinusKw
                 | SyntaxKind::IMinusKw
@@ -510,6 +516,7 @@ impl SyntaxKind {
             SyntaxKind::MatchingKw => "matching",
             SyntaxKind::UnionKw => "union",
             SyntaxKind::DUnionKw => "d_union",
+            SyntaxKind::XUnionKw => "xunion",
             SyntaxKind::IntersectKw => "intersect",
             SyntaxKind::MinusKw => "minus",
             SyntaxKind::IMinusKw => "i_minus",
@@ -589,6 +596,7 @@ impl SyntaxKind {
             SyntaxKind::MatchingKw => "`matching`",
             SyntaxKind::UnionKw => "`union`",
             SyntaxKind::DUnionKw => "`d_union`",
+            SyntaxKind::XUnionKw => "`xunion`",
             SyntaxKind::IntersectKw => "`intersect`",
             SyntaxKind::MinusKw => "`minus`",
             SyntaxKind::IMinusKw => "`i_minus`",
