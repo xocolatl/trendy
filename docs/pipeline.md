@@ -397,6 +397,11 @@ compute the left operand twice. Lowering calls `trendy_rt_matching`, with
 the common attributes as for `And`; it sorts both operands on them and
 keeps the left's tuples that do, or don't, have a match, in one pass.
 
+Relations are ordered by inclusion: an ordering comparison of relations
+resolves to `Compare(…, Compared::Relation)`, which folds as subset, and
+lowers to `trendy_rt_subset`, one pass over both in canonical order, with
+the operands swapped for `>=` and `>`, and a flag for the proper ones.
+
 `union`, `d_union`, `xunion`, `intersect`, `minus` and `i_minus` are joins
 to sema (`JoinKind`), with their own rule: operands of one heading
 (A0031). `intersect` becomes `And`, which of relations with all their

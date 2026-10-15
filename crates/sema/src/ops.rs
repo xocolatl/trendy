@@ -156,13 +156,17 @@ impl Operator {
     pub(crate) fn resolve(self, ty: &hir::Type) -> Option<Resolved> {
         use hir::BinaryOp as B;
         let hir::Type::Scalar(scalar) = *ty else {
-            return match self {
-                Operator::Compare(
-                    comparison @ (hir::Comparison::Equal | hir::Comparison::NotEqual),
-                ) => Some(Resolved::Binary(B::Compare(
-                    comparison,
-                    hir::Compared::of(ty),
-                ))),
+            // Tuples have only equality; relations are ordered by inclusion.
+            return match (self, ty) {
+                (
+                    Operator::Compare(
+                        comparison @ (hir::Comparison::Equal | hir::Comparison::NotEqual),
+                    ),
+                    _,
+                )
+                | (Operator::Compare(comparison), hir::Type::Relation(_)) => Some(
+                    Resolved::Binary(B::Compare(comparison, hir::Compared::of(ty))),
+                ),
                 _ => None,
             };
         };

@@ -190,6 +190,11 @@ pub enum RuntimeFn {
     /// canonically, in memory the statement owns. The other arguments are
     /// as for [`RuntimeFn::And`]'s.
     Matching,
+    /// `trendy_rt_subset(dst, lhs, rhs, descriptor, proper)`: store at
+    /// `dst`, a [`Layout::U8`], whether every tuple of the relation `lhs` is
+    /// in the relation `rhs`, of the type the descriptor describes, and, if
+    /// `proper` (a [`Field::Usize`]) is 1, `rhs` has more.
+    Subset,
     /// `trendy_rt_combine(dst, lhs, rhs, descriptor, combination)`: store
     /// at `dst` the relations `lhs` and `rhs`, of the type the descriptor
     /// describes, combined as `combination` (a [`Field::Usize`], a
@@ -233,6 +238,7 @@ impl RuntimeFn {
             RuntimeFn::Ungroup => "trendy_rt_ungroup",
             RuntimeFn::Matching => "trendy_rt_matching",
             RuntimeFn::Combine => "trendy_rt_combine",
+            RuntimeFn::Subset => "trendy_rt_subset",
             RuntimeFn::Allocate => "trendy_rt_allocate",
             RuntimeFn::Sort => "trendy_rt_sort",
             RuntimeFn::CompareText => "trendy_rt_compare_text",

@@ -1934,7 +1934,7 @@ mod tests {
             "nested values compare as values"
         );
         let source = format!(
-            "var a := tuple {{ x: 1 }} = tuple {{ x: 1, y: 2 }};\nvar b := tuple {{ x: 1 }} = relation {{ {{ x: 1 }} }};\nvar c := relation {{ {{ x: 1 }} }} >= relation {{}};{MAIN}"
+            "var a := tuple {{ x: 1 }} = tuple {{ x: 1, y: 2 }};\nvar b := tuple {{ x: 1 }} = relation {{ {{ x: 1 }} }};\nvar c := tuple {{ x: 1 }} >= tuple {{ x: 2 }};{MAIN}"
         );
         let errors = errors(&source);
         let found: Vec<_> = errors.iter().map(|e| (e.code, &e.message[..])).collect();
@@ -1946,7 +1946,7 @@ mod tests {
                     Code::TypeMismatch,
                     "mismatched types: expected `tuple { x: integer }`, found `relation { x: integer }`"
                 ),
-                (Code::WrongOperandType, "`>=` can't be applied to relations"),
+                (Code::WrongOperandType, "`>=` can't be applied to tuples"),
             ]
         );
         assert!(
@@ -3012,6 +3012,33 @@ mod tests {
                 ),
                 (Code::EmptyList, "`i_minus[]` has no value".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn subset_comparisons() {
+        let vars = variables(
+            "var a := relation { { n: 1 } };\nvar b := relation { { n: 1 }, { n: 2 } };\nvar c := tuple { le: a <= b, lt: a < b, ge: a >= b, gt: a > b, same_le: a <= a, same_lt: a < a, back: b <= a };",
+        );
+        assert_eq!(
+            vars[2].init,
+            variables(
+                "var e := tuple { back: false, ge: false, gt: false, le: true, lt: true, same_le: true, same_lt: false };"
+            )[0]
+            .init
+        );
+        let found: Vec<_> = errors(&format!(
+            "var a := tuple {{ x: 1 }} < tuple {{ x: 2 }};{MAIN}"
+        ))
+        .into_iter()
+        .map(|e| (e.code, e.message))
+        .collect();
+        assert_eq!(
+            found,
+            [(
+                Code::WrongOperandType,
+                "`<` can't be applied to tuples".to_string()
+            )]
         );
     }
 

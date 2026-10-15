@@ -1945,7 +1945,7 @@ pub(crate) fn wrong_operand_type(
     let hir::Type::Scalar(scalar) = *ty else {
         return match op {
             Operator::Compare(_) => d.with_note(
-                "tuples and relations have no order; they can only be compared with `=` and `<>`",
+                "tuples have no order: they can only be compared with `=` and `<>`; relations can also be compared as sets, with `<=` and `<` for subset and proper subset",
             ),
             _ => d,
         };

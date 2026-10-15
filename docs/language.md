@@ -538,8 +538,14 @@ Two values are equal exactly when they are the same value, as *The Third
 Manifesto* requires (RM Prescription 8). Two tuples are equal when every
 attribute's values are equal, and two relations when they have the same
 tuples, in any order; the values inside are compared the same way, so
-`tuple { x: 0e0 } <> tuple { x: -0e0 }`. Tuples and relations have no
-order, so `<`, `<=`, `>` and `>=` don't apply to them (A0022).
+`tuple { x: 0e0 } <> tuple { x: -0e0 }`. Tuples have no order, so `<`,
+`<=`, `>` and `>=` don't apply to them (A0022).
+
+Relations are ordered as sets, by inclusion, as in Tutorial D: `r <= s`
+is true when every tuple of `r` is in `s` (subset), `r < s` when, too,
+`s` has more (proper subset), and `r >= s` and `r > s` the same the
+other way around (superset and proper superset). The order is partial:
+for relations that each have a tuple the other lacks, all four are false.
 
 The right operand of a tuple or relation comparison takes its heading
 from the left one, so `r = relation {}` asks whether `r` is empty.
@@ -555,6 +561,8 @@ operator check{n: integer, name: text} [
 operator same{a: tuple { x: integer }, r: relation { x: integer }} [
     call debug_value{v: a = tuple { x: 1 }};
     call debug_value{v: r = relation {}};
+    call debug_value{v: relation { { x: 1 } } <= r};
+    call debug_value{v: r < relation { { x: 1 } }};
 ];
 
 operator main{} [
@@ -1576,6 +1584,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `UNION ALL` | `union`: a relation has no duplicates |
 | `R D_UNION S`, `R I_MINUS S` | `r d_union s`, `r i_minus s` |
 | symmetric difference, Python's `s ^ t` | `r xunion s` |
+| `R1 ⊆ R2`, `R1 ⊂ R2`, `R1 ⊇ R2`, `R1 ⊃ R2`, Python's `s <= t` | `r1 <= r2`, `r1 < r2`, `r1 >= r2`, `r1 > r2` |
 | `R MATCHING S`, `R SEMIJOIN S`, `WHERE EXISTS (…)` | `r matching s` |
 | `R NOT MATCHING S`, `R SEMIMINUS S`, `WHERE NOT EXISTS (…)` | `r not matching s` |
 | `T1 UNION T2`, of tuples (tuple union) | `t1 join t2` |

@@ -541,14 +541,17 @@ fn relations() {
             // Matching, and not matching without the common attribute.
             r#"relation { born: integer, name: text } { { born: 1815, name: "Ada" }, { born: 1923, name: "Edgar" } }"#,
             r#"relation { born: integer, name: text } { { born: 1815, name: "Édouard" } }"#,
-            // Union, intersection, difference, of lists, and an exclusive
-            // union.
+            // Union, intersection, difference, of lists, an exclusive union,
+            // and inclusion.
             r#"relation { name: text } { { name: "Ada" }, { name: "Edgar" }, { name: "Wangari" }, { name: "Édouard" } }"#,
             r#"relation { name: text } { { name: "Ada" }, { name: "Edgar" } }"#,
             r#"relation { name: text } { { name: "Édouard" } }"#,
             r#"relation { name: text } { { name: "Ada" }, { name: "Edgar" }, { name: "Wangari" }, { name: "Édouard" } }"#,
             r#"relation { name: text } { { name: "Édouard" } }"#,
             r#"relation { name: text } { { name: "Wangari" }, { name: "Édouard" } }"#,
+            // Included, as sets: everyone in `people` is in `cities`, but
+            // not everyone in `births`.
+            "tuple { born: false, listed: true }",
             // A disjoint union, and an included minus.
             r#"relation { name: text } { { name: "Ada" }, { name: "Edgar" }, { name: "Wangari" }, { name: "Édouard" } }"#,
             r#"relation { name: text } { { name: "Édouard" } }"#,

@@ -572,6 +572,50 @@ pub unsafe extern "C" fn trendy_rt_ungroup(
     }
 }
 
+/// Store at `dst`, a byte, 1 if every tuple of the relation `lhs` is in the
+/// relation `rhs`, both of the type `desc` describes, and, if `*proper` is
+/// 1, `rhs` has more tuples too; else 0. Both are in canonical order, so one
+/// pass compares them.
+///
+/// # Safety
+///
+/// `lhs` and `rhs` must point to valid relations of the type `desc`
+/// describes, `proper` to 0 or 1, and `dst` to a byte.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_subset(
+    dst: *mut u8,
+    lhs: *const u8,
+    rhs: *const u8,
+    desc: *const TypeDesc,
+    proper: *const usize,
+) {
+    use core::cmp::Ordering;
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let desc = &*desc;
+        let ((lhs, lhs_count), (rhs, rhs_count)) = (read_slice(lhs), read_slice(rhs));
+        let size = desc.element_size;
+        let mut j = 0;
+        let mut subset = true;
+        for i in 0..lhs_count {
+            let tuple = lhs.add(i * size);
+            // Past the tuples of `rhs` before it, to it if `rhs` has it.
+            while j < rhs_count && compare_tuples(rhs.add(j * size), tuple, desc) == Ordering::Less
+            {
+                j += 1;
+            }
+            if j == rhs_count || compare_tuples(rhs.add(j * size), tuple, desc) != Ordering::Equal {
+                subset = false;
+                break;
+            }
+            j += 1;
+        }
+        let proper = proper.read_unaligned() == 1;
+        dst.write(u8::from(subset && (!proper || lhs_count < rhs_count)));
+    }
+}
+
 /// [`trendy_rt_combine`]'s union.
 pub const COMBINE_UNION: usize = 0;
 /// [`trendy_rt_combine`]'s union of operands with no tuple in common.

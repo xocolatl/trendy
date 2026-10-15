@@ -1138,6 +1138,29 @@ impl FunctionBuilder<'_> {
         cx: &mut Lowering,
     ) -> lir::Place {
         let (op, lhs, rhs) = match op {
+            // Relations ordered as sets: `>=` and `>` are `<=` and `<` the
+            // other way around.
+            hir::BinaryOp::Compare(
+                comparison @ (hir::Comparison::Less
+                | hir::Comparison::LessOrEqual
+                | hir::Comparison::Greater
+                | hir::Comparison::GreaterOrEqual),
+                hir::Compared::Relation,
+            ) => {
+                let (lhs, rhs) = match comparison {
+                    hir::Comparison::Less | hir::Comparison::LessOrEqual => (lhs, rhs),
+                    _ => (rhs, lhs),
+                };
+                let proper = matches!(comparison, hir::Comparison::Less | hir::Comparison::Greater);
+                let dst = self.slot(lir::Layout::U8);
+                let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(operand_ty)));
+                let proper = usize_constant(u64::from(proper), cx);
+                self.insts.push(lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::Subset,
+                    args: vec![dst.clone(), lhs, rhs, descriptor, proper],
+                });
+                return dst;
+            }
             hir::BinaryOp::Compare(comparison, hir::Compared::Tuple | hir::Compared::Relation) => {
                 let equal = self.slot(lir::Layout::U8);
                 let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(operand_ty)));

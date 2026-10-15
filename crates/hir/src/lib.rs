@@ -282,6 +282,27 @@ pub enum Failure {
     DivisionByZero,
 }
 
+/// Whether relations `lhs` and `rhs` compare true by `comparison`, an
+/// ordering one, as sets: `<=` is subset, `<` proper subset, and `>=` and
+/// `>` the same the other way around.
+///
+/// # Panics
+///
+/// If either value isn't a relation, or the comparison is `=` or `<>`.
+fn contains(comparison: Comparison, lhs: &Value, rhs: &Value) -> bool {
+    let (Value::Relation(lhs), Value::Relation(rhs)) = (lhs, rhs) else {
+        panic!("comparing {lhs:?} and {rhs:?} as sets");
+    };
+    let (small, large, proper) = match comparison {
+        Comparison::LessOrEqual => (lhs, rhs, false),
+        Comparison::Less => (lhs, rhs, true),
+        Comparison::GreaterOrEqual => (rhs, lhs, false),
+        Comparison::Greater => (rhs, lhs, true),
+        Comparison::Equal | Comparison::NotEqual => panic!("equality isn't containment"),
+    };
+    small.tuples.is_subset(&large.tuples) && (!proper || small.tuples.len() < large.tuples.len())
+}
+
 /// How relations of one heading are combined, by [`Expr::Combine`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Combination {
@@ -431,14 +452,16 @@ pub enum BinaryOp {
     Compare(Comparison, Compared),
 }
 
-/// What a comparison compares. Scalars are ordered; tuples and relations
-/// only have `=` and `<>`.
+/// What a comparison compares. Scalars are ordered; tuples only have `=`
+/// and `<>`; and relations have those, and `<=`, `<`, `>=` and `>` as
+/// subset, proper subset, superset and proper superset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Compared {
     Scalar(Scalar),
     /// Tuples of one tuple type, equal when every attribute is.
     Tuple,
-    /// Relations of one relation type, equal when they have the same tuples.
+    /// Relations of one relation type, equal when they have the same tuples,
+    /// and one less than or equal to another when it is a subset of it.
     Relation,
 }
 
@@ -555,7 +578,10 @@ impl BinaryOp {
             // set equality for relations.
             BinaryOp::Compare(Comparison::Equal, _) => return Ok(Value::Boolean(lhs == rhs)),
             BinaryOp::Compare(Comparison::NotEqual, _) => return Ok(Value::Boolean(lhs != rhs)),
-            BinaryOp::Compare(..) => panic!("tuples and relations aren't ordered"),
+            BinaryOp::Compare(comparison, Compared::Relation) => {
+                return Ok(Value::Boolean(contains(comparison, lhs, rhs)));
+            }
+            BinaryOp::Compare(..) => panic!("tuples aren't ordered"),
             _ => {}
         }
         match (lhs, rhs) {
