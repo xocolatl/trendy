@@ -3855,6 +3855,20 @@ mod tests {
                 assigning(POETS, "n := 1;")
             );
         }
+        // Of the variable into itself, as its one change.
+        for keyword in ["insert", "d_insert"] {
+            assert_eq!(
+                fixed(&format!("n := 1; {keyword} poets poets;")),
+                assigning(POETS, "n := 1;")
+            );
+            assert_eq!(
+                fixed(&format!("assign {{ {keyword} poets poets; n := 2; }};")),
+                assigning(POETS, "assign { n := 2; };")
+            );
+        }
+        // With changes that remove tuples, it adds them back.
+        let back = "assign { update poets { born := born + 1 }; insert poets poets; };";
+        assert!(analyze_str(&assigning(POETS, back)).is_ok());
         // Each attribute's own value, of a relation, with or without a
         // condition, or of a tuple.
         for body in [

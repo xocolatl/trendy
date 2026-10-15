@@ -356,10 +356,13 @@ change that is known to change nothing is reported where it is checked
 (A0033): a value that is the variable itself, once folded, the empty
 relation inserted or deleted, and, in `Checker::assign_attributes`, for
 `replace` and `update` alike, an attribute's value that is its own, the
-tuple at hand's attribute. Conflicts known when compiling are reported
-then (R0009): those, and two `i_delete`s of the same constant tuple. A variable's new value that is known when compiling is
-checked against its keys then (R0008), pointing at the tuples as for an
-initial value; any other is checked when running.
+tuple at hand's attribute. An `insert` or a `d_insert` of the variable
+into itself is reported with the variable's changes, when it is the one:
+with others, it adds back the tuples they remove. Conflicts known when
+compiling are reported then (R0009): those, and two `i_delete`s of the
+same constant tuple. A variable's new value that is known when compiling
+is checked against its keys then (R0008), pointing at the tuples as for
+an initial value; any other is checked when running.
 
 Expressions are checked into `hir::Expr` by one checker (`check::Checker`),
 for initial values and operator bodies alike; only what names refer to

@@ -302,7 +302,8 @@ fn shorthand(
 
 /// The new value of the variable `target`, `variable`, from its changes,
 /// `list`, in source order, or `None` after reporting a condition known
-/// when compiling, or a conflict between two of them.
+/// when compiling, an insert of the variable into itself, or a conflict
+/// between two of them.
 fn merged(
     target: hir::VariableId,
     variable: &hir::Variable,
@@ -312,6 +313,12 @@ fn merged(
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Expr> {
     if constant_conditions(&variable.name, &list, errors) {
+        return None;
+    }
+    if let [(clause, change)] = &list[..]
+        && let Some(error) = inserted_into_itself(target, &variable.name, clause, change)
+    {
+        errors.push(error);
         return None;
     }
     // A whole new value conflicts with any other change.
@@ -422,6 +429,35 @@ fn constant_condition(
         }
         (_, false) => errors::no_tuple_changed(keyword.text(), clause.span(), &clause.statement()?),
     })
+}
+
+/// The error for `clause`, `change`, the one change to the variable
+/// `target`, `name`, if it inserts the variable into itself, which changes
+/// nothing, or, with `d_insert`, fails if it has a tuple. With other
+/// changes, it adds back the tuples they remove.
+fn inserted_into_itself(
+    target: hir::VariableId,
+    name: &str,
+    clause: &Clause,
+    change: &Change,
+) -> Option<Diagnostic> {
+    let Change::Tuples(TupleChange {
+        removed: None,
+        added: Some(Addition { tuples, .. }),
+    }) = change
+    else {
+        return None;
+    };
+    if *tuples != hir::Expr::Variable(target) {
+        return None;
+    }
+    let keyword = clause.keyword()?;
+    Some(errors::inserted_into_itself(
+        keyword.text(),
+        name,
+        clause.span(),
+        &clause.statement()?,
+    ))
 }
 
 /// A tuple variable's new value from its `update`s, each in a clause and

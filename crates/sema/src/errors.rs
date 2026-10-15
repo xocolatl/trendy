@@ -760,6 +760,35 @@ pub(crate) fn no_tuples_given(
     deleted(d, statement)
 }
 
+/// An `insert` or a `d_insert`, after `keyword`, of the variable `name`,
+/// at `span`, in `statement`, into itself.
+pub(crate) fn inserted_into_itself(
+    keyword: &str,
+    name: &str,
+    span: Span,
+    statement: &trendy_syntax::ast::AssignStmt,
+) -> Diagnostic {
+    let (label, note) = if keyword == "d_insert" {
+        (
+            "fails, or changes nothing",
+            "`d_insert r s` adds the tuples of `s` to `r`, and fails if one is there already, so with `r` itself it fails if `r` has a tuple, and otherwise changes nothing",
+        )
+    } else {
+        (
+            "changes nothing",
+            "`insert r s` adds the tuples of `s` to `r`, and those of `r` are there already",
+        )
+    };
+    let d = Diagnostic::error(
+        Code::NoChange,
+        format!("`{name}` is inserted into itself"),
+        span,
+        label,
+    )
+    .with_note(note);
+    deleted(d, statement)
+}
+
 /// An `update`, at `span`, in `statement`, that gives each attribute its
 /// own value.
 pub(crate) fn own_values_updated(

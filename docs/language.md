@@ -450,7 +450,9 @@ operator main{} [
 - **An assignment must change something.** Giving a variable its own
   value, `x := x;`, or an attribute its own, `update r { a := a };`, is an
   error, and so is inserting or deleting the empty relation,
-  `insert r relation {};` (A0033). So are an `update` of no attributes,
+  `insert r relation {};`, or inserting a variable into itself,
+  `insert r r;`, unless other changes in its block remove tuples for it to
+  add back (A0033). So are an `update` of no attributes,
   `update r {};`, and a block of no assignments, `assign {};` (A0023).
 
 ```trendy,error
