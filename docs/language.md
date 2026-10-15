@@ -447,6 +447,11 @@ operator main{} [
   them all or none, which is written without it (A0032): a `delete` of
   every tuple is `r := relation {};`, an `update` of every tuple has no
   `where`, and a change of none is no statement at all.
+- **An assignment must change something.** Giving a variable its own
+  value, `x := x;`, or an attribute its own, `update r { a := a };`, is an
+  error, and so is inserting or deleting the empty relation,
+  `insert r relation {};` (A0033). So are an `update` of no attributes,
+  `update r {};`, and a block of no assignments, `assign {};` (A0023).
 
 ```trendy,error
 var poets := relation { { name: "Ada", born: 1815 } };
@@ -462,6 +467,14 @@ var poets := relation { { name: "Ada", born: 1815 } };
 operator main{} [
     delete poets where true;
     update poets { born := born + 1 } where 1 = 1;
+];
+```
+
+```trendy,error
+var poets := relation { { name: "Ada", born: 1815 } };
+
+operator main{} [
+    update poets { name := name, born := born + 1 };
 ];
 ```
 
@@ -970,7 +983,8 @@ operator main{} [
   another type is an error (A0004): to change an attribute's type, compute
   it under another name with `extend`, then `remove` the old one and
   `rename` the new. A name given twice is an error (A0008), and so is
-  `replace {}`, which replaces nothing (A0023).
+  `replace {}`, which replaces nothing (A0023), and an attribute given its
+  own value, `a := a`, which changes nothing (A0033).
 - **Tuples that become equal are one,** since a relation is a set: the
   result can have fewer tuples than the operand.
 - Assignments are written as in `extend`, and the same habits are fixed

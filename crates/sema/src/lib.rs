@@ -2023,7 +2023,7 @@ mod tests {
                     Code::DuplicateAttribute,
                     "attribute `born` is given more than once"
                 ),
-                (Code::EmptyRemove, "`remove {}` removes nothing"),
+                (Code::EmptyDoesNothing, "`remove {}` removes nothing"),
                 (Code::WrongOperandType, "integers can't be projected"),
                 (
                     Code::TypeMismatch,
@@ -2160,7 +2160,7 @@ mod tests {
                 ),
                 (Code::AttributeExists, "attribute `city` already exists"),
                 (Code::AttributeExists, "attribute `x` already exists"),
-                (Code::EmptyRemove, "`rename {}` renames nothing"),
+                (Code::EmptyDoesNothing, "`rename {}` renames nothing"),
                 (
                     Code::WrongOperandType,
                     "`rename` can't be applied to integers"
@@ -2419,7 +2419,7 @@ mod tests {
                     Code::DuplicateAttribute,
                     "attribute `d` is given more than once"
                 ),
-                (Code::EmptyRemove, "`extend {}` adds nothing"),
+                (Code::EmptyDoesNothing, "`extend {}` adds nothing"),
                 (
                     Code::WrongOperandType,
                     "`extend` can't be applied to integers"
@@ -2570,7 +2570,7 @@ mod tests {
                     "attribute `g` is given more than once"
                 ),
                 (Code::AttributeExists, "attribute `k` already exists"),
-                (Code::EmptyRemove, "`group {}` gathers nothing"),
+                (Code::EmptyDoesNothing, "`group {}` gathers nothing"),
                 (Code::WrongOperandType, "`group` can't be applied to tuples"),
             ]
         );
@@ -2630,7 +2630,7 @@ mod tests {
                     Code::AttributeExists,
                     "ungrouping `i` would give two attributes `b`"
                 ),
-                (Code::EmptyRemove, "`ungroup {}` ungroups nothing"),
+                (Code::EmptyDoesNothing, "`ungroup {}` ungroups nothing"),
                 (
                     Code::WrongOperandType,
                     "`ungroup` can't be applied to tuples"
@@ -2698,7 +2698,7 @@ mod tests {
                     "attribute `a` is gathered into both `v` and `x`"
                 ),
                 (Code::AttributeExists, "attribute `b` already exists"),
-                (Code::EmptyRemove, "`wrap {}` gathers nothing"),
+                (Code::EmptyDoesNothing, "`wrap {}` gathers nothing"),
                 (
                     Code::WrongOperandType,
                     "`wrap` can't be applied to integers"
@@ -2715,7 +2715,7 @@ mod tests {
                     Code::WrongOperandType,
                     "`a` can't be unwrapped: it is `integer`"
                 ),
-                (Code::EmptyRemove, "`unwrap {}` unwraps nothing"),
+                (Code::EmptyDoesNothing, "`unwrap {}` unwraps nothing"),
             ]
         );
         assert_eq!(
@@ -2801,7 +2801,7 @@ mod tests {
                     Code::DuplicateAttribute,
                     "attribute `price` is given more than once"
                 ),
-                (Code::EmptyRemove, "`replace {}` replaces nothing"),
+                (Code::EmptyDoesNothing, "`replace {}` replaces nothing"),
                 (
                     Code::WrongOperandType,
                     "`replace` can't be applied to integers"
@@ -3679,7 +3679,10 @@ mod tests {
             errors[0].message,
             "two changes to `poets` remove the same tuple"
         );
-        assert_eq!(codes(&assigning(POETS, "assign {};")), [Code::EmptyList]);
+        assert_eq!(
+            codes(&assigning(POETS, "assign {};")),
+            [Code::EmptyDoesNothing]
+        );
     }
 
     #[test]
@@ -3754,7 +3757,7 @@ mod tests {
         );
         assert_eq!(
             codes(&assigning(POETS, "update poets {};")),
-            [Code::EmptyList]
+            [Code::EmptyDoesNothing]
         );
         assert_eq!(
             codes(&assigning(POETS, "delete poets where born;")),
@@ -3762,25 +3765,27 @@ mod tests {
         );
     }
 
+    /// The program with `POETS` whose `main` is `body`, which has one
+    /// error, with `code`, with its one fix applied, which leaves none.
+    fn fixed(code: Code, body: &str) -> String {
+        let source = assigning(POETS, body);
+        let errors = errors(&source);
+        let [error] = &errors[..] else {
+            panic!("one error: {errors:#?}");
+        };
+        assert_eq!(error.code, code, "{body}");
+        let [edit] = &error.suggestions[0].edits[..] else {
+            panic!("one edit: {:?}", error.suggestions);
+        };
+        let mut fixed = source.clone();
+        fixed.replace_range(edit.span.start..edit.span.end, &edit.replacement);
+        assert!(analyze_str(&fixed).is_ok(), "{fixed}");
+        fixed
+    }
+
     #[test]
     fn conditions_known_when_compiling_are_written_without() {
-        // `body`, whose one error is a condition known when compiling, with
-        // its fix applied.
-        let fixed = |body: &str| {
-            let source = assigning(POETS, body);
-            let errors = errors(&source);
-            let [error] = &errors[..] else {
-                panic!("one error: {errors:#?}");
-            };
-            assert_eq!(error.code, Code::ConstantCondition, "{body}");
-            let [edit] = &error.suggestions[0].edits[..] else {
-                panic!("one edit: {:?}", error.suggestions);
-            };
-            let mut fixed = source.clone();
-            fixed.replace_range(edit.span.start..edit.span.end, &edit.replacement);
-            assert!(analyze_str(&fixed).is_ok(), "{fixed}");
-            fixed
-        };
+        let fixed = |body: &str| fixed(Code::ConstantCondition, body);
         // Each condition is `true` once folded: every tuple is changed.
         for condition in ["true", "1 = 1", "born > 1 or true"] {
             assert_eq!(
@@ -3831,6 +3836,71 @@ mod tests {
             "{:?}",
             combined[0].help
         );
+    }
+
+    #[test]
+    fn assignments_that_change_nothing_go() {
+        let fixed = |body: &str| fixed(Code::NoChange, body);
+        // A variable's own value, once folded.
+        for body in ["n := n;", "n := (n);", "n := n + 0;"] {
+            assert_eq!(
+                fixed(&format!("n := 1; {body}")),
+                assigning(POETS, "n := 1;")
+            );
+        }
+        // No tuples, inserted or deleted.
+        for keyword in ["insert", "d_insert", "i_delete"] {
+            assert_eq!(
+                fixed(&format!("n := 1; {keyword} poets relation {{}};")),
+                assigning(POETS, "n := 1;")
+            );
+        }
+        // Each attribute's own value, of a relation, with or without a
+        // condition, or of a tuple.
+        for body in [
+            "update poets { born := born };",
+            "update poets { born := born, name := name } where born > 1;",
+            "update address { city := city };",
+        ] {
+            assert_eq!(
+                fixed(&format!("n := 1; {body}")),
+                assigning(POETS, "n := 1;")
+            );
+        }
+        // With a block of nothing else.
+        assert_eq!(
+            fixed("n := 1; assign { n := n; };"),
+            assigning(POETS, "n := 1;")
+        );
+        // Only one attribute's: that assignment goes.
+        assert_eq!(
+            fixed("update poets { name := name, born := born + 1 };"),
+            assigning(POETS, "update poets { born := born + 1 };")
+        );
+        assert_eq!(
+            fixed("update poets { born := born + 1, name := name };"),
+            assigning(POETS, "update poets { born := born + 1 };")
+        );
+        // In a `replace`, too.
+        let source =
+            "var r := relation { { a: 1, b: 2 } } replace { a := a };\noperator main{} [];";
+        let errors = errors(source);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, Code::NoChange);
+        let edit = &errors[0].suggestions[0].edits[0];
+        assert_eq!(
+            &source[edit.span.start..edit.span.end],
+            " replace { a := a }"
+        );
+        assert_eq!(
+            codes(
+                "var r := relation { { a: 1, b: 2 } } replace { a := a, b := 3 };\noperator main{} [];"
+            ),
+            [Code::NoChange]
+        );
+        // What changes something is fine.
+        let changes = r#"n := n + 1; insert poets relation { { name: "Rumi", born: 1207 } }; update address { city := city || "!" };"#;
+        assert!(analyze_str(&assigning(POETS, changes)).is_ok());
     }
 
     #[test]

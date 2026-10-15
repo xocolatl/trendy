@@ -257,7 +257,10 @@ impl<'a> Checker<'a> {
         let result = self.assign_attributes(
             operand,
             &assigned,
-            || errors::empty_assign(assigning, postfix, &operand_expr),
+            |why| match why {
+                Unchanged::Empty => errors::empty_assign(assigning, postfix, &operand_expr),
+                Unchanged::OwnValues => errors::own_values_replaced(postfix, &operand_expr),
+            },
             errors,
         )?;
         self.matched(expected, result, expr, errors)
@@ -268,12 +271,14 @@ impl<'a> Checker<'a> {
     /// says: each attribute's value is checked with the attributes of the
     /// tuple at hand in scope. A `replace`'s values have the types of the
     /// attributes they replace, and are computed from the old values, all
-    /// at once. `empty` is the error for a list with none.
+    /// at once. An attribute given its own value is an error, and
+    /// `unchanged` is the error for a list that leaves the operand as it
+    /// is.
     pub(crate) fn assign_attributes(
         &mut self,
         operand: hir::Expr,
         assigned: &Assigned,
-        empty: impl FnOnce() -> Diagnostic,
+        unchanged: impl FnOnce(Unchanged) -> Diagnostic,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Expr> {
         let Assigned {
@@ -302,7 +307,7 @@ impl<'a> Checker<'a> {
             })
             .collect();
         if list.assignments().next().is_none() {
-            errors.push(empty());
+            errors.push(unchanged(Unchanged::Empty));
             return None;
         }
         // When every name is wrong for an `extend` or a `replace`, the
@@ -349,6 +354,20 @@ impl<'a> Checker<'a> {
             }
         }
         if !ok {
+            return None;
+        }
+        let own: Vec<&(ast::Assign, String, Span)> = assignments
+            .iter()
+            .filter(|(_, name, _)| is_own_value(&values[name], name))
+            .collect();
+        if own.len() == assignments.len() {
+            errors.push(unchanged(Unchanged::OwnValues));
+            return None;
+        }
+        if !own.is_empty() {
+            for (assign, name, _) in own {
+                errors.push(errors::own_attribute_value(name, assign, list));
+            }
             return None;
         }
         match ops::extend(operand, hir::Heading::new(types), values) {
@@ -912,6 +931,26 @@ pub(crate) struct Assigned<'a> {
     pub(crate) keyword: &'a trendy_syntax::SyntaxToken,
     pub(crate) list: &'a ast::AssignList,
     pub(crate) operand: &'a Expr,
+}
+
+/// Why an `extend`'s, a `replace`'s or an `update`'s list leaves its
+/// operand as it is.
+#[derive(Clone, Copy)]
+pub(crate) enum Unchanged {
+    /// It has no attributes.
+    Empty,
+    /// It gives each attribute its own value.
+    OwnValues,
+}
+
+/// Whether `value`, computed for the attribute `name`, is that attribute
+/// of the tuple at hand, unchanged.
+fn is_own_value(value: &hir::Expr, name: &str) -> bool {
+    matches!(
+        value,
+        hir::Expr::Extract(tuple, attribute)
+            if attribute == name && matches!(**tuple, hir::Expr::Current(0, _))
+    )
 }
 
 /// Names in the values an `extend` or a `replace` computes: the attributes of the tuple at

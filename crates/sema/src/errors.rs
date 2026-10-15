@@ -691,12 +691,7 @@ pub(crate) fn no_tuple_changed(
     } else {
         "update r { … } where p"
     };
-    // A block with nothing else in it goes too.
-    let (what, removal) = match statement.block() {
-        Some(block) if block.statements().count() == 1 => ("the `assign` block", block.removal()),
-        _ => ("the statement", statement.removal()),
-    };
-    Diagnostic::error(
+    let d = Diagnostic::error(
         Code::ConstantCondition,
         format!("this `{keyword}`'s condition is always false"),
         span,
@@ -704,34 +699,147 @@ pub(crate) fn no_tuple_changed(
     )
     .with_note(format!(
         "`{form}` {keyword}s the tuples for which `p` is true, so with a condition that is always false, it changes nothing"
-    ))
-    .with_suggestion(
+    ));
+    deleted(d, statement)
+}
+
+/// `d` with the fix deleting `statement`, and its `assign` block if
+/// nothing else is in it.
+fn deleted(d: Diagnostic, statement: &trendy_syntax::ast::AssignStmt) -> Diagnostic {
+    let (what, span) = match statement.block() {
+        Some(block) if block.statements().count() == 1 => ("the `assign` block", block.removal()),
+        _ => ("the statement", statement.removal()),
+    };
+    d.with_suggestion(
         format!("delete {what}"),
         vec![Edit {
-            span: removal,
+            span,
             replacement: String::new(),
         }],
     )
 }
 
-/// An `update` with an empty `list`, which would change nothing.
-pub(crate) fn empty_update(list: &trendy_syntax::ast::AssignList) -> Diagnostic {
+/// An assignment, at `span`, in `statement`, of the variable `name`'s own
+/// value to it.
+pub(crate) fn own_value(
+    name: &str,
+    span: Span,
+    statement: &trendy_syntax::ast::AssignStmt,
+) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::NoChange,
+        format!("`{name}` is given its own value"),
+        span,
+        "changes nothing",
+    )
+    .with_note(OWN_VALUE_RULE);
+    deleted(d, statement)
+}
+
+/// An `insert`, a `d_insert` or an `i_delete`, after `keyword`, at `span`,
+/// in `statement`, of the empty relation.
+pub(crate) fn no_tuples_given(
+    keyword: &str,
+    span: Span,
+    statement: &trendy_syntax::ast::AssignStmt,
+) -> Diagnostic {
+    let (does, form) = if keyword == "i_delete" {
+        ("removes", "removes the tuples of `s` from `r`")
+    } else {
+        ("adds", "adds the tuples of `s` to `r`")
+    };
+    let d = Diagnostic::error(
+        Code::NoChange,
+        format!("this `{keyword}` {does} no tuples"),
+        span,
+        "changes nothing",
+    )
+    .with_note(format!(
+        "`{keyword} r s` {form}, and `s` is the empty relation"
+    ));
+    deleted(d, statement)
+}
+
+/// An `update`, at `span`, in `statement`, that gives each attribute its
+/// own value.
+pub(crate) fn own_values_updated(
+    span: Span,
+    statement: &trendy_syntax::ast::AssignStmt,
+) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::NoChange,
+        "this `update` gives each attribute its own value",
+        span,
+        "changes nothing",
+    )
+    .with_note(OWN_VALUE_RULE);
+    deleted(d, statement)
+}
+
+/// `postfix`, a `replace` of `operand`, that gives each attribute its own
+/// value.
+pub(crate) fn own_values_replaced(
+    postfix: &trendy_syntax::ast::PostfixExpr,
+    operand: &Expr,
+) -> Diagnostic {
+    let (span, edit) = dropped(postfix, operand);
     Diagnostic::error(
-        Code::EmptyList,
+        Code::NoChange,
+        "this `replace` gives each attribute its own value",
+        span,
+        "leaves the operand as it is",
+    )
+    .with_note(OWN_VALUE_RULE)
+    .with_suggestion("drop the `replace { … }`", vec![edit])
+}
+
+/// `assign`, in `list`, which gives the attribute `name` its own value.
+pub(crate) fn own_attribute_value(
+    name: &str,
+    assign: &trendy_syntax::ast::Assign,
+    list: &trendy_syntax::ast::AssignList,
+) -> Diagnostic {
+    Diagnostic::error(
+        Code::NoChange,
+        format!("`{name}` is given its own value"),
+        assign.span(),
+        "changes nothing",
+    )
+    .with_note(OWN_VALUE_RULE)
+    .with_suggestion(
+        "delete the assignment",
+        vec![Edit {
+            span: list.removal(assign),
+            replacement: String::new(),
+        }],
+    )
+}
+
+/// Why giving something its own value is an error, for notes.
+const OWN_VALUE_RULE: &str = "a variable or an attribute that isn't given a new value keeps its own, so giving it its own value changes nothing";
+
+/// An `update` with an empty `list`, in `statement`, which would change
+/// nothing.
+pub(crate) fn empty_update(
+    list: &trendy_syntax::ast::AssignList,
+    statement: &trendy_syntax::ast::AssignStmt,
+) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::EmptyDoesNothing,
         "this `update` changes nothing",
         list.span(),
         "no attributes",
     )
     .with_note(
         "`update` takes attributes the variable has, each `name := value`; with none it would change nothing",
-    )
-    .with_help("give the attributes to change, or delete the `update`")
+    );
+    deleted(d, statement)
 }
 
 /// An `assign` block with no assignments.
 pub(crate) fn empty_assign_block(block: &trendy_syntax::ast::AssignBlock) -> Diagnostic {
     Diagnostic::error(
-        Code::EmptyList,
+        Code::EmptyDoesNothing,
         "this `assign` block assigns nothing",
         block.span(),
         "no assignments",
@@ -1957,28 +2065,33 @@ fn empty_list(
     does: (&str, &str),
     note: &str,
 ) -> Diagnostic {
-    let end = postfix.span().end;
-    let keyword = postfix.operator();
-    let start = keyword.as_ref().map_or(operand.span().end, |t| {
-        trendy_syntax::span(t.text_range()).start
-    });
-    let spelled = keyword
+    let spelled = postfix
+        .operator()
         .and_then(|t| t.kind().fixed_text())
         .unwrap_or("this");
+    let (span, edit) = dropped(postfix, operand);
     Diagnostic::error(
-        Code::EmptyRemove,
+        Code::EmptyDoesNothing,
         format!("`{spelled} {{}}` {}", does.0),
-        Span::new(start, end),
+        span,
         does.1,
     )
     .with_note(note.to_string())
-    .with_suggestion(
-        format!("drop the `{spelled} {{}}`"),
-        vec![Edit {
-            span: Span::new(operand.span().end, end),
-            replacement: String::new(),
-        }],
-    )
+    .with_suggestion(format!("drop the `{spelled} {{}}`"), vec![edit])
+}
+
+/// `postfix`, an operator applied to `operand`, from its keyword, and the
+/// edit that drops it, leaving the operand.
+fn dropped(postfix: &trendy_syntax::ast::PostfixExpr, operand: &Expr) -> (Span, Edit) {
+    let end = postfix.span().end;
+    let start = postfix.operator().map_or(operand.span().end, |t| {
+        trendy_syntax::span(t.text_range()).start
+    });
+    let edit = Edit {
+        span: Span::new(operand.span().end, end),
+        replacement: String::new(),
+    };
+    (Span::new(start, end), edit)
 }
 
 /// The variables in `cycle`, each with its declaration's name span and the

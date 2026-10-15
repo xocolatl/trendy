@@ -351,9 +351,13 @@ attributes, and `v := …` merges with nothing. A `delete`'s or an
 which is written without it (A0032): `r := relation {}`, an `update`
 without `where`, or no statement. It is reported with the variable's
 changes, since `r := relation {}` is the fix only when the `delete` is the
-variable's one change; with others, it would conflict with them.
-Conflicts known when compiling are reported then (R0009): those, and two
-`i_delete`s of the same constant tuple. A variable's new value that is known when compiling is
+variable's one change; with others, it would conflict with them. A
+change that is known to change nothing is reported where it is checked
+(A0033): a value that is the variable itself, once folded, the empty
+relation inserted or deleted, and, in `Checker::assign_attributes`, for
+`replace` and `update` alike, an attribute's value that is its own, the
+tuple at hand's attribute. Conflicts known when compiling are reported
+then (R0009): those, and two `i_delete`s of the same constant tuple. A variable's new value that is known when compiling is
 checked against its keys then (R0008), pointing at the tuples as for an
 initial value; any other is checked when running.
 

@@ -14,7 +14,7 @@ use trendy_syntax::ast::{self, Clause};
 use trendy_syntax::{SyntaxKind, SyntaxToken};
 
 use crate::body::{BodyNames, Context};
-use crate::check::{Assigned, Checker};
+use crate::check::{Assigned, Checker, Unchanged};
 use crate::types::{Expected, Origin};
 use crate::{Kind, errors, keys, ops};
 
@@ -144,8 +144,14 @@ fn change(
     let mut checker = Checker::new(&mut names);
     let change = match (clause, clause.keyword()) {
         (Clause::Assignment(_), _) => {
-            let value = clause.operand()?;
-            Change::Value(checker.expr(&value, Some(&target.expected), errors)?, value)
+            let written = clause.operand()?;
+            let value = checker.expr(&written, Some(&target.expected), errors)?;
+            if value == target.current() {
+                let statement = clause.statement()?;
+                errors.push(errors::own_value(&variable.name, clause.span(), &statement));
+                return None;
+            }
+            Change::Value(value, written)
         }
         (Clause::Update(_), Some(keyword)) => {
             update(clause, &keyword, &target, &mut checker, errors)?
@@ -185,16 +191,20 @@ fn update(
     errors: &mut Vec<Diagnostic>,
 ) -> Option<Change> {
     let list = clause.assignments()?;
+    let statement = clause.statement()?;
     let assigned = Assigned {
         assigning: ops::Assigning::Update,
         keyword,
         list: &list,
         operand: target.written,
     };
-    let empty = || errors::empty_update(&list);
+    let unchanged = |why| match why {
+        Unchanged::Empty => errors::empty_update(&list, &statement),
+        Unchanged::OwnValues => errors::own_values_updated(clause.span(), &statement),
+    };
     match (clause.where_keyword(), &target.variable.ty) {
         (None, hir::Type::Tuple(_)) => {
-            match checker.assign_attributes(target.current(), &assigned, empty, errors)? {
+            match checker.assign_attributes(target.current(), &assigned, unchanged, errors)? {
                 hir::Expr::Extend(_, computed, values) => {
                     Some(Change::Attributes(computed, values))
                 }
@@ -213,7 +223,7 @@ fn update(
         (token, ty) => {
             let hir::Type::Relation(heading) = ty else {
                 // A scalar has no attributes to update.
-                checker.assign_attributes(target.current(), &assigned, empty, errors)?;
+                checker.assign_attributes(target.current(), &assigned, unchanged, errors)?;
                 return None;
             };
             let condition = match token {
@@ -223,7 +233,7 @@ fn update(
                 None => hir::Expr::Constant(hir::Value::Boolean(true)),
             };
             let selected = restricted(target.current(), condition.clone());
-            let replaced = checker.assign_attributes(selected, &assigned, empty, errors)?;
+            let replaced = checker.assign_attributes(selected, &assigned, unchanged, errors)?;
             Some(Change::Tuples(TupleChange {
                 removed: Some(Removal::Where(condition)),
                 added: Some(Addition {
@@ -264,6 +274,17 @@ fn shorthand(
         });
     }
     let tuples = checker.expr(&operand, Some(&target.expected), errors)?;
+    if let hir::Expr::Constant(hir::Value::Relation(relation)) = &tuples
+        && relation.tuples.is_empty()
+    {
+        let statement = clause.statement()?;
+        errors.push(errors::no_tuples_given(
+            keyword.text(),
+            clause.span(),
+            &statement,
+        ));
+        return None;
+    }
     Some(match keyword.kind() {
         SyntaxKind::IDeleteKw => TupleChange {
             removed: Some(Removal::Included(tuples)),
