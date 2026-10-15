@@ -69,6 +69,7 @@ pub enum Code {
     ImageOutsideTuple,
     HeadingMismatch,
     NotAssignable,
+    ConstantCondition,
     Overflow,
     DivisionByZero,
     OutOfMemory,
@@ -95,7 +96,7 @@ pub enum CodeKind {
 }
 
 impl Code {
-    pub const ALL: [Code; 66] = [
+    pub const ALL: [Code; 67] = [
         Code::UnexpectedCharacter,
         Code::MissingToken,
         Code::WrongDelimiter,
@@ -152,6 +153,7 @@ impl Code {
         Code::ImageOutsideTuple,
         Code::HeadingMismatch,
         Code::NotAssignable,
+        Code::ConstantCondition,
         Code::Overflow,
         Code::DivisionByZero,
         Code::OutOfMemory,
@@ -223,6 +225,7 @@ impl Code {
             Code::ImageOutsideTuple => "A0030",
             Code::HeadingMismatch => "A0031",
             Code::NotAssignable => "A0026",
+            Code::ConstantCondition => "A0032",
             Code::Overflow => "R0001",
             Code::DivisionByZero => "R0002",
             Code::OutOfMemory => "R0003",
@@ -323,6 +326,7 @@ impl Code {
             Code::ImageOutsideTuple => include_str!("../errors/A0030.md"),
             Code::HeadingMismatch => include_str!("../errors/A0031.md"),
             Code::NotAssignable => include_str!("../errors/A0026.md"),
+            Code::ConstantCondition => include_str!("../errors/A0032.md"),
             Code::Overflow => include_str!("../errors/R0001.md"),
             Code::DivisionByZero => include_str!("../errors/R0002.md"),
             Code::OutOfMemory => include_str!("../errors/R0003.md"),

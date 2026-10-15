@@ -629,6 +629,91 @@ pub(crate) fn assigned_operator(name: &str, span: Span, kind: Kind) -> Diagnosti
     .with_note("only variables, declared with `var` at the top level, are assigned")
 }
 
+/// A `delete` of the variable `name`, at `span`, whose condition is always
+/// true, so that it deletes every tuple. `alone` says whether it is the
+/// variable's only change in its statement, which the assignment of the
+/// empty relation can then replace.
+pub(crate) fn every_tuple_deleted(name: &str, span: Span, alone: bool) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::ConstantCondition,
+        "this `delete`'s condition is always true",
+        span,
+        format!("deletes every tuple of `{name}`"),
+    )
+    .with_note(
+        "`delete r where p` deletes the tuples for which `p` is true; to delete every tuple, assign the empty relation, `r := relation {}`, which says so",
+    );
+    if alone {
+        d.with_suggestion(
+            "assign the empty relation",
+            vec![Edit {
+                span,
+                replacement: format!("{name} := relation {{}}"),
+            }],
+        )
+    } else {
+        d.with_help(format!(
+            "`{name} := relation {{}}` can't combine with this block's other changes to `{name}`; replace them all with one assignment of its whole new value, `{name} := …`"
+        ))
+    }
+}
+
+/// An `update`'s condition, at `span`, that is always true, so that it
+/// updates every tuple, as it would without it; `removal` deletes it.
+pub(crate) fn every_tuple_updated(span: Span, removal: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::ConstantCondition,
+        "this `update`'s condition is always true",
+        span,
+        "selects every tuple",
+    )
+    .with_note(
+        "`update r { … } where p` updates the tuples for which `p` is true, and `update r { … }` every tuple",
+    )
+    .with_suggestion(
+        "delete the condition",
+        vec![Edit {
+            span: removal,
+            replacement: String::new(),
+        }],
+    )
+}
+
+/// A `delete` or an `update`, after `keyword`, at `span`, in `statement`,
+/// whose condition is always false, so that it changes nothing.
+pub(crate) fn no_tuple_changed(
+    keyword: &str,
+    span: Span,
+    statement: &trendy_syntax::ast::AssignStmt,
+) -> Diagnostic {
+    let form = if keyword == "delete" {
+        "delete r where p"
+    } else {
+        "update r { … } where p"
+    };
+    // A block with nothing else in it goes too.
+    let (what, removal) = match statement.block() {
+        Some(block) if block.statements().count() == 1 => ("the `assign` block", block.removal()),
+        _ => ("the statement", statement.removal()),
+    };
+    Diagnostic::error(
+        Code::ConstantCondition,
+        format!("this `{keyword}`'s condition is always false"),
+        span,
+        format!("{keyword}s nothing"),
+    )
+    .with_note(format!(
+        "`{form}` {keyword}s the tuples for which `p` is true, so with a condition that is always false, it changes nothing"
+    ))
+    .with_suggestion(
+        format!("delete {what}"),
+        vec![Edit {
+            span: removal,
+            replacement: String::new(),
+        }],
+    )
+}
+
 /// An `update` with an empty `list`, which would change nothing.
 pub(crate) fn empty_update(list: &trendy_syntax::ast::AssignList) -> Diagnostic {
     Diagnostic::error(
@@ -657,7 +742,7 @@ pub(crate) fn empty_assign_block(block: &trendy_syntax::ast::AssignBlock) -> Dia
     .with_suggestion(
         "delete it",
         vec![Edit {
-            span: block.span(),
+            span: block.removal(),
             replacement: String::new(),
         }],
     )

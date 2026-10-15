@@ -3763,6 +3763,77 @@ mod tests {
     }
 
     #[test]
+    fn conditions_known_when_compiling_are_written_without() {
+        // `body`, whose one error is a condition known when compiling, with
+        // its fix applied.
+        let fixed = |body: &str| {
+            let source = assigning(POETS, body);
+            let errors = errors(&source);
+            let [error] = &errors[..] else {
+                panic!("one error: {errors:#?}");
+            };
+            assert_eq!(error.code, Code::ConstantCondition, "{body}");
+            let [edit] = &error.suggestions[0].edits[..] else {
+                panic!("one edit: {:?}", error.suggestions);
+            };
+            let mut fixed = source.clone();
+            fixed.replace_range(edit.span.start..edit.span.end, &edit.replacement);
+            assert!(analyze_str(&fixed).is_ok(), "{fixed}");
+            fixed
+        };
+        // Each condition is `true` once folded: every tuple is changed.
+        for condition in ["true", "1 = 1", "born > 1 or true"] {
+            assert_eq!(
+                fixed(&format!("delete poets where {condition};")),
+                assigning(POETS, "poets := relation {};")
+            );
+            assert_eq!(
+                fixed(&format!("update poets {{ born := 1 }} where {condition};")),
+                assigning(POETS, "update poets { born := 1 };")
+            );
+        }
+        // Each is `false`: none is, so the statement goes.
+        for condition in ["false", "not true", "born > 1 and false"] {
+            for change in ["delete poets", "update poets { born := 1 }"] {
+                assert_eq!(
+                    fixed(&format!("n := 1; {change} where {condition};")),
+                    assigning(POETS, "n := 1;")
+                );
+            }
+        }
+        // From a block, and with it if nothing else is in it.
+        assert_eq!(
+            fixed("assign { delete poets where false; n := 1; };"),
+            assigning(POETS, "assign { n := 1; };")
+        );
+        assert_eq!(
+            fixed("n := 1; assign { delete poets where false; };"),
+            assigning(POETS, "n := 1;")
+        );
+        let tuple_dependent =
+            "delete poets where born > 1; update poets { born := 1 } where born < 1;";
+        assert!(analyze_str(&assigning(POETS, tuple_dependent)).is_ok());
+        // The empty relation replaces a block's one change to the variable.
+        assert_eq!(
+            fixed("assign { delete poets where true; n := 1; };"),
+            assigning(POETS, "assign { poets := relation {}; n := 1; };")
+        );
+        // With others, it would conflict with them.
+        let combined = errors(&assigning(
+            POETS,
+            r#"assign { delete poets where true; insert poets relation { { name: "Rumi", born: 1207 } }; };"#,
+        ));
+        assert_eq!(combined.len(), 1);
+        assert_eq!(combined[0].code, Code::ConstantCondition);
+        assert!(combined[0].suggestions.is_empty());
+        assert!(
+            combined[0].help[0].contains("`poets := …`"),
+            "{:?}",
+            combined[0].help
+        );
+    }
+
+    #[test]
     fn keys_of_values_known_when_compiling_are_checked() {
         let body =
             r#"poets := relation { { name: "Ada", born: 1815 }, { name: "Ada", born: 1816 } };"#;

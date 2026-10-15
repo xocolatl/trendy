@@ -442,12 +442,26 @@ operator main{} [
   `update r { a := x } where p;`, not as Tutorial D orders them (P0024).
   Its condition and values have the attributes of the tuple at hand in
   scope, as in `where` and `replace`.
+- **A condition must depend on the tuple.** One known when compiling to be
+  the same for every tuple, such as `true`, `1 = 1` or `false`, selects
+  them all or none, which is written without it (A0032): a `delete` of
+  every tuple is `r := relation {};`, an `update` of every tuple has no
+  `where`, and a change of none is no statement at all.
 
 ```trendy,error
 var poets := relation { { name: "Ada", born: 1815 } };
 
 operator main{} [
     delete poets;
+];
+```
+
+```trendy,error
+var poets := relation { { name: "Ada", born: 1815 } };
+
+operator main{} [
+    delete poets where true;
+    update poets { born := born + 1 } where 1 = 1;
 ];
 ```
 
@@ -1711,8 +1725,9 @@ line after a comment on its own line, such as a file's header, is kept.
 | `x = 0` | `x := 0` |
 | `INSERT R …`, `INSERT INTO r …` | `insert r …;` |
 | `DELETE R WHERE P`, `DELETE FROM r WHERE p` | `delete r where p;` |
-| `DELETE R`, `DELETE FROM r` | `r := relation {};` |
+| `DELETE R`, `DELETE FROM r`, `… WHERE 1 = 1` | `r := relation {};` |
 | `UPDATE R WHERE P ( A := X )`, `UPDATE r SET a = x WHERE p` | `update r { a := x } where p;` |
+| `UPDATE r SET a = x`, `… WHERE 1 = 1` | `update r { a := x };` |
 | `X := Y, Y := X`, a multiple assignment | `assign { x := y; y := x; };` |
 | `(params) { body }` | `{params} [body]` |
 | `bool` | `boolean` |

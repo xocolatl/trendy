@@ -185,6 +185,19 @@ impl AssignStmt {
     pub fn clauses(&self) -> impl Iterator<Item = Clause> + use<> {
         self.0.children().filter_map(Clause::cast)
     }
+
+    /// The `assign` block the statement is in, if it is in one.
+    #[must_use]
+    pub fn block(&self) -> Option<AssignBlock> {
+        AssignBlock::cast(self.0.parent()?)
+    }
+
+    /// The span to delete to remove the statement, with the whitespace
+    /// directly before it.
+    #[must_use]
+    pub fn removal(&self) -> Span {
+        statement_removal(&self.0)
+    }
 }
 
 impl AssignBlock {
@@ -198,6 +211,25 @@ impl AssignBlock {
     pub fn statements(&self) -> impl Iterator<Item = AssignStmt> + use<> {
         self.0.children().filter_map(AssignStmt::cast)
     }
+
+    /// The span to delete to remove the block, with the whitespace directly
+    /// before it.
+    #[must_use]
+    pub fn removal(&self) -> Span {
+        statement_removal(&self.0)
+    }
+}
+
+/// The span to delete to remove the statement `node`, with the whitespace
+/// directly before it. A comment before it stays, since it may be about
+/// what follows.
+fn statement_removal(node: &SyntaxNode) -> Span {
+    let own = span(node.text_range());
+    let start = node
+        .prev_sibling_or_token()
+        .filter(|e| e.kind() == SyntaxKind::Whitespace)
+        .map_or(own.start, |e| span(e.text_range()).start);
+    Span::new(start, own.end)
 }
 
 /// One assignment in an assignment statement: `v := x`, or a shorthand for
@@ -263,6 +295,21 @@ impl Clause {
     #[must_use]
     pub fn where_keyword(&self) -> Option<SyntaxToken> {
         significant_tokens(self.syntax()).find(|t| t.kind() == SyntaxKind::WhereKw)
+    }
+
+    /// The span to delete to remove the `where` and the condition, with the
+    /// whitespace before them, up to the end of what comes before.
+    #[must_use]
+    pub fn condition_removal(&self) -> Option<Span> {
+        let keyword = self.where_keyword()?;
+        let end = self.operand()?.span().end;
+        Some(Span::new(preceded_from(&keyword.into()), end))
+    }
+
+    /// The statement the assignment is in.
+    #[must_use]
+    pub fn statement(&self) -> Option<AssignStmt> {
+        AssignStmt::cast(self.syntax().parent()?)
     }
 
     /// An `update`'s attributes and their new values.
@@ -619,15 +666,20 @@ impl Key {
     /// up to the end of what comes before.
     #[must_use]
     pub fn removal(&self) -> Span {
-        let own = span(self.0.text_range());
-        let start = std::iter::successors(
-            self.0.prev_sibling_or_token(),
-            SyntaxElement::prev_sibling_or_token,
-        )
-        .find(|e| !e.kind().is_trivia())
-        .map_or(own.start, |e| span(e.text_range()).end);
-        Span::new(start, own.end)
+        Span::new(preceded_from(&self.0.clone().into()), self.span().end)
     }
+}
+
+/// Where the trivia before `element` starts: the end of the sibling before
+/// it that isn't trivia, or, if there is none, its own start.
+fn preceded_from(element: &SyntaxElement) -> usize {
+    let own = span(element.text_range()).start;
+    std::iter::successors(
+        element.prev_sibling_or_token(),
+        SyntaxElement::prev_sibling_or_token,
+    )
+    .find(|e| !e.kind().is_trivia())
+    .map_or(own, |e| span(e.text_range()).end)
 }
 
 /// A type as written: a name, a tuple type, or a relation type.

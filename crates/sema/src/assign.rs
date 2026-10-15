@@ -280,8 +280,8 @@ fn shorthand(
 }
 
 /// The new value of the variable `target`, `variable`, from its changes,
-/// `list`, in source order, or `None` after reporting a conflict between
-/// two of them.
+/// `list`, in source order, or `None` after reporting a condition known
+/// when compiling, or a conflict between two of them.
 fn merged(
     target: hir::VariableId,
     variable: &hir::Variable,
@@ -290,6 +290,9 @@ fn merged(
     cx: &Context,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Expr> {
+    if constant_conditions(&variable.name, &list, errors) {
+        return None;
+    }
     // A whole new value conflicts with any other change.
     let whole = list
         .iter()
@@ -350,6 +353,54 @@ fn merged(
             tuples_merged(target, variable, changes, errors)
         }
     }
+}
+
+/// Whether a change in `list`, the changes to the variable `name`, has a
+/// condition known when compiling, after reporting each one: it selects
+/// every tuple or none, which is written without it.
+fn constant_conditions(
+    name: &str,
+    list: &[(&Clause, Change)],
+    errors: &mut Vec<Diagnostic>,
+) -> bool {
+    let found: Vec<Diagnostic> = list
+        .iter()
+        .filter_map(|(clause, change)| constant_condition(name, clause, change, list.len() == 1))
+        .collect();
+    let any = !found.is_empty();
+    errors.extend(found);
+    any
+}
+
+/// The error for `clause`, `change` to the variable `name`, if its
+/// condition is known when compiling. `alone` says whether it is the
+/// variable's one change: a `delete` of every tuple is then the assignment
+/// of the empty relation, which would conflict with any other.
+fn constant_condition(
+    name: &str,
+    clause: &Clause,
+    change: &Change,
+    alone: bool,
+) -> Option<Diagnostic> {
+    let Change::Tuples(TupleChange {
+        removed: Some(Removal::Where(hir::Expr::Constant(hir::Value::Boolean(always)))),
+        ..
+    }) = change
+    else {
+        return None;
+    };
+    // An `update` without `where` is of every tuple, as it should be.
+    let token = clause.where_keyword()?;
+    let keyword = clause.keyword()?;
+    Some(match (keyword.kind(), always) {
+        (SyntaxKind::DeleteKw, true) => errors::every_tuple_deleted(name, clause.span(), alone),
+        (_, true) => {
+            let start = trendy_syntax::span(token.text_range()).start;
+            let condition = Span::new(start, clause.operand()?.span().end);
+            errors::every_tuple_updated(condition, clause.condition_removal()?)
+        }
+        (_, false) => errors::no_tuple_changed(keyword.text(), clause.span(), &clause.statement()?),
+    })
 }
 
 /// A tuple variable's new value from its `update`s, each in a clause and

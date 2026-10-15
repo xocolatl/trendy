@@ -80,6 +80,8 @@ operator main{} [
        };
     */
 
+    /* Every tuple is deleted by assigning the empty relation, which says
+       so: `delete poets where true;` is an error. */
     poets := relation {};
     call debug_value{v: poets};
 ];
