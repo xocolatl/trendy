@@ -30,7 +30,15 @@ pub fn analyze(prelude: &Prelude, file: &SourceFile) -> Result<hir::Program, Vec
     let mut errors = Vec::new();
     let namespaces = collect_names(prelude, file, &mut errors);
 
-    // Variables first: operator bodies refer to them.
+    // Every operator's signature first, so that anything can refer to an
+    // operator defined after it.
+    let Operators {
+        list: mut operators,
+        signatures,
+        user: user_operators,
+    } = signatures(prelude, file, &namespaces, &mut errors);
+
+    // Then the variables, which operator bodies refer to.
     let declarations = declarations(file, &namespaces);
     let variables = Globals::new(&declarations, &namespaces).evaluate(file, &mut errors);
     let variable_ids: HashMap<_, _> = variables
@@ -38,53 +46,6 @@ pub fn analyze(prelude: &Prelude, file: &SourceFile) -> Result<hir::Program, Vec
         .enumerate()
         .map(|(i, v)| (v.name.clone(), hir::VariableId(i)))
         .collect();
-
-    // Every operator's signature before any body, so that a call can refer
-    // to an operator defined after it.
-    let mut operators = prelude.operators().to_vec();
-    let mut signatures = HashMap::new();
-    for (i, op) in operators.iter().enumerate() {
-        signatures.insert(
-            op.name.clone(),
-            body::Signature::builtin(hir::OperatorId(i)),
-        );
-    }
-    let mut user_operators = Vec::new();
-    for item in file.items() {
-        match item {
-            Item::Operator(op) => {
-                let Some(ident) = op.name().and_then(|n| n.ident()) else {
-                    continue;
-                };
-                if !namespaces.is_first_operator(&ident) {
-                    continue;
-                }
-                let id = hir::OperatorId(operators.len());
-                let params = op
-                    .params()
-                    .and_then(|h| body::params(&h, &namespaces, &mut errors));
-                operators.push(hir::Operator {
-                    name: ident.text().to_string(),
-                    params: params.clone().unwrap_or_default(),
-                    kind: hir::OperatorKind::User { body: Vec::new() },
-                });
-                signatures.insert(
-                    ident.text().to_string(),
-                    body::Signature::user(id, op.clone(), params.is_some()),
-                );
-                user_operators.push((op, id));
-            }
-            Item::Builtin(builtin) => errors.push(errors::builtin_outside_prelude(
-                builtin.keyword(),
-                builtin.syntax(),
-            )),
-            Item::BuiltinType(builtin) => errors.push(errors::builtin_outside_prelude(
-                builtin.keyword(),
-                builtin.syntax(),
-            )),
-            Item::Variable(_) => {}
-        }
-    }
 
     let context = body::Context {
         namespaces: &namespaces,
@@ -113,6 +74,80 @@ pub fn analyze(prelude: &Prelude, file: &SourceFile) -> Result<hir::Program, Vec
             entry,
         }),
         _ => Err(errors),
+    }
+}
+
+/// Every operator, built in and the program's own, with the signatures
+/// calls are checked against. A user operator's body is checked once the
+/// variables are, so until then its `kind` holds an empty one.
+struct Operators {
+    /// Indexed by `hir::OperatorId`: the prelude's, then the program's.
+    list: Vec<hir::Operator>,
+    signatures: HashMap<String, body::Signature>,
+    /// The program's own, with their definitions.
+    user: Vec<(trendy_syntax::ast::Operator, hir::OperatorId)>,
+}
+
+/// Every operator's signature: the prelude's, then the program's, each
+/// with its parameters checked. Built-ins declared outside the prelude are
+/// reported.
+fn signatures(
+    prelude: &Prelude,
+    file: &SourceFile,
+    namespaces: &Namespaces,
+    errors: &mut Vec<Diagnostic>,
+) -> Operators {
+    let mut list = prelude.operators().to_vec();
+    let mut signatures: HashMap<_, _> = list
+        .iter()
+        .enumerate()
+        .map(|(i, op)| {
+            (
+                op.name.clone(),
+                body::Signature::builtin(hir::OperatorId(i)),
+            )
+        })
+        .collect();
+    let mut user = Vec::new();
+    for item in file.items() {
+        match item {
+            Item::Operator(op) => {
+                let Some(ident) = op.name().and_then(|n| n.ident()) else {
+                    continue;
+                };
+                if !namespaces.is_first_operator(&ident) {
+                    continue;
+                }
+                let id = hir::OperatorId(list.len());
+                let params = op
+                    .params()
+                    .and_then(|h| body::params(&h, namespaces, errors));
+                list.push(hir::Operator {
+                    name: ident.text().to_string(),
+                    params: params.clone().unwrap_or_default(),
+                    kind: hir::OperatorKind::User { body: Vec::new() },
+                });
+                signatures.insert(
+                    ident.text().to_string(),
+                    body::Signature::user(id, op.clone(), params.is_some()),
+                );
+                user.push((op, id));
+            }
+            Item::Builtin(builtin) => errors.push(errors::builtin_outside_prelude(
+                builtin.keyword(),
+                builtin.syntax(),
+            )),
+            Item::BuiltinType(builtin) => errors.push(errors::builtin_outside_prelude(
+                builtin.keyword(),
+                builtin.syntax(),
+            )),
+            Item::Variable(_) => {}
+        }
+    }
+    Operators {
+        list,
+        signatures,
+        user,
     }
 }
 

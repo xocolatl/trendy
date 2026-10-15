@@ -317,8 +317,13 @@ name or a type's. Where a name is says which namespace it is in: after
 before `{}` could be either, a projection on no attributes or a call
 without arguments: it is the operator if there is one, so it is a call,
 and a value of the same name is projected as `(x){}`. An update operator
-has no value, so calling one in an expression is an error (A0016). Sema collects every name before checking
-anything, so errors can refer to definitions anywhere in the file.
+has no value, so calling one in an expression is an error (A0016).
+
+Sema collects every name before checking anything, so errors can refer to
+definitions anywhere in the file. Then it checks, in order, every
+operator's parameters (`signatures`), so that anything can refer to an
+operator defined after it; the variables, whose initial values it
+evaluates; and the operators' bodies, which refer to both.
 
 A variable without a value gets its type's default (`0`, `""`), and one
 without a type gets its value's type. These are the two options *The Third
