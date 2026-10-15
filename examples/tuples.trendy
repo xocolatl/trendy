@@ -22,15 +22,6 @@ var addr := tuple {
    and hide any variable or parameter of the same name. To use one of
    those, rename it first. */
 
-/* Assignment and update (RM Prescription 21), once variables can be
-   assigned at all.
-   Tutorial D: ADDR := TUPLE { ... }, and UPDATE ADDR ( POSTAL_CODE := '75002' )
-   Proposed: an assignment statement, and `update` as a statement.
-
-   addr := addr replace { postal_code := "75002" };
-   update addr { postal_code := "75002" };
-*/
-
 /* Projection, and its complement, remove (Algebra A's REMOVE): the tuple
    with only the attributes named, or without them. Implemented: each
    result below is printed twice, folded when compiling and computed when

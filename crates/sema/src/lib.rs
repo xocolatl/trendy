@@ -1,3 +1,4 @@
+mod assign;
 mod body;
 mod check;
 mod errors;
@@ -30,7 +31,8 @@ pub fn analyze(prelude: &Prelude, file: &SourceFile) -> Result<hir::Program, Vec
     let values = collect_names(prelude, file, &mut errors);
 
     // Variables first: operator bodies refer to them.
-    let variables = Globals::new(file, &values).evaluate(file, &mut errors);
+    let declarations = declarations(file, &values);
+    let variables = Globals::new(&declarations, &values).evaluate(file, &mut errors);
     let variable_ids: HashMap<_, _> = variables
         .iter()
         .enumerate()
@@ -90,6 +92,7 @@ pub fn analyze(prelude: &Prelude, file: &SourceFile) -> Result<hir::Program, Vec
         signatures: &signatures,
         variables: &variables,
         variable_ids: &variable_ids,
+        declarations: &declarations,
     };
     let mut bodies = Vec::new();
     for (op, id) in &user_operators {
@@ -214,7 +217,7 @@ fn collect_names(prelude: &Prelude, file: &SourceFile, errors: &mut Vec<Diagnost
 struct Globals<'a> {
     values: &'a Values,
     /// The first declaration of each variable.
-    decls: HashMap<String, VarDecl>,
+    decls: &'a HashMap<String, VarDecl>,
     states: HashMap<String, State>,
     /// The variables being evaluated, innermost last: each one's name, its
     /// declaration's name span, and where its initial value refers to the
@@ -228,17 +231,20 @@ enum State {
     Done(Option<hir::Variable>),
 }
 
+/// The first declaration of each variable, by name.
+fn declarations(file: &SourceFile, values: &Values) -> HashMap<String, VarDecl> {
+    file.variables()
+        .filter_map(|decl| {
+            let ident = decl.name()?.ident()?;
+            values
+                .is_first(&ident)
+                .then(|| (ident.text().to_string(), decl))
+        })
+        .collect()
+}
+
 impl<'a> Globals<'a> {
-    fn new(file: &SourceFile, values: &'a Values) -> Self {
-        let decls = file
-            .variables()
-            .filter_map(|decl| {
-                let ident = decl.name()?.ident()?;
-                values
-                    .is_first(&ident)
-                    .then(|| (ident.text().to_string(), decl))
-            })
-            .collect();
+    fn new(decls: &'a HashMap<String, VarDecl>, values: &'a Values) -> Self {
         Globals {
             values,
             decls,
@@ -1246,15 +1252,15 @@ mod tests {
             panic!("greet is a user operator");
         };
         // Inside `greet`, `r` is the parameter, which hides the variable.
-        let hir::Statement::Call { args, .. } = &body[1];
-        assert_eq!(args["v"], hir::Expr::Parameter("r".to_string()));
+        assert_eq!(*argument(&body[1]), hir::Expr::Parameter("r".to_string()));
         let main = program.operator(program.entry);
         let hir::OperatorKind::User { body } = &main.kind else {
             panic!("main is a user operator");
         };
-        let hir::Statement::Call { args, .. } = &body[0];
-        assert_eq!(args["v"], hir::Expr::Variable(hir::VariableId(0)));
-        let hir::Statement::Call { args, .. } = &body[1];
+        assert_eq!(*argument(&body[0]), hir::Expr::Variable(hir::VariableId(0)));
+        let hir::Statement::Call { args, .. } = &body[1] else {
+            panic!("a call");
+        };
         assert_eq!(
             args["name"],
             hir::Expr::Constant(hir::Value::Text("Ada".to_string()))
@@ -1513,7 +1519,9 @@ mod tests {
     }
 
     fn argument(statement: &hir::Statement) -> &hir::Expr {
-        let hir::Statement::Call { args, .. } = statement;
+        let hir::Statement::Call { args, .. } = statement else {
+            panic!("a call");
+        };
         &args["v"]
     }
 
@@ -3493,5 +3501,282 @@ mod tests {
             codes,
             [Code::UnknownType, Code::UntypedVariable, Code::MissingMain]
         );
+    }
+
+    /// A program with `variables`, whose `main` is `body`.
+    fn assigning(variables: &str, body: &str) -> String {
+        format!("{variables}\noperator main{{}} [ {body} ];")
+    }
+
+    const POETS: &str = "var poets := relation { { name: \"Ada\", born: 1815 } } key { name };\nvar address := tuple { city: \"Lima\" };\nvar n := 0;";
+
+    #[test]
+    fn assignments_expand_their_shorthands() {
+        let poets = || Box::new(hir::Expr::Variable(hir::VariableId(0)));
+        let assigned = |body: &str| {
+            let body = main_body(&assigning(POETS, body));
+            let [hir::Statement::Assign(assignments)] = &body[..] else {
+                panic!("{body:?}");
+            };
+            assignments
+                .iter()
+                .map(|a| (a.target, a.value.clone()))
+                .collect::<Vec<_>>()
+        };
+        let relation = |name: &str| {
+            let tuple = hir::TupleValue::new(
+                [
+                    ("born".to_string(), hir::Value::Integer(1)),
+                    ("name".to_string(), hir::Value::Text(name.to_string())),
+                ]
+                .into(),
+            );
+            let heading = hir::Heading::new(
+                [
+                    ("born".to_string(), hir::Type::Scalar(hir::Scalar::Integer)),
+                    ("name".to_string(), hir::Type::Scalar(hir::Scalar::Text)),
+                ]
+                .into(),
+            );
+            Box::new(hir::Expr::Constant(hir::Value::Relation(
+                hir::RelationValue {
+                    heading,
+                    tuples: [tuple].into(),
+                },
+            )))
+        };
+        let target = hir::VariableId(0);
+        assert_eq!(
+            assigned(r#"insert poets relation { { name: "Rumi", born: 1 } };"#),
+            [(
+                target,
+                hir::Expr::Combine(hir::Combination::Union, poets(), relation("Rumi"))
+            )]
+        );
+        // Merged in a block: what is removed first, then what is added.
+        assert_eq!(
+            assigned(
+                r#"assign { d_insert poets relation { { name: "Rumi", born: 1 } }; i_delete poets relation { { name: "Ada", born: 1 } }; };"#
+            ),
+            [(
+                target,
+                hir::Expr::Combine(
+                    hir::Combination::DisjointUnion,
+                    Box::new(hir::Expr::Combine(
+                        hir::Combination::IncludedMinus,
+                        poets(),
+                        relation("Ada")
+                    )),
+                    relation("Rumi")
+                )
+            )]
+        );
+        // The tuples for which the condition is false are kept.
+        let [(_, hir::Expr::Restrict(operand, condition))] =
+            &assigned("delete poets where born > 1900;")[..]
+        else {
+            panic!("a restriction");
+        };
+        assert_eq!(*operand, poets());
+        assert!(matches!(
+            **condition,
+            hir::Expr::Unary(hir::UnaryOp::Not, _)
+        ));
+        // Those for which it is true are replaced, in union with the others.
+        let [(_, hir::Expr::Combine(hir::Combination::Union, kept, changed))] =
+            &assigned("update poets { born := born + 1 } where name = \"Ada\";")[..]
+        else {
+            panic!("a union");
+        };
+        assert!(matches!(**kept, hir::Expr::Restrict(..)));
+        assert!(matches!(**changed, hir::Expr::Extend(..)));
+        // A tuple's update is a replace of it.
+        let [(target, hir::Expr::Extend(operand, ..))] =
+            &assigned("update address { city := city || \"!\" };")[..]
+        else {
+            panic!("an extension");
+        };
+        assert_eq!(*target, hir::VariableId(1));
+        assert_eq!(**operand, hir::Expr::Variable(hir::VariableId(1)));
+    }
+
+    #[test]
+    fn a_blocks_changes_to_a_variable_are_merged() {
+        let main = |body: &str| main_body(&assigning(POETS, body));
+        // Two updates: the old value less the tuples either selects, which
+        // must be different, with the tuples each makes.
+        let body = main(
+            "assign { update poets { born := 1 } where name = \"Ada\"; update poets { born := 2 } where born > 1900; };",
+        );
+        let [hir::Statement::Assign(assignments)] = &body[..] else {
+            panic!("{body:?}");
+        };
+        let [hir::Assignment { value, .. }] = &assignments[..] else {
+            panic!("one assignment: {assignments:?}");
+        };
+        let hir::Expr::Combine(hir::Combination::Union, inner, second) = value else {
+            panic!("{value:?}");
+        };
+        let hir::Expr::Combine(hir::Combination::Union, kept, first) = &**inner else {
+            panic!("{inner:?}");
+        };
+        assert!(matches!(**first, hir::Expr::Extend(..)));
+        assert!(matches!(**second, hir::Expr::Extend(..)));
+        let hir::Expr::Combine(hir::Combination::Minus, _, removed) = &**kept else {
+            panic!("{kept:?}");
+        };
+        assert!(matches!(
+            **removed,
+            hir::Expr::Combine(hir::Combination::DisjointChanges, ..)
+        ));
+        // A tuple's updates of different attributes are one.
+        let body = main("assign { update address { city := \"Cusco\" }; n := n + 1; };");
+        let [hir::Statement::Assign(assignments)] = &body[..] else {
+            panic!("{body:?}");
+        };
+        assert_eq!(assignments.len(), 2);
+        let source = "var t := tuple { a: 1, b: 2 };\noperator main{} [ assign { update t { a := b }; update t { b := a }; }; ];";
+        let body = main_body(source);
+        let [hir::Statement::Assign(assignments)] = &body[..] else {
+            panic!("{body:?}");
+        };
+        let [
+            hir::Assignment {
+                value: hir::Expr::Extend(_, _, values),
+                ..
+            },
+        ] = &assignments[..]
+        else {
+            panic!("one extension: {assignments:?}");
+        };
+        assert_eq!(values.len(), 2, "both attributes, each from the old tuple");
+    }
+
+    #[test]
+    fn conflicting_changes_known_when_compiling() {
+        let conflict = |body: &str| codes(&assigning(POETS, body));
+        assert_eq!(
+            conflict("assign { n := 1; n := 2; };"),
+            [Code::ConflictingChanges]
+        );
+        assert_eq!(
+            conflict("assign { poets := relation {}; delete poets where born > 1; };"),
+            [Code::ConflictingChanges]
+        );
+        assert_eq!(
+            conflict(
+                "assign { update address { city := \"a\" }; update address { city := \"b\" }; };"
+            ),
+            [Code::ConflictingChanges]
+        );
+        let errors = errors(&assigning(
+            POETS,
+            r#"assign { i_delete poets relation { { name: "Ada", born: 1815 } }; i_delete poets relation { { name: "Ada", born: 1815 } }; };"#,
+        ));
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, Code::ConflictingChanges);
+        assert_eq!(
+            errors[0].message,
+            "two changes to `poets` remove the same tuple"
+        );
+        assert_eq!(codes(&assigning(POETS, "assign {};")), [Code::EmptyList]);
+    }
+
+    #[test]
+    fn only_variables_are_assigned() {
+        let source = "var n := 0;\noperator f{n: integer, p: integer} [ p := 1; n := 2; ];\noperator main{} [ main := 1; m := 2; ];";
+        let errors = errors(source);
+        let codes: Vec<_> = errors.iter().map(|e| e.code).collect();
+        assert_eq!(
+            codes,
+            [
+                Code::NotAssignable,
+                Code::NotAssignable,
+                Code::NotAssignable,
+                Code::UnknownName
+            ]
+        );
+        assert_eq!(errors[0].message, "parameter `p` can't be assigned");
+        // The parameter `n` hides the variable.
+        assert!(
+            errors[1].help[0].contains("rename the parameter"),
+            "{:?}",
+            errors[1].help
+        );
+        assert_eq!(errors[2].message, "`main` is an operator, not a variable");
+    }
+
+    #[test]
+    fn assigned_values_have_the_variables_type() {
+        let inferred = errors(&assigning(POETS, "n := \"one\";"));
+        assert_eq!(inferred.len(), 1);
+        assert_eq!(inferred[0].code, Code::TypeMismatch);
+        assert_eq!(
+            inferred[0].secondary[0].message,
+            "`n` has this value's type"
+        );
+        assert!(
+            inferred[0].suggestions.is_empty(),
+            "the variable's type stays"
+        );
+        let declared = errors(&assigning("var m: integer;", "m := true;"));
+        assert_eq!(declared[0].code, Code::TypeMismatch);
+        assert_eq!(
+            declared[0].secondary[0].message,
+            "`m` is declared with this type"
+        );
+        // A tuple's attributes are checked against the variable's.
+        assert_eq!(
+            codes(&assigning(POETS, "address := tuple { town: \"Lima\" };")),
+            [Code::MissingAttribute, Code::UnknownAttribute]
+        );
+    }
+
+    #[test]
+    fn shorthands_need_the_right_variables() {
+        assert_eq!(
+            codes(&assigning(
+                POETS,
+                "insert address tuple { city: \"Lima\" };"
+            )),
+            [Code::WrongOperandType]
+        );
+        assert_eq!(
+            codes(&assigning(
+                POETS,
+                "update address { city := \"Quito\" } where city = \"Lima\";"
+            )),
+            [Code::WrongOperandType]
+        );
+        assert_eq!(
+            codes(&assigning(POETS, "update poets { died := 1852 };")),
+            [Code::UnknownAttribute]
+        );
+        assert_eq!(
+            codes(&assigning(POETS, "update poets {};")),
+            [Code::EmptyList]
+        );
+        assert_eq!(
+            codes(&assigning(POETS, "delete poets where born;")),
+            [Code::TypeMismatch]
+        );
+    }
+
+    #[test]
+    fn keys_of_values_known_when_compiling_are_checked() {
+        let body =
+            r#"poets := relation { { name: "Ada", born: 1815 }, { name: "Ada", born: 1816 } };"#;
+        let errors = errors(&assigning(POETS, body));
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, Code::KeyViolated);
+        // Pointing at the second tuple, with the first as a secondary.
+        let source = assigning(POETS, body);
+        assert_eq!(
+            &source[errors[0].span().start..errors[0].span().end],
+            r#"{ name: "Ada", born: 1816 }"#
+        );
+        // So it is in a block.
+        let block = format!("assign {{ {body} n := 1; }};");
+        assert_eq!(codes(&assigning(POETS, &block)), [Code::KeyViolated]);
     }
 }

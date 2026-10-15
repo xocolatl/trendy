@@ -66,7 +66,24 @@ fn empty_main() {
 
 #[test]
 fn variables() {
-    assert_eq!(compile_and_run("variables"), 0);
+    let (code, stderr) = run_example("variables");
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            r#""kwaheri""#,
+            // Inserted, deleted, updated; inserted and deleted again.
+            r#"relation { born: integer, name: text } { { born: 701, name: "李白" }, { born: 1644, name: "Bashō" }, { born: 1815, name: "Ada" }, { born: 1923, name: "Wisława" } }"#,
+            r#"relation { born: integer, name: text } { { born: 701, name: "李白" }, { born: 1644, name: "Bashō" }, { born: 1815, name: "Ada" } }"#,
+            r#"relation { born: integer, name: text } { { born: 701, name: "李白" }, { born: 1644, name: "Bashō" }, { born: 1814, name: "Ada" } }"#,
+            r#"relation { born: integer, name: text } { { born: 701, name: "李白" }, { born: 1644, name: "Bashō" }, { born: 1814, name: "Ada" } }"#,
+            r#"tuple { city: "Nairobi", postal_code: "00200" }"#,
+            // Swapped, and two guests swapped between rooms.
+            "tuple { x: 2, y: 1 }",
+            r#"relation { guest: text, room: integer } { { guest: "Amara", room: 2 }, { guest: "Kenji", room: 1 } }"#,
+            "relation { born: integer, name: text } {}",
+        ]
+    );
 }
 
 #[test]
@@ -389,7 +406,7 @@ fn run_time_failures_stop_the_program() {
             "fail_d_union",
             "relation { { n: a } } d_union relation { { n: a } }",
             format!(
-                "error[{}]: the operands of d_union have a tuple in common",
+                "error[{}]: d_union or d_insert adds a tuple that is already there",
                 Code::SharedTuple.id()
             ),
         ),
@@ -397,7 +414,7 @@ fn run_time_failures_stop_the_program() {
             "fail_i_minus",
             "relation { { n: a } } i_minus relation { { n: b } }",
             format!(
-                "error[{}]: i_minus removes a tuple that isn't there",
+                "error[{}]: i_minus or i_delete removes a tuple that isn't there",
                 Code::MissingTuple.id()
             ),
         ),
@@ -420,6 +437,61 @@ fn run_time_failures_stop_the_program() {
             )
         )
     );
+}
+
+/// Assignments that break a rule stop the program: two changes that
+/// remove the same tuple, a disjoint insert of a tuple already there, an
+/// included delete of one that isn't, and two tuples with the same key.
+#[test]
+fn assignments_that_break_a_rule_stop_the_program() {
+    use trendy_diag::Code;
+    let assigning = |statement: &str| {
+        format!(
+            "var poets := relation {{ {{ name: \"Ada\", born: 1815 }} }}\nkey {{ name }};\n\noperator f{{a: integer}} [\n    call debug_value{{v: 1}};\n    {statement};\n    call debug_value{{v: 2}};\n];\n\noperator main{{}} [\n    call f{{a: 1815}};\n];\n"
+        )
+    };
+    for (name, statement, failure) in [
+        (
+            // `variables.trendy`'s example of changes that conflict.
+            "fail_conflict",
+            r#"assign { update poets { born := a } where name = "Ada"; delete poets where born < 1900; }"#,
+            format!(
+                "error[{}]: two changes in an assign block remove the same tuple",
+                Code::ConflictingChanges.id()
+            ),
+        ),
+        (
+            "fail_d_insert",
+            r#"d_insert poets relation { { name: "Ada", born: a } }"#,
+            format!(
+                "error[{}]: d_union or d_insert adds a tuple that is already there",
+                Code::SharedTuple.id()
+            ),
+        ),
+        (
+            "fail_i_delete",
+            r#"i_delete poets relation { { name: "Ada", born: a + 1 } }"#,
+            format!(
+                "error[{}]: i_minus or i_delete removes a tuple that isn't there",
+                Code::MissingTuple.id()
+            ),
+        ),
+        (
+            "fail_key",
+            r#"insert poets relation { { name: "Ada", born: a + 1 } }"#,
+            format!(
+                "error[{}]: two tuples of a variable have the same values for one of its keys",
+                Code::KeyViolated.id()
+            ),
+        ),
+    ] {
+        let (code, stderr) = run_source(name, &assigning(statement));
+        assert_eq!(
+            (code, stderr),
+            (1, format!("1\n{failure}\n")),
+            "{statement}"
+        );
+    }
 }
 
 /// The lines `name` prints, which are each result twice: folded when

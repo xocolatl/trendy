@@ -24,6 +24,10 @@ pub(crate) const RENAME_FORM: &str =
     "`rename` takes renamings, each `old as new`: `r rename {postal_code as code}`";
 pub(crate) const TUPLE_VALUE_FORM: &str = "a tuple value has the form `tuple { name: value, … }`";
 pub(crate) const BUILTIN_FORM: &str = "built-ins are declared as `builtin type name;` or `builtin operator name{params};`, only in the prelude";
+pub(crate) const ASSIGNMENT_FORM: &str = "an assignment statement is `name := value;`, or a shorthand for one: `insert r s;`, `d_insert r s;`, `delete r where p;`, `i_delete r s;` or `update r { a := x } where p;`";
+pub(crate) const ASSIGN_BLOCK_FORM: &str =
+    "an `assign` block makes assignments all at once: `assign { x := y; y := x; };`";
+pub(crate) const UPDATE_FORM: &str = "`update` takes attributes the variable has, each `name := value`, then for a relation an optional `where` and condition: `update r { price := price * 2 } where id = 7;`";
 pub(crate) const VARIABLE_FORM: &str = "a variable declaration has the form `var name: type := value;`, where either the type or the value may be left out";
 
 /// Words other languages use to start a definition or declaration, which
@@ -348,11 +352,13 @@ pub(crate) fn wrong_attribute_separator(found: SyntaxKind, span: Span) -> Diagno
 }
 
 /// What a list of attribute assignments does: `extend` adds attributes,
-/// and `replace` gives existing ones new values.
-#[derive(Debug, Clone, Copy)]
+/// and `replace` gives existing ones new values, as does `update`, to a
+/// variable's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Assigning {
     Extend,
     Replace,
+    Update,
 }
 
 impl Assigning {
@@ -361,7 +367,8 @@ impl Assigning {
         match keyword {
             SyntaxKind::ExtendKw => Assigning::Extend,
             SyntaxKind::ReplaceKw => Assigning::Replace,
-            _ => unreachable!("only `extend` and `replace` assign attributes"),
+            SyntaxKind::UpdateKw => Assigning::Update,
+            _ => unreachable!("only `extend`, `replace` and `update` assign attributes"),
         }
     }
 
@@ -369,6 +376,7 @@ impl Assigning {
         match self {
             Assigning::Extend => EXTEND_FORM,
             Assigning::Replace => REPLACE_FORM,
+            Assigning::Update => UPDATE_FORM,
         }
     }
 
@@ -376,7 +384,7 @@ impl Assigning {
     pub(crate) fn list(self) -> &'static str {
         match self {
             Assigning::Extend => "new attributes",
-            Assigning::Replace => "attributes and their new values",
+            Assigning::Replace | Assigning::Update => "attributes and their new values",
         }
     }
 
@@ -384,7 +392,7 @@ impl Assigning {
     fn attribute(self) -> &'static str {
         match self {
             Assigning::Extend => "new attribute",
-            Assigning::Replace => "attribute",
+            Assigning::Replace | Assigning::Update => "attribute",
         }
     }
 
@@ -394,7 +402,7 @@ impl Assigning {
             Assigning::Extend => {
                 "write the new attribute's name and `:=` before the value, as in `total := a + b`"
             }
-            Assigning::Replace => {
+            Assigning::Replace | Assigning::Update => {
                 "write the name of the attribute it replaces and `:=` before the value, as in `price := price * 2`"
             }
         }
@@ -419,6 +427,9 @@ pub(crate) fn assign_separator(
         Assigning::Replace => {
             "in `replace`, each attribute is given a new value computed from the tuple, with `:=`, as a variable is; `:` pairs a name with a given value in a tuple, and `=` compares"
         }
+        Assigning::Update => {
+            "in `update`, each attribute is given a new value computed from the tuple, with `:=`, as a variable is; `:` pairs a name with a given value in a tuple, and `=` compares"
+        }
     };
     Diagnostic::error(
         Code::AttributeSeparator,
@@ -441,7 +452,9 @@ pub(crate) fn assign_separator(
 pub(crate) fn unnamed_assign(assigning: Assigning, span: Span) -> Diagnostic {
     let message = match assigning {
         Assigning::Extend => "a new attribute needs a name",
-        Assigning::Replace => "an attribute's new value needs the attribute's name",
+        Assigning::Replace | Assigning::Update => {
+            "an attribute's new value needs the attribute's name"
+        }
     };
     Diagnostic::error(Code::MissingToken, message, span, "this value has no name")
         .with_note(assigning.form())
@@ -458,7 +471,7 @@ pub(crate) fn assign_as(assigning: Assigning, span: Span, name: &str, value: &st
             "an {} is written `{name} := …`, not `… as {name}`",
             match assigning {
                 Assigning::Extend => "new attribute",
-                Assigning::Replace => "attribute's new value",
+                Assigning::Replace | Assigning::Update => "attribute's new value",
             }
         ),
         span,
@@ -1025,11 +1038,12 @@ pub(crate) fn missing_call(found: Found) -> Diagnostic {
     )
 }
 
-/// `=` where `:=` belongs.
-pub(crate) fn assignment_with_eq(span: Span) -> Diagnostic {
+/// `=` where `:=` belongs, `context` saying where, as in "in an
+/// assignment".
+pub(crate) fn assignment_with_eq(span: Span, context: &str) -> Diagnostic {
     Diagnostic::error(
         Code::AssignmentWithEq,
-        "expected `:=` for the initial value, found `=`",
+        format!("expected `:=` {context}, found `=`"),
         span,
         "`=` is not assignment",
     )
@@ -1084,6 +1098,182 @@ pub(crate) fn expected_definition(
             span: first.span,
             replacement: keyword.to_string(),
         }],
+    )
+}
+
+/// Assignments `clauses`, separated by `commas`, in the statement at
+/// `span`, as TTM writes a multiple assignment; `in_block` says whether
+/// the statement is in an `assign` block already.
+pub(crate) fn comma_assignments(
+    span: Span,
+    commas: &[Span],
+    clauses: &[&str],
+    in_block: bool,
+) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::CommaAssignment,
+        "assignments are separated by `;`, not `,`",
+        commas[0],
+        "a comma between assignments",
+    );
+    if in_block {
+        return d
+            .with_note("in an `assign` block, each assignment ends with `;`, as statements do")
+            .with_suggestion(
+                "end each assignment with `;`",
+                commas
+                    .iter()
+                    .map(|&span| Edit {
+                        span,
+                        replacement: ";".to_string(),
+                    })
+                    .collect(),
+            );
+    }
+    let statements: Vec<String> = clauses.iter().map(|c| format!("{c};")).collect();
+    d.with_note(
+        "assignments made all at once, each computed from the variables as they were, go in an `assign` block: `assign { x := y; y := x; };`",
+    )
+    .with_suggestion(
+        "make them at once, in an `assign` block",
+        vec![Edit {
+            span,
+            replacement: format!("assign {{ {} }};", statements.join(" ")),
+        }],
+    )
+}
+
+/// SQL's `found`, `into` or `from`, after `keyword`, `insert` or `delete`
+/// and their kin, where `span` deletes it.
+pub(crate) fn sql_statement_word(found: Found, span: Span, keyword: SyntaxKind) -> Diagnostic {
+    let spelled = keyword.fixed_text().expect("keywords have fixed text");
+    let form = if matches!(keyword, SyntaxKind::DeleteKw | SyntaxKind::IDeleteKw) {
+        "delete r where p"
+    } else {
+        "insert r s"
+    };
+    let word = found.text.to_ascii_lowercase();
+    Diagnostic::error(
+        Code::SqlRelational,
+        format!("`{spelled}` takes no `{word}`"),
+        found.span,
+        "SQL's spelling",
+    )
+    .with_note(format!(
+        "the variable's name follows `{spelled}` directly, as in `{form}`"
+    ))
+    .with_suggestion(
+        format!("delete `{}`", found.text),
+        vec![Edit {
+            span,
+            replacement: String::new(),
+        }],
+    )
+}
+
+/// SQL's `set`, at `set`, before an `update`'s new values, which end at
+/// `end`.
+pub(crate) fn sql_set(set: Span, end: usize) -> Diagnostic {
+    Diagnostic::error(
+        Code::SqlRelational,
+        "an `update`'s new values are written in braces, not after `set`",
+        set,
+        "SQL's spelling",
+    )
+    .with_note(UPDATE_FORM)
+    .with_suggestion(
+        "write the new values in braces",
+        vec![
+            Edit {
+                span: set,
+                replacement: "{".to_string(),
+            },
+            Edit {
+                span: Span::empty(end),
+                replacement: " }".to_string(),
+            },
+        ],
+    )
+}
+
+/// A `delete` at `span`, of the variable `target`, with no `where`: before
+/// `relation`, its text and whether it needs parentheses as an operand, if
+/// there is one.
+pub(crate) fn delete_without_where(
+    span: Span,
+    target: Option<&str>,
+    relation: Option<(&str, bool)>,
+) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::DeleteWithoutWhere,
+        "`delete` needs `where` and a condition",
+        span,
+        "no condition",
+    );
+    let Some(target) = target else {
+        return d.with_note(ASSIGNMENT_FORM);
+    };
+    match relation {
+        None => d
+            .with_note(
+                "`delete r where p` deletes the tuples for which `p` is true, so that every tuple isn't deleted by accident; to delete them all, assign the empty relation",
+            )
+            .with_suggestion(
+                "assign the empty relation",
+                vec![Edit {
+                    span,
+                    replacement: format!("{target} := relation {{}}"),
+                }],
+            ),
+        Some((relation, needs_parentheses)) => {
+            let relation = if needs_parentheses {
+                format!("({relation})")
+            } else {
+                relation.to_string()
+            };
+            d.with_note(
+                "`delete r where p` deletes the tuples for which `p` is true; to delete the tuples of a relation, assign the difference, or write `i_delete r s`, which also checks that each is there",
+            )
+            .with_suggestion(
+                "assign the difference",
+                vec![Edit {
+                    span,
+                    replacement: format!("{target} := {target} minus {relation}"),
+                }],
+            )
+        }
+    }
+}
+
+/// An `update`'s new values, between the parentheses `open` and `close`,
+/// after its condition, which starts with `where` at `where_start` and
+/// ends at `condition_end`, as Tutorial D writes `UPDATE R WHERE p ( … )`.
+pub(crate) fn values_after_where(
+    where_start: usize,
+    condition_end: usize,
+    (open, close): (Span, Span),
+    source: &str,
+) -> Diagnostic {
+    let values = source[open.end..close.start].trim();
+    Diagnostic::error(
+        Code::UpdateOrder,
+        "an `update`'s new values go before `where`",
+        Span::new(open.start, close.end),
+        "after the condition",
+    )
+    .with_note(UPDATE_FORM)
+    .with_suggestion(
+        "move them before `where`, in braces",
+        vec![
+            Edit {
+                span: Span::empty(where_start),
+                replacement: format!("{{ {values} }} "),
+            },
+            Edit {
+                span: Span::new(condition_end, close.end),
+                replacement: String::new(),
+            },
+        ],
     )
 }
 

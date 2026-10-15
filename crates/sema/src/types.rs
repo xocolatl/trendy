@@ -39,6 +39,9 @@ pub(crate) enum Origin {
     /// The attribute named, of the operand written here, which a `replace`
     /// gives a new value of the same type.
     Replaced(Expr, String),
+    /// The variable named, assigned a value: where its type is set, by its
+    /// declared type or else its initial value.
+    Variable(String, Box<Origin>),
 }
 
 impl Origin {
@@ -50,6 +53,7 @@ impl Origin {
             Origin::Value(v) | Origin::Replaced(v, _) => Some(v.span()),
             Origin::Builtin => None,
             Origin::Operator(token) => Some(trendy_syntax::span(token.text_range())),
+            Origin::Variable(_, declared) => declared.span(),
         }
     }
 
@@ -60,6 +64,10 @@ impl Origin {
             }
             Origin::Value(_) => "expected because of this value".to_string(),
             Origin::Replaced(_, name) => format!("`{name}` has the expected type here"),
+            Origin::Variable(name, declared) => match **declared {
+                Origin::Type(_) => format!("`{name}` is declared with this type"),
+                _ => format!("`{name}` has this value's type"),
+            },
             Origin::Operator(token) if token.kind() == trendy_syntax::SyntaxKind::WhereKw => {
                 "`where` takes a boolean condition".to_string()
             }
@@ -85,6 +93,7 @@ impl Origin {
     /// Where the expectation for attribute `name` is written.
     fn attribute(&self, name: &str) -> Option<Origin> {
         match self {
+            Origin::Variable(_, declared) => declared.attribute(name),
             Origin::Type(TypeExpr::Tuple(t)) => Origin::Heading(t.heading()?).attribute(name),
             Origin::Heading(h) => h
                 .attributes()
@@ -111,6 +120,7 @@ impl Origin {
     /// Where the expectation for a relation's tuples is written.
     fn element(&self) -> Option<Origin> {
         match self {
+            Origin::Variable(_, declared) => declared.element(),
             Origin::Type(TypeExpr::Relation(r)) => r.heading().map(Origin::Heading),
             Origin::Heading(h) => Some(Origin::Heading(h.clone())),
             Origin::Value(Expr::Relation(r)) => r.elements().next().map(Origin::Value),

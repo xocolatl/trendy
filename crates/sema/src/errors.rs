@@ -232,7 +232,13 @@ pub(crate) fn type_mismatch(
         Origin::Replaced(_, name) => d.with_note(format!(
             "`replace` keeps each attribute's type; to change `{name}`'s, compute it under another name with `extend`, then remove the old one and rename the new: `… extend {{ new_{name} := … }} remove {{{name}}} rename {{new_{name} as {name}}}`"
         )),
-        Origin::Heading(_) | Origin::Value(_) | Origin::Builtin | Origin::Operator(_) => d,
+        // A variable's type is fixed by its declaration: assign a value of
+        // that type.
+        Origin::Variable(..)
+        | Origin::Heading(_)
+        | Origin::Value(_)
+        | Origin::Builtin
+        | Origin::Operator(_) => d,
     }
 }
 
@@ -590,6 +596,112 @@ pub(crate) fn operator_as_value(name: &str, span: Span) -> Diagnostic {
         "to invoke it, write a statement: `call {name}{{…}};`"
     ))
 }
+
+/// The parameter `name`, at `span`, assigned. `hidden` says whether it
+/// hides a variable of the same name.
+pub(crate) fn assigned_parameter(name: &str, span: Span, hidden: bool) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::NotAssignable,
+        format!("parameter `{name}` can't be assigned"),
+        span,
+        "a parameter",
+    )
+    .with_note("parameters are read-only: an operator can't change the arguments it is passed");
+    if hidden {
+        d.with_help(format!(
+            "the parameter hides the variable `{name}`; to assign the variable, rename the parameter"
+        ))
+    } else {
+        d.with_help(format!(
+            "to keep a changed value, declare a variable for it, and assign that: `var new_{name} := {name};` at the top level"
+        ))
+    }
+}
+
+/// The operator `name`, at `span`, assigned, `kind` saying which kind.
+pub(crate) fn assigned_operator(name: &str, span: Span, kind: Kind) -> Diagnostic {
+    Diagnostic::error(
+        Code::NotAssignable,
+        format!("`{name}` is {}, not a variable", kind.describe()),
+        span,
+        "can't be assigned",
+    )
+    .with_note("only variables, declared with `var` at the top level, are assigned")
+}
+
+/// An `update` with an empty `list`, which would change nothing.
+pub(crate) fn empty_update(list: &trendy_syntax::ast::AssignList) -> Diagnostic {
+    Diagnostic::error(
+        Code::EmptyList,
+        "this `update` changes nothing",
+        list.span(),
+        "no attributes",
+    )
+    .with_note(
+        "`update` takes attributes the variable has, each `name := value`; with none it would change nothing",
+    )
+    .with_help("give the attributes to change, or delete the `update`")
+}
+
+/// An `assign` block with no assignments.
+pub(crate) fn empty_assign_block(block: &trendy_syntax::ast::AssignBlock) -> Diagnostic {
+    Diagnostic::error(
+        Code::EmptyList,
+        "this `assign` block assigns nothing",
+        block.span(),
+        "no assignments",
+    )
+    .with_note(
+        "an `assign` block makes its assignments all at once; with none it would change nothing",
+    )
+    .with_suggestion(
+        "delete it",
+        vec![Edit {
+            span: block.span(),
+            replacement: String::new(),
+        }],
+    )
+}
+
+/// Two changes to the variable `name` in one `assign` block, at `first`
+/// and `second`, that conflict, as `why` says.
+pub(crate) fn conflicting_changes(name: &str, first: Span, second: Span, why: &str) -> Diagnostic {
+    Diagnostic::error(
+        Code::ConflictingChanges,
+        format!("two changes to `{name}` conflict: {why}"),
+        second,
+        "conflicts with the other change",
+    )
+    .with_secondary(first, "the other change")
+    .with_note(CHANGES_RULE)
+    .with_help(
+        "make one of the changes do both, or make them in two statements, one after the other",
+    )
+}
+
+/// Two `i_delete`s of the variable `name` in one `assign` block, at `first`
+/// and `second`, that both remove `tuple`.
+pub(crate) fn conflicting_tuple(
+    name: &str,
+    first: Span,
+    second: Span,
+    tuple: &hir::TupleValue,
+) -> Diagnostic {
+    let tuple = source_text(&hir::Value::Tuple(tuple.clone()))
+        .map_or_else(|| "a tuple".to_string(), |t| format!("`{t}`"));
+    Diagnostic::error(
+        Code::ConflictingChanges,
+        format!("two changes to `{name}` remove the same tuple"),
+        second,
+        format!("removes {tuple}"),
+    )
+    .with_secondary(first, format!("also removes {tuple}"))
+    .with_note(CHANGES_RULE)
+    .with_help("remove the tuple in only one of the changes")
+}
+
+/// How an `assign` block's changes to one variable combine, for notes.
+const CHANGES_RULE: &str = "the changes in an `assign` block are made at once, each computed from the variables as they were before it: changes to a variable's tuples or attributes combine, unless two remove the same tuple or set the same attribute, and `v := …` can't combine with any other change to `v`";
 
 /// `call name{…}`, at `span`, where `name` is `what`, not an operator.
 pub(crate) fn not_an_operator(name: &str, span: Span, what: &str) -> Diagnostic {
@@ -1252,6 +1364,7 @@ pub(crate) fn empty_assign(
             ("replaces nothing", "no attributes"),
             "`replace` takes attributes the operand has, each `name := value`; with none it would change nothing",
         ),
+        crate::ops::Assigning::Update => unreachable!("an `update` is a statement"),
     }
 }
 
@@ -1292,6 +1405,7 @@ pub(crate) fn extension_exists(
 /// span, if no attribute the `replace` names exists, so that `extend` is
 /// likely meant.
 pub(crate) fn replaced_unknown(
+    assigning: crate::ops::Assigning,
     name: &str,
     span: Span,
     ty: &hir::Type,
@@ -1306,15 +1420,16 @@ pub(crate) fn replaced_unknown(
         .map(|(a, _)| a)
         .filter(|a| edit_distance(a, name) <= 2)
         .min_by_key(|a| edit_distance(a, name));
-    let d = unknown_attribute(
-        Noun::Projected,
-        name,
-        span,
-        "`replace` gives attributes the operand has new values of the same types; it adds none",
-        rename,
-        None,
-    )
-    .with_secondary(operand.span(), format!("this is `{ty}`"));
+    let rule = if assigning == crate::ops::Assigning::Update {
+        "`update` gives attributes the variable has new values of the same types; a variable's type never changes, so it adds none"
+    } else {
+        "`replace` gives attributes the operand has new values of the same types; it adds none"
+    };
+    let d = unknown_attribute(Noun::Projected, name, span, rule, rename, None)
+        .with_secondary(operand.span(), format!("this is `{ty}`"));
+    if assigning == crate::ops::Assigning::Update {
+        return d;
+    }
     match extend {
         Some(keyword) => d.with_suggestion(
             format!("to add `{name}` as a new attribute, write `extend`"),
@@ -1362,6 +1477,9 @@ pub(crate) fn not_relational(
         }
         "ungroup" => {
             "`ungroup` replaces each tuple of a relation with one for each tuple of its relation-valued attributes; a tuple's result would be a relation"
+        }
+        "insert" | "d_insert" | "delete" | "i_delete" => {
+            "`insert`, `d_insert`, `delete` and `i_delete` add and remove the tuples of a relation variable; another variable is given a new value with `:=`, and a tuple variable new attribute values with `update`"
         }
         _ => "`tuple from` and `value from` take the only tuple of a relation",
     };

@@ -1304,13 +1304,17 @@ fn restricted(heading: &hir::Heading, names: &BTreeSet<String>) -> hir::Heading 
     heading.without(&others)
 }
 
-/// What an `extend` or a `replace` does with its attribute assignments.
+/// What an `extend`, a `replace` or an `update` does with its attribute
+/// assignments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Assigning {
     /// Adds attributes the operand doesn't have.
     Extend,
     /// Gives attributes the operand has new values of the same types.
     Replace,
+    /// Gives attributes a variable has new values of the same types: a
+    /// `replace` of the variable, assigned to it.
+    Update,
 }
 
 impl Assigning {
@@ -1328,6 +1332,7 @@ impl Assigning {
         match self {
             Assigning::Extend => "extend",
             Assigning::Replace => "replace",
+            Assigning::Update => "update",
         }
     }
 }

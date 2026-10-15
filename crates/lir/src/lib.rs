@@ -221,6 +221,14 @@ pub enum RuntimeFn {
     /// [`Layout::U8`], whether two values of the type the descriptor
     /// describes are equal. For tuples and relations.
     Equal,
+    /// `trendy_rt_assign(dst, owner, src, descriptor)`: store at `dst`, a
+    /// variable's value, a copy of the value at `src`, of the type the
+    /// descriptor describes, with what it points to in memory of its own,
+    /// which `owner`, a [`Layout::Address`] next to the value, then holds.
+    /// The memory `owner` held before, if any, the statement owns (see
+    /// [`RuntimeFn::Release`]). For values that point to texts or
+    /// relations; others are copied.
+    Assign,
 }
 
 impl RuntimeFn {
@@ -243,6 +251,7 @@ impl RuntimeFn {
             RuntimeFn::Sort => "trendy_rt_sort",
             RuntimeFn::CompareText => "trendy_rt_compare_text",
             RuntimeFn::Equal => "trendy_rt_equal",
+            RuntimeFn::Assign => "trendy_rt_assign",
         }
     }
 }
@@ -395,6 +404,9 @@ pub enum Failure {
     NoTuple,
     /// A relation has several tuples, where its only one is taken.
     SeveralTuples,
+    /// Two tuples of a relation assigned to a variable have the same
+    /// values for one of its keys.
+    KeyViolated,
 }
 
 impl Failure {
@@ -408,6 +420,7 @@ impl Failure {
             Failure::TupleMismatch => 4,
             Failure::NoTuple => 5,
             Failure::SeveralTuples => 6,
+            Failure::KeyViolated => 9,
         }
     }
 }
@@ -424,6 +437,9 @@ pub enum Combination {
     Minus,
     /// A minus that fails if the right operand has a tuple the left lacks.
     IncludedMinus,
+    /// A union that fails, as a conflict between changes, if the operands
+    /// share a tuple.
+    DisjointChanges,
 }
 
 impl Combination {
@@ -436,6 +452,7 @@ impl Combination {
             Combination::Minus => 2,
             Combination::IncludedMinus => 3,
             Combination::ExclusiveUnion => 4,
+            Combination::DisjointChanges => 5,
         }
     }
 }
@@ -482,7 +499,10 @@ pub struct Data {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataKind {
     /// A program variable. `name` is unique among variables; codegen derives
-    /// the symbol from it.
+    /// the symbol from it. Its first field is its value; a value that
+    /// points to texts or relations has a second, a [`Field::Usize`] of 0,
+    /// where [`RuntimeFn::Assign`] keeps the address of the memory it
+    /// copies them to.
     Variable { name: String },
     /// Data with no name in the program, such as a text literal's bytes.
     Constant,

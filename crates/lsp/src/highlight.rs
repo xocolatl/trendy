@@ -144,14 +144,19 @@ fn is_parameter(token: &SyntaxToken) -> bool {
 }
 
 /// Whether the name `token`, in an attribute assignment, names an existing
-/// attribute that a `replace` gives a new value, rather than defining a new
-/// one in an `extend`.
+/// attribute that a `replace` or an `update` gives a new value, rather
+/// than defining a new one in an `extend`.
 fn is_replaced(token: &SyntaxToken) -> bool {
-    token
-        .parent_ancestors()
-        .find_map(trendy_syntax::ast::PostfixExpr::cast)
-        .and_then(|postfix| postfix.operator())
-        .is_some_and(|keyword| keyword.kind() == SyntaxKind::ReplaceKw)
+    // The name, the assignment, its list, and what the list belongs to.
+    let Some(owner) = token.parent_ancestors().nth(3) else {
+        return false;
+    };
+    match trendy_syntax::ast::PostfixExpr::cast(owner.clone()) {
+        Some(postfix) => postfix
+            .operator()
+            .is_some_and(|keyword| keyword.kind() == SyntaxKind::ReplaceKw),
+        None => owner.kind() == SyntaxKind::Update,
+    }
 }
 
 #[cfg(test)]
@@ -283,6 +288,35 @@ mod tests {
                 ("c", Class::Attribute, false),
                 ("d", Class::Variable, false),
             ]
+        );
+    }
+
+    #[test]
+    fn assignment_statements() {
+        assert_eq!(
+            highlight("operator f{p: integer} [ n := p; update r { a := b } where c; ];"),
+            [
+                ("operator", Class::Keyword, false),
+                ("f", Class::Operator, true),
+                ("p", Class::Parameter, true),
+                ("integer", Class::Type, false),
+                ("n", Class::Variable, false),
+                ("p", Class::Parameter, false),
+                ("update", Class::Keyword, false),
+                ("r", Class::Variable, false),
+                ("a", Class::Attribute, false),
+                ("b", Class::Variable, false),
+                ("where", Class::ExprOperator, false),
+                ("c", Class::Variable, false),
+            ]
+        );
+        assert_eq!(
+            highlight("operator f{} [ assign { insert r s; delete r where a; }; ];")
+                .into_iter()
+                .filter(|(_, class, _)| *class == Class::Keyword)
+                .map(|(text, _, _)| text)
+                .collect::<Vec<_>>(),
+            ["operator", "assign", "insert", "delete"]
         );
     }
 

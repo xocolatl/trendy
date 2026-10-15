@@ -166,6 +166,24 @@ assignment meant and fixed to `:=`, and SQL's and Tutorial D's `value as name` t
 `name := value` (P0011). A value with no name is reported without a fix,
 since the name can't be guessed.
 
+A statement is a call, an assignment statement (`AssignStmt`), or an
+`assign` block (`AssignBlock`) of assignment statements, made at once. An
+assignment is `name := value` (`Assignment`) or a shorthand starting with
+its keyword:
+`insert` and `d_insert` (`Insertion`), `delete` and `i_delete`
+(`Deletion`), and `update` (`Update`). A statement starting with a name and
+`:=` or `=` is an assignment, `=` fixed to `:=` (P0005). A `delete`'s
+condition and an `update`'s are all that follows `where`, as in an
+expression, which is why an `update`'s new values come before it. Other
+languages' habits are parsed as what they mean and fixed: Tutorial D's
+capitals; SQL's `insert into`, `delete from` and `update … set a = x`
+(P0021); Tutorial D's `update r where p (a := x)` (P0024); and its
+multiple assignment, separated by commas, which is parsed into one
+statement and fixed to a block (P0025). Anything but an assignment in a
+block is reported and skipped, up to its `;`. A `delete`
+without `where` is reported, with the assignment Tutorial D's would mean
+as the fix (P0023).
+
 `!!r` (`ImageExpr`), Tutorial D's image relation, takes a single operand:
 a name, a literal or a parenthesized expression. The lexer makes `!!` one
 token only when the two `!`s are together; a lone `!` is C's `not`, fixed
@@ -206,6 +224,9 @@ value that spans lines, or when that line would be too long, each key goes
 on a line of its own, in the declaration's column, which is also the column
 of a relation value's closing brace, and a blank line follows them; a too
 long line breaks its keys before any list in it.
+
+An `assign` block is laid out like an operator's body: each assignment on
+its own line, indented, and `};` on a line of its own.
 
 Everything else goes on one line, except that a relation value with more than
 one tuple is broken across lines: each tuple on its own line, indented four
@@ -263,6 +284,14 @@ and rename under fresh names, which HIR would have to invent. `Extend`
 carries the computed attributes' heading, since an empty relation has no
 tuple to take their types from.
 
+An operator's body is a list of statements: calls, and assignments
+(`Statement::Assign`), each a list of variables, all different, and their
+new values, made at once (TTM RM Prescription 21): every value is computed
+from the variables as they were. The shorthands are already expanded, and
+an `assign` block's changes to one variable merged into one value.
+`Combination::DisjointChanges` is the union of the tuples changes remove,
+which conflict (R0009) if two remove the same one.
+
 Every type's equality must hold exactly when no operator can tell two values
 apart (TTM RM Prescription 8). For approximate numbers, that is IEEE 754
 totalOrder. `hir::Approximate` implements it, and every comparison, ordering
@@ -302,6 +331,26 @@ satisfy them: two tuples with the same values for a key are an error. To
 point at the two tuples, sema evaluates each tuple of the initial value's
 relation selector again, only once a key is found violated; the value was
 already checked, so that can't fail.
+
+An assignment's target must be a variable, not a parameter, which is
+read-only, nor an operator (A0026), and its value must have the variable's
+type, which the declaration sets (`types::Origin::Variable`). Each
+assignment is a change to its variable (`assign::Change`), with the
+variable's attributes in scope in a condition or a new value as in `where`
+and `replace`, whose checks they share (`Checker::condition`,
+`Checker::assign_attributes`). A change to a relation's tuples is what it
+removes from the old value, the tuples a `delete`'s or an `update`'s
+condition selects or an `i_delete`'s relation, and what it adds, the
+`update`d tuples or an `insert`'s relation. A variable's changes in a block
+merge into one value: the old value `minus` (`i_minus`, with an
+`i_delete`) the `DisjointChanges` of the removals, `union` (`d_union`, for a
+`d_insert`) each addition. One condition alone is simply
+`r where not p`. Two `update`s of a tuple merge if they set different
+attributes, and `v := …` merges with nothing. Conflicts known when
+compiling are reported then (R0009): those, and two `i_delete`s of the same
+constant tuple. A variable's new value that is known when compiling is
+checked against its keys then (R0008), pointing at the tuples as for an
+initial value; any other is checked when running.
 
 Expressions are checked into `hir::Expr` by one checker (`check::Checker`),
 for initial values and operator bodies alike; only what names refer to
@@ -515,13 +564,26 @@ then reads.
 
 It also owns the lifetime of allocated values. A concatenation done at run
 time calls `trendy_rt_concat`, which allocates the result's bytes with
-`malloc`, as do the runtime functions that make relations. No value can
-outlive the statement that computes it yet, since there is no assignment
-and operators return nothing. So the statement owns them all: the runtime
-keeps a list of what it made, and a statement that made anything ends with
-`trendy_rt_release`, which frees the list. That holds however many values a
-loop made, which per-value freeing couldn't track. Assignment and returned
-values will need a real ownership scheme.
+`malloc`, as do the runtime functions that make relations. The statement
+owns them all: the runtime keeps a list of what it made, and a statement
+that made anything ends with `trendy_rt_release`, which frees the list.
+That holds however many values a loop made, which per-value freeing
+couldn't track.
+
+Only an assigned value outlives its statement. A variable whose type has a
+text or a relation in it has a second field, its owner, the address of the
+memory its value points into, or null while that is the value compiled
+into the program. `trendy_rt_assign` copies the value, with everything it
+points to, into one new block, which the owner then holds, and puts the
+old block on the statement's list, since the statement's values can still
+point into it. Other variables are assigned by a copy.
+
+An assignment statement computes each value into a slot of its own: a
+copy, since a value can be a variable's own place, which assigning another
+variable of the statement would change. Then each variable's keys are
+checked against its value, a projection on each key the variable
+declares, whose count must equal the value's, or the program stops
+(R0008). Only then are the variables assigned.
 
 An attribute's value, `t.a` (`hir::Expr::Extract`), is the tuple's place
 with the attribute's field added to its path, so it costs nothing; sema

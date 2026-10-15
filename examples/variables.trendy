@@ -10,4 +10,76 @@ var r: relation { a: boolean, b: integer } := relation {
     { a: false, b: 25 }
 };
 
-operator main{} [];
+/* Assignment (RM Prescription 21): `:=` gives a variable a new value of
+   its type, and `insert`, `d_insert`, `delete`, `i_delete` and `update`
+   are shorthands for changing a relation variable's tuples, or, with
+   `update`, a tuple variable's attributes. Implemented: main prints each
+   variable after it changes. */
+var poets := relation {
+    { name: "Ada", born: 1815 },
+    { name: "Bashō", born: 1644 },
+    { name: "Wisława", born: 1923 },
+}
+key { name };
+
+var address := tuple { city: "Nairobi", postal_code: "00100" };
+var x := 1;
+var y := 2;
+
+/* Rooms, each with one guest at most. */
+var rooms := relation {
+    { room: 1, guest: "Amara" },
+    { room: 2, guest: "Kenji" },
+}
+key { room }
+key { guest };
+
+operator main{} [
+    t := t || "kwaheri";
+    call debug_value{v: t};
+
+    insert poets relation { { name: "李白", born: 701 } };
+    call debug_value{v: poets};
+    delete poets where born > 1900;
+    call debug_value{v: poets};
+    update poets { born := born - 1 } where name = "Ada";
+    call debug_value{v: poets};
+    d_insert poets relation { { name: "Rumi", born: 1207 } };
+    i_delete poets relation { { name: "Rumi", born: 1207 } };
+    call debug_value{v: poets};
+
+    update address { postal_code := "00200" };
+    call debug_value{v: address};
+
+    /* An `assign` block makes its assignments at once, each computed
+       from the variables as they were before it, so this swaps. */
+    assign {
+        x := y;
+        y := x;
+    };
+    call debug_value{v: tuple { x: x, y: y }};
+
+    /* Changes to one variable merge: each condition sees the guests as
+       they were, so the two guests swap rooms. The keys are checked once
+       both changes are made; as two statements, the first would give
+       Kenji two rooms. */
+    assign {
+        update rooms { guest := "Kenji" } where room = 1;
+        update rooms { guest := "Amara" } where room = 2;
+    };
+    call debug_value{v: rooms};
+
+    /* Two changes that touch the same tuple conflict, since neither
+       order is the right one: this stops the program, writing
+       `error[R0009]: two changes in an assign block remove the same
+       tuple`, as room 1's guest is Kenji, now.
+
+       assign {
+           update rooms { guest := "Wanjiru" } where room = 1;
+           delete rooms where guest = "Kenji";
+       };
+    */
+
+    poets := relation {};
+    call debug_value{v: poets};
+];

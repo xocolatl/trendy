@@ -242,7 +242,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// A statement. For now, the only statements are calls.
+    /// A statement: a call, or an assignment statement.
     fn statement(&mut self) {
         let Some(found) = self.found() else {
             return;
@@ -252,6 +252,10 @@ impl<'a> Parser<'a> {
             .is_some_and(|f| matches!(f.kind, SyntaxKind::LBrace | SyntaxKind::LParen));
         if found.kind == SyntaxKind::CallKw {
             self.call_stmt();
+        } else if found.kind == SyntaxKind::AssignKw {
+            self.assign_block();
+        } else if self.at_assignment() {
+            self.assign_stmt(false);
         } else if found.kind == SyntaxKind::Ident && call_like {
             // `debug_value{v: r};`: a call without `call`.
             self.errors.push(errors::missing_call(found));
@@ -259,23 +263,49 @@ impl<'a> Parser<'a> {
         } else {
             self.missing_with_help(
                 SyntaxKind::CallKw,
-                "statements are calls, such as `call debug_value{v: 1};`",
+                "statements are calls, such as `call debug_value{v: 1};`, and assignments, such as `n := n + 1;`",
             );
-            self.start_node(SyntaxKind::Error);
-            while let Some(kind) = self.peek() {
-                if matches!(
-                    kind,
-                    SyntaxKind::RBracket | SyntaxKind::OperatorKw | SyntaxKind::VarKw
-                ) {
-                    break;
-                }
-                self.bump();
-                if kind == SyntaxKind::Semicolon {
-                    break;
-                }
-            }
-            self.builder.finish_node();
+            self.skip_statement(&[
+                SyntaxKind::RBracket,
+                SyntaxKind::OperatorKw,
+                SyntaxKind::VarKw,
+            ]);
         }
+    }
+
+    /// Whether an assignment, or a shorthand for one, starts here. A
+    /// keyword before `:=` is one too, reported as a name that can't be one.
+    fn at_assignment(&mut self) -> bool {
+        let Some(found) = self.found() else {
+            return false;
+        };
+        let assigned = (found.kind == SyntaxKind::Ident || found.kind.is_keyword())
+            && self
+                .found_after(1)
+                .is_some_and(|f| matches!(f.kind, SyntaxKind::ColonEq | SyntaxKind::Eq));
+        assigned || self.at_clause_keyword().is_some()
+    }
+
+    /// Wrap the tokens of a statement that isn't one in an error node, up
+    /// to its `;`, or up to one of `stops` outside any delimiters it opens.
+    fn skip_statement(&mut self, stops: &[SyntaxKind]) {
+        self.start_node(SyntaxKind::Error);
+        let mut depth = 0usize;
+        while let Some(kind) = self.peek() {
+            if depth == 0 && stops.contains(&kind) {
+                break;
+            }
+            self.bump();
+            match kind {
+                SyntaxKind::LBrace | SyntaxKind::LBracket | SyntaxKind::LParen => depth += 1,
+                SyntaxKind::RBrace | SyntaxKind::RBracket | SyntaxKind::RParen => {
+                    depth = depth.saturating_sub(1);
+                }
+                SyntaxKind::Semicolon if depth == 0 => break,
+                _ => {}
+            }
+        }
+        self.builder.finish_node();
     }
 
     /// `call name{arguments};`, with `call` already reported if missing.
@@ -303,6 +333,335 @@ impl<'a> Parser<'a> {
         );
         self.expect(SyntaxKind::Semicolon);
         self.builder.finish_node();
+    }
+
+    /// `x := y;`, or a shorthand for an assignment. Several separated by
+    /// commas, as TTM writes a multiple assignment, are reported, with a
+    /// fix writing them in an `assign` block, or, `in_block`, ending each
+    /// with `;`.
+    fn assign_stmt(&mut self, in_block: bool) {
+        let outer_form = std::mem::replace(&mut self.form, errors::ASSIGNMENT_FORM);
+        self.start_node(SyntaxKind::AssignStmt);
+        let start = self.found().map_or(0, |f| f.span.start);
+        let mut clauses = Vec::new();
+        let mut commas = Vec::new();
+        loop {
+            let from = self.found().map_or(start, |f| f.span.start);
+            self.clause();
+            clauses.push(Span::new(from, self.last_end.unwrap_or(from)));
+            if !self.at(SyntaxKind::Comma) {
+                break;
+            }
+            commas.push(self.bump());
+        }
+        self.expect(SyntaxKind::Semicolon);
+        self.builder.finish_node();
+        self.form = outer_form;
+        if !commas.is_empty() {
+            let end = self.last_end.unwrap_or(start);
+            let clauses: Vec<&str> = clauses
+                .iter()
+                .map(|c| &self.source[c.start..c.end])
+                .collect();
+            self.errors.push(errors::comma_assignments(
+                Span::new(start, end),
+                &commas,
+                &clauses,
+                in_block,
+            ));
+        }
+    }
+
+    /// `assign { x := y; y := x; };`: assignments made at once. Only
+    /// assignments go in it; anything else is reported and skipped.
+    fn assign_block(&mut self) {
+        let outer_form = std::mem::replace(&mut self.form, errors::ASSIGN_BLOCK_FORM);
+        self.start_node(SyntaxKind::AssignBlock);
+        self.bump();
+        if self.at(SyntaxKind::LBrace) {
+            self.bump();
+            while let Some(kind) = self.peek() {
+                if matches!(
+                    kind,
+                    SyntaxKind::RBrace
+                        | SyntaxKind::RBracket
+                        | SyntaxKind::OperatorKw
+                        | SyntaxKind::VarKw
+                        | SyntaxKind::BuiltinKw
+                ) {
+                    break;
+                }
+                if self.at_assignment() {
+                    self.assign_stmt(true);
+                } else {
+                    self.missing_with_help(
+                        SyntaxKind::Ident,
+                        "an `assign` block holds only assignments, such as `x := 1;`; anything else goes before or after it",
+                    );
+                    self.skip_statement(&[
+                        SyntaxKind::RBrace,
+                        SyntaxKind::RBracket,
+                        SyntaxKind::OperatorKw,
+                        SyntaxKind::VarKw,
+                    ]);
+                }
+            }
+            self.expect(SyntaxKind::RBrace);
+        } else {
+            self.missing(SyntaxKind::LBrace);
+        }
+        self.expect(SyntaxKind::Semicolon);
+        self.builder.finish_node();
+        self.form = outer_form;
+    }
+
+    /// The keyword a shorthand for an assignment starts with, if one is
+    /// next: the keyword, or a mis-cased spelling of it followed by a name,
+    /// as in Tutorial D's `INSERT R …`.
+    fn at_clause_keyword(&mut self) -> Option<SyntaxKind> {
+        let found = self.found()?;
+        if found.kind.is_assignment_keyword() {
+            return Some(found.kind);
+        }
+        let before_name = self
+            .found_after(1)
+            .is_some_and(|f| f.kind == SyntaxKind::Ident);
+        if found.kind != SyntaxKind::Ident || !before_name {
+            return None;
+        }
+        SyntaxKind::ALL
+            .into_iter()
+            .filter(|k| k.is_assignment_keyword())
+            .find(|k| {
+                k.fixed_text()
+                    .is_some_and(|text| text.eq_ignore_ascii_case(found.text))
+            })
+    }
+
+    /// One assignment: `v := x`, or a shorthand for one.
+    fn clause(&mut self) {
+        match self.at_clause_keyword() {
+            Some(keyword @ (SyntaxKind::InsertKw | SyntaxKind::DInsertKw)) => {
+                self.start_node(SyntaxKind::Insertion);
+                self.clause_keyword(keyword);
+                let into = self.sql_word("into", keyword);
+                self.errors.extend(into);
+                self.target();
+                self.expression();
+            }
+            Some(keyword @ (SyntaxKind::DeleteKw | SyntaxKind::IDeleteKw)) => {
+                self.start_node(SyntaxKind::Deletion);
+                let start = self.clause_keyword(keyword);
+                let from = self.sql_word("from", keyword);
+                let target = self.target();
+                // Without a condition, the fix rewrites the whole deletion,
+                // `from` included.
+                let conditioned = keyword == SyntaxKind::IDeleteKw || self.at(SyntaxKind::WhereKw);
+                if conditioned {
+                    self.errors.extend(from);
+                }
+                if keyword == SyntaxKind::IDeleteKw {
+                    self.expression();
+                } else {
+                    self.condition(start, target);
+                }
+            }
+            Some(keyword) => {
+                self.start_node(SyntaxKind::Update);
+                self.clause_keyword(keyword);
+                self.target();
+                // Tutorial D's order has the new values after the condition.
+                let values_first = !self.at(SyntaxKind::WhereKw);
+                if self.at_sql_set() {
+                    self.sql_set();
+                } else if values_first {
+                    self.assign_list(keyword);
+                }
+                if self.at(SyntaxKind::WhereKw) {
+                    let where_span = self.bump();
+                    self.binary(WHERE + 1);
+                    if !values_first {
+                        self.values_after_where(where_span);
+                    }
+                }
+            }
+            None => {
+                self.start_node(SyntaxKind::Assignment);
+                self.target();
+                match self.found() {
+                    Some(found) if found.kind == SyntaxKind::Eq => {
+                        let span = self.bump();
+                        self.errors
+                            .push(errors::assignment_with_eq(span, "in an assignment"));
+                    }
+                    _ => self.expect(SyntaxKind::ColonEq),
+                }
+                self.expression();
+            }
+        }
+        self.builder.finish_node();
+    }
+
+    /// Consume `keyword`, which [`Parser::at_clause_keyword`] found,
+    /// reporting a mis-cased spelling of it. Returns where it starts.
+    fn clause_keyword(&mut self, keyword: SyntaxKind) -> usize {
+        let found = self.found().expect("the keyword is next");
+        self.bump();
+        if found.kind != keyword {
+            let spelled = keyword.fixed_text().expect("keywords have fixed text");
+            self.errors.push(errors::miscased_keyword(found, spelled));
+        }
+        found.span.start
+    }
+
+    /// SQL's `word`, `into` or `from`, after `keyword`, before the
+    /// variable's name: consumed, and its error, with a fix deleting it,
+    /// returned.
+    fn sql_word(&mut self, word: &str, keyword: SyntaxKind) -> Option<Diagnostic> {
+        let found = self.found()?;
+        let before_name = self
+            .found_after(1)
+            .is_some_and(|f| f.kind == SyntaxKind::Ident);
+        if found.kind == SyntaxKind::Ident && found.text.eq_ignore_ascii_case(word) && before_name {
+            self.bump();
+            let next = self.found().map_or(found.span.end, |f| f.span.start);
+            return Some(errors::sql_statement_word(
+                found,
+                Span::new(found.span.start, next),
+                keyword,
+            ));
+        }
+        None
+    }
+
+    /// The variable an assignment assigns, and its name, if it is there.
+    fn target(&mut self) -> Option<&'a str> {
+        if self.at(SyntaxKind::Ident) {
+            self.start_node(SyntaxKind::NameRef);
+            let span = self.bump();
+            self.builder.finish_node();
+            return Some(&self.source[span.start..span.end]);
+        }
+        if !self.keyword_as_name(SyntaxKind::NameRef, &[SyntaxKind::ColonEq, SyntaxKind::Eq]) {
+            self.missing_with_help(SyntaxKind::Ident, "name the variable to assign");
+        }
+        None
+    }
+
+    /// A `delete`'s `where` and condition, after the variable. Without
+    /// them, the deletion is reported, with a fix writing what it would
+    /// mean in Tutorial D: the assignment of the empty relation, or, before
+    /// a relation, of the variable minus it. `start` is where the deletion
+    /// starts, and `target` the variable's name.
+    fn condition(&mut self, start: usize, target: Option<&str>) {
+        if self.at(SyntaxKind::WhereKw) {
+            self.bump();
+            self.binary(WHERE + 1);
+            return;
+        }
+        let target_end = self.last_end.unwrap_or(start);
+        let relation = self.at_operand().then(|| {
+            let from = self.found().map_or(target_end, |f| f.span.start);
+            self.expression();
+            let to = self.last_end.unwrap_or(from);
+            (
+                &self.source[from..to],
+                self.has_operator(Span::new(from, to)),
+            )
+        });
+        let end = self.last_end.unwrap_or(target_end);
+        self.errors.push(errors::delete_without_where(
+            Span::new(start, end),
+            target,
+            relation,
+        ));
+    }
+
+    /// Whether the expression at `span` has an operator outside any
+    /// delimiters, so that it needs parentheses to be an operand.
+    fn has_operator(&self, span: Span) -> bool {
+        let mut depth = 0usize;
+        self.tokens
+            .iter()
+            .filter(|t| t.span.start >= span.start && t.span.end <= span.end)
+            .any(|t| {
+                match t.kind {
+                    SyntaxKind::LBrace | SyntaxKind::LBracket | SyntaxKind::LParen => depth += 1,
+                    SyntaxKind::RBrace | SyntaxKind::RBracket | SyntaxKind::RParen => {
+                        depth = depth.saturating_sub(1);
+                    }
+                    _ => {}
+                }
+                depth == 0 && t.kind.is_operator()
+            })
+    }
+
+    /// Whether SQL's `set` is next, in an `update`: `set` before an
+    /// attribute's name and its new value.
+    fn at_sql_set(&mut self) -> bool {
+        self.found()
+            .is_some_and(|f| f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case("set"))
+            && self
+                .found_after(1)
+                .is_some_and(|f| f.kind == SyntaxKind::Ident)
+    }
+
+    /// SQL's `set a = x, b = y`, in an `update`: parsed as the attributes
+    /// it means, and reported with a fix writing them in braces.
+    fn sql_set(&mut self) {
+        let outer_form = std::mem::replace(&mut self.form, errors::UPDATE_FORM);
+        self.start_node(SyntaxKind::AssignList);
+        let set = self.bump();
+        loop {
+            self.assign(errors::Assigning::Update, WHERE + 1);
+            // A comma before another `name =`, as SQL writes them,
+            // continues the list; any other ends the assignment, as the one
+            // before `n := …` does.
+            let continues = self.at(SyntaxKind::Comma)
+                && self
+                    .found_after(1)
+                    .is_some_and(|f| f.kind == SyntaxKind::Ident)
+                && self
+                    .found_after(2)
+                    .is_some_and(|f| f.kind == SyntaxKind::Eq);
+            if !continues {
+                break;
+            }
+            self.bump();
+        }
+        self.builder.finish_node();
+        self.form = outer_form;
+        let end = self.last_end.unwrap_or(set.end);
+        self.errors.push(errors::sql_set(set, end));
+    }
+
+    /// Tutorial D's order, `update r where p ( a := x )`: the new values,
+    /// after the condition, are parsed and reported, with a fix moving them
+    /// before `where`, at `where_span`, in braces.
+    fn values_after_where(&mut self, where_span: Span) {
+        if !self.at(SyntaxKind::LParen) {
+            self.missing_with_help(
+                SyntaxKind::LBrace,
+                "write the new values before `where`, as in `update r { a := x } where p;`",
+            );
+            return;
+        }
+        let condition_end = self.last_end.unwrap_or_default();
+        self.start_node(SyntaxKind::AssignList);
+        let open = self.bump();
+        self.items(Self::at_operand, |p| p.assign(errors::Assigning::Update, 0));
+        let close = self.at(SyntaxKind::RParen).then(|| self.bump());
+        self.builder.finish_node();
+        let Some(close) = close else {
+            self.missing(SyntaxKind::RParen);
+            return;
+        };
+        self.errors.push(errors::values_after_where(
+            where_span.start,
+            condition_end,
+            (open, close),
+            self.source,
+        ));
     }
 
     fn at_argument(&mut self) -> bool {
@@ -376,7 +735,8 @@ impl<'a> Parser<'a> {
                 self.start_node(SyntaxKind::Initializer);
                 let span = self.bump();
                 if found.kind == SyntaxKind::Eq {
-                    self.errors.push(errors::assignment_with_eq(span));
+                    self.errors
+                        .push(errors::assignment_with_eq(span, "for the initial value"));
                 }
                 self.expression();
                 self.builder.finish_node();
@@ -1019,21 +1379,37 @@ impl<'a> Parser<'a> {
     fn assign_list(&mut self, keyword: SyntaxKind) {
         let assigning = errors::Assigning::of(keyword);
         let outer_form = std::mem::replace(&mut self.form, assigning.form());
-        let delimiters = self.list_delimiters();
+        // An `update` isn't an operator that could be chained, so brackets
+        // are only a wrong delimiter there.
+        let (delimiters, mistakes): (_, &[_]) = if assigning == errors::Assigning::Update {
+            (
+                (SyntaxKind::LBrace, SyntaxKind::RBrace),
+                &[
+                    (SyntaxKind::LParen, SyntaxKind::RParen),
+                    (SyntaxKind::LBracket, SyntaxKind::RBracket),
+                ],
+            )
+        } else {
+            (
+                self.list_delimiters(),
+                &[(SyntaxKind::LParen, SyntaxKind::RParen)],
+            )
+        };
         self.delimited(
             Some(SyntaxKind::AssignList),
             assigning.list(),
             delimiters,
-            &[(SyntaxKind::LParen, SyntaxKind::RParen)],
-            move |p| p.items(Self::at_operand, move |p| p.assign(assigning)),
+            mistakes,
+            move |p| p.items(Self::at_operand, move |p| p.assign(assigning, 0)),
         );
         self.form = outer_form;
     }
 
     /// `a := x`. `a: x` and `a = x`, as a tuple and as keyword arguments
     /// are written, are fixed to `a := x`, and `x as a`, as SQL and Tutorial
-    /// D's `ADD` write it, to `a := x`.
-    fn assign(&mut self, assigning: errors::Assigning) {
+    /// D's `ADD` write it, to `a := x`. The value's operators bind at least
+    /// as tightly as `min`: after SQL's `set`, a `where` ends it.
+    fn assign(&mut self, assigning: errors::Assigning, min: u8) {
         self.start_node(SyntaxKind::Assign);
         let separator = self.found_after(1).map(|f| f.kind);
         let named = self.at(SyntaxKind::Ident)
@@ -1056,10 +1432,10 @@ impl<'a> Parser<'a> {
                     assigning, found.kind, span, neighbors,
                 ));
             }
-            self.expression();
+            self.binary(min);
         } else {
             let start = self.found().map_or(0, |f| f.span.start);
-            self.expression();
+            self.binary(min);
             let value_end = self.last_end.unwrap_or(start);
             match self.found() {
                 Some(found)
@@ -1803,7 +2179,7 @@ fn is_skipped(kind: SyntaxKind) -> bool {
 mod tests {
     use super::*;
     use trendy_diag::Code;
-    use trendy_syntax::ast::AstNode;
+    use trendy_syntax::ast::{AstNode, Statement};
     use trendy_syntax::outline;
 
     fn parse_str(source: &str) -> Parse {
@@ -2377,7 +2753,9 @@ SourceFile
         let parse = parse_str("operator greet{name: text} [ call debug_value{v: name}; ];");
         let op = parse.tree.operators().next().unwrap();
         assert_eq!(op.params().unwrap().attributes().count(), 1);
-        let call = op.body().unwrap().statements().next().unwrap();
+        let Some(Statement::Call(call)) = op.body().unwrap().statements().next() else {
+            panic!("a call");
+        };
         assert_eq!(
             call.callee().unwrap().ident().unwrap().text(),
             "debug_value"
@@ -2389,7 +2767,7 @@ SourceFile
     fn positional_arguments_parse_for_sema_to_fix() {
         let parse = parse_str("operator main{} [ call debug_value{r}; ];");
         assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
-        let call = parse
+        let statement = parse
             .tree
             .operators()
             .next()
@@ -2397,8 +2775,10 @@ SourceFile
             .body()
             .unwrap()
             .statements()
-            .next()
-            .unwrap();
+            .next();
+        let Some(Statement::Call(call)) = statement else {
+            panic!("a call");
+        };
         assert_eq!(call.arguments().unwrap().positional().count(), 1);
     }
 
@@ -2466,6 +2846,144 @@ SourceFile
                 .statements()
                 .count(),
             1
+        );
+    }
+
+    /// The assignments in `main`'s body, `body`, each as its kind and the
+    /// text of its target, keyword and operand, those in an `assign` block
+    /// marked so.
+    fn clauses(body: &str) -> Vec<String> {
+        let source = format!("operator main{{}} [ {body} ];");
+        let parse = parse_str(&source);
+        assert!(parse.errors.is_empty(), "{body}: {:#?}", parse.errors);
+        let text = |expr: Option<trendy_syntax::ast::Expr>| {
+            expr.map_or_else(|| "-".to_string(), |e| e.syntax().text().to_string())
+        };
+        let describe = |clause: trendy_syntax::ast::Clause| {
+            format!(
+                "{:?} {} {} {}",
+                clause.syntax().kind(),
+                text(clause.target()),
+                clause
+                    .keyword()
+                    .map_or("-".to_string(), |k| k.text().to_string()),
+                text(clause.operand()),
+            )
+        };
+        let body = parse.tree.operators().next().unwrap().body().unwrap();
+        body.statements()
+            .flat_map(|statement| match statement {
+                Statement::Assign(stmt) => stmt.clauses().map(describe).collect(),
+                Statement::Block(block) => block
+                    .statements()
+                    .flat_map(|stmt| stmt.clauses())
+                    .map(|clause| format!("assign: {}", describe(clause)))
+                    .collect(),
+                Statement::Call(_) => Vec::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn assignment_statements() {
+        assert_eq!(clauses("n := n + 1;"), ["Assignment n - n + 1"]);
+        assert_eq!(
+            clauses("insert r s union t; d_insert r s;"),
+            ["Insertion r insert s union t", "Insertion r d_insert s"]
+        );
+        // The condition is all that follows `where`.
+        assert_eq!(
+            clauses("delete r where a = 1 and b; i_delete r s;"),
+            ["Deletion r delete a = 1 and b", "Deletion r i_delete s"]
+        );
+        assert_eq!(
+            clauses("update r { a := a + 1 } where b = 2;"),
+            ["Update r update b = 2"]
+        );
+        assert_eq!(clauses("update t { a := 1 };"), ["Update t update -"]);
+    }
+
+    #[test]
+    fn assign_blocks() {
+        assert_eq!(
+            clauses("assign { a := b; b := a; }; n := 1;"),
+            [
+                "assign: Assignment a - b",
+                "assign: Assignment b - a",
+                "Assignment n - 1"
+            ]
+        );
+        assert_eq!(
+            clauses("assign { update r { a := 1 }; delete r where b; };"),
+            ["assign: Update r update -", "assign: Deletion r delete b"]
+        );
+        assert_eq!(clauses("assign {};"), Vec::<String>::new());
+        // Only assignments go in a block.
+        let main = |body: &str| format!("operator main{{}} [ {body} ];");
+        assert_eq!(
+            messages(&main("assign { call f{}; a := 1; };")),
+            ["expected identifier, found `call`"]
+        );
+        assert_eq!(
+            messages(&main("assign { assign { a := 1; }; };")),
+            ["expected identifier, found `assign`"]
+        );
+    }
+
+    #[test]
+    fn assignment_mistakes() {
+        let main = |body: &str| format!("operator main{{}} [ {body} ];");
+        // C's `=`, and Tutorial D's capitals.
+        assert_eq!(fix(&main("n = n + 1;")), main("n := n + 1;"));
+        assert_eq!(
+            messages(&main("n = 1;")),
+            ["expected `:=` in an assignment, found `=`"]
+        );
+        assert_eq!(fix(&main("INSERT r s;")), main("insert r s;"));
+        // TTM's multiple assignment, with commas.
+        assert_eq!(
+            fix(&main("a := b, b := a;")),
+            main("assign { a := b; b := a; };")
+        );
+        assert_eq!(
+            fix(&main("assign { a := b, b := a; };")),
+            main("assign { a := b; b := a; };")
+        );
+        // SQL's words.
+        assert_eq!(
+            fix(&main("insert into r s; delete from r where a;")),
+            main("insert r s; delete r where a;")
+        );
+        assert_eq!(
+            fix(&main("update r set a = 1, b = a where c;")),
+            main("update r { a := 1, b := a } where c;")
+        );
+        assert_eq!(
+            fix(&main("assign { update r set a = 1; n := 2; };")),
+            main("assign { update r { a := 1 }; n := 2; };")
+        );
+        // Tutorial D's order.
+        assert_eq!(
+            fix(&main("update r where c (a := 1);")),
+            main("update r { a := 1 } where c;")
+        );
+        assert_eq!(fix(&main("update r [a := 1];")), main("update r {a := 1};"));
+        // A `delete` needs a condition.
+        assert_eq!(
+            messages(&main("delete r;")),
+            ["`delete` needs `where` and a condition"]
+        );
+        assert_eq!(fix(&main("delete r;")), main("r := relation {};"));
+        assert_eq!(fix(&main("delete from r;")), main("r := relation {};"));
+        assert_eq!(fix(&main("delete r s;")), main("r := r minus s;"));
+        assert_eq!(
+            fix(&main("delete r s union t;")),
+            main("r := r minus (s union t);")
+        );
+        // A keyword can't be assigned.
+        assert_eq!(
+            messages(&main("join := 1;")),
+            ["`join` is a keyword, so it can't be a name"]
         );
     }
 

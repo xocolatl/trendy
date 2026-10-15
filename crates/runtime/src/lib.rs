@@ -42,6 +42,11 @@ pub const FAIL_MISSING_TUPLE: u32 = 8;
 pub const FAIL_NO_TUPLE: u32 = 5;
 /// A relation has several tuples, where its only one is taken.
 pub const FAIL_SEVERAL_TUPLES: u32 = 6;
+/// Two tuples of a relation assigned to a variable have the same values
+/// for one of its keys.
+pub const FAIL_KEY_VIOLATED: u32 = 9;
+/// Two changes to a variable in an `assign` block remove the same tuple.
+pub const FAIL_CONFLICT: u32 = 10;
 
 /// The line written to stderr for each `FAIL_` constant, with the
 /// compiler's error code, which `trendyc --explain` describes.
@@ -53,8 +58,16 @@ pub fn failure_message(failure: u32) -> &'static str {
         FAIL_APPROXIMATE_OVERFLOW => "error[R0001]: approximate overflow\n",
         FAIL_OUT_OF_MEMORY => "error[R0003]: out of memory\n",
         FAIL_TUPLE_MISMATCH => "error[R0004]: tuples disagree on a common attribute\n",
-        FAIL_SHARED_TUPLE => "error[R0006]: the operands of d_union have a tuple in common\n",
-        FAIL_MISSING_TUPLE => "error[R0007]: i_minus removes a tuple that isn't there\n",
+        FAIL_SHARED_TUPLE => {
+            "error[R0006]: d_union or d_insert adds a tuple that is already there\n"
+        }
+        FAIL_MISSING_TUPLE => {
+            "error[R0007]: i_minus or i_delete removes a tuple that isn't there\n"
+        }
+        FAIL_KEY_VIOLATED => {
+            "error[R0008]: two tuples of a variable have the same values for one of its keys\n"
+        }
+        FAIL_CONFLICT => "error[R0009]: two changes in an assign block remove the same tuple\n",
         FAIL_NO_TUPLE => "error[R0005]: the relation has no tuples, but exactly one was taken\n",
         FAIL_SEVERAL_TUPLES => {
             "error[R0005]: the relation has several tuples, but exactly one was taken\n"
@@ -243,6 +256,153 @@ pub extern "C" fn trendy_rt_release() {
             let next = (*block).next;
             free(block.cast());
             block = next;
+        }
+    }
+}
+
+/// Store at `dst` a copy of the value at `src`, of the type `desc`
+/// describes, in memory of its own, which outlives the statement: a
+/// variable's new value. `owner` holds the memory of the variable's current
+/// value, or null while that is the value compiled into the program. That
+/// memory is released when the statement ends, since the statement's values
+/// can still point into it, and `owner` then holds the new value's. Stops
+/// the program if the memory can't be allocated.
+///
+/// # Safety
+///
+/// `src` must point to a valid value of the type `desc` describes, `desc`
+/// to a valid descriptor, `dst` to memory for one value that doesn't
+/// overlap `src`, and `owner` to null or memory that an earlier call
+/// stored there.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_assign(
+    dst: *mut u8,
+    owner: *mut *mut u8,
+    src: *const u8,
+    desc: *const TypeDesc,
+) {
+    use core::sync::atomic::Ordering::Relaxed;
+    // SAFETY: guaranteed by the caller; the block has room for everything
+    // the value points to, as measured.
+    unsafe {
+        let desc = &*desc;
+        let mut measured = Arena::measuring();
+        persist(core::ptr::null_mut(), src, desc, &mut measured);
+        let units = measured.used.div_ceil(size_of::<Owned>()) + 1;
+        let block = allocate::<Owned>(units);
+        block.write(Owned {
+            next: core::ptr::null_mut(),
+        });
+        let mut arena = Arena {
+            base: block.add(1).cast(),
+            used: 0,
+        };
+        core::ptr::copy_nonoverlapping(src, dst, desc.size);
+        persist(dst, src, desc, &mut arena);
+        let old = owner.cast::<*mut Owned>().read_unaligned();
+        if !old.is_null() {
+            (*old).next = OWNED.load(Relaxed);
+            OWNED.store(old, Relaxed);
+        }
+        owner.cast::<*mut Owned>().write_unaligned(block);
+    }
+}
+
+/// Where [`persist`] puts what a value points to: one block, filled in
+/// order, or none while measuring how much it needs.
+struct Arena {
+    /// The block, or null while measuring.
+    base: *mut u8,
+    /// The bytes taken so far.
+    used: usize,
+}
+
+impl Arena {
+    fn measuring() -> Self {
+        Arena {
+            base: core::ptr::null_mut(),
+            used: 0,
+        }
+    }
+
+    /// Room for `size` bytes, aligned to `align` from the block's start:
+    /// its address, or null while measuring.
+    fn take(&mut self, size: usize, align: usize) -> *mut u8 {
+        let start = self.used.next_multiple_of(align);
+        self.used = start + size;
+        if self.base.is_null() {
+            core::ptr::null_mut()
+        } else {
+            self.base.wrapping_add(start)
+        }
+    }
+}
+
+/// The alignment of each relation's tuples in an [`Arena`]: that of any
+/// value, as the block's start is.
+const ARRAY_ALIGN: usize = 16;
+
+/// Copy what the value at `src`, of the type `desc` describes, points to
+/// into `arena`, and point the copy of the value at `dst` to it: each text's
+/// bytes and each relation's tuples, and what those point to in turn. While
+/// measuring, `dst` is null, and nothing is written.
+///
+/// # Safety
+///
+/// `src` must point to a valid value of the type `desc` describes, and,
+/// unless measuring, `dst` to a copy of it, and the arena have room for
+/// what it points to.
+unsafe fn persist(dst: *mut u8, src: *const u8, desc: &TypeDesc, arena: &mut Arena) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        match desc.kind {
+            KIND_TEXT => {
+                let (bytes, len) = read_slice(src);
+                let to = arena.take(len, 1);
+                if !to.is_null() {
+                    core::ptr::copy_nonoverlapping(bytes, to, len);
+                    dst.cast::<Text>().write_unaligned(Text { bytes: to, len });
+                }
+            }
+            KIND_TUPLE => persist_tuple(dst, src, desc, arena),
+            KIND_RELATION => {
+                let (tuples, count) = read_slice(src);
+                let size = count * desc.element_size;
+                let to = arena.take(size, ARRAY_ALIGN);
+                if !to.is_null() {
+                    core::ptr::copy_nonoverlapping(tuples, to, size);
+                    dst.cast::<Text>().write_unaligned(Text {
+                        bytes: to,
+                        len: count,
+                    });
+                }
+                for i in 0..count {
+                    let offset = i * desc.element_size;
+                    persist_tuple(to.wrapping_add(offset), tuples.add(offset), desc, arena);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// [`persist`] for a tuple with the attributes of `desc`, a tuple or
+/// relation descriptor.
+///
+/// # Safety
+///
+/// As for [`persist`].
+unsafe fn persist_tuple(dst: *mut u8, src: *const u8, desc: &TypeDesc, arena: &mut Arena) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        for attr in attributes(desc) {
+            persist(
+                dst.wrapping_add(attr.offset),
+                src.add(attr.offset),
+                &*attr.desc,
+                arena,
+            );
         }
     }
 }
@@ -628,6 +788,9 @@ pub const COMBINE_INCLUDED_MINUS: usize = 3;
 /// [`trendy_rt_combine`]'s symmetric difference: the tuples of exactly one
 /// operand.
 pub const COMBINE_EXCLUSIVE_UNION: usize = 4;
+/// [`trendy_rt_combine`]'s union of the tuples changes remove, which
+/// conflict if they share one.
+pub const COMBINE_DISJOINT_CHANGES: usize = 5;
 
 /// Store at `dst` the relations `lhs` and `rhs`, of the one type `desc`
 /// describes, combined as `*combination`, a `COMBINE_` constant, says: the
@@ -635,8 +798,9 @@ pub const COMBINE_EXCLUSIVE_UNION: usize = 4;
 /// canonical order, in
 /// memory that [`trendy_rt_release`] releases. Both operands are in
 /// canonical order, so one pass merges them, and the result needs no
-/// sorting. Stops the program if a disjoint union's operands share a
-/// tuple, or an included minus's right operand has one the left lacks.
+/// sorting. Stops the program if a disjoint union's operands, or disjoint
+/// changes', share a tuple, or an included minus's right operand has one
+/// the left lacks.
 ///
 /// # Safety
 ///
@@ -686,8 +850,10 @@ pub unsafe extern "C" fn trendy_rt_combine(
                     i += 1;
                 }
                 Ordering::Equal => {
-                    if combination == COMBINE_DISJOINT_UNION {
-                        trendy_rt_fail(FAIL_SHARED_TUPLE);
+                    match combination {
+                        COMBINE_DISJOINT_UNION => trendy_rt_fail(FAIL_SHARED_TUPLE),
+                        COMBINE_DISJOINT_CHANGES => trendy_rt_fail(FAIL_CONFLICT),
+                        _ => {}
                     }
                     // A tuple of both is in an exclusive union's result
                     // no more than in a minus's.
@@ -1386,6 +1552,64 @@ mod tests {
             offset,
             desc,
         }
+    }
+
+    #[test]
+    fn persisted_values_point_only_into_their_arena() {
+        // `relation { name: text } { { name: "Ada" }, { name: "李白" } }`.
+        let text = scalar(KIND_TEXT, 16);
+        let attrs = [attr("name", 0, &text)];
+        let relation = TypeDesc {
+            kind: KIND_RELATION,
+            size: 16,
+            attributes: attrs.as_ptr(),
+            count: 1,
+            element_size: 16,
+        };
+        let (ada, li) = ("Ada", "李白");
+        let tuples = [
+            [ada.as_ptr() as usize, ada.len()],
+            [li.as_ptr() as usize, li.len()],
+        ];
+        let src = [tuples.as_ptr() as usize, 2];
+        let mut measured = Arena::measuring();
+        // SAFETY: the value matches its descriptor, and nothing is written
+        // while measuring.
+        unsafe {
+            persist(
+                core::ptr::null_mut(),
+                src.as_ptr().cast(),
+                &relation,
+                &mut measured,
+            );
+        };
+        assert_eq!(measured.used, 2 * 16 + ada.len() + li.len());
+
+        let mut memory = vec![0_u128; measured.used.div_ceil(16)];
+        let base: *mut u8 = memory.as_mut_ptr().cast();
+        let mut arena = Arena { base, used: 0 };
+        let mut dst = src;
+        // SAFETY: `dst` is a copy of the value, and the arena has the room
+        // measured.
+        unsafe {
+            persist(
+                dst.as_mut_ptr().cast(),
+                src.as_ptr().cast(),
+                &relation,
+                &mut arena,
+            );
+        };
+        assert_eq!(arena.used, measured.used);
+        assert_eq!(
+            print(dst.as_ptr().cast(), &relation),
+            print(src.as_ptr().cast(), &relation)
+        );
+        let inside =
+            |address: usize| (base as usize..base as usize + arena.used).contains(&address);
+        assert!(inside(dst[0]), "the tuples are copied");
+        // SAFETY: the copied tuples are texts, in the arena.
+        let copied = unsafe { core::slice::from_raw_parts(dst[0] as *const [usize; 2], 2) };
+        assert!(copied.iter().all(|t| inside(t[0])), "so are their texts");
     }
 
     #[test]

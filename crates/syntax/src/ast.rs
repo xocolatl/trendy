@@ -42,6 +42,12 @@ ast_node!(BuiltinOperator);
 ast_node!(BuiltinType);
 ast_node!(Body);
 ast_node!(CallStmt);
+ast_node!(AssignStmt);
+ast_node!(AssignBlock);
+ast_node!(Assignment);
+ast_node!(Insertion);
+ast_node!(Deletion);
+ast_node!(Update);
 ast_node!(Arguments);
 ast_node!(PositionalArg);
 ast_node!(NameRef);
@@ -155,8 +161,114 @@ impl BuiltinType {
 }
 
 impl Body {
-    pub fn statements(&self) -> impl Iterator<Item = CallStmt> {
-        self.0.children().filter_map(CallStmt::cast)
+    pub fn statements(&self) -> impl Iterator<Item = Statement> {
+        self.0.children().filter_map(|node| {
+            CallStmt::cast(node.clone())
+                .map(Statement::Call)
+                .or_else(|| AssignStmt::cast(node.clone()).map(Statement::Assign))
+                .or_else(|| AssignBlock::cast(node).map(Statement::Block))
+        })
+    }
+}
+
+/// A statement in an operator's body.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Statement {
+    Call(CallStmt),
+    Assign(AssignStmt),
+    Block(AssignBlock),
+}
+
+impl AssignStmt {
+    /// The assignments, in source order: one, or, in a statement the
+    /// parser reported, several separated by commas.
+    pub fn clauses(&self) -> impl Iterator<Item = Clause> + use<> {
+        self.0.children().filter_map(Clause::cast)
+    }
+}
+
+impl AssignBlock {
+    /// The `assign` keyword.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    /// The assignment statements in the block, in source order.
+    pub fn statements(&self) -> impl Iterator<Item = AssignStmt> + use<> {
+        self.0.children().filter_map(AssignStmt::cast)
+    }
+}
+
+/// One assignment in an assignment statement: `v := x`, or a shorthand for
+/// one.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Clause {
+    /// `v := x`
+    Assignment(Assignment),
+    /// `insert r s` or `d_insert r s`
+    Insertion(Insertion),
+    /// `delete r where p` or `i_delete r s`
+    Deletion(Deletion),
+    /// `update r { a := x } where p`
+    Update(Update),
+}
+
+impl Clause {
+    #[must_use]
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        Assignment::cast(node.clone())
+            .map(Clause::Assignment)
+            .or_else(|| Insertion::cast(node.clone()).map(Clause::Insertion))
+            .or_else(|| Deletion::cast(node.clone()).map(Clause::Deletion))
+            .or_else(|| Update::cast(node).map(Clause::Update))
+    }
+
+    #[must_use]
+    pub fn syntax(&self) -> &SyntaxNode {
+        match self {
+            Clause::Assignment(c) => c.syntax(),
+            Clause::Insertion(c) => c.syntax(),
+            Clause::Deletion(c) => c.syntax(),
+            Clause::Update(c) => c.syntax(),
+        }
+    }
+
+    #[must_use]
+    pub fn span(&self) -> Span {
+        span(self.syntax().text_range())
+    }
+
+    /// The variable assigned: the first expression.
+    #[must_use]
+    pub fn target(&self) -> Option<Expr> {
+        self.syntax().children().find_map(Expr::cast)
+    }
+
+    /// The keyword it starts with, for a shorthand: `insert`, `d_insert`,
+    /// `delete`, `i_delete` or `update`.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(self.syntax()).find(|t| t.kind().is_assignment_keyword())
+    }
+
+    /// The expression after the target: the value assigned, the relation
+    /// inserted or deleted, or the condition of a `delete` or an `update`.
+    #[must_use]
+    pub fn operand(&self) -> Option<Expr> {
+        self.syntax().children().filter_map(Expr::cast).nth(1)
+    }
+
+    /// The `where` before a condition, if there is one.
+    #[must_use]
+    pub fn where_keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(self.syntax()).find(|t| t.kind() == SyntaxKind::WhereKw)
+    }
+
+    /// An `update`'s attributes and their new values.
+    #[must_use]
+    pub fn assignments(&self) -> Option<AssignList> {
+        self.syntax().children().find_map(AssignList::cast)
     }
 }
 

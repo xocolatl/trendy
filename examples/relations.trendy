@@ -97,18 +97,6 @@ key { name };
    call debug_value{v: tclose relation { { from: 1, to: 2 }, { from: 2, to: 3 } }};
 */
 
-/* Assignment, and its shorthands (RM Prescription 21), once variables can
-   be assigned at all.
-   Tutorial D: R := ..., INSERT R ..., DELETE R WHERE ..., and
-   UPDATE R WHERE ... ( A := ... )
-   Proposed: statements.
-
-   people := people union relation { { name: "李白", born: 701 } };
-   insert people relation { { name: "李白", born: 701 } };
-   delete people where born > 1900;
-   update people where name = "Ada" { born: 1815 };
-*/
-
 /* Projection, and its complement, remove (Algebra A's REMOVE). The result
    has no duplicates, so it can have fewer tuples, and is in canonical
    order. Implemented: each result below is printed twice, folded when

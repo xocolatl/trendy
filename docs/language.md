@@ -38,8 +38,8 @@ body in square brackets `[]`, and a closing `;`.
 
 - **Parameters are a heading:** `{name: type, …}`, with each name unique and
   in any order. `main` has none, since nothing passes it arguments.
-- **A body is a list of statements,** each ending with `;`. For now, the only
-  statement is `call`.
+- **A body is a list of statements,** each ending with `;`: calls, and
+  assignments (see [Assignment](#assignment)).
 - **Arguments are a tuple of the parameters:** `call greet{name: "Ada",
   count: 2};`. Every argument is named, every parameter gets one, and the
   order doesn't matter.
@@ -155,6 +155,9 @@ var stopped: boolean;
 
 operator main{} [];
 ```
+
+Operators can then give variables new values; see
+[Assignment](#assignment).
 
 Variables whose initial values refer to each other in a cycle have no order
 to be evaluated in, which is an error.
@@ -360,9 +363,11 @@ operator main{} [];
 - **Only relation variables have keys,** not tuple or scalar variables
   (A0020), and not types or values: a key is a rule about what a variable
   can hold.
-- **An initial value must satisfy the keys.** It's checked when compiling,
-  and two tuples with the same values for a key are an error (A0026),
-  reported at the two tuples.
+- **Every value must satisfy the keys.** Two tuples with the same values
+  for a key are an error (R0008). An initial value is checked when
+  compiling, and the error is reported at the two tuples; an assigned
+  value is checked when the assignment is made, or, in an `assign` block,
+  once all of the block's are (see [Assignment](#assignment)).
 - `key` is a keyword only there, so it can still be a name: an attribute or
   a variable can be called `key`.
 
@@ -386,6 +391,163 @@ operator main{} [];
 var rivers: relation { name: text } key { name } := relation { { name: "Mekong" } };
 
 operator main{} [];
+```
+
+## Assignment
+
+An operator's body gives a variable a new value with an assignment
+statement, `name := value;`, or a shorthand for one (*The Third Manifesto*,
+RM Prescription 21).
+
+```trendy
+var poets := relation {
+    { name: "Ada", born: 1815 },
+    { name: "Bashō", born: 1644 },
+}
+key { name };
+
+var address := tuple { city: "Nairobi", postal_code: "00100" };
+var visits := 0;
+
+operator main{} [
+    visits := visits + 1;
+    insert poets relation { { name: "Rumi", born: 1207 } };
+    delete poets where born < 1300;
+    update poets { born := born + 1 } where name = "Ada";
+    update address { postal_code := "00200" };
+];
+```
+
+- **The value has the variable's type,** which never changes: an
+  assignment of another type is an error (A0004). `=` is equality, not
+  assignment (P0005).
+- **Only variables are assigned.** An operator's parameters are
+  read-only, and an operator is not a variable (A0026).
+- **The shorthands are for relation variables,** but for `update`, which
+  is also for tuple variables. Each means an assignment:
+
+| Statement | Means |
+|---|---|
+| `insert r s;` | `r := r union s;` |
+| `d_insert r s;` | `r := r d_union s;`, which fails if a tuple of `s` is already in `r` (R0006) |
+| `delete r where p;` | `r := r where not (p);` |
+| `i_delete r s;` | `r := r i_minus s;`, which fails if a tuple of `s` isn't in `r` (R0007) |
+| `update r { a := x };` | `r := r replace { a := x };`, of a relation or a tuple |
+| `update r { a := x } where p;` | `r := (r where not (p)) union ((r where p) replace { a := x });` |
+
+- **`delete` needs `where` and a condition** (P0023), so that every tuple
+  isn't deleted by accident. To delete them all, assign the empty relation:
+  `r := relation {};`, whose heading comes from the variable.
+- **An `update`'s new values come before `where`:**
+  `update r { a := x } where p;`, not as Tutorial D orders them (P0024).
+  Its condition and values have the attributes of the tuple at hand in
+  scope, as in `where` and `replace`.
+
+```trendy,error
+var poets := relation { { name: "Ada", born: 1815 } };
+
+operator main{} [
+    delete poets;
+];
+```
+
+```trendy,error
+var visits := 0;
+
+operator count{visits: integer} [
+    visits := visits + 1;
+];
+
+operator main{} [];
+```
+
+### Assigning at once
+
+An `assign` block makes several assignments at once, as one statement
+(RM Prescription 21's multiple assignment). Its braces say that the order
+of its assignments doesn't matter: each ends with `;`, as a statement does,
+and the block with `};`.
+
+```trendy
+var x := 1;
+var y := 2;
+var rooms := relation {
+    { room: 1, guest: "Amara" },
+    { room: 2, guest: "Kenji" },
+}
+key { room }
+key { guest };
+
+operator main{} [
+    assign {
+        x := y;
+        y := x;
+    };
+    assign {
+        update rooms { guest := "Kenji" } where room = 1;
+        update rooms { guest := "Amara" } where room = 2;
+    };
+];
+```
+
+- **Every value is computed from the variables as they were before the
+  block,** so `x := y; y := x;` in a block swaps them, whereas as two
+  statements both would end up `y`'s.
+- **Changes to one variable merge into its new value.** An `insert`,
+  `d_insert`, `delete`, `i_delete` or `update` of a relation is a change to
+  its tuples: the new value is the old one less every tuple the changes
+  remove, which a `delete` or an `update` selects and an `i_delete` names,
+  with every tuple they add. Each condition sees the old tuples, so the two
+  `update`s above swap the guests. An `update` of a tuple changes its
+  attributes, and `update`s of different attributes merge.
+- **Changes that touch the same tuple or attribute conflict,** since
+  neither order would be the right one. Two changes that remove the same
+  tuple stop the program (R0009), as do two `update`s of the same
+  attribute of a tuple, and `v := …` with any other change to `v`; each is
+  an error when compiling when it is known then. This program compiles,
+  but stops when it runs, writing `error[R0009]: two changes in an assign
+  block remove the same tuple`, since both changes remove Kenji's:
+
+```trendy
+var rooms := relation { { room: 1, guest: "Kenji" } } key { room };
+
+operator main{} [
+    assign {
+        update rooms { guest := "Wanjiru" } where room = 1;
+        delete rooms where guest = "Kenji";
+    };
+];
+```
+
+- **`d_insert` checks the tuples it adds against those the block keeps,**
+  and the other `d_insert`s' in it, and `i_delete` checks the tuples it
+  names against the old value.
+- **Keys are checked once all the block's assignments are made,** so a key
+  can be broken between them: as two statements, the first `update` above
+  would give Kenji two rooms. A variable whose new value has two tuples
+  with the same values for a key stops the program (R0008); when the value
+  is known while compiling, that is an error then.
+- **Only assignments go in a block.** Several assignments separated by
+  commas, as Tutorial D writes them, are fixed to a block (P0025).
+
+```trendy,error
+var x := 1;
+var y := 2;
+
+operator main{} [
+    x := y, y := x;
+];
+```
+
+```trendy,error
+var count := 0;
+
+operator main{} [
+    assign {
+        count := count + 1;
+        count := count + 2;
+    };
+];
 ```
 
 ## Expressions
@@ -799,7 +961,8 @@ operator main{} [
   result can have fewer tuples than the operand.
 - Assignments are written as in `extend`, and the same habits are fixed
   (P0011). `replace` is not an update: it changes no variable, and leaves
-  the operand as it was.
+  the operand as it was. The `update` statement assigns a variable its
+  `replace` (see [Assignment](#assignment)).
 
 ```trendy,error
 var items := relation { { name: "tea", price: 3 } };
@@ -1469,8 +1632,9 @@ are case-sensitive. The keywords are `operator`, `var`, `call`, `builtin`,
 `tuple`, `relation`, `true`, `false`, `not`, `and`, `or`, `xor`,
 `implies`, `div`, `mod`, `remove`, `rename`, `extend`, `replace`, `group`,
 `ungroup`, `wrap`, `unwrap`, `join`, `times`, `compose`, `matching`,
-`union`, `d_union`, `xunion`, `intersect`, `minus`, `i_minus`, `where` and
-`as`, all lowercase, and a keyword can't be a name (P0017).
+`union`, `d_union`, `xunion`, `intersect`, `minus`, `i_minus`, `where`,
+`as`, `insert`, `d_insert`, `delete`, `i_delete`, `update` and `assign`,
+all lowercase, and a keyword can't be a name (P0017).
 `type` is a keyword only after `builtin`, `key` only where a variable's
 keys go, and `value` and `from` only in `tuple from` and `value from`.
 
@@ -1515,6 +1679,8 @@ operator main{} [];
 - an operator's body has each statement on its own line, indented, on
   adjacent lines unless you separate them with a blank line to group them;
   several blank lines become one;
+- an `assign` block has each assignment on its own line, indented, like
+  an operator's body;
 - a variable's keys on the line before them, when they fit there, with
   spaces inside their braces: `var r: relation { a: integer } key { a };`.
   After a value that spans lines, or when they don't fit, each key goes on
@@ -1543,6 +1709,11 @@ line after a comment on its own line, such as a file's header, is kept.
 | `print(x)`, `f(x)` | `call debug_value{v: x};` |
 | `let`, `const`, `int x` | `var x` |
 | `x = 0` | `x := 0` |
+| `INSERT R …`, `INSERT INTO r …` | `insert r …;` |
+| `DELETE R WHERE P`, `DELETE FROM r WHERE p` | `delete r where p;` |
+| `DELETE R`, `DELETE FROM r` | `r := relation {};` |
+| `UPDATE R WHERE P ( A := X )`, `UPDATE r SET a = x WHERE p` | `update r { a := x } where p;` |
+| `X := Y, Y := X`, a multiple assignment | `assign { x := y; y := x; };` |
 | `(params) { body }` | `{params} [body]` |
 | `bool` | `boolean` |
 | `True`, `TRUE`, `1` for true | `true` |

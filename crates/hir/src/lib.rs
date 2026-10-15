@@ -132,6 +132,20 @@ pub enum Statement {
         operator: OperatorId,
         args: BTreeMap<String, Expr>,
     },
+    /// Assignments made at once (TTM RM Prescription 21), each to a
+    /// different variable, the shorthands, such as `insert`, expanded, and
+    /// an `assign` block's changes to one variable merged. Every value is
+    /// computed from the variables as they were before any changes, and
+    /// the variables' keys are checked once all the values are, before any
+    /// is assigned.
+    Assign(Vec<Assignment>),
+}
+
+/// `target := value`, in an assignment statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Assignment {
+    pub target: VariableId,
+    pub value: Expr,
 }
 
 /// An expression whose value is known only when the program runs. Parts
@@ -319,11 +333,15 @@ pub enum Combination {
     /// The tuples of the left that aren't in the right, all of whose tuples
     /// must be in the left (`i_minus`).
     IncludedMinus,
+    /// The tuples of either, which must have none in common: the tuples
+    /// that changes to one variable in an `assign` block remove, which
+    /// conflict if two remove the same tuple.
+    DisjointChanges,
 }
 
 /// A tuple that breaks a checked [`Combination`]'s condition: one both
-/// operands of a disjoint union have, or one of the right operand of an
-/// included minus that the left lacks.
+/// operands of a disjoint union, or of disjoint changes, have, or one of
+/// the right operand of an included minus that the left lacks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Broken {
     pub combination: Combination,
@@ -958,7 +976,7 @@ impl Value {
             })
         };
         match combination {
-            Combination::DisjointUnion => {
+            Combination::DisjointUnion | Combination::DisjointChanges => {
                 if let Some(shared) = lhs.tuples.intersection(&rhs.tuples).next() {
                     return Err(broken(shared));
                 }
@@ -979,7 +997,7 @@ impl Value {
                 .symmetric_difference(&rhs.tuples)
                 .cloned()
                 .collect(),
-            Combination::Union | Combination::DisjointUnion => {
+            Combination::Union | Combination::DisjointUnion | Combination::DisjointChanges => {
                 lhs.tuples.union(&rhs.tuples).cloned().collect()
             }
         };

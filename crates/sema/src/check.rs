@@ -235,10 +235,7 @@ impl<'a> Checker<'a> {
     }
 
     /// `postfix`, an `extend` or a `replace`, as `assigning` says, written
-    /// `expr`: each attribute's value is checked with the attributes of the
-    /// tuple at hand in scope. A `replace`'s values have the types of the
-    /// attributes they replace, and are computed from the old values, all
-    /// at once.
+    /// `expr`.
     fn assigned(
         &mut self,
         postfix: &ast::PostfixExpr,
@@ -249,19 +246,53 @@ impl<'a> Checker<'a> {
     ) -> Option<hir::Expr> {
         let operand_expr = postfix.operand()?;
         let operand = self.expr(&operand_expr, None, errors)?;
-        let ty = self.ty(&operand);
+        let list = postfix.assignments()?;
         let keyword = postfix.operator()?;
+        let assigned = Assigned {
+            assigning,
+            keyword: &keyword,
+            list: &list,
+            operand: &operand_expr,
+        };
+        let result = self.assign_attributes(
+            operand,
+            &assigned,
+            || errors::empty_assign(assigning, postfix, &operand_expr),
+            errors,
+        )?;
+        self.matched(expected, result, expr, errors)
+    }
+
+    /// `operand`, written `assigned.operand`, with the attributes in
+    /// `assigned.list` added, or given new values, as `assigned.assigning`
+    /// says: each attribute's value is checked with the attributes of the
+    /// tuple at hand in scope. A `replace`'s values have the types of the
+    /// attributes they replace, and are computed from the old values, all
+    /// at once. `empty` is the error for a list with none.
+    pub(crate) fn assign_attributes(
+        &mut self,
+        operand: hir::Expr,
+        assigned: &Assigned,
+        empty: impl FnOnce() -> Diagnostic,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let Assigned {
+            assigning,
+            keyword,
+            list,
+            operand: operand_expr,
+        } = *assigned;
+        let ty = self.ty(&operand);
         let (hir::Type::Tuple(heading) | hir::Type::Relation(heading)) = &ty else {
             let at = trendy_syntax::span(keyword.text_range());
             errors.push(errors::not_projectable(
                 Some(assigning.keyword()),
                 at,
                 &ty,
-                &operand_expr,
+                operand_expr,
             ));
             return None;
         };
-        let list = postfix.assignments()?;
         let assignments: Vec<(ast::Assign, String, Span)> = list
             .assignments()
             .filter_map(|assign| {
@@ -271,18 +302,17 @@ impl<'a> Checker<'a> {
             })
             .collect();
         if list.assignments().next().is_none() {
-            errors.push(errors::empty_assign(assigning, postfix, &operand_expr));
+            errors.push(empty());
             return None;
         }
-        // When every name is wrong for this operator, the other one is
-        // likely what was meant.
+        // When every name is wrong for an `extend` or a `replace`, the
+        // other one is likely what was meant.
         let keyword = trendy_syntax::span(keyword.text_range());
-        let other = assignments
-            .iter()
-            .all(|(_, name, _)| {
+        let other = (assigning != ops::Assigning::Update
+            && assignments.iter().all(|(_, name, _)| {
                 heading.get(name).is_some() == (assigning == ops::Assigning::Extend)
-            })
-            .then_some(keyword);
+            }))
+        .then_some(keyword);
         let mut ok = true;
         let mut values = BTreeMap::new();
         let mut types = BTreeMap::new();
@@ -300,7 +330,7 @@ impl<'a> Checker<'a> {
                 continue;
             }
             let (valid, expected) =
-                assigned_name(assigning, name, *span, &ty, &operand_expr, other, errors);
+                assigned_name(assigning, name, *span, &ty, operand_expr, other, errors);
             ok &= valid;
             let mut names = TupleNames {
                 outer: &mut *self.names,
@@ -322,7 +352,7 @@ impl<'a> Checker<'a> {
             return None;
         }
         match ops::extend(operand, hir::Heading::new(types), values) {
-            Ok(result) => self.matched(expected, result, expr, errors),
+            Ok(result) => Some(result),
             Err(failure) => {
                 let value = assignments
                     .iter()
@@ -528,6 +558,26 @@ impl<'a> Checker<'a> {
             return None;
         };
         let condition_expr = binary.rhs()?;
+        let condition = self.condition(heading, &condition_expr, token, errors)?;
+        match ops::restrict(operand, condition) {
+            Ok(result) => self.matched(expected, result, expr, errors),
+            Err(failure) => {
+                errors.push(errors::extension_failure(&failure, &condition_expr));
+                None
+            }
+        }
+    }
+
+    /// `condition`, after `token`, `where`, checked as a boolean with the
+    /// attributes of the tuple at hand, of a relation with `heading`, in
+    /// scope.
+    pub(crate) fn condition(
+        &mut self,
+        heading: hir::Heading,
+        condition: &Expr,
+        token: trendy_syntax::SyntaxToken,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
         let boolean = Expected {
             ty: hir::Type::Scalar(hir::Scalar::Boolean),
             origin: types::Origin::Operator(token),
@@ -536,14 +586,7 @@ impl<'a> Checker<'a> {
             outer: &mut *self.names,
             heading,
         };
-        let condition = Checker::new(&mut names).expr(&condition_expr, Some(&boolean), errors)?;
-        match ops::restrict(operand, condition) {
-            Ok(result) => self.matched(expected, result, expr, errors),
-            Err(failure) => {
-                errors.push(errors::extension_failure(&failure, &condition_expr));
-                None
-            }
-        }
+        Checker::new(&mut names).expr(condition, Some(&boolean), errors)
     }
 
     /// `image`, written `expr`: the image relation of the tuple at hand in
@@ -696,15 +739,17 @@ fn assigned_name(
             errors.push(errors::extension_exists(name, span, ty, operand, other));
             (false, None)
         }
-        (ops::Assigning::Replace, Some(replaced)) => (
+        (ops::Assigning::Replace | ops::Assigning::Update, Some(replaced)) => (
             true,
             Some(Expected {
                 ty: replaced.clone(),
                 origin: types::Origin::Replaced(operand.clone(), name.to_string()),
             }),
         ),
-        (ops::Assigning::Replace, None) => {
-            errors.push(errors::replaced_unknown(name, span, ty, operand, other));
+        (ops::Assigning::Replace | ops::Assigning::Update, None) => {
+            errors.push(errors::replaced_unknown(
+                assigning, name, span, ty, operand, other,
+            ));
             (false, None)
         }
     }
@@ -857,6 +902,16 @@ fn unpackings(
         }
     }
     ok.then_some(names)
+}
+
+/// An `extend`, a `replace` or an `update`, as `assigning` says, after
+/// `keyword`, of `list`, applied to what is written `operand`.
+#[derive(Clone, Copy)]
+pub(crate) struct Assigned<'a> {
+    pub(crate) assigning: ops::Assigning,
+    pub(crate) keyword: &'a trendy_syntax::SyntaxToken,
+    pub(crate) list: &'a ast::AssignList,
+    pub(crate) operand: &'a Expr,
 }
 
 /// Names in the values an `extend` or a `replace` computes: the attributes of the tuple at

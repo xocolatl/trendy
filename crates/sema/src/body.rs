@@ -5,11 +5,11 @@ use std::collections::{BTreeMap, HashMap};
 
 use trendy_diag::{Diagnostic, Span, edit_distance};
 use trendy_hir as hir;
-use trendy_syntax::ast::{self, AstNode, AttributeValue};
+use trendy_syntax::ast::{self, AstNode, AttributeValue, VarDecl};
 
 use crate::check::{Checker, Lookup, Names};
 use crate::types::{self, Expected, Origin};
-use crate::{Kind, Values, errors};
+use crate::{Kind, Values, assign, errors};
 
 /// What a call needs to know about the operator it calls.
 pub(crate) struct Signature {
@@ -63,6 +63,8 @@ pub(crate) struct Context<'a> {
     pub(crate) signatures: &'a HashMap<String, Signature>,
     pub(crate) variables: &'a [hir::Variable],
     pub(crate) variable_ids: &'a HashMap<String, hir::VariableId>,
+    /// Each variable's declaration, by name.
+    pub(crate) declarations: &'a HashMap<String, VarDecl>,
 }
 
 /// A user operator's parameters, or `None` after reporting why they are
@@ -92,7 +94,14 @@ pub(crate) fn body(
     let mut statements = Vec::new();
     let mut ok = true;
     for stmt in body.statements() {
-        match call(&stmt, within, cx, errors) {
+        let statement = match &stmt {
+            ast::Statement::Call(stmt) => call(stmt, within, cx, errors),
+            ast::Statement::Assign(stmt) => {
+                assign::statement(&stmt.clauses().collect::<Vec<_>>(), within, cx, errors)
+            }
+            ast::Statement::Block(block) => assign::block(block, within, cx, errors),
+        };
+        match statement {
             Some(statement) => statements.push(statement),
             None => ok = false,
         }
@@ -266,9 +275,9 @@ fn checked(
 
 /// Names in the body of `within`: its parameters, which hide variables of
 /// the same name, and the variables.
-struct BodyNames<'a, 'b> {
-    cx: &'a Context<'b>,
-    within: hir::OperatorId,
+pub(crate) struct BodyNames<'a, 'b> {
+    pub(crate) cx: &'a Context<'b>,
+    pub(crate) within: hir::OperatorId,
 }
 
 impl Names for BodyNames<'_, '_> {

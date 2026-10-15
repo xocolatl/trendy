@@ -89,7 +89,7 @@
       "match": "\\b(key)\\s*(?=\\{)"
     },
     "keywords": {
-      "match": "\\b(?:operator|var|tuple|relation|call|builtin|as)\\b",
+      "match": "\\b(?:operator|var|tuple|relation|call|builtin|as|insert|d_insert|delete|i_delete|update|assign)\\b",
       "name": "keyword.other.trendy"
     },
     "number": {
@@ -193,7 +193,7 @@
           "name": "entity.name.type.trendy"
         }
       },
-      "match": "\\b(var)\\s+([A-Z_a-z][0-9A-Z_a-z]*)(?:\\s*(\\:)\\s*(?!(?:operator|var|true|false|tuple|relation|call|builtin|not|and|or|xor|implies|div|mod|remove|rename|extend|replace|group|ungroup|wrap|unwrap|join|times|compose|matching|union|d_union|xunion|intersect|minus|i_minus|where|as)\\b)([A-Z_a-z][0-9A-Z_a-z]*))?"
+      "match": "\\b(var)\\s+([A-Z_a-z][0-9A-Z_a-z]*)(?:\\s*(\\:)\\s*(?!(?:operator|var|true|false|tuple|relation|call|builtin|not|and|or|xor|implies|div|mod|remove|rename|extend|replace|group|ungroup|wrap|unwrap|join|times|compose|matching|union|d_union|xunion|intersect|minus|i_minus|where|as|insert|d_insert|delete|i_delete|update|assign)\\b)([A-Z_a-z][0-9A-Z_a-z]*))?"
     }
   },
   "scopeName": "source.trendy"

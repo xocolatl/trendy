@@ -18,13 +18,18 @@ pub fn lower(program: &hir::Program) -> lir::Program {
 
     let mut variable_data = Vec::new();
     for variable in &program.variables {
-        let field = cx.value_field(&variable.init);
+        let mut fields = vec![cx.value_field(&variable.init)];
+        // Where an assigned value's texts and relations are: none yet, as
+        // the initial value's are constants.
+        if points(&variable.ty) {
+            fields.push(lir::Field::Usize(0));
+        }
         variable_data.push(cx.push(lir::Data {
             kind: lir::DataKind::Variable {
                 name: variable.name.clone(),
             },
             writable: true,
-            fields: vec![field],
+            fields,
         }));
     }
 
@@ -216,9 +221,9 @@ struct FunctionBuilder<'a> {
     current: lir::BlockId,
     insts: Vec<lir::Inst>,
     /// Whether the current statement calls a runtime function that makes a
-    /// text or relation, which the statement owns until it ends. No value
-    /// outlives the statement that computes it, since there is no
-    /// assignment yet and operators return nothing.
+    /// text or relation, which the statement owns until it ends. Only an
+    /// assigned value outlives it, copied into memory of the variable's
+    /// own.
     allocates: bool,
     /// Where each tuple at hand is, innermost last: what `Current` refers
     /// to, inside an `Extend`'s values.
@@ -250,7 +255,10 @@ impl FunctionBuilder<'_> {
     }
 
     fn statement(&mut self, statement: &hir::Statement, cx: &mut Lowering) {
-        self.call(statement, cx);
+        match statement {
+            hir::Statement::Call { operator, args } => self.call(*operator, args, cx),
+            hir::Statement::Assign(assignments) => self.assign(assignments, cx),
+        }
         if std::mem::take(&mut self.allocates) {
             self.insts.push(lir::Inst::CallRuntime {
                 function: lir::RuntimeFn::Release,
@@ -259,9 +267,13 @@ impl FunctionBuilder<'_> {
         }
     }
 
-    fn call(&mut self, statement: &hir::Statement, cx: &mut Lowering) {
-        let hir::Statement::Call { operator, args } = statement;
-        let callee = self.program.operator(*operator);
+    fn call(
+        &mut self,
+        operator: hir::OperatorId,
+        args: &BTreeMap<String, hir::Expr>,
+        cx: &mut Lowering,
+    ) {
+        let callee = self.program.operator(operator);
         match &callee.kind {
             hir::OperatorKind::Builtin(hir::Builtin::DebugValue) => {
                 let value = &args["v"];
@@ -292,10 +304,111 @@ impl FunctionBuilder<'_> {
                     slot
                 });
                 self.insts.push(lir::Inst::Call {
-                    function: self.function_ids[operator],
+                    function: self.function_ids[&operator],
                     args: args_place,
                 });
             }
+        }
+    }
+
+    /// Assignments made at once, each to a different variable. Each value
+    /// is computed and copied into a slot of its own, since it can be in a
+    /// variable that another assignment changes. Then each variable's value
+    /// is checked against its keys, and only then assigned.
+    fn assign(&mut self, assignments: &[hir::Assignment], cx: &mut Lowering) {
+        let mut values: Vec<(hir::VariableId, lir::Place)> = Vec::new();
+        for assignment in assignments {
+            let value = self.place(&assignment.value, cx);
+            let ty = &self.program.variable(assignment.target).ty;
+            let slot = self.slot(layout(ty));
+            self.insts.push(lir::Inst::Copy {
+                dst: slot.clone(),
+                src: value,
+                layout: layout(ty),
+            });
+            values.push((assignment.target, slot));
+        }
+        for (target, value) in &values {
+            self.check_keys(*target, value, cx);
+        }
+        for (target, value) in values {
+            self.store(target, value, cx);
+        }
+    }
+
+    /// Stop the program if the relation at `value`, about to be assigned to
+    /// the variable `target`, has two tuples with the same values for one
+    /// of its keys: if its projection on the key has fewer tuples. A key of
+    /// the whole heading always holds.
+    fn check_keys(&mut self, target: hir::VariableId, value: &lir::Place, cx: &mut Lowering) {
+        let variable = self.program.variable(target);
+        let ty = &variable.ty;
+        if !matches!(ty, hir::Type::Relation(_)) {
+            return;
+        }
+        let names: Vec<&str> = attribute_names(ty).collect();
+        for key in &variable.keys {
+            if key.len() == names.len() {
+                continue;
+            }
+            let others: BTreeSet<String> = names
+                .iter()
+                .filter(|name| !key.contains(**name))
+                .map(|name| (*name).to_string())
+                .collect();
+            let sources: Vec<usize> = names
+                .iter()
+                .enumerate()
+                .filter(|(_, name)| key.contains(**name))
+                .map(|(i, _)| i)
+                .collect();
+            let projected = self.reshape(ty, &ty.without(&others), &sources, value.clone(), cx);
+            let (mut count, mut keys) = (value.clone(), projected);
+            count.path.push(1);
+            keys.path.push(1);
+            let violated = self.slot(lir::Layout::U8);
+            self.insts.push(lir::Inst::Binary {
+                dst: violated.clone(),
+                op: lir::BinaryOp::Compare(lir::Comparison::NotEqual, lir::Operand::Usize),
+                lhs: count,
+                rhs: keys,
+            });
+            let (fail, holds) = (self.new_block(), self.new_block());
+            self.end_block(
+                lir::Terminator::Branch {
+                    condition: violated,
+                    then: fail,
+                    otherwise: holds,
+                },
+                fail,
+            );
+            self.end_block(lir::Terminator::Fail(lir::Failure::KeyViolated), holds);
+        }
+    }
+
+    /// Assign the value at `value` to the variable `target`: copied, or,
+    /// if it points to texts or relations, copied with them into memory of
+    /// the variable's own.
+    fn store(&mut self, target: hir::VariableId, value: lir::Place, cx: &mut Lowering) {
+        let ty = &self.program.variable(target).ty;
+        let data = self.variable_data[target.0];
+        let field = |i| lir::Place {
+            base: lir::Base::Data(data),
+            path: vec![i],
+        };
+        if points(ty) {
+            let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(ty)));
+            self.insts.push(lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::Assign,
+                args: vec![field(0), field(1), value, descriptor],
+            });
+            self.allocates = true;
+        } else {
+            self.insts.push(lir::Inst::Copy {
+                dst: field(0),
+                src: value,
+                layout: layout(ty),
+            });
         }
     }
 
@@ -951,6 +1064,7 @@ impl FunctionBuilder<'_> {
             hir::Combination::ExclusiveUnion => lir::Combination::ExclusiveUnion,
             hir::Combination::Minus => lir::Combination::Minus,
             hir::Combination::IncludedMinus => lir::Combination::IncludedMinus,
+            hir::Combination::DisjointChanges => lir::Combination::DisjointChanges,
         };
         let combination = usize_constant(combination.code(), cx);
         let dst = self.slot(layout(&ty));
@@ -1321,6 +1435,16 @@ fn scalar_layout(scalar: hir::Scalar) -> lir::Layout {
 }
 
 /// The layout of a value of type `ty`.
+/// Whether a value of type `ty` points to memory: whether it is or has a
+/// text or a relation.
+fn points(ty: &hir::Type) -> bool {
+    match ty {
+        hir::Type::Scalar(scalar) => *scalar == hir::Scalar::Text,
+        hir::Type::Relation(_) => true,
+        hir::Type::Tuple(heading) => heading.attributes().any(|(_, ty)| points(ty)),
+    }
+}
+
 fn layout(ty: &hir::Type) -> lir::Layout {
     match ty {
         hir::Type::Scalar(hir::Scalar::Boolean) => lir::Layout::U8,
@@ -1423,7 +1547,7 @@ mod tests {
     }
 
     #[test]
-    fn values_are_single_fields() {
+    fn values_are_fields_with_an_owner_if_they_point() {
         let lowered = lower(&program(
             vec![user("main", &[], vec![])],
             vec![
@@ -1437,12 +1561,17 @@ mod tests {
             lowered.data[1].fields,
             [lir::Field::Bytes("hé".as_bytes().to_vec())]
         );
+        // A text points to its bytes, so the variable has an owner for
+        // the bytes of a text assigned to it: none yet.
         assert_eq!(
             lowered.data[2].fields,
-            [lir::Field::Struct(vec![
-                lir::Field::Address(lir::DataId(1)),
-                lir::Field::Usize(3)
-            ])]
+            [
+                lir::Field::Struct(vec![
+                    lir::Field::Address(lir::DataId(1)),
+                    lir::Field::Usize(3)
+                ]),
+                lir::Field::Usize(0)
+            ]
         );
         assert_eq!(lowered.data[3].fields, [lir::Field::U8(1)]);
     }
@@ -1466,10 +1595,13 @@ mod tests {
         assert!(!lowered.data[0].writable);
         assert_eq!(
             lowered.data[1].fields,
-            [lir::Field::Struct(vec![
-                lir::Field::Address(lir::DataId(0)),
-                lir::Field::Usize(2)
-            ])]
+            [
+                lir::Field::Struct(vec![
+                    lir::Field::Address(lir::DataId(0)),
+                    lir::Field::Usize(2)
+                ]),
+                lir::Field::Usize(0)
+            ]
         );
     }
 
@@ -1585,6 +1717,89 @@ mod tests {
                 (lir::RuntimeFn::DebugValue, Some(slot(1))),
                 (lir::RuntimeFn::Release, None),
             ]
+        );
+    }
+
+    fn assign(assignments: Vec<(usize, hir::Expr)>) -> hir::Statement {
+        hir::Statement::Assign(
+            assignments
+                .into_iter()
+                .map(|(target, value)| hir::Assignment {
+                    target: hir::VariableId(target),
+                    value,
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn assignments_read_every_value_before_assigning_any() {
+        // `a := b, b := a;` swaps them.
+        let var = |i| hir::Expr::Variable(hir::VariableId(i));
+        let lowered = lower(&program(
+            vec![user(
+                "main",
+                &[],
+                vec![assign(vec![(0, var(1)), (1, var(0))])],
+            )],
+            vec![
+                variable("a", hir::Value::Integer(1)),
+                variable("b", hir::Value::Integer(2)),
+            ],
+        ));
+        let data = |i| lir::Place {
+            base: lir::Base::Data(lir::DataId(i)),
+            path: vec![0],
+        };
+        let slot = |i| lir::Place::whole(lir::Base::Slot(lir::SlotId(i)));
+        let copy = |dst, src| lir::Inst::Copy {
+            dst,
+            src,
+            layout: lir::Layout::I64,
+        };
+        assert_eq!(
+            lowered.functions[0].blocks[0].insts,
+            [
+                copy(slot(0), data(1)),
+                copy(slot(1), data(0)),
+                copy(data(0), slot(0)),
+                copy(data(1), slot(1)),
+            ]
+        );
+    }
+
+    #[test]
+    fn assigned_texts_are_copied_into_memory_of_the_variables_own() {
+        let t = hir::Expr::Variable(hir::VariableId(0));
+        let lowered = lower(&program(
+            vec![user("main", &[], vec![assign(vec![(0, t)])])],
+            vec![variable("t", hir::Value::Text("a".to_string()))],
+        ));
+        let variable = lir::DataId(1);
+        let field = |i| lir::Place {
+            base: lir::Base::Data(variable),
+            path: vec![i],
+        };
+        let insts = &lowered.functions[0].blocks[0].insts;
+        let lir::Inst::CallRuntime { function, args } = &insts[1] else {
+            panic!("expected a runtime call, found {:?}", insts[1]);
+        };
+        assert_eq!(*function, lir::RuntimeFn::Assign);
+        assert_eq!(
+            args[..3],
+            [
+                field(0),
+                field(1),
+                lir::Place::whole(lir::Base::Slot(lir::SlotId(0)))
+            ]
+        );
+        // The variable's old memory is released with the statement's.
+        assert_eq!(
+            insts[2],
+            lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::Release,
+                args: Vec::new(),
+            }
         );
     }
 

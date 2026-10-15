@@ -13,8 +13,8 @@ mod order;
 use std::collections::HashSet;
 
 use trendy_syntax::ast::{
-    Arguments, AssignList, AstNode, Body, GatherList, Heading, NameList, NaryExpr, RelationLiteral,
-    RenameList, SourceFile, TupleLiteral,
+    Arguments, AssignBlock, AssignList, AstNode, Body, Clause, GatherList, Heading, NameList,
+    NaryExpr, RelationLiteral, RenameList, SourceFile, TupleLiteral,
 };
 use trendy_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
@@ -116,6 +116,9 @@ impl Layout {
         match node.kind() {
             SyntaxKind::Body => {
                 Body::cast(node.clone()).is_some_and(|b| b.statements().next().is_some())
+            }
+            SyntaxKind::AssignBlock => {
+                AssignBlock::cast(node.clone()).is_some_and(|b| b.statements().next().is_some())
             }
             _ => is_multi_tuple_relation(node) || self.broken.contains(node),
         }
@@ -241,9 +244,12 @@ fn between(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool, layout: &La
         // Statements in a row go on adjacent lines, unless the source groups
         // them with a blank line, which is kept; several become one.
         let statement_end = prev.kind() == SyntaxKind::Semicolon
-            && prev
-                .parent()
-                .is_some_and(|p| p.kind() == SyntaxKind::CallStmt);
+            && prev.parent().is_some_and(|p| {
+                matches!(
+                    p.kind(),
+                    SyntaxKind::CallStmt | SyntaxKind::AssignStmt | SyntaxKind::AssignBlock
+                )
+            });
         let blank = blank_line && statement_end && next.kind() != SyntaxKind::RBracket;
         return format!(
             "{}\n{}",
@@ -464,9 +470,8 @@ fn broken_line(prev: &SyntaxToken, next: &SyntaxToken, layout: &Layout) -> Optio
 /// whether the source has a blank line between them.
 fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'static str {
     use SyntaxKind::{
-        BuiltinKw, BuiltinType, CallKw, Colon, ColonEq, Comma, Heading, Ident, LBrace, LBracket,
-        Minus, NotKw, OperatorKw, Plus, RBrace, RelationKw, RelationLiteral, Semicolon, TupleKw,
-        TupleLiteral, VarDecl, VarKw,
+        BuiltinType, Heading, Ident, LBrace, LBracket, Minus, Plus, RBrace, RelationLiteral,
+        Semicolon, TupleLiteral, VarDecl,
     };
     if prev.kind() == Semicolon {
         // Between definitions: variable declarations in a row go on adjacent
@@ -526,6 +531,8 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
         });
     match (prev.kind(), next.kind()) {
         _ if key_start(next).is_some() => " ",
+        // The variable an assignment assigns, as in `update r { … }`.
+        _ if is_target(prev) => " ",
         _ if projection => "",
         (LBrace, RBrace) if list_brace(prev) => "",
         (LBrace, _) if list_brace(prev) => " ",
@@ -534,44 +541,74 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
         _ if dyadic(prev) || dyadic(next) => " ",
         // `- -a`, not `--a`.
         _ if sign(prev) && sign(next) => " ",
-        (
-            OperatorKw
-            | VarKw
-            | TupleKw
-            | RelationKw
-            | CallKw
-            | BuiltinKw
-            | Colon
-            | ColonEq
-            | Comma
-            | NotKw
-            | SyntaxKind::RemoveKw
-            | SyntaxKind::RenameKw
-            | SyntaxKind::ExtendKw
-            | SyntaxKind::ReplaceKw
-            | SyntaxKind::GroupKw
-            | SyntaxKind::UngroupKw
-            | SyntaxKind::WrapKw
-            | SyntaxKind::UnwrapKw
-            | SyntaxKind::AsKw,
-            _,
-        )
-        | (
-            _,
-            ColonEq
-            | SyntaxKind::RemoveKw
-            | SyntaxKind::RenameKw
-            | SyntaxKind::ExtendKw
-            | SyntaxKind::ReplaceKw
-            | SyntaxKind::GroupKw
-            | SyntaxKind::UngroupKw
-            | SyntaxKind::WrapKw
-            | SyntaxKind::UnwrapKw
-            | SyntaxKind::AsKw,
-        )
-        | (RBrace, LBracket | LBrace) => " ",
+        (RBrace, LBracket | LBrace) => " ",
+        (prev, next) if spaced_after(prev) || spaced_before(next) => " ",
         _ => "",
     }
+}
+
+/// Whether a space always follows a token of this kind: a keyword before
+/// a name or an operand, or a separator.
+fn spaced_after(kind: SyntaxKind) -> bool {
+    use SyntaxKind::{
+        AssignKw, BuiltinKw, CallKw, Colon, Comma, DInsertKw, DeleteKw, IDeleteKw, InsertKw, NotKw,
+        OperatorKw, RelationKw, TupleKw, UpdateKw, VarKw,
+    };
+    spaced_before(kind)
+        || matches!(
+            kind,
+            OperatorKw
+                | VarKw
+                | TupleKw
+                | RelationKw
+                | CallKw
+                | BuiltinKw
+                | Colon
+                | Comma
+                | NotKw
+                | InsertKw
+                | DInsertKw
+                | DeleteKw
+                | IDeleteKw
+                | UpdateKw
+                | AssignKw
+        )
+}
+
+/// Whether a space always goes before, and after, a token of this kind:
+/// `:=`, and the postfix operators and other words between two parts.
+fn spaced_before(kind: SyntaxKind) -> bool {
+    use SyntaxKind::{
+        AsKw, ColonEq, ExtendKw, GroupKw, RemoveKw, RenameKw, ReplaceKw, UngroupKw, UnwrapKw,
+        WhereKw, WrapKw,
+    };
+    matches!(
+        kind,
+        ColonEq
+            | RemoveKw
+            | RenameKw
+            | ExtendKw
+            | ReplaceKw
+            | GroupKw
+            | UngroupKw
+            | WrapKw
+            | UnwrapKw
+            | AsKw
+            | WhereKw
+    )
+}
+
+/// Whether `token` ends the variable an assignment assigns: the first
+/// expression of an assignment or a shorthand for one.
+fn is_target(token: &SyntaxToken) -> bool {
+    let Some(name) = token.parent().filter(|p| p.kind() == SyntaxKind::NameRef) else {
+        return false;
+    };
+    name.parent().is_some_and(|clause| {
+        Clause::cast(clause)
+            .and_then(|c| c.target())
+            .is_some_and(|target| target.syntax() == &name)
+    })
 }
 
 /// Whether `prev` and `next`, written with nothing between them, would lex

@@ -80,27 +80,66 @@ pub(crate) fn keys(
     let hir::Value::Relation(relation) = init else {
         unreachable!("a relation variable's value is a relation");
     };
-    let mut places = None;
-    for (key, attributes) in irreducible {
-        let mut seen: BTreeMap<hir::TupleValue, &hir::TupleValue> = BTreeMap::new();
-        for tuple in &relation.tuples {
-            let value = key_value(tuple, attributes);
-            let Some(first) = seen.get(&value) else {
-                seen.insert(value, tuple);
-                continue;
-            };
-            let places = places.get_or_insert_with(|| tuple_places(decl, heading, scope));
-            let place = |t: &hir::TupleValue| places.iter().find(|(v, _)| v == t).map(|&(_, s)| s);
-            let (at, first) = match (place(first), place(tuple)) {
-                (Some(a), Some(b)) => (a.max(b), Some(a.min(b))),
-                _ => (decl.initializer()?.span(), None),
-            };
-            errors.push(errors::key_violated(name, key, &value, at, first));
-            ok = false;
-        }
+    if let Some(value) = decl.initializer() {
+        let irreducible: Vec<(Key, BTreeSet<String>)> = irreducible
+            .into_iter()
+            .map(|(key, attributes)| (key.clone(), attributes.clone()))
+            .collect();
+        ok &= satisfied(name, &irreducible, relation, &value, scope, errors);
     }
 
     ok.then(|| keys.into_iter().map(|(_, attributes)| attributes).collect())
+}
+
+/// The keys written in `decl` that are among `keys`, each with its
+/// attributes: those a value assigned to the variable must satisfy, since
+/// the key of the whole heading always is.
+pub(crate) fn written(decl: &VarDecl, keys: &[hir::Key]) -> Vec<(Key, BTreeSet<String>)> {
+    decl.keys()
+        .filter_map(|key| {
+            let attributes: BTreeSet<String> = key
+                .names()?
+                .names()
+                .filter_map(|n| Some(n.ident()?.text().to_string()))
+                .collect();
+            keys.contains(&attributes).then_some((key, attributes))
+        })
+        .collect()
+}
+
+/// Whether `relation`, the value of the variable `name`, written `value`,
+/// satisfies each of `keys`, after reporting each it violates, at the
+/// tuples that share a key's values when `value` is a relation selector.
+pub(crate) fn satisfied(
+    name: &str,
+    keys: &[(Key, BTreeSet<String>)],
+    relation: &hir::RelationValue,
+    value: &Expr,
+    scope: &mut dyn Names,
+    errors: &mut Vec<Diagnostic>,
+) -> bool {
+    let mut ok = true;
+    let mut places = None;
+    for (key, attributes) in keys {
+        let mut seen: BTreeMap<hir::TupleValue, &hir::TupleValue> = BTreeMap::new();
+        for tuple in &relation.tuples {
+            let shared = key_value(tuple, attributes);
+            let Some(first) = seen.get(&shared) else {
+                seen.insert(shared, tuple);
+                continue;
+            };
+            let places =
+                places.get_or_insert_with(|| tuple_places(value, &relation.heading, scope));
+            let place = |t: &hir::TupleValue| places.iter().find(|(v, _)| v == t).map(|&(_, s)| s);
+            let (at, first) = match (place(first), place(tuple)) {
+                (Some(a), Some(b)) => (a.max(b), Some(a.min(b))),
+                _ => (value.span(), None),
+            };
+            errors.push(errors::key_violated(name, key, &shared, at, first));
+            ok = false;
+        }
+    }
+    ok
 }
 
 /// `tuple`'s value for the key `attributes`: the tuple of just those.
@@ -114,16 +153,16 @@ fn key_value(tuple: &hir::TupleValue, attributes: &BTreeSet<String>) -> hir::Tup
     )
 }
 
-/// Where each tuple of `decl`'s initial value is written, when it is a
-/// relation selector, so that a key violation can point at the tuples. The
+/// Where each tuple of `value` is written, when it is a relation selector
+/// of constants, so that a key violation can point at the tuples. The
 /// value was already checked, so each tuple evaluates again without error;
 /// this is only done once a key is found violated.
 fn tuple_places(
-    decl: &VarDecl,
+    value: &Expr,
     heading: &hir::Heading,
     scope: &mut dyn Names,
 ) -> Vec<(hir::TupleValue, Span)> {
-    let Some(Expr::Relation(relation)) = decl.initializer() else {
+    let Expr::Relation(relation) = value else {
         return Vec::new();
     };
     let expected = Expected {

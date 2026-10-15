@@ -68,6 +68,19 @@ pub enum SyntaxKind {
     WhereKw,
     /// `as`, in `old as new`.
     AsKw,
+    /// `insert`, in `insert r s;`.
+    InsertKw,
+    /// `d_insert`, disjoint insert: an `insert` that fails if a tuple is
+    /// already there.
+    DInsertKw,
+    /// `delete`, in `delete r where p;`.
+    DeleteKw,
+    /// `i_delete`, included delete: it fails if a tuple isn't there.
+    IDeleteKw,
+    /// `update`, in `update r { a := x } where p;`.
+    UpdateKw,
+    /// `assign`, in `assign { x := y; y := x; };`.
+    AssignKw,
     LBrace,
     RBrace,
     LBracket,
@@ -129,6 +142,21 @@ pub enum SyntaxKind {
     Body,
     /// `call name{arguments};`
     CallStmt,
+    /// `a := x;` or `insert r s;`: an assignment. Several separated by
+    /// commas are parsed, so that they can be reported.
+    AssignStmt,
+    /// `assign { a := x; insert r s; };`: assignments all made at once
+    /// (TTM RM Prescription 21).
+    AssignBlock,
+    /// `v := x`, in an assignment statement.
+    Assignment,
+    /// `insert r s` or `d_insert r s`, in an assignment statement.
+    Insertion,
+    /// `delete r where p` or `i_delete r s`, in an assignment statement.
+    Deletion,
+    /// `update r { a := x } where p`, in an assignment statement; for a
+    /// tuple, without `where`.
+    Update,
     /// `{name: value, …}`: a call's arguments, a tuple of its parameters.
     Arguments,
     /// An argument without a name, which is reported with a fix.
@@ -206,7 +234,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 106] = [
+    pub const ALL: [SyntaxKind; 118] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -245,6 +273,12 @@ impl SyntaxKind {
         SyntaxKind::IMinusKw,
         SyntaxKind::WhereKw,
         SyntaxKind::AsKw,
+        SyntaxKind::InsertKw,
+        SyntaxKind::DInsertKw,
+        SyntaxKind::DeleteKw,
+        SyntaxKind::IDeleteKw,
+        SyntaxKind::UpdateKw,
+        SyntaxKind::AssignKw,
         SyntaxKind::LBrace,
         SyntaxKind::RBrace,
         SyntaxKind::LBracket,
@@ -281,6 +315,12 @@ impl SyntaxKind {
         SyntaxKind::Name,
         SyntaxKind::Body,
         SyntaxKind::CallStmt,
+        SyntaxKind::AssignStmt,
+        SyntaxKind::AssignBlock,
+        SyntaxKind::Assignment,
+        SyntaxKind::Insertion,
+        SyntaxKind::Deletion,
+        SyntaxKind::Update,
         SyntaxKind::Arguments,
         SyntaxKind::PositionalArg,
         SyntaxKind::NameRef,
@@ -359,6 +399,12 @@ impl SyntaxKind {
                 | SyntaxKind::IMinusKw
                 | SyntaxKind::WhereKw
                 | SyntaxKind::AsKw
+                | SyntaxKind::InsertKw
+                | SyntaxKind::DInsertKw
+                | SyntaxKind::DeleteKw
+                | SyntaxKind::IDeleteKw
+                | SyntaxKind::UpdateKw
+                | SyntaxKind::AssignKw
         )
     }
 
@@ -455,6 +501,20 @@ impl SyntaxKind {
         )
     }
 
+    /// Whether this keyword starts a shorthand for an assignment: `insert`,
+    /// `d_insert`, `delete`, `i_delete` or `update`.
+    #[must_use]
+    pub fn is_assignment_keyword(self) -> bool {
+        matches!(
+            self,
+            SyntaxKind::InsertKw
+                | SyntaxKind::DInsertKw
+                | SyntaxKind::DeleteKw
+                | SyntaxKind::IDeleteKw
+                | SyntaxKind::UpdateKw
+        )
+    }
+
     /// Whether this kind is a literal token: a number, text, or a boolean
     /// keyword.
     #[must_use]
@@ -522,6 +582,12 @@ impl SyntaxKind {
             SyntaxKind::IMinusKw => "i_minus",
             SyntaxKind::WhereKw => "where",
             SyntaxKind::AsKw => "as",
+            SyntaxKind::InsertKw => "insert",
+            SyntaxKind::DInsertKw => "d_insert",
+            SyntaxKind::DeleteKw => "delete",
+            SyntaxKind::IDeleteKw => "i_delete",
+            SyntaxKind::UpdateKw => "update",
+            SyntaxKind::AssignKw => "assign",
             SyntaxKind::LBrace => "{",
             SyntaxKind::RBrace => "}",
             SyntaxKind::LBracket => "[",
@@ -602,6 +668,12 @@ impl SyntaxKind {
             SyntaxKind::IMinusKw => "`i_minus`",
             SyntaxKind::WhereKw => "`where`",
             SyntaxKind::AsKw => "`as`",
+            SyntaxKind::InsertKw => "`insert`",
+            SyntaxKind::DInsertKw => "`d_insert`",
+            SyntaxKind::DeleteKw => "`delete`",
+            SyntaxKind::IDeleteKw => "`i_delete`",
+            SyntaxKind::UpdateKw => "`update`",
+            SyntaxKind::AssignKw => "`assign`",
             SyntaxKind::ForeignOperator => "operator",
             SyntaxKind::LBrace => "`{`",
             SyntaxKind::RBrace => "`}`",
@@ -661,6 +733,12 @@ impl SyntaxKind {
             SyntaxKind::Assign => "attribute assignment",
             SyntaxKind::Body => "body",
             SyntaxKind::CallStmt => "call",
+            SyntaxKind::AssignStmt => "assignment statement",
+            SyntaxKind::AssignBlock => "`assign` block",
+            SyntaxKind::Assignment => "assignment",
+            SyntaxKind::Insertion => "insertion",
+            SyntaxKind::Deletion => "deletion",
+            SyntaxKind::Update => "update",
             SyntaxKind::Arguments => "arguments",
             SyntaxKind::PositionalArg => "argument",
             SyntaxKind::TypeAnnotation => "type annotation",
