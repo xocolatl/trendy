@@ -18,7 +18,7 @@ use trendy_syntax::ast::{
 
 use crate::check::{Checker, Names};
 use crate::ops::{Operands, Operator, Resolved};
-use crate::{Values, errors};
+use crate::{Namespaces, errors};
 
 /// Where an expected type comes from: for the secondary label of a
 /// mismatch, and to find where each attribute's own expectation is written.
@@ -171,7 +171,7 @@ pub(crate) fn result_type(
 /// denotes none.
 pub(crate) fn resolve(
     type_expr: &TypeExpr,
-    values: &Values,
+    namespaces: &Namespaces,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Type> {
     match type_expr {
@@ -185,22 +185,22 @@ pub(crate) fn resolve(
             }
             let scalar = hir::Scalar::from_name(ident.text());
             if scalar.is_none() {
-                errors.push(errors::unknown_type(&ident, values));
+                errors.push(errors::unknown_type(&ident, namespaces));
             }
             scalar.map(hir::Type::Scalar)
         }
         TypeExpr::Tuple(tuple) => {
-            resolve_heading(&tuple.heading()?, values, errors).map(hir::Type::Tuple)
+            resolve_heading(&tuple.heading()?, namespaces, errors).map(hir::Type::Tuple)
         }
         TypeExpr::Relation(relation) => {
-            resolve_heading(&relation.heading()?, values, errors).map(hir::Type::Relation)
+            resolve_heading(&relation.heading()?, namespaces, errors).map(hir::Type::Relation)
         }
     }
 }
 
 pub(crate) fn resolve_heading(
     heading: &ast::Heading,
-    values: &Values,
+    namespaces: &Namespaces,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Heading> {
     let mut attributes = BTreeMap::new();
@@ -224,7 +224,7 @@ pub(crate) fn resolve_heading(
         first_spans.insert(ident.text().to_string(), span);
         match attribute
             .type_expr()
-            .and_then(|t| resolve(&t, values, errors))
+            .and_then(|t| resolve(&t, namespaces, errors))
         {
             Some(ty) => {
                 attributes.insert(ident.text().to_string(), ty);
@@ -276,13 +276,13 @@ struct Reported;
 fn own_heading(
     heading: Option<ast::Heading>,
     wrap: fn(hir::Heading) -> hir::Type,
-    values: &Values,
+    namespaces: &Namespaces,
     errors: &mut Vec<Diagnostic>,
 ) -> Result<Option<Expected>, Reported> {
     let Some(heading) = heading else {
         return Ok(None);
     };
-    let resolved = resolve_heading(&heading, values, errors).ok_or(Reported)?;
+    let resolved = resolve_heading(&heading, namespaces, errors).ok_or(Reported)?;
     Ok(Some(Expected {
         ty: wrap(resolved),
         origin: Origin::Heading(heading),
@@ -296,7 +296,13 @@ pub(crate) fn tuple_selector(
     checker: &mut Checker,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Expr> {
-    let own = own_heading(tuple.heading(), hir::Type::Tuple, checker.values(), errors).ok()?;
+    let own = own_heading(
+        tuple.heading(),
+        hir::Type::Tuple,
+        checker.namespaces(),
+        errors,
+    )
+    .ok()?;
     let here = own.as_ref().or(expected);
     let heading = match here {
         Some(Expected {
@@ -425,7 +431,7 @@ pub(crate) fn relation_selector(
     let own = own_heading(
         relation.heading(),
         hir::Type::Relation,
-        checker.values(),
+        checker.namespaces(),
         errors,
     )
     .ok()?;

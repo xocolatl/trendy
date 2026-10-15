@@ -16,7 +16,7 @@ use trendy_syntax::{SyntaxKind, SyntaxToken};
 use crate::body::{BodyNames, Context};
 use crate::check::{Assigned, Checker, Unchanged};
 use crate::types::{Expected, Origin};
-use crate::{Kind, errors, keys, ops};
+use crate::{errors, keys, ops};
 
 /// An assignment statement outside a block, of its one clause; `clauses`
 /// has several only in a statement the parser reported.
@@ -603,16 +603,15 @@ fn assigned_variable(
     if let Some(&id) = cx.variable_ids.get(name) {
         return Some(id);
     }
-    match cx.values.get(name) {
-        // A variable with errors in its declaration is already reported.
-        Some((Kind::Variable, _)) => {}
-        Some((kind @ (Kind::Operator | Kind::Builtin), _)) => {
-            errors.push(errors::assigned_operator(name, span, kind));
-        }
-        None => {
-            let variables: Vec<&str> = cx.variable_ids.keys().map(String::as_str).collect();
-            errors.push(errors::unknown_name(name, span, "variable", &variables));
-        }
+    // A variable with errors in its declaration is already reported.
+    if cx.namespaces.variable(name).is_some() {
+        return None;
+    }
+    if let Some((kind, _)) = cx.namespaces.operator(name) {
+        errors.push(errors::assigned_operator(name, span, kind));
+    } else {
+        let variables: Vec<&str> = cx.variable_ids.keys().map(String::as_str).collect();
+        errors.push(errors::unknown_name(name, span, "variable", &variables));
     }
     None
 }

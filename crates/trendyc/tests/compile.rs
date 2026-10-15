@@ -439,6 +439,39 @@ fn run_time_failures_stop_the_program() {
     );
 }
 
+/// Operators and variables have separate namespaces, so one name can be
+/// both, and each compiles to its own symbol: even `main`, the entry point.
+#[test]
+fn a_variable_can_have_an_operators_name() {
+    let source = r#"var greet := "Hello";
+var debug_value := relation { { name: "Ada" } };
+var main := 7;
+
+operator greet{name: text} [
+    call debug_value{v: greet || ", " || name};
+];
+
+operator main{} [
+    call greet{name: "Amara"};
+    call debug_value{v: (debug_value){}};
+    call debug_value{v: main};
+    greet := "Habari";
+    call greet{name: "Kenji"};
+];
+"#;
+    let (code, stderr) = run_source("namespaces", source);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            r#""Hello, Amara""#,
+            "relation {} { {} }",
+            "7",
+            r#""Habari, Kenji""#
+        ]
+    );
+}
+
 /// Assignments that break a rule stop the program: two changes that
 /// remove the same tuple, a disjoint insert of a tuple already there, an
 /// included delete of one that isn't, and two tuples with the same key.

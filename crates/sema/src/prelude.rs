@@ -1,12 +1,12 @@
 //! The prelude: the declarations of the built-in operators, checked against
 //! the operators the compiler implements.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use trendy_hir as hir;
 use trendy_syntax::ast::{Item, SourceFile, TypeExpr};
 
-use crate::{Values, types};
+use crate::{Namespaces, types};
 
 /// The types the compiler implements: `any`, for built-in parameters, and
 /// the scalar types.
@@ -29,7 +29,7 @@ impl Prelude {
     /// Describes how the prelude is wrong. The prelude is part of the
     /// compiler, so any error is a compiler bug.
     pub fn load(file: &SourceFile) -> Result<Prelude, String> {
-        let no_values = Values(HashMap::new());
+        let no_names = Namespaces::default();
         let mut operators: Vec<hir::Operator> = Vec::new();
         let mut types: Vec<String> = Vec::new();
         for item in file.items() {
@@ -75,7 +75,7 @@ impl Prelude {
                     }
                     Some(t) => {
                         let mut errors = Vec::new();
-                        types::resolve(&t, &no_values, &mut errors)
+                        types::resolve(&t, &no_names, &mut errors)
                             .map(hir::ParamType::Type)
                             .ok_or_else(|| format!("`{name}` has an invalid parameter type"))?
                     }

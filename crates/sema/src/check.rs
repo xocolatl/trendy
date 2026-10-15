@@ -16,7 +16,7 @@ use trendy_syntax::ast::{self, Expr};
 
 use crate::ops::{self, Operator, Resolved};
 use crate::types::{self, Expected};
-use crate::{Values, errors};
+use crate::{Namespaces, errors};
 
 /// What a name refers to.
 pub(crate) enum Lookup {
@@ -29,7 +29,8 @@ pub(crate) enum Lookup {
 
 /// What names in an expression refer to.
 pub(crate) trait Names {
-    fn values(&self) -> &Values;
+    /// The program's top-level names.
+    fn namespaces(&self) -> &Namespaces;
 
     /// What `name`, written at `span`, refers to.
     fn resolve(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup;
@@ -37,6 +38,11 @@ pub(crate) trait Names {
     /// The names in scope, which a name that refers to nothing may be a
     /// misspelling of.
     fn candidates(&self) -> Vec<String>;
+
+    /// Whether a value named `name` is in scope.
+    fn has_value(&self, name: &str) -> bool {
+        self.candidates().iter().any(|c| c == name)
+    }
 
     /// The type of `leaf`, a variable or parameter that [`Names::resolve`]
     /// gave.
@@ -59,8 +65,8 @@ impl<'a> Checker<'a> {
         Checker { names }
     }
 
-    pub(crate) fn values(&self) -> &Values {
-        self.names.values()
+    pub(crate) fn namespaces(&self) -> &Namespaces {
+        self.names.namespaces()
     }
 
     /// The type of `expr`, which this checker produced.
@@ -207,6 +213,12 @@ impl<'a> Checker<'a> {
         expected: Option<&Expected>,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Expr> {
+        if let Expr::Project(project) = expr
+            && let Some(error) = self.operator_before_braces(project)
+        {
+            errors.push(error);
+            return None;
+        }
         let (operand_expr, postfix) = match expr {
             Expr::Project(project) => (project.operand()?, None),
             Expr::Postfix(postfix) => (postfix.operand()?, Some(postfix)),
@@ -232,6 +244,28 @@ impl<'a> Checker<'a> {
             _ => unreachable!("matched above"),
         };
         self.matched(expected, result, expr, errors)
+    }
+
+    /// The error for `project`, if it is `x{}` of an operator's name `x`:
+    /// before `{}`, a name is the operator when there is one, as it is
+    /// after `call`, so it is a call, and an update operator has no value.
+    /// A value of the same name is projected on no attributes as `(x){}`.
+    fn operator_before_braces(&self, project: &ast::ProjectExpr) -> Option<Diagnostic> {
+        let Expr::Name(name_ref) = project.operand()? else {
+            return None;
+        };
+        if project.names()?.names().next().is_some() {
+            return None;
+        }
+        let ident = name_ref.ident()?;
+        let name = ident.text();
+        let (_, defined) = self.names.namespaces().operator(name)?;
+        Some(errors::operator_call_without_value(
+            name,
+            trendy_syntax::span(ident.text_range()),
+            defined,
+            self.names.has_value(name),
+        ))
     }
 
     /// `postfix`, an `extend` or a `replace`, as `assigning` says, written
@@ -961,8 +995,8 @@ struct TupleNames<'a> {
 }
 
 impl Names for TupleNames<'_> {
-    fn values(&self) -> &Values {
-        self.outer.values()
+    fn namespaces(&self) -> &Namespaces {
+        self.outer.namespaces()
     }
 
     fn resolve(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {

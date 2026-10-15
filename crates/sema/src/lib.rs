@@ -28,11 +28,11 @@ pub use prelude::Prelude;
 /// Returns every semantic error, in source order.
 pub fn analyze(prelude: &Prelude, file: &SourceFile) -> Result<hir::Program, Vec<Diagnostic>> {
     let mut errors = Vec::new();
-    let values = collect_names(prelude, file, &mut errors);
+    let namespaces = collect_names(prelude, file, &mut errors);
 
     // Variables first: operator bodies refer to them.
-    let declarations = declarations(file, &values);
-    let variables = Globals::new(&declarations, &values).evaluate(file, &mut errors);
+    let declarations = declarations(file, &namespaces);
+    let variables = Globals::new(&declarations, &namespaces).evaluate(file, &mut errors);
     let variable_ids: HashMap<_, _> = variables
         .iter()
         .enumerate()
@@ -56,13 +56,13 @@ pub fn analyze(prelude: &Prelude, file: &SourceFile) -> Result<hir::Program, Vec
                 let Some(ident) = op.name().and_then(|n| n.ident()) else {
                     continue;
                 };
-                if !values.is_first(&ident) {
+                if !namespaces.is_first_operator(&ident) {
                     continue;
                 }
                 let id = hir::OperatorId(operators.len());
                 let params = op
                     .params()
-                    .and_then(|h| body::params(&h, &values, &mut errors));
+                    .and_then(|h| body::params(&h, &namespaces, &mut errors));
                 operators.push(hir::Operator {
                     name: ident.text().to_string(),
                     params: params.clone().unwrap_or_default(),
@@ -87,7 +87,7 @@ pub fn analyze(prelude: &Prelude, file: &SourceFile) -> Result<hir::Program, Vec
     }
 
     let context = body::Context {
-        values: &values,
+        namespaces: &namespaces,
         operators: &operators,
         signatures: &signatures,
         variables: &variables,
@@ -104,7 +104,7 @@ pub fn analyze(prelude: &Prelude, file: &SourceFile) -> Result<hir::Program, Vec
         operators[id.0].kind = hir::OperatorKind::User { body: statements };
     }
 
-    let entry = entry(file, &values, &operators, &user_operators, &mut errors);
+    let entry = entry(file, &namespaces, &operators, &user_operators, &mut errors);
     errors.sort_by_key(|d| d.span().start);
     match entry {
         Some(entry) if errors.is_empty() => Ok(hir::Program {
@@ -120,7 +120,7 @@ pub fn analyze(prelude: &Prelude, file: &SourceFile) -> Result<hir::Program, Vec
 /// parameters.
 fn entry(
     file: &SourceFile,
-    values: &Values,
+    namespaces: &Namespaces,
     operators: &[hir::Operator],
     user_operators: &[(trendy_syntax::ast::Operator, hir::OperatorId)],
     errors: &mut Vec<Diagnostic>,
@@ -129,7 +129,7 @@ fn entry(
         .iter()
         .find(|(_, id)| operators[id.0].name == "main")
     else {
-        errors.push(errors::missing_main(file, values));
+        errors.push(errors::missing_main(file, namespaces));
         return None;
     };
     if let Some(params) = op.params().filter(|h| h.attributes().next().is_some()) {
@@ -139,7 +139,7 @@ fn entry(
     Some(*id)
 }
 
-/// What a name in the value namespace refers to.
+/// What a top-level name refers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Kind {
     Operator,
@@ -157,37 +157,60 @@ impl Kind {
     }
 }
 
-/// The value namespace, shared by operators and variables: each name's first
-/// definition, and where it is in the program (built-ins are in the prelude,
-/// so they have no span). Types have a namespace of their own.
-pub(crate) struct Values(HashMap<String, (Kind, Option<Span>)>);
+/// The program's top-level names, each in its namespace: its first
+/// definition, and where it is (built-ins are in the prelude, so they have
+/// no span). Operators and variables have a namespace each, so a variable
+/// can have an operator's name; types have a third.
+#[derive(Default)]
+pub(crate) struct Namespaces {
+    /// User and built-in operators.
+    operators: HashMap<String, (Kind, Option<Span>)>,
+    variables: HashMap<String, Span>,
+}
 
-impl Values {
-    pub(crate) fn get(&self, name: &str) -> Option<(Kind, Option<Span>)> {
-        self.0.get(name).copied()
+impl Namespaces {
+    /// The operator named `name`: whether it is built in, and where it is
+    /// defined.
+    pub(crate) fn operator(&self, name: &str) -> Option<(Kind, Option<Span>)> {
+        self.operators.get(name).copied()
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (&str, Kind, Option<Span>)> {
-        self.0
+    /// Where the variable named `name` is declared.
+    pub(crate) fn variable(&self, name: &str) -> Option<Span> {
+        self.variables.get(name).copied()
+    }
+
+    pub(crate) fn operators(&self) -> impl Iterator<Item = (&str, Kind, Option<Span>)> {
+        self.operators
             .iter()
             .map(|(name, &(kind, span))| (name.as_str(), kind, span))
     }
 
-    /// Whether `ident` is its name's first definition, not a duplicate.
-    fn is_first(&self, ident: &SyntaxToken) -> bool {
-        self.get(ident.text())
+    /// Whether `ident` is its operator name's first definition, not a
+    /// duplicate.
+    fn is_first_operator(&self, ident: &SyntaxToken) -> bool {
+        self.operator(ident.text())
             .is_some_and(|(_, span)| span == Some(trendy_syntax::span(ident.text_range())))
+    }
+
+    /// Whether `ident` is its variable name's first declaration, not a
+    /// duplicate.
+    fn is_first_variable(&self, ident: &SyntaxToken) -> bool {
+        self.variable(ident.text()) == Some(trendy_syntax::span(ident.text_range()))
     }
 }
 
-/// Record every top-level name, the prelude's first, reporting each one
-/// defined more than once.
-fn collect_names(prelude: &Prelude, file: &SourceFile, errors: &mut Vec<Diagnostic>) -> Values {
-    let mut values: HashMap<String, (Kind, Option<Span>)> = prelude
-        .operators()
-        .iter()
-        .map(|op| (op.name.clone(), (Kind::Builtin, None)))
-        .collect();
+/// Record every top-level name in its namespace, the prelude's first,
+/// reporting each one defined more than once in it.
+fn collect_names(prelude: &Prelude, file: &SourceFile, errors: &mut Vec<Diagnostic>) -> Namespaces {
+    let mut namespaces = Namespaces {
+        operators: prelude
+            .operators()
+            .iter()
+            .map(|op| (op.name.clone(), (Kind::Builtin, None)))
+            .collect(),
+        variables: HashMap::new(),
+    };
     for item in file.items() {
         let (kind, name) = match item {
             Item::Operator(op) => (Kind::Operator, op.name()),
@@ -198,24 +221,31 @@ fn collect_names(prelude: &Prelude, file: &SourceFile, errors: &mut Vec<Diagnost
         let Some(ident) = name.and_then(|n| n.ident()) else {
             continue;
         };
-        let span = trendy_syntax::span(ident.text_range());
-        match values.get(ident.text()) {
-            Some(&first) => {
-                errors.push(errors::duplicate_name(ident.text(), (kind, span), first));
+        let (name, span) = (ident.text(), trendy_syntax::span(ident.text_range()));
+        let first = match kind {
+            Kind::Variable => namespaces.variable(name).map(|s| (kind, Some(s))),
+            _ => namespaces.operator(name),
+        };
+        match (first, kind) {
+            (Some(first), _) => errors.push(errors::duplicate_name(name, (kind, span), first)),
+            (None, Kind::Variable) => {
+                namespaces.variables.insert(name.to_string(), span);
             }
-            None => {
-                values.insert(ident.text().to_string(), (kind, Some(span)));
+            (None, _) => {
+                namespaces
+                    .operators
+                    .insert(name.to_string(), (kind, Some(span)));
             }
         }
     }
-    Values(values)
+    namespaces
 }
 
 /// The program's variables, whose initial values are evaluated when
 /// compiling. An initial value can refer to any variable, so each is
 /// evaluated when first needed, after the ones it refers to.
 struct Globals<'a> {
-    values: &'a Values,
+    namespaces: &'a Namespaces,
     /// The first declaration of each variable.
     decls: &'a HashMap<String, VarDecl>,
     states: HashMap<String, State>,
@@ -232,21 +262,21 @@ enum State {
 }
 
 /// The first declaration of each variable, by name.
-fn declarations(file: &SourceFile, values: &Values) -> HashMap<String, VarDecl> {
+fn declarations(file: &SourceFile, namespaces: &Namespaces) -> HashMap<String, VarDecl> {
     file.variables()
         .filter_map(|decl| {
             let ident = decl.name()?.ident()?;
-            values
-                .is_first(&ident)
+            namespaces
+                .is_first_variable(&ident)
                 .then(|| (ident.text().to_string(), decl))
         })
         .collect()
 }
 
 impl<'a> Globals<'a> {
-    fn new(decls: &'a HashMap<String, VarDecl>, values: &'a Values) -> Self {
+    fn new(decls: &'a HashMap<String, VarDecl>, namespaces: &'a Namespaces) -> Self {
         Globals {
-            values,
+            namespaces,
             decls,
             states: HashMap::new(),
             stack: Vec::new(),
@@ -260,7 +290,7 @@ impl<'a> Globals<'a> {
             let Some(ident) = decl.name().and_then(|n| n.ident()) else {
                 continue;
             };
-            if self.values.is_first(&ident) {
+            if self.namespaces.is_first_variable(&ident) {
                 variables.extend(self.variable(ident.text(), errors));
             } else {
                 // A duplicate, already reported, but it can have errors of
@@ -291,22 +321,22 @@ impl<'a> Globals<'a> {
 }
 
 impl check::Names for Globals<'_> {
-    fn values(&self) -> &Values {
-        self.values
+    fn namespaces(&self) -> &Namespaces {
+        self.namespaces
     }
 
     fn resolve(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> check::Lookup {
-        match self.values.get(name) {
-            Some((Kind::Variable, _)) => match self.constant(name, span, errors) {
+        if self.namespaces.variable(name).is_some() {
+            return match self.constant(name, span, errors) {
                 Some(value) => check::Lookup::Found(hir::Expr::Constant(value)),
                 None => check::Lookup::Reported,
-            },
-            Some((Kind::Operator | Kind::Builtin, _)) => {
-                errors.push(errors::operator_as_value(name, span));
-                check::Lookup::Reported
-            }
-            None => check::Lookup::Unknown,
+            };
         }
+        if self.namespaces.operator(name).is_some() {
+            errors.push(errors::operator_as_value(name, span));
+            return check::Lookup::Reported;
+        }
+        check::Lookup::Unknown
     }
 
     fn candidates(&self) -> Vec<String> {
@@ -350,11 +380,11 @@ fn variable(
     globals: &mut Globals,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Variable> {
-    let values = globals.values;
+    let namespaces = globals.namespaces;
     let ident = decl.name()?.ident()?;
     let declared = decl
         .type_expr()
-        .map(|t| (types::resolve(&t, values, errors), t));
+        .map(|t| (types::resolve(&t, namespaces, errors), t));
 
     let (ty, init) = match (declared, decl.initializer()) {
         (None, None) => {
@@ -389,7 +419,7 @@ fn variable(
         }
     };
     let keys = keys::keys(decl, ident.text(), &ty, &init, globals, errors)?;
-    values.is_first(&ident).then(|| hir::Variable {
+    namespaces.is_first_variable(&ident).then(|| hir::Variable {
         name: ident.text().to_string(),
         ty,
         init,
@@ -529,16 +559,67 @@ mod tests {
     }
 
     #[test]
-    fn variables_and_operators_share_names() {
-        let errors = errors("var main := 0;\noperator main{} [];");
-        assert_eq!(errors.len(), 2, "{errors:#?}");
-        assert_eq!(errors[0].code, Code::MissingMain);
-        assert_eq!(errors[1].code, Code::DuplicateName);
-        assert_eq!(errors[1].primary.message, "redefined here as an operator");
+    fn variables_and_operators_have_separate_namespaces() {
+        // A variable and an operator can have the same name, built in or
+        // not: a value is the variable, and `call` the operator.
+        let program = analyze_str("var main := 0;\noperator main{} [];").unwrap();
+        assert_eq!(program.variables[0].name, "main");
+        analyze_str(
+            "var greet := \"Hello\";\nvar debug_value := 1;\noperator greet{name: text} [ call debug_value{v: greet || name}; ];\noperator main{} [ call greet{name: \"Amara\"}; call debug_value{v: debug_value}; ];",
+        )
+        .unwrap();
+        // So can a parameter.
+        analyze_str(
+            "operator f{debug_value: integer} [ call debug_value{v: debug_value}; ];\noperator main{} [];",
+        )
+        .unwrap();
+        // But not two variables, or two operators.
+        let variables = errors("var a := 0;\nvar a := 1;\noperator main{} [];");
+        assert_eq!(variables[0].code, Code::DuplicateName);
+        assert!(variables[0].notes[0].starts_with("variables have a namespace of their own"));
+        let operators = errors("operator a{} [];\noperator a{} [];\noperator main{} [];");
+        assert!(operators[0].notes[0].starts_with("operators have a namespace of their own"));
+    }
+
+    #[test]
+    fn a_name_before_empty_braces_is_the_operator() {
+        // `poets{}` calls the operator, as `call poets{};` does, which, as an
+        // update operator, has no value; projecting the variable needs
+        // parentheses.
+        let program = |value: &str| {
+            format!(
+                "var poets := relation {{ {{ name: \"Ada\" }} }};\noperator poets{{}} [];\noperator main{{}} [ call debug_value{{v: {value}}}; ];"
+            )
+        };
+        let called = errors(&program("poets{}"));
+        assert_eq!(called.len(), 1, "{called:#?}");
+        assert_eq!(called[0].code, Code::OperatorAsValue);
         assert_eq!(
-            errors[1].secondary[0].message,
-            "`main` is first defined here as a variable"
+            called[0].message,
+            "`poets{}` calls the operator `poets`, which has no value"
         );
+        assert_eq!(fix(&program("poets{}")), program("(poets){}"));
+        analyze_str(&program("(poets){}")).unwrap();
+        // A projection on attributes can't be a call, so it is the value's.
+        analyze_str(&program("poets{name}")).unwrap();
+        // So it is in an initial value, and for a built-in operator.
+        let source = format!(
+            "var debug_value := relation {{ {{ a: 1 }} }};\nvar r := debug_value{{}};{MAIN}"
+        );
+        assert_eq!(codes(&source), [Code::OperatorAsValue]);
+        assert!(fix(&source).contains("var r := (debug_value){};"));
+        // Without a value of its name, there's nothing to project instead.
+        let alone = errors(&format!("var r := main{{}};{MAIN}"));
+        assert_eq!(
+            alone[0].message,
+            "`main{}` calls the operator `main`, which has no value"
+        );
+        assert!(alone[0].suggestions.is_empty());
+        // Without an operator, it is the projection it looks like.
+        analyze_str(&format!(
+            "var poets := relation {{ {{ name: \"Ada\" }} }};\nvar none := poets{{}};{MAIN}"
+        ))
+        .unwrap();
     }
 
     #[test]

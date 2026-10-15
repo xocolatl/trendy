@@ -310,9 +310,14 @@ or every semantic error found.
 **Owns:** name resolution, type checking, and translating the CST to HIR.
 **It is the last layer allowed to report an error to the user.**
 
-There are two namespaces. Variables and operators share the value namespace,
-so no two of them can have the same name. Types have their own namespace, so a
-variable can be named after a type. Sema collects every name before checking
+There are three namespaces (`Namespaces`): operators, values, which are
+variables and parameters, and types, so a variable can have an operator's
+name or a type's. Where a name is says which namespace it is in: after
+`call`, it is an operator, and in an expression, a value. A name right
+before `{}` could be either, a projection on no attributes or a call
+without arguments: it is the operator if there is one, so it is a call,
+and a value of the same name is projected as `(x){}`. An update operator
+has no value, so calling one in an expression is an error (A0016). Sema collects every name before checking
 anything, so errors can refer to definitions anywhere in the file.
 
 A variable without a value gets its type's default (`0`, `""`), and one

@@ -843,7 +843,9 @@ operator main{} [
 - **`r{}` keeps nothing:** a tuple becomes `tuple {}`, and a relation
   becomes `relation {} { {} }` (table_dee) if it has tuples, or
   `relation {} {}` (table_dum) if not. `remove {}` removes nothing, and is
-  an error (A0023).
+  an error (A0023). A name right before `{}` is an operator if there is
+  one with that name (see [Names](#names)), so `(r){}` projects a value
+  that has an operator's name.
 - **They bind tighter than any other operator,** so `-t remove {x}`
   negates the result. Chained, they apply left to right:
   `r{a, b} remove {b}`.
@@ -1669,20 +1671,50 @@ all lowercase, and a keyword can't be a name (P0017).
 `type` is a keyword only after `builtin`, `key` only where a variable's
 keys go, and `value` and `from` only in `tuple from` and `value from`.
 
-Variables and operators share one namespace, so no two of them can have the
-same name. Types have their own namespace, so a variable can be named after a
-type.
+Operators, values and types each have a namespace of their own. Values
+are variables and parameters, and a parameter hides a variable of its
+name. So a variable can have an operator's name, or a type's, and which
+one a name is depends on where it is: in `call greet{…};` it is an
+operator, and as a value it is a variable or a parameter. No two
+operators can have the same name, nor two variables (A0001).
 
 ```trendy
+var greet := "Hello";
 var text: text := "allowed";
 
-operator main{} [];
+operator greet{name: text} [
+    call debug_value{v: greet || ", " || name};
+];
+
+operator main{} [
+    call greet{name: "Amara"};
+];
 ```
 
 ```trendy,error
 var main: integer := 0;
+var main := 1;
 
 operator main{} [];
+```
+
+- **A name right before `{}` is an operator** if there is one with that
+  name, even if a value has it too, as the name after `call` is. In an
+  expression, `greet{}` is then a call of `greet`, which needs a value,
+  and an update operator has none: it is invoked only by a `call`
+  statement (A0016). To project a value of the same name on no
+  attributes, parenthesize it: `(poets){}`. The parentheses are needed
+  only then; with attributes, `poets{name}` can't be a call, and is a
+  projection.
+
+```trendy,error
+var poets := relation { { name: "Ada" } };
+
+operator poets{} [];
+
+operator main{} [
+    call debug_value{v: poets{}};
+];
 ```
 
 ## Layout

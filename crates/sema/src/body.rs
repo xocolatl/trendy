@@ -9,7 +9,7 @@ use trendy_syntax::ast::{self, AstNode, AttributeValue, VarDecl};
 
 use crate::check::{Checker, Lookup, Names};
 use crate::types::{self, Expected, Origin};
-use crate::{Kind, Values, assign, errors};
+use crate::{Namespaces, assign, errors};
 
 /// What a call needs to know about the operator it calls.
 pub(crate) struct Signature {
@@ -58,7 +58,7 @@ impl Signature {
 
 /// Everything a body can refer to.
 pub(crate) struct Context<'a> {
-    pub(crate) values: &'a Values,
+    pub(crate) namespaces: &'a Namespaces,
     pub(crate) operators: &'a [hir::Operator],
     pub(crate) signatures: &'a HashMap<String, Signature>,
     pub(crate) variables: &'a [hir::Variable],
@@ -71,10 +71,10 @@ pub(crate) struct Context<'a> {
 /// invalid.
 pub(crate) fn params(
     heading: &ast::Heading,
-    values: &Values,
+    namespaces: &Namespaces,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<BTreeMap<String, hir::ParamType>> {
-    let heading = types::resolve_heading(heading, values, errors)?;
+    let heading = types::resolve_heading(heading, namespaces, errors)?;
     Some(
         heading
             .attributes()
@@ -123,10 +123,7 @@ fn call(
         let what = if cx.operators[within.0].params.contains_key(name) {
             Some("a parameter")
         } else {
-            match cx.values.get(name) {
-                Some((Kind::Variable, _)) => Some("a variable"),
-                _ => None,
-            }
+            cx.namespaces.variable(name).map(|_| "a variable")
         };
         if let Some(what) = what {
             errors.push(errors::not_an_operator(name, span, what));
@@ -281,8 +278,8 @@ pub(crate) struct BodyNames<'a, 'b> {
 }
 
 impl Names for BodyNames<'_, '_> {
-    fn values(&self) -> &Values {
-        self.cx.values
+    fn namespaces(&self) -> &Namespaces {
+        self.cx.namespaces
     }
 
     fn resolve(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {
@@ -292,15 +289,15 @@ impl Names for BodyNames<'_, '_> {
         if let Some(&id) = self.cx.variable_ids.get(name) {
             return Lookup::Found(hir::Expr::Variable(id));
         }
-        match self.cx.values.get(name) {
-            // A variable with errors in its declaration is already reported.
-            Some((Kind::Variable, _)) => Lookup::Reported,
-            Some((Kind::Operator | Kind::Builtin, _)) => {
-                errors.push(errors::operator_as_value(name, span));
-                Lookup::Reported
-            }
-            None => Lookup::Unknown,
+        // A variable with errors in its declaration is already reported.
+        if self.cx.namespaces.variable(name).is_some() {
+            return Lookup::Reported;
         }
+        if self.cx.namespaces.operator(name).is_some() {
+            errors.push(errors::operator_as_value(name, span));
+            return Lookup::Reported;
+        }
+        Lookup::Unknown
     }
 
     fn candidates(&self) -> Vec<String> {

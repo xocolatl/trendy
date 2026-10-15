@@ -9,7 +9,7 @@ use trendy_syntax::SyntaxToken;
 use trendy_syntax::ast::{AstNode, Expr, Key, NaryExpr, SourceFile};
 
 use crate::types::Origin;
-use crate::{Kind, Values};
+use crate::{Kind, Namespaces};
 
 /// Type names from other languages, and the built-in type each one means.
 const TYPE_ALIASES: &[(&str, hir::Scalar)] = &[
@@ -58,15 +58,23 @@ pub(crate) fn duplicate_name(
             first.0.describe()
         )),
     };
-    d.with_note("variables and operators share one namespace, so every name must be unique")
+    let note = match this.0 {
+        Kind::Variable => {
+            "variables have a namespace of their own, so no two can have the same name, though a variable can have an operator's"
+        }
+        _ => {
+            "operators have a namespace of their own, so no two can have the same name, though an operator can have a variable's"
+        }
+    };
+    d.with_note(note)
         .with_help("delete the duplicate definition, or rename one of them")
 }
 
-pub(crate) fn missing_main(file: &SourceFile, values: &Values) -> Diagnostic {
+pub(crate) fn missing_main(file: &SourceFile, namespaces: &Namespaces) -> Diagnostic {
     const MESSAGE: &str = "program has no `main` operator";
     const ENTRY_NOTE: &str = "execution starts in the operator named `main`";
 
-    if let Some((Kind::Variable, Some(span))) = values.get("main") {
+    if let Some(span) = namespaces.variable("main") {
         return Diagnostic::error(
             Code::MissingMain,
             MESSAGE,
@@ -79,8 +87,8 @@ pub(crate) fn missing_main(file: &SourceFile, values: &Values) -> Diagnostic {
 
     // `Main` or `MAIN` is almost certainly meant to be the entry point, so the
     // fix goes there.
-    let near_miss = values
-        .iter()
+    let near_miss = namespaces
+        .operators()
         .filter(|&(name, kind, _)| kind == Kind::Operator && name.eq_ignore_ascii_case("main"))
         .filter_map(|(name, _, span)| Some((name, span?)))
         .min_by_key(|&(_, span)| span.start);
@@ -125,7 +133,7 @@ pub(crate) fn missing_main(file: &SourceFile, values: &Values) -> Diagnostic {
 }
 
 /// The type name `ident` doesn't name a type.
-pub(crate) fn unknown_type(ident: &SyntaxToken, values: &Values) -> Diagnostic {
+pub(crate) fn unknown_type(ident: &SyntaxToken, namespaces: &Namespaces) -> Diagnostic {
     let name = ident.text();
     let span = trendy_syntax::span(ident.text_range());
     let builtins: Vec<_> = hir::Scalar::ALL
@@ -142,7 +150,11 @@ pub(crate) fn unknown_type(ident: &SyntaxToken, values: &Values) -> Diagnostic {
         "the built-in types are {}",
         trendy_diag::conjoin(&builtins)
     ));
-    if let Some((kind, _)) = values.get(name) {
+    let kind = namespaces
+        .variable(name)
+        .map(|_| Kind::Variable)
+        .or_else(|| namespaces.operator(name).map(|(kind, _)| kind));
+    if let Some(kind) = kind {
         return d.with_note(format!("`{name}` is {}, not a type", kind.describe()));
     }
 
@@ -595,6 +607,53 @@ pub(crate) fn operator_as_value(name: &str, span: Span) -> Diagnostic {
     .with_help(format!(
         "to invoke it, write a statement: `call {name}{{…}};`"
     ))
+}
+
+/// `name{}` in an expression, the name at `span`: a call of the operator
+/// `name`, defined at `defined` unless it is built in, which has no value.
+/// `projectable` says whether a value of the same name is in scope, which
+/// `(name){}` would project.
+pub(crate) fn operator_call_without_value(
+    name: &str,
+    span: Span,
+    defined: Option<Span>,
+    projectable: bool,
+) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::OperatorAsValue,
+        format!("`{name}{{}}` calls the operator `{name}`, which has no value"),
+        span,
+        "an update operator",
+    );
+    let d = match defined {
+        Some(defined) => {
+            d.with_secondary(defined, format!("the operator `{name}` is defined here"))
+        }
+        None => d.with_note(format!(
+            "`{name}` is a built-in operator, declared in the prelude"
+        )),
+    };
+    let d = d.with_note(
+        "a name right before `{}` is the operator when there is one, as it is after `call`; an update operator returns no value, so it is invoked only by a `call` statement, not in an expression",
+    );
+    if !projectable {
+        return d.with_help(format!(
+            "to invoke it, write a statement: `call {name}{{}};`"
+        ));
+    }
+    d.with_suggestion(
+        format!("parenthesize `{name}` to project the value of that name instead"),
+        vec![
+            Edit {
+                span: Span::empty(span.start),
+                replacement: "(".to_string(),
+            },
+            Edit {
+                span: Span::empty(span.end),
+                replacement: ")".to_string(),
+            },
+        ],
+    )
 }
 
 /// The parameter `name`, at `span`, assigned. `hidden` says whether it
