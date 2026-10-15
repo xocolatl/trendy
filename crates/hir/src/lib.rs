@@ -246,8 +246,7 @@ pub enum Expr {
     /// A call of a read-only operator, whose value it is: the arguments
     /// are its parameters, by name. Sema evaluates every call it can, so
     /// one remains only where an argument, or a variable the operator
-    /// reads, is known only when the program runs. For now that is only in
-    /// read-only operators' values.
+    /// reads, is known only when the program runs.
     Call(OperatorId, BTreeMap<String, Expr>),
 }
 

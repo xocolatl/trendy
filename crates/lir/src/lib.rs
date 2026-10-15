@@ -31,7 +31,11 @@
 //! A function with parameters takes one pointer, to a struct of its
 //! parameters in name order: a call's arguments are a tuple. The caller
 //! builds that struct in a stack slot. A function without parameters takes
-//! nothing.
+//! nothing. A function with a result, a read-only operator's, then takes
+//! a pointer to where the result goes, a stack slot of the caller's. What
+//! it makes, such as the result's texts, is the calling statement's, as if
+//! the caller had computed the value itself, so it begins no scope (see
+//! [`RuntimeFn::Begin`]).
 //!
 //! # Failures
 //!
@@ -66,6 +70,9 @@ pub struct Function {
     /// The layout of the parameter struct, a [`Layout::Struct`], if the
     /// function takes parameters.
     pub params: Option<Layout>,
+    /// The layout of its result, if it has one: a read-only operator's
+    /// function stores its value at [`Base::Result`].
+    pub result: Option<Layout>,
     /// Stack slots, each with the layout of what it holds.
     pub slots: Vec<Layout>,
     /// The first block is the entry block.
@@ -128,6 +135,8 @@ pub enum Base {
     Slot(SlotId),
     /// The current function's parameter struct.
     Params,
+    /// Where the current function's result goes, as its caller says.
+    Result,
     /// The value with layout `pointee` at the address in `slot`, a
     /// [`Layout::Address`]: such as a relation's tuple, as a loop goes
     /// through them.
@@ -283,10 +292,12 @@ pub enum Inst {
         src: Place,
         layout: Layout,
     },
-    /// Call a function, passing the address of its parameter struct.
+    /// Call a function, passing the address of its parameter struct, and
+    /// of where its result goes.
     Call {
         function: FunctionId,
         args: Option<Place>,
+        result: Option<Place>,
     },
     /// Call a runtime function, passing the address of each place.
     CallRuntime {

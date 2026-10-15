@@ -118,6 +118,8 @@ operator main{} [
     call debug_value{v: twelve};
     call debug_value{v: double{x: 21}};
     call debug_value{v: doubled};
+    rate := 4;
+    call debug_value{v: scaled{x: 2}};
 ];
 ```
 
@@ -131,16 +133,18 @@ operator main{} [
   operator has no value (A0016).
 - **It doesn't call itself,** directly or through others (A0036): without
   a conditional, nothing could stop the calls.
-- **Calls are evaluated when compiling.** An initial value can call a
-  read-only operator: the variables it reads have their initial values,
-  evaluated first, so a cycle through it is an initial values' cycle
-  (A0021). So can a body, with arguments known when compiling, if the
-  operator reads no variable, and an `extend`'s or a `where`'s values,
+- **A call is evaluated when compiling where it can be.** An initial value
+  can call a read-only operator: the variables it reads have their initial
+  values, evaluated first, so a cycle through it is an initial values'
+  cycle (A0021). So can a body, with arguments known when compiling, if
+  the operator reads no variable, and an `extend`'s or a `where`'s values,
   for each tuple of a constant operand. A call that fails, such as one
   that overflows for its arguments, is an error at the call.
-- **For now, that is the only way to call one:** a call whose arguments,
-  or a variable the operator reads, are known only when the program runs
-  is an error (A0038).
+- **Elsewhere it is made when the program runs:** where its arguments, or
+  a variable the operator reads, are known only then. The operator reads
+  each variable as it is at the call, so `scaled{x: 2}` above is 16 once
+  `rate` is 4, and a failure in it stops the program, as one anywhere
+  else does.
 - **`f{}` calls a read-only operator without parameters,** and is its
   value, even where a variable or parameter is named `f` too: see
   [Names](#names-1).

@@ -10,11 +10,7 @@ use trendy_lir as lir;
 /// Translate HIR to LIR. Infallible: sema has already rejected bad programs.
 #[must_use]
 pub fn lower(program: &hir::Program) -> lir::Program {
-    let mut cx = Lowering {
-        data: Vec::new(),
-        descriptors: HashMap::new(),
-        empty: None,
-    };
+    let mut cx = Lowering::new();
 
     let mut variable_data = Vec::new();
     for variable in &program.variables {
@@ -33,8 +29,10 @@ pub fn lower(program: &hir::Program) -> lir::Program {
         }));
     }
 
-    // Only update operators become functions: built-ins are runtime calls,
-    // and sema evaluates every call of a read-only operator.
+    // Each update operator becomes a function, numbered first. A read-only
+    // operator becomes one once lowered code calls it, which sema leaves
+    // only where the program runs, numbered after. Built-ins are runtime
+    // calls.
     let mut function_ids = HashMap::new();
     for (i, op) in program.operators.iter().enumerate() {
         if matches!(op.kind, hir::OperatorKind::Update { .. }) {
@@ -46,30 +44,14 @@ pub fn lower(program: &hir::Program) -> lir::Program {
         let hir::OperatorKind::Update { body } = &op.kind else {
             continue;
         };
-        let mut function = FunctionBuilder {
-            program,
-            within: hir::OperatorId(i),
-            function_ids: &function_ids,
-            variable_data: &variable_data,
-            slots: Vec::new(),
-            blocks: vec![placeholder()],
-            current: lir::BlockId(0),
-            insts: Vec::new(),
-            scoped: false,
-            scope: None,
-            tuples: Vec::new(),
-        };
+        let mut function =
+            FunctionBuilder::new(program, hir::OperatorId(i), &function_ids, &variable_data);
         for statement in body {
             function.statement(statement, &mut cx);
         }
-        function.end_block(lir::Terminator::Return, lir::BlockId(0));
-        functions.push(lir::Function {
-            name: op.name.clone(),
-            params: params_layout(&op.params),
-            slots: function.slots,
-            blocks: function.blocks,
-        });
+        functions.push(function.finish(None));
     }
+    functions.append(&mut cx.read_only_functions);
 
     lir::Program {
         functions,
@@ -78,16 +60,32 @@ pub fn lower(program: &hir::Program) -> lir::Program {
     }
 }
 
-/// The program-wide part of lowering: the data objects.
+/// The program-wide part of lowering: the data objects, and the read-only
+/// operators' functions.
 struct Lowering {
     data: Vec<lir::Data>,
     /// Each type's descriptor, built once.
     descriptors: HashMap<hir::Type, lir::DataId>,
     /// An empty constant, for addresses that are never read.
     empty: Option<lir::DataId>,
+    /// Each read-only operator's function, once lowered code calls it, and
+    /// whether a call of it makes a text or relation.
+    read_only: HashMap<hir::OperatorId, (lir::FunctionId, bool)>,
+    /// Those functions, in the order lowered, each after those it calls.
+    read_only_functions: Vec<lir::Function>,
 }
 
 impl Lowering {
+    fn new() -> Self {
+        Lowering {
+            data: Vec::new(),
+            descriptors: HashMap::new(),
+            empty: None,
+            read_only: HashMap::new(),
+            read_only_functions: Vec::new(),
+        }
+    }
+
     fn push(&mut self, data: lir::Data) -> lir::DataId {
         self.data.push(data);
         lir::DataId(self.data.len() - 1)
@@ -243,7 +241,43 @@ fn placeholder() -> lir::Block {
     }
 }
 
-impl FunctionBuilder<'_> {
+impl<'a> FunctionBuilder<'a> {
+    /// The function of the operator `within`, with an empty entry block.
+    fn new(
+        program: &'a hir::Program,
+        within: hir::OperatorId,
+        function_ids: &'a HashMap<hir::OperatorId, lir::FunctionId>,
+        variable_data: &'a [lir::DataId],
+    ) -> Self {
+        FunctionBuilder {
+            program,
+            within,
+            function_ids,
+            variable_data,
+            slots: Vec::new(),
+            blocks: vec![placeholder()],
+            current: lir::BlockId(0),
+            insts: Vec::new(),
+            scoped: false,
+            scope: None,
+            tuples: Vec::new(),
+        }
+    }
+
+    /// The function, its last block ended with a return, with a result
+    /// laid out as `result`, if it has one.
+    fn finish(mut self, result: Option<lir::Layout>) -> lir::Function {
+        self.end_block(lir::Terminator::Return, lir::BlockId(0));
+        let op = self.program.operator(self.within);
+        lir::Function {
+            name: op.name.clone(),
+            params: params_layout(&op.params),
+            result,
+            slots: self.slots,
+            blocks: self.blocks,
+        }
+    }
+
     /// A new block, to be built later.
     fn new_block(&mut self) -> lir::BlockId {
         self.blocks.push(placeholder());
@@ -338,32 +372,97 @@ impl FunctionBuilder<'_> {
                 {
                     self.scoped = true;
                 }
-                // The arguments are a tuple: build it in a stack slot, in
-                // parameter name order, and pass its address.
-                let args_place = params_layout(&callee.params).map(|params| {
-                    let slot = self.slot(params);
-                    for (i, (name, param)) in callee.params.iter().enumerate() {
-                        let src = self.place(&args[name], cx);
-                        self.insts.push(lir::Inst::Copy {
-                            dst: lir::Place {
-                                base: slot.base.clone(),
-                                path: vec![i],
-                            },
-                            src,
-                            layout: param_layout(param),
-                        });
-                    }
-                    slot
-                });
+                let args = self.arguments(&callee.params, args, cx);
                 self.insts.push(lir::Inst::Call {
                     function: self.function_ids[&operator],
-                    args: args_place,
+                    args,
+                    result: None,
                 });
             }
             hir::OperatorKind::ReadOnly { .. } => {
                 unreachable!("`call` invokes only update operators")
             }
         }
+    }
+
+    /// The arguments of a call, for `params`: a tuple, built in a stack
+    /// slot in parameter name order, whose address is passed, if there are
+    /// any.
+    fn arguments(
+        &mut self,
+        params: &BTreeMap<String, hir::ParamType>,
+        args: &BTreeMap<String, hir::Expr>,
+        cx: &mut Lowering,
+    ) -> Option<lir::Place> {
+        let slot = self.slot(params_layout(params)?);
+        for (i, (name, param)) in params.iter().enumerate() {
+            let src = self.place(&args[name], cx);
+            let mut dst = slot.clone();
+            dst.path.push(i);
+            self.insts.push(lir::Inst::Copy {
+                dst,
+                src,
+                layout: param_layout(param),
+            });
+        }
+        Some(slot)
+    }
+
+    /// The value of a call of the read-only operator `id`, computed into
+    /// a new stack slot. What the operator makes is the statement's.
+    fn read_only_call(
+        &mut self,
+        id: hir::OperatorId,
+        args: &BTreeMap<String, hir::Expr>,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let callee = self.program.operator(id);
+        let hir::OperatorKind::ReadOnly { result, value } = &callee.kind else {
+            unreachable!("only read-only operators are called in expressions");
+        };
+        let (function, makes) = self.read_only(id, value, result, cx);
+        self.scoped |= makes;
+        let args = self.arguments(&callee.params, args, cx);
+        let dst = self.slot(layout(result));
+        self.insts.push(lir::Inst::Call {
+            function,
+            args,
+            result: Some(dst.clone()),
+        });
+        dst
+    }
+
+    /// The function of the read-only operator `id`, lowered when first
+    /// called, and whether a call of it makes a text or relation: its
+    /// `value` computed, then stored where the caller says, as a `result`.
+    /// It begins no scope, so what it makes is the calling statement's.
+    /// Read-only operators don't call themselves, so this ends.
+    fn read_only(
+        &mut self,
+        id: hir::OperatorId,
+        value: &hir::Expr,
+        result: &hir::Type,
+        cx: &mut Lowering,
+    ) -> (lir::FunctionId, bool) {
+        if let Some(&lowered) = cx.read_only.get(&id) {
+            return lowered;
+        }
+        let mut function =
+            FunctionBuilder::new(self.program, id, self.function_ids, self.variable_data);
+        let src = function.place(value, cx);
+        function.insts.push(lir::Inst::Copy {
+            dst: lir::Place::whole(lir::Base::Result),
+            src,
+            layout: layout(result),
+        });
+        let lowered = (
+            lir::FunctionId(self.function_ids.len() + cx.read_only_functions.len()),
+            function.scoped,
+        );
+        cx.read_only_functions
+            .push(function.finish(Some(layout(result))));
+        cx.read_only.insert(id, lowered);
+        lowered
     }
 
     /// Assignments made at once, each to a different variable. Each value
@@ -566,9 +665,7 @@ impl FunctionBuilder<'_> {
             hir::Expr::Antijoin(lhs, rhs) => self.matching(lhs, rhs, true, cx),
             hir::Expr::Restrict(operand, condition) => self.restrict(operand, condition, cx),
             hir::Expr::Current(depth, _) => self.tuples[self.tuples.len() - 1 - depth].clone(),
-            // Calls are only in read-only operators' values, which aren't
-            // lowered: sema evaluates every other call when compiling.
-            hir::Expr::Call(..) => unreachable!("sema evaluates calls outside read-only operators"),
+            hir::Expr::Call(id, args) => self.read_only_call(*id, args, cx),
             hir::Expr::Extend(operand, _, attributes) => self.extend(expr, operand, attributes, cx),
             hir::Expr::Binary(op, lhs, rhs) => {
                 let operand_ty = self.program.type_of(lhs, self.within);
@@ -1598,7 +1695,7 @@ mod tests {
     }
 
     #[test]
-    fn only_user_operators_become_functions() {
+    fn built_ins_dont_become_functions() {
         let lowered = lower(&program(
             vec![debug_value(), user("main", &[], vec![])],
             vec![],
@@ -2051,6 +2148,7 @@ mod tests {
                 lir::Inst::Call {
                     function: lir::FunctionId(0),
                     args: Some(lir::Place::whole(lir::Base::Slot(lir::SlotId(0)))),
+                    result: None,
                 },
             ]
         );
@@ -2093,6 +2191,91 @@ mod tests {
             .collect();
         assert_eq!(functions, [lir::RuntimeFn::Begin, lir::RuntimeFn::End]);
         assert!(matches!(insts[insts.len() - 2], lir::Inst::Call { .. }));
+    }
+
+    #[test]
+    fn read_only_operators_become_functions_once_called() {
+        // `shout{t: text}: text [ return t || "!"; ]`, called when running
+        // as `debug_value{v: shout{t: t}}`, and `unused`, which isn't.
+        let text = || hir::Type::Scalar(hir::Scalar::Text);
+        let read_only = |name: &str, value| hir::Operator {
+            name: name.to_string(),
+            params: [("t".to_string(), hir::ParamType::Type(text()))].into(),
+            kind: hir::OperatorKind::ReadOnly {
+                result: text(),
+                value,
+            },
+        };
+        let t = || Box::new(hir::Expr::Parameter("t".to_string()));
+        let bang = hir::Expr::Constant(hir::Value::Text("!".to_string()));
+        let shout = read_only(
+            "shout",
+            hir::Expr::Binary(hir::BinaryOp::Concatenate, t(), Box::new(bang)),
+        );
+        let shouted = hir::Expr::Call(
+            hir::OperatorId(1),
+            [("t".to_string(), hir::Expr::Variable(hir::VariableId(0)))].into(),
+        );
+        let lowered = lower(&program(
+            vec![
+                debug_value(),
+                shout,
+                read_only("unused", *t()),
+                user("main", &[], vec![call(0, vec![("v", shouted)])]),
+            ],
+            vec![variable("t", hir::Value::Text("a".to_string()))],
+        ));
+        let names: Vec<&str> = lowered.functions.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["main", "shout"]);
+        // `shout` stores its value where the caller says, in no scope of
+        // its own.
+        let shout = &lowered.functions[1];
+        assert_eq!(shout.result, Some(layout(&text())));
+        let runtime = |insts: &[lir::Inst]| -> Vec<lir::RuntimeFn> {
+            insts
+                .iter()
+                .filter_map(|inst| match inst {
+                    lir::Inst::CallRuntime { function, .. } => Some(*function),
+                    _ => None,
+                })
+                .collect()
+        };
+        let insts = &shout.blocks[0].insts;
+        assert_eq!(runtime(insts), [lir::RuntimeFn::Concat]);
+        assert!(matches!(
+            insts.last(),
+            Some(lir::Inst::Copy {
+                dst: lir::Place {
+                    base: lir::Base::Result,
+                    ..
+                },
+                ..
+            })
+        ));
+        // The call passes a slot for the result, and the calling
+        // statement's scope owns what `shout` makes.
+        let insts = &lowered.functions[0].blocks[0].insts;
+        assert_eq!(
+            runtime(insts),
+            [
+                lir::RuntimeFn::Begin,
+                lir::RuntimeFn::DebugValue,
+                lir::RuntimeFn::End
+            ]
+        );
+        let Some(lir::Inst::Call {
+            function,
+            result: Some(result),
+            ..
+        }) = insts.iter().find(|i| matches!(i, lir::Inst::Call { .. }))
+        else {
+            panic!("{insts:#?}");
+        };
+        assert_eq!(*function, lir::FunctionId(1));
+        let Some(lir::Inst::CallRuntime { args, .. }) = insts.get(insts.len() - 2) else {
+            panic!("{insts:#?}");
+        };
+        assert_eq!(&args[0], result);
     }
 
     #[test]
@@ -2149,11 +2332,7 @@ mod tests {
             ]
             .into(),
         );
-        let mut cx = Lowering {
-            data: Vec::new(),
-            descriptors: HashMap::new(),
-            empty: None,
-        };
+        let mut cx = Lowering::new();
         let id = cx.descriptor(&hir::Type::Tuple(heading));
         let lir::Field::Address(attributes) = cx.data[id.0].fields[2] else {
             panic!("attributes are an address");

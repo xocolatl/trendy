@@ -103,6 +103,10 @@ fn operators() {
             r#""spicy ramen""#,
             r#""spicy ramen → ramen""#,
             r#""ramen""#,
+            // Calls made when running, with `vat` at 16, then at 25.
+            r#"relation { dish: text } { { dish: "pozole" }, { dish: "ramen" } }"#,
+            r#"relation { dish: text } { { dish: "pozole" } }"#,
+            r#"relation { country: text, dish: text, total: integer } { { country: "Ghana", dish: "jollof rice", total: 1500 }, { country: "Japan", dish: "ramen", total: 1125 }, { country: "Mexico", dish: "pozole", total: 937 } }"#,
         ]
     );
 }

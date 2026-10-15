@@ -2404,20 +2404,6 @@ pub(crate) fn extra_return(
 /// A read-only operator's body, for notes.
 const RETURN_RULE: &str = "a read-only operator's body is one statement, `return value;`, with a value of its result type";
 
-/// A statement, at `span`, with a call of `name` whose arguments, or a
-/// variable it reads, are known only when the program runs.
-pub(crate) fn run_time_call(name: &str, span: Span) -> Diagnostic {
-    Diagnostic::error(
-        Code::RunTimeCall,
-        format!("this statement calls `{name}` with a value known only when the program runs"),
-        span,
-        format!("an argument of `{name}`, or a variable it reads, is known only when running"),
-    )
-    .with_note(
-        "for now, a read-only operator is called only when compiling: in an initial value, or with arguments known then, when it reads no variable",
-    )
-}
-
 /// `expr`, a call of `signature` with constant arguments, whose value
 /// fails, as `failed` says.
 pub(crate) fn call_failure(

@@ -62,58 +62,11 @@ pub(crate) fn body(
             }
         };
         match statement {
-            // For now, sema evaluates every call; one left, of a read-only
-            // operator whose arguments, or a variable it reads, are known
-            // only when running, can't be lowered yet.
-            Some(statement) if let Some(id) = left_call(&statement) => {
-                errors.push(errors::run_time_call(
-                    &cx.operators.get(id).name,
-                    stmt.span(),
-                ));
-                ok = false;
-            }
             Some(statement) => statements.push(statement),
             None => ok = false,
         }
     }
     ok.then_some(statements)
-}
-
-/// The operator of a call left in `statement`'s expressions, if there is
-/// one.
-fn left_call(statement: &hir::Statement) -> Option<hir::OperatorId> {
-    match statement {
-        hir::Statement::Call { args, .. } => args.values().find_map(called),
-        hir::Statement::Assign(assignments) => assignments.iter().find_map(|a| called(&a.value)),
-    }
-}
-
-/// The operator of a call in `expr`, if there is one.
-fn called(expr: &hir::Expr) -> Option<hir::OperatorId> {
-    match expr {
-        hir::Expr::Call(id, _) => Some(*id),
-        hir::Expr::Constant(_)
-        | hir::Expr::Variable(_)
-        | hir::Expr::Parameter(_)
-        | hir::Expr::Current(..) => None,
-        hir::Expr::Unary(_, operand)
-        | hir::Expr::Extract(operand, _)
-        | hir::Expr::Remove(operand, _)
-        | hir::Expr::Rename(operand, _)
-        | hir::Expr::Ungroup(operand, _)
-        | hir::Expr::Only(operand) => called(operand),
-        hir::Expr::Binary(_, lhs, rhs)
-        | hir::Expr::And(lhs, rhs)
-        | hir::Expr::Combine(_, lhs, rhs)
-        | hir::Expr::Semijoin(lhs, rhs)
-        | hir::Expr::Antijoin(lhs, rhs)
-        | hir::Expr::Restrict(lhs, rhs) => called(lhs).or_else(|| called(rhs)),
-        hir::Expr::Tuple(attributes) => attributes.values().find_map(called),
-        hir::Expr::Relation(_, tuples) => tuples.iter().find_map(called),
-        hir::Expr::Extend(operand, _, attributes) => {
-            called(operand).or_else(|| attributes.values().find_map(called))
-        }
-    }
 }
 
 /// `call name{arguments};`, of an update operator.

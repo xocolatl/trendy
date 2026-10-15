@@ -312,9 +312,7 @@ A read-only operator is its value, an expression of its parameters and the
 variables it reads (`OperatorKind::ReadOnly`). A call of one
 (`Expr::Call`) is the value, with the arguments for the parameters. Sema
 evaluates every call it can, so a call is left only where an argument, or
-a variable the operator reads, is known only when the program runs: for
-now, only in a read-only operator's value, where its arguments are the
-operator's parameters.
+a variable the operator reads, is known only when the program runs.
 
 Every type's equality must hold exactly when no operator can tell two values
 apart (TTM RM Prescription 8). For approximate numbers, that is IEEE 754
@@ -387,9 +385,8 @@ Elsewhere variables change when the program runs, so a call of an
 operator that reads one stays a call. A call whose arguments are known
 only for each tuple at hand is evaluated once they are, when a constant
 operand is folded. A failure is an error at the call, such as an overflow
-for its arguments (R0001), with a label at the callee's value. For now,
-nothing calls an operator when running, so a statement left with a call
-is an error (A0038), checked once the statement is folded.
+for its arguments (R0001), with a label at the callee's value. A call
+left is made when the program runs.
 
 A relation variable's keys must name its attributes, each once, and none
 may contain another, since a key is irreducible. Its initial value must
@@ -638,11 +635,13 @@ translation.
 **Input:** `hir::Program`. **Output:** `lir::Program`. It cannot fail.
 
 **Owns:** turning tree-shaped code into control flow, and choosing how each
-value is represented in memory. Each update operator becomes a function.
-Read-only operators don't, for now: sema evaluates every call of one
-outside read-only operators' values, which nothing lowers yet. A computed expression, such as `not p`, is
-evaluated into a stack slot of its own, which the instruction that uses it
-then reads.
+value is represented in memory. Each update operator becomes a function,
+and so does each read-only operator that lowered code calls, once it
+does: its value is computed, then stored where the caller says
+(`Base::Result`). Sema evaluates every other call, so an operator called
+only when compiling has no function. A computed expression, such as
+`not p`, is evaluated into a stack slot of its own, which the instruction
+that uses it then reads.
 
 It also owns the lifetime of allocated values. A concatenation done at run
 time calls `trendy_rt_concat`, which allocates the result's bytes with
@@ -666,6 +665,14 @@ keeps, since those statements, and only those, can point into it: with
 the assigning statement's own values, or with arguments, which a caller
 can have passed from the variable. So a statement that passes a text or
 relation to an update operator has a scope even if it makes nothing.
+
+A read-only operator's function begins no scope: what it makes, such as
+its result's texts, is the calling statement's, as if the caller had
+computed the value itself, which is what sema does when it evaluates a
+call. So a statement that calls one that makes a text or relation has a
+scope. Lowering knows whether one does from its function, lowered at its
+first call, before the caller's statement ends; read-only operators don't
+call themselves, so that ends.
 
 An assignment statement computes each value into a slot of its own: a
 copy, since a value can be a variable's own place, which assigning another
@@ -757,7 +764,9 @@ produced with Cranelift.
 The calling convention: a function with parameters takes one pointer, to a
 struct of its parameters in name order, because a call's arguments are a
 tuple. The caller builds that struct in a stack slot, copying each argument
-from a constant, a variable, or its own parameters. Runtime functions taking
+from a constant, a variable, or its own parameters. A read-only operator's
+function then takes a pointer to where its result goes, a stack slot of
+the caller's. Runtime functions taking
 `any` get the value's address and a type descriptor: read-only data laid out
 as `trendy_runtime::TypeDesc` and `Attr`, built by lowering from ordinary
 fields. Its sizes and offsets are LIR's `Size` and `Offset` fields, which

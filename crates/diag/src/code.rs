@@ -76,7 +76,6 @@ pub enum Code {
     Return,
     Recursion,
     CallOfReadOnly,
-    RunTimeCall,
     Overflow,
     DivisionByZero,
     OutOfMemory,
@@ -103,7 +102,7 @@ pub enum CodeKind {
 }
 
 impl Code {
-    pub const ALL: [Code; 74] = [
+    pub const ALL: [Code; 73] = [
         Code::UnexpectedCharacter,
         Code::MissingToken,
         Code::WrongDelimiter,
@@ -167,7 +166,6 @@ impl Code {
         Code::Return,
         Code::Recursion,
         Code::CallOfReadOnly,
-        Code::RunTimeCall,
         Code::Overflow,
         Code::DivisionByZero,
         Code::OutOfMemory,
@@ -246,7 +244,6 @@ impl Code {
             Code::Return => "A0035",
             Code::Recursion => "A0036",
             Code::CallOfReadOnly => "A0037",
-            Code::RunTimeCall => "A0038",
             Code::Overflow => "R0001",
             Code::DivisionByZero => "R0002",
             Code::OutOfMemory => "R0003",
@@ -354,7 +351,6 @@ impl Code {
             Code::Return => include_str!("../errors/A0035.md"),
             Code::Recursion => include_str!("../errors/A0036.md"),
             Code::CallOfReadOnly => include_str!("../errors/A0037.md"),
-            Code::RunTimeCall => include_str!("../errors/A0038.md"),
             Code::Overflow => include_str!("../errors/R0001.md"),
             Code::DivisionByZero => include_str!("../errors/R0002.md"),
             Code::OutOfMemory => include_str!("../errors/R0003.md"),

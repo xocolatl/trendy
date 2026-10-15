@@ -54,7 +54,8 @@ pub fn compile(program: &lir::Program) -> Result<Vec<u8>, String> {
         .iter()
         .map(|f| {
             let mut signature = module.make_signature();
-            if f.params.is_some() {
+            // The parameters' address, then the result's.
+            for _ in f.params.iter().chain(&f.result) {
                 signature.params.push(AbiParam::new(pointer));
             }
             module
@@ -158,12 +159,15 @@ impl Functions {
         let blocks: Vec<_> = function.blocks.iter().map(|_| b.create_block()).collect();
         b.append_block_params_for_function_params(blocks[0]);
         b.switch_to_block(blocks[0]);
-        let params = b.block_params(blocks[0]).first().copied();
+        let mut addresses = b.block_params(blocks[0]).iter().copied();
+        let params = function.params.as_ref().and_then(|_| addresses.next());
+        let result = function.result.as_ref().and_then(|_| addresses.next());
 
         let frame = Frame {
             function,
             slots: &slots,
             params,
+            result,
         };
         for (i, (block, &cl_block)) in function.blocks.iter().zip(&blocks).enumerate() {
             if i > 0 {
@@ -219,15 +223,20 @@ impl Functions {
                     MemFlagsData::new(),
                 );
             }
-            lir::Inst::Call { function, args } => {
+            lir::Inst::Call {
+                function,
+                args,
+                result,
+            } => {
                 let callee = self
                     .module
                     .declare_func_in_func(self.function_ids[function.0], b.func);
-                let args = match args {
-                    Some(place) => vec![self.address(place, frame, b)?],
-                    None => Vec::new(),
-                };
-                b.ins().call(callee, &args);
+                let addresses = args
+                    .iter()
+                    .chain(result)
+                    .map(|place| self.address(place, frame, b))
+                    .collect::<Result<Vec<_>, _>>()?;
+                b.ins().call(callee, &addresses);
             }
             lir::Inst::CallRuntime { function, args } => {
                 let pointers = vec![self.config.pointer_type(); args.len()];
@@ -492,6 +501,11 @@ impl Functions {
                 .params
                 .as_ref()
                 .ok_or("parameters used in a function without them")?,
+            lir::Base::Result => frame
+                .function
+                .result
+                .as_ref()
+                .ok_or("a result stored by a function without one")?,
             lir::Base::Indirect { pointee, .. } => pointee,
         };
         let offset = i64::try_from(self.target.path_offset(base_layout, &place.path)?)
@@ -512,6 +526,12 @@ impl Functions {
                 let base = frame
                     .params
                     .ok_or("parameters used in a function without them")?;
+                b.ins().iadd_imm_s(base, offset)
+            }
+            lir::Base::Result => {
+                let base = frame
+                    .result
+                    .ok_or("a result stored by a function without one")?;
                 b.ins().iadd_imm_s(base, offset)
             }
             lir::Base::Indirect { slot, .. } => {
@@ -550,11 +570,13 @@ fn operand_type(operand: lir::Operand) -> cranelift_codegen::ir::Type {
     }
 }
 
-/// The function being built: its stack slots and its parameter pointer.
+/// The function being built: its stack slots, and the addresses of its
+/// parameters and its result.
 struct Frame<'a> {
     function: &'a lir::Function,
     slots: &'a [cranelift_codegen::ir::StackSlot],
     params: Option<Value>,
+    result: Option<Value>,
 }
 
 /// Declare and define every data object, laid out for the target. Returns
@@ -781,6 +803,7 @@ mod tests {
             functions: vec![lir::Function {
                 name: "main".to_string(),
                 params: None,
+                result: None,
                 slots: Vec::new(),
                 blocks: vec![lir::Block {
                     insts: Vec::new(),
@@ -893,6 +916,7 @@ mod tests {
         let callee = lir::Function {
             name: "show".to_string(),
             params: Some(args.clone()),
+            result: None,
             slots: Vec::new(),
             blocks: vec![lir::Block {
                 insts: vec![lir::Inst::CallRuntime {
@@ -911,6 +935,7 @@ mod tests {
         let main = lir::Function {
             name: "main".to_string(),
             params: None,
+            result: None,
             slots: vec![args],
             blocks: vec![lir::Block {
                 insts: vec![
@@ -928,6 +953,7 @@ mod tests {
                     lir::Inst::Call {
                         function: lir::FunctionId(0),
                         args: Some(lir::Place::whole(lir::Base::Slot(lir::SlotId(0)))),
+                        result: None,
                     },
                 ],
                 terminator: lir::Terminator::Return,

@@ -556,15 +556,12 @@ mod tests {
         let source = program("call debug_value{v: double{n}};");
         assert_eq!(codes(&source), [Code::PositionalArgument]);
         assert!(fix(&source).contains("double{x: n}"));
-        // For now, a call is evaluated only when compiling.
-        assert_eq!(
-            codes(&program("call debug_value{v: double{x: n}};")),
-            [Code::RunTimeCall]
-        );
-        assert_eq!(
-            codes(&program("call debug_value{v: scaled{x: 1}};")),
-            [Code::RunTimeCall]
-        );
+        // A call whose arguments, or a variable its operator reads, are
+        // known only when the program runs is made then.
+        for value in ["double{x: n}", "scaled{x: 1}"] {
+            let body = main_body(&program(&format!("call debug_value{{v: {value}}};")));
+            assert!(matches!(argument(&body[0]), hir::Expr::Call(..)), "{value}");
+        }
         // A call whose value fails is an error at the call.
         let errors = errors(&format!(
             "{READ_ONLY}\nvar big := double{{x: 9223372036854775807}};{MAIN}"
