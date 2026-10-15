@@ -78,9 +78,11 @@ fn classify(token: &SyntaxToken) -> Option<Highlight> {
         {
             (Class::Parameter, true)
         }
-        (SyntaxKind::Ident, Some(SyntaxKind::NameRef), Some(SyntaxKind::CallStmt)) => {
-            (Class::Operator, false)
-        }
+        (
+            SyntaxKind::Ident,
+            Some(SyntaxKind::NameRef),
+            Some(SyntaxKind::CallStmt | SyntaxKind::CallExpr),
+        ) => (Class::Operator, false),
         (SyntaxKind::Ident, Some(SyntaxKind::NameRef), _) => {
             if is_parameter(token) {
                 (Class::Parameter, false)

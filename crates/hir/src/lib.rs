@@ -4,7 +4,7 @@
 //! invariant sema promises holds. This is where relational algebra will live
 //! and where the optimizer will rewrite it. Nothing here refers to syntax.
 //!
-//! Variables and operators share one namespace; types have their own.
+//! Operators, variables and types each have a namespace of their own.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -34,7 +34,7 @@ impl Program {
     /// # Panics
     ///
     /// If `expr` names a parameter `within` doesn't have, or one of type
-    /// `any`, which sema never produces.
+    /// `any`, or calls an update operator, which sema never produces.
     #[must_use]
     pub fn type_of(&self, expr: &Expr, within: OperatorId) -> Type {
         expr.type_with(&|leaf| match leaf {
@@ -43,7 +43,11 @@ impl Program {
                 ParamType::Type(ty) => ty.clone(),
                 ParamType::Any => unreachable!("only built-ins have `any` parameters"),
             },
-            _ => unreachable!("only variables and parameters are leaves"),
+            Expr::Call(id, _) => match &self.operator(*id).kind {
+                OperatorKind::ReadOnly { result, .. } => result.clone(),
+                _ => unreachable!("only read-only operators are called in expressions"),
+            },
+            _ => unreachable!("only variables, parameters and calls are leaves"),
         })
     }
 }
@@ -56,10 +60,12 @@ pub struct OperatorId(pub usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VariableId(pub usize);
 
-/// An update operator: it returns nothing and is invoked by `call`.
+/// An operator: an update operator, which returns nothing and is invoked
+/// by `call`, or a read-only operator, whose call is a value (TTM RM
+/// Prescription 3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Operator {
-    /// Unique among variables and operators.
+    /// Unique among operators.
     pub name: String,
     /// The parameters, by name. A call's arguments are a tuple of them.
     pub params: BTreeMap<String, ParamType>,
@@ -68,8 +74,12 @@ pub struct Operator {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OperatorKind {
-    /// Defined in the program, with a body.
-    User { body: Vec<Statement> },
+    /// An update operator defined in the program, with its statements.
+    Update { body: Vec<Statement> },
+    /// A read-only operator defined in the program: its value, of type
+    /// `result`, computed from its parameters. It changes nothing, and
+    /// calls no operator but read-only ones, none of which calls itself.
+    ReadOnly { result: Type, value: Expr },
     /// Declared in the prelude and implemented by the compiler.
     Builtin(Builtin),
 }
@@ -233,11 +243,17 @@ pub enum Expr {
     /// here, counting the innermost as 0. Its attributes are in scope by
     /// name in the source, and are extracted from it here.
     Current(usize, Heading),
+    /// A call of a read-only operator, whose value it is: the arguments
+    /// are its parameters, by name. Sema evaluates every call it can, so
+    /// one remains only where an argument, or a variable the operator
+    /// reads, is known only when the program runs. For now that is only in
+    /// read-only operators' values.
+    Call(OperatorId, BTreeMap<String, Expr>),
 }
 
 impl Expr {
-    /// The expression's type, where `leaf` gives the type of each variable
-    /// and parameter in it.
+    /// The expression's type, where `leaf` gives the type of each variable,
+    /// parameter and call in it.
     ///
     /// # Panics
     ///
@@ -246,7 +262,7 @@ impl Expr {
     pub fn type_with(&self, leaf: &dyn Fn(&Expr) -> Type) -> Type {
         match self {
             Expr::Constant(value) => value.ty(),
-            Expr::Variable(_) | Expr::Parameter(_) => leaf(self),
+            Expr::Variable(_) | Expr::Parameter(_) | Expr::Call(..) => leaf(self),
             Expr::Unary(op, _) => Type::Scalar(op.result()),
             Expr::Binary(op, ..) => Type::Scalar(op.result()),
             Expr::Extract(tuple, name) => match tuple.type_with(leaf) {

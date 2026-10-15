@@ -87,6 +87,22 @@ fn variables() {
 }
 
 #[test]
+fn operators() {
+    let (code, stderr) = run_example("operators");
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            // Each dish's price with VAT, by a call for each tuple.
+            r#"relation { country: text, dish: text, total: integer } { { country: "Ghana", dish: "jollof rice", total: 1392 }, { country: "Japan", dish: "ramen", total: 1044 }, { country: "Mexico", dish: "pozole", total: 870 } }"#,
+            r#"relation { dish: text } { { dish: "pozole" } }"#,
+            r#""half of 1200""#,
+            "600",
+        ]
+    );
+}
+
+#[test]
 fn debug_value_prints_every_type() {
     let (code, stderr) = run_example("debug");
     assert_eq!(code, 0);
@@ -711,7 +727,7 @@ error[P0002]: expected `]`, found `;`
   |
 2 |   [;
   |    ^ expected `]` here
-  = note: an operator definition has the form `operator name{} [];`
+  = note: an operator definition has the form `operator name{} [];`, or, for a read-only operator, `operator name{}: type [return value;];`
 help: insert `]`
   |
 2 |   [];

@@ -166,8 +166,9 @@ assignment meant and fixed to `:=`, and SQL's and Tutorial D's `value as name` t
 `name := value` (P0011). A value with no name is reported without a fix,
 since the name can't be guessed.
 
-A statement is a call, an assignment statement (`AssignStmt`), or an
-`assign` block (`AssignBlock`) of assignment statements, made at once. An
+A statement is a call, an assignment statement (`AssignStmt`), an
+`assign` block (`AssignBlock`) of assignment statements, made at once, or a
+`return` (`ReturnStmt`). An
 assignment is `name := value` (`Assignment`) or a shorthand starting with
 its keyword:
 `insert` and `d_insert` (`Insertion`), `delete` and `i_delete`
@@ -183,6 +184,20 @@ statement and fixed to a block (P0025). Anything but an assignment in a
 block is reported and skipped, up to its `;`. A `delete`
 without `where` is reported, with the assignment Tutorial D's would mean
 as the fix (P0023).
+
+A read-only operator has its result type after its parameters, as a
+`TypeAnnotation`, and its body is a `return` statement (`ReturnStmt`),
+which the parser accepts in any body and sema restricts. Other languages'
+spellings of the result type, `-> type` and `returns type`, are fixed to
+`: type` (P0026), and `RETURN` to `return` (P0010). A call of one in an
+expression (`CallExpr`) is a name before arguments that a projection
+can't have: named ones, `f{a: x}`, or one starting with a value, `f{1}`,
+which sema reports. `f{}` and `f{a}` stay projections (`ProjectExpr`),
+and sema makes them calls of an operator; the parser can't, since it
+doesn't know what names are. A name before `(` is a call too, as other
+languages write one, fixed to braces (P0003), except in the condition of
+Tutorial D's `update r where p (a := x)`, whose values follow it
+(`Parser::paren_calls`).
 
 `!!r` (`ImageExpr`), Tutorial D's image relation, takes a single operand:
 a name, a literal or a parenthesized expression. The lexer makes `!!` one
@@ -284,13 +299,22 @@ and rename under fresh names, which HIR would have to invent. `Extend`
 carries the computed attributes' heading, since an empty relation has no
 tuple to take their types from.
 
-An operator's body is a list of statements: calls, and assignments
-(`Statement::Assign`), each a list of variables, all different, and their
-new values, made at once (TTM RM Prescription 21): every value is computed
-from the variables as they were. The shorthands are already expanded, and
-an `assign` block's changes to one variable merged into one value.
+An update operator's body is a list of statements
+(`OperatorKind::Update`): calls, and assignments (`Statement::Assign`),
+each a list of variables, all different, and their new values, made at once
+(TTM RM Prescription 21): every value is computed from the variables as
+they were. The shorthands are already expanded, and an `assign` block's
+changes to one variable merged into one value.
 `Combination::DisjointChanges` is the union of the tuples changes remove,
 which conflict (R0009) if two remove the same one.
+
+A read-only operator is its value, an expression of its parameters and the
+variables it reads (`OperatorKind::ReadOnly`). A call of one
+(`Expr::Call`) is the value, with the arguments for the parameters. Sema
+evaluates every call it can, so a call is left only where an argument, or
+a variable the operator reads, is known only when the program runs: for
+now, only in a read-only operator's value, where its arguments are the
+operator's parameters.
 
 Every type's equality must hold exactly when no operator can tell two values
 apart (TTM RM Prescription 8). For approximate numbers, that is IEEE 754
@@ -321,19 +345,51 @@ has no value, so calling one in an expression is an error (A0016).
 
 Sema collects every name before checking anything, so errors can refer to
 definitions anywhere in the file. Then it checks, in order, every
-operator's parameters (`signatures`), so that anything can refer to an
-operator defined after it; the variables, whose initial values it
-evaluates; and the operators' bodies, which refer to both.
+operator's signature, its parameters and result type (`signatures`), so
+that anything can refer to an operator defined after it; the globals,
+which are the variables, whose initial values it evaluates, and the
+read-only operators' values, which initial values can call; and the update
+operators' bodies, which refer to both. The program's HIR operators are
+made at the end, from the signatures and what the bodies checked to.
 
 A variable without a value gets its type's default (`0`, `""`), and one
 without a type gets its value's type. These are the two options *The Third
 Manifesto* allows for initialization (RM Prescription 11).
 
 Initial values are evaluated when compiling, so a HIR variable holds a
-`Value`, never an expression. An initial value can refer to any variable:
-each variable is evaluated when first needed, after the ones it refers to,
-and a variable referred to while it is itself being evaluated closes a
-cycle, reported once with a label at each reference in it (A0021).
+`Value`, never an expression. An initial value can refer to any variable,
+and call any read-only operator, which can read any variable: each global
+is evaluated, or checked, when first needed, after the ones it refers to
+(`globals::Globals`). One referred to while it is itself being evaluated
+closes a cycle, reported once with a label at each reference in it: of
+initial values, through operators or not (A0021), or, among read-only
+operators alone, recursion (A0036), which nothing could stop without a
+conditional. A variable's id is its first declaration's place among them,
+known before any is evaluated, so that a read-only operator's value can
+refer to one.
+
+A read-only operator's body is one `return`, of a value of its result
+type (A0035), and nothing else: an assignment or a `call` would change
+something (A0034), which TTM RM Prescription 3 rules out, and which
+evaluating a call when compiling would skip. Checking a call checks its
+callee's value first, so every operator a call's evaluation reaches is
+checked already, and recursion is found then, not when it would loop. The
+call's arguments are checked as `call`'s are (`Checker::arguments`). An
+update operator has no value, so calling one in an expression is an error
+(A0016), and `call` of a read-only operator would lose its value (A0037).
+
+A call is evaluated by substituting its arguments, once they are all
+known when compiling, for its callee's parameters, and folding again
+(`ops::call`), as a constant operand's tuples are substituted for the
+tuple at hand (`ops::substitute`), with the same `Bindings`: the
+read-only operators' values, and, in an initial value, the variables'.
+Elsewhere variables change when the program runs, so a call of an
+operator that reads one stays a call. A call whose arguments are known
+only for each tuple at hand is evaluated once they are, when a constant
+operand is folded. A failure is an error at the call, such as an overflow
+for its arguments (R0001), with a label at the callee's value. For now,
+nothing calls an operator when running, so a statement left with a call
+is an error (A0038), checked once the statement is folded.
 
 A relation variable's keys must name its attributes, each once, and none
 may contain another, since a key is irreducible. Its initial value must
@@ -582,7 +638,9 @@ translation.
 **Input:** `hir::Program`. **Output:** `lir::Program`. It cannot fail.
 
 **Owns:** turning tree-shaped code into control flow, and choosing how each
-value is represented in memory. A computed expression, such as `not p`, is
+value is represented in memory. Each update operator becomes a function.
+Read-only operators don't, for now: sema evaluates every call of one
+outside read-only operators' values, which nothing lowers yet. A computed expression, such as `not p`, is
 evaluated into a stack slot of its own, which the instruction that uses it
 then reads.
 

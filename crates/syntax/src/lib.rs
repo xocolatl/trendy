@@ -81,6 +81,8 @@ pub enum SyntaxKind {
     UpdateKw,
     /// `assign`, in `assign { x := y; y := x; };`.
     AssignKw,
+    /// `return`, in a read-only operator's `return value;`.
+    ReturnKw,
     LBrace,
     RBrace,
     LBracket,
@@ -128,7 +130,8 @@ pub enum SyntaxKind {
 
     // Nodes.
     SourceFile,
-    /// `operator name{params} [body];`
+    /// `operator name{params} [body];`, or, for a read-only operator,
+    /// `operator name{params}: type [return value;];`.
     Operator,
     /// `builtin operator name{params};`, only in the prelude.
     BuiltinOperator,
@@ -148,6 +151,8 @@ pub enum SyntaxKind {
     /// `assign { a := x; insert r s; };`: assignments all made at once
     /// (TTM RM Prescription 21).
     AssignBlock,
+    /// `return value;`: a read-only operator's value.
+    ReturnStmt,
     /// `v := x`, in an assignment statement.
     Assignment,
     /// `insert r s` or `d_insert r s`, in an assignment statement.
@@ -187,6 +192,10 @@ pub enum SyntaxKind {
     /// the only value of its only tuple. `value` and `from` are contextual
     /// keywords, identifiers elsewhere.
     FromExpr,
+    /// `name{arguments}`: a call of a read-only operator, whose value it is.
+    /// `name{}` is a projection to the parser, and sema makes it a call when
+    /// `name` is an operator.
+    CallExpr,
     /// `{a, b}`: attribute names, as in a projection.
     NameList,
     /// `{a as b, c as d}`, in a `rename`.
@@ -234,7 +243,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 118] = [
+    pub const ALL: [SyntaxKind; 121] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -279,6 +288,7 @@ impl SyntaxKind {
         SyntaxKind::IDeleteKw,
         SyntaxKind::UpdateKw,
         SyntaxKind::AssignKw,
+        SyntaxKind::ReturnKw,
         SyntaxKind::LBrace,
         SyntaxKind::RBrace,
         SyntaxKind::LBracket,
@@ -317,6 +327,7 @@ impl SyntaxKind {
         SyntaxKind::CallStmt,
         SyntaxKind::AssignStmt,
         SyntaxKind::AssignBlock,
+        SyntaxKind::ReturnStmt,
         SyntaxKind::Assignment,
         SyntaxKind::Insertion,
         SyntaxKind::Deletion,
@@ -333,6 +344,7 @@ impl SyntaxKind {
         SyntaxKind::NaryExpr,
         SyntaxKind::ImageExpr,
         SyntaxKind::FromExpr,
+        SyntaxKind::CallExpr,
         SyntaxKind::NameList,
         SyntaxKind::RenameList,
         SyntaxKind::Renaming,
@@ -405,6 +417,7 @@ impl SyntaxKind {
                 | SyntaxKind::IDeleteKw
                 | SyntaxKind::UpdateKw
                 | SyntaxKind::AssignKw
+                | SyntaxKind::ReturnKw
         )
     }
 
@@ -588,6 +601,7 @@ impl SyntaxKind {
             SyntaxKind::IDeleteKw => "i_delete",
             SyntaxKind::UpdateKw => "update",
             SyntaxKind::AssignKw => "assign",
+            SyntaxKind::ReturnKw => "return",
             SyntaxKind::LBrace => "{",
             SyntaxKind::RBrace => "}",
             SyntaxKind::LBracket => "[",
@@ -674,6 +688,7 @@ impl SyntaxKind {
             SyntaxKind::IDeleteKw => "`i_delete`",
             SyntaxKind::UpdateKw => "`update`",
             SyntaxKind::AssignKw => "`assign`",
+            SyntaxKind::ReturnKw => "`return`",
             SyntaxKind::ForeignOperator => "operator",
             SyntaxKind::LBrace => "`{`",
             SyntaxKind::RBrace => "`}`",
@@ -723,7 +738,8 @@ impl SyntaxKind {
             | SyntaxKind::PostfixExpr
             | SyntaxKind::NaryExpr
             | SyntaxKind::ImageExpr
-            | SyntaxKind::FromExpr => "expression",
+            | SyntaxKind::FromExpr
+            | SyntaxKind::CallExpr => "expression",
             SyntaxKind::NameList => "attribute names",
             SyntaxKind::RenameList => "renamings",
             SyntaxKind::Renaming => "renaming",
@@ -735,6 +751,7 @@ impl SyntaxKind {
             SyntaxKind::CallStmt => "call",
             SyntaxKind::AssignStmt => "assignment statement",
             SyntaxKind::AssignBlock => "`assign` block",
+            SyntaxKind::ReturnStmt => "`return` statement",
             SyntaxKind::Assignment => "assignment",
             SyntaxKind::Insertion => "insertion",
             SyntaxKind::Deletion => "deletion",

@@ -1,89 +1,40 @@
-//! Operators: their parameters, and the statements and expressions in their
-//! bodies.
+//! Update operators' bodies: their statements, and the expressions in them.
 
 use std::collections::{BTreeMap, HashMap};
 
-use trendy_diag::{Diagnostic, Span, edit_distance};
+use trendy_diag::{Diagnostic, Span};
 use trendy_hir as hir;
-use trendy_syntax::ast::{self, AstNode, AttributeValue, VarDecl};
+use trendy_syntax::ast::{self, VarDecl};
 
-use crate::check::{Checker, Lookup, Names};
-use crate::types::{self, Expected, Origin};
-use crate::{Namespaces, assign, errors};
-
-/// What a call needs to know about the operator it calls.
-pub(crate) struct Signature {
-    pub(crate) id: hir::OperatorId,
-    /// The definition, for a user operator: where its parameter types are
-    /// written, for the labels of mismatches.
-    decl: Option<ast::Operator>,
-    /// Whether the parameters are valid. Calls to an operator whose
-    /// parameters have errors aren't checked, because those errors are
-    /// already reported.
-    valid: bool,
-}
-
-impl Signature {
-    pub(crate) fn builtin(id: hir::OperatorId) -> Self {
-        Signature {
-            id,
-            decl: None,
-            valid: true,
-        }
-    }
-
-    pub(crate) fn user(id: hir::OperatorId, decl: ast::Operator, valid: bool) -> Self {
-        Signature {
-            id,
-            decl: Some(decl),
-            valid,
-        }
-    }
-
-    /// Where parameter `name`'s type is written.
-    fn param_origin(&self, name: &str) -> Origin {
-        let written = self.decl.as_ref().and_then(|decl| {
-            decl.params()?
-                .attributes()
-                .find(|a| {
-                    a.name()
-                        .and_then(|n| n.ident())
-                        .is_some_and(|i| i.text() == name)
-                })?
-                .type_expr()
-        });
-        written.map_or(Origin::Builtin, Origin::Type)
-    }
-}
+use crate::check::{Checker, Lookup, Names, Written};
+use crate::operators::Operators;
+use crate::{Namespaces, assign, errors, ops};
 
 /// Everything a body can refer to.
 pub(crate) struct Context<'a> {
     pub(crate) namespaces: &'a Namespaces,
-    pub(crate) operators: &'a [hir::Operator],
-    pub(crate) signatures: &'a HashMap<String, Signature>,
-    pub(crate) variables: &'a [hir::Variable],
+    pub(crate) operators: &'a Operators,
+    /// Each valid read-only operator's value.
+    pub(crate) values: &'a HashMap<hir::OperatorId, hir::Expr>,
+    /// Each variable, by id: `None` for one with errors, already reported.
+    pub(crate) variables: &'a [Option<hir::Variable>],
     pub(crate) variable_ids: &'a HashMap<String, hir::VariableId>,
     /// Each variable's declaration, by name.
     pub(crate) declarations: &'a HashMap<String, VarDecl>,
 }
 
-/// A user operator's parameters, or `None` after reporting why they are
-/// invalid.
-pub(crate) fn params(
-    heading: &ast::Heading,
-    namespaces: &Namespaces,
-    errors: &mut Vec<Diagnostic>,
-) -> Option<BTreeMap<String, hir::ParamType>> {
-    let heading = types::resolve_heading(heading, namespaces, errors)?;
-    Some(
-        heading
-            .attributes()
-            .map(|(name, ty)| (name.to_string(), hir::ParamType::Type(ty.clone())))
-            .collect(),
-    )
+impl Context<'_> {
+    /// What evaluating a call in a body substitutes: no variable, since
+    /// they change when the program runs.
+    pub(crate) fn bindings(&self) -> ops::Bindings<'_> {
+        ops::Bindings {
+            values: self.values,
+            variables: None,
+        }
+    }
 }
 
-/// The statements of the user operator `op`, whose id is `within`.
+/// The statements of the update operator `op`, whose id is `within`.
 pub(crate) fn body(
     op: &ast::Operator,
     within: hir::OperatorId,
@@ -91,6 +42,9 @@ pub(crate) fn body(
     errors: &mut Vec<Diagnostic>,
 ) -> Option<Vec<hir::Statement>> {
     let body = op.body()?;
+    let name = &cx.operators.get(within).name;
+    // `main` with a result type is reported with its `return`s.
+    let returns_reported = name == "main" && op.result().is_some();
     let mut statements = Vec::new();
     let mut ok = true;
     for stmt in body.statements() {
@@ -100,8 +54,24 @@ pub(crate) fn body(
                 assign::statement(&stmt.clauses().collect::<Vec<_>>(), within, cx, errors)
             }
             ast::Statement::Block(block) => assign::block(block, within, cx, errors),
+            ast::Statement::Return(stmt) => {
+                if !returns_reported {
+                    errors.push(errors::return_in_update(name, stmt));
+                }
+                None
+            }
         };
         match statement {
+            // For now, sema evaluates every call; one left, of a read-only
+            // operator whose arguments, or a variable it reads, are known
+            // only when running, can't be lowered yet.
+            Some(statement) if let Some(id) = left_call(&statement) => {
+                errors.push(errors::run_time_call(
+                    &cx.operators.get(id).name,
+                    stmt.span(),
+                ));
+                ok = false;
+            }
             Some(statement) => statements.push(statement),
             None => ok = false,
         }
@@ -109,7 +79,44 @@ pub(crate) fn body(
     ok.then_some(statements)
 }
 
-/// `call name{arguments};`.
+/// The operator of a call left in `statement`'s expressions, if there is
+/// one.
+fn left_call(statement: &hir::Statement) -> Option<hir::OperatorId> {
+    match statement {
+        hir::Statement::Call { args, .. } => args.values().find_map(called),
+        hir::Statement::Assign(assignments) => assignments.iter().find_map(|a| called(&a.value)),
+    }
+}
+
+/// The operator of a call in `expr`, if there is one.
+fn called(expr: &hir::Expr) -> Option<hir::OperatorId> {
+    match expr {
+        hir::Expr::Call(id, _) => Some(*id),
+        hir::Expr::Constant(_)
+        | hir::Expr::Variable(_)
+        | hir::Expr::Parameter(_)
+        | hir::Expr::Current(..) => None,
+        hir::Expr::Unary(_, operand)
+        | hir::Expr::Extract(operand, _)
+        | hir::Expr::Remove(operand, _)
+        | hir::Expr::Rename(operand, _)
+        | hir::Expr::Ungroup(operand, _)
+        | hir::Expr::Only(operand) => called(operand),
+        hir::Expr::Binary(_, lhs, rhs)
+        | hir::Expr::And(lhs, rhs)
+        | hir::Expr::Combine(_, lhs, rhs)
+        | hir::Expr::Semijoin(lhs, rhs)
+        | hir::Expr::Antijoin(lhs, rhs)
+        | hir::Expr::Restrict(lhs, rhs) => called(lhs).or_else(|| called(rhs)),
+        hir::Expr::Tuple(attributes) => attributes.values().find_map(called),
+        hir::Expr::Relation(_, tuples) => tuples.iter().find_map(called),
+        hir::Expr::Extend(operand, _, attributes) => {
+            called(operand).or_else(|| attributes.values().find_map(called))
+        }
+    }
+}
+
+/// `call name{arguments};`, of an update operator.
 fn call(
     stmt: &ast::CallStmt,
     within: hir::OperatorId,
@@ -119,8 +126,8 @@ fn call(
     let ident = stmt.callee()?.ident()?;
     let name = ident.text();
     let span = trendy_syntax::span(ident.text_range());
-    let Some(signature) = cx.signatures.get(name) else {
-        let what = if cx.operators[within.0].params.contains_key(name) {
+    let Some(signature) = cx.operators.named(name) else {
+        let what = if cx.operators.get(within).params.contains_key(name) {
             Some("a parameter")
         } else {
             cx.namespaces.variable(name).map(|_| "a variable")
@@ -128,146 +135,25 @@ fn call(
         if let Some(what) = what {
             errors.push(errors::not_an_operator(name, span, what));
         } else {
-            let operators: Vec<&str> = cx.signatures.keys().map(String::as_str).collect();
+            let operators: Vec<&str> = cx.operators.names().collect();
             errors.push(errors::unknown_name(name, span, "operator", &operators));
         }
         return None;
     };
+    if signature.read_only {
+        errors.push(errors::call_of_read_only(name, span, signature.defined()));
+        return None;
+    }
     let args = stmt.arguments()?;
     if !signature.valid {
         return None;
     }
-    let args = arguments(&args, signature, name, within, cx, errors)?;
+    let mut names = BodyNames { cx, within };
+    let args = Checker::new(&mut names).arguments(Written::Arguments(&args), signature, errors)?;
     Some(hir::Statement::Call {
         operator: signature.id,
         args,
     })
-}
-
-/// A call's arguments: a tuple of the callee's parameters.
-fn arguments(
-    args: &ast::Arguments,
-    signature: &Signature,
-    callee: &str,
-    within: hir::OperatorId,
-    cx: &Context,
-    errors: &mut Vec<Diagnostic>,
-) -> Option<BTreeMap<String, hir::Expr>> {
-    let params = &cx.operators[signature.id.0].params;
-    let signature_text = format!("`{callee}{}`", params_text(params));
-    let mut ok = true;
-
-    let named: Vec<(AttributeValue, String, Span)> = args
-        .named()
-        .filter_map(|a| {
-            let ident = a.name()?.ident()?;
-            let span = trendy_syntax::span(ident.text_range());
-            Some((a, ident.text().to_string(), span))
-        })
-        .collect();
-    let positional: Vec<_> = args.positional().collect();
-    // With one parameter, a lone unnamed argument can only be that one.
-    let only_param = (params.len() == 1 && named.is_empty() && positional.len() == 1)
-        .then(|| params.keys().next())
-        .flatten();
-    for arg in &positional {
-        ok = false;
-        errors.push(errors::positional_argument(
-            arg.span(),
-            only_param.map(String::as_str),
-            &signature_text,
-        ));
-    }
-
-    let mut missing: Vec<&str> = params
-        .keys()
-        .map(String::as_str)
-        .filter(|p| !named.iter().any(|(_, n, _)| n == p))
-        .collect();
-    let mut result = BTreeMap::new();
-    for (arg, name, span) in &named {
-        if let Some(&(_, _, first)) = named.iter().find(|(_, n, _)| n == name)
-            && first != *span
-        {
-            errors.push(errors::duplicate_attribute(
-                errors::Noun::Argument,
-                name,
-                *span,
-                first,
-            ));
-            ok = false;
-            continue;
-        }
-        let Some(param) = params.get(name) else {
-            ok = false;
-            let renamed = missing
-                .iter()
-                .copied()
-                .filter(|m| edit_distance(m, name) <= 2)
-                .min_by_key(|m| edit_distance(m, name));
-            if let Some(target) = renamed {
-                missing.retain(|m| *m != target);
-            }
-            errors.push(errors::unknown_attribute(
-                errors::Noun::Argument,
-                name,
-                *span,
-                &format!("the parameters are {signature_text}"),
-                renamed,
-                Some(args.removal(arg)),
-            ));
-            continue;
-        };
-        let expected = match param {
-            hir::ParamType::Type(ty) => Some(Expected {
-                ty: ty.clone(),
-                origin: signature.param_origin(name),
-            }),
-            hir::ParamType::Any => None,
-        };
-        match arg
-            .value()
-            .and_then(|v| checked(&v, expected.as_ref(), within, cx, errors))
-        {
-            Some(value) => {
-                result.insert(name.clone(), value);
-            }
-            None => ok = false,
-        }
-    }
-    // A lone unnamed argument is reported, with a fix, as that parameter.
-    if !missing.is_empty() && positional.is_empty() {
-        let missing: Vec<_> = missing
-            .into_iter()
-            .map(|name| {
-                let ty = match &params[name] {
-                    hir::ParamType::Type(ty) => Some(ty),
-                    hir::ParamType::Any => None,
-                };
-                (name, ty)
-            })
-            .collect();
-        errors.push(errors::missing_attributes(
-            errors::Noun::Argument,
-            &missing,
-            &format!("the parameters are {signature_text}"),
-            args.span(),
-            args.insertion(),
-        ));
-        ok = false;
-    }
-    ok.then_some(result)
-}
-
-/// `expr`, in the body of `within`, checked against `expected` if given.
-fn checked(
-    expr: &ast::Expr,
-    expected: Option<&Expected>,
-    within: hir::OperatorId,
-    cx: &Context,
-    errors: &mut Vec<Diagnostic>,
-) -> Option<hir::Expr> {
-    Checker::new(&mut BodyNames { cx, within }).expr(expr, expected, errors)
 }
 
 /// Names in the body of `within`: its parameters, which hide variables of
@@ -277,21 +163,31 @@ pub(crate) struct BodyNames<'a, 'b> {
     pub(crate) within: hir::OperatorId,
 }
 
+impl BodyNames<'_, '_> {
+    fn params(&self) -> &BTreeMap<String, hir::ParamType> {
+        &self.cx.operators.get(self.within).params
+    }
+}
+
 impl Names for BodyNames<'_, '_> {
     fn namespaces(&self) -> &Namespaces {
         self.cx.namespaces
     }
 
+    fn operators(&self) -> &Operators {
+        self.cx.operators
+    }
+
     fn resolve(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {
-        if self.cx.operators[self.within.0].params.contains_key(name) {
+        if self.params().contains_key(name) {
             return Lookup::Found(hir::Expr::Parameter(name.to_string()));
         }
         if let Some(&id) = self.cx.variable_ids.get(name) {
-            return Lookup::Found(hir::Expr::Variable(id));
-        }
-        // A variable with errors in its declaration is already reported.
-        if self.cx.namespaces.variable(name).is_some() {
-            return Lookup::Reported;
+            // A variable with errors in its declaration is already reported.
+            return match self.cx.variables[id.0] {
+                Some(_) => Lookup::Found(hir::Expr::Variable(id)),
+                None => Lookup::Reported,
+            };
         }
         if self.cx.namespaces.operator(name).is_some() {
             errors.push(errors::operator_as_value(name, span));
@@ -301,8 +197,7 @@ impl Names for BodyNames<'_, '_> {
     }
 
     fn candidates(&self) -> Vec<String> {
-        self.cx.operators[self.within.0]
-            .params
+        self.params()
             .keys()
             .chain(self.cx.variable_ids.keys())
             .cloned()
@@ -311,21 +206,25 @@ impl Names for BodyNames<'_, '_> {
 
     fn leaf_type(&self, leaf: &hir::Expr) -> hir::Type {
         match leaf {
-            hir::Expr::Variable(id) => self.cx.variables[id.0].ty.clone(),
-            hir::Expr::Parameter(name) => match &self.cx.operators[self.within.0].params[name] {
+            hir::Expr::Variable(id) => self.cx.variables[id.0]
+                .as_ref()
+                .expect("only valid variables are resolved")
+                .ty
+                .clone(),
+            hir::Expr::Parameter(name) => match &self.params()[name] {
                 hir::ParamType::Type(ty) => ty.clone(),
                 hir::ParamType::Any => unreachable!("only built-ins have `any` parameters"),
             },
             _ => unreachable!("only variables and parameters are leaves"),
         }
     }
-}
 
-/// Parameters as written: `{name: text, times: integer}`.
-pub(crate) fn params_text(params: &BTreeMap<String, hir::ParamType>) -> String {
-    let attributes: Vec<_> = params
-        .iter()
-        .map(|(name, ty)| format!("{name}: {ty}"))
-        .collect();
-    format!("{{{}}}", attributes.join(", "))
+    fn checked(&mut self, id: hir::OperatorId, _: Span, _: &mut Vec<Diagnostic>) -> bool {
+        // Every read-only operator is checked with the globals.
+        self.cx.values.contains_key(&id)
+    }
+
+    fn bindings(&self) -> ops::Bindings<'_> {
+        self.cx.bindings()
+    }
 }

@@ -247,7 +247,10 @@ fn between(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool, layout: &La
             && prev.parent().is_some_and(|p| {
                 matches!(
                     p.kind(),
-                    SyntaxKind::CallStmt | SyntaxKind::AssignStmt | SyntaxKind::AssignBlock
+                    SyntaxKind::CallStmt
+                        | SyntaxKind::AssignStmt
+                        | SyntaxKind::AssignBlock
+                        | SyntaxKind::ReturnStmt
                 )
             });
         let blank = blank_line && statement_end && next.kind() != SyntaxKind::RBracket;
@@ -523,6 +526,10 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
                 .is_some_and(|p| p.kind() == SyntaxKind::BinaryExpr)
     };
     let sign = |token: &SyntaxToken| matches!(token.kind(), Plus | Minus);
+    // A body's `[` follows what comes before it after a space, whether the
+    // parameters or a read-only operator's result type: `f{}: integer [`.
+    let body =
+        next.kind() == LBracket && next.parent().is_some_and(|p| p.kind() == SyntaxKind::Body);
     // A projection's braces follow its operand directly: `r{a}{b}`.
     let projection = next.kind() == LBrace
         && next.parent().is_some_and(|list| {
@@ -534,6 +541,7 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
         // The variable an assignment assigns, as in `update r { … }`.
         _ if is_target(prev) => " ",
         _ if projection => "",
+        _ if body => " ",
         (LBrace, RBrace) if list_brace(prev) => "",
         (LBrace, _) if list_brace(prev) => " ",
         (_, RBrace) if list_brace(next) => " ",
@@ -552,7 +560,7 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
 fn spaced_after(kind: SyntaxKind) -> bool {
     use SyntaxKind::{
         AssignKw, BuiltinKw, CallKw, Colon, Comma, DInsertKw, DeleteKw, IDeleteKw, InsertKw, NotKw,
-        OperatorKw, RelationKw, TupleKw, UpdateKw, VarKw,
+        OperatorKw, RelationKw, ReturnKw, TupleKw, UpdateKw, VarKw,
     };
     spaced_before(kind)
         || matches!(
@@ -572,6 +580,7 @@ fn spaced_after(kind: SyntaxKind) -> bool {
                 | IDeleteKw
                 | UpdateKw
                 | AssignKw
+                | ReturnKw
         )
 }
 
@@ -783,6 +792,20 @@ mod tests {
                 "operator greet { name : text } [ call debug_value { v : name } ; call debug_value{v:1};];operator main{}[call greet{name:\"Ada\"};];"
             ),
             "operator greet{name: text} [\n    call debug_value{v: name};\n    call debug_value{v: 1};\n];\n\noperator main{} [\n    call greet{name: \"Ada\"};\n];\n"
+        );
+    }
+
+    #[test]
+    fn read_only_operators_and_calls() {
+        assert_eq!(
+            fmt(
+                "operator double { x : integer } : integer [ return x*2 ; ];operator main{}[call debug_value{v:double{x:1}};];"
+            ),
+            "operator double{x: integer}: integer [\n    return x * 2;\n];\n\noperator main{} [\n    call debug_value{v: double{x: 1}};\n];\n"
+        );
+        assert_eq!(
+            fmt("operator f{}:tuple{a:integer}[return tuple{a:1};];"),
+            "operator f{}: tuple { a: integer } [\n    return tuple { a: 1 };\n];\n"
         );
     }
 

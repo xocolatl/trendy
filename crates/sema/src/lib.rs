@@ -2,7 +2,9 @@ mod assign;
 mod body;
 mod check;
 mod errors;
+mod globals;
 mod keys;
+mod operators;
 mod ops;
 mod prelude;
 mod types;
@@ -12,9 +14,11 @@ use std::collections::HashMap;
 use trendy_diag::{Diagnostic, Span};
 use trendy_hir as hir;
 use trendy_syntax::SyntaxToken;
-use trendy_syntax::ast::{AstNode, Item, SourceFile, VarDecl};
+use trendy_syntax::ast::{Item, SourceFile, VarDecl};
 
 pub use prelude::Prelude;
+
+use crate::operators::Operators;
 
 /// Check a parsed program and translate it to HIR. The prelude's built-in
 /// operators are in scope.
@@ -32,146 +36,109 @@ pub fn analyze(prelude: &Prelude, file: &SourceFile) -> Result<hir::Program, Vec
 
     // Every operator's signature first, so that anything can refer to an
     // operator defined after it.
-    let Operators {
-        list: mut operators,
-        signatures,
-        user: user_operators,
-    } = signatures(prelude, file, &namespaces, &mut errors);
+    let operators = operators::signatures(prelude, file, &namespaces, &mut errors);
 
-    // Then the variables, which operator bodies refer to.
+    // Then the globals: the variables' initial values, and the read-only
+    // operators' values, which initial values can call and which read
+    // variables, each when first needed.
     let declarations = declarations(file, &namespaces);
-    let variables = Globals::new(&declarations, &namespaces).evaluate(file, &mut errors);
-    let variable_ids: HashMap<_, _> = variables
-        .iter()
-        .enumerate()
-        .map(|(i, v)| (v.name.clone(), hir::VariableId(i)))
-        .collect();
+    let variable_ids = variable_ids(file, &namespaces);
+    let evaluated = globals::Globals::new(&namespaces, &operators, &declarations, &variable_ids)
+        .evaluate(file, &mut errors);
 
+    // Then the update operators' bodies, which refer to both.
     let context = body::Context {
         namespaces: &namespaces,
         operators: &operators,
-        signatures: &signatures,
-        variables: &variables,
+        values: &evaluated.values,
+        variables: &evaluated.variables,
         variable_ids: &variable_ids,
         declarations: &declarations,
     };
-    let mut bodies = Vec::new();
-    for (op, id) in &user_operators {
-        if let Some(statements) = body::body(op, *id, &context, &mut errors) {
-            bodies.push((*id, statements));
+    let mut bodies = HashMap::new();
+    for signature in operators.iter().filter(|s| !s.read_only) {
+        if let Some(decl) = &signature.decl
+            && let Some(statements) = body::body(decl, signature.id, &context, &mut errors)
+        {
+            bodies.insert(signature.id, statements);
         }
     }
-    for (id, statements) in bodies {
-        operators[id.0].kind = hir::OperatorKind::User { body: statements };
-    }
 
-    let entry = entry(file, &namespaces, &operators, &user_operators, &mut errors);
+    let entry = entry(file, &namespaces, &operators, &mut errors);
     errors.sort_by_key(|d| d.span().start);
     match entry {
-        Some(entry) if errors.is_empty() => Ok(hir::Program {
-            operators,
-            variables,
-            entry,
-        }),
+        Some(entry) if errors.is_empty() => Ok(program(&operators, evaluated, bodies, entry)),
         _ => Err(errors),
     }
 }
 
-/// Every operator, built in and the program's own, with the signatures
-/// calls are checked against. A user operator's body is checked once the
-/// variables are, so until then its `kind` holds an empty one.
-struct Operators {
-    /// Indexed by `hir::OperatorId`: the prelude's, then the program's.
-    list: Vec<hir::Operator>,
-    signatures: HashMap<String, body::Signature>,
-    /// The program's own, with their definitions.
-    user: Vec<(trendy_syntax::ast::Operator, hir::OperatorId)>,
-}
-
-/// Every operator's signature: the prelude's, then the program's, each
-/// with its parameters checked. Built-ins declared outside the prelude are
-/// reported.
-fn signatures(
-    prelude: &Prelude,
-    file: &SourceFile,
-    namespaces: &Namespaces,
-    errors: &mut Vec<Diagnostic>,
-) -> Operators {
-    let mut list = prelude.operators().to_vec();
-    let mut signatures: HashMap<_, _> = list
+/// The checked program, of `operators`, with their `bodies` and the
+/// globals `evaluated`, which have no errors, starting at `entry`.
+fn program(
+    operators: &Operators,
+    evaluated: globals::Evaluated,
+    mut bodies: HashMap<hir::OperatorId, Vec<hir::Statement>>,
+    entry: hir::OperatorId,
+) -> hir::Program {
+    let operators = operators
         .iter()
-        .enumerate()
-        .map(|(i, op)| {
-            (
-                op.name.clone(),
-                body::Signature::builtin(hir::OperatorId(i)),
-            )
+        .map(|signature| {
+            let kind = match (signature.builtin, &signature.result) {
+                (Some(builtin), _) => hir::OperatorKind::Builtin(builtin),
+                (None, Some(result)) => hir::OperatorKind::ReadOnly {
+                    result: result.clone(),
+                    value: evaluated.values[&signature.id].clone(),
+                },
+                (None, None) => hir::OperatorKind::Update {
+                    body: bodies
+                        .remove(&signature.id)
+                        .expect("every update operator without errors has a body"),
+                },
+            };
+            hir::Operator {
+                name: signature.name.clone(),
+                params: signature.params.clone(),
+                kind,
+            }
         })
         .collect();
-    let mut user = Vec::new();
-    for item in file.items() {
-        match item {
-            Item::Operator(op) => {
-                let Some(ident) = op.name().and_then(|n| n.ident()) else {
-                    continue;
-                };
-                if !namespaces.is_first_operator(&ident) {
-                    continue;
-                }
-                let id = hir::OperatorId(list.len());
-                let params = op
-                    .params()
-                    .and_then(|h| body::params(&h, namespaces, errors));
-                list.push(hir::Operator {
-                    name: ident.text().to_string(),
-                    params: params.clone().unwrap_or_default(),
-                    kind: hir::OperatorKind::User { body: Vec::new() },
-                });
-                signatures.insert(
-                    ident.text().to_string(),
-                    body::Signature::user(id, op.clone(), params.is_some()),
-                );
-                user.push((op, id));
-            }
-            Item::Builtin(builtin) => errors.push(errors::builtin_outside_prelude(
-                builtin.keyword(),
-                builtin.syntax(),
-            )),
-            Item::BuiltinType(builtin) => errors.push(errors::builtin_outside_prelude(
-                builtin.keyword(),
-                builtin.syntax(),
-            )),
-            Item::Variable(_) => {}
-        }
-    }
-    Operators {
-        list,
-        signatures,
-        user,
+    let variables = evaluated
+        .variables
+        .into_iter()
+        .map(|v| v.expect("a program without errors has every variable"))
+        .collect();
+    hir::Program {
+        operators,
+        variables,
+        entry,
     }
 }
 
-/// The operator named `main`, which must be the program's own and take no
-/// parameters.
+/// The operator named `main`, which must be the program's own, an update
+/// operator taking no parameters.
 fn entry(
     file: &SourceFile,
     namespaces: &Namespaces,
-    operators: &[hir::Operator],
-    user_operators: &[(trendy_syntax::ast::Operator, hir::OperatorId)],
+    operators: &Operators,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::OperatorId> {
-    let Some((op, id)) = user_operators
-        .iter()
-        .find(|(_, id)| operators[id.0].name == "main")
+    let Some((signature, decl)) = operators
+        .named("main")
+        .and_then(|s| Some((s, s.decl.as_ref()?)))
     else {
         errors.push(errors::missing_main(file, namespaces));
         return None;
     };
-    if let Some(params) = op.params().filter(|h| h.attributes().next().is_some()) {
+    let mut valid = true;
+    if let Some(params) = decl.params().filter(|h| h.attributes().next().is_some()) {
         errors.push(errors::main_with_params(&params));
-        return None;
+        valid = false;
     }
-    Some(*id)
+    if decl.result().is_some() {
+        errors.push(errors::main_with_result(decl));
+        valid = false;
+    }
+    valid.then_some(signature.id)
 }
 
 /// What a top-level name refers to.
@@ -223,14 +190,14 @@ impl Namespaces {
 
     /// Whether `ident` is its operator name's first definition, not a
     /// duplicate.
-    fn is_first_operator(&self, ident: &SyntaxToken) -> bool {
+    pub(crate) fn is_first_operator(&self, ident: &SyntaxToken) -> bool {
         self.operator(ident.text())
             .is_some_and(|(_, span)| span == Some(trendy_syntax::span(ident.text_range())))
     }
 
     /// Whether `ident` is its variable name's first declaration, not a
     /// duplicate.
-    fn is_first_variable(&self, ident: &SyntaxToken) -> bool {
+    pub(crate) fn is_first_variable(&self, ident: &SyntaxToken) -> bool {
         self.variable(ident.text()) == Some(trendy_syntax::span(ident.text_range()))
     }
 }
@@ -276,26 +243,6 @@ fn collect_names(prelude: &Prelude, file: &SourceFile, errors: &mut Vec<Diagnost
     namespaces
 }
 
-/// The program's variables, whose initial values are evaluated when
-/// compiling. An initial value can refer to any variable, so each is
-/// evaluated when first needed, after the ones it refers to.
-struct Globals<'a> {
-    namespaces: &'a Namespaces,
-    /// The first declaration of each variable.
-    decls: &'a HashMap<String, VarDecl>,
-    states: HashMap<String, State>,
-    /// The variables being evaluated, innermost last: each one's name, its
-    /// declaration's name span, and where its initial value refers to the
-    /// next.
-    stack: Vec<(String, Span, Span)>,
-}
-
-enum State {
-    Evaluating,
-    /// `None` after reporting errors.
-    Done(Option<hir::Variable>),
-}
-
 /// The first declaration of each variable, by name.
 fn declarations(file: &SourceFile, namespaces: &Namespaces) -> HashMap<String, VarDecl> {
     file.variables()
@@ -308,158 +255,19 @@ fn declarations(file: &SourceFile, namespaces: &Namespaces) -> HashMap<String, V
         .collect()
 }
 
-impl<'a> Globals<'a> {
-    fn new(decls: &'a HashMap<String, VarDecl>, namespaces: &'a Namespaces) -> Self {
-        Globals {
-            namespaces,
-            decls,
-            states: HashMap::new(),
-            stack: Vec::new(),
-        }
-    }
-
-    /// Every valid variable, in source order.
-    fn evaluate(mut self, file: &SourceFile, errors: &mut Vec<Diagnostic>) -> Vec<hir::Variable> {
-        let mut variables = Vec::new();
-        for decl in file.variables() {
-            let Some(ident) = decl.name().and_then(|n| n.ident()) else {
-                continue;
-            };
-            if self.namespaces.is_first_variable(&ident) {
-                variables.extend(self.variable(ident.text(), errors));
-            } else {
-                // A duplicate, already reported, but it can have errors of
-                // its own.
-                variable(&decl, &mut self, errors);
-            }
-        }
-        variables
-    }
-
-    /// The first declared variable named `name`, evaluated if it isn't yet.
-    fn variable(&mut self, name: &str, errors: &mut Vec<Diagnostic>) -> Option<hir::Variable> {
-        match self.states.get(name) {
-            Some(State::Done(variable)) => return variable.clone(),
-            Some(State::Evaluating) => unreachable!("cycles are caught at the reference"),
-            None => {}
-        }
-        let decl = self.decls.get(name)?.clone();
-        let declared = trendy_syntax::span(decl.name()?.ident()?.text_range());
-        self.states.insert(name.to_string(), State::Evaluating);
-        self.stack.push((name.to_string(), declared, declared));
-        let variable = variable(&decl, self, errors);
-        self.stack.pop();
-        self.states
-            .insert(name.to_string(), State::Done(variable.clone()));
-        variable
-    }
-}
-
-impl check::Names for Globals<'_> {
-    fn namespaces(&self) -> &Namespaces {
-        self.namespaces
-    }
-
-    fn resolve(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> check::Lookup {
-        if self.namespaces.variable(name).is_some() {
-            return match self.constant(name, span, errors) {
-                Some(value) => check::Lookup::Found(hir::Expr::Constant(value)),
-                None => check::Lookup::Reported,
-            };
-        }
-        if self.namespaces.operator(name).is_some() {
-            errors.push(errors::operator_as_value(name, span));
-            return check::Lookup::Reported;
-        }
-        check::Lookup::Unknown
-    }
-
-    fn candidates(&self) -> Vec<String> {
-        self.decls.keys().cloned().collect()
-    }
-
-    fn leaf_type(&self, leaf: &hir::Expr) -> hir::Type {
-        unreachable!("an initial value's names are constants, not {leaf:?}")
-    }
-}
-
-impl Globals<'_> {
-    /// The value of the variable `name`, referred to at `span`, evaluated if
-    /// it isn't yet, or `None` after reporting why it has none.
-    fn constant(
-        &mut self,
-        name: &str,
-        span: Span,
-        errors: &mut Vec<Diagnostic>,
-    ) -> Option<hir::Value> {
-        if let Some(State::Evaluating) = self.states.get(name) {
-            let start = self.stack.iter().position(|(n, _, _)| n == name)?;
-            let mut cycle = self.stack[start..].to_vec();
-            if let Some(last) = cycle.last_mut() {
-                last.2 = span;
-            }
-            errors.push(errors::cyclic_initial_values(&cycle));
-            return None;
-        }
-        if let Some(innermost) = self.stack.last_mut() {
-            innermost.2 = span;
-        }
-        Some(self.variable(name, errors)?.init)
-    }
-}
-
-/// Check a variable declaration: at least one of its type and initial value
-/// must be given, and they must agree.
-fn variable(
-    decl: &VarDecl,
-    globals: &mut Globals,
-    errors: &mut Vec<Diagnostic>,
-) -> Option<hir::Variable> {
-    let namespaces = globals.namespaces;
-    let ident = decl.name()?.ident()?;
-    let declared = decl
-        .type_expr()
-        .map(|t| (types::resolve(&t, namespaces, errors), t));
-
-    let (ty, init) = match (declared, decl.initializer()) {
-        (None, None) => {
-            errors.push(errors::untyped_variable(
-                ident.text(),
-                trendy_syntax::span(ident.text_range()),
-            ));
-            return None;
-        }
-        (Some((ty, _)), None) => {
-            let ty = ty?;
-            let init = ty.default_value();
-            (ty, init)
-        }
-        (None, Some(expr)) => {
-            let value = types::value(&expr, None, globals, errors)?;
-            (value.ty(), value)
-        }
-        (Some((None, _)), Some(expr)) => {
-            // The type is invalid, but the value can still have errors of its
-            // own.
-            types::value(&expr, None, globals, errors);
-            return None;
-        }
-        (Some((Some(ty), type_expr)), Some(expr)) => {
-            let expected = types::Expected {
-                ty: ty.clone(),
-                origin: types::Origin::Type(type_expr),
-            };
-            let value = types::value(&expr, Some(&expected), globals, errors)?;
-            (ty, value)
-        }
-    };
-    let keys = keys::keys(decl, ident.text(), &ty, &init, globals, errors)?;
-    namespaces.is_first_variable(&ident).then(|| hir::Variable {
-        name: ident.text().to_string(),
-        ty,
-        init,
-        keys,
-    })
+/// Each variable's id, by name: its first declaration's place among them,
+/// in source order.
+fn variable_ids(file: &SourceFile, namespaces: &Namespaces) -> HashMap<String, hir::VariableId> {
+    file.variables()
+        .filter_map(|decl| {
+            let ident = decl.name()?.ident()?;
+            namespaces
+                .is_first_variable(&ident)
+                .then(|| ident.text().to_string())
+        })
+        .enumerate()
+        .map(|(i, name)| (name, hir::VariableId(i)))
+        .collect()
 }
 
 #[cfg(test)]
@@ -614,6 +422,185 @@ mod tests {
         assert!(variables[0].notes[0].starts_with("variables have a namespace of their own"));
         let operators = errors("operator a{} [];\noperator a{} [];\noperator main{} [];");
         assert!(operators[0].notes[0].starts_with("operators have a namespace of their own"));
+    }
+
+    /// Read-only operators for the tests below.
+    const READ_ONLY: &str = "var rate := 3;\nvar poets := relation { { name: \"Ada\", born: 1815 }, { name: \"Rumi\", born: 1207 } };\noperator double{x: integer}: integer [ return x * 2; ];\noperator quadruple{x: integer}: integer [ return double{x: double{x: x}}; ];\noperator scaled{x: integer}: integer [ return x * rate; ];\noperator born_before{year: integer}: relation { name: text, born: integer } [ return poets where born < year; ];";
+
+    #[test]
+    fn read_only_operators_are_evaluated_when_compiling() {
+        let program = analyze_str(&format!(
+            "{READ_ONLY}\nvar a := quadruple{{x: 2}};\nvar b := scaled{{x: 2}};\nvar c := born_before{{year: 1500}}{{name}};\nvar d := poets extend {{ twice := double{{x: born}} }};{MAIN}"
+        ))
+        .unwrap();
+        let value = |name: &str| {
+            program
+                .variables
+                .iter()
+                .find(|v| v.name == name)
+                .unwrap()
+                .init
+                .clone()
+        };
+        assert_eq!(value("a"), hir::Value::Integer(8));
+        // A variable an operator reads has its initial value then.
+        assert_eq!(value("b"), hir::Value::Integer(6));
+        let hir::Value::Relation(c) = value("c") else {
+            panic!("a relation");
+        };
+        assert_eq!(c.tuples.len(), 1);
+        // A call whose argument is the tuple at hand's is evaluated for each.
+        let hir::Value::Relation(d) = value("d") else {
+            panic!("a relation");
+        };
+        assert!(
+            d.tuples
+                .iter()
+                .any(|t| t.get("twice") == Some(&hir::Value::Integer(3630)))
+        );
+        // So is one in a body, with arguments known when compiling.
+        let body = main_body(&format!(
+            "{READ_ONLY}\noperator main{{}} [ call debug_value{{v: double{{x: 21}}}}; ];"
+        ));
+        assert_eq!(
+            argument(&body[0]),
+            &hir::Expr::Constant(hir::Value::Integer(42))
+        );
+        // A read-only operator's value is in HIR, with calls of others left
+        // where their arguments are its parameters.
+        let quadruple = program
+            .operators
+            .iter()
+            .find(|o| o.name == "quadruple")
+            .unwrap();
+        let hir::OperatorKind::ReadOnly { result, value } = &quadruple.kind else {
+            panic!("a read-only operator");
+        };
+        assert_eq!(result, &hir::Type::Scalar(hir::Scalar::Integer));
+        assert!(matches!(value, hir::Expr::Call(..)));
+    }
+
+    #[test]
+    fn read_only_operators_change_nothing_and_return_once() {
+        let codes_of = |body: &str| {
+            codes(&format!(
+                "var n := 0;\noperator f{{x: integer}}: integer [ {body} ];{MAIN}"
+            ))
+        };
+        assert_eq!(
+            codes_of("call debug_value{v: x}; n := x; return x;"),
+            [Code::ReadOnlyEffect, Code::ReadOnlyEffect]
+        );
+        assert_eq!(codes_of(""), [Code::Return]);
+        let source =
+            "operator f{x: integer}: integer [ return x; return 1; ];\noperator main{} [];";
+        assert_eq!(codes(source), [Code::Return]);
+        assert_eq!(
+            fix(source),
+            "operator f{x: integer}: integer [ return x; ];\noperator main{} [];"
+        );
+        // A `return` in an update operator.
+        assert_eq!(
+            codes("operator f{} [ return 1; ];\noperator main{} [];"),
+            [Code::Return]
+        );
+        // A `return` of the wrong type, reported at the value.
+        let errors = errors("operator f{}: integer [ return \"one\"; ];\noperator main{} [];");
+        assert_eq!(errors[0].code, Code::TypeMismatch);
+        // `main` has no result type: the fix removes it with its `return`s.
+        let source = "operator main{}: integer [ call debug_value{v: 1}; return 0; ];";
+        assert_eq!(codes(source), [Code::MainSignature]);
+        assert_eq!(fix(source), "operator main{} [ call debug_value{v: 1}; ];");
+    }
+
+    #[test]
+    fn calls_of_read_only_and_update_operators() {
+        let program = |body: &str| {
+            format!(
+                "{READ_ONLY}\nvar n := 1;\noperator note{{}} [];\noperator main{{}} [ {body} ];"
+            )
+        };
+        // A read-only operator's call is a value, which `call` would lose.
+        assert_eq!(
+            codes(&program("call double{x: 1};")),
+            [Code::CallOfReadOnly]
+        );
+        // An update operator's has none.
+        assert_eq!(
+            codes(&program("call debug_value{v: note{}};")),
+            [Code::OperatorAsValue]
+        );
+        assert_eq!(
+            codes(&program("call debug_value{v: debug_value{v: 1}};")),
+            [Code::OperatorAsValue]
+        );
+        // Calls are checked as `call`'s are.
+        assert_eq!(
+            codes(&program("call debug_value{v: double{y: 1}};")),
+            [Code::UnknownAttribute]
+        );
+        assert_eq!(
+            codes(&program("call debug_value{v: double{}};")),
+            [Code::MissingAttribute]
+        );
+        assert_eq!(
+            codes(&program("call debug_value{v: n{x: 1}};")),
+            [Code::NotAnOperator]
+        );
+        assert_eq!(
+            codes(&program("call debug_value{v: triple{x: 1}};")),
+            [Code::UnknownName]
+        );
+        // A name before attribute names that only an operator has is a call
+        // with positional arguments.
+        let source = program("call debug_value{v: double{n}};");
+        assert_eq!(codes(&source), [Code::PositionalArgument]);
+        assert!(fix(&source).contains("double{x: n}"));
+        // For now, a call is evaluated only when compiling.
+        assert_eq!(
+            codes(&program("call debug_value{v: double{x: n}};")),
+            [Code::RunTimeCall]
+        );
+        assert_eq!(
+            codes(&program("call debug_value{v: scaled{x: 1}};")),
+            [Code::RunTimeCall]
+        );
+        // A call whose value fails is an error at the call.
+        let errors = errors(&format!(
+            "{READ_ONLY}\nvar big := double{{x: 9223372036854775807}};{MAIN}"
+        ));
+        assert_eq!(errors[0].code, Code::Overflow);
+        assert!(errors[0].notes.iter().any(|n| n.contains("`double`")));
+    }
+
+    #[test]
+    fn read_only_operators_dont_call_themselves() {
+        let mutual = errors(
+            "operator f{}: integer [ return g{}; ];\noperator g{}: integer [ return f{}; ];\noperator main{} [];",
+        );
+        assert_eq!(mutual.len(), 1, "{mutual:#?}");
+        assert_eq!(mutual[0].code, Code::Recursion);
+        assert_eq!(mutual[0].message, "`f` and `g` call each other");
+        assert_eq!(
+            messages("operator f{x: integer}: integer [ return f{x: x}; ];\noperator main{} [];"),
+            ["`f` calls itself"]
+        );
+        // A cycle through an operator's value is an initial values' cycle.
+        let cycle = errors(&format!(
+            "var a := f{{}};\noperator f{{}}: integer [ return a + 1; ];{MAIN}"
+        ));
+        assert_eq!(cycle.len(), 1, "{cycle:#?}");
+        assert_eq!(cycle[0].code, Code::CyclicInitialValues);
+        assert_eq!(
+            cycle[0].message,
+            "the initial value of `a` depends on itself"
+        );
+        let labels: Vec<&str> = cycle[0]
+            .secondary
+            .iter()
+            .map(|l| l.message.as_str())
+            .collect();
+        assert_eq!(labels, ["`a` calls `f`", "`f` reads `a`"]);
     }
 
     #[test]
@@ -1364,13 +1351,13 @@ mod tests {
             .iter()
             .find(|o| o.name == "greet")
             .unwrap();
-        let hir::OperatorKind::User { body } = &greet.kind else {
+        let hir::OperatorKind::Update { body } = &greet.kind else {
             panic!("greet is a user operator");
         };
         // Inside `greet`, `r` is the parameter, which hides the variable.
         assert_eq!(*argument(&body[1]), hir::Expr::Parameter("r".to_string()));
         let main = program.operator(program.entry);
-        let hir::OperatorKind::User { body } = &main.kind else {
+        let hir::OperatorKind::Update { body } = &main.kind else {
             panic!("main is a user operator");
         };
         assert_eq!(*argument(&body[0]), hir::Expr::Variable(hir::VariableId(0)));
@@ -1460,7 +1447,7 @@ mod tests {
     #[test]
     fn main_takes_no_parameters() {
         let source = "operator main{args: text} [];";
-        assert_eq!(codes(source), [Code::MainWithParams]);
+        assert_eq!(codes(source), [Code::MainSignature]);
         assert_eq!(fix(source), "operator main{} [];");
     }
 
@@ -1476,7 +1463,7 @@ mod tests {
         let body = |source: &str| {
             let program = analyze_str(source).unwrap();
             let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-            let hir::OperatorKind::User { body } = &f.kind else {
+            let hir::OperatorKind::Update { body } = &f.kind else {
                 panic!("f is a user operator");
             };
             body.clone()
@@ -1628,7 +1615,7 @@ mod tests {
 
     fn main_body(source: &str) -> Vec<hir::Statement> {
         let program = analyze_str(source).unwrap();
-        let hir::OperatorKind::User { body } = &program.operator(program.entry).kind else {
+        let hir::OperatorKind::Update { body } = &program.operator(program.entry).kind else {
             panic!("main is a user operator");
         };
         body.clone()
@@ -1673,7 +1660,7 @@ mod tests {
             let body = |e: &str| {
                 let program = analyze_str(&source(e)).unwrap();
                 let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-                let hir::OperatorKind::User { body } = &f.kind else {
+                let hir::OperatorKind::Update { body } = &f.kind else {
                     panic!("f is a user operator");
                 };
                 argument(&body[0]).clone()
@@ -1880,7 +1867,7 @@ mod tests {
             let body = |e: &str| {
                 let program = analyze_str(&source(e)).unwrap();
                 let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-                let hir::OperatorKind::User { body } = &f.kind else {
+                let hir::OperatorKind::Update { body } = &f.kind else {
                     panic!("f is a user operator");
                 };
                 argument(&body[0]).clone()
@@ -1893,7 +1880,7 @@ mod tests {
         )
         .unwrap();
         let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-        let hir::OperatorKind::User { body } = &f.kind else {
+        let hir::OperatorKind::Update { body } = &f.kind else {
             panic!("f is a user operator");
         };
         assert_eq!(
@@ -1972,7 +1959,7 @@ mod tests {
             let body = |e: &str| {
                 let program = analyze_str(&source(e)).unwrap();
                 let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-                let hir::OperatorKind::User { body } = &f.kind else {
+                let hir::OperatorKind::Update { body } = &f.kind else {
                     panic!("f is a user operator");
                 };
                 argument(&body[0]).clone()
@@ -2218,7 +2205,7 @@ mod tests {
             ))
             .unwrap();
             let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-            let hir::OperatorKind::User { body } = &f.kind else {
+            let hir::OperatorKind::Update { body } = &f.kind else {
                 panic!("f is a user operator");
             };
             argument(&body[0]).clone()
@@ -2851,7 +2838,7 @@ mod tests {
         )
         .unwrap();
         let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-        let hir::OperatorKind::User { body } = &f.kind else {
+        let hir::OperatorKind::Update { body } = &f.kind else {
             panic!("f is a user operator");
         };
         // An extend of the kept attributes, each with its image in `r`.
@@ -2947,7 +2934,7 @@ mod tests {
         )
         .unwrap();
         let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-        let hir::OperatorKind::User { body } = &f.kind else {
+        let hir::OperatorKind::Update { body } = &f.kind else {
             panic!("f is a user operator");
         };
         let heading =
@@ -3303,7 +3290,7 @@ mod tests {
         )
         .unwrap();
         let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-        let hir::OperatorKind::User { body } = &f.kind else {
+        let hir::OperatorKind::Update { body } = &f.kind else {
             panic!("f is a user operator");
         };
         assert!(matches!(argument(&body[0]), hir::Expr::Restrict(..)));
@@ -3408,7 +3395,7 @@ mod tests {
         )
         .unwrap();
         let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-        let hir::OperatorKind::User { body } = &f.kind else {
+        let hir::OperatorKind::Update { body } = &f.kind else {
             panic!("f is a user operator");
         };
         let cities = || Box::new(hir::Expr::Variable(hir::VariableId(0)));
@@ -3432,7 +3419,7 @@ mod tests {
         )
         .unwrap();
         let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-        let hir::OperatorKind::User { body } = &f.kind else {
+        let hir::OperatorKind::Update { body } = &f.kind else {
             panic!("f is a user operator");
         };
         let hir::Expr::And(constant, parameter) = argument(&body[0]) else {
@@ -3505,7 +3492,7 @@ mod tests {
             let body = |e: &str| {
                 let program = analyze_str(&source(e)).unwrap();
                 let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-                let hir::OperatorKind::User { body } = &f.kind else {
+                let hir::OperatorKind::Update { body } = &f.kind else {
                     panic!("f is a user operator");
                 };
                 argument(&body[0]).clone()
@@ -3547,7 +3534,7 @@ mod tests {
             let body = |e: &str| {
                 let program = analyze_str(&source(e)).unwrap();
                 let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-                let hir::OperatorKind::User { body } = &f.kind else {
+                let hir::OperatorKind::Update { body } = &f.kind else {
                     panic!("f is a user operator");
                 };
                 argument(&body[0]).clone()

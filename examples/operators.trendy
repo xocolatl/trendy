@@ -1,0 +1,44 @@
+/* Operators, read-only and update (TTM RM Prescription 3). A read-only
+   operator has a result type, and its body is one `return`: its call is a
+   value. An update operator returns nothing, and is invoked by `call`.
+   Implemented: for now, a read-only operator is called when compiling, in
+   an initial value, or in a body with arguments known then when it reads
+   no variable. main prints each result. */
+var vat := 16;
+var dishes := relation {
+    { dish: "jollof rice", country: "Ghana", price: 1200 },
+    { dish: "ramen", country: "Japan", price: 900 },
+    { dish: "pozole", country: "Mexico", price: 750 },
+}
+key { dish };
+
+/* A price in cents with VAT, rounded down. It reads `vat`, as it is when
+   the operator is called. */
+operator taxed{price: integer}: integer [
+    return price + price * vat div 100;
+];
+
+/* A relation, of the dishes whose price with VAT is under `limit`: the
+   condition calls `taxed` for each. */
+operator under{limit: integer}: relation { dish: text, country: text, price: integer } [
+    return dishes where taxed{price: price} < limit;
+];
+
+operator half{n: integer}: integer [
+    return n div 2;
+];
+
+/* An update operator, invoked by `call`. */
+operator show{label: text, cents: integer} [
+    call debug_value{v: label};
+    call debug_value{v: cents};
+];
+
+var totals := dishes extend { total := taxed{price: price} } remove {price};
+var affordable := under{limit: 1000}{dish};
+
+operator main{} [
+    call debug_value{v: totals};
+    call debug_value{v: affordable};
+    call show{label: "half of 1200", cents: half{n: 1200}};
+];

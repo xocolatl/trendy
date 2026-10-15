@@ -33,16 +33,17 @@ pub fn lower(program: &hir::Program) -> lir::Program {
         }));
     }
 
-    // Only user operators become functions; built-ins are runtime calls.
+    // Only update operators become functions: built-ins are runtime calls,
+    // and sema evaluates every call of a read-only operator.
     let mut function_ids = HashMap::new();
     for (i, op) in program.operators.iter().enumerate() {
-        if matches!(op.kind, hir::OperatorKind::User { .. }) {
+        if matches!(op.kind, hir::OperatorKind::Update { .. }) {
             function_ids.insert(hir::OperatorId(i), lir::FunctionId(function_ids.len()));
         }
     }
     let mut functions = Vec::new();
     for (i, op) in program.operators.iter().enumerate() {
-        let hir::OperatorKind::User { body } = &op.kind else {
+        let hir::OperatorKind::Update { body } = &op.kind else {
             continue;
         };
         let mut function = FunctionBuilder {
@@ -285,7 +286,7 @@ impl FunctionBuilder<'_> {
                     args: vec![value, descriptor],
                 });
             }
-            hir::OperatorKind::User { .. } => {
+            hir::OperatorKind::Update { .. } => {
                 // The arguments are a tuple: build it in a stack slot, in
                 // parameter name order, and pass its address.
                 let args_place = params_layout(&callee.params).map(|params| {
@@ -307,6 +308,9 @@ impl FunctionBuilder<'_> {
                     function: self.function_ids[&operator],
                     args: args_place,
                 });
+            }
+            hir::OperatorKind::ReadOnly { .. } => {
+                unreachable!("`call` invokes only update operators")
             }
         }
     }
@@ -511,6 +515,9 @@ impl FunctionBuilder<'_> {
             hir::Expr::Antijoin(lhs, rhs) => self.matching(lhs, rhs, true, cx),
             hir::Expr::Restrict(operand, condition) => self.restrict(operand, condition, cx),
             hir::Expr::Current(depth, _) => self.tuples[self.tuples.len() - 1 - depth].clone(),
+            // Calls are only in read-only operators' values, which aren't
+            // lowered: sema evaluates every other call when compiling.
+            hir::Expr::Call(..) => unreachable!("sema evaluates calls outside read-only operators"),
             hir::Expr::Extend(operand, _, attributes) => self.extend(expr, operand, attributes, cx),
             hir::Expr::Binary(op, lhs, rhs) => {
                 let operand_ty = self.program.type_of(lhs, self.within);
@@ -1490,7 +1497,7 @@ mod tests {
                 .iter()
                 .map(|p| ((*p).to_string(), hir::ParamType::Type(integer())))
                 .collect(),
-            kind: hir::OperatorKind::User { body },
+            kind: hir::OperatorKind::Update { body },
         }
     }
 

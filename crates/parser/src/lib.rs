@@ -32,6 +32,7 @@ pub fn parse(source: &str, lexed: Lexed) -> Parse {
         last_end: None,
         form: errors::OPERATOR_FORM,
         missing: None,
+        paren_calls: true,
         builder: TreeBuilder::new(),
         errors: lexed.errors,
     };
@@ -58,6 +59,10 @@ struct Parser<'a> {
     /// Tokens found missing at `pos`, reported together as one error once
     /// the parser moves on, so one mistake gives one error.
     missing: Option<Missing>,
+    /// Whether a name followed by `(` is a call, as other languages write
+    /// one: everywhere but in Tutorial D's `UPDATE R WHERE p ( … )`, whose
+    /// condition the parenthesized new values follow.
+    paren_calls: bool,
     builder: TreeBuilder,
     errors: Vec<Diagnostic>,
 }
@@ -125,6 +130,24 @@ struct Found<'a> {
     text: &'a str,
 }
 
+/// Whether a value can start with a token of this kind, other than a name:
+/// a literal, a selector, a parenthesized expression, a prefix operator or
+/// an image relation.
+fn starts_value(kind: SyntaxKind) -> bool {
+    kind.is_literal()
+        || matches!(
+            kind,
+            SyntaxKind::TupleKw
+                | SyntaxKind::RelationKw
+                | SyntaxKind::LBrace
+                | SyntaxKind::LParen
+                | SyntaxKind::Minus
+                | SyntaxKind::Plus
+                | SyntaxKind::NotKw
+                | SyntaxKind::BangBang
+        )
+}
+
 impl Found<'_> {
     fn describe(&self) -> String {
         match self.kind {
@@ -156,6 +179,7 @@ impl<'a> Parser<'a> {
             &[SyntaxKind::LBrace, SyntaxKind::LParen],
         );
         self.params();
+        self.result_type();
         self.delimited(
             Some(SyntaxKind::Body),
             "body",
@@ -202,6 +226,41 @@ impl<'a> Parser<'a> {
         self.builder.finish_node();
     }
 
+    /// A read-only operator's result type, `: type`, after its parameters,
+    /// if it has one. Other languages' spellings, `-> type` and Tutorial
+    /// D's `RETURNS type`, are parsed as it and fixed.
+    fn result_type(&mut self) {
+        let Some(found) = self.found() else {
+            return;
+        };
+        let starts_type = self.found_after(1).is_some_and(|f| {
+            matches!(
+                f.kind,
+                SyntaxKind::Ident
+                    | SyntaxKind::TupleKw
+                    | SyntaxKind::RelationKw
+                    | SyntaxKind::LBrace
+            )
+        });
+        let spelled_otherwise = match found.kind {
+            SyntaxKind::Colon => false,
+            SyntaxKind::ForeignOperator if found.text == "->" && starts_type => true,
+            SyntaxKind::Ident if found.text.eq_ignore_ascii_case("returns") && starts_type => true,
+            _ => return,
+        };
+        let before = self.last_end.unwrap_or(found.span.start);
+        self.start_node(SyntaxKind::TypeAnnotation);
+        self.bump();
+        if spelled_otherwise {
+            self.errors.push(errors::result_spelling(
+                found,
+                Span::new(before, found.span.end),
+            ));
+        }
+        self.type_expr();
+        self.builder.finish_node();
+    }
+
     /// An operator's parameters: a heading, which C-style `()` is accepted
     /// for and reported.
     fn params(&mut self) {
@@ -242,7 +301,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// A statement: a call, or an assignment statement.
+    /// A statement: a call, an assignment statement, or a `return`.
     fn statement(&mut self) {
         let Some(found) = self.found() else {
             return;
@@ -256,6 +315,10 @@ impl<'a> Parser<'a> {
             self.assign_block();
         } else if self.at_assignment() {
             self.assign_stmt(false);
+        } else if found.kind == SyntaxKind::ReturnKw
+            || (found.kind == SyntaxKind::Ident && found.text.eq_ignore_ascii_case("return"))
+        {
+            self.return_stmt();
         } else if found.kind == SyntaxKind::Ident && call_like {
             // `debug_value{v: r};`: a call without `call`.
             self.errors.push(errors::missing_call(found));
@@ -263,7 +326,7 @@ impl<'a> Parser<'a> {
         } else {
             self.missing_with_help(
                 SyntaxKind::CallKw,
-                "statements are calls, such as `call debug_value{v: 1};`, and assignments, such as `n := n + 1;`",
+                "statements are calls, such as `call debug_value{v: 1};`, assignments, such as `n := n + 1;`, and, in a read-only operator, `return value;`",
             );
             self.skip_statement(&[
                 SyntaxKind::RBracket,
@@ -305,6 +368,27 @@ impl<'a> Parser<'a> {
                 _ => {}
             }
         }
+        self.builder.finish_node();
+    }
+
+    /// `return value;`, with `return` in any case, as Tutorial D's
+    /// `RETURN`, which is fixed.
+    fn return_stmt(&mut self) {
+        self.start_node(SyntaxKind::ReturnStmt);
+        let found = self.found().expect("at `return`");
+        self.bump();
+        if found.kind != SyntaxKind::ReturnKw {
+            self.errors.push(errors::miscased_keyword(found, "return"));
+        }
+        if self.at_operand() {
+            self.expression();
+        } else {
+            self.missing_with_help(
+                SyntaxKind::Literal,
+                "write the value to return after `return`, as in `return x + 1;`",
+            );
+        }
+        self.expect(SyntaxKind::Semicolon);
         self.builder.finish_node();
     }
 
@@ -479,7 +563,9 @@ impl<'a> Parser<'a> {
                 }
                 if self.at(SyntaxKind::WhereKw) {
                     let where_span = self.bump();
+                    let outer = std::mem::replace(&mut self.paren_calls, values_first);
                     self.binary(WHERE + 1);
+                    self.paren_calls = outer;
                     if !values_first {
                         self.values_after_where(where_span);
                     }
@@ -665,16 +751,51 @@ impl<'a> Parser<'a> {
     }
 
     fn at_argument(&mut self) -> bool {
-        self.peek().is_some_and(|k| {
-            k.is_literal()
-                || matches!(
-                    k,
-                    SyntaxKind::Ident
-                        | SyntaxKind::TupleKw
-                        | SyntaxKind::RelationKw
-                        | SyntaxKind::LBrace
-                )
-        })
+        self.peek()
+            .is_some_and(|k| k == SyntaxKind::Ident || starts_value(k))
+    }
+
+    /// Whether a call expression starts here: a name followed by its
+    /// arguments, which have names, `f{a: x}`, or start with a value,
+    /// `f{1}`, which sema reports, or are in parentheses, as other
+    /// languages write a call. `f{}` and `f{a}` are projections to the
+    /// parser, and sema makes `f{}` a call when `f` is an operator.
+    fn at_call(&mut self) -> bool {
+        let named = |f: Option<Found>| f.is_some_and(|f| f.kind == SyntaxKind::Ident);
+        if !named(self.found()) {
+            return false;
+        }
+        match self.found_after(1).map(|f| f.kind) {
+            Some(SyntaxKind::LParen) => self.paren_calls,
+            Some(SyntaxKind::LBrace) => match self.found_after(2) {
+                Some(f) if f.kind == SyntaxKind::Ident => self.found_after(3).is_some_and(|f| {
+                    matches!(
+                        f.kind,
+                        SyntaxKind::Colon | SyntaxKind::Eq | SyntaxKind::ColonEq
+                    )
+                }),
+                Some(f) => starts_value(f.kind),
+                None => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// `name{arguments}`, at [`Parser::at_call`]: a call of a read-only
+    /// operator. Arguments in parentheses are reported, with a fix.
+    fn call_expr(&mut self) {
+        self.start_node(SyntaxKind::CallExpr);
+        self.start_node(SyntaxKind::NameRef);
+        self.bump();
+        self.builder.finish_node();
+        self.delimited(
+            Some(SyntaxKind::Arguments),
+            "argument list",
+            (SyntaxKind::LBrace, SyntaxKind::RBrace),
+            &[(SyntaxKind::LParen, SyntaxKind::RParen)],
+            |p| p.items(Self::at_argument, Self::argument),
+        );
+        self.builder.finish_node();
     }
 
     /// `name: value`, or a value without a name, which sema reports.
@@ -1658,6 +1779,8 @@ impl<'a> Parser<'a> {
                 found,
                 errors::boolean_spelling(found.text).expect("just checked"),
             ));
+        } else if self.at_call() {
+            self.call_expr();
         } else if self.at(SyntaxKind::Ident) {
             self.start_node(SyntaxKind::NameRef);
             self.bump();
@@ -2179,7 +2302,7 @@ fn is_skipped(kind: SyntaxKind) -> bool {
 mod tests {
     use super::*;
     use trendy_diag::Code;
-    use trendy_syntax::ast::{AstNode, Statement};
+    use trendy_syntax::ast::{AstNode, Expr, Statement, TypeExpr};
     use trendy_syntax::outline;
 
     fn parse_str(source: &str) -> Parse {
@@ -2764,6 +2887,61 @@ SourceFile
     }
 
     #[test]
+    fn read_only_operators_and_calls() {
+        let source = "operator double{x: integer}: integer [ return x * 2; ];\nvar four := double{x: 2} + 0;";
+        let parse = parse_str(source);
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let op = parse.tree.operators().next().unwrap();
+        assert!(matches!(op.result(), Some(TypeExpr::Named(_))));
+        let Some(Statement::Return(stmt)) = op.body().unwrap().statements().next() else {
+            panic!("a return");
+        };
+        assert!(stmt.value().is_some());
+        let initial = |source: &str| {
+            let parse = parse_str(&format!("var x := {source};"));
+            assert!(parse.errors.is_empty(), "{source}: {:#?}", parse.errors);
+            parse
+                .tree
+                .variables()
+                .next()
+                .unwrap()
+                .initializer()
+                .unwrap()
+        };
+        assert!(matches!(initial("f{a: 1}"), Expr::Call(_)));
+        // A value first is a positional argument, which sema reports.
+        assert!(matches!(initial("f{1}"), Expr::Call(_)));
+        // Postfix operators apply to the call.
+        let Expr::Project(project) = initial("g{b: 2}{c}") else {
+            panic!("a projection");
+        };
+        assert!(matches!(project.operand(), Some(Expr::Call(_))));
+        // `f{}` and `f{a}` are projections to the parser.
+        assert!(matches!(initial("f{}"), Expr::Project(_)));
+        assert!(matches!(initial("f{a}"), Expr::Project(_)));
+        // Other languages' spellings are fixed.
+        assert_eq!(
+            fix("operator f{x: integer} -> integer [ RETURN x; ];"),
+            "operator f{x: integer}: integer [ return x; ];"
+        );
+        assert_eq!(
+            fix("operator f{x: integer} returns integer [ return x; ];"),
+            "operator f{x: integer}: integer [ return x; ];"
+        );
+        assert_eq!(fix("var x := f(a: 1);"), "var x := f{a: 1};");
+        // Tutorial D's `update`, whose values follow the condition in
+        // parentheses, isn't a call.
+        assert_eq!(
+            fix("operator main{} [ update r where c (a := 1); ];"),
+            "operator main{} [ update r { a := 1 } where c; ];"
+        );
+        assert_eq!(
+            messages("operator f{}: integer [ return; ];"),
+            ["expected value, found `;`"]
+        );
+    }
+
+    #[test]
     fn positional_arguments_parse_for_sema_to_fix() {
         let parse = parse_str("operator main{} [ call debug_value{r}; ];");
         assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
@@ -2879,7 +3057,7 @@ SourceFile
                     .flat_map(|stmt| stmt.clauses())
                     .map(|clause| format!("assign: {}", describe(clause)))
                     .collect(),
-                Statement::Call(_) => Vec::new(),
+                Statement::Call(_) | Statement::Return(_) => Vec::new(),
             })
             .collect()
     }

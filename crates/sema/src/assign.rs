@@ -71,7 +71,9 @@ fn assignments(
     }
     let mut assignments = Vec::new();
     for (target, list) in changes {
-        let variable = &cx.variables[target.0];
+        let variable = cx.variables[target.0]
+            .as_ref()
+            .expect("only valid variables are assigned");
         let Some(value) = merged(target, variable, list, within, cx, errors) else {
             ok = false;
             continue;
@@ -125,7 +127,9 @@ fn change(
 ) -> Option<(hir::VariableId, Change)> {
     let written = clause.target()?;
     let id = assigned_variable(&written, within, cx, errors)?;
-    let variable = &cx.variables[id.0];
+    let variable = cx.variables[id.0]
+        .as_ref()
+        .expect("only valid variables are assigned");
     let declaration = &cx.declarations[&variable.name];
     let declared = declaration
         .type_expr()
@@ -232,7 +236,7 @@ fn update(
                 }
                 None => hir::Expr::Constant(hir::Value::Boolean(true)),
             };
-            let selected = restricted(target.current(), condition.clone());
+            let selected = restricted(target.current(), condition.clone(), checker.bindings());
             let replaced = checker.assign_attributes(selected, &assigned, unchanged, errors)?;
             Some(Change::Tuples(TupleChange {
                 removed: Some(Removal::Where(condition)),
@@ -361,7 +365,7 @@ fn merged(
                 };
                 changes.push((clause, computed, values));
             }
-            attributes_merged(target, &variable.name, changes, errors)
+            attributes_merged(target, &variable.name, changes, cx.bindings(), errors)
         }
         Change::Tuples(change) => {
             let mut changes = vec![(clause, change)];
@@ -371,7 +375,7 @@ fn merged(
                 };
                 changes.push((clause, change));
             }
-            tuples_merged(target, variable, changes, errors)
+            tuples_merged(target, variable, changes, cx.bindings(), errors)
         }
     }
 }
@@ -452,6 +456,7 @@ fn attributes_merged(
     target: hir::VariableId,
     name: &str,
     changes: Vec<(&Clause, hir::Heading, BTreeMap<String, hir::Expr>)>,
+    bindings: ops::Bindings,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Expr> {
     let mut types = BTreeMap::new();
@@ -481,6 +486,7 @@ fn attributes_merged(
             hir::Expr::Variable(target),
             hir::Heading::new(types),
             values,
+            bindings,
         )
         .unwrap_or_else(|_| unreachable!("a variable's value is known only when running")),
     )
@@ -494,6 +500,7 @@ fn tuples_merged(
     target: hir::VariableId,
     variable: &hir::Variable,
     changes: Vec<(&Clause, TupleChange)>,
+    bindings: ops::Bindings,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Expr> {
     let current = || hir::Expr::Variable(target);
@@ -511,7 +518,7 @@ fn tuples_merged(
     let kept = match (&wheres[..], included.is_empty()) {
         ([], true) => current(),
         // One condition, and nothing else removed: the others.
-        ([condition], true) => restricted(current(), negated(condition.clone())),
+        ([condition], true) => restricted(current(), negated(condition.clone()), bindings),
         _ => {
             // Only relations named by `i_delete`s are known now, so a
             // conflict found now is between two of those.
@@ -527,7 +534,7 @@ fn tuples_merged(
             let strict = !included.is_empty();
             let all = wheres
                 .into_iter()
-                .map(|condition| restricted(current(), condition))
+                .map(|condition| restricted(current(), condition, bindings))
                 .chain(included.into_iter().map(|(_, tuples)| tuples))
                 .reduce(|all, tuples| {
                     ops::combined(all, tuples, hir::Combination::DisjointChanges)
@@ -595,17 +602,14 @@ fn assigned_variable(
     };
     let ident = name.ident()?;
     let (name, span) = (ident.text(), trendy_syntax::span(ident.text_range()));
-    if cx.operators[within.0].params.contains_key(name) {
+    if cx.operators.get(within).params.contains_key(name) {
         let hidden = cx.variable_ids.contains_key(name);
         errors.push(errors::assigned_parameter(name, span, hidden));
         return None;
     }
     if let Some(&id) = cx.variable_ids.get(name) {
-        return Some(id);
-    }
-    // A variable with errors in its declaration is already reported.
-    if cx.namespaces.variable(name).is_some() {
-        return None;
+        // A variable with errors in its declaration is already reported.
+        return cx.variables[id.0].is_some().then_some(id);
     }
     if let Some((kind, _)) = cx.namespaces.operator(name) {
         errors.push(errors::assigned_operator(name, span, kind));
@@ -617,8 +621,8 @@ fn assigned_variable(
 }
 
 /// The tuples of the relation `operand` for which `condition` is true.
-fn restricted(operand: hir::Expr, condition: hir::Expr) -> hir::Expr {
-    ops::restrict(operand, condition)
+fn restricted(operand: hir::Expr, condition: hir::Expr, bindings: ops::Bindings) -> hir::Expr {
+    ops::restrict(operand, condition, bindings)
         .unwrap_or_else(|_| unreachable!("a variable's value is known only when running"))
 }
 

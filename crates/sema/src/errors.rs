@@ -8,6 +8,8 @@ use trendy_hir as hir;
 use trendy_syntax::SyntaxToken;
 use trendy_syntax::ast::{AstNode, Expr, Key, NaryExpr, SourceFile};
 
+use crate::globals::Pending;
+use crate::operators::Signature;
 use crate::types::Origin;
 use crate::{Kind, Namespaces};
 
@@ -609,19 +611,22 @@ pub(crate) fn operator_as_value(name: &str, span: Span) -> Diagnostic {
     ))
 }
 
-/// `name{}` in an expression, the name at `span`: a call of the operator
-/// `name`, defined at `defined` unless it is built in, which has no value.
-/// `projectable` says whether a value of the same name is in scope, which
-/// `(name){}` would project.
+/// A call in an expression, of the operator `name`, at `span`, defined at
+/// `defined` unless it is built in, which has no value. `empty` says
+/// whether the call is `name{}`, without arguments, and `projectable`
+/// whether a value of the same name is in scope then, which `(name){}`
+/// would project.
 pub(crate) fn operator_call_without_value(
     name: &str,
     span: Span,
     defined: Option<Span>,
+    empty: bool,
     projectable: bool,
 ) -> Diagnostic {
+    let args = if empty { "" } else { "…" };
     let d = Diagnostic::error(
         Code::OperatorAsValue,
-        format!("`{name}{{}}` calls the operator `{name}`, which has no value"),
+        format!("`{name}{{{args}}}` calls the operator `{name}`, which has no value"),
         span,
         "an update operator",
     );
@@ -1009,7 +1014,9 @@ pub(crate) fn not_an_operator(name: &str, span: Span, what: &str) -> Diagnostic 
         span,
         "can't be called",
     )
-    .with_note("`call` invokes an update operator, such as `debug_value`")
+    .with_note(
+        "only operators are called: `call` invokes an update operator, such as `debug_value`, and a read-only operator's call is a value in an expression",
+    )
 }
 
 /// An argument without a name, at `span`, in a call to `signature`.
@@ -1040,10 +1047,44 @@ pub(crate) fn positional_argument(
     }
 }
 
+/// `operator main{…}: type`, the definition `decl`, which has no result
+/// type: the fix removes it, and the `return`s with it.
+pub(crate) fn main_with_result(decl: &trendy_syntax::ast::Operator) -> Diagnostic {
+    let mut edits: Vec<Edit> = decl
+        .result_removal()
+        .into_iter()
+        .map(|span| Edit {
+            span,
+            replacement: String::new(),
+        })
+        .collect();
+    for statement in decl
+        .body()
+        .iter()
+        .flat_map(trendy_syntax::ast::Body::statements)
+    {
+        if let trendy_syntax::ast::Statement::Return(stmt) = statement {
+            edits.push(Edit {
+                span: stmt.removal(),
+                replacement: String::new(),
+            });
+        }
+    }
+    let span = decl.result().map_or_else(|| decl.span(), |t| t.span());
+    Diagnostic::error(
+        Code::MainSignature,
+        "`main` can't have a result type",
+        span,
+        "nothing receives `main`'s value",
+    )
+    .with_note("execution starts in `main`, an update operator, which returns no value")
+    .with_suggestion("remove the result type, and the `return`s", edits)
+}
+
 /// `operator main{…}`, whose parameters `params` must be empty.
 pub(crate) fn main_with_params(params: &trendy_syntax::ast::Heading) -> Diagnostic {
     Diagnostic::error(
-        Code::MainWithParams,
+        Code::MainSignature,
         "`main` can't take parameters",
         params.span(),
         "nothing passes arguments to `main`",
@@ -2199,38 +2240,209 @@ fn dropped(postfix: &trendy_syntax::ast::PostfixExpr, operand: &Expr) -> (Span, 
     (Span::new(start, end), edit)
 }
 
-/// The variables in `cycle`, each with its declaration's name span and the
-/// span where its initial value refers to the next one, the last referring
-/// to the first.
-pub(crate) fn cyclic_initial_values(cycle: &[(String, Span, Span)]) -> Diagnostic {
-    let (first, declared, _) = &cycle[0];
-    let names: Vec<String> = cycle.iter().map(|(n, _, _)| format!("`{n}`")).collect();
-    let message = match names.as_slice() {
-        [_] => format!("the initial value of `{first}` depends on itself"),
-        _ => format!(
-            "the initial values of {} depend on each other",
-            trendy_diag::conjoin(&names)
+/// The globals in `cycle`, each referring to the next and the last to
+/// the first: an initial value's cycle, through operators or not, or, if
+/// it has no variable, read-only operators that call each other.
+pub(crate) fn cycle(cycle: &[Pending]) -> Diagnostic {
+    // Start at a variable, if there is one, whose initial value has no
+    // order to be evaluated in.
+    let start = cycle.iter().position(|p| !p.operator).unwrap_or(0);
+    let cycle: Vec<&Pending> = cycle[start..].iter().chain(&cycle[..start]).collect();
+    let first = cycle[0];
+    let names = |operators: bool| -> Vec<String> {
+        cycle
+            .iter()
+            .filter(|p| p.operator == operators)
+            .map(|p| format!("`{}`", p.name))
+            .collect()
+    };
+    let d = if first.operator {
+        let names = names(true);
+        let message = match names.as_slice() {
+            [_] => format!("`{}` calls itself", first.name),
+            _ => format!("{} call each other", trendy_diag::conjoin(&names)),
+        };
+        Diagnostic::error(Code::Recursion, message, first.defined, "defined here")
+            .with_note(
+                "a read-only operator can't call itself, directly or through others: without a condition to stop on, its call would never end",
+            )
+            .with_help("compute the value without calling the operator from its own body")
+    } else {
+        let names = names(false);
+        let message = match names.as_slice() {
+            [_] => format!("the initial value of `{}` depends on itself", first.name),
+            _ => format!(
+                "the initial values of {} depend on each other",
+                trendy_diag::conjoin(&names)
+            ),
+        };
+        Diagnostic::error(Code::CyclicInitialValues, message, first.defined, "declared here")
+            .with_note(
+                "initial values are evaluated when compiling, each after the ones it refers to, and the read-only operators it calls with the variables they read, so a cycle has no order to evaluate them in",
+            )
+            .with_help("give one of these variables a value that doesn't refer to the others")
+    };
+    cycle.iter().enumerate().fold(d, |d, (i, pending)| {
+        let next = cycle[(i + 1) % cycle.len()];
+        let verb = match (pending.operator, next.operator) {
+            (_, true) => "calls",
+            (true, false) => "reads",
+            (false, false) => "refers to",
+        };
+        let label = if next.name == pending.name && next.operator == pending.operator {
+            format!("`{}` {verb} itself", pending.name)
+        } else {
+            format!("`{}` {verb} `{}`", pending.name, next.name)
+        };
+        d.with_secondary(pending.via, label)
+    })
+}
+
+/// A `call` of the read-only operator `name`, at `span`, defined at
+/// `defined`, whose value would be lost.
+pub(crate) fn call_of_read_only(name: &str, span: Span, defined: Option<Span>) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::CallOfReadOnly,
+        format!("`{name}` is a read-only operator, so `call` would lose its value"),
+        span,
+        "a read-only operator",
+    );
+    let d = match defined {
+        Some(defined) => d.with_secondary(defined, "defined here, with a result type"),
+        None => d,
+    };
+    d.with_note(format!(
+        "`call` invokes an update operator, which returns nothing; a read-only operator's call is a value, used in an expression, as in `call debug_value{{v: {name}{{…}}}};`"
+    ))
+}
+
+/// `stmt`, a `return` in the update operator `name`.
+pub(crate) fn return_in_update(name: &str, stmt: &trendy_syntax::ast::ReturnStmt) -> Diagnostic {
+    let span = stmt
+        .keyword()
+        .map_or_else(|| stmt.span(), |t| trendy_syntax::span(t.text_range()));
+    Diagnostic::error(
+        Code::Return,
+        format!("`{name}` is an update operator, which returns no value"),
+        span,
+        "returns a value",
+    )
+    .with_note(
+        "only a read-only operator, which has a result type, returns a value: `operator name{params}: type [return value;];`",
+    )
+    .with_help(format!(
+        "give `{name}` a result type to make it read-only, or delete the `return`"
+    ))
+}
+
+/// `stmt`, a statement other than `return` in the read-only operator
+/// `name`: a call, or an assignment, which would change something.
+pub(crate) fn read_only_effect(name: &str, stmt: &trendy_syntax::ast::Statement) -> Diagnostic {
+    let (message, label) = match stmt {
+        trendy_syntax::ast::Statement::Call(_) => (
+            "a read-only operator can't call an operator",
+            format!("a `call` in `{name}`"),
+        ),
+        _ => (
+            "a read-only operator can't assign a variable",
+            format!("an assignment in `{name}`"),
         ),
     };
-    let mut d = Diagnostic::error(
-        Code::CyclicInitialValues,
-        message,
-        *declared,
-        "declared here",
-    );
-    for (i, (name, _, via)) in cycle.iter().enumerate() {
-        let next = &cycle[(i + 1) % cycle.len()].0;
-        let label = if next == name {
-            format!("`{name}` refers to itself")
-        } else {
-            format!("`{name}` refers to `{next}`")
-        };
-        d = d.with_secondary(*via, label);
-    }
-    d.with_note(
-        "initial values are evaluated when compiling, each after the ones it refers to, so a cycle has no order to evaluate them in",
+    Diagnostic::error(Code::ReadOnlyEffect, message, stmt.span(), label)
+        .with_note(
+            "a read-only operator changes nothing (TTM RM Prescription 3): its body is one `return`, of a value computed from its parameters and the variables it reads",
+        )
+        .with_help(format!(
+            "to change something, make `{name}` an update operator, without a result type, invoked by `call`"
+        ))
+}
+
+/// The read-only operator `name`, whose `body` has no `return`, and whose
+/// result type is `written`.
+pub(crate) fn missing_return(
+    name: &str,
+    body: &trendy_syntax::ast::Body,
+    written: &trendy_syntax::ast::TypeExpr,
+) -> Diagnostic {
+    let at = body.end().map_or_else(|| body.span(), Span::empty);
+    Diagnostic::error(
+        Code::Return,
+        format!("read-only operator `{name}` has no `return`"),
+        at,
+        "no `return`",
     )
-    .with_help("give one of these variables a value that doesn't refer to the others")
+    .with_secondary(
+        written.span(),
+        format!("`{name}` returns a value of this type"),
+    )
+    .with_note(RETURN_RULE)
+    .with_help("return its value: `return …;`")
+}
+
+/// `stmt`, a `return` after `first` in a read-only operator.
+pub(crate) fn extra_return(
+    stmt: &trendy_syntax::ast::ReturnStmt,
+    first: &trendy_syntax::ast::ReturnStmt,
+) -> Diagnostic {
+    Diagnostic::error(
+        Code::Return,
+        "a read-only operator returns once",
+        stmt.span(),
+        "another `return`",
+    )
+    .with_secondary(first.span(), "the first, which gives its value")
+    .with_note(RETURN_RULE)
+    .with_suggestion(
+        "delete it",
+        vec![Edit {
+            span: stmt.removal(),
+            replacement: String::new(),
+        }],
+    )
+}
+
+/// A read-only operator's body, for notes.
+const RETURN_RULE: &str = "a read-only operator's body is one statement, `return value;`, with a value of its result type";
+
+/// A statement, at `span`, with a call of `name` whose arguments, or a
+/// variable it reads, are known only when the program runs.
+pub(crate) fn run_time_call(name: &str, span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::RunTimeCall,
+        format!("this statement calls `{name}` with a value known only when the program runs"),
+        span,
+        format!("an argument of `{name}`, or a variable it reads, is known only when running"),
+    )
+    .with_note(
+        "for now, a read-only operator is called only when compiling: in an initial value, or with arguments known then, when it reads no variable",
+    )
+}
+
+/// `expr`, a call of `signature` with constant arguments, whose value
+/// fails, as `failed` says.
+pub(crate) fn call_failure(
+    failed: &crate::ops::Failed,
+    expr: &Expr,
+    signature: &Signature,
+) -> Diagnostic {
+    let d = self::failed(failed, expr).with_note(format!(
+        "computing `{}`'s value for these arguments",
+        signature.name
+    ));
+    let returned = signature
+        .decl
+        .as_ref()
+        .and_then(trendy_syntax::ast::Operator::body)
+        .and_then(|body| {
+            body.statements().find_map(|s| match s {
+                trendy_syntax::ast::Statement::Return(stmt) => stmt.value(),
+                _ => None,
+            })
+        });
+    match returned {
+        Some(value) => d.with_secondary(value.span(), format!("`{}`'s value", signature.name)),
+        None => d,
+    }
 }
 
 /// A tuple at `span` that the relation already has, first at `first`.

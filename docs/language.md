@@ -39,15 +39,15 @@ body in square brackets `[]`, and a closing `;`.
 - **Parameters are a heading:** `{name: type, …}`, with each name unique and
   in any order. `main` has none, since nothing passes it arguments.
 - **A body is a list of statements,** each ending with `;`: calls, and
-  assignments (see [Assignment](#assignment)).
+  assignments (see [Assignment](#assignment)), or, for a read-only
+  operator, one `return` (see [Read-only operators](#read-only-operators)).
 - **Arguments are a tuple of the parameters:** `call greet{name: "Ada",
   count: 2};`. Every argument is named, every parameter gets one, and the
   order doesn't matter.
 
 Following *The Third Manifesto*, operators are either read-only operators,
 which return a value and are used in expressions, or update operators, which
-return nothing and are invoked by a `call` statement. So far there are only
-update operators.
+return nothing and are invoked by a `call` statement.
 
 ```trendy,error
 operator main{} [
@@ -65,7 +65,8 @@ operator main{} [
 
 Inside an operator, a name refers to one of its parameters, or else to a
 variable of the program: parameters hide variables with the same name. An
-operator is not a value, so its name can only follow `call`.
+operator is not a value: its name follows `call`, or, for a read-only
+operator, comes right before its arguments in an expression, `f{x: 1}`.
 
 ```trendy
 var greeting := "hello";
@@ -82,6 +83,88 @@ operator main{} [
 
 A tuple or relation value's attributes can be any expression, names
 included, as in `tuple { n: n }`; see [Tuples](#tuples).
+
+### Read-only operators
+
+A read-only operator has a result type after its parameters, written as a
+variable's type is, and its body is one `return`, of a value of that type
+(TTM RM Prescription 3). A call of it, `name{arguments}` in an expression,
+is that value, computed from the arguments.
+
+```trendy
+var rate := 3;
+var poets := relation {
+    { name: "Ada", born: 1815 },
+    { name: "Rumi", born: 1207 },
+};
+
+operator double{x: integer}: integer [
+    return x * 2;
+];
+
+operator scaled{x: integer}: integer [
+    return double{x: x} * rate;
+];
+
+operator born_before{year: integer}: relation { name: text, born: integer } [
+    return poets where born < year;
+];
+
+var twelve := scaled{x: 2};
+var medieval := born_before{year: 1500}{name};
+var doubled := poets extend { twice := double{x: born} };
+
+operator main{} [
+    call debug_value{v: twelve};
+    call debug_value{v: double{x: 21}};
+    call debug_value{v: doubled};
+];
+```
+
+- **It changes nothing.** It can't assign a variable or `call` an
+  operator, not even `debug_value` (A0034). It can read variables, and
+  call read-only operators.
+- **Its body is one `return`** (A0035). An update operator, which has no
+  result type, has none: it returns nothing. So `call` invokes only update
+  operators, as `call` of a read-only one would lose its value (A0037),
+  and only read-only operators are called in expressions, as an update
+  operator has no value (A0016).
+- **It doesn't call itself,** directly or through others (A0036): without
+  a conditional, nothing could stop the calls.
+- **Calls are evaluated when compiling.** An initial value can call a
+  read-only operator: the variables it reads have their initial values,
+  evaluated first, so a cycle through it is an initial values' cycle
+  (A0021). So can a body, with arguments known when compiling, if the
+  operator reads no variable, and an `extend`'s or a `where`'s values,
+  for each tuple of a constant operand. A call that fails, such as one
+  that overflows for its arguments, is an error at the call.
+- **For now, that is the only way to call one:** a call whose arguments,
+  or a variable the operator reads, are known only when the program runs
+  is an error (A0038).
+- **`f{}` calls a read-only operator without parameters,** and is its
+  value, even where a variable or parameter is named `f` too: see
+  [Names](#names-1).
+
+```trendy,error
+var calls := 0;
+
+operator double{x: integer}: integer [
+    calls := calls + 1;
+    return x * 2;
+];
+
+operator main{} [];
+```
+
+```trendy,error
+operator double{x: integer}: integer [
+    return x * 2;
+];
+
+operator main{} [
+    call double{x: 21};
+];
+```
 
 ### Built-in operators
 
@@ -844,7 +927,7 @@ operator main{} [
   becomes `relation {} { {} }` (table_dee) if it has tuples, or
   `relation {} {}` (table_dum) if not. `remove {}` removes nothing, and is
   an error (A0023). A name right before `{}` is an operator if there is
-  one with that name (see [Names](#names)), so `(r){}` projects a value
+  one with that name (see [Names](#names-1)), so `(r){}` projects a value
   that has an operator's name.
 - **They bind tighter than any other operator,** so `-t remove {x}`
   negates the result. Chained, they apply left to right:
@@ -1666,8 +1749,8 @@ are case-sensitive. The keywords are `operator`, `var`, `call`, `builtin`,
 `implies`, `div`, `mod`, `remove`, `rename`, `extend`, `replace`, `group`,
 `ungroup`, `wrap`, `unwrap`, `join`, `times`, `compose`, `matching`,
 `union`, `d_union`, `xunion`, `intersect`, `minus`, `i_minus`, `where`,
-`as`, `insert`, `d_insert`, `delete`, `i_delete`, `update` and `assign`,
-all lowercase, and a keyword can't be a name (P0017).
+`as`, `insert`, `d_insert`, `delete`, `i_delete`, `update`, `assign` and
+`return`, all lowercase, and a keyword can't be a name (P0017).
 `type` is a keyword only after `builtin`, `key` only where a variable's
 keys go, and `value` and `from` only in `tuple from` and `value from`.
 
@@ -1741,7 +1824,8 @@ operator main{} [
   tuple's order;
 - an operator's body has each statement on its own line, indented, on
   adjacent lines unless you separate them with a blank line to group them;
-  several blank lines become one;
+  several blank lines become one, and a read-only operator's result type
+  goes right after its parameters: `operator f{x: integer}: integer [`;
 - an `assign` block has each assignment on its own line, indented, like
   an operator's body;
 - a variable's keys on the line before them, when they fit there, with
@@ -1769,7 +1853,10 @@ line after a comment on its own line, such as a file's header, is kept.
 | Elsewhere | In trendy |
 |---|---|
 | `fn`, `def`, `function`, `void main()` | `operator main{} [];` |
+| `fn f(x: i64) -> i64 { x + 1 }`, `RETURNS INTEGER` | `operator f{x: integer}: integer [return x + 1;];` |
+| `RETURN x` | `return x;` |
 | `print(x)`, `f(x)` | `call debug_value{v: x};` |
+| `f(x)` in an expression | `f{x: x}`, every argument named |
 | `let`, `const`, `int x` | `var x` |
 | `x = 0` | `x := 0` |
 | `INSERT R …`, `INSERT INTO r …` | `insert r …;` |

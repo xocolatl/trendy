@@ -1,7 +1,7 @@
 //! Operators in expressions: what each token denotes, checking operand
 //! types, and evaluating and simplifying what can be known when compiling.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use trendy_diag::{Diagnostic, Span, edit_distance};
 use trendy_hir as hir;
@@ -1004,6 +1004,7 @@ pub(crate) enum Failed {
 pub(crate) fn restrict(
     operand: hir::Expr,
     condition: hir::Expr,
+    bindings: Bindings,
 ) -> Result<hir::Expr, TupleFailure> {
     if condition == hir::Expr::Constant(hir::Value::Boolean(true)) {
         return Ok(operand);
@@ -1013,7 +1014,7 @@ pub(crate) fn restrict(
     };
     let mut kept = BTreeSet::new();
     for tuple in &relation.tuples {
-        match substitute(condition.clone(), 0, tuple) {
+        match substitute(condition.clone(), 0, &Substitution::tuple(tuple, bindings)) {
             Ok(hir::Expr::Constant(hir::Value::Boolean(true))) => {
                 kept.insert(tuple.clone());
             }
@@ -1212,6 +1213,7 @@ pub(crate) fn group(
     operand: hir::Expr,
     heading: &hir::Heading,
     groups: Vec<(String, BTreeSet<String>)>,
+    bindings: Bindings,
 ) -> Result<hir::Expr, TupleFailure> {
     let all: BTreeSet<String> = groups.iter().flat_map(|(_, set)| set.clone()).collect();
     let kept = heading.without(&all);
@@ -1226,7 +1228,12 @@ pub(crate) fn group(
         types.insert(name.clone(), hir::Type::Relation(restricted(heading, &set)));
         values.insert(name, remove(image.clone(), others));
     }
-    extend(remove(operand, all), hir::Heading::new(types), values)
+    extend(
+        remove(operand, all),
+        hir::Heading::new(types),
+        values,
+        bindings,
+    )
 }
 
 /// `operand`, a tuple or relation with `heading`, wrapped: each wrapping's
@@ -1237,6 +1244,7 @@ pub(crate) fn wrap(
     operand: hir::Expr,
     heading: &hir::Heading,
     wraps: Vec<(String, BTreeSet<String>)>,
+    bindings: Bindings,
 ) -> hir::Expr {
     let tuple = || hir::Expr::Current(0, heading.clone());
     let mut wrapped = BTreeSet::new();
@@ -1255,7 +1263,7 @@ pub(crate) fn wrap(
         .difference(&types.keys().cloned().collect())
         .cloned()
         .collect();
-    let extended = extend(operand, hir::Heading::new(types), values)
+    let extended = extend(operand, hir::Heading::new(types), values, bindings)
         .unwrap_or_else(|_| unreachable!("wrapping only extracts, which can't fail"));
     remove(extended, gone)
 }
@@ -1269,6 +1277,7 @@ pub(crate) fn unwrap(
     operand: hir::Expr,
     heading: &hir::Heading,
     names: &BTreeSet<String>,
+    bindings: Bindings,
 ) -> hir::Expr {
     let tuple = || hir::Expr::Current(0, heading.clone());
     let mut types = BTreeMap::new();
@@ -1289,7 +1298,7 @@ pub(crate) fn unwrap(
         .difference(&types.keys().cloned().collect())
         .cloned()
         .collect();
-    let extended = extend(operand, hir::Heading::new(types), values)
+    let extended = extend(operand, hir::Heading::new(types), values, bindings)
         .unwrap_or_else(|_| unreachable!("unwrapping only extracts, which can't fail"));
     remove(extended, gone)
 }
@@ -1357,6 +1366,12 @@ fn shifted(expr: hir::Expr, cutoff: usize) -> hir::Expr {
         | hir::Expr::Constant(_)
         | hir::Expr::Variable(_)
         | hir::Expr::Parameter(_) => expr,
+        hir::Expr::Call(id, args) => hir::Expr::Call(
+            id,
+            args.into_iter()
+                .map(|(name, e)| (name, shifted(e, cutoff)))
+                .collect(),
+        ),
         hir::Expr::Unary(op, operand) => hir::Expr::Unary(op, shift(operand)),
         hir::Expr::Binary(op, lhs, rhs) => hir::Expr::Binary(op, shift(lhs), shift(rhs)),
         hir::Expr::Extract(operand, name) => hir::Expr::Extract(shift(operand), name),
@@ -1438,16 +1453,17 @@ pub(crate) fn extend(
     operand: hir::Expr,
     computed: hir::Heading,
     attributes: BTreeMap<String, hir::Expr>,
+    bindings: Bindings,
 ) -> Result<hir::Expr, TupleFailure> {
     let folded = match &operand {
         hir::Expr::Constant(hir::Value::Tuple(tuple)) => {
-            extended(tuple, &attributes)?.map(hir::Value::Tuple)
+            extended(tuple, &attributes, bindings)?.map(hir::Value::Tuple)
         }
         hir::Expr::Constant(hir::Value::Relation(relation)) => {
             let mut tuples = BTreeSet::new();
             let mut all = true;
             for tuple in &relation.tuples {
-                match extended(tuple, &attributes)? {
+                match extended(tuple, &attributes, bindings)? {
                     Some(tuple) => {
                         tuples.insert(tuple);
                     }
@@ -1474,10 +1490,11 @@ pub(crate) fn extend(
 fn extended(
     tuple: &hir::TupleValue,
     attributes: &BTreeMap<String, hir::Expr>,
+    bindings: Bindings,
 ) -> Result<Option<hir::TupleValue>, TupleFailure> {
     let mut computed = BTreeMap::new();
     for (name, value) in attributes {
-        match substitute(value.clone(), 0, tuple) {
+        match substitute(value.clone(), 0, &Substitution::tuple(tuple, bindings)) {
             Ok(hir::Expr::Constant(value)) => {
                 computed.insert(name.clone(), value);
             }
@@ -1494,24 +1511,119 @@ fn extended(
     Ok(Some(tuple.with(computed)))
 }
 
-/// `expr` with the tuple at hand `depth` `Extend`s out replaced by `tuple`,
-/// and simplified as when it was checked, so that what then depends only on
-/// constants is evaluated.
+/// What evaluating a call substitutes for the leaves of the callee's value,
+/// besides its arguments for its parameters.
+#[derive(Clone, Copy)]
+pub(crate) struct Bindings<'a> {
+    /// The read-only operators' checked values. A call is checked after its
+    /// callee, so every operator a call's evaluation reaches is here.
+    pub(crate) values: &'a HashMap<hir::OperatorId, hir::Expr>,
+    /// Each variable's value, by id, in an initial value, where they are
+    /// known: every variable a read-only operator reads is evaluated when
+    /// the operator is checked. Elsewhere, they change when the program
+    /// runs, so none is known.
+    pub(crate) variables: Option<&'a [Option<hir::Value>]>,
+}
+
+/// What [`substitute`] replaces in an expression, which it then folds
+/// again.
+struct Substitution<'a> {
+    /// The tuple at hand where substituting starts, `Current(0)` there.
+    tuple: Option<&'a hir::TupleValue>,
+    /// A call's arguments, for its callee's parameters.
+    args: Option<&'a BTreeMap<String, hir::Value>>,
+    bindings: Bindings<'a>,
+}
+
+impl<'a> Substitution<'a> {
+    fn tuple(tuple: &'a hir::TupleValue, bindings: Bindings<'a>) -> Self {
+        Substitution {
+            tuple: Some(tuple),
+            args: None,
+            bindings,
+        }
+    }
+}
+
+/// A call of the read-only operator `id` with `args`: its value, with the
+/// arguments substituted for its parameters and folded, if they are all
+/// known when compiling, and otherwise the call itself.
+///
+/// # Errors
+///
+/// Returns why evaluating the operator's value for the arguments fails.
+pub(crate) fn call(
+    id: hir::OperatorId,
+    args: BTreeMap<String, hir::Expr>,
+    bindings: Bindings,
+) -> Result<hir::Expr, Failed> {
+    let known: Option<BTreeMap<String, hir::Value>> = args
+        .iter()
+        .map(|(name, arg)| match arg {
+            hir::Expr::Constant(value) => Some((name.clone(), value.clone())),
+            _ => None,
+        })
+        .collect();
+    let Some(known) = known else {
+        return Ok(hir::Expr::Call(id, args));
+    };
+    let value = bindings.values[&id].clone();
+    let substitution = Substitution {
+        tuple: None,
+        args: Some(&known),
+        bindings,
+    };
+    let evaluated = substitute(value, 0, &substitution)?;
+    Ok(match evaluated {
+        hir::Expr::Constant(_) => evaluated,
+        // A variable the operator reads is known only when running.
+        _ => hir::Expr::Call(id, args),
+    })
+}
+
+/// `expr` with what `substitution` says replaced, and simplified as when
+/// it was checked, so that what then depends only on constants is
+/// evaluated: the tuple at hand `depth` `Extend`s out, the parameters of a
+/// call's callee, and the variables, if their values are known. A call
+/// whose arguments are then all known is evaluated.
 ///
 /// # Errors
 ///
 /// Returns why an operator now known to fail fails, and its type.
-fn substitute(expr: hir::Expr, depth: usize, tuple: &hir::TupleValue) -> Result<hir::Expr, Failed> {
-    let sub = |e: Box<hir::Expr>| substitute(*e, depth, tuple);
+fn substitute(
+    expr: hir::Expr,
+    depth: usize,
+    substitution: &Substitution,
+) -> Result<hir::Expr, Failed> {
+    let sub = |e: Box<hir::Expr>| substitute(*e, depth, substitution);
     Ok(match expr {
-        hir::Expr::Current(d, _) if d == depth => {
-            hir::Expr::Constant(hir::Value::Tuple(tuple.clone()))
+        hir::Expr::Current(d, _) if d == depth && substitution.tuple.is_some() => {
+            hir::Expr::Constant(hir::Value::Tuple(
+                substitution.tuple.expect("just checked").clone(),
+            ))
         }
-        hir::Expr::Current(d, heading) if d > depth => hir::Expr::Current(d - 1, heading),
-        hir::Expr::Current(..)
-        | hir::Expr::Constant(_)
-        | hir::Expr::Variable(_)
-        | hir::Expr::Parameter(_) => expr,
+        hir::Expr::Current(d, heading) if d > depth && substitution.tuple.is_some() => {
+            hir::Expr::Current(d - 1, heading)
+        }
+        hir::Expr::Parameter(name) if substitution.args.is_some() => {
+            hir::Expr::Constant(substitution.args.expect("just checked")[&name].clone())
+        }
+        hir::Expr::Variable(id) => match substitution
+            .bindings
+            .variables
+            .and_then(|values| values[id.0].clone())
+        {
+            Some(value) => hir::Expr::Constant(value),
+            None => expr,
+        },
+        hir::Expr::Current(..) | hir::Expr::Constant(_) | hir::Expr::Parameter(_) => expr,
+        hir::Expr::Call(id, args) => {
+            let args = args
+                .into_iter()
+                .map(|(name, arg)| Ok((name, substitute(arg, depth, substitution)?)))
+                .collect::<Result<_, _>>()?;
+            call(id, args, substitution.bindings)?
+        }
         hir::Expr::Unary(op, operand) => {
             unary(op, sub(operand)?).map_err(|f| Failed::Scalar(f, op.result()))?
         }
@@ -1519,12 +1631,12 @@ fn substitute(expr: hir::Expr, depth: usize, tuple: &hir::TupleValue) -> Result<
             binary(op, sub(lhs)?, sub(rhs)?).map_err(|f| Failed::Scalar(f, op.result()))?
         }
         hir::Expr::Extract(operand, name) => extract(sub(operand)?, name),
-        hir::Expr::Tuple(attributes) => tuple_of(attributes, depth, tuple)?,
+        hir::Expr::Tuple(attributes) => tuple_of(attributes, depth, substitution)?,
         hir::Expr::Relation(heading, tuples) => relation(
             heading,
             tuples
                 .into_iter()
-                .map(|t| substitute(t, depth, tuple))
+                .map(|t| substitute(t, depth, substitution))
                 .collect::<Result<_, _>>()?,
         ),
         hir::Expr::Remove(operand, names) => remove(sub(operand)?, names),
@@ -1537,16 +1649,17 @@ fn substitute(expr: hir::Expr, depth: usize, tuple: &hir::TupleValue) -> Result<
         hir::Expr::Antijoin(lhs, rhs) => matching(sub(lhs)?, sub(rhs)?, true),
         // The condition is one tuple at hand further in.
         hir::Expr::Restrict(operand, condition) => {
-            let condition = substitute(*condition, depth + 1, tuple)?;
-            restrict(sub(operand)?, condition).map_err(|f| f.failed)?
+            let condition = substitute(*condition, depth + 1, substitution)?;
+            restrict(sub(operand)?, condition, substitution.bindings).map_err(|f| f.failed)?
         }
         hir::Expr::Extend(operand, computed, attributes) => {
             // The values are one `Extend` further in.
             let attributes = attributes
                 .into_iter()
-                .map(|(name, e)| Ok((name, substitute(e, depth + 1, tuple)?)))
+                .map(|(name, e)| Ok((name, substitute(e, depth + 1, substitution)?)))
                 .collect::<Result<_, _>>()?;
-            extend(sub(operand)?, computed, attributes).map_err(|f| f.failed)?
+            extend(sub(operand)?, computed, attributes, substitution.bindings)
+                .map_err(|f| f.failed)?
         }
     })
 }
@@ -1555,12 +1668,12 @@ fn substitute(expr: hir::Expr, depth: usize, tuple: &hir::TupleValue) -> Result<
 fn tuple_of(
     attributes: BTreeMap<String, hir::Expr>,
     depth: usize,
-    tuple: &hir::TupleValue,
+    substitution: &Substitution,
 ) -> Result<hir::Expr, Failed> {
     Ok(self::tuple(
         attributes
             .into_iter()
-            .map(|(name, e)| Ok((name, substitute(e, depth, tuple)?)))
+            .map(|(name, e)| Ok((name, substitute(e, depth, substitution)?)))
             .collect::<Result<_, _>>()?,
     ))
 }
@@ -1732,8 +1845,9 @@ fn can_fail(expr: &hir::Expr) -> bool {
         // Negating the smallest integer overflows, and building a relation,
         // removing, renaming or adding attributes, joining or ungrouping it,
         // allocates the result; adding attributes computes them, which can
-        // fail too.
+        // fail too, as can a call, which computes its operator's value.
         hir::Expr::Unary(hir::UnaryOp::Negate(hir::Numeric::Integer), _)
+        | hir::Expr::Call(..)
         | hir::Expr::Remove(..)
         | hir::Expr::Rename(..)
         | hir::Expr::And(..)

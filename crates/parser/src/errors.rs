@@ -6,7 +6,7 @@ use trendy_syntax::SyntaxKind;
 
 use crate::Found;
 
-pub(crate) const OPERATOR_FORM: &str = "an operator definition has the form `operator name{} [];`";
+pub(crate) const OPERATOR_FORM: &str = "an operator definition has the form `operator name{} [];`, or, for a read-only operator, `operator name{}: type [return value;];`";
 pub(crate) const HEADING_FORM: &str = "a heading lists attributes with their types: `{ name: type, … }`, as in `tuple { name: text }` or `relation { name: text }`";
 pub(crate) const RELATION_VALUE_FORM: &str = "a relation value has the form `relation { tuple, … }`, optionally with a heading first: `relation { name: type, … } { … }`";
 pub(crate) const PROJECTION_FORM: &str =
@@ -1015,6 +1015,25 @@ fn spaced(text: &str, (before, after): (Option<char>, Option<char>)) -> String {
         spaced.push(' ');
     }
     spaced
+}
+
+/// A read-only operator's result type, after `found`, another language's
+/// `->` or `returns`, which `span` covers with the whitespace before it.
+pub(crate) fn result_spelling(found: Found, span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::ResultSpelling,
+        format!("a result type is written after `:`, not `{}`", found.text),
+        found.span,
+        "another language's spelling",
+    )
+    .with_note("a read-only operator has the form `operator name{params}: type [return value;];`, with the result type written as a variable's is")
+    .with_suggestion(
+        format!("replace `{}` with `:`", found.text),
+        vec![Edit {
+            span,
+            replacement: ":".to_string(),
+        }],
+    )
 }
 
 /// A call statement, starting with the operator's name `found`, without

@@ -42,6 +42,7 @@ ast_node!(BuiltinOperator);
 ast_node!(BuiltinType);
 ast_node!(Body);
 ast_node!(CallStmt);
+ast_node!(ReturnStmt);
 ast_node!(AssignStmt);
 ast_node!(AssignBlock);
 ast_node!(Assignment);
@@ -60,6 +61,7 @@ ast_node!(PostfixExpr);
 ast_node!(NaryExpr);
 ast_node!(ImageExpr);
 ast_node!(FromExpr);
+ast_node!(CallExpr);
 ast_node!(NameList);
 ast_node!(RenameList);
 ast_node!(Renaming);
@@ -122,6 +124,30 @@ impl Operator {
         self.0.children().find_map(Heading::cast)
     }
 
+    /// The result type, from `: type`: a read-only operator's.
+    #[must_use]
+    pub fn result(&self) -> Option<TypeExpr> {
+        self.0
+            .children()
+            .find(|n| n.kind() == SyntaxKind::TypeAnnotation)?
+            .children()
+            .find_map(TypeExpr::cast)
+    }
+
+    /// The span to delete to remove the result type, `: type`, with the
+    /// whitespace before it.
+    #[must_use]
+    pub fn result_removal(&self) -> Option<Span> {
+        let annotation = self
+            .0
+            .children()
+            .find(|n| n.kind() == SyntaxKind::TypeAnnotation)?;
+        Some(Span::new(
+            preceded_from(&annotation.clone().into()),
+            span(annotation.text_range()).end,
+        ))
+    }
+
     #[must_use]
     pub fn body(&self) -> Option<Body> {
         self.0.children().find_map(Body::cast)
@@ -166,8 +192,19 @@ impl Body {
             CallStmt::cast(node.clone())
                 .map(Statement::Call)
                 .or_else(|| AssignStmt::cast(node.clone()).map(Statement::Assign))
-                .or_else(|| AssignBlock::cast(node).map(Statement::Block))
+                .or_else(|| AssignBlock::cast(node.clone()).map(Statement::Block))
+                .or_else(|| ReturnStmt::cast(node).map(Statement::Return))
         })
+    }
+
+    /// Where something missing from the end of the body goes: just before
+    /// its `]`.
+    #[must_use]
+    pub fn end(&self) -> Option<usize> {
+        significant_tokens(&self.0)
+            .filter(|t| t.kind() == SyntaxKind::RBracket)
+            .last()
+            .map(|t| span(t.text_range()).start)
     }
 }
 
@@ -177,6 +214,45 @@ pub enum Statement {
     Call(CallStmt),
     Assign(AssignStmt),
     Block(AssignBlock),
+    Return(ReturnStmt),
+}
+
+impl Statement {
+    #[must_use]
+    pub fn syntax(&self) -> &SyntaxNode {
+        match self {
+            Statement::Call(s) => s.syntax(),
+            Statement::Assign(s) => s.syntax(),
+            Statement::Block(s) => s.syntax(),
+            Statement::Return(s) => s.syntax(),
+        }
+    }
+
+    #[must_use]
+    pub fn span(&self) -> Span {
+        span(self.syntax().text_range())
+    }
+}
+
+impl ReturnStmt {
+    /// The `return` keyword.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    /// The value returned.
+    #[must_use]
+    pub fn value(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+
+    /// The span to delete to remove the statement, as for
+    /// [`AssignBlock::removal`].
+    #[must_use]
+    pub fn removal(&self) -> Span {
+        statement_removal(&self.0)
+    }
 }
 
 impl AssignStmt {
@@ -320,6 +396,19 @@ impl Clause {
 }
 
 impl CallStmt {
+    /// The operator called.
+    #[must_use]
+    pub fn callee(&self) -> Option<NameRef> {
+        self.0.children().find_map(NameRef::cast)
+    }
+
+    #[must_use]
+    pub fn arguments(&self) -> Option<Arguments> {
+        self.0.children().find_map(Arguments::cast)
+    }
+}
+
+impl CallExpr {
     /// The operator called.
     #[must_use]
     pub fn callee(&self) -> Option<NameRef> {
@@ -602,6 +691,12 @@ impl NameList {
         self.0.children().filter_map(Name::cast)
     }
 
+    /// Where a new item goes, as for [`TupleLiteral::insertion`].
+    #[must_use]
+    pub fn insertion(&self) -> (usize, &'static str, &'static str) {
+        list_insertion(&self.0, self.names().last().map(|n| n.0))
+    }
+
     /// The span to delete to remove `name` from the list, with a comma that
     /// separates it from a neighbor.
     #[must_use]
@@ -730,6 +825,7 @@ pub enum Expr {
     Nary(NaryExpr),
     Image(ImageExpr),
     From(FromExpr),
+    Call(CallExpr),
 }
 
 impl Expr {
@@ -748,7 +844,8 @@ impl Expr {
             .or_else(|| PostfixExpr::cast(node.clone()).map(Expr::Postfix))
             .or_else(|| NaryExpr::cast(node.clone()).map(Expr::Nary))
             .or_else(|| ImageExpr::cast(node.clone()).map(Expr::Image))
-            .or_else(|| FromExpr::cast(node).map(Expr::From))
+            .or_else(|| FromExpr::cast(node.clone()).map(Expr::From))
+            .or_else(|| CallExpr::cast(node).map(Expr::Call))
     }
 
     #[must_use]
@@ -767,6 +864,7 @@ impl Expr {
             Expr::Nary(e) => e.syntax(),
             Expr::Image(e) => e.syntax(),
             Expr::From(e) => e.syntax(),
+            Expr::Call(e) => e.syntax(),
         }
     }
 
