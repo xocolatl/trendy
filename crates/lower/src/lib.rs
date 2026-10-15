@@ -55,7 +55,8 @@ pub fn lower(program: &hir::Program) -> lir::Program {
             blocks: vec![placeholder()],
             current: lir::BlockId(0),
             insts: Vec::new(),
-            allocates: false,
+            scoped: false,
+            scope: None,
             tuples: Vec::new(),
         };
         for statement in body {
@@ -221,11 +222,14 @@ struct FunctionBuilder<'a> {
     /// The block being built, whose instructions are `insts`.
     current: lir::BlockId,
     insts: Vec<lir::Inst>,
-    /// Whether the current statement calls a runtime function that makes a
-    /// text or relation, which the statement owns until it ends. Only an
-    /// assigned value outlives it, copied into memory of the variable's
-    /// own.
-    allocates: bool,
+    /// Whether the current statement needs a scope (see
+    /// [`lir::RuntimeFn::Begin`]): whether it calls a runtime function that
+    /// makes a text or relation, which the statement owns until it ends, or
+    /// passes one to an update operator. Only an assigned value outlives
+    /// its statement, copied into memory of the variable's own.
+    scoped: bool,
+    /// The slot of the statements' scopes, one at a time.
+    scope: Option<lir::Place>,
     /// Where each tuple at hand is, innermost last: what `Current` refers
     /// to, inside an `Extend`'s values.
     tuples: Vec<lir::Place>,
@@ -255,15 +259,53 @@ impl FunctionBuilder<'_> {
         self.current = next;
     }
 
+    /// The slot of the statements' scopes, made when one first needs it.
+    fn scope_slot(&mut self) -> lir::Place {
+        if let Some(scope) = &self.scope {
+            return scope.clone();
+        }
+        let scope = self.slot(lir::Layout::scope());
+        self.scope = Some(scope.clone());
+        scope
+    }
+
+    /// Where the next instruction goes: the current block, and its index
+    /// there.
+    fn position(&self) -> (lir::BlockId, usize) {
+        (self.current, self.insts.len())
+    }
+
+    /// Insert `inst` at `at`, a position taken earlier.
+    fn insert(&mut self, at: (lir::BlockId, usize), inst: lir::Inst) {
+        let (block, index) = at;
+        let insts = if block == self.current {
+            &mut self.insts
+        } else {
+            &mut self.blocks[block.0].insts
+        };
+        insts.insert(index, inst);
+    }
+
+    /// The statement, in a scope of its own if it needs one, which begins
+    /// before its first instruction and ends after its last.
     fn statement(&mut self, statement: &hir::Statement, cx: &mut Lowering) {
+        let start = self.position();
         match statement {
             hir::Statement::Call { operator, args } => self.call(*operator, args, cx),
             hir::Statement::Assign(assignments) => self.assign(assignments, cx),
         }
-        if std::mem::take(&mut self.allocates) {
+        if std::mem::take(&mut self.scoped) {
+            let scope = self.scope_slot();
+            self.insert(
+                start,
+                lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::Begin,
+                    args: vec![scope.clone()],
+                },
+            );
             self.insts.push(lir::Inst::CallRuntime {
-                function: lir::RuntimeFn::Release,
-                args: Vec::new(),
+                function: lir::RuntimeFn::End,
+                args: vec![scope],
             });
         }
     }
@@ -287,6 +329,15 @@ impl FunctionBuilder<'_> {
                 });
             }
             hir::OperatorKind::Update { .. } => {
+                // An assignment the operator makes must not release what
+                // an argument points to.
+                if callee
+                    .params
+                    .values()
+                    .any(|param| points(param_type(param)))
+                {
+                    self.scoped = true;
+                }
                 // The arguments are a tuple: build it in a stack slot, in
                 // parameter name order, and pass its address.
                 let args_place = params_layout(&callee.params).map(|params| {
@@ -406,7 +457,7 @@ impl FunctionBuilder<'_> {
                 function: lir::RuntimeFn::Assign,
                 args: vec![field(0), field(1), value, descriptor],
             });
-            self.allocates = true;
+            self.scoped = true;
         } else {
             self.insts.push(lir::Inst::Copy {
                 dst: field(0),
@@ -596,7 +647,7 @@ impl FunctionBuilder<'_> {
                 descriptor,
             ],
         });
-        self.allocates = true;
+        self.scoped = true;
         dst
     }
 
@@ -763,7 +814,7 @@ impl FunctionBuilder<'_> {
             function: lir::RuntimeFn::Allocate,
             args: vec![dst.clone(), count, descriptor],
         });
-        self.allocates = true;
+        self.scoped = true;
         dst
     }
 
@@ -941,7 +992,7 @@ impl FunctionBuilder<'_> {
                 lir::Place::whole(lir::Base::Data(offsets)),
             ],
         });
-        self.allocates = true;
+        self.scoped = true;
         dst
     }
 
@@ -1004,7 +1055,7 @@ impl FunctionBuilder<'_> {
             function: lir::RuntimeFn::And,
             args: [vec![dst.clone()], args].concat(),
         });
-        self.allocates = true;
+        self.scoped = true;
         dst
     }
 
@@ -1048,7 +1099,7 @@ impl FunctionBuilder<'_> {
             function: lir::RuntimeFn::Matching,
             args,
         });
-        self.allocates = true;
+        self.scoped = true;
         dst
     }
 
@@ -1079,7 +1130,7 @@ impl FunctionBuilder<'_> {
             function: lir::RuntimeFn::Combine,
             args: vec![dst.clone(), lhs, rhs, descriptor, combination],
         });
-        self.allocates = true;
+        self.scoped = true;
         dst
     }
 
@@ -1166,7 +1217,7 @@ impl FunctionBuilder<'_> {
             function: lir::RuntimeFn::Ungroup,
             args,
         });
-        self.allocates = true;
+        self.scoped = true;
         dst
     }
 
@@ -1306,7 +1357,7 @@ impl FunctionBuilder<'_> {
                     function: lir::RuntimeFn::Concat,
                     args: vec![dst.clone(), lhs, rhs],
                 });
-                self.allocates = true;
+                self.scoped = true;
                 return dst;
             }
             hir::BinaryOp::Compare(comparison, hir::Compared::Scalar(hir::Scalar::Text)) => {
@@ -1395,7 +1446,6 @@ fn lower_comparison(comparison: hir::Comparison) -> lir::Comparison {
     }
 }
 
-/// The attribute names of a tuple or relation type, in name order.
 /// For each attribute the relations with `lhs` and `rhs` have in common, a
 /// struct of its offset in a tuple of each and the address of its type's
 /// descriptor, as the runtime's joins take them.
@@ -1423,6 +1473,7 @@ fn usize_constant(n: u64, cx: &mut Lowering) -> lir::Place {
     }
 }
 
+/// The attribute names of a tuple or relation type, in name order.
 fn attribute_names(ty: &hir::Type) -> impl Iterator<Item = &str> {
     let (hir::Type::Tuple(heading) | hir::Type::Relation(heading)) = ty else {
         unreachable!("only tuples and relations have attributes");
@@ -1441,7 +1492,6 @@ fn scalar_layout(scalar: hir::Scalar) -> lir::Layout {
     layout(&hir::Type::Scalar(scalar))
 }
 
-/// The layout of a value of type `ty`.
 /// Whether a value of type `ty` points to memory: whether it is or has a
 /// text or a relation.
 fn points(ty: &hir::Type) -> bool {
@@ -1452,6 +1502,7 @@ fn points(ty: &hir::Type) -> bool {
     }
 }
 
+/// The layout of a value of type `ty`.
 fn layout(ty: &hir::Type) -> lir::Layout {
     match ty {
         hir::Type::Scalar(hir::Scalar::Boolean) => lir::Layout::U8,
@@ -1466,11 +1517,15 @@ fn layout(ty: &hir::Type) -> lir::Layout {
     }
 }
 
-fn param_layout(param: &hir::ParamType) -> lir::Layout {
+fn param_type(param: &hir::ParamType) -> &hir::Type {
     match param {
-        hir::ParamType::Type(ty) => layout(ty),
+        hir::ParamType::Type(ty) => ty,
         hir::ParamType::Any => unreachable!("only built-ins have `any` parameters"),
     }
+}
+
+fn param_layout(param: &hir::ParamType) -> lir::Layout {
+    layout(param_type(param))
 }
 
 /// The parameter struct of a user operator, if it has parameters.
@@ -1692,7 +1747,7 @@ mod tests {
     }
 
     #[test]
-    fn concatenations_are_released_when_the_statement_ends() {
+    fn concatenations_are_owned_by_the_statements_scope() {
         let t = || Box::new(hir::Expr::Variable(hir::VariableId(0)));
         let inner = hir::Expr::Binary(hir::BinaryOp::Concatenate, t(), t());
         let expr = hir::Expr::Binary(hir::BinaryOp::Concatenate, Box::new(inner), t());
@@ -1705,24 +1760,25 @@ mod tests {
         ));
         let main = &lowered.functions[0];
         let text = lir::Layout::Struct(vec![lir::Layout::Address, lir::Layout::Usize]);
-        assert_eq!(main.slots, [text.clone(), text]);
+        assert_eq!(main.slots, [text.clone(), text, lir::Layout::scope()]);
         let slot = |i| lir::Place::whole(lir::Base::Slot(lir::SlotId(i)));
         let runtime: Vec<_> = main.blocks[0]
             .insts
             .iter()
             .map(|inst| match inst {
-                lir::Inst::CallRuntime { function, args } => (*function, args.first().cloned()),
+                lir::Inst::CallRuntime { function, args } => (*function, args[0].clone()),
                 other => panic!("unexpected {other:?}"),
             })
             .collect();
-        // Released together, once, when the statement ends.
+        // Released together, once, when the statement's scope ends.
         assert_eq!(
             runtime,
             [
-                (lir::RuntimeFn::Concat, Some(slot(0))),
-                (lir::RuntimeFn::Concat, Some(slot(1))),
-                (lir::RuntimeFn::DebugValue, Some(slot(1))),
-                (lir::RuntimeFn::Release, None),
+                (lir::RuntimeFn::Begin, slot(2)),
+                (lir::RuntimeFn::Concat, slot(0)),
+                (lir::RuntimeFn::Concat, slot(1)),
+                (lir::RuntimeFn::DebugValue, slot(1)),
+                (lir::RuntimeFn::End, slot(2)),
             ]
         );
     }
@@ -1787,27 +1843,21 @@ mod tests {
             base: lir::Base::Data(variable),
             path: vec![i],
         };
+        let slot = |i| lir::Place::whole(lir::Base::Slot(lir::SlotId(i)));
         let insts = &lowered.functions[0].blocks[0].insts;
-        let lir::Inst::CallRuntime { function, args } = &insts[1] else {
-            panic!("expected a runtime call, found {:?}", insts[1]);
+        let lir::Inst::CallRuntime { function, args } = &insts[2] else {
+            panic!("expected a runtime call, found {:?}", insts[2]);
         };
         assert_eq!(*function, lir::RuntimeFn::Assign);
-        assert_eq!(
-            args[..3],
-            [
-                field(0),
-                field(1),
-                lir::Place::whole(lir::Base::Slot(lir::SlotId(0)))
-            ]
-        );
-        // The variable's old memory is released with the statement's.
-        assert_eq!(
-            insts[2],
-            lir::Inst::CallRuntime {
-                function: lir::RuntimeFn::Release,
-                args: Vec::new(),
-            }
-        );
+        assert_eq!(args[..3], [field(0), field(1), slot(0)]);
+        // The statement has a scope, in case the variable's old memory is
+        // its.
+        let scope = |function| lir::Inst::CallRuntime {
+            function,
+            args: vec![slot(1)],
+        };
+        assert_eq!(insts[0], scope(lir::RuntimeFn::Begin));
+        assert_eq!(insts[3], scope(lir::RuntimeFn::End));
     }
 
     #[test]
@@ -1840,7 +1890,7 @@ mod tests {
         ));
         let main = &lowered.functions[0];
         let slot = lir::Place::whole(lir::Base::Slot(lir::SlotId(0)));
-        let lir::Inst::CallRuntime { function, args } = &main.blocks[0].insts[0] else {
+        let lir::Inst::CallRuntime { function, args } = &main.blocks[0].insts[1] else {
             panic!("{:?}", main.blocks[0].insts);
         };
         assert_eq!(*function, lir::RuntimeFn::And);
@@ -1856,13 +1906,13 @@ mod tests {
             "the result's and each operand's: {descriptors:?}"
         );
         let released = main.blocks[0].insts.last().unwrap();
-        assert_eq!(
+        assert!(matches!(
             released,
-            &lir::Inst::CallRuntime {
-                function: lir::RuntimeFn::Release,
-                args: Vec::new(),
+            lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::End,
+                ..
             }
-        );
+        ));
     }
 
     #[test]
@@ -1906,8 +1956,12 @@ mod tests {
                 .collect()
         };
         // The result is allocated, then each tuple computed into it, then
-        // sorted.
-        assert_eq!(runtime(entry), [lir::RuntimeFn::Allocate]);
+        // sorted, in the statement's scope, which begins in a block ended
+        // before it was known to need one.
+        assert_eq!(
+            runtime(entry),
+            [lir::RuntimeFn::Begin, lir::RuntimeFn::Allocate]
+        );
         assert_eq!(entry.terminator, lir::Terminator::Jump(lir::BlockId(1)));
         assert!(matches!(
             head.terminator,
@@ -1932,7 +1986,7 @@ mod tests {
             [
                 lir::RuntimeFn::Sort,
                 lir::RuntimeFn::DebugValue,
-                lir::RuntimeFn::Release
+                lir::RuntimeFn::End
             ]
         );
         assert_eq!(done.terminator, lir::Terminator::Return);
@@ -2000,6 +2054,45 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn calls_passing_a_text_have_a_scope() {
+        // `call f{t: t};`, which makes nothing, but must keep `t`'s memory
+        // from being released by an assignment `f` makes.
+        let f = hir::Operator {
+            name: "f".to_string(),
+            params: [(
+                "t".to_string(),
+                hir::ParamType::Type(hir::Type::Scalar(hir::Scalar::Text)),
+            )]
+            .into(),
+            kind: hir::OperatorKind::Update { body: vec![] },
+        };
+        let lowered = lower(&program(
+            vec![
+                f,
+                user(
+                    "main",
+                    &[],
+                    vec![call(
+                        0,
+                        vec![("t", hir::Expr::Variable(hir::VariableId(0)))],
+                    )],
+                ),
+            ],
+            vec![variable("t", hir::Value::Text("a".to_string()))],
+        ));
+        let insts = &lowered.functions[1].blocks[0].insts;
+        let functions: Vec<_> = insts
+            .iter()
+            .filter_map(|inst| match inst {
+                lir::Inst::CallRuntime { function, .. } => Some(*function),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(functions, [lir::RuntimeFn::Begin, lir::RuntimeFn::End]);
+        assert!(matches!(insts[insts.len() - 2], lir::Inst::Call { .. }));
     }
 
     #[test]

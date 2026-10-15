@@ -92,6 +92,16 @@ pub enum Layout {
     Struct(Vec<Layout>),
 }
 
+impl Layout {
+    /// A statement's scope (see [`RuntimeFn::Begin`]), which only the
+    /// runtime reads: `trendy_runtime::Scope`, of two addresses and a
+    /// 64-bit time.
+    #[must_use]
+    pub fn scope() -> Layout {
+        Layout::Struct(vec![Layout::Address, Layout::Address, Layout::I64])
+    }
+}
+
 /// A location in memory: a base, then a path of field indexes through
 /// nested structs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,13 +147,21 @@ pub enum RuntimeFn {
     Fail,
     /// `trendy_rt_concat(dst, lhs, rhs)`: store the concatenation of two
     /// texts at `dst`, in memory the statement owns (see
-    /// [`RuntimeFn::Release`]). It stops the program if the memory can't be
+    /// [`RuntimeFn::Begin`]). It stops the program if the memory can't be
     /// allocated.
     Concat,
-    /// `trendy_rt_release()`: release the memory of every text and relation
-    /// that runtime functions made since the last release, which a
-    /// statement owns until it ends.
-    Release,
+    /// `trendy_rt_begin(scope)`: begin a statement's scope, in a slot laid
+    /// out as [`Layout::scope`]. Until [`RuntimeFn::End`], the statement
+    /// owns the memory of every text and relation that runtime functions
+    /// make. A variable's old value, once [`RuntimeFn::Assign`] replaces
+    /// it, is the outermost statement's that began while it was the value,
+    /// since those, and only those, can point into it. So a statement needs
+    /// a scope if it makes a text or relation, or passes one to an update
+    /// operator, whose assignments must not release it.
+    Begin,
+    /// `trendy_rt_end(scope)`: end the scope at `scope`, the innermost,
+    /// releasing the memory its statement owns.
+    End,
     /// `trendy_rt_reshape(dst, src, result, source, offsets)`: store at
     /// `dst` the relation `src` with its tuples reshaped into the
     /// attributes the descriptor `result` describes, sorted canonically and
@@ -225,8 +243,8 @@ pub enum RuntimeFn {
     /// variable's value, a copy of the value at `src`, of the type the
     /// descriptor describes, with what it points to in memory of its own,
     /// which `owner`, a [`Layout::Address`] next to the value, then holds.
-    /// The memory `owner` held before, if any, the statement owns (see
-    /// [`RuntimeFn::Release`]). For values that point to texts or
+    /// The memory `owner` held before, if any, a statement owns (see
+    /// [`RuntimeFn::Begin`]). For values that point to texts or
     /// relations; others are copied.
     Assign,
 }
@@ -239,7 +257,8 @@ impl RuntimeFn {
             RuntimeFn::DebugValue => "trendy_rt_debug_value",
             RuntimeFn::Fail => "trendy_rt_fail",
             RuntimeFn::Concat => "trendy_rt_concat",
-            RuntimeFn::Release => "trendy_rt_release",
+            RuntimeFn::Begin => "trendy_rt_begin",
+            RuntimeFn::End => "trendy_rt_end",
             RuntimeFn::Reshape => "trendy_rt_reshape",
             RuntimeFn::Relation => "trendy_rt_relation",
             RuntimeFn::And => "trendy_rt_and",

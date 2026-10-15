@@ -98,6 +98,11 @@ fn operators() {
             r#"relation { dish: text } { { dish: "pozole" } }"#,
             r#""half of 1200""#,
             "600",
+            // The second argument is `previous`, which `rotate` assigns.
+            r#""ramen → spicy ramen""#,
+            r#""spicy ramen""#,
+            r#""spicy ramen → ramen""#,
+            r#""ramen""#,
         ]
     );
 }

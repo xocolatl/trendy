@@ -86,9 +86,8 @@ pub struct Text {
     pub len: usize,
 }
 
-/// Store `lhs || rhs` at `dst`, in memory allocated for it, which
-/// [`trendy_rt_release`] releases. Stops the program if the memory can't
-/// be allocated.
+/// Store `lhs || rhs` at `dst`, in memory the statement owns. Stops the
+/// program if the memory can't be allocated.
 ///
 /// # Safety
 ///
@@ -206,74 +205,146 @@ unsafe fn text_bytes<'a>(text: Text) -> &'a [u8] {
     unsafe { core::slice::from_raw_parts(text.bytes, text.len) }
 }
 
-/// The header of a block of memory that the current statement owns: a text
-/// or relation a runtime function made and handed to compiled code. Blocks
-/// are kept in a list, newest first, and all released when the statement
-/// ends, so a value never needs freeing on its own, however many times a
-/// loop made one. Its alignment keeps the memory after it aligned for any
-/// value.
+/// The header of a block of memory holding what values point to: each
+/// text's bytes and each relation's tuples. A block is a statement's, in
+/// its [`Scope`], or a variable's, holding what its value points to. Its
+/// alignment keeps the memory after it aligned for any value.
 #[cfg(not(test))]
 #[repr(C, align(16))]
 struct Owned {
+    /// The scope's next block: a scope keeps its blocks in a list, newest
+    /// first.
     next: *mut Owned,
+    /// For a variable's block, when it was made, on [`CLOCK`].
+    made: u64,
 }
 
-/// The current statement's blocks, newest first.
+/// The memory a statement owns, from [`trendy_rt_begin`] to
+/// [`trendy_rt_end`]: every text and relation that runtime functions make
+/// while it runs, since no value outlives the statement that computes it,
+/// and variables' old values that it can still point into. So a value never
+/// needs freeing on its own, however many times a loop made one.
+///
+/// Scopes nest as calls do: a statement that calls an update operator holds
+/// its arguments while the operator's statements run. Compiled code keeps
+/// each scope in a stack slot laid out as this struct, which only the
+/// runtime reads.
 #[cfg(not(test))]
-static OWNED: core::sync::atomic::AtomicPtr<Owned> =
+#[repr(C)]
+pub struct Scope {
+    /// The blocks it owns, newest first.
+    owned: *mut Owned,
+    /// The scope of the statement this one's operator was called from, or
+    /// null.
+    outer: *mut Scope,
+    /// When the statement began, on [`CLOCK`].
+    begun: u64,
+}
+
+/// The scope of the statement running now.
+#[cfg(not(test))]
+static CURRENT: core::sync::atomic::AtomicPtr<Scope> =
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
+/// The time, one more for each statement that begins and each value
+/// assigned to a variable: whether a statement began while a variable had
+/// a value.
+#[cfg(not(test))]
+static CLOCK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// The next time on [`CLOCK`].
+#[cfg(not(test))]
+fn tick() -> u64 {
+    CLOCK.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1
+}
+
+/// Begin the scope at `scope` of a statement, which owns what runtime
+/// functions make until [`trendy_rt_end`] ends it.
+///
+/// # Safety
+///
+/// `scope` must point to memory for a [`Scope`] that stays valid until
+/// [`trendy_rt_end`] ends it, and each scope must end before the one it is
+/// in.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_begin(scope: *mut Scope) {
+    use core::sync::atomic::Ordering::Relaxed;
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        scope.write(Scope {
+            owned: core::ptr::null_mut(),
+            outer: CURRENT.load(Relaxed),
+            begun: tick(),
+        });
+    }
+    CURRENT.store(scope, Relaxed);
+}
+
+/// End the scope at `scope`, releasing the memory its statement owns: the
+/// end of the lifetime of every text and relation runtime functions made
+/// while it ran.
+///
+/// # Safety
+///
+/// `scope` must point to the innermost scope, which [`trendy_rt_begin`]
+/// began.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_end(scope: *mut Scope) {
+    use core::sync::atomic::Ordering::Relaxed;
+    // SAFETY: guaranteed by the caller. Every block in the list was
+    // allocated by `allocate_owned` or `trendy_rt_assign`, and is in no
+    // other list, so is released only here, once.
+    unsafe {
+        let mut block = (*scope).owned;
+        while !block.is_null() {
+            let next = (*block).next;
+            free(block.cast());
+            block = next;
+        }
+        CURRENT.store((*scope).outer, Relaxed);
+    }
+}
+
 /// Memory for `bytes` bytes, owned by the current statement and released
-/// by [`trendy_rt_release`]. Stops the program if there is none.
+/// when it ends. Stops the program if there is none.
 #[cfg(not(test))]
 fn allocate_owned(bytes: usize) -> *mut u8 {
     use core::sync::atomic::Ordering::Relaxed;
     // In units of the header: one for it, then enough for the bytes.
     let units = bytes.div_ceil(size_of::<Owned>()) + 1;
     let block = allocate::<Owned>(units);
-    // SAFETY: `block` has room for the header and `bytes` more.
+    // SAFETY: `block` has room for the header and `bytes` more. Compiled
+    // code begins a scope for every statement that makes a text or
+    // relation, so there is a current one.
     unsafe {
+        let scope = CURRENT.load(Relaxed);
         block.write(Owned {
-            next: OWNED.load(Relaxed),
+            next: (*scope).owned,
+            made: 0,
         });
-        OWNED.store(block, Relaxed);
+        (*scope).owned = block;
         block.add(1).cast::<u8>()
-    }
-}
-
-/// Release every text and relation that runtime functions made during the
-/// current statement: the end of their lifetime, since no value outlives
-/// the statement that computes it.
-#[cfg(not(test))]
-#[unsafe(no_mangle)]
-pub extern "C" fn trendy_rt_release() {
-    use core::sync::atomic::Ordering::Relaxed;
-    let mut block = OWNED.swap(core::ptr::null_mut(), Relaxed);
-    while !block.is_null() {
-        // SAFETY: every block in the list was allocated by
-        // `allocate_owned`, and is released only here, once.
-        unsafe {
-            let next = (*block).next;
-            free(block.cast());
-            block = next;
-        }
     }
 }
 
 /// Store at `dst` a copy of the value at `src`, of the type `desc`
 /// describes, in memory of its own, which outlives the statement: a
-/// variable's new value. `owner` holds the memory of the variable's current
-/// value, or null while that is the value compiled into the program. That
-/// memory is released when the statement ends, since the statement's values
-/// can still point into it, and `owner` then holds the new value's. Stops
-/// the program if the memory can't be allocated.
+/// variable's new value, which `owner` then holds. `owner` holds the memory
+/// of the variable's current value, or null while that is the value
+/// compiled into the program. That memory becomes the outermost scope's
+/// whose statement began while it was the variable's value, since those
+/// statements, and only those, can point into it, such as with an
+/// argument; it is released when that statement ends. Stops the program if
+/// the memory can't be allocated.
 ///
 /// # Safety
 ///
 /// `src` must point to a valid value of the type `desc` describes, `desc`
 /// to a valid descriptor, `dst` to memory for one value that doesn't
 /// overlap `src`, and `owner` to null or memory that an earlier call
-/// stored there.
+/// stored there. The statement must have begun a scope.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn trendy_rt_assign(
@@ -293,6 +364,7 @@ pub unsafe extern "C" fn trendy_rt_assign(
         let block = allocate::<Owned>(units);
         block.write(Owned {
             next: core::ptr::null_mut(),
+            made: tick(),
         });
         let mut arena = Arena {
             base: block.add(1).cast(),
@@ -302,8 +374,14 @@ pub unsafe extern "C" fn trendy_rt_assign(
         persist(dst, src, desc, &mut arena);
         let old = owner.cast::<*mut Owned>().read_unaligned();
         if !old.is_null() {
-            (*old).next = OWNED.load(Relaxed);
-            OWNED.store(old, Relaxed);
+            // The current statement began after the old value was made,
+            // and the scopes it is in began before it.
+            let mut scope = CURRENT.load(Relaxed);
+            while !(*scope).outer.is_null() && (*(*scope).outer).begun > (*old).made {
+                scope = (*scope).outer;
+            }
+            (*old).next = (*scope).owned;
+            (*scope).owned = old;
         }
         owner.cast::<*mut Owned>().write_unaligned(block);
     }
@@ -425,11 +503,11 @@ fn allocate<T>(count: usize) -> *mut T {
 
 /// Store at `dst` the relation at `src`, with each tuple reshaped into the
 /// attributes `result` describes, in canonical order and without
-/// duplicates, in memory that [`trendy_rt_release`] releases. `source`
-/// describes `src`, and `offsets` gives, for each attribute of `result`,
-/// the offset in a tuple of `src` of the attribute it comes from. Removing
-/// attributes is reshaping, and can make tuples equal; renaming is too, and
-/// can change their order.
+/// duplicates, in memory the statement owns. `source` describes `src`,
+/// and `offsets` gives, for each attribute of `result`, the offset in a
+/// tuple of `src` of the attribute it comes from. Removing attributes is
+/// reshaping, and can make tuples equal; renaming is too, and can change
+/// their order.
 ///
 /// # Safety
 ///
@@ -481,7 +559,7 @@ pub unsafe extern "C" fn trendy_rt_reshape(
 
 /// Store at `dst` the relation `desc` describes whose tuples are the
 /// `*count` at `tuples`, one after another, in canonical order and without
-/// duplicates, in memory that [`trendy_rt_release`] releases.
+/// duplicates, in memory the statement owns.
 ///
 /// # Safety
 ///
@@ -539,8 +617,7 @@ struct Group {
 /// Store at `dst` the relation `result` describes whose tuples are each
 /// made of a tuple of the relation `lhs` and one of `rhs` that agree on
 /// their common attributes (Algebra A's AND), in canonical order, in memory
-/// that [`trendy_rt_release`] releases. `lhs_desc` and `rhs_desc` describe
-/// the operands. `sources` says where each attribute of `result` comes
+/// the statement owns. `lhs_desc` and `rhs_desc` describe the operands. `sources` says where each attribute of `result` comes
 /// from, and `common` lists the `*common_count` common attributes.
 ///
 /// Both operands' tuples are sorted on the common attributes, then merged:
@@ -631,8 +708,8 @@ pub struct Ungrouped {
 /// Store at `dst` the relation `result` describes whose tuples are, for
 /// each tuple of the relation `src`, which `source` describes, one for each
 /// combination of a tuple of each of its `*ungrouped_count` relation-valued
-/// attributes in `ungrouped`, in canonical order, in memory that
-/// [`trendy_rt_release`] releases. A tuple with an empty one has none.
+/// attributes in `ungrouped`, in canonical order, in memory the statement
+/// owns. A tuple with an empty one has none.
 /// `sources` says where each attribute of `result` comes from.
 ///
 /// # Safety
@@ -795,8 +872,7 @@ pub const COMBINE_DISJOINT_CHANGES: usize = 5;
 /// Store at `dst` the relations `lhs` and `rhs`, of the one type `desc`
 /// describes, combined as `*combination`, a `COMBINE_` constant, says: the
 /// tuples of either, of exactly one, or of `lhs` but not `rhs`, in
-/// canonical order, in
-/// memory that [`trendy_rt_release`] releases. Both operands are in
+/// canonical order, in memory the statement owns. Both operands are in
 /// canonical order, so one pass merges them, and the result needs no
 /// sorting. Stops the program if a disjoint union's operands, or disjoint
 /// changes', share a tuple, or an included minus's right operand has one
@@ -894,7 +970,7 @@ pub unsafe extern "C" fn trendy_rt_combine(
 /// describes, that have a match in the relation `rhs`, which `rhs_desc`
 /// describes, on the `*common_count` attributes in `common`, or, if
 /// `*negated` is 1, those that have none (the semijoin and the antijoin), in
-/// canonical order, in memory that [`trendy_rt_release`] releases.
+/// canonical order, in memory the statement owns.
 ///
 /// # Safety
 ///

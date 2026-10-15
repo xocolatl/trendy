@@ -647,18 +647,25 @@ then reads.
 It also owns the lifetime of allocated values. A concatenation done at run
 time calls `trendy_rt_concat`, which allocates the result's bytes with
 `malloc`, as do the runtime functions that make relations. The statement
-owns them all: the runtime keeps a list of what it made, and a statement
-that made anything ends with `trendy_rt_release`, which frees the list.
-That holds however many values a loop made, which per-value freeing
-couldn't track.
+owns them all, in its scope: a stack slot that `trendy_rt_begin` begins
+before the statement's first instruction, where the runtime lists what it
+makes, and `trendy_rt_end` ends after its last, freeing the list. That
+holds however many values a loop made, which per-value freeing couldn't
+track. Scopes nest as calls do, so an operator's statements release their
+own memory, never the memory of the statement that called the operator,
+such as its arguments'.
 
 Only an assigned value outlives its statement. A variable whose type has a
 text or a relation in it has a second field, its owner, the address of the
 memory its value points into, or null while that is the value compiled
 into the program. `trendy_rt_assign` copies the value, with everything it
-points to, into one new block, which the owner then holds, and puts the
-old block on the statement's list, since the statement's values can still
-point into it. Other variables are assigned by a copy.
+points to, into one new block, which the owner then holds. Other variables
+are assigned by a copy. The old block becomes the outermost scope's whose
+statement began while it was the variable's value, by a clock the runtime
+keeps, since those statements, and only those, can point into it: with
+the assigning statement's own values, or with arguments, which a caller
+can have passed from the variable. So a statement that passes a text or
+relation to an update operator has a scope even if it makes nothing.
 
 An assignment statement computes each value into a slot of its own: a
 copy, since a value can be a variable's own place, which assigning another

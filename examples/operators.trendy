@@ -34,6 +34,20 @@ operator show{label: text, cents: integer} [
     call debug_value{v: cents};
 ];
 
+var special := "ramen";
+var previous := "none";
+
+/* A parameter keeps its value while the operator runs, even once the
+   operator assigns the variable its argument came from. */
+operator rotate{next: text} [
+    assign {
+        previous := special;
+        special := next;
+    };
+    call debug_value{v: previous || " → " || special};
+    call debug_value{v: next};
+];
+
 var totals := dishes extend { total := taxed{price: price} } remove {price};
 var affordable := under{limit: 1000}{dish};
 
@@ -41,4 +55,6 @@ operator main{} [
     call debug_value{v: totals};
     call debug_value{v: affordable};
     call show{label: "half of 1200", cents: half{n: 1200}};
+    call rotate{next: "spicy " || special};
+    call rotate{next: previous};
 ];
