@@ -442,15 +442,16 @@ operator main{} [
   `update r { a := x } where p;`, not as Tutorial D orders them (P0024).
   Its condition and values have the attributes of the tuple at hand in
   scope, as in `where` and `replace`.
-- **A condition must depend on the tuple.** One known when compiling to be
-  the same for every tuple, such as `true`, `1 = 1` or `false`, selects
-  them all or none, which is written without it (A0032): a `delete` of
-  every tuple is `r := relation {};`, an `update` of every tuple has no
-  `where`, and a change of none is no statement at all.
+- **A change of every tuple says so:** `r := relation {};` deletes them
+  all, and `update r { a := x };`, without `where`, updates them all. A
+  condition known when compiling to be true whatever the tuple, such as
+  `true` or `1 = 1`, selects them all another way, as does
+  `i_delete r r;`, and is an error (A0032).
 - **An assignment must change something.** Giving a variable its own
   value, `x := x;`, or an attribute its own, `update r { a := a };`, is an
   error, and so is inserting or deleting the empty relation,
-  `insert r relation {};`, or inserting a variable into itself,
+  `insert r relation {};`, a condition known when compiling to be false,
+  `delete r where false;`, or inserting a variable into itself,
   `insert r r;`, unless other changes in its block remove tuples for it to
   add back (A0033). So are an `update` of no attributes,
   `update r {};`, and a block of no assignments, `assign {};` (A0023).

@@ -629,20 +629,37 @@ pub(crate) fn assigned_operator(name: &str, span: Span, kind: Kind) -> Diagnosti
     .with_note("only variables, declared with `var` at the top level, are assigned")
 }
 
-/// A `delete` of the variable `name`, at `span`, whose condition is always
-/// true, so that it deletes every tuple. `alone` says whether it is the
-/// variable's only change in its statement, which the assignment of the
-/// empty relation can then replace.
-pub(crate) fn every_tuple_deleted(name: &str, span: Span, alone: bool) -> Diagnostic {
+/// A `delete` or an `i_delete`, after `keyword`, of the variable `name`,
+/// at `span`, that deletes every tuple: a `delete` whose condition is
+/// always true, or an `i_delete` of the variable itself. `alone` says
+/// whether it is the variable's only change in its statement, which the
+/// assignment of the empty relation can then replace.
+pub(crate) fn every_tuple_deleted(
+    keyword: &str,
+    name: &str,
+    span: Span,
+    alone: bool,
+) -> Diagnostic {
+    let (message, form) = if keyword == "i_delete" {
+        (
+            format!("`{name}` is deleted from itself"),
+            "`i_delete r s` deletes the tuples of `s` from `r`",
+        )
+    } else {
+        (
+            "this `delete`'s condition is always true".to_string(),
+            "`delete r where p` deletes the tuples for which `p` is true",
+        )
+    };
     let d = Diagnostic::error(
-        Code::ConstantCondition,
-        "this `delete`'s condition is always true",
+        Code::EveryTuple,
+        message,
         span,
         format!("deletes every tuple of `{name}`"),
     )
-    .with_note(
-        "`delete r where p` deletes the tuples for which `p` is true; to delete every tuple, assign the empty relation, `r := relation {}`, which says so",
-    );
+    .with_note(format!(
+        "{form}; to delete every tuple, assign the empty relation, `r := relation {{}}`, which says so"
+    ));
     if alone {
         d.with_suggestion(
             "assign the empty relation",
@@ -662,7 +679,7 @@ pub(crate) fn every_tuple_deleted(name: &str, span: Span, alone: bool) -> Diagno
 /// updates every tuple, as it would without it; `removal` deletes it.
 pub(crate) fn every_tuple_updated(span: Span, removal: Span) -> Diagnostic {
     Diagnostic::error(
-        Code::ConstantCondition,
+        Code::EveryTuple,
         "this `update`'s condition is always true",
         span,
         "selects every tuple",
@@ -692,7 +709,7 @@ pub(crate) fn no_tuple_changed(
         "update r { … } where p"
     };
     let d = Diagnostic::error(
-        Code::ConstantCondition,
+        Code::NoChange,
         format!("this `{keyword}`'s condition is always false"),
         span,
         format!("{keyword}s nothing"),

@@ -301,9 +301,8 @@ fn shorthand(
 }
 
 /// The new value of the variable `target`, `variable`, from its changes,
-/// `list`, in source order, or `None` after reporting a condition known
-/// when compiling, an insert of the variable into itself, or a conflict
-/// between two of them.
+/// `list`, in source order, or `None` after reporting a change whose
+/// effect is known when compiling, or a conflict between two of them.
 fn merged(
     target: hir::VariableId,
     variable: &hir::Variable,
@@ -312,13 +311,7 @@ fn merged(
     cx: &Context,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Expr> {
-    if constant_conditions(&variable.name, &list, errors) {
-        return None;
-    }
-    if let [(clause, change)] = &list[..]
-        && let Some(error) = inserted_into_itself(target, &variable.name, clause, change)
-    {
-        errors.push(error);
+    if known_effects(target, &variable.name, &list, errors) {
         return None;
     }
     // A whole new value conflicts with any other change.
@@ -383,81 +376,73 @@ fn merged(
     }
 }
 
-/// Whether a change in `list`, the changes to the variable `name`, has a
-/// condition known when compiling, after reporting each one: it selects
-/// every tuple or none, which is written without it.
-fn constant_conditions(
+/// Whether a change in `list`, the changes to the variable `target`,
+/// `name`, has an effect known when compiling, on every tuple or none,
+/// after reporting each one: it is written as that effect. These are
+/// checked with the variable's other changes, on which their errors
+/// depend.
+fn known_effects(
+    target: hir::VariableId,
     name: &str,
     list: &[(&Clause, Change)],
     errors: &mut Vec<Diagnostic>,
 ) -> bool {
+    let alone = list.len() == 1;
     let found: Vec<Diagnostic> = list
         .iter()
-        .filter_map(|(clause, change)| constant_condition(name, clause, change, list.len() == 1))
+        .filter_map(|(clause, change)| known_effect(target, name, clause, change, alone))
         .collect();
     let any = !found.is_empty();
     errors.extend(found);
     any
 }
 
-/// The error for `clause`, `change` to the variable `name`, if its
-/// condition is known when compiling. `alone` says whether it is the
-/// variable's one change: a `delete` of every tuple is then the assignment
-/// of the empty relation, which would conflict with any other.
-fn constant_condition(
+/// The error for `clause`, `change` to the variable `target`, `name`, if
+/// its effect is known when compiling: a condition that is, which selects
+/// every tuple or none, an `i_delete` of the variable itself, which deletes
+/// every tuple, or an insert of it into itself, which changes nothing.
+/// `alone` says whether it is the variable's one change. With others, the
+/// empty relation's assignment, which a deletion of every tuple is, would
+/// conflict with them, and an insert into itself adds back the tuples they
+/// remove, which changes something.
+fn known_effect(
+    target: hir::VariableId,
     name: &str,
     clause: &Clause,
     change: &Change,
     alone: bool,
 ) -> Option<Diagnostic> {
-    let Change::Tuples(TupleChange {
-        removed: Some(Removal::Where(hir::Expr::Constant(hir::Value::Boolean(always)))),
-        ..
-    }) = change
-    else {
+    let Change::Tuples(TupleChange { removed, added }) = change else {
         return None;
     };
-    // An `update` without `where` is of every tuple, as it should be.
-    let token = clause.where_keyword()?;
     let keyword = clause.keyword()?;
-    Some(match (keyword.kind(), always) {
-        (SyntaxKind::DeleteKw, true) => errors::every_tuple_deleted(name, clause.span(), alone),
-        (_, true) => {
-            let start = trendy_syntax::span(token.text_range()).start;
-            let condition = Span::new(start, clause.operand()?.span().end);
-            errors::every_tuple_updated(condition, clause.condition_removal()?)
+    let itself = |tuples: &hir::Expr| *tuples == hir::Expr::Variable(target);
+    match (removed, added) {
+        (Some(Removal::Where(hir::Expr::Constant(hir::Value::Boolean(always)))), _) => {
+            // An `update` without `where` is of every tuple, as it should be.
+            let token = clause.where_keyword()?;
+            Some(match (keyword.kind(), always) {
+                (SyntaxKind::DeleteKw, true) => {
+                    errors::every_tuple_deleted(keyword.text(), name, clause.span(), alone)
+                }
+                (_, true) => {
+                    let start = trendy_syntax::span(token.text_range()).start;
+                    let condition = Span::new(start, clause.operand()?.span().end);
+                    errors::every_tuple_updated(condition, clause.condition_removal()?)
+                }
+                (_, false) => {
+                    errors::no_tuple_changed(keyword.text(), clause.span(), &clause.statement()?)
+                }
+            })
         }
-        (_, false) => errors::no_tuple_changed(keyword.text(), clause.span(), &clause.statement()?),
-    })
-}
-
-/// The error for `clause`, `change`, the one change to the variable
-/// `target`, `name`, if it inserts the variable into itself, which changes
-/// nothing, or, with `d_insert`, fails if it has a tuple. With other
-/// changes, it adds back the tuples they remove.
-fn inserted_into_itself(
-    target: hir::VariableId,
-    name: &str,
-    clause: &Clause,
-    change: &Change,
-) -> Option<Diagnostic> {
-    let Change::Tuples(TupleChange {
-        removed: None,
-        added: Some(Addition { tuples, .. }),
-    }) = change
-    else {
-        return None;
-    };
-    if *tuples != hir::Expr::Variable(target) {
-        return None;
+        (Some(Removal::Included(tuples)), None) if itself(tuples) => Some(
+            errors::every_tuple_deleted(keyword.text(), name, clause.span(), alone),
+        ),
+        (None, Some(Addition { tuples, .. })) if alone && itself(tuples) => Some(
+            errors::inserted_into_itself(keyword.text(), name, clause.span(), &clause.statement()?),
+        ),
+        _ => None,
     }
-    let keyword = clause.keyword()?;
-    Some(errors::inserted_into_itself(
-        keyword.text(),
-        name,
-        clause.span(),
-        &clause.statement()?,
-    ))
 }
 
 /// A tuple variable's new value from its `update`s, each in a clause and

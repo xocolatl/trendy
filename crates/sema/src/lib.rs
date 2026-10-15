@@ -3806,9 +3806,9 @@ mod tests {
     }
 
     #[test]
-    fn conditions_known_when_compiling_are_written_without() {
-        let fixed = |body: &str| fixed(Code::ConstantCondition, body);
-        // Each condition is `true` once folded: every tuple is changed.
+    fn a_change_of_every_tuple_says_so() {
+        let fixed = |body: &str| fixed(Code::EveryTuple, body);
+        // Each condition is `true` once folded.
         for condition in ["true", "1 = 1", "born > 1 or true"] {
             assert_eq!(
                 fixed(&format!("delete poets where {condition};")),
@@ -3819,45 +3819,35 @@ mod tests {
                 assigning(POETS, "update poets { born := 1 };")
             );
         }
-        // Each is `false`: none is, so the statement goes.
-        for condition in ["false", "not true", "born > 1 and false"] {
-            for change in ["delete poets", "update poets { born := 1 }"] {
-                assert_eq!(
-                    fixed(&format!("n := 1; {change} where {condition};")),
-                    assigning(POETS, "n := 1;")
-                );
-            }
-        }
-        // From a block, and with it if nothing else is in it.
         assert_eq!(
-            fixed("assign { delete poets where false; n := 1; };"),
-            assigning(POETS, "assign { n := 1; };")
-        );
-        assert_eq!(
-            fixed("n := 1; assign { delete poets where false; };"),
-            assigning(POETS, "n := 1;")
+            fixed("i_delete poets poets;"),
+            assigning(POETS, "poets := relation {};")
         );
         let tuple_dependent =
             "delete poets where born > 1; update poets { born := 1 } where born < 1;";
         assert!(analyze_str(&assigning(POETS, tuple_dependent)).is_ok());
         // The empty relation replaces a block's one change to the variable.
-        assert_eq!(
-            fixed("assign { delete poets where true; n := 1; };"),
-            assigning(POETS, "assign { poets := relation {}; n := 1; };")
-        );
-        // With others, it would conflict with them.
-        let combined = errors(&assigning(
-            POETS,
-            r#"assign { delete poets where true; insert poets relation { { name: "Rumi", born: 1207 } }; };"#,
-        ));
-        assert_eq!(combined.len(), 1);
-        assert_eq!(combined[0].code, Code::ConstantCondition);
-        assert!(combined[0].suggestions.is_empty());
-        assert!(
-            combined[0].help[0].contains("`poets := …`"),
-            "{:?}",
-            combined[0].help
-        );
+        for deletion in ["delete poets where true", "i_delete poets poets"] {
+            assert_eq!(
+                fixed(&format!("assign {{ {deletion}; n := 1; }};")),
+                assigning(POETS, "assign { poets := relation {}; n := 1; };")
+            );
+            // With others, it would conflict with them.
+            let combined = errors(&assigning(
+                POETS,
+                &format!(
+                    r#"assign {{ {deletion}; insert poets relation {{ {{ name: "Rumi", born: 1207 }} }}; }};"#
+                ),
+            ));
+            assert_eq!(combined.len(), 1);
+            assert_eq!(combined[0].code, Code::EveryTuple);
+            assert!(combined[0].suggestions.is_empty());
+            assert!(
+                combined[0].help[0].contains("`poets := …`"),
+                "{:?}",
+                combined[0].help
+            );
+        }
     }
 
     #[test]
@@ -3877,6 +3867,24 @@ mod tests {
                 assigning(POETS, "n := 1;")
             );
         }
+        // A condition that is `false` once folded selects no tuple.
+        for condition in ["false", "not true", "born > 1 and false"] {
+            for change in ["delete poets", "update poets { born := 1 }"] {
+                assert_eq!(
+                    fixed(&format!("n := 1; {change} where {condition};")),
+                    assigning(POETS, "n := 1;")
+                );
+            }
+        }
+        // From a block, and with it if nothing else is in it.
+        assert_eq!(
+            fixed("assign { delete poets where false; n := 1; };"),
+            assigning(POETS, "assign { n := 1; };")
+        );
+        assert_eq!(
+            fixed("n := 1; assign { delete poets where false; };"),
+            assigning(POETS, "n := 1;")
+        );
         // Of the variable into itself, as its one change.
         for keyword in ["insert", "d_insert"] {
             assert_eq!(

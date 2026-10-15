@@ -346,19 +346,21 @@ merge into one value: the old value `minus` (`i_minus`, with an
 `i_delete`) the `DisjointChanges` of the removals, `union` (`d_union`, for a
 `d_insert`) each addition. One condition alone is simply
 `r where not p`. Two `update`s of a tuple merge if they set different
-attributes, and `v := …` merges with nothing. A `delete`'s or an
-`update`'s condition that folds to a constant selects every tuple or none,
-which is written without it (A0032): `r := relation {}`, an `update`
-without `where`, or no statement. It is reported with the variable's
-changes, since `r := relation {}` is the fix only when the `delete` is the
-variable's one change; with others, it would conflict with them. A
-change that is known to change nothing is reported where it is checked
-(A0033): a value that is the variable itself, once folded, the empty
-relation inserted or deleted, and, in `Checker::assign_attributes`, for
-`replace` and `update` alike, an attribute's value that is its own, the
-tuple at hand's attribute. An `insert` or a `d_insert` of the variable
-into itself is reported with the variable's changes, when it is the one:
-with others, it adds back the tuples they remove. Conflicts known when
+attributes, and `v := …` merges with nothing. A change that is known
+to change nothing is reported where it is checked (A0033): a value that
+is the variable itself, once folded, the empty relation inserted or
+deleted, and, in `Checker::assign_attributes`, for `replace` and `update`
+alike, an attribute's value that is its own, the tuple at hand's
+attribute. A change whose effect on every tuple or none is known when
+compiling is reported with the variable's changes (`known_effects`),
+since some of its errors depend on them: a condition that folds to
+`true`, or an `i_delete` of the variable itself, selects every tuple,
+which is written `r := relation {}` or as an `update` without `where`
+(A0032), though `r := relation {}` is the fix only for the variable's one
+change, as it would conflict with others; a condition that folds to
+`false` selects none (A0033); and an `insert` or a `d_insert` of the
+variable into itself changes nothing (A0033) only as its one change, since
+it adds back the tuples others remove. Conflicts known when
 compiling are reported then (R0009): those, and two `i_delete`s of the
 same constant tuple. A variable's new value that is known when compiling
 is checked against its keys then (R0008), pointing at the tuples as for
