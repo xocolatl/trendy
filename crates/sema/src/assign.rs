@@ -557,6 +557,9 @@ fn tuples_merged(
             combined(current(), all, combination)
         }
     };
+    // A `d_insert` is checked against the tuples kept and the other
+    // `d_insert`s' only, whatever the order, so they are added first.
+    additions.sort_by_key(|addition| !addition.disjoint);
     let mut value = kept;
     for addition in additions {
         let combination = if addition.disjoint {

@@ -3650,6 +3650,28 @@ mod tests {
             panic!("one extension: {assignments:?}");
         };
         assert_eq!(values.len(), 2, "both attributes, each from the old tuple");
+        // A `d_insert` is checked against the tuples kept, not those an
+        // `update` makes, before or after it.
+        for block in [
+            "assign { update poets { born := 1 }; d_insert poets relation { { name: \"Rumi\", born: n } }; };",
+            "assign { d_insert poets relation { { name: \"Rumi\", born: n } }; update poets { born := 1 }; };",
+        ] {
+            let body = main(block);
+            let [hir::Statement::Assign(assignments)] = &body[..] else {
+                panic!("{body:?}");
+            };
+            let [hir::Assignment { value, .. }] = &assignments[..] else {
+                panic!("one assignment: {assignments:?}");
+            };
+            let hir::Expr::Combine(hir::Combination::Union, inserted, updated) = value else {
+                panic!("{value:?}");
+            };
+            assert!(matches!(
+                **inserted,
+                hir::Expr::Combine(hir::Combination::DisjointUnion, ..)
+            ));
+            assert!(matches!(**updated, hir::Expr::Extend(..)), "{block}");
+        }
     }
 
     #[test]
