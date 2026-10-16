@@ -337,6 +337,10 @@ impl Names for ReadOnlyNames<'_, '_> {
                 None => Lookup::Reported,
             };
         }
+        if let Some(relation) = self.globals.operators.get(self.within).per_relation(name) {
+            errors.push(errors::per_as_value(name, relation, span));
+            return Lookup::Reported;
+        }
         if self.globals.namespaces.operator(name).is_some() {
             errors.push(errors::operator_as_value(name, span));
             return Lookup::Reported;

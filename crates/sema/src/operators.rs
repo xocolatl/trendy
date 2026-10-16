@@ -19,6 +19,10 @@ pub(crate) struct Signature {
     /// The type parameters: those declared with `types`, then one for each
     /// `any` written as a parameter's type.
     pub(crate) types: Vec<hir::TypeParameter>,
+    /// The parameters, as a call gives their arguments.
+    pub(crate) written: BTreeMap<String, Param>,
+    /// The parameters, as the operator sees them: without `per` ones,
+    /// which are attributes of their relations' tuples.
     pub(crate) params: BTreeMap<String, hir::Type>,
     /// Whether it is read-only, written with a result type: its call is
     /// then a value, and an update operator's isn't.
@@ -52,6 +56,15 @@ impl Signature {
         written.map_or(Origin::Builtin, Origin::Type)
     }
 
+    /// The relation whose tuples the `per` parameter `name` is an attribute
+    /// of, if it is one.
+    pub(crate) fn per_relation(&self, name: &str) -> Option<&str> {
+        match self.written.get(name)? {
+            Param::Per { relation, .. } => Some(relation),
+            _ => None,
+        }
+    }
+
     /// Where the operator's name is written in its definition, for the
     /// program's own.
     pub(crate) fn defined(&self) -> Option<Span> {
@@ -62,7 +75,7 @@ impl Signature {
     /// The parameters, as a call's error says what they are:
     /// `` `greet{name: text}` ``.
     pub(crate) fn text(&self) -> String {
-        format!("`{}{}`", self.name, params_text(&self.params))
+        format!("`{}{}`", self.name, params_text(&self.written))
     }
 }
 
@@ -113,6 +126,11 @@ pub(crate) fn signatures(
                 id: hir::OperatorId(i),
                 name: op.name.clone(),
                 types: op.types.clone(),
+                written: op
+                    .params
+                    .iter()
+                    .map(|(name, ty)| (name.clone(), Param::Value(ty.clone())))
+                    .collect(),
                 params: op.params.clone(),
                 read_only: false,
                 result: None,
@@ -158,7 +176,11 @@ pub(crate) fn signatures(
                     name: ident.text().to_string(),
                     valid: declared_valid && params.is_some() && result_valid && determined,
                     types: type_parameters,
-                    params: params.unwrap_or_default(),
+                    written: params
+                        .as_ref()
+                        .map(|p| p.written.clone())
+                        .unwrap_or_default(),
+                    params: params.map(|p| p.seen).unwrap_or_default(),
                     read_only: written.is_some(),
                     result,
                     decl: Some(op),
@@ -180,27 +202,127 @@ pub(crate) fn signatures(
     Operators { list, by_name }
 }
 
+/// A parameter, as a call gives its argument.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Param {
+    /// An argument of this type.
+    Value(hir::Type),
+    /// A relation of any heading, which `per` parameters are evaluated for
+    /// each tuple of. The operator sees its tuples with their values as
+    /// attributes, beside the tuples' own attributes, wrapped in one more,
+    /// of this type parameter, `any tuple` (see [`hir::wrapped`]).
+    Relation(hir::TypeParameter),
+    /// An argument of type `ty` evaluated for each tuple of the argument
+    /// for the parameter `relation`, which the operator sees as an
+    /// attribute of that relation's tuples.
+    Per { relation: String, ty: hir::Type },
+}
+
+/// An operator's parameters: as calls give their arguments, and as the
+/// operator sees them, where a relation's `per` parameters are attributes
+/// of its tuples.
+pub(crate) struct Params {
+    pub(crate) written: BTreeMap<String, Param>,
+    pub(crate) seen: BTreeMap<String, hir::Type>,
+}
+
 /// A user operator's parameters, where `types` are its type parameters,
 /// which each `any` written as a parameter's type adds one to, or `None`
-/// after reporting why they are invalid.
+/// after reporting why they are invalid. Each `per r` must refer to
+/// another parameter, of type `any relation`.
 pub(crate) fn params(
     heading: &ast::Heading,
     types: &mut Vec<hir::TypeParameter>,
     namespaces: &Namespaces,
     errors: &mut Vec<Diagnostic>,
-) -> Option<BTreeMap<String, hir::Type>> {
-    let heading = types::resolve_heading(
+) -> Option<Params> {
+    let resolved = types::resolve_attributes(
         heading,
         &mut TypeParameters::Open(types),
         namespaces,
         errors,
     )?;
-    Some(
-        heading
-            .attributes()
-            .map(|(name, ty)| (name.to_string(), ty.clone()))
-            .collect(),
-    )
+    // Each `per` parameter, with the relation it refers to.
+    let mut per: BTreeMap<String, String> = BTreeMap::new();
+    let mut ok = true;
+    for attribute in heading.attributes() {
+        let (Some(clause), Some(name)) =
+            (attribute.per(), attribute.name().and_then(|n| n.ident()))
+        else {
+            continue;
+        };
+        let Some(relation) = clause.relation().and_then(|r| r.ident()) else {
+            continue;
+        };
+        let target = heading.attributes().find(|a| {
+            a.name()
+                .and_then(|n| n.ident())
+                .is_some_and(|i| i.text() == relation.text())
+        });
+        let problem = match &target {
+            _ if relation.text() == name.text() => Some(errors::PerProblem::Itself),
+            None => Some(errors::PerProblem::NotAParameter(
+                resolved.attributes().map(|(a, _)| a.to_string()).collect(),
+            )),
+            Some(target) if target.per().is_some() => Some(errors::PerProblem::Per),
+            Some(target) => match target.type_expr() {
+                Some(TypeExpr::Any(any)) if types::any_of(&any) == Some(hir::Any::Relation) => None,
+                Some(written) => Some(errors::PerProblem::NotAnyRelation(written)),
+                None => {
+                    ok = false;
+                    continue;
+                }
+            },
+        };
+        if let Some(problem) = problem {
+            errors.push(errors::per_relation(name.text(), &relation, problem));
+            ok = false;
+            continue;
+        }
+        per.insert(name.text().to_string(), relation.text().to_string());
+    }
+    if !ok {
+        return None;
+    }
+    // Each relation's own attributes are wrapped as `any tuple`, which its
+    // `any relation` becomes.
+    let mut relations: BTreeMap<&str, hir::TypeParameter> = BTreeMap::new();
+    for relation in per.values() {
+        let Some(hir::Type::Parameter(p)) = resolved.get(relation) else {
+            unreachable!("`per` refers to an `any relation`");
+        };
+        types[p.index].any = hir::Any::Tuple;
+        relations.insert(relation, types[p.index].clone());
+    }
+    let mut written = BTreeMap::new();
+    let mut seen = BTreeMap::new();
+    for (name, ty) in resolved.attributes() {
+        if let Some(relation) = per.get(name) {
+            written.insert(
+                name.to_string(),
+                Param::Per {
+                    relation: relation.clone(),
+                    ty: ty.clone(),
+                },
+            );
+        } else if let Some(wrapped) = relations.get(name) {
+            let attributes = per
+                .iter()
+                .filter(|(_, relation)| *relation == name)
+                .map(|(p, _)| (p.clone(), resolved.get(p).expect("a parameter").clone()))
+                .chain([(hir::wrapped(name), hir::Type::Parameter(wrapped.clone()))])
+                .collect();
+            written.insert(name.to_string(), Param::Relation(wrapped.clone()));
+            seen.insert(
+                name.to_string(),
+                hir::Type::Relation(hir::Heading::new(attributes)),
+            );
+        } else {
+            written.insert(name.to_string(), Param::Value(ty.clone()));
+            seen.insert(name.to_string(), ty.clone());
+        }
+    }
+    Some(Params { written, seen })
 }
 
 /// The type parameters `declared` lists, each `any type`, `any tuple` or
@@ -222,6 +344,10 @@ fn declared_types(
             continue;
         };
         let (name, span) = (ident.text(), trendy_syntax::span(ident.text_range()));
+        if let Some(per) = attribute.per() {
+            errors.push(errors::per_outside_parameters(&per));
+            ok = false;
+        }
         if let Some(&first) = spans.get(name) {
             errors.push(errors::duplicate_type_parameter(name, span, first));
             ok = false;
@@ -306,11 +432,16 @@ fn determined(
     ok
 }
 
-/// Parameters as written: `{name: text, times: integer}`.
-pub(crate) fn params_text(params: &BTreeMap<String, hir::Type>) -> String {
+/// Parameters as written: `{name: text, times: integer}`, and
+/// `{r: any relation, of: integer per r}`.
+pub(crate) fn params_text(params: &BTreeMap<String, Param>) -> String {
     let attributes: Vec<_> = params
         .iter()
-        .map(|(name, ty)| format!("{name}: {ty}"))
+        .map(|(name, param)| match param {
+            Param::Value(ty) => format!("{name}: {ty}"),
+            Param::Relation(_) => format!("{name}: any relation"),
+            Param::Per { relation, ty } => format!("{name}: {ty} per {relation}"),
+        })
         .collect();
     format!("{{{}}}", attributes.join(", "))
 }

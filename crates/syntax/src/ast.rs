@@ -78,6 +78,7 @@ ast_node!(TypeParameters);
 ast_node!(Literal);
 ast_node!(Heading);
 ast_node!(AttributeType);
+ast_node!(Per);
 ast_node!(TupleType);
 ast_node!(RelationType);
 ast_node!(TupleLiteral);
@@ -934,6 +935,33 @@ impl AttributeType {
     #[must_use]
     pub fn type_expr(&self) -> Option<TypeExpr> {
         self.0.children().find_map(TypeExpr::cast)
+    }
+
+    /// `per r`, after a parameter's type.
+    #[must_use]
+    pub fn per(&self) -> Option<Per> {
+        self.0.children().find_map(Per::cast)
+    }
+}
+
+impl Per {
+    /// The word `per`.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    /// The parameter named after `per`, whose argument's tuples the
+    /// argument is evaluated for.
+    #[must_use]
+    pub fn relation(&self) -> Option<NameRef> {
+        self.0.children().find_map(NameRef::cast)
+    }
+
+    /// The span to delete to remove it, with the whitespace before.
+    #[must_use]
+    pub fn removal(&self) -> Span {
+        Span::new(preceded_from(&self.0.clone().into()), self.span().end)
     }
 }
 

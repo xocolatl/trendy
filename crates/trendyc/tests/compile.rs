@@ -115,6 +115,11 @@ fn operators() {
             "true",
             r#""pairs""#,
             "relation { v: relation { v: integer } } { { v: relation { v: integer } { { v: 1 }, { v: 2 } } }, { v: relation { v: integer } { { v: 3 }, { v: 4 } } } }",
+            // `per` arguments, for each dish, with `vat` at 25.
+            r#""with VAT""#,
+            "relation { v: integer } { { v: 937 }, { v: 1125 }, { v: 1500 } }",
+            r#""where from""#,
+            r#"relation { v: text } { { v: "jollof rice, Ghana" }, { v: "pozole, Mexico" }, { v: "ramen, Japan" } }"#,
         ]
     );
 }

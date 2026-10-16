@@ -81,6 +81,8 @@ pub enum Code {
     TypeParameterNamedOnce,
     TypeParameterNotAny,
     GrowingRecursion,
+    PerRelation,
+    PerAsValue,
     Overflow,
     DivisionByZero,
     OutOfMemory,
@@ -107,7 +109,7 @@ pub enum CodeKind {
 }
 
 impl Code {
-    pub const ALL: [Code; 78] = [
+    pub const ALL: [Code; 80] = [
         Code::UnexpectedCharacter,
         Code::MissingToken,
         Code::WrongDelimiter,
@@ -176,6 +178,8 @@ impl Code {
         Code::TypeParameterNamedOnce,
         Code::TypeParameterNotAny,
         Code::GrowingRecursion,
+        Code::PerRelation,
+        Code::PerAsValue,
         Code::Overflow,
         Code::DivisionByZero,
         Code::OutOfMemory,
@@ -259,6 +263,8 @@ impl Code {
             Code::TypeParameterNamedOnce => "A0039",
             Code::TypeParameterNotAny => "A0040",
             Code::GrowingRecursion => "A0041",
+            Code::PerRelation => "A0042",
+            Code::PerAsValue => "A0043",
             Code::Overflow => "R0001",
             Code::DivisionByZero => "R0002",
             Code::OutOfMemory => "R0003",
@@ -371,6 +377,8 @@ impl Code {
             Code::TypeParameterNamedOnce => include_str!("../errors/A0039.md"),
             Code::TypeParameterNotAny => include_str!("../errors/A0040.md"),
             Code::GrowingRecursion => include_str!("../errors/A0041.md"),
+            Code::PerRelation => include_str!("../errors/A0042.md"),
+            Code::PerAsValue => include_str!("../errors/A0043.md"),
             Code::Overflow => include_str!("../errors/R0001.md"),
             Code::DivisionByZero => include_str!("../errors/R0002.md"),
             Code::OutOfMemory => include_str!("../errors/R0003.md"),

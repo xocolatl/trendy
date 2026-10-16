@@ -108,13 +108,34 @@ fn function(
 }
 
 /// Parameters as written, `{name: text, times: integer}`, with their
-/// types.
+/// types in full, so that different types are written differently.
 fn params_text(params: &BTreeMap<String, hir::Type>) -> String {
-    let params: Vec<String> = params
-        .iter()
-        .map(|(name, ty)| format!("{name}: {ty}"))
+    format!("{{{}}}", attributes_text(params.iter()))
+}
+
+/// Attributes, `name: type, …`, with their types in full: a wrapped
+/// attribute too, which a type's source text leaves out.
+fn attributes_text<'t>(attributes: impl Iterator<Item = (&'t String, &'t hir::Type)>) -> String {
+    let written: Vec<String> = attributes
+        .map(|(name, ty)| format!("{name}: {}", type_text(ty)))
         .collect();
-    format!("{{{}}}", params.join(", "))
+    written.join(", ")
+}
+
+/// A type's text in full, as for [`attributes_text`].
+fn type_text(ty: &hir::Type) -> String {
+    let heading = |h: &hir::Heading| {
+        let attributes: Vec<(String, hir::Type)> = h
+            .attributes()
+            .map(|(name, ty)| (name.to_string(), ty.clone()))
+            .collect();
+        attributes_text(attributes.iter().map(|(name, ty)| (name, ty)))
+    };
+    match ty {
+        hir::Type::Tuple(h) => format!("tuple {{ {} }}", heading(h)),
+        hir::Type::Relation(h) => format!("relation {{ {} }}", heading(h)),
+        _ => ty.to_string(),
+    }
 }
 
 /// The program-wide part of lowering: the data objects, and the functions.
@@ -227,13 +248,15 @@ impl Lowering {
     }
 
     /// A heading's attributes, laid out as an array of `trendy_runtime::Attr`:
-    /// `{ name: *u8, name_len, offset, desc: *TypeDesc }`, in name order.
+    /// `{ name: *u8, name_len, offset, desc: *TypeDesc }`, in name order. A
+    /// wrapped attribute, which the source can't name, has none.
     fn attributes(&mut self, heading: &hir::Heading) -> lir::DataId {
         let tuple = layout(&hir::Type::Tuple(heading.clone()));
         let entries = heading
             .attributes()
             .enumerate()
             .map(|(i, (name, ty))| {
+                let name = if hir::is_wrapped(name) { "" } else { name };
                 let name_bytes = self.constant(vec![lir::Field::Bytes(name.as_bytes().to_vec())]);
                 let desc = self.descriptor(ty);
                 lir::Field::Struct(vec![

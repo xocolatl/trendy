@@ -533,16 +533,21 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
     };
     // The contextual keywords: `type`, in `builtin type name;`, `key`,
     // `value` and `from`, in `tuple from r` and `value from r`, `any`, in
-    // `any type`, and `types`, before an operator's type parameters.
+    // `any type`, `types`, before an operator's type parameters, and `per`,
+    // which a space also comes before.
     let contextual_keyword = prev.kind() == Ident
         && prev.parent().is_some_and(|p| match p.kind() {
             BuiltinType => prev.text() == "type",
             SyntaxKind::Key
             | SyntaxKind::FromExpr
             | SyntaxKind::AnyType
-            | SyntaxKind::TypeParameters => true,
+            | SyntaxKind::TypeParameters
+            | SyntaxKind::Per => true,
             _ => false,
         });
+    let per = next
+        .parent()
+        .is_some_and(|p| p.kind() == SyntaxKind::Per && p.first_token().as_ref() == Some(next));
     // A dyadic operator token, such as the `-` in `a - b`, as opposed to the
     // prefix one in `-b`.
     let dyadic = |token: &SyntaxToken| {
@@ -568,7 +573,7 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
                 .is_some_and(|p| p.kind() == SyntaxKind::ProjectExpr)
         });
     match (prev.kind(), next.kind()) {
-        _ if key_start(next).is_some() => " ",
+        _ if key_start(next).is_some() || per => " ",
         // The variable an assignment assigns, as in `update r { … }`.
         _ if is_target(prev) => " ",
         _ if projection => "",
@@ -851,6 +856,11 @@ mod tests {
         assert_eq!(
             fmt("operator show{t:any tuple}types{}[];"),
             "operator show{t: any tuple}\n    types {}\n[];\n"
+        );
+        // `per`, between spaces.
+        assert_eq!(
+            fmt("operator f{r:any relation,of:tuple{a:T}per  r}types{T:any type}[];"),
+            "operator f{r: any relation, of: tuple { a: T } per r}\n    types { T: any type }\n[];\n"
         );
         // Without them, the body follows the signature.
         assert_eq!(

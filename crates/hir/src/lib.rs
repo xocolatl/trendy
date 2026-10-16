@@ -974,21 +974,39 @@ impl std::fmt::Display for Type {
     }
 }
 
-/// Source text for the heading: `{ a: integer, b: text }` or `{}`.
+/// Source text for the heading: `{ a: integer, b: text }` or `{}`. A
+/// wrapped attribute, which no source can name, is written `…`, last.
 impl std::fmt::Display for Heading {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.is_empty() {
             return f.write_str("{}");
         }
-        f.write_str("{ ")?;
-        for (i, (name, ty)) in self.attributes().enumerate() {
-            if i > 0 {
-                f.write_str(", ")?;
-            }
-            write!(f, "{name}: {ty}")?;
+        let mut written: Vec<String> = self
+            .attributes()
+            .filter(|(name, _)| !is_wrapped(name))
+            .map(|(name, ty)| format!("{name}: {ty}"))
+            .collect();
+        if self.attributes().any(|(name, _)| is_wrapped(name)) {
+            written.push("…".to_string());
         }
-        f.write_str(" }")
+        write!(f, "{{ {} }}", written.join(", "))
     }
+}
+
+/// The name of the attribute that the tuples of a relation, passed for an
+/// operator's parameter `param` that `per` parameters refer to, keep their
+/// own attributes in, wrapped, inside the operator. No source can write
+/// it, so it never clashes with the `per` parameters' attributes beside
+/// it, which the operator names.
+#[must_use]
+pub fn wrapped(param: &str) -> String {
+    format!("%{param}")
+}
+
+/// Whether `name` is a wrapped attribute's (see [`wrapped`]).
+#[must_use]
+pub fn is_wrapped(name: &str) -> bool {
+    name.starts_with('%')
 }
 
 /// A built-in scalar type.
@@ -1057,6 +1075,12 @@ impl Heading {
     /// The attributes, sorted by name.
     pub fn attributes(&self) -> impl Iterator<Item = (&str, &Type)> {
         self.0.iter().map(|(name, ty)| (name.as_str(), ty))
+    }
+
+    /// The attributes a source can name, sorted by name: all but a
+    /// wrapped one (see [`wrapped`]).
+    pub fn named(&self) -> impl Iterator<Item = (&str, &Type)> {
+        self.attributes().filter(|(name, _)| !is_wrapped(name))
     }
 
     #[must_use]

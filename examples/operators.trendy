@@ -4,7 +4,8 @@
    call is evaluated when compiling where it can be, and made when the
    program runs elsewhere. A parameter's type can be `any type`, and type
    parameters, declared with `types`, say that several types are one: each
-   call gives them its arguments' types. main prints each result. */
+   call gives them its arguments' types. A `per` parameter's argument is
+   evaluated for each tuple of a relation. main prints each result. */
 var vat := 16;
 var dishes := relation {
     { dish: "jollof rice", country: "Ghana", price: 1200 },
@@ -53,6 +54,15 @@ operator within{r: R, of: R}: boolean
     return r <= of;
 ];
 
+/* The values `of` takes for the tuples of `r`: `per r` evaluates its
+   argument for each of them, with their attributes in scope, as in
+   `where`. Inside, `of` is an attribute of `r`'s tuples. */
+operator values{r: any relation, of: T per r}: relation { v: T }
+    types { T: any type }
+[
+    return r{of} rename {of as v};
+];
+
 var special := "ramen";
 var previous := "none";
 
@@ -87,4 +97,6 @@ operator main{} [
     call show{label: "specials", value: both{a: special, b: previous}};
     call show{label: "affordable on the menu", value: within{r: affordable, of: dishes{dish}}};
     call show{label: "pairs", value: both{a: both{a: 1, b: 2}, b: both{a: 3, b: 4}}};
+    call show{label: "with VAT", value: values{r: dishes, of: taxed{price: price}}};
+    call show{label: "where from", value: values{r: dishes, of: dish || ", " || country}};
 ];

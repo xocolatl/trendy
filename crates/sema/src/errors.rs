@@ -436,7 +436,7 @@ fn rewrite_literal(ty: hir::Scalar, value: &hir::Value, written: &str) -> Option
 }
 
 /// Source text for `value`, if it can be written as a literal.
-fn source_text(value: &hir::Value) -> Option<String> {
+pub(crate) fn source_text(value: &hir::Value) -> Option<String> {
     Some(match value {
         hir::Value::Boolean(b) => b.to_string(),
         hir::Value::Integer(n) => n.to_string(),
@@ -776,6 +776,162 @@ pub(crate) fn growing_recursion(
     )
     .with_note("an operator is compiled once for each list of types its type parameters are given, and calls that lead back to it with a type built from its own would give it ever larger ones, which no program can hold")
     .with_help("pass the type parameters on as they are, or give the call specific types")
+}
+
+/// `per`, written `per`, in a heading other than an operator's parameters.
+pub(crate) fn per_outside_parameters(per: &trendy_syntax::ast::Per) -> Diagnostic {
+    Diagnostic::error(
+        Code::PerRelation,
+        "`per` is only for an operator's parameters",
+        per.span(),
+        "not after a parameter's type",
+    )
+    .with_note(PER_RULE)
+    .with_suggestion(
+        "remove it",
+        vec![Edit {
+            span: per.removal(),
+            replacement: String::new(),
+        }],
+    )
+}
+
+const PER_RULE: &str = "a parameter `p: type per r` takes an argument evaluated for each tuple of the argument for `r`, with that tuple's attributes in scope, as in `where`; inside the operator, `p` is an attribute of `r`'s tuples";
+
+/// Why `per` can't refer to the parameter it names.
+pub(crate) enum PerProblem {
+    /// It names the parameter it follows.
+    Itself,
+    /// It names no parameter; these are the operator's.
+    NotAParameter(Vec<String>),
+    /// It names a `per` parameter, which isn't a relation of its own.
+    Per,
+    /// It names a parameter of the type written here, not `any relation`.
+    NotAnyRelation(TypeExpr),
+}
+
+/// `per relation`, after the parameter `name`'s type, which can't refer
+/// to it, for `problem`.
+pub(crate) fn per_relation(name: &str, relation: &SyntaxToken, problem: PerProblem) -> Diagnostic {
+    let span = trendy_syntax::span(relation.text_range());
+    let target = relation.text();
+    let message = match &problem {
+        PerProblem::Itself => format!("`{name}` can't be evaluated per its own tuples"),
+        PerProblem::NotAParameter(_) => format!("`{target}` is not a parameter"),
+        PerProblem::Per => format!("`{target}` is evaluated per tuple itself, so it has none"),
+        PerProblem::NotAnyRelation(_) => {
+            format!("`per` refers to a parameter of type `any relation`, but `{target}` isn't one")
+        }
+    };
+    let d = Diagnostic::error(Code::PerRelation, message, span, "after `per`").with_note(PER_RULE);
+    match problem {
+        PerProblem::Itself | PerProblem::Per => {
+            d.with_help("name a parameter of type `any relation` after `per`")
+        }
+        PerProblem::NotAParameter(params) => {
+            let close = params
+                .iter()
+                .filter(|p| *p != name && edit_distance(p, target) <= 2)
+                .min_by_key(|p| edit_distance(p, target));
+            match close {
+                Some(close) => d.with_suggestion(
+                    format!("use `{close}`"),
+                    vec![Edit {
+                        span,
+                        replacement: close.clone(),
+                    }],
+                ),
+                None => d.with_help("name a parameter of type `any relation` after `per`"),
+            }
+        }
+        PerProblem::NotAnyRelation(written) => d
+            .with_secondary(written.span(), format!("`{target}` is declared with this type"))
+            .with_note("the operator sees the relation's tuples with the `per` parameters as attributes, and their own attributes wrapped, so that they stay distinct but can't clash, as only `any relation` can be")
+            .with_help(format!(
+                "declare `{target}: any relation`, or, for a relation of a known heading, compute from its attributes in the operator, with `where` or `extend`"
+            )),
+    }
+}
+
+/// The argument written `arg`, of type `actual`, for the parameter `name`,
+/// written as `origin` says, which `per` parameters refer to, which isn't
+/// a relation whose heading is known.
+pub(crate) fn per_relation_argument(
+    name: &str,
+    origin: &Origin,
+    actual: &hir::Type,
+    arg: &Expr,
+) -> Diagnostic {
+    let unknown = matches!(actual, hir::Type::Parameter(p) if p.any == hir::Any::Relation);
+    let message = if unknown {
+        format!(
+            "the attributes of `{actual}` aren't known here, so no `per` argument can be evaluated for its tuples"
+        )
+    } else {
+        format!("mismatched types: expected a relation, found `{actual}`")
+    };
+    let mut d = Diagnostic::error(Code::TypeMismatch, message, arg.span(), format!("this is `{actual}`"))
+        .with_note(format!(
+            "`{name}` takes a relation of any heading, whose tuples the `per` arguments are evaluated for"
+        ));
+    if let Some(span) = origin.span() {
+        d = d.with_secondary(span, origin.label());
+    }
+    d
+}
+
+/// The error for `value`, a `per` argument, if it is a text literal naming
+/// an attribute of the tuples of `heading`, where `expected` isn't text: as
+/// SQL's dynamic queries and data frames name columns, rather than the
+/// attribute itself.
+pub(crate) fn attribute_as_text(
+    value: &Expr,
+    heading: &hir::Heading,
+    expected: &crate::types::Expected,
+) -> Option<Diagnostic> {
+    let Expr::Literal(literal) = value else {
+        return None;
+    };
+    let Ok(trendy_syntax::ast::LiteralValue::Text(name)) = literal.value() else {
+        return None;
+    };
+    if expected.ty == hir::Type::Scalar(hir::Scalar::Text) || heading.get(&name).is_none() {
+        return None;
+    }
+    let mut d = Diagnostic::error(
+        Code::TypeMismatch,
+        format!("mismatched types: expected `{}`, found `text`", expected.ty),
+        value.span(),
+        format!("a text, not the attribute `{name}`"),
+    )
+    .with_note("a `per` argument is evaluated for each tuple, with its attributes in scope by name, as in `where`, so an attribute is named bare");
+    if let Some(span) = expected.origin.span() {
+        d = d.with_secondary(span, expected.origin.label());
+    }
+    Some(d.with_suggestion(
+        format!("name the attribute: `{name}`"),
+        vec![Edit {
+            span: value.span(),
+            replacement: name,
+        }],
+    ))
+}
+
+/// The `per` parameter `name`, of the relation `relation`, written at
+/// `span` as a value, outside that relation's tuples.
+pub(crate) fn per_as_value(name: &str, relation: &str, span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::PerAsValue,
+        format!("`{name}` is an attribute of `{relation}`'s tuples, not a value"),
+        span,
+        format!("not in `{relation}`'s tuples"),
+    )
+    .with_note(format!(
+        "`{name}` is a `per {relation}` parameter: its argument is evaluated for each tuple of `{relation}`, and inside the operator it is an attribute of `{relation}`'s tuples"
+    ))
+    .with_help(format!(
+        "name it where `{relation}`'s attributes are in scope: in `{relation} where …`, `{relation} extend {{ … }}`, `{relation}{{{name}}}`, or a `per {relation}` argument"
+    ))
 }
 
 /// `any`, written `written`, somewhere other than a parameter's type: in a
@@ -1359,12 +1515,19 @@ const JOIN_RULE: &str = "`join` matches the tuples of its operands on all the at
 
 const IMAGE_RULE: &str = "`!!r` is the image relation of the tuple at hand in `r`: the tuples of `r` that match it on their common attributes, by name, without those attributes";
 
+/// The attributes of `heading`, each in backticks, as a list writes them:
+/// a wrapped one, which no source can name, as `…`, last.
+fn named_attributes(heading: &hir::Heading) -> Vec<String> {
+    let mut names: Vec<String> = heading.named().map(|(a, _)| format!("`{a}`")).collect();
+    if heading.attributes().any(|(a, _)| hir::is_wrapped(a)) {
+        names.push("…".to_string());
+    }
+    names
+}
+
 /// The attributes of `heading`, for a label or note.
 fn listed(heading: &hir::Heading) -> String {
-    let names: Vec<String> = heading
-        .attributes()
-        .map(|(a, _)| format!("`{a}`"))
-        .collect();
+    let names = named_attributes(heading);
     if names.is_empty() {
         "no attributes".to_string()
     } else {
@@ -1423,8 +1586,8 @@ pub(crate) fn image_unrelated(
     // An attribute named a little differently on each side is likely the
     // one to match on.
     let close = heading
-        .attributes()
-        .flat_map(|(a, _)| at_hand.attributes().map(move |(b, _)| (a, b)))
+        .named()
+        .flat_map(|(a, _)| at_hand.named().map(move |(b, _)| (a, b)))
         .filter(|(a, b)| edit_distance(a, b) <= 2)
         .min_by_key(|(a, b)| (edit_distance(a, b), *a, *b));
     match close {
@@ -1661,8 +1824,8 @@ pub(crate) fn common_attributes(
                 .zip(groups)
                 .filter(move |(_, h)| *h != g)
                 .flat_map(move |(Operand { heading: b, .. }, _)| {
-                    a.attributes()
-                        .flat_map(move |(x, _)| b.attributes().map(move |(y, _)| (x, y)))
+                    a.named()
+                        .flat_map(move |(x, _)| b.named().map(move |(y, _)| (x, y)))
                 })
         })
         .filter(|(a, b)| {
@@ -1988,7 +2151,7 @@ pub(crate) fn replaced_unknown(
         unreachable!("only tuples and relations have attributes to replace");
     };
     let rename = heading
-        .attributes()
+        .named()
         .map(|(a, _)| a)
         .filter(|a| edit_distance(a, name) <= 2)
         .min_by_key(|a| edit_distance(a, name));
@@ -2073,10 +2236,7 @@ pub(crate) fn attributes_note(whose: &str, ty: &hir::Type) -> String {
     let (hir::Type::Tuple(heading) | hir::Type::Relation(heading)) = ty else {
         unreachable!("only tuples and relations have attributes");
     };
-    let attributes: Vec<String> = heading
-        .attributes()
-        .map(|(a, _)| format!("`{a}`"))
-        .collect();
+    let attributes = named_attributes(heading);
     if attributes.is_empty() {
         format!("the {whose}, of type `{ty}`, has no attributes")
     } else {

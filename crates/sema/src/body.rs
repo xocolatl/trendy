@@ -212,6 +212,10 @@ impl Names for BodyNames<'_, '_> {
                 None => Lookup::Reported,
             };
         }
+        if let Some(relation) = self.cx.operators.get(self.within).per_relation(name) {
+            errors.push(errors::per_as_value(name, relation, span));
+            return Lookup::Reported;
+        }
         if self.cx.namespaces.operator(name).is_some() {
             errors.push(errors::operator_as_value(name, span));
             return Lookup::Reported;

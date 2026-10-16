@@ -233,6 +233,10 @@ pub enum SyntaxKind {
     Heading,
     /// `name: type`, in a heading.
     AttributeType,
+    /// `per r`, after a parameter's type: its argument is evaluated for each
+    /// tuple of the argument for `r`. `per` is a contextual keyword, an
+    /// identifier elsewhere.
+    Per,
     /// `tuple { name: type, … }`
     TupleType,
     /// `relation { name: type, … }`
@@ -251,7 +255,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 123] = [
+    pub const ALL: [SyntaxKind; 124] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -368,6 +372,7 @@ impl SyntaxKind {
         SyntaxKind::Key,
         SyntaxKind::Heading,
         SyntaxKind::AttributeType,
+        SyntaxKind::Per,
         SyntaxKind::TupleType,
         SyntaxKind::RelationType,
         SyntaxKind::TupleLiteral,
@@ -771,6 +776,7 @@ impl SyntaxKind {
             SyntaxKind::TypeAnnotation => "type annotation",
             SyntaxKind::TypeRef | SyntaxKind::AnyType => "type",
             SyntaxKind::TypeParameters => "type parameters",
+            SyntaxKind::Per => "`per`",
             SyntaxKind::Initializer => "initial value",
             SyntaxKind::Key => "key",
             SyntaxKind::Heading => "heading",

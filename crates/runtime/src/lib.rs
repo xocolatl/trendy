@@ -1311,7 +1311,10 @@ pub struct TypeDesc {
 /// An attribute of a heading.
 #[repr(C)]
 pub struct Attr {
-    /// The UTF-8 bytes of the attribute's name.
+    /// The UTF-8 bytes of the attribute's name, which is empty for one the
+    /// source can't name: one that a relation passed for an operator's
+    /// parameter that `per` parameters refer to wraps its tuples' own
+    /// attributes in, written `…`.
     pub name: *const u8,
     pub name_len: usize,
     /// Where the attribute is within a tuple, in bytes.
@@ -1338,7 +1341,9 @@ pub unsafe extern "C" fn trendy_rt_debug_value(value: *const u8, desc: *const Ty
 
 /// Write `value` as trendy source: tuples and relations with their
 /// attributes in name order, and relations with their heading first, so the
-/// output is a literal for the same value.
+/// output is a literal for the same value. An attribute without a name,
+/// which the source can't name, is written `…`, last, without its type or
+/// value, as the compiler writes its type.
 ///
 /// # Safety
 ///
@@ -1421,24 +1426,9 @@ unsafe fn write_type(out: &mut impl Write, desc: &TypeDesc) -> fmt::Result {
 ///
 /// `desc` must be a valid tuple or relation descriptor.
 unsafe fn write_heading(out: &mut impl Write, desc: &TypeDesc) -> fmt::Result {
-    // SAFETY: guaranteed by the caller.
-    let attributes = unsafe { attributes(desc) };
-    if attributes.is_empty() {
-        return out.write_str("{}");
-    }
-    out.write_str("{ ")?;
-    for (i, attr) in attributes.iter().enumerate() {
-        if i > 0 {
-            out.write_str(", ")?;
-        }
-        // SAFETY: a valid descriptor's attributes are valid.
-        unsafe {
-            out.write_str(name(attr))?;
-            out.write_str(": ")?;
-            write_type(out, &*attr.desc)?;
-        }
-    }
-    out.write_str(" }")
+    // SAFETY: guaranteed by the caller; a valid descriptor's attributes
+    // are valid.
+    unsafe { write_attributes(out, desc, |out, attr| write_type(out, &*attr.desc)) }
 }
 
 /// `{ name: value, … }` or `{}`, for the tuple at `value`.
@@ -1447,22 +1437,52 @@ unsafe fn write_heading(out: &mut impl Write, desc: &TypeDesc) -> fmt::Result {
 ///
 /// As for [`write_value`], with `desc` describing the tuple's heading.
 unsafe fn write_tuple(out: &mut impl Write, value: *const u8, desc: &TypeDesc) -> fmt::Result {
+    // SAFETY: guaranteed by the caller; the attribute's offset and
+    // descriptor are its layout.
+    unsafe {
+        write_attributes(out, desc, |out, attr| {
+            write_value(out, value.add(attr.offset), &*attr.desc)
+        })
+    }
+}
+
+/// `{ name: …, … }` or `{}`, for the attributes of `desc`, each written
+/// after its name by `each`, and those without a name as one `…`, last.
+///
+/// # Safety
+///
+/// `desc` must be a valid tuple or relation descriptor, and `each` safe
+/// to call with each of its attributes.
+unsafe fn write_attributes<W: Write>(
+    out: &mut W,
+    desc: &TypeDesc,
+    each: impl Fn(&mut W, &Attr) -> fmt::Result,
+) -> fmt::Result {
     // SAFETY: guaranteed by the caller.
     let attributes = unsafe { attributes(desc) };
     if attributes.is_empty() {
         return out.write_str("{}");
     }
     out.write_str("{ ")?;
-    for (i, attr) in attributes.iter().enumerate() {
-        if i > 0 {
+    let mut first = true;
+    let mut unnamed = false;
+    for attr in attributes {
+        // SAFETY: a valid descriptor's attributes are valid.
+        let name = unsafe { name(attr) };
+        if name.is_empty() {
+            unnamed = true;
+            continue;
+        }
+        if !first {
             out.write_str(", ")?;
         }
-        // SAFETY: the attribute's offset and descriptor are its layout.
-        unsafe {
-            out.write_str(name(attr))?;
-            out.write_str(": ")?;
-            write_value(out, value.add(attr.offset), &*attr.desc)?;
-        }
+        first = false;
+        out.write_str(name)?;
+        out.write_str(": ")?;
+        each(out, attr)?;
+    }
+    if unnamed {
+        out.write_str(if first { "…" } else { ", …" })?;
     }
     out.write_str(" }")
 }
@@ -1794,6 +1814,35 @@ mod tests {
             print(empty.as_ptr().cast(), &relation),
             "relation { a: boolean, b: integer } {}"
         );
+    }
+
+    #[test]
+    fn unnamed_attributes_are_written_last_as_an_ellipsis() {
+        let integer = scalar(KIND_INTEGER, 8);
+        // tuple { "": integer, b: integer }, as a `per` relation's tuples
+        // wrap their own attributes in one the source can't name.
+        let heading = [attr("", 0, &integer), attr("b", 8, &integer)];
+        let relation = TypeDesc {
+            kind: KIND_RELATION,
+            size: 16,
+            attributes: heading.as_ptr(),
+            count: 2,
+            element_size: 16,
+        };
+        let tuples: [i64; 4] = [1, 7, 2, 7];
+        let value: [usize; 2] = [tuples.as_ptr() as usize, 2];
+        assert_eq!(
+            print(value.as_ptr().cast(), &relation),
+            "relation { b: integer, … } { { b: 7, … }, { b: 7, … } }"
+        );
+        let alone = TypeDesc {
+            kind: KIND_TUPLE,
+            size: 8,
+            attributes: heading.as_ptr(),
+            count: 1,
+            element_size: 0,
+        };
+        assert_eq!(print(tuples.as_ptr().cast(), &alone), "tuple { … }");
     }
 
     #[test]

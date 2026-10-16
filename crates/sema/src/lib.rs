@@ -4284,4 +4284,100 @@ mod tests {
         )
         .unwrap();
     }
+
+    const PLOTS: &str = "var plots := relation {\n    { plot: 1, region: \"Nyeri\", of: 1200 },\n    { plot: 2, region: \"Nyeri\", of: 950 },\n    { plot: 3, region: \"Mendoza\", of: 220 },\n}\nkey { plot };\n";
+
+    const VALUES: &str = "operator values{r: any relation, of: T per r}: relation { v: T } types { T: any type } [ return r{of} rename {of as v}; ];\n";
+
+    #[test]
+    fn per_arguments_are_evaluated_for_each_tuple() {
+        let vars = variables(&format!(
+            "{PLOTS}{VALUES}var regions := values{{r: plots, of: region}};\nvar wet := values{{r: plots, of: of > 1000}};"
+        ));
+        // The operator's `of` is its own, not the plots' attribute of that
+        // name, which is in scope in the argument.
+        assert_eq!(
+            text(&vars[1].init),
+            r#"relation { v: text } { { v: "Mendoza" }, { v: "Nyeri" } }"#
+        );
+        assert_eq!(
+            text(&vars[2].init),
+            "relation { v: boolean } { { v: false }, { v: true } }"
+        );
+        // The operator sees the relation's tuples with `of`, and their own
+        // attributes wrapped, which it can't name.
+        let program = analyze_str(&format!("{VALUES}{MAIN}")).unwrap();
+        let values = program
+            .operators
+            .iter()
+            .find(|o| o.name == "values")
+            .unwrap();
+        assert_eq!(values.params.len(), 1);
+        assert_eq!(values.params["r"].to_string(), "relation { of: T, … }");
+        // A relation passed on keeps its tuples, and its `per` attribute.
+        let again = "operator again{r: any relation, of: T per r}: relation { v: T } types { T: any type } [ return values{r: r, of: of}; ];\n";
+        let vars = variables(&format!(
+            "{PLOTS}{VALUES}{again}var regions := again{{r: plots, of: region}};"
+        ));
+        assert_eq!(
+            text(&vars[1].init),
+            r#"relation { v: text } { { v: "Mendoza" }, { v: "Nyeri" } }"#
+        );
+    }
+
+    /// `value` as source text.
+    fn text(value: &hir::Value) -> String {
+        errors::source_text(value).unwrap()
+    }
+
+    #[test]
+    fn per_errors() {
+        // `per` names an `any relation` parameter of the operator.
+        let source = "operator f{r: any relation, a: integer per s, b: integer per b, c: integer per a, d: relation {}, e: integer per d} [];\noperator main{} [];";
+        assert_eq!(
+            codes(source),
+            [
+                Code::PerRelation,
+                Code::PerRelation,
+                Code::PerRelation,
+                Code::PerRelation
+            ]
+        );
+        assert_eq!(
+            codes("var t: tuple { a: integer per a };\noperator main{} [];"),
+            [Code::PerRelation]
+        );
+        // Inside the operator, a `per` parameter is an attribute.
+        let source = "operator f{r: any relation, of: integer per r}: integer [ return of; ];\noperator main{} [];";
+        assert_eq!(codes(source), [Code::PerAsValue]);
+        // Attributes are named bare.
+        let source = format!(
+            "{PLOTS}operator total{{r: any relation, of: integer per r}} [];\noperator main{{}} [ call total{{r: plots, of: \"of\"}}; ];"
+        );
+        assert_eq!(codes(&source), [Code::TypeMismatch]);
+        assert!(fix(&source).contains("call total{r: plots, of: of};"));
+        // The relation is a relation.
+        let source = format!("{VALUES}var v := values{{r: 1, of: 2}};{MAIN}");
+        assert_eq!(
+            messages(&source),
+            ["mismatched types: expected a relation, found `integer`"]
+        );
+        // A `per` argument is checked for each tuple.
+        let source =
+            format!("{PLOTS}{VALUES}var v := values{{r: plots, of: 1 div (of - 950)}};{MAIN}");
+        assert_eq!(codes(&source), [Code::DivisionByZero]);
+        // The wrapped attribute is never suggested.
+        let source = format!(
+            "{VALUES}operator f{{r: any relation, of: integer per r}}: relation {{ of: integer }} [ return r{{x}}; ];{MAIN}"
+        );
+        let errors = errors(&source);
+        assert_eq!(errors[0].code, Code::UnknownAttribute);
+        assert!(
+            errors[0]
+                .suggestions
+                .iter()
+                .all(|s| !s.message.contains('%')),
+            "{errors:#?}"
+        );
+    }
 }

@@ -298,7 +298,7 @@ impl<'a> Parser<'a> {
             &[],
             |p| {
                 p.items(Self::at_attribute, |p| {
-                    p.attribute(SyntaxKind::AttributeType, Self::type_expr);
+                    p.attribute(SyntaxKind::AttributeType, Self::attribute_type);
                 });
             },
         );
@@ -383,7 +383,7 @@ impl<'a> Parser<'a> {
             &[(SyntaxKind::LParen, SyntaxKind::RParen)],
             |p| {
                 p.items(Self::at_attribute, |p| {
-                    p.attribute(SyntaxKind::AttributeType, Self::type_expr);
+                    p.attribute(SyntaxKind::AttributeType, Self::attribute_type);
                 });
             },
         );
@@ -1095,6 +1095,38 @@ impl<'a> Parser<'a> {
         self.builder.finish_node();
         self.errors.push(errors::keyword_as_name(found));
         true
+    }
+
+    /// An attribute's type, in a heading, and for a parameter, `per r`
+    /// after it, if it is evaluated for each tuple of the relation `r`.
+    /// `per` is a contextual keyword, recognized there before a name, in
+    /// any case, which is reported; sema reports it anywhere but in an
+    /// operator's parameters.
+    fn attribute_type(&mut self) {
+        self.type_expr();
+        // Looking ahead leaves the whitespace after the type to whatever
+        // comes next, unless it is `per`.
+        let Some(found) = self
+            .lookahead()
+            .filter(|f| f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case("per"))
+        else {
+            return;
+        };
+        if self
+            .lookahead_nth(1)
+            .is_none_or(|f| f.kind != SyntaxKind::Ident)
+        {
+            return;
+        }
+        self.start_node(SyntaxKind::Per);
+        self.bump();
+        if found.text != "per" {
+            self.errors.push(errors::miscased_keyword(found, "per"));
+        }
+        self.start_node(SyntaxKind::NameRef);
+        self.bump();
+        self.builder.finish_node();
+        self.builder.finish_node();
     }
 
     /// A named type, a tuple type, a relation type, or `any type`,
@@ -2089,7 +2121,7 @@ impl<'a> Parser<'a> {
             &[],
             |p| {
                 p.items(Self::at_attribute, |p| {
-                    p.attribute(SyntaxKind::AttributeType, Self::type_expr);
+                    p.attribute(SyntaxKind::AttributeType, Self::attribute_type);
                 });
             },
         );
@@ -3131,6 +3163,25 @@ SourceFile
         let errors =
             parse_str("operator max<T extends Comparable<T>>{a: T}: T [ return a; ];").errors;
         assert_eq!(errors.len(), 1, "{errors:#?}");
+    }
+
+    #[test]
+    fn per_parameters() {
+        let parse = parse_str("operator f{r: any relation, of: T per r} types { T: any type } [];");
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let op = parse.tree.operators().next().unwrap();
+        let params: Vec<_> = op.params().unwrap().attributes().collect();
+        assert!(params[0].per().is_none());
+        let per = params[1].per().unwrap();
+        assert_eq!(per.relation().unwrap().ident().unwrap().text(), "r");
+        assert!(matches!(params[1].type_expr(), Some(TypeExpr::Named(_))));
+        // `per` is a word elsewhere.
+        let parse = parse_str("var per := 1; var r := relation { { per: per } };");
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        assert_eq!(
+            fix("operator f{r: any relation, of: integer PER r} [];"),
+            "operator f{r: any relation, of: integer per r} [];"
+        );
     }
 
     #[test]

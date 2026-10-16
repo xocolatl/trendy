@@ -60,7 +60,8 @@ fn classify(token: &SyntaxToken) -> Option<Highlight> {
         (kind, _, _) if kind.is_operator() => (Class::ExprOperator, false),
         (kind, _, _) if kind.is_keyword() => (Class::Keyword, false),
         // The contextual keywords: `type`, in `builtin type name;`, `key`,
-        // `value` and `from`, `any` and `type`, in `any type`, and `types`.
+        // `value` and `from`, `any` and `type`, in `any type`, `types`, and
+        // `per`.
         (SyntaxKind::Ident, Some(SyntaxKind::BuiltinType), _) if token.text() == "type" => {
             (Class::Keyword, false)
         }
@@ -70,7 +71,8 @@ fn classify(token: &SyntaxToken) -> Option<Highlight> {
                 SyntaxKind::Key
                 | SyntaxKind::FromExpr
                 | SyntaxKind::AnyType
-                | SyntaxKind::TypeParameters,
+                | SyntaxKind::TypeParameters
+                | SyntaxKind::Per,
             ),
             _,
         ) => (Class::Keyword, false),
@@ -533,6 +535,24 @@ mod tests {
                 ("T", Class::Type, true),
                 ("any", Class::Keyword, false),
                 ("type", Class::Keyword, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn per() {
+        assert_eq!(
+            highlight("operator f{r: any relation, of: integer per r} [];"),
+            [
+                ("operator", Class::Keyword, false),
+                ("f", Class::Operator, true),
+                ("r", Class::Parameter, true),
+                ("any", Class::Keyword, false),
+                ("relation", Class::Keyword, false),
+                ("of", Class::Parameter, true),
+                ("integer", Class::Type, false),
+                ("per", Class::Keyword, false),
+                ("r", Class::Parameter, false),
             ]
         );
     }

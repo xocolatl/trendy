@@ -299,6 +299,81 @@ operator same<T>{a: T, b: T}: boolean [
 operator main{} [];
 ```
 
+### `per` parameters
+
+A parameter written `name: type per r` takes an argument evaluated for
+each tuple of the argument for `r`, another parameter, of type
+`any relation`, with that tuple's attributes in scope by name, as in
+`where`. Inside the operator, it is an attribute of `r`'s tuples.
+
+```trendy
+var plots := relation {
+    { plot: 1, region: "Nyeri", rainfall: 1200 },
+    { plot: 2, region: "Nyeri", rainfall: 950 },
+    { plot: 3, region: "Mendoza", rainfall: 220 },
+}
+key { plot };
+
+operator values{r: any relation, of: T per r}: relation { v: T }
+    types { T: any type }
+[
+    return r{of} rename {of as v};
+];
+
+operator holds_for_any{r: any relation, holds: boolean per r}: boolean [
+    return (r where holds){} = relation { tuple {} };
+];
+
+operator main{} [
+    call debug_value{v: values{r: plots, of: region}};
+    call debug_value{v: values{r: plots where region = "Nyeri", of: rainfall div 100}};
+    call debug_value{v: holds_for_any{r: plots, holds: rainfall < 500}};
+];
+```
+
+This is what aggregate operators need: Tutorial D's take a relation and
+one of its attributes, as in `SUM (SP, QTY)`, and a `per` argument
+generalizes that attribute to any expression of each tuple's attributes.
+
+- **The argument names the tuple's attributes bare,** as `where` and
+  `extend` do: `of: region`. `of: "region"` is a text, and where a text
+  isn't expected, it is reported with the attribute as the fix (A0004).
+  Other names refer to what they do around the call.
+- **Inside the operator, a `per` parameter is an attribute** of its
+  relation's tuples, not a value: it is named where they are in scope, as
+  in `r{of}`, `r where of > 0`, `r extend { … }`, or the argument for
+  another operator's `per` parameter, `values{r: r, of: of}`. Anywhere else
+  it is an error (A0043).
+- **The operator gets all of the relation,** never a projection: each
+  tuple keeps its own attributes, beside the `per` ones, wrapped in one
+  more that the operator can't name. So tuples with equal values of `of`
+  stay distinct, and nothing the operator names can clash with their
+  attributes: a relation with an attribute called `of` can be given for
+  `r`. A type writes the wrapped attribute `…`: inside `values`, `r` is a
+  `relation { of: T, … }`. So does `debug_value`, which writes what the
+  operator sees: `{ of: "Nyeri", … }` for each tuple.
+- **`per` names a parameter of type `any relation`** (A0042), not the one
+  it follows, nor another `per` parameter, and only an operator's
+  parameters have it. A relation of a known heading needs none: the
+  operator can name its attributes itself.
+- **Each tuple's value is computed with the call,** when compiling where
+  it can be; a failure for one is an error at the argument, with a note
+  on the tuple.
+
+```trendy,error
+operator values{r: any relation, of: T per r}: relation { v: T }
+    types { T: any type }
+[
+    return r{of} rename {of as v};
+];
+
+operator first{r: any relation, of: integer per r}: integer [
+    return of;
+];
+
+operator main{} [];
+```
+
 ### Built-in operators
 
 The compiler implements some operators itself. They are declared in the
@@ -320,6 +395,9 @@ source. Tuples and relations are written with their attributes in name
 order, relations with their heading first and their tuples in a fixed order,
 so the output reads back as the same value. For example:
 `relation { a: boolean, b: integer } { { a: false, b: 25 }, { a: true, b: 3 } }`.
+The one exception is the attribute a `per` parameter's relation wraps its
+tuples' own attributes in, which no source can name: it is written `…`,
+as in `relation { of: text, … } { { of: "Nyeri", … } }`.
 
 ## Variables
 
@@ -2003,6 +2081,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `(params) { body }` | `{params} [body]` |
 | `fn same<T>(a: T, b: T)`, `same<T>(a: T, b: T)` | `operator same{a: T, b: T} types { T: any type }` |
 | `any`, `anyelement` | `any type` |
+| `SUM (SP, QTY)`, an attribute for each tuple | `of: integer per r`, an expression of each tuple's attributes |
 | `bool` | `boolean` |
 | `True`, `TRUE`, `1` for true | `true` |
 | `int`, `long`, `i64` | `integer` |

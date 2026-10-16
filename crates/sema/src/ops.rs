@@ -391,7 +391,7 @@ pub(crate) fn listed(
             // The closest attribute not already named is probably the one
             // meant.
             let rename = heading
-                .attributes()
+                .named()
                 .map(|(a, _)| a)
                 .filter(|a| !named.iter().any(|(_, n, _)| n == a))
                 .filter(|a| edit_distance(a, text) <= 2)
@@ -472,7 +472,7 @@ pub(crate) fn renamed(
                 ));
             } else {
                 let rename = heading
-                    .attributes()
+                    .named()
                     .map(|(a, _)| a)
                     .filter(|a| !entries.iter().any(|(_, (b, _), _)| b == a))
                     .filter(|a| edit_distance(a, before) <= 2)
@@ -1712,7 +1712,7 @@ pub(crate) fn extracted(
     };
     if heading.get(&name).is_none() {
         let rename = heading
-            .attributes()
+            .named()
             .map(|(a, _)| a)
             .filter(|a| edit_distance(a, &name) <= 2)
             .min_by_key(|a| edit_distance(a, &name));

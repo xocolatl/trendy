@@ -62,7 +62,8 @@ impl Prelude {
                 .ok_or_else(|| format!("`{name}` has no parameters"))?;
             let mut types = Vec::new();
             let params = operators::params(&heading, &mut types, &no_names, &mut Vec::new())
-                .ok_or_else(|| format!("`{name}` has an invalid parameter type"))?;
+                .ok_or_else(|| format!("`{name}` has an invalid parameter type"))?
+                .seen;
             if types != builtin.types() || params != builtin.params() {
                 return Err(format!(
                     "`{name}` is declared with parameters that differ from its implementation"

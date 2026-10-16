@@ -15,7 +15,7 @@ use trendy_hir as hir;
 use trendy_syntax::SyntaxToken;
 use trendy_syntax::ast::{self, AstNode, AttributeValue, Expr};
 
-use crate::operators::{Operators, Signature};
+use crate::operators::{Operators, Param, Signature};
 use crate::ops::{self, Operator, Resolved};
 use crate::types::{self, Expected};
 use crate::{Namespaces, errors};
@@ -357,8 +357,8 @@ impl<'a> Checker<'a> {
             .named(ident.text())
             .expect("a projected call is of an operator");
         let names: Vec<ast::Name> = list.names().collect();
-        let only_param = (signature.params.len() == 1 && names.len() == 1)
-            .then(|| signature.params.keys().next())
+        let only_param = (signature.written.len() == 1 && names.len() == 1)
+            .then(|| signature.written.keys().next())
             .flatten();
         for name in &names {
             errors.push(errors::positional_argument(
@@ -432,7 +432,7 @@ impl<'a> Checker<'a> {
         signature: &Signature,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Call> {
-        let params = &signature.params;
+        let params = &signature.written;
         let signature_text = signature.text();
         let mut ok = true;
 
@@ -466,8 +466,8 @@ impl<'a> Checker<'a> {
             .map(String::as_str)
             .filter(|p| !named.iter().any(|(_, n, _)| n == p))
             .collect();
-        // The arguments to check, with their parameters' types.
-        let mut pending: Vec<(Expr, &str, &hir::Type)> = Vec::new();
+        // The arguments to check, with their parameters.
+        let mut pending: Vec<(Expr, &str, &Param)> = Vec::new();
         for (arg, name, span) in &named {
             if let Some(&(_, _, first)) = named.iter().find(|(_, n, _)| n == name)
                 && first != *span
@@ -525,59 +525,258 @@ impl<'a> Checker<'a> {
         })
     }
 
-    /// The arguments `pending`, each written with the name and type of
-    /// its parameter, of the operator `signature`, each checked once the
-    /// type parameters in its parameter's type are given types, and those
-    /// types; or `None` after reporting why some argument is invalid.
+    /// The arguments `pending`, each written with the name of its
+    /// parameter, of the operator `signature`, each checked once the type
+    /// parameters in its parameter's type are given types, and a `per`
+    /// one once its relation is, for each of its tuples; and those types.
+    /// The arguments are those the operator sees: each relation's carries
+    /// its `per` arguments' values as attributes of its tuples. `None`
+    /// after reporting why some argument is invalid.
     fn typed_arguments<'s>(
         &mut self,
-        mut pending: Vec<(Expr, &str, &hir::Type)>,
+        mut pending: Vec<(Expr, &str, &'s Param)>,
         signature: &'s Signature,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<(TypeArguments<'s>, BTreeMap<String, hir::Expr>)> {
         let mut types = TypeArguments::new(signature);
         let mut args = BTreeMap::new();
+        // Each relation's argument, as written, and its tuples' heading,
+        // and each `per` argument, as written and checked.
+        let mut relations: BTreeMap<String, (Expr, hir::Heading)> = BTreeMap::new();
+        let mut per: BTreeMap<String, (Expr, hir::Expr)> = BTreeMap::new();
         let mut ok = true;
-        while !pending.is_empty() {
-            // Those whose parameters' types are known: checked against them.
-            let (ready, rest): (Vec<_>, Vec<_>) =
-                pending.into_iter().partition(|(_, _, ty)| types.know(ty));
-            pending = rest;
-            let checked_now = if ready.is_empty() {
-                // An unknown type parameter expects nothing of its
-                // argument, which is checked on its own and gives it a
-                // type, so those come first; others then expect nothing
-                // either.
-                let (bare, structured): (Vec<_>, Vec<_>) = std::mem::take(&mut pending)
-                    .into_iter()
-                    .partition(|(_, _, ty)| matches!(ty, hir::Type::Parameter(_)));
-                if bare.is_empty() {
-                    structured
-                } else {
-                    pending = structured;
-                    bare
+        loop {
+            let stage = |param: &Param| match param {
+                Param::Per { relation, .. } if !relations.contains_key(relation) => Stage::Waiting,
+                Param::Value(ty) | Param::Per { ty, .. } if types.know(ty) => Stage::Ready,
+                Param::Value(hir::Type::Parameter(_))
+                | Param::Per {
+                    ty: hir::Type::Parameter(_),
+                    ..
                 }
-            } else {
-                ready
+                | Param::Relation(_) => Stage::Bare,
+                Param::Value(_) | Param::Per { .. } => Stage::Structured,
             };
-            for (value, name, ty) in checked_now {
-                let expected = types.know(ty).then(|| types.expected(name, ty));
-                let Some(checked) = self.expr(&value, expected.as_ref(), errors) else {
-                    ok = false;
-                    continue;
-                };
-                if expected.is_none() {
-                    let actual = self.ty(&checked);
-                    if let Err(error) = types.bind(name, ty, &actual, &value) {
-                        errors.push(error.diagnostic(&actual, Self::constant(&checked), &value));
-                        ok = false;
+            // Those whose parameters' types are known are checked against
+            // them. An unknown type parameter expects nothing of its
+            // argument, which is checked on its own and gives it a type, so
+            // those come next; others then expect nothing either.
+            let Some(now) = [Stage::Ready, Stage::Bare, Stage::Structured]
+                .into_iter()
+                .find(|now| pending.iter().any(|(_, _, p)| stage(p) == *now))
+            else {
+                // Only `per` arguments of relations with errors are left.
+                break;
+            };
+            let (checked_now, rest): (Vec<_>, Vec<_>) =
+                pending.into_iter().partition(|(_, _, p)| stage(p) == now);
+            pending = rest;
+            for (value, name, param) in checked_now {
+                let checked = match param {
+                    Param::Value(ty) => {
+                        self.typed_argument(&value, name, ty, None, &mut types, errors)
+                    }
+                    Param::Per { relation, ty } => {
+                        let heading = relations[relation].1.clone();
+                        let checked = self.typed_argument(
+                            &value,
+                            name,
+                            ty,
+                            Some(heading),
+                            &mut types,
+                            errors,
+                        );
+                        ok &= checked.is_some();
+                        if let Some(checked) = checked {
+                            per.insert(name.to_string(), (value, checked));
+                        }
                         continue;
                     }
+                    Param::Relation(wrapped) => {
+                        let checked = self.expr(&value, None, errors);
+                        let Some((checked, heading)) = checked.and_then(|checked| {
+                            self.relation_argument(checked, &value, name, signature, errors)
+                        }) else {
+                            ok = false;
+                            continue;
+                        };
+                        types.give(wrapped, hir::Type::Tuple(heading.clone()), &value);
+                        relations.insert(name.to_string(), (value, heading));
+                        Some(checked)
+                    }
+                };
+                match checked {
+                    Some(checked) => {
+                        args.insert(name.to_string(), checked);
+                    }
+                    None => ok = false,
                 }
-                args.insert(name.to_string(), checked);
             }
         }
+        ok &= pending.is_empty();
+        ok &= self.relations_seen(relations, &per, &mut args, signature, errors);
         ok.then_some((types, args))
+    }
+
+    /// `checked`, the argument written `value` for the parameter `name` of
+    /// the operator `signature`, which `per` parameters refer to, with the
+    /// heading of its tuples, or `None` after reporting why it isn't a
+    /// relation of a heading known here.
+    fn relation_argument(
+        &self,
+        checked: hir::Expr,
+        value: &Expr,
+        name: &str,
+        signature: &Signature,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<(hir::Expr, hir::Heading)> {
+        let actual = self.ty(&checked);
+        let hir::Type::Relation(heading) = actual else {
+            errors.push(errors::per_relation_argument(
+                name,
+                &signature.param_origin(name),
+                &actual,
+                value,
+            ));
+            return None;
+        };
+        Some((checked, heading))
+    }
+
+    /// Replace each relation's argument in `args`, written and of tuples
+    /// of the heading in `relations`, with the relation the operator
+    /// `signature` sees, carrying the values of its `per` arguments, in
+    /// `per`, as attributes of its tuples (see [`Checker::relation_seen`]).
+    /// Whether every one has its `per` arguments, and none fails for a
+    /// tuple, after reporting it.
+    fn relations_seen(
+        &self,
+        relations: BTreeMap<String, (Expr, hir::Heading)>,
+        per: &BTreeMap<String, (Expr, hir::Expr)>,
+        args: &mut BTreeMap<String, hir::Expr>,
+        signature: &Signature,
+        errors: &mut Vec<Diagnostic>,
+    ) -> bool {
+        let mut ok = true;
+        for (relation, (written, heading)) in relations {
+            let Some(arg) = args.remove(&relation) else {
+                continue;
+            };
+            let names: Vec<&str> = signature
+                .written
+                .iter()
+                .filter(|(_, p)| matches!(p, Param::Per { relation: r, .. } if *r == relation))
+                .map(|(name, _)| name.as_str())
+                .collect();
+            if !names.iter().all(|n| per.contains_key(*n)) {
+                ok = false;
+                continue;
+            }
+            match self.relation_seen(&relation, arg, &heading, &names, per) {
+                Ok(seen) => {
+                    args.insert(relation, seen);
+                }
+                Err(failure) => {
+                    let at = failure
+                        .attribute
+                        .as_ref()
+                        .and_then(|a| per.get(a))
+                        .map_or(&written, |(written, _)| written);
+                    errors.push(errors::extension_failure(&failure, at));
+                    ok = false;
+                }
+            }
+        }
+        ok
+    }
+
+    /// The argument `value` for the parameter `name`, of type `ty`, as the
+    /// type parameters in it are known so far in `types`, or, if they
+    /// aren't, giving them their types, or `None` after reporting why it
+    /// is invalid. A `per` argument has the attributes of the tuples of its
+    /// relation's argument, `heading`, in scope.
+    fn typed_argument(
+        &mut self,
+        value: &Expr,
+        name: &str,
+        ty: &hir::Type,
+        heading: Option<hir::Heading>,
+        types: &mut TypeArguments,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let expected = types.know(ty).then(|| types.expected(name, ty));
+        let checked = match heading {
+            Some(heading) => {
+                if let Some(expected) = &expected
+                    && let Some(error) = errors::attribute_as_text(value, &heading, expected)
+                {
+                    errors.push(error);
+                    return None;
+                }
+                let mut names = TupleNames {
+                    outer: &mut *self.names,
+                    heading,
+                };
+                Checker::new(&mut names).expr(value, expected.as_ref(), errors)?
+            }
+            None => self.expr(value, expected.as_ref(), errors)?,
+        };
+        if expected.is_none() {
+            let actual = self.ty(&checked);
+            if let Err(error) = types.bind(name, ty, &actual, value) {
+                errors.push(error.diagnostic(&actual, Self::constant(&checked), value));
+                return None;
+            }
+        }
+        Some(checked)
+    }
+
+    /// The relation the operator sees for the parameter `relation`, whose
+    /// argument is `arg`, of tuples of `heading`: its tuples with the
+    /// values of the `per` parameters `names`, from `per`, as attributes,
+    /// beside their own attributes, wrapped in one more. Those named as a
+    /// `per` parameter are replaced, and the wrapped one may have the name
+    /// of one the argument's tuples wrap themselves.
+    ///
+    /// # Errors
+    ///
+    /// Returns why a `per` argument fails for a tuple of a constant `arg`.
+    fn relation_seen(
+        &self,
+        relation: &str,
+        arg: hir::Expr,
+        heading: &hir::Heading,
+        names: &[&str],
+        per: &BTreeMap<String, (Expr, hir::Expr)>,
+    ) -> Result<hir::Expr, ops::TupleFailure> {
+        let wrapped = hir::wrapped(relation);
+        let at_hand = hir::Expr::Current(0, heading.clone());
+        let own: BTreeMap<String, hir::Expr> = heading
+            .attributes()
+            .map(|(name, _)| {
+                let value = ops::extract(at_hand.clone(), name.to_string());
+                (name.to_string(), value)
+            })
+            .collect();
+        let mut computed = BTreeMap::from([(wrapped.clone(), hir::Type::Tuple(heading.clone()))]);
+        let mut attributes = BTreeMap::from([(wrapped.clone(), ops::tuple(own))]);
+        for name in names {
+            let checked = per[*name].1.clone();
+            computed.insert((*name).to_string(), self.ty(&checked));
+            attributes.insert((*name).to_string(), checked);
+        }
+        let dropped = heading
+            .attributes()
+            .map(|(name, _)| name.to_string())
+            .filter(|name| !computed.contains_key(name))
+            .collect();
+        let extended = ops::extend(
+            arg,
+            hir::Heading::new(computed),
+            attributes,
+            self.bindings(),
+        )?;
+        Ok(ops::remove(extended, dropped))
     }
 
     /// `postfix`, an `extend` or a `replace`, as `assigning` says, written
@@ -1288,8 +1487,11 @@ fn missing_arguments(missing: &[&str], signature: &Signature, written: Written) 
     let missing: Vec<_> = missing
         .iter()
         .map(|&name| {
-            let ty = &signature.params[name];
-            (name, ty.parameters().next().is_none().then_some(ty))
+            let ty = match &signature.written[name] {
+                Param::Value(ty) | Param::Per { ty, .. } => Some(ty),
+                Param::Relation(_) => None,
+            };
+            (name, ty.filter(|ty| ty.parameters().next().is_none()))
         })
         .collect();
     let (span, insertion) = match written {
@@ -1396,6 +1598,12 @@ impl<'s> TypeArguments<'s> {
         })
     }
 
+    /// Give the type parameter `parameter` the type `ty`, from the argument
+    /// written `arg`: a relation's own tuple type, which it has none yet.
+    fn give(&mut self, parameter: &hir::TypeParameter, ty: hir::Type, arg: &Expr) {
+        self.types[parameter.index] = Some((ty, arg.clone()));
+    }
+
     /// The type each type parameter is given, by index, once every
     /// argument is given and valid: each has one, since each is in a
     /// parameter's type.
@@ -1460,6 +1668,20 @@ impl Unbound<'_> {
     }
 }
 
+/// When an argument is checked, as [`TypeArguments`] says.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    /// Against its parameter's type, which is known.
+    Ready,
+    /// On its own, its parameter's type an unknown type parameter, which
+    /// expects nothing of it, or a relation for `per` parameters.
+    Bare,
+    /// On its own, its parameter's type made of unknown type parameters.
+    Structured,
+    /// Once its relation is checked, for a `per` argument.
+    Waiting,
+}
+
 /// Why an `extend`'s, a `replace`'s or an `update`'s list leaves its
 /// operand as it is.
 #[derive(Clone, Copy)]
@@ -1505,7 +1727,7 @@ impl Names for TupleNames<'_> {
 
     fn candidates(&self) -> Vec<String> {
         self.heading
-            .attributes()
+            .named()
             .map(|(name, _)| name.to_string())
             .chain(self.outer.candidates())
             .collect()

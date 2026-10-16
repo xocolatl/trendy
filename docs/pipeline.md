@@ -209,7 +209,11 @@ angle brackets after the operator's name, `f<T, U>{…}`, are consumed up to
 the matching `>` into an error node and reported once the result type is
 parsed, with a fix that moves them to `types` there, if they are only
 names (P0027); `relation any` and `tuple any` are parsed as what they
-mean and fixed the same way.
+mean and fixed the same way. In a heading, `per r` can follow an
+attribute's type (`Per`), `per` a contextual keyword recognized there
+before a name; looking for it leaves the whitespace after the type to what
+follows. The parser accepts it in every heading, and sema in an operator's
+parameters only.
 
 `!!r` (`ImageExpr`), Tutorial D's image relation, takes a single operand:
 a name, a literal or a parenthesized expression. The lexer makes `!!` one
@@ -326,6 +330,13 @@ Comparing values of a type parameter is `Compared::Parameter`, which
 instantiating makes what the type's values are compared as. `debug_value`
 is a built-in with one, `{v: any type}`.
 
+A `per` parameter is no parameter in HIR: an operator sees the relation it
+refers to with the `per` parameters' values as attributes of its tuples,
+beside an attribute that wraps the tuples' own (`hir::wrapped`), whose name
+no source can write, so that they stay distinct and never clash with what
+the operator names. Its type is a type parameter, `any tuple`. A type's
+source text writes it `…`.
+
 An update operator's body is a list of statements
 (`OperatorKind::Update`): calls, and assignments (`Statement::Assign`),
 each a list of variables, all different, and their new values, made at once
@@ -430,6 +441,27 @@ operator's body is checked once, with its type parameters as types of
 their own, so only what applies to every type they can be applies to
 their values: `=` and `<>`, and for `any relation`, the comparisons of
 sets (`ops::Operator::resolve`); errors about them say so.
+
+A `per` parameter (`operators::Param::Per`) refers to another parameter, of
+type `any relation`, and not to itself or another `per` one (A0042), and
+only an operator's parameters have one. The operator sees that relation
+(`Param::Relation`) as a relation of the `per` parameters, as attributes,
+and its tuples' own attributes, wrapped as `any tuple`, which the
+`any relation` becomes (`Signature::params`, while `Signature::written`
+keeps the parameters as calls give them). So in its body a `per`
+parameter is an attribute, in scope where the relation's tuples are, and
+a value nowhere (A0043). A call checks a `per` argument once its
+relation's argument is checked, against its parameter's type as for any
+other argument, with the attributes of that relation's tuples in scope
+(`check::TupleNames`), as in `where`; a text literal naming one of them,
+where a text isn't expected, is reported with the attribute as the fix.
+The relation's argument the operator gets is then built as Tutorial D's
+WRAP and EXTEND would (`Checker::relation_seen`): an `Extend` that adds
+the wrapped attribute, a tuple of the tuple at hand's attributes, and each
+`per` argument's value, replacing an attribute of the same name, then a
+`Remove` of the rest, so that folding and lowering need nothing new, and a
+`per` argument that fails for a constant relation's tuple is an error at
+that argument.
 
 A call of an update operator that gives one of the callee's type
 parameters a type built from the caller's own, such as `tuple { x: T }`,
@@ -702,7 +734,8 @@ lowered code calls it, starting with the entry point, and an operator with
 type parameters becomes one for each list of types it is called with,
 instantiated with them (`hir::Operator::instantiated`), so the functions
 see only specific types; their names are the operator's with its
-parameters' types, `pair{a: integer, b: integer}`. An update operator's
+parameters' types in full, wrapped attributes too, as
+`pair{a: integer, b: integer}`. An update operator's
 function is numbered before its body is lowered, so a call of itself finds
 it. A read-only operator's computes its value, then stores it where the
 caller says (`Base::Result`). Sema evaluates every other call, so an
@@ -837,7 +870,9 @@ function then takes a pointer to where its result goes, a stack slot of
 the caller's. Runtime functions taking
 `any` get the value's address and a type descriptor: read-only data laid out
 as `trendy_runtime::TypeDesc` and `Attr`, built by lowering from ordinary
-fields. Its sizes and offsets are LIR's `Size` and `Offset` fields, which
+fields. A wrapped attribute's `Attr` has no name, which `debug_value` writes
+as `…`, as a type's source text does, so the runtime needn't know how such
+attributes are named. Its sizes and offsets are LIR's `Size` and `Offset` fields, which
 codegen resolves with the same layout engine as everything else, so the
 runtime never repeats the layout rules.
 
