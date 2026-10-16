@@ -238,6 +238,10 @@ impl<'a> Checker<'a> {
                 let operand_expr = extract.operand()?;
                 let operand = self.expr(&operand_expr, None, errors)?;
                 let ty = self.ty(&operand);
+                if let Some(error) = self.method_call(extract, &operand_expr, &ty) {
+                    errors.push(error);
+                    return None;
+                }
                 let name = ops::extracted(extract, &operand_expr, &ty, errors)?;
                 self.matched(expected, ops::extract(operand, name), expr, errors)
             }
@@ -260,6 +264,46 @@ impl<'a> Checker<'a> {
             Expr::Tuple(tuple) => types::tuple_selector(tuple, expected, self, errors),
             Expr::Relation(relation) => types::relation_selector(relation, expected, self, errors),
         }
+    }
+
+    /// The error for `extract`, `x.f`, of `operand`, of type `ty`, which has
+    /// no attribute `f`, if an operator is named `f`: a method call, as
+    /// object-oriented languages write one, which trendy writes `f{p: x}`.
+    fn method_call(
+        &self,
+        extract: &ast::ExtractExpr,
+        operand: &Expr,
+        ty: &hir::Type,
+    ) -> Option<Diagnostic> {
+        let ident = extract.attribute()?.ident()?;
+        let name = ident.text();
+        if let hir::Type::Tuple(heading) = ty
+            && heading.get(name).is_some()
+        {
+            return None;
+        }
+        let signature = self.names.operators().named(name)?;
+        // `x.f{}`: the empty braces that follow are the call's arguments.
+        let braces = extract
+            .syntax()
+            .parent()
+            .and_then(ast::ProjectExpr::cast)
+            .filter(|p| p.names().is_some_and(|n| n.names().next().is_none()));
+        let whole = braces
+            .as_ref()
+            .map_or_else(|| extract.span(), AstNode::span);
+        let only = (signature.written.len() == 1)
+            .then(|| signature.written.keys().next())
+            .flatten()
+            .filter(|_| braces.is_some());
+        Some(errors::method_call(
+            name,
+            trendy_syntax::span(ident.text_range()),
+            operand,
+            whole,
+            only.map(String::as_str),
+            &signature.text(),
+        ))
     }
 
     /// A projection, `remove` or `rename`, written `expr`.
@@ -408,7 +452,8 @@ impl<'a> Checker<'a> {
             return None;
         }
         let call = self.arguments(written, &signature, errors)?;
-        if !self.names.checked(signature.id, span, errors) {
+        // A built-in's implementation is the compiler's, never checked.
+        if signature.builtin.is_none() && !self.names.checked(signature.id, span, errors) {
             return None;
         }
         let result = match ops::call(call, self.names.bindings()) {

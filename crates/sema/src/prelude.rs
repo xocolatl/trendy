@@ -12,6 +12,7 @@ use trendy_syntax::SyntaxToken;
 use trendy_syntax::ast::AstNode;
 
 use crate::operators::{self, Param, Signature};
+use crate::types::{self, TypeParameters};
 use crate::{Namespaces, Source};
 
 /// An internal error, `message`, at the name `ident` in the prelude.
@@ -19,9 +20,13 @@ fn internal(message: String, ident: &SyntaxToken) -> Diagnostic {
     Diagnostic::error(
         Code::Internal,
         message,
-        trendy_syntax::span(ident.text_range()),
+        ident_span(ident),
         "not as the compiler implements it",
     )
+}
+
+fn ident_span(ident: &SyntaxToken) -> Span {
+    trendy_syntax::span(ident.text_range())
 }
 
 /// `params`, as calls give arguments for parameters of those types.
@@ -61,6 +66,32 @@ fn builtin_operator(
     let heading = decl.params()?;
     let mut types = Vec::new();
     let params = operators::params(&heading, &mut types, &Namespaces::default(), errors)?.seen;
+    let written = decl.result();
+    let result = match &written {
+        Some(written) => {
+            let mut parameters = TypeParameters::Fixed(&types);
+            Some(types::resolve(
+                written,
+                &mut parameters,
+                &Namespaces::default(),
+                errors,
+            )?)
+        }
+        None => None,
+    };
+    if result != builtin.result() {
+        let span = written.map_or_else(|| ident_span(&ident), |w| w.span());
+        let expected = builtin
+            .result()
+            .map_or_else(|| "none".to_string(), |r| format!("`{r}`"));
+        errors.push(Diagnostic::error(
+            Code::Internal,
+            format!("`{name}` is declared with a result type that differs from its implementation's, {expected}"),
+            span,
+            "not the result type the compiler implements",
+        ));
+        return None;
+    }
     if types != builtin.types() || params != builtin.params() {
         errors.push(Diagnostic::error(
             Code::Internal,

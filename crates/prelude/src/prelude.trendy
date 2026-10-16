@@ -5,6 +5,8 @@ builtin type text;
 
 builtin operator debug_value{v: any type};
 
+builtin operator count{r: any relation}: integer;
+
 /* Whether `of` is true for some tuple of `r`: whether `r where of` has
    one, which its projection on no attributes, `relation { {} }` or
    `relation {}`, says. Of no tuples, it is false. */

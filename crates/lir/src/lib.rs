@@ -343,7 +343,7 @@ pub enum Operand {
     Boolean,
     Numeric(Numeric),
     /// [`Layout::Usize`], such as a loop's index, compared unsigned. Only
-    /// comparisons take it.
+    /// comparisons and [`UnaryOp::Integer`] take it.
     Usize,
 }
 
@@ -355,6 +355,9 @@ pub enum UnaryOp {
     /// Fails with [`Failure::IntegerOverflow`] for the smallest integer;
     /// never fails for an approximate number.
     Negate(Numeric),
+    /// The integer a [`Layout::Usize`] is, such as a relation's count,
+    /// which is never more than the largest integer.
+    Integer,
 }
 
 impl UnaryOp {
@@ -363,6 +366,7 @@ impl UnaryOp {
         match self {
             UnaryOp::Not => Operand::Boolean,
             UnaryOp::Negate(numeric) => Operand::Numeric(numeric),
+            UnaryOp::Integer => Operand::Usize,
         }
     }
 }

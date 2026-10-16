@@ -1992,6 +1992,40 @@ pub(crate) fn empty_operands(join: crate::ops::JoinKind, nary: &NaryExpr) -> Dia
 }
 
 /// `.name`, at `at`, applied to a value of type `ty`, which isn't a tuple.
+/// The operator `name`, at `at`, called as a method of `operand`, as
+/// `operand.name{}`, written over `whole`. With a lone parameter `only`,
+/// the fix makes `operand` its argument.
+pub(crate) fn method_call(
+    name: &str,
+    at: Span,
+    operand: &Expr,
+    whole: Span,
+    only: Option<&str>,
+    params: &str,
+) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::WrongOperandType,
+        format!("`{name}` is an operator, not an attribute, so it isn't called as a method"),
+        at,
+        "called as a method",
+    )
+    .with_note(format!(
+        "an operator is called by its name, with each argument named in braces after it, and none before it as a method's receiver: the parameters are {params}"
+    ));
+    match only {
+        Some(param) => d.with_suggestion(
+            format!("call `{name}` with it as `{param}`"),
+            vec![Edit {
+                span: whole,
+                replacement: format!("{name}{{{param}: {}}}", operand.syntax().text()),
+            }],
+        ),
+        None => d.with_help(format!(
+            "call it as `{name}{{…}}`, with this value as one of its arguments"
+        )),
+    }
+}
+
 pub(crate) fn not_extractable(name: &str, at: Span, ty: &hir::Type, operand: &Expr) -> Diagnostic {
     let d = Diagnostic::error(
         Code::WrongOperandType,

@@ -315,6 +315,7 @@ impl Names for Globals<'_> {
 
     fn bindings(&self) -> ops::Bindings<'_> {
         ops::Bindings {
+            operators: self.operators,
             values: &self.values,
             variables: Some(&self.known),
         }
@@ -394,6 +395,7 @@ impl Names for ReadOnlyNames<'_, '_> {
 
     fn bindings(&self) -> ops::Bindings<'_> {
         ops::Bindings {
+            operators: self.globals.operators,
             values: &self.globals.values,
             variables: None,
         }

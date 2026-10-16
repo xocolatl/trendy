@@ -23,7 +23,7 @@ pub(crate) const KEY_FORM: &str = "a key lists attributes after a relation varia
 pub(crate) const RENAME_FORM: &str =
     "`rename` takes renamings, each `old as new`: `r rename {postal_code as code}`";
 pub(crate) const TUPLE_VALUE_FORM: &str = "a tuple value has the form `tuple { name: value, … }`";
-pub(crate) const BUILTIN_FORM: &str = "built-ins are declared as `builtin type name;` or `builtin operator name{params};`, only in the prelude";
+pub(crate) const BUILTIN_FORM: &str = "built-ins are declared as `builtin type name;`, `builtin operator name{params};` or `builtin operator name{params}: type;`, only in the prelude";
 pub(crate) const ASSIGNMENT_FORM: &str = "an assignment statement is `name := value;`, or a shorthand for one: `insert r s;`, `d_insert r s;`, `delete r where p;`, `i_delete r s;` or `update r { a := x } where p;`";
 pub(crate) const ASSIGN_BLOCK_FORM: &str =
     "an `assign` block makes assignments all at once: `assign { x := y; y := x; };`";

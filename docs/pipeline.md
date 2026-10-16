@@ -17,7 +17,11 @@ program. Drivers parse it next to the program. Sema checks every
 declaration against what the compiler implements (`hir::Builtin`, and the
 scalar types), then checks the prelude's own operators, with only the
 built-ins in scope, once, as a program's are (`sema::Source::Prelude`), and
-gives every program them as checked HIR. A wrong prelude is an internal
+gives every program them as checked HIR. A built-in with a result type is
+read-only, and its call is a value, which sema evaluates when compiling
+where its arguments are known (`hir::Builtin::evaluate`), and lowering
+computes inline otherwise: `count` is the count every relation keeps
+after its tuples. A wrong prelude is an internal
 compiler error, and the tests keep it valid: a declaration that doesn't
 match the compiler is reported at it (X0000), and an error in an operator
 the prelude defines as it would be in a program. The language server
@@ -702,9 +706,9 @@ with a rename that fixes both.
 
 **Provides:** the low-level IR. A function is a control-flow graph of basic
 blocks: each block is a list of instructions (`Copy`, `Call`,
-`CallRuntime`, the boolean and integer `Unary` and `Binary`, and `Element`
-and `Increment` for loops) ending in a terminator: `Return`, `Jump` or
-`Branch`. Instructions refer to memory through places: a data object, a
+`CallRuntime`, the boolean and integer `Unary` and `Binary`, `Unary`'s
+conversion of a count to an integer, and `Element` and `Increment` for
+loops) ending in a terminator: `Return`, `Jump` or `Branch`. Instructions refer to memory through places: a data object, a
 stack slot, the parameter struct, or what the address in a slot points to
 (`Base::Indirect`, such as the tuple a loop is at), plus a path through
 nested structs. Every value's shape is a `Layout`. There is no nesting and

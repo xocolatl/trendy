@@ -28,6 +28,7 @@ impl Context<'_> {
     /// they change when the program runs.
     pub(crate) fn bindings(&self) -> ops::Bindings<'_> {
         ops::Bindings {
+            operators: self.operators,
             values: self.values,
             variables: None,
         }

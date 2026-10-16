@@ -461,7 +461,8 @@ impl<'a> FunctionBuilder<'a> {
                     result: None,
                 });
             }
-            hir::OperatorKind::ReadOnly { .. } => {
+            hir::OperatorKind::ReadOnly { .. }
+            | hir::OperatorKind::Builtin(hir::Builtin::Count) => {
                 unreachable!("`call` invokes only update operators")
             }
         }
@@ -494,6 +495,9 @@ impl<'a> FunctionBuilder<'a> {
     /// stack slot. What the operator makes is the statement's.
     fn read_only_call(&mut self, call: &hir::Call, cx: &mut Lowering) -> lir::Place {
         let callee = self.program.operator(call.operator);
+        if let hir::OperatorKind::Builtin(builtin) = callee.kind {
+            return self.builtin_value(builtin, call, cx);
+        }
         let (function, makes) = function(
             self.program,
             self.variable_data,
@@ -510,6 +514,31 @@ impl<'a> FunctionBuilder<'a> {
             result: Some(dst.clone()),
         });
         dst
+    }
+
+    /// The value of `call`, of the read-only built-in `builtin`, computed
+    /// into a new stack slot.
+    fn builtin_value(
+        &mut self,
+        builtin: hir::Builtin,
+        call: &hir::Call,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        match builtin {
+            // The relation's count, which it keeps after its tuples.
+            hir::Builtin::Count => {
+                let mut count = self.place(&call.args["r"], cx);
+                count.path.push(1);
+                let dst = self.slot(lir::Layout::I64);
+                self.insts.push(lir::Inst::Unary {
+                    dst: dst.clone(),
+                    op: lir::UnaryOp::Integer,
+                    src: count,
+                });
+                dst
+            }
+            hir::Builtin::DebugValue => unreachable!("`debug_value` is an update operator"),
+        }
     }
 
     /// Assignments made at once, each to a different variable. Each value
@@ -2385,6 +2414,47 @@ mod tests {
         assert_eq!(
             called,
             [lir::FunctionId(1), lir::FunctionId(1), lir::FunctionId(2)]
+        );
+    }
+
+    #[test]
+    fn count_is_the_relations_count_as_an_integer() {
+        // `debug_value{v: count{r: r}}`, of a relation variable.
+        let count = hir::Operator {
+            name: "count".to_string(),
+            types: hir::Builtin::Count.types(),
+            params: hir::Builtin::Count.params(),
+            kind: hir::OperatorKind::Builtin(hir::Builtin::Count),
+        };
+        let tuple = |n| hir::TupleValue::new([("a".to_string(), hir::Value::Integer(n))].into());
+        let r = hir::Value::Relation(hir::RelationValue {
+            heading: hir::Heading::new([("a".to_string(), integer())].into()),
+            tuples: [tuple(1), tuple(2)].into(),
+        });
+        let counted = hir::Expr::Call(hir::Call {
+            operator: hir::OperatorId(1),
+            types: vec![r.ty()],
+            args: [("r".to_string(), hir::Expr::Variable(hir::VariableId(0)))].into(),
+        });
+        let lowered = lower(&program(
+            vec![
+                debug_value(),
+                count,
+                user("main", &[], vec![call(0, vec![("v", counted)])]),
+            ],
+            vec![variable("r", r)],
+        ));
+        assert_eq!(lowered.functions.len(), 1, "a built-in has no function");
+        assert_eq!(
+            lowered.functions[0].blocks[0].insts[0],
+            lir::Inst::Unary {
+                dst: lir::Place::whole(lir::Base::Slot(lir::SlotId(0))),
+                op: lir::UnaryOp::Integer,
+                src: lir::Place {
+                    base: lir::Base::Data(lir::DataId(1)),
+                    path: vec![0, 1],
+                },
+            }
         );
     }
 

@@ -1473,7 +1473,7 @@ mod tests {
 
     #[test]
     fn names() {
-        let source = "var count := 1;\noperator main{} [\n    call debug_value{v: cout};\n    call debug_valu{v: 1};\n    call debug_value{v: main};\n    call count{};\n];";
+        let source = "var tally := 1;\noperator main{} [\n    call debug_value{v: taly};\n    call debug_valu{v: 1};\n    call debug_value{v: main};\n    call tally{};\n];";
         assert_eq!(
             codes(source),
             [
@@ -1483,7 +1483,7 @@ mod tests {
                 Code::NotAnOperator
             ]
         );
-        assert!(fix(source).contains("call debug_value{v: count};\n    call debug_value{v: 1};"));
+        assert!(fix(source).contains("call debug_value{v: tally};\n    call debug_value{v: 1};"));
     }
 
     #[test]
@@ -4465,5 +4465,42 @@ mod tests {
         let taken = self::errors("operator some{} [];\noperator main{} [];");
         assert_eq!(taken[0].code, Code::DuplicateName);
         assert!(taken[0].notes[0].contains("declared in the prelude"));
+    }
+
+    #[test]
+    fn count_is_a_read_only_built_in() {
+        let vars = variables(&format!(
+            "{PLOTS}var n := count{{r: plots}};\nvar none := count{{r: plots where false}};"
+        ));
+        assert_eq!(vars[1].init, hir::Value::Integer(3));
+        assert_eq!(vars[2].init, hir::Value::Integer(0));
+        // Made when running where the relation is known only then.
+        let body = main_body(&format!(
+            "{PLOTS}operator main{{}} [ call debug_value{{v: count{{r: plots}}}}; ];"
+        ));
+        let hir::Expr::Call(call) = argument(&body[0]) else {
+            panic!("a call");
+        };
+        assert_eq!(call.args.len(), 1);
+        // `call` would lose its value.
+        assert_eq!(
+            codes(&format!(
+                "{PLOTS}operator main{{}} [ call count{{r: plots}}; ];"
+            )),
+            [Code::CallOfReadOnly]
+        );
+        // Other languages' spellings are fixed: a positional argument, and
+        // a method call. `count(plots)`'s parentheses are the parser's.
+        for written in ["count{plots}", "plots.count{}"] {
+            let source = format!("{PLOTS}var n := {written};{MAIN}");
+            assert!(
+                fix(&source).contains("var n := count{r: plots};"),
+                "{written}: {}",
+                fix(&source)
+            );
+        }
+        // An attribute named as an operator is still an attribute.
+        analyze_str("var t := tuple { count: 1 };\nvar c := t.count;\noperator main{} [];")
+            .unwrap();
     }
 }

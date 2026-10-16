@@ -184,6 +184,16 @@ impl BuiltinOperator {
         self.0.children().find_map(Heading::cast)
     }
 
+    /// The result type, from `: type`: a read-only built-in's.
+    #[must_use]
+    pub fn result(&self) -> Option<TypeExpr> {
+        self.0
+            .children()
+            .find(|n| n.kind() == SyntaxKind::TypeAnnotation)?
+            .children()
+            .find_map(TypeExpr::cast)
+    }
+
     /// The `builtin` keyword.
     #[must_use]
     pub fn keyword(&self) -> Option<SyntaxToken> {

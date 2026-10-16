@@ -121,6 +121,8 @@ fn operators() {
             r#""where from""#,
             r#"relation { v: text } { { v: "jollof rice, Ghana" }, { v: "pozole, Mexico" }, { v: "ramen, Japan" } }"#,
             // Only pozole, at 937, is under 1000.
+            r#""how many under 1000""#,
+            "1",
             r#""some under 1000""#,
             "true",
             r#""every under 1000""#,

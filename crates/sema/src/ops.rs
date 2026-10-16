@@ -9,6 +9,7 @@ use trendy_syntax::ast::{self, AstNode, Expr, Literal, LiteralError};
 use trendy_syntax::{SyntaxKind, SyntaxToken, literal};
 
 use crate::errors;
+use crate::operators::Operators;
 use crate::types::{Expected, Origin};
 
 /// What an operator token denotes, before its operand type is known. Sema
@@ -1527,6 +1528,9 @@ fn extended(
 /// besides its arguments for its parameters.
 #[derive(Clone, Copy)]
 pub(crate) struct Bindings<'a> {
+    /// Every operator, by id, for the built-ins among them, which the
+    /// compiler evaluates.
+    pub(crate) operators: &'a Operators,
     /// The read-only operators' checked values. A call is checked after its
     /// callee, so every operator a call's evaluation reaches is here.
     pub(crate) values: &'a HashMap<hir::OperatorId, hir::Expr>,
@@ -1576,6 +1580,12 @@ pub(crate) fn call(call: hir::Call, bindings: Bindings) -> Result<hir::Expr, Fai
     let Some(known) = known else {
         return Ok(hir::Expr::Call(call));
     };
+    if let Some(builtin) = bindings.operators.get(call.operator).builtin {
+        let value = builtin
+            .evaluate(&known)
+            .expect("only read-only operators are called in expressions");
+        return Ok(hir::Expr::Constant(value));
+    }
     // The callee's value for the types its type parameters are given.
     let value = &bindings.values[&call.operator];
     let value = if call.types.is_empty() {

@@ -114,7 +114,7 @@ impl Signature {
         written: BTreeMap<String, Param>,
     ) -> Self {
         let (builtin, result) = match &op.kind {
-            hir::OperatorKind::Builtin(builtin) => (Some(*builtin), None),
+            hir::OperatorKind::Builtin(builtin) => (Some(*builtin), builtin.result()),
             hir::OperatorKind::ReadOnly { result, .. } => (None, Some(result.clone())),
             hir::OperatorKind::Update { .. } => (None, None),
         };

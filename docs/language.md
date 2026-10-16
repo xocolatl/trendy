@@ -396,6 +396,8 @@ builtin type text;
 
 builtin operator debug_value{v: any type};
 
+builtin operator count{r: any relation}: integer;
+
 /* Whether `of` is true for some tuple of `r`: whether `r where of` has
    one, which its projection on no attributes, `relation { {} }` or
    `relation {}`, says. Of no tuples, it is false. */
@@ -418,6 +420,27 @@ so the output reads back as the same value. For example:
 The one exception is the attribute a `per` parameter's relation wraps its
 tuples' own attributes in, which no source can name: it is written `…`,
 as in `relation { of: text, … } { { of: "Nyeri", … } }`.
+
+**`count{r: any relation}: integer`** is the number of tuples of `r`,
+Tutorial D's `COUNT` and SQL's `COUNT(*)`. With an image relation, it
+counts each tuple's matches, keeping the groups with none, which SQL's
+`GROUP BY` leaves out: below, Hokkaido has no plots.
+
+```trendy
+var plots := relation {
+    { plot: 1, region: "Nyeri" },
+    { plot: 2, region: "Nyeri" },
+    { plot: 3, region: "Mendoza" },
+}
+key { plot };
+
+var regions := relation { { region: "Nyeri" }, { region: "Mendoza" }, { region: "Hokkaido" } };
+var counted := regions extend { plots := count{r: !!plots} };
+
+operator main{} [
+    call debug_value{v: counted};
+];
+```
 
 **`some{r: any relation, of: boolean per r}`** and
 **`every{r: any relation, of: boolean per r}`** are aggregates, SQL's
@@ -810,7 +833,7 @@ operator main{} [
 ```trendy,error
 var visits := 0;
 
-operator count{visits: integer} [
+operator record{visits: integer} [
     visits := visits + 1;
 ];
 
@@ -2124,6 +2147,8 @@ line after a comment on its own line, such as a file's header, is kept.
 | `fn same<T>(a: T, b: T)`, `same<T>(a: T, b: T)` | `operator same{a: T, b: T} types { T: any type }` |
 | `any`, `anyelement` | `any type` |
 | `SUM (SP, QTY)`, an attribute for each tuple | `of: integer per r`, an expression of each tuple's attributes |
+| `COUNT(*)`, `COUNT (R)`, `len(r)`, `r.count()` | `count{r: r}` |
+| `GROUP BY a` with `COUNT(*)` | `groups extend { n := count{r: !!r} }`, which keeps the empty groups |
 | `bool` | `boolean` |
 | `True`, `TRUE`, `1` for true | `true` |
 | `int`, `long`, `i64` | `integer` |

@@ -201,9 +201,9 @@ impl<'a> Parser<'a> {
         self.builder.finish_node();
     }
 
-    /// `builtin type name;` or `builtin operator name{params};`: a
-    /// declaration of something the compiler implements. Only the prelude
-    /// has these.
+    /// `builtin type name;` or `builtin operator name{params};`, with a
+    /// result type for a read-only one: a declaration of something the
+    /// compiler implements. Only the prelude has these.
     fn builtin(&mut self) {
         self.form = errors::BUILTIN_FORM;
         let is_type = self
@@ -229,6 +229,7 @@ impl<'a> Parser<'a> {
             &[SyntaxKind::LBrace, SyntaxKind::LParen],
         );
         self.params();
+        self.result_type();
         self.expect(SyntaxKind::Semicolon);
         self.builder.finish_node();
     }

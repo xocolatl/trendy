@@ -249,7 +249,11 @@ impl Functions {
                 b.ins().call(callee, &args);
             }
             lir::Inst::Unary { dst, op, src } => {
-                let value = self.load(operand_type(op.operand()), src, frame, b)?;
+                let ty = match op.operand() {
+                    lir::Operand::Usize => self.config.pointer_type(),
+                    operand => operand_type(operand),
+                };
+                let value = self.load(ty, src, frame, b)?;
                 let result = match op {
                     lir::UnaryOp::Not => b.ins().bxor_imm_u(value, 1),
                     lir::UnaryOp::Negate(lir::Numeric::Integer) => {
@@ -260,6 +264,8 @@ impl Functions {
                     }
                     // Exact: only the sign changes.
                     lir::UnaryOp::Negate(lir::Numeric::Approximate) => b.ins().fneg(value),
+                    lir::UnaryOp::Integer if ty == types::I64 => value,
+                    lir::UnaryOp::Integer => b.ins().uextend(types::I64, value),
                 };
                 self.store(dst, result, frame, b)?;
             }
@@ -566,7 +572,7 @@ fn operand_type(operand: lir::Operand) -> cranelift_codegen::ir::Type {
         lir::Operand::Boolean => types::I8,
         lir::Operand::Numeric(lir::Numeric::Integer) => types::I64,
         lir::Operand::Numeric(lir::Numeric::Approximate) => types::F64,
-        lir::Operand::Usize => unreachable!("only comparisons take indexes, as pointer-sized"),
+        lir::Operand::Usize => unreachable!("a `Usize` is pointer-sized, as the target says"),
     }
 }
 

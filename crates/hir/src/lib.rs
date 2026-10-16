@@ -53,10 +53,14 @@ impl Program {
     /// If the operator isn't read-only, which sema rules out.
     #[must_use]
     pub fn result(&self, call: &Call) -> Type {
-        match &self.operator(call.operator).kind {
-            OperatorKind::ReadOnly { result, .. } => result.instantiated(&call.types),
-            _ => unreachable!("only read-only operators are called in expressions"),
-        }
+        let result = match &self.operator(call.operator).kind {
+            OperatorKind::ReadOnly { result, .. } => Some(result.clone()),
+            OperatorKind::Builtin(builtin) => builtin.result(),
+            OperatorKind::Update { .. } => None,
+        };
+        result
+            .expect("only read-only operators are called in expressions")
+            .instantiated(&call.types)
     }
 }
 
@@ -183,25 +187,30 @@ pub enum OperatorKind {
     /// `result`, computed from its parameters. It changes nothing, and
     /// calls no operator but read-only ones, none of which calls itself.
     ReadOnly { result: Type, value: Expr },
-    /// Declared in the prelude and implemented by the compiler.
+    /// Declared in the prelude and implemented by the compiler: an update
+    /// operator, or a read-only one, with a [`Builtin::result`].
     Builtin(Builtin),
 }
 
 /// The operators the compiler implements. Each is declared in the prelude,
-/// and sema checks the declaration against [`Builtin::params`].
+/// and sema checks the declaration against [`Builtin::params`] and
+/// [`Builtin::result`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Builtin {
     /// Print a value to stderr as one line of trendy source.
     DebugValue,
+    /// The number of tuples of a relation.
+    Count,
 }
 
 impl Builtin {
-    pub const ALL: [Builtin; 1] = [Builtin::DebugValue];
+    pub const ALL: [Builtin; 2] = [Builtin::DebugValue, Builtin::Count];
 
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
             Builtin::DebugValue => "debug_value",
+            Builtin::Count => "count",
         }
     }
 
@@ -213,21 +222,56 @@ impl Builtin {
     /// The type parameters the compiler's implementation takes.
     #[must_use]
     pub fn types(self) -> Vec<TypeParameter> {
-        match self {
-            Builtin::DebugValue => vec![TypeParameter {
-                index: 0,
-                name: None,
-                any: Any::Type,
-            }],
-        }
+        let any = match self {
+            Builtin::DebugValue => Any::Type,
+            Builtin::Count => Any::Relation,
+        };
+        vec![TypeParameter {
+            index: 0,
+            name: None,
+            any,
+        }]
     }
 
     /// The parameters the compiler's implementation takes.
     #[must_use]
     pub fn params(self) -> BTreeMap<String, Type> {
-        let types = self.types();
+        let parameter = || Type::Parameter(self.types()[0].clone());
         match self {
-            Builtin::DebugValue => [("v".to_string(), Type::Parameter(types[0].clone()))].into(),
+            Builtin::DebugValue => [("v".to_string(), parameter())].into(),
+            Builtin::Count => [("r".to_string(), parameter())].into(),
+        }
+    }
+
+    /// The result type of the compiler's implementation, for a read-only
+    /// built-in, whose call is a value.
+    #[must_use]
+    pub fn result(self) -> Option<Type> {
+        match self {
+            Builtin::DebugValue => None,
+            Builtin::Count => Some(Type::Scalar(Scalar::Integer)),
+        }
+    }
+
+    /// The value of a call of the read-only built-in with the arguments
+    /// `args`, known when compiling, by parameter name, or `None` for an
+    /// update one.
+    ///
+    /// # Panics
+    ///
+    /// If the arguments aren't those of [`Builtin::params`], which sema
+    /// rules out.
+    #[must_use]
+    pub fn evaluate(self, args: &BTreeMap<String, Value>) -> Option<Value> {
+        match self {
+            Builtin::DebugValue => None,
+            Builtin::Count => {
+                let Value::Relation(r) = &args["r"] else {
+                    panic!("counting the tuples of {:?}", args["r"]);
+                };
+                let count = i64::try_from(r.tuples.len()).expect("a relation's tuples fit");
+                Some(Value::Integer(count))
+            }
         }
     }
 }

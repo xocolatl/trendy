@@ -133,7 +133,8 @@ pub enum SyntaxKind {
     /// `operator name{params} [body];`, or, for a read-only operator,
     /// `operator name{params}: type [return value;];`.
     Operator,
-    /// `builtin operator name{params};`, only in the prelude.
+    /// `builtin operator name{params};`, or, for a read-only one,
+    /// `builtin operator name{params}: type;`, only in the prelude.
     BuiltinOperator,
     /// `builtin type name;`, only in the prelude. `type` is a contextual
     /// keyword, an identifier elsewhere.
