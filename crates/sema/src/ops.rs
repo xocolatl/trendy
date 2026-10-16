@@ -167,6 +167,14 @@ impl Operator {
                 | (Operator::Compare(comparison), hir::Type::Relation(_)) => Some(
                     Resolved::Binary(B::Compare(comparison, hir::Compared::of(ty))),
                 ),
+                (Operator::Compare(comparison), hir::Type::Parameter(p))
+                    if p.any == hir::Any::Relation =>
+                {
+                    Some(Resolved::Binary(B::Compare(
+                        comparison,
+                        hir::Compared::of(ty),
+                    )))
+                }
                 _ => None,
             };
         };
@@ -820,12 +828,14 @@ impl Joining {
                 hir::Type::Tuple(_) => {
                     errors.push(errors::tuple_among_relations(self.kind.keyword(), operand));
                 }
-                hir::Type::Scalar(_) => errors.push(errors::not_joinable(
-                    self.kind,
-                    self.operator(),
-                    ty,
-                    operand,
-                )),
+                hir::Type::Scalar(_) | hir::Type::Parameter(_) => {
+                    errors.push(errors::not_joinable(
+                        self.kind,
+                        self.operator(),
+                        ty,
+                        operand,
+                    ));
+                }
             }
         }
         (operands.len() == self.operands.len()).then_some(operands)
@@ -1366,12 +1376,14 @@ fn shifted(expr: hir::Expr, cutoff: usize) -> hir::Expr {
         | hir::Expr::Constant(_)
         | hir::Expr::Variable(_)
         | hir::Expr::Parameter(_) => expr,
-        hir::Expr::Call(id, args) => hir::Expr::Call(
-            id,
-            args.into_iter()
+        hir::Expr::Call(call) => hir::Expr::Call(hir::Call {
+            args: call
+                .args
+                .into_iter()
                 .map(|(name, e)| (name, shifted(e, cutoff)))
                 .collect(),
-        ),
+            ..call
+        }),
         hir::Expr::Unary(op, operand) => hir::Expr::Unary(op, shift(operand)),
         hir::Expr::Binary(op, lhs, rhs) => hir::Expr::Binary(op, shift(lhs), shift(rhs)),
         hir::Expr::Extract(operand, name) => hir::Expr::Extract(shift(operand), name),
@@ -1552,12 +1564,9 @@ impl<'a> Substitution<'a> {
 /// # Errors
 ///
 /// Returns why evaluating the operator's value for the arguments fails.
-pub(crate) fn call(
-    id: hir::OperatorId,
-    args: BTreeMap<String, hir::Expr>,
-    bindings: Bindings,
-) -> Result<hir::Expr, Failed> {
-    let known: Option<BTreeMap<String, hir::Value>> = args
+pub(crate) fn call(call: hir::Call, bindings: Bindings) -> Result<hir::Expr, Failed> {
+    let known: Option<BTreeMap<String, hir::Value>> = call
+        .args
         .iter()
         .map(|(name, arg)| match arg {
             hir::Expr::Constant(value) => Some((name.clone(), value.clone())),
@@ -1565,9 +1574,15 @@ pub(crate) fn call(
         })
         .collect();
     let Some(known) = known else {
-        return Ok(hir::Expr::Call(id, args));
+        return Ok(hir::Expr::Call(call));
     };
-    let value = bindings.values[&id].clone();
+    // The callee's value for the types its type parameters are given.
+    let value = &bindings.values[&call.operator];
+    let value = if call.types.is_empty() {
+        value.clone()
+    } else {
+        value.instantiated(&call.types)
+    };
     let substitution = Substitution {
         tuple: None,
         args: Some(&known),
@@ -1577,7 +1592,7 @@ pub(crate) fn call(
     Ok(match evaluated {
         hir::Expr::Constant(_) => evaluated,
         // A variable the operator reads is known only when running.
-        _ => hir::Expr::Call(id, args),
+        _ => hir::Expr::Call(call),
     })
 }
 
@@ -1617,12 +1632,13 @@ fn substitute(
             None => expr,
         },
         hir::Expr::Current(..) | hir::Expr::Constant(_) | hir::Expr::Parameter(_) => expr,
-        hir::Expr::Call(id, args) => {
-            let args = args
+        hir::Expr::Call(called) => {
+            let args = called
+                .args
                 .into_iter()
                 .map(|(name, arg)| Ok((name, substitute(arg, depth, substitution)?)))
                 .collect::<Result<_, _>>()?;
-            call(id, args, substitution.bindings)?
+            call(hir::Call { args, ..called }, substitution.bindings)?
         }
         hir::Expr::Unary(op, operand) => {
             unary(op, sub(operand)?).map_err(|f| Failed::Scalar(f, op.result()))?

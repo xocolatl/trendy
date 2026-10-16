@@ -59,13 +59,26 @@ fn classify(token: &SyntaxToken) -> Option<Highlight> {
         (SyntaxKind::Comment, _, _) => (Class::Comment, false),
         (kind, _, _) if kind.is_operator() => (Class::ExprOperator, false),
         (kind, _, _) if kind.is_keyword() => (Class::Keyword, false),
-        // The contextual keywords: `type`, in `builtin type name;`, and
-        // `key`.
+        // The contextual keywords: `type`, in `builtin type name;`, `key`,
+        // `value` and `from`, `any` and `type`, in `any type`, and `types`.
         (SyntaxKind::Ident, Some(SyntaxKind::BuiltinType), _) if token.text() == "type" => {
             (Class::Keyword, false)
         }
-        (SyntaxKind::Ident, Some(SyntaxKind::Key | SyntaxKind::FromExpr), _) => {
-            (Class::Keyword, false)
+        (
+            SyntaxKind::Ident,
+            Some(
+                SyntaxKind::Key
+                | SyntaxKind::FromExpr
+                | SyntaxKind::AnyType
+                | SyntaxKind::TypeParameters,
+            ),
+            _,
+        ) => (Class::Keyword, false),
+        // A type parameter, declared in `types { … }`.
+        (SyntaxKind::Ident, Some(SyntaxKind::Name), Some(SyntaxKind::AttributeType))
+            if heading_owner == Some(SyntaxKind::TypeParameters) =>
+        {
+            (Class::Type, true)
         }
         (SyntaxKind::Ident, Some(SyntaxKind::Name), Some(SyntaxKind::BuiltinType)) => {
             (Class::Type, true)
@@ -488,16 +501,38 @@ mod tests {
     #[test]
     fn builtins() {
         assert_eq!(
-            highlight("builtin type any;\nbuiltin operator debug_value{v: any};"),
+            highlight("builtin type text;\nbuiltin operator debug_value{v: any type};"),
             [
                 ("builtin", Class::Keyword, false),
                 ("type", Class::Keyword, false),
-                ("any", Class::Type, true),
+                ("text", Class::Type, true),
                 ("builtin", Class::Keyword, false),
                 ("operator", Class::Keyword, false),
                 ("debug_value", Class::Operator, true),
                 ("v", Class::Parameter, true),
-                ("any", Class::Type, false),
+                ("any", Class::Keyword, false),
+                ("type", Class::Keyword, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn type_parameters() {
+        assert_eq!(
+            highlight("operator f{a: T, r: any relation}: T types { T: any type } [];"),
+            [
+                ("operator", Class::Keyword, false),
+                ("f", Class::Operator, true),
+                ("a", Class::Parameter, true),
+                ("T", Class::Type, false),
+                ("r", Class::Parameter, true),
+                ("any", Class::Keyword, false),
+                ("relation", Class::Keyword, false),
+                ("T", Class::Type, false),
+                ("types", Class::Keyword, false),
+                ("T", Class::Type, true),
+                ("any", Class::Keyword, false),
+                ("type", Class::Keyword, false),
             ]
         );
     }

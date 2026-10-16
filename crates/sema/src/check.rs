@@ -56,6 +56,13 @@ pub(crate) trait Names {
         None
     }
 
+    /// The type parameters of the operator whose body this is, which a
+    /// type written in it can name: `None` outside one, in an initial
+    /// value.
+    fn type_parameters(&self) -> Option<&[hir::TypeParameter]> {
+        None
+    }
+
     /// Every operator, by id and by name.
     fn operators(&self) -> &Operators;
 
@@ -91,16 +98,25 @@ impl<'a> Checker<'a> {
         self.names.namespaces()
     }
 
+    /// The type parameters a type written here can name.
+    pub(crate) fn type_parameters(&self) -> types::TypeParameters<'_> {
+        match self.names.type_parameters() {
+            Some(list) => types::TypeParameters::Fixed(list),
+            None => types::TypeParameters::None,
+        }
+    }
+
     /// The type of `expr`, which this checker produced.
     pub(crate) fn ty(&self, expr: &hir::Expr) -> hir::Type {
         expr.type_with(&|leaf| match leaf {
-            hir::Expr::Call(id, _) => self
+            hir::Expr::Call(call) => self
                 .names
                 .operators()
-                .get(*id)
+                .get(call.operator)
                 .result
-                .clone()
-                .expect("only valid read-only operators are called"),
+                .as_ref()
+                .expect("only valid read-only operators are called")
+                .instantiated(&call.types),
             _ => self.names.leaf_type(leaf),
         })
     }
@@ -391,11 +407,11 @@ impl<'a> Checker<'a> {
         if !signature.valid {
             return None;
         }
-        let args = self.arguments(written, &signature, errors)?;
+        let call = self.arguments(written, &signature, errors)?;
         if !self.names.checked(signature.id, span, errors) {
             return None;
         }
-        let result = match ops::call(signature.id, args, self.names.bindings()) {
+        let result = match ops::call(call, self.names.bindings()) {
             Ok(result) => result,
             Err(failed) => {
                 errors.push(errors::call_failure(&failed, expr, &signature));
@@ -405,15 +421,17 @@ impl<'a> Checker<'a> {
         self.matched(expected, result, expr, errors)
     }
 
-    /// A call's arguments, as `written`, for the parameters of the operator
-    /// `signature`: each named, each parameter given one, and each of its
-    /// parameter's type.
+    /// A call of the operator `signature`, with `written` arguments for its
+    /// parameters: each named, each parameter given one, and each of its
+    /// parameter's type, once each type parameter in that type is given
+    /// the type of an argument, the same for every argument that gives it
+    /// one (see [`TypeArguments`]).
     pub(crate) fn arguments(
         &mut self,
         written: Written,
         signature: &Signature,
         errors: &mut Vec<Diagnostic>,
-    ) -> Option<BTreeMap<String, hir::Expr>> {
+    ) -> Option<hir::Call> {
         let params = &signature.params;
         let signature_text = signature.text();
         let mut ok = true;
@@ -448,7 +466,8 @@ impl<'a> Checker<'a> {
             .map(String::as_str)
             .filter(|p| !named.iter().any(|(_, n, _)| n == p))
             .collect();
-        let mut result = BTreeMap::new();
+        // The arguments to check, with their parameters' types.
+        let mut pending: Vec<(Expr, &str, &hir::Type)> = Vec::new();
         for (arg, name, span) in &named {
             if let Some(&(_, _, first)) = named.iter().find(|(_, n, _)| n == name)
                 && first != *span
@@ -485,29 +504,80 @@ impl<'a> Checker<'a> {
                 ));
                 continue;
             };
-            let expected = match param {
-                hir::ParamType::Type(ty) => Some(Expected {
-                    ty: ty.clone(),
-                    origin: signature.param_origin(name),
-                }),
-                hir::ParamType::Any => None,
-            };
-            match arg
-                .value()
-                .and_then(|v| self.expr(&v, expected.as_ref(), errors))
-            {
-                Some(value) => {
-                    result.insert(name.clone(), value);
-                }
+            match arg.value() {
+                Some(value) => pending.push((value, name, param)),
                 None => ok = false,
             }
         }
+
+        let checked = self.typed_arguments(pending, signature, errors);
         // A lone unnamed argument is reported, with a fix, as that parameter.
         if !missing.is_empty() && positional.is_empty() {
             errors.push(missing_arguments(&missing, signature, written));
             ok = false;
         }
-        ok.then_some(result)
+        // Every type parameter has a type once every argument is given.
+        let (types, args) = checked.filter(|_| ok)?;
+        Some(hir::Call {
+            operator: signature.id,
+            types: types.finish(),
+            args,
+        })
+    }
+
+    /// The arguments `pending`, each written with the name and type of
+    /// its parameter, of the operator `signature`, each checked once the
+    /// type parameters in its parameter's type are given types, and those
+    /// types; or `None` after reporting why some argument is invalid.
+    fn typed_arguments<'s>(
+        &mut self,
+        mut pending: Vec<(Expr, &str, &hir::Type)>,
+        signature: &'s Signature,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<(TypeArguments<'s>, BTreeMap<String, hir::Expr>)> {
+        let mut types = TypeArguments::new(signature);
+        let mut args = BTreeMap::new();
+        let mut ok = true;
+        while !pending.is_empty() {
+            // Those whose parameters' types are known: checked against them.
+            let (ready, rest): (Vec<_>, Vec<_>) =
+                pending.into_iter().partition(|(_, _, ty)| types.know(ty));
+            pending = rest;
+            let checked_now = if ready.is_empty() {
+                // An unknown type parameter expects nothing of its
+                // argument, which is checked on its own and gives it a
+                // type, so those come first; others then expect nothing
+                // either.
+                let (bare, structured): (Vec<_>, Vec<_>) = std::mem::take(&mut pending)
+                    .into_iter()
+                    .partition(|(_, _, ty)| matches!(ty, hir::Type::Parameter(_)));
+                if bare.is_empty() {
+                    structured
+                } else {
+                    pending = structured;
+                    bare
+                }
+            } else {
+                ready
+            };
+            for (value, name, ty) in checked_now {
+                let expected = types.know(ty).then(|| types.expected(name, ty));
+                let Some(checked) = self.expr(&value, expected.as_ref(), errors) else {
+                    ok = false;
+                    continue;
+                };
+                if expected.is_none() {
+                    let actual = self.ty(&checked);
+                    if let Err(error) = types.bind(name, ty, &actual, &value) {
+                        errors.push(error.diagnostic(&actual, Self::constant(&checked), &value));
+                        ok = false;
+                        continue;
+                    }
+                }
+                args.insert(name.to_string(), checked);
+            }
+        }
+        ok.then_some((types, args))
     }
 
     /// `postfix`, an `extend` or a `replace`, as `assigning` says, written
@@ -805,7 +875,7 @@ impl<'a> Checker<'a> {
                 ));
                 return None;
             }
-            hir::Type::Scalar(_) => {
+            hir::Type::Scalar(_) | hir::Type::Parameter(_) => {
                 errors.push(errors::not_relational(operator, span, &ty, &operand_expr));
                 return None;
             }
@@ -1214,14 +1284,12 @@ pub(crate) struct Assigned<'a> {
 /// The error for a call, with `written` arguments, of `signature`, which
 /// has the parameters `missing` that aren't given one.
 fn missing_arguments(missing: &[&str], signature: &Signature, written: Written) -> Diagnostic {
+    // A type with a type parameter in it has no default value.
     let missing: Vec<_> = missing
         .iter()
         .map(|&name| {
-            let ty = match &signature.params[name] {
-                hir::ParamType::Type(ty) => Some(ty),
-                hir::ParamType::Any => None,
-            };
-            (name, ty)
+            let ty = &signature.params[name];
+            (name, ty.parameters().next().is_none().then_some(ty))
         })
         .collect();
     let (span, insertion) = match written {
@@ -1235,6 +1303,161 @@ fn missing_arguments(missing: &[&str], signature: &Signature, written: Written) 
         span,
         insertion,
     )
+}
+
+/// The types a call gives its operator's type parameters, as its arguments
+/// are checked, each from the argument it is the type of, or is in the
+/// type of.
+///
+/// An argument is checked against its parameter's type once every type
+/// parameter in that type has a type. One whose parameter's type is a type
+/// parameter that has none yet is checked on its own, and gives it its
+/// type; then, if none is ready, the rest are checked on their own, and
+/// their types give their type parameters theirs. So which argument gives
+/// a type parameter its type never depends on the order the arguments are
+/// written in, which has no meaning, as for a tuple's attributes.
+struct TypeArguments<'s> {
+    signature: &'s Signature,
+    types: Vec<Option<(hir::Type, Expr)>>,
+}
+
+impl<'s> TypeArguments<'s> {
+    fn new(signature: &'s Signature) -> Self {
+        TypeArguments {
+            signature,
+            types: vec![None; signature.types.len()],
+        }
+    }
+
+    /// Whether every type parameter in `ty` has a type.
+    fn know(&self, ty: &hir::Type) -> bool {
+        ty.parameters().all(|p| self.types[p.index].is_some())
+    }
+
+    /// `ty`, a parameter's type, with each type parameter that has a type
+    /// replaced by it.
+    fn instantiate(&self, ty: &hir::Type) -> hir::Type {
+        let types: Vec<hir::Type> = self
+            .types
+            .iter()
+            .zip(&self.signature.types)
+            .map(|(given, parameter)| match given {
+                Some((ty, _)) => ty.clone(),
+                None => hir::Type::Parameter(parameter.clone()),
+            })
+            .collect();
+        ty.instantiated(&types)
+    }
+
+    /// What the argument for the parameter `name`, of type `ty`, every
+    /// type parameter in which has a type, is expected to be: of that type,
+    /// because of the argument that gave the type parameter its type, if
+    /// `ty` is one, or else because of the type written.
+    fn expected(&self, name: &str, ty: &hir::Type) -> Expected {
+        let origin = match ty {
+            hir::Type::Parameter(p) => {
+                let (_, from) = self.types[p.index]
+                    .as_ref()
+                    .expect("only a known type is expected");
+                types::Origin::TypeParameter(p.to_string(), from.clone())
+            }
+            _ => self.signature.param_origin(name),
+        };
+        Expected {
+            ty: self.instantiate(ty),
+            origin,
+        }
+    }
+
+    /// Give each type parameter in `pattern`, the type of the parameter
+    /// `name`, the type that makes it `actual`, the type of its argument,
+    /// written `arg`: all of them, or, if no types do, none, and why.
+    fn bind<'a>(
+        &mut self,
+        name: &'a str,
+        pattern: &'a hir::Type,
+        actual: &hir::Type,
+        arg: &Expr,
+    ) -> Result<(), Unbound<'a>> {
+        let mut trial = self.types.clone();
+        if bind(&mut trial, pattern, actual, arg) {
+            self.types = trial;
+            return Ok(());
+        }
+        Err(match pattern {
+            hir::Type::Parameter(p) => match &self.types[p.index] {
+                Some(_) => Unbound::Given(self.expected(name, pattern)),
+                None => Unbound::Kind(p, self.signature.param_origin(name)),
+            },
+            _ => Unbound::Given(Expected {
+                ty: self.instantiate(pattern),
+                origin: self.signature.param_origin(name),
+            }),
+        })
+    }
+
+    /// The type each type parameter is given, by index, once every
+    /// argument is given and valid: each has one, since each is in a
+    /// parameter's type.
+    fn finish(self) -> Vec<hir::Type> {
+        self.types
+            .into_iter()
+            .map(|t| t.expect("every type parameter is in a parameter's type").0)
+            .collect()
+    }
+}
+
+/// Give the type parameters in `pattern` the types in `types` that make it
+/// `actual`, from the argument `arg`: whether some do.
+fn bind(
+    types: &mut [Option<(hir::Type, Expr)>],
+    pattern: &hir::Type,
+    actual: &hir::Type,
+    arg: &Expr,
+) -> bool {
+    match (pattern, actual) {
+        (hir::Type::Parameter(p), _) => match &types[p.index] {
+            Some((given, _)) => given == actual,
+            None if p.any.admits(actual) => {
+                types[p.index] = Some((actual.clone(), arg.clone()));
+                true
+            }
+            None => false,
+        },
+        (hir::Type::Tuple(pattern), hir::Type::Tuple(actual))
+        | (hir::Type::Relation(pattern), hir::Type::Relation(actual)) => {
+            pattern.attributes().count() == actual.attributes().count()
+                && pattern.attributes().all(|(name, ty)| {
+                    actual
+                        .get(name)
+                        .is_some_and(|other| bind(types, ty, other, arg))
+                })
+        }
+        _ => pattern == actual,
+    }
+}
+
+/// Why an argument's type gives its parameter's type parameters none.
+enum Unbound<'a> {
+    /// They have types already, or the type has more than type parameters
+    /// in it, so the argument was expected to have this one.
+    Given(Expected),
+    /// The parameter's type is the type parameter, which can't be the
+    /// argument's type: `any tuple` or `any relation` of another type.
+    Kind(&'a hir::TypeParameter, types::Origin),
+}
+
+impl Unbound<'_> {
+    /// The error for an argument, written `arg`, of type `actual`, and
+    /// with the value `value` if it is a constant.
+    fn diagnostic(&self, actual: &hir::Type, value: Option<&hir::Value>, arg: &Expr) -> Diagnostic {
+        match self {
+            Unbound::Given(expected) => {
+                errors::type_mismatch(&expected.ty, &expected.origin, actual, value, arg)
+            }
+            Unbound::Kind(parameter, origin) => errors::not_of_kind(parameter, origin, actual, arg),
+        }
+    }
 }
 
 /// Why an `extend`'s, a `replace`'s or an `update`'s list leaves its
@@ -1294,6 +1517,10 @@ impl Names for TupleNames<'_> {
 
     fn tuple_at_hand(&self) -> Option<&hir::Heading> {
         Some(&self.heading)
+    }
+
+    fn type_parameters(&self) -> Option<&[hir::TypeParameter]> {
+        self.outer.type_parameters()
     }
 
     fn operators(&self) -> &Operators {

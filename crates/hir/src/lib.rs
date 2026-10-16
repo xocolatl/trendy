@@ -29,26 +29,34 @@ impl Program {
         &self.variables[id.0]
     }
 
-    /// The type of `expr`, inside the operator `within`.
+    /// The type of `expr`, inside an operator with the parameters
+    /// `params`: one of the program's, or one instantiated from it.
     ///
     /// # Panics
     ///
-    /// If `expr` names a parameter `within` doesn't have, or one of type
-    /// `any`, or calls an update operator, which sema never produces.
+    /// If `expr` names a parameter that isn't in `params`, or calls an
+    /// update operator, which sema never produces.
     #[must_use]
-    pub fn type_of(&self, expr: &Expr, within: OperatorId) -> Type {
+    pub fn type_of(&self, expr: &Expr, params: &BTreeMap<String, Type>) -> Type {
         expr.type_with(&|leaf| match leaf {
             Expr::Variable(id) => self.variable(*id).ty.clone(),
-            Expr::Parameter(name) => match &self.operator(within).params[name] {
-                ParamType::Type(ty) => ty.clone(),
-                ParamType::Any => unreachable!("only built-ins have `any` parameters"),
-            },
-            Expr::Call(id, _) => match &self.operator(*id).kind {
-                OperatorKind::ReadOnly { result, .. } => result.clone(),
-                _ => unreachable!("only read-only operators are called in expressions"),
-            },
+            Expr::Parameter(name) => params[name].clone(),
+            Expr::Call(call) => self.result(call),
             _ => unreachable!("only variables, parameters and calls are leaves"),
         })
+    }
+
+    /// The type of the value of `call`, a call of a read-only operator.
+    ///
+    /// # Panics
+    ///
+    /// If the operator isn't read-only, which sema rules out.
+    #[must_use]
+    pub fn result(&self, call: &Call) -> Type {
+        match &self.operator(call.operator).kind {
+            OperatorKind::ReadOnly { result, .. } => result.instantiated(&call.types),
+            _ => unreachable!("only read-only operators are called in expressions"),
+        }
     }
 }
 
@@ -63,13 +71,108 @@ pub struct VariableId(pub usize);
 /// An operator: an update operator, which returns nothing and is invoked
 /// by `call`, or a read-only operator, whose call is a value (TTM RM
 /// Prescription 3).
+///
+/// An operator with type parameters is generic: its parameters' types,
+/// its result type and its body refer to them, and each call gives each
+/// one a type. Lowering compiles it once for each list of types it is
+/// called with, instantiated with them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Operator {
     /// Unique among operators.
     pub name: String,
+    /// The type parameters, the `i`th with index `i`. Each is in some
+    /// parameter's type, so a call's arguments determine it.
+    pub types: Vec<TypeParameter>,
     /// The parameters, by name. A call's arguments are a tuple of them.
-    pub params: BTreeMap<String, ParamType>,
+    pub params: BTreeMap<String, Type>,
     pub kind: OperatorKind,
+}
+
+impl Operator {
+    /// The operator a call that gives the type parameters `types` calls:
+    /// this one with each type parameter replaced by its type, so it has
+    /// none.
+    #[must_use]
+    pub fn instantiated(&self, types: &[Type]) -> Operator {
+        let kind = match &self.kind {
+            OperatorKind::Update { body } => OperatorKind::Update {
+                body: body.iter().map(|s| s.instantiated(types)).collect(),
+            },
+            OperatorKind::ReadOnly { result, value } => OperatorKind::ReadOnly {
+                result: result.instantiated(types),
+                value: value.instantiated(types),
+            },
+            OperatorKind::Builtin(builtin) => OperatorKind::Builtin(*builtin),
+        };
+        Operator {
+            name: self.name.clone(),
+            types: Vec::new(),
+            params: self
+                .params
+                .iter()
+                .map(|(name, ty)| (name.clone(), ty.instantiated(types)))
+                .collect(),
+            kind,
+        }
+    }
+}
+
+/// A type parameter of an operator: any type of what it is, which each
+/// call gives it from its arguments.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TypeParameter {
+    /// Its place among the operator's type parameters, which a call's
+    /// types follow.
+    pub index: usize,
+    /// The name it is declared with, in `types { T: any type }`, or `None`
+    /// for one written as a parameter's type, as in `v: any type`.
+    pub name: Option<String>,
+    pub any: Any,
+}
+
+/// What a type parameter can be: `any type`, `any tuple` or
+/// `any relation`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Any {
+    Type,
+    Tuple,
+    Relation,
+}
+
+impl Any {
+    /// Whether `ty`, a type that is not a type parameter of the operator
+    /// this is one of, is one of these.
+    #[must_use]
+    pub fn admits(self, ty: &Type) -> bool {
+        match (self, ty) {
+            (Any::Type, _) | (Any::Tuple, Type::Tuple(_)) | (Any::Relation, Type::Relation(_)) => {
+                true
+            }
+            (Any::Tuple | Any::Relation, Type::Parameter(p)) => p.any == self,
+            _ => false,
+        }
+    }
+}
+
+/// Source text: `any type`, `any tuple` or `any relation`.
+impl std::fmt::Display for Any {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Any::Type => "any type",
+            Any::Tuple => "any tuple",
+            Any::Relation => "any relation",
+        })
+    }
+}
+
+/// Its name, or, without one, what it can be: `any type`.
+impl std::fmt::Display for TypeParameter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.name {
+            Some(name) => f.write_str(name),
+            None => write!(f, "{}", self.any),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,23 +185,6 @@ pub enum OperatorKind {
     ReadOnly { result: Type, value: Expr },
     /// Declared in the prelude and implemented by the compiler.
     Builtin(Builtin),
-}
-
-/// The type of a parameter: a type, or `any`, which only built-in operators
-/// use. `any` is not a type: no value or variable has it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ParamType {
-    Type(Type),
-    Any,
-}
-
-impl std::fmt::Display for ParamType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ParamType::Type(ty) => write!(f, "{ty}"),
-            ParamType::Any => f.write_str("any"),
-        }
-    }
 }
 
 /// The operators the compiler implements. Each is declared in the prelude,
@@ -124,11 +210,52 @@ impl Builtin {
         Builtin::ALL.into_iter().find(|b| b.name() == name)
     }
 
+    /// The type parameters the compiler's implementation takes.
+    #[must_use]
+    pub fn types(self) -> Vec<TypeParameter> {
+        match self {
+            Builtin::DebugValue => vec![TypeParameter {
+                index: 0,
+                name: None,
+                any: Any::Type,
+            }],
+        }
+    }
+
     /// The parameters the compiler's implementation takes.
     #[must_use]
-    pub fn params(self) -> BTreeMap<String, ParamType> {
+    pub fn params(self) -> BTreeMap<String, Type> {
+        let types = self.types();
         match self {
-            Builtin::DebugValue => [("v".to_string(), ParamType::Any)].into(),
+            Builtin::DebugValue => [("v".to_string(), Type::Parameter(types[0].clone()))].into(),
+        }
+    }
+}
+
+/// A call of an operator: of an update operator, as a statement, or of a
+/// read-only one, as an expression.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Call {
+    pub operator: OperatorId,
+    /// The type of each of the operator's type parameters, by index, which
+    /// the arguments determine.
+    pub types: Vec<Type>,
+    /// The arguments, for the operator's parameters, by name.
+    pub args: BTreeMap<String, Expr>,
+}
+
+impl Call {
+    /// The call, in an operator instantiated with `types`.
+    #[must_use]
+    pub fn instantiated(&self, types: &[Type]) -> Call {
+        Call {
+            operator: self.operator,
+            types: self.types.iter().map(|t| t.instantiated(types)).collect(),
+            args: self
+                .args
+                .iter()
+                .map(|(name, arg)| (name.clone(), arg.instantiated(types)))
+                .collect(),
         }
     }
 }
@@ -136,12 +263,8 @@ impl Builtin {
 /// A statement in an operator's body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Statement {
-    /// `call name{arguments};`: the arguments are the callee's parameters,
-    /// by name.
-    Call {
-        operator: OperatorId,
-        args: BTreeMap<String, Expr>,
-    },
+    /// `call name{arguments};`.
+    Call(Call),
     /// Assignments made at once (TTM RM Prescription 21), each to a
     /// different variable, the shorthands, such as `insert`, expanded, and
     /// an `assign` block's changes to one variable merged. Every value is
@@ -149,6 +272,25 @@ pub enum Statement {
     /// the variables' keys are checked once all the values are, before any
     /// is assigned.
     Assign(Vec<Assignment>),
+}
+
+impl Statement {
+    /// The statement, in an operator instantiated with `types`.
+    #[must_use]
+    pub fn instantiated(&self, types: &[Type]) -> Statement {
+        match self {
+            Statement::Call(call) => Statement::Call(call.instantiated(types)),
+            Statement::Assign(assignments) => Statement::Assign(
+                assignments
+                    .iter()
+                    .map(|a| Assignment {
+                        target: a.target,
+                        value: a.value.instantiated(types),
+                    })
+                    .collect(),
+            ),
+        }
+    }
 }
 
 /// `target := value`, in an assignment statement.
@@ -243,11 +385,10 @@ pub enum Expr {
     /// here, counting the innermost as 0. Its attributes are in scope by
     /// name in the source, and are extracted from it here.
     Current(usize, Heading),
-    /// A call of a read-only operator, whose value it is: the arguments
-    /// are its parameters, by name. Sema evaluates every call it can, so
-    /// one remains only where an argument, or a variable the operator
-    /// reads, is known only when the program runs.
-    Call(OperatorId, BTreeMap<String, Expr>),
+    /// A call of a read-only operator, whose value it is. Sema evaluates
+    /// every call it can, so one remains only where an argument, or a
+    /// variable the operator reads, is known only when the program runs.
+    Call(Call),
 }
 
 impl Expr {
@@ -261,7 +402,7 @@ impl Expr {
     pub fn type_with(&self, leaf: &dyn Fn(&Expr) -> Type) -> Type {
         match self {
             Expr::Constant(value) => value.ty(),
-            Expr::Variable(_) | Expr::Parameter(_) | Expr::Call(..) => leaf(self),
+            Expr::Variable(_) | Expr::Parameter(_) | Expr::Call(_) => leaf(self),
             Expr::Unary(op, _) => Type::Scalar(op.result()),
             Expr::Binary(op, ..) => Type::Scalar(op.result()),
             Expr::Extract(tuple, name) => match tuple.type_with(leaf) {
@@ -296,6 +437,51 @@ impl Expr {
                 Type::Relation(heading) => Type::Tuple(heading),
                 other => panic!("the only tuple of {other}"),
             },
+        }
+    }
+}
+
+impl Expr {
+    /// The expression, in an operator instantiated with `types`: each type
+    /// parameter in it replaced by its type, by index.
+    #[must_use]
+    pub fn instantiated(&self, types: &[Type]) -> Expr {
+        let inst = |e: &Expr| Box::new(e.instantiated(types));
+        let all = |attributes: &BTreeMap<String, Expr>| {
+            attributes
+                .iter()
+                .map(|(name, e)| (name.clone(), e.instantiated(types)))
+                .collect()
+        };
+        match self {
+            Expr::Constant(value) => Expr::Constant(value.instantiated(types)),
+            Expr::Variable(_) | Expr::Parameter(_) => self.clone(),
+            Expr::Unary(op, operand) => Expr::Unary(*op, inst(operand)),
+            Expr::Binary(op, lhs, rhs) => {
+                Expr::Binary(op.instantiated(types), inst(lhs), inst(rhs))
+            }
+            Expr::Extract(tuple, name) => Expr::Extract(inst(tuple), name.clone()),
+            Expr::Tuple(attributes) => Expr::Tuple(all(attributes)),
+            Expr::Relation(heading, tuples) => Expr::Relation(
+                heading.instantiated(types),
+                tuples.iter().map(|t| t.instantiated(types)).collect(),
+            ),
+            Expr::Remove(operand, names) => Expr::Remove(inst(operand), names.clone()),
+            Expr::Rename(operand, renamings) => Expr::Rename(inst(operand), renamings.clone()),
+            Expr::And(lhs, rhs) => Expr::And(inst(lhs), inst(rhs)),
+            Expr::Combine(combination, lhs, rhs) => {
+                Expr::Combine(*combination, inst(lhs), inst(rhs))
+            }
+            Expr::Semijoin(lhs, rhs) => Expr::Semijoin(inst(lhs), inst(rhs)),
+            Expr::Antijoin(lhs, rhs) => Expr::Antijoin(inst(lhs), inst(rhs)),
+            Expr::Extend(operand, computed, attributes) => {
+                Expr::Extend(inst(operand), computed.instantiated(types), all(attributes))
+            }
+            Expr::Ungroup(operand, names) => Expr::Ungroup(inst(operand), names.clone()),
+            Expr::Restrict(operand, condition) => Expr::Restrict(inst(operand), inst(condition)),
+            Expr::Only(operand) => Expr::Only(inst(operand)),
+            Expr::Current(depth, heading) => Expr::Current(*depth, heading.instantiated(types)),
+            Expr::Call(call) => Expr::Call(call.instantiated(types)),
         }
     }
 }
@@ -496,6 +682,10 @@ pub enum Compared {
     /// Relations of one relation type, equal when they have the same tuples,
     /// and one less than or equal to another when it is a subset of it.
     Relation,
+    /// Values of the type parameter with this index, compared as values of
+    /// the type a call gives it: only `=` and `<>`, but for `any relation`,
+    /// which is a relation.
+    Parameter(usize),
 }
 
 impl Compared {
@@ -506,6 +696,16 @@ impl Compared {
             Type::Scalar(scalar) => Compared::Scalar(*scalar),
             Type::Tuple(_) => Compared::Tuple,
             Type::Relation(_) => Compared::Relation,
+            Type::Parameter(p) => Compared::Parameter(p.index),
+        }
+    }
+
+    /// What it compares, in an operator instantiated with `types`.
+    #[must_use]
+    pub fn instantiated(self, types: &[Type]) -> Compared {
+        match self {
+            Compared::Parameter(index) => Compared::of(&types[index]),
+            _ => self,
         }
     }
 }
@@ -575,7 +775,7 @@ impl BinaryOp {
             BinaryOp::Div | BinaryOp::Mod => Scalar::Integer,
             BinaryOp::Concatenate => Scalar::Text,
             BinaryOp::Compare(_, Compared::Scalar(scalar)) => scalar,
-            BinaryOp::Compare(_, Compared::Tuple | Compared::Relation) => {
+            BinaryOp::Compare(_, Compared::Tuple | Compared::Relation | Compared::Parameter(_)) => {
                 panic!("tuple and relation comparisons have no scalar operand type")
             }
         }
@@ -587,6 +787,17 @@ impl BinaryOp {
         match self {
             BinaryOp::Compare(..) => Scalar::Boolean,
             _ => self.operand(),
+        }
+    }
+
+    /// The operator, in an operator instantiated with `types`.
+    #[must_use]
+    pub fn instantiated(self, types: &[Type]) -> BinaryOp {
+        match self {
+            BinaryOp::Compare(comparison, compared) => {
+                BinaryOp::Compare(comparison, compared.instantiated(types))
+            }
+            _ => self,
         }
     }
 
@@ -611,7 +822,9 @@ impl BinaryOp {
             // set equality for relations.
             BinaryOp::Compare(Comparison::Equal, _) => return Ok(Value::Boolean(lhs == rhs)),
             BinaryOp::Compare(Comparison::NotEqual, _) => return Ok(Value::Boolean(lhs != rhs)),
-            BinaryOp::Compare(comparison, Compared::Relation) => {
+            // Only `any relation` is ordered, by inclusion, of the types
+            // a type parameter can be.
+            BinaryOp::Compare(comparison, Compared::Relation | Compared::Parameter(_)) => {
                 return Ok(Value::Boolean(contains(comparison, lhs, rhs)));
             }
             BinaryOp::Compare(..) => panic!("tuples aren't ordered"),
@@ -681,21 +894,53 @@ pub struct Variable {
 /// A key: a set of a relation's attributes, by name.
 pub type Key = BTreeSet<String>;
 
-/// A type: a built-in scalar type, a tuple type, or a relation type.
+/// A type: a built-in scalar type, a tuple type, a relation type, or a
+/// type parameter of the operator it is written in.
 ///
 /// Types are structural: two tuple types, or two relation types, are the
 /// same type exactly when their headings are equal, wherever they are
-/// written.
+/// written. A type parameter is a type of its own inside its operator, the
+/// same type only as itself, and outside it means nothing: a call gives it
+/// a type, which [`Type::instantiated`] puts in its place.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Type {
     Scalar(Scalar),
     Tuple(Heading),
     Relation(Heading),
+    Parameter(TypeParameter),
 }
 
 impl Type {
+    /// The type, in an operator instantiated with `types`: each type
+    /// parameter in it replaced by its type, by index.
+    #[must_use]
+    pub fn instantiated(&self, types: &[Type]) -> Type {
+        match self {
+            Type::Scalar(_) => self.clone(),
+            Type::Tuple(heading) => Type::Tuple(heading.instantiated(types)),
+            Type::Relation(heading) => Type::Relation(heading.instantiated(types)),
+            Type::Parameter(p) => types[p.index].clone(),
+        }
+    }
+
+    /// The type parameters in the type.
+    pub fn parameters(&self) -> Box<dyn Iterator<Item = &TypeParameter> + '_> {
+        match self {
+            Type::Scalar(_) => Box::new(std::iter::empty()),
+            Type::Tuple(heading) | Type::Relation(heading) => {
+                Box::new(heading.0.values().flat_map(Type::parameters))
+            }
+            Type::Parameter(p) => Box::new(std::iter::once(p)),
+        }
+    }
+
     /// The value a variable of this type starts with when none is given:
     /// for a tuple, each attribute's default.
+    ///
+    /// # Panics
+    ///
+    /// If the type has a type parameter in it, which only operators'
+    /// parameters, and not variables, have.
     #[must_use]
     pub fn default_value(&self) -> Value {
         match self {
@@ -711,6 +956,7 @@ impl Type {
                 heading: heading.clone(),
                 tuples: BTreeSet::new(),
             }),
+            Type::Parameter(p) => panic!("no variable has the type parameter {p}"),
         }
     }
 }
@@ -723,6 +969,7 @@ impl std::fmt::Display for Type {
             Type::Scalar(scalar) => f.write_str(scalar.name()),
             Type::Tuple(heading) => write!(f, "tuple {heading}"),
             Type::Relation(heading) => write!(f, "relation {heading}"),
+            Type::Parameter(p) => write!(f, "{p}"),
         }
     }
 }
@@ -822,6 +1069,17 @@ impl Heading {
         self.0.is_empty()
     }
 
+    /// The heading, in an operator instantiated with `types`.
+    #[must_use]
+    pub fn instantiated(&self, types: &[Type]) -> Heading {
+        Heading(
+            self.0
+                .iter()
+                .map(|(name, ty)| (name.clone(), ty.instantiated(types)))
+                .collect(),
+        )
+    }
+
     /// The heading with attributes renamed, all at once, from each key of
     /// `renamings` to its value.
     #[must_use]
@@ -919,6 +1177,25 @@ impl Value {
             Value::Relation(relation) => Type::Relation(relation.heading.clone()),
         }
     }
+
+    /// The value, in an operator instantiated with `types`: the only
+    /// values with a type parameter in their types are relations whose
+    /// headings have one, and so no tuples, or values with them inside.
+    #[must_use]
+    pub fn instantiated(&self, types: &[Type]) -> Value {
+        match self {
+            Value::Tuple(tuple) => Value::Tuple(tuple.instantiated(types)),
+            Value::Relation(relation) => Value::Relation(RelationValue {
+                heading: relation.heading.instantiated(types),
+                tuples: relation
+                    .tuples
+                    .iter()
+                    .map(|t| t.instantiated(types))
+                    .collect(),
+            }),
+            _ => self.clone(),
+        }
+    }
 }
 
 /// A tuple value: a value for each attribute of its heading. Two tuples are
@@ -935,6 +1212,17 @@ impl TupleValue {
     /// The attributes, sorted by name.
     pub fn attributes(&self) -> impl Iterator<Item = (&str, &Value)> {
         self.0.iter().map(|(name, value)| (name.as_str(), value))
+    }
+
+    /// The tuple, in an operator instantiated with `types`.
+    #[must_use]
+    pub fn instantiated(&self, types: &[Type]) -> TupleValue {
+        TupleValue(
+            self.0
+                .iter()
+                .map(|(name, value)| (name.clone(), value.instantiated(types)))
+                .collect(),
+        )
     }
 }
 
@@ -1256,7 +1544,7 @@ impl Type {
         match self {
             Type::Tuple(heading) => Type::Tuple(heading.without(names)),
             Type::Relation(heading) => Type::Relation(heading.without(names)),
-            Type::Scalar(_) => panic!("removing attributes from {self}"),
+            _ => panic!("removing attributes from {self}"),
         }
     }
 
@@ -1290,7 +1578,7 @@ impl Type {
         match self {
             Type::Tuple(heading) => Type::Tuple(added(heading)),
             Type::Relation(heading) => Type::Relation(added(heading)),
-            Type::Scalar(_) => panic!("adding attributes to {self}"),
+            _ => panic!("adding attributes to {self}"),
         }
     }
 
@@ -1320,7 +1608,7 @@ impl Type {
         match self {
             Type::Tuple(heading) => Type::Tuple(heading.renamed(renamings)),
             Type::Relation(heading) => Type::Relation(heading.renamed(renamings)),
-            Type::Scalar(_) => panic!("renaming attributes of {self}"),
+            _ => panic!("renaming attributes of {self}"),
         }
     }
 }
@@ -1442,6 +1730,42 @@ mod tests {
         assert_eq!(ab, ba);
         assert_eq!(ba.to_string(), "tuple { a: integer, b: text }");
         assert_eq!(tuple(&[]).to_string(), "tuple {}");
+    }
+
+    #[test]
+    fn instantiating_replaces_type_parameters() {
+        let t = TypeParameter {
+            index: 0,
+            name: Some("T".to_string()),
+            any: Any::Type,
+        };
+        let generic = Type::Relation(Heading::new(
+            [("v".to_string(), Type::Parameter(t.clone()))].into(),
+        ));
+        assert_eq!(generic.to_string(), "relation { v: T }");
+        let text = Type::Scalar(Scalar::Text);
+        let types = [text.clone()];
+        assert_eq!(
+            generic.instantiated(&types).to_string(),
+            "relation { v: text }"
+        );
+        // An empty relation of it, and how its values are compared.
+        let compared = Expr::Binary(
+            BinaryOp::Compare(Comparison::Equal, Compared::of(&Type::Parameter(t))),
+            Box::new(Expr::Constant(generic.default_value())),
+            Box::new(Expr::Parameter("a".to_string())),
+        );
+        let Expr::Binary(op, lhs, _) = compared.instantiated(&types) else {
+            panic!("a comparison");
+        };
+        assert_eq!(
+            op,
+            BinaryOp::Compare(Comparison::Equal, Compared::Scalar(Scalar::Text))
+        );
+        assert_eq!(
+            lhs.type_with(&|_| text.clone()).to_string(),
+            "relation { v: text }"
+        );
     }
 
     #[test]

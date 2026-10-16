@@ -313,7 +313,7 @@ struct ReadOnlyNames<'g, 'a> {
 }
 
 impl ReadOnlyNames<'_, '_> {
-    fn params(&self) -> &std::collections::BTreeMap<String, hir::ParamType> {
+    fn params(&self) -> &std::collections::BTreeMap<String, hir::Type> {
         &self.globals.operators.get(self.within).params
     }
 }
@@ -354,16 +354,17 @@ impl Names for ReadOnlyNames<'_, '_> {
 
     fn leaf_type(&self, leaf: &hir::Expr) -> hir::Type {
         match leaf {
-            hir::Expr::Parameter(name) => match &self.params()[name] {
-                hir::ParamType::Type(ty) => ty.clone(),
-                hir::ParamType::Any => unreachable!("only built-ins have `any` parameters"),
-            },
+            hir::Expr::Parameter(name) => self.params()[name].clone(),
             hir::Expr::Variable(id) => match &self.globals.variables[id.0] {
                 Some(State::Done(Some(variable))) => variable.ty.clone(),
                 _ => unreachable!("a variable is evaluated when its name is resolved"),
             },
             _ => unreachable!("only variables and parameters are leaves"),
         }
+    }
+
+    fn type_parameters(&self) -> Option<&[hir::TypeParameter]> {
+        Some(&self.globals.operators.get(self.within).types)
     }
 
     fn checked(&mut self, id: hir::OperatorId, at: Span, errors: &mut Vec<Diagnostic>) -> bool {
@@ -387,9 +388,10 @@ fn variable(
 ) -> Option<hir::Variable> {
     let namespaces = globals.namespaces;
     let ident = decl.name()?.ident()?;
-    let declared = decl
-        .type_expr()
-        .map(|t| (types::resolve(&t, namespaces, errors), t));
+    let declared = decl.type_expr().map(|t| {
+        let ty = types::resolve(&t, &mut types::TypeParameters::None, namespaces, errors);
+        (ty, t)
+    });
 
     let (ty, init) = match (declared, decl.initializer()) {
         (None, None) => {

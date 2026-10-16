@@ -107,6 +107,14 @@ fn operators() {
             r#"relation { dish: text } { { dish: "pozole" }, { dish: "ramen" } }"#,
             r#"relation { dish: text } { { dish: "pozole" } }"#,
             r#"relation { country: text, dish: text, total: integer } { { country: "Ghana", dish: "jollof rice", total: 1500 }, { country: "Japan", dish: "ramen", total: 1125 }, { country: "Mexico", dish: "pozole", total: 937 } }"#,
+            // Generic operators, for texts, relations and relations of
+            // relations.
+            r#""specials""#,
+            r#"relation { v: text } { { v: "ramen" }, { v: "spicy ramen" } }"#,
+            r#""affordable on the menu""#,
+            "true",
+            r#""pairs""#,
+            "relation { v: relation { v: integer } } { { v: relation { v: integer } { { v: 1 }, { v: 2 } } }, { v: relation { v: integer } { { v: 3 }, { v: 4 } } } }",
         ]
     );
 }

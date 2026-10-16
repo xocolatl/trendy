@@ -6,11 +6,11 @@ use std::collections::BTreeSet;
 use trendy_diag::{Code, Diagnostic, Edit, Span, edit_distance};
 use trendy_hir as hir;
 use trendy_syntax::SyntaxToken;
-use trendy_syntax::ast::{AstNode, Expr, Key, NaryExpr, SourceFile};
+use trendy_syntax::ast::{AstNode, Expr, Key, NaryExpr, SourceFile, TypeExpr};
 
 use crate::globals::Pending;
 use crate::operators::Signature;
-use crate::types::Origin;
+use crate::types::{Origin, TypeParameters};
 use crate::{Kind, Namespaces};
 
 /// Type names from other languages, and the built-in type each one means.
@@ -135,7 +135,18 @@ pub(crate) fn missing_main(file: &SourceFile, namespaces: &Namespaces) -> Diagno
 }
 
 /// The type name `ident` doesn't name a type.
-pub(crate) fn unknown_type(ident: &SyntaxToken, namespaces: &Namespaces) -> Diagnostic {
+/// Names other languages give a type that values of any type have:
+/// TypeScript's, Go's and Python's `any`, and the polymorphic pseudo-types
+/// of Postgres.
+const ANY_ALIASES: &[&str] = &["any", "anycompatible", "anyelement", "anynonarray"];
+
+/// The type named `ident`, which isn't one, written where `parameters` are
+/// the type parameters it could name.
+pub(crate) fn unknown_type(
+    ident: &SyntaxToken,
+    namespaces: &Namespaces,
+    parameters: &TypeParameters,
+) -> Diagnostic {
     let name = ident.text();
     let span = trendy_syntax::span(ident.text_range());
     let builtins: Vec<_> = hir::Scalar::ALL
@@ -152,6 +163,18 @@ pub(crate) fn unknown_type(ident: &SyntaxToken, namespaces: &Namespaces) -> Diag
         "the built-in types are {}",
         trendy_diag::conjoin(&builtins)
     ));
+    let declared: Vec<&str> = parameters
+        .list()
+        .iter()
+        .filter_map(|p| p.name.as_deref())
+        .collect();
+    if !declared.is_empty() {
+        let listed: Vec<String> = declared.iter().map(|p| format!("`{p}`")).collect();
+        d = d.with_note(format!(
+            "the operator's type parameters are {}",
+            trendy_diag::conjoin(&listed)
+        ));
+    }
     let kind = namespaces
         .variable(name)
         .map(|_| Kind::Variable)
@@ -161,30 +184,51 @@ pub(crate) fn unknown_type(ident: &SyntaxToken, namespaces: &Namespaces) -> Diag
     }
 
     let lowercase = name.to_lowercase();
+    if ANY_ALIASES.contains(&lowercase.as_str()) {
+        return match parameters {
+            TypeParameters::Open(_) => d
+                .with_note("a parameter that takes a value of any type has the type `any type`, and each call gives it the type of its argument")
+                .with_suggestion(
+                    "write `any type`",
+                    vec![Edit {
+                        span,
+                        replacement: "any type".to_string(),
+                    }],
+                ),
+            TypeParameters::Fixed(_) => d.with_note(ANY_ONLY_IN_PARAMETERS).with_help(ANY_ELSEWHERE),
+            TypeParameters::None => d.with_note(ANY_ONLY_IN_PARAMETERS).with_note(VARIABLE_TYPES),
+        };
+    }
+    let written = |n: &str| (n.to_string(), n.to_string());
     let meant = TYPE_ALIASES
         .iter()
         .find(|(alias, _)| *alias == lowercase)
-        .map(|&(_, ty)| ty)
+        .map(|&(_, ty)| written(ty.name()))
         .or_else(|| {
-            hir::Scalar::ALL
+            let types: Vec<&str> = hir::Scalar::ALL
+                .iter()
+                .map(|t| t.name())
+                .chain(declared.iter().copied())
+                .collect();
+            types
                 .into_iter()
-                .filter(|t| edit_distance(t.name(), name) <= 2)
-                .min_by_key(|t| edit_distance(t.name(), name))
+                .filter(|t| edit_distance(t, name) <= 2)
+                .min_by_key(|t| edit_distance(t, name))
+                .map(written)
         });
-    if let Some(ty) = meant {
+    if let Some((meant, replacement)) = meant {
         if TYPE_ALIASES.iter().any(|(alias, _)| *alias == lowercase) {
-            d = d.with_note(format!("trendy's name for this type is `{}`", ty.name()));
+            d = d.with_note(format!("trendy's name for this type is `{meant}`"));
         }
-        d = d.with_suggestion(
-            format!("use `{}`", ty.name()),
-            vec![Edit {
-                span,
-                replacement: ty.name().to_string(),
-            }],
-        );
+        d = d.with_suggestion(format!("use `{meant}`"), vec![Edit { span, replacement }]);
     }
     d
 }
+
+const ANY_ONLY_IN_PARAMETERS: &str = "only a parameter's type can be `any type`, `any tuple` or `any relation`: each call gives it the type of its argument, and nothing would give one written anywhere else a type";
+const ANY_ELSEWHERE: &str = "to use the type of an argument here, declare a type parameter after the signature, `types { T: any type }`, and write `T` both here and as the parameter's type";
+const VARIABLE_TYPES: &str =
+    "a variable's type is always a specific type, such as `integer` or `relation { name: text }`";
 
 /// A value written as `expr`, of type `found`, where `declared` is expected
 /// because of `origin`. `value` is the value, if it is a constant, for fixes
@@ -205,6 +249,10 @@ pub(crate) fn type_mismatch(
     .with_note("values never convert to another type implicitly");
     if let Some(span) = origin.span() {
         d = d.with_secondary(span, origin.label());
+    }
+    let unnamed = |ty: &hir::Type| ty.parameters().any(|p| p.name.is_none());
+    if unnamed(declared) || unnamed(found) {
+        d = d.with_note("each `any type`, `any tuple` or `any relation` written as a parameter's type is a type of its own; to make parameters' types the same, declare one type parameter after the signature, `types { T: any type }`, and write `T` in each");
     }
 
     // `not n = 0`: `not` binds tightest, so this negates `n`; the comparison
@@ -248,12 +296,44 @@ pub(crate) fn type_mismatch(
         )),
         // A variable's type is fixed by its declaration: assign a value of
         // that type.
+        Origin::TypeParameter(name, _) => d.with_note(format!(
+            "the operator's parameters of type `{name}` all take arguments of one type"
+        )),
         Origin::Variable(..)
         | Origin::Heading(_)
         | Origin::Value(_)
         | Origin::Builtin
         | Origin::Operator(_) => d,
     }
+}
+
+/// An argument written `arg`, of type `actual`, for a parameter of type
+/// `parameter`, `any tuple` or `any relation`, written as `origin` says,
+/// which it isn't.
+pub(crate) fn not_of_kind(
+    parameter: &hir::TypeParameter,
+    origin: &Origin,
+    actual: &hir::Type,
+    arg: &Expr,
+) -> Diagnostic {
+    let (article, what) = match parameter.any {
+        hir::Any::Tuple => ("a", "tuple"),
+        hir::Any::Relation => ("a", "relation"),
+        hir::Any::Type => unreachable!("every type is `any type`"),
+    };
+    let mut d = Diagnostic::error(
+        Code::TypeMismatch,
+        format!("mismatched types: expected {article} {what}, found `{actual}`"),
+        arg.span(),
+        format!("this is `{actual}`"),
+    )
+    .with_note(format!(
+        "a parameter of type `{parameter}` takes {article} {what} of any heading"
+    ));
+    if let Some(span) = origin.span() {
+        d = d.with_secondary(span, origin.label());
+    }
+    d
 }
 
 /// The fix for `not` applied to a non-boolean `operand` that starts the left
@@ -559,15 +639,164 @@ pub(crate) fn builtin_outside_prelude(
 
 /// The reserved type name `any`, at `span`, used outside a built-in
 /// operator's parameters.
-pub(crate) fn any_outside_builtin(span: Span) -> Diagnostic {
+/// The type parameter `name`, declared at `span`, already declared at
+/// `first`.
+pub(crate) fn duplicate_type_parameter(name: &str, span: Span, first: Span) -> Diagnostic {
     Diagnostic::error(
-        Code::AnyOutsideBuiltin,
-        "`any` is only for the parameters of built-in operators",
+        Code::DuplicateName,
+        format!("type parameter `{name}` is declared more than once"),
         span,
-        "not a type that values or variables can have",
+        "declared again here",
     )
-    .with_note("`any` lets a built-in operator such as `debug_value` take a value of every type")
-    .with_help("use a specific type, such as `integer`, `text` or `tuple { name: text }`")
+    .with_secondary(first, format!("`{name}` is first declared here"))
+    .with_note("each type parameter stands for one type, so each has a name of its own")
+    .with_help("delete the duplicate, or rename one of them")
+}
+
+/// A type parameter declared at `span` with the name `name` of a built-in
+/// type, which it would hide.
+pub(crate) fn type_parameter_named_as_type(name: &str, span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::DuplicateName,
+        format!("`{name}` is already a type"),
+        span,
+        "a built-in type's name",
+    )
+    .with_note("a type parameter can't have a type's name, which it would hide in the operator")
+    .with_help("rename the type parameter, such as to `T`")
+}
+
+/// The type parameter `name` declared as `written`, a specific type rather
+/// than `any …`.
+pub(crate) fn type_parameter_not_any(name: &str, written: &TypeExpr) -> Diagnostic {
+    Diagnostic::error(
+        Code::TypeParameterNotAny,
+        format!("type parameter `{name}` must be `any type`, `any tuple` or `any relation`"),
+        written.span(),
+        "a specific type",
+    )
+    .with_note("a type parameter stands for any type of what it says, which each call gives it from its arguments")
+    .with_help(format!(
+        "declare `{name}: any type`, or write the specific type where `{name}` is used"
+    ))
+}
+
+/// The type parameter `name`, declared at `span`, which no parameter's
+/// type has, so no call can give it a type. It is used `uses` times
+/// elsewhere; with none, `removal` removes it.
+pub(crate) fn undetermined_type_parameter(
+    name: &str,
+    span: Span,
+    uses: usize,
+    removal: Span,
+) -> Diagnostic {
+    let rule = "each call gives a type parameter a type from the argument for each parameter whose type has it, so it must be in some parameter's type";
+    if uses == 0 {
+        return Diagnostic::error(
+            Code::UndeterminedTypeParameter,
+            format!("type parameter `{name}` is never used"),
+            span,
+            "declared here",
+        )
+        .with_note(rule)
+        .with_suggestion(
+            format!("remove `{name}`"),
+            vec![Edit {
+                span: removal,
+                replacement: String::new(),
+            }],
+        );
+    }
+    Diagnostic::error(
+        Code::UndeterminedTypeParameter,
+        format!("no parameter's type has `{name}`, so a call can't give it a type"),
+        span,
+        "not in any parameter's type",
+    )
+    .with_note(rule)
+    .with_note("an operator's result type is what its arguments' types make it, so a type parameter only in the result, or in the body, would have no type")
+    .with_help(format!(
+        "write `{name}` in the type of the parameter whose argument has that type, or use a specific type instead"
+    ))
+}
+
+/// The type parameter `name`, declared at `declared` as `any`, and written
+/// only once, at `only`, a parameter's type. `removal` removes the
+/// declaration.
+pub(crate) fn type_parameter_named_once(
+    name: &str,
+    any: hir::Any,
+    only: Span,
+    declared: Span,
+    removal: Span,
+) -> Diagnostic {
+    Diagnostic::error(
+        Code::TypeParameterNamedOnce,
+        format!("type parameter `{name}` is used only once, so it needs no name: write `{any}`"),
+        only,
+        format!("the only use of `{name}`"),
+    )
+    .with_secondary(declared, format!("`{name}` is declared here"))
+    .with_note("a type parameter's name says that several types are the same type; one used once is written as what it can be, in its place")
+    .with_suggestion(
+        format!("write `{any}` here, and remove `{name}`"),
+        vec![
+            Edit {
+                span: only,
+                replacement: any.to_string(),
+            },
+            Edit {
+                span: removal,
+                replacement: String::new(),
+            },
+        ],
+    )
+}
+
+/// A call, in the operator `within`, of `called`, written at `span`, which
+/// gives `called`'s type parameter `parameter` the type `ty`, built from
+/// `within`'s own, and leads back to `within`.
+pub(crate) fn growing_recursion(
+    within: &str,
+    called: &str,
+    span: Span,
+    parameter: &hir::TypeParameter,
+    ty: &hir::Type,
+) -> Diagnostic {
+    let message = if within == called {
+        format!("`{within}` calls itself with a larger type each time")
+    } else {
+        format!("this call of `{called}` leads back to `{within}` with a larger type each time")
+    };
+    Diagnostic::error(
+        Code::GrowingRecursion,
+        message,
+        span,
+        format!("gives `{parameter}` the type `{ty}`"),
+    )
+    .with_note("an operator is compiled once for each list of types its type parameters are given, and calls that lead back to it with a type built from its own would give it ever larger ones, which no program can hold")
+    .with_help("pass the type parameters on as they are, or give the call specific types")
+}
+
+/// `any`, written `written`, somewhere other than a parameter's type: in a
+/// variable's, if `in_variable`, or in an operator's result type or body.
+pub(crate) fn any_outside_parameter(
+    any: hir::Any,
+    written: &trendy_syntax::ast::AnyType,
+    in_variable: bool,
+) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::AnyOutsideParameter,
+        format!("`{any}` can only be the type of an operator's parameter"),
+        written.span(),
+        "not a parameter's type",
+    )
+    .with_note(ANY_ONLY_IN_PARAMETERS);
+    if in_variable {
+        d.with_note(VARIABLE_TYPES)
+    } else {
+        d.with_help(ANY_ELSEWHERE)
+    }
 }
 
 /// A name `name`, at `span`, that refers to nothing. `kind` is what was
@@ -1118,6 +1347,7 @@ pub(crate) fn not_projectable(
         ),
     };
     Diagnostic::error(Code::WrongOperandType, message, at, label)
+        .with_parameter_note(ty)
         .with_secondary(operand.span(), format!("this is `{ty}`"))
         .with_note(
             "a projection, `r{a, b}`, `r remove {c}`, `r rename {a as b}`, `r extend { d := … }`, `r replace { a := … }`, `r wrap { w := {a} }` and `r unwrap {w}` work on the attributes of a tuple or relation",
@@ -1167,6 +1397,7 @@ pub(crate) fn image_not_relation(span: Span, ty: &hir::Type, operand: &Expr) -> 
         span,
         "`!!` takes a relation",
     )
+    .with_parameter_note(ty)
     .with_secondary(operand.span(), format!("this is `{ty}`"))
     .with_note(IMAGE_RULE)
 }
@@ -1279,6 +1510,7 @@ pub(crate) fn not_joinable(
         span,
         format!("`{operator}` takes {takes}"),
     )
+    .with_parameter_note(ty)
     .with_secondary(operand.span(), format!("this is `{ty}`"))
     .with_note(note)
 }
@@ -1604,6 +1836,7 @@ pub(crate) fn not_extractable(name: &str, at: Span, ty: &hir::Type, operand: &Ex
         at,
         "only a tuple has an attribute's value",
     )
+    .with_parameter_note(ty)
     .with_secondary(operand.span(), format!("this is `{ty}`"));
     match ty {
         hir::Type::Relation(_) => d
@@ -1792,6 +2025,7 @@ pub(crate) fn not_restrictable(span: Span, ty: &hir::Type, operand: &Expr) -> Di
         span,
         "`where` takes a relation",
     )
+    .with_parameter_note(ty)
     .with_secondary(operand.span(), format!("this is `{ty}`"))
     .with_note("`r where p` is the tuples of the relation `r` for which the condition `p` is true");
     match ty {
@@ -1828,6 +2062,7 @@ pub(crate) fn not_relational(
         span,
         format!("`{operator}` takes a relation"),
     )
+    .with_parameter_note(ty)
     .with_secondary(operand.span(), format!("this is `{ty}`"))
     .with_note(note)
 }
@@ -2534,14 +2769,41 @@ pub(crate) fn failure(
 }
 
 /// How a type's values are named in the plural.
-fn plural(ty: &hir::Type) -> &'static str {
+/// A note on a type parameter's values: only what applies to any type of
+/// what it can be applies to them.
+trait ParameterNote {
+    /// The diagnostic, with the note if `ty` is a type parameter.
+    fn with_parameter_note(self, ty: &hir::Type) -> Self;
+}
+
+impl ParameterNote for Diagnostic {
+    fn with_parameter_note(self, ty: &hir::Type) -> Self {
+        let hir::Type::Parameter(p) = ty else {
+            return self;
+        };
+        self.with_note(match p.any {
+            hir::Any::Type => format!(
+                "`{p}` can be any type, so only what applies to every type applies to its values: `=` and `<>`, and passing them on"
+            ),
+            hir::Any::Tuple => format!(
+                "`{p}` can be any tuple, so its attributes aren't known here: only `=` and `<>` apply to its values, and passing them on"
+            ),
+            hir::Any::Relation => format!(
+                "`{p}` can be any relation, so its attributes aren't known here: only `=` and `<>` apply to its values, and `<=`, `<`, `>=` and `>` as sets, and passing them on"
+            ),
+        })
+    }
+}
+
+fn plural(ty: &hir::Type) -> String {
     match ty {
-        hir::Type::Scalar(hir::Scalar::Boolean) => "booleans",
-        hir::Type::Scalar(hir::Scalar::Integer) => "integers",
-        hir::Type::Scalar(hir::Scalar::Approximate) => "approximate numbers",
-        hir::Type::Scalar(hir::Scalar::Text) => "text",
-        hir::Type::Tuple(_) => "tuples",
-        hir::Type::Relation(_) => "relations",
+        hir::Type::Scalar(hir::Scalar::Boolean) => "booleans".to_string(),
+        hir::Type::Scalar(hir::Scalar::Integer) => "integers".to_string(),
+        hir::Type::Scalar(hir::Scalar::Approximate) => "approximate numbers".to_string(),
+        hir::Type::Scalar(hir::Scalar::Text) => "text".to_string(),
+        hir::Type::Tuple(_) => "tuples".to_string(),
+        hir::Type::Relation(_) => "relations".to_string(),
+        hir::Type::Parameter(p) => format!("values of `{p}`"),
     }
 }
 
@@ -2560,9 +2822,11 @@ pub(crate) fn wrong_operand_type(
         span,
         format!("`{}` takes {}", token.text(), op.takes()),
     )
+    .with_parameter_note(ty)
     .with_note("values never convert to another type implicitly");
     let hir::Type::Scalar(scalar) = *ty else {
         return match op {
+            _ if matches!(ty, hir::Type::Parameter(_)) => d,
             Operator::Compare(_) => d.with_note(
                 "tuples have no order: they can only be compared with `=` and `<>`; relations can also be compared as sets, with `<=` and `<` for subset and proper subset",
             ),

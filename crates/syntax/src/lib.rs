@@ -215,6 +215,14 @@ pub enum SyntaxKind {
     /// `: type`
     TypeAnnotation,
     TypeRef,
+    /// `any type`, `any tuple` or `any relation`: a parameter's type that
+    /// can be any type of what it says, which each call gives it. `any`
+    /// and `type` are contextual keywords, identifiers elsewhere.
+    AnyType,
+    /// `types { T: any type, … }`: an operator's type parameters, after
+    /// its parameters and result type. `types` is a contextual keyword, an
+    /// identifier elsewhere.
+    TypeParameters,
     /// `:= value`
     Initializer,
     /// `key { a, b }`, after a variable's type or value. `key` is a
@@ -243,7 +251,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 121] = [
+    pub const ALL: [SyntaxKind; 123] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -354,6 +362,8 @@ impl SyntaxKind {
         SyntaxKind::Assign,
         SyntaxKind::TypeAnnotation,
         SyntaxKind::TypeRef,
+        SyntaxKind::AnyType,
+        SyntaxKind::TypeParameters,
         SyntaxKind::Initializer,
         SyntaxKind::Key,
         SyntaxKind::Heading,
@@ -759,7 +769,8 @@ impl SyntaxKind {
             SyntaxKind::Arguments => "arguments",
             SyntaxKind::PositionalArg => "argument",
             SyntaxKind::TypeAnnotation => "type annotation",
-            SyntaxKind::TypeRef => "type",
+            SyntaxKind::TypeRef | SyntaxKind::AnyType => "type",
+            SyntaxKind::TypeParameters => "type parameters",
             SyntaxKind::Initializer => "initial value",
             SyntaxKind::Key => "key",
             SyntaxKind::Heading => "heading",

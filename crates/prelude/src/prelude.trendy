@@ -1,7 +1,6 @@
-builtin type any;
 builtin type boolean;
 builtin type integer;
 builtin type approximate;
 builtin type text;
 
-builtin operator debug_value{v: any};
+builtin operator debug_value{v: any type};

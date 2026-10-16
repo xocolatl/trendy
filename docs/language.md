@@ -170,37 +170,156 @@ operator main{} [
 ];
 ```
 
+### Generic operators
+
+A parameter's type can be `any type`, `any tuple` or `any relation`: the
+operator takes an argument of any type, of any tuple type, or of any
+relation type, and each call gives the parameter its argument's type. A
+type parameter, declared after the signature with `types`, names such a
+type, to say that several types are one, as for `same`'s `a` and `b`, or
+that the result's type is made of an argument's, as for `pair`.
+
+```trendy
+var cities := relation {
+    { city: "Kinshasa", river: "Congo" },
+    { city: "Brazzaville", river: "Congo" },
+    { city: "Varanasi", river: "Ganges" },
+}
+key { city };
+
+operator show{v: any type} [
+    call debug_value{v: v};
+];
+
+operator same{a: T, b: T}: boolean
+    types { T: any type }
+[
+    return a = b;
+];
+
+operator pair{a: T, b: T}: relation { v: T }
+    types { T: any type }
+[
+    return relation {
+        tuple { v: a },
+        tuple { v: b }
+    };
+];
+
+operator within{r: R, of: R}: boolean
+    types { R: any relation }
+[
+    return r <= of;
+];
+
+operator main{} [
+    call show{v: cities};
+    call show{v: same{a: "Congo", b: "Ganges"}};
+    call show{v: pair{a: 1, b: 2}};
+    call show{v: pair{a: cities{river}, b: cities{river}}};
+    call show{v: within{r: cities where river = "Congo", of: cities}};
+];
+```
+
+*The Third Manifesto* asks for operators like these (RM Very Strong
+Suggestion 7): the built-in relational operators are generic, working for
+every relation type, and a program should be able to define its own,
+though the Manifesto leaves how to further study.
+
+- **`types { … }` declares the type parameters,** after the parameters
+  and the result type: each a name, capitalized by convention, and what
+  it can be, `any type`, `any tuple` or `any relation` (A0040). Inside the
+  operator, a type parameter is a type, which the parameters' types, the
+  result type and the body can use, in other types too, as in
+  `relation { v: T }`. Each `any …` written as a parameter's type is a type
+  parameter without a name, of its own: `a: any type, b: any type` can
+  take arguments of two types.
+- **Each call gives each type parameter a type,** from its arguments: the
+  type of the argument whose parameter's type it is, or the part of that
+  argument's type where it is, so a call never names types. Every
+  argument it gives a type must give it the same one (A0004). So each
+  type parameter must be in some parameter's type (A0038), and one written
+  only once, as a parameter's type, is written `any type` instead, without
+  a name (A0039). An argument is checked against its parameter's type
+  once the type parameters in it have types, which other arguments can
+  give them: for parameters `a: T` and `r: relation { v: T }`, with `1` for
+  `a`, `relation {}` for `r` is the empty `relation { v: integer }`. Which
+  argument gives a type parameter its type never depends on the order the
+  arguments are written in.
+- **A body is checked once, for every type.** Only what applies to every
+  type a type parameter can be applies to its values: `=` and `<>`, and
+  passing them on, to operators and into tuples and relations, and for
+  `any relation`, which is ordered by inclusion, `<=`, `<`, `>=` and `>`.
+  So `a < b` of `T`s is an error (A0022), even if every call gives `T`
+  integers, as are the attributes of `any tuple` and `any relation`, which
+  aren't known.
+- **Each list of types is compiled on its own,** as if the operator were
+  written again with the types in place of its type parameters, and a call
+  is evaluated when compiling where it can be, as any other is. So a call
+  that leads back to the operator making it, giving a type parameter a
+  type built from that operator's own, such as `tuple { x: T }`, is an
+  error (A0041): it would need a version for every larger type.
+- **Only parameters have them.** A variable's type is always a specific
+  type, and `any type` written anywhere but as a parameter's type is an
+  error (A0014). `any`, `type` and `types` are words of their own only
+  there, so a variable can be named `any` or `types`.
+- **Other languages' spellings are fixed:** type parameters in angle
+  brackets after the name, `same<T>{…}`, as Rust, TypeScript, Java and C++
+  write them, to `types { T: any type }`, `relation any` to `any relation`
+  (P0027), and a bare `any`, as TypeScript and Go write it, to `any type`
+  (A0003).
+
+```trendy,error
+operator same{a: T, b: T}: boolean
+    types { T: any type }
+[
+    return a = b;
+];
+
+var different := same{a: 1, b: "Lima"};
+
+operator main{} [];
+```
+
+```trendy,error
+operator less{a: T, b: T}: boolean
+    types { T: any type }
+[
+    return a < b;
+];
+
+operator main{} [];
+```
+
+```trendy,error
+operator same<T>{a: T, b: T}: boolean [
+    return a = b;
+];
+
+operator main{} [];
+```
+
 ### Built-in operators
 
 The compiler implements some operators itself. They are declared in the
 *prelude*, trendy source that is part of every program, so they are always in
 scope. A program can't declare built-ins itself. The prelude also declares the
-built-in types, and `any`: a type name reserved for the parameters of built-in
-operators that accept a value of every type.
+built-in types.
 
 ```
-builtin type any;
 builtin type boolean;
 builtin type integer;
 builtin type approximate;
 builtin type text;
 
-builtin operator debug_value{v: any};
+builtin operator debug_value{v: any type};
 ```
 
-**`debug_value{v: any}`** writes `v` to stderr, on one line, as trendy source.
-Tuples and relations are written with their attributes in name order,
-relations with their heading first and their tuples in a fixed order, so the
-output reads back as the same value. For example:
+**`debug_value{v: any type}`** writes `v` to stderr, on one line, as trendy
+source. Tuples and relations are written with their attributes in name
+order, relations with their heading first and their tuples in a fixed order,
+so the output reads back as the same value. For example:
 `relation { a: boolean, b: integer } { { a: false, b: 25 }, { a: true, b: 3 } }`.
-
-`any` is a type name only, so a variable can be named `any`.
-
-```trendy,error
-operator show{v: any} [];
-
-operator main{} [];
-```
 
 ## Variables
 
@@ -1830,6 +1949,18 @@ operator main{} [
   adjacent lines unless you separate them with a blank line to group them;
   several blank lines become one, and a read-only operator's result type
   goes right after its parameters: `operator f{x: integer}: integer [`;
+- an operator's type parameters go on a line of their own, indented, with
+  spaces inside their braces, and then its body's `[` on a line of its own,
+  in the operator's column:
+
+  ```
+  operator same{a: T, b: T}: boolean
+      types { T: any type }
+  [
+      return a = b;
+  ];
+  ```
+
 - an `assign` block has each assignment on its own line, indented, like
   an operator's body;
 - a variable's keys on the line before them, when they fit there, with
@@ -1870,6 +2001,8 @@ line after a comment on its own line, such as a file's header, is kept.
 | `UPDATE r SET a = x`, `… WHERE 1 = 1` | `update r { a := x };` |
 | `X := Y, Y := X`, a multiple assignment | `assign { x := y; y := x; };` |
 | `(params) { body }` | `{params} [body]` |
+| `fn same<T>(a: T, b: T)`, `same<T>(a: T, b: T)` | `operator same{a: T, b: T} types { T: any type }` |
+| `any`, `anyelement` | `any type` |
 | `bool` | `boolean` |
 | `True`, `TRUE`, `1` for true | `true` |
 | `int`, `long`, `i64` | `integer` |

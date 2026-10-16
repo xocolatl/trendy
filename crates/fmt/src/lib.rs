@@ -402,6 +402,14 @@ impl Gap<'_> {
 
 const INDENT: &str = "    ";
 
+/// The type parameters, `types { … }`, that `token` starts, if it starts
+/// them.
+fn type_parameters_start(token: &SyntaxToken) -> Option<SyntaxNode> {
+    token.parent().filter(|p| {
+        p.kind() == SyntaxKind::TypeParameters && p.first_token().as_ref() == Some(token)
+    })
+}
+
 /// The key that `token` starts, if it starts one.
 fn key_start(token: &SyntaxToken) -> Option<SyntaxNode> {
     token
@@ -456,6 +464,20 @@ fn broken_line(prev: &SyntaxToken, next: &SyntaxToken, layout: &Layout) -> Optio
     {
         return Some(layout.level(&key));
     }
+    // An operator's type parameters, on a line of their own, one level in,
+    // and then its body's `[`, in the operator's column.
+    if let Some(types) = type_parameters_start(next) {
+        return Some(layout.level(&types) + 1);
+    }
+    if next.kind() == SyntaxKind::LBracket
+        && let Some(body) = next.parent().filter(|p| p.kind() == SyntaxKind::Body)
+        && body.parent().is_some_and(|op| {
+            op.children()
+                .any(|n| n.kind() == SyntaxKind::TypeParameters)
+        })
+    {
+        return Some(layout.level(&body));
+    }
     match prev.kind() {
         SyntaxKind::LBrace | SyntaxKind::LBracket | SyntaxKind::Comma => {
             block(prev).map(|b| layout.level(&b) + 1)
@@ -509,12 +531,16 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
             _ => false,
         })
     };
-    // The contextual keywords: `type`, in `builtin type name;`, `key`, and
-    // `value` and `from`, in `tuple from r` and `value from r`.
+    // The contextual keywords: `type`, in `builtin type name;`, `key`,
+    // `value` and `from`, in `tuple from r` and `value from r`, `any`, in
+    // `any type`, and `types`, before an operator's type parameters.
     let contextual_keyword = prev.kind() == Ident
         && prev.parent().is_some_and(|p| match p.kind() {
             BuiltinType => prev.text() == "type",
-            SyntaxKind::Key | SyntaxKind::FromExpr => true,
+            SyntaxKind::Key
+            | SyntaxKind::FromExpr
+            | SyntaxKind::AnyType
+            | SyntaxKind::TypeParameters => true,
             _ => false,
         });
     // A dyadic operator token, such as the `-` in `a - b`, as opposed to the
@@ -526,6 +552,11 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
                 .is_some_and(|p| p.kind() == SyntaxKind::BinaryExpr)
     };
     let sign = |token: &SyntaxToken| matches!(token.kind(), Plus | Minus);
+    // The word ending `any type`, `any tuple` or `any relation`, which
+    // nothing of its own follows.
+    let ends_any = prev
+        .parent()
+        .is_some_and(|p| p.kind() == SyntaxKind::AnyType && p.last_token().as_ref() == Some(prev));
     // A body's `[` follows what comes before it after a space, whether the
     // parameters or a read-only operator's result type: `f{}: integer [`.
     let body =
@@ -545,6 +576,7 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
         (LBrace, RBrace) if list_brace(prev) => "",
         (LBrace, _) if list_brace(prev) => " ",
         (_, RBrace) if list_brace(next) => " ",
+        _ if ends_any => "",
         _ if contextual_keyword => " ",
         _ if dyadic(prev) || dyadic(next) => " ",
         // `- -a`, not `--a`.
@@ -806,6 +838,35 @@ mod tests {
         assert_eq!(
             fmt("operator f{}:tuple{a:integer}[return tuple{a:1};];"),
             "operator f{}: tuple { a: integer } [\n    return tuple { a: 1 };\n];\n"
+        );
+    }
+
+    #[test]
+    fn type_parameters() {
+        // On a line of their own, and then the body's `[`.
+        assert_eq!(
+            fmt("operator same{a:T,b:T,r:any   relation}:boolean types{T:any type}[return a=b;];"),
+            "operator same{a: T, b: T, r: any relation}: boolean\n    types { T: any type }\n[\n    return a = b;\n];\n"
+        );
+        assert_eq!(
+            fmt("operator show{t:any tuple}types{}[];"),
+            "operator show{t: any tuple}\n    types {}\n[];\n"
+        );
+        // Without them, the body follows the signature.
+        assert_eq!(
+            fmt("operator show{t:any tuple}[];"),
+            "operator show{t: any tuple} [];\n"
+        );
+        // A long signature breaks its parameters.
+        let long = "operator tally{relation_of_things: any relation, of: T, at_least: integer}: relation { value: T, n: integer, at_least: integer } types { T: any type } [];";
+        assert_eq!(
+            fmt(long),
+            "operator tally{\n    relation_of_things: any relation,\n    of: T,\n    at_least: integer\n}: relation { value: T, n: integer, at_least: integer }\n    types { T: any type }\n[];\n"
+        );
+        // A comment before them stays on its line.
+        assert_eq!(
+            fmt("operator f{a: T}: T /* the same */ types { T: any type } [ return a; ];"),
+            "operator f{a: T}: T /* the same */\n    types { T: any type }\n[\n    return a;\n];\n"
         );
     }
 
@@ -1147,7 +1208,8 @@ mod tests {
             "var p:tuple{a:tuple{},b:text}:=tuple{a:tuple{},b:\"\",};",
             "var r:=relation{a:integer}{{a:1},tuple{a:2},};",
             "var r:relation{a:boolean,b:integer}:=relation{{b:1,a:true},{a:false,b:2},};",
-            "builtin type any;builtin operator f{v:any};operator main{}[call f{v:1};call f{v:2};];",
+            "builtin type text;builtin operator f{v:any type};operator main{}[call f{v:1};call f{v:2};];",
+            "operator f{a:T,b:any  relation}:T types{T:any type}[return a;];",
         ] {
             let once = fmt(source);
             assert_eq!(fmt(&once), once, "not idempotent for {source:?}");

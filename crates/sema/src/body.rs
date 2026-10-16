@@ -34,11 +34,27 @@ impl Context<'_> {
     }
 }
 
-/// The statements of the update operator `op`, whose id is `within`.
+/// A call, in the body of the update operator `caller`, of `callee`, which
+/// gives one of its type parameters, `parameter`, a type built from
+/// `caller`'s own, `ty`. If it leads back to `caller`, each time around
+/// gives it a larger type.
+pub(crate) struct Growing {
+    pub(crate) caller: hir::OperatorId,
+    pub(crate) callee: hir::OperatorId,
+    /// The callee's name, where the call writes it.
+    pub(crate) span: Span,
+    pub(crate) parameter: hir::TypeParameter,
+    pub(crate) ty: hir::Type,
+}
+
+/// The statements of the update operator `op`, whose id is `within`. Each
+/// call that gives a type parameter a type built from `op`'s own is added
+/// to `growing`.
 pub(crate) fn body(
     op: &ast::Operator,
     within: hir::OperatorId,
     cx: &Context,
+    growing: &mut Vec<Growing>,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<Vec<hir::Statement>> {
     let body = op.body()?;
@@ -49,7 +65,7 @@ pub(crate) fn body(
     let mut ok = true;
     for stmt in body.statements() {
         let statement = match &stmt {
-            ast::Statement::Call(stmt) => call(stmt, within, cx, errors),
+            ast::Statement::Call(stmt) => call(stmt, within, cx, growing, errors),
             ast::Statement::Assign(stmt) => {
                 assign::statement(&stmt.clauses().collect::<Vec<_>>(), within, cx, errors)
             }
@@ -74,6 +90,7 @@ fn call(
     stmt: &ast::CallStmt,
     within: hir::OperatorId,
     cx: &Context,
+    growing: &mut Vec<Growing>,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Statement> {
     let ident = stmt.callee()?.ident()?;
@@ -102,11 +119,64 @@ fn call(
         return None;
     }
     let mut names = BodyNames { cx, within };
-    let args = Checker::new(&mut names).arguments(Written::Arguments(&args), signature, errors)?;
-    Some(hir::Statement::Call {
-        operator: signature.id,
-        args,
-    })
+    let call = Checker::new(&mut names).arguments(Written::Arguments(&args), signature, errors)?;
+    // A type parameter passed on as it is never grows.
+    for (parameter, ty) in signature.types.iter().zip(&call.types) {
+        if !matches!(ty, hir::Type::Parameter(_)) && ty.parameters().next().is_some() {
+            growing.push(Growing {
+                caller: within,
+                callee: signature.id,
+                span,
+                parameter: parameter.clone(),
+                ty: ty.clone(),
+            });
+        }
+    }
+    Some(hir::Statement::Call(call))
+}
+
+/// Report each call in `growing` that leads back to its caller through
+/// the calls in the update operators' `bodies`: the operator would need a
+/// function for each of the ever larger types the type parameter is given
+/// each time around (see [`hir::Operator`]).
+pub(crate) fn growing_recursion(
+    growing: &[Growing],
+    bodies: &HashMap<hir::OperatorId, Vec<hir::Statement>>,
+    operators: &Operators,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let calls = |id: &hir::OperatorId| {
+        bodies
+            .get(id)
+            .into_iter()
+            .flatten()
+            .filter_map(|s| match s {
+                hir::Statement::Call(call) => Some(call.operator),
+                hir::Statement::Assign(_) => None,
+            })
+    };
+    for call in growing {
+        // Whether the callee reaches the caller.
+        let mut seen = vec![call.callee];
+        let mut next = vec![call.callee];
+        while let Some(id) = next.pop() {
+            for callee in calls(&id) {
+                if !seen.contains(&callee) {
+                    seen.push(callee);
+                    next.push(callee);
+                }
+            }
+        }
+        if seen.contains(&call.caller) {
+            errors.push(errors::growing_recursion(
+                &operators.get(call.caller).name,
+                &operators.get(call.callee).name,
+                call.span,
+                &call.parameter,
+                &call.ty,
+            ));
+        }
+    }
 }
 
 /// Names in the body of `within`: its parameters, which hide variables of
@@ -117,7 +187,7 @@ pub(crate) struct BodyNames<'a, 'b> {
 }
 
 impl BodyNames<'_, '_> {
-    fn params(&self) -> &BTreeMap<String, hir::ParamType> {
+    fn params(&self) -> &BTreeMap<String, hir::Type> {
         &self.cx.operators.get(self.within).params
     }
 }
@@ -164,12 +234,13 @@ impl Names for BodyNames<'_, '_> {
                 .expect("only valid variables are resolved")
                 .ty
                 .clone(),
-            hir::Expr::Parameter(name) => match &self.params()[name] {
-                hir::ParamType::Type(ty) => ty.clone(),
-                hir::ParamType::Any => unreachable!("only built-ins have `any` parameters"),
-            },
+            hir::Expr::Parameter(name) => self.params()[name].clone(),
             _ => unreachable!("only variables and parameters are leaves"),
         }
+    }
+
+    fn type_parameters(&self) -> Option<&[hir::TypeParameter]> {
+        Some(&self.cx.operators.get(self.within).types)
     }
 
     fn checked(&mut self, id: hir::OperatorId, _: Span, _: &mut Vec<Diagnostic>) -> bool {

@@ -73,6 +73,8 @@ ast_node!(VarDecl);
 ast_node!(Key);
 ast_node!(Name);
 ast_node!(TypeRef);
+ast_node!(AnyType);
+ast_node!(TypeParameters);
 ast_node!(Literal);
 ast_node!(Heading);
 ast_node!(AttributeType);
@@ -132,6 +134,21 @@ impl Operator {
             .find(|n| n.kind() == SyntaxKind::TypeAnnotation)?
             .children()
             .find_map(TypeExpr::cast)
+    }
+
+    /// The type parameters, `types { T: any type }`.
+    #[must_use]
+    pub fn type_parameters(&self) -> Option<TypeParameters> {
+        self.0.children().find_map(TypeParameters::cast)
+    }
+
+    /// Every type written by name in it, nested ones too, in source order,
+    /// but in its type parameters, which declare them.
+    pub fn type_refs(&self) -> impl Iterator<Item = TypeRef> + use<> {
+        self.0.descendants().filter_map(TypeRef::cast).filter(|t| {
+            !t.0.ancestors()
+                .any(|a| a.kind() == SyntaxKind::TypeParameters)
+        })
     }
 
     /// The span to delete to remove the result type, `: type`, with the
@@ -783,6 +800,7 @@ pub enum TypeExpr {
     Named(TypeRef),
     Tuple(TupleType),
     Relation(RelationType),
+    Any(AnyType),
 }
 
 impl TypeExpr {
@@ -791,7 +809,8 @@ impl TypeExpr {
         TypeRef::cast(node.clone())
             .map(TypeExpr::Named)
             .or_else(|| TupleType::cast(node.clone()).map(TypeExpr::Tuple))
-            .or_else(|| RelationType::cast(node).map(TypeExpr::Relation))
+            .or_else(|| RelationType::cast(node.clone()).map(TypeExpr::Relation))
+            .or_else(|| AnyType::cast(node).map(TypeExpr::Any))
     }
 
     #[must_use]
@@ -800,6 +819,7 @@ impl TypeExpr {
             TypeExpr::Named(t) => t.syntax(),
             TypeExpr::Tuple(t) => t.syntax(),
             TypeExpr::Relation(t) => t.syntax(),
+            TypeExpr::Any(t) => t.syntax(),
         }
     }
 
@@ -877,6 +897,17 @@ impl Expr {
 impl Heading {
     pub fn attributes(&self) -> impl Iterator<Item = AttributeType> {
         self.0.children().filter_map(AttributeType::cast)
+    }
+
+    /// The span to delete to remove `attribute`, with its comma.
+    #[must_use]
+    pub fn removal(&self, attribute: &AttributeType) -> Span {
+        list_removal(attribute.syntax())
+    }
+
+    /// Every type written by name in it, nested ones too, in source order.
+    pub fn type_refs(&self) -> impl Iterator<Item = TypeRef> + use<> {
+        self.0.descendants().filter_map(TypeRef::cast)
     }
 }
 
@@ -1043,6 +1074,42 @@ impl TypeRef {
     #[must_use]
     pub fn ident(&self) -> Option<SyntaxToken> {
         ident_of(&self.0)
+    }
+}
+
+impl AnyType {
+    /// The word `any`.
+    #[must_use]
+    pub fn any(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).find(|t| t.kind() == SyntaxKind::Ident && t.text() == "any")
+    }
+
+    /// The word for what it can be: `type`, `tuple` or `relation`, which
+    /// follows `any`, or, as the parser reports, comes before it.
+    #[must_use]
+    pub fn what(&self) -> Option<SyntaxToken> {
+        let any = self.any()?;
+        significant_tokens(&self.0).find(|t| *t != any)
+    }
+}
+
+impl TypeParameters {
+    /// The word `types`, or how it is cased otherwise.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    /// The type parameters, `{ T: any type }`: a heading.
+    #[must_use]
+    pub fn heading(&self) -> Option<Heading> {
+        self.0.children().find_map(Heading::cast)
+    }
+
+    /// The span to delete to remove them, with the whitespace before.
+    #[must_use]
+    pub fn removal(&self) -> Span {
+        Span::new(preceded_from(&self.0.clone().into()), self.span().end)
     }
 }
 

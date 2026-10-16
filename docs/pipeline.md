@@ -199,6 +199,18 @@ languages write one, fixed to braces (P0003), except in the condition of
 Tutorial D's `update r where p (a := x)`, whose values follow it
 (`Parser::paren_calls`).
 
+An operator's type parameters follow its result type, `types { T: any type }`
+(`TypeParameters`), a heading whose types sema requires to be `any …`.
+`types` is a contextual keyword, recognized there before `{`, and `any`
+another, recognized in a type before `type`, which is a word, or the
+keyword `tuple` or `relation` (`AnyType`). Elsewhere all three are names,
+and a bare `any` is a type's name, which sema reports. Type parameters in
+angle brackets after the operator's name, `f<T, U>{…}`, are consumed up to
+the matching `>` into an error node and reported once the result type is
+parsed, with a fix that moves them to `types` there, if they are only
+names (P0027); `relation any` and `tuple any` are parsed as what they
+mean and fixed the same way.
+
 `!!r` (`ImageExpr`), Tutorial D's image relation, takes a single operand:
 a name, a literal or a parenthesized expression. The lexer makes `!!` one
 token only when the two `!`s are together; a lone `!` is C's `not`, fixed
@@ -241,7 +253,10 @@ of a relation value's closing brace, and a blank line follows them; a too
 long line breaks its keys before any list in it.
 
 An `assign` block is laid out like an operator's body: each assignment on
-its own line, indented, and `};` on a line of its own.
+its own line, indented, and `};` on a line of its own. An operator's type
+parameters go on a line of their own, one level in, their braces spaced as
+a heading's, and then its body's `[` on a line of its own, in the
+operator's column.
 
 Everything else goes on one line, except that a relation value with more than
 one tuple is broken across lines: each tuple on its own line, indented four
@@ -298,6 +313,18 @@ are Tutorial D Version 2's `EXTEND`; `replace` is then not extend, remove
 and rename under fresh names, which HIR would have to invent. `Extend`
 carries the computed attributes' heading, since an empty relation has no
 tuple to take their types from.
+
+An operator can have type parameters (`Operator::types`), each `any type`,
+`any tuple` or `any relation` (`hir::Any`), named or not, which its
+parameters' types, its result type and its body refer to as
+`Type::Parameter`: a type of its own inside the operator, equal only to
+itself. Each call (`hir::Call`, a statement's or an expression's) gives
+each one a type, by index, which the arguments determined, and the
+callee's types mean those: `Operator::instantiated` replaces each type
+parameter with its type throughout, an operator of its own with none.
+Comparing values of a type parameter is `Compared::Parameter`, which
+instantiating makes what the type's values are compared as. `debug_value`
+is a built-in with one, `{v: any type}`.
 
 An update operator's body is a list of statements
 (`OperatorKind::Update`): calls, and assignments (`Statement::Assign`),
@@ -376,9 +403,44 @@ call's arguments are checked as `call`'s are (`Checker::arguments`). An
 update operator has no value, so calling one in an expression is an error
 (A0016), and `call` of a read-only operator would lose its value (A0037).
 
+An operator's type parameters are those its `types` list declares, then
+one for each `any …` written as a parameter's type, without a name; only a
+parameter's type can have one (A0014). Type names resolve to the
+operator's type parameters before the built-in types
+(`types::TypeParameters`), and a type parameter can't have a built-in
+type's name (A0001). Each declared one must be in some parameter's type,
+so that a call's arguments determine it (A0038), and one written only
+once, as a parameter's type, is reported with the fix that writes it
+without a name instead (A0039); these are counted in the source, so that
+a use in the body counts.
+
+A call's arguments are checked against their parameters' types as each
+type parameter in them gets a type (`check::TypeArguments`): an argument
+whose parameter's type has a type parameter with none yet is checked
+without an expectation, and its type gives the type parameter one, then
+the arguments whose parameters' types are now known are checked against
+them. Those whose parameter's type is a type parameter go first, since
+expecting a type parameter says nothing about a value; so an empty
+`relation {}` gets its heading from another argument, and which argument
+gives a type parameter its type never depends on the order they are
+written in. Two that give it different types are a mismatch at the
+later one, with a label at the one that gave it its type (A0004), and
+`any tuple` or `any relation` takes only tuples or relations. A generic
+operator's body is checked once, with its type parameters as types of
+their own, so only what applies to every type they can be applies to
+their values: `=` and `<>`, and for `any relation`, the comparisons of
+sets (`ops::Operator::resolve`); errors about them say so.
+
+A call of an update operator that gives one of the callee's type
+parameters a type built from the caller's own, such as `tuple { x: T }`,
+is recorded (`body::Growing`), and once every body is checked, reported if
+the callee's calls lead back to the caller (A0041): lowering would need a
+function for each of the ever larger types.
+
 A call is evaluated by substituting its arguments, once they are all
 known when compiling, for its callee's parameters, and folding again
-(`ops::call`), as a constant operand's tuples are substituted for the
+(`ops::call`), the callee's value first instantiated with the call's
+types, as a constant operand's tuples are substituted for the
 tuple at hand (`ops::substitute`), with the same `Bindings`: the
 read-only operators' values, and, in an initial value, the variables'.
 Elsewhere variables change when the program runs, so a call of an
@@ -635,11 +697,17 @@ translation.
 **Input:** `hir::Program`. **Output:** `lir::Program`. It cannot fail.
 
 **Owns:** turning tree-shaped code into control flow, and choosing how each
-value is represented in memory. Each update operator becomes a function,
-and so does each read-only operator that lowered code calls, once it
-does: its value is computed, then stored where the caller says
-(`Base::Result`). Sema evaluates every other call, so an operator called
-only when compiling has no function. A computed expression, such as
+value is represented in memory. Each operator becomes a function once
+lowered code calls it, starting with the entry point, and an operator with
+type parameters becomes one for each list of types it is called with,
+instantiated with them (`hir::Operator::instantiated`), so the functions
+see only specific types; their names are the operator's with its
+parameters' types, `pair{a: integer, b: integer}`. An update operator's
+function is numbered before its body is lowered, so a call of itself finds
+it. A read-only operator's computes its value, then stores it where the
+caller says (`Base::Result`). Sema evaluates every other call, so an
+operator called only when compiling has no function, and neither has one
+never called. A computed expression, such as
 `not p`, is evaluated into a stack slot of its own, which the instruction
 that uses it then reads.
 

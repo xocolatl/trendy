@@ -28,6 +28,7 @@ pub(crate) const ASSIGNMENT_FORM: &str = "an assignment statement is `name := va
 pub(crate) const ASSIGN_BLOCK_FORM: &str =
     "an `assign` block makes assignments all at once: `assign { x := y; y := x; };`";
 pub(crate) const UPDATE_FORM: &str = "`update` takes attributes the variable has, each `name := value`, then for a relation an optional `where` and condition: `update r { price := price * 2 } where id = 7;`";
+pub(crate) const TYPES_FORM: &str = "an operator's type parameters follow its parameters and result type, each `name: any type`, `any tuple` or `any relation`: `operator pair{a: T, b: T}: relation { v: T } types { T: any type } [ … ];`";
 pub(crate) const VARIABLE_FORM: &str = "a variable declaration has the form `var name: type := value;`, where either the type or the value may be left out";
 
 /// Words other languages use to start a definition or declaration, which
@@ -1032,6 +1033,66 @@ pub(crate) fn result_spelling(found: Found, span: Span) -> Diagnostic {
         vec![Edit {
             span,
             replacement: ":".to_string(),
+        }],
+    )
+}
+
+/// Type parameters in angle brackets after an operator's name, `<T, U>`,
+/// at `span`, with their names if they are only names.
+pub(crate) struct Angled {
+    pub(crate) span: Span,
+    pub(crate) names: Option<Vec<String>>,
+}
+
+/// `angled`, written after an operator's name: the fix declares its names
+/// with `types` at `at`, the end of the signature, unless the operator
+/// already has a `types` list, which is `declared`.
+pub(crate) fn angled_type_parameters(angled: &Angled, declared: bool, at: usize) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::TypeParameterSpelling,
+        "type parameters are declared with `types`, after the signature, not in `<…>`",
+        angled.span,
+        "another language's syntax",
+    )
+    .with_note(TYPES_FORM)
+    .with_note(
+        "each call gives the type parameters types from its arguments, so a call never names them",
+    );
+    let Some(names) = &angled.names else {
+        return d.with_help(
+            "remove the `<…>` and declare each type parameter after the result type, as `types { T: any type }`",
+        );
+    };
+    let mut edits = vec![Edit {
+        span: angled.span,
+        replacement: String::new(),
+    }];
+    if !declared {
+        let list: Vec<String> = names.iter().map(|n| format!("{n}: any type")).collect();
+        edits.push(Edit {
+            span: Span::new(at, at),
+            replacement: format!(" types {{ {} }}", list.join(", ")),
+        });
+    }
+    d.with_suggestion("declare them with `types`", edits)
+}
+
+/// `keyword any`, at `span`, where `keyword` is `tuple` or `relation`:
+/// written the other way around.
+pub(crate) fn any_after(keyword: Found, span: Span) -> Diagnostic {
+    let fixed = format!("any {}", keyword.text);
+    Diagnostic::error(
+        Code::TypeParameterSpelling,
+        format!("write `{fixed}`, not `{} any`", keyword.text),
+        span,
+        "the words are the other way around",
+    )
+    .with_note("a parameter that takes any tuple, or any relation, has the type `any tuple` or `any relation`, as one that takes any value has `any type`")
+    .with_suggestion(
+        format!("write `{fixed}`"),
+        vec![Edit {
+            span,
+            replacement: fixed,
         }],
     )
 }

@@ -29,50 +29,107 @@ pub fn lower(program: &hir::Program) -> lir::Program {
         }));
     }
 
-    // Each update operator becomes a function, numbered first. A read-only
-    // operator becomes one once lowered code calls it, which sema leaves
-    // only where the program runs, numbered after. Built-ins are runtime
+    // Each operator becomes a function once lowered code calls it,
+    // starting with the entry point, and once for each list of types its
+    // type parameters are given: an operator that is only called when
+    // compiling, which sema evaluates, has none. Built-ins are runtime
     // calls.
-    let mut function_ids = HashMap::new();
-    for (i, op) in program.operators.iter().enumerate() {
-        if matches!(op.kind, hir::OperatorKind::Update { .. }) {
-            function_ids.insert(hir::OperatorId(i), lir::FunctionId(function_ids.len()));
-        }
-    }
-    let mut functions = Vec::new();
-    for (i, op) in program.operators.iter().enumerate() {
-        let hir::OperatorKind::Update { body } = &op.kind else {
-            continue;
-        };
-        let mut function =
-            FunctionBuilder::new(program, hir::OperatorId(i), &function_ids, &variable_data);
-        for statement in body {
-            function.statement(statement, &mut cx);
-        }
-        functions.push(function.finish(None));
-    }
-    functions.append(&mut cx.read_only_functions);
-
+    let (entry, _) = function(program, &variable_data, program.entry, &[], &mut cx);
     lir::Program {
-        functions,
+        functions: cx.functions.into_values().collect(),
         data: cx.data,
-        entry: function_ids[&program.entry],
+        entry,
     }
 }
 
-/// The program-wide part of lowering: the data objects, and the read-only
-/// operators' functions.
+/// The function of the operator `id` instantiated with `types`, lowered
+/// when first called, and whether a call of it makes a text or relation
+/// that the calling statement owns, as a read-only operator's can.
+///
+/// An update operator's function runs each statement in a scope of its
+/// own. A read-only operator's computes its value, then stores it where the
+/// caller says, as a `result`; it begins no scope, so what it makes is the
+/// calling statement's. Read-only operators don't call themselves, so
+/// whether one makes something is known once its function is lowered,
+/// before the calling statement ends.
+fn function(
+    program: &hir::Program,
+    variable_data: &[lir::DataId],
+    id: hir::OperatorId,
+    types: &[hir::Type],
+    cx: &mut Lowering,
+) -> (lir::FunctionId, bool) {
+    let key = (id, types.to_vec());
+    if let Some(&lowered) = cx.functions_of.get(&key) {
+        return lowered;
+    }
+    // Numbered before its body is lowered, so that a call of itself finds
+    // it.
+    let function_id = lir::FunctionId(cx.functions_of.len());
+    cx.functions_of.insert(key.clone(), (function_id, false));
+
+    let op = program.operator(id);
+    let hir::Operator {
+        name, params, kind, ..
+    } = if types.is_empty() {
+        op.clone()
+    } else {
+        op.instantiated(types)
+    };
+    // Instances of one operator are told apart by their parameters' types.
+    let name = if types.is_empty() {
+        name
+    } else {
+        format!("{name}{}", params_text(&params))
+    };
+    let mut builder = FunctionBuilder::new(program, name, params, variable_data);
+    let (lowered, makes) = match kind {
+        hir::OperatorKind::Update { body } => {
+            for statement in &body {
+                builder.statement(statement, cx);
+            }
+            (builder.finish(None), false)
+        }
+        hir::OperatorKind::ReadOnly { result, value } => {
+            let src = builder.place(&value, cx);
+            builder.insts.push(lir::Inst::Copy {
+                dst: lir::Place::whole(lir::Base::Result),
+                src,
+                layout: layout(&result),
+            });
+            let makes = builder.scoped;
+            (builder.finish(Some(layout(&result))), makes)
+        }
+        hir::OperatorKind::Builtin(_) => unreachable!("built-ins are runtime calls"),
+    };
+    cx.functions.insert(function_id.0, lowered);
+    cx.functions_of.insert(key, (function_id, makes));
+    (function_id, makes)
+}
+
+/// Parameters as written, `{name: text, times: integer}`, with their
+/// types.
+fn params_text(params: &BTreeMap<String, hir::Type>) -> String {
+    let params: Vec<String> = params
+        .iter()
+        .map(|(name, ty)| format!("{name}: {ty}"))
+        .collect();
+    format!("{{{}}}", params.join(", "))
+}
+
+/// The program-wide part of lowering: the data objects, and the functions.
 struct Lowering {
     data: Vec<lir::Data>,
     /// Each type's descriptor, built once.
     descriptors: HashMap<hir::Type, lir::DataId>,
     /// An empty constant, for addresses that are never read.
     empty: Option<lir::DataId>,
-    /// Each read-only operator's function, once lowered code calls it, and
-    /// whether a call of it makes a text or relation.
-    read_only: HashMap<hir::OperatorId, (lir::FunctionId, bool)>,
-    /// Those functions, in the order lowered, each after those it calls.
-    read_only_functions: Vec<lir::Function>,
+    /// The functions lowered, by id, which counts up from 0: one is added
+    /// once its body is lowered, after those it calls.
+    functions: BTreeMap<usize, lir::Function>,
+    /// The function of each operator and list of types lowered code calls
+    /// it with, and whether a call of it makes a text or relation.
+    functions_of: HashMap<(hir::OperatorId, Vec<hir::Type>), (lir::FunctionId, bool)>,
 }
 
 impl Lowering {
@@ -81,8 +138,8 @@ impl Lowering {
             data: Vec::new(),
             descriptors: HashMap::new(),
             empty: None,
-            read_only: HashMap::new(),
-            read_only_functions: Vec::new(),
+            functions: BTreeMap::new(),
+            functions_of: HashMap::new(),
         }
     }
 
@@ -152,6 +209,7 @@ impl Lowering {
                 Some(heading),
                 Some(layout(&hir::Type::Tuple(heading.clone()))),
             ),
+            hir::Type::Parameter(_) => unreachable!("functions are of instantiated operators"),
         };
         let (attributes, count) = match heading {
             Some(heading) => (self.attributes(heading), heading.attributes().count()),
@@ -210,9 +268,11 @@ const KIND_RELATION: u8 = 5;
 /// The part of lowering for one function.
 struct FunctionBuilder<'a> {
     program: &'a hir::Program,
-    /// The operator this function is.
-    within: hir::OperatorId,
-    function_ids: &'a HashMap<hir::OperatorId, lir::FunctionId>,
+    /// The function's name, unique in the program.
+    name: String,
+    /// The parameters of the operator it is, with their types, which have
+    /// no type parameters in them.
+    params: BTreeMap<String, hir::Type>,
     variable_data: &'a [lir::DataId],
     slots: Vec<lir::Layout>,
     /// The blocks, those not ended yet placeholders.
@@ -242,17 +302,18 @@ fn placeholder() -> lir::Block {
 }
 
 impl<'a> FunctionBuilder<'a> {
-    /// The function of the operator `within`, with an empty entry block.
+    /// The function `name`, of an operator with the parameters `params`,
+    /// with an empty entry block.
     fn new(
         program: &'a hir::Program,
-        within: hir::OperatorId,
-        function_ids: &'a HashMap<hir::OperatorId, lir::FunctionId>,
+        name: String,
+        params: BTreeMap<String, hir::Type>,
         variable_data: &'a [lir::DataId],
     ) -> Self {
         FunctionBuilder {
             program,
-            within,
-            function_ids,
+            name,
+            params,
             variable_data,
             slots: Vec::new(),
             blocks: vec![placeholder()],
@@ -268,10 +329,9 @@ impl<'a> FunctionBuilder<'a> {
     /// laid out as `result`, if it has one.
     fn finish(mut self, result: Option<lir::Layout>) -> lir::Function {
         self.end_block(lir::Terminator::Return, lir::BlockId(0));
-        let op = self.program.operator(self.within);
         lir::Function {
-            name: op.name.clone(),
-            params: params_layout(&op.params),
+            name: self.name,
+            params: params_layout(&self.params),
             result,
             slots: self.slots,
             blocks: self.blocks,
@@ -325,7 +385,7 @@ impl<'a> FunctionBuilder<'a> {
     fn statement(&mut self, statement: &hir::Statement, cx: &mut Lowering) {
         let start = self.position();
         match statement {
-            hir::Statement::Call { operator, args } => self.call(*operator, args, cx),
+            hir::Statement::Call(call) => self.call(call, cx),
             hir::Statement::Assign(assignments) => self.assign(assignments, cx),
         }
         if std::mem::take(&mut self.scoped) {
@@ -344,17 +404,12 @@ impl<'a> FunctionBuilder<'a> {
         }
     }
 
-    fn call(
-        &mut self,
-        operator: hir::OperatorId,
-        args: &BTreeMap<String, hir::Expr>,
-        cx: &mut Lowering,
-    ) {
-        let callee = self.program.operator(operator);
+    fn call(&mut self, call: &hir::Call, cx: &mut Lowering) {
+        let callee = self.program.operator(call.operator);
         match &callee.kind {
             hir::OperatorKind::Builtin(hir::Builtin::DebugValue) => {
-                let value = &args["v"];
-                let ty = self.program.type_of(value, self.within);
+                let value = &call.args["v"];
+                let ty = self.program.type_of(value, &self.params);
                 let value = self.place(value, cx);
                 let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
                 self.insts.push(lir::Inst::CallRuntime {
@@ -363,18 +418,22 @@ impl<'a> FunctionBuilder<'a> {
                 });
             }
             hir::OperatorKind::Update { .. } => {
+                let params = params_of(callee, &call.types);
                 // An assignment the operator makes must not release what
                 // an argument points to.
-                if callee
-                    .params
-                    .values()
-                    .any(|param| points(param_type(param)))
-                {
+                if params.values().any(points) {
                     self.scoped = true;
                 }
-                let args = self.arguments(&callee.params, args, cx);
+                let (function, _) = function(
+                    self.program,
+                    self.variable_data,
+                    call.operator,
+                    &call.types,
+                    cx,
+                );
+                let args = self.arguments(&params, &call.args, cx);
                 self.insts.push(lir::Inst::Call {
-                    function: self.function_ids[&operator],
+                    function,
                     args,
                     result: None,
                 });
@@ -390,79 +449,44 @@ impl<'a> FunctionBuilder<'a> {
     /// any.
     fn arguments(
         &mut self,
-        params: &BTreeMap<String, hir::ParamType>,
+        params: &BTreeMap<String, hir::Type>,
         args: &BTreeMap<String, hir::Expr>,
         cx: &mut Lowering,
     ) -> Option<lir::Place> {
         let slot = self.slot(params_layout(params)?);
-        for (i, (name, param)) in params.iter().enumerate() {
+        for (i, (name, ty)) in params.iter().enumerate() {
             let src = self.place(&args[name], cx);
             let mut dst = slot.clone();
             dst.path.push(i);
             self.insts.push(lir::Inst::Copy {
                 dst,
                 src,
-                layout: param_layout(param),
+                layout: layout(ty),
             });
         }
         Some(slot)
     }
 
-    /// The value of a call of the read-only operator `id`, computed into
-    /// a new stack slot. What the operator makes is the statement's.
-    fn read_only_call(
-        &mut self,
-        id: hir::OperatorId,
-        args: &BTreeMap<String, hir::Expr>,
-        cx: &mut Lowering,
-    ) -> lir::Place {
-        let callee = self.program.operator(id);
-        let hir::OperatorKind::ReadOnly { result, value } = &callee.kind else {
-            unreachable!("only read-only operators are called in expressions");
-        };
-        let (function, makes) = self.read_only(id, value, result, cx);
+    /// The value of `call`, of a read-only operator, computed into a new
+    /// stack slot. What the operator makes is the statement's.
+    fn read_only_call(&mut self, call: &hir::Call, cx: &mut Lowering) -> lir::Place {
+        let callee = self.program.operator(call.operator);
+        let (function, makes) = function(
+            self.program,
+            self.variable_data,
+            call.operator,
+            &call.types,
+            cx,
+        );
         self.scoped |= makes;
-        let args = self.arguments(&callee.params, args, cx);
-        let dst = self.slot(layout(result));
+        let args = self.arguments(&params_of(callee, &call.types), &call.args, cx);
+        let dst = self.slot(layout(&self.program.result(call)));
         self.insts.push(lir::Inst::Call {
             function,
             args,
             result: Some(dst.clone()),
         });
         dst
-    }
-
-    /// The function of the read-only operator `id`, lowered when first
-    /// called, and whether a call of it makes a text or relation: its
-    /// `value` computed, then stored where the caller says, as a `result`.
-    /// It begins no scope, so what it makes is the calling statement's.
-    /// Read-only operators don't call themselves, so this ends.
-    fn read_only(
-        &mut self,
-        id: hir::OperatorId,
-        value: &hir::Expr,
-        result: &hir::Type,
-        cx: &mut Lowering,
-    ) -> (lir::FunctionId, bool) {
-        if let Some(&lowered) = cx.read_only.get(&id) {
-            return lowered;
-        }
-        let mut function =
-            FunctionBuilder::new(self.program, id, self.function_ids, self.variable_data);
-        let src = function.place(value, cx);
-        function.insts.push(lir::Inst::Copy {
-            dst: lir::Place::whole(lir::Base::Result),
-            src,
-            layout: layout(result),
-        });
-        let lowered = (
-            lir::FunctionId(self.function_ids.len() + cx.read_only_functions.len()),
-            function.scoped,
-        );
-        cx.read_only_functions
-            .push(function.finish(Some(layout(result))));
-        cx.read_only.insert(id, lowered);
-        lowered
     }
 
     /// Assignments made at once, each to a different variable. Each value
@@ -584,8 +608,8 @@ impl<'a> FunctionBuilder<'a> {
                 path: vec![0],
             },
             hir::Expr::Parameter(name) => {
-                let params = &self.program.operator(self.within).params;
-                let index = params
+                let index = self
+                    .params
                     .keys()
                     .position(|p| p == name)
                     .expect("sema resolved the parameter");
@@ -610,7 +634,7 @@ impl<'a> FunctionBuilder<'a> {
             }
             // The attribute's own place within the tuple: no copy.
             hir::Expr::Extract(tuple, name) => {
-                let ty = self.program.type_of(tuple, self.within);
+                let ty = self.program.type_of(tuple, &self.params);
                 let index = attribute_names(&ty)
                     .position(|a| a == name)
                     .expect("sema extracts only attributes the tuple has");
@@ -619,14 +643,14 @@ impl<'a> FunctionBuilder<'a> {
                 place
             }
             hir::Expr::Tuple(attributes) => {
-                let ty = self.program.type_of(expr, self.within);
+                let ty = self.program.type_of(expr, &self.params);
                 let dst = self.slot(layout(&ty));
                 self.fill_tuple(attributes, &dst, cx);
                 dst
             }
             hir::Expr::Relation(heading, tuples) => self.relation(heading, tuples, cx),
             hir::Expr::Remove(operand, names) => {
-                let ty = self.program.type_of(operand, self.within);
+                let ty = self.program.type_of(operand, &self.params);
                 let src = self.place(operand, cx);
                 // The kept attributes, in their own order, which is the
                 // result's too.
@@ -638,7 +662,7 @@ impl<'a> FunctionBuilder<'a> {
                 self.reshape(&ty, &ty.without(names), &sources, src, cx)
             }
             hir::Expr::Rename(operand, renamings) => {
-                let ty = self.program.type_of(operand, self.within);
+                let ty = self.program.type_of(operand, &self.params);
                 let src = self.place(operand, cx);
                 let result_ty = ty.renamed(renamings);
                 // Each result attribute comes from the operand's attribute
@@ -665,10 +689,10 @@ impl<'a> FunctionBuilder<'a> {
             hir::Expr::Antijoin(lhs, rhs) => self.matching(lhs, rhs, true, cx),
             hir::Expr::Restrict(operand, condition) => self.restrict(operand, condition, cx),
             hir::Expr::Current(depth, _) => self.tuples[self.tuples.len() - 1 - depth].clone(),
-            hir::Expr::Call(id, args) => self.read_only_call(*id, args, cx),
+            hir::Expr::Call(call) => self.read_only_call(call, cx),
             hir::Expr::Extend(operand, _, attributes) => self.extend(expr, operand, attributes, cx),
             hir::Expr::Binary(op, lhs, rhs) => {
-                let operand_ty = self.program.type_of(lhs, self.within);
+                let operand_ty = self.program.type_of(lhs, &self.params);
                 let lhs = self.place(lhs, cx);
                 let rhs = self.place(rhs, cx);
                 self.binary(*op, &operand_ty, lhs, rhs, cx)
@@ -685,7 +709,7 @@ impl<'a> FunctionBuilder<'a> {
         cx: &mut Lowering,
     ) {
         for (i, value) in attributes.values().enumerate() {
-            let ty = self.program.type_of(value, self.within);
+            let ty = self.program.type_of(value, &self.params);
             let src = self.place(value, cx);
             let mut to = dst.clone();
             to.path.push(i);
@@ -757,8 +781,8 @@ impl<'a> FunctionBuilder<'a> {
         attributes: &BTreeMap<String, hir::Expr>,
         cx: &mut Lowering,
     ) -> lir::Place {
-        let ty = self.program.type_of(operand, self.within);
-        let result_ty = self.program.type_of(expr, self.within);
+        let ty = self.program.type_of(operand, &self.params);
+        let result_ty = self.program.type_of(expr, &self.params);
         let src = self.place(operand, cx);
         match (&ty, &result_ty) {
             (hir::Type::Tuple(heading), hir::Type::Tuple(result)) => {
@@ -851,7 +875,7 @@ impl<'a> FunctionBuilder<'a> {
         condition: &hir::Expr,
         cx: &mut Lowering,
     ) -> lir::Place {
-        let ty = self.program.type_of(operand, self.within);
+        let ty = self.program.type_of(operand, &self.params);
         let hir::Type::Relation(heading) = &ty else {
             unreachable!("sema restricts only relations");
         };
@@ -981,7 +1005,7 @@ impl<'a> FunctionBuilder<'a> {
     /// The only tuple of the relation `operand`, copied into a new stack
     /// slot. The program stops if the relation has none, or several.
     fn only(&mut self, operand: &hir::Expr, cx: &mut Lowering) -> lir::Place {
-        let ty = self.program.type_of(operand, self.within);
+        let ty = self.program.type_of(operand, &self.params);
         let hir::Type::Relation(heading) = &ty else {
             unreachable!("sema takes the only tuple of relations only");
         };
@@ -1166,8 +1190,8 @@ impl<'a> FunctionBuilder<'a> {
         negated: bool,
         cx: &mut Lowering,
     ) -> lir::Place {
-        let lhs_ty = self.program.type_of(lhs, self.within);
-        let rhs_ty = self.program.type_of(rhs, self.within);
+        let lhs_ty = self.program.type_of(lhs, &self.params);
+        let rhs_ty = self.program.type_of(rhs, &self.params);
         let (hir::Type::Relation(lhs_heading), hir::Type::Relation(rhs_heading)) =
             (&lhs_ty, &rhs_ty)
         else {
@@ -1209,7 +1233,7 @@ impl<'a> FunctionBuilder<'a> {
         rhs: &hir::Expr,
         cx: &mut Lowering,
     ) -> lir::Place {
-        let ty = self.program.type_of(lhs, self.within);
+        let ty = self.program.type_of(lhs, &self.params);
         let lhs = self.place(lhs, cx);
         let rhs = self.place(rhs, cx);
         let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
@@ -1241,7 +1265,7 @@ impl<'a> FunctionBuilder<'a> {
         names: &BTreeSet<String>,
         cx: &mut Lowering,
     ) -> lir::Place {
-        let ty = &self.program.type_of(operand, self.within);
+        let ty = &self.program.type_of(operand, &self.params);
         let src = self.place(operand, cx);
         let hir::Type::Relation(heading) = ty else {
             unreachable!("sema ungroups only relations");
@@ -1321,8 +1345,8 @@ impl<'a> FunctionBuilder<'a> {
     /// `lhs` and `rhs` joined, computed into a new stack slot: the AND of
     /// relations, by the runtime, or the join of tuples.
     fn joined(&mut self, lhs: &hir::Expr, rhs: &hir::Expr, cx: &mut Lowering) -> lir::Place {
-        let lhs_ty = self.program.type_of(lhs, self.within);
-        let rhs_ty = self.program.type_of(rhs, self.within);
+        let lhs_ty = self.program.type_of(lhs, &self.params);
+        let rhs_ty = self.program.type_of(rhs, &self.params);
         let lhs = self.place(lhs, cx);
         let rhs = self.place(rhs, cx);
         match lhs_ty {
@@ -1526,6 +1550,9 @@ fn lower_binary_op(op: hir::BinaryOp) -> lir::BinaryOp {
                 hir::Compared::Scalar(hir::Scalar::Text)
                 | hir::Compared::Tuple
                 | hir::Compared::Relation => unreachable!("compared by a runtime call"),
+                hir::Compared::Parameter(_) => {
+                    unreachable!("functions are of instantiated operators")
+                }
             },
         ),
         hir::BinaryOp::Concatenate => unreachable!("text is concatenated by a runtime call"),
@@ -1596,6 +1623,7 @@ fn points(ty: &hir::Type) -> bool {
         hir::Type::Scalar(scalar) => *scalar == hir::Scalar::Text,
         hir::Type::Relation(_) => true,
         hir::Type::Tuple(heading) => heading.attributes().any(|(_, ty)| points(ty)),
+        hir::Type::Parameter(_) => unreachable!("functions are of instantiated operators"),
     }
 }
 
@@ -1611,23 +1639,21 @@ fn layout(ty: &hir::Type) -> lir::Layout {
         hir::Type::Tuple(heading) => {
             lir::Layout::Struct(heading.attributes().map(|(_, ty)| layout(ty)).collect())
         }
+        hir::Type::Parameter(_) => unreachable!("functions are of instantiated operators"),
     }
 }
 
-fn param_type(param: &hir::ParamType) -> &hir::Type {
-    match param {
-        hir::ParamType::Type(ty) => ty,
-        hir::ParamType::Any => unreachable!("only built-ins have `any` parameters"),
-    }
-}
-
-fn param_layout(param: &hir::ParamType) -> lir::Layout {
-    layout(param_type(param))
+/// The parameters of `op`, instantiated with `types`.
+fn params_of(op: &hir::Operator, types: &[hir::Type]) -> BTreeMap<String, hir::Type> {
+    op.params
+        .iter()
+        .map(|(name, ty)| (name.clone(), ty.instantiated(types)))
+        .collect()
 }
 
 /// The parameter struct of a user operator, if it has parameters.
-fn params_layout(params: &BTreeMap<String, hir::ParamType>) -> Option<lir::Layout> {
-    (!params.is_empty()).then(|| lir::Layout::Struct(params.values().map(param_layout).collect()))
+fn params_layout(params: &BTreeMap<String, hir::Type>) -> Option<lir::Layout> {
+    (!params.is_empty()).then(|| lir::Layout::Struct(params.values().map(layout).collect()))
 }
 
 fn len(n: usize) -> u64 {
@@ -1645,9 +1671,10 @@ mod tests {
     fn user(name: &str, params: &[&str], body: Vec<hir::Statement>) -> hir::Operator {
         hir::Operator {
             name: name.to_string(),
+            types: Vec::new(),
             params: params
                 .iter()
-                .map(|p| ((*p).to_string(), hir::ParamType::Type(integer())))
+                .map(|p| ((*p).to_string(), integer()))
                 .collect(),
             kind: hir::OperatorKind::Update { body },
         }
@@ -1656,6 +1683,7 @@ mod tests {
     fn debug_value() -> hir::Operator {
         hir::Operator {
             name: "debug_value".to_string(),
+            types: hir::Builtin::DebugValue.types(),
             params: hir::Builtin::DebugValue.params(),
             kind: hir::OperatorKind::Builtin(hir::Builtin::DebugValue),
         }
@@ -1688,10 +1716,11 @@ mod tests {
     }
 
     fn call(operator: usize, args: Vec<(&str, hir::Expr)>) -> hir::Statement {
-        hir::Statement::Call {
+        hir::Statement::Call(hir::Call {
             operator: hir::OperatorId(operator),
+            types: Vec::new(),
             args: args.into_iter().map(|(n, e)| (n.to_string(), e)).collect(),
-        }
+        })
     }
 
     #[test]
@@ -2108,14 +2137,15 @@ mod tests {
             ],
             vec![variable("x", hir::Value::Integer(1))],
         ));
+        // `main` first, then what it calls.
         assert_eq!(
-            lowered.functions[0].params,
+            lowered.functions[1].params,
             Some(lir::Layout::Struct(vec![
                 lir::Layout::I64,
                 lir::Layout::I64
             ]))
         );
-        let main = &lowered.functions[1];
+        let main = &lowered.functions[0];
         assert_eq!(
             main.slots,
             [lir::Layout::Struct(vec![
@@ -2146,7 +2176,7 @@ mod tests {
                     layout: lir::Layout::I64,
                 },
                 lir::Inst::Call {
-                    function: lir::FunctionId(0),
+                    function: lir::FunctionId(1),
                     args: Some(lir::Place::whole(lir::Base::Slot(lir::SlotId(0)))),
                     result: None,
                 },
@@ -2159,12 +2189,9 @@ mod tests {
         // `call f{t: t};`, which makes nothing, but must keep `t`'s memory
         // from being released by an assignment `f` makes.
         let f = hir::Operator {
+            types: Vec::new(),
             name: "f".to_string(),
-            params: [(
-                "t".to_string(),
-                hir::ParamType::Type(hir::Type::Scalar(hir::Scalar::Text)),
-            )]
-            .into(),
+            params: [("t".to_string(), hir::Type::Scalar(hir::Scalar::Text))].into(),
             kind: hir::OperatorKind::Update { body: vec![] },
         };
         let lowered = lower(&program(
@@ -2181,7 +2208,7 @@ mod tests {
             ],
             vec![variable("t", hir::Value::Text("a".to_string()))],
         ));
-        let insts = &lowered.functions[1].blocks[0].insts;
+        let insts = &lowered.functions[0].blocks[0].insts;
         let functions: Vec<_> = insts
             .iter()
             .filter_map(|inst| match inst {
@@ -2200,7 +2227,8 @@ mod tests {
         let text = || hir::Type::Scalar(hir::Scalar::Text);
         let read_only = |name: &str, value| hir::Operator {
             name: name.to_string(),
-            params: [("t".to_string(), hir::ParamType::Type(text()))].into(),
+            types: Vec::new(),
+            params: [("t".to_string(), text())].into(),
             kind: hir::OperatorKind::ReadOnly {
                 result: text(),
                 value,
@@ -2212,10 +2240,11 @@ mod tests {
             "shout",
             hir::Expr::Binary(hir::BinaryOp::Concatenate, t(), Box::new(bang)),
         );
-        let shouted = hir::Expr::Call(
-            hir::OperatorId(1),
-            [("t".to_string(), hir::Expr::Variable(hir::VariableId(0)))].into(),
-        );
+        let shouted = hir::Expr::Call(hir::Call {
+            operator: hir::OperatorId(1),
+            types: Vec::new(),
+            args: [("t".to_string(), hir::Expr::Variable(hir::VariableId(0)))].into(),
+        });
         let lowered = lower(&program(
             vec![
                 debug_value(),
@@ -2279,6 +2308,64 @@ mod tests {
     }
 
     #[test]
+    fn generic_operators_become_a_function_for_each_list_of_types() {
+        // `show{v: any type} [ call debug_value{v: v}; ]`, called with an
+        // integer twice, then with a text.
+        let parameter = hir::TypeParameter {
+            index: 0,
+            name: None,
+            any: hir::Any::Type,
+        };
+        let show = hir::Operator {
+            name: "show".to_string(),
+            types: vec![parameter.clone()],
+            params: [("v".to_string(), hir::Type::Parameter(parameter.clone()))].into(),
+            kind: hir::OperatorKind::Update {
+                body: vec![hir::Statement::Call(hir::Call {
+                    operator: hir::OperatorId(0),
+                    types: vec![hir::Type::Parameter(parameter)],
+                    args: [("v".to_string(), hir::Expr::Parameter("v".to_string()))].into(),
+                })],
+            },
+        };
+        let text = hir::Type::Scalar(hir::Scalar::Text);
+        let call = |ty: &hir::Type, value| {
+            hir::Statement::Call(hir::Call {
+                operator: hir::OperatorId(1),
+                types: vec![ty.clone()],
+                args: [("v".to_string(), hir::Expr::Constant(value))].into(),
+            })
+        };
+        let main_body = vec![
+            call(&integer(), hir::Value::Integer(1)),
+            call(&integer(), hir::Value::Integer(2)),
+            call(&text, hir::Value::Text("Lagos".to_string())),
+        ];
+        let lowered = lower(&program(
+            vec![debug_value(), show, user("main", &[], main_body)],
+            vec![],
+        ));
+        let names: Vec<&str> = lowered.functions.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["main", "show{v: integer}", "show{v: text}"]);
+        assert_eq!(
+            lowered.functions[2].params,
+            Some(lir::Layout::Struct(vec![layout(&text)]))
+        );
+        let called: Vec<lir::FunctionId> = lowered.functions[0].blocks[0]
+            .insts
+            .iter()
+            .filter_map(|inst| match inst {
+                lir::Inst::Call { function, .. } => Some(*function),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            called,
+            [lir::FunctionId(1), lir::FunctionId(1), lir::FunctionId(2)]
+        );
+    }
+
+    #[test]
     fn debug_value_passes_the_value_and_a_shared_descriptor() {
         let show_param = vec![call(0, vec![("v", hir::Expr::Parameter("p".to_string()))])];
         let main_body = vec![
@@ -2293,7 +2380,7 @@ mod tests {
             ],
             vec![],
         ));
-        let show = &lowered.functions[0];
+        let show = &lowered.functions[1];
         let lir::Inst::CallRuntime { function, args } = &show.blocks[0].insts[0] else {
             panic!("expected a runtime call");
         };
@@ -2316,7 +2403,7 @@ mod tests {
             ]
         );
         // `main`'s call passes the same integer descriptor.
-        let main = &lowered.functions[1];
+        let main = &lowered.functions[0];
         let lir::Inst::CallRuntime { args, .. } = &main.blocks[0].insts[2] else {
             panic!("expected a runtime call");
         };

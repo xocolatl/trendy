@@ -1,17 +1,14 @@
 //! The prelude: the declarations of the built-in operators, checked against
 //! the operators the compiler implements.
 
-use std::collections::BTreeMap;
-
 use trendy_hir as hir;
-use trendy_syntax::ast::{Item, SourceFile, TypeExpr};
+use trendy_syntax::ast::{Item, SourceFile};
 
-use crate::{Namespaces, types};
+use crate::{Namespaces, operators};
 
-/// The types the compiler implements: `any`, for built-in parameters, and
-/// the scalar types.
+/// The types the compiler implements: the scalar types.
 fn builtin_types() -> impl Iterator<Item = &'static str> {
-    std::iter::once("any").chain(hir::Scalar::ALL.into_iter().map(hir::Scalar::name))
+    hir::Scalar::ALL.into_iter().map(hir::Scalar::name)
 }
 
 /// The loaded prelude: its built-in operators.
@@ -60,30 +57,13 @@ impl Prelude {
             let builtin = hir::Builtin::from_name(name)
                 .ok_or_else(|| format!("`{name}` is not a built-in the compiler implements"))?;
 
-            let mut params = BTreeMap::new();
             let heading = decl
                 .params()
                 .ok_or_else(|| format!("`{name}` has no parameters"))?;
-            for attribute in heading.attributes() {
-                let param = attribute
-                    .name()
-                    .and_then(|n| n.ident())
-                    .ok_or_else(|| format!("a parameter of `{name}` has no name"))?;
-                let ty = match attribute.type_expr() {
-                    Some(TypeExpr::Named(t)) if t.ident().is_some_and(|i| i.text() == "any") => {
-                        hir::ParamType::Any
-                    }
-                    Some(t) => {
-                        let mut errors = Vec::new();
-                        types::resolve(&t, &no_names, &mut errors)
-                            .map(hir::ParamType::Type)
-                            .ok_or_else(|| format!("`{name}` has an invalid parameter type"))?
-                    }
-                    None => return Err(format!("a parameter of `{name}` has no type")),
-                };
-                params.insert(param.text().to_string(), ty);
-            }
-            if params != builtin.params() {
+            let mut types = Vec::new();
+            let params = operators::params(&heading, &mut types, &no_names, &mut Vec::new())
+                .ok_or_else(|| format!("`{name}` has an invalid parameter type"))?;
+            if types != builtin.types() || params != builtin.params() {
                 return Err(format!(
                     "`{name}` is declared with parameters that differ from its implementation"
                 ));
@@ -93,6 +73,7 @@ impl Prelude {
             }
             operators.push(hir::Operator {
                 name: name.to_string(),
+                types,
                 params,
                 kind: hir::OperatorKind::Builtin(builtin),
             });

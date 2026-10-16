@@ -178,8 +178,15 @@ impl<'a> Parser<'a> {
             "add a name after `operator`, such as `operator main{} [];`",
             &[SyntaxKind::LBrace, SyntaxKind::LParen],
         );
+        let angled = self.angled_type_parameters();
         self.params();
         self.result_type();
+        let declared = self.type_parameters();
+        if let Some(angled) = angled {
+            let at = self.last_end.unwrap_or(angled.span.end);
+            self.errors
+                .push(errors::angled_type_parameters(&angled, declared, at));
+        }
         self.delimited(
             Some(SyntaxKind::Body),
             "body",
@@ -259,6 +266,110 @@ impl<'a> Parser<'a> {
         }
         self.type_expr();
         self.builder.finish_node();
+    }
+
+    /// An operator's type parameters, `types { T: any type, … }`, after its
+    /// parameters and result type, if it has them, which it returns.
+    /// `types` is a contextual keyword, recognized there before `{`, in any
+    /// case, which is reported.
+    fn type_parameters(&mut self) -> bool {
+        let Some(found) = self
+            .found()
+            .filter(|f| f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case("types"))
+        else {
+            return false;
+        };
+        if self
+            .found_after(1)
+            .is_none_or(|f| f.kind != SyntaxKind::LBrace)
+        {
+            return false;
+        }
+        self.start_node(SyntaxKind::TypeParameters);
+        self.bump();
+        if found.text != "types" {
+            self.errors.push(errors::miscased_keyword(found, "types"));
+        }
+        let outer_form = std::mem::replace(&mut self.form, errors::TYPES_FORM);
+        self.delimited(
+            Some(SyntaxKind::Heading),
+            "type parameters",
+            (SyntaxKind::LBrace, SyntaxKind::RBrace),
+            &[],
+            |p| {
+                p.items(Self::at_attribute, |p| {
+                    p.attribute(SyntaxKind::AttributeType, Self::type_expr);
+                });
+            },
+        );
+        self.form = outer_form;
+        self.builder.finish_node();
+        true
+    }
+
+    /// Type parameters in angle brackets after an operator's name, as
+    /// Rust, TypeScript, Java and C++ write them, `pair<T>{…}`: kept in an
+    /// error node, to be reported once the signature is parsed, when where
+    /// `types { … }` goes is known.
+    fn angled_type_parameters(&mut self) -> Option<errors::Angled> {
+        let open = self.found().filter(|f| f.kind == SyntaxKind::Lt)?;
+        self.start_node(SyntaxKind::Error);
+        self.bump();
+        // Up to the matching `>`, or what starts the parameters or ends
+        // the definition, if it is missing.
+        let mut inside: Vec<Found> = Vec::new();
+        let mut depth = 1;
+        let mut end = open.span.end;
+        while let Some(found) = self.found() {
+            let ends = matches!(
+                found.kind,
+                SyntaxKind::LBrace
+                    | SyntaxKind::LBracket
+                    | SyntaxKind::LParen
+                    | SyntaxKind::Semicolon
+                    | SyntaxKind::OperatorKw
+                    | SyntaxKind::VarKw
+            );
+            if ends {
+                break;
+            }
+            match found.kind {
+                SyntaxKind::Lt => depth += 1,
+                SyntaxKind::Gt => depth -= 1,
+                _ => {}
+            }
+            end = self.bump().end;
+            if depth == 0 {
+                break;
+            }
+            inside.push(found);
+        }
+        self.builder.finish_node();
+        // Names alone, separated by commas, which `types` can declare as
+        // they are; anything more, such as a bound, has no fix.
+        let names: Option<Vec<String>> = (depth == 0)
+            .then(|| {
+                inside
+                    .chunks(2)
+                    .map(|pair| match pair {
+                        [name]
+                        | [
+                            name,
+                            Found {
+                                kind: SyntaxKind::Comma,
+                                ..
+                            },
+                        ] if name.kind == SyntaxKind::Ident => Some(name.text.to_string()),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>()
+            })
+            .flatten()
+            .filter(|names| !names.is_empty());
+        Some(errors::Angled {
+            span: Span::new(open.span.start, end),
+            names,
+        })
     }
 
     /// An operator's parameters: a heading, which C-style `()` is accepted
@@ -986,9 +1097,36 @@ impl<'a> Parser<'a> {
         true
     }
 
-    /// A named type, a tuple type, or a relation type.
+    /// A named type, a tuple type, a relation type, or `any type`,
+    /// `any tuple` or `any relation`, whose words are contextual keywords,
+    /// recognized together. `relation any` and `tuple any` are parsed as
+    /// what they mean and fixed.
     fn type_expr(&mut self) {
-        if self.at_keyword(SyntaxKind::TupleKw) || self.at(SyntaxKind::LBrace) {
+        let word = |found: Option<Found>, word: &str| {
+            found.is_some_and(|f| f.kind == SyntaxKind::Ident && f.text == word)
+        };
+        let next = self.found();
+        let after = self.found_after(1);
+        if word(next, "any")
+            && (word(after, "type")
+                || after.is_some_and(|f| {
+                    matches!(f.kind, SyntaxKind::TupleKw | SyntaxKind::RelationKw)
+                }))
+        {
+            self.start_node(SyntaxKind::AnyType);
+            self.bump();
+            self.bump();
+            self.builder.finish_node();
+        } else if let Some(keyword) = next.filter(|f| {
+            matches!(f.kind, SyntaxKind::TupleKw | SyntaxKind::RelationKw) && word(after, "any")
+        }) {
+            self.start_node(SyntaxKind::AnyType);
+            let start = self.bump().start;
+            let end = self.bump().end;
+            self.builder.finish_node();
+            self.errors
+                .push(errors::any_after(keyword, Span::new(start, end)));
+        } else if self.at_keyword(SyntaxKind::TupleKw) || self.at(SyntaxKind::LBrace) {
             // A bare `{`, as in TypeScript, is a tuple type without `tuple`.
             self.start_node(SyntaxKind::TupleType);
             self.keyword(SyntaxKind::TupleKw);
@@ -2939,6 +3077,60 @@ SourceFile
             messages("operator f{}: integer [ return; ];"),
             ["expected value, found `;`"]
         );
+    }
+
+    #[test]
+    fn type_parameters() {
+        let source = "operator pair{a: T, b: any tuple, r: any relation}: relation { v: T } types { T: any type } [ return relation {}; ];";
+        let parse = parse_str(source);
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let op = parse.tree.operators().next().unwrap();
+        let types = op.type_parameters().unwrap();
+        assert_eq!(types.keyword().unwrap().text(), "types");
+        let declared: Vec<_> = types.heading().unwrap().attributes().collect();
+        assert_eq!(declared.len(), 1);
+        let Some(TypeExpr::Any(any)) = declared[0].type_expr() else {
+            panic!("`any type`");
+        };
+        assert_eq!(any.what().unwrap().text(), "type");
+        let params: Vec<_> = op.params().unwrap().attributes().collect();
+        assert!(matches!(params[0].type_expr(), Some(TypeExpr::Named(_))));
+        let Some(TypeExpr::Any(any)) = params[2].type_expr() else {
+            panic!("`any relation`");
+        };
+        assert_eq!(any.what().unwrap().kind(), SyntaxKind::RelationKw);
+        // `types` and `any` are words elsewhere.
+        let parse = parse_str("var types := 1; var any := types;");
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        // A bare `any` is a type's name to the parser, which sema reports.
+        let parse = parse_str("operator f{v: any} [];");
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+
+        // Other languages' spellings are fixed.
+        assert_eq!(
+            fix("operator same<T, U>{a: T, b: U}: boolean [ return true; ];"),
+            "operator same{a: T, b: U}: boolean types { T: any type, U: any type } [ return true; ];"
+        );
+        assert_eq!(
+            fix("operator same<T>{a: T, b: T} types { T: any type } [];"),
+            "operator same{a: T, b: T} types { T: any type } [];"
+        );
+        assert_eq!(
+            fix("operator f{r: relation any, t: tuple any} [];"),
+            "operator f{r: any relation, t: any tuple} [];"
+        );
+        assert_eq!(
+            fix("operator f{v: T} TYPES { T: any type } [];"),
+            "operator f{v: T} types { T: any type } [];"
+        );
+        // A bound has no fix, but is reported once.
+        let errors = parse_str("operator max<T: Ord>{a: T}: T [ return a; ];").errors;
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].code, Code::TypeParameterSpelling);
+        assert!(errors[0].suggestions.is_empty());
+        let errors =
+            parse_str("operator max<T extends Comparable<T>>{a: T}: T [ return a; ];").errors;
+        assert_eq!(errors.len(), 1, "{errors:#?}");
     }
 
     #[test]

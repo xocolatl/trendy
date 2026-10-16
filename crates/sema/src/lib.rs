@@ -56,13 +56,16 @@ pub fn analyze(prelude: &Prelude, file: &SourceFile) -> Result<hir::Program, Vec
         declarations: &declarations,
     };
     let mut bodies = HashMap::new();
+    let mut growing = Vec::new();
     for signature in operators.iter().filter(|s| !s.read_only) {
         if let Some(decl) = &signature.decl
-            && let Some(statements) = body::body(decl, signature.id, &context, &mut errors)
+            && let Some(statements) =
+                body::body(decl, signature.id, &context, &mut growing, &mut errors)
         {
             bodies.insert(signature.id, statements);
         }
     }
+    body::growing_recursion(&growing, &bodies, &operators, &mut errors);
 
     let entry = entry(file, &namespaces, &operators, &mut errors);
     errors.sort_by_key(|d| d.span().start);
@@ -97,6 +100,7 @@ fn program(
             };
             hir::Operator {
                 name: signature.name.clone(),
+                types: signature.types.clone(),
                 params: signature.params.clone(),
                 kind,
             }
@@ -1358,11 +1362,11 @@ mod tests {
             panic!("main is a user operator");
         };
         assert_eq!(*argument(&body[0]), hir::Expr::Variable(hir::VariableId(0)));
-        let hir::Statement::Call { args, .. } = &body[1] else {
+        let hir::Statement::Call(call) = &body[1] else {
             panic!("a call");
         };
         assert_eq!(
-            args["name"],
+            call.args["name"],
             hir::Expr::Constant(hir::Value::Text("Ada".to_string()))
         );
     }
@@ -1430,12 +1434,29 @@ mod tests {
             codes("builtin operator show{v: integer};\noperator main{} [];"),
             [Code::BuiltinOutsidePrelude]
         );
+        // `any type` is only a parameter's.
+        let source = "var x: any type := 1;\noperator f{v: integer}: any type [ return v; ];\noperator main{} [];";
         assert_eq!(
-            codes("var x: any := 1;\noperator show{v: any} [];\noperator main{} [];"),
-            [Code::AnyOutsideBuiltin, Code::AnyOutsideBuiltin]
+            codes(source),
+            [Code::AnyOutsideParameter, Code::AnyOutsideParameter]
         );
-        // A variable may be named `any`; it's only reserved as a type.
-        analyze_str("var any := 1;\noperator main{} [ call debug_value{v: any}; ];").unwrap();
+        // A bare `any`, as TypeScript and Go write it, is fixed to it in a
+        // parameter's type, as are PostgreSQL's polymorphic types.
+        let source =
+            "var x: any := 1;\noperator show{v: any, w: anyelement} [];\noperator main{} [];";
+        assert_eq!(
+            codes(source),
+            [Code::UnknownType, Code::UnknownType, Code::UnknownType]
+        );
+        assert_eq!(
+            fix(source),
+            "var x: any := 1;\noperator show{v: any type, w: any type} [];\noperator main{} [];"
+        );
+        // A variable may be named `any`, or `types`.
+        analyze_str(
+            "var any := 1;\nvar types := any;\noperator main{} [ call debug_value{v: types}; ];",
+        )
+        .unwrap();
         let errors = errors("operator debug_value{} [];\noperator main{} [];");
         assert_eq!(errors[0].code, Code::DuplicateName);
         assert!(errors[0].notes[0].contains("declared in the prelude"));
@@ -1619,10 +1640,10 @@ mod tests {
     }
 
     fn argument(statement: &hir::Statement) -> &hir::Expr {
-        let hir::Statement::Call { args, .. } = statement else {
+        let hir::Statement::Call(call) = statement else {
             panic!("a call");
         };
-        &args["v"]
+        &call.args["v"]
     }
 
     #[test]
@@ -4063,5 +4084,204 @@ mod tests {
         // So it is in a block.
         let block = format!("assign {{ {body} n := 1; }};");
         assert_eq!(codes(&assigning(POETS, &block)), [Code::KeyViolated]);
+    }
+
+    /// What `source` has at `span`.
+    fn at(source: &str, span: Span) -> &str {
+        &source[span.start..span.end]
+    }
+
+    const SAME: &str =
+        "operator same{a: T, b: T}: boolean types { T: any type } [ return a = b; ];\n";
+
+    #[test]
+    fn generic_operators_are_called_with_their_arguments_types() {
+        // Evaluated when compiling, for each type.
+        let program = analyze_str(&format!(
+            "{SAME}var t := same{{a: 1, b: 1}};\nvar f := same{{b: \"Lhasa\", a: \"Lima\"}};\nvar r := same{{a: relation {{ {{ x: 1 }} }}, b: relation {{}}}};{MAIN}"
+        ))
+        .unwrap();
+        let values: Vec<_> = program.variables.iter().map(|v| v.init.clone()).collect();
+        assert_eq!(
+            values,
+            [
+                hir::Value::Boolean(true),
+                hir::Value::Boolean(false),
+                hir::Value::Boolean(false)
+            ]
+        );
+        // When running, the call says which types.
+        let body = main_body(&format!(
+            "{SAME}var n := 1;\noperator main{{}} [ call debug_value{{v: same{{a: n, b: 2}}}}; ];"
+        ));
+        let hir::Expr::Call(call) = argument(&body[0]) else {
+            panic!("a call");
+        };
+        assert_eq!(call.types, [hir::Type::Scalar(hir::Scalar::Integer)]);
+        // So does a call of `debug_value`, whose `any type` has no name.
+        let hir::Statement::Call(call) = &body[0] else {
+            panic!("a call");
+        };
+        assert_eq!(call.types, [hir::Type::Scalar(hir::Scalar::Boolean)]);
+    }
+
+    #[test]
+    fn a_type_parameter_is_one_type_for_every_argument() {
+        let source = format!("{SAME}var x := same{{a: 1, b: \"Lima\"}};{MAIN}");
+        let errors = errors(&source);
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].code, Code::TypeMismatch);
+        assert_eq!(at(&source, errors[0].span()), "\"Lima\"");
+        let given = &errors[0].secondary[0];
+        assert_eq!(at(&source, given.span), "1");
+        assert_eq!(given.message, "`T` is given this argument's type");
+        // `any relation` takes only relations, and `any tuple` only tuples.
+        let source = "operator f{r: any relation, t: any tuple} [];\noperator main{} [ call f{r: 1, t: relation { { a: 1 } }}; ];";
+        let messages = messages(source);
+        assert_eq!(
+            messages,
+            [
+                "mismatched types: expected a relation, found `integer`",
+                "mismatched types: expected a tuple, found `relation { a: integer }`"
+            ]
+        );
+        // A structured type takes its type parameters' types from its
+        // argument's, and gives them to others.
+        let only = "operator only{r: relation { v: T }}: T types { T: any type } [ return value from r; ];\n";
+        let vars = variables(&format!(
+            "{only}var a := only{{r: relation {{ {{ v: 5 }} }}}};\nvar b := only{{r: relation {{ {{ v: \"Kyiv\" }} }}}};"
+        ));
+        assert_eq!(vars[0].init, hir::Value::Integer(5));
+        assert_eq!(vars[1].init, hir::Value::Text("Kyiv".to_string()));
+        let pick = "operator pick{a: T, r: relation { v: T }}: boolean types { T: any type } [ return r = relation {}; ];\n";
+        // `relation {}` is expected to have `T`'s heading, once `a` gives
+        // `T` its type, whichever is written first.
+        for args in ["a: 1, r: relation {}", "r: relation {}, a: 1"] {
+            let vars = variables(&format!("{pick}var p := pick{{{args}}};"));
+            assert_eq!(vars[0].init, hir::Value::Boolean(true));
+        }
+        assert_eq!(
+            codes(&format!(
+                "{pick}var p := pick{{a: 1, r: relation {{ {{ v: \"x\" }} }}}};{MAIN}"
+            )),
+            [Code::TypeMismatch]
+        );
+    }
+
+    #[test]
+    fn generic_bodies_are_checked_for_every_type() {
+        // Only `=` and `<>` apply to any type.
+        let source = "operator f{a: T, b: T}: boolean types { T: any type } [ return a < b; ];\noperator main{} [];";
+        assert_eq!(codes(source), [Code::WrongOperandType]);
+        assert_eq!(messages(source), ["`<` can't be applied to values of `T`"]);
+        let source =
+            "operator f{a: T}: T types { T: any type } [ return a + a; ];\noperator main{} [];";
+        assert_eq!(codes(source), [Code::WrongOperandType]);
+        // Two type parameters are two types.
+        let source = "operator f{a: T, b: U, c: T, d: U}: boolean types { T: any type, U: any type } [ return a = b; ];\noperator main{} [];";
+        assert_eq!(codes(source), [Code::TypeMismatch]);
+        // So are two written `any type`, which one declared can make one.
+        let source =
+            "operator f{a: any type, b: any type}: boolean [ return a = b; ];\noperator main{} [];";
+        let errors = errors(source);
+        assert_eq!(errors[0].code, Code::TypeMismatch);
+        assert!(
+            errors[0]
+                .notes
+                .iter()
+                .any(|n| n.contains("types { T: any type }")),
+            "{errors:#?}"
+        );
+        // Relations are ordered by inclusion, so `any relation` is.
+        analyze_str(
+            "operator sub{r: R, s: R}: boolean types { R: any relation } [ return r <= s; ];\nvar yes := sub{r: relation { { a: 1 } }, s: relation { { a: 1 }, { a: 2 } }};\noperator main{} [];",
+        )
+        .unwrap();
+        // A type parameter can be written in the body.
+        let program = analyze_str(
+            "operator none{a: T}: relation { v: T } types { T: any type } [ return relation { v: T } {}; ];\nvar e := none{a: \"Accra\"};\noperator main{} [];",
+        )
+        .unwrap();
+        assert_eq!(program.variables[0].ty.to_string(), "relation { v: text }");
+    }
+
+    #[test]
+    fn type_parameters_are_declared_once_and_determined() {
+        // Never used, or only where no argument gives it a type.
+        let source = "operator f{a: integer} types { T: any type } [];\noperator main{} [];";
+        assert_eq!(codes(source), [Code::UndeterminedTypeParameter]);
+        assert_eq!(
+            fix(source),
+            "operator f{a: integer} [];\noperator main{} [];"
+        );
+        let source =
+            "operator f{a: T, b: T} types { T: any type, U: any type } [];\noperator main{} [];";
+        assert_eq!(
+            fix(source),
+            "operator f{a: T, b: T} types { T: any type } [];\noperator main{} [];"
+        );
+        let source = "operator f{a: integer}: relation { v: T } types { T: any type } [ return relation {}; ];\noperator main{} [];";
+        assert_eq!(codes(source), [Code::UndeterminedTypeParameter]);
+        assert!(errors(source)[0].suggestions.is_empty());
+        // Used once, it needs no name.
+        let source =
+            "operator f{r: R, n: integer} types { R: any relation } [];\noperator main{} [];";
+        assert_eq!(codes(source), [Code::TypeParameterNamedOnce]);
+        assert_eq!(
+            fix(source),
+            "operator f{r: any relation, n: integer} [];\noperator main{} [];"
+        );
+        // Twice, or in the result or the body, it does.
+        analyze_str(
+            "operator f{a: T}: T types { T: any type } [ return a; ];\noperator main{} [];",
+        )
+        .unwrap();
+        analyze_str(
+            "operator f{a: T} types { T: any type } [ call debug_value{v: relation { a: T } {}}; ];\noperator main{} [];",
+        )
+        .unwrap();
+        // It is `any …`, under a name of its own.
+        let source = "operator f{a: T, b: T} types { T: integer } [];\noperator main{} [];";
+        assert_eq!(codes(source), [Code::TypeParameterNotAny]);
+        let source =
+            "operator f{a: text, b: text} types { text: any type } [];\noperator main{} [];";
+        assert_eq!(codes(source), [Code::DuplicateName]);
+        let source =
+            "operator f{a: T, b: T} types { T: any type, T: any tuple } [];\noperator main{} [];";
+        assert_eq!(codes(source), [Code::DuplicateName]);
+        // A misspelled one is found.
+        let source = "operator f{a: Key, b: Kye} types { Key: any type } [];\noperator main{} [];";
+        assert_eq!(
+            fix(source),
+            "operator f{a: Key, b: Key} types { Key: any type } [];\noperator main{} [];"
+        );
+        // Variables have specific types.
+        assert_eq!(
+            codes(
+                "operator f{a: T, b: T} types { T: any type } [];\nvar x: T;\noperator main{} [];"
+            ),
+            [Code::UnknownType]
+        );
+    }
+
+    #[test]
+    fn recursion_with_larger_types_is_reported() {
+        let source = "operator f{a: T, b: T} types { T: any type } [ call f{a: tuple { x: a }, b: tuple { x: b }}; ];\noperator main{} [ call f{a: 1, b: 2}; ];";
+        let errors = errors(source);
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].code, Code::GrowingRecursion);
+        assert_eq!(
+            errors[0].primary.message,
+            "gives `T` the type `tuple { x: T }`"
+        );
+        // Through another operator too.
+        let source = "operator f{a: any type} [ call g{b: relation { tuple { x: a } }}; ];\noperator g{b: any type} [ call f{a: b}; ];\noperator main{} [];";
+        assert_eq!(codes(source), [Code::GrowingRecursion]);
+        // Passing the type on as it is is fine, and so is a larger type
+        // that doesn't lead back.
+        analyze_str(
+            "operator f{a: any type} [ call f{a: a}; call g{b: tuple { x: a }}; ];\noperator g{b: any type} [];\noperator main{} [];",
+        )
+        .unwrap();
     }
 }

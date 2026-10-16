@@ -2,7 +2,9 @@
    operator has a result type, and its body is one `return`: its call is a
    value. An update operator returns nothing, and is invoked by `call`. A
    call is evaluated when compiling where it can be, and made when the
-   program runs elsewhere. main prints each result. */
+   program runs elsewhere. A parameter's type can be `any type`, and type
+   parameters, declared with `types`, say that several types are one: each
+   call gives them its arguments' types. main prints each result. */
 var vat := 16;
 var dishes := relation {
     { dish: "jollof rice", country: "Ghana", price: 1200 },
@@ -27,10 +29,28 @@ operator half{n: integer}: integer [
     return n div 2;
 ];
 
-/* An update operator, invoked by `call`. */
-operator show{label: text, cents: integer} [
+/* An update operator, invoked by `call`. `value` can be of any type. */
+operator show{label: text, value: any type} [
     call debug_value{v: label};
-    call debug_value{v: cents};
+    call debug_value{v: value};
+];
+
+/* A relation of two values, of any one type, `T`. */
+operator both{a: T, b: T}: relation { v: T }
+    types { T: any type }
+[
+    return relation {
+        tuple { v: a },
+        tuple { v: b }
+    };
+];
+
+/* Whether every tuple of `r` is one of `of`'s, whatever their heading, as
+   long as it is one: relations are ordered by inclusion. */
+operator within{r: R, of: R}: boolean
+    types { R: any relation }
+[
+    return r <= of;
 ];
 
 var special := "ramen";
@@ -53,7 +73,7 @@ var affordable := under{limit: 1000}{dish};
 operator main{} [
     call debug_value{v: totals};
     call debug_value{v: affordable};
-    call show{label: "half of 1200", cents: half{n: 1200}};
+    call show{label: "half of 1200", value: half{n: 1200}};
     call rotate{next: "spicy " || special};
     call rotate{next: previous};
     /* A call of an operator that reads a variable is made when the program
@@ -62,4 +82,9 @@ operator main{} [
     vat := 25;
     call debug_value{v: under{limit: 1100}{dish}};
     call debug_value{v: dishes extend { total := taxed{price: price} } remove {price}};
+    /* A generic operator is compiled for each list of types it is called
+       with when the program runs. */
+    call show{label: "specials", value: both{a: special, b: previous}};
+    call show{label: "affordable on the menu", value: within{r: affordable, of: dishes{dish}}};
+    call show{label: "pairs", value: both{a: both{a: 1, b: 2}, b: both{a: 3, b: 4}}};
 ];

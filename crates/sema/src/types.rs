@@ -42,6 +42,9 @@ pub(crate) enum Origin {
     /// The variable named, assigned a value: where its type is set, by its
     /// declared type or else its initial value.
     Variable(String, Box<Origin>),
+    /// The type parameter named, of an operator called, given its type by
+    /// the argument written here.
+    TypeParameter(String, Expr),
 }
 
 impl Origin {
@@ -50,7 +53,9 @@ impl Origin {
         match self {
             Origin::Type(t) => Some(t.span()),
             Origin::Heading(h) => Some(h.span()),
-            Origin::Value(v) | Origin::Replaced(v, _) => Some(v.span()),
+            Origin::Value(v) | Origin::Replaced(v, _) | Origin::TypeParameter(_, v) => {
+                Some(v.span())
+            }
             Origin::Builtin => None,
             Origin::Operator(token) => Some(trendy_syntax::span(token.text_range())),
             Origin::Variable(_, declared) => declared.span(),
@@ -63,6 +68,9 @@ impl Origin {
                 "expected because of this type".to_string()
             }
             Origin::Value(_) => "expected because of this value".to_string(),
+            Origin::TypeParameter(name, _) => {
+                format!("`{name}` is given this argument's type")
+            }
             Origin::Replaced(_, name) => format!("`{name}` has the expected type here"),
             Origin::Variable(name, declared) => match **declared {
                 Origin::Type(_) => format!("`{name}` is declared with this type"),
@@ -167,39 +175,96 @@ pub(crate) fn result_type(
     }
 }
 
-/// The type a type expression denotes, or `None` after reporting why it
-/// denotes none.
+/// The type parameters a type can name, besides the built-in types, by
+/// where it is written.
+pub(crate) enum TypeParameters<'a> {
+    /// None: in a variable's type, which is always a specific type.
+    None,
+    /// The operator's own: in its result type, or in its body.
+    Fixed(&'a [hir::TypeParameter]),
+    /// The operator's own, in a parameter's type, where each `any type`,
+    /// `any tuple` or `any relation` adds one.
+    Open(&'a mut Vec<hir::TypeParameter>),
+}
+
+impl TypeParameters<'_> {
+    /// The type parameters there are so far.
+    pub(crate) fn list(&self) -> &[hir::TypeParameter] {
+        match self {
+            TypeParameters::None => &[],
+            TypeParameters::Fixed(list) => list,
+            TypeParameters::Open(list) => list,
+        }
+    }
+
+    /// The type parameter declared with the name `name`.
+    fn named(&self, name: &str) -> Option<&hir::TypeParameter> {
+        self.list().iter().find(|p| p.name.as_deref() == Some(name))
+    }
+}
+
+/// What `any` says a type parameter can be, from the word with it: `type`,
+/// `tuple` or `relation`.
+pub(crate) fn any_of(any: &ast::AnyType) -> Option<hir::Any> {
+    let what = any.what()?;
+    Some(match what.kind() {
+        trendy_syntax::SyntaxKind::TupleKw => hir::Any::Tuple,
+        trendy_syntax::SyntaxKind::RelationKw => hir::Any::Relation,
+        _ => hir::Any::Type,
+    })
+}
+
+/// The type a type expression denotes, where `parameters` are the type
+/// parameters it can name, or `None` after reporting why it denotes none.
 pub(crate) fn resolve(
     type_expr: &TypeExpr,
+    parameters: &mut TypeParameters,
     namespaces: &Namespaces,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Type> {
     match type_expr {
         TypeExpr::Named(type_ref) => {
             let ident = type_ref.ident()?;
-            if ident.text() == "any" {
-                errors.push(errors::any_outside_builtin(trendy_syntax::span(
-                    ident.text_range(),
-                )));
-                return None;
+            if let Some(parameter) = parameters.named(ident.text()) {
+                return Some(hir::Type::Parameter(parameter.clone()));
             }
             let scalar = hir::Scalar::from_name(ident.text());
             if scalar.is_none() {
-                errors.push(errors::unknown_type(&ident, namespaces));
+                errors.push(errors::unknown_type(&ident, namespaces, parameters));
             }
             scalar.map(hir::Type::Scalar)
         }
         TypeExpr::Tuple(tuple) => {
-            resolve_heading(&tuple.heading()?, namespaces, errors).map(hir::Type::Tuple)
+            resolve_heading(&tuple.heading()?, parameters, namespaces, errors).map(hir::Type::Tuple)
         }
         TypeExpr::Relation(relation) => {
-            resolve_heading(&relation.heading()?, namespaces, errors).map(hir::Type::Relation)
+            resolve_heading(&relation.heading()?, parameters, namespaces, errors)
+                .map(hir::Type::Relation)
+        }
+        TypeExpr::Any(written) => {
+            let any = any_of(written)?;
+            let TypeParameters::Open(list) = parameters else {
+                errors.push(errors::any_outside_parameter(
+                    any,
+                    written,
+                    matches!(parameters, TypeParameters::None),
+                ));
+                return None;
+            };
+            let parameter = hir::TypeParameter {
+                index: list.len(),
+                name: None,
+                any,
+            };
+            list.push(parameter.clone());
+            Some(hir::Type::Parameter(parameter))
         }
     }
 }
 
 pub(crate) fn resolve_heading(
     heading: &ast::Heading,
+    parameters: &mut TypeParameters,
     namespaces: &Namespaces,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Heading> {
@@ -224,7 +289,7 @@ pub(crate) fn resolve_heading(
         first_spans.insert(ident.text().to_string(), span);
         match attribute
             .type_expr()
-            .and_then(|t| resolve(&t, namespaces, errors))
+            .and_then(|t| resolve(&t, parameters, namespaces, errors))
         {
             Some(ty) => {
                 attributes.insert(ident.text().to_string(), ty);
@@ -276,13 +341,15 @@ struct Reported;
 fn own_heading(
     heading: Option<ast::Heading>,
     wrap: fn(hir::Heading) -> hir::Type,
-    namespaces: &Namespaces,
+    checker: &Checker,
     errors: &mut Vec<Diagnostic>,
 ) -> Result<Option<Expected>, Reported> {
     let Some(heading) = heading else {
         return Ok(None);
     };
-    let resolved = resolve_heading(&heading, namespaces, errors).ok_or(Reported)?;
+    let mut parameters = checker.type_parameters();
+    let resolved =
+        resolve_heading(&heading, &mut parameters, checker.namespaces(), errors).ok_or(Reported)?;
     Ok(Some(Expected {
         ty: wrap(resolved),
         origin: Origin::Heading(heading),
@@ -296,13 +363,7 @@ pub(crate) fn tuple_selector(
     checker: &mut Checker,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Expr> {
-    let own = own_heading(
-        tuple.heading(),
-        hir::Type::Tuple,
-        checker.namespaces(),
-        errors,
-    )
-    .ok()?;
+    let own = own_heading(tuple.heading(), hir::Type::Tuple, checker, errors).ok()?;
     let here = own.as_ref().or(expected);
     let heading = match here {
         Some(Expected {
@@ -428,13 +489,7 @@ pub(crate) fn relation_selector(
     checker: &mut Checker,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Expr> {
-    let own = own_heading(
-        relation.heading(),
-        hir::Type::Relation,
-        checker.namespaces(),
-        errors,
-    )
-    .ok()?;
+    let own = own_heading(relation.heading(), hir::Type::Relation, checker, errors).ok()?;
     let here = own.as_ref().or(expected);
     // What each tuple must be: the tuple type of the relation's heading.
     let mut element = match here {
