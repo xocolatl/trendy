@@ -54,6 +54,10 @@ in the "Diagnostics" section of `docs/pipeline.md`.
   `crates/prelude/src/prelude.trendy`, listed in `hir::Builtin`, and usually
   implemented in `crates/runtime`. Sema checks the prelude against the
   compiler, so all three must change together.
+- Keep built-ins as few as possible. An operator that can be written in
+  trendy is defined in the prelude, in trendy, rather than built in. When the
+  language gains a feature, check whether it lets a built-in be replaced by
+  ordinary trendy, and replace it.
 - `docs/pipeline.md` defines the compiler layers. Its `layers` block is
   enforced by `crates/trendyc/tests/layers.rs`, so a dependency change means
   editing the doc.

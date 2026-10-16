@@ -12,12 +12,22 @@ This document is about the compiler. For the language itself, see
 ### The prelude and the runtime
 
 **`trendy_prelude`** holds the prelude: trendy source declaring the built-in
-types and operators, which is part of every program. Drivers parse it next to
-the program, and sema checks every declaration against what the compiler
-implements (`hir::Builtin`, and the scalar types). A wrong prelude is an
-internal compiler error, and the tests keep it valid. A built-in is added in
-three places: its declaration in `prelude.trendy`, its `hir::Builtin` entry,
-and its implementation, which is usually in the runtime.
+types and operators, and defining operators in trendy, all part of every
+program. Drivers parse it next to the program. Sema checks every
+declaration against what the compiler implements (`hir::Builtin`, and the
+scalar types), then checks the prelude's own operators, with only the
+built-ins in scope, once, as a program's are (`sema::Source::Prelude`), and
+gives every program them as checked HIR. A wrong prelude is an internal
+compiler error, and the tests keep it valid: a declaration that doesn't
+match the compiler is reported at it (X0000), and an error in an operator
+the prelude defines as it would be in a program. The language server
+checks the file at `trendy_prelude::SOURCE_PATH`, where the prelude was
+when it was built, as the prelude, not as a program. A built-in is added in three
+places: its declaration in `prelude.trendy`, its `hir::Builtin` entry, and
+its implementation, which is usually in the runtime. Built-ins are kept as
+few as possible: an operator that can be written in trendy is defined in
+the prelude instead, and each new language feature is a reason to look for
+a built-in it can replace.
 
 **`trendy_runtime`** is a `no_std` library linked into every executable. It
 uses only the C library. `trendyc`'s `build.rs` builds it as a static library

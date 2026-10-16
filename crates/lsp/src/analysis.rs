@@ -24,22 +24,47 @@ fn prelude() -> &'static trendy_sema::Prelude {
     })
 }
 
-/// Every lexer and parser error, or if there are none, every sema error.
-fn errors(source: &str) -> Vec<trendy_diag::Diagnostic> {
+/// Every lexer and parser error in the document at `uri`, or if there are
+/// none, every sema error: as the prelude's, if it is the prelude, and
+/// otherwise as a program's.
+fn errors(uri: &Uri, source: &str) -> Vec<trendy_diag::Diagnostic> {
     let parse = trendy_parser::parse(source, trendy_lexer::lex(source));
-    if parse.errors.is_empty() {
-        trendy_sema::analyze(prelude(), &parse.tree)
+    if !parse.errors.is_empty() {
+        return parse.errors;
+    }
+    if is_prelude(uri) {
+        trendy_sema::Prelude::load(&parse.tree)
             .err()
             .unwrap_or_default()
     } else {
-        parse.errors
+        trendy_sema::analyze(prelude(), &parse.tree)
+            .err()
+            .unwrap_or_default()
     }
+}
+
+/// Whether `uri` is the prelude's source, which the server was built from.
+fn is_prelude(uri: &Uri) -> bool {
+    let is_file = uri
+        .scheme()
+        .is_some_and(|s| s.as_str().eq_ignore_ascii_case("file"));
+    let path = uri.path().as_estr().decode().into_string_lossy();
+    let same = |a: &std::path::Path, b: &std::path::Path| match (a.canonicalize(), b.canonicalize())
+    {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    };
+    is_file
+        && same(
+            std::path::Path::new(path.as_ref()),
+            std::path::Path::new(trendy_prelude::SOURCE_PATH),
+        )
 }
 
 /// Errors to show in the editor.
 pub fn diagnostics(uri: &Uri, source: &str) -> Vec<Diagnostic> {
     let index = LineIndex::new(source);
-    errors(source)
+    errors(uri, source)
         .iter()
         .map(|d| to_lsp(uri, &index, d))
         .collect()
@@ -80,7 +105,7 @@ fn to_lsp(uri: &Uri, index: &LineIndex, d: &trendy_diag::Diagnostic) -> Diagnost
 pub fn code_actions(uri: &Uri, source: &str, range: Range) -> Vec<CodeActionOrCommand> {
     let index = LineIndex::new(source);
     let mut actions = Vec::new();
-    for d in errors(source) {
+    for d in errors(uri, source) {
         let lsp = to_lsp(uri, &index, &d);
         if lsp.range.start > range.end || range.start > lsp.range.end {
             continue;
@@ -221,6 +246,34 @@ mod tests {
     #[test]
     fn valid_program_has_no_diagnostics() {
         assert_eq!(diagnostics(&uri(), "operator main{} [];"), []);
+    }
+
+    #[test]
+    fn the_prelude_is_checked_as_the_prelude() {
+        let prelude: Uri = format!("file://{}", trendy_prelude::SOURCE_PATH)
+            .parse()
+            .unwrap();
+        assert_eq!(diagnostics(&prelude, trendy_prelude::SOURCE), []);
+        // As a program, it has built-ins it can't declare, operators the
+        // prelude already has, and no `main`.
+        assert!(!diagnostics(&uri(), trendy_prelude::SOURCE).is_empty());
+        // A declaration the compiler doesn't implement is an internal error
+        // there.
+        let wrong =
+            trendy_prelude::SOURCE.replace("debug_value{v: any type}", "debug_value{v: integer}");
+        let diags = diagnostics(&prelude, &wrong);
+        assert_eq!(diags.len(), 1, "{diags:#?}");
+        assert_eq!(
+            diags[0].code,
+            Some(NumberOrString::String("X0000".to_string()))
+        );
+        // And an error in an operator it defines is reported as a program's.
+        let wrong = trendy_prelude::SOURCE.replace("(r where of){}", "(r where 1){}");
+        let diags = diagnostics(&prelude, &wrong);
+        assert_eq!(
+            diags[0].code,
+            Some(NumberOrString::String("A0004".to_string()))
+        );
     }
 
     #[test]

@@ -9,7 +9,7 @@ use trendy_hir as hir;
 use trendy_syntax::ast::{self, AstNode, Item, SourceFile, TypeExpr};
 
 use crate::types::{self, Origin, TypeParameters};
-use crate::{Namespaces, Prelude, errors};
+use crate::{Namespaces, Prelude, Source, errors};
 
 /// What a call needs to know about the operator it calls.
 #[derive(Clone)]
@@ -104,42 +104,47 @@ impl Operators {
     }
 }
 
-/// Every operator's signature: the prelude's, then the program's, each
-/// with its parameters and result type checked. Built-ins declared outside
-/// the prelude are reported. `main` is checked as an update operator, even
+impl Signature {
+    /// The signature of the prelude's operator `op`, whose id is `id`, with
+    /// its parameters as calls give their arguments, `written`. It points
+    /// at nothing in the prelude's source, which isn't the program's.
+    pub(crate) fn of_prelude(
+        id: hir::OperatorId,
+        op: &hir::Operator,
+        written: BTreeMap<String, Param>,
+    ) -> Self {
+        let (builtin, result) = match &op.kind {
+            hir::OperatorKind::Builtin(builtin) => (Some(*builtin), None),
+            hir::OperatorKind::ReadOnly { result, .. } => (None, Some(result.clone())),
+            hir::OperatorKind::Update { .. } => (None, None),
+        };
+        Signature {
+            id,
+            name: op.name.clone(),
+            types: op.types.clone(),
+            written,
+            params: op.params.clone(),
+            read_only: result.is_some(),
+            result,
+            decl: None,
+            builtin,
+            valid: true,
+        }
+    }
+}
+
+/// Every operator's signature: the prelude's, then the file's, each with
+/// its parameters and result type checked. Built-ins declared outside the
+/// prelude are reported. `main` is checked as an update operator, even
 /// with a result type, which is reported when the entry point is.
 pub(crate) fn signatures(
     prelude: &Prelude,
     file: &SourceFile,
     namespaces: &Namespaces,
+    source: Source,
     errors: &mut Vec<Diagnostic>,
 ) -> Operators {
-    let mut list: Vec<Signature> = prelude
-        .operators()
-        .iter()
-        .enumerate()
-        .map(|(i, op)| {
-            let hir::OperatorKind::Builtin(builtin) = op.kind else {
-                unreachable!("the prelude declares only built-ins");
-            };
-            Signature {
-                id: hir::OperatorId(i),
-                name: op.name.clone(),
-                types: op.types.clone(),
-                written: op
-                    .params
-                    .iter()
-                    .map(|(name, ty)| (name.clone(), Param::Value(ty.clone())))
-                    .collect(),
-                params: op.params.clone(),
-                read_only: false,
-                result: None,
-                decl: None,
-                builtin: Some(builtin),
-                valid: true,
-            }
-        })
-        .collect();
+    let mut list: Vec<Signature> = prelude.signatures().collect();
     for item in file.items() {
         match item {
             Item::Operator(op) => {
@@ -187,6 +192,7 @@ pub(crate) fn signatures(
                     builtin: None,
                 });
             }
+            Item::Builtin(_) | Item::BuiltinType(_) if source == Source::Prelude => {}
             Item::Builtin(builtin) => errors.push(errors::builtin_outside_prelude(
                 builtin.keyword(),
                 builtin.syntax(),

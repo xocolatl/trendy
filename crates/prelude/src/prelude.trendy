@@ -4,3 +4,16 @@ builtin type approximate;
 builtin type text;
 
 builtin operator debug_value{v: any type};
+
+/* Whether `of` is true for some tuple of `r`: whether `r where of` has
+   one, which its projection on no attributes, `relation { {} }` or
+   `relation {}`, says. Of no tuples, it is false. */
+operator some{r: any relation, of: boolean per r}: boolean [
+    return (r where of){} = relation { {} };
+];
+
+/* Whether `of` is true for every tuple of `r`: whether no tuple makes it
+   false. Of no tuples, it is true. */
+operator every{r: any relation, of: boolean per r}: boolean [
+    return (r where not of){} = relation {};
+];

@@ -99,4 +99,7 @@ operator main{} [
     call show{label: "pairs", value: both{a: both{a: 1, b: 2}, b: both{a: 3, b: 4}}};
     call show{label: "with VAT", value: values{r: dishes, of: taxed{price: price}}};
     call show{label: "where from", value: values{r: dishes, of: dish || ", " || country}};
+    /* The prelude's `some` and `every`, written in trendy. */
+    call show{label: "some under 1000", value: some{r: dishes, of: taxed{price: price} < 1000}};
+    call show{label: "every under 1000", value: every{r: dishes, of: taxed{price: price} < 1000}};
 ];

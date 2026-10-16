@@ -123,3 +123,15 @@ fn language_reference_examples_behave_as_documented() {
         }
     }
 }
+
+#[test]
+fn language_reference_shows_the_prelude_as_it_is() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/language.md");
+    let reference = std::fs::read_to_string(path).unwrap();
+    assert!(
+        code_blocks(&reference)
+            .iter()
+            .any(|(info, source)| info.is_empty() && source == trendy_prelude::SOURCE),
+        "docs/language.md's copy of the prelude differs from crates/prelude/src/prelude.trendy"
+    );
+}

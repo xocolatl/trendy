@@ -20,7 +20,7 @@ pub use prelude::Prelude;
 
 use crate::operators::Operators;
 
-/// Check a parsed program and translate it to HIR. The prelude's built-in
+/// Check a parsed program and translate it to HIR. The prelude's
 /// operators are in scope.
 ///
 /// This is the last layer allowed to report errors to the user. Drivers run
@@ -32,19 +32,66 @@ use crate::operators::Operators;
 /// Returns every semantic error, in source order.
 pub fn analyze(prelude: &Prelude, file: &SourceFile) -> Result<hir::Program, Vec<Diagnostic>> {
     let mut errors = Vec::new();
-    let namespaces = collect_names(prelude, file, &mut errors);
+    let checked = check(prelude, file, Source::Program, &mut errors);
+    let entry = entry(file, &checked.namespaces, &checked.operators, &mut errors);
+    errors.sort_by_key(|d| d.span().start);
+    match entry {
+        Some(entry) if errors.is_empty() => {
+            let (operators, variables) = checked.finish(prelude);
+            Ok(hir::Program {
+                operators,
+                variables,
+                entry,
+            })
+        }
+        _ => Err(errors),
+    }
+}
+
+/// What a file is checked as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Source {
+    /// A program, which declares no built-ins.
+    Program,
+    /// The prelude, whose built-ins the prelude it is checked with already
+    /// has: its operators written in trendy are checked.
+    Prelude,
+}
+
+/// A file, checked, with every error reported.
+pub(crate) struct Checked {
+    namespaces: Namespaces,
+    operators: Operators,
+    evaluated: globals::Evaluated,
+    bodies: HashMap<hir::OperatorId, Vec<hir::Statement>>,
+}
+
+/// Check `file`, as `source` says, with `prelude`'s operators in scope.
+pub(crate) fn check(
+    prelude: &Prelude,
+    file: &SourceFile,
+    source: Source,
+    errors: &mut Vec<Diagnostic>,
+) -> Checked {
+    let namespaces = collect_names(prelude, file, errors);
 
     // Every operator's signature first, so that anything can refer to an
     // operator defined after it.
-    let operators = operators::signatures(prelude, file, &namespaces, &mut errors);
+    let operators = operators::signatures(prelude, file, &namespaces, source, errors);
 
     // Then the globals: the variables' initial values, and the read-only
     // operators' values, which initial values can call and which read
     // variables, each when first needed.
     let declarations = declarations(file, &namespaces);
     let variable_ids = variable_ids(file, &namespaces);
-    let evaluated = globals::Globals::new(&namespaces, &operators, &declarations, &variable_ids)
-        .evaluate(file, &mut errors);
+    let evaluated = globals::Globals::new(
+        prelude,
+        &namespaces,
+        &operators,
+        &declarations,
+        &variable_ids,
+    )
+    .evaluate(file, errors);
 
     // Then the update operators' bodies, which refer to both.
     let context = body::Context {
@@ -59,62 +106,64 @@ pub fn analyze(prelude: &Prelude, file: &SourceFile) -> Result<hir::Program, Vec
     let mut growing = Vec::new();
     for signature in operators.iter().filter(|s| !s.read_only) {
         if let Some(decl) = &signature.decl
-            && let Some(statements) =
-                body::body(decl, signature.id, &context, &mut growing, &mut errors)
+            && let Some(statements) = body::body(decl, signature.id, &context, &mut growing, errors)
         {
             bodies.insert(signature.id, statements);
         }
     }
-    body::growing_recursion(&growing, &bodies, &operators, &mut errors);
-
-    let entry = entry(file, &namespaces, &operators, &mut errors);
-    errors.sort_by_key(|d| d.span().start);
-    match entry {
-        Some(entry) if errors.is_empty() => Ok(program(&operators, evaluated, bodies, entry)),
-        _ => Err(errors),
+    body::growing_recursion(&growing, &bodies, &operators, errors);
+    Checked {
+        namespaces,
+        operators,
+        evaluated,
+        bodies,
     }
 }
 
-/// The checked program, of `operators`, with their `bodies` and the
-/// globals `evaluated`, which have no errors, starting at `entry`.
-fn program(
-    operators: &Operators,
-    evaluated: globals::Evaluated,
-    mut bodies: HashMap<hir::OperatorId, Vec<hir::Statement>>,
-    entry: hir::OperatorId,
-) -> hir::Program {
-    let operators = operators
-        .iter()
-        .map(|signature| {
-            let kind = match (signature.builtin, &signature.result) {
-                (Some(builtin), _) => hir::OperatorKind::Builtin(builtin),
-                (None, Some(result)) => hir::OperatorKind::ReadOnly {
-                    result: result.clone(),
-                    value: evaluated.values[&signature.id].clone(),
-                },
-                (None, None) => hir::OperatorKind::Update {
-                    body: bodies
-                        .remove(&signature.id)
-                        .expect("every update operator without errors has a body"),
-                },
-            };
-            hir::Operator {
-                name: signature.name.clone(),
-                types: signature.types.clone(),
-                params: signature.params.clone(),
-                kind,
-            }
-        })
-        .collect();
-    let variables = evaluated
-        .variables
-        .into_iter()
-        .map(|v| v.expect("a program without errors has every variable"))
-        .collect();
-    hir::Program {
-        operators,
-        variables,
-        entry,
+impl Checked {
+    /// The signatures of the file's operators, after the prelude's.
+    pub(crate) fn signatures(&self) -> impl Iterator<Item = &operators::Signature> {
+        self.operators.iter()
+    }
+
+    /// The HIR operators, `prelude`'s as it has them, then the file's, with
+    /// their bodies, and the variables, of a file without errors.
+    pub(crate) fn finish(mut self, prelude: &Prelude) -> (Vec<hir::Operator>, Vec<hir::Variable>) {
+        let operators = self
+            .operators
+            .iter()
+            .map(|signature| {
+                if let Some(op) = prelude.operators().get(signature.id.0) {
+                    return op.clone();
+                }
+                let kind = match (signature.builtin, &signature.result) {
+                    (Some(builtin), _) => hir::OperatorKind::Builtin(builtin),
+                    (None, Some(result)) => hir::OperatorKind::ReadOnly {
+                        result: result.clone(),
+                        value: self.evaluated.values[&signature.id].clone(),
+                    },
+                    (None, None) => hir::OperatorKind::Update {
+                        body: self
+                            .bodies
+                            .remove(&signature.id)
+                            .expect("every update operator without errors has a body"),
+                    },
+                };
+                hir::Operator {
+                    name: signature.name.clone(),
+                    types: signature.types.clone(),
+                    params: signature.params.clone(),
+                    kind,
+                }
+            })
+            .collect();
+        let variables = self
+            .evaluated
+            .variables
+            .into_iter()
+            .map(|v| v.expect("a program without errors has every variable"))
+            .collect();
+        (operators, variables)
     }
 }
 
@@ -150,13 +199,15 @@ fn entry(
 pub(crate) enum Kind {
     Operator,
     Builtin,
+    /// An operator the prelude defines in trendy.
+    Prelude,
     Variable,
 }
 
 impl Kind {
     pub(crate) fn describe(self) -> &'static str {
         match self {
-            Kind::Operator => "an operator",
+            Kind::Operator | Kind::Prelude => "an operator",
             Kind::Builtin => "a built-in operator",
             Kind::Variable => "a variable",
         }
@@ -213,7 +264,13 @@ fn collect_names(prelude: &Prelude, file: &SourceFile, errors: &mut Vec<Diagnost
         operators: prelude
             .operators()
             .iter()
-            .map(|op| (op.name.clone(), (Kind::Builtin, None)))
+            .map(|op| {
+                let kind = match op.kind {
+                    hir::OperatorKind::Builtin(_) => Kind::Builtin,
+                    _ => Kind::Prelude,
+                };
+                (op.name.clone(), (kind, None))
+            })
             .collect(),
         variables: HashMap::new(),
     };
@@ -221,7 +278,8 @@ fn collect_names(prelude: &Prelude, file: &SourceFile, errors: &mut Vec<Diagnost
         let (kind, name) = match item {
             Item::Operator(op) => (Kind::Operator, op.name()),
             Item::Variable(decl) => (Kind::Variable, decl.name()),
-            // Reported as being outside the prelude.
+            // Reported as being outside the prelude, or the prelude's own,
+            // already in it.
             Item::Builtin(_) | Item::BuiltinType(_) => continue,
         };
         let Some(ident) = name.and_then(|n| n.ident()) else {
@@ -4379,5 +4437,33 @@ mod tests {
                 .all(|s| !s.message.contains('%')),
             "{errors:#?}"
         );
+    }
+
+    #[test]
+    fn the_prelude_defines_some_and_every_in_trendy() {
+        let vars = variables(&format!(
+            "{PLOTS}var dry := some{{r: plots, of: of < 500}};\nvar wet := every{{r: plots, of: of > 500}};\nvar none := some{{r: plots where false, of: true}};\nvar all := every{{r: plots where false, of: false}};"
+        ));
+        let values: Vec<_> = vars[1..].iter().map(|v| v.init.clone()).collect();
+        assert_eq!(
+            values,
+            [
+                hir::Value::Boolean(true),
+                hir::Value::Boolean(false),
+                hir::Value::Boolean(false),
+                hir::Value::Boolean(true)
+            ]
+        );
+        // Their errors point at nothing in the prelude, which isn't the
+        // program's source.
+        let source = format!("{PLOTS}var x := some{{r: plots, of: 1}};{MAIN}");
+        let errors = errors(&source);
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].code, Code::TypeMismatch);
+        assert!(errors[0].secondary.is_empty());
+        // Their names are taken, as the built-ins' are.
+        let taken = self::errors("operator some{} [];\noperator main{} [];");
+        assert_eq!(taken[0].code, Code::DuplicateName);
+        assert!(taken[0].notes[0].contains("declared in the prelude"));
     }
 }

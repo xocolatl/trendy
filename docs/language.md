@@ -374,12 +374,19 @@ operator first{r: any relation, of: integer per r}: integer [
 operator main{} [];
 ```
 
-### Built-in operators
+### The prelude
 
-The compiler implements some operators itself. They are declared in the
-*prelude*, trendy source that is part of every program, so they are always in
-scope. A program can't declare built-ins itself. The prelude also declares the
-built-in types.
+Some operators are part of every program, always in scope: the
+*prelude*'s, trendy source the compiler includes. A few the compiler
+implements itself, the *built-ins*, which the prelude declares with
+`builtin`, as it does the built-in types; the rest it defines in trendy, as
+any program could. They are checked once, as a program's own operators
+are, and compiled into a program only if it calls them. A program can't
+declare built-ins, nor define an operator with a name the prelude has.
+
+The prelude keeps built-ins as few as possible: what can be written in
+trendy is, so that it means exactly what its definition says, and when the
+language can express more, built-ins become ordinary operators.
 
 ```
 builtin type boolean;
@@ -388,6 +395,19 @@ builtin type approximate;
 builtin type text;
 
 builtin operator debug_value{v: any type};
+
+/* Whether `of` is true for some tuple of `r`: whether `r where of` has
+   one, which its projection on no attributes, `relation { {} }` or
+   `relation {}`, says. Of no tuples, it is false. */
+operator some{r: any relation, of: boolean per r}: boolean [
+    return (r where of){} = relation { {} };
+];
+
+/* Whether `of` is true for every tuple of `r`: whether no tuple makes it
+   false. Of no tuples, it is true. */
+operator every{r: any relation, of: boolean per r}: boolean [
+    return (r where not of){} = relation {};
+];
 ```
 
 **`debug_value{v: any type}`** writes `v` to stderr, on one line, as trendy
@@ -398,6 +418,28 @@ so the output reads back as the same value. For example:
 The one exception is the attribute a `per` parameter's relation wraps its
 tuples' own attributes in, which no source can name: it is written `…`,
 as in `relation { of: text, … } { { of: "Nyeri", … } }`.
+
+**`some{r: any relation, of: boolean per r}`** and
+**`every{r: any relation, of: boolean per r}`** are aggregates, SQL's
+`SOME` and `EVERY`, and Tutorial D's `OR` and `AND` of a relation: whether
+`of` is true for some tuple of `r`, or for every one. Of no tuples, `some`
+is false and `every` true.
+
+```trendy
+var plots := relation {
+    { plot: 1, region: "Nyeri", rainfall: 1200 },
+    { plot: 2, region: "Mendoza", rainfall: 220 },
+}
+key { plot };
+
+var any_dry := some{r: plots, of: rainfall < 500};
+var all_wet := every{r: plots, of: rainfall > 500};
+
+operator main{} [
+    call debug_value{v: any_dry};
+    call debug_value{v: all_wet};
+];
+```
 
 ## Variables
 

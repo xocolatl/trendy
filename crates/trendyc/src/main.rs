@@ -74,8 +74,11 @@ fn prelude() -> Result<trendy_sema::Prelude, String> {
             "error[X0000]: internal compiler error: the prelude doesn't parse\n{rendered}"
         ));
     }
-    trendy_sema::Prelude::load(&parse.tree)
-        .map_err(|e| format!("error[X0000]: internal compiler error: the prelude is invalid: {e}"))
+    trendy_sema::Prelude::load(&parse.tree).map_err(|errors| {
+        let rendered =
+            trendy_diag::render_all(&errors, Format::Human, trendy_prelude::PATH, source);
+        format!("error[X0000]: internal compiler error: the prelude is invalid\n{rendered}")
+    })
 }
 
 /// Rendered diagnostics, plus for people a summary that says where to learn

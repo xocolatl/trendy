@@ -14,7 +14,7 @@ use trendy_syntax::ast::{self, SourceFile, VarDecl};
 use crate::check::{Checker, Lookup, Names};
 use crate::operators::{Operators, Signature};
 use crate::types::{self, Expected, Origin};
-use crate::{Namespaces, errors, keys, ops};
+use crate::{Namespaces, Prelude, errors, keys, ops};
 
 /// What the globals evaluate to.
 pub(crate) struct Evaluated {
@@ -68,12 +68,26 @@ pub(crate) struct Pending {
 }
 
 impl<'a> Globals<'a> {
+    /// The globals of a file, with `prelude`'s read-only operators, which
+    /// are checked already.
     pub(crate) fn new(
+        prelude: &Prelude,
         namespaces: &'a Namespaces,
         operators: &'a Operators,
         decls: &'a HashMap<String, VarDecl>,
         ids: &'a HashMap<String, hir::VariableId>,
     ) -> Self {
+        let values: HashMap<hir::OperatorId, hir::Expr> = prelude
+            .operators()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, op)| match &op.kind {
+                hir::OperatorKind::ReadOnly { value, .. } => {
+                    Some((hir::OperatorId(i), value.clone()))
+                }
+                _ => None,
+            })
+            .collect();
         Globals {
             namespaces,
             operators,
@@ -81,8 +95,11 @@ impl<'a> Globals<'a> {
             ids,
             variables: vec![None; ids.len()],
             known: vec![None; ids.len()],
-            operator_states: HashMap::new(),
-            values: HashMap::new(),
+            operator_states: values
+                .keys()
+                .map(|&id| (id, State::Done(Some(()))))
+                .collect(),
+            values,
             stack: Vec::new(),
         }
     }
