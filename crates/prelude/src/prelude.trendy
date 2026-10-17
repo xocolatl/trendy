@@ -1,7 +1,11 @@
-builtin type boolean;
-builtin type integer;
-builtin type approximate;
-builtin type text;
+/* The types with a total order, `<`: a type parameter of `any ordered`
+   can be compared with `<`, `<=`, `>` and `>=`. */
+kind ordered { < };
+
+builtin type boolean: { ordered };
+builtin type integer: { ordered };
+builtin type approximate: { ordered };
+builtin type text: { ordered };
 
 builtin operator debug_value{v: any type};
 

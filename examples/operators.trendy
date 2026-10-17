@@ -63,6 +63,14 @@ operator values{r: any relation, of: T per r}: relation { v: T }
     return r{of} rename {of as v};
 ];
 
+/* The values of `of` below `limit`, of any type with an order: a kind,
+   `ordered`, that the prelude declares, and its types declare. */
+operator below{r: any relation, of: T per r, limit: T}: relation { v: T }
+    types { T: any ordered }
+[
+    return (r where of < limit){of} rename {of as v};
+];
+
 var special := "ramen";
 var previous := "none";
 
@@ -103,6 +111,7 @@ operator main{} [
         label: "how many under 1000",
         value: count{r: dishes where taxed{price: price} < 1000}
     };
+    call show{label: "before p", value: below{r: dishes, of: dish, limit: "p"}};
     /* The prelude's `some` and `every`, written in trendy. */
     call show{label: "some under 1000", value: some{r: dishes, of: taxed{price: price} < 1000}};
     call show{label: "every under 1000", value: every{r: dishes, of: taxed{price: price} < 1000}};

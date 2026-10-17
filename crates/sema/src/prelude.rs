@@ -3,9 +3,9 @@
 //! trendy, checked as a program's are.
 
 use trendy_hir as hir;
-use trendy_syntax::ast::{BuiltinOperator, BuiltinType, Item, SourceFile};
+use trendy_syntax::ast::{BuiltinOperator, BuiltinType, Item, KindDecl, SourceFile};
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use trendy_diag::{Code, Diagnostic, Span};
 use trendy_syntax::SyntaxToken;
@@ -42,6 +42,7 @@ fn value_params(params: &BTreeMap<String, hir::Type>) -> BTreeMap<String, Param>
 /// name is added to those `declared`, unless it already is.
 fn builtin_operator(
     decl: &BuiltinOperator,
+    namespaces: &Namespaces,
     declared: &mut Vec<String>,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Operator> {
@@ -65,7 +66,7 @@ fn builtin_operator(
     declared.push(name.to_string());
     let heading = decl.params()?;
     let mut types = Vec::new();
-    let params = operators::params(&heading, &mut types, &Namespaces::default(), errors)?.seen;
+    let params = operators::params(&heading, &mut types, namespaces, errors)?.seen;
     let written = decl.result();
     let result = match &written {
         Some(written) => {
@@ -73,7 +74,7 @@ fn builtin_operator(
             Some(types::resolve(
                 written,
                 &mut parameters,
-                &Namespaces::default(),
+                namespaces,
                 errors,
             )?)
         }
@@ -112,26 +113,117 @@ fn builtin_operator(
     })
 }
 
-/// Add the built-in type `decl` declares to `types`, or report why it isn't
-/// one.
-fn builtin_type(decl: &BuiltinType, types: &mut Vec<String>, errors: &mut Vec<Diagnostic>) {
+/// The kind `decl` declares, with what the compiler can require of its
+/// types, or `None` after reporting why it isn't one: `kinds` are those
+/// declared before it.
+fn kind_decl(
+    decl: &KindDecl,
+    kinds: &[(hir::Kind, BTreeSet<hir::Scalar>)],
+    errors: &mut Vec<Diagnostic>,
+) -> Option<hir::Kind> {
+    // A missing name is a syntax error, already reported.
+    let ident = decl.name()?.ident()?;
+    let name = ident.text();
+    if kinds.iter().any(|(kind, _)| kind.name == name) {
+        errors.push(internal(
+            format!("`{name}` is declared more than once"),
+            &ident,
+        ));
+        return None;
+    }
+    // `any type` is every type, of no kind.
+    if name == "type" {
+        errors.push(internal(
+            "a kind can't be called `type`".to_string(),
+            &ident,
+        ));
+        return None;
+    }
+    let mut requires = BTreeSet::new();
+    for requirement in decl.requirements() {
+        let Some(token) = requirement.token() else {
+            continue;
+        };
+        match token.kind() {
+            trendy_syntax::SyntaxKind::Lt => {
+                requires.insert(hir::Requirement::Order);
+            }
+            _ => errors.push(internal(
+                format!(
+                    "`{}` is not a requirement the compiler implements",
+                    token.text()
+                ),
+                &token,
+            )),
+        }
+    }
+    Some(hir::Kind {
+        name: name.to_string(),
+        requires,
+    })
+}
+
+/// Add the built-in type `decl` declares to `types`, and to each of the
+/// `kinds` it declares, or report why it isn't one.
+fn builtin_type(
+    decl: &BuiltinType,
+    types: &mut Vec<String>,
+    kinds: &mut [(hir::Kind, BTreeSet<hir::Scalar>)],
+    errors: &mut Vec<Diagnostic>,
+) {
     // A missing name is a syntax error, already reported.
     let Some(ident) = decl.name().and_then(|n| n.ident()) else {
         return;
     };
     let name = ident.text().to_string();
-    if !builtin_types().any(|t| t == name) {
+    let Some(scalar) = hir::Scalar::from_name(&name) else {
         errors.push(internal(
             format!("`{name}` is not a type the compiler implements"),
             &ident,
         ));
-    } else if types.contains(&name) {
+        return;
+    };
+    if types.contains(&name) {
         errors.push(internal(
             format!("`{name}` is declared more than once"),
             &ident,
         ));
-    } else {
-        types.push(name);
+        return;
+    }
+    types.push(name.clone());
+    let declared = decl.kinds();
+    for kind_ident in declared
+        .iter()
+        .flat_map(trendy_syntax::ast::NameList::names)
+        .filter_map(|n| n.ident())
+    {
+        let Some((kind, members)) = kinds
+            .iter_mut()
+            .find(|(kind, _)| kind.name == kind_ident.text())
+        else {
+            errors.push(internal(
+                format!("`{}` is not a kind the prelude declares", kind_ident.text()),
+                &kind_ident,
+            ));
+            continue;
+        };
+        // Every built-in type has an order: `false` before `true`, numbers
+        // numerically, and text by code point.
+        let missing = kind.requires.iter().find(|r| match r {
+            hir::Requirement::Order => false,
+        });
+        if let Some(missing) = missing {
+            errors.push(internal(
+                format!(
+                    "`{name}` doesn't have `{}`, which `{}` requires",
+                    missing.text(),
+                    kind.name
+                ),
+                &kind_ident,
+            ));
+            continue;
+        }
+        members.insert(scalar);
     }
 }
 
@@ -148,6 +240,8 @@ pub struct Prelude {
     /// Each one's parameters, as calls give their arguments, which HIR's
     /// lack for `per` parameters.
     written: Vec<BTreeMap<String, Param>>,
+    /// The kinds, each with the built-in types that declare it.
+    kinds: Vec<(hir::Kind, BTreeSet<hir::Scalar>)>,
 }
 
 impl Prelude {
@@ -164,21 +258,34 @@ impl Prelude {
     /// defines is reported as a program's would be.
     pub fn load(file: &SourceFile) -> Result<Prelude, Vec<Diagnostic>> {
         let mut errors = Vec::new();
+        // The kinds first, which types declare and built-ins can name.
+        let mut kinds: Vec<(hir::Kind, BTreeSet<hir::Scalar>)> = Vec::new();
+        for item in file.items() {
+            if let Item::Kind(decl) = item
+                && let Some(kind) = kind_decl(&decl, &kinds, &mut errors)
+            {
+                kinds.push((kind, BTreeSet::new()));
+            }
+        }
+        let mut types: Vec<String> = Vec::new();
+        for item in file.items() {
+            if let Item::BuiltinType(decl) = item {
+                builtin_type(&decl, &mut types, &mut kinds, &mut errors);
+            }
+        }
+        let namespaces = Namespaces::with_kinds(&kinds);
         let mut operators: Vec<hir::Operator> = Vec::new();
         // The built-ins declared, rightly or not, so that a wrong
         // declaration isn't missing too.
         let mut declared: Vec<String> = Vec::new();
-        let mut types: Vec<String> = Vec::new();
         for item in file.items() {
             match item {
                 Item::Builtin(decl) => {
-                    if let Some(op) = builtin_operator(&decl, &mut declared, &mut errors) {
-                        operators.push(op);
-                    }
+                    let op = builtin_operator(&decl, &namespaces, &mut declared, &mut errors);
+                    operators.extend(op);
                 }
-                Item::BuiltinType(decl) => builtin_type(&decl, &mut types, &mut errors),
-                // Checked once the built-ins are known.
-                Item::Operator(_) => {}
+                // Checked above, or once the built-ins are known.
+                Item::BuiltinType(_) | Item::Kind(_) | Item::Operator(_) => {}
                 Item::Variable(decl) => errors.push(Diagnostic::error(
                     Code::Internal,
                     "the prelude declares no variables",
@@ -204,7 +311,11 @@ impl Prelude {
             .iter()
             .map(|op| value_params(&op.params))
             .collect();
-        let builtins = Prelude { operators, written };
+        let builtins = Prelude {
+            operators,
+            written,
+            kinds,
+        };
 
         let checked = crate::check(&builtins, file, Source::Prelude, &mut errors);
         if !errors.is_empty() {
@@ -213,7 +324,16 @@ impl Prelude {
         }
         let written = checked.signatures().map(|s| s.written.clone()).collect();
         let (operators, _) = checked.finish(&builtins);
-        Ok(Prelude { operators, written })
+        Ok(Prelude {
+            operators,
+            written,
+            kinds: builtins.kinds,
+        })
+    }
+
+    /// The kinds, each with the built-in types that declare it.
+    pub(crate) fn kinds(&self) -> &[(hir::Kind, BTreeSet<hir::Scalar>)] {
+        &self.kinds
     }
 
     /// The operators, the built-ins first, each in the order the prelude

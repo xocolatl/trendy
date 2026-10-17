@@ -768,8 +768,10 @@ impl<'a> Checker<'a> {
         };
         if expected.is_none() {
             let actual = self.ty(&checked);
-            if let Err(error) = types.bind(name, ty, &actual, value) {
-                errors.push(error.diagnostic(&actual, Self::constant(&checked), value));
+            let namespaces = self.names.namespaces();
+            if let Err(error) = types.bind(name, ty, &actual, value, namespaces) {
+                let constant = Self::constant(&checked);
+                errors.push(error.diagnostic(&actual, constant, value, namespaces));
                 return None;
             }
         }
@@ -1313,6 +1315,8 @@ impl<'a> Checker<'a> {
         errors: &mut Vec<Diagnostic>,
     ) -> Option<(Resolved, Vec<hir::Expr>)> {
         let op = Operator::of(token)?;
+        // For the help on an operator a type parameter's values don't have.
+        let kinds: Vec<hir::Kind> = self.namespaces().kinds().into_iter().cloned().collect();
         ops::check_operands(
             op,
             token,
@@ -1323,6 +1327,7 @@ impl<'a> Checker<'a> {
                 let ty = self.ty(&checked);
                 Some((checked, ty))
             },
+            &kinds,
             errors,
         )
     }
@@ -1625,21 +1630,22 @@ impl<'s> TypeArguments<'s> {
         pattern: &'a hir::Type,
         actual: &hir::Type,
         arg: &Expr,
+        namespaces: &Namespaces,
     ) -> Result<(), Unbound<'a>> {
         let mut trial = self.types.clone();
-        if bind(&mut trial, pattern, actual, arg) {
+        if bind(&mut trial, pattern, actual, arg, namespaces) {
             self.types = trial;
             return Ok(());
         }
         Err(match pattern {
             hir::Type::Parameter(p) => match &self.types[p.index] {
-                Some(_) => Unbound::Given(self.expected(name, pattern)),
+                Some(_) => Unbound::Given(Box::new(self.expected(name, pattern))),
                 None => Unbound::Kind(p, self.signature.param_origin(name)),
             },
-            _ => Unbound::Given(Expected {
+            _ => Unbound::Given(Box::new(Expected {
                 ty: self.instantiate(pattern),
                 origin: self.signature.param_origin(name),
-            }),
+            })),
         })
     }
 
@@ -1661,17 +1667,19 @@ impl<'s> TypeArguments<'s> {
 }
 
 /// Give the type parameters in `pattern` the types in `types` that make it
-/// `actual`, from the argument `arg`: whether some do.
+/// `actual`, from the argument `arg`, where `namespaces` says which types
+/// are of each kind: whether some do.
 fn bind(
     types: &mut [Option<(hir::Type, Expr)>],
     pattern: &hir::Type,
     actual: &hir::Type,
     arg: &Expr,
+    namespaces: &Namespaces,
 ) -> bool {
     match (pattern, actual) {
         (hir::Type::Parameter(p), _) => match &types[p.index] {
             Some((given, _)) => given == actual,
-            None if p.any.admits(actual) => {
+            None if namespaces.admits(&p.any, actual) => {
                 types[p.index] = Some((actual.clone(), arg.clone()));
                 true
             }
@@ -1683,7 +1691,7 @@ fn bind(
                 && pattern.attributes().all(|(name, ty)| {
                     actual
                         .get(name)
-                        .is_some_and(|other| bind(types, ty, other, arg))
+                        .is_some_and(|other| bind(types, ty, other, arg, namespaces))
                 })
         }
         _ => pattern == actual,
@@ -1694,7 +1702,7 @@ fn bind(
 enum Unbound<'a> {
     /// They have types already, or the type has more than type parameters
     /// in it, so the argument was expected to have this one.
-    Given(Expected),
+    Given(Box<Expected>),
     /// The parameter's type is the type parameter, which can't be the
     /// argument's type: `any tuple` or `any relation` of another type.
     Kind(&'a hir::TypeParameter, types::Origin),
@@ -1703,12 +1711,20 @@ enum Unbound<'a> {
 impl Unbound<'_> {
     /// The error for an argument, written `arg`, of type `actual`, and
     /// with the value `value` if it is a constant.
-    fn diagnostic(&self, actual: &hir::Type, value: Option<&hir::Value>, arg: &Expr) -> Diagnostic {
+    fn diagnostic(
+        &self,
+        actual: &hir::Type,
+        value: Option<&hir::Value>,
+        arg: &Expr,
+        namespaces: &Namespaces,
+    ) -> Diagnostic {
         match self {
             Unbound::Given(expected) => {
                 errors::type_mismatch(&expected.ty, &expected.origin, actual, value, arg)
             }
-            Unbound::Kind(parameter, origin) => errors::not_of_kind(parameter, origin, actual, arg),
+            Unbound::Kind(parameter, origin) => {
+                errors::not_of_kind(parameter, origin, actual, arg, namespaces)
+            }
         }
     }
 }

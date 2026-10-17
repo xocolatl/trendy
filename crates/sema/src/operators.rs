@@ -155,9 +155,10 @@ pub(crate) fn signatures(
                     continue;
                 }
                 let declared = op.type_parameters();
-                let (mut type_parameters, declared_valid) = declared
-                    .as_ref()
-                    .map_or_else(|| (Vec::new(), true), |d| declared_types(d, errors));
+                let (mut type_parameters, declared_valid) = declared.as_ref().map_or_else(
+                    || (Vec::new(), true),
+                    |d| declared_types(d, namespaces, errors),
+                );
                 let declared_count = type_parameters.len();
                 let params = op
                     .params()
@@ -192,7 +193,9 @@ pub(crate) fn signatures(
                     builtin: None,
                 });
             }
-            Item::Builtin(_) | Item::BuiltinType(_) if source == Source::Prelude => {}
+            Item::Builtin(_) | Item::BuiltinType(_) | Item::Kind(_)
+                if source == Source::Prelude => {}
+            Item::Kind(kind) => errors.push(errors::kind_outside_prelude(&kind)),
             Item::Builtin(builtin) => errors.push(errors::builtin_outside_prelude(
                 builtin.keyword(),
                 builtin.syntax(),
@@ -272,7 +275,7 @@ pub(crate) fn params(
             )),
             Some(target) if target.per().is_some() => Some(errors::PerProblem::Per),
             Some(target) => match target.type_expr() {
-                Some(TypeExpr::Any(any)) if types::any_of(&any) == Some(hir::Any::Relation) => None,
+                Some(TypeExpr::Any(any)) if any_relation(&any) => None,
                 Some(written) => Some(errors::PerProblem::NotAnyRelation(written)),
                 None => {
                     ok = false;
@@ -337,6 +340,7 @@ pub(crate) fn params(
 /// `any type`, so that its uses aren't reported too.
 fn declared_types(
     declared: &ast::TypeParameters,
+    namespaces: &Namespaces,
     errors: &mut Vec<Diagnostic>,
 ) -> (Vec<hir::TypeParameter>, bool) {
     let Some(heading) = declared.heading() else {
@@ -366,7 +370,7 @@ fn declared_types(
             continue;
         }
         let any = match attribute.type_expr() {
-            Some(TypeExpr::Any(any)) => types::any_of(&any),
+            Some(TypeExpr::Any(any)) => types::any_of(&any, namespaces, errors),
             Some(other) => {
                 errors.push(errors::type_parameter_not_any(name, &other));
                 None
@@ -426,7 +430,7 @@ fn determined(
             [only] if uses == 1 => {
                 errors.push(errors::type_parameter_named_once(
                     name,
-                    parameter.any,
+                    &parameter.any,
                     only.span(),
                     attribute.span(),
                     removal,
@@ -436,6 +440,12 @@ fn determined(
         }
     }
     ok
+}
+
+/// Whether `any` is `any relation`.
+fn any_relation(any: &ast::AnyType) -> bool {
+    any.what()
+        .is_some_and(|w| w.kind() == trendy_syntax::SyntaxKind::RelationKw)
 }
 
 /// Parameters as written: `{name: text, times: integer}`, and

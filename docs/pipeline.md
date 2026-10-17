@@ -216,8 +216,11 @@ Tutorial D's `update r where p (a := x)`, whose values follow it
 An operator's type parameters follow its result type, `types { T: any type }`
 (`TypeParameters`), a heading whose types sema requires to be `any …`.
 `types` is a contextual keyword, recognized there before `{`, and `any`
-another, recognized in a type before `type`, which is a word, or the
-keyword `tuple` or `relation` (`AnyType`). Elsewhere all three are names,
+another, recognized in a type before a name, `type` or a kind's, or the
+keyword `tuple` or `relation` (`AnyType`). `kind name { < };` (`KindDecl`)
+is a definition of its own, `kind` a contextual keyword recognized at a
+definition's start before a name and `{`, and a built-in type can list
+its kinds, `builtin type integer: { ordered };`. Elsewhere all three are names,
 and a bare `any` is a type's name, which sema reports. Type parameters in
 angle brackets after the operator's name, `f<T, U>{…}`, are consumed up to
 the matching `>` into an error node and reported once the result type is
@@ -342,7 +345,10 @@ callee's types mean those: `Operator::instantiated` replaces each type
 parameter with its type throughout, an operator of its own with none.
 Comparing values of a type parameter is `Compared::Parameter`, which
 instantiating makes what the type's values are compared as. `debug_value`
-is a built-in with one, `{v: any type}`.
+is a built-in with one, `{v: any type}`. A type parameter can be of a kind
+(`Any::Kind`): a set of types that each declare it, with what each must
+have (`Requirement`), which the kind's type parameters can then be used
+for, such as `Requirement::Order` for `<`.
 
 A `per` parameter is no parameter in HIR: an operator sees the relation it
 refers to with the `per` parameters' values as attributes of its tuples,
@@ -427,6 +433,16 @@ checked already, and recursion is found then, not when it would loop. The
 call's arguments are checked as `call`'s are (`Checker::arguments`). An
 update operator has no value, so calling one in an expression is an error
 (A0016), and `call` of a read-only operator would lose its value (A0037).
+
+The kinds, which only the prelude declares (A0013), are in `Namespaces`,
+each with the built-in types that declare it. Loading the prelude reads the
+kinds first, then the types, checking that each has what its kinds
+require, then the built-in operators, which can name kinds. A call's
+argument for a type parameter of a kind must be of one of its types, or a
+type parameter of the caller's of the same kind (`Namespaces::admits`),
+and inside a generic body, values of a type parameter whose kind requires
+an order can be compared (`ops::Operator::resolve`); comparing values of
+one whose kind doesn't is reported with the kinds that would allow it.
 
 An operator's type parameters are those its `types` list declares, then
 one for each `any …` written as a parameter's type, without a name; only a

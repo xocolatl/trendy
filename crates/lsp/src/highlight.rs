@@ -46,84 +46,76 @@ pub fn highlights(file: &SourceFile) -> Vec<Highlight> {
 }
 
 fn classify(token: &SyntaxToken) -> Option<Highlight> {
-    let parent = token.parent().map(|p| p.kind());
-    let grandparent = token.parent().and_then(|p| p.parent()).map(|p| p.kind());
-    // A heading's owner: an operator's heading holds its parameters.
-    let heading_owner = token
-        .parent()
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent())
-        .map(|p| p.kind());
-    let (class, definition) = match (token.kind(), parent, grandparent) {
-        (SyntaxKind::Comment, _, _) => (Class::Comment, false),
-        (kind, _, _) if kind.is_operator() => (Class::ExprOperator, false),
-        (kind, _, _) if kind.is_keyword() => (Class::Keyword, false),
-        // The contextual keywords: `type`, in `builtin type name;`, `key`,
-        // `value` and `from`, `any` and `type`, in `any type`, `types`, and
-        // `per`.
-        (SyntaxKind::Ident, Some(SyntaxKind::BuiltinType), _) if token.text() == "type" => {
-            (Class::Keyword, false)
-        }
-        (
-            SyntaxKind::Ident,
-            Some(
-                SyntaxKind::Key
-                | SyntaxKind::FromExpr
-                | SyntaxKind::AnyType
-                | SyntaxKind::TypeParameters
-                | SyntaxKind::Per,
-            ),
-            _,
-        ) => (Class::Keyword, false),
-        // A type parameter, declared in `types { … }`.
-        (SyntaxKind::Ident, Some(SyntaxKind::Name), Some(SyntaxKind::AttributeType))
-            if heading_owner == Some(SyntaxKind::TypeParameters) =>
-        {
-            (Class::Type, true)
-        }
-        (SyntaxKind::Ident, Some(SyntaxKind::Name), Some(SyntaxKind::BuiltinType)) => {
-            (Class::Type, true)
-        }
-        (SyntaxKind::Ident, Some(SyntaxKind::Name), Some(SyntaxKind::AttributeType))
+    let (class, definition) = match token.kind() {
+        SyntaxKind::Comment => (Class::Comment, false),
+        kind if kind.is_operator() => (Class::ExprOperator, false),
+        kind if kind.is_keyword() => (Class::Keyword, false),
+        SyntaxKind::IntLiteral | SyntaxKind::ApproximateLiteral => (Class::Number, false),
+        SyntaxKind::TextLiteral => (Class::Text, false),
+        SyntaxKind::Ident => word(token)?,
+        _ => return None,
+    };
+    Some(Highlight {
+        span: trendy_syntax::span(token.text_range()),
+        class,
+        definition,
+    })
+}
+
+/// What the identifier `token` is, and whether it is where that is
+/// defined: a contextual keyword, or the name of a type, a kind, or a
+/// value.
+fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
+    // The kind of the node `n` levels above the token, the parent first.
+    let above = |n: usize| token.parent_ancestors().nth(n).map(|p| p.kind());
+    let (parent, grandparent) = (above(0), above(1));
+    // The contextual keywords: `type`, in `builtin type name;`, `key`,
+    // `value` and `from`, `any` and `type`, in `any type`, `types`, `per`
+    // and `kind`.
+    let keyword = match parent {
+        Some(SyntaxKind::BuiltinType) => token.text() == "type",
+        Some(SyntaxKind::AnyType) => matches!(token.text(), "any" | "type"),
+        Some(
+            SyntaxKind::Key
+            | SyntaxKind::FromExpr
+            | SyntaxKind::TypeParameters
+            | SyntaxKind::Per
+            | SyntaxKind::KindDecl,
+        ) => true,
+        _ => false,
+    };
+    if keyword {
+        return Some((Class::Keyword, false));
+    }
+    if let Some(named) = type_name(parent, grandparent, above(2), above(3)) {
+        return Some(named);
+    }
+    Some(match (parent, grandparent) {
+        (Some(SyntaxKind::Name), Some(SyntaxKind::AttributeType))
             if matches!(
-                heading_owner,
+                above(3),
                 Some(SyntaxKind::Operator | SyntaxKind::BuiltinOperator)
             ) =>
         {
             (Class::Parameter, true)
         }
-        (
-            SyntaxKind::Ident,
-            Some(SyntaxKind::NameRef),
-            Some(SyntaxKind::CallStmt | SyntaxKind::CallExpr),
-        ) => (Class::Operator, false),
-        (SyntaxKind::Ident, Some(SyntaxKind::NameRef), _) => {
-            if is_parameter(token) {
-                (Class::Parameter, false)
-            } else {
-                (Class::Variable, false)
-            }
+        (Some(SyntaxKind::NameRef), Some(SyntaxKind::CallStmt | SyntaxKind::CallExpr)) => {
+            (Class::Operator, false)
         }
-        (
-            SyntaxKind::Ident,
-            Some(SyntaxKind::Name),
-            Some(SyntaxKind::Operator | SyntaxKind::BuiltinOperator),
-        ) => (Class::Operator, true),
-        (SyntaxKind::Ident, Some(SyntaxKind::Name), Some(SyntaxKind::VarDecl)) => {
-            (Class::Variable, true)
+        (Some(SyntaxKind::NameRef), _) if is_parameter(token) => (Class::Parameter, false),
+        (Some(SyntaxKind::NameRef), _) => (Class::Variable, false),
+        (Some(SyntaxKind::Name), Some(SyntaxKind::Operator | SyntaxKind::BuiltinOperator)) => {
+            (Class::Operator, true)
         }
-        (
-            SyntaxKind::Ident,
-            Some(SyntaxKind::Name),
-            Some(SyntaxKind::AttributeType | SyntaxKind::Gathering),
-        ) => (Class::Attribute, true),
+        (Some(SyntaxKind::Name), Some(SyntaxKind::VarDecl)) => (Class::Variable, true),
+        (Some(SyntaxKind::Name), Some(SyntaxKind::AttributeType | SyntaxKind::Gathering)) => {
+            (Class::Attribute, true)
+        }
         // A new attribute in an `extend`, or an existing one in a `replace`.
-        (SyntaxKind::Ident, Some(SyntaxKind::Name), Some(SyntaxKind::Assign)) => {
+        (Some(SyntaxKind::Name), Some(SyntaxKind::Assign)) => {
             (Class::Attribute, !is_replaced(token))
         }
         (
-            SyntaxKind::Ident,
             Some(SyntaxKind::Name),
             Some(
                 SyntaxKind::AttributeValue
@@ -132,16 +124,39 @@ fn classify(token: &SyntaxToken) -> Option<Highlight> {
                 | SyntaxKind::ExtractExpr,
             ),
         ) => (Class::Attribute, false),
-        (SyntaxKind::Ident, Some(SyntaxKind::TypeRef), _) => (Class::Type, false),
-        (SyntaxKind::IntLiteral | SyntaxKind::ApproximateLiteral, _, _) => (Class::Number, false),
-        (SyntaxKind::TextLiteral, _, _) => (Class::Text, false),
+        _ => return None,
+    })
+}
+
+/// Whether an identifier, below nodes of the kinds `parent`, `grandparent`,
+/// and the two above, `third` and `fourth`, is the name of a type or a
+/// kind, and whether it is where that is defined.
+fn type_name(
+    parent: Option<SyntaxKind>,
+    grandparent: Option<SyntaxKind>,
+    third: Option<SyntaxKind>,
+    fourth: Option<SyntaxKind>,
+) -> Option<(Class, bool)> {
+    let definition = match (parent?, grandparent) {
+        // A type, named, or a kind, after `any`, as in `any ordered`.
+        (SyntaxKind::TypeRef | SyntaxKind::AnyType, _) => false,
+        // A built-in type, or a kind, declared.
+        (SyntaxKind::Name, Some(SyntaxKind::BuiltinType | SyntaxKind::KindDecl)) => true,
+        // A kind, among a built-in type's.
+        (SyntaxKind::Name, Some(SyntaxKind::NameList))
+            if third == Some(SyntaxKind::BuiltinType) =>
+        {
+            false
+        }
+        // A type parameter, declared in `types { … }`.
+        (SyntaxKind::Name, Some(SyntaxKind::AttributeType))
+            if fourth == Some(SyntaxKind::TypeParameters) =>
+        {
+            true
+        }
         _ => return None,
     };
-    Some(Highlight {
-        span: trendy_syntax::span(token.text_range()),
-        class,
-        definition,
-    })
+    Some((Class::Type, definition))
 }
 
 /// Whether the name `token` refers to a parameter of the operator it is in.
@@ -553,6 +568,29 @@ mod tests {
                 ("integer", Class::Type, false),
                 ("per", Class::Keyword, false),
                 ("r", Class::Parameter, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn kinds() {
+        assert_eq!(
+            highlight(
+                "kind ordered { < };\nbuiltin type text: { ordered };\noperator f{a: any ordered} [];"
+            ),
+            [
+                ("kind", Class::Keyword, false),
+                ("ordered", Class::Type, true),
+                ("<", Class::ExprOperator, false),
+                ("builtin", Class::Keyword, false),
+                ("type", Class::Keyword, false),
+                ("text", Class::Type, true),
+                ("ordered", Class::Type, false),
+                ("operator", Class::Keyword, false),
+                ("f", Class::Operator, true),
+                ("a", Class::Parameter, true),
+                ("any", Class::Keyword, false),
+                ("ordered", Class::Type, false),
             ]
         );
     }

@@ -315,21 +315,41 @@ pub(crate) fn not_of_kind(
     origin: &Origin,
     actual: &hir::Type,
     arg: &Expr,
+    namespaces: &Namespaces,
 ) -> Diagnostic {
-    let (article, what) = match parameter.any {
-        hir::Any::Tuple => ("a", "tuple"),
-        hir::Any::Relation => ("a", "relation"),
+    let (expected, note) = match &parameter.any {
+        hir::Any::Tuple => (
+            "a tuple".to_string(),
+            format!("a parameter of type `{parameter}` takes a tuple of any heading"),
+        ),
+        hir::Any::Relation => (
+            "a relation".to_string(),
+            format!("a parameter of type `{parameter}` takes a relation of any heading"),
+        ),
+        hir::Any::Kind(kind) => {
+            let members: Vec<String> = namespaces
+                .members(kind)
+                .iter()
+                .map(|m| format!("`{}`", m.name()))
+                .collect();
+            (
+                format!("a type of kind `{}`", kind.name),
+                format!(
+                    "a parameter of type `{parameter}` takes a value of a type that declares `{}`: {}",
+                    kind.name,
+                    trendy_diag::conjoin(&members)
+                ),
+            )
+        }
         hir::Any::Type => unreachable!("every type is `any type`"),
     };
     let mut d = Diagnostic::error(
         Code::TypeMismatch,
-        format!("mismatched types: expected {article} {what}, found `{actual}`"),
+        format!("mismatched types: expected {expected}, found `{actual}`"),
         arg.span(),
         format!("this is `{actual}`"),
     )
-    .with_note(format!(
-        "a parameter of type `{parameter}` takes {article} {what} of any heading"
-    ));
+    .with_note(note);
     if let Some(span) = origin.span() {
         d = d.with_secondary(span, origin.label());
     }
@@ -619,6 +639,60 @@ pub(crate) fn unknown_attribute(
 }
 
 /// `builtin …`, the declaration `decl` with `keyword`, outside the prelude.
+/// A kind, declared by `decl` in a program, which only the prelude
+/// declares: its types are the ones that declare it, and a program can't
+/// declare a type.
+pub(crate) fn kind_outside_prelude(decl: &trendy_syntax::ast::KindDecl) -> Diagnostic {
+    let span = decl
+        .keyword()
+        .map_or_else(|| decl.span(), |k| trendy_syntax::span(k.text_range()));
+    Diagnostic::error(
+        Code::BuiltinOutsidePrelude,
+        "kinds can only be declared in the prelude",
+        span,
+        "not allowed in a program",
+    )
+    .with_note("a kind's types are those that declare it, as the prelude's built-in types do, and a program can't declare a type, so a kind of its own would have none")
+    .with_help("name one of the prelude's kinds after `any`, as in `any ordered`")
+}
+
+/// The kind `what`, written after `any`, which isn't one, where
+/// `namespaces` has the kinds there are.
+pub(crate) fn unknown_kind(what: &SyntaxToken, namespaces: &Namespaces) -> Diagnostic {
+    let name = what.text();
+    let span = trendy_syntax::span(what.text_range());
+    let kinds = namespaces.kinds();
+    let listed: Vec<String> = kinds.iter().map(|k| format!("`{}`", k.name)).collect();
+    let d = Diagnostic::error(
+        Code::UnknownType,
+        format!("unknown kind `{name}`"),
+        span,
+        "not a kind",
+    )
+    .with_note(format!(
+        "`any` is followed by `type`, `tuple`, `relation`, or a kind, the prelude's {}",
+        trendy_diag::conjoin(&listed)
+    ));
+    let words: Vec<&str> = ["type"]
+        .into_iter()
+        .chain(kinds.iter().map(|k| k.name.as_str()))
+        .collect();
+    let close = words
+        .into_iter()
+        .filter(|w| edit_distance(w, name) <= 2)
+        .min_by_key(|w| edit_distance(w, name));
+    match close {
+        Some(close) => d.with_suggestion(
+            format!("use `{close}`"),
+            vec![Edit {
+                span,
+                replacement: close.to_string(),
+            }],
+        ),
+        None => d,
+    }
+}
+
 pub(crate) fn builtin_outside_prelude(
     keyword: Option<SyntaxToken>,
     decl: &trendy_syntax::SyntaxNode,
@@ -637,8 +711,6 @@ pub(crate) fn builtin_outside_prelude(
     .with_help("to define an operator, remove `builtin` and give it a body: `operator name{…} [ … ];`")
 }
 
-/// The reserved type name `any`, at `span`, used outside a built-in
-/// operator's parameters.
 /// The type parameter `name`, declared at `span`, already declared at
 /// `first`.
 pub(crate) fn duplicate_type_parameter(name: &str, span: Span, first: Span) -> Diagnostic {
@@ -725,7 +797,7 @@ pub(crate) fn undetermined_type_parameter(
 /// declaration.
 pub(crate) fn type_parameter_named_once(
     name: &str,
-    any: hir::Any,
+    any: &hir::Any,
     only: Span,
     declared: Span,
     removal: Span,
@@ -937,7 +1009,7 @@ pub(crate) fn per_as_value(name: &str, relation: &str, span: Span) -> Diagnostic
 /// `any`, written `written`, somewhere other than a parameter's type: in a
 /// variable's, if `in_variable`, or in an operator's result type or body.
 pub(crate) fn any_outside_parameter(
-    any: hir::Any,
+    any: &hir::Any,
     written: &trendy_syntax::ast::AnyType,
     in_variable: bool,
 ) -> Diagnostic {
@@ -2975,7 +3047,20 @@ impl ParameterNote for Diagnostic {
         let hir::Type::Parameter(p) = ty else {
             return self;
         };
-        self.with_note(match p.any {
+        self.with_note(match &p.any {
+            hir::Any::Kind(kind) => {
+                let required: Vec<String> = kind
+                    .requires
+                    .iter()
+                    .map(|r| format!("`{}`", r.text()))
+                    .collect();
+                format!(
+                    "`{p}` can be any type of kind `{}`, so only what every one has applies to its values: `=` and `<>`, what `{}` requires, {}, and passing them on",
+                    kind.name,
+                    kind.name,
+                    trendy_diag::conjoin(&required)
+                )
+            }
             hir::Any::Type => format!(
                 "`{p}` can be any type, so only what applies to every type applies to its values: `=` and `<>`, and passing them on"
             ),
@@ -2987,6 +3072,33 @@ impl ParameterNote for Diagnostic {
             ),
         })
     }
+}
+
+/// `d`, with how to compare values of the type parameter `p` with
+/// `operator`: as a type of a kind that requires an order, of `kinds`.
+fn ordered_help(
+    d: Diagnostic,
+    p: &hir::TypeParameter,
+    operator: &str,
+    kinds: &[hir::Kind],
+) -> Diagnostic {
+    let ordered: Vec<String> = kinds
+        .iter()
+        .filter(|k| k.requires.contains(&hir::Requirement::Order))
+        .map(|k| format!("`any {}`", k.name))
+        .collect();
+    if ordered.is_empty() {
+        return d;
+    }
+    let what = trendy_diag::disjoin(&ordered);
+    d.with_help(match &p.name {
+        Some(name) => format!(
+            "to compare values of `{name}` with `{operator}`, declare `{name}` as {what}, whose types all have it"
+        ),
+        None => format!(
+            "to compare these values with `{operator}`, write {what} for the parameter's type, whose types all have it"
+        ),
+    })
 }
 
 fn plural(ty: &hir::Type) -> String {
@@ -3007,6 +3119,7 @@ pub(crate) fn wrong_operand_type(
     op: crate::ops::Operator,
     token: &SyntaxToken,
     ty: &hir::Type,
+    kinds: &[hir::Kind],
 ) -> Diagnostic {
     use crate::ops::Operator;
     let span = trendy_syntax::span(token.text_range());
@@ -3020,6 +3133,9 @@ pub(crate) fn wrong_operand_type(
     .with_note("values never convert to another type implicitly");
     let hir::Type::Scalar(scalar) = *ty else {
         return match op {
+            Operator::Compare(_) if let hir::Type::Parameter(p) = ty => {
+                ordered_help(d, p, token.text(), kinds)
+            }
             _ if matches!(ty, hir::Type::Parameter(_)) => d,
             Operator::Compare(_) => d.with_note(
                 "tuples have no order: they can only be compared with `=` and `<>`; relations can also be compared as sets, with `<=` and `<` for subset and proper subset",

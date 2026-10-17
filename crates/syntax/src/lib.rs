@@ -136,9 +136,18 @@ pub enum SyntaxKind {
     /// `builtin operator name{params};`, or, for a read-only one,
     /// `builtin operator name{params}: type;`, only in the prelude.
     BuiltinOperator,
-    /// `builtin type name;`, only in the prelude. `type` is a contextual
-    /// keyword, an identifier elsewhere.
+    /// `builtin type name;`, or `builtin type name: { kind, … };` with the
+    /// kinds it is of, only in the prelude. `type` is a contextual keyword,
+    /// an identifier elsewhere.
     BuiltinType,
+    /// `kind name { requirement, … };`: a set of types, each of which
+    /// declares it, and what each must have, such as `<`. `kind` is a
+    /// contextual keyword, an identifier elsewhere.
+    KindDecl,
+    /// `{ <, … }`: what a kind's types must have.
+    RequirementList,
+    /// One thing a kind's types must have: an operator, such as `<`.
+    Requirement,
     /// `var name: type := value;`
     VarDecl,
     Name,
@@ -256,7 +265,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 124] = [
+    pub const ALL: [SyntaxKind; 127] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -334,6 +343,9 @@ impl SyntaxKind {
         SyntaxKind::Operator,
         SyntaxKind::BuiltinOperator,
         SyntaxKind::BuiltinType,
+        SyntaxKind::KindDecl,
+        SyntaxKind::RequirementList,
+        SyntaxKind::Requirement,
         SyntaxKind::VarDecl,
         SyntaxKind::Name,
         SyntaxKind::Body,
@@ -744,6 +756,9 @@ impl SyntaxKind {
             SyntaxKind::Operator => "operator definition",
             SyntaxKind::BuiltinOperator => "built-in operator declaration",
             SyntaxKind::BuiltinType => "built-in type declaration",
+            SyntaxKind::KindDecl => "kind declaration",
+            SyntaxKind::RequirementList => "requirements",
+            SyntaxKind::Requirement => "requirement",
             SyntaxKind::VarDecl => "variable declaration",
             SyntaxKind::Name | SyntaxKind::NameRef => "name",
             SyntaxKind::UnaryExpr

@@ -174,7 +174,8 @@ operator main{} [
 
 A parameter's type can be `any type`, `any tuple` or `any relation`: the
 operator takes an argument of any type, of any tuple type, or of any
-relation type, and each call gives the parameter its argument's type. A
+relation type, and each call gives the parameter its argument's type. It
+can also be `any` and a kind, a set of types (see [Kinds](#kinds)). A
 type parameter, declared after the signature with `types`, names such a
 type, to say that several types are one, as for `same`'s `a` and `b`, or
 that the result's type is made of an argument's, as for `pair`.
@@ -248,11 +249,12 @@ though the Manifesto leaves how to further study.
   arguments are written in.
 - **A body is checked once, for every type.** Only what applies to every
   type a type parameter can be applies to its values: `=` and `<>`, and
-  passing them on, to operators and into tuples and relations, and for
-  `any relation`, which is ordered by inclusion, `<=`, `<`, `>=` and `>`.
-  So `a < b` of `T`s is an error (A0022), even if every call gives `T`
-  integers, as are the attributes of `any tuple` and `any relation`, which
-  aren't known.
+  passing them on, to operators and into tuples and relations; for
+  `any relation`, which is ordered by inclusion, `<=`, `<`, `>=` and `>`;
+  and for a kind, what it requires. So `a < b` of `T`s of `any type` is an
+  error (A0022), even if every call gives `T` integers, whose help says to
+  make it `any ordered`; and so are the attributes of `any tuple` and
+  `any relation`, which aren't known.
 - **Each list of types is compiled on its own,** as if the operator were
   written again with the types in place of its type parameters, and a call
   is evaluated when compiling where it can be, as any other is. So a call
@@ -295,6 +297,63 @@ operator main{} [];
 operator same<T>{a: T, b: T}: boolean [
     return a = b;
 ];
+
+operator main{} [];
+```
+
+### Kinds
+
+A kind is a set of types, each of which declares it, and what each of them
+must have. Only the prelude declares kinds, so far one, `ordered`: the
+types with a total order, `<`. A type parameter of `any ordered` can be
+compared with `<`, `<=`, `>` and `>=`, and a call gives it one of those
+types.
+
+```trendy
+var plots := relation {
+    { plot: 1, region: "Nyeri", rainfall: 1200 },
+    { plot: 2, region: "Nyeri", rainfall: 950 },
+    { plot: 3, region: "Mendoza", rainfall: 220 },
+}
+key { plot };
+
+operator below{r: any relation, of: T per r, limit: T}: relation { v: T }
+    types { T: any ordered }
+[
+    return (r where of < limit){of} rename {of as v};
+];
+
+operator main{} [
+    call debug_value{v: below{r: plots, of: rainfall, limit: 1000}};
+    call debug_value{v: below{r: plots, of: region, limit: "N"}};
+];
+```
+
+- **`any` is followed by a set of types:** `type`, every type; `tuple` or
+  `relation`, every type that type generator makes, whatever its heading;
+  or a kind, every type that declares it. The first three come from how
+  types are made, so the language has them; kinds are declared, so that
+  nothing about them is built into the compiler.
+- **A type declares the kinds it is of,** as the prelude's do:
+  `builtin type integer: { ordered };`. It must have what each requires,
+  which the prelude's loading checks. `boolean`, `integer`, `approximate`
+  and `text` are ordered; relations aren't, as their `<` is subset, which
+  isn't a total order.
+- **A kind says what its types must have, not what they happen to have,**
+  so a body can use exactly what its type parameters' kinds require, and
+  nothing else. Declaring a kind also says what no compiler can check, as
+  that `<` is a total order.
+- **An argument must be of the kind** (A0004), and a kind named wrong is
+  reported with the closest as the fix (A0003). A program can't declare
+  a kind (A0013): its types are those that declare it, and a program can't
+  declare a type.
+
+```trendy,error
+operator before{a: T, b: T}: boolean types { T: any ordered } [
+    return a < b;
+];
+
+var x := before{a: tuple { n: 1 }, b: tuple { n: 2 }};
 
 operator main{} [];
 ```
@@ -389,10 +448,14 @@ trendy is, so that it means exactly what its definition says, and when the
 language can express more, built-ins become ordinary operators.
 
 ```
-builtin type boolean;
-builtin type integer;
-builtin type approximate;
-builtin type text;
+/* The types with a total order, `<`: a type parameter of `any ordered`
+   can be compared with `<`, `<=`, `>` and `>=`. */
+kind ordered { < };
+
+builtin type boolean: { ordered };
+builtin type integer: { ordered };
+builtin type approximate: { ordered };
+builtin type text: { ordered };
 
 builtin operator debug_value{v: any type};
 

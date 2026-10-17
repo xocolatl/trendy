@@ -40,6 +40,9 @@ ast_node!(SourceFile);
 ast_node!(Operator);
 ast_node!(BuiltinOperator);
 ast_node!(BuiltinType);
+ast_node!(KindDecl);
+ast_node!(RequirementList);
+ast_node!(Requirement);
 ast_node!(Body);
 ast_node!(CallStmt);
 ast_node!(ReturnStmt);
@@ -91,6 +94,7 @@ pub enum Item {
     Operator(Operator),
     Builtin(BuiltinOperator),
     BuiltinType(BuiltinType),
+    Kind(KindDecl),
     Variable(VarDecl),
 }
 
@@ -102,6 +106,7 @@ impl SourceFile {
                 .map(Item::Operator)
                 .or_else(|| BuiltinOperator::cast(node.clone()).map(Item::Builtin))
                 .or_else(|| BuiltinType::cast(node.clone()).map(Item::BuiltinType))
+                .or_else(|| KindDecl::cast(node.clone()).map(Item::Kind))
                 .or_else(|| VarDecl::cast(node).map(Item::Variable))
         })
     }
@@ -207,10 +212,50 @@ impl BuiltinType {
         self.0.children().find_map(Name::cast)
     }
 
+    /// The kinds it is of, `{ ordered, … }`.
+    #[must_use]
+    pub fn kinds(&self) -> Option<NameList> {
+        self.0.children().find_map(NameList::cast)
+    }
+
     /// The `builtin` keyword.
     #[must_use]
     pub fn keyword(&self) -> Option<SyntaxToken> {
         significant_tokens(&self.0).find(|t| t.kind() == SyntaxKind::BuiltinKw)
+    }
+}
+
+impl KindDecl {
+    /// The word `kind`.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    #[must_use]
+    pub fn name(&self) -> Option<Name> {
+        self.0.children().find_map(Name::cast)
+    }
+
+    /// What its types must have.
+    pub fn requirements(&self) -> impl Iterator<Item = Requirement> + use<> {
+        self.0
+            .children()
+            .filter_map(RequirementList::cast)
+            .flat_map(|list| {
+                list.0
+                    .children()
+                    .filter_map(Requirement::cast)
+                    .collect::<Vec<_>>()
+            })
+    }
+}
+
+impl Requirement {
+    /// The token it is: an operator, such as `<`.
+    #[must_use]
+    pub fn token(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
     }
 }
 

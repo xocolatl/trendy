@@ -165,9 +165,52 @@ impl<'a> Parser<'a> {
                 SyntaxKind::OperatorKw => self.operator(),
                 SyntaxKind::BuiltinKw => self.builtin(),
                 SyntaxKind::VarKw => self.var_decl(),
+                SyntaxKind::Ident if self.at_kind() => self.kind_decl(),
                 _ => self.junk(found),
             }
         }
+    }
+
+    /// Whether a kind declaration starts here: `kind`, a contextual keyword,
+    /// before a name and `{`.
+    fn at_kind(&mut self) -> bool {
+        self.found().is_some_and(|f| f.text == "kind")
+            && self
+                .found_after(1)
+                .is_some_and(|f| f.kind == SyntaxKind::Ident)
+            && self
+                .found_after(2)
+                .is_some_and(|f| f.kind == SyntaxKind::LBrace)
+    }
+
+    /// `kind name { requirement, … };`: a set of types, each of which
+    /// declares it, and what each must have.
+    fn kind_decl(&mut self) {
+        self.form = errors::KIND_FORM;
+        self.start_node(SyntaxKind::KindDecl);
+        self.bump();
+        self.name("add the kind's name after `kind`", &[SyntaxKind::LBrace]);
+        self.delimited(
+            Some(SyntaxKind::RequirementList),
+            "requirements",
+            (SyntaxKind::LBrace, SyntaxKind::RBrace),
+            &[],
+            |p| {
+                p.items(Self::at_requirement, |p| {
+                    p.start_node(SyntaxKind::Requirement);
+                    p.bump();
+                    p.builder.finish_node();
+                });
+            },
+        );
+        self.expect(SyntaxKind::Semicolon);
+        self.builder.finish_node();
+    }
+
+    /// Whether a requirement starts here: an operator, or a name.
+    fn at_requirement(&mut self) -> bool {
+        self.peek()
+            .is_some_and(|k| k == SyntaxKind::Ident || k.is_operator())
     }
 
     fn operator(&mut self) {
@@ -215,8 +258,13 @@ impl<'a> Parser<'a> {
             self.bump();
             self.name(
                 "add the type's name after `builtin type`",
-                &[SyntaxKind::Semicolon],
+                &[SyntaxKind::Semicolon, SyntaxKind::Colon],
             );
+            // The kinds it is of.
+            if self.at(SyntaxKind::Colon) {
+                self.bump();
+                self.names(errors::BUILTIN_FORM);
+            }
             self.expect(SyntaxKind::Semicolon);
             self.builder.finish_node();
             return;
@@ -1131,8 +1179,8 @@ impl<'a> Parser<'a> {
     }
 
     /// A named type, a tuple type, a relation type, or `any type`,
-    /// `any tuple` or `any relation`, whose words are contextual keywords,
-    /// recognized together. `relation any` and `tuple any` are parsed as
+    /// `any tuple`, `any relation` or `any` and a kind, whose words are
+    /// contextual keywords, recognized together. `relation any` and `tuple any` are parsed as
     /// what they mean and fixed.
     fn type_expr(&mut self) {
         let word = |found: Option<Found>, word: &str| {
@@ -1141,10 +1189,12 @@ impl<'a> Parser<'a> {
         let next = self.found();
         let after = self.found_after(1);
         if word(next, "any")
-            && (word(after, "type")
-                || after.is_some_and(|f| {
-                    matches!(f.kind, SyntaxKind::TupleKw | SyntaxKind::RelationKw)
-                }))
+            && after.is_some_and(|f| {
+                matches!(
+                    f.kind,
+                    SyntaxKind::Ident | SyntaxKind::TupleKw | SyntaxKind::RelationKw
+                )
+            })
         {
             self.start_node(SyntaxKind::AnyType);
             self.bump();
@@ -3164,6 +3214,28 @@ SourceFile
         let errors =
             parse_str("operator max<T extends Comparable<T>>{a: T}: T [ return a; ];").errors;
         assert_eq!(errors.len(), 1, "{errors:#?}");
+    }
+
+    #[test]
+    fn kinds() {
+        let parse = parse_str(
+            "kind ordered { < };\nbuiltin type text: { ordered };\noperator f{a: any ordered} [];",
+        );
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let items: Vec<_> = parse.tree.items().collect();
+        let trendy_syntax::ast::Item::Kind(kind) = &items[0] else {
+            panic!("a kind");
+        };
+        assert_eq!(kind.name().unwrap().ident().unwrap().text(), "ordered");
+        let requirements: Vec<_> = kind.requirements().filter_map(|r| r.token()).collect();
+        assert_eq!(requirements[0].kind(), SyntaxKind::Lt);
+        let trendy_syntax::ast::Item::BuiltinType(text) = &items[1] else {
+            panic!("a built-in type");
+        };
+        assert_eq!(text.kinds().unwrap().names().count(), 1);
+        // `kind` is a word elsewhere.
+        let parse = parse_str("var kind := 1; var r := relation { { kind: kind } };");
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
     }
 
     #[test]

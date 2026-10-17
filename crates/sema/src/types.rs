@@ -204,13 +204,25 @@ impl TypeParameters<'_> {
 }
 
 /// What `any` says a type parameter can be, from the word with it: `type`,
-/// `tuple` or `relation`.
-pub(crate) fn any_of(any: &ast::AnyType) -> Option<hir::Any> {
+/// `tuple`, `relation`, or a kind, or `None` after reporting that it names
+/// none.
+pub(crate) fn any_of(
+    any: &ast::AnyType,
+    namespaces: &Namespaces,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<hir::Any> {
     let what = any.what()?;
     Some(match what.kind() {
         trendy_syntax::SyntaxKind::TupleKw => hir::Any::Tuple,
         trendy_syntax::SyntaxKind::RelationKw => hir::Any::Relation,
-        _ => hir::Any::Type,
+        _ if what.text() == "type" => hir::Any::Type,
+        _ => {
+            let Some(kind) = namespaces.kind(what.text()) else {
+                errors.push(errors::unknown_kind(&what, namespaces));
+                return None;
+            };
+            hir::Any::Kind(kind.clone())
+        }
     })
 }
 
@@ -242,10 +254,10 @@ pub(crate) fn resolve(
                 .map(hir::Type::Relation)
         }
         TypeExpr::Any(written) => {
-            let any = any_of(written)?;
+            let any = any_of(written, namespaces, errors)?;
             let TypeParameters::Open(list) = parameters else {
                 errors.push(errors::any_outside_parameter(
-                    any,
+                    &any,
                     written,
                     matches!(parameters, TypeParameters::None),
                 ));

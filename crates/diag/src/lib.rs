@@ -188,10 +188,20 @@ pub fn render_all(diagnostics: &[Diagnostic], format: Format, path: &str, source
 /// Join items for prose: `a`, `a and b`, or `a, b and c`.
 #[must_use]
 pub fn conjoin(items: &[String]) -> String {
+    joined(items, "and")
+}
+
+/// Join alternatives for prose: `a`, `a or b`, or `a, b or c`.
+#[must_use]
+pub fn disjoin(items: &[String]) -> String {
+    joined(items, "or")
+}
+
+fn joined(items: &[String], word: &str) -> String {
     match items {
         [] => String::new(),
         [only] => only.clone(),
-        [init @ .., last] => format!("{} and {last}", init.join(", ")),
+        [init @ .., last] => format!("{} {word} {last}", init.join(", ")),
     }
 }
 

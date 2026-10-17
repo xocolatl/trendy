@@ -134,38 +134,61 @@ pub struct TypeParameter {
     pub any: Any,
 }
 
-/// What a type parameter can be: `any type`, `any tuple` or
-/// `any relation`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// What a type parameter can be: `any type`, every type; `any tuple` or
+/// `any relation`, every type that type generator makes; or any type of a
+/// kind, such as `any ordered`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Any {
     Type,
     Tuple,
     Relation,
+    Kind(Kind),
 }
 
 impl Any {
-    /// Whether `ty`, a type that is not a type parameter of the operator
-    /// this is one of, is one of these.
+    /// Whether a type parameter of this can be used as `requirement` says,
+    /// because every type it can be is of a kind that requires it.
     #[must_use]
-    pub fn admits(self, ty: &Type) -> bool {
-        match (self, ty) {
-            (Any::Type, _) | (Any::Tuple, Type::Tuple(_)) | (Any::Relation, Type::Relation(_)) => {
-                true
-            }
-            (Any::Tuple | Any::Relation, Type::Parameter(p)) => p.any == self,
-            _ => false,
+    pub fn requires(&self, requirement: Requirement) -> bool {
+        matches!(self, Any::Kind(kind) if kind.requires.contains(&requirement))
+    }
+}
+
+/// A kind: a set of types, each of which declares it, and what each must
+/// have, which values of a type parameter of the kind can be used for.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Kind {
+    pub name: String,
+    pub requires: BTreeSet<Requirement>,
+}
+
+/// Something a kind's types must have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Requirement {
+    /// `<`, a total order, and so `<=`, `>` and `>=` with it.
+    Order,
+}
+
+impl Requirement {
+    /// Source text: the operator, as a kind's declaration writes it.
+    #[must_use]
+    pub fn text(self) -> &'static str {
+        match self {
+            Requirement::Order => "<",
         }
     }
 }
 
-/// Source text: `any type`, `any tuple` or `any relation`.
+/// Source text: `any type`, `any tuple`, `any relation`, or `any` and the
+/// kind, as in `any ordered`.
 impl std::fmt::Display for Any {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Any::Type => "any type",
-            Any::Tuple => "any tuple",
-            Any::Relation => "any relation",
-        })
+        match self {
+            Any::Type => f.write_str("any type"),
+            Any::Tuple => f.write_str("any tuple"),
+            Any::Relation => f.write_str("any relation"),
+            Any::Kind(kind) => write!(f, "any {}", kind.name),
+        }
     }
 }
 
@@ -728,7 +751,7 @@ pub enum Compared {
     Relation,
     /// Values of the type parameter with this index, compared as values of
     /// the type a call gives it: only `=` and `<>`, but for `any relation`,
-    /// which is a relation.
+    /// which is a relation, and a kind that requires an order.
     Parameter(usize),
 }
 
@@ -866,10 +889,18 @@ impl BinaryOp {
             // set equality for relations.
             BinaryOp::Compare(Comparison::Equal, _) => return Ok(Value::Boolean(lhs == rhs)),
             BinaryOp::Compare(Comparison::NotEqual, _) => return Ok(Value::Boolean(lhs != rhs)),
-            // Only `any relation` is ordered, by inclusion, of the types
-            // a type parameter can be.
-            BinaryOp::Compare(comparison, Compared::Relation | Compared::Parameter(_)) => {
+            BinaryOp::Compare(comparison, Compared::Relation) => {
                 return Ok(Value::Boolean(contains(comparison, lhs, rhs)));
+            }
+            // Values of a type parameter's type, as the values are: of
+            // `any relation`, ordered by inclusion, or of a kind that
+            // requires an order.
+            BinaryOp::Compare(comparison, Compared::Parameter(_)) => {
+                let holds = match lhs {
+                    Value::Relation(_) => contains(comparison, lhs, rhs),
+                    _ => comparison.holds(compare(lhs, rhs)),
+                };
+                return Ok(Value::Boolean(holds));
             }
             BinaryOp::Compare(..) => panic!("tuples aren't ordered"),
             _ => {}

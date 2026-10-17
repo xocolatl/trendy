@@ -168,8 +168,10 @@ impl Operator {
                 | (Operator::Compare(comparison), hir::Type::Relation(_)) => Some(
                     Resolved::Binary(B::Compare(comparison, hir::Compared::of(ty))),
                 ),
+                // `any relation`, ordered by inclusion, and a kind that
+                // requires an order.
                 (Operator::Compare(comparison), hir::Type::Parameter(p))
-                    if p.any == hir::Any::Relation =>
+                    if p.any == hir::Any::Relation || p.any.requires(hir::Requirement::Order) =>
                 {
                     Some(Resolved::Binary(B::Compare(
                         comparison,
@@ -222,6 +224,7 @@ pub(crate) fn check_operands<T>(
     operands: Vec<Option<Expr>>,
     expected: Option<&Expected>,
     check: &mut CheckOperand<'_, T>,
+    kinds: &[hir::Kind],
     errors: &mut Vec<Diagnostic>,
 ) -> Option<(Resolved, Vec<T>)> {
     // A context the operator can work in sets the operand type.
@@ -268,7 +271,7 @@ pub(crate) fn check_operands<T>(
             // other operands are still checked against it, so that an empty
             // relation gets its heading and a mismatch is still reported.
             if op.resolve(&ty).is_none() {
-                errors.push(errors::wrong_operand_type(op, token, &ty));
+                errors.push(errors::wrong_operand_type(op, token, &ty, kinds));
                 ok = false;
                 wrong_type = true;
             }
@@ -287,7 +290,7 @@ pub(crate) fn check_operands<T>(
         return None;
     }
     let Some(resolved) = op.resolve(&ty) else {
-        errors.push(errors::wrong_operand_type(op, token, &ty));
+        errors.push(errors::wrong_operand_type(op, token, &ty, kinds));
         return None;
     };
     Some((resolved, checked))

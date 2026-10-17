@@ -153,6 +153,7 @@ fn is_list(node: &SyntaxNode) -> bool {
         node.kind(),
         SyntaxKind::Heading
             | SyntaxKind::Arguments
+            | SyntaxKind::RequirementList
             | SyntaxKind::TupleLiteral
             | SyntaxKind::RelationLiteral
             | SyntaxKind::NameList
@@ -433,6 +434,8 @@ fn items(node: &SyntaxNode) -> usize {
         heading.attributes().count()
     } else if let Some(names) = NameList::cast(node.clone()) {
         names.names().count()
+    } else if node.kind() == SyntaxKind::RequirementList {
+        node.children().count()
     } else if let Some(renamings) = RenameList::cast(node.clone()) {
         renamings.renamings().count()
     } else if let Some(assignments) = AssignList::cast(node.clone()) {
@@ -505,7 +508,9 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
         let both_variables = item_kind(prev) == Some(VarDecl) && item_kind(next) == Some(VarDecl);
         let both_builtin_types =
             item_kind(prev) == Some(BuiltinType) && item_kind(next) == Some(BuiltinType);
-        return if (both_variables || both_builtin_types) && !blank_line {
+        let both_kinds = item_kind(prev) == Some(SyntaxKind::KindDecl)
+            && item_kind(next) == Some(SyntaxKind::KindDecl);
+        return if (both_variables || both_builtin_types || both_kinds) && !blank_line {
             "\n"
         } else {
             "\n\n"
@@ -523,11 +528,15 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
                     SyntaxKind::Operator | SyntaxKind::BuiltinOperator
                 )
             }),
-            TupleLiteral | RelationLiteral | SyntaxKind::AssignList | SyntaxKind::GatherList => {
-                true
-            }
-            // A key's attributes, as in `key { a, b }`.
-            SyntaxKind::NameList => p.parent().is_some_and(|k| k.kind() == SyntaxKind::Key),
+            TupleLiteral
+            | RelationLiteral
+            | SyntaxKind::AssignList
+            | SyntaxKind::GatherList
+            | SyntaxKind::RequirementList => true,
+            // A key's attributes, as in `key { a, b }`, and a type's kinds.
+            SyntaxKind::NameList => p
+                .parent()
+                .is_some_and(|k| matches!(k.kind(), SyntaxKind::Key | BuiltinType)),
             _ => false,
         })
     };
@@ -542,9 +551,15 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
             | SyntaxKind::FromExpr
             | SyntaxKind::AnyType
             | SyntaxKind::TypeParameters
-            | SyntaxKind::Per => true,
+            | SyntaxKind::Per
+            | SyntaxKind::KindDecl => true,
             _ => false,
         });
+    // A kind's requirements follow its name after a space.
+    let requirements = next.kind() == LBrace
+        && next
+            .parent()
+            .is_some_and(|p| p.kind() == SyntaxKind::RequirementList);
     let per = next
         .parent()
         .is_some_and(|p| p.kind() == SyntaxKind::Per && p.first_token().as_ref() == Some(next));
@@ -573,7 +588,7 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
                 .is_some_and(|p| p.kind() == SyntaxKind::ProjectExpr)
         });
     match (prev.kind(), next.kind()) {
-        _ if key_start(next).is_some() || per => " ",
+        _ if key_start(next).is_some() || per || requirements => " ",
         // The variable an assignment assigns, as in `update r { … }`.
         _ if is_target(prev) => " ",
         _ if projection => "",
@@ -843,6 +858,20 @@ mod tests {
         assert_eq!(
             fmt("operator f{}:tuple{a:integer}[return tuple{a:1};];"),
             "operator f{}: tuple { a: integer } [\n    return tuple { a: 1 };\n];\n"
+        );
+    }
+
+    #[test]
+    fn kinds() {
+        assert_eq!(
+            fmt(
+                "kind ordered{<};kind other { < , < } ;builtin type integer:{ordered};builtin type text : {ordered,other};"
+            ),
+            "kind ordered { < };\nkind other { <, < };\n\nbuiltin type integer: { ordered };\nbuiltin type text: { ordered, other };\n"
+        );
+        assert_eq!(
+            fmt("operator f{a:any ordered}[];"),
+            "operator f{a: any ordered} [];\n"
         );
     }
 

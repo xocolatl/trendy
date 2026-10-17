@@ -9,7 +9,7 @@ mod ops;
 mod prelude;
 mod types;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use trendy_diag::{Diagnostic, Span};
 use trendy_hir as hir;
@@ -223,9 +223,59 @@ pub(crate) struct Namespaces {
     /// User and built-in operators.
     operators: HashMap<String, (Kind, Option<Span>)>,
     variables: HashMap<String, Span>,
+    /// The kinds, which only the prelude declares, by name, each with the
+    /// built-in types of it.
+    kinds: HashMap<String, (hir::Kind, BTreeSet<hir::Scalar>)>,
 }
 
 impl Namespaces {
+    /// Names with the prelude's `kinds` only, for its own declarations.
+    pub(crate) fn with_kinds(kinds: &[(hir::Kind, BTreeSet<hir::Scalar>)]) -> Self {
+        Namespaces {
+            kinds: kinds
+                .iter()
+                .map(|(kind, members)| (kind.name.clone(), (kind.clone(), members.clone())))
+                .collect(),
+            ..Namespaces::default()
+        }
+    }
+
+    /// The kind named `name`.
+    pub(crate) fn kind(&self, name: &str) -> Option<&hir::Kind> {
+        self.kinds.get(name).map(|(kind, _)| kind)
+    }
+
+    /// Every kind, sorted by name.
+    pub(crate) fn kinds(&self) -> Vec<&hir::Kind> {
+        let mut kinds: Vec<&hir::Kind> = self.kinds.values().map(|(kind, _)| kind).collect();
+        kinds.sort_by(|a, b| a.name.cmp(&b.name));
+        kinds
+    }
+
+    /// The types of `kind`, sorted.
+    pub(crate) fn members(&self, kind: &hir::Kind) -> Vec<hir::Scalar> {
+        self.kinds
+            .get(&kind.name)
+            .map(|(_, members)| members.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// Whether a type parameter of `any` can be `ty`: a type of a call's
+    /// arguments, which can be a type parameter of the caller's.
+    pub(crate) fn admits(&self, any: &hir::Any, ty: &hir::Type) -> bool {
+        match (any, ty) {
+            (hir::Any::Type, _)
+            | (hir::Any::Tuple, hir::Type::Tuple(_))
+            | (hir::Any::Relation, hir::Type::Relation(_)) => true,
+            (hir::Any::Kind(kind), hir::Type::Scalar(scalar)) => self
+                .kinds
+                .get(&kind.name)
+                .is_some_and(|(_, members)| members.contains(scalar)),
+            (_, hir::Type::Parameter(p)) => p.any == *any,
+            _ => false,
+        }
+    }
+
     /// The operator named `name`: whether it is built in, and where it is
     /// defined.
     pub(crate) fn operator(&self, name: &str) -> Option<(Kind, Option<Span>)> {
@@ -261,6 +311,7 @@ impl Namespaces {
 /// reporting each one defined more than once in it.
 fn collect_names(prelude: &Prelude, file: &SourceFile, errors: &mut Vec<Diagnostic>) -> Namespaces {
     let mut namespaces = Namespaces {
+        kinds: Namespaces::with_kinds(prelude.kinds()).kinds,
         operators: prelude
             .operators()
             .iter()
@@ -280,7 +331,7 @@ fn collect_names(prelude: &Prelude, file: &SourceFile, errors: &mut Vec<Diagnost
             Item::Variable(decl) => (Kind::Variable, decl.name()),
             // Reported as being outside the prelude, or the prelude's own,
             // already in it.
-            Item::Builtin(_) | Item::BuiltinType(_) => continue,
+            Item::Builtin(_) | Item::BuiltinType(_) | Item::Kind(_) => continue,
         };
         let Some(ident) = name.and_then(|n| n.ident()) else {
             continue;
@@ -4502,5 +4553,50 @@ mod tests {
         // An attribute named as an operator is still an attribute.
         analyze_str("var t := tuple { count: 1 };\nvar c := t.count;\noperator main{} [];")
             .unwrap();
+    }
+
+    #[test]
+    fn a_kind_says_what_its_type_parameters_can_be() {
+        let below = "operator below{r: any relation, of: T per r, limit: T}: relation { v: T } types { T: any ordered } [ return (r where of < limit){of} rename {of as v}; ];\n";
+        let vars = variables(&format!(
+            "{PLOTS}{below}var dry := below{{r: plots, of: of, limit: 1000}};\nvar early := below{{r: plots, of: region, limit: \"N\"}};"
+        ));
+        assert_eq!(
+            text(&vars[1].init),
+            "relation { v: integer } { { v: 220 }, { v: 950 } }"
+        );
+        assert_eq!(
+            text(&vars[2].init),
+            r#"relation { v: text } { { v: "Mendoza" } }"#
+        );
+        // Only types of the kind are arguments.
+        let source = format!(
+            "{below}var x := below{{r: relation {{ {{ a: tuple {{}} }} }}, of: a, limit: tuple {{}}}};{MAIN}"
+        );
+        let mismatched = errors(&source);
+        assert_eq!(mismatched[0].code, Code::TypeMismatch);
+        assert_eq!(
+            mismatched[0].message,
+            "mismatched types: expected a type of kind `ordered`, found `tuple {}`"
+        );
+        // `<` is for a kind that requires it, and the error says which.
+        let source = "operator less{a: T, b: T}: boolean types { T: any type } [ return a < b; ];\noperator main{} [];";
+        let unordered = errors(source);
+        assert_eq!(unordered[0].code, Code::WrongOperandType);
+        assert!(
+            unordered[0].help[0].contains("declare `T` as `any ordered`"),
+            "{unordered:#?}"
+        );
+        // A kind named wrong, or declared in a program.
+        let source = "operator f{a: any ordred} [];\noperator main{} [];";
+        assert_eq!(codes(source), [Code::UnknownType]);
+        assert_eq!(
+            fix(source),
+            "operator f{a: any ordered} [];\noperator main{} [];"
+        );
+        assert_eq!(
+            codes("kind mine { < };\noperator main{} [];"),
+            [Code::BuiltinOutsidePrelude]
+        );
     }
 }
