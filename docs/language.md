@@ -461,6 +461,16 @@ builtin operator debug_value{v: any type};
 
 builtin operator count{r: any relation}: integer;
 
+/* The least value of `of` for a tuple of `r`, by `<`. Of no tuples, there
+   is none, and the program fails (R0010). */
+builtin operator min{r: any relation, of: T per r}: T
+    types { T: any ordered };
+
+/* The greatest value of `of` for a tuple of `r`, by `<`. Of no tuples,
+   there is none, and the program fails (R0010). */
+builtin operator max{r: any relation, of: T per r}: T
+    types { T: any ordered };
+
 /* Whether `of` is true for some tuple of `r`: whether `r where of` has
    one, which its projection on no attributes, `relation { {} }` or
    `relation {}`, says. Of no tuples, it is false. */
@@ -503,6 +513,42 @@ var counted := regions extend { plots := count{r: !!plots} };
 operator main{} [
     call debug_value{v: counted};
 ];
+```
+
+**`min{r: any relation, of: T per r}: T`** and
+**`max{r: any relation, of: T per r}: T`**, for `T` of `any ordered`, are
+the least and the greatest value of `of` for a tuple of `r`, by `<`:
+Tutorial D's `MIN` and `MAX`, and SQL's. `of` can be of any ordered type,
+so text too, by code point. Of no tuples, neither has a value, so either
+is an error, when compiling if the relation is known then, and otherwise
+when the program runs (R0010); SQL's would be `NULL`, which trendy doesn't
+have. A group's image relation has no tuples when nothing matches the
+group, so for each group's, extend only those with tuples, which
+`matching` keeps: below, Hokkaido has no plots.
+
+```trendy
+var plots := relation {
+    { plot: 1, region: "Nyeri", rainfall: 1200 },
+    { plot: 2, region: "Nyeri", rainfall: 950 },
+    { plot: 3, region: "Mendoza", rainfall: 220 },
+}
+key { plot };
+
+var regions := relation { { region: "Nyeri" }, { region: "Mendoza" }, { region: "Hokkaido" } };
+var driest := min{r: plots, of: rainfall};
+var wettest := (regions matching plots) extend { rainfall := max{r: !!plots, of: rainfall} };
+
+operator main{} [
+    call debug_value{v: driest};
+    call debug_value{v: wettest};
+];
+```
+
+```trendy,error
+var plots := relation { plot: integer, rainfall: integer } {};
+var driest := min{r: plots, of: rainfall};
+
+operator main{} [];
 ```
 
 **`some{r: any relation, of: boolean per r}`** and
@@ -2212,6 +2258,8 @@ line after a comment on its own line, such as a file's header, is kept.
 | `SUM (SP, QTY)`, an attribute for each tuple | `of: integer per r`, an expression of each tuple's attributes |
 | `COUNT(*)`, `COUNT (R)`, `len(r)`, `r.count()` | `count{r: r}` |
 | `GROUP BY a` with `COUNT(*)` | `groups extend { n := count{r: !!r} }`, which keeps the empty groups |
+| `MIN(x)`, `MAX (R, X)` | `min{r: r, of: x}`, `max{r: r, of: x}` |
+| `GROUP BY a` with `MAX(x)` | `(groups matching r) extend { m := max{r: !!r, of: x} }`, since an empty group has no max |
 | `bool` | `boolean` |
 | `True`, `TRUE`, `1` for true | `true` |
 | `int`, `long`, `i64` | `integer` |

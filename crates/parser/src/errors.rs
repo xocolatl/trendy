@@ -23,13 +23,13 @@ pub(crate) const KEY_FORM: &str = "a key lists attributes after a relation varia
 pub(crate) const RENAME_FORM: &str =
     "`rename` takes renamings, each `old as new`: `r rename {postal_code as code}`";
 pub(crate) const TUPLE_VALUE_FORM: &str = "a tuple value has the form `tuple { name: value, … }`";
-pub(crate) const BUILTIN_FORM: &str = "built-ins are declared as `builtin type name;`, or `builtin type name: { kind, … };` with the kinds it is of, `builtin operator name{params};` or `builtin operator name{params}: type;`, only in the prelude";
+pub(crate) const BUILTIN_FORM: &str = "built-ins are declared as `builtin type name;`, or `builtin type name: { kind, … };` with the kinds it is of, `builtin operator name{params};`, or `builtin operator name{params}: type;` with a result type, then `types { T: any type }` for type parameters, only in the prelude";
 pub(crate) const KIND_FORM: &str = "a kind is declared as `kind name { requirement, … };`, with what each of its types must have, such as `<`";
 pub(crate) const ASSIGNMENT_FORM: &str = "an assignment statement is `name := value;`, or a shorthand for one: `insert r s;`, `d_insert r s;`, `delete r where p;`, `i_delete r s;` or `update r { a := x } where p;`";
 pub(crate) const ASSIGN_BLOCK_FORM: &str =
     "an `assign` block makes assignments all at once: `assign { x := y; y := x; };`";
 pub(crate) const UPDATE_FORM: &str = "`update` takes attributes the variable has, each `name := value`, then for a relation an optional `where` and condition: `update r { price := price * 2 } where id = 7;`";
-pub(crate) const TYPES_FORM: &str = "an operator's type parameters follow its parameters and result type, each `name: any type`, `any tuple` or `any relation`: `operator pair{a: T, b: T}: relation { v: T } types { T: any type } [ … ];`";
+pub(crate) const TYPES_FORM: &str = "an operator's type parameters follow its parameters and result type, each `name: any type`, `any tuple`, `any relation` or `any` and a kind: `operator pair{a: T, b: T}: relation { v: T } types { T: any type } [ … ];`";
 pub(crate) const VARIABLE_FORM: &str = "a variable declaration has the form `var name: type := value;`, where either the type or the value may be left out";
 
 /// Words other languages use to start a definition or declaration, which

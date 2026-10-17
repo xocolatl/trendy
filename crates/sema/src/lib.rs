@@ -121,11 +121,6 @@ pub(crate) fn check(
 }
 
 impl Checked {
-    /// The signatures of the file's operators, after the prelude's.
-    pub(crate) fn signatures(&self) -> impl Iterator<Item = &operators::Signature> {
-        self.operators.iter()
-    }
-
     /// The HIR operators, `prelude`'s as it has them, then the file's, with
     /// their bodies, and the variables, of a file without errors.
     pub(crate) fn finish(mut self, prelude: &Prelude) -> (Vec<hir::Operator>, Vec<hir::Variable>) {
@@ -1448,6 +1443,38 @@ mod tests {
             prelude.operators()[0].params,
             hir::Builtin::DebugValue.params()
         );
+    }
+
+    #[test]
+    fn the_prelude_declares_built_ins_as_the_compiler_implements_them() {
+        let wrong = |from: &str, to: &str| {
+            assert!(trendy_prelude::SOURCE.contains(from), "{from}");
+            let source = trendy_prelude::SOURCE.replacen(from, to, 1);
+            let errors = Prelude::load(&parse(&source)).unwrap_err();
+            assert_eq!(errors.len(), 1, "{errors:#?}");
+            assert_eq!(errors[0].code, Code::Internal);
+            let span = errors[0].primary.span;
+            (
+                errors[0].message.clone(),
+                source[span.start..span.end].to_string(),
+            )
+        };
+        // A type parameter of another kind.
+        let (message, at) = wrong(
+            "max{r: any relation, of: T per r}: T\n    types { T: any ordered }",
+            "max{r: any relation, of: T per r}: T\n    types { T: any type }",
+        );
+        assert_eq!(
+            message,
+            "`max` is declared with parameters that differ from its implementation's, `{of: T per r, r: any relation} types { T: any ordered }`"
+        );
+        assert_eq!(at, "types { T: any type }");
+        // A parameter that isn't `per`.
+        let (_, at) = wrong(
+            "min{r: any relation, of: T per r}: T",
+            "min{r: any relation, of: T}: T",
+        );
+        assert_eq!(at, "{r: any relation, of: T}");
     }
 
     #[test]
@@ -4598,5 +4625,55 @@ mod tests {
             codes("kind mine { < };\noperator main{} [];"),
             [Code::BuiltinOutsidePrelude]
         );
+    }
+
+    #[test]
+    fn min_and_max_are_by_the_order_of_any_ordered_type() {
+        let vars = variables(&format!(
+            "{PLOTS}var driest := min{{r: plots, of: of}};\nvar last := max{{r: plots, of: region}};\nvar wettest := max{{r: plots, of: of * -1}};"
+        ));
+        assert_eq!(vars[1].init, hir::Value::Integer(220));
+        assert_eq!(vars[2].init, hir::Value::Text("Nyeri".to_string()));
+        assert_eq!(vars[3].init, hir::Value::Integer(-220));
+        // Of no tuples, neither has a value: an error when compiling, if the
+        // relation is known then.
+        let source = format!("{PLOTS}var none := max{{r: plots where false, of: of}};{MAIN}");
+        let empty = errors(&source);
+        assert_eq!(empty[0].code, Code::NoMinOrMax);
+        assert_eq!(
+            empty[0].message,
+            "the relation has no tuples, so it has no max"
+        );
+        assert!(
+            empty[0].notes.iter().all(|n| !n.contains("computing")),
+            "{empty:#?}"
+        );
+        // For each tuple at hand, as of a group's image relation.
+        let source = format!(
+            "{PLOTS}var regions := relation {{ {{ region: \"Nyeri\" }}, {{ region: \"Puno\" }} }};\nvar lows := regions extend {{ low := min{{r: !!plots, of: of}} }};{MAIN}"
+        );
+        let empty = errors(&source);
+        assert_eq!(empty[0].code, Code::NoMinOrMax);
+        assert!(empty[0].notes[1].contains("\"Puno\""), "{empty:#?}");
+        // Only for types with an order, which a generic operator's type
+        // parameter is told how to have.
+        assert_eq!(
+            codes(&format!(
+                "{PLOTS}var t := max{{r: plots, of: tuple {{}}}};{MAIN}"
+            )),
+            [Code::TypeMismatch]
+        );
+        let source = "operator top{r: any relation, of: T per r}: T types { T: any type } [ return max{r: r, of: of}; ];\noperator main{} [];";
+        let unordered = errors(source);
+        assert_eq!(unordered[0].code, Code::TypeMismatch);
+        assert_eq!(
+            unordered[0].help,
+            ["declare `T` as `any ordered`, whose types all declare it"]
+        );
+        let source = "operator top{r: any relation, of: T per r}: T types { T: any ordered } [ return max{r: r, of: of}; ];\n";
+        let vars = variables(&format!(
+            "{PLOTS}{source}var top := top{{r: plots, of: plot}};"
+        ));
+        assert_eq!(vars[1].init, hir::Value::Integer(3));
     }
 }

@@ -5,7 +5,8 @@
    program runs elsewhere. A parameter's type can be `any type`, and type
    parameters, declared with `types`, say that several types are one: each
    call gives them its arguments' types. A `per` parameter's argument is
-   evaluated for each tuple of a relation. main prints each result. */
+   evaluated for each tuple of a relation, as the prelude's `min` and
+   `max` take `of`. main prints each result. */
 var vat := 16;
 var dishes := relation {
     { dish: "jollof rice", country: "Ghana", price: 1200 },
@@ -71,6 +72,14 @@ operator below{r: any relation, of: T per r, limit: T}: relation { v: T }
     return (r where of < limit){of} rename {of as v};
 ];
 
+/* The least and the greatest value of `of`, of any ordered type, from the
+   prelude's `min` and `max`, which fail for a relation with no tuples. */
+operator range{r: any relation, of: T per r}: tuple { low: T, high: T }
+    types { T: any ordered }
+[
+    return tuple { low: min{r: r, of: of}, high: max{r: r, of: of} };
+];
+
 var special := "ramen";
 var previous := "none";
 
@@ -115,4 +124,6 @@ operator main{} [
     /* The prelude's `some` and `every`, written in trendy. */
     call show{label: "some under 1000", value: some{r: dishes, of: taxed{price: price} < 1000}};
     call show{label: "every under 1000", value: every{r: dishes, of: taxed{price: price} < 1000}};
+    call show{label: "prices with VAT", value: range{r: dishes, of: taxed{price: price}}};
+    call show{label: "names", value: range{r: dishes, of: dish}};
 ];

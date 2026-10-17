@@ -5,13 +5,13 @@
 use trendy_hir as hir;
 use trendy_syntax::ast::{BuiltinOperator, BuiltinType, Item, KindDecl, SourceFile};
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use trendy_diag::{Code, Diagnostic, Span};
 use trendy_syntax::SyntaxToken;
 use trendy_syntax::ast::AstNode;
 
-use crate::operators::{self, Param, Signature};
+use crate::operators::{self, Signature};
 use crate::types::{self, TypeParameters};
 use crate::{Namespaces, Source};
 
@@ -29,12 +29,19 @@ fn ident_span(ident: &SyntaxToken) -> Span {
     trendy_syntax::span(ident.text_range())
 }
 
-/// `params`, as calls give arguments for parameters of those types.
-fn value_params(params: &BTreeMap<String, hir::Type>) -> BTreeMap<String, Param> {
-    params
+/// The type parameters `types` that have names, as `types { … }` declares
+/// them after the parameters, with a space before it, or nothing if none
+/// has one.
+fn declared_text(types: &[hir::TypeParameter]) -> String {
+    let declared: Vec<String> = types
         .iter()
-        .map(|(name, ty)| (name.clone(), Param::Value(ty.clone())))
-        .collect()
+        .filter_map(|t| Some(format!("{}: {}", t.name.as_ref()?, t.any)))
+        .collect();
+    if declared.is_empty() {
+        String::new()
+    } else {
+        format!(" types {{ {} }}", declared.join(", "))
+    }
 }
 
 /// The built-in operator `decl` declares, with the parameters the
@@ -64,9 +71,15 @@ fn builtin_operator(
         return None;
     }
     declared.push(name.to_string());
+    let (mut types, declared_valid) = decl.type_parameters().map_or_else(
+        || (Vec::new(), true),
+        |d| operators::declared_types(&d, namespaces, errors),
+    );
     let heading = decl.params()?;
-    let mut types = Vec::new();
-    let params = operators::params(&heading, &mut types, namespaces, errors)?.seen;
+    let params = operators::params(&heading, &mut types, namespaces, errors)?;
+    if !declared_valid {
+        return None;
+    }
     let written = decl.result();
     let result = match &written {
         Some(written) => {
@@ -80,6 +93,29 @@ fn builtin_operator(
         }
         None => None,
     };
+    // The type parameters first, which the result type can name.
+    let implemented = builtin.types();
+    if types != implemented || params != builtin.params() {
+        // At `types { … }`, if those it declares are what differ.
+        let named = |list: &[hir::TypeParameter]| -> Vec<hir::TypeParameter> {
+            list.iter().filter(|t| t.name.is_some()).cloned().collect()
+        };
+        let span = match decl.type_parameters() {
+            Some(declared) if named(&types) != named(&implemented) => declared.span(),
+            _ => heading.span(),
+        };
+        errors.push(Diagnostic::error(
+            Code::Internal,
+            format!(
+                "`{name}` is declared with parameters that differ from its implementation's, `{}{}`",
+                operators::params_text(&operators::written(&builtin.params())),
+                declared_text(&implemented)
+            ),
+            span,
+            "not the parameters the compiler implements",
+        ));
+        return None;
+    }
     if result != builtin.result() {
         let span = written.map_or_else(|| ident_span(&ident), |w| w.span());
         let expected = builtin
@@ -90,18 +126,6 @@ fn builtin_operator(
             format!("`{name}` is declared with a result type that differs from its implementation's, {expected}"),
             span,
             "not the result type the compiler implements",
-        ));
-        return None;
-    }
-    if types != builtin.types() || params != builtin.params() {
-        errors.push(Diagnostic::error(
-            Code::Internal,
-            format!(
-                "`{name}` is declared with parameters that differ from its implementation's, `{}`",
-                operators::params_text(&value_params(&builtin.params()))
-            ),
-            heading.span(),
-            "not the parameters the compiler implements",
         ));
         return None;
     }
@@ -237,9 +261,6 @@ fn builtin_types() -> impl Iterator<Item = &'static str> {
 #[derive(Debug, Clone)]
 pub struct Prelude {
     operators: Vec<hir::Operator>,
-    /// Each one's parameters, as calls give their arguments, which HIR's
-    /// lack for `per` parameters.
-    written: Vec<BTreeMap<String, Param>>,
     /// The kinds, each with the built-in types that declare it.
     kinds: Vec<(hir::Kind, BTreeSet<hir::Scalar>)>,
 }
@@ -307,26 +328,16 @@ impl Prelude {
         for message in missing_operators.chain(missing_types) {
             errors.push(Diagnostic::error(Code::Internal, message, end, "missing"));
         }
-        let written = operators
-            .iter()
-            .map(|op| value_params(&op.params))
-            .collect();
-        let builtins = Prelude {
-            operators,
-            written,
-            kinds,
-        };
+        let builtins = Prelude { operators, kinds };
 
         let checked = crate::check(&builtins, file, Source::Prelude, &mut errors);
         if !errors.is_empty() {
             errors.sort_by_key(|d| d.span().start);
             return Err(errors);
         }
-        let written = checked.signatures().map(|s| s.written.clone()).collect();
         let (operators, _) = checked.finish(&builtins);
         Ok(Prelude {
             operators,
-            written,
             kinds: builtins.kinds,
         })
     }
@@ -346,10 +357,7 @@ impl Prelude {
     pub(crate) fn signatures(&self) -> impl Iterator<Item = Signature> {
         self.operators
             .iter()
-            .zip(&self.written)
             .enumerate()
-            .map(|(i, (op, written))| {
-                Signature::of_prelude(hir::OperatorId(i), op, written.clone())
-            })
+            .map(|(i, op)| Signature::of_prelude(hir::OperatorId(i), op))
     }
 }

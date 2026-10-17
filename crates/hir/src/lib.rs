@@ -224,16 +224,28 @@ pub enum Builtin {
     DebugValue,
     /// The number of tuples of a relation.
     Count,
+    /// The least of a value computed for each tuple of a relation, by `<`.
+    Min,
+    /// The greatest of a value computed for each tuple of a relation, by
+    /// `<`.
+    Max,
 }
 
 impl Builtin {
-    pub const ALL: [Builtin; 2] = [Builtin::DebugValue, Builtin::Count];
+    pub const ALL: [Builtin; 4] = [
+        Builtin::DebugValue,
+        Builtin::Count,
+        Builtin::Min,
+        Builtin::Max,
+    ];
 
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
             Builtin::DebugValue => "debug_value",
             Builtin::Count => "count",
+            Builtin::Min => "min",
+            Builtin::Max => "max",
         }
     }
 
@@ -242,27 +254,52 @@ impl Builtin {
         Builtin::ALL.into_iter().find(|b| b.name() == name)
     }
 
-    /// The type parameters the compiler's implementation takes.
+    /// The type parameters the compiler's implementation takes: for `min`
+    /// and `max`, `T`, of the kind `ordered`, and the tuples of `r`, whose
+    /// `per` parameter `of` is.
     #[must_use]
     pub fn types(self) -> Vec<TypeParameter> {
-        let any = match self {
-            Builtin::DebugValue => Any::Type,
-            Builtin::Count => Any::Relation,
-        };
-        vec![TypeParameter {
-            index: 0,
+        let unnamed = |index, any| TypeParameter {
+            index,
             name: None,
             any,
-        }]
+        };
+        match self {
+            Builtin::DebugValue => vec![unnamed(0, Any::Type)],
+            Builtin::Count => vec![unnamed(0, Any::Relation)],
+            Builtin::Min | Builtin::Max => vec![
+                TypeParameter {
+                    index: 0,
+                    name: Some("T".to_string()),
+                    any: Any::Kind(Kind {
+                        name: "ordered".to_string(),
+                        requires: [Requirement::Order].into(),
+                    }),
+                },
+                unnamed(1, Any::Tuple),
+            ],
+        }
     }
 
-    /// The parameters the compiler's implementation takes.
+    /// The parameters the compiler's implementation takes, as it sees them:
+    /// a `per` parameter is an attribute of its relation's tuples.
     #[must_use]
     pub fn params(self) -> BTreeMap<String, Type> {
-        let parameter = || Type::Parameter(self.types()[0].clone());
+        let types = self.types();
+        let parameter = |index: usize| Type::Parameter(types[index].clone());
         match self {
-            Builtin::DebugValue => [("v".to_string(), parameter())].into(),
-            Builtin::Count => [("r".to_string(), parameter())].into(),
+            Builtin::DebugValue => [("v".to_string(), parameter(0))].into(),
+            Builtin::Count => [("r".to_string(), parameter(0))].into(),
+            Builtin::Min | Builtin::Max => {
+                let tuples = Heading::new(
+                    [
+                        ("of".to_string(), parameter(0)),
+                        (wrapped("r"), parameter(1)),
+                    ]
+                    .into(),
+                );
+                [("r".to_string(), Type::Relation(tuples))].into()
+            }
         }
     }
 
@@ -273,31 +310,53 @@ impl Builtin {
         match self {
             Builtin::DebugValue => None,
             Builtin::Count => Some(Type::Scalar(Scalar::Integer)),
+            Builtin::Min | Builtin::Max => Some(Type::Parameter(self.types()[0].clone())),
         }
     }
 
     /// The value of a call of the read-only built-in with the arguments
-    /// `args`, known when compiling, by parameter name, or `None` for an
-    /// update one.
+    /// `args`, known when compiling, by parameter name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NoTuples`] for `min` or `max` of a relation without
+    /// tuples, which has neither.
     ///
     /// # Panics
     ///
-    /// If the arguments aren't those of [`Builtin::params`], which sema
-    /// rules out.
-    #[must_use]
-    pub fn evaluate(self, args: &BTreeMap<String, Value>) -> Option<Value> {
+    /// If the built-in is an update operator, which has no value, or the
+    /// arguments aren't those of [`Builtin::params`], which sema rules out.
+    pub fn evaluate(self, args: &BTreeMap<String, Value>) -> Result<Value, NoTuples> {
+        let tuples = || match &args["r"] {
+            Value::Relation(r) => &r.tuples,
+            other => panic!("{} of {other:?}", self.name()),
+        };
+        let values = || {
+            tuples()
+                .iter()
+                .map(|t| t.get("of").expect("`of` is an attribute"))
+        };
         match self {
-            Builtin::DebugValue => None,
+            Builtin::DebugValue => panic!("`debug_value` is an update operator"),
             Builtin::Count => {
-                let Value::Relation(r) = &args["r"] else {
-                    panic!("counting the tuples of {:?}", args["r"]);
-                };
-                let count = i64::try_from(r.tuples.len()).expect("a relation's tuples fit");
-                Some(Value::Integer(count))
+                let count = i64::try_from(tuples().len()).expect("a relation's tuples fit");
+                Ok(Value::Integer(count))
             }
+            Builtin::Min => values()
+                .min_by(|a, b| compare(a, b))
+                .cloned()
+                .ok_or(NoTuples),
+            Builtin::Max => values()
+                .max_by(|a, b| compare(a, b))
+                .cloned()
+                .ok_or(NoTuples),
         }
     }
 }
+
+/// Why `min` or `max` of a relation has no value: it has no tuples.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NoTuples;
 
 /// A call of an operator: of an update operator, as a statement, or of a
 /// read-only one, as an expression.

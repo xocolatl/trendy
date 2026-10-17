@@ -462,7 +462,9 @@ impl<'a> FunctionBuilder<'a> {
                 });
             }
             hir::OperatorKind::ReadOnly { .. }
-            | hir::OperatorKind::Builtin(hir::Builtin::Count) => {
+            | hir::OperatorKind::Builtin(
+                hir::Builtin::Count | hir::Builtin::Min | hir::Builtin::Max,
+            ) => {
                 unreachable!("`call` invokes only update operators")
             }
         }
@@ -537,8 +539,90 @@ impl<'a> FunctionBuilder<'a> {
                 });
                 dst
             }
+            hir::Builtin::Min => {
+                let r = &call.args["r"];
+                self.extreme(r, hir::Comparison::Less, lir::Failure::NoMin, cx)
+            }
+            hir::Builtin::Max => {
+                let r = &call.args["r"];
+                self.extreme(r, hir::Comparison::Greater, lir::Failure::NoMax, cx)
+            }
             hir::Builtin::DebugValue => unreachable!("`debug_value` is an update operator"),
         }
+    }
+
+    /// The value of the attribute `of` of the relation `r`'s tuples that
+    /// is `comparison` (`<` for the least, `>` for the greatest) every
+    /// other, computed into a new stack slot: the first tuple's, replaced
+    /// by each tuple's that is `comparison` it. The program stops with
+    /// `failure` if the relation has no tuples.
+    fn extreme(
+        &mut self,
+        r: &hir::Expr,
+        comparison: hir::Comparison,
+        failure: lir::Failure,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let ty = self.program.type_of(r, &self.params);
+        let hir::Type::Relation(heading) = &ty else {
+            unreachable!("`min` and `max` take relations");
+        };
+        let of_ty = heading.get("of").expect("`of` is an attribute").clone();
+        let of = attribute_names(&ty)
+            .position(|a| a == "of")
+            .expect("`of` is an attribute");
+        let tuple = layout(&hir::Type::Tuple(heading.clone()));
+        let value = layout(&of_ty);
+        let src = self.place(r, cx);
+        let mut count = src.clone();
+        count.path.push(1);
+        let zero = usize_constant(0, cx);
+        let empty = self.slot(lir::Layout::U8);
+        self.insts.push(lir::Inst::Binary {
+            dst: empty.clone(),
+            op: lir::BinaryOp::Compare(lir::Comparison::Equal, lir::Operand::Usize),
+            lhs: count,
+            rhs: zero.clone(),
+        });
+        let (none, some) = (self.new_block(), self.new_block());
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: empty,
+                then: none,
+                otherwise: some,
+            },
+            none,
+        );
+        self.end_block(lir::Terminator::Fail(failure), some);
+        let mut first = self.element(&src, &zero, tuple.clone());
+        first.path.push(of);
+        let best = self.slot(value.clone());
+        self.insts.push(lir::Inst::Copy {
+            dst: best.clone(),
+            src: first,
+            layout: value.clone(),
+        });
+        let compare = hir::BinaryOp::Compare(comparison, hir::Compared::of(&of_ty));
+        self.each_tuple(&src, tuple, cx, |this, mut at_hand, _, cx| {
+            at_hand.path.push(of);
+            let better = this.binary(compare, &of_ty, at_hand.clone(), best.clone(), cx);
+            let (replace, next) = (this.new_block(), this.new_block());
+            this.end_block(
+                lir::Terminator::Branch {
+                    condition: better,
+                    then: replace,
+                    otherwise: next,
+                },
+                replace,
+            );
+            this.insts.push(lir::Inst::Copy {
+                dst: best.clone(),
+                src: at_hand,
+                layout: value,
+            });
+            this.end_block(lir::Terminator::Jump(next), next);
+        });
+        best
     }
 
     /// Assignments made at once, each to a different variable. Each value
@@ -2455,6 +2539,76 @@ mod tests {
                     path: vec![0, 1],
                 },
             }
+        );
+    }
+
+    #[test]
+    fn max_keeps_the_greatest_and_fails_without_tuples() {
+        // `debug_value{v: max{r: r, of: of}}`, of a relation variable whose
+        // tuples have `of` beside their own attributes, as sema makes it.
+        let max = hir::Operator {
+            name: "max".to_string(),
+            types: hir::Builtin::Max.types(),
+            params: hir::Builtin::Max.params(),
+            kind: hir::OperatorKind::Builtin(hir::Builtin::Max),
+        };
+        let own = hir::Heading::new(BTreeMap::new());
+        let tuple = |n| {
+            hir::TupleValue::new(
+                [
+                    ("of".to_string(), hir::Value::Integer(n)),
+                    (
+                        hir::wrapped("r"),
+                        hir::Value::Tuple(hir::TupleValue::new(BTreeMap::new())),
+                    ),
+                ]
+                .into(),
+            )
+        };
+        let r = hir::Value::Relation(hir::RelationValue {
+            heading: hir::Heading::new(
+                [
+                    ("of".to_string(), integer()),
+                    (hir::wrapped("r"), hir::Type::Tuple(own.clone())),
+                ]
+                .into(),
+            ),
+            tuples: [tuple(1), tuple(2)].into(),
+        });
+        let greatest = hir::Expr::Call(hir::Call {
+            operator: hir::OperatorId(1),
+            types: vec![integer(), hir::Type::Tuple(own)],
+            args: [("r".to_string(), hir::Expr::Variable(hir::VariableId(0)))].into(),
+        });
+        let lowered = lower(&program(
+            vec![
+                debug_value(),
+                max,
+                user("main", &[], vec![call(0, vec![("v", greatest)])]),
+            ],
+            vec![variable("r", r)],
+        ));
+        assert_eq!(lowered.functions.len(), 1, "a built-in has no function");
+        let blocks = &lowered.functions[0].blocks;
+        assert!(
+            blocks
+                .iter()
+                .any(|b| b.terminator == lir::Terminator::Fail(lir::Failure::NoMax)),
+            "{blocks:#?}"
+        );
+        // Each tuple's `of` is compared with the greatest so far.
+        assert!(
+            blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(
+                i,
+                lir::Inst::Binary {
+                    op: lir::BinaryOp::Compare(
+                        lir::Comparison::Greater,
+                        lir::Operand::Numeric(lir::Numeric::Integer)
+                    ),
+                    ..
+                }
+            )),
+            "{blocks:#?}"
         );
     }
 

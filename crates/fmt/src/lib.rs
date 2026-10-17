@@ -886,6 +886,13 @@ mod tests {
             fmt("operator show{t:any tuple}types{}[];"),
             "operator show{t: any tuple}\n    types {}\n[];\n"
         );
+        // A built-in's, before its `;`.
+        assert_eq!(
+            fmt(
+                "builtin operator max{r:any relation,of:T per r}:T types{T:any ordered};builtin operator count{r: any relation}: integer;"
+            ),
+            "builtin operator max{r: any relation, of: T per r}: T\n    types { T: any ordered };\n\nbuiltin operator count{r: any relation}: integer;\n"
+        );
         // `per`, between spaces.
         assert_eq!(
             fmt("operator f{r:any relation,of:tuple{a:T}per  r}types{T:any type}[];"),

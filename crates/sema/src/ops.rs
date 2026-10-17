@@ -1004,6 +1004,8 @@ pub(crate) enum Failed {
     NotOne(usize),
     /// A tuple breaks a disjoint union's or an included minus's condition.
     Broken(Box<hir::Broken>),
+    /// This built-in, `min` or `max`, is of a relation without tuples.
+    NoTuples(hir::Builtin),
 }
 
 /// The tuples of `operand` for which `condition`, computed from the tuple at
@@ -1586,7 +1588,7 @@ pub(crate) fn call(call: hir::Call, bindings: Bindings) -> Result<hir::Expr, Fai
     if let Some(builtin) = bindings.operators.get(call.operator).builtin {
         let value = builtin
             .evaluate(&known)
-            .expect("only read-only operators are called in expressions");
+            .map_err(|hir::NoTuples| Failed::NoTuples(builtin))?;
         return Ok(hir::Expr::Constant(value));
     }
     // The callee's value for the types its type parameters are given.

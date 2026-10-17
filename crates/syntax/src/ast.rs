@@ -199,6 +199,12 @@ impl BuiltinOperator {
             .find_map(TypeExpr::cast)
     }
 
+    /// The type parameters, `types { T: any ordered }`.
+    #[must_use]
+    pub fn type_parameters(&self) -> Option<TypeParameters> {
+        self.0.children().find_map(TypeParameters::cast)
+    }
+
     /// The `builtin` keyword.
     #[must_use]
     pub fn keyword(&self) -> Option<SyntaxToken> {

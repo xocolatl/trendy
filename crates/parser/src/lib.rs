@@ -245,8 +245,9 @@ impl<'a> Parser<'a> {
     }
 
     /// `builtin type name;` or `builtin operator name{params};`, with a
-    /// result type for a read-only one: a declaration of something the
-    /// compiler implements. Only the prelude has these.
+    /// result type for a read-only one and type parameters for a generic
+    /// one: a declaration of something the compiler implements. Only the
+    /// prelude has these.
     fn builtin(&mut self) {
         self.form = errors::BUILTIN_FORM;
         let is_type = self
@@ -278,6 +279,7 @@ impl<'a> Parser<'a> {
         );
         self.params();
         self.result_type();
+        self.type_parameters();
         self.expect(SyntaxKind::Semicolon);
         self.builder.finish_node();
     }
@@ -3284,6 +3286,21 @@ SourceFile
             parse.tree.items().next(),
             Some(trendy_syntax::ast::Item::Builtin(_))
         ));
+        // With type parameters, after the result type.
+        let parse = parse_str(
+            "builtin operator max{r: any relation, of: T per r}: T types { T: any ordered };",
+        );
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let Some(trendy_syntax::ast::Item::Builtin(max)) = parse.tree.items().next() else {
+            panic!("a built-in");
+        };
+        assert!(max.result().is_some());
+        assert_eq!(
+            max.type_parameters()
+                .and_then(|t| t.heading())
+                .map(|h| h.attributes().count()),
+            Some(1)
+        );
     }
 
     #[test]

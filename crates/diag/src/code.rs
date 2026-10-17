@@ -92,6 +92,7 @@ pub enum Code {
     MissingTuple,
     KeyViolated,
     ConflictingChanges,
+    NoMinOrMax,
     Internal,
 }
 
@@ -109,7 +110,7 @@ pub enum CodeKind {
 }
 
 impl Code {
-    pub const ALL: [Code; 80] = [
+    pub const ALL: [Code; 81] = [
         Code::UnexpectedCharacter,
         Code::MissingToken,
         Code::WrongDelimiter,
@@ -189,6 +190,7 @@ impl Code {
         Code::MissingTuple,
         Code::KeyViolated,
         Code::ConflictingChanges,
+        Code::NoMinOrMax,
         Code::Internal,
     ];
 
@@ -274,6 +276,7 @@ impl Code {
             Code::MissingTuple => "R0007",
             Code::KeyViolated => "R0008",
             Code::ConflictingChanges => "R0009",
+            Code::NoMinOrMax => "R0010",
             Code::Internal => "X0000",
         }
     }
@@ -388,6 +391,7 @@ impl Code {
             Code::MissingTuple => include_str!("../errors/R0007.md"),
             Code::KeyViolated => include_str!("../errors/R0008.md"),
             Code::ConflictingChanges => include_str!("../errors/R0009.md"),
+            Code::NoMinOrMax => include_str!("../errors/R0010.md"),
             Code::Internal => include_str!("../errors/X0000.md"),
         }
     }

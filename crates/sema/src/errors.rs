@@ -335,7 +335,7 @@ pub(crate) fn not_of_kind(
             (
                 format!("a type of kind `{}`", kind.name),
                 format!(
-                    "a parameter of type `{parameter}` takes a value of a type that declares `{}`: {}",
+                    "the types of kind `{}` are those that declare it: {}",
                     kind.name,
                     trendy_diag::conjoin(&members)
                 ),
@@ -352,6 +352,21 @@ pub(crate) fn not_of_kind(
     .with_note(note);
     if let Some(span) = origin.span() {
         d = d.with_secondary(span, origin.label());
+    }
+    // A type parameter of the operator the call is in, which can be types
+    // that aren't of the kind: it can be declared as the kind instead.
+    if let (hir::Type::Parameter(p), hir::Any::Kind(kind)) = (actual, &parameter.any) {
+        let wanted = format!("any {}", kind.name);
+        d = d.with_note(format!(
+            "`{actual}` is `{}`, which can be a type that doesn't declare `{}`",
+            p.any, kind.name
+        ));
+        d = d.with_help(match &p.name {
+            Some(name) => format!("declare `{name}` as `{wanted}`, whose types all declare it"),
+            None => {
+                format!("write `{wanted}` for the parameter's type, whose types all declare it")
+            }
+        });
     }
     d
 }
@@ -2540,7 +2555,26 @@ pub(crate) fn failed(failed: &crate::ops::Failed, expr: &Expr) -> Diagnostic {
         crate::ops::Failed::Mismatch(mismatch) => tuple_mismatch(mismatch, expr),
         crate::ops::Failed::NotOne(count) => not_one_tuple(*count, expr),
         crate::ops::Failed::Broken(broken) => broken_combination(broken, expr),
+        crate::ops::Failed::NoTuples(builtin) => no_tuples(*builtin, expr),
     }
+}
+
+/// `expr`, which takes `builtin`, `min` or `max`, of a relation without
+/// tuples.
+fn no_tuples(builtin: hir::Builtin, expr: &Expr) -> Diagnostic {
+    let name = builtin.name();
+    let extreme = match builtin {
+        hir::Builtin::Min => "least",
+        _ => "greatest",
+    };
+    Diagnostic::error(
+        Code::NoMinOrMax,
+        format!("the relation has no tuples, so it has no {name}"),
+        expr.span(),
+        format!("`{name}` of a relation with no tuples"),
+    )
+    .with_note(format!("`{name}{{r: r, of: x}}` is the {extreme} value of `x` for a tuple of `r`, so `r` must have one; unlike `count`, which is 0, it has no value for no tuples"))
+    .with_help(format!("take the {name} only of a relation with tuples; for each group's, as in `r extend {{ m := {name}{{r: !!s, of: x}} }}`, extend `r matching s` instead, which keeps the groups with tuples in `s`"))
 }
 
 /// `expr`, a disjoint union or an included minus of constants, which a
@@ -2912,6 +2946,10 @@ pub(crate) fn call_failure(
     expr: &Expr,
     signature: &Signature,
 ) -> Diagnostic {
+    // A built-in's value is the compiler's, with nothing to point at.
+    if signature.builtin.is_some() {
+        return self::failed(failed, expr);
+    }
     let d = self::failed(failed, expr).with_note(format!(
         "computing `{}`'s value for these arguments",
         signature.name

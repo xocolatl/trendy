@@ -441,6 +441,12 @@ pub enum Failure {
     /// Two tuples of a relation assigned to a variable have the same
     /// values for one of its keys.
     KeyViolated,
+    /// A relation has no tuples, where the least value of an attribute is
+    /// taken.
+    NoMin,
+    /// A relation has no tuples, where the greatest value of an attribute
+    /// is taken.
+    NoMax,
 }
 
 impl Failure {
@@ -455,6 +461,8 @@ impl Failure {
             Failure::NoTuple => 5,
             Failure::SeveralTuples => 6,
             Failure::KeyViolated => 9,
+            Failure::NoMin => 11,
+            Failure::NoMax => 12,
         }
     }
 }

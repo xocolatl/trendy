@@ -21,7 +21,11 @@ gives every program them as checked HIR. A built-in with a result type is
 read-only, and its call is a value, which sema evaluates when compiling
 where its arguments are known (`hir::Builtin::evaluate`), and lowering
 computes inline otherwise: `count` is the count every relation keeps
-after its tuples. A wrong prelude is an internal
+after its tuples, and `min` and `max` a loop over them (`extreme`), which
+ends the block with `Terminator::Fail` for none (R0010). A built-in can
+have type parameters, of a kind too, and `per` parameters, declared as an
+operator's are, and checked against the compiler's, written as the
+operator sees them. A wrong prelude is an internal
 compiler error, and the tests keep it valid: a declaration that doesn't
 match the compiler is reported at it (X0000), and an error in an operator
 the prelude defines as it would be in a program. The language server
@@ -478,7 +482,9 @@ only an operator's parameters have one. The operator sees that relation
 (`Param::Relation`) as a relation of the `per` parameters, as attributes,
 and its tuples' own attributes, wrapped as `any tuple`, which the
 `any relation` becomes (`Signature::params`, while `Signature::written`
-keeps the parameters as calls give them). So in its body a `per`
+keeps the parameters as calls give them, which `operators::written`
+recovers from them, since only these relations have a wrapped
+attribute). So in its body a `per`
 parameter is an attribute, in scope where the relation's tuples are, and
 a value nowhere (A0043). A call checks a `per` argument once its
 relation's argument is checked, against its parameter's type as for any

@@ -11,6 +11,16 @@ builtin operator debug_value{v: any type};
 
 builtin operator count{r: any relation}: integer;
 
+/* The least value of `of` for a tuple of `r`, by `<`. Of no tuples, there
+   is none, and the program fails (R0010). */
+builtin operator min{r: any relation, of: T per r}: T
+    types { T: any ordered };
+
+/* The greatest value of `of` for a tuple of `r`, by `<`. Of no tuples,
+   there is none, and the program fails (R0010). */
+builtin operator max{r: any relation, of: T per r}: T
+    types { T: any ordered };
+
 /* Whether `of` is true for some tuple of `r`: whether `r where of` has
    one, which its projection on no attributes, `relation { {} }` or
    `relation {}`, says. Of no tuples, it is false. */

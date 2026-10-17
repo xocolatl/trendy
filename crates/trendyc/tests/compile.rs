@@ -129,6 +129,11 @@ fn operators() {
             "true",
             r#""every under 1000""#,
             "false",
+            // `min` and `max`, of integers and of texts.
+            r#""prices with VAT""#,
+            "tuple { high: 1500, low: 937 }",
+            r#""names""#,
+            r#"tuple { high: "ramen", low: "jollof rice" }"#,
         ]
     );
 }
@@ -389,14 +394,17 @@ fn run_source(name: &str, source: &str) -> (i32, String) {
     )
 }
 
+/// A program that writes 1, then `call`, computed from `a`, the largest
+/// integer, and `b`, 0, when it runs, then 2.
+fn program(call: &str) -> String {
+    format!(
+        "operator f{{a: integer, b: integer}} [\n    call debug_value{{v: 1}};\n    call debug_value{{v: {call}}};\n    call debug_value{{v: 2}};\n];\n\noperator main{{}} [\n    call f{{a: 9223372036854775807, b: 0}};\n];\n"
+    )
+}
+
 #[test]
 fn run_time_failures_stop_the_program() {
     use trendy_diag::Code;
-    let program = |call: &str| {
-        format!(
-            "operator f{{a: integer, b: integer}} [\n    call debug_value{{v: 1}};\n    call debug_value{{v: {call}}};\n    call debug_value{{v: 2}};\n];\n\noperator main{{}} [\n    call f{{a: 9223372036854775807, b: 0}};\n];\n"
-        )
-    };
     let overflow = format!("1\nerror[{}]: integer overflow\n", Code::Overflow.id());
     let division = format!(
         "1\nerror[{}]: division by zero\n",
@@ -484,6 +492,36 @@ fn run_time_failures_stop_the_program() {
             )
         )
     );
+}
+
+#[test]
+fn min_and_max_of_no_tuples_stop_the_program() {
+    use trendy_diag::Code;
+    for (name, expr, which) in [
+        (
+            "fail_no_min",
+            "min{r: relation { { n: a } } where n = b, of: n}",
+            "min",
+        ),
+        (
+            "fail_no_max",
+            "max{r: relation { { n: a } } where n = b, of: n}",
+            "max",
+        ),
+    ] {
+        let (code, stderr) = run_source(name, &program(expr));
+        assert_eq!(
+            (code, stderr),
+            (
+                1,
+                format!(
+                    "1\nerror[{}]: the relation has no tuples, so it has no {which}\n",
+                    Code::NoMinOrMax.id()
+                )
+            ),
+            "{expr}"
+        );
+    }
 }
 
 /// Operators and variables have separate namespaces, so one name can be

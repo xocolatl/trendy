@@ -47,6 +47,12 @@ pub const FAIL_SEVERAL_TUPLES: u32 = 6;
 pub const FAIL_KEY_VIOLATED: u32 = 9;
 /// Two changes to a variable in an `assign` block remove the same tuple.
 pub const FAIL_CONFLICT: u32 = 10;
+/// A relation has no tuples, where the least value of an attribute is
+/// taken.
+pub const FAIL_NO_MIN: u32 = 11;
+/// A relation has no tuples, where the greatest value of an attribute is
+/// taken.
+pub const FAIL_NO_MAX: u32 = 12;
 
 /// The line written to stderr for each `FAIL_` constant, with the
 /// compiler's error code, which `trendyc --explain` describes.
@@ -72,6 +78,8 @@ pub fn failure_message(failure: u32) -> &'static str {
         FAIL_SEVERAL_TUPLES => {
             "error[R0005]: the relation has several tuples, but exactly one was taken\n"
         }
+        FAIL_NO_MIN => "error[R0010]: the relation has no tuples, so it has no min\n",
+        FAIL_NO_MAX => "error[R0010]: the relation has no tuples, so it has no max\n",
         // The compiler and the runtime disagree: a bug.
         _ => "error[X0000]: internal error: unknown run-time failure\n",
     }
