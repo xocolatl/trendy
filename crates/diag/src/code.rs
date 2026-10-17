@@ -83,6 +83,7 @@ pub enum Code {
     GrowingRecursion,
     PerRelation,
     PerAsValue,
+    ConstantPer,
     Overflow,
     DivisionByZero,
     OutOfMemory,
@@ -110,7 +111,7 @@ pub enum CodeKind {
 }
 
 impl Code {
-    pub const ALL: [Code; 81] = [
+    pub const ALL: [Code; 82] = [
         Code::UnexpectedCharacter,
         Code::MissingToken,
         Code::WrongDelimiter,
@@ -181,6 +182,7 @@ impl Code {
         Code::GrowingRecursion,
         Code::PerRelation,
         Code::PerAsValue,
+        Code::ConstantPer,
         Code::Overflow,
         Code::DivisionByZero,
         Code::OutOfMemory,
@@ -267,6 +269,7 @@ impl Code {
             Code::GrowingRecursion => "A0041",
             Code::PerRelation => "A0042",
             Code::PerAsValue => "A0043",
+            Code::ConstantPer => "A0044",
             Code::Overflow => "R0001",
             Code::DivisionByZero => "R0002",
             Code::OutOfMemory => "R0003",
@@ -382,6 +385,7 @@ impl Code {
             Code::GrowingRecursion => include_str!("../errors/A0041.md"),
             Code::PerRelation => include_str!("../errors/A0042.md"),
             Code::PerAsValue => include_str!("../errors/A0043.md"),
+            Code::ConstantPer => include_str!("../errors/A0044.md"),
             Code::Overflow => include_str!("../errors/R0001.md"),
             Code::DivisionByZero => include_str!("../errors/R0002.md"),
             Code::OutOfMemory => include_str!("../errors/R0003.md"),

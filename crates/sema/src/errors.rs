@@ -967,41 +967,78 @@ pub(crate) fn per_relation_argument(
     d
 }
 
-/// The error for `value`, a `per` argument, if it is a text literal naming
-/// an attribute of the tuples of `heading`, where `expected` isn't text: as
-/// SQL's dynamic queries and data frames name columns, rather than the
-/// attribute itself.
-pub(crate) fn attribute_as_text(
+/// The note on a `per` argument that is the same for every tuple: the
+/// argument for `name`, of the parameter `relation`'s tuples.
+fn per_note(name: &str, relation: &str) -> String {
+    format!(
+        "`{name}` is a `per {relation}` parameter: its argument is computed for each tuple of `{relation}`, with the tuple's attributes in scope by name, as in `where`; one that doesn't use them is the same for every tuple, so only how many there are would matter"
+    )
+}
+
+/// The argument `value` for the `per` parameter `name`, of the parameter
+/// `relation`'s tuples of `heading`, if it names one of their attributes
+/// in quotes, as SQL writes a column's name: a text, the same for every
+/// tuple, which the fix makes the attribute.
+pub(crate) fn quoted_attribute(
     value: &Expr,
+    name: &str,
+    relation: &str,
     heading: &hir::Heading,
-    expected: &crate::types::Expected,
 ) -> Option<Diagnostic> {
     let Expr::Literal(literal) = value else {
         return None;
     };
-    let Ok(trendy_syntax::ast::LiteralValue::Text(name)) = literal.value() else {
+    let Ok(trendy_syntax::ast::LiteralValue::Text(attribute)) = literal.value() else {
         return None;
     };
-    if expected.ty == hir::Type::Scalar(hir::Scalar::Text) || heading.get(&name).is_none() {
-        return None;
-    }
-    let mut d = Diagnostic::error(
-        Code::TypeMismatch,
-        format!("mismatched types: expected `{}`, found `text`", expected.ty),
-        value.span(),
-        format!("a text, not the attribute `{name}`"),
+    heading.named().find(|(a, _)| *a == attribute)?;
+    Some(
+        Diagnostic::error(
+            Code::ConstantPer,
+            format!("the argument for `{name}` is the same for every tuple of `{relation}`"),
+            value.span(),
+            format!("a text, not the attribute `{attribute}`"),
+        )
+        .with_note(per_note(name, relation))
+        .with_note("double quotes make a text; SQL writes a column's name in them, but an attribute is named bare")
+        .with_suggestion(
+            format!("name the attribute: `{attribute}`"),
+            vec![Edit {
+                span: value.span(),
+                replacement: attribute,
+            }],
+        ),
     )
-    .with_note("a `per` argument is evaluated for each tuple, with its attributes in scope by name, as in `where`, so an attribute is named bare");
-    if let Some(span) = expected.origin.span() {
-        d = d.with_secondary(span, expected.origin.label());
-    }
-    Some(d.with_suggestion(
-        format!("name the attribute: `{name}`"),
-        vec![Edit {
-            span: value.span(),
-            replacement: name,
-        }],
-    ))
+}
+
+/// The argument `value` for the `per` parameter `name`, which doesn't use
+/// the attributes of the parameter `relation`'s tuples, of `heading`, so
+/// is the same for every one.
+pub(crate) fn constant_per(
+    name: &str,
+    relation: &str,
+    value: &Expr,
+    heading: &hir::Heading,
+) -> Diagnostic {
+    let attributes: Vec<String> = heading.named().map(|(a, _)| format!("`{a}`")).collect();
+    let help = if attributes.is_empty() {
+        format!(
+            "`{relation}`'s tuples have no attributes, so no `per {relation}` argument can use them"
+        )
+    } else {
+        format!(
+            "compute it from the attributes of `{relation}`'s tuples: {}",
+            trendy_diag::conjoin(&attributes)
+        )
+    };
+    Diagnostic::error(
+        Code::ConstantPer,
+        format!("the argument for `{name}` is the same for every tuple of `{relation}`"),
+        value.span(),
+        "this doesn't depend on the tuple",
+    )
+    .with_note(per_note(name, relation))
+    .with_help(help)
 }
 
 /// The `per` parameter `name`, of the relation `relation`, written at

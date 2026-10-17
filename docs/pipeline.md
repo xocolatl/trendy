@@ -489,8 +489,11 @@ parameter is an attribute, in scope where the relation's tuples are, and
 a value nowhere (A0043). A call checks a `per` argument once its
 relation's argument is checked, against its parameter's type as for any
 other argument, with the attributes of that relation's tuples in scope
-(`check::TupleNames`), as in `where`; a text literal naming one of them,
-where a text isn't expected, is reported with the attribute as the fix.
+(`check::TupleNames`), as in `where`. It must use the tuple at hand
+(`ops::uses_tuple`, which looks for `Current` in the checked expression,
+so an image relation counts and a condition folded to a constant
+doesn't); otherwise it is the same for every tuple (A0044), and a text
+literal naming one of the attributes gets the attribute as the fix.
 The relation's argument the operator gets is then built as Tutorial D's
 WRAP and EXTEND would (`Checker::relation_seen`): an `Extend` that adds
 the wrapped attribute, a tuple of the tuple at hand's attributes, and each

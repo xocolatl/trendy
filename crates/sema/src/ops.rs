@@ -1429,6 +1429,37 @@ fn shifted(expr: hir::Expr, cutoff: usize) -> hir::Expr {
     }
 }
 
+/// Whether `expr` uses the tuple at hand `depth` `Extend`s out from it:
+/// one of its attributes, or an image relation of it, which names none.
+pub(crate) fn uses_tuple(expr: &hir::Expr, depth: usize) -> bool {
+    let uses = |e: &hir::Expr| uses_tuple(e, depth);
+    match expr {
+        hir::Expr::Current(d, _) => *d == depth,
+        hir::Expr::Constant(_) | hir::Expr::Variable(_) | hir::Expr::Parameter(_) => false,
+        hir::Expr::Call(call) => call.args.values().any(uses),
+        hir::Expr::Unary(_, operand)
+        | hir::Expr::Extract(operand, _)
+        | hir::Expr::Remove(operand, _)
+        | hir::Expr::Rename(operand, _)
+        | hir::Expr::Ungroup(operand, _)
+        | hir::Expr::Only(operand) => uses(operand),
+        hir::Expr::Binary(_, lhs, rhs)
+        | hir::Expr::And(lhs, rhs)
+        | hir::Expr::Combine(_, lhs, rhs)
+        | hir::Expr::Semijoin(lhs, rhs)
+        | hir::Expr::Antijoin(lhs, rhs) => uses(lhs) || uses(rhs),
+        hir::Expr::Tuple(attributes) => attributes.values().any(uses),
+        hir::Expr::Relation(_, tuples) => tuples.iter().any(uses),
+        // The condition and the values are one tuple at hand further in.
+        hir::Expr::Restrict(operand, condition) => {
+            uses(operand) || uses_tuple(condition, depth + 1)
+        }
+        hir::Expr::Extend(operand, _, attributes) => {
+            uses(operand) || attributes.values().any(|e| uses_tuple(e, depth + 1))
+        }
+    }
+}
+
 /// The image relation of the tuple at hand, with heading `at_hand`, in
 /// `relation`, with `heading`: its tuples that match the tuple at hand on
 /// their common attributes, without those attributes. That is `relation`

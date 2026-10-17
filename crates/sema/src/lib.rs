@@ -4486,12 +4486,35 @@ mod tests {
         // Inside the operator, a `per` parameter is an attribute.
         let source = "operator f{r: any relation, of: integer per r}: integer [ return of; ];\noperator main{} [];";
         assert_eq!(codes(source), [Code::PerAsValue]);
-        // Attributes are named bare.
-        let source = format!(
-            "{PLOTS}operator total{{r: any relation, of: integer per r}} [];\noperator main{{}} [ call total{{r: plots, of: \"of\"}}; ];"
-        );
-        assert_eq!(codes(&source), [Code::TypeMismatch]);
-        assert!(fix(&source).contains("call total{r: plots, of: of};"));
+        // Attributes are named bare, whatever the type: in quotes, one is a
+        // text, the same for every tuple.
+        for ty in ["integer", "text"] {
+            let source = format!(
+                "{PLOTS}operator total{{r: any relation, of: {ty} per r}} [];\noperator main{{}} [ call total{{r: plots, of: \"of\"}}; ];"
+            );
+            assert_eq!(codes(&source), [Code::ConstantPer], "{ty}");
+            assert!(fix(&source).contains("call total{r: plots, of: of};"));
+        }
+        // An argument must use the tuple: one that doesn't, because it is a
+        // constant, a parameter or an outer tuple's attribute, or folds to a
+        // constant, is the same for every tuple.
+        for of in ["true", "n", "region = \"Nyeri\"", "false and of > 0"] {
+            let source = format!(
+                "{PLOTS}operator total{{r: any relation, of: boolean per r}}: boolean [ return every{{r: r, of: of}}; ];\nvar regions := relation {{ {{ region: \"Nyeri\", n: true }} }};\nvar x := regions extend {{ t := total{{r: !!plots, of: {of}}} }};{MAIN}"
+            );
+            let errors = errors(&source);
+            assert_eq!(errors[0].code, Code::ConstantPer, "{of}: {errors:#?}");
+            assert_eq!(
+                errors[0].help,
+                ["compute it from the attributes of `r`'s tuples: `of` and `plot`"],
+                "{of}"
+            );
+        }
+        // An image relation uses the tuple, though it names no attribute.
+        analyze_str(&format!(
+            "{PLOTS}var regions := relation {{ {{ region: \"Nyeri\" }} }};\nvar x := some{{r: regions, of: count{{r: !!plots}} > 1}};{MAIN}"
+        ))
+        .unwrap();
         // The relation is a relation.
         let source = format!("{VALUES}var v := values{{r: 1, of: 2}};{MAIN}");
         assert_eq!(
@@ -4520,7 +4543,7 @@ mod tests {
     #[test]
     fn the_prelude_defines_some_and_every_in_trendy() {
         let vars = variables(&format!(
-            "{PLOTS}var dry := some{{r: plots, of: of < 500}};\nvar wet := every{{r: plots, of: of > 500}};\nvar none := some{{r: plots where false, of: true}};\nvar all := every{{r: plots where false, of: false}};"
+            "{PLOTS}var dry := some{{r: plots, of: of < 500}};\nvar wet := every{{r: plots, of: of > 500}};\nvar none := some{{r: plots where false, of: of > 0}};\nvar all := every{{r: plots where false, of: of > 0}};"
         ));
         let values: Vec<_> = vars[1..].iter().map(|v| v.init.clone()).collect();
         assert_eq!(

@@ -622,12 +622,12 @@ impl<'a> Checker<'a> {
                         self.typed_argument(&value, name, ty, None, &mut types, errors)
                     }
                     Param::Per { relation, ty } => {
-                        let heading = relations[relation].1.clone();
+                        let heading = &relations[relation].1;
                         let checked = self.typed_argument(
                             &value,
                             name,
                             ty,
-                            Some(heading),
+                            Some((relation, heading)),
                             &mut types,
                             errors,
                         );
@@ -738,29 +738,29 @@ impl<'a> Checker<'a> {
     /// The argument `value` for the parameter `name`, of type `ty`, as the
     /// type parameters in it are known so far in `types`, or, if they
     /// aren't, giving them their types, or `None` after reporting why it
-    /// is invalid. A `per` argument has the attributes of the tuples of its
-    /// relation's argument, `heading`, in scope.
+    /// is invalid. A `per` argument, of the parameter `relation`, has the
+    /// attributes of the tuples of its relation's argument, `heading`, in
+    /// scope, and must use them: otherwise it is the same for every tuple.
     fn typed_argument(
         &mut self,
         value: &Expr,
         name: &str,
         ty: &hir::Type,
-        heading: Option<hir::Heading>,
+        per: Option<(&str, &hir::Heading)>,
         types: &mut TypeArguments,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Expr> {
         let expected = types.know(ty).then(|| types.expected(name, ty));
-        let checked = match heading {
-            Some(heading) => {
-                if let Some(expected) = &expected
-                    && let Some(error) = errors::attribute_as_text(value, &heading, expected)
-                {
+        let checked = match per {
+            Some((relation, heading)) => {
+                // An attribute named in quotes, whatever the type expected.
+                if let Some(error) = errors::quoted_attribute(value, name, relation, heading) {
                     errors.push(error);
                     return None;
                 }
                 let mut names = TupleNames {
                     outer: &mut *self.names,
-                    heading,
+                    heading: heading.clone(),
                 };
                 Checker::new(&mut names).expr(value, expected.as_ref(), errors)?
             }
@@ -774,6 +774,12 @@ impl<'a> Checker<'a> {
                 errors.push(error.diagnostic(&actual, constant, value, namespaces));
                 return None;
             }
+        }
+        if let Some((relation, heading)) = per
+            && !ops::uses_tuple(&checked, 0)
+        {
+            errors.push(errors::constant_per(name, relation, value, heading));
+            return None;
         }
         Some(checked)
     }

@@ -395,9 +395,17 @@ one of its attributes, as in `SUM (SP, QTY)`, and a `per` argument
 generalizes that attribute to any expression of each tuple's attributes.
 
 - **The argument names the tuple's attributes bare,** as `where` and
-  `extend` do: `of: region`. `of: "region"` is a text, and where a text
-  isn't expected, it is reported with the attribute as the fix (A0004).
-  Other names refer to what they do around the call.
+  `extend` do: `of: region`. Other names refer to what they do around the
+  call.
+- **The argument must use the tuple:** its attributes, or an image
+  relation of it, `!!s`. One that doesn't, such as a constant, a
+  parameter, or an attribute of a tuple further out, is the same for
+  every tuple, so the result would depend only on how many there are;
+  that is an error (A0044), as Tutorial D's attribute is always one of
+  the relation's. `of: "region"`, in quotes, as SQL names a column, is a
+  text, and the fix makes it the attribute. For a value the same for
+  every tuple, use it outside the operator, with `count{r: r}` for how
+  many tuples there are.
 - **Inside the operator, a `per` parameter is an attribute** of its
   relation's tuples, not a value: it is named where they are in scope, as
   in `r{of}`, `r where of > 0`, `r extend { … }`, or the argument for
@@ -429,6 +437,18 @@ operator values{r: any relation, of: T per r}: relation { v: T }
 operator first{r: any relation, of: integer per r}: integer [
     return of;
 ];
+
+operator main{} [];
+```
+
+```trendy,error
+var plots := relation {
+    { plot: 1, region: "Nyeri", rainfall: 1200 },
+    { plot: 2, region: "Mendoza", rainfall: 220 },
+}
+key { plot };
+
+var wettest := max{r: plots, of: "rainfall"};
 
 operator main{} [];
 ```
