@@ -453,17 +453,45 @@ impl<'a> Parser<'a> {
                     | SyntaxKind::RParen
                     | SyntaxKind::Semicolon
                     | SyntaxKind::OperatorKw
-                    | SyntaxKind::VarKw
                     | SyntaxKind::BuiltinKw
             );
-            if ends_body {
+            if ends_body || self.at_unclosed_declaration(&found) {
                 break;
             }
             self.statement();
         }
     }
 
-    /// A statement: a call, an assignment statement, or a `return`.
+    /// Whether `found`, the next token, is a `var` at the start of an
+    /// unindented line, in a body that no `]` closes before the next
+    /// definition: the declaration of a program's variable, before which
+    /// the body's `];` is missing. A local variable's declaration is in a
+    /// body that a `]` closes, in a valid program.
+    fn at_unclosed_declaration(&self, found: &Found) -> bool {
+        let unindented = self.source[..found.span.start]
+            .rsplit('\n')
+            .next()
+            .is_some_and(str::is_empty);
+        if found.kind != SyntaxKind::VarKw || !unindented {
+            return false;
+        }
+        let mut depth = 0usize;
+        for token in &self.tokens[self.pos..] {
+            match token.kind {
+                SyntaxKind::LBracket | SyntaxKind::LBrace | SyntaxKind::LParen => depth += 1,
+                SyntaxKind::RBracket if depth == 0 => return false,
+                SyntaxKind::RBracket | SyntaxKind::RBrace | SyntaxKind::RParen => {
+                    depth = depth.saturating_sub(1);
+                }
+                SyntaxKind::OperatorKw | SyntaxKind::BuiltinKw if depth == 0 => return true,
+                _ => {}
+            }
+        }
+        true
+    }
+
+    /// A statement: a call, an assignment statement, a local variable's
+    /// declaration, or a `return`.
     fn statement(&mut self) {
         let Some(found) = self.found() else {
             return;
@@ -473,6 +501,8 @@ impl<'a> Parser<'a> {
             .is_some_and(|f| matches!(f.kind, SyntaxKind::LBrace | SyntaxKind::LParen));
         if found.kind == SyntaxKind::CallKw {
             self.call_stmt();
+        } else if found.kind == SyntaxKind::VarKw {
+            self.var_decl();
         } else if found.kind == SyntaxKind::AssignKw {
             self.assign_block();
         } else if self.at_assignment() {
@@ -488,7 +518,7 @@ impl<'a> Parser<'a> {
         } else {
             self.missing_with_help(
                 SyntaxKind::CallKw,
-                "statements are calls, such as `call debug_value{v: 1};`, assignments, such as `n := n + 1;`, and, in a read-only operator, `return value;`",
+                "statements are calls, such as `call debug_value{v: 1};`, assignments, such as `n := n + 1;`, local variables, such as `var n := 0;`, and, in a read-only operator, `return value;`",
             );
             self.skip_statement(&[
                 SyntaxKind::RBracket,
@@ -981,7 +1011,7 @@ impl<'a> Parser<'a> {
     /// `var name: type := value;`, where either the type or the value may be
     /// left out. Sema checks that at least one is there.
     fn var_decl(&mut self) {
-        self.form = errors::VARIABLE_FORM;
+        let outer_form = std::mem::replace(&mut self.form, errors::VARIABLE_FORM);
         self.start_node(SyntaxKind::VarDecl);
         self.bump();
         self.name(
@@ -1057,6 +1087,7 @@ impl<'a> Parser<'a> {
         self.keys();
         self.expect(SyntaxKind::Semicolon);
         self.builder.finish_node();
+        self.form = outer_form;
     }
 
     /// A variable's keys, each `key { a, b }`, and their spans.
@@ -3360,6 +3391,35 @@ SourceFile
         );
     }
 
+    #[test]
+    fn local_variables_are_declared_in_bodies() {
+        let parse = parse_str(
+            "operator f{} [ var n: integer := 1; var r := relation {} key {}; n := 2; ];",
+        );
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let body = parse.tree.operators().next().unwrap().body().unwrap();
+        let declared: Vec<String> = body
+            .statements()
+            .filter_map(|s| match s {
+                Statement::Var(decl) => Some(decl.name()?.syntax().text().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(declared, ["n", "r"]);
+        assert_eq!(body.statements().count(), 3);
+        // Unindented, in a body no `]` closes before the next definition, a
+        // `var` is the program's, before which the `];` is missing.
+        let source = "operator f{} [\n    call g{};\nvar y := 1;\noperator main{} [];";
+        let parse = parse_str(source);
+        assert_eq!(parse.errors.len(), 1, "{:#?}", parse.errors);
+        assert_eq!(parse.errors[0].message, "expected `]`, found `var`");
+        assert_eq!(parse.tree.variables().count(), 1);
+        // Closed, it is the operator's, however it is indented.
+        let parse = parse_str("operator f{} [\nvar y := 1;\n];\noperator main{} [];");
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        assert_eq!(parse.tree.variables().count(), 0);
+    }
+
     /// The assignments in `main`'s body, `body`, each as its kind and the
     /// text of its target, keyword and operand, those in an `assign` block
     /// marked so.
@@ -3390,7 +3450,7 @@ SourceFile
                     .flat_map(|stmt| stmt.clauses())
                     .map(|clause| format!("assign: {}", describe(clause)))
                     .collect(),
-                Statement::Call(_) | Statement::Return(_) => Vec::new(),
+                Statement::Call(_) | Statement::Return(_) | Statement::Var(_) => Vec::new(),
             })
             .collect()
     }

@@ -175,6 +175,10 @@ pub enum RuntimeFn {
     /// [`RuntimeFn::Begin`]). It stops the program if the memory can't be
     /// allocated.
     Concat,
+    /// `trendy_rt_release(owner)`: release the memory of its own that a
+    /// local variable's owner holds, set by [`RuntimeFn::Assign`], if any,
+    /// at the end of its operator's body.
+    Release,
     /// `trendy_rt_begin(scope)`: begin a statement's scope, in a slot laid
     /// out as [`Layout::scope`]. Until [`RuntimeFn::End`], the statement
     /// owns the memory of every text and relation that runtime functions
@@ -285,6 +289,7 @@ impl RuntimeFn {
             RuntimeFn::Product => "trendy_rt_product",
             RuntimeFn::Fail => "trendy_rt_fail",
             RuntimeFn::Concat => "trendy_rt_concat",
+            RuntimeFn::Release => "trendy_rt_release",
             RuntimeFn::Begin => "trendy_rt_begin",
             RuntimeFn::End => "trendy_rt_end",
             RuntimeFn::Reshape => "trendy_rt_reshape",

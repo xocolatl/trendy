@@ -272,7 +272,8 @@ impl Body {
                 .map(Statement::Call)
                 .or_else(|| AssignStmt::cast(node.clone()).map(Statement::Assign))
                 .or_else(|| AssignBlock::cast(node.clone()).map(Statement::Block))
-                .or_else(|| ReturnStmt::cast(node).map(Statement::Return))
+                .or_else(|| ReturnStmt::cast(node.clone()).map(Statement::Return))
+                .or_else(|| VarDecl::cast(node).map(Statement::Var))
         })
     }
 
@@ -294,6 +295,8 @@ pub enum Statement {
     Assign(AssignStmt),
     Block(AssignBlock),
     Return(ReturnStmt),
+    /// A local variable's declaration, as a program variable's is written.
+    Var(VarDecl),
 }
 
 impl Statement {
@@ -304,6 +307,7 @@ impl Statement {
             Statement::Assign(s) => s.syntax(),
             Statement::Block(s) => s.syntax(),
             Statement::Return(s) => s.syntax(),
+            Statement::Var(s) => s.syntax(),
         }
     }
 

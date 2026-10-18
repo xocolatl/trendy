@@ -389,12 +389,19 @@ no source can write, so that they stay distinct and never clash with what
 the operator names. Its type is a type parameter, `any tuple`. A type's
 source text writes it `…`.
 
-An update operator's body is a list of statements
-(`OperatorKind::Update`): calls, and assignments (`Statement::Assign`),
-each a list of variables, all different, and their new values, made at once
-(TTM RM Prescription 21): every value is computed from the variables as
-they were. The shorthands are already expanded, and an `assign` block's
-changes to one variable merged into one value.
+An update operator's body is a list of statements, with the operator's
+local variables (`OperatorKind::Update`, `hir::Local`): calls, and
+assignments (`Statement::Assign`), each a list of variables, all
+different, of the program or local (`hir::Target`), and their new values,
+made at once (TTM RM Prescription 21): every value is computed from the
+variables as they were. The shorthands are already expanded, and an
+`assign` block's changes to one variable merged into one value. A local
+variable's declaration is the assignment of its initial value, or its
+type's default, and `Expr::Local` reads it. Sema finds a body's local
+variables before checking its statements (`body::Locals`), so that one is
+in scope in all of the body, hiding a variable of the program's with its
+name, but is reported if it is used before its declaration (A0045); and
+reports one with a parameter's name or another local variable's (A0001).
 `Combination::DisjointChanges` is the union of the tuples changes remove,
 which conflict (R0009) if two remove the same one.
 
@@ -840,6 +847,14 @@ keeps, since those statements, and only those, can point into it: with
 the assigning statement's own values, or with arguments, which a caller
 can have passed from the variable. So a statement that passes a text or
 relation to an update operator has a scope even if it makes nothing.
+
+A local variable is a slot in its operator's function for its value, and
+one for its owner if it has one, assigned by `trendy_rt_assign` as a
+variable is. The owner starts as null, so that the declaration, the first
+assignment, has nothing to release; `trendy_rt_release` frees what an
+owner holds at the end of the body, when nothing points into it: an assignment copies a value into
+memory of the variable's own, and every statement that could point into it
+has ended.
 
 A read-only operator's function begins no scope: what it makes, such as
 its result's texts, is the calling statement's, as if the caller had

@@ -84,6 +84,7 @@ pub enum Code {
     PerRelation,
     PerAsValue,
     ConstantPer,
+    LocalBeforeDeclaration,
     Overflow,
     DivisionByZero,
     OutOfMemory,
@@ -111,7 +112,7 @@ pub enum CodeKind {
 }
 
 impl Code {
-    pub const ALL: [Code; 82] = [
+    pub const ALL: [Code; 83] = [
         Code::UnexpectedCharacter,
         Code::MissingToken,
         Code::WrongDelimiter,
@@ -183,6 +184,7 @@ impl Code {
         Code::PerRelation,
         Code::PerAsValue,
         Code::ConstantPer,
+        Code::LocalBeforeDeclaration,
         Code::Overflow,
         Code::DivisionByZero,
         Code::OutOfMemory,
@@ -270,6 +272,7 @@ impl Code {
             Code::PerRelation => "A0042",
             Code::PerAsValue => "A0043",
             Code::ConstantPer => "A0044",
+            Code::LocalBeforeDeclaration => "A0045",
             Code::Overflow => "R0001",
             Code::DivisionByZero => "R0002",
             Code::OutOfMemory => "R0003",
@@ -386,6 +389,7 @@ impl Code {
             Code::PerRelation => include_str!("../errors/A0042.md"),
             Code::PerAsValue => include_str!("../errors/A0043.md"),
             Code::ConstantPer => include_str!("../errors/A0044.md"),
+            Code::LocalBeforeDeclaration => include_str!("../errors/A0045.md"),
             Code::Overflow => include_str!("../errors/R0001.md"),
             Code::DivisionByZero => include_str!("../errors/R0002.md"),
             Code::OutOfMemory => include_str!("../errors/R0003.md"),

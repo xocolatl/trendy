@@ -395,6 +395,29 @@ pub unsafe extern "C" fn trendy_rt_assign(
     }
 }
 
+/// Release the memory of its own that `owner` holds for a local variable,
+/// which [`trendy_rt_assign`] stored there, if it did, at the end of its
+/// operator's body. Nothing points into it then: an assignment copies a
+/// value into memory of the variable's own, and every statement that could
+/// point into it has ended.
+///
+/// # Safety
+///
+/// `owner` must point to null or to memory that [`trendy_rt_assign`]
+/// stored there, which nothing points into.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_release(owner: *mut *mut u8) {
+    // SAFETY: guaranteed by the caller. The block is in no scope's list:
+    // only a variable's old values are.
+    unsafe {
+        let block = owner.cast::<*mut Owned>().read_unaligned();
+        if !block.is_null() {
+            free(block.cast());
+        }
+    }
+}
+
 /// Where [`persist`] puts what a value points to: one block, filled in
 /// order, or none while measuring how much it needs.
 struct Arena {

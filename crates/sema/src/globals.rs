@@ -448,7 +448,7 @@ fn variable(
             (ty, value)
         }
     };
-    let keys = keys::keys(decl, ident.text(), &ty, &init, globals, errors)?;
+    let keys = keys::keys(decl, ident.text(), &ty, Some(&init), globals, errors)?;
     namespaces.is_first_variable(&ident).then(|| hir::Variable {
         name: ident.text().to_string(),
         ty,

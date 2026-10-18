@@ -84,10 +84,12 @@ fn function(
     };
     let mut builder = FunctionBuilder::new(program, name, params, variable_data);
     let (lowered, makes) = match kind {
-        hir::OperatorKind::Update { body } => {
+        hir::OperatorKind::Update { locals, body } => {
+            builder.declare(locals, cx);
             for statement in &body {
                 builder.statement(statement, cx);
             }
+            builder.release();
             (builder.finish(None), false)
         }
         hir::OperatorKind::ReadOnly { result, value } => {
@@ -297,6 +299,11 @@ struct FunctionBuilder<'a> {
     /// no type parameters in them.
     params: BTreeMap<String, hir::Type>,
     variable_data: &'a [lir::DataId],
+    /// The local variables of the operator it is, with their types, which
+    /// have no type parameters in them.
+    locals: Vec<hir::Local>,
+    /// Where each local variable is, by id.
+    local_places: Vec<LocalPlace>,
     slots: Vec<lir::Layout>,
     /// The blocks, those not ended yet placeholders.
     blocks: Vec<lir::Block>,
@@ -314,6 +321,15 @@ struct FunctionBuilder<'a> {
     /// Where each tuple at hand is, innermost last: what `Current` refers
     /// to, inside an `Extend`'s values.
     tuples: Vec<lir::Place>,
+}
+
+/// Where a local variable is: its value's slot, and, if it points to texts
+/// or relations, the slot of the memory of its own that holds them, which
+/// [`lir::RuntimeFn::Assign`] takes as the owner, as a variable's.
+#[derive(Debug, Clone)]
+struct LocalPlace {
+    value: lir::Place,
+    owner: Option<lir::Place>,
 }
 
 /// A block not built yet.
@@ -338,6 +354,8 @@ impl<'a> FunctionBuilder<'a> {
             name,
             params,
             variable_data,
+            locals: Vec::new(),
+            local_places: Vec::new(),
             slots: Vec::new(),
             blocks: vec![placeholder()],
             current: lir::BlockId(0),
@@ -345,6 +363,47 @@ impl<'a> FunctionBuilder<'a> {
             scoped: false,
             scope: None,
             tuples: Vec::new(),
+        }
+    }
+
+    /// The type of `expr`, in the function.
+    fn type_of(&self, expr: &hir::Expr) -> hir::Type {
+        self.program.type_of(expr, &self.params, &self.locals)
+    }
+
+    /// Slots for the local variables `locals`, each with no memory of its
+    /// own yet: what holds its texts or relations starts as null, as a
+    /// variable's does, so that its declaration, the first assignment, has
+    /// nothing to release.
+    fn declare(&mut self, locals: Vec<hir::Local>, cx: &mut Lowering) {
+        for local in locals {
+            let value = self.slot(layout(&local.ty));
+            let owner = points(&local.ty).then(|| {
+                let owner = self.slot(lir::Layout::Address);
+                self.insts.push(lir::Inst::Copy {
+                    dst: owner.clone(),
+                    src: usize_constant(0, cx),
+                    layout: lir::Layout::Address,
+                });
+                owner
+            });
+            self.locals.push(local);
+            self.local_places.push(LocalPlace { value, owner });
+        }
+    }
+
+    /// Release the memory of the local variables' own, at the end of the
+    /// body: nothing points into it then, as an assignment copies a value
+    /// into memory of the variable's own, and every statement that could
+    /// point into it has ended.
+    fn release(&mut self) {
+        for place in &self.local_places {
+            if let Some(owner) = &place.owner {
+                self.insts.push(lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::Release,
+                    args: vec![owner.clone()],
+                });
+            }
         }
     }
 
@@ -432,7 +491,7 @@ impl<'a> FunctionBuilder<'a> {
         match &callee.kind {
             hir::OperatorKind::Builtin(hir::Builtin::DebugValue) => {
                 let value = &call.args["v"];
-                let ty = self.program.type_of(value, &self.params);
+                let ty = self.type_of(value);
                 let value = self.place(value, cx);
                 let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
                 self.insts.push(lir::Inst::CallRuntime {
@@ -557,7 +616,7 @@ impl<'a> FunctionBuilder<'a> {
             hir::Builtin::Product => self.numbers(lir::RuntimeFn::Product, call, cx),
             hir::Builtin::ToText => {
                 let from = &call.args["from"];
-                let ty = self.program.type_of(from, &self.params);
+                let ty = self.type_of(from);
                 let value = self.place(from, cx);
                 let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
                 let dst = self.slot(scalar_layout(hir::Scalar::Text));
@@ -593,7 +652,7 @@ impl<'a> FunctionBuilder<'a> {
         cx: &mut Lowering,
     ) -> lir::Place {
         let r = &call.args["r"];
-        let ty = self.program.type_of(r, &self.params);
+        let ty = self.type_of(r);
         let hir::Type::Relation(heading) = &ty else {
             unreachable!("`sum` and `product` take relations");
         };
@@ -624,7 +683,7 @@ impl<'a> FunctionBuilder<'a> {
         failure: lir::Failure,
         cx: &mut Lowering,
     ) -> lir::Place {
-        let ty = self.program.type_of(r, &self.params);
+        let ty = self.type_of(r);
         let hir::Type::Relation(heading) = &ty else {
             unreachable!("`min` and `max` take relations");
         };
@@ -691,15 +750,15 @@ impl<'a> FunctionBuilder<'a> {
     /// variable that another assignment changes. Then each variable's value
     /// is checked against its keys, and only then assigned.
     fn assign(&mut self, assignments: &[hir::Assignment], cx: &mut Lowering) {
-        let mut values: Vec<(hir::VariableId, lir::Place)> = Vec::new();
+        let mut values: Vec<(hir::Target, lir::Place)> = Vec::new();
         for assignment in assignments {
             let value = self.place(&assignment.value, cx);
-            let ty = &self.program.variable(assignment.target).ty;
-            let slot = self.slot(layout(ty));
+            let ty = layout(self.assigned(assignment.target).0);
+            let slot = self.slot(ty.clone());
             self.insts.push(lir::Inst::Copy {
                 dst: slot.clone(),
                 src: value,
-                layout: layout(ty),
+                layout: ty,
             });
             values.push((assignment.target, slot));
         }
@@ -711,18 +770,33 @@ impl<'a> FunctionBuilder<'a> {
         }
     }
 
+    /// The type and keys of the variable `target`, of the program or local.
+    fn assigned(&self, target: hir::Target) -> (&hir::Type, &[hir::Key]) {
+        match target {
+            hir::Target::Variable(id) => {
+                let variable = self.program.variable(id);
+                (&variable.ty, &variable.keys)
+            }
+            hir::Target::Local(id) => {
+                let local = &self.locals[id.0];
+                (&local.ty, &local.keys)
+            }
+        }
+    }
+
     /// Stop the program if the relation at `value`, about to be assigned to
     /// the variable `target`, has two tuples with the same values for one
     /// of its keys: if its projection on the key has fewer tuples. A key of
     /// the whole heading always holds.
-    fn check_keys(&mut self, target: hir::VariableId, value: &lir::Place, cx: &mut Lowering) {
-        let variable = self.program.variable(target);
-        let ty = &variable.ty;
+    fn check_keys(&mut self, target: hir::Target, value: &lir::Place, cx: &mut Lowering) {
+        let (ty, keys) = self.assigned(target);
+        let (ty, keys) = (ty.clone(), keys.to_vec());
+        let ty = &ty;
         if !matches!(ty, hir::Type::Relation(_)) {
             return;
         }
         let names: Vec<&str> = attribute_names(ty).collect();
-        for key in &variable.keys {
+        for key in &keys {
             if key.len() == names.len() {
                 continue;
             }
@@ -761,29 +835,39 @@ impl<'a> FunctionBuilder<'a> {
         }
     }
 
-    /// Assign the value at `value` to the variable `target`: copied, or,
-    /// if it points to texts or relations, copied with them into memory of
-    /// the variable's own.
-    fn store(&mut self, target: hir::VariableId, value: lir::Place, cx: &mut Lowering) {
-        let ty = &self.program.variable(target).ty;
-        let data = self.variable_data[target.0];
-        let field = |i| lir::Place {
-            base: lir::Base::Data(data),
-            path: vec![i],
+    /// Assign the value at `value` to the variable `target`, of the
+    /// program or local: copied, or, if it points to texts or relations,
+    /// copied with them into memory of the variable's own.
+    fn store(&mut self, target: hir::Target, value: lir::Place, cx: &mut Lowering) {
+        let ty = self.assigned(target).0.clone();
+        // Where the value goes, and what holds the memory of its own.
+        let (dst, owner) = match target {
+            hir::Target::Variable(id) => {
+                let field = |i| lir::Place {
+                    base: lir::Base::Data(self.variable_data[id.0]),
+                    path: vec![i],
+                };
+                (field(0), Some(field(1)))
+            }
+            hir::Target::Local(id) => {
+                let place = &self.local_places[id.0];
+                (place.value.clone(), place.owner.clone())
+            }
         };
-        if points(ty) {
-            let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(ty)));
-            self.insts.push(lir::Inst::CallRuntime {
-                function: lir::RuntimeFn::Assign,
-                args: vec![field(0), field(1), value, descriptor],
-            });
-            self.scoped = true;
-        } else {
-            self.insts.push(lir::Inst::Copy {
-                dst: field(0),
+        match owner.filter(|_| points(&ty)) {
+            Some(owner) => {
+                let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+                self.insts.push(lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::Assign,
+                    args: vec![dst, owner, value, descriptor],
+                });
+                self.scoped = true;
+            }
+            None => self.insts.push(lir::Inst::Copy {
+                dst,
                 src: value,
-                layout: layout(ty),
-            });
+                layout: layout(&ty),
+            }),
         }
     }
 
@@ -804,6 +888,7 @@ impl<'a> FunctionBuilder<'a> {
                 base: lir::Base::Data(self.variable_data[id.0]),
                 path: vec![0],
             },
+            hir::Expr::Local(id) => self.local_places[id.0].value.clone(),
             hir::Expr::Parameter(name) => {
                 let index = self
                     .params
@@ -821,7 +906,7 @@ impl<'a> FunctionBuilder<'a> {
             }
             // The attribute's own place within the tuple: no copy.
             hir::Expr::Extract(tuple, name) => {
-                let ty = self.program.type_of(tuple, &self.params);
+                let ty = self.type_of(tuple);
                 let index = attribute_names(&ty)
                     .position(|a| a == name)
                     .expect("sema extracts only attributes the tuple has");
@@ -830,14 +915,14 @@ impl<'a> FunctionBuilder<'a> {
                 place
             }
             hir::Expr::Tuple(attributes) => {
-                let ty = self.program.type_of(expr, &self.params);
+                let ty = self.type_of(expr);
                 let dst = self.slot(layout(&ty));
                 self.fill_tuple(attributes, &dst, cx);
                 dst
             }
             hir::Expr::Relation(heading, tuples) => self.relation(heading, tuples, cx),
             hir::Expr::Remove(operand, names) => {
-                let ty = self.program.type_of(operand, &self.params);
+                let ty = self.type_of(operand);
                 let src = self.place(operand, cx);
                 // The kept attributes, in their own order, which is the
                 // result's too.
@@ -849,7 +934,7 @@ impl<'a> FunctionBuilder<'a> {
                 self.reshape(&ty, &ty.without(names), &sources, src, cx)
             }
             hir::Expr::Rename(operand, renamings) => {
-                let ty = self.program.type_of(operand, &self.params);
+                let ty = self.type_of(operand);
                 let src = self.place(operand, cx);
                 let result_ty = ty.renamed(renamings);
                 // Each result attribute comes from the operand's attribute
@@ -879,7 +964,7 @@ impl<'a> FunctionBuilder<'a> {
             hir::Expr::Call(call) => self.read_only_call(call, cx),
             hir::Expr::Extend(operand, _, attributes) => self.extend(expr, operand, attributes, cx),
             hir::Expr::Binary(op, lhs, rhs) => {
-                let operand_ty = self.program.type_of(lhs, &self.params);
+                let operand_ty = self.type_of(lhs);
                 let lhs = self.place(lhs, cx);
                 let rhs = self.place(rhs, cx);
                 self.binary(*op, &operand_ty, lhs, rhs, cx)
@@ -896,7 +981,7 @@ impl<'a> FunctionBuilder<'a> {
         cx: &mut Lowering,
     ) {
         for (i, value) in attributes.values().enumerate() {
-            let ty = self.program.type_of(value, &self.params);
+            let ty = self.type_of(value);
             let src = self.place(value, cx);
             let mut to = dst.clone();
             to.path.push(i);
@@ -968,8 +1053,8 @@ impl<'a> FunctionBuilder<'a> {
         attributes: &BTreeMap<String, hir::Expr>,
         cx: &mut Lowering,
     ) -> lir::Place {
-        let ty = self.program.type_of(operand, &self.params);
-        let result_ty = self.program.type_of(expr, &self.params);
+        let ty = self.type_of(operand);
+        let result_ty = self.type_of(expr);
         let src = self.place(operand, cx);
         match (&ty, &result_ty) {
             (hir::Type::Tuple(heading), hir::Type::Tuple(result)) => {
@@ -1062,7 +1147,7 @@ impl<'a> FunctionBuilder<'a> {
         condition: &hir::Expr,
         cx: &mut Lowering,
     ) -> lir::Place {
-        let ty = self.program.type_of(operand, &self.params);
+        let ty = self.type_of(operand);
         let hir::Type::Relation(heading) = &ty else {
             unreachable!("sema restricts only relations");
         };
@@ -1192,7 +1277,7 @@ impl<'a> FunctionBuilder<'a> {
     /// The only tuple of the relation `operand`, copied into a new stack
     /// slot. The program stops if the relation has none, or several.
     fn only(&mut self, operand: &hir::Expr, cx: &mut Lowering) -> lir::Place {
-        let ty = self.program.type_of(operand, &self.params);
+        let ty = self.type_of(operand);
         let hir::Type::Relation(heading) = &ty else {
             unreachable!("sema takes the only tuple of relations only");
         };
@@ -1377,8 +1462,8 @@ impl<'a> FunctionBuilder<'a> {
         negated: bool,
         cx: &mut Lowering,
     ) -> lir::Place {
-        let lhs_ty = self.program.type_of(lhs, &self.params);
-        let rhs_ty = self.program.type_of(rhs, &self.params);
+        let lhs_ty = self.type_of(lhs);
+        let rhs_ty = self.type_of(rhs);
         let (hir::Type::Relation(lhs_heading), hir::Type::Relation(rhs_heading)) =
             (&lhs_ty, &rhs_ty)
         else {
@@ -1420,7 +1505,7 @@ impl<'a> FunctionBuilder<'a> {
         rhs: &hir::Expr,
         cx: &mut Lowering,
     ) -> lir::Place {
-        let ty = self.program.type_of(lhs, &self.params);
+        let ty = self.type_of(lhs);
         let lhs = self.place(lhs, cx);
         let rhs = self.place(rhs, cx);
         let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
@@ -1452,7 +1537,7 @@ impl<'a> FunctionBuilder<'a> {
         names: &BTreeSet<String>,
         cx: &mut Lowering,
     ) -> lir::Place {
-        let ty = &self.program.type_of(operand, &self.params);
+        let ty = &self.type_of(operand);
         let src = self.place(operand, cx);
         let hir::Type::Relation(heading) = ty else {
             unreachable!("sema ungroups only relations");
@@ -1532,8 +1617,8 @@ impl<'a> FunctionBuilder<'a> {
     /// `lhs` and `rhs` joined, computed into a new stack slot: the AND of
     /// relations, by the runtime, or the join of tuples.
     fn joined(&mut self, lhs: &hir::Expr, rhs: &hir::Expr, cx: &mut Lowering) -> lir::Place {
-        let lhs_ty = self.program.type_of(lhs, &self.params);
-        let rhs_ty = self.program.type_of(rhs, &self.params);
+        let lhs_ty = self.type_of(lhs);
+        let rhs_ty = self.type_of(rhs);
         let lhs = self.place(lhs, cx);
         let rhs = self.place(rhs, cx);
         match lhs_ty {
@@ -1885,7 +1970,10 @@ mod tests {
                 .iter()
                 .map(|p| ((*p).to_string(), integer()))
                 .collect(),
-            kind: hir::OperatorKind::Update { body },
+            kind: hir::OperatorKind::Update {
+                locals: Vec::new(),
+                body,
+            },
         }
     }
 
@@ -2123,7 +2211,7 @@ mod tests {
             assignments
                 .into_iter()
                 .map(|(target, value)| hir::Assignment {
-                    target: hir::VariableId(target),
+                    target: hir::Target::Variable(hir::VariableId(target)),
                     value,
                 })
                 .collect(),
@@ -2401,7 +2489,10 @@ mod tests {
             types: Vec::new(),
             name: "f".to_string(),
             params: [("t".to_string(), hir::Type::Scalar(hir::Scalar::Text))].into(),
-            kind: hir::OperatorKind::Update { body: vec![] },
+            kind: hir::OperatorKind::Update {
+                locals: Vec::new(),
+                body: vec![],
+            },
         };
         let lowered = lower(&program(
             vec![
@@ -2530,6 +2621,7 @@ mod tests {
             types: vec![parameter.clone()],
             params: [("v".to_string(), hir::Type::Parameter(parameter.clone()))].into(),
             kind: hir::OperatorKind::Update {
+                locals: Vec::new(),
                 body: vec![hir::Statement::Call(hir::Call {
                     operator: hir::OperatorId(0),
                     types: vec![hir::Type::Parameter(parameter)],
@@ -2683,6 +2775,85 @@ mod tests {
             )),
             "{blocks:#?}"
         );
+    }
+
+    #[test]
+    fn local_variables_own_their_memory_until_the_body_ends() {
+        // `f{} [ var r: relation { v: integer }; var n := 1; call
+        // debug_value{v: r}; ]`.
+        let heading = hir::Heading::new([("v".to_string(), integer())].into());
+        let r = hir::Local {
+            name: "r".to_string(),
+            ty: hir::Type::Relation(heading.clone()),
+            keys: vec![["v".to_string()].into()],
+        };
+        let n = hir::Local {
+            name: "n".to_string(),
+            ty: integer(),
+            keys: Vec::new(),
+        };
+        let declared = |id, value| {
+            hir::Statement::Assign(vec![hir::Assignment {
+                target: hir::Target::Local(hir::LocalId(id)),
+                value: hir::Expr::Constant(value),
+            }])
+        };
+        let empty = hir::Value::Relation(hir::RelationValue {
+            heading,
+            tuples: BTreeSet::new(),
+        });
+        let f = hir::Operator {
+            name: "f".to_string(),
+            types: Vec::new(),
+            params: BTreeMap::new(),
+            kind: hir::OperatorKind::Update {
+                locals: vec![r, n],
+                body: vec![
+                    declared(0, empty),
+                    declared(1, hir::Value::Integer(1)),
+                    call(0, vec![("v", hir::Expr::Local(hir::LocalId(0)))]),
+                ],
+            },
+        };
+        let lowered = lower(&program(
+            vec![debug_value(), f, user("main", &[], vec![call(1, vec![])])],
+            Vec::new(),
+        ));
+        let f = lowered.functions.iter().find(|f| f.name == "f").unwrap();
+        let insts: Vec<&lir::Inst> = f.blocks.iter().flat_map(|b| &b.insts).collect();
+        // The relation's owner starts as null, and is the assignment's,
+        // then released last; the integer is copied.
+        let lir::Inst::Copy { dst: owner, .. } = insts[0] else {
+            panic!("{insts:#?}");
+        };
+        let assigned = insts.iter().find_map(|i| match i {
+            lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::Assign,
+                args,
+            } => Some(&args[1]),
+            _ => None,
+        });
+        assert_eq!(assigned, Some(owner), "{insts:#?}");
+        assert_eq!(
+            insts.last(),
+            Some(&&lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::Release,
+                args: vec![owner.clone()],
+            })
+        );
+        let releases = insts
+            .iter()
+            .filter(|i| {
+                matches!(
+                    i,
+                    lir::Inst::CallRuntime {
+                        function: lir::RuntimeFn::Release,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(releases, 1, "only the relation has memory of its own");
     }
 
     #[test]

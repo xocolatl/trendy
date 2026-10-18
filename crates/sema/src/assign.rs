@@ -1,6 +1,7 @@
 //! Assignment statements and `assign` blocks (TTM RM Prescription 21).
 //!
-//! Each assignment, or shorthand for one, is a change to a variable. The
+//! Each assignment, or shorthand for one, is a change to a variable, of the
+//! program or local to the operator. The
 //! changes of one `assign` block are made at once: every value is computed
 //! from the variables as they were before the block, and several changes
 //! to one variable are merged, if they don't conflict, into its one new
@@ -10,23 +11,25 @@ use std::collections::BTreeMap;
 
 use trendy_diag::{Diagnostic, Span};
 use trendy_hir as hir;
-use trendy_syntax::ast::{self, Clause};
+use trendy_syntax::ast::{self, Clause, VarDecl};
 use trendy_syntax::{SyntaxKind, SyntaxToken};
 
-use crate::body::{BodyNames, Context};
+use crate::body::{BodyNames, Context, Local, Locals};
 use crate::check::{Assigned, Checker, Unchanged};
 use crate::types::{Expected, Origin};
 use crate::{errors, keys, ops};
 
-/// An assignment statement outside a block, of its one clause; `clauses`
-/// has several only in a statement the parser reported.
+/// An assignment statement outside a block, of its one clause, in the body
+/// of `within`, whose local variables are `locals`; `clauses` has several
+/// only in a statement the parser reported.
 pub(crate) fn statement(
     clauses: &[Clause],
     within: hir::OperatorId,
     cx: &Context,
+    locals: &Locals,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Statement> {
-    assignments(clauses, within, cx, errors)
+    assignments(clauses, within, cx, locals, errors)
 }
 
 /// An `assign` block: its assignments, made at once.
@@ -34,6 +37,7 @@ pub(crate) fn block(
     block: &ast::AssignBlock,
     within: hir::OperatorId,
     cx: &Context,
+    locals: &Locals,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Statement> {
     let clauses: Vec<Clause> = block.statements().flat_map(|stmt| stmt.clauses()).collect();
@@ -41,7 +45,7 @@ pub(crate) fn block(
         errors.push(errors::empty_assign_block(block));
         return None;
     }
-    assignments(&clauses, within, cx, errors)
+    assignments(&clauses, within, cx, locals, errors)
 }
 
 /// `clauses`, each checked into a change, and each variable's changes
@@ -51,36 +55,60 @@ fn assignments(
     clauses: &[Clause],
     within: hir::OperatorId,
     cx: &Context,
+    locals: &Locals,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Statement> {
     let mut ok = true;
     // Each variable's changes, in the order variables first appear.
-    let mut changes: Vec<(hir::VariableId, Vec<(&Clause, Change)>)> = Vec::new();
+    let mut changes: Vec<(Assignee, Vec<(&Clause, Change)>)> = Vec::new();
     for clause in clauses {
-        let Some((target, change)) = change(clause, within, cx, errors) else {
+        let Some((assignee, change)) = change(clause, within, cx, locals, errors) else {
             ok = false;
             continue;
         };
-        match changes.iter_mut().find(|(t, _)| *t == target) {
+        match changes
+            .iter_mut()
+            .find(|(a, _)| a.target == assignee.target)
+        {
             Some((_, list)) => list.push((clause, change)),
-            None => changes.push((target, vec![(clause, change)])),
+            None => changes.push((assignee, vec![(clause, change)])),
         }
     }
     if !ok {
         return None;
     }
     let mut assignments = Vec::new();
-    for (target, list) in changes {
-        let variable = cx.variables[target.0]
-            .as_ref()
-            .expect("only valid variables are assigned");
-        let Some(value) = merged(target, variable, list, within, cx, errors) else {
+    for (assignee, list) in changes {
+        let Some(value) = merged(&assignee, list, within, cx, locals, errors) else {
             ok = false;
             continue;
         };
-        assignments.push(hir::Assignment { target, value });
+        assignments.push(hir::Assignment {
+            target: assignee.target,
+            value,
+        });
     }
     ok.then_some(hir::Statement::Assign(assignments))
+}
+
+/// A variable an assignment assigns, of the program or local to the
+/// operator, as it is declared.
+struct Assignee<'a> {
+    target: hir::Target,
+    name: &'a str,
+    ty: &'a hir::Type,
+    keys: &'a [hir::Key],
+    declaration: &'a VarDecl,
+}
+
+impl Assignee<'_> {
+    /// The variable's value before the assignment.
+    fn current(&self) -> hir::Expr {
+        match self.target {
+            hir::Target::Variable(id) => hir::Expr::Variable(id),
+            hir::Target::Local(id) => hir::Expr::Local(id),
+        }
+    }
 }
 
 /// What one clause does to its variable.
@@ -119,40 +147,41 @@ struct Addition {
 
 /// The variable `clause` assigns, and its change, or `None` after
 /// reporting why it has none.
-fn change(
+fn change<'a>(
     clause: &Clause,
     within: hir::OperatorId,
-    cx: &Context,
+    cx: &'a Context,
+    locals: &'a Locals,
     errors: &mut Vec<Diagnostic>,
-) -> Option<(hir::VariableId, Change)> {
+) -> Option<(Assignee<'a>, Change)> {
     let written = clause.target()?;
-    let id = assigned_variable(&written, within, cx, errors)?;
-    let variable = cx.variables[id.0]
-        .as_ref()
-        .expect("only valid variables are assigned");
-    let declaration = &cx.declarations[&variable.name];
-    let declared = declaration
+    let assignee = assigned(&written, within, cx, locals, errors)?;
+    let declared = assignee
+        .declaration
         .type_expr()
         .map(Origin::Type)
-        .or_else(|| declaration.initializer().map(Origin::Value))?;
+        .or_else(|| assignee.declaration.initializer().map(Origin::Value))?;
     let target = Target {
-        id,
-        variable,
-        written: &written,
         expected: Expected {
-            ty: variable.ty.clone(),
-            origin: Origin::Variable(variable.name.clone(), Box::new(declared)),
+            ty: assignee.ty.clone(),
+            origin: Origin::Variable(assignee.name.to_string(), Box::new(declared)),
         },
+        assignee,
+        written: &written,
     };
-    let mut names = BodyNames { cx, within };
+    let mut names = BodyNames { cx, within, locals };
     let mut checker = Checker::new(&mut names);
     let change = match (clause, clause.keyword()) {
         (Clause::Assignment(_), _) => {
             let written = clause.operand()?;
             let value = checker.expr(&written, Some(&target.expected), errors)?;
-            if value == target.current() {
+            if value == target.assignee.current() {
                 let statement = clause.statement()?;
-                errors.push(errors::own_value(&variable.name, clause.span(), &statement));
+                errors.push(errors::own_value(
+                    target.assignee.name,
+                    clause.span(),
+                    &statement,
+                ));
                 return None;
             }
             Change::Value(value, written)
@@ -165,23 +194,15 @@ fn change(
         }
         (_, None) => return None,
     };
-    Some((id, change))
+    Some((target.assignee, change))
 }
 
-/// The variable an assignment assigns: its id, its declaration, where it
-/// is written, and the type its value must have.
-struct Target<'a> {
-    id: hir::VariableId,
-    variable: &'a hir::Variable,
-    written: &'a ast::Expr,
+/// The variable an assignment assigns, where it is written, and the type
+/// its value must have.
+struct Target<'a, 'w> {
+    assignee: Assignee<'a>,
+    written: &'w ast::Expr,
     expected: Expected,
-}
-
-impl Target<'_> {
-    /// The variable's value before the assignment.
-    fn current(&self) -> hir::Expr {
-        hir::Expr::Variable(self.id)
-    }
 }
 
 /// `clause`, an `update` after `keyword`, of `target`: of a tuple, its
@@ -206,9 +227,14 @@ fn update(
         Unchanged::Empty => errors::empty_update(&list, &statement),
         Unchanged::OwnValues => errors::own_values_updated(clause.span(), &statement),
     };
-    match (clause.where_keyword(), &target.variable.ty) {
+    match (clause.where_keyword(), target.assignee.ty) {
         (None, hir::Type::Tuple(_)) => {
-            match checker.assign_attributes(target.current(), &assigned, unchanged, errors)? {
+            match checker.assign_attributes(
+                target.assignee.current(),
+                &assigned,
+                unchanged,
+                errors,
+            )? {
                 hir::Expr::Extend(_, computed, values) => {
                     Some(Change::Attributes(computed, values))
                 }
@@ -219,7 +245,7 @@ fn update(
             let span = trendy_syntax::span(token.text_range());
             errors.push(errors::not_restrictable(
                 span,
-                &target.variable.ty,
+                target.assignee.ty,
                 target.written,
             ));
             None
@@ -227,7 +253,12 @@ fn update(
         (token, ty) => {
             let hir::Type::Relation(heading) = ty else {
                 // A scalar has no attributes to update.
-                checker.assign_attributes(target.current(), &assigned, unchanged, errors)?;
+                checker.assign_attributes(
+                    target.assignee.current(),
+                    &assigned,
+                    unchanged,
+                    errors,
+                )?;
                 return None;
             };
             let condition = match token {
@@ -236,7 +267,11 @@ fn update(
                 }
                 None => hir::Expr::Constant(hir::Value::Boolean(true)),
             };
-            let selected = restricted(target.current(), condition.clone(), checker.bindings());
+            let selected = restricted(
+                target.assignee.current(),
+                condition.clone(),
+                checker.bindings(),
+            );
             let replaced = checker.assign_attributes(selected, &assigned, unchanged, errors)?;
             Some(Change::Tuples(TupleChange {
                 removed: Some(Removal::Where(condition)),
@@ -258,12 +293,12 @@ fn shorthand(
     checker: &mut Checker,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<TupleChange> {
-    let hir::Type::Relation(heading) = &target.variable.ty else {
+    let hir::Type::Relation(heading) = target.assignee.ty else {
         let span = trendy_syntax::span(keyword.text_range());
         errors.push(errors::not_relational(
             keyword.text(),
             span,
-            &target.variable.ty,
+            target.assignee.ty,
             target.written,
         ));
         return None;
@@ -304,18 +339,19 @@ fn shorthand(
     })
 }
 
-/// The new value of the variable `target`, `variable`, from its changes,
-/// `list`, in source order, or `None` after reporting a change whose
-/// effect is known when compiling, or a conflict between two of them.
+/// The new value of the variable `assignee` from its changes, `list`, in
+/// source order, or `None` after reporting a change whose effect is known
+/// when compiling, or a conflict between two of them.
 fn merged(
-    target: hir::VariableId,
-    variable: &hir::Variable,
+    assignee: &Assignee,
     list: Vec<(&Clause, Change)>,
     within: hir::OperatorId,
     cx: &Context,
+    locals: &Locals,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Expr> {
-    if known_effects(target, &variable.name, &list, errors) {
+    let name = assignee.name;
+    if known_effects(&assignee.current(), name, &list, errors) {
         return None;
     }
     // A whole new value conflicts with any other change.
@@ -327,13 +363,10 @@ fn merged(
         let other = usize::from(i == 0);
         let (first, second) = (i.min(other), i.max(other));
         errors.push(errors::conflicting_changes(
-            &variable.name,
+            name,
             list[first].0.span(),
             list[second].0.span(),
-            &format!(
-                "`{} := …` gives `{}` a whole new value",
-                variable.name, variable.name
-            ),
+            &format!("`{name} := …` gives `{name}` a whole new value"),
         ));
         return None;
     }
@@ -342,16 +375,9 @@ fn merged(
     match first {
         Change::Value(value, written) => {
             if let hir::Expr::Constant(hir::Value::Relation(relation)) = &value {
-                let keys = keys::written(&cx.declarations[&variable.name], &variable.keys);
-                let mut names = BodyNames { cx, within };
-                if !keys::satisfied(
-                    &variable.name,
-                    &keys,
-                    relation,
-                    &written,
-                    &mut names,
-                    errors,
-                ) {
+                let keys = keys::written(assignee.declaration, assignee.keys);
+                let mut names = BodyNames { cx, within, locals };
+                if !keys::satisfied(name, &keys, relation, &written, &mut names, errors) {
                     return None;
                 }
             }
@@ -365,7 +391,7 @@ fn merged(
                 };
                 changes.push((clause, computed, values));
             }
-            attributes_merged(target, &variable.name, changes, cx.bindings(), errors)
+            attributes_merged(assignee.current(), name, changes, cx.bindings(), errors)
         }
         Change::Tuples(change) => {
             let mut changes = vec![(clause, change)];
@@ -375,18 +401,18 @@ fn merged(
                 };
                 changes.push((clause, change));
             }
-            tuples_merged(target, variable, changes, cx.bindings(), errors)
+            tuples_merged(&assignee.current(), name, changes, cx.bindings(), errors)
         }
     }
 }
 
-/// Whether a change in `list`, the changes to the variable `target`,
-/// `name`, has an effect known when compiling, on every tuple or none,
-/// after reporting each one: it is written as that effect. These are
-/// checked with the variable's other changes, on which their errors
-/// depend.
+/// Whether a change in `list`, the changes to the variable `name`, whose
+/// value before them is `current`, has an effect known when compiling, on
+/// every tuple or none, after reporting each one: it is written as that
+/// effect. These are checked with the variable's other changes, on which
+/// their errors depend.
 fn known_effects(
-    target: hir::VariableId,
+    current: &hir::Expr,
     name: &str,
     list: &[(&Clause, Change)],
     errors: &mut Vec<Diagnostic>,
@@ -394,15 +420,15 @@ fn known_effects(
     let alone = list.len() == 1;
     let found: Vec<Diagnostic> = list
         .iter()
-        .filter_map(|(clause, change)| known_effect(target, name, clause, change, alone))
+        .filter_map(|(clause, change)| known_effect(current, name, clause, change, alone))
         .collect();
     let any = !found.is_empty();
     errors.extend(found);
     any
 }
 
-/// The error for `clause`, `change` to the variable `target`, `name`, if
-/// its effect is known when compiling: a condition that is, which selects
+/// The error for `clause`, `change` to the variable `name`, whose value
+/// before it is `current`, if its effect is known when compiling: a condition that is, which selects
 /// every tuple or none, an `i_delete` of the variable itself, which deletes
 /// every tuple, or an insert of it into itself, which changes nothing.
 /// `alone` says whether it is the variable's one change. With others, the
@@ -410,7 +436,7 @@ fn known_effects(
 /// conflict with them, and an insert into itself adds back the tuples they
 /// remove, which changes something.
 fn known_effect(
-    target: hir::VariableId,
+    current: &hir::Expr,
     name: &str,
     clause: &Clause,
     change: &Change,
@@ -420,7 +446,7 @@ fn known_effect(
         return None;
     };
     let keyword = clause.keyword()?;
-    let itself = |tuples: &hir::Expr| *tuples == hir::Expr::Variable(target);
+    let itself = |tuples: &hir::Expr| tuples == current;
     match (removed, added) {
         (Some(Removal::Where(hir::Expr::Constant(hir::Value::Boolean(always)))), _) => {
             // An `update` without `where` is of every tuple, as it should be.
@@ -449,11 +475,11 @@ fn known_effect(
     }
 }
 
-/// A tuple variable's new value from its `update`s, each in a clause and
-/// giving attributes new values: one `replace` of them all, if no two give
-/// the same attribute one.
+/// The new value of the tuple variable `name`, whose value is `current`,
+/// from its `update`s, each in a clause and giving attributes new values:
+/// one `replace` of them all, if no two give the same attribute one.
 fn attributes_merged(
-    target: hir::VariableId,
+    current: hir::Expr,
     name: &str,
     changes: Vec<(&Clause, hir::Heading, BTreeMap<String, hir::Expr>)>,
     bindings: ops::Bindings,
@@ -482,28 +508,24 @@ fn attributes_merged(
     }
     let values = values.into_iter().map(|(a, (_, v))| (a, v)).collect();
     Some(
-        ops::extend(
-            hir::Expr::Variable(target),
-            hir::Heading::new(types),
-            values,
-            bindings,
-        )
-        .unwrap_or_else(|_| unreachable!("a variable's value is known only when running")),
+        ops::extend(current, hir::Heading::new(types), values, bindings)
+            .unwrap_or_else(|_| unreachable!("a variable's value is known only when running")),
     )
 }
 
-/// A relation variable's new value from the `changes` to its tuples: its
-/// old tuples less every tuple a change removes, and with every tuple one
-/// adds. Two changes that remove the same tuple conflict, which is reported
-/// now if it is known now, and else stops the program when it runs.
+/// The new value of the relation variable `name`, whose value is `old`,
+/// from the `changes` to its tuples: its old tuples less every tuple a
+/// change removes, and with every tuple one adds. Two changes that remove
+/// the same tuple conflict, which is reported now if it is known now, and
+/// else stops the program when it runs.
 fn tuples_merged(
-    target: hir::VariableId,
-    variable: &hir::Variable,
+    old: &hir::Expr,
+    name: &str,
     changes: Vec<(&Clause, TupleChange)>,
     bindings: ops::Bindings,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Expr> {
-    let current = || hir::Expr::Variable(target);
+    let current = || old.clone();
     let mut wheres = Vec::new();
     let mut included = Vec::new();
     let mut additions = Vec::new();
@@ -524,7 +546,7 @@ fn tuples_merged(
             // conflict found now is between two of those.
             if let Some((first, second, tuple)) = shared(&included) {
                 errors.push(errors::conflicting_tuple(
-                    &variable.name,
+                    name,
                     first.span(),
                     second.span(),
                     &tuple,
@@ -588,15 +610,17 @@ fn shared<'a>(
         })
 }
 
-/// The variable `target` names, which an assignment assigns, or `None`
-/// after reporting why it can't be assigned: it isn't a variable, or it is
-/// a parameter, which is read-only.
-fn assigned_variable(
+/// The variable `target` names, which an assignment assigns, of the
+/// program or among `locals`, or `None` after reporting why it can't be
+/// assigned: it isn't a variable, it is a parameter, which is read-only, or
+/// it is a local variable before its declaration.
+fn assigned<'a>(
     target: &ast::Expr,
     within: hir::OperatorId,
-    cx: &Context,
+    cx: &'a Context,
+    locals: &'a Locals,
     errors: &mut Vec<Diagnostic>,
-) -> Option<hir::VariableId> {
+) -> Option<Assignee<'a>> {
     let ast::Expr::Name(name) = target else {
         return None;
     };
@@ -607,14 +631,42 @@ fn assigned_variable(
         errors.push(errors::assigned_parameter(name, span, hidden));
         return None;
     }
+    match locals.find(name) {
+        Some(Local::Declared(id, local, declaration)) => {
+            return Some(Assignee {
+                target: hir::Target::Local(id),
+                name: &local.name,
+                ty: &local.ty,
+                keys: &local.keys,
+                declaration,
+            });
+        }
+        Some(Local::Later(decl)) => {
+            errors.push(errors::local_before_declaration(name, span, decl));
+            return None;
+        }
+        // Its declaration's errors are already reported.
+        Some(Local::Invalid) => return None,
+        None => {}
+    }
     if let Some(&id) = cx.variable_ids.get(name) {
         // A variable with errors in its declaration is already reported.
-        return cx.variables[id.0].is_some().then_some(id);
+        let variable = cx.variables[id.0].as_ref()?;
+        return Some(Assignee {
+            target: hir::Target::Variable(id),
+            name: &variable.name,
+            ty: &variable.ty,
+            keys: &variable.keys,
+            declaration: &cx.declarations[&variable.name],
+        });
     }
     if let Some((kind, _)) = cx.namespaces.operator(name) {
         errors.push(errors::assigned_operator(name, span, kind));
     } else {
-        let variables: Vec<&str> = cx.variable_ids.keys().map(String::as_str).collect();
+        let variables: Vec<&str> = locals
+            .names()
+            .chain(cx.variable_ids.keys().map(String::as_str))
+            .collect();
         errors.push(errors::unknown_name(name, span, "variable", &variables));
     }
     None

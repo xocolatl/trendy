@@ -34,6 +34,21 @@ var rooms := relation {
 key { room }
 key { guest };
 
+/* Local variables (RM Prescription 3): declared in an operator's body as
+   the program's are, and its own. One is in scope in all of the body, and
+   hides a variable of the program's with its name, as `x` does here, but
+   has a value only from its declaration on; no two of an operator's names,
+   its parameters' and local variables', are the same. Implemented, and
+   gone once the operator returns. */
+operator check_in{room: integer, guest: text} [
+    var greeting: text;
+    var x := relation { { room: room, guest: guest } } key { room } key { guest };
+    greeting := "karibu, " || guest;
+    rooms := rooms union x;
+    call debug_value{v: greeting};
+    call debug_value{v: x};
+];
+
 operator main{} [
     t := t || "kwaheri";
     call debug_value{v: t};
@@ -68,6 +83,11 @@ operator main{} [
         update rooms { guest := "Amara" } where room = 2;
     };
     call debug_value{v: rooms};
+
+    /* The program's `x` is unchanged by the local variable `x`. */
+    call check_in{room: 3, guest: "Wanjiru"};
+    call debug_value{v: rooms};
+    call debug_value{v: x};
 
     /* Two changes that touch the same tuple conflict, since neither
        order is the right one: this stops the program, writing

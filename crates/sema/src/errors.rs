@@ -6,7 +6,9 @@ use std::collections::BTreeSet;
 use trendy_diag::{Code, Diagnostic, Edit, Span, edit_distance};
 use trendy_hir as hir;
 use trendy_syntax::SyntaxToken;
-use trendy_syntax::ast::{AstNode, Expr, Key, NaryExpr, ProjectExpr, SourceFile, TypeExpr};
+use trendy_syntax::ast::{
+    AstNode, Expr, Key, NaryExpr, ProjectExpr, SourceFile, TypeExpr, VarDecl,
+};
 
 use crate::globals::Pending;
 use crate::operators::Signature;
@@ -70,6 +72,113 @@ pub(crate) fn duplicate_name(
     };
     d.with_note(note)
         .with_help("delete the duplicate definition, or rename one of them")
+}
+
+/// What a local variable's name must be.
+const LOCAL_NAMES: &str = "an operator's names, its parameters' and its local variables', each mean one thing in all of its body, so no two are the same; they hide the program's variables of their names";
+
+/// The local variable `name`, declared in the body of the operator `op` by
+/// `decl`, which `first` declares already.
+pub(crate) fn local_declared_again(
+    name: &str,
+    decl: &VarDecl,
+    first: &VarDecl,
+    op: &str,
+) -> Diagnostic {
+    let named = |decl: &VarDecl| decl.name().map_or_else(|| decl.span(), |n| n.span());
+    let d = Diagnostic::error(
+        Code::DuplicateName,
+        format!("`{name}` is declared again in `{op}`"),
+        named(decl),
+        "declared again here",
+    )
+    .with_secondary(named(first), format!("`{name}` is first declared here"))
+    .with_note(LOCAL_NAMES);
+    // `var total := total + 1;`, as Rust declares a variable again to give
+    // it a new value: the first one's assignment was meant.
+    match (
+        decl.name(),
+        decl.type_expr(),
+        decl.initializer(),
+        decl.keys().next(),
+    ) {
+        (Some(new), None, Some(_), None) => d.with_suggestion(
+            format!("assign the first one instead: `{name} := …;`"),
+            vec![Edit {
+                span: Span::new(decl.span().start, new.span().start),
+                replacement: String::new(),
+            }],
+        ),
+        _ => d.with_help(format!(
+            "give the second a name of its own, or assign the first: `{name} := …;`"
+        )),
+    }
+}
+
+/// A local variable `name`, declared at `span` in the body of the operator
+/// `op`, whose parameter written at `parameter` has its name.
+pub(crate) fn local_named_as_parameter(
+    name: &str,
+    span: Span,
+    parameter: Option<Span>,
+    op: &str,
+) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::DuplicateName,
+        format!("`{name}` is a parameter of `{op}` already"),
+        span,
+        "a local variable with a parameter's name",
+    );
+    let d = match parameter {
+        Some(parameter) => d.with_secondary(parameter, format!("the parameter `{name}`")),
+        None => d,
+    };
+    d.with_note(LOCAL_NAMES).with_help(format!(
+        "a parameter keeps its value while `{op}` runs, so a value computed from it needs a name of its own, as in `var new_{name} := …;`"
+    ))
+}
+
+/// A local variable `name`, used at `span`, before `decl` declares it.
+pub(crate) fn local_before_declaration(name: &str, span: Span, decl: &VarDecl) -> Diagnostic {
+    let declared = decl.span();
+    let named = decl.name().map_or(declared, |n| n.span());
+    // `var n := n + 1;`, as Rust declares a variable from one it hides.
+    let own = declared.start <= span.start && span.end <= declared.end;
+    let (label, help) = if own {
+        (
+            "declared here, with a value computed from it",
+            format!(
+                "to compute it from a variable of the program named `{name}`, give the local variable a name of its own"
+            ),
+        )
+    } else {
+        (
+            "declared here, after it is used",
+            format!("declare `{name}` before it is used, or give it a name of its own"),
+        )
+    };
+    Diagnostic::error(
+        Code::LocalBeforeDeclaration,
+        format!("local variable `{name}` is used before its declaration"),
+        span,
+        "used here",
+    )
+    .with_secondary(named, label)
+    .with_note("a local variable is in scope in all of its operator's body, so that its name means one thing there, hiding any variable of the program's, but it has a value only once its declaration gives it one")
+    .with_help(help)
+}
+
+/// A variable `name`, of type `ty`, written `type_expr`, which has a type
+/// parameter in it, without an initial value.
+pub(crate) fn no_default_value(name: &str, ty: &hir::Type, type_expr: &TypeExpr) -> Diagnostic {
+    Diagnostic::error(
+        Code::UntypedVariable,
+        format!("variable `{name}`, of type `{ty}`, has no initial value"),
+        type_expr.span(),
+        "a type without a default",
+    )
+    .with_note("without a value, a variable starts at its type's default, but each call gives a type parameter its type, so a type with one in it has no default")
+    .with_help(format!("give it a value: `var {name}: {ty} := …;`"))
 }
 
 pub(crate) fn missing_main(file: &SourceFile, namespaces: &Namespaces) -> Diagnostic {
@@ -1297,7 +1406,7 @@ pub(crate) fn assigned_parameter(name: &str, span: Span, hidden: bool) -> Diagno
         ))
     } else {
         d.with_help(format!(
-            "to keep a changed value, declare a variable for it, and assign that: `var new_{name} := {name};` at the top level"
+            "to keep a changed value, declare a local variable for it, and assign that: `var new_{name} := {name};`"
         ))
     }
 }
@@ -3017,23 +3126,31 @@ pub(crate) fn return_in_update(name: &str, stmt: &trendy_syntax::ast::ReturnStmt
 /// `stmt`, a statement other than `return` in the read-only operator
 /// `name`: a call, or an assignment, which would change something.
 pub(crate) fn read_only_effect(name: &str, stmt: &trendy_syntax::ast::Statement) -> Diagnostic {
-    let (message, label) = match stmt {
+    let change = format!(
+        "to change something, make `{name}` an update operator, without a result type, invoked by `call`"
+    );
+    let (message, label, help) = match stmt {
         trendy_syntax::ast::Statement::Call(_) => (
             "a read-only operator can't call an operator",
             format!("a `call` in `{name}`"),
+            change,
+        ),
+        trendy_syntax::ast::Statement::Var(_) => (
+            "a read-only operator can't declare a variable",
+            format!("a `var` in `{name}`"),
+            "compute the value in the `return`".to_string(),
         ),
         _ => (
             "a read-only operator can't assign a variable",
             format!("an assignment in `{name}`"),
+            change,
         ),
     };
     Diagnostic::error(Code::ReadOnlyEffect, message, stmt.span(), label)
         .with_note(
             "a read-only operator changes nothing (TTM RM Prescription 3): its body is one `return`, of a value computed from its parameters and the variables it reads",
         )
-        .with_help(format!(
-            "to change something, make `{name}` an update operator, without a result type, invoked by `call`"
-        ))
+        .with_help(help)
 }
 
 /// The read-only operator `name`, whose `body` has no `return`, and whose

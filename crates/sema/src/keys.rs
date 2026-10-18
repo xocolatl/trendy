@@ -12,14 +12,15 @@ use crate::types::{self, Expected, Origin};
 use crate::{errors, ops};
 
 /// The keys of the variable `decl`, named `name`, of type `ty`, whose
-/// initial value is `init`: those written, or the whole heading when none
-/// is, and none for a variable that isn't a relation. `None` after
-/// reporting a key that isn't valid, or that `init` doesn't satisfy.
+/// initial value is `init`, if it is known when compiling: those written,
+/// or the whole heading when none is, and none for a variable that isn't a
+/// relation. `None` after reporting a key that isn't valid, or that `init`
+/// doesn't satisfy.
 pub(crate) fn keys(
     decl: &VarDecl,
     name: &str,
     ty: &hir::Type,
-    init: &hir::Value,
+    init: Option<&hir::Value>,
     scope: &mut dyn Names,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<Vec<hir::Key>> {
@@ -77,10 +78,11 @@ pub(crate) fn keys(
         }
     }
 
-    let hir::Value::Relation(relation) = init else {
-        unreachable!("a relation variable's value is a relation");
-    };
-    if let Some(value) = decl.initializer() {
+    let relation = init.map(|init| match init {
+        hir::Value::Relation(relation) => relation,
+        _ => unreachable!("a relation variable's value is a relation"),
+    });
+    if let (Some(relation), Some(value)) = (relation, decl.initializer()) {
         let irreducible: Vec<(Key, BTreeSet<String>)> = irreducible
             .into_iter()
             .map(|(key, attributes)| (key.clone(), attributes.clone()))

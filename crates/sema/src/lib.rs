@@ -63,7 +63,8 @@ pub(crate) struct Checked {
     namespaces: Namespaces,
     operators: Operators,
     evaluated: globals::Evaluated,
-    bodies: HashMap<hir::OperatorId, Vec<hir::Statement>>,
+    /// Each valid update operator's local variables and statements.
+    bodies: HashMap<hir::OperatorId, (Vec<hir::Local>, Vec<hir::Statement>)>,
 }
 
 /// Check `file`, as `source` says, with `prelude`'s operators in scope.
@@ -137,12 +138,13 @@ impl Checked {
                         result: result.clone(),
                         value: self.evaluated.values[&signature.id].clone(),
                     },
-                    (None, None) => hir::OperatorKind::Update {
-                        body: self
+                    (None, None) => {
+                        let (locals, body) = self
                             .bodies
                             .remove(&signature.id)
-                            .expect("every update operator without errors has a body"),
-                    },
+                            .expect("every update operator without errors has a body");
+                        hir::OperatorKind::Update { locals, body }
+                    }
                 };
                 hir::Operator {
                     name: signature.name.clone(),
@@ -1620,13 +1622,13 @@ mod tests {
             .iter()
             .find(|o| o.name == "greet")
             .unwrap();
-        let hir::OperatorKind::Update { body } = &greet.kind else {
+        let hir::OperatorKind::Update { body, .. } = &greet.kind else {
             panic!("greet is a user operator");
         };
         // Inside `greet`, `r` is the parameter, which hides the variable.
         assert_eq!(*argument(&body[1]), hir::Expr::Parameter("r".to_string()));
         let main = program.operator(program.entry);
-        let hir::OperatorKind::Update { body } = &main.kind else {
+        let hir::OperatorKind::Update { body, .. } = &main.kind else {
             panic!("main is a user operator");
         };
         assert_eq!(*argument(&body[0]), hir::Expr::Variable(hir::VariableId(0)));
@@ -1749,7 +1751,7 @@ mod tests {
         let body = |source: &str| {
             let program = analyze_str(source).unwrap();
             let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-            let hir::OperatorKind::Update { body } = &f.kind else {
+            let hir::OperatorKind::Update { body, .. } = &f.kind else {
                 panic!("f is a user operator");
             };
             body.clone()
@@ -1901,7 +1903,7 @@ mod tests {
 
     fn main_body(source: &str) -> Vec<hir::Statement> {
         let program = analyze_str(source).unwrap();
-        let hir::OperatorKind::Update { body } = &program.operator(program.entry).kind else {
+        let hir::OperatorKind::Update { body, .. } = &program.operator(program.entry).kind else {
             panic!("main is a user operator");
         };
         body.clone()
@@ -1946,7 +1948,7 @@ mod tests {
             let body = |e: &str| {
                 let program = analyze_str(&source(e)).unwrap();
                 let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-                let hir::OperatorKind::Update { body } = &f.kind else {
+                let hir::OperatorKind::Update { body, .. } = &f.kind else {
                     panic!("f is a user operator");
                 };
                 argument(&body[0]).clone()
@@ -2153,7 +2155,7 @@ mod tests {
             let body = |e: &str| {
                 let program = analyze_str(&source(e)).unwrap();
                 let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-                let hir::OperatorKind::Update { body } = &f.kind else {
+                let hir::OperatorKind::Update { body, .. } = &f.kind else {
                     panic!("f is a user operator");
                 };
                 argument(&body[0]).clone()
@@ -2166,7 +2168,7 @@ mod tests {
         )
         .unwrap();
         let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-        let hir::OperatorKind::Update { body } = &f.kind else {
+        let hir::OperatorKind::Update { body, .. } = &f.kind else {
             panic!("f is a user operator");
         };
         assert_eq!(
@@ -2245,7 +2247,7 @@ mod tests {
             let body = |e: &str| {
                 let program = analyze_str(&source(e)).unwrap();
                 let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-                let hir::OperatorKind::Update { body } = &f.kind else {
+                let hir::OperatorKind::Update { body, .. } = &f.kind else {
                     panic!("f is a user operator");
                 };
                 argument(&body[0]).clone()
@@ -2491,7 +2493,7 @@ mod tests {
             ))
             .unwrap();
             let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-            let hir::OperatorKind::Update { body } = &f.kind else {
+            let hir::OperatorKind::Update { body, .. } = &f.kind else {
                 panic!("f is a user operator");
             };
             argument(&body[0]).clone()
@@ -3124,7 +3126,7 @@ mod tests {
         )
         .unwrap();
         let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-        let hir::OperatorKind::Update { body } = &f.kind else {
+        let hir::OperatorKind::Update { body, .. } = &f.kind else {
             panic!("f is a user operator");
         };
         // An extend of the kept attributes, each with its image in `r`.
@@ -3220,7 +3222,7 @@ mod tests {
         )
         .unwrap();
         let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-        let hir::OperatorKind::Update { body } = &f.kind else {
+        let hir::OperatorKind::Update { body, .. } = &f.kind else {
             panic!("f is a user operator");
         };
         let heading =
@@ -3576,7 +3578,7 @@ mod tests {
         )
         .unwrap();
         let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-        let hir::OperatorKind::Update { body } = &f.kind else {
+        let hir::OperatorKind::Update { body, .. } = &f.kind else {
             panic!("f is a user operator");
         };
         assert!(matches!(argument(&body[0]), hir::Expr::Restrict(..)));
@@ -3681,7 +3683,7 @@ mod tests {
         )
         .unwrap();
         let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-        let hir::OperatorKind::Update { body } = &f.kind else {
+        let hir::OperatorKind::Update { body, .. } = &f.kind else {
             panic!("f is a user operator");
         };
         let cities = || Box::new(hir::Expr::Variable(hir::VariableId(0)));
@@ -3705,7 +3707,7 @@ mod tests {
         )
         .unwrap();
         let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-        let hir::OperatorKind::Update { body } = &f.kind else {
+        let hir::OperatorKind::Update { body, .. } = &f.kind else {
             panic!("f is a user operator");
         };
         let hir::Expr::And(constant, parameter) = argument(&body[0]) else {
@@ -3778,7 +3780,7 @@ mod tests {
             let body = |e: &str| {
                 let program = analyze_str(&source(e)).unwrap();
                 let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-                let hir::OperatorKind::Update { body } = &f.kind else {
+                let hir::OperatorKind::Update { body, .. } = &f.kind else {
                     panic!("f is a user operator");
                 };
                 argument(&body[0]).clone()
@@ -3820,7 +3822,7 @@ mod tests {
             let body = |e: &str| {
                 let program = analyze_str(&source(e)).unwrap();
                 let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-                let hir::OperatorKind::Update { body } = &f.kind else {
+                let hir::OperatorKind::Update { body, .. } = &f.kind else {
                     panic!("f is a user operator");
                 };
                 argument(&body[0]).clone()
@@ -3934,7 +3936,7 @@ mod tests {
                 },
             )))
         };
-        let target = hir::VariableId(0);
+        let target = hir::Target::Variable(hir::VariableId(0));
         assert_eq!(
             assigned(r#"insert poets relation { { name: "Rumi", born: 1 } };"#),
             [(
@@ -3985,7 +3987,7 @@ mod tests {
         else {
             panic!("an extension");
         };
-        assert_eq!(*target, hir::VariableId(1));
+        assert_eq!(*target, hir::Target::Variable(hir::VariableId(1)));
         assert_eq!(**operand, hir::Expr::Variable(hir::VariableId(1)));
     }
 
@@ -5009,5 +5011,135 @@ mod tests {
                 .any(|n| n.starts_with("`T` is whatever type each call gives it")),
             "{literal:#?}"
         );
+    }
+
+    /// The local variables and statements of the update operator `name`.
+    fn update_body<'p>(
+        program: &'p hir::Program,
+        name: &str,
+    ) -> (&'p [hir::Local], &'p [hir::Statement]) {
+        let op = program.operators.iter().find(|o| o.name == name).unwrap();
+        let hir::OperatorKind::Update { locals, body } = &op.kind else {
+            panic!("{name} is an update operator");
+        };
+        (locals, body)
+    }
+
+    #[test]
+    fn local_variables_are_their_operators_own() {
+        let program = analyze_str(
+            "var x := 1;\noperator f{n: integer} [\n    var x := n * 2;\n    var seen: relation { v: integer } key { v };\n    insert seen relation { { v: x } };\n    call debug_value{v: seen};\n];\noperator main{} [ call f{n: x}; ];",
+        )
+        .unwrap();
+        let (locals, body) = update_body(&program, "f");
+        let declared: Vec<(&str, String)> = locals
+            .iter()
+            .map(|l| (l.name.as_str(), l.ty.to_string()))
+            .collect();
+        assert_eq!(
+            declared,
+            [
+                ("x", "integer".to_string()),
+                ("seen", "relation { v: integer }".to_string())
+            ]
+        );
+        assert_eq!(locals[1].keys, [["v".to_string()].into()]);
+        // A declaration assigns the initial value, or the type's default.
+        let targets: Vec<Vec<hir::Target>> = body
+            .iter()
+            .filter_map(|s| match s {
+                hir::Statement::Assign(a) => Some(a.iter().map(|a| a.target).collect()),
+                hir::Statement::Call(_) => None,
+            })
+            .collect();
+        let local = |i| vec![hir::Target::Local(hir::LocalId(i))];
+        assert_eq!(targets, [local(0), local(1), local(1)]);
+        let hir::Statement::Assign(declared) = &body[1] else {
+            panic!("a declaration");
+        };
+        assert_eq!(
+            declared[0].value,
+            hir::Expr::Constant(hir::Value::Relation(hir::RelationValue {
+                heading: hir::Heading::new(
+                    [("v".to_string(), hir::Type::Scalar(hir::Scalar::Integer))].into()
+                ),
+                tuples: std::collections::BTreeSet::new(),
+            }))
+        );
+        // `x` is the local variable in `f`, hiding the program's.
+        let hir::Statement::Call(call) = &body[3] else {
+            panic!("a call");
+        };
+        assert_eq!(call.args["v"], hir::Expr::Local(hir::LocalId(1)));
+        let (_, main) = update_body(&program, "main");
+        let hir::Statement::Call(call) = &main[0] else {
+            panic!("a call");
+        };
+        assert_eq!(call.args["n"], hir::Expr::Variable(hir::VariableId(0)));
+    }
+
+    #[test]
+    fn a_local_variable_has_a_name_of_its_own() {
+        let errors_in = |body: &str| {
+            errors(&format!(
+                "var total := 0;\noperator f{{p: integer}} [ {body} ];{MAIN}"
+            ))
+        };
+        let parameter = errors_in("var p := 1;");
+        assert_eq!(parameter[0].code, Code::DuplicateName);
+        assert_eq!(parameter[0].message, "`p` is a parameter of `f` already");
+        // Declared again, as Rust gives a variable a new value: assigned.
+        let source = format!(
+            "operator f{{}} [ var n := 1; var n := n + 1; call debug_value{{v: n}}; ];{MAIN}"
+        );
+        let again = errors(&source);
+        assert_eq!(again[0].message, "`n` is declared again in `f`");
+        let fixed = fix(&source);
+        assert_eq!(
+            fixed,
+            format!("operator f{{}} [ var n := 1; n := n + 1; call debug_value{{v: n}}; ];{MAIN}")
+        );
+        assert!(analyze_str(&fixed).is_ok(), "{fixed}");
+        // In scope in all of the body, but with a value from its declaration.
+        let before = errors_in("total := total + 1; var total := 5;");
+        assert_eq!(before[0].code, Code::LocalBeforeDeclaration);
+        assert_eq!(
+            before[0].message,
+            "local variable `total` is used before its declaration"
+        );
+        let own = errors(&format!(
+            "var n := 1;\noperator f{{}} [ var n := n + 1; ];{MAIN}"
+        ));
+        assert_eq!(own[0].code, Code::LocalBeforeDeclaration);
+        assert!(
+            own[0].help[0].contains("give the local variable a name of its own"),
+            "{own:#?}"
+        );
+        // A type parameter's type has no default.
+        let generic = errors(&format!(
+            "operator f{{v: T}} types {{ T: any type }} [ var w: T; ];{MAIN}"
+        ));
+        assert_eq!(generic[0].code, Code::UntypedVariable);
+        assert_eq!(
+            generic[0].message,
+            "variable `w`, of type `T`, has no initial value"
+        );
+        // Not yet in a read-only operator.
+        let read_only = errors(&format!(
+            "operator f{{}}: integer [ var k := 1; return k; ];{MAIN}"
+        ));
+        assert_eq!(read_only[0].code, Code::ReadOnlyEffect);
+        assert_eq!(
+            read_only[0].message,
+            "a read-only operator can't declare a variable"
+        );
+    }
+
+    #[test]
+    fn a_local_relation_is_checked_against_its_keys_when_known() {
+        let source = format!(
+            "operator f{{}} [ var r := relation {{ {{ k: 1, v: 1 }}, {{ k: 1, v: 2 }} }} key {{ k }}; ];{MAIN}"
+        );
+        assert_eq!(codes(&source), [Code::KeyViolated]);
     }
 }

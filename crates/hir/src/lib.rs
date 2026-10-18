@@ -30,19 +30,22 @@ impl Program {
     }
 
     /// The type of `expr`, inside an operator with the parameters
-    /// `params`: one of the program's, or one instantiated from it.
+    /// `params` and the local variables `locals`: one of the program's, or
+    /// one instantiated from it.
     ///
     /// # Panics
     ///
-    /// If `expr` names a parameter that isn't in `params`, or calls an
-    /// update operator, which sema never produces.
+    /// If `expr` names a parameter that isn't in `params`, or a local
+    /// variable that isn't in `locals`, or calls an update operator, which
+    /// sema never produces.
     #[must_use]
-    pub fn type_of(&self, expr: &Expr, params: &BTreeMap<String, Type>) -> Type {
+    pub fn type_of(&self, expr: &Expr, params: &BTreeMap<String, Type>, locals: &[Local]) -> Type {
         expr.type_with(&|leaf| match leaf {
             Expr::Variable(id) => self.variable(*id).ty.clone(),
             Expr::Parameter(name) => params[name].clone(),
+            Expr::Local(id) => locals[id.0].ty.clone(),
             Expr::Call(call) => self.result(call),
-            _ => unreachable!("only variables, parameters and calls are leaves"),
+            _ => unreachable!("only variables, parameters, locals and calls are leaves"),
         })
     }
 
@@ -72,6 +75,35 @@ pub struct OperatorId(pub usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VariableId(pub usize);
 
+/// Index into an update operator's local variables
+/// ([`OperatorKind::Update`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LocalId(pub usize);
+
+/// A local variable of an update operator, purely local to it (TTM RM
+/// Prescription 3): in scope in its whole body, and assigned its initial
+/// value where it is declared, which is before any use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Local {
+    /// Unique among the operator's parameters and local variables.
+    pub name: String,
+    pub ty: Type,
+    /// A relation's keys, as a variable's ([`Variable::keys`]).
+    pub keys: Vec<Key>,
+}
+
+impl Local {
+    /// The local variable, in an operator instantiated with `types`.
+    #[must_use]
+    pub fn instantiated(&self, types: &[Type]) -> Local {
+        Local {
+            name: self.name.clone(),
+            ty: self.ty.instantiated(types),
+            keys: self.keys.clone(),
+        }
+    }
+}
+
 /// An operator: an update operator, which returns nothing and is invoked
 /// by `call`, or a read-only operator, whose call is a value (TTM RM
 /// Prescription 3).
@@ -99,7 +131,8 @@ impl Operator {
     #[must_use]
     pub fn instantiated(&self, types: &[Type]) -> Operator {
         let kind = match &self.kind {
-            OperatorKind::Update { body } => OperatorKind::Update {
+            OperatorKind::Update { locals, body } => OperatorKind::Update {
+                locals: locals.iter().map(|l| l.instantiated(types)).collect(),
                 body: body.iter().map(|s| s.instantiated(types)).collect(),
             },
             OperatorKind::ReadOnly { result, value } => OperatorKind::ReadOnly {
@@ -210,8 +243,12 @@ impl std::fmt::Display for TypeParameter {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OperatorKind {
-    /// An update operator defined in the program, with its statements.
-    Update { body: Vec<Statement> },
+    /// An update operator defined in the program, with its local variables
+    /// and its statements.
+    Update {
+        locals: Vec<Local>,
+        body: Vec<Statement>,
+    },
     /// A read-only operator defined in the program: its value, of type
     /// `result`, computed from its parameters. It changes nothing, and
     /// calls no operator but read-only ones, none of which calls itself.
@@ -515,7 +552,8 @@ pub enum Statement {
     /// `call name{arguments};`.
     Call(Call),
     /// Assignments made at once (TTM RM Prescription 21), each to a
-    /// different variable, the shorthands, such as `insert`, expanded, and
+    /// different variable, or local variable, which a declaration assigns
+    /// its initial value, the shorthands, such as `insert`, expanded, and
     /// an `assign` block's changes to one variable merged. Every value is
     /// computed from the variables as they were before any changes, and
     /// the variables' keys are checked once all the values are, before any
@@ -545,8 +583,16 @@ impl Statement {
 /// `target := value`, in an assignment statement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Assignment {
-    pub target: VariableId,
+    pub target: Target,
     pub value: Expr,
+}
+
+/// What an assignment assigns: a variable of the program, or a local
+/// variable of the operator it is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Target {
+    Variable(VariableId),
+    Local(LocalId),
 }
 
 /// An expression whose value is known only when the program runs. Parts
@@ -558,6 +604,8 @@ pub enum Expr {
     Variable(VariableId),
     /// A parameter of the operator the expression is in.
     Parameter(String),
+    /// A local variable of the update operator the expression is in.
+    Local(LocalId),
     /// A monadic operator: `not x` or `-x`.
     Unary(UnaryOp, Box<Expr>),
     /// A dyadic operator, such as `x and y` or `x + y`.
@@ -651,7 +699,7 @@ impl Expr {
     pub fn type_with(&self, leaf: &dyn Fn(&Expr) -> Type) -> Type {
         match self {
             Expr::Constant(value) => value.ty(),
-            Expr::Variable(_) | Expr::Parameter(_) | Expr::Call(_) => leaf(self),
+            Expr::Variable(_) | Expr::Parameter(_) | Expr::Local(_) | Expr::Call(_) => leaf(self),
             // Arithmetic on a type parameter's values has their type.
             Expr::Unary(op, operand) => op
                 .operand()
@@ -709,7 +757,7 @@ impl Expr {
         };
         match self {
             Expr::Constant(value) => Expr::Constant(value.instantiated(types)),
-            Expr::Variable(_) | Expr::Parameter(_) => self.clone(),
+            Expr::Variable(_) | Expr::Parameter(_) | Expr::Local(_) => self.clone(),
             Expr::Unary(op, operand) => Expr::Unary(op.instantiated(types), inst(operand)),
             Expr::Binary(op, lhs, rhs) => {
                 Expr::Binary(op.instantiated(types), inst(lhs), inst(rhs))

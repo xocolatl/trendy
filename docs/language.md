@@ -63,9 +63,10 @@ operator main{} [
 
 ### Names
 
-Inside an operator, a name refers to one of its parameters, or else to a
-variable of the program: parameters hide variables with the same name. An
-operator is not a value: its name follows `call`, or, for a read-only
+Inside an operator, a name refers to one of its parameters, or one of its
+local variables, or else to a variable of the program: an operator's own
+names hide the program's variables with the same name (see [Local
+variables](#local-variables)). An operator is not a value: its name follows `call`, or, for a read-only
 operator, comes right before its arguments in an expression, `f{x: 1}`.
 
 ```trendy
@@ -827,6 +828,70 @@ operator main{} [];
 
 ```trendy,error
 var count: integer = 0;
+
+operator main{} [];
+```
+
+### Local variables
+
+An update operator's body can declare variables of its own, written as
+the program's are, which its statements use and assign as they do the
+program's. They are purely local to the operator, as TTM allows (RM
+Prescription 3), and gone once it returns.
+
+```trendy
+var visits := relation { city: text, guests: integer } {};
+
+operator welcome{city: text, guests: integer} [
+    var greeting: text;
+    var arrival := relation { { city: city, guests: guests } } key { city };
+    greeting := "karibu, " || city;
+    visits := visits union arrival;
+    call debug_value{v: greeting};
+];
+
+operator main{} [
+    call welcome{city: "Mombasa", guests: 3};
+    call welcome{city: "Kisumu", guests: 2};
+    call debug_value{v: visits};
+];
+```
+
+- **A local variable starts with its initial value,** or its type's
+  default, as the program's do; but its value is computed when its
+  declaration runs, from the parameters and variables then. A type with a
+  type parameter in it has no default, so a local variable of one needs
+  an initial value (A0006). A relation's keys are checked whenever it is
+  assigned (R0008), and when compiling if the value is known then.
+- **It is in scope in all of the body,** so that its name means one thing
+  there, and it hides a variable of the program's with its name before
+  its declaration as well as after. But it has a value only from its
+  declaration on, so a use before it is an error (A0045): as in Rust, a
+  local variable can't be declared from a program's variable of its name,
+  `var n := n + 1;`.
+- **No two of an operator's names are the same** (A0001): a local
+  variable can't have a parameter's name, or another local variable's. A
+  second declaration of one, as Rust gives a variable a new value, is
+  fixed to an assignment of the first.
+- **Only update operators have them, so far:** a read-only operator's body
+  is one `return` (A0034).
+
+```trendy,error
+var total := 0;
+
+operator tally{n: integer} [
+    total := total + n;
+    var total := n * 2;
+];
+
+operator main{} [];
+```
+
+```trendy,error
+operator scale{n: integer} [
+    var n := n * 2;
+    call debug_value{v: n};
+];
 
 operator main{} [];
 ```
@@ -2448,7 +2513,8 @@ line after a comment on its own line, such as a file's header, is kept.
 | `RETURN x` | `return x;` |
 | `print(x)`, `f(x)` | `call debug_value{v: x};` |
 | `f(x)` in an expression | `f{x: x}`, every argument named |
-| `let`, `const`, `int x` | `var x` |
+| `let`, `const`, `int x` | `var x`, at the top level or in an operator's body |
+| `let x = x + 1;`, declaring a variable again | `x := x + 1;`, assigning it |
 | `x = 0` | `x := 0` |
 | `INSERT R …`, `INSERT INTO r …` | `insert r …;` |
 | `DELETE R WHERE P`, `DELETE FROM r WHERE p` | `delete r where p;` |

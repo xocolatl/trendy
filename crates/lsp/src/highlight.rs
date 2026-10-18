@@ -324,6 +324,25 @@ mod tests {
     }
 
     #[test]
+    fn local_variables() {
+        assert_eq!(
+            highlight("operator f{} [ var n: integer := 1; n := n + 1; ];"),
+            [
+                ("operator", Class::Keyword, false),
+                ("f", Class::Operator, true),
+                ("var", Class::Keyword, false),
+                ("n", Class::Variable, true),
+                ("integer", Class::Type, false),
+                ("1", Class::Number, false),
+                ("n", Class::Variable, false),
+                ("n", Class::Variable, false),
+                ("+", Class::ExprOperator, false),
+                ("1", Class::Number, false),
+            ]
+        );
+    }
+
+    #[test]
     fn assignment_statements() {
         assert_eq!(
             highlight("operator f{p: integer} [ n := p; update r { a := b } where c; ];"),

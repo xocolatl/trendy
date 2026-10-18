@@ -81,6 +81,11 @@ fn variables() {
             // Swapped, and two guests swapped between rooms.
             "tuple { x: 2, y: 1 }",
             r#"relation { guest: text, room: integer } { { guest: "Amara", room: 2 }, { guest: "Kenji", room: 1 } }"#,
+            // A check-in, with local variables, one of them hiding `x`.
+            r#""karibu, Wanjiru""#,
+            r#"relation { guest: text, room: integer } { { guest: "Wanjiru", room: 3 } }"#,
+            r#"relation { guest: text, room: integer } { { guest: "Amara", room: 2 }, { guest: "Kenji", room: 1 }, { guest: "Wanjiru", room: 3 } }"#,
+            "2",
             "relation { born: integer, name: text } {}",
         ]
     );

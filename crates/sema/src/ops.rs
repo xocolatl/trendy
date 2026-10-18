@@ -1425,7 +1425,8 @@ fn shifted(expr: hir::Expr, cutoff: usize) -> hir::Expr {
         hir::Expr::Current(..)
         | hir::Expr::Constant(_)
         | hir::Expr::Variable(_)
-        | hir::Expr::Parameter(_) => expr,
+        | hir::Expr::Parameter(_)
+        | hir::Expr::Local(_) => expr,
         hir::Expr::Call(call) => hir::Expr::Call(hir::Call {
             args: call
                 .args
@@ -1479,7 +1480,10 @@ pub(crate) fn uses_tuple(expr: &hir::Expr, depth: usize) -> bool {
     let uses = |e: &hir::Expr| uses_tuple(e, depth);
     match expr {
         hir::Expr::Current(d, _) => *d == depth,
-        hir::Expr::Constant(_) | hir::Expr::Variable(_) | hir::Expr::Parameter(_) => false,
+        hir::Expr::Constant(_)
+        | hir::Expr::Variable(_)
+        | hir::Expr::Parameter(_)
+        | hir::Expr::Local(_) => false,
         hir::Expr::Call(call) => call.args.values().any(uses),
         hir::Expr::Unary(_, operand)
         | hir::Expr::Extract(operand, _)
@@ -1728,7 +1732,11 @@ fn substitute(
             Some(value) => hir::Expr::Constant(value),
             None => expr,
         },
-        hir::Expr::Current(..) | hir::Expr::Constant(_) | hir::Expr::Parameter(_) => expr,
+        // A local variable's value is known only when running.
+        hir::Expr::Current(..)
+        | hir::Expr::Constant(_)
+        | hir::Expr::Parameter(_)
+        | hir::Expr::Local(_) => expr,
         hir::Expr::Call(called) => {
             let args = called
                 .args
@@ -1952,6 +1960,7 @@ fn can_fail(expr: &hir::Expr) -> bool {
         hir::Expr::Constant(_)
         | hir::Expr::Variable(_)
         | hir::Expr::Parameter(_)
+        | hir::Expr::Local(_)
         | hir::Expr::Current(..) => false,
         // Negating the smallest integer overflows, and building a relation,
         // removing, renaming or adding attributes, joining or ungrouping it,
