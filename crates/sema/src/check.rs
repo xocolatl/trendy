@@ -1269,11 +1269,44 @@ impl<'a> Checker<'a> {
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Expr> {
         let joining = ops::Joining::of(expr)?;
-        // Every operand is checked, so that each one's errors are reported.
-        let operands: Vec<Option<hir::Expr>> = joining
+        // Every operand is checked on its own, so that each one's errors are
+        // reported, and operands of different headings are, together. Of
+        // operands of one heading, one whose own can't be known, as an empty
+        // relation's, is checked again with another's, or else the result's
+        // (see [`types::Alone`]); of others, it is unknown.
+        let alone: Vec<types::Alone<hir::Expr>> = joining
             .operands
             .iter()
-            .map(|operand| self.expr(operand, None, errors))
+            .map(|operand| {
+                let mut own_errors = Vec::new();
+                let out = self.expr(operand, None, &mut own_errors);
+                types::Alone::of(out, own_errors, operand.span())
+            })
+            .collect();
+        let given = alone
+            .iter()
+            .zip(&joining.operands)
+            .find_map(|(alone, operand)| match alone {
+                types::Alone::Valid(out) => Some(Expected {
+                    ty: self.ty(out),
+                    origin: types::Origin::Value(operand.clone()),
+                }),
+                _ => None,
+            })
+            .or_else(|| {
+                expected
+                    .filter(|e| matches!(e.ty, hir::Type::Relation(_)))
+                    .cloned()
+            })
+            .filter(|_| joining.kind.one_heading());
+        let operands: Vec<Option<hir::Expr>> = alone
+            .into_iter()
+            .zip(&joining.operands)
+            .map(|(alone, operand)| {
+                alone.finish(given.is_some(), operand.span(), errors, |errors| {
+                    self.expr(operand, given.as_ref(), errors)
+                })
+            })
             .collect();
         let operands: Vec<hir::Expr> = operands.into_iter().collect::<Option<_>>()?;
         let types: Vec<hir::Type> = operands.iter().map(|o| self.ty(o)).collect();

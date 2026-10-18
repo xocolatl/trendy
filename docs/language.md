@@ -1042,8 +1042,11 @@ operator main{} [];
 
 - **The heading comes from context.** It's taken from the selector's own
   heading, from the type expected of the value (such as the variable's
-  declared type), or from the first tuple, in that order. So an empty
-  relation needs one of the first two.
+  declared type), or from a tuple whose type is known on its own, in that
+  order. So an empty relation needs one of the first two. Which tuple
+  gives it doesn't depend on their order, which they don't have: in
+  `relation { { r: relation {} }, { r: relation { { b: 1 } } } }`, the
+  empty relation takes its heading from the second tuple's.
 - **The default is the empty relation.** A relation variable declared without
   a value starts with no tuples.
 - **No duplicates.** A relation is a set, so listing the same tuple twice is
@@ -2190,7 +2193,8 @@ operator main{} [];
 `r union s` is the tuples of either relation, `r intersect s` the tuples
 of both, `r minus s` the tuples of `r` that aren't in `s`, and
 `r xunion s` the tuples of exactly one, as `xor` is of booleans. The
-relations must have the same heading. They are Tutorial D's `UNION`,
+relations must have the same heading, so an empty `relation {}` takes the
+other's, whichever side it is on. They are Tutorial D's `UNION`,
 `INTERSECT` and `MINUS`, and SQL's `UNION`, `INTERSECT` and `EXCEPT`.
 
 ```trendy

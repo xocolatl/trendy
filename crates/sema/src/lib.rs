@@ -1281,6 +1281,68 @@ mod tests {
     }
 
     #[test]
+    fn any_tuple_gives_a_relation_selector_its_heading() {
+        // The tuples have no order, so the one with an empty relation in it
+        // takes its heading from another, whichever is first.
+        let typed = "{ r: relation { { b: 1 } } }";
+        let empty = "{ r: relation {} }";
+        let first = variables(&format!("var a := relation {{ {typed}, {empty} }};"));
+        let second = variables(&format!("var a := relation {{ {empty}, {typed} }};"));
+        assert_eq!(first[0].init, second[0].init);
+        assert_eq!(
+            second[0].init.to_string(),
+            "relation { r: relation { b: integer } } { { r: relation { b: integer } {} }, { r: relation { b: integer } { { b: 1 } } } }"
+        );
+        // However deeply it is nested.
+        let deep = variables(
+            "var a := relation { { r: relation { { s: relation {} } } }, { r: relation { { s: relation { { c: 1 } } } } } };",
+        );
+        assert_eq!(
+            deep[0].ty.to_string(),
+            "relation { r: relation { s: relation { c: integer } } }"
+        );
+        // With no tuple whose type is known on its own, each is reported.
+        let source = format!("var a := relation {{ {empty}, {empty} }};{MAIN}");
+        assert_eq!(
+            codes(&source),
+            [Code::UnknownRelationHeading, Code::UnknownRelationHeading]
+        );
+        // Another error in a tuple is reported, not taken for one that
+        // needs a heading.
+        let source = format!(
+            "var a := relation {{ {{ r: relation {{}}, n: 1 + true }}, {{ r: relation {{ {{ b: 1 }} }}, n: 2 }} }};{MAIN}"
+        );
+        assert_eq!(codes(&source), [Code::TypeMismatch]);
+    }
+
+    #[test]
+    fn an_operand_gives_an_empty_relation_its_heading() {
+        let r = "var r := relation { { b: 1 } };\n";
+        let heading = |value: &str| variables(&format!("{r}var v := {value};"))[1].ty.clone();
+        // Of operators of one heading, from another operand, or else the
+        // type expected, whichever order they're written in.
+        for (first, second) in [
+            ("relation {} union r", "r union relation {}"),
+            ("union{relation {}, r}", "union{r, relation {}}"),
+            ("relation {} = r", "r = relation {}"),
+            ("minus[relation {}, r]", "r minus relation {}"),
+        ] {
+            assert_eq!(heading(first), heading(second), "{first}");
+        }
+        let vars =
+            variables("var v: relation { b: integer } := relation {} intersect relation {};");
+        assert_eq!(vars[0].init.to_string(), "relation { b: integer } {}");
+        // Not of a join, whose operands' headings differ.
+        assert_eq!(
+            codes(&format!("{r}var v := relation {{}} join r;{MAIN}")),
+            [Code::UnknownRelationHeading]
+        );
+        // Operands of different headings are still reported together.
+        let source = format!("{r}var s := relation {{ {{ c: 1 }} }};\nvar v := r union s;{MAIN}");
+        assert_eq!(codes(&source), [Code::HeadingMismatch]);
+    }
+
+    #[test]
     fn inferred_heading_mismatch() {
         let source = format!("var r := relation {{ {{ a: 1 }}, {{ a: \"x\" }} }};{MAIN}");
         let errors = errors(&source);

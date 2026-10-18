@@ -763,8 +763,18 @@ value's bits, which is totalOrder; text is compared by
 
 Checking is bidirectional: the expected type flows down into a value
 (`types::Expected`), along with where it came from (`types::Origin`): a
-written type, a selector's heading, or an earlier value such as a relation's
-first tuple, or an operator such as `and` for its operands. That is how an
+written type, a selector's heading, or another value, such as the tuple
+of a relation selector that gives the others their type, or an operator
+such as `and` for its operands. That tuple is the first that is valid on
+its own, wherever it is, since the tuples have no order; one that is valid
+but for an empty relation's heading in it waits, and is checked again with
+the type (`types::Alone`), and one with other errors keeps them, without
+the headings, if another gives the type. An operator's operands find their
+type the same way, the first operand that is valid on its own giving it,
+so that `relation {} = r` and `r = relation {}` both check (`ops::check_operands`),
+and so do the operands of a `union`, `intersect` or `minus`, each checked on
+its own, so that operands of different headings are reported together, an
+empty one taking another's, or else the result's (`Checker::joined`). That is how an
 empty relation gets its heading from context, and how each error's secondary
 label points at the source of the expectation. An operator such as `+` or
 `||`, whose result has its operands' type, passes the type expected of its

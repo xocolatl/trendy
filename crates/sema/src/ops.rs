@@ -10,7 +10,7 @@ use trendy_syntax::{SyntaxKind, SyntaxToken, literal};
 
 use crate::errors;
 use crate::operators::Operators;
-use crate::types::{Expected, Origin};
+use crate::types::{self, Expected, Origin};
 
 /// What an operator token denotes, before its operand type is known. Sema
 /// sees only trees without syntax errors, so foreign spellings such as `&&`
@@ -274,17 +274,66 @@ pub(crate) fn check_operands<T>(
             origin: e.origin.operand(token),
         }),
     };
-    let mut checked = Vec::new();
     let mut ok = true;
     // Whether the operator was reported as not taking the operands' type.
     let mut wrong_type = false;
-    for operand in operands {
+    // Without an expected type, the first operand sets it for the rest,
+    // or, if its own type can't be known on its own, as an empty relation's
+    // heading, the first after it that can (see [`types::Alone`]).
+    let mut alone: Vec<Option<types::Alone<(T, hir::Type)>>> =
+        operands.iter().map(|_| None).collect();
+    if expectation.is_none() {
+        for (operand, alone) in operands.iter().zip(&mut alone) {
+            let Some(operand) = operand else {
+                break;
+            };
+            let mut own_errors = Vec::new();
+            let checked = check(operand, None, &mut own_errors);
+            let checked = types::Alone::of(checked, own_errors, operand.span());
+            if let types::Alone::Valid((_, ty)) = &checked {
+                // An operator that doesn't take this type is reported once;
+                // the other operands are still checked against it, so that
+                // an empty relation gets its heading and a mismatch is still
+                // reported.
+                if op.resolve(ty).is_none() {
+                    errors.push(errors::wrong_operand_type(
+                        op,
+                        token,
+                        ty,
+                        Some(operand),
+                        kinds,
+                    ));
+                    ok = false;
+                    wrong_type = true;
+                }
+                expectation = Some(Expected {
+                    ty: ty.clone(),
+                    origin: Origin::Value(operand.clone()),
+                });
+            }
+            let waiting = matches!(checked, types::Alone::Waiting(_));
+            *alone = Some(checked);
+            if !waiting {
+                break;
+            }
+        }
+    }
+    let mut checked = Vec::new();
+    for (operand, alone) in operands.into_iter().zip(alone) {
         let Some(operand) = operand else {
             ok = false;
             continue;
         };
         let before = errors.len();
-        let result = check(&operand, expectation.as_ref(), errors);
+        let typed = expectation.is_some();
+        let result = match alone {
+            // The operand that set a type the operator doesn't take.
+            Some(types::Alone::Valid(_)) if wrong_type => continue,
+            Some(alone) => alone.finish(typed, operand.span(), errors, |errors| {
+                check(&operand, expectation.as_ref(), errors)
+            }),
+            None => check(&operand, expectation.as_ref(), errors),
+        };
         if wrong_type {
             // The operand was checked against a type the operator doesn't
             // take, which is already reported; only its own errors remain.
@@ -298,35 +347,10 @@ pub(crate) fn check_operands<T>(
                 }
             }
         }
-        let Some((value, ty)) = result else {
+        let Some((value, _)) = result else {
             ok = false;
             continue;
         };
-        if expectation.is_none() && ok {
-            // The first operand sets the type for the rest, if the operator
-            // works on it.
-            // An operator that doesn't take this type is reported once; the
-            // other operands are still checked against it, so that an empty
-            // relation gets its heading and a mismatch is still reported.
-            if op.resolve(&ty).is_none() {
-                errors.push(errors::wrong_operand_type(
-                    op,
-                    token,
-                    &ty,
-                    Some(&operand),
-                    kinds,
-                ));
-                ok = false;
-                wrong_type = true;
-            }
-            expectation = Some(Expected {
-                ty,
-                origin: Origin::Value(operand),
-            });
-            if !ok {
-                continue;
-            }
-        }
         checked.push(value);
     }
     let Expected { ty, .. } = expectation?;
@@ -604,6 +628,23 @@ pub(crate) enum JoinKind {
 }
 
 impl JoinKind {
+    /// Whether its operands have one heading, which is the result's.
+    pub(crate) fn one_heading(self) -> bool {
+        match self {
+            JoinKind::Union
+            | JoinKind::DisjointUnion
+            | JoinKind::ExclusiveUnion
+            | JoinKind::Intersect
+            | JoinKind::Minus
+            | JoinKind::IncludedMinus => true,
+            JoinKind::Join
+            | JoinKind::Times
+            | JoinKind::Compose
+            | JoinKind::Matching
+            | JoinKind::NotMatching => false,
+        }
+    }
+
     /// The join written with the operator `tokens`, if they are one.
     fn of(tokens: &[SyntaxToken]) -> Option<JoinKind> {
         let kinds: Vec<SyntaxKind> = tokens.iter().map(SyntaxToken::kind).collect();

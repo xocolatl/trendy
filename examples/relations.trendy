@@ -10,7 +10,10 @@ var people := relation {
 key { name };
 
 var nested: tuple { name: text, friends: relation { name: text } };
+/* The empty relation takes its heading from the other tuple's, as the
+   tuples have no order. */
 var teams := relation {
+    { team: "docs", members: relation {} },
     {
         team: "core",
         members: relation {
@@ -18,7 +21,6 @@ var teams := relation {
             { name: "Edgar" }
         }
     },
-    { team: "docs", members: relation { name: text } {} },
 }
 key { team };
 

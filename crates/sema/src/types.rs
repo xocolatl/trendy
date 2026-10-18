@@ -29,7 +29,8 @@ pub(crate) enum Origin {
     /// A selector's heading, as in `relation { a: integer } { … }`, which
     /// sets the attributes of a tuple, or of a relation's tuples.
     Heading(ast::Heading),
-    /// An earlier value that set the type, such as a relation's first tuple.
+    /// Another value that set the type, such as the tuple of a relation
+    /// selector that gives the others theirs.
     Value(Expr),
     /// A built-in operator's parameter, declared in the prelude: there is no
     /// place in the program to point at.
@@ -571,34 +572,53 @@ pub(crate) fn relation_selector(
         None => None,
     };
 
+    let elements: Vec<Expr> = relation.elements().collect();
+    let mut ok = true;
+    // Without a heading from the selector or the context, the first tuple
+    // that is valid on its own sets it for the rest, wherever it is, as the
+    // tuples have no order (see [`Alone`]).
+    let mut alone: Vec<Option<Alone<hir::Expr>>> = vec![None; elements.len()];
+    if element.is_none() {
+        for (tuple, alone) in elements.iter().zip(&mut alone) {
+            let mut own_errors = Vec::new();
+            let out = checker.expr(tuple, None, &mut own_errors);
+            let on_its_own = Alone::of(out, own_errors, tuple.span());
+            if let Alone::Valid(out) = &on_its_own {
+                let ty = checker.ty(out);
+                if !matches!(ty, hir::Type::Tuple(_)) {
+                    errors.push(errors::not_a_tuple(&ty, tuple));
+                    *alone = Some(Alone::Failed(Vec::new()));
+                    continue;
+                }
+                element = Some(Expected {
+                    ty,
+                    origin: Origin::Value(tuple.clone()),
+                });
+                *alone = Some(on_its_own);
+                break;
+            }
+            *alone = Some(on_its_own);
+        }
+    }
     let mut tuples = Vec::new();
     let mut known: BTreeMap<hir::TupleValue, Span> = BTreeMap::new();
-    let mut ok = true;
-    for tuple in relation.elements() {
-        let Some(out) = checker.expr(&tuple, element.as_ref(), errors) else {
+    for (tuple, alone) in elements.iter().zip(alone) {
+        let out = match alone {
+            Some(alone) => alone.finish(element.is_some(), tuple.span(), errors, |errors| {
+                checker.expr(tuple, element.as_ref(), errors)
+            }),
+            None => checker.expr(tuple, element.as_ref(), errors),
+        };
+        let Some(out) = out else {
             ok = false;
             continue;
         };
-        // Without a heading from the selector or the context, the first
-        // tuple sets it for the rest.
-        if element.is_none() {
-            let ty = checker.ty(&out);
-            if !matches!(ty, hir::Type::Tuple(_)) {
-                errors.push(errors::not_a_tuple(&ty, &tuple));
-                ok = false;
-                continue;
-            }
-            element = Some(Expected {
-                ty,
-                origin: Origin::Value(tuple.clone()),
-            });
-        }
         if let Some(hir::Value::Tuple(value)) = Checker::constant(&out) {
             if let Some(&first) = known.get(value) {
                 errors.push(errors::duplicate_tuple(
                     tuple.span(),
                     first,
-                    relation.removal(&tuple),
+                    relation.removal(tuple),
                 ));
                 ok = false;
                 continue;
@@ -626,6 +646,70 @@ pub(crate) fn relation_selector(
         Some(_) => checker.matched(expected, out, &Expr::Relation(relation.clone()), errors),
         None => Some(out),
     }
+}
+
+/// A value checked on its own, without an expected type, to find one among
+/// several that gives the others theirs, as a relation selector's tuples
+/// and an operator's operands do, whose order doesn't decide which.
+#[derive(Clone)]
+pub(crate) enum Alone<T> {
+    Valid(T),
+    /// Valid but for what another's type would give it: the type of an
+    /// empty relation in it, its heading. It is checked again with that
+    /// type, if another gives one, and else has these errors.
+    Waiting(Vec<Diagnostic>),
+    /// Invalid on its own, with these errors, those of what another's type
+    /// would give it among them, which are left out if another gives one.
+    Failed(Vec<Diagnostic>),
+}
+
+impl<T> Alone<T> {
+    /// What checking the value written at `span` on its own came to: `out`,
+    /// with `errors`.
+    pub(crate) fn of(out: Option<T>, errors: Vec<Diagnostic>, span: Span) -> Self {
+        match out {
+            Some(out) if errors.is_empty() => Alone::Valid(out),
+            _ if !errors.is_empty() && errors.iter().all(|d| given(d, span)) => {
+                Alone::Waiting(errors)
+            }
+            _ => Alone::Failed(errors),
+        }
+    }
+
+    /// The value written at `span`, once another's type is known, if
+    /// `typed`, which `check` checks it against again if it is waiting,
+    /// after reporting its errors that remain.
+    pub(crate) fn finish(
+        self,
+        typed: bool,
+        span: Span,
+        errors: &mut Vec<Diagnostic>,
+        check: impl FnOnce(&mut Vec<Diagnostic>) -> Option<T>,
+    ) -> Option<T> {
+        match self {
+            Alone::Valid(out) => Some(out),
+            Alone::Waiting(_) if typed => check(errors),
+            Alone::Waiting(own) => {
+                errors.extend(own);
+                None
+            }
+            Alone::Failed(own) => {
+                errors.extend(own.into_iter().filter(|d| !(typed && given(d, span))));
+                None
+            }
+        }
+    }
+}
+
+/// Whether `error`, of a value written at `span`, is one that another
+/// value's type gives what it lacks: an empty relation's unknown heading,
+/// in the value. Errors elsewhere, as in an operator it calls, checked
+/// then, aren't.
+fn given(error: &Diagnostic, span: Span) -> bool {
+    let at = error.span();
+    error.code == trendy_diag::Code::UnknownRelationHeading
+        && span.start <= at.start
+        && at.end <= span.end
 }
 
 pub(crate) fn literal_value(literal: &Literal, errors: &mut Vec<Diagnostic>) -> Option<hir::Value> {
