@@ -4,6 +4,7 @@ mod check;
 mod errors;
 mod globals;
 mod keys;
+mod locals;
 mod operators;
 mod ops;
 mod prelude;
@@ -136,6 +137,11 @@ impl Checked {
                     (Some(builtin), _) => hir::OperatorKind::Builtin(builtin),
                     (None, Some(result)) => hir::OperatorKind::ReadOnly {
                         result: result.clone(),
+                        locals: self
+                            .evaluated
+                            .locals
+                            .remove(&signature.id)
+                            .expect("every read-only operator without errors has a value"),
                         value: self.evaluated.values[&signature.id].clone(),
                     },
                     (None, None) => {
@@ -583,7 +589,7 @@ mod tests {
             .iter()
             .find(|o| o.name == "quadruple")
             .unwrap();
-        let hir::OperatorKind::ReadOnly { result, value } = &quadruple.kind else {
+        let hir::OperatorKind::ReadOnly { result, value, .. } = &quadruple.kind else {
             panic!("a read-only operator");
         };
         assert_eq!(result, &hir::Type::Scalar(hir::Scalar::Integer));
@@ -5124,14 +5130,91 @@ mod tests {
             generic[0].message,
             "variable `w`, of type `T`, has no initial value"
         );
-        // Not yet in a read-only operator.
-        let read_only = errors(&format!(
-            "operator f{{}}: integer [ var k := 1; return k; ];{MAIN}"
-        ));
-        assert_eq!(read_only[0].code, Code::ReadOnlyEffect);
+    }
+
+    #[test]
+    fn a_read_only_operators_local_variables_are_lets() {
+        let program = analyze_str(&format!(
+            "var vat := 16;\noperator taxed{{price: integer}}: integer [\n    var tax := price * vat div 100;\n    var total := price + tax;\n    total := total + 1;\n    return total;\n];\nvar folded := taxed{{price: 1000}};{MAIN}"
+        ))
+        .unwrap();
+        let op = program
+            .operators
+            .iter()
+            .find(|o| o.name == "taxed")
+            .unwrap();
+        let hir::OperatorKind::ReadOnly { locals, value, .. } = &op.kind else {
+            panic!("taxed is read-only");
+        };
+        // The assignment gives `total` a local variable of its own.
+        let named: Vec<&str> = locals.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(named, ["tax", "total", "total"]);
+        let mut lets = Vec::new();
+        let mut rest = value;
+        while let hir::Expr::Let(id, _, body) = rest {
+            lets.push(id.0);
+            rest = body;
+        }
+        assert_eq!(lets, [0, 1, 2]);
+        assert_eq!(*rest, hir::Expr::Local(hir::LocalId(2)));
+        // Called with constants, evaluated when compiling.
+        assert_eq!(program.variables[1].init, hir::Value::Integer(1161));
+        // Each value is computed once: doubling a relation six times is six
+        // `Let`s, not 64 copies of it.
+        let doubled = "operator doubled{r: relation { a: integer }}: relation { a: integer } [ var a := r union r; var b := a union a; var c := b union b; var d := c union c; var e := d union d; return e union e; ];\n";
+        let program = analyze_str(&format!("{doubled}{MAIN}")).unwrap();
+        let op = program
+            .operators
+            .iter()
+            .find(|o| o.name == "doubled")
+            .unwrap();
+        let hir::OperatorKind::ReadOnly { value, .. } = &op.kind else {
+            panic!("doubled is read-only");
+        };
         assert_eq!(
-            read_only[0].message,
-            "a read-only operator can't declare a variable"
+            format!("{value:?}").matches("Parameter").count(),
+            2,
+            "{value:?}"
+        );
+        // Swapped at once, in an `assign` block.
+        let swapped = "operator swapped{a: integer, b: integer}: tuple { a: integer, b: integer } [ var x := a; var y := b; assign { x := y; y := x; }; return tuple { a: x, b: y }; ];\nvar t := swapped{a: 1, b: 2};";
+        assert_eq!(
+            variables(swapped)[0].init.to_string(),
+            "tuple { a: 2, b: 1 }"
+        );
+    }
+
+    #[test]
+    fn a_read_only_operator_changes_only_its_local_variables() {
+        let read_only = |body: &str| {
+            errors(&format!(
+                "var total := 0;\noperator f{{n: integer}}: integer [ {body} ];{MAIN}"
+            ))
+        };
+        let assigned = read_only("total := total + n; return total;");
+        assert_eq!(assigned[0].code, Code::ReadOnlyEffect);
+        assert_eq!(
+            assigned[0].message,
+            "a read-only operator can't assign a variable of the program's"
+        );
+        let called = read_only("var k := n; call debug_value{v: k}; return k;");
+        assert_eq!(
+            called[0].message,
+            "a read-only operator can't call an operator"
+        );
+        // Its `return` is last.
+        let after = read_only("return n; var later := 1;");
+        assert_eq!(after[0].code, Code::Return);
+        assert_eq!(
+            after[0].message,
+            "a statement after `return` would never run"
+        );
+        // A local variable can't be computed from itself.
+        let own = read_only("var m := m + 1; return n;");
+        assert_eq!(own[0].code, Code::LocalBeforeDeclaration);
+        assert_eq!(
+            own[0].help,
+            ["compute `m`'s initial value from something else"]
         );
     }
 

@@ -145,6 +145,9 @@ fn operators() {
             "relation { v: integer } { { v: 2174 }, { v: 2550 }, { v: 3300 } }",
             r#""one and a half ramen, delivered""#,
             "1.9875e3",
+            // With `vat` at 25: pozole at 937, and ramen at 1125.
+            r#""under 1200""#,
+            "tuple { dishes: 2, lowest: 937 }",
         ]
     );
 }

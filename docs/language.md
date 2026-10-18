@@ -38,9 +38,11 @@ body in square brackets `[]`, and a closing `;`.
 
 - **Parameters are a heading:** `{name: type, …}`, with each name unique and
   in any order. `main` has none, since nothing passes it arguments.
-- **A body is a list of statements,** each ending with `;`: calls, and
-  assignments (see [Assignment](#assignment)), or, for a read-only
-  operator, one `return` (see [Read-only operators](#read-only-operators)).
+- **A body is a list of statements,** each ending with `;`: calls,
+  assignments (see [Assignment](#assignment)), and local variables'
+  declarations (see [Local variables](#local-variables)), and, ending a
+  read-only operator's, one `return` (see [Read-only
+  operators](#read-only-operators)).
 - **Arguments are a tuple of the parameters:** `call greet{name: "Ada",
   count: 2};`. Every argument is named, every parameter gets one, and the
   order doesn't matter.
@@ -88,9 +90,10 @@ included, as in `tuple { n: n }`; see [Tuples](#tuples).
 ### Read-only operators
 
 A read-only operator has a result type after its parameters, written as a
-variable's type is, and its body is one `return`, of a value of that type
-(TTM RM Prescription 3). A call of it, `name{arguments}` in an expression,
-is that value, computed from the arguments.
+variable's type is, and its body ends in one `return`, of a value of that
+type (TTM RM Prescription 3), which local variables can name parts of (see
+[Local variables](#local-variables)). A call of it, `name{arguments}` in
+an expression, is that value, computed from the arguments.
 
 ```trendy
 var rate := 3;
@@ -124,11 +127,12 @@ operator main{} [
 ];
 ```
 
-- **It changes nothing.** It can't assign a variable or `call` an
-  operator, not even `debug_value` (A0034). It can read variables, and
-  call read-only operators.
-- **Its body is one `return`** (A0035). An update operator, which has no
-  result type, has none: it returns nothing. So `call` invokes only update
+- **It changes nothing but its own local variables.** It can't assign a
+  variable of the program's or `call` an operator, not even `debug_value`
+  (A0034). It can read variables, and call read-only operators.
+- **Its body ends in one `return`** (A0035), after which nothing could
+  run. An update operator, which has no result type, has none: it returns
+  nothing. So `call` invokes only update
   operators, as `call` of a read-only one would lose its value (A0037),
   and only read-only operators are called in expressions, as an update
   operator has no value (A0016).
@@ -834,10 +838,10 @@ operator main{} [];
 
 ### Local variables
 
-An update operator's body can declare variables of its own, written as
-the program's are, which its statements use and assign as they do the
-program's. They are purely local to the operator, as TTM allows (RM
-Prescription 3), and gone once it returns.
+An operator's body can declare variables of its own, written as the
+program's are, which its statements use and assign as they do the
+program's. They are purely local to the operator, as TTM allows even a
+read-only one (RM Prescription 3), and gone once it returns.
 
 ```trendy
 var visits := relation { city: text, guests: integer } {};
@@ -873,8 +877,37 @@ operator main{} [
   variable can't have a parameter's name, or another local variable's. A
   second declaration of one, as Rust gives a variable a new value, is
   fixed to an assignment of the first.
-- **Only update operators have them, so far:** a read-only operator's body
-  is one `return` (A0034).
+- **A read-only operator's local variables name parts of its value,**
+  each computed once, however many times it is used: below, `under`.
+  Assigning one gives it a new value from there on, as in an update
+  operator, and the rest of its value is still one expression, which sema
+  evaluates when compiling where it can be.
+
+```trendy
+var dishes := relation {
+    { dish: "jollof rice", price: 1392 },
+    { dish: "ramen", price: 1044 },
+    { dish: "pozole", price: 870 },
+}
+key { dish };
+
+operator cheapest{limit: integer}: tuple { dishes: integer, lowest: integer } [
+    var under := dishes where price < limit;
+    return tuple { dishes: count{r: under}, lowest: min{r: under, of: price} };
+];
+
+operator discounted{price: integer, percent: integer}: integer [
+    var discount := price * percent div 100;
+    var paid := price - discount;
+    paid := paid - paid mod 10;
+    return paid;
+];
+
+operator main{} [
+    call debug_value{v: cheapest{limit: 1100}};
+    call debug_value{v: discounted{price: 1392, percent: 15}};
+];
+```
 
 ```trendy,error
 var total := 0;

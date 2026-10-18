@@ -1,6 +1,6 @@
 /* Operators, read-only and update (TTM RM Prescription 3). A read-only
-   operator has a result type, and its body is one `return`: its call is a
-   value. An update operator returns nothing, and is invoked by `call`. A
+   operator has a result type, and its body ends in one `return`: its call
+   is a value. An update operator returns nothing, and is invoked by `call`. A
    call is evaluated when compiling where it can be, and made when the
    program runs elsewhere. A parameter's type can be `any type`, and type
    parameters, declared with `types`, say that several types are one: each
@@ -17,9 +17,11 @@ var dishes := relation {
 key { dish };
 
 /* A price in cents with VAT, rounded down. It reads `vat`, as it is when
-   the operator is called. */
+   the operator is called. A read-only operator's local variables name
+   parts of its value, which `return` ends with. */
 operator taxed{price: integer}: integer [
-    return price + price * vat div 100;
+    var tax := price * vat div 100;
+    return price + tax;
 ];
 
 /* A relation, of the dishes whose price with VAT is under `limit`: the
@@ -79,6 +81,13 @@ operator range{r: any relation, of: T per r}: tuple { low: T, high: T }
     types { T: any ordered }
 [
     return tuple { low: min{r: r, of: of}, high: max{r: r, of: of} };
+];
+
+/* How many dishes are under `limit` with VAT, and the cheapest's price:
+   `under` is computed once, for both. */
+operator cheapest{limit: integer}: tuple { dishes: integer, lowest: integer } [
+    var under := dishes where taxed{price: price} < limit;
+    return tuple { dishes: count{r: under}, lowest: min{r: under, of: taxed{price: price}} };
 ];
 
 /* An order's cost, of any numeric type: `*` and `+` are what `numeric`,
@@ -144,4 +153,5 @@ operator main{} [
         label: "one and a half ramen, delivered",
         value: cost{price: to_approximate{from: taxed{price: 900}}, quantity: 1.5e0, delivery: 3e2}
     };
+    call show{label: "under 1200", value: cheapest{limit: 1200}};
 ];

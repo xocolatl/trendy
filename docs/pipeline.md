@@ -463,10 +463,20 @@ conditional. A variable's id is its first declaration's place among them,
 known before any is evaluated, so that a read-only operator's value can
 refer to one.
 
-A read-only operator's body is one `return`, of a value of its result
-type (A0035), and nothing else: an assignment or a `call` would change
-something (A0034), which TTM RM Prescription 3 rules out, and which
-evaluating a call when compiling would skip. Checking a call checks its
+A read-only operator's body declares and assigns its local variables, and
+ends in one `return`, of a value of its result type (A0035): assigning a
+variable of the program's or a `call` would change something (A0034),
+which TTM RM Prescription 3 rules out, and which evaluating a call when
+compiling would skip. Its value stays one expression: each declaration
+and assignment is an `Expr::Let` of a local variable of its own (each
+assignment gives one a new id, as `Locals::reassigned` does), so each value
+is computed once, however many times it is used, where substituting it
+for each use would copy it, as many times again for each local variable
+computed from it. Assignments are checked as an update operator's are,
+through `assign::Assigning`. Evaluating a call substitutes a `Let`'s value
+in the rest once it is known (`ops::Substitution::locals`); lowering places
+the local variable where the value is, with no copy and no owner, since
+nothing changes it while the expression is computed. Checking a call checks its
 callee's value first, so every operator a call's evaluation reaches is
 checked already, and recursion is found then, not when it would loop. The
 call's arguments are checked as `call`'s are (`Checker::arguments`). An

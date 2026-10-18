@@ -80,9 +80,12 @@ pub struct VariableId(pub usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LocalId(pub usize);
 
-/// A local variable of an update operator, purely local to it (TTM RM
-/// Prescription 3): in scope in its whole body, and assigned its initial
-/// value where it is declared, which is before any use.
+/// A local variable of an operator, purely local to it (TTM RM Prescription
+/// 3): in scope in its whole body, and assigned its initial value where it
+/// is declared, which is before any use. In an update operator, each is
+/// assigned as a variable is; in a read-only one, its declaration and each
+/// assignment are a [`Expr::Let`] of a local variable of its own, which has
+/// the value from there on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Local {
     /// Unique among the operator's parameters and local variables.
@@ -135,8 +138,13 @@ impl Operator {
                 locals: locals.iter().map(|l| l.instantiated(types)).collect(),
                 body: body.iter().map(|s| s.instantiated(types)).collect(),
             },
-            OperatorKind::ReadOnly { result, value } => OperatorKind::ReadOnly {
+            OperatorKind::ReadOnly {
+                result,
+                locals,
+                value,
+            } => OperatorKind::ReadOnly {
                 result: result.instantiated(types),
+                locals: locals.iter().map(|l| l.instantiated(types)).collect(),
                 value: value.instantiated(types),
             },
             OperatorKind::Builtin(builtin) => OperatorKind::Builtin(*builtin),
@@ -250,9 +258,14 @@ pub enum OperatorKind {
         body: Vec<Statement>,
     },
     /// A read-only operator defined in the program: its value, of type
-    /// `result`, computed from its parameters. It changes nothing, and
-    /// calls no operator but read-only ones, none of which calls itself.
-    ReadOnly { result: Type, value: Expr },
+    /// `result`, computed from its parameters, with its local variables. It
+    /// changes nothing else, and calls no operator but read-only ones, none
+    /// of which calls itself.
+    ReadOnly {
+        result: Type,
+        locals: Vec<Local>,
+        value: Expr,
+    },
     /// Declared in the prelude and implemented by the compiler: an update
     /// operator, or a read-only one, with a [`Builtin::result`].
     Builtin(Builtin),
@@ -604,8 +617,12 @@ pub enum Expr {
     Variable(VariableId),
     /// A parameter of the operator the expression is in.
     Parameter(String),
-    /// A local variable of the update operator the expression is in.
+    /// A local variable of the operator the expression is in.
     Local(LocalId),
+    /// The last expression, with the local variable holding the value of
+    /// the first, computed once, in it: a read-only operator's local
+    /// variable, from its declaration or an assignment on.
+    Let(LocalId, Box<Expr>, Box<Expr>),
     /// A monadic operator: `not x` or `-x`.
     Unary(UnaryOp, Box<Expr>),
     /// A dyadic operator, such as `x and y` or `x + y`.
@@ -700,6 +717,7 @@ impl Expr {
         match self {
             Expr::Constant(value) => value.ty(),
             Expr::Variable(_) | Expr::Parameter(_) | Expr::Local(_) | Expr::Call(_) => leaf(self),
+            Expr::Let(_, _, body) => body.type_with(leaf),
             // Arithmetic on a type parameter's values has their type.
             Expr::Unary(op, operand) => op
                 .operand()
@@ -758,6 +776,7 @@ impl Expr {
         match self {
             Expr::Constant(value) => Expr::Constant(value.instantiated(types)),
             Expr::Variable(_) | Expr::Parameter(_) | Expr::Local(_) => self.clone(),
+            Expr::Let(local, value, body) => Expr::Let(*local, inst(value), inst(body)),
             Expr::Unary(op, operand) => Expr::Unary(op.instantiated(types), inst(operand)),
             Expr::Binary(op, lhs, rhs) => {
                 Expr::Binary(op.instantiated(types), inst(lhs), inst(rhs))

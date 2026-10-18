@@ -138,18 +138,29 @@ pub(crate) fn local_named_as_parameter(
     ))
 }
 
-/// A local variable `name`, used at `span`, before `decl` declares it.
-pub(crate) fn local_before_declaration(name: &str, span: Span, decl: &VarDecl) -> Diagnostic {
+/// A local variable `name`, used at `span`, before `decl` declares it,
+/// which hides a variable of the program's, if `hides` says so.
+pub(crate) fn local_before_declaration(
+    name: &str,
+    span: Span,
+    decl: &VarDecl,
+    hides: bool,
+) -> Diagnostic {
     let declared = decl.span();
     let named = decl.name().map_or(declared, |n| n.span());
     // `var n := n + 1;`, as Rust declares a variable from one it hides.
     let own = declared.start <= span.start && span.end <= declared.end;
-    let (label, help) = if own {
+    let (label, help) = if own && hides {
         (
             "declared here, with a value computed from it",
             format!(
-                "to compute it from a variable of the program named `{name}`, give the local variable a name of its own"
+                "to compute it from the program's variable `{name}`, give the local variable a name of its own"
             ),
+        )
+    } else if own {
+        (
+            "declared here, with a value computed from it",
+            format!("compute `{name}`'s initial value from something else"),
         )
     } else {
         (
@@ -3123,34 +3134,53 @@ pub(crate) fn return_in_update(name: &str, stmt: &trendy_syntax::ast::ReturnStmt
     ))
 }
 
-/// `stmt`, a statement other than `return` in the read-only operator
-/// `name`: a call, or an assignment, which would change something.
-pub(crate) fn read_only_effect(name: &str, stmt: &trendy_syntax::ast::Statement) -> Diagnostic {
-    let change = format!(
+/// What a read-only operator changes, for notes.
+const READ_ONLY: &str = "a read-only operator changes nothing but its own local variables (TTM RM Prescription 3): its value is computed from its parameters and the variables it reads";
+
+/// `stmt`, a `call` in the read-only operator `name`, which would change
+/// something.
+pub(crate) fn call_in_read_only(name: &str, stmt: &trendy_syntax::ast::CallStmt) -> Diagnostic {
+    Diagnostic::error(
+        Code::ReadOnlyEffect,
+        "a read-only operator can't call an operator",
+        stmt.span(),
+        format!("a `call` in `{name}`"),
+    )
+    .with_note(READ_ONLY)
+    .with_help(format!(
         "to change something, make `{name}` an update operator, without a result type, invoked by `call`"
-    );
-    let (message, label, help) = match stmt {
-        trendy_syntax::ast::Statement::Call(_) => (
-            "a read-only operator can't call an operator",
-            format!("a `call` in `{name}`"),
-            change,
-        ),
-        trendy_syntax::ast::Statement::Var(_) => (
-            "a read-only operator can't declare a variable",
-            format!("a `var` in `{name}`"),
-            "compute the value in the `return`".to_string(),
-        ),
-        _ => (
-            "a read-only operator can't assign a variable",
-            format!("an assignment in `{name}`"),
-            change,
-        ),
-    };
-    Diagnostic::error(Code::ReadOnlyEffect, message, stmt.span(), label)
-        .with_note(
-            "a read-only operator changes nothing (TTM RM Prescription 3): its body is one `return`, of a value computed from its parameters and the variables it reads",
-        )
-        .with_help(help)
+    ))
+}
+
+/// The variable `name`, at `span`, of the program's, assigned in the
+/// read-only operator `op`.
+pub(crate) fn assigned_in_read_only(name: &str, span: Span, op: &str) -> Diagnostic {
+    Diagnostic::error(
+        Code::ReadOnlyEffect,
+        "a read-only operator can't assign a variable of the program's",
+        span,
+        format!("a variable of the program's, assigned in `{op}`"),
+    )
+    .with_note(READ_ONLY)
+    .with_help(format!(
+        "to compute a value, assign a local variable of `{op}`'s, as in `var new_{name} := …;`; to change `{name}`, make `{op}` an update operator, without a result type, invoked by `call`"
+    ))
+}
+
+/// `stmt`, after `returned`, the `return` of a read-only operator.
+pub(crate) fn after_return(
+    stmt: &trendy_syntax::ast::Statement,
+    returned: &trendy_syntax::ast::ReturnStmt,
+) -> Diagnostic {
+    Diagnostic::error(
+        Code::Return,
+        "a statement after `return` would never run",
+        stmt.span(),
+        "after the `return`",
+    )
+    .with_secondary(returned.span(), "the operator returns here")
+    .with_note(RETURN_RULE)
+    .with_help("move it before the `return`, or delete it")
 }
 
 /// The read-only operator `name`, whose `body` has no `return`, and whose
@@ -3198,7 +3228,7 @@ pub(crate) fn extra_return(
 }
 
 /// A read-only operator's body, for notes.
-const RETURN_RULE: &str = "a read-only operator's body is one statement, `return value;`, with a value of its result type";
+const RETURN_RULE: &str = "a read-only operator's body declares and assigns its local variables, if it has any, and ends in one `return value;`, with a value of its result type";
 
 /// `expr`, a call of `signature` with constant arguments, whose value
 /// fails, as `failed` says.

@@ -1458,6 +1458,7 @@ fn shifted(expr: hir::Expr, cutoff: usize) -> hir::Expr {
             hir::Expr::Combine(combination, shift(lhs), shift(rhs))
         }
         hir::Expr::Antijoin(lhs, rhs) => hir::Expr::Antijoin(shift(lhs), shift(rhs)),
+        hir::Expr::Let(local, value, body) => hir::Expr::Let(local, shift(value), shift(body)),
         // The condition is one tuple at hand further in.
         hir::Expr::Restrict(operand, condition) => {
             hir::Expr::Restrict(shift(operand), Box::new(shifted(*condition, cutoff + 1)))
@@ -1495,7 +1496,8 @@ pub(crate) fn uses_tuple(expr: &hir::Expr, depth: usize) -> bool {
         | hir::Expr::And(lhs, rhs)
         | hir::Expr::Combine(_, lhs, rhs)
         | hir::Expr::Semijoin(lhs, rhs)
-        | hir::Expr::Antijoin(lhs, rhs) => uses(lhs) || uses(rhs),
+        | hir::Expr::Antijoin(lhs, rhs)
+        | hir::Expr::Let(_, lhs, rhs) => uses(lhs) || uses(rhs),
         hir::Expr::Tuple(attributes) => attributes.values().any(uses),
         hir::Expr::Relation(_, tuples) => tuples.iter().any(uses),
         // The condition and the values are one tuple at hand further in.
@@ -1632,6 +1634,9 @@ struct Substitution<'a> {
     tuple: Option<&'a hir::TupleValue>,
     /// A call's arguments, for its callee's parameters.
     args: Option<&'a BTreeMap<String, hir::Value>>,
+    /// The values of the callee's local variables known so far, each its
+    /// `Let`'s, once the value is known.
+    locals: &'a [(hir::LocalId, hir::Value)],
     bindings: Bindings<'a>,
 }
 
@@ -1640,6 +1645,7 @@ impl<'a> Substitution<'a> {
         Substitution {
             tuple: Some(tuple),
             args: None,
+            locals: &[],
             bindings,
         }
     }
@@ -1687,6 +1693,7 @@ pub(crate) fn call(call: hir::Call, bindings: Bindings) -> Result<hir::Expr, Fai
     let substitution = Substitution {
         tuple: None,
         args: Some(&known),
+        locals: &[],
         bindings,
     };
     let evaluated = substitute(value, 0, &substitution)?;
@@ -1732,11 +1739,26 @@ fn substitute(
             Some(value) => hir::Expr::Constant(value),
             None => expr,
         },
-        // A local variable's value is known only when running.
-        hir::Expr::Current(..)
-        | hir::Expr::Constant(_)
-        | hir::Expr::Parameter(_)
-        | hir::Expr::Local(_) => expr,
+        hir::Expr::Local(id) => match substitution.locals.iter().find(|(l, _)| *l == id) {
+            Some((_, value)) => hir::Expr::Constant(value.clone()),
+            // An update operator's local variable's value is known only
+            // when running.
+            None => expr,
+        },
+        hir::Expr::Let(id, value, body) => match sub(value)? {
+            // Known, it is substituted in the rest.
+            hir::Expr::Constant(value) => {
+                let mut locals = substitution.locals.to_vec();
+                locals.push((id, value));
+                let inner = Substitution {
+                    locals: &locals,
+                    ..*substitution
+                };
+                substitute(*body, depth, &inner)?
+            }
+            value => hir::Expr::Let(id, Box::new(value), Box::new(sub(body)?)),
+        },
+        hir::Expr::Current(..) | hir::Expr::Constant(_) | hir::Expr::Parameter(_) => expr,
         hir::Expr::Call(called) => {
             let args = called
                 .args
@@ -1995,6 +2017,7 @@ fn can_fail(expr: &hir::Expr) -> bool {
             );
             itself || can_fail(lhs) || can_fail(rhs)
         }
+        hir::Expr::Let(_, value, body) => can_fail(value) || can_fail(body),
     }
 }
 

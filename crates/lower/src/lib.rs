@@ -92,7 +92,12 @@ fn function(
             builder.release();
             (builder.finish(None), false)
         }
-        hir::OperatorKind::ReadOnly { result, value } => {
+        hir::OperatorKind::ReadOnly {
+            result,
+            locals,
+            value,
+        } => {
+            builder.bind(locals);
             let src = builder.place(&value, cx);
             builder.insts.push(lir::Inst::Copy {
                 dst: lir::Place::whole(lir::Base::Result),
@@ -302,8 +307,9 @@ struct FunctionBuilder<'a> {
     /// The local variables of the operator it is, with their types, which
     /// have no type parameters in them.
     locals: Vec<hir::Local>,
-    /// Where each local variable is, by id.
-    local_places: Vec<LocalPlace>,
+    /// Where each local variable is, by id: in a read-only operator, once
+    /// its `Let` is lowered.
+    local_places: Vec<Option<LocalPlace>>,
     slots: Vec<lir::Layout>,
     /// The blocks, those not ended yet placeholders.
     blocks: Vec<lir::Block>,
@@ -388,8 +394,17 @@ impl<'a> FunctionBuilder<'a> {
                 owner
             });
             self.locals.push(local);
-            self.local_places.push(LocalPlace { value, owner });
+            self.local_places.push(Some(LocalPlace { value, owner }));
         }
+    }
+
+    /// The local variables `locals` of a read-only operator, each placed
+    /// where its `Let`'s value is: computed once, by the expression, whose
+    /// values its calling statement owns, or a variable's or a parameter's
+    /// own place, which nothing changes while the expression is computed.
+    fn bind(&mut self, locals: Vec<hir::Local>) {
+        self.local_places = vec![None; locals.len()];
+        self.locals = locals;
     }
 
     /// Release the memory of the local variables' own, at the end of the
@@ -397,7 +412,7 @@ impl<'a> FunctionBuilder<'a> {
     /// into memory of the variable's own, and every statement that could
     /// point into it has ended.
     fn release(&mut self) {
-        for place in &self.local_places {
+        for place in self.local_places.iter().flatten() {
             if let Some(owner) = &place.owner {
                 self.insts.push(lir::Inst::CallRuntime {
                     function: lir::RuntimeFn::Release,
@@ -850,7 +865,9 @@ impl<'a> FunctionBuilder<'a> {
                 (field(0), Some(field(1)))
             }
             hir::Target::Local(id) => {
-                let place = &self.local_places[id.0];
+                let place = self.local_places[id.0]
+                    .as_ref()
+                    .expect("an update operator's local variables are placed first");
                 (place.value.clone(), place.owner.clone())
             }
         };
@@ -888,7 +905,17 @@ impl<'a> FunctionBuilder<'a> {
                 base: lir::Base::Data(self.variable_data[id.0]),
                 path: vec![0],
             },
-            hir::Expr::Local(id) => self.local_places[id.0].value.clone(),
+            hir::Expr::Local(id) => self.local_places[id.0]
+                .as_ref()
+                .expect("a local variable is placed before it is used")
+                .value
+                .clone(),
+            hir::Expr::Let(id, value, body) => {
+                let value = self.place(value, cx);
+                self.check_keys(hir::Target::Local(*id), &value, cx);
+                self.local_places[id.0] = Some(LocalPlace { value, owner: None });
+                self.place(body, cx)
+            }
             hir::Expr::Parameter(name) => {
                 let index = self
                     .params
@@ -2531,6 +2558,7 @@ mod tests {
             params: [("t".to_string(), text())].into(),
             kind: hir::OperatorKind::ReadOnly {
                 result: text(),
+                locals: Vec::new(),
                 value,
             },
         };
@@ -2854,6 +2882,68 @@ mod tests {
             })
             .count();
         assert_eq!(releases, 1, "only the relation has memory of its own");
+    }
+
+    #[test]
+    fn a_let_computes_its_value_once() {
+        // `f{p: integer}: integer [ var n := p + 1; return n * n; ]`.
+        let n = || Box::new(hir::Expr::Local(hir::LocalId(0)));
+        let value = hir::Expr::Let(
+            hir::LocalId(0),
+            Box::new(hir::Expr::Binary(
+                hir::BinaryOp::Add(hir::Numeric::Integer),
+                Box::new(hir::Expr::Parameter("p".to_string())),
+                Box::new(hir::Expr::Constant(hir::Value::Integer(1))),
+            )),
+            Box::new(hir::Expr::Binary(
+                hir::BinaryOp::Multiply(hir::Numeric::Integer),
+                n(),
+                n(),
+            )),
+        );
+        let f = hir::Operator {
+            name: "f".to_string(),
+            types: Vec::new(),
+            params: [("p".to_string(), integer())].into(),
+            kind: hir::OperatorKind::ReadOnly {
+                result: integer(),
+                locals: vec![hir::Local {
+                    name: "n".to_string(),
+                    ty: integer(),
+                    keys: Vec::new(),
+                }],
+                value,
+            },
+        };
+        let called = hir::Expr::Call(hir::Call {
+            operator: hir::OperatorId(1),
+            types: Vec::new(),
+            args: [("p".to_string(), hir::Expr::Variable(hir::VariableId(0)))].into(),
+        });
+        let lowered = lower(&program(
+            vec![
+                debug_value(),
+                f,
+                user("main", &[], vec![call(0, vec![("v", called)])]),
+            ],
+            vec![variable("x", hir::Value::Integer(2))],
+        ));
+        let f = lowered.functions.iter().find(|f| f.name == "f").unwrap();
+        let binaries: Vec<&lir::Inst> = f
+            .blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .filter(|i| matches!(i, lir::Inst::Binary { .. }))
+            .collect();
+        // One addition, whose result the multiplication takes twice.
+        let [
+            lir::Inst::Binary { dst: sum, .. },
+            lir::Inst::Binary { lhs, rhs, .. },
+        ] = binaries.as_slice()
+        else {
+            panic!("{binaries:#?}");
+        };
+        assert_eq!((lhs, rhs), (sum, sum));
     }
 
     #[test]

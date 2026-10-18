@@ -14,30 +14,70 @@ use trendy_hir as hir;
 use trendy_syntax::ast::{self, Clause, VarDecl};
 use trendy_syntax::{SyntaxKind, SyntaxToken};
 
-use crate::body::{BodyNames, Context, Local, Locals};
-use crate::check::{Assigned, Checker, Unchanged};
+use crate::check::{Assigned, Checker, Names, Unchanged};
 use crate::types::{Expected, Origin};
 use crate::{errors, keys, ops};
 
-/// An assignment statement outside a block, of its one clause, in the body
-/// of `within`, whose local variables are `locals`; `clauses` has several
-/// only in a statement the parser reported.
+/// What names in an operator's body refer to, which an assignment there
+/// can assign.
+pub(crate) trait Assigning: Names {
+    /// The variable `name`, written at `span`, that an assignment assigns,
+    /// of the program or local, or `None` after reporting why it can't be
+    /// assigned.
+    fn assigned(
+        &mut self,
+        name: &str,
+        span: Span,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<Assignee>;
+}
+
+/// A variable an assignment assigns, of the program or local to the
+/// operator, as it is declared.
+pub(crate) struct Assignee {
+    pub(crate) target: hir::Target,
+    pub(crate) name: String,
+    pub(crate) ty: hir::Type,
+    pub(crate) keys: Vec<hir::Key>,
+    pub(crate) declaration: VarDecl,
+}
+
+impl Assignee {
+    /// The local variable `id`, `local`, which `declaration` declares.
+    pub(crate) fn local(id: hir::LocalId, local: &hir::Local, declaration: &VarDecl) -> Self {
+        Assignee {
+            target: hir::Target::Local(id),
+            name: local.name.clone(),
+            ty: local.ty.clone(),
+            keys: local.keys.clone(),
+            declaration: declaration.clone(),
+        }
+    }
+
+    /// The variable's value before the assignment.
+    fn current(&self) -> hir::Expr {
+        match self.target {
+            hir::Target::Variable(id) => hir::Expr::Variable(id),
+            hir::Target::Local(id) => hir::Expr::Local(id),
+        }
+    }
+}
+
+/// An assignment statement outside a block, of its one clause, whose names
+/// `names` resolves; `clauses` has several only in a statement the parser
+/// reported.
 pub(crate) fn statement(
     clauses: &[Clause],
-    within: hir::OperatorId,
-    cx: &Context,
-    locals: &Locals,
+    names: &mut dyn Assigning,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Statement> {
-    assignments(clauses, within, cx, locals, errors)
+    assignments(clauses, names, errors)
 }
 
 /// An `assign` block: its assignments, made at once.
 pub(crate) fn block(
     block: &ast::AssignBlock,
-    within: hir::OperatorId,
-    cx: &Context,
-    locals: &Locals,
+    names: &mut dyn Assigning,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Statement> {
     let clauses: Vec<Clause> = block.statements().flat_map(|stmt| stmt.clauses()).collect();
@@ -45,7 +85,7 @@ pub(crate) fn block(
         errors.push(errors::empty_assign_block(block));
         return None;
     }
-    assignments(&clauses, within, cx, locals, errors)
+    assignments(&clauses, names, errors)
 }
 
 /// `clauses`, each checked into a change, and each variable's changes
@@ -53,16 +93,14 @@ pub(crate) fn block(
 /// compiling is checked against its keys now.
 fn assignments(
     clauses: &[Clause],
-    within: hir::OperatorId,
-    cx: &Context,
-    locals: &Locals,
+    names: &mut dyn Assigning,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Statement> {
     let mut ok = true;
     // Each variable's changes, in the order variables first appear.
     let mut changes: Vec<(Assignee, Vec<(&Clause, Change)>)> = Vec::new();
     for clause in clauses {
-        let Some((assignee, change)) = change(clause, within, cx, locals, errors) else {
+        let Some((assignee, change)) = change(clause, names, errors) else {
             ok = false;
             continue;
         };
@@ -79,7 +117,7 @@ fn assignments(
     }
     let mut assignments = Vec::new();
     for (assignee, list) in changes {
-        let Some(value) = merged(&assignee, list, within, cx, locals, errors) else {
+        let Some(value) = merged(&assignee, list, names, errors) else {
             ok = false;
             continue;
         };
@@ -89,26 +127,6 @@ fn assignments(
         });
     }
     ok.then_some(hir::Statement::Assign(assignments))
-}
-
-/// A variable an assignment assigns, of the program or local to the
-/// operator, as it is declared.
-struct Assignee<'a> {
-    target: hir::Target,
-    name: &'a str,
-    ty: &'a hir::Type,
-    keys: &'a [hir::Key],
-    declaration: &'a VarDecl,
-}
-
-impl Assignee<'_> {
-    /// The variable's value before the assignment.
-    fn current(&self) -> hir::Expr {
-        match self.target {
-            hir::Target::Variable(id) => hir::Expr::Variable(id),
-            hir::Target::Local(id) => hir::Expr::Local(id),
-        }
-    }
 }
 
 /// What one clause does to its variable.
@@ -147,15 +165,18 @@ struct Addition {
 
 /// The variable `clause` assigns, and its change, or `None` after
 /// reporting why it has none.
-fn change<'a>(
+fn change(
     clause: &Clause,
-    within: hir::OperatorId,
-    cx: &'a Context,
-    locals: &'a Locals,
+    names: &mut dyn Assigning,
     errors: &mut Vec<Diagnostic>,
-) -> Option<(Assignee<'a>, Change)> {
+) -> Option<(Assignee, Change)> {
     let written = clause.target()?;
-    let assignee = assigned(&written, within, cx, locals, errors)?;
+    let ast::Expr::Name(name) = &written else {
+        return None;
+    };
+    let ident = name.ident()?;
+    let span = trendy_syntax::span(ident.text_range());
+    let assignee = names.assigned(ident.text(), span, errors)?;
     let declared = assignee
         .declaration
         .type_expr()
@@ -164,13 +185,12 @@ fn change<'a>(
     let target = Target {
         expected: Expected {
             ty: assignee.ty.clone(),
-            origin: Origin::Variable(assignee.name.to_string(), Box::new(declared)),
+            origin: Origin::Variable(assignee.name.clone(), Box::new(declared)),
         },
         assignee,
         written: &written,
     };
-    let mut names = BodyNames { cx, within, locals };
-    let mut checker = Checker::new(&mut names);
+    let mut checker = Checker::new(names);
     let change = match (clause, clause.keyword()) {
         (Clause::Assignment(_), _) => {
             let written = clause.operand()?;
@@ -178,7 +198,7 @@ fn change<'a>(
             if value == target.assignee.current() {
                 let statement = clause.statement()?;
                 errors.push(errors::own_value(
-                    target.assignee.name,
+                    &target.assignee.name,
                     clause.span(),
                     &statement,
                 ));
@@ -199,8 +219,8 @@ fn change<'a>(
 
 /// The variable an assignment assigns, where it is written, and the type
 /// its value must have.
-struct Target<'a, 'w> {
-    assignee: Assignee<'a>,
+struct Target<'w> {
+    assignee: Assignee,
     written: &'w ast::Expr,
     expected: Expected,
 }
@@ -227,7 +247,7 @@ fn update(
         Unchanged::Empty => errors::empty_update(&list, &statement),
         Unchanged::OwnValues => errors::own_values_updated(clause.span(), &statement),
     };
-    match (clause.where_keyword(), target.assignee.ty) {
+    match (clause.where_keyword(), &target.assignee.ty) {
         (None, hir::Type::Tuple(_)) => {
             match checker.assign_attributes(
                 target.assignee.current(),
@@ -245,7 +265,7 @@ fn update(
             let span = trendy_syntax::span(token.text_range());
             errors.push(errors::not_restrictable(
                 span,
-                target.assignee.ty,
+                &target.assignee.ty,
                 target.written,
             ));
             None
@@ -293,12 +313,12 @@ fn shorthand(
     checker: &mut Checker,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<TupleChange> {
-    let hir::Type::Relation(heading) = target.assignee.ty else {
+    let hir::Type::Relation(heading) = &target.assignee.ty else {
         let span = trendy_syntax::span(keyword.text_range());
         errors.push(errors::not_relational(
             keyword.text(),
             span,
-            target.assignee.ty,
+            &target.assignee.ty,
             target.written,
         ));
         return None;
@@ -345,12 +365,10 @@ fn shorthand(
 fn merged(
     assignee: &Assignee,
     list: Vec<(&Clause, Change)>,
-    within: hir::OperatorId,
-    cx: &Context,
-    locals: &Locals,
+    names: &mut dyn Assigning,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Expr> {
-    let name = assignee.name;
+    let name = assignee.name.as_str();
     if known_effects(&assignee.current(), name, &list, errors) {
         return None;
     }
@@ -375,9 +393,8 @@ fn merged(
     match first {
         Change::Value(value, written) => {
             if let hir::Expr::Constant(hir::Value::Relation(relation)) = &value {
-                let keys = keys::written(assignee.declaration, assignee.keys);
-                let mut names = BodyNames { cx, within, locals };
-                if !keys::satisfied(name, &keys, relation, &written, &mut names, errors) {
+                let keys = keys::written(&assignee.declaration, &assignee.keys);
+                if !keys::satisfied(name, &keys, relation, &written, names, errors) {
                     return None;
                 }
             }
@@ -391,7 +408,7 @@ fn merged(
                 };
                 changes.push((clause, computed, values));
             }
-            attributes_merged(assignee.current(), name, changes, cx.bindings(), errors)
+            attributes_merged(assignee.current(), name, changes, names.bindings(), errors)
         }
         Change::Tuples(change) => {
             let mut changes = vec![(clause, change)];
@@ -401,7 +418,7 @@ fn merged(
                 };
                 changes.push((clause, change));
             }
-            tuples_merged(&assignee.current(), name, changes, cx.bindings(), errors)
+            tuples_merged(&assignee.current(), name, changes, names.bindings(), errors)
         }
     }
 }
@@ -608,68 +625,6 @@ fn shared<'a>(
                 Some((*first, *second, tuple.clone()))
             })
         })
-}
-
-/// The variable `target` names, which an assignment assigns, of the
-/// program or among `locals`, or `None` after reporting why it can't be
-/// assigned: it isn't a variable, it is a parameter, which is read-only, or
-/// it is a local variable before its declaration.
-fn assigned<'a>(
-    target: &ast::Expr,
-    within: hir::OperatorId,
-    cx: &'a Context,
-    locals: &'a Locals,
-    errors: &mut Vec<Diagnostic>,
-) -> Option<Assignee<'a>> {
-    let ast::Expr::Name(name) = target else {
-        return None;
-    };
-    let ident = name.ident()?;
-    let (name, span) = (ident.text(), trendy_syntax::span(ident.text_range()));
-    if cx.operators.get(within).params.contains_key(name) {
-        let hidden = cx.variable_ids.contains_key(name);
-        errors.push(errors::assigned_parameter(name, span, hidden));
-        return None;
-    }
-    match locals.find(name) {
-        Some(Local::Declared(id, local, declaration)) => {
-            return Some(Assignee {
-                target: hir::Target::Local(id),
-                name: &local.name,
-                ty: &local.ty,
-                keys: &local.keys,
-                declaration,
-            });
-        }
-        Some(Local::Later(decl)) => {
-            errors.push(errors::local_before_declaration(name, span, decl));
-            return None;
-        }
-        // Its declaration's errors are already reported.
-        Some(Local::Invalid) => return None,
-        None => {}
-    }
-    if let Some(&id) = cx.variable_ids.get(name) {
-        // A variable with errors in its declaration is already reported.
-        let variable = cx.variables[id.0].as_ref()?;
-        return Some(Assignee {
-            target: hir::Target::Variable(id),
-            name: &variable.name,
-            ty: &variable.ty,
-            keys: &variable.keys,
-            declaration: &cx.declarations[&variable.name],
-        });
-    }
-    if let Some((kind, _)) = cx.namespaces.operator(name) {
-        errors.push(errors::assigned_operator(name, span, kind));
-    } else {
-        let variables: Vec<&str> = locals
-            .names()
-            .chain(cx.variable_ids.keys().map(String::as_str))
-            .collect();
-        errors.push(errors::unknown_name(name, span, "variable", &variables));
-    }
-    None
 }
 
 /// The tuples of the relation `operand` for which `condition` is true.

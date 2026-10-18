@@ -11,7 +11,9 @@ use trendy_diag::{Diagnostic, Span};
 use trendy_hir as hir;
 use trendy_syntax::ast::{self, SourceFile, VarDecl};
 
+use crate::assign::{self, Assignee, Assigning};
 use crate::check::{Checker, Lookup, Names};
+use crate::locals::{self, Local, Locals};
 use crate::operators::{Operators, Signature};
 use crate::types::{self, Expected, Origin};
 use crate::{Namespaces, Prelude, errors, keys, ops};
@@ -22,6 +24,9 @@ pub(crate) struct Evaluated {
     pub(crate) variables: Vec<Option<hir::Variable>>,
     /// Each valid read-only operator's value.
     pub(crate) values: HashMap<hir::OperatorId, hir::Expr>,
+    /// Each valid read-only operator's local variables, which its value's
+    /// `Let`s give values.
+    pub(crate) locals: HashMap<hir::OperatorId, Vec<hir::Local>>,
 }
 
 /// Evaluates the globals, each when first needed.
@@ -41,6 +46,8 @@ pub(crate) struct Globals<'a> {
     operator_states: HashMap<hir::OperatorId, State<()>>,
     /// Each valid read-only operator's value.
     values: HashMap<hir::OperatorId, hir::Expr>,
+    /// Each valid read-only operator's local variables.
+    locals: HashMap<hir::OperatorId, Vec<hir::Local>>,
     /// The globals being evaluated, innermost last.
     stack: Vec<Pending>,
 }
@@ -100,6 +107,7 @@ impl<'a> Globals<'a> {
                 .map(|&id| (id, State::Done(Some(()))))
                 .collect(),
             values,
+            locals: HashMap::new(),
             stack: Vec::new(),
         }
     }
@@ -135,6 +143,7 @@ impl<'a> Globals<'a> {
                 })
                 .collect(),
             values: self.values,
+            locals: self.locals,
         }
     }
 
@@ -221,8 +230,9 @@ impl<'a> Globals<'a> {
         let value = self.value(signature, errors);
         self.stack.pop();
         let valid = value.is_some();
-        if let Some(value) = value {
+        if let Some((locals, value)) = value {
             self.values.insert(id, value);
+            self.locals.insert(id, locals);
         }
         self.operator_states
             .insert(id, State::Done(valid.then_some(())));
@@ -239,43 +249,108 @@ impl<'a> Globals<'a> {
         errors.push(errors::cycle(&cycle));
     }
 
-    /// The value of the read-only operator `signature`: its body is one
-    /// `return`, of a value of its result type, and changes nothing (TTM RM
-    /// Prescription 3). `None` after reporting why it has none.
-    fn value(&mut self, signature: &Signature, errors: &mut Vec<Diagnostic>) -> Option<hir::Expr> {
+    /// The value of the read-only operator `signature`, and its local
+    /// variables: its body declares and assigns those, and ends in one
+    /// `return`, of a value of its result type; it changes nothing else
+    /// (TTM RM Prescription 3). Each declaration and assignment is a `Let`
+    /// of a local variable of its own, which has the value from there on,
+    /// so that the value is one expression, which computes each local
+    /// variable's value once. `None` after reporting why it has none.
+    fn value(
+        &mut self,
+        signature: &Signature,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<(Vec<hir::Local>, hir::Expr)> {
         let decl = signature.decl.as_ref()?;
         let written = decl.result()?;
         let body = decl.body()?;
-        let mut valid = signature.valid;
-        let mut returns = Vec::new();
+        let namespaces = self.namespaces;
+        let (mut locals, mut valid) = locals::declarations(&body, signature, errors);
+        valid &= signature.valid;
+        let mut lets: Vec<(hir::LocalId, hir::Expr)> = Vec::new();
+        let mut returned: Option<(ast::ReturnStmt, Option<hir::Expr>)> = None;
         for statement in body.statements() {
-            match statement {
-                ast::Statement::Return(stmt) => returns.push(stmt),
-                other => {
-                    errors.push(errors::read_only_effect(&signature.name, &other));
+            if let Some((first, _)) = &returned {
+                errors.push(match &statement {
+                    ast::Statement::Return(stmt) => errors::extra_return(stmt, first),
+                    other => errors::after_return(other, first),
+                });
+                valid = false;
+                continue;
+            }
+            let mut names = ReadOnlyNames {
+                globals: self,
+                within: signature.id,
+                locals: &locals,
+            };
+            match &statement {
+                ast::Statement::Return(stmt) => {
+                    let expected = signature.result.clone().map(|ty| Expected {
+                        ty,
+                        origin: Origin::Type(written.clone()),
+                    });
+                    let value = stmt.value().and_then(|value| {
+                        Checker::new(&mut names).expr(&value, expected.as_ref(), errors)
+                    });
+                    returned = Some((stmt.clone(), value));
+                }
+                ast::Statement::Var(decl) => {
+                    let checked = locals::local(decl, signature, namespaces, &mut names, errors);
+                    let (local, value) = checked.unzip();
+                    match (locals.declare(decl, local), value) {
+                        (Some(id), Some(value)) => lets.push((id, value)),
+                        _ => valid = false,
+                    }
+                }
+                ast::Statement::Assign(stmt) => {
+                    let clauses: Vec<_> = stmt.clauses().collect();
+                    let assigned = assign::statement(&clauses, &mut names, errors);
+                    valid &= reassigned(assigned, &mut locals, &mut lets);
+                }
+                ast::Statement::Block(block) => {
+                    let assigned = assign::block(block, &mut names, errors);
+                    valid &= reassigned(assigned, &mut locals, &mut lets);
+                }
+                ast::Statement::Call(stmt) => {
+                    errors.push(errors::call_in_read_only(&signature.name, stmt));
                     valid = false;
                 }
             }
         }
-        let Some((first, extra)) = returns.split_first() else {
+        let Some((_, value)) = returned else {
             errors.push(errors::missing_return(&signature.name, &body, &written));
             return None;
         };
-        for stmt in extra {
-            errors.push(errors::extra_return(stmt, first));
-            valid = false;
-        }
-        let expected = signature.result.clone().map(|ty| Expected {
-            ty,
-            origin: Origin::Type(written),
-        });
-        let mut names = ReadOnlyNames {
-            globals: self,
-            within: signature.id,
-        };
-        let value = Checker::new(&mut names).expr(&first.value()?, expected.as_ref(), errors)?;
-        valid.then_some(value)
+        let value = value?;
+        valid.then(|| {
+            let value = lets.into_iter().rev().fold(value, |body, (id, value)| {
+                hir::Expr::Let(id, Box::new(value), Box::new(body))
+            });
+            (locals.finish(), value)
+        })
     }
+}
+
+/// Whether `assigned`, an assignment statement in a read-only operator, of
+/// its local variables, is valid, each local variable it assigns then given
+/// a new one, which has the value from there on, in `lets`. The values are
+/// computed from the local variables before any is assigned, so the
+/// statement's assignments are still made at once.
+fn reassigned(
+    assigned: Option<hir::Statement>,
+    locals: &mut Locals,
+    lets: &mut Vec<(hir::LocalId, hir::Expr)>,
+) -> bool {
+    let Some(hir::Statement::Assign(assignments)) = assigned else {
+        return false;
+    };
+    for assignment in assignments {
+        let hir::Target::Local(id) = assignment.target else {
+            unreachable!("a read-only operator assigns only its local variables");
+        };
+        lets.push((locals.reassigned(id), assignment.value));
+    }
+    true
 }
 
 impl Names for Globals<'_> {
@@ -322,21 +397,22 @@ impl Names for Globals<'_> {
     }
 }
 
-/// Names in the value of the read-only operator `within`: its parameters,
-/// which hide variables of the same name, and the variables, which it reads
-/// when it is called.
-struct ReadOnlyNames<'g, 'a> {
+/// Names in the body of the read-only operator `within`: its parameters and
+/// its local variables, which hide variables of the same name, and the
+/// variables, which it reads when it is called.
+struct ReadOnlyNames<'g, 'a, 'l> {
     globals: &'g mut Globals<'a>,
     within: hir::OperatorId,
+    locals: &'l Locals,
 }
 
-impl ReadOnlyNames<'_, '_> {
+impl ReadOnlyNames<'_, '_, '_> {
     fn params(&self) -> &std::collections::BTreeMap<String, hir::Type> {
         &self.globals.operators.get(self.within).params
     }
 }
 
-impl Names for ReadOnlyNames<'_, '_> {
+impl Names for ReadOnlyNames<'_, '_, '_> {
     fn namespaces(&self) -> &Namespaces {
         self.globals.namespaces
     }
@@ -348,6 +424,20 @@ impl Names for ReadOnlyNames<'_, '_> {
     fn resolve(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {
         if self.params().contains_key(name) {
             return Lookup::Found(hir::Expr::Parameter(name.to_string()));
+        }
+        match self.locals.find(name) {
+            Some(Local::Declared(id, ..)) => return Lookup::Found(hir::Expr::Local(id)),
+            Some(Local::Later(decl)) => {
+                errors.push(errors::local_before_declaration(
+                    name,
+                    span,
+                    decl,
+                    self.globals.ids.contains_key(name),
+                ));
+                return Lookup::Reported;
+            }
+            Some(Local::Invalid) => return Lookup::Reported,
+            None => {}
         }
         if let Some(&id) = self.globals.ids.get(name) {
             return match self.globals.reach(name, span, errors) {
@@ -369,19 +459,22 @@ impl Names for ReadOnlyNames<'_, '_> {
     fn candidates(&self) -> Vec<String> {
         self.params()
             .keys()
-            .chain(self.globals.ids.keys())
-            .cloned()
+            .map(String::as_str)
+            .chain(self.locals.names())
+            .chain(self.globals.ids.keys().map(String::as_str))
+            .map(str::to_string)
             .collect()
     }
 
     fn leaf_type(&self, leaf: &hir::Expr) -> hir::Type {
         match leaf {
             hir::Expr::Parameter(name) => self.params()[name].clone(),
+            hir::Expr::Local(id) => self.locals.get(*id).ty.clone(),
             hir::Expr::Variable(id) => match &self.globals.variables[id.0] {
                 Some(State::Done(Some(variable))) => variable.ty.clone(),
                 _ => unreachable!("a variable is evaluated when its name is resolved"),
             },
-            _ => unreachable!("only variables and parameters are leaves"),
+            _ => unreachable!("only variables, parameters and local variables are leaves"),
         }
     }
 
@@ -399,6 +492,48 @@ impl Names for ReadOnlyNames<'_, '_> {
             values: &self.globals.values,
             variables: None,
         }
+    }
+}
+
+impl Assigning for ReadOnlyNames<'_, '_, '_> {
+    fn assigned(
+        &mut self,
+        name: &str,
+        span: Span,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<Assignee> {
+        let op = self.globals.operators.get(self.within);
+        if self.params().contains_key(name) {
+            let hidden = self.globals.ids.contains_key(name);
+            errors.push(errors::assigned_parameter(name, span, hidden));
+            return None;
+        }
+        match self.locals.find(name) {
+            Some(Local::Declared(id, local, declaration)) => {
+                return Some(Assignee::local(id, local, declaration));
+            }
+            Some(Local::Later(decl)) => {
+                errors.push(errors::local_before_declaration(
+                    name,
+                    span,
+                    decl,
+                    self.globals.ids.contains_key(name),
+                ));
+                return None;
+            }
+            // Its declaration's errors are already reported.
+            Some(Local::Invalid) => return None,
+            None => {}
+        }
+        if self.globals.ids.contains_key(name) {
+            errors.push(errors::assigned_in_read_only(name, span, &op.name));
+        } else if let Some((kind, _)) = self.globals.namespaces.operator(name) {
+            errors.push(errors::assigned_operator(name, span, kind));
+        } else {
+            let variables: Vec<&str> = self.locals.names().collect();
+            errors.push(errors::unknown_name(name, span, "variable", &variables));
+        }
+        None
     }
 }
 
