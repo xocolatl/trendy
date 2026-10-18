@@ -2758,10 +2758,14 @@ operator main{} [
   them with a blank line to group them; several blank lines become one;
 - a blank line between other definitions;
 - single spaces around `:=` and after `:`;
-- lines are at most 100 characters where a list can be broken: a line
-  that would be longer has its outermost list, such as an operator's
-  parameters, a call's arguments, a heading or a tuple value, written one
-  item per line, until it fits;
+- lines are at most 100 characters where a list or an `if` expression can
+  be broken: a line that would be longer has its outermost list, such as
+  an operator's parameters, a call's arguments, a heading or a tuple value,
+  written one item per line, or its outermost `if`'s `then` and `else`
+  each starting a line, one level in, until it fits; an `else if` chain
+  stays at its `if`'s level;
+- an `if` statement's blocks, as an operator's body, have each statement
+  on its own line, even one alone;
 - a relation value with more than one tuple has each tuple on its own line,
   indented four spaces per level of nesting;
 - a tuple value, relation value or call's arguments with several items, one

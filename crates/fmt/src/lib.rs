@@ -83,12 +83,13 @@ impl Layout {
             if let Some(decl) = keys {
                 return Some(Break::Keys(decl));
             }
-            // The first list or `if` that starts on the line and isn't
-            // broken yet: the outermost.
+            // The outermost list or `if` that starts on the line and isn't
+            // broken yet, and of those the first: in `r{a, b} extend {…}`,
+            // the `extend`'s list, which the projection is within.
             let breakable = lines
                 .iter()
                 .filter(|(_, l)| *l == line)
-                .find_map(|(token, _)| {
+                .filter_map(|(token, _)| {
                     let node = token.parent()?;
                     let opens = match token.kind() {
                         SyntaxKind::LBrace | SyntaxKind::LBracket => {
@@ -98,7 +99,8 @@ impl Layout {
                         _ => false,
                     };
                     (opens && !self.is_block(&node) && !self.chained_if(&node)).then_some(node)
-                });
+                })
+                .min_by_key(|node| node.ancestors().count());
             if let Some(node) = breakable {
                 return Some(Break::Node(node));
             }
@@ -943,6 +945,18 @@ mod tests {
         assert_eq!(
             fmt("operator f{} [\n    if a then [ call g{}; ];\n\n    call g{};\n];\n"),
             "operator f{} [\n    if a then [\n        call g{};\n    ];\n\n    call g{};\n];\n"
+        );
+    }
+
+    #[test]
+    fn the_outermost_list_breaks_first() {
+        // The `extend`'s list, not the projection within its operand, which
+        // comes first.
+        assert_eq!(
+            fmt(
+                "var list := scaled{ingredient, unit} extend { total := sum{r: !!scaled, of: amount}, recipes := (!!scaled){recipe} };"
+            ),
+            "var list := scaled{ingredient, unit} extend {\n    total := sum{r: !!scaled, of: amount},\n    recipes := (!!scaled){recipe}\n};\n"
         );
     }
 

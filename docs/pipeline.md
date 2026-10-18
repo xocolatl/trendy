@@ -313,8 +313,12 @@ spaces per level of nesting, with the closing brace on a line of its own.
 A tuple value, relation value or call's arguments with several items, one of
 them broken, puts each item on its own line too. Lines are at most 100
 characters: the formatter lays everything out, then breaks the outermost
-unbroken list on the first line that's too long, one item per line, and
-repeats until every line fits or none can be broken further.
+unbroken list on the first line that's too long, one item per line, or
+`if` expression, its `then` and its `else` each starting a line, and
+repeats until every line fits or none can be broken further. An `if` with
+a part that spans lines is broken too, and an `else if` with the `if` it
+is in. A block of an `if` statement, as an operator's body, has each
+statement on its own line.
 
 The formatter reprints the CST's tokens and decides the whitespace between
 them. It never adds or drops a token, comments included. Comments are
