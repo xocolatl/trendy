@@ -426,10 +426,11 @@ evaluates every call it can, so a call is left only where an argument, or
 a variable the operator reads, is known only when the program runs.
 
 Every type's equality must hold exactly when no operator can tell two values
-apart (TTM RM Prescription 8). For approximate numbers, that is IEEE 754
-totalOrder. `hir::Approximate` implements it, and every comparison, ordering
-or hash of an approximate number goes through that type, never through `f64`
-operators.
+apart (TTM RM Prescription 8). IEEE 754 equality doesn't, because of NaN and
+`-0.0`, so approximate numbers have neither: no operator makes a NaN or an
+infinity, and `hir::Approximate::new` makes `-0.0` `0.0`. Two are then equal
+exactly when their bits are. Every comparison, ordering or hash of an
+approximate number goes through that type, never through `f64` operators.
 
 **Must not:** refer to syntax: no tokens, no CST, no spans. When debug info
 arrives, source locations come back as a separate, explicit HIR field rather
@@ -771,15 +772,14 @@ result so far and the next operand, which must have an attribute in common
 (A0029).
 
 Comparisons follow one order per type (`hir::compare`): `false` before `true`,
-integers numerically, approximate numbers by IEEE 754 totalOrder, and text by
-code point. Tuples, relations and arrays have only `=` and `<>`
+integers and approximate numbers numerically, and text by code point. Tuples, relations and arrays have only `=` and `<>`
 (`hir::Compared`), by value equality: when folding, `hir::Value`'s, and at run time
 `trendy_rt_equal`, which walks the type descriptor. A relation's tuples are
 always in one canonical order, so equal relations have equal arrays; building
 relations at run time must keep that order. Codegen compares approximate
-numbers as integers, after flipping every bit but the sign of a negative
-value's bits, which is totalOrder; text is compared by
-`trendy_rt_compare_text`, since UTF-8 byte order is code point order.
+numbers with the target's floating-point comparisons, which, without NaN or
+`-0.0`, order them by value; text is compared by `trendy_rt_compare_text`,
+since UTF-8 byte order is code point order.
 
 Checking is bidirectional: the expected type flows down into a value
 (`types::Expected`), along with where it came from (`types::Origin`): a
@@ -1030,11 +1030,10 @@ attributes are named. Its sizes and offsets are LIR's `Size` and `Offset` fields
 codegen resolves with the same layout engine as everything else, so the
 runtime never repeats the layout rules.
 
-Approximate comparisons compile to totalOrder (an integer comparison on the
-bits, after flipping every bit but the sign of negative values), never to the
-target's floating-point compare instructions, which would make `-0e0` equal to
-`0e0`. LIR carries approximate numbers as exact bits (`Field::F64Bits`) for
-the same reason.
+Approximate arithmetic makes IEEE 754's `-0.0` into `0.0` by adding `0.0` to
+each result (`one_zero`), which leaves every other number as it is, so that
+there is one zero, as in HIR. LIR carries approximate numbers as exact bits
+(`Field::F64Bits`).
 
 **Must not:** see syntax, or produce user-facing errors. Any error it
 returns is a compiler bug, and the driver reports it as `X0000`, internal

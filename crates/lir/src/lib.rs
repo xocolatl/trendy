@@ -427,8 +427,8 @@ pub enum BinaryOp {
     Div,
     /// Of integers, with the sign of the dividend. `i64::MIN mod -1` is 0.
     Mod,
-    /// A comparison, whose result is a boolean: `false` before `true`,
-    /// integers numerically, and approximate numbers by IEEE 754 totalOrder.
+    /// A comparison, whose result is a boolean: `false` before `true`, and
+    /// integers and approximate numbers numerically.
     /// Texts are compared by [`RuntimeFn::CompareText`], and tuples,
     /// relations and arrays by [`RuntimeFn::Equal`].
     Compare(Comparison, Operand),

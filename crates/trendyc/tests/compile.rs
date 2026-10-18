@@ -304,10 +304,10 @@ fn approximate_numbers() {
     // Evaluated when compiling.
     assert_eq!(
         lines[..5],
-        ["5e-1", "1.875e1", "-0e0", "1e-310", "9.007199254740992e15"]
+        ["5e-1", "1.875e1", "0e0", "1e-310", "9.007199254740992e15"]
     );
     // Each row: `-a`, `a + b`, `a - b`, `a * b`, `a / b`, rounded as IEEE
-    // 754 rounds them, signed zeros included.
+    // 754 rounds them, except that there is one zero.
     let rows: Vec<_> = lines[5..25].chunks(5).collect();
     assert_eq!(
         rows,
@@ -320,7 +320,7 @@ fn approximate_numbers() {
                 "2.0000000000000004e-2",
                 "5e-1"
             ],
-            ["-0e0", "-1e0", "1e0", "-0e0", "-0e0"],
+            ["0e0", "-1e0", "1e0", "0e0", "0e0"],
             ["-1e300", "1e300", "1e300", "1e292", "1e308"],
         ]
     );
@@ -406,7 +406,7 @@ fn comparisons() {
             "100101", // true, true
             "011100", // -2, 1
             "100101", // 7, 7
-            "011100", // -0.0, 0.0: totalOrder
+            "100101", // -0e0, 0e0: one zero
             "010011", // 2.5, -1e300
             "011100", // "Z", "a": by code point
             "011100", // "é", "😀"
@@ -429,7 +429,7 @@ fn comparisons() {
             "01", // a subset
             "01", // against the empty relation
             "10", // two empty relations
-            "01", // `0.0` and `-0.0` are different values, even nested
+            "10", // `0e0` and `-0e0` are one value, even nested
             "10", // nested relations compare as sets
         ]
     );
@@ -771,14 +771,14 @@ fn relations() {
             r#"relation { place: text } { { place: "London" }, { place: "Paris" }, { place: "Portland" } }"#,
             r#"relation { born: integer, place: text } { { born: 1815, place: "London" }, { born: 1815, place: "Paris" }, { born: 1816, place: "London" }, { born: 1923, place: "Portland" } }"#,
             "relation {} { {} }",
-            // Approximate numbers by totalOrder.
-            "relation { x: approximate } { { x: -1.5e0 }, { x: -0e0 }, { x: 0e0 }, { x: 2.5e0 } }",
+            // Approximate numbers numerically, and `-0e0` is `0e0`.
+            "relation { x: approximate } { { x: -1.5e0 }, { x: 0e0 }, { x: 2.5e0 } }",
             // Relations by their tuples: the empty one first.
             r#"relation { members: relation { name: text } } { { members: relation { name: text } {} }, { members: relation { name: text } { { name: "Ada" }, { name: "Edgar" } } } }"#,
             "relation {} {}",
             // Renamed, and sorted again by the new first attribute.
             r#"relation { alias: text, born: integer, place: text } { { alias: "Ada", born: 1815, place: "London" }, { alias: "Ada", born: 1816, place: "London" }, { alias: "Edgar", born: 1923, place: "Portland" }, { alias: "Édouard", born: 1815, place: "Paris" } }"#,
-            "relation { n: approximate, x: integer } { { n: -1.5e0, x: 3 }, { n: -1.5e0, x: 5 }, { n: -0e0, x: 2 }, { n: 0e0, x: 4 }, { n: 2.5e0, x: 1 } }",
+            "relation { n: approximate, x: integer } { { n: -1.5e0, x: 3 }, { n: -1.5e0, x: 5 }, { n: 0e0, x: 2 }, { n: 0e0, x: 4 }, { n: 2.5e0, x: 1 } }",
             // Built from run-time values, sorted, and with the tuples that
             // turn out equal made one.
             r#"relation { born: integer, name: text } { { born: 701, name: "李白" }, { born: 1815, name: "Ada" } }"#,

@@ -1,5 +1,5 @@
 var folded := 1 < 2 and "a" < "b" and false < true;
-var signed_zeros := -0e0 < 0e0 and -0e0 <> 0e0;
+var one_zero := -0e0 = 0e0;
 var ada := tuple { name: "Ada", born: 1815 };
 var people := relation {
     { name: "Ada", born: 1815 },
@@ -66,7 +66,7 @@ operator nested{
 
 operator main{} [
     call debug_value{v: folded};
-    call debug_value{v: signed_zeros};
+    call debug_value{v: one_zero};
     call debug_value{v: folded_tuples};
     call booleans{a: false, b: true};
     call booleans{a: true, b: true};

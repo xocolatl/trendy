@@ -262,8 +262,11 @@ impl Functions {
                         self.fail_if(overflow, lir::Failure::IntegerOverflow, b)?;
                         result
                     }
-                    // Exact: only the sign changes.
-                    lir::UnaryOp::Negate(lir::Numeric::Approximate) => b.ins().fneg(value),
+                    // Exact: only the sign changes, and 0.0 stays 0.0.
+                    lir::UnaryOp::Negate(lir::Numeric::Approximate) => {
+                        let negated = b.ins().fneg(value);
+                        one_zero(negated, b)
+                    }
                     lir::UnaryOp::Integer if ty == types::I64 => value,
                     lir::UnaryOp::Integer => b.ins().uextend(types::I64, value),
                     lir::UnaryOp::Usize if self.config.pointer_type() == types::I64 => value,
@@ -294,11 +297,7 @@ impl Functions {
                 self.store(place, next, frame, b)?;
             }
             lir::Inst::Binary { dst, op, lhs, rhs } => {
-                // Approximate numbers are compared by their bits.
                 let ty = match op {
-                    lir::BinaryOp::Compare(_, lir::Operand::Numeric(lir::Numeric::Approximate)) => {
-                        types::I64
-                    }
                     lir::BinaryOp::Compare(_, lir::Operand::Usize) => self.config.pointer_type(),
                     _ => operand_type(op.operand()),
                 };
@@ -333,32 +332,22 @@ impl Functions {
             let infinity = b.ins().f64const(f64::INFINITY);
             let overflow = b.ins().fcmp(FloatCC::Equal, magnitude, infinity);
             this.fail_if(overflow, lir::Failure::ApproximateOverflow, b)
-                .map(|()| result)
+                .map(|()| one_zero(result, b))
         };
         Ok(match op {
-            lir::BinaryOp::Compare(comparison, operand) => {
-                let signed = condition(comparison, true);
-                match operand {
-                    // `false` and `true` are 0 and 1, so signed order is
-                    // their order.
-                    lir::Operand::Boolean | lir::Operand::Numeric(Integer) => {
-                        b.ins().icmp(signed, lhs, rhs)
-                    }
-                    lir::Operand::Usize => b.ins().icmp(condition(comparison, false), lhs, rhs),
-                    // IEEE 754 totalOrder: flipping every bit but the sign
-                    // of a negative value's bits makes them order as signed
-                    // integers, and keeps distinct values distinct.
-                    lir::Operand::Numeric(Approximate) => {
-                        let key = |b: &mut FunctionBuilder, bits| {
-                            let sign = b.ins().sshr_imm_u(bits, 63);
-                            let mask = b.ins().ushr_imm_u(sign, 1);
-                            b.ins().bxor(bits, mask)
-                        };
-                        let (lhs, rhs) = (key(b, lhs), key(b, rhs));
-                        b.ins().icmp(signed, lhs, rhs)
-                    }
+            lir::BinaryOp::Compare(comparison, operand) => match operand {
+                // `false` and `true` are 0 and 1, so signed order is their
+                // order.
+                lir::Operand::Boolean | lir::Operand::Numeric(Integer) => {
+                    b.ins().icmp(condition(comparison, true), lhs, rhs)
                 }
-            }
+                lir::Operand::Usize => b.ins().icmp(condition(comparison, false), lhs, rhs),
+                // Without NaN or `-0.0`, IEEE 754 comparison is equal exactly
+                // for identical values, and orders them all.
+                lir::Operand::Numeric(Approximate) => {
+                    b.ins().fcmp(float_condition(comparison), lhs, rhs)
+                }
+            },
             lir::BinaryOp::And => b.ins().band(lhs, rhs),
             lir::BinaryOp::Or => b.ins().bor(lhs, rhs),
             lir::BinaryOp::Xor => b.ins().bxor(lhs, rhs),
@@ -568,6 +557,27 @@ fn condition(comparison: lir::Comparison, signed: bool) -> cranelift_codegen::ir
         (lir::Comparison::Greater, false) => IntCC::UnsignedGreaterThan,
         (lir::Comparison::GreaterOrEqual, false) => IntCC::UnsignedGreaterThanOrEqual,
     }
+}
+
+/// The float comparison `comparison`.
+fn float_condition(comparison: lir::Comparison) -> cranelift_codegen::ir::condcodes::FloatCC {
+    use cranelift_codegen::ir::condcodes::FloatCC;
+    match comparison {
+        lir::Comparison::Equal => FloatCC::Equal,
+        lir::Comparison::NotEqual => FloatCC::NotEqual,
+        lir::Comparison::Less => FloatCC::LessThan,
+        lir::Comparison::LessOrEqual => FloatCC::LessThanOrEqual,
+        lir::Comparison::Greater => FloatCC::GreaterThan,
+        lir::Comparison::GreaterOrEqual => FloatCC::GreaterThanOrEqual,
+    }
+}
+
+/// The approximate number `value`, with IEEE 754's `-0.0` made `0.0`, since
+/// approximate numbers have one zero. Adding `0.0` does that, and leaves
+/// every other number as it is (IEEE 754, 6.3).
+fn one_zero(value: Value, b: &mut FunctionBuilder) -> Value {
+    let zero = b.ins().f64const(0.0);
+    b.ins().fadd(value, zero)
 }
 
 /// The Cranelift type an instruction's operands are loaded as.

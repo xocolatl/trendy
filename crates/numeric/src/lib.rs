@@ -83,20 +83,11 @@ const LIMBS: usize = 34;
 pub struct ApproximateSum {
     /// Least significant first.
     limbs: [u64; LIMBS],
-    /// Whether a value has been added.
-    added: bool,
-    /// Whether every value added is `-0.0`. As IEEE 754 addition in any
-    /// order, a sum that is exactly zero is `-0.0` only then.
-    negative_zero: bool,
 }
 
 impl Default for ApproximateSum {
     fn default() -> Self {
-        ApproximateSum {
-            limbs: [0; LIMBS],
-            added: false,
-            negative_zero: true,
-        }
+        ApproximateSum { limbs: [0; LIMBS] }
     }
 }
 
@@ -122,8 +113,6 @@ impl ApproximateSum {
     /// Add `x`, which must be finite: an infinity or a NaN has no exact
     /// value, and the total would mean nothing.
     pub fn add(&mut self, x: f64) {
-        self.added = true;
-        self.negative_zero &= x.to_bits() == (-0.0_f64).to_bits();
         let (significand, shift) = decode(x);
         if significand == 0 {
             return;
@@ -190,12 +179,7 @@ impl ApproximateSum {
                 (*limb, carry) = (!*limb).overflowing_add(u64::from(carry));
             }
         }
-        let zero = magnitude.iter().all(|&limb| limb == 0);
-        nearest(
-            &magnitude,
-            -1074,
-            negative || zero && self.added && self.negative_zero,
-        )
+        nearest(&magnitude, -1074, negative)
     }
 }
 
@@ -284,7 +268,7 @@ impl ApproximateProduct {
     #[must_use]
     pub fn total(&self) -> Rounded {
         if self.zero {
-            return Rounded::Nearest(Some(if self.negative { -0.0 } else { 0.0 }));
+            return Rounded::Nearest(Some(0.0));
         }
         let (low, high) = halves(self.significand);
         let rounded = nearest(&[low, high], self.exponent, self.negative);
@@ -399,14 +383,13 @@ fn join(low: u64, high: u64) -> u128 {
 /// The approximate number nearest `magnitude` × 2^`exponent`, ties to even,
 /// with the sign `negative`, or `None` if that is beyond the largest finite
 /// one. `magnitude` is an integer, least significant limb first. A result
-/// too small for a subnormal is zero, of the sign, as IEEE 754 rounds it.
+/// too small for a subnormal is zero, which is `0.0` whatever the sign:
+/// approximate numbers have one zero, and never `-0.0`.
 fn nearest(magnitude: &[u64], exponent: i64, negative: bool) -> Option<f64> {
-    let sign = u64::from(negative) << 63;
-    let zero = Some(f64::from_bits(sign));
     // The positions of the lowest and highest bits set, counting from 0. A
     // position beyond an `i64` is of a number far beyond any finite one.
     let Some(top) = magnitude.iter().rposition(|&limb| limb != 0) else {
-        return zero;
+        return Some(0.0);
     };
     let bottom = magnitude.iter().position(|&limb| limb != 0)?;
     let position = |limb: usize, bit: u32| Some(i64::try_from(limb).ok()? * 64 + i64::from(bit));
@@ -443,11 +426,13 @@ fn nearest(magnitude: &[u64], exponent: i64, negative: bool) -> Option<f64> {
             return None;
         }
         ((scale + 1074).unsigned_abs() << FRACTION_BITS) + significand
+    } else if significand == 0 {
+        return Some(0.0);
     } else {
-        // A subnormal, or zero, in units of 2^-1074.
+        // A subnormal, in units of 2^-1074.
         significand
     };
-    Some(f64::from_bits(sign | bits))
+    Some(f64::from_bits(u64::from(negative) << 63 | bits))
 }
 
 #[cfg(test)]
@@ -543,14 +528,11 @@ mod tests {
             sum_in_any_order(&[least_normal, least_normal]),
             Some(2.0 * least_normal)
         );
-        // A sum that is exactly zero is -0.0 only if every value is.
-        let is = |total: Option<f64>, zero: f64| total.map(f64::to_bits) == Some(zero.to_bits());
-        assert!(is(sum(&[]), 0.0));
-        assert!(is(sum_in_any_order(&[-0.0]), -0.0));
-        assert!(is(sum_in_any_order(&[-0.0, -0.0]), -0.0));
-        assert!(is(sum_in_any_order(&[-0.0, 0.0]), 0.0));
-        assert!(is(sum_in_any_order(&[1.5, -1.5, -0.0]), 0.0));
-        assert!(is(sum_in_any_order(&[-1.5, 1.5]), 0.0));
+        // A sum that is exactly zero is 0.0, never -0.0.
+        let is_zero = |total: Option<f64>| total.map(f64::to_bits) == Some(0);
+        assert!(is_zero(sum(&[])));
+        assert!(is_zero(sum_in_any_order(&[-1.5, 1.5])));
+        assert!(is_zero(sum_in_any_order(&[-tiny, tiny, 0.0])));
     }
 
     #[test]
@@ -601,7 +583,7 @@ mod tests {
             product.multiply(x);
         }
         if product.zero {
-            return Some(if product.negative { -0.0 } else { 0.0 });
+            return Some(0.0);
         }
         let exact = Exact {
             factors: product.factors,
@@ -693,22 +675,26 @@ mod tests {
         );
         assert_eq!(product_in_any_order(&[tiny, 0.75]), Some(tiny));
         assert_eq!(product_in_any_order(&[tiny, 1.5]), Some(2.0 * tiny));
+        // A product that rounds to zero, or has a zero factor, is 0.0,
+        // never -0.0.
         assert_eq!(
             product_in_any_order(&[-tiny, 0.25]).map(f64::to_bits),
-            Some((-0.0_f64).to_bits())
+            Some(0)
         );
-        // A zero factor makes the product zero, of the sign of the rest.
-        let is = |total: Option<f64>, zero: f64| total.map(f64::to_bits) == Some(zero.to_bits());
-        assert!(is(product_in_any_order(&[-0.0, 5.0]), -0.0));
-        assert!(is(product_in_any_order(&[-0.0, -5.0]), 0.0));
-        assert!(is(product_in_any_order(&[0.0, f64::MAX, 2.0]), 0.0));
+        assert_eq!(
+            product_in_any_order(&[0.0, -5.0]).map(f64::to_bits),
+            Some(0)
+        );
+        assert_eq!(
+            product_in_any_order(&[0.0, f64::MAX, 2.0]).map(f64::to_bits),
+            Some(0)
+        );
     }
 
     #[test]
     fn one_factor_is_itself_and_two_are_their_ieee_product() {
         let values = [
             0.0,
-            -0.0,
             1.0,
             -1.0,
             0.1,
@@ -725,7 +711,9 @@ mod tests {
         for &a in &values {
             assert_eq!(product(&[a]).map(f64::to_bits), Some(a.to_bits()), "{a}");
             for &b in &values {
-                let ieee = a * b;
+                // Adding 0.0 turns IEEE 754's -0.0 into 0.0, and leaves
+                // every other number as it is.
+                let ieee = a * b + 0.0;
                 let expected = ieee.is_finite().then_some(ieee);
                 assert_eq!(
                     product_in_any_order(&[a, b]).map(f64::to_bits),

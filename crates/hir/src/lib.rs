@@ -1170,10 +1170,8 @@ impl Comparison {
 }
 
 /// The order of two values of the same scalar type: `false` before `true`,
-/// integers numerically, approximate numbers by IEEE 754 totalOrder (so
-/// `-0.0` before `0.0`, and two approximate numbers are equal exactly when
-/// they are the same value), and text by code point, which is the order of
-/// its UTF-8 bytes.
+/// integers and approximate numbers numerically, and text by code point,
+/// which is the order of its UTF-8 bytes.
 ///
 /// # Panics
 ///
@@ -2187,15 +2185,17 @@ impl Type {
     }
 }
 
-/// An `approximate` value: a 64-bit IEEE 754 binary floating-point number.
+/// An `approximate` value: a finite 64-bit IEEE 754 binary floating-point
+/// number, with one zero.
 ///
 /// *The Third Manifesto* requires `=` to hold exactly when two values can't
-/// be told apart by any operator (RM Prescription 8). Float equality breaks
-/// that: NaN is not equal to itself, and `-0.0` equals `0.0` although `1/x`
-/// tells them apart. So approximate numbers are compared by IEEE 754
-/// totalOrder instead. Two approximate numbers are equal exactly when their
-/// bits are identical, and they sort as
-/// `-NaN < -∞ < … < -0.0 < 0.0 < … < ∞ < NaN`.
+/// be told apart by any operator (RM Prescription 8). IEEE 754 equality
+/// breaks that twice: NaN is not equal to itself, and `-0.0` equals `0.0`
+/// although `1/x` tells them apart. Neither is an approximate number. No
+/// operator makes an infinity or a NaN, since a result out of range fails,
+/// as an integer's does; and `-0.0` is always made `0.0`, as SQL databases
+/// have one zero too. So two approximate numbers are equal exactly when
+/// their bits are identical, and they sort by value.
 ///
 /// Every comparison, ordering and hash of an approximate number must go
 /// through this type, never through `f64` operators.
@@ -2203,9 +2203,14 @@ impl Type {
 pub struct Approximate(f64);
 
 impl Approximate {
+    /// The approximate number `value`, which must be finite; `-0.0` is
+    /// `0.0`.
     #[must_use]
     pub fn new(value: f64) -> Self {
-        Approximate(value)
+        debug_assert!(value.is_finite(), "the approximate number {value}");
+        // Adding `0.0` turns `-0.0` into `0.0`, and leaves every other
+        // number as it is (IEEE 754, 6.3).
+        Approximate(value + 0.0)
     }
 
     #[must_use]
@@ -2228,13 +2233,13 @@ impl Approximate {
         let [b0, b1, b2, b3, b4, b5, b6, b7] = n.to_le_bytes();
         let high = i32::from_le_bytes([b4, b5, b6, b7]);
         let low = u32::from_le_bytes([b0, b1, b2, b3]);
-        Approximate(f64::from(high) * 4_294_967_296.0 + f64::from(low))
+        Approximate::new(f64::from(high) * 4_294_967_296.0 + f64::from(low))
     }
 }
 
 /// The value as a literal, which always has an exponent: the shortest one
-/// that reads back as the same value, as in `1e0`, `2.5e0`, `5e-1` or
-/// `-0e0`. No operator makes an infinity or a NaN, which have none.
+/// that reads back as the same value, as in `0e0`, `1e0`, `2.5e0` or
+/// `-5e-1`.
 impl std::fmt::Display for Approximate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:e}", self.0)
@@ -2257,6 +2262,8 @@ impl PartialOrd for Approximate {
 
 impl Ord for Approximate {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // IEEE 754 totalOrder, which, without NaN or `-0.0`, is the order
+        // of the values.
         self.0.total_cmp(&other.0)
     }
 }
@@ -2404,10 +2411,6 @@ mod tests {
             Err(Failure::DivisionByZero)
         );
         assert_eq!(
-            apply(BinaryOp::Divide, 0.0, -0.0),
-            Err(Failure::DivisionByZero)
-        );
-        assert_eq!(
             apply(BinaryOp::Multiply(Numeric::Approximate), 1e300, 1e10),
             Err(Failure::Overflow(Scalar::Approximate))
         );
@@ -2415,19 +2418,17 @@ mod tests {
             apply(BinaryOp::Divide, 1e300, 1e-10),
             Err(Failure::Overflow(Scalar::Approximate))
         );
-        // IEEE 754 sign rules: these are different values.
-        assert_eq!(
-            apply(BinaryOp::Add(Numeric::Approximate), -0.0, 0.0),
-            Ok(r(0.0))
-        );
-        assert_eq!(
-            apply(BinaryOp::Multiply(Numeric::Approximate), -5.0, 0.0),
-            Ok(r(-0.0))
-        );
-        assert_eq!(
-            UnaryOp::Negate(Numeric::Approximate).apply(&r(0.0)),
-            Ok(r(-0.0))
-        );
+        // There is one zero: where IEEE 754 makes -0.0, the result is 0.0,
+        // whose bits are all clear.
+        let bits = |v: Result<Value, Failure>| match v {
+            Ok(Value::Approximate(x)) => x.to_bits(),
+            other => panic!("{other:?}"),
+        };
+        let multiply = BinaryOp::Multiply(Numeric::Approximate);
+        assert_eq!(bits(apply(multiply, -5.0, 0.0)), 0);
+        assert_eq!(bits(apply(BinaryOp::Divide, -5e-324, 4.0)), 0);
+        let negate = UnaryOp::Negate(Numeric::Approximate);
+        assert_eq!(bits(negate.apply(&r(0.0))), 0);
     }
 
     #[test]
@@ -2450,8 +2451,8 @@ mod tests {
             Value::Integer(-2),
             Value::Integer(1)
         ));
-        assert!(holds(Comparison::Less, r(-0.0), r(0.0)));
-        assert!(holds(Comparison::NotEqual, r(-0.0), r(0.0)));
+        assert!(holds(Comparison::Less, r(-5e-324), r(0.0)));
+        assert!(holds(Comparison::Equal, r(-0.0), r(0.0)));
         assert!(holds(Comparison::Equal, r(0.5), r(0.5)));
         // By code point: `Z` before `a`, and `é` (U+E9) before `😀`.
         assert!(holds(Comparison::Less, t("Z"), t("a")));
@@ -2636,35 +2637,18 @@ mod tests {
 
     #[test]
     fn approximate_equality_is_identity() {
-        assert_ne!(Approximate::new(-0.0), Approximate::new(0.0));
-        assert_eq!(Approximate::new(f64::NAN), Approximate::new(f64::NAN));
+        assert_eq!(Approximate::new(-0.0).to_bits(), 0);
+        assert_eq!(Approximate::new(-0.0), Approximate::new(0.0));
         assert_eq!(Approximate::new(1.5), Approximate::new(1.5));
+        assert_ne!(Approximate::new(1.5), Approximate::new(-1.5));
     }
 
     #[test]
-    fn approximates_sort_by_total_order() {
-        let mut values = [
-            f64::NAN,
-            1.0,
-            f64::INFINITY,
-            0.0,
-            -0.0,
-            f64::NEG_INFINITY,
-            -f64::NAN,
-        ]
-        .map(Approximate::new);
+    fn approximates_sort_by_value() {
+        let mut values = [1.0, f64::MAX, 0.0, -1.0, 5e-324, -f64::MAX].map(Approximate::new);
         values.sort();
         let bits = values.map(Approximate::to_bits);
-        let expected = [
-            -f64::NAN,
-            f64::NEG_INFINITY,
-            -0.0,
-            0.0,
-            1.0,
-            f64::INFINITY,
-            f64::NAN,
-        ]
-        .map(f64::to_bits);
+        let expected = [-f64::MAX, -1.0, 0.0, 5e-324, 1.0, f64::MAX].map(f64::to_bits);
         assert_eq!(bits, expected);
     }
 }

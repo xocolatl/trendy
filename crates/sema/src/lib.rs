@@ -1001,7 +1001,7 @@ mod tests {
             hir::Value::Text(text) => text.clone(),
             other => panic!("{other:?}"),
         };
-        assert_eq!(text(0), "-0e0");
+        assert_eq!(text(0), "0e0", "there is one zero");
         assert_eq!(text(1), "tuple { city: \"Lima\\n\", n: 1 }");
         assert_eq!(text(2), "relation { a: integer } {}");
         assert_eq!(
@@ -2075,7 +2075,7 @@ mod tests {
         );
         assert_eq!(
             init("var a := -0e0;", "a"),
-            hir::Value::Approximate(hir::Approximate::new(-0.0))
+            hir::Value::Approximate(hir::Approximate::new(0.0))
         );
     }
 
@@ -2136,7 +2136,8 @@ mod tests {
         let r = |x| hir::Value::Approximate(hir::Approximate::new(x));
         assert_eq!(init("var a := 1.5e0 + 2.25e0 * 2e0;", "a"), r(6.0));
         assert_eq!(init("var a := 1e0 / 4e0 - 0.5e0;", "a"), r(-0.25));
-        assert_eq!(init("var a := -(0e0);", "a"), r(-0.0));
+        assert_eq!(init("var a := -(0e0);", "a"), r(0.0));
+        assert_eq!(init("var a := -2e0 * 0e0;", "a"), r(0.0));
         assert_eq!(init("var a := +2.5e0;", "a"), r(2.5));
         assert_eq!(init("var a := b / 2e0;\nvar b := 3e0;", "a"), r(1.5));
         // The context sets the operand type, so the literal is what's wrong.
@@ -2233,18 +2234,21 @@ mod tests {
             ("x * 1e0", "x"),
             ("1e0 * x", "x"),
             ("x / 1e0", "x"),
+            ("x + 0e0", "x"),
+            ("0e0 + x", "x"),
             ("x - 0e0", "x"),
+            ("0e0 - x", "-x"),
+            ("x * 0e0", "0e0"),
+            ("0e0 * x", "0e0"),
             ("x + -0e0", "x"),
-            ("-0e0 + x", "x"),
-            ("-0e0 - x", "-x"),
             ("x * -1e0", "-x"),
             ("x / -1e0", "-x"),
             ("- -x", "x"),
             ("+x", "x"),
-            // IEEE 754 signed zeros: these aren't the identity.
-            ("x + 0e0", "x + 0e0"),
-            ("0e0 - x", "0e0 - x"),
-            ("x * 0e0", "x * 0e0"),
+            // An operand that can fail is kept, so that its failure isn't
+            // skipped; and `x` may be zero, which fails.
+            ("x * 1e300 * 0e0", "x * 1e300 * 0e0"),
+            ("0e0 / x", "0e0 / x"),
         ];
         for (written, simplified) in cases {
             let source = |e: &str| {
@@ -2269,31 +2273,6 @@ mod tests {
             };
             assert_eq!(body(written), body(simplified), "{written}");
         }
-        let x = || Box::new(hir::Expr::Parameter("x".to_string()));
-        let program = analyze_str(
-            "operator f{x: approximate} [ call debug_value{v: x + 0e0}; ];\noperator main{} [];",
-        )
-        .unwrap();
-        let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-        let hir::OperatorKind::Update {
-            body: hir::Block {
-                statements: body, ..
-            },
-            ..
-        } = &f.kind
-        else {
-            panic!("f is a user operator");
-        };
-        assert_eq!(
-            argument(&body[0]),
-            &hir::Expr::Binary(
-                hir::BinaryOp::Add(hir::Numeric::Approximate),
-                x(),
-                Box::new(hir::Expr::Constant(hir::Value::Approximate(
-                    hir::Approximate::new(0.0)
-                )))
-            )
-        );
         assert_eq!(
             codes(
                 "operator f{x: approximate} [ call debug_value{v: x / 0e0}; ];\noperator main{} [];"
@@ -2382,8 +2361,8 @@ mod tests {
         let no = hir::Value::Boolean(false);
         assert_eq!(init("var a := false < true;", "a"), yes);
         assert_eq!(init("var a := 1 + 1 = 2;", "a"), yes);
-        assert_eq!(init("var a := -0e0 < 0e0;", "a"), yes);
-        assert_eq!(init("var a := -0e0 = 0e0;", "a"), no);
+        assert_eq!(init("var a := -0e0 = 0e0;", "a"), yes);
+        assert_eq!(init("var a := -0e0 < 0e0;", "a"), no);
         assert_eq!(init("var a := \"Z\" < \"a\";", "a"), yes);
         assert_eq!(init("var a := \"é\" > \"z\";", "a"), yes);
         assert_eq!(init("var a := not (1 >= 2);", "a"), yes);
@@ -2449,7 +2428,7 @@ mod tests {
                 "var a := tuple { r: relation { { x: -0e0 } } } = tuple { r: relation { { x: 0e0 } } };",
                 "a"
             ),
-            no,
+            yes,
             "nested values compare as values"
         );
         let source = format!(

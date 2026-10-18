@@ -1026,15 +1026,19 @@ Type names are case-sensitive, and other languages' names such as `int`,
 
 Every type has equality, and two values are equal exactly when no operator
 can tell them apart, as *The Third Manifesto* requires (RM Prescription 8).
-For `approximate`, that means IEEE 754 totalOrder rather than the usual
-floating-point comparison:
+IEEE 754 equality breaks that rule twice: NaN isn't equal to itself, and
+`-0.0` is equal to `0.0` although `1/x` tells them apart. So approximate
+numbers have neither:
 
-- two approximate numbers are equal exactly when they are the same bits;
-- `-0e0` and `0e0` are different values, because `1/x` tells them apart;
-- every NaN is equal to itself.
+- every approximate number is finite. No operator makes an infinity or a
+  NaN, since a result out of range is an error, as an integer's is (see
+  [Arithmetic](#arithmetic));
+- there is one zero. Wherever IEEE 754 would make `-0.0`, the result is
+  `0e0`, which is also how SQL databases have it: SQLite stores `-0.0` as
+  `0.0`, and PostgreSQL compares the two equal.
 
-Ordering and sorting use the same total order:
-`-NaN < -∞ < … < -0e0 < 0e0 < … < ∞ < NaN`.
+So two approximate numbers are equal exactly when they are the same bits,
+and they are ordered numerically.
 
 Values never convert to another type implicitly, as *The Third Manifesto*
 requires. An integer literal can't initialize an `approximate`: write `1e0`,
@@ -1589,14 +1593,14 @@ operator main{} [];
 ```
 
 Approximate arithmetic is IEEE 754 binary64 arithmetic, rounded to nearest:
-`0.1e0 + 0.2e0` is `0.30000000000000004e0`, and signed zeros follow its rules, so
-`0e0 * -1e0` is `-0e0`.
+`0.1e0 + 0.2e0` is `0.30000000000000004e0`. There is one zero, though, so
+`0e0 * -1e0` is `0e0` (see [Types](#types)).
 
 An operator whose result is out of range has no result: an integer outside 64
 bits, or an approximate number beyond about `1.8e308` in magnitude. Neither
-does division by zero, including by `-0e0`. Results never wrap around and
-never become infinities or NaN, so every approximate number is finite and
-can be written as a literal. When the operands are known while compiling,
+does division by zero. Results never wrap around and never become infinities
+or NaN, so every approximate number is finite and can be written as a
+literal. When the operands are known while compiling,
 this is a compile error (R0001 for overflow, R0002 for division by zero).
 Otherwise the program stops at that operator, writing the error to stderr,
 such as `error[R0001]: integer overflow`, and exits with status 1.
@@ -1616,8 +1620,7 @@ operator main{} [];
 ```
 
 A `-` written directly before a number literal makes a negative literal, so
-the smallest integer, `-9223372036854775808`, can be written, and so can
-`-0e0`.
+the smallest integer, `-9223372036854775808`, can be written.
 
 ### Text
 
@@ -1658,16 +1661,16 @@ The built-in types are also ordered:
 |---|---|
 | `boolean` | `false` before `true` |
 | `integer` | numerical |
-| `approximate` | IEEE 754 totalOrder (see [Types](#types)): numerical, except that `-0e0` is before `0e0`, and they aren't equal |
+| `approximate` | numerical |
 | `text` | by code point, which is also the order of the UTF-8 bytes. There is no collation: `"Z" < "a"`, and `"é" > "z"` |
 
 Two values are equal exactly when they are the same value, as *The Third
 Manifesto* requires (RM Prescription 8). Two tuples are equal when every
 attribute's values are equal, and two relations when they have the same
-tuples, in any order; the values inside are compared the same way, so
-`tuple { x: 0e0 } <> tuple { x: -0e0 }`. Two arrays are equal when they
-have equal elements at each position. Tuples and arrays have no order, so
-`<`, `<=`, `>` and `>=` don't apply to them (A0022).
+tuples, in any order; the values inside are compared the same way. Two
+arrays are equal when they have equal elements at each position. Tuples and
+arrays have no order, so `<`, `<=`, `>` and `>=` don't apply to them
+(A0022).
 
 Relations are ordered as sets, by inclusion, as in Tutorial D: `r <= s`
 is true when every tuple of `r` is in `s` (subset), `r < s` when, too,
@@ -2590,9 +2593,8 @@ condition takes is computed. Whatever doesn't depend on parameters or variables 
 evaluated when compiling, and so is whatever a constant operand decides, when
 the other operand can't fail: `p and false` is just `false`, `true and p` is
 just `p`, and `n * 1` is just `n`. But `(n + 1) * 0` is still computed, since
-`n + 1` can overflow. Approximate numbers are simplified only where IEEE 754
-makes it exact, signed zeros included: `x * 1e0` is `x`, but `x + 0e0` isn't,
-since `-0e0 + 0e0` is `0e0`.
+`n + 1` can overflow. Approximate numbers are simplified the same way, since
+they are finite and have one zero: `x + 0e0` is `x`, and `x * 0e0` is `0e0`.
 
 ## Literals
 

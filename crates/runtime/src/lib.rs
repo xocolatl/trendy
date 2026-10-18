@@ -123,8 +123,8 @@ pub unsafe extern "C" fn trendy_rt_concat(dst: *mut Text, lhs: *const Text, rhs:
 
 /// Store at `dst` 1 if `lhs` and `rhs`, of the type `desc` describes, are
 /// equal, and 0 if not. Two values are equal exactly when they are the same
-/// value: approximate numbers when they have the same bits (IEEE 754
-/// totalOrder), tuples attribute by attribute, relations when they have
+/// value: approximate numbers when they have the same bits (there is no NaN,
+/// and one zero), tuples attribute by attribute, relations when they have
 /// the same tuples, and arrays element by element. The compiler keeps every
 /// relation's tuples in one canonical order, so equal relations have equal
 /// arrays of tuples.
@@ -1269,9 +1269,8 @@ unsafe fn canonical(tuples: *const u8, count: usize, desc: &TypeDesc) -> (*mut u
 }
 
 /// The canonical order of two values of the type `desc` describes, which is
-/// the compiler's (`hir::Value`'s): `false` before `true`, integers
-/// numerically, approximate numbers by IEEE 754 totalOrder, text by its
-/// bytes, tuples attribute by attribute in name order, and relations by their
+/// the compiler's (`hir::Value`'s): `false` before `true`, integers and
+/// approximate numbers numerically, text by its bytes, tuples attribute by attribute in name order, and relations by their
 /// tuples and arrays by their elements, lexicographically, a prefix first.
 ///
 /// # Safety
@@ -1287,6 +1286,8 @@ pub unsafe fn order(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> core::cm
                 .cast::<i64>()
                 .read_unaligned()
                 .cmp(&rhs.cast::<i64>().read_unaligned()),
+            // IEEE 754 totalOrder, which, without NaN or `-0.0`, is the
+            // order of the values.
             KIND_APPROXIMATE => lhs
                 .cast::<f64>()
                 .read_unaligned()
@@ -2091,7 +2092,7 @@ mod tests {
         let approximate = |r: f64| print(r.to_ne_bytes().as_ptr(), &scalar(KIND_APPROXIMATE, 8));
         assert_eq!(approximate(0.0), "0e0");
         assert_eq!(approximate(1.5e-3), "1.5e-3");
-        assert_eq!(approximate(-0.0), "-0e0");
+        assert_eq!(approximate(-1.5e-3), "-1.5e-3");
         assert_eq!(approximate(0.1 + 0.2), "3.0000000000000004e-1");
         assert_eq!(approximate(1e300), "1e300");
     }
@@ -2107,7 +2108,7 @@ mod tests {
             )
         };
         assert!(same(1.5, 1.5));
-        assert!(!same(0.0, -0.0), "different values, by totalOrder");
+        assert!(!same(1.5, -1.5));
         let text = scalar(KIND_TEXT, 16);
         let value = |t: &str| [t.as_ptr() as usize, t.len()];
         let same_text = |a: &str, b: &str| unsafe {

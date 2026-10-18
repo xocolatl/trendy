@@ -2188,8 +2188,6 @@ enum Known {
     False,
     /// `0` or `0.0`.
     Zero,
-    /// `-0.0`, which IEEE 754 sign rules make the identity of `+`.
-    NegativeZero,
     /// `""`
     Empty,
     One,
@@ -2208,8 +2206,7 @@ fn known(expr: &hir::Expr) -> Option<Known> {
         hir::Value::Integer(-1) => Known::MinusOne,
         hir::Value::Text(t) if t.is_empty() => Known::Empty,
         hir::Value::Approximate(r) => match r.get() {
-            r if r.to_bits() == 0.0_f64.to_bits() => Known::Zero,
-            r if r.to_bits() == (-0.0_f64).to_bits() => Known::NegativeZero,
+            0.0 => Known::Zero,
             1.0 => Known::One,
             -1.0 => Known::MinusOne,
             _ => return None,
@@ -2250,8 +2247,8 @@ enum Side {
 /// `lhs op rhs`, evaluated if both are constants, and otherwise simplified
 /// where a constant operand decides the result or leaves the other operand
 /// as it is. Expressions have no side effects, so this never changes what a
-/// program does. Approximate simplifications follow IEEE 754 exactly, signed
-/// zeros included: `x + 0.0` is not `x` when `x` is `-0.0`.
+/// program does. Approximate numbers are finite, with one zero, so these
+/// hold for them as for integers: `x * 0.0` is `0.0`, whatever `x` is.
 ///
 /// # Errors
 ///
@@ -2262,12 +2259,11 @@ pub(crate) fn binary(
     lhs: hir::Expr,
     rhs: hir::Expr,
 ) -> Result<hir::Expr, hir::Failure> {
-    use Known::{Empty, False, MinusOne, NegativeZero, One, True, Zero};
+    use Known::{Empty, False, MinusOne, One, True, Zero};
     use hir::BinaryOp::{
         Add, And, Compare, Concatenate, Div, Divide, Implies, Mod, Multiply, Or, Subtract, Xor,
     };
     use hir::Comparison::{Equal, NotEqual};
-    use hir::Numeric::{Approximate, Integer};
     if let (hir::Expr::Constant(a), hir::Expr::Constant(b)) = (&lhs, &rhs) {
         return op.apply(a, b).map(hir::Expr::Constant);
     }
@@ -2295,14 +2291,12 @@ pub(crate) fn binary(
         // The constant leaves the other operand as it is,
         (And | Implies | Compare(Equal, _), Some(True), _)
         | (Or | Xor | Compare(NotEqual, _), Some(False), _)
-        | (Add(Integer), Some(Zero), _)
-        | (Add(Approximate), Some(NegativeZero), _)
+        | (Add(_), Some(Zero), _)
         | (Multiply(_), Some(One), _)
         | (Concatenate, Some(Empty), _) => rhs,
         (And | Compare(Equal, _), _, Some(True))
         | (Or | Xor | Compare(NotEqual, _), _, Some(False))
-        | (Add(Integer) | Subtract(_), _, Some(Zero))
-        | (Add(Approximate), _, Some(NegativeZero))
+        | (Add(_) | Subtract(_), _, Some(Zero))
         | (Multiply(_) | Div | Divide, _, Some(One))
         | (Concatenate, _, Some(Empty)) => lhs,
         // negates it,
@@ -2311,18 +2305,16 @@ pub(crate) fn binary(
         }
         (Xor | Compare(NotEqual, _), _, Some(True))
         | (Compare(Equal, _) | Implies, _, Some(False)) => unary(hir::UnaryOp::Not, lhs)?,
-        (Subtract(Integer), Some(Zero), _)
-        | (Subtract(Approximate), Some(NegativeZero), _)
-        | (Multiply(_), Some(MinusOne), _) => negate(rhs)?,
+        (Subtract(_), Some(Zero), _) | (Multiply(_), Some(MinusOne), _) => negate(rhs)?,
         (Multiply(_) | Div | Divide, _, Some(MinusOne)) => negate(lhs)?,
         // or decides the result.
-        (Div | Mod | Divide, _, Some(Zero | NegativeZero)) => {
+        (Div | Mod | Divide, _, Some(Zero)) => {
             return Err(hir::Failure::DivisionByZero);
         }
-        (And, Some(False), _) | (Multiply(Integer), Some(Zero), _) => {
+        (And, Some(False), _) | (Multiply(_), Some(Zero), _) => {
             unless_fails(Side::Rhs, lhs.clone(), lhs, rhs)
         }
-        (And, _, Some(False)) | (Multiply(Integer), _, Some(Zero)) => {
+        (And, _, Some(False)) | (Multiply(_), _, Some(Zero)) => {
             unless_fails(Side::Lhs, rhs.clone(), lhs, rhs)
         }
         (Mod, _, Some(One | MinusOne)) => {

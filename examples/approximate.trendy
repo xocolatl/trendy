@@ -1,6 +1,7 @@
 var half := 1e0 / 2e0;
 var area := 3e0 * 2.5e0 * 2.5e0;
-var negative_zero := -0e0;
+/* There is one zero, so negating it gives 0e0 again. */
+var negated_zero := -0e0;
 var tiny := 1e-300 / 1e10;
 var rounded := to_approximate{from: 9007199254740993};
 
@@ -20,7 +21,7 @@ operator widen{n: integer} [
 operator main{} [
     call debug_value{v: half};
     call debug_value{v: area};
-    call debug_value{v: negative_zero};
+    call debug_value{v: negated_zero};
     call debug_value{v: tiny};
     call debug_value{v: rounded};
     call arithmetic{a: 7e0, b: 2e0};
