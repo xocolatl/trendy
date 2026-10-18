@@ -149,6 +149,15 @@ fn starts_value(kind: SyntaxKind) -> bool {
 }
 
 impl Found<'_> {
+    /// Whether it is `keyword`, or the same word in another case.
+    fn spells(&self, keyword: SyntaxKind) -> bool {
+        self.kind == keyword
+            || (self.kind == SyntaxKind::Ident
+                && keyword
+                    .fixed_text()
+                    .is_some_and(|text| self.text.eq_ignore_ascii_case(text)))
+    }
+
     fn describe(&self) -> String {
         match self.kind {
             SyntaxKind::Ident => format!("identifier `{}`", self.text),
@@ -507,9 +516,7 @@ impl<'a> Parser<'a> {
             self.assign_block();
         } else if self.at_assignment() {
             self.assign_stmt(false);
-        } else if found.kind == SyntaxKind::ReturnKw
-            || (found.kind == SyntaxKind::Ident && found.text.eq_ignore_ascii_case("return"))
-        {
+        } else if found.spells(SyntaxKind::ReturnKw) {
             self.return_stmt();
         } else if found.kind == SyntaxKind::Ident && call_like {
             // `debug_value{v: r};`: a call without `call`.
@@ -1277,8 +1284,192 @@ impl<'a> Parser<'a> {
     }
 
     /// An expression.
+    /// A whole expression: an `if`, or operators down to `where`. Other
+    /// languages' conditionals after one, Python's `a if c else b` and C's
+    /// `c ? a : b`, are reported, with fixes.
     fn expression(&mut self) {
+        self.peek();
+        let start = self.builder.checkpoint();
+        let from = self.lookahead().map(|f| f.span.start);
+        if self.at_if() {
+            self.if_expression();
+        } else {
+            self.binary(0);
+        }
+        if let Some(from) = from {
+            self.foreign_conditional(start, from);
+        }
+    }
+
+    /// An expression whose operators bind at least as tightly as `min`: a
+    /// whole one, an `if` too, at 0, and else one that an `if`'s `else`
+    /// branch would run past the end of, unless parenthesized.
+    fn value(&mut self, min: u8) {
+        if min == 0 {
+            self.expression();
+        } else {
+            self.binary(min);
+        }
+    }
+
+    /// Whether an `if` starts here: the keyword, or Tutorial D's `IF` in
+    /// another case, which `then`, in any case, follows before the end of
+    /// the expression.
+    fn at_if(&mut self) -> bool {
+        let Some(found) = self.found() else {
+            return false;
+        };
+        if found.kind == SyntaxKind::IfKw {
+            return true;
+        }
+        if !found.spells(SyntaxKind::IfKw) {
+            return false;
+        }
+        let mut depth = 0_usize;
+        for i in self.pos + 1..self.tokens.len() {
+            let token = self.tokens[i];
+            match token.kind {
+                SyntaxKind::LBrace | SyntaxKind::LBracket | SyntaxKind::LParen => depth += 1,
+                SyntaxKind::RBrace | SyntaxKind::RBracket | SyntaxKind::RParen if depth == 0 => {
+                    return false;
+                }
+                SyntaxKind::RBrace | SyntaxKind::RBracket | SyntaxKind::RParen => depth -= 1,
+                SyntaxKind::Semicolon | SyntaxKind::Comma if depth == 0 => return false,
+                _ if depth == 0 && self.found_at(i).spells(SyntaxKind::ThenKw) => return true,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// `if condition then value else value`, each part a whole expression,
+    /// so the `else` branch takes all that follows. Every `if` has an
+    /// `else`, since it has a value either way. Its keywords in capitals,
+    /// Python's `elif` and its kin for `else if`, and Tutorial D's `END IF`
+    /// after the last value, are reported, with fixes.
+    fn if_expression(&mut self) {
+        let outer_form = std::mem::replace(&mut self.form, errors::IF_FORM);
+        self.start_node(SyntaxKind::IfExpr);
+        self.any_case(SyntaxKind::IfKw);
+        self.if_branches();
+        self.builder.finish_node();
+        self.end_if();
+        self.form = outer_form;
+    }
+
+    /// What follows an `if`'s keyword: the condition, and its branches.
+    fn if_branches(&mut self) {
+        self.expression();
+        self.any_case(SyntaxKind::ThenKw);
+        self.expression();
+        match self.found() {
+            // `elif c then …`: an `else if`, whose `if` it is too.
+            Some(found)
+                if found.kind == SyntaxKind::Ident
+                    && ["elif", "elsif", "elseif"]
+                        .iter()
+                        .any(|w| found.text.eq_ignore_ascii_case(w)) =>
+            {
+                self.start_node(SyntaxKind::IfExpr);
+                self.bump();
+                self.errors.push(errors::else_if_spelling(found));
+                self.if_branches();
+                self.builder.finish_node();
+            }
+            Some(found) if found.spells(SyntaxKind::ElseKw) => {
+                self.any_case(SyntaxKind::ElseKw);
+                self.expression();
+            }
+            // `else` can be inserted, but not the value after it.
+            _ => {
+                self.missing(SyntaxKind::ElseKw);
+                self.missing_with_help(
+                    SyntaxKind::Literal,
+                    "an `if` has a value either way: write `else` and the value when the condition is false",
+                );
+            }
+        }
+    }
+
+    /// Tutorial D's `END IF` after an `if`'s last value, in any case:
+    /// consumed, so nothing else cascades, and reported, with the fix that
+    /// deletes it.
+    fn end_if(&mut self) {
+        let end = self
+            .lookahead_nth(0)
+            .is_some_and(|f| f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case("end"));
+        if !end
+            || !self
+                .lookahead_nth(1)
+                .is_some_and(|f| f.spells(SyntaxKind::IfKw))
+        {
+            return;
+        }
+        let start = self.last_end;
+        self.start_node(SyntaxKind::Error);
+        let end = self.bump().start;
+        let span = Span::new(end, self.bump().end);
+        self.builder.finish_node();
+        self.errors.push(errors::end_if(
+            span,
+            Span::new(start.unwrap_or(span.start), span.end),
+        ));
+    }
+
+    /// Python's `a if c else b`, or C's `c ? a : b`, after the expression
+    /// that started at `start`, from `from`, if there is one: parsed, each
+    /// chained one too, as in `a if c else b if d else e`, and reported,
+    /// with the fix to `if c then a else b`.
+    fn foreign_conditional(&mut self, start: trendy_syntax::Checkpoint, from: usize) {
+        let Some(found) = self.lookahead() else {
+            return;
+        };
+        let style = match found.kind {
+            SyntaxKind::IfKw => errors::Conditional::Python,
+            SyntaxKind::ForeignOperator if found.text == "?" => errors::Conditional::C,
+            _ => return,
+        };
+        let (opener, separator) = match style {
+            errors::Conditional::Python => (SyntaxKind::IfKw, SyntaxKind::ElseKw),
+            errors::Conditional::C => (SyntaxKind::ForeignOperator, SyntaxKind::Colon),
+        };
+        let Some(first_end) = self.last_end else {
+            return;
+        };
+        self.builder.start_node_at(start, SyntaxKind::Error);
+        // Each part's text, in the order written: a value or a condition
+        // first, as the style says, then alternately the other, and the
+        // last value.
+        let mut parts = vec![self.source[from..first_end].to_string()];
+        loop {
+            self.bump();
+            parts.push(self.part());
+            if !self.at(separator) {
+                self.missing(separator);
+                self.builder.finish_node();
+                return;
+            }
+            self.bump();
+            parts.push(self.part());
+            if !self.lookahead().is_some_and(|f| {
+                f.kind == opener && (opener != SyntaxKind::ForeignOperator || f.text == "?")
+            }) {
+                break;
+            }
+        }
+        self.builder.finish_node();
+        let span = Span::new(from, self.last_end.unwrap_or(first_end));
+        self.errors
+            .push(errors::foreign_conditional(style, span, &parts, found.span));
+    }
+
+    /// A part of another language's conditional, as text: operators down
+    /// to `where`.
+    fn part(&mut self) -> String {
+        let from = self.lookahead().map_or(0, |f| f.span.start);
         self.binary(0);
+        let end = self.last_end.unwrap_or(from).max(from);
+        self.source[from..end].to_string()
     }
 
     /// An expression whose dyadic operators bind at least as tightly as
@@ -1380,10 +1571,7 @@ impl<'a> Parser<'a> {
             kind => kind,
         };
         // `not matching`: `not` is otherwise a prefix operator only.
-        let matching = |f: Found| {
-            f.kind == SyntaxKind::MatchingKw
-                || (f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case("matching"))
-        };
+        let matching = |f: Found| f.spells(SyntaxKind::MatchingKw);
         if keyword == SyntaxKind::NotKw && self.lookahead_nth(1).is_some_and(matching) {
             return Some(BinaryOperator {
                 precedence: JOIN,
@@ -1550,15 +1738,12 @@ impl<'a> Parser<'a> {
         if from.kind != SyntaxKind::Ident || !from.text.eq_ignore_ascii_case("from") {
             return None;
         }
-        match first.kind {
-            SyntaxKind::TupleKw => Some(trendy_syntax::ast::Taken::Tuple),
-            SyntaxKind::Ident if first.text.eq_ignore_ascii_case("tuple") => {
-                Some(trendy_syntax::ast::Taken::Tuple)
-            }
-            SyntaxKind::Ident if first.text.eq_ignore_ascii_case("value") => {
-                Some(trendy_syntax::ast::Taken::Value)
-            }
-            _ => None,
+        if first.spells(SyntaxKind::TupleKw) {
+            Some(trendy_syntax::ast::Taken::Tuple)
+        } else if first.kind == SyntaxKind::Ident && first.text.eq_ignore_ascii_case("value") {
+            Some(trendy_syntax::ast::Taken::Value)
+        } else {
+            None
         }
     }
 
@@ -1735,15 +1920,6 @@ impl<'a> Parser<'a> {
         self.bump();
         self.builder.finish_node();
         match self.found() {
-            Some(found) if found.kind == SyntaxKind::AsKw => {
-                self.bump();
-            }
-            Some(found)
-                if found.kind == SyntaxKind::Ident && found.text.eq_ignore_ascii_case("as") =>
-            {
-                self.bump();
-                self.errors.push(errors::miscased_keyword(found, "as"));
-            }
             Some(found) if found.kind == SyntaxKind::Colon => {
                 let neighbors = (
                     self.source[..found.span.start].chars().next_back(),
@@ -1753,7 +1929,7 @@ impl<'a> Parser<'a> {
                 self.errors
                     .push(errors::colon_in_renaming(found, neighbors));
             }
-            _ => self.missing(SyntaxKind::AsKw),
+            _ => self.any_case(SyntaxKind::AsKw),
         }
         if self.at(SyntaxKind::Ident) {
             self.start_node(SyntaxKind::Name);
@@ -1835,17 +2011,13 @@ impl<'a> Parser<'a> {
                     assigning, found.kind, span, neighbors,
                 ));
             }
-            self.binary(min);
+            self.value(min);
         } else {
             let start = self.found().map_or(0, |f| f.span.start);
-            self.binary(min);
+            self.value(min);
             let value_end = self.last_end.unwrap_or(start);
             match self.found() {
-                Some(found)
-                    if found.kind == SyntaxKind::AsKw
-                        || (found.kind == SyntaxKind::Ident
-                            && found.text.eq_ignore_ascii_case("as")) =>
-                {
+                Some(found) if found.spells(SyntaxKind::AsKw) => {
                     self.bump();
                     if let Some(name) = self.found().filter(|f| f.kind == SyntaxKind::Ident) {
                         self.start_node(SyntaxKind::Name);
@@ -1920,11 +2092,7 @@ impl<'a> Parser<'a> {
             self.names(gathering.form());
             let list_end = self.last_end.unwrap_or(start);
             match self.found() {
-                Some(found)
-                    if found.kind == SyntaxKind::AsKw
-                        || (found.kind == SyntaxKind::Ident
-                            && found.text.eq_ignore_ascii_case("as")) =>
-                {
+                Some(found) if found.spells(SyntaxKind::AsKw) => {
                     self.bump();
                     if let Some(name) = self.found().filter(|f| f.kind == SyntaxKind::Ident) {
                         self.start_node(SyntaxKind::Name);
@@ -2038,9 +2206,19 @@ impl<'a> Parser<'a> {
         if self.at(SyntaxKind::LParen) {
             self.start_node(SyntaxKind::ParenExpr);
             self.bump();
-            self.binary(0);
+            self.expression();
             self.expect(SyntaxKind::RParen);
             self.builder.finish_node();
+            return;
+        }
+        if self.at_if() {
+            // An operand: an `if` takes all that follows, so it needs
+            // parentheses to say where it ends.
+            let from = self.lookahead().map_or(0, |f| f.span.start);
+            self.if_expression();
+            let end = self.last_end.unwrap_or(from);
+            self.errors
+                .push(errors::unparenthesized_if(Span::new(from, end)));
             return;
         }
         if self.peek().is_some_and(SyntaxKind::is_literal) {
@@ -2336,19 +2514,31 @@ impl<'a> Parser<'a> {
         let Some(found) = self.found() else {
             return false;
         };
-        if found.kind == keyword {
-            return true;
-        }
-        let spelled = keyword.fixed_text().expect("keywords have fixed text");
-        found.kind == SyntaxKind::Ident
-            && found.text.eq_ignore_ascii_case(spelled)
-            && self
-                .found_after(1)
-                .is_some_and(|f| f.kind == SyntaxKind::LBrace)
+        found.kind == keyword
+            || (found.spells(keyword)
+                && self
+                    .found_after(1)
+                    .is_some_and(|f| f.kind == SyntaxKind::LBrace))
     }
 
-    /// Consume `keyword`, reporting a mis-cased spelling of it, or record it
-    /// as missing.
+    /// Consume `keyword`, or the same word in another case, which is
+    /// reported, wherever it is, or record it as missing.
+    fn any_case(&mut self, keyword: SyntaxKind) {
+        match self.found() {
+            Some(found) if found.kind == keyword => {
+                self.bump();
+            }
+            Some(found) if found.spells(keyword) => {
+                self.bump();
+                let spelled = keyword.fixed_text().expect("keywords have fixed text");
+                self.errors.push(errors::miscased_keyword(found, spelled));
+            }
+            _ => self.missing(keyword),
+        }
+    }
+
+    /// Consume `keyword`, a selector's, reporting a mis-cased spelling of
+    /// it before the selector's `{`, or record it as missing.
     fn keyword(&mut self, keyword: SyntaxKind) {
         let Some(found) = self.found() else {
             self.missing(keyword);
@@ -3270,6 +3460,108 @@ SourceFile
         assert_eq!(fix("var n := a.length();"), "var n := a.length{};");
         // A missing `]`.
         one_fix("var x := a[1;", "var x := a[1];");
+    }
+
+    #[test]
+    fn ifs() {
+        let initializer = |source: &str| {
+            let parse = parse_str(source);
+            assert!(parse.errors.is_empty(), "{source}: {:#?}", parse.errors);
+            parse
+                .tree
+                .variables()
+                .next()
+                .unwrap()
+                .initializer()
+                .unwrap()
+        };
+        let Expr::If(chain) = initializer("var x := if a then 1 else if b then 2 else 3;") else {
+            panic!("an `if`");
+        };
+        assert!(matches!(chain.condition(), Some(Expr::Name(_))));
+        assert!(matches!(chain.then_branch(), Some(Expr::Literal(_))));
+        assert!(matches!(chain.else_branch(), Some(Expr::If(_))));
+        // The `else` branch takes all that follows, `where` too.
+        let Expr::If(sum) = initializer("var x := if a then 1 else b + 1;") else {
+            panic!("an `if`");
+        };
+        assert!(matches!(sum.else_branch(), Some(Expr::Binary(_))));
+        let Expr::If(restricted) = initializer("var x := if a then r else s where p;") else {
+            panic!("an `if`");
+        };
+        assert!(matches!(restricted.else_branch(), Some(Expr::Binary(_))));
+        // Every `if` has an `else`, so one in a `then` branch is complete.
+        let Expr::If(nested) = initializer("var x := if a then if b then 1 else 2 else 3;") else {
+            panic!("an `if`");
+        };
+        assert!(matches!(nested.then_branch(), Some(Expr::If(_))));
+        assert!(matches!(nested.else_branch(), Some(Expr::Literal(_))));
+        // Parenthesized, as an operand.
+        let Expr::Binary(added) = initializer("var x := (if a then 1 else 2) + 3;") else {
+            panic!("a sum");
+        };
+        assert!(matches!(added.lhs(), Some(Expr::Paren(_))));
+        for source in [
+            "var x := f{v: if a then 1 else 2};",
+            "var x := tuple { a: if b then 1 else 2 };",
+            "var x := array [if a then 1 else 2];",
+            "var x := r extend { y := if a > 0 then a else -a };",
+            "operator f{n: integer}: integer [ return if n < 0 then -n else n; ];",
+        ] {
+            let parse = parse_str(source);
+            assert!(parse.errors.is_empty(), "{source}: {:#?}", parse.errors);
+        }
+    }
+
+    #[test]
+    fn if_recovery() {
+        let one_fix = |source: &str, fixed: &str| {
+            let errors = parse_str(source).errors;
+            assert_eq!(errors.len(), 1, "{source}: {errors:#?}");
+            assert_eq!(fix(source), fixed, "{source}");
+        };
+        // As an operand, parenthesized where its `else` branch ends.
+        one_fix(
+            "var x := 1 + if a then 2 else 3 + 4;",
+            "var x := 1 + (if a then 2 else 3 + 4);",
+        );
+        // Python's, C's and Tutorial D's.
+        one_fix(
+            "var x := \"one\" if n = 1 else \"many\";",
+            "var x := if n = 1 then \"one\" else \"many\";",
+        );
+        one_fix(
+            "var x := 1 if a else 2 if b else 3;",
+            "var x := if a then 1 else if b then 2 else 3;",
+        );
+        one_fix(
+            "var x := n = 1 ? \"one\" : n = 2 ? \"two\" : \"many\";",
+            "var x := if n = 1 then \"one\" else if n = 2 then \"two\" else \"many\";",
+        );
+        one_fix(
+            "var x := (a ? 1 : 2) + 3;",
+            "var x := (if a then 1 else 2) + 3;",
+        );
+        one_fix(
+            "var x := if a then 1 elif b then 2 else 3;",
+            "var x := if a then 1 else if b then 2 else 3;",
+        );
+        one_fix(
+            "var x := if a then 1 else 2 END IF;",
+            "var x := if a then 1 else 2;",
+        );
+        assert_eq!(
+            fix("var x := IF a THEN 1 ELSE 2 END IF;"),
+            "var x := if a then 1 else 2;"
+        );
+        // A name `IF` without `then` after it is a name.
+        assert!(parse_str("var x := IF;").errors.is_empty());
+        // Without `else`, there is no value to insert.
+        let errors = parse_str("var x := if a then 1;").errors;
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].code, Code::MissingToken);
+        assert!(errors[0].suggestions.is_empty(), "{errors:#?}");
+        one_fix("var x := if a 1 else 2;", "var x := if a then 1 else 2;");
     }
 
     #[test]

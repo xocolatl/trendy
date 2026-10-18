@@ -90,6 +90,19 @@ operator cheapest{limit: integer}: tuple { dishes: integer, lowest: integer } [
     return tuple { dishes: count{r: under}, lowest: min{r: under, of: taxed{price: price}} };
 ];
 
+/* The mean price of `r`'s dishes with VAT, rounded down. An `if`
+   computes only the branch it takes, so the mean of none is 0, and no
+   division by zero. */
+operator mean{r: relation { dish: text, country: text, price: integer }}: integer [
+    return if count{r: r} = 0 then 0 else sum{r: r, of: taxed{price: price}} div count{r: r};
+];
+
+/* A word for how many dishes `r` has: an `else if` chains another
+   condition. */
+operator how_many{r: relation { dish: text, country: text, price: integer }}: text [
+    return if count{r: r} = 0 then "none" else if count{r: r} = 1 then "one" else "several";
+];
+
 /* An order's cost, of any numeric type: `*` and `+` are what `numeric`,
    another kind the prelude declares, requires of its types. */
 operator cost{price: T, quantity: T, delivery: T}: T
@@ -114,6 +127,7 @@ operator rotate{next: text} [
 
 var totals := dishes extend { total := taxed{price: price} } remove {price};
 var affordable := under{limit: 1000}{dish};
+var plural := if count{r: dishes} = 1 then "dish" else "dishes";
 
 operator main{} [
     call debug_value{v: totals};
@@ -154,4 +168,12 @@ operator main{} [
         value: cost{price: to_approximate{from: taxed{price: 900}}, quantity: 1.5e0, delivery: 3e2}
     };
     call show{label: "under 1200", value: cheapest{limit: 1200}};
+    call show{label: "mean under 1000", value: mean{r: dishes where taxed{price: price} < 1000}};
+    call show{label: "mean under 500", value: mean{r: dishes where taxed{price: price} < 500}};
+    call show{
+        label: "how many under 1200",
+        value: how_many{r: dishes where taxed{price: price} < 1200}
+    };
+    /* Decided when compiling, as `dishes` is known then. */
+    call show{label: "the menu's", value: plural};
 ];

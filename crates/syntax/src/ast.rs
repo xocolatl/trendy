@@ -87,6 +87,7 @@ ast_node!(RelationType);
 ast_node!(ArrayType);
 ast_node!(ArrayLiteral);
 ast_node!(IndexExpr);
+ast_node!(IfExpr);
 ast_node!(TupleLiteral);
 ast_node!(AttributeValue);
 ast_node!(RelationLiteral);
@@ -608,6 +609,33 @@ impl IndexExpr {
     }
 }
 
+impl IfExpr {
+    /// The `if`, or the word another language writes for it, which is
+    /// reported: Python's `elif` in an `else` branch.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    /// The condition, between `if` and `then`.
+    #[must_use]
+    pub fn condition(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+
+    /// The value if the condition is true, between `then` and `else`.
+    #[must_use]
+    pub fn then_branch(&self) -> Option<Expr> {
+        self.0.children().filter_map(Expr::cast).nth(1)
+    }
+
+    /// The value if the condition is false, after `else`.
+    #[must_use]
+    pub fn else_branch(&self) -> Option<Expr> {
+        self.0.children().filter_map(Expr::cast).nth(2)
+    }
+}
+
 impl ExtractExpr {
     #[must_use]
     pub fn operand(&self) -> Option<Expr> {
@@ -942,6 +970,7 @@ pub enum Expr {
     Paren(ParenExpr),
     Extract(ExtractExpr),
     Index(IndexExpr),
+    If(IfExpr),
     Project(ProjectExpr),
     Postfix(PostfixExpr),
     Nary(NaryExpr),
@@ -964,6 +993,7 @@ impl Expr {
             .or_else(|| ParenExpr::cast(node.clone()).map(Expr::Paren))
             .or_else(|| ExtractExpr::cast(node.clone()).map(Expr::Extract))
             .or_else(|| IndexExpr::cast(node.clone()).map(Expr::Index))
+            .or_else(|| IfExpr::cast(node.clone()).map(Expr::If))
             .or_else(|| ProjectExpr::cast(node.clone()).map(Expr::Project))
             .or_else(|| PostfixExpr::cast(node.clone()).map(Expr::Postfix))
             .or_else(|| NaryExpr::cast(node.clone()).map(Expr::Nary))
@@ -985,6 +1015,7 @@ impl Expr {
             Expr::Paren(e) => e.syntax(),
             Expr::Extract(e) => e.syntax(),
             Expr::Index(e) => e.syntax(),
+            Expr::If(e) => e.syntax(),
             Expr::Project(e) => e.syntax(),
             Expr::Postfix(e) => e.syntax(),
             Expr::Nary(e) => e.syntax(),

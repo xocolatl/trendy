@@ -40,6 +40,7 @@ pub enum Code {
     CommaAssignment,
     ResultSpelling,
     TypeParameterSpelling,
+    ConditionalSpelling,
     DuplicateName,
     MissingMain,
     UnknownType,
@@ -85,6 +86,7 @@ pub enum Code {
     PerAsValue,
     ConstantPer,
     LocalBeforeDeclaration,
+    PointlessIf,
     Overflow,
     DivisionByZero,
     OutOfMemory,
@@ -113,7 +115,7 @@ pub enum CodeKind {
 }
 
 impl Code {
-    pub const ALL: [Code; 84] = [
+    pub const ALL: [Code; 86] = [
         Code::UnexpectedCharacter,
         Code::MissingToken,
         Code::WrongDelimiter,
@@ -141,6 +143,7 @@ impl Code {
         Code::CommaAssignment,
         Code::ResultSpelling,
         Code::TypeParameterSpelling,
+        Code::ConditionalSpelling,
         Code::DuplicateName,
         Code::MissingMain,
         Code::UnknownType,
@@ -186,6 +189,7 @@ impl Code {
         Code::PerAsValue,
         Code::ConstantPer,
         Code::LocalBeforeDeclaration,
+        Code::PointlessIf,
         Code::Overflow,
         Code::DivisionByZero,
         Code::OutOfMemory,
@@ -230,6 +234,7 @@ impl Code {
             Code::CommaAssignment => "P0025",
             Code::ResultSpelling => "P0026",
             Code::TypeParameterSpelling => "P0027",
+            Code::ConditionalSpelling => "P0028",
             Code::DuplicateName => "A0001",
             Code::MissingMain => "A0002",
             Code::UnknownType => "A0003",
@@ -275,6 +280,7 @@ impl Code {
             Code::PerAsValue => "A0043",
             Code::ConstantPer => "A0044",
             Code::LocalBeforeDeclaration => "A0045",
+            Code::PointlessIf => "A0046",
             Code::Overflow => "R0001",
             Code::DivisionByZero => "R0002",
             Code::OutOfMemory => "R0003",
@@ -348,6 +354,7 @@ impl Code {
             Code::CommaAssignment => include_str!("../errors/P0025.md"),
             Code::ResultSpelling => include_str!("../errors/P0026.md"),
             Code::TypeParameterSpelling => include_str!("../errors/P0027.md"),
+            Code::ConditionalSpelling => include_str!("../errors/P0028.md"),
             Code::DuplicateName => include_str!("../errors/A0001.md"),
             Code::MissingMain => include_str!("../errors/A0002.md"),
             Code::UnknownType => include_str!("../errors/A0003.md"),
@@ -393,6 +400,7 @@ impl Code {
             Code::PerAsValue => include_str!("../errors/A0043.md"),
             Code::ConstantPer => include_str!("../errors/A0044.md"),
             Code::LocalBeforeDeclaration => include_str!("../errors/A0045.md"),
+            Code::PointlessIf => include_str!("../errors/A0046.md"),
             Code::Overflow => include_str!("../errors/R0001.md"),
             Code::DivisionByZero => include_str!("../errors/R0002.md"),
             Code::OutOfMemory => include_str!("../errors/R0003.md"),

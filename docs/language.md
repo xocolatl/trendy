@@ -1642,6 +1642,96 @@ operator main{} [];
 Equality is `=`, and inequality `<>`, as in Tutorial D and SQL; `==` and
 `!=` get fixes. Assignment is `:=`.
 
+### `if`
+
+`if c then a else b` is `a` if the boolean `c` is true, and else `b`.
+Another condition is an `if` in the `else` branch:
+`if a then x else if b then y else z`. *The Third Manifesto* assumes
+IF-THEN-ELSE expressions of the usual form (chapter 5).
+
+```trendy
+var dishes := relation {
+    { dish: "jollof rice", price: 1200 },
+    { dish: "ramen", price: 900 },
+};
+var label := if count{r: dishes} = 1 then "dish" else "dishes";
+
+operator mean{r: relation { dish: text, price: integer }}: integer [
+    return if count{r: r} = 0 then 0 else sum{r: r, of: price} div count{r: r};
+];
+
+operator sign{n: integer}: text [
+    return if n < 0 then "negative" else if n = 0 then "zero" else "positive";
+];
+
+operator main{} [
+    call debug_value{v: mean{r: dishes}};
+    call debug_value{v: mean{r: dishes where price > 5000}};
+    call debug_value{v: sign{n: -3}};
+];
+```
+
+- **Every `if` has an `else`,** since it has a value either way (P0002).
+- **The branches have one type,** the type expected of the `if`, or else
+  that of a branch whose type is known on its own, whichever it is, so
+  `if c then relation {} else r` takes its heading from `r`. The condition
+  is a boolean (A0004).
+- **Only the branch taken is computed.** So `mean` above never divides by
+  zero, and a failure in the other branch never happens. Where the
+  condition is known when compiling, the `if` is the branch it takes, and
+  the other's failures aren't reported; otherwise a branch that is known
+  to fail is an error, since it fails whenever it is taken.
+- **An `if` that decides nothing is an error** (A0046): a condition written
+  `true` or `false`, which the fix replaces with the branch taken, and the
+  branches `true` and `false`, which are the condition itself, or `not` it.
+  A condition that is only known when compiling, from variables, is
+  fine.
+- **The `else` branch takes all that follows,** as `where`'s condition
+  does, so `if c then a else b + 1` adds 1 to `b`. As an operand of
+  another operator, an `if` needs parentheses to say where it ends:
+  `(if c then 2 else 3) + 4` (P0022).
+- **Other languages' spellings are fixed** (P0028): Python's
+  `a if c else b`, C's `c ? a : b`, `elif`, `elsif` and `elseif` for
+  `else if`, and Tutorial D's `END IF`, which an `if` doesn't have.
+
+```trendy,error
+operator label{n: integer}: text [
+    return if n = 1 then "one";
+];
+
+operator main{} [];
+```
+
+```trendy,error
+operator label{n: integer}: text [
+    return if n = 1 then "one" else 2;
+];
+
+operator main{} [];
+```
+
+```trendy,error
+operator positive{n: integer}: boolean [
+    return if n > 0 then true else false;
+];
+
+operator main{} [];
+```
+
+```trendy,error
+var plus := 1 + if true then 2 else 3;
+
+operator main{} [];
+```
+
+```trendy,error
+operator label{n: integer}: text [
+    return "one" if n = 1 else "many";
+];
+
+operator main{} [];
+```
+
 ### Attribute values
 
 `t.a` is the value of the tuple `t`'s attribute `a`, and `t.a.b` reaches
@@ -2362,6 +2452,7 @@ From tightest to loosest:
 | `or` | left |
 | `implies` | right |
 | `where`, whose condition is all that follows | left |
+| `if … then … else …`, whose `else` branch is all that follows | none: an operand needs parentheses |
 
 So `-a * b` is `(-a) * b`, `a + 1 < b` is `(a + 1) < b`, and, as with
 every prefix operator, `not a = b` is `(not a) = b`. To negate a
@@ -2379,6 +2470,10 @@ which is meant. These pairs are:
 
 - **A comparison and another comparison,** since `a < b < c` doesn't
   chain (P0015).
+- **An `if` as an operand,** since its `else` branch takes all that
+  follows: `1 + if c then 2 else 3 + 4` could add the `if` or end it at
+  `3`. Write `1 + (if c then 2 else 3 + 4)` or `1 + (if c then 2 else 3) + 4`
+  (P0022).
 - **`!!` and a postfix operator or a join after it:**
   `!!r rename {a as b}` could be the image of the renamed relation
   or the image renamed, and `!!r join s` could be the image of the
@@ -2413,7 +2508,8 @@ operator main{} [];
 ### Evaluation
 
 Expressions have no side effects. Every operand is evaluated, so an error in
-one is never skipped. Whatever doesn't depend on parameters or variables is
+one is never skipped, but for an `if`'s branches: only the one its
+condition takes is computed. Whatever doesn't depend on parameters or variables is
 evaluated when compiling, and so is whatever a constant operand decides, when
 the other operand can't fail: `p and false` is just `false`, `true and p` is
 just `p`, and `n * 1` is just `n`. But `(n + 1) * 0` is still computed, since
@@ -2522,12 +2618,13 @@ operator main{} [];
 
 Names are ASCII letters, digits and `_`, and don't start with a digit. They
 are case-sensitive. The keywords are `operator`, `var`, `call`, `builtin`,
-`tuple`, `relation`, `true`, `false`, `not`, `and`, `or`, `xor`,
+`tuple`, `relation`, `array`, `true`, `false`, `not`, `and`, `or`, `xor`,
 `implies`, `div`, `mod`, `remove`, `rename`, `extend`, `replace`, `group`,
 `ungroup`, `wrap`, `unwrap`, `join`, `times`, `compose`, `matching`,
 `union`, `d_union`, `xunion`, `intersect`, `minus`, `i_minus`, `where`,
-`as`, `insert`, `d_insert`, `delete`, `i_delete`, `update`, `assign` and
-`return`, all lowercase, and a keyword can't be a name (P0017).
+`as`, `insert`, `d_insert`, `delete`, `i_delete`, `update`, `assign`,
+`return`, `if`, `then` and `else`, all lowercase, and a keyword can't be a
+name (P0017).
 `type` is a keyword only after `builtin`, `key` only where a variable's
 keys go, and `value` and `from` only in `tuple from` and `value from`.
 
@@ -2691,6 +2788,8 @@ line after a comment on its own line, such as a file's header, is kept.
 | `AND`, `Or`, `NOT` | `and`, `or`, `not` |
 | `a == b`, `a != b` | `a = b`, `a <> b` |
 | `a < b < c` | `a < b and b < c` |
+| `a if c else b`, `c ? a : b`, `IF c THEN a ELSE b END IF` | `if c then a else b` |
+| `elif`, `elsif`, `ELSEIF` | `else if` |
 | `A FROM T`, `t["a"]` | `t.a` |
 | `R { A, B }`, `R { ALL BUT C }` | `r{a, b}`, `r remove {c}` |
 | `R RENAME ( A AS B )`, `rename(columns={'a': 'b'})` | `r rename {a as b}` |

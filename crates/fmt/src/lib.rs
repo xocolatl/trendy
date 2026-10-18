@@ -14,7 +14,7 @@ use std::collections::HashSet;
 
 use trendy_syntax::ast::{
     Arguments, ArrayLiteral, AssignBlock, AssignList, AstNode, Body, Clause, GatherList, Heading,
-    NameList, NaryExpr, RelationLiteral, RenameList, SourceFile, TupleLiteral,
+    IfExpr, NameList, NaryExpr, RelationLiteral, RenameList, SourceFile, TupleLiteral,
 };
 use trendy_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
@@ -32,8 +32,8 @@ pub fn format(file: &SourceFile) -> String {
     loop {
         let (out, lines) = render(file, &layout);
         match layout.too_long(&out, &lines) {
-            Some(Break::List(list)) => {
-                layout.broken.insert(list);
+            Some(Break::Node(node)) => {
+                layout.broken.insert(node);
             }
             Some(Break::Keys(decl)) => {
                 layout.broken_keys.insert(decl);
@@ -45,18 +45,19 @@ pub fn format(file: &SourceFile) -> String {
 
 /// What to break across lines next.
 enum Break {
-    /// A list, one item per line.
-    List(SyntaxNode),
+    /// A list, one item per line, or an `if`, with its `then` and its
+    /// `else` each starting a line.
+    Node(SyntaxNode),
     /// The keys of a variable declaration, each on a line of its own.
     Keys(SyntaxNode),
 }
 
 /// The widest a line may be, in characters, before the formatter breaks a
-/// list in it across lines.
+/// list or an `if` in it across lines.
 const MAX_WIDTH: usize = 100;
 
-/// Which lists, and which variable declarations' keys, are broken across
-/// lines beyond those the structure demands.
+/// Which lists and `if`s, and which variable declarations' keys, are broken
+/// across lines beyond those the structure demands.
 #[derive(Default)]
 struct Layout {
     broken: HashSet<SyntaxNode>,
@@ -82,16 +83,24 @@ impl Layout {
             if let Some(decl) = keys {
                 return Some(Break::Keys(decl));
             }
-            let list = lines
+            // The first list or `if` that starts on the line and isn't
+            // broken yet: the outermost.
+            let breakable = lines
                 .iter()
                 .filter(|(_, l)| *l == line)
-                .filter(|(token, _)| {
-                    matches!(token.kind(), SyntaxKind::LBrace | SyntaxKind::LBracket)
-                })
-                .filter_map(|(token, _)| token.parent())
-                .find(|node| is_list(node) && items(node) > 0 && !self.is_block(node));
-            if let Some(list) = list {
-                return Some(Break::List(list));
+                .find_map(|(token, _)| {
+                    let node = token.parent()?;
+                    let opens = match token.kind() {
+                        SyntaxKind::LBrace | SyntaxKind::LBracket => {
+                            is_list(&node) && items(&node) > 0
+                        }
+                        SyntaxKind::IfKw => node.kind() == SyntaxKind::IfExpr,
+                        _ => false,
+                    };
+                    (opens && !self.is_block(&node) && !self.chained_if(&node)).then_some(node)
+                });
+            if let Some(node) = breakable {
+                return Some(Break::Node(node));
             }
         }
         None
@@ -114,6 +123,9 @@ impl Layout {
     /// it.
     fn own_block(&self, node: &SyntaxNode) -> bool {
         match node.kind() {
+            // An `else if` chained to a broken `if` is laid out with it, at
+            // its level.
+            SyntaxKind::IfExpr => self.broken_if(node) && !self.chained_if(node),
             SyntaxKind::Body => {
                 Body::cast(node.clone()).is_some_and(|b| b.statements().next().is_some())
             }
@@ -133,6 +145,44 @@ impl Layout {
                 .children()
                 .filter(|n| n.kind() != SyntaxKind::Key)
                 .any(|n| n.descendants().any(|d| self.is_block(&d)))
+    }
+
+    /// Whether `node` is an `if` whose `then` and `else` each start a line:
+    /// one broken because it was too long, one chained to such an `if`, or
+    /// one with something in it laid out across lines, so that no value
+    /// across lines is followed by more on its last line.
+    fn broken_if(&self, node: &SyntaxNode) -> bool {
+        node.kind() == SyntaxKind::IfExpr
+            && (self.broken.contains(node)
+                || self.chained_if(node)
+                || node.descendants().skip(1).any(|n| {
+                    if n.kind() == SyntaxKind::IfExpr {
+                        self.broken.contains(&n)
+                    } else {
+                        self.own_block(&n)
+                    }
+                }))
+    }
+
+    /// Whether `node` is an `if` in the `else` branch of a broken `if`,
+    /// which is broken with it, as one chain: `else if`.
+    fn chained_if(&self, node: &SyntaxNode) -> bool {
+        node.kind() == SyntaxKind::IfExpr
+            && node.parent().is_some_and(|outer| {
+                IfExpr::cast(outer.clone())
+                    .and_then(|outer| outer.else_branch())
+                    .is_some_and(|branch| branch.syntax() == node)
+                    && self.broken_if(&outer)
+            })
+    }
+
+    /// The `if` that a broken `if`, `node`, is chained to, or itself.
+    fn chain_start(&self, node: &SyntaxNode) -> SyntaxNode {
+        let mut start = node.clone();
+        while self.chained_if(&start) {
+            start = start.parent().expect("a chained `if` is in another");
+        }
+        start
     }
 
     /// How many blocks enclose `node`, not counting itself: the indentation
@@ -475,6 +525,13 @@ fn broken_line(prev: &SyntaxToken, next: &SyntaxToken, layout: &Layout) -> Optio
     if let Some(types) = type_parameters_start(next) {
         return Some(layout.level(&types) + 1);
     }
+    // A broken `if`'s `then` and `else`, each starting a line one level
+    // in from the `if`, or from the one it is chained to.
+    if matches!(next.kind(), SyntaxKind::ThenKw | SyntaxKind::ElseKw)
+        && let Some(if_expr) = next.parent().filter(|p| layout.broken_if(p))
+    {
+        return Some(layout.level(&layout.chain_start(&if_expr)) + 1);
+    }
     if next.kind() == SyntaxKind::LBracket
         && let Some(body) = next.parent().filter(|p| p.kind() == SyntaxKind::Body)
         && body.parent().is_some_and(|op| {
@@ -619,13 +676,14 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
 /// a name or an operand, or a separator.
 fn spaced_after(kind: SyntaxKind) -> bool {
     use SyntaxKind::{
-        ArrayKw, AssignKw, BuiltinKw, CallKw, Colon, Comma, DInsertKw, DeleteKw, IDeleteKw,
+        ArrayKw, AssignKw, BuiltinKw, CallKw, Colon, Comma, DInsertKw, DeleteKw, IDeleteKw, IfKw,
         InsertKw, NotKw, OperatorKw, RelationKw, ReturnKw, TupleKw, UpdateKw, VarKw,
     };
     spaced_before(kind)
         || matches!(
             kind,
             OperatorKw
+                | IfKw
                 | VarKw
                 | TupleKw
                 | RelationKw
@@ -649,12 +707,14 @@ fn spaced_after(kind: SyntaxKind) -> bool {
 /// `:=`, and the postfix operators and other words between two parts.
 fn spaced_before(kind: SyntaxKind) -> bool {
     use SyntaxKind::{
-        AsKw, ColonEq, ExtendKw, GroupKw, RemoveKw, RenameKw, ReplaceKw, UngroupKw, UnwrapKw,
-        WhereKw, WrapKw,
+        AsKw, ColonEq, ElseKw, ExtendKw, GroupKw, RemoveKw, RenameKw, ReplaceKw, ThenKw, UngroupKw,
+        UnwrapKw, WhereKw, WrapKw,
     };
     matches!(
         kind,
         ColonEq
+            | ThenKw
+            | ElseKw
             | RemoveKw
             | RenameKw
             | ExtendKw
@@ -844,6 +904,28 @@ mod tests {
         assert_eq!(
             fmt(months),
             "var m := array [\n    \"January\",\n    \"February\",\n    \"March\",\n    \"April\",\n    \"May\",\n    \"June\",\n    \"July\",\n    \"August\",\n    \"September\"\n];\n"
+        );
+    }
+
+    #[test]
+    fn ifs() {
+        assert_eq!(
+            fmt("var x:=if a then\"one\"else(if b then 2 else 3)+1;"),
+            "var x := if a then \"one\" else (if b then 2 else 3) + 1;\n"
+        );
+        // Too long, `then` and `else` each start a line, one level in, and
+        // an `else if` chain stays at that level.
+        assert_eq!(
+            fmt(
+                "operator sign{n: integer}: text [ return if n < 0 then \"negative\" else if n = 0 then \"zero\" else \"positive, and more words to be long\"; ];"
+            ),
+            "operator sign{n: integer}: text [\n    return if n < 0\n        then \"negative\"\n        else if n = 0\n        then \"zero\"\n        else \"positive, and more words to be long\";\n];\n"
+        );
+        // A branch across lines breaks the `if`, so nothing follows it on
+        // its last line.
+        assert_eq!(
+            fmt("var r := if a then relation {{x: 1}, {x: 2}} else relation {{x: 3}};"),
+            "var r := if a\n    then relation {\n        { x: 1 },\n        { x: 2 }\n    }\n    else relation { { x: 3 } };\n"
         );
     }
 

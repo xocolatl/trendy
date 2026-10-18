@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use trendy_diag::{Diagnostic, Span, edit_distance};
+use trendy_diag::{CodeKind, Diagnostic, Span, edit_distance};
 use trendy_hir as hir;
 use trendy_syntax::SyntaxToken;
 use trendy_syntax::ast::{self, AstNode, AttributeValue, Expr};
@@ -251,7 +251,105 @@ impl<'a> Checker<'a> {
             Expr::Relation(relation) => types::relation_selector(relation, expected, self, errors),
             Expr::Array(array) => types::array_selector(array, expected, self, errors),
             Expr::Index(index) => self.indexed(index, expr, expected, errors),
+            Expr::If(if_expr) => self.conditional(if_expr, expected, errors),
         }
+    }
+
+    /// `if_expr`: its `then` branch's value if its condition is true, and
+    /// else its `else` branch's, of one type. Only the branch taken is
+    /// computed, so a condition known when compiling leaves the other's
+    /// failures unreported.
+    fn conditional(
+        &mut self,
+        if_expr: &ast::IfExpr,
+        expected: Option<&Expected>,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let condition_expr = if_expr.condition()?;
+        let branches = [if_expr.then_branch()?, if_expr.else_branch()?];
+        if let Some(error) = errors::pointless_if(if_expr, &condition_expr, &branches) {
+            errors.push(error);
+        }
+        let boolean = Expected {
+            ty: hir::Type::Scalar(hir::Scalar::Boolean),
+            origin: types::Origin::Operator(if_expr.keyword()?),
+        };
+        let condition = self.expr(&condition_expr, Some(&boolean), errors);
+        let taken = match &condition {
+            Some(hir::Expr::Constant(hir::Value::Boolean(taken))) => Some(*taken),
+            _ => None,
+        };
+        let [then, otherwise] = self.branches(&branches, taken, expected, errors)?;
+        match (taken, then, otherwise) {
+            (Some(true), then, _) => then,
+            (Some(false), _, otherwise) => otherwise,
+            (None, Some(then), Some(otherwise)) => {
+                Some(ops::conditional(condition?, then, otherwise))
+            }
+            (None, ..) => None,
+        }
+    }
+
+    /// An `if`'s branches, `then` and `else`, written `written`, of one
+    /// type: the type expected, or else that of the first valid on its own
+    /// (see [`types::Alone`]). The one a condition known when compiling
+    /// doesn't take, as `taken` says, is never computed, so its failures
+    /// aren't reported, and it has no value if one makes it fail. `None`
+    /// after reporting a branch's errors.
+    fn branches(
+        &mut self,
+        written: &[Expr; 2],
+        taken: Option<bool>,
+        expected: Option<&Expected>,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<[Option<hir::Expr>; 2]> {
+        let skipped = |i: usize| taken.is_some_and(|taken| taken != (i == 0));
+        let check =
+            |this: &mut Self, i: usize, expected: Option<&Expected>, errors: &mut Vec<_>| {
+                if !skipped(i) {
+                    return this.expr(&written[i], expected, errors);
+                }
+                let mut own: Vec<Diagnostic> = Vec::new();
+                let out = this.expr(&written[i], expected, &mut own);
+                errors.extend(own.into_iter().filter(|d| d.code.kind() != CodeKind::Run));
+                out
+            };
+        let mut expectation = expected.cloned();
+        let mut alone: [Option<types::Alone<hir::Expr>>; 2] = [None, None];
+        if expectation.is_none() {
+            for (i, branch) in written.iter().enumerate() {
+                let mut own = Vec::new();
+                let out = check(self, i, None, &mut own);
+                let on_its_own = types::Alone::of(out, own, branch.span());
+                let valid = matches!(on_its_own, types::Alone::Valid(_));
+                if let types::Alone::Valid(out) = &on_its_own {
+                    expectation = Some(Expected {
+                        ty: self.ty(out),
+                        origin: types::Origin::Value(branch.clone()),
+                    });
+                }
+                alone[i] = Some(on_its_own);
+                if valid {
+                    break;
+                }
+            }
+        }
+        let typed = expectation.is_some();
+        let mut values = [None, None];
+        let mut ok = true;
+        for (i, alone) in alone.into_iter().enumerate() {
+            let before = errors.len();
+            let out = match alone {
+                Some(alone) => alone.finish(typed, written[i].span(), errors, |errors| {
+                    check(self, i, expectation.as_ref(), errors)
+                }),
+                None => check(self, i, expectation.as_ref(), errors),
+            };
+            // A branch not taken that would fail is no error.
+            ok &= out.is_some() || (skipped(i) && errors.len() == before);
+            values[i] = out;
+        }
+        ok.then_some(values)
     }
 
     /// The value `name_ref` names, written `expr`.

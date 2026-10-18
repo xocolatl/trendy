@@ -968,6 +968,9 @@ impl<'a> FunctionBuilder<'a> {
             hir::Expr::Relation(heading, tuples) => self.relation(heading, tuples, cx),
             hir::Expr::Array(element, elements) => self.array(element, elements, cx),
             hir::Expr::Index(array, position) => self.index(array, position, cx),
+            hir::Expr::If(condition, then, otherwise) => {
+                self.conditional(expr, condition, [then, otherwise], cx)
+            }
             hir::Expr::Remove(operand, names) => self.removed(operand, names, cx),
             hir::Expr::Rename(operand, renamings) => self.renamed(operand, renamings, cx),
             hir::Expr::And(lhs, rhs) => self.joined(lhs, rhs, cx),
@@ -987,6 +990,41 @@ impl<'a> FunctionBuilder<'a> {
                 self.binary(*op, &operand_ty, lhs, rhs, cx)
             }
         }
+    }
+
+    /// `expr`, the value of one of `branches`, `then` if `condition` is
+    /// true and else `otherwise`, copied into a new stack slot: a branch to
+    /// a block of each, which computes only its own, then on to one after
+    /// both.
+    fn conditional(
+        &mut self,
+        expr: &hir::Expr,
+        condition: &hir::Expr,
+        branches: [&hir::Expr; 2],
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let value = layout(&self.type_of(expr));
+        let condition = self.place(condition, cx);
+        let dst = self.slot(value.clone());
+        let (then, otherwise, after) = (self.new_block(), self.new_block(), self.new_block());
+        self.end_block(
+            lir::Terminator::Branch {
+                condition,
+                then,
+                otherwise,
+            },
+            then,
+        );
+        for (branch, next) in branches.into_iter().zip([otherwise, after]) {
+            let src = self.place(branch, cx);
+            self.insts.push(lir::Inst::Copy {
+                dst: dst.clone(),
+                src,
+                layout: value.clone(),
+            });
+            self.end_block(lir::Terminator::Jump(after), next);
+        }
+        dst
     }
 
     /// `operand` without the attributes `names`, reshaped.
@@ -3408,6 +3446,77 @@ mod tests {
         assert!(
             matches!(args[0].base, lir::Base::Indirect { .. }),
             "{args:#?}"
+        );
+    }
+
+    #[test]
+    fn an_if_computes_each_branch_in_a_block_of_its_own() {
+        // `show{p: integer} [ call debug_value{v: if p = 0 then 1 else -p}; ]`.
+        let p = || Box::new(hir::Expr::Parameter("p".to_string()));
+        let condition = hir::Expr::Binary(
+            hir::BinaryOp::Compare(
+                hir::Comparison::Equal,
+                hir::Compared::Scalar(hir::Scalar::Integer),
+            ),
+            p(),
+            Box::new(hir::Expr::Constant(hir::Value::Integer(0))),
+        );
+        let chosen = hir::Expr::If(
+            Box::new(condition),
+            Box::new(hir::Expr::Constant(hir::Value::Integer(1))),
+            Box::new(hir::Expr::Unary(
+                hir::UnaryOp::Negate(hir::Numeric::Integer),
+                p(),
+            )),
+        );
+        let lowered = lower(&program(
+            vec![
+                debug_value(),
+                user("show", &["p"], vec![call(0, vec![("v", chosen)])]),
+                user(
+                    "main",
+                    &[],
+                    vec![call(
+                        1,
+                        vec![("p", hir::Expr::Constant(hir::Value::Integer(1)))],
+                    )],
+                ),
+            ],
+            vec![],
+        ));
+        let blocks = &lowered.functions[1].blocks;
+        let lir::Terminator::Branch {
+            then, otherwise, ..
+        } = blocks[0].terminator
+        else {
+            panic!("{blocks:#?}");
+        };
+        // Only the `else` block negates, and both go on to one block.
+        let negates = |b: lir::BlockId| {
+            blocks[b.0].insts.iter().any(|i| {
+                matches!(
+                    i,
+                    lir::Inst::Unary {
+                        op: lir::UnaryOp::Negate(_),
+                        ..
+                    }
+                )
+            })
+        };
+        assert!(!negates(then) && negates(otherwise), "{blocks:#?}");
+        assert_eq!(blocks[then.0].terminator, blocks[otherwise.0].terminator);
+        let lir::Terminator::Jump(after) = blocks[then.0].terminator else {
+            panic!("{blocks:#?}");
+        };
+        assert!(
+            blocks[after.0].insts.iter().any(|i| matches!(
+                i,
+                lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::DebugValue,
+                    ..
+                }
+            )),
+            "{blocks:#?}"
         );
     }
 }

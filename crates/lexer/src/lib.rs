@@ -107,9 +107,11 @@ pub fn lex(source: &str) -> Lexed {
 }
 
 /// Operators from other languages, which the parser replaces with trendy's
-/// keywords: `&&` for `and`, `->` for `implies`, `%` for `mod`, and so on.
-/// Longer ones come first, so that `&&` isn't two `&`.
-pub const FOREIGN_OPERATORS: [&str; 10] = ["&&", "->", "=>", "==", "!=", "!", "&", "|", "^", "%"];
+/// keywords: `&&` for `and`, `->` for `implies`, `%` for `mod`, and so on,
+/// and C's `c ? a : b` with an `if`. Longer ones come first, so that `&&`
+/// isn't two `&`.
+pub const FOREIGN_OPERATORS: [&str; 11] =
+    ["&&", "->", "=>", "==", "!=", "!", "&", "|", "^", "%", "?"];
 
 /// The two-character punctuation `text` starts with, if any. It's tried
 /// before foreign operators, so that `||` isn't two `|`; none of these
@@ -461,7 +463,7 @@ mod tests {
 
     #[test]
     fn unexpected_character_is_an_error_token() {
-        let lexed = lex("main#?");
+        let lexed = lex("main#@");
         assert_eq!(
             lexed.tokens.iter().map(|t| t.kind).collect::<Vec<_>>(),
             [Ident, ErrorToken, ErrorToken]

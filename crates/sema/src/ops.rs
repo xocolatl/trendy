@@ -1286,6 +1286,22 @@ pub(crate) fn index(array: hir::Expr, position: hir::Expr) -> Result<hir::Expr, 
     }
 }
 
+/// `then` if `condition` is true, and else `otherwise`: decided now if the
+/// condition is a constant, or if both are the same and the condition
+/// can't fail, since then nothing tells them apart.
+pub(crate) fn conditional(
+    condition: hir::Expr,
+    then: hir::Expr,
+    otherwise: hir::Expr,
+) -> hir::Expr {
+    match condition {
+        hir::Expr::Constant(hir::Value::Boolean(true)) => then,
+        hir::Expr::Constant(hir::Value::Boolean(false)) => otherwise,
+        condition if then == otherwise && !can_fail(&condition) => then,
+        condition => hir::Expr::If(Box::new(condition), Box::new(then), Box::new(otherwise)),
+    }
+}
+
 /// `operand` with the relation-valued attributes `names` replaced by their
 /// attributes: evaluated if the operand is a constant.
 pub(crate) fn ungroup(operand: hir::Expr, names: BTreeSet<String>) -> hir::Expr {
@@ -1564,6 +1580,9 @@ fn shifted(expr: hir::Expr, cutoff: usize) -> hir::Expr {
             elements.into_iter().map(|e| shifted(e, cutoff)).collect(),
         ),
         hir::Expr::Index(array, position) => hir::Expr::Index(shift(array), shift(position)),
+        hir::Expr::If(condition, then, otherwise) => {
+            hir::Expr::If(shift(condition), shift(then), shift(otherwise))
+        }
         // The condition is one tuple at hand further in.
         hir::Expr::Restrict(operand, condition) => {
             hir::Expr::Restrict(shift(operand), Box::new(shifted(*condition, cutoff + 1)))
@@ -1604,6 +1623,9 @@ pub(crate) fn uses_tuple(expr: &hir::Expr, depth: usize) -> bool {
         | hir::Expr::Antijoin(lhs, rhs)
         | hir::Expr::Let(_, lhs, rhs)
         | hir::Expr::Index(lhs, rhs) => uses(lhs) || uses(rhs),
+        hir::Expr::If(condition, then, otherwise) => {
+            uses(condition) || uses(then) || uses(otherwise)
+        }
         hir::Expr::Tuple(attributes) => attributes.values().any(uses),
         hir::Expr::Array(_, elements) => elements.iter().any(uses),
         hir::Expr::Relation(_, tuples) => tuples.iter().any(uses),
@@ -1889,6 +1911,20 @@ fn substitute(
         hir::Expr::Index(operand, position) => {
             index(sub(operand)?, sub(position)?).map_err(Failed::Scalar)?
         }
+        // Only the branch taken is computed.
+        hir::Expr::If(condition, then, otherwise) => match sub(condition)? {
+            hir::Expr::Constant(hir::Value::Boolean(taken)) => {
+                sub(if taken { then } else { otherwise })?
+            }
+            // Either may be taken when running, or neither: one that fails
+            // now stays as it is, to fail only if it is. The whole is no
+            // constant, so it isn't the value of what it is in.
+            condition => {
+                let branch =
+                    |e: Box<hir::Expr>| substitute((*e).clone(), depth, substitution).unwrap_or(*e);
+                conditional(condition, branch(then), branch(otherwise))
+            }
+        },
         hir::Expr::Tuple(attributes) => tuple_of(attributes, depth, substitution)?,
         hir::Expr::Relation(heading, tuples) => relation(
             heading,
@@ -2139,6 +2175,9 @@ fn can_fail(expr: &hir::Expr) -> bool {
             itself || can_fail(lhs) || can_fail(rhs)
         }
         hir::Expr::Let(_, value, body) => can_fail(value) || can_fail(body),
+        hir::Expr::If(condition, then, otherwise) => {
+            can_fail(condition) || can_fail(then) || can_fail(otherwise)
+        }
     }
 }
 

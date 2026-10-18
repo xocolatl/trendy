@@ -5468,4 +5468,84 @@ mod tests {
             assert!(analyze_str(&fixed_source).is_ok(), "{fixed}");
         }
     }
+
+    #[test]
+    fn an_if_computes_only_the_branch_taken() {
+        let vars = variables(
+            "var none := relation { n: integer } {};\nvar mean := if count{r: none} = 0 then 0 else sum{r: none, of: n} div count{r: none};\nvar label := if count{r: none} = 1 then \"one\" else if count{r: none} = 0 then \"none\" else \"many\";",
+        );
+        assert_eq!(vars[1].init, hir::Value::Integer(0));
+        assert_eq!(vars[2].init, hir::Value::Text("none".to_string()));
+        // A call evaluated when compiling takes only one branch too.
+        let safe = "operator safe{a: integer, b: integer}: integer [ return if b = 0 then 0 else a div b; ];\n";
+        assert_eq!(
+            variables(&format!("{safe}var x := safe{{a: 7, b: 0}};"))[0].init,
+            hir::Value::Integer(0)
+        );
+        // Unknown when compiling, a branch that fails whenever it is taken
+        // is an error.
+        let source = format!(
+            "operator f{{n: integer}}: integer [ return if n > 0 then 1 else 1 div 0; ];{MAIN}"
+        );
+        assert_eq!(codes(&source), [Code::DivisionByZero]);
+    }
+
+    #[test]
+    fn an_ifs_branches_have_one_type() {
+        // An empty relation takes its heading from the other branch, in
+        // either order.
+        for source in [
+            "operator f{n: integer}: boolean [ return (if n > 0 then relation {} else relation { { a: 1 } }) = relation {}; ];",
+            "operator f{n: integer}: boolean [ return (if n > 0 then relation { { a: 1 } } else relation {}) = relation {}; ];",
+            "operator f{n: integer}: relation { a: integer } [ return if n > 0 then relation {} else relation {}; ];",
+        ] {
+            assert!(analyze_str(&format!("{source}{MAIN}")).is_ok(), "{source}");
+        }
+        for (source, code) in [
+            ("var x := if 1 = 1 then 1 else \"one\";", Code::TypeMismatch),
+            ("var x := if 1 then 1 else 2;", Code::TypeMismatch),
+            (
+                "var x := if 1 = 1 then relation {} else relation {};",
+                Code::UnknownEmptyType,
+            ),
+        ] {
+            assert!(
+                codes(&format!("{source}{MAIN}")).contains(&code),
+                "{source}"
+            );
+        }
+        // Both alike, it is the one, if the condition can't fail.
+        let program = analyze_str(&format!(
+            "operator same{{n: integer}}: integer [ return if n > 0 then n else n; ];{MAIN}"
+        ))
+        .unwrap();
+        let op = program.operators.iter().find(|o| o.name == "same").unwrap();
+        let hir::OperatorKind::ReadOnly { value, .. } = &op.kind else {
+            panic!("same is read-only");
+        };
+        assert_eq!(*value, hir::Expr::Parameter("n".to_string()));
+    }
+
+    #[test]
+    fn an_if_that_decides_nothing_is_fixed() {
+        let f = |body: &str| format!("operator f{{n: integer}}: boolean [ return {body}; ];{MAIN}");
+        for (written, fixed) in [
+            ("if true then n > 0 else n < 0", "n > 0"),
+            ("if false then n > 0 else n < 0", "n < 0"),
+            ("if n > 0 then true else false", "n > 0"),
+            ("if n > 0 then false else true", "not (n > 0)"),
+            ("if (n > 0) then false else true", "not (n > 0)"),
+        ] {
+            assert_eq!(codes(&f(written)), [Code::PointlessIf], "{written}");
+            assert_eq!(fix(&f(written)), f(fixed), "{written}");
+            assert!(analyze_str(&f(fixed)).is_ok(), "{fixed}");
+        }
+        // Known only from a variable's value, it decides.
+        assert!(
+            analyze_str(&format!(
+                "var on := true;\nvar x := if on then 1 else 2;{MAIN}"
+            ))
+            .is_ok()
+        );
+    }
 }

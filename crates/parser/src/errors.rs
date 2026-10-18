@@ -30,7 +30,8 @@ pub(crate) const ASSIGNMENT_FORM: &str = "an assignment statement is `name := va
 pub(crate) const ASSIGN_BLOCK_FORM: &str =
     "an `assign` block makes assignments all at once: `assign { x := y; y := x; };`";
 pub(crate) const UPDATE_FORM: &str = "`update` takes attributes the variable has, each `name := value`, then for a relation an optional `where` and condition: `update r { price := price * 2 } where id = 7;`";
-pub(crate) const TYPES_FORM: &str = "an operator's type parameters follow its parameters and result type, each `name: any type`, `any tuple`, `any relation` or `any` and a kind: `operator pair{a: T, b: T}: relation { v: T } types { T: any type } [ … ];`";
+pub(crate) const TYPES_FORM: &str = "an operator's type parameters follow its parameters and result type, each `name: any type`, `any tuple`, `any relation`, `any array` or `any` and a kind: `operator pair{a: T, b: T}: relation { v: T } types { T: any type } [ … ];`";
+pub(crate) const IF_FORM: &str = "an `if` has the form `if condition then value else value`, and `else if` chains another: `if n = 1 then \"one\" else if n = 2 then \"two\" else \"many\"`";
 pub(crate) const VARIABLE_FORM: &str = "a variable declaration has the form `var name: type := value;`, where either the type or the value may be left out";
 
 /// Words other languages use to start a definition or declaration, which
@@ -590,6 +591,111 @@ pub(crate) fn unordered_image(
         };
     }
     d
+}
+
+/// An `if`, at `span`, as an operand of another operator: it takes all
+/// that follows, so the fix parenthesizes what it took.
+pub(crate) fn unparenthesized_if(span: Span) -> Diagnostic {
+    let insert = |at: usize, text: &str| Edit {
+        span: Span::empty(at),
+        replacement: text.to_string(),
+    };
+    Diagnostic::error(
+        Code::UnorderedOperators,
+        "an `if` that is an operand needs parentheses",
+        span,
+        "this `if` takes all that follows",
+    )
+    .with_note("an `if`'s `else` branch takes all that follows, so in `1 + if c then 2 else 3 + 4`, it could be `3` or `3 + 4`, and neither is assumed")
+    .with_suggestion(
+        "parenthesize the `if`, ending where its `else` branch now ends",
+        vec![insert(span.start, "("), insert(span.end, ")")],
+    )
+}
+
+/// Which language's conditional expression is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Conditional {
+    /// `a if c else b`.
+    Python,
+    /// `c ? a : b`.
+    C,
+}
+
+/// Another language's conditional expression, as `style` says, at `span`,
+/// with its first `if` or `?` at `at`: `parts`, as written, are a value
+/// and a condition for Python, a condition and a value for C, alternately,
+/// then the last value.
+pub(crate) fn foreign_conditional(
+    style: Conditional,
+    span: Span,
+    parts: &[String],
+    at: Span,
+) -> Diagnostic {
+    let (language, written) = match style {
+        Conditional::Python => ("Python's", "a if c else b"),
+        Conditional::C => ("C's", "c ? a : b"),
+    };
+    let (pairs, last) = parts.split_at(parts.len() - 1);
+    let branches: Vec<String> = pairs
+        .chunks(2)
+        .map(|pair| {
+            let (condition, value) = match style {
+                Conditional::Python => (&pair[1], &pair[0]),
+                Conditional::C => (&pair[0], &pair[1]),
+            };
+            format!("if {condition} then {value}")
+        })
+        .collect();
+    let replacement = format!("{} else {}", branches.join(" else "), last[0]);
+    Diagnostic::error(
+        Code::ConditionalSpelling,
+        format!("{language} `{written}` is written `if c then a else b`"),
+        at,
+        format!("{language} conditional"),
+    )
+    .with_note("an `if` is written with its condition first, then each value after `then` and `else`; it can be used wherever a value can")
+    .with_suggestion(
+        format!("write `{replacement}`"),
+        vec![Edit { span, replacement }],
+    )
+}
+
+/// `elif`, `elsif` or `elseif`, `found`, in an `if`: `else if`.
+pub(crate) fn else_if_spelling(found: Found) -> Diagnostic {
+    Diagnostic::error(
+        Code::ConditionalSpelling,
+        format!("`{}` is written `else if`", found.text),
+        found.span,
+        "another language's `else if`",
+    )
+    .with_note("another condition, after an `if`'s `then` branch, is an `if` in its `else` branch: `if a then x else if b then y else z`")
+    .with_suggestion(
+        "write `else if`",
+        vec![Edit {
+            span: found.span,
+            replacement: "else if".to_string(),
+        }],
+    )
+}
+
+/// Tutorial D's `END IF`, at `span`, after an `if`'s last value, which
+/// `removal` deletes with the space before it.
+pub(crate) fn end_if(span: Span, removal: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::ConditionalSpelling,
+        "an `if` has no `end if`",
+        span,
+        "Tutorial D's end of an `IF`",
+    )
+    .with_note("an `if` ends with its `else` branch, which takes all that follows; parentheses end one sooner")
+    .with_suggestion(
+        "remove it",
+        vec![Edit {
+            span: removal,
+            replacement: String::new(),
+        }],
+    )
 }
 
 /// What a list of gatherings makes: `group` new relation-valued

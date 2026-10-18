@@ -2565,6 +2565,92 @@ pub(crate) fn not_extractable(name: &str, at: Span, ty: &hir::Type, operand: &Ex
     }
 }
 
+/// The error for `if_expr`, of `condition` and `branches`, if it decides
+/// nothing: its condition is written `true` or `false`, so it is the
+/// branch that takes, or its branches are `true` and `false`, so it is its
+/// condition, or the condition negated.
+pub(crate) fn pointless_if(
+    if_expr: &trendy_syntax::ast::IfExpr,
+    condition: &Expr,
+    branches: &[Expr; 2],
+) -> Option<Diagnostic> {
+    let boolean = |e: &Expr| match e {
+        Expr::Literal(literal) => match literal.value() {
+            Ok(trendy_syntax::ast::LiteralValue::Boolean(b)) => Some(b),
+            _ => None,
+        },
+        _ => None,
+    };
+    let text = |e: &Expr| e.syntax().text().to_string();
+    let note = "an `if` chooses between its branches by its condition, so it decides something only if the condition can be either";
+    if let Some(always) = boolean(condition) {
+        let taken = &branches[usize::from(!always)];
+        let which = if always { "then" } else { "else" };
+        return Some(
+            Diagnostic::error(
+                Code::PointlessIf,
+                format!("the condition is always `{always}`"),
+                condition.span(),
+                format!("so the `{which}` branch is always taken"),
+            )
+            .with_note(note)
+            .with_suggestion(
+                format!("keep the `{which}` branch"),
+                vec![Edit {
+                    span: if_expr.span(),
+                    replacement: text(taken),
+                }],
+            ),
+        );
+    }
+    let negated = match (boolean(&branches[0]), boolean(&branches[1])) {
+        (Some(true), Some(false)) => false,
+        (Some(false), Some(true)) => true,
+        _ => return None,
+    };
+    let at = Span::new(branches[0].span().start, branches[1].span().end);
+    let (message, label, replacement) = if negated {
+        // `not` binds tightest, so all but a single operand needs
+        // parentheses after it.
+        let operand = match condition {
+            Expr::Name(_)
+            | Expr::Literal(_)
+            | Expr::Paren(_)
+            | Expr::Call(_)
+            | Expr::Extract(_)
+            | Expr::Index(_) => text(condition),
+            _ => format!("({})", text(condition)),
+        };
+        (
+            "its condition negated",
+            "the opposite of the condition's value",
+            format!("not {operand}"),
+        )
+    } else {
+        (
+            "its condition",
+            "the condition's own value",
+            text(condition),
+        )
+    };
+    Some(
+        Diagnostic::error(
+            Code::PointlessIf,
+            format!("this `if` is {message}"),
+            at,
+            label,
+        )
+        .with_note(note)
+        .with_suggestion(
+            format!("write `{replacement}`"),
+            vec![Edit {
+                span: if_expr.span(),
+                replacement,
+            }],
+        ),
+    )
+}
+
 /// `index`, `a[i]`, whose operand `a`, written `operand`, has type `ty`,
 /// not an array's: only an array's elements have positions. A tuple's
 /// attribute named in quotes, as other languages index a dictionary, is

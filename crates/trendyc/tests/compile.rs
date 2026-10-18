@@ -148,6 +148,16 @@ fn operators() {
             // With `vat` at 25: pozole at 937, and ramen at 1125.
             r#""under 1200""#,
             "tuple { dishes: 2, lowest: 937 }",
+            // `if`s: only pozole, at 937, is under 1000, and none under
+            // 500, whose mean is 0, with no division by zero.
+            r#""mean under 1000""#,
+            "937",
+            r#""mean under 500""#,
+            "0",
+            r#""how many under 1200""#,
+            r#""several""#,
+            r#""the menu's""#,
+            r#""dishes""#,
         ]
     );
 }
@@ -561,6 +571,18 @@ fn run_time_failures_stop_the_program() {
             )
         )
     );
+}
+
+#[test]
+fn an_if_fails_only_if_the_branch_it_takes_does() {
+    let overflow = format!(
+        "1\nerror[{}]: integer overflow\n",
+        trendy_diag::Code::Overflow.id()
+    );
+    let (code, stderr) = run_source("if_safe", &program("if b = 0 then 0 else a div b"));
+    assert_eq!((code, &stderr[..]), (0, "1\n0\n2\n"));
+    let (code, stderr) = run_source("fail_if", &program("if b = 0 then a + 1 else 0"));
+    assert_eq!((code, stderr), (1, overflow));
 }
 
 #[test]

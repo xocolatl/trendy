@@ -623,8 +623,14 @@ is `p`, and `n * 1` is `n`): expressions have no side effects, so this never
 changes what a program does. An operand is dropped only if it can't fail,
 so that every operand is evaluated and no run-time error is skipped. A
 constant overflow, or a division by a constant zero, is a compile error
-(R0001, R0002). `-` directly before a number literal makes a negative
-literal, so that the smallest integer can be written. Approximate folding and
+(R0001, R0002). An `if` (`hir::Expr::If`) is the one exception to
+evaluating every operand: only the branch its condition takes is
+computed. A constant condition makes the `if` that branch
+(`ops::conditional`), and the checker drops the failures of the branch
+not taken (`Checker::branches`), which it still checks; a call evaluated
+when compiling computes only the branch taken (`ops::substitute`). `-`
+directly before a number literal makes a negative literal, so that the
+smallest integer can be written. Approximate folding and
 simplification are exact IEEE 754 binary64, the same arithmetic the program
 does at run time, so folding never changes a result.
 
@@ -894,6 +900,10 @@ variable of the statement would change. Then each variable's keys are
 checked against its value, a projection on each key the variable
 declares, whose count must equal the value's, or the program stops
 (R0008). Only then are the variables assigned.
+
+An `if` computes its condition, then branches to a block for each branch,
+which computes only its own value into one slot, and jumps to the block
+after both.
 
 An attribute's value, `t.a` (`hir::Expr::Extract`), is the tuple's place
 with the attribute's field added to its path, so it costs nothing; sema

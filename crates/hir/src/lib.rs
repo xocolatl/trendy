@@ -711,6 +711,10 @@ pub enum Expr {
     /// The element of the array at the position the second expression
     /// gives, counting from 1, which fails if it has none there.
     Index(Box<Expr>, Box<Expr>),
+    /// The second expression's value if the first, a boolean, is true, and
+    /// else the third's: only that one is computed, so the other's failure
+    /// never happens.
+    If(Box<Expr>, Box<Expr>, Box<Expr>),
     /// The only tuple of a relation (`tuple from`), which fails if it has
     /// none or several. `value from` is the extraction of its only
     /// attribute.
@@ -744,6 +748,7 @@ impl Expr {
                 Type::Array(element) => *element,
                 other => panic!("an element of {other}"),
             },
+            Expr::If(_, then, _) => then.type_with(leaf),
             // Arithmetic on a type parameter's values has their type.
             Expr::Unary(op, operand) => op
                 .operand()
@@ -808,6 +813,9 @@ impl Expr {
                 elements.iter().map(|e| e.instantiated(types)).collect(),
             ),
             Expr::Index(array, index) => Expr::Index(inst(array), inst(index)),
+            Expr::If(condition, then, otherwise) => {
+                Expr::If(inst(condition), inst(then), inst(otherwise))
+            }
             Expr::Unary(op, operand) => Expr::Unary(op.instantiated(types), inst(operand)),
             Expr::Binary(op, lhs, rhs) => {
                 Expr::Binary(op.instantiated(types), inst(lhs), inst(rhs))

@@ -84,6 +84,12 @@ pub enum SyntaxKind {
     AssignKw,
     /// `return`, in a read-only operator's `return value;`.
     ReturnKw,
+    /// `if`, in `if condition then value else value`.
+    IfKw,
+    /// `then`, in an `if`.
+    ThenKw,
+    /// `else`, in an `if`.
+    ElseKw,
     LBrace,
     RBrace,
     LBracket,
@@ -190,6 +196,8 @@ pub enum SyntaxKind {
     ExtractExpr,
     /// `a[i]`: an array's element at position `i`, counting from 1.
     IndexExpr,
+    /// `if c then a else b`: `a` if `c` is true, and else `b`.
+    IfExpr,
     /// `r{a, b}`: a projection.
     ProjectExpr,
     /// `r remove {a, b}`, `r rename {a as b}`, `r extend { c := a + b }`,
@@ -272,7 +280,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 131] = [
+    pub const ALL: [SyntaxKind; 135] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -319,6 +327,9 @@ impl SyntaxKind {
         SyntaxKind::UpdateKw,
         SyntaxKind::AssignKw,
         SyntaxKind::ReturnKw,
+        SyntaxKind::IfKw,
+        SyntaxKind::ThenKw,
+        SyntaxKind::ElseKw,
         SyntaxKind::LBrace,
         SyntaxKind::RBrace,
         SyntaxKind::LBracket,
@@ -373,6 +384,7 @@ impl SyntaxKind {
         SyntaxKind::ParenExpr,
         SyntaxKind::ExtractExpr,
         SyntaxKind::IndexExpr,
+        SyntaxKind::IfExpr,
         SyntaxKind::ProjectExpr,
         SyntaxKind::PostfixExpr,
         SyntaxKind::NaryExpr,
@@ -458,6 +470,9 @@ impl SyntaxKind {
                 | SyntaxKind::UpdateKw
                 | SyntaxKind::AssignKw
                 | SyntaxKind::ReturnKw
+                | SyntaxKind::IfKw
+                | SyntaxKind::ThenKw
+                | SyntaxKind::ElseKw
         )
     }
 
@@ -643,6 +658,9 @@ impl SyntaxKind {
             SyntaxKind::UpdateKw => "update",
             SyntaxKind::AssignKw => "assign",
             SyntaxKind::ReturnKw => "return",
+            SyntaxKind::IfKw => "if",
+            SyntaxKind::ThenKw => "then",
+            SyntaxKind::ElseKw => "else",
             SyntaxKind::LBrace => "{",
             SyntaxKind::RBrace => "}",
             SyntaxKind::LBracket => "[",
@@ -731,6 +749,9 @@ impl SyntaxKind {
             SyntaxKind::UpdateKw => "`update`",
             SyntaxKind::AssignKw => "`assign`",
             SyntaxKind::ReturnKw => "`return`",
+            SyntaxKind::IfKw => "`if`",
+            SyntaxKind::ThenKw => "`then`",
+            SyntaxKind::ElseKw => "`else`",
             SyntaxKind::ForeignOperator => "operator",
             SyntaxKind::LBrace => "`{`",
             SyntaxKind::RBrace => "`}`",
@@ -780,6 +801,7 @@ impl SyntaxKind {
             | SyntaxKind::ParenExpr
             | SyntaxKind::ExtractExpr
             | SyntaxKind::IndexExpr
+            | SyntaxKind::IfExpr
             | SyntaxKind::ProjectExpr
             | SyntaxKind::PostfixExpr
             | SyntaxKind::NaryExpr

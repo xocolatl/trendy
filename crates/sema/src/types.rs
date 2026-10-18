@@ -101,6 +101,13 @@ impl Origin {
             Origin::Type(_) | Origin::Heading(_) | Origin::Builtin => {
                 "expected because of this type".to_string()
             }
+            Origin::Value(v)
+                if v.syntax()
+                    .parent()
+                    .is_some_and(|p| p.kind() == trendy_syntax::SyntaxKind::IfExpr) =>
+            {
+                "an `if`'s branches have one type, this one's".to_string()
+            }
             Origin::Value(_) => "expected because of this value".to_string(),
             Origin::TypeParameter(name, _) => {
                 format!("`{name}` is given this argument's type")
@@ -116,6 +123,14 @@ impl Origin {
             }
             Origin::Operator(token) if token.kind() == trendy_syntax::SyntaxKind::LBracket => {
                 "an array's positions are integers, counting from 1".to_string()
+            }
+            // An `if`'s keyword, or another language's `elif` for one.
+            Origin::Operator(token)
+                if token
+                    .parent()
+                    .is_some_and(|p| p.kind() == trendy_syntax::SyntaxKind::IfExpr) =>
+            {
+                "`if` takes a boolean condition".to_string()
             }
             // Only operators with a fixed operand type are origins.
             Origin::Operator(token) => match Operator::of(token).map(|op| (op, op.operands())) {
