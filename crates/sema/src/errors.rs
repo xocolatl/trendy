@@ -254,6 +254,14 @@ pub(crate) fn type_mismatch(
     if unnamed(declared) || unnamed(found) {
         d = d.with_note("each `any type`, `any tuple` or `any relation` written as a parameter's type is a type of its own; to make parameters' types the same, declare one type parameter after the signature, `types { T: any type }`, and write `T` in each");
     }
+    // `x + 1` of a `T`, as generic code in other languages can write it.
+    if let hir::Type::Parameter(p @ hir::TypeParameter { name: Some(_), .. }) = declared
+        && !matches!(found, hir::Type::Parameter(_))
+    {
+        d = d.with_note(format!(
+            "`{p}` is whatever type each call gives it, so a value of a specific type, such as `{found}`, is never a `{p}`: values of `{p}` come from the arguments"
+        ));
+    }
 
     // `not n = 0`: `not` binds tightest, so this negates `n`; the comparison
     // was meant.
@@ -2622,7 +2630,7 @@ pub(crate) fn extension_failure(failure: &crate::ops::TupleFailure, value: &Expr
 /// Why `expr`, of constants, has no value, as `failed` says.
 pub(crate) fn failed(failed: &crate::ops::Failed, expr: &Expr) -> Diagnostic {
     match failed {
-        crate::ops::Failed::Scalar(failure, scalar) => self::failure(*failure, *scalar, expr, None),
+        crate::ops::Failed::Scalar(failure) => self::failure(*failure, expr, None),
         crate::ops::Failed::Mismatch(mismatch) => tuple_mismatch(mismatch, expr),
         crate::ops::Failed::NotOne(count) => not_one_tuple(*count, expr),
         crate::ops::Failed::Broken(broken) => broken_combination(broken, expr),
@@ -3100,17 +3108,11 @@ pub(crate) fn integer_out_of_range(span: Span) -> Diagnostic {
     ))
 }
 
-/// An operator written `expr`, whose result would be a `result`, that has
-/// no result because of `failure`. `divisor` is its right operand, where a
+/// An operator written `expr` that has no result because of `failure`. `divisor` is its right operand, where a
 /// division by zero is reported.
-pub(crate) fn failure(
-    failure: hir::Failure,
-    result: hir::Scalar,
-    expr: &Expr,
-    divisor: Option<&Expr>,
-) -> Diagnostic {
-    match (failure, result) {
-        (hir::Failure::Overflow, hir::Scalar::Approximate) => Diagnostic::error(
+pub(crate) fn failure(failure: hir::Failure, expr: &Expr, divisor: Option<&Expr>) -> Diagnostic {
+    match failure {
+        hir::Failure::Overflow(hir::Scalar::Approximate) => Diagnostic::error(
             Code::Overflow,
             "approximate overflow",
             expr.span(),
@@ -3120,7 +3122,7 @@ pub(crate) fn failure(
             "approximate numbers are finite, up to about {:e} in magnitude; a larger result is an error, not an infinity",
             f64::MAX
         )),
-        (hir::Failure::Overflow, _) => Diagnostic::error(
+        hir::Failure::Overflow(_) => Diagnostic::error(
             Code::Overflow,
             "integer overflow",
             expr.span(),
@@ -3131,7 +3133,7 @@ pub(crate) fn failure(
             i64::MIN,
             i64::MAX
         )),
-        (hir::Failure::DivisionByZero, _) => Diagnostic::error(
+        hir::Failure::DivisionByZero => Diagnostic::error(
             Code::DivisionByZero,
             "division by zero",
             divisor.map_or(expr.span(), Expr::span),
@@ -3181,31 +3183,68 @@ impl ParameterNote for Diagnostic {
     }
 }
 
-/// `d`, with how to compare values of the type parameter `p` with
-/// `operator`: as a type of a kind that requires an order, of `kinds`.
-fn ordered_help(
+/// `d`, with how to apply `op`, written `operator`, to values of the type
+/// parameter `p`: as a type of one of `kinds` that requires it, and what
+/// `p`'s own kind requires.
+fn kind_help(
     d: Diagnostic,
+    op: crate::ops::Operator,
     p: &hir::TypeParameter,
     operator: &str,
     kinds: &[hir::Kind],
 ) -> Diagnostic {
-    let ordered: Vec<String> = kinds
-        .iter()
-        .filter(|k| k.requires.contains(&hir::Requirement::Order))
-        .map(|k| format!("`any {}`", k.name))
-        .collect();
-    if ordered.is_empty() {
+    use crate::ops::Operator;
+    let Some(needed) = op.requirement() else {
         return d;
+    };
+    let none = std::collections::BTreeSet::new();
+    let has = match &p.any {
+        hir::Any::Kind(kind) => &kind.requires,
+        hir::Any::Type | hir::Any::Tuple | hir::Any::Relation => &none,
+    };
+    let any = |fits: &dyn Fn(&hir::Kind) -> bool| {
+        let names: Vec<String> = kinds
+            .iter()
+            .filter(|k| k.requires.contains(&needed) && fits(k))
+            .map(|k| format!("`any {}`", k.name))
+            .collect();
+        (!names.is_empty()).then(|| trendy_diag::disjoin(&names))
+    };
+    let values = p.name.as_ref().map_or_else(
+        || "these values".to_string(),
+        |name| format!("values of `{name}`"),
+    );
+    let doing = match op {
+        Operator::Compare(_) => format!("compare {values} with `{operator}`"),
+        Operator::Add => format!("add {values} with `{operator}`"),
+        Operator::Multiply => format!("multiply {values} with `{operator}`"),
+        _ => format!("apply `{operator}` to {values}"),
+    };
+    let declare = |what: &str| match &p.name {
+        Some(name) => format!("declare `{name}` as {what}"),
+        None => format!("write {what} for the parameter's type"),
+    };
+    if let Some(what) = any(&|k| has.is_subset(&k.requires)) {
+        return d.with_help(format!(
+            "to {doing}, {}, whose types all have it",
+            declare(&what)
+        ));
     }
-    let what = trendy_diag::disjoin(&ordered);
-    d.with_help(match &p.name {
-        Some(name) => format!(
-            "to compare values of `{name}` with `{operator}`, declare `{name}` as {what}, whose types all have it"
-        ),
-        None => format!(
-            "to compare these values with `{operator}`, write {what} for the parameter's type, whose types all have it"
-        ),
-    })
+    // No kind requires both: the other one, if nothing needs what `p`'s
+    // kind requires.
+    match (&p.any, any(&|_| true)) {
+        (hir::Any::Kind(kind), Some(what)) => {
+            let required: Vec<String> = has.iter().map(|r| format!("`{}`", r.text())).collect();
+            d.with_help(format!(
+                "to {doing}, {} instead, if nothing else needs what `{}` requires, {}: no kind requires `{}` as well",
+                declare(&what),
+                kind.name,
+                trendy_diag::conjoin(&required),
+                needed.text()
+            ))
+        }
+        _ => d,
+    }
 }
 
 fn plural(ty: &hir::Type) -> String {
@@ -3249,12 +3288,9 @@ pub(crate) fn wrong_operand_type(
         return with_conversion(d, &subject, builtin, first);
     }
     let hir::Type::Scalar(scalar) = *ty else {
-        return match op {
-            Operator::Compare(_) if let hir::Type::Parameter(p) = ty => {
-                ordered_help(d, p, token.text(), kinds)
-            }
-            _ if matches!(ty, hir::Type::Parameter(_)) => d,
-            Operator::Compare(_) => d.with_note(
+        return match (op, ty) {
+            (_, hir::Type::Parameter(p)) => kind_help(d, op, p, token.text(), kinds),
+            (Operator::Compare(_), _) => d.with_note(
                 "tuples have no order: they can only be compared with `=` and `<>`; relations can also be compared as sets, with `<=` and `<` for subset and proper subset",
             ),
             _ => d,

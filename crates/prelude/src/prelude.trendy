@@ -2,9 +2,13 @@
    can be compared with `<`, `<=`, `>` and `>=`. */
 kind ordered { < };
 
+/* The types with addition and multiplication, `+` and `*`: values of a
+   type parameter of `any numeric` can be added and multiplied. */
+kind numeric { +, * };
+
 builtin type boolean: { ordered };
-builtin type integer: { ordered };
-builtin type approximate: { ordered };
+builtin type integer: { ordered, numeric };
+builtin type approximate: { ordered, numeric };
 builtin type text: { ordered };
 
 builtin operator debug_value{v: any type};

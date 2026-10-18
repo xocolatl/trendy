@@ -167,6 +167,10 @@ pub struct Kind {
 pub enum Requirement {
     /// `<`, a total order, and so `<=`, `>` and `>=` with it.
     Order,
+    /// `+`, addition, and so prefix `+`, which gives its operand.
+    Addition,
+    /// `*`, multiplication.
+    Multiplication,
 }
 
 impl Requirement {
@@ -175,6 +179,8 @@ impl Requirement {
     pub fn text(self) -> &'static str {
         match self {
             Requirement::Order => "<",
+            Requirement::Addition => "+",
+            Requirement::Multiplication => "*",
         }
     }
 }
@@ -547,8 +553,13 @@ impl Expr {
         match self {
             Expr::Constant(value) => value.ty(),
             Expr::Variable(_) | Expr::Parameter(_) | Expr::Call(_) => leaf(self),
-            Expr::Unary(op, _) => Type::Scalar(op.result()),
-            Expr::Binary(op, ..) => Type::Scalar(op.result()),
+            // Arithmetic on a type parameter's values has their type.
+            Expr::Unary(op, operand) => op
+                .operand()
+                .map_or_else(|| operand.type_with(leaf), Type::Scalar),
+            Expr::Binary(op, lhs, _) => op
+                .result()
+                .map_or_else(|| lhs.type_with(leaf), Type::Scalar),
             Expr::Extract(tuple, name) => match tuple.type_with(leaf) {
                 Type::Tuple(heading) => heading
                     .get(name)
@@ -600,7 +611,7 @@ impl Expr {
         match self {
             Expr::Constant(value) => Expr::Constant(value.instantiated(types)),
             Expr::Variable(_) | Expr::Parameter(_) => self.clone(),
-            Expr::Unary(op, operand) => Expr::Unary(*op, inst(operand)),
+            Expr::Unary(op, operand) => Expr::Unary(op.instantiated(types), inst(operand)),
             Expr::Binary(op, lhs, rhs) => {
                 Expr::Binary(op.instantiated(types), inst(lhs), inst(rhs))
             }
@@ -637,7 +648,8 @@ impl Expr {
 /// infinity or a NaN.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Failure {
-    Overflow,
+    /// The result is out of the range of this type.
+    Overflow(Scalar),
     DivisionByZero,
 }
 
@@ -708,14 +720,38 @@ pub struct Mismatch {
 pub enum Numeric {
     Integer,
     Approximate,
+    /// Values of the type parameter with this index, of a kind that requires
+    /// the operator, as values of the type a call gives it.
+    Parameter(usize),
 }
 
 impl Numeric {
+    /// The scalar type, or `None` for a type parameter's, which each call
+    /// gives.
     #[must_use]
-    pub fn scalar(self) -> Scalar {
+    pub fn scalar(self) -> Option<Scalar> {
         match self {
-            Numeric::Integer => Scalar::Integer,
-            Numeric::Approximate => Scalar::Approximate,
+            Numeric::Integer => Some(Scalar::Integer),
+            Numeric::Approximate => Some(Scalar::Approximate),
+            Numeric::Parameter(_) => None,
+        }
+    }
+
+    /// The numeric type, in an operator instantiated with `types`.
+    ///
+    /// # Panics
+    ///
+    /// If a type parameter's type isn't numeric, which only a kind's types
+    /// can be, and the prelude checks that they are.
+    #[must_use]
+    pub fn instantiated(self, types: &[Type]) -> Numeric {
+        match self {
+            Numeric::Parameter(index) => match types[index] {
+                Type::Scalar(scalar) => Numeric::of(scalar),
+                _ => None,
+            }
+            .unwrap_or_else(|| panic!("arithmetic on {}", types[index])),
+            _ => self,
         }
     }
 
@@ -735,7 +771,7 @@ fn finite(r: f64) -> Result<Value, Failure> {
     if r.is_finite() {
         Ok(Value::Approximate(Approximate::new(r)))
     } else {
-        Err(Failure::Overflow)
+        Err(Failure::Overflow(Scalar::Approximate))
     }
 }
 
@@ -750,19 +786,23 @@ pub enum UnaryOp {
 }
 
 impl UnaryOp {
-    /// The type of the operand.
+    /// The scalar type of the operand, and of the result: `None` for a type
+    /// parameter's values.
     #[must_use]
-    pub fn operand(self) -> Scalar {
+    pub fn operand(self) -> Option<Scalar> {
         match self {
-            UnaryOp::Not => Scalar::Boolean,
+            UnaryOp::Not => Some(Scalar::Boolean),
             UnaryOp::Negate(numeric) => numeric.scalar(),
         }
     }
 
-    /// The type of the result.
+    /// The operator, in an operator instantiated with `types`.
     #[must_use]
-    pub fn result(self) -> Scalar {
-        self.operand()
+    pub fn instantiated(self, types: &[Type]) -> UnaryOp {
+        match self {
+            UnaryOp::Negate(numeric) => UnaryOp::Negate(numeric.instantiated(types)),
+            UnaryOp::Not => self,
+        }
     }
 
     /// The result for `operand`, which has the operand type.
@@ -778,9 +818,10 @@ impl UnaryOp {
     pub fn apply(self, operand: &Value) -> Result<Value, Failure> {
         match (self, operand) {
             (UnaryOp::Not, Value::Boolean(b)) => Ok(Value::Boolean(!b)),
-            (UnaryOp::Negate(Numeric::Integer), Value::Integer(n)) => {
-                n.checked_neg().map(Value::Integer).ok_or(Failure::Overflow)
-            }
+            (UnaryOp::Negate(Numeric::Integer), Value::Integer(n)) => n
+                .checked_neg()
+                .map(Value::Integer)
+                .ok_or(Failure::Overflow(Scalar::Integer)),
             (UnaryOp::Negate(Numeric::Approximate), Value::Approximate(r)) => {
                 Ok(Value::Approximate(Approximate::new(-r.get())))
             }
@@ -902,34 +943,33 @@ pub fn compare(lhs: &Value, rhs: &Value) -> std::cmp::Ordering {
 }
 
 impl BinaryOp {
-    /// The type of both operands.
-    ///
-    /// # Panics
-    ///
-    /// For a comparison of tuples or relations, whose operand types aren't
-    /// scalars: see [`Compared`].
+    /// The scalar type of both operands: `None` for tuples, relations and a
+    /// type parameter's values.
     #[must_use]
-    pub fn operand(self) -> Scalar {
+    pub fn operand(self) -> Option<Scalar> {
         match self {
-            BinaryOp::And | BinaryOp::Or | BinaryOp::Xor | BinaryOp::Implies => Scalar::Boolean,
+            BinaryOp::And | BinaryOp::Or | BinaryOp::Xor | BinaryOp::Implies => {
+                Some(Scalar::Boolean)
+            }
             BinaryOp::Add(numeric) | BinaryOp::Subtract(numeric) | BinaryOp::Multiply(numeric) => {
                 numeric.scalar()
             }
-            BinaryOp::Divide => Scalar::Approximate,
-            BinaryOp::Div | BinaryOp::Mod => Scalar::Integer,
-            BinaryOp::Concatenate => Scalar::Text,
-            BinaryOp::Compare(_, Compared::Scalar(scalar)) => scalar,
+            BinaryOp::Divide => Some(Scalar::Approximate),
+            BinaryOp::Div | BinaryOp::Mod => Some(Scalar::Integer),
+            BinaryOp::Concatenate => Some(Scalar::Text),
+            BinaryOp::Compare(_, Compared::Scalar(scalar)) => Some(scalar),
             BinaryOp::Compare(_, Compared::Tuple | Compared::Relation | Compared::Parameter(_)) => {
-                panic!("tuple and relation comparisons have no scalar operand type")
+                None
             }
         }
     }
 
-    /// The type of the result.
+    /// The scalar type of the result: `None` for arithmetic on a type
+    /// parameter's values, which has their type.
     #[must_use]
-    pub fn result(self) -> Scalar {
+    pub fn result(self) -> Option<Scalar> {
         match self {
-            BinaryOp::Compare(..) => Scalar::Boolean,
+            BinaryOp::Compare(..) => Some(Scalar::Boolean),
             _ => self.operand(),
         }
     }
@@ -938,6 +978,9 @@ impl BinaryOp {
     #[must_use]
     pub fn instantiated(self, types: &[Type]) -> BinaryOp {
         match self {
+            BinaryOp::Add(numeric) => BinaryOp::Add(numeric.instantiated(types)),
+            BinaryOp::Subtract(numeric) => BinaryOp::Subtract(numeric.instantiated(types)),
+            BinaryOp::Multiply(numeric) => BinaryOp::Multiply(numeric.instantiated(types)),
             BinaryOp::Compare(comparison, compared) => {
                 BinaryOp::Compare(comparison, compared.instantiated(types))
             }
@@ -1004,7 +1047,9 @@ impl BinaryOp {
                     BinaryOp::Mod => Some(a.wrapping_rem(b)),
                     _ => panic!("`{self:?}` of integers"),
                 };
-                result.map(Value::Integer).ok_or(Failure::Overflow)
+                result
+                    .map(Value::Integer)
+                    .ok_or(Failure::Overflow(Scalar::Integer))
             }
             (Value::Text(a), Value::Text(b)) if self == BinaryOp::Concatenate => {
                 Ok(Value::Text(format!("{a}{b}")))
@@ -1190,6 +1235,17 @@ pub enum Scalar {
 }
 
 impl Scalar {
+    /// Whether the type has what `requirement` names: every built-in type
+    /// has an order, `false` before `true`, numbers numerically and text by
+    /// code point, and the numbers have arithmetic.
+    #[must_use]
+    pub fn has(self, requirement: Requirement) -> bool {
+        match requirement {
+            Requirement::Order => true,
+            Requirement::Addition | Requirement::Multiplication => Numeric::of(self).is_some(),
+        }
+    }
+
     /// In alphabetical order, as messages list them.
     pub const ALL: [Scalar; 4] = [
         Scalar::Boolean,
@@ -2064,11 +2120,11 @@ mod tests {
         );
         assert_eq!(
             apply(BinaryOp::Multiply(Numeric::Approximate), 1e300, 1e10),
-            Err(Failure::Overflow)
+            Err(Failure::Overflow(Scalar::Approximate))
         );
         assert_eq!(
             apply(BinaryOp::Divide, 1e300, 1e-10),
-            Err(Failure::Overflow)
+            Err(Failure::Overflow(Scalar::Approximate))
         );
         // IEEE 754 sign rules: these are different values.
         assert_eq!(
@@ -2262,23 +2318,26 @@ mod tests {
         assert_eq!(apply(BinaryOp::Mod, 7, -2), ok(1));
         assert_eq!(
             apply(BinaryOp::Add(Numeric::Integer), i64::MAX, 1),
-            Err(Failure::Overflow)
+            Err(Failure::Overflow(Scalar::Integer))
         );
         assert_eq!(
             apply(BinaryOp::Subtract(Numeric::Integer), i64::MIN, 1),
-            Err(Failure::Overflow)
+            Err(Failure::Overflow(Scalar::Integer))
         );
         assert_eq!(
             apply(BinaryOp::Multiply(Numeric::Integer), i64::MAX, 2),
-            Err(Failure::Overflow)
+            Err(Failure::Overflow(Scalar::Integer))
         );
-        assert_eq!(apply(BinaryOp::Div, i64::MIN, -1), Err(Failure::Overflow));
+        assert_eq!(
+            apply(BinaryOp::Div, i64::MIN, -1),
+            Err(Failure::Overflow(Scalar::Integer))
+        );
         assert_eq!(apply(BinaryOp::Mod, i64::MIN, -1), ok(0));
         assert_eq!(apply(BinaryOp::Div, 1, 0), Err(Failure::DivisionByZero));
         assert_eq!(apply(BinaryOp::Mod, 1, 0), Err(Failure::DivisionByZero));
         assert_eq!(
             UnaryOp::Negate(Numeric::Integer).apply(&Value::Integer(i64::MIN)),
-            Err(Failure::Overflow)
+            Err(Failure::Overflow(Scalar::Integer))
         );
         assert_eq!(
             UnaryOp::Negate(Numeric::Integer).apply(&Value::Integer(5)),

@@ -193,14 +193,14 @@ impl<'a> Checker<'a> {
                     return self.matched(expected, hir::Expr::Constant(value), expr, errors);
                 }
                 let token = unary.operator()?;
-                let (resolved, operands) =
+                let (resolved, operands, result) =
                     self.operands(&token, vec![unary.operand()], expected, errors)?;
-                types::result_type(expected, resolved.result(), expr, errors)?;
+                types::result_type(expected, &result, expr, errors)?;
                 let [operand] = <[hir::Expr; 1]>::try_from(operands).ok()?;
                 match resolved {
-                    Resolved::Identity(_) => Some(operand),
+                    Resolved::Identity => Some(operand),
                     Resolved::Unary(op) => {
-                        types::evaluated(ops::unary(op, operand), resolved, expr, None, errors)
+                        types::evaluated(ops::unary(op, operand), expr, None, errors)
                     }
                     Resolved::Binary(_) => None,
                 }
@@ -218,9 +218,9 @@ impl<'a> Checker<'a> {
             Expr::Nary(_) => None,
             Expr::Binary(binary) => {
                 let token = binary.operator()?;
-                let (resolved, operands) =
+                let (resolved, operands, result) =
                     self.operands(&token, vec![binary.lhs(), binary.rhs()], expected, errors)?;
-                types::result_type(expected, resolved.result(), expr, errors)?;
+                types::result_type(expected, &result, expr, errors)?;
                 let (Resolved::Binary(op), Ok([lhs, rhs])) =
                     (resolved, <[hir::Expr; 2]>::try_from(operands))
                 else {
@@ -228,7 +228,6 @@ impl<'a> Checker<'a> {
                 };
                 types::evaluated(
                     ops::binary(op, lhs, rhs),
-                    resolved,
                     expr,
                     binary.rhs().as_ref(),
                     errors,
@@ -1312,14 +1311,15 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// The operator written `token` and its checked `operands`.
+    /// The operator written `token`, its checked `operands` and the type of
+    /// its result.
     fn operands(
         &mut self,
         token: &trendy_syntax::SyntaxToken,
         operands: Vec<Option<Expr>>,
         expected: Option<&Expected>,
         errors: &mut Vec<Diagnostic>,
-    ) -> Option<(Resolved, Vec<hir::Expr>)> {
+    ) -> Option<(Resolved, Vec<hir::Expr>, hir::Type)> {
         let op = Operator::of(token)?;
         // For the help on an operator a type parameter's values don't have.
         let kinds: Vec<hir::Kind> = self.namespaces().kinds().into_iter().cloned().collect();

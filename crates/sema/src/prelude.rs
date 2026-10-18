@@ -168,18 +168,22 @@ fn kind_decl(
         let Some(token) = requirement.token() else {
             continue;
         };
-        match token.kind() {
-            trendy_syntax::SyntaxKind::Lt => {
-                requires.insert(hir::Requirement::Order);
+        let requirement = match token.kind() {
+            trendy_syntax::SyntaxKind::Lt => hir::Requirement::Order,
+            trendy_syntax::SyntaxKind::Plus => hir::Requirement::Addition,
+            trendy_syntax::SyntaxKind::Star => hir::Requirement::Multiplication,
+            _ => {
+                errors.push(internal(
+                    format!(
+                        "`{}` is not a requirement the compiler implements",
+                        token.text()
+                    ),
+                    &token,
+                ));
+                continue;
             }
-            _ => errors.push(internal(
-                format!(
-                    "`{}` is not a requirement the compiler implements",
-                    token.text()
-                ),
-                &token,
-            )),
-        }
+        };
+        requires.insert(requirement);
     }
     Some(hir::Kind {
         name: name.to_string(),
@@ -231,11 +235,7 @@ fn builtin_type(
             ));
             continue;
         };
-        // Every built-in type has an order: `false` before `true`, numbers
-        // numerically, and text by code point.
-        let missing = kind.requires.iter().find(|r| match r {
-            hir::Requirement::Order => false,
-        });
+        let missing = kind.requires.iter().find(|r| !scalar.has(**r));
         if let Some(missing) = missing {
             errors.push(internal(
                 format!(

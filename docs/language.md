@@ -304,10 +304,11 @@ operator main{} [];
 ### Kinds
 
 A kind is a set of types, each of which declares it, and what each of them
-must have. Only the prelude declares kinds, so far one, `ordered`: the
-types with a total order, `<`. A type parameter of `any ordered` can be
-compared with `<`, `<=`, `>` and `>=`, and a call gives it one of those
-types.
+must have. Only the prelude declares kinds, so far two: `ordered`, the
+types with a total order, `<`, and `numeric`, the types with addition and
+multiplication, `+` and `*`. A type parameter of `any ordered` can be
+compared with `<`, `<=`, `>` and `>=`, one of `any numeric` added and
+multiplied, and a call gives it one of the kind's types.
 
 ```trendy
 var plots := relation {
@@ -335,18 +336,38 @@ operator main{} [
   types are made, so the language has them; kinds are declared, so that
   nothing about them is built into the compiler.
 - **A type declares the kinds it is of,** as the prelude's do:
-  `builtin type integer: { ordered };`. It must have what each requires,
-  which the prelude's loading checks. `boolean`, `integer`, `approximate`
-  and `text` are ordered; relations aren't, as their `<` is subset, which
-  isn't a total order.
+  `builtin type integer: { ordered, numeric };`. It must have what each
+  requires, which the prelude's loading checks. `boolean`, `integer`,
+  `approximate` and `text` are ordered; relations aren't, as their `<` is
+  subset, which isn't a total order. `integer` and `approximate` are
+  numeric.
 - **A kind says what its types must have, not what they happen to have,**
   so a body can use exactly what its type parameters' kinds require, and
   nothing else. Declaring a kind also says what no compiler can check, as
   that `<` is a total order.
+- **A type parameter is of one kind,** and no kind yet requires both `<`
+  and `+`, so a body can't both compare and add its values: the help on
+  using one says what switching kinds would lose (A0022).
+- **No literal is of a type parameter,** since each call gives it a type:
+  `x + 1` of an `x` of `any numeric` is an error (A0004), whose note says
+  that values of the type come from the arguments.
 - **An argument must be of the kind** (A0004), and a kind named wrong is
   reported with the closest as the fix (A0003). A program can't declare
   a kind (A0013): its types are those that declare it, and a program can't
   declare a type.
+
+```trendy
+operator cost{price: T, quantity: T, delivery: T}: T
+    types { T: any numeric }
+[
+    return price * quantity + delivery;
+];
+
+operator main{} [
+    call debug_value{v: cost{price: 1250, quantity: 3, delivery: 400}};
+    call debug_value{v: cost{price: 2.5e0, quantity: 1.5e0, delivery: 4e0}};
+];
+```
 
 ```trendy,error
 operator before{a: T, b: T}: boolean types { T: any ordered } [
@@ -472,9 +493,13 @@ language can express more, built-ins become ordinary operators.
    can be compared with `<`, `<=`, `>` and `>=`. */
 kind ordered { < };
 
+/* The types with addition and multiplication, `+` and `*`: values of a
+   type parameter of `any numeric` can be added and multiplied. */
+kind numeric { +, * };
+
 builtin type boolean: { ordered };
-builtin type integer: { ordered };
-builtin type approximate: { ordered };
+builtin type integer: { ordered, numeric };
+builtin type approximate: { ordered, numeric };
 builtin type text: { ordered };
 
 builtin operator debug_value{v: any type};
@@ -1161,7 +1186,9 @@ context when it says, as in `var r: approximate := 1 + 2;`, where `1` and `2`
 must be written `1e0` and `2e0`, and otherwise from the left operand. An
 integer that isn't a literal converts with `to_approximate`, as in
 `to_approximate{from: n} * 1.5e0`. `/` doesn't divide integers, and `div`
-doesn't divide approximate numbers (A0022).
+doesn't divide approximate numbers (A0022). `+` and `*` also apply to
+values of a type parameter of `any numeric` (see [Kinds](#kinds)), as the
+type a call gives it.
 
 ```trendy
 var seven := 1 + 2 * 3;

@@ -134,6 +134,12 @@ fn operators() {
             "tuple { high: 1500, low: 937 }",
             r#""names""#,
             r#"tuple { high: "ramen", low: "jollof rice" }"#,
+            // `cost` of integers, 937, 1125 and 1500 twice and 300 more, and
+            // of approximate numbers, 1125 one and a half times and 300.
+            r#""two of each, delivered""#,
+            "relation { v: integer } { { v: 2174 }, { v: 2550 }, { v: 3300 } }",
+            r#""one and a half ramen, delivered""#,
+            "1.9875e3",
         ]
     );
 }

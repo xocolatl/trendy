@@ -52,19 +52,9 @@ pub(crate) enum Operands {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Resolved {
     /// Prefix `+`, whose result is its operand.
-    Identity(hir::Scalar),
+    Identity,
     Unary(hir::UnaryOp),
     Binary(hir::BinaryOp),
-}
-
-impl Resolved {
-    pub(crate) fn result(self) -> hir::Scalar {
-        match self {
-            Resolved::Identity(scalar) => scalar,
-            Resolved::Unary(op) => op.result(),
-            Resolved::Binary(op) => op.result(),
-        }
-    }
 }
 
 impl Operator {
@@ -130,6 +120,37 @@ impl Operator {
         !matches!(self, Operator::Compare(_))
     }
 
+    /// What a kind must require for its types' values to take the operator:
+    /// every type has `=` and `<>`, and no kind requires the others yet.
+    pub(crate) fn requirement(self) -> Option<hir::Requirement> {
+        match self {
+            Operator::Compare(hir::Comparison::Equal | hir::Comparison::NotEqual)
+            | Operator::Not
+            | Operator::And
+            | Operator::Or
+            | Operator::Xor
+            | Operator::Implies
+            | Operator::Negate
+            | Operator::Subtract
+            | Operator::Divide
+            | Operator::Div
+            | Operator::Mod
+            | Operator::Concatenate => None,
+            Operator::Compare(_) => Some(hir::Requirement::Order),
+            Operator::Plus | Operator::Add => Some(hir::Requirement::Addition),
+            Operator::Multiply => Some(hir::Requirement::Multiplication),
+        }
+    }
+
+    /// The type of the result, for operands of type `operands`.
+    fn result(self, operands: hir::Type) -> hir::Type {
+        if self.result_is_operand() {
+            operands
+        } else {
+            hir::Type::Scalar(hir::Scalar::Boolean)
+        }
+    }
+
     /// The types the operator takes, as written in an error message.
     pub(crate) fn takes(self) -> &'static str {
         match self {
@@ -168,15 +189,29 @@ impl Operator {
                 | (Operator::Compare(comparison), hir::Type::Relation(_)) => Some(
                     Resolved::Binary(B::Compare(comparison, hir::Compared::of(ty))),
                 ),
-                // `any relation`, ordered by inclusion, and a kind that
-                // requires an order.
                 (Operator::Compare(comparison), hir::Type::Parameter(p))
-                    if p.any == hir::Any::Relation || p.any.requires(hir::Requirement::Order) =>
+                    if p.any == hir::Any::Relation =>
                 {
                     Some(Resolved::Binary(B::Compare(
                         comparison,
                         hir::Compared::of(ty),
                     )))
+                }
+                // A kind that requires the operator.
+                (_, hir::Type::Parameter(p))
+                    if self.requirement().is_some_and(|r| p.any.requires(r)) =>
+                {
+                    let numeric = hir::Numeric::Parameter(p.index);
+                    match self {
+                        Operator::Compare(comparison) => Some(Resolved::Binary(B::Compare(
+                            comparison,
+                            hir::Compared::of(ty),
+                        ))),
+                        Operator::Plus => Some(Resolved::Identity),
+                        Operator::Add => Some(Resolved::Binary(B::Add(numeric))),
+                        Operator::Multiply => Some(Resolved::Binary(B::Multiply(numeric))),
+                        _ => None,
+                    }
                 }
                 _ => None,
             };
@@ -188,7 +223,7 @@ impl Operator {
             (Operator::Or, _) => Resolved::Binary(B::Or),
             (Operator::Xor, _) => Resolved::Binary(B::Xor),
             (Operator::Implies, _) => Resolved::Binary(B::Implies),
-            (Operator::Plus, Some(_)) => Resolved::Identity(scalar),
+            (Operator::Plus, Some(_)) => Resolved::Identity,
             (Operator::Negate, Some(n)) => Resolved::Unary(hir::UnaryOp::Negate(n)),
             (Operator::Add, Some(n)) => Resolved::Binary(B::Add(n)),
             (Operator::Subtract, Some(n)) => Resolved::Binary(B::Subtract(n)),
@@ -216,8 +251,8 @@ pub(crate) type CheckOperand<'a, T> =
 /// value is `expected` to have a type. `check` checks one operand against
 /// an expectation, giving its checked form and its type.
 ///
-/// Returns the resolved operator and the checked operands, or `None` after
-/// reporting why there are none.
+/// Returns the resolved operator, the checked operands and the type of the
+/// result, or `None` after reporting why there are none.
 pub(crate) fn check_operands<T>(
     op: Operator,
     token: &SyntaxToken,
@@ -226,7 +261,7 @@ pub(crate) fn check_operands<T>(
     check: &mut CheckOperand<'_, T>,
     kinds: &[hir::Kind],
     errors: &mut Vec<Diagnostic>,
-) -> Option<(Resolved, Vec<T>)> {
+) -> Option<(Resolved, Vec<T>, hir::Type)> {
     // A context the operator can work in sets the operand type.
     let context = expected.filter(|e| op.result_is_operand() && op.resolve(&e.ty).is_some());
     let mut expectation = match op.operands() {
@@ -302,7 +337,7 @@ pub(crate) fn check_operands<T>(
         errors.push(errors::wrong_operand_type(op, token, &ty, None, kinds));
         return None;
     };
-    Some((resolved, checked))
+    Some((resolved, checked, op.result(ty)))
 }
 
 /// A projection, `r{a, b}`, or its complement, `r remove {c}`.
@@ -1005,8 +1040,8 @@ pub(crate) fn and(operands: Vec<hir::Expr>) -> Result<hir::Expr, Failed> {
 /// Why an expression of constants has no value.
 #[derive(Debug, Clone)]
 pub(crate) enum Failed {
-    /// An operator whose result is of this type fails.
-    Scalar(hir::Failure, hir::Scalar),
+    /// An operator on scalars fails.
+    Scalar(hir::Failure),
     /// Tuples being joined disagree on a common attribute.
     Mismatch(hir::Mismatch),
     /// A relation whose only tuple is taken has this many, not one.
@@ -1701,11 +1736,9 @@ fn substitute(
                 .collect::<Result<_, _>>()?;
             call(hir::Call { args, ..called }, substitution.bindings)?
         }
-        hir::Expr::Unary(op, operand) => {
-            unary(op, sub(operand)?).map_err(|f| Failed::Scalar(f, op.result()))?
-        }
+        hir::Expr::Unary(op, operand) => unary(op, sub(operand)?).map_err(Failed::Scalar)?,
         hir::Expr::Binary(op, lhs, rhs) => {
-            binary(op, sub(lhs)?, sub(rhs)?).map_err(|f| Failed::Scalar(f, op.result()))?
+            binary(op, sub(lhs)?, sub(rhs)?).map_err(Failed::Scalar)?
         }
         hir::Expr::Extract(operand, name) => extract(sub(operand)?, name),
         hir::Expr::Tuple(attributes) => tuple_of(attributes, depth, substitution)?,
@@ -2046,7 +2079,10 @@ pub(crate) fn binary(
         return op.apply(a, b).map(hir::Expr::Constant);
     }
     let negate = |e| {
-        let numeric = hir::Numeric::of(op.operand()).expect("only arithmetic negates");
+        let numeric = op
+            .operand()
+            .and_then(hir::Numeric::of)
+            .expect("only arithmetic on constants negates");
         unary(hir::UnaryOp::Negate(numeric), e)
     };
     // `result`, which drops one operand, unless that one can fail.

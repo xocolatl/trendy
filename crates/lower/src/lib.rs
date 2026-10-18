@@ -783,17 +783,7 @@ impl<'a> FunctionBuilder<'a> {
             }
             hir::Expr::Unary(op, operand) => {
                 let src = self.place(operand, cx);
-                let dst = self.slot(scalar_layout(op.result()));
-                let op = match op {
-                    hir::UnaryOp::Not => lir::UnaryOp::Not,
-                    hir::UnaryOp::Negate(numeric) => lir::UnaryOp::Negate(lower_numeric(*numeric)),
-                };
-                self.insts.push(lir::Inst::Unary {
-                    dst: dst.clone(),
-                    op,
-                    src,
-                });
-                dst
+                self.unary(*op, src)
             }
             // The attribute's own place within the tuple: no copy.
             hir::Expr::Extract(tuple, name) => {
@@ -1583,6 +1573,21 @@ impl<'a> FunctionBuilder<'a> {
         dst
     }
 
+    /// `op src`, computed into a new stack slot.
+    fn unary(&mut self, op: hir::UnaryOp, src: lir::Place) -> lir::Place {
+        let op = match op {
+            hir::UnaryOp::Not => lir::UnaryOp::Not,
+            hir::UnaryOp::Negate(numeric) => lir::UnaryOp::Negate(lower_numeric(numeric)),
+        };
+        let dst = self.slot(operand_layout(op.operand()));
+        self.insts.push(lir::Inst::Unary {
+            dst: dst.clone(),
+            op,
+            src,
+        });
+        dst
+    }
+
     /// `lhs op rhs`, of operands of type `operand_ty`, computed into a new
     /// stack slot.
     fn binary(
@@ -1663,12 +1668,7 @@ impl<'a> FunctionBuilder<'a> {
         };
         let dst = self.slot(match op {
             lir::BinaryOp::Compare(..) => scalar_layout(hir::Scalar::Boolean),
-            op => match op.operand() {
-                lir::Operand::Boolean => lir::Layout::U8,
-                lir::Operand::Numeric(lir::Numeric::Integer) => lir::Layout::I64,
-                lir::Operand::Numeric(lir::Numeric::Approximate) => lir::Layout::F64Bits,
-                lir::Operand::Usize => unreachable!("only comparisons take indexes"),
-            },
+            op => operand_layout(op.operand()),
         });
         self.insts.push(lir::Inst::Binary {
             dst: dst.clone(),
@@ -1768,10 +1768,22 @@ fn attribute_names(ty: &hir::Type) -> impl Iterator<Item = &str> {
     heading.attributes().map(|(name, _)| name)
 }
 
+/// The layout of the result of an operator on `operand`, which has its
+/// operand's type: no operator but a comparison takes indexes.
+fn operand_layout(operand: lir::Operand) -> lir::Layout {
+    match operand {
+        lir::Operand::Boolean => lir::Layout::U8,
+        lir::Operand::Numeric(lir::Numeric::Integer) => lir::Layout::I64,
+        lir::Operand::Numeric(lir::Numeric::Approximate) => lir::Layout::F64Bits,
+        lir::Operand::Usize => unreachable!("only comparisons take indexes"),
+    }
+}
+
 fn lower_numeric(numeric: hir::Numeric) -> lir::Numeric {
     match numeric {
         hir::Numeric::Integer => lir::Numeric::Integer,
         hir::Numeric::Approximate => lir::Numeric::Approximate,
+        hir::Numeric::Parameter(_) => unreachable!("functions are of instantiated operators"),
     }
 }
 

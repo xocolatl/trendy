@@ -4,9 +4,10 @@
    call is evaluated when compiling where it can be, and made when the
    program runs elsewhere. A parameter's type can be `any type`, and type
    parameters, declared with `types`, say that several types are one: each
-   call gives them its arguments' types. A `per` parameter's argument is
-   evaluated for each tuple of a relation, as the prelude's `min` and
-   `max` take `of`. main prints each result. */
+   call gives them its arguments' types, which can be limited to a kind,
+   as `ordered` or `numeric`. A `per` parameter's argument is evaluated
+   for each tuple of a relation, as the prelude's `min` and `max` take
+   `of`. main prints each result. */
 var vat := 16;
 var dishes := relation {
     { dish: "jollof rice", country: "Ghana", price: 1200 },
@@ -80,6 +81,14 @@ operator range{r: any relation, of: T per r}: tuple { low: T, high: T }
     return tuple { low: min{r: r, of: of}, high: max{r: r, of: of} };
 ];
 
+/* An order's cost, of any numeric type: `*` and `+` are what `numeric`,
+   another kind the prelude declares, requires of its types. */
+operator cost{price: T, quantity: T, delivery: T}: T
+    types { T: any numeric }
+[
+    return price * quantity + delivery;
+];
+
 var special := "ramen";
 var previous := "none";
 
@@ -126,4 +135,13 @@ operator main{} [
     call show{label: "every under 1000", value: every{r: dishes, of: taxed{price: price} < 1000}};
     call show{label: "prices with VAT", value: range{r: dishes, of: taxed{price: price}}};
     call show{label: "names", value: range{r: dishes, of: dish}};
+    /* `cost`, of integers and of approximate numbers. */
+    call show{
+        label: "two of each, delivered",
+        value: values{r: dishes, of: cost{price: taxed{price: price}, quantity: 2, delivery: 300}}
+    };
+    call show{
+        label: "one and a half ramen, delivered",
+        value: cost{price: to_approximate{from: taxed{price: 900}}, quantity: 1.5e0, delivery: 3e2}
+    };
 ];

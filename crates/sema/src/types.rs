@@ -17,7 +17,7 @@ use trendy_syntax::ast::{
 };
 
 use crate::check::{Checker, Names};
-use crate::ops::{Operands, Operator, Resolved};
+use crate::ops::{Operands, Operator};
 use crate::{Namespaces, errors};
 
 /// Where an expected type comes from: for the secondary label of a
@@ -195,14 +195,13 @@ impl Expected {
 /// is what the context expects; `None` after reporting that it isn't.
 pub(crate) fn result_type(
     expected: Option<&Expected>,
-    result: hir::Scalar,
+    result: &hir::Type,
     expr: &Expr,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<()> {
-    let result = hir::Type::Scalar(result);
     match expected {
-        Some(e) if e.ty != result => {
-            errors.push(errors::type_mismatch(&e.ty, &e.origin, &result, None, expr));
+        Some(e) if e.ty != *result => {
+            errors.push(errors::type_mismatch(&e.ty, &e.origin, result, None, expr));
             None
         }
         _ => Some(()),
@@ -387,14 +386,13 @@ pub(crate) fn value(
 /// reported.
 pub(crate) fn evaluated<T>(
     result: Result<T, hir::Failure>,
-    resolved: Resolved,
     expr: &Expr,
     divisor: Option<&Expr>,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<T> {
     result
         .map_err(|failure| {
-            errors.push(errors::failure(failure, resolved.result(), expr, divisor));
+            errors.push(errors::failure(failure, expr, divisor));
         })
         .ok()
 }

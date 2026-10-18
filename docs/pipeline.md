@@ -354,12 +354,17 @@ itself. Each call (`hir::Call`, a statement's or an expression's) gives
 each one a type, by index, which the arguments determined, and the
 callee's types mean those: `Operator::instantiated` replaces each type
 parameter with its type throughout, an operator of its own with none.
-Comparing values of a type parameter is `Compared::Parameter`, which
-instantiating makes what the type's values are compared as. `debug_value`
-is a built-in with one, `{v: any type}`. A type parameter can be of a kind
-(`Any::Kind`): a set of types that each declare it, with what each must
-have (`Requirement`), which the kind's type parameters can then be used
-for, such as `Requirement::Order` for `<`.
+Comparing values of a type parameter is `Compared::Parameter`, and adding
+or multiplying them `Numeric::Parameter`, which instantiating makes what
+the type's values are compared or computed as. `debug_value` is a built-in
+with one, `{v: any type}`. A type parameter can be of a kind (`Any::Kind`):
+a set of types that each declare it, with what each must have
+(`Requirement`), which the kind's type parameters can then be used for,
+such as `Requirement::Order` for `<` and `Requirement::Addition` for `+`.
+The scalar type of an operator on them is `None` (`BinaryOp::operand`),
+and the type of its result their type. An operator's failure carries the
+type it failed in (`Failure::Overflow`), so that reporting it needs no
+type from elsewhere.
 
 A `per` parameter is no parameter in HIR: an operator sees the relation it
 refers to with the `per` parameters' values as attributes of its tuples,
@@ -451,9 +456,12 @@ kinds first, then the types, checking that each has what its kinds
 require, then the built-in operators, which can name kinds. A call's
 argument for a type parameter of a kind must be of one of its types, or a
 type parameter of the caller's of the same kind (`Namespaces::admits`),
-and inside a generic body, values of a type parameter whose kind requires
-an order can be compared (`ops::Operator::resolve`); comparing values of
-one whose kind doesn't is reported with the kinds that would allow it.
+and inside a generic body, values of a type parameter can be used as its
+kind requires (`ops::Operator::requirement`), compared if it requires an
+order and added if it requires `+` (`ops::Operator::resolve`). Using them
+otherwise is reported with the kinds that would allow it, and, where no
+kind also requires what the type parameter's own does, with what switching
+would lose.
 
 An operator's type parameters are those its `types` list declares, then
 one for each `any …` written as a parameter's type, without a name; only a

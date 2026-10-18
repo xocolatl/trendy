@@ -1596,6 +1596,17 @@ mod tests {
             "min{r: any relation, of: T}: T",
         );
         assert_eq!(at, "{r: any relation, of: T}");
+        // A kind requiring what the compiler doesn't implement, or a type
+        // declaring a kind whose requirement it doesn't have.
+        let (message, at) = wrong("kind numeric { +, * };", "kind numeric { +, - };");
+        assert_eq!(message, "`-` is not a requirement the compiler implements");
+        assert_eq!(at, "-");
+        let (message, at) = wrong(
+            "builtin type text: { ordered };",
+            "builtin type text: { ordered, numeric };",
+        );
+        assert_eq!(message, "`text` doesn't have `+`, which `numeric` requires");
+        assert_eq!(at, "numeric");
     }
 
     #[test]
@@ -4814,5 +4825,67 @@ mod tests {
             "{PLOTS}{source}var top := top{{r: plots, of: plot}};"
         ));
         assert_eq!(vars[1].init, hir::Value::Integer(3));
+    }
+
+    #[test]
+    fn values_of_any_numeric_are_added_and_multiplied() {
+        let generic = "operator twice{x: T}: T types { T: any numeric } [ return x + +x; ];\noperator area{w: T, h: T}: T types { T: any numeric } [ return w * h; ];\n";
+        let vars = variables(&format!(
+            "{generic}var a := twice{{x: 21}};\nvar b := area{{w: 2.5e0, h: 4e0}};"
+        ));
+        assert_eq!(vars[0].init, hir::Value::Integer(42));
+        assert_eq!(
+            vars[1].init,
+            hir::Value::Approximate(hir::Approximate::new(10.0))
+        );
+        // As the type a call gives, which can overflow.
+        let source = format!("{generic}var big := twice{{x: 9223372036854775807}};{MAIN}");
+        assert_eq!(codes(&source), [Code::Overflow]);
+        // Only types of the kind are arguments.
+        let source = format!("{generic}var t := twice{{x: \"Lagos\"}};{MAIN}");
+        assert_eq!(
+            errors(&source)[0].message,
+            "mismatched types: expected a type of kind `numeric`, found `text`"
+        );
+        // Only what the kind requires applies, and the help names the kind
+        // that would allow the rest.
+        let body = |any: &str, body: &str| {
+            errors(&format!(
+                "operator f{{x: T, y: T}}: T types {{ T: any {any} }} [ return {body}; ];{MAIN}"
+            ))
+        };
+        let subtracted = body("numeric", "x - y");
+        assert_eq!(subtracted[0].code, Code::WrongOperandType);
+        assert!(subtracted[0].help.is_empty(), "{subtracted:#?}");
+        assert!(
+            subtracted[0].notes[0].contains("what `numeric` requires, `+` and `*`"),
+            "{subtracted:#?}"
+        );
+        assert_eq!(
+            body("type", "x + y")[0].help,
+            [
+                "to add values of `T` with `+`, declare `T` as `any numeric`, whose types all have it"
+            ]
+        );
+        // No kind requires both, so switching loses what one requires.
+        let ordered = errors(&format!(
+            "operator f{{x: T, y: T}}: boolean types {{ T: any numeric }} [ return x < y; ];{MAIN}"
+        ));
+        assert_eq!(
+            ordered[0].help,
+            [
+                "to compare values of `T` with `<`, declare `T` as `any ordered` instead, if nothing else needs what `numeric` requires, `+` and `*`: no kind requires `<` as well"
+            ]
+        );
+        // A literal is never a `T`, as generic code elsewhere can write it.
+        let literal = body("numeric", "x + 1");
+        assert_eq!(literal[0].code, Code::TypeMismatch);
+        assert!(
+            literal[0]
+                .notes
+                .iter()
+                .any(|n| n.starts_with("`T` is whatever type each call gives it")),
+            "{literal:#?}"
+        );
     }
 }
