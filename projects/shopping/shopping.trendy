@@ -82,8 +82,77 @@ var list := scaled{ingredient, unit} extend {
 };
 
 /* What it can't say yet, as it should read once the language has what it
-   needs: a pantry to subtract what's already at home, which needs storage,
-   and output for people rather than `debug_value`. */
+   needs:
+
+   A pantry, to subtract what's already at home. It changes as food is
+   bought and used, so it outlives each run of the program: it is a
+   relvar in a database. The database is a variable that persists,
+   whose value is a tuple of relations (TTM's dbvar, Appendix D), so its
+   type lists them, each with its keys. Only relations go in one. The
+   program never names the file it is kept in: by default, it is
+   `kitchen.sqlite`, in the directory the program runs in.
+
+     var kitchen: database {
+         pantry:
+             relation {
+                 ingredient: text,
+                 quantity: approximate,
+                 unit: text,
+             }
+             key { ingredient },
+     };
+
+   Every read and write of a database is in a `transaction` block,
+   begun and committed explicitly (TTM OO Prescription 4), which
+   touches one database. Reading a relvar is `kitchen.pantry`. Writing
+   is `update kitchen { … }`: inside the braces, `pantry` is its value
+   in the database, and `insert`, `delete` and `update` apply to it,
+   all at once, as one assignment of the whole database. A failure, or
+   `rollback;`, undoes the whole transaction, and stops the program.
+
+     operator bought{item: text, added: approximate, unit: text} [
+         transaction [
+             var held := kitchen.pantry where ingredient = item;
+             if held = relation {} then [
+                 update kitchen {
+                     insert pantry relation { { ingredient: item, quantity: added, unit: unit } },
+                 };
+             ] else [
+                 update kitchen {
+                     update pantry { quantity := quantity + added } where ingredient = item,
+                 };
+             ];
+         ];
+     ];
+
+     operator used{item: text, taken: approximate} [
+         transaction [
+             var held := kitchen.pantry where ingredient = item;
+             if held = relation {} then [
+                 rollback;
+             ] else if value from held{quantity} < taken then [
+                 rollback;
+             ];
+             update kitchen {
+                 update pantry { quantity := quantity - taken } where ingredient = item,
+             };
+         ];
+     ];
+
+   What to buy is the list less what's at home: the image of each
+   ingredient in the pantry is its quantity there, or no tuple, whose
+   sum is 0.
+
+     operator main{} [
+         transaction [
+             var to_buy := list
+                 extend { buy := total - sum{r: !!(kitchen.pantry), of: quantity} }
+                 where buy > 0e0;
+             call debug_value{v: to_buy{ingredient, buy, unit}};
+         ];
+     ];
+
+   Later: output for people rather than `debug_value`. */
 
 operator main{} [
     call debug_value{v: plan};
