@@ -50,7 +50,7 @@ operator tuples{a: tuple { name: text, born: integer }, b: tuple { name: text, b
 
 operator relations{
     a: relation { name: text, born: integer },
-    b: relation { name: text, born: integer }
+    b: relation { name: text, born: integer },
 } [
     call debug_value{v: a = b};
     call debug_value{v: a <> b};
@@ -58,7 +58,7 @@ operator relations{
 
 operator nested{
     a: tuple { r: relation { x: approximate } },
-    b: tuple { r: relation { x: approximate } }
+    b: tuple { r: relation { x: approximate } },
 } [
     call debug_value{v: a = b};
     call debug_value{v: a <> b};
@@ -85,8 +85,8 @@ operator main{} [
         a: people,
         b: relation {
             { name: "Edgar", born: 1923 },
-            { name: "Ada", born: 1815 }
-        }
+            { name: "Ada", born: 1815 },
+        },
     };
     call relations{a: people, b: relation { { name: "Ada", born: 1815 } }};
     call relations{a: people, b: relation {}};
@@ -95,11 +95,11 @@ operator main{} [
     call nested{
         a: tuple { r: relation {
             { x: 1.5e0 },
-            { x: 2.5e0 }
+            { x: 2.5e0 },
         } },
         b: tuple { r: relation {
             { x: 2.5e0 },
-            { x: 1.5e0 }
-        } }
+            { x: 1.5e0 },
+        } },
     };
 ];

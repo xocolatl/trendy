@@ -67,7 +67,7 @@ var planned := join{plan, recipes, ingredients};
    so the counts of people, integers, are converted to approximate
    numbers. */
 var scaled := planned extend {
-    amount := quantity * to_approximate{from: people} / to_approximate{from: serves}
+    amount := quantity * to_approximate{from: people} / to_approximate{from: serves},
 };
 
 /* What to buy: each ingredient and its unit, with the sum of its amounts
@@ -78,7 +78,7 @@ var scaled := planned extend {
    there. */
 var list := scaled{ingredient, unit} extend {
     total := sum{r: !!scaled, of: amount},
-    recipes := (!!scaled){recipe}
+    recipes := (!!scaled){recipe},
 };
 
 /* What it can't say yet, as it should read once the language has what it

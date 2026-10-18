@@ -1077,7 +1077,9 @@ operator main{} [];
   of its declared type, each with a distinct name.
 - `tuple {}`, the tuple with no attributes, is a valid type with exactly one
   value.
-- A trailing comma after the last attribute is allowed.
+- A trailing comma after the last attribute is allowed, and the formatter
+  writes one where the tuple is laid out one attribute per line (see
+  [Layout](#layout)).
 - **Attribute values can be any expression,** including parameters,
   variables and other operators: `tuple { street: name || "!", n: n + 1 }`.
   A tuple whose values are all known when compiling is built then; others
@@ -2805,7 +2807,9 @@ operator main{} [
   `-` and `+`, and none inside parentheses: `not (a and b)`,
   `-a * (b + 1)`.
 
-A trailing comma is kept or left out as written.
+A list laid out one item per line has a comma after its last item, so
+that adding an item changes no other line, and an inline list has none:
+the formatter adds or drops it, as the layout says.
 
 Comments are kept exactly as written. A comment on a line of its own stays
 on its own line, indented like the code after it, where the layout breaks

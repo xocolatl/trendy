@@ -321,7 +321,10 @@ is in. A block of an `if` statement, as an operator's body, has each
 statement on its own line.
 
 The formatter reprints the CST's tokens and decides the whitespace between
-them. It never adds or drops a token, comments included. Comments are
+them. The only tokens it adds or drops are the commas after lists' last
+items: a list laid out one item per line has one, so that adding an item
+changes no other line, and an inline one has none. The parser accepts
+both in every list. Comments are
 placed by where they were: one on its own line stays on its own line where
 the layout breaks the line anyway, and otherwise goes inline, which a block
 comment always can; one after code on the same line stays there. The only tokens it moves are the attributes of a relation's

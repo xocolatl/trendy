@@ -1,12 +1,14 @@
 //! The canonical source formatter.
 //!
 //! The formatter reprints the CST's tokens and decides the whitespace between
-//! them. It never adds or drops a token, and keeps every comment, placed by
-//! where it was: on its own line, after code, or within a line. The only tokens it moves are the attributes of
-//! a relation's tuples, which it writes in the order of the relation's
-//! heading; attributes are unordered, so that never changes what a program
-//! means. This crate defines the language's layout: whatever it prints is the
-//! style.
+//! them. It keeps every comment, placed by where it was: on its own line,
+//! after code, or within a line. The only tokens it adds or drops are the
+//! commas after lists' last items, which a list laid out one item per line
+//! has and an inline one doesn't, and the only ones it moves are the
+//! attributes of a relation's tuples, which it writes in the order of the
+//! relation's heading; attributes are unordered, so neither ever changes
+//! what a program means. This crate defines the language's layout: whatever
+//! it prints is the style.
 
 mod order;
 
@@ -231,7 +233,8 @@ fn render(file: &SourceFile, layout: &Layout) -> (String, Vec<(SyntaxToken, usiz
     // token or comment.
     let mut newline = false;
     let mut blank_since = false;
-    for token in order::tokens(file) {
+    let tokens = order::tokens(file);
+    for (i, token) in tokens.iter().cloned().enumerate() {
         match token.kind() {
             SyntaxKind::Whitespace => {
                 let breaks = token.text().matches('\n').count();
@@ -252,6 +255,13 @@ fn render(file: &SourceFile, layout: &Layout) -> (String, Vec<(SyntaxToken, usiz
             }
             _ => {}
         }
+        // The comma after a list's last item goes with its layout: an
+        // inline list has none, and one laid out one item per line has one,
+        // so that adding an item changes no other line.
+        let next = tokens[i + 1..].iter().find(|t| !t.kind().is_trivia());
+        if trailing_comma(&token, next).is_some_and(|list| !layout.is_block(&list)) {
+            continue;
+        }
         let sep = match &prev {
             Some(prev) => between(prev, &token, blank_line, layout),
             None => String::new(),
@@ -263,6 +273,12 @@ fn render(file: &SourceFile, layout: &Layout) -> (String, Vec<(SyntaxToken, usiz
             blank_after: blank_since,
         };
         let before = out.len();
+        if prev
+            .as_ref()
+            .is_some_and(|prev| needs_trailing_comma(prev, &token, layout))
+        {
+            out.push(',');
+        }
         gap.write(&std::mem::take(&mut comments), &mut out);
         line += out[before..].matches('\n').count();
         lines.push((token.clone(), line));
@@ -290,6 +306,29 @@ fn render(file: &SourceFile, layout: &Layout) -> (String, Vec<(SyntaxToken, usiz
         out.push('\n');
     }
     (out, lines)
+}
+
+/// The list `comma` ends the last item of, if it is the comma after a
+/// list's last item: `next`, the significant token after it, is the
+/// list's closing delimiter.
+fn trailing_comma(comma: &SyntaxToken, next: Option<&SyntaxToken>) -> Option<SyntaxNode> {
+    let list = comma.parent().filter(is_list)?;
+    let closes = next.is_some_and(|next| {
+        matches!(next.kind(), SyntaxKind::RBrace | SyntaxKind::RBracket)
+            && next.parent().as_ref() == Some(&list)
+    });
+    (comma.kind() == SyntaxKind::Comma && closes).then_some(list)
+}
+
+/// Whether a comma goes between `prev` and `closer`: `closer` closes a
+/// list laid out one item per line, and `prev`, ending its last item, is
+/// no comma.
+fn needs_trailing_comma(prev: &SyntaxToken, closer: &SyntaxToken, layout: &Layout) -> bool {
+    matches!(closer.kind(), SyntaxKind::RBrace | SyntaxKind::RBracket)
+        && prev.kind() != SyntaxKind::Comma
+        && closer
+            .parent()
+            .is_some_and(|list| is_list(&list) && items(&list) > 0 && layout.is_block(&list))
 }
 
 /// The whitespace between two adjacent significant tokens.
@@ -825,7 +864,7 @@ mod tests {
     fn keys_after_a_value_on_several_lines_go_on_lines_of_their_own() {
         assert_eq!(
             fmt("var r := relation {{a: 1}, {a: 2}} key {a} key {b};var s := 1;"),
-            "var r := relation {\n    { a: 1 },\n    { a: 2 }\n}\nkey { a }\nkey { b };\n\nvar s := 1;\n"
+            "var r := relation {\n    { a: 1 },\n    { a: 2 },\n}\nkey { a }\nkey { b };\n\nvar s := 1;\n"
         );
     }
 
@@ -854,7 +893,7 @@ mod tests {
             .map(|n| format!("    {n}"))
             .collect::<Vec<_>>()
             .join(",\n");
-        assert_eq!(fmt(&source), format!("var r := s\nkey {{\n{items}\n}};\n"));
+        assert_eq!(fmt(&source), format!("var r := s\nkey {{\n{items},\n}};\n"));
     }
 
     #[test]
@@ -879,7 +918,7 @@ mod tests {
             fmt(
                 "var x:tuple{a:tuple{b:boolean},c:text};var e:tuple{ };var q:=tuple{x:1e0,y:2e0,};operator main{}[];"
             ),
-            "var x: tuple { a: tuple { b: boolean }, c: text };\nvar e: tuple {};\nvar q := tuple { x: 1e0, y: 2e0, };\n\noperator main{} [];\n"
+            "var x: tuple { a: tuple { b: boolean }, c: text };\nvar e: tuple {};\nvar q := tuple { x: 1e0, y: 2e0 };\n\noperator main{} [];\n"
         );
     }
 
@@ -889,7 +928,7 @@ mod tests {
             fmt(
                 "var r:=relation{a:integer}{{a:1},tuple{a:2}};var e:relation{a:integer}:=relation{};var d:=relation{}{};var t:=tuple{a:integer}{a:1};"
             ),
-            "var r := relation { a: integer } {\n    { a: 1 },\n    tuple { a: 2 }\n};\nvar e: relation { a: integer } := relation {};\nvar d := relation {} {};\nvar t := tuple { a: integer } { a: 1 };\n"
+            "var r := relation { a: integer } {\n    { a: 1 },\n    tuple { a: 2 },\n};\nvar e: relation { a: integer } := relation {};\nvar d := relation {} {};\nvar t := tuple { a: integer } { a: 1 };\n"
         );
     }
 
@@ -906,7 +945,7 @@ mod tests {
         let months = r#"var m := array ["January", "February", "March", "April", "May", "June", "July", "August", "September"];"#;
         assert_eq!(
             fmt(months),
-            "var m := array [\n    \"January\",\n    \"February\",\n    \"March\",\n    \"April\",\n    \"May\",\n    \"June\",\n    \"July\",\n    \"August\",\n    \"September\"\n];\n"
+            "var m := array [\n    \"January\",\n    \"February\",\n    \"March\",\n    \"April\",\n    \"May\",\n    \"June\",\n    \"July\",\n    \"August\",\n    \"September\",\n];\n"
         );
     }
 
@@ -928,7 +967,7 @@ mod tests {
         // its last line.
         assert_eq!(
             fmt("var r := if a then relation {{x: 1}, {x: 2}} else relation {{x: 3}};"),
-            "var r := if a\n    then relation {\n        { x: 1 },\n        { x: 2 }\n    }\n    else relation { { x: 3 } };\n"
+            "var r := if a\n    then relation {\n        { x: 1 },\n        { x: 2 },\n    }\n    else relation { { x: 3 } };\n"
         );
     }
 
@@ -949,6 +988,20 @@ mod tests {
     }
 
     #[test]
+    fn trailing_commas_follow_the_layout() {
+        // Added after the last item of a list laid out one item per line,
+        // before a comment there, and dropped from an inline one.
+        assert_eq!(
+            fmt("var r := relation {\n    { a: 1, },\n    { a: 2 } /* last */\n};"),
+            "var r := relation {\n    { a: 1 },\n    { a: 2 }, /* last */\n};\n"
+        );
+        assert_eq!(
+            fmt("operator f{a: integer, b: text,} [ call g{x: 1,}; ];"),
+            "operator f{a: integer, b: text} [\n    call g{x: 1};\n];\n"
+        );
+    }
+
+    #[test]
     fn the_outermost_list_breaks_first() {
         // The `extend`'s list, not the projection within its operand, which
         // comes first.
@@ -956,7 +1009,7 @@ mod tests {
             fmt(
                 "var list := scaled{ingredient, unit} extend { total := sum{r: !!scaled, of: amount}, recipes := (!!scaled){recipe} };"
             ),
-            "var list := scaled{ingredient, unit} extend {\n    total := sum{r: !!scaled, of: amount},\n    recipes := (!!scaled){recipe}\n};\n"
+            "var list := scaled{ingredient, unit} extend {\n    total := sum{r: !!scaled, of: amount},\n    recipes := (!!scaled){recipe},\n};\n"
         );
     }
 
@@ -968,11 +1021,11 @@ mod tests {
         );
         assert_eq!(
             fmt("var p:=relation{n:text}{{n:\"a\"},{n:\"b\"}};"),
-            "var p := relation { n: text } {\n    { n: \"a\" },\n    { n: \"b\" }\n};\n"
+            "var p := relation { n: text } {\n    { n: \"a\" },\n    { n: \"b\" },\n};\n"
         );
         assert_eq!(
             fmt("var q:=relation{{r:relation{{x:1},{x:2}}},{r:relation{}}};"),
-            "var q := relation {\n    { r: relation {\n        { x: 1 },\n        { x: 2 }\n    } },\n    { r: relation {} }\n};\n"
+            "var q := relation {\n    { r: relation {\n        { x: 1 },\n        { x: 2 },\n    } },\n    { r: relation {} },\n};\n"
         );
     }
 
@@ -1046,7 +1099,7 @@ mod tests {
         let long = "operator tally{relation_of_things: any relation, of: T, at_least: integer}: relation { value: T, n: integer, at_least: integer } types { T: any type } [];";
         assert_eq!(
             fmt(long),
-            "operator tally{\n    relation_of_things: any relation,\n    of: T,\n    at_least: integer\n}: relation { value: T, n: integer, at_least: integer }\n    types { T: any type }\n[];\n"
+            "operator tally{\n    relation_of_things: any relation,\n    of: T,\n    at_least: integer,\n}: relation { value: T, n: integer, at_least: integer }\n    types { T: any type }\n[];\n"
         );
         // A comment before them stays on its line.
         assert_eq!(
@@ -1059,7 +1112,7 @@ mod tests {
     fn relations_in_calls_indent_inside_the_body() {
         assert_eq!(
             fmt("operator main{}[call debug_value{v:relation{{a:1},{a:2}}};];"),
-            "operator main{} [\n    call debug_value{v: relation {\n        { a: 1 },\n        { a: 2 }\n    }};\n];\n"
+            "operator main{} [\n    call debug_value{v: relation {\n        { a: 1 },\n        { a: 2 },\n    }};\n];\n"
         );
     }
 
@@ -1069,14 +1122,14 @@ mod tests {
         let source = "operator main{} [ call f{a: tuple { r: relation { { x: 1 }, { x: 2 } }, s: 1 }, b: 1}; ];";
         assert_eq!(
             fmt(source),
-            "operator main{} [\n    call f{\n        a: tuple {\n            r: relation {\n                { x: 1 },\n                { x: 2 }\n            },\n            s: 1\n        },\n        b: 1\n    };\n];\n"
+            "operator main{} [\n    call f{\n        a: tuple {\n            r: relation {\n                { x: 1 },\n                { x: 2 },\n            },\n            s: 1,\n        },\n        b: 1,\n    };\n];\n"
         );
         // A single item stays hugged.
         assert_eq!(
             fmt(
                 "operator main{} [ call f{a: tuple { r: relation { { x: 1 }, { x: 2 } } }, b: 1}; ];"
             ),
-            "operator main{} [\n    call f{\n        a: tuple { r: relation {\n            { x: 1 },\n            { x: 2 }\n        } },\n        b: 1\n    };\n];\n"
+            "operator main{} [\n    call f{\n        a: tuple { r: relation {\n            { x: 1 },\n            { x: 2 },\n        } },\n        b: 1,\n    };\n];\n"
         );
         // Nothing broken inside: one line, as before.
         assert_eq!(
@@ -1110,7 +1163,7 @@ mod tests {
             fmt(
                 "var r: relation { a: boolean, b: integer } := relation {{a:true, b:3}, {b:25, a:false}};"
             ),
-            "var r: relation { a: boolean, b: integer } := relation {\n    { a: true, b: 3 },\n    { a: false, b: 25 }\n};\n"
+            "var r: relation { a: boolean, b: integer } := relation {\n    { a: true, b: 3 },\n    { a: false, b: 25 },\n};\n"
         );
     }
 
@@ -1128,7 +1181,7 @@ mod tests {
             fmt(
                 "var r := relation { y: integer, x: integer } { { x: 1, y: 2 }, tuple { x: 3, y: 4, } };"
             ),
-            "var r := relation { y: integer, x: integer } {\n    { y: 2, x: 1 },\n    tuple { y: 4, x: 3, }\n};\n"
+            "var r := relation { y: integer, x: integer } {\n    { y: 2, x: 1 },\n    tuple { y: 4, x: 3 },\n};\n"
         );
     }
 
@@ -1136,7 +1189,7 @@ mod tests {
     fn without_a_heading_the_first_tuple_sets_the_order() {
         assert_eq!(
             fmt("var r := relation { { n: 1, m: 2 }, { m: 3, n: 4 } };"),
-            "var r := relation {\n    { n: 1, m: 2 },\n    { n: 4, m: 3 }\n};\n"
+            "var r := relation {\n    { n: 1, m: 2 },\n    { n: 4, m: 3 },\n};\n"
         );
     }
 
@@ -1197,7 +1250,7 @@ mod tests {
         let names: Vec<String> = (0..12).map(|i| format!("relation_number_{i}")).collect();
         assert_eq!(
             fmt(&format!("var r := join{{{}}};", names.join(", "))),
-            format!("var r := join{{\n    {}\n}};\n", names.join(",\n    "))
+            format!("var r := join{{\n    {},\n}};\n", names.join(",\n    "))
         );
     }
 
@@ -1295,7 +1348,7 @@ mod tests {
         // In a relation's lines.
         assert_eq!(
             fmt("var r := relation {\n{ a: 1 }, /* first */\n/* second */\n{ a: 2 }\n};"),
-            "var r := relation {\n    { a: 1 }, /* first */\n    /* second */\n    { a: 2 }\n};\n"
+            "var r := relation {\n    { a: 1 }, /* first */\n    /* second */\n    { a: 2 },\n};\n"
         );
         // Nested and multi-line comments are kept as written.
         let nested = "/* a /* nested */\n   comment */\nvar a := 1;\n";
@@ -1361,7 +1414,7 @@ mod tests {
     #[test]
     fn long_lines_break_their_outermost_list() {
         let source = "operator extract{a: tuple { street: text, city: text, country: text, postal_code: text }, p: tuple { x: approximate, y: approximate }} [];";
-        let expected = "operator extract{\n    a: tuple { street: text, city: text, country: text, postal_code: text },\n    p: tuple { x: approximate, y: approximate }\n} [];\n";
+        let expected = "operator extract{\n    a: tuple { street: text, city: text, country: text, postal_code: text },\n    p: tuple { x: approximate, y: approximate },\n} [];\n";
         assert_eq!(fmt(source), expected);
         assert_eq!(fmt(expected), expected, "idempotent");
         // Within a broken list, an item still too long breaks in turn.
@@ -1370,7 +1423,7 @@ mod tests {
         );
         assert_eq!(
             deep,
-            "var t := tuple {\n    a: tuple {\n        street: \"1 Rue de Rivoli\",\n        city: \"Paris\",\n        country: \"République française\",\n        postal_code: \"75001\"\n    },\n    b: 1\n};\n"
+            "var t := tuple {\n    a: tuple {\n        street: \"1 Rue de Rivoli\",\n        city: \"Paris\",\n        country: \"République française\",\n        postal_code: \"75001\",\n    },\n    b: 1,\n};\n"
         );
         assert!(deep.lines().all(|l| l.chars().count() <= MAX_WIDTH));
         // A line with nothing to break stays as it is.
@@ -1398,8 +1451,10 @@ mod tests {
         ] {
             let once = fmt(source);
             assert_eq!(fmt(&once), once, "not idempotent for {source:?}");
-            // Attributes may move, but no token is added or dropped.
-            let sorted = |mut tokens: Vec<String>| {
+            // Attributes may move, and commas after lists' last items go
+            // with the layout, but no other token is added or dropped.
+            let sorted = |tokens: Vec<String>| {
+                let mut tokens: Vec<String> = tokens.into_iter().filter(|t| t != ",").collect();
                 tokens.sort();
                 tokens
             };

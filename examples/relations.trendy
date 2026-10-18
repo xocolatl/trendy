@@ -18,8 +18,8 @@ var teams := relation {
         team: "core",
         members: relation {
             { name: "Ada" },
-            { name: "Edgar" }
-        }
+            { name: "Edgar" },
+        },
     },
 }
 key { team };
@@ -137,21 +137,21 @@ operator rename_signs{r: relation { x: approximate, n: integer }} [
    Implemented, and printed twice like the projections. */
 var added := relation {
     { name: "李白", born: 701 },
-    { name: "Ada", born: 1815 }
+    { name: "Ada", born: 1815 },
 };
 var collapsed := relation { { x: 1 } };
 var held := tuple {
     who: "core",
     members: relation {
         { name: "Ada" },
-        { name: "李白" }
-    }
+        { name: "李白" },
+    },
 };
 
 operator build_people{name: text, born: integer} [
     call debug_value{v: relation {
         { name: name, born: born },
-        { name: "Ada", born: 1815 }
+        { name: "Ada", born: 1815 },
     }};
 ];
 
@@ -159,7 +159,7 @@ operator build_duplicates{a: integer, b: integer} [
     call debug_value{v: relation {
         { x: a },
         { x: b },
-        { x: 1 }
+        { x: 1 },
     }};
 ];
 
@@ -168,8 +168,8 @@ operator build_nested{team: text, member: text} [
         who: team,
         members: relation {
             { name: member },
-            { name: "Ada" }
-        }
+            { name: "Ada" },
+        },
     }};
 ];
 
@@ -184,7 +184,7 @@ var lived := people join cities;
 var born_in := people compose cities;
 var years := relation {
     { year: 2024 },
-    { year: 2025 }
+    { year: 2025 },
 };
 var every_year := cities{city} times years;
 /* Of any number of relations: join{r, s, t} and times{r, s, t}, in
@@ -469,7 +469,7 @@ var regions := relation {
 };
 var by_region := regions extend {
     crops := count{r: !!harvests},
-    tonnes := sum{r: !!harvests, of: tonnes}
+    tonnes := sum{r: !!harvests, of: tonnes},
 };
 var same_year := births where count{r: !!(births rename {name as other, place as elsewhere})} > 1;
 

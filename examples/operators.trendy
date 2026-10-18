@@ -46,7 +46,7 @@ operator both{a: T, b: T}: relation { v: T }
 [
     return relation {
         tuple { v: a },
-        tuple { v: b }
+        tuple { v: b },
     };
 ];
 
@@ -150,7 +150,7 @@ operator main{} [
     call show{label: "where from", value: values{r: dishes, of: dish || ", " || country}};
     call show{
         label: "how many under 1000",
-        value: count{r: dishes where taxed{price: price} < 1000}
+        value: count{r: dishes where taxed{price: price} < 1000},
     };
     call show{label: "before p", value: below{r: dishes, of: dish, limit: "p"}};
     /* The prelude's `some` and `every`, written in trendy. */
@@ -161,18 +161,18 @@ operator main{} [
     /* `cost`, of integers and of approximate numbers. */
     call show{
         label: "two of each, delivered",
-        value: values{r: dishes, of: cost{price: taxed{price: price}, quantity: 2, delivery: 300}}
+        value: values{r: dishes, of: cost{price: taxed{price: price}, quantity: 2, delivery: 300}},
     };
     call show{
         label: "one and a half ramen, delivered",
-        value: cost{price: to_approximate{from: taxed{price: 900}}, quantity: 1.5e0, delivery: 3e2}
+        value: cost{price: to_approximate{from: taxed{price: 900}}, quantity: 1.5e0, delivery: 3e2},
     };
     call show{label: "under 1200", value: cheapest{limit: 1200}};
     call show{label: "mean under 1000", value: mean{r: dishes where taxed{price: price} < 1000}};
     call show{label: "mean under 500", value: mean{r: dishes where taxed{price: price} < 500}};
     call show{
         label: "how many under 1200",
-        value: how_many{r: dishes where taxed{price: price} < 1200}
+        value: how_many{r: dishes where taxed{price: price} < 1200},
     };
     /* Decided when compiling, as `dishes` is known then. */
     call show{label: "the menu's", value: plural};

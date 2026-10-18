@@ -18,7 +18,7 @@ var cities := relation {
 var ordered := relation {
     { m: array [2] },
     { m: array [1, 9] },
-    { m: array [] }
+    { m: array [] },
 };
 
 /* An element at a position, and how many there are. */
@@ -51,18 +51,18 @@ operator computed{wet: integer, mid: integer, low: integer, two: integer, city: 
     call debug_value{v: g};
     call debug_value{v: relation {
         { city: city, rainy: array ["Jun", "Jul", "Aug", "Sep"] },
-        { city: "Cairo", rainy: array [] }
+        { city: "Cairo", rainy: array [] },
     }};
     call debug_value{v: relation {
         { m: array [two] },
         { m: array [1, 9] },
-        { m: array [] }
+        { m: array [] },
     }};
     call debug_value{v: r[at]};
     call debug_value{v: g[1][at]};
     call debug_value{v: length{a: r}};
     call debug_value{
-        v: tuple { copied: r = array [wet, mid, low], reordered: r = array [mid, wet, low] }
+        v: tuple { copied: r = array [wet, mid, low], reordered: r = array [mid, wet, low] },
     };
     call debug_value{v: first{a: r}};
     call debug_value{v: first{a: array ["Amara", city]}};

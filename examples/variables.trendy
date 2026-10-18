@@ -7,7 +7,7 @@ var t: text := "";
 var tp: tuple { a: boolean, b: integer };
 var r: relation { a: boolean, b: integer } := relation {
     { a: true, b: 3 },
-    { a: false, b: 25 }
+    { a: false, b: 25 },
 };
 
 /* Assignment (RM Prescription 21): `:=` gives a variable a new value of

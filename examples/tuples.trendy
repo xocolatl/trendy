@@ -5,7 +5,7 @@ var addr := tuple {
     street: "1 Rue de Rivoli",
     city: "Paris",
     country: "France",
-    postal_code: "75001"
+    postal_code: "75001",
 };
 
 /* Tuple operators, to design and then implement one at a time. Each comment
@@ -45,7 +45,7 @@ var swapped := q rename {x as y, y as x};
 
 operator rename_addr{
     a: tuple { street: text, city: text, country: text, postal_code: text },
-    p: tuple { x: approximate, y: approximate }
+    p: tuple { x: approximate, y: approximate },
 } [
     call debug_value{v: a rename {postal_code as code}};
     call debug_value{v: p rename {x as y, y as x}};
@@ -71,7 +71,7 @@ var sum := q.x + q.y;
 operator extract{
     a: tuple { street: text, city: text, country: text, postal_code: text },
     t: tuple { a: tuple { b: boolean }, c: text },
-    p: tuple { x: approximate, y: approximate }
+    p: tuple { x: approximate, y: approximate },
 } [
     call debug_value{v: a.postal_code};
     call debug_value{v: t.a.b};
@@ -88,7 +88,7 @@ var summed := q extend { total := x + y, outer := tuple { inner: x } };
 
 operator extend_addr{
     a: tuple { street: text, city: text, country: text, postal_code: text },
-    p: tuple { x: approximate, y: approximate }
+    p: tuple { x: approximate, y: approximate },
 } [
     call debug_value{v: a extend { floor := 2, line := street || ", " || city }};
     call debug_value{v: p extend { total := x + y, outer := tuple { inner: x } }};
@@ -105,7 +105,7 @@ var flipped := q replace { x := y * 2e0, y := x };
 
 operator replace_addr{
     a: tuple { street: text, city: text, country: text, postal_code: text },
-    p: tuple { x: approximate, y: approximate }
+    p: tuple { x: approximate, y: approximate },
 } [
     call debug_value{v: a replace { postal_code := "75002" }};
     call debug_value{v: p replace { x := y * 2e0, y := x }};
@@ -144,7 +144,7 @@ var dated := addr times tuple { year: 2024 };
 var regioned := join{
     addr,
     tuple { postal_code: "75001", district: "1st" },
-    tuple { city: "Paris", region: "Île-de-France" }
+    tuple { city: "Paris", region: "Île-de-France" },
 };
 
 operator join_addr{
@@ -169,7 +169,7 @@ operator join_addr{
    projections. */
 var cities := relation {
     { city: "Paris", country: "France" },
-    { city: "Kumasi", country: "Ghana" }
+    { city: "Kumasi", country: "Ghana" },
 };
 var paris := tuple from cities where city = "Paris";
 var country := value from (cities where city = "Paris"){country};
