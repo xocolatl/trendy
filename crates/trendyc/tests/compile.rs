@@ -168,12 +168,15 @@ tuple {}
 relation { name: text } {}
 relation { born: integer, name: text } { { born: 1815, name: "Ada" }, { born: 1923, name: "Edgar" } }
 relation { members: relation { name: text }, team: text } { { members: relation { name: text } { { name: "Ada" } }, team: "core" } }
-tuple { greeting: "\"say \\\"hi\\\"\\n\\ttab \\\\ é\"", point: "tuple { x: 1e0, y: tuple { z: false } }", teams: "relation { members: relation { name: text }, team: text } { { members: relation { name: text } { { name: \"Ada\" } }, team: \"core\" } }" }
+array [1200, 950, 220]
+array text []
+tuple { greeting: "\"say \\\"hi\\\"\\n\\ttab \\\\ é\"", point: "tuple { x: 1e0, y: tuple { z: false } }", rainfall: "array [1200, 950, 220]", teams: "relation { members: relation { name: text }, team: text } { { members: relation { name: text } { { name: \"Ada\" } }, team: \"core\" } }" }
 7
 "count"
 42
 "\"say \\\"hi\\\"\\n\\ttab \\\\ é\""
 "tuple { x: 1e0, y: tuple { z: false } }"
+"array [1200, 950, 220]"
 "relation { members: relation { name: text }, team: text } { { members: relation { name: text } { { name: \"Ada\" } }, team: \"core\" } }"
 "#
     );
@@ -188,14 +191,14 @@ fn to_text_is_what_debug_value_writes() {
         program.variables[0].init.clone()
     };
     let written = |written: &str| trendy_hir::Value::Text(written.to_string());
-    // `greeting`, `point` and `teams`: folded when compiling into
-    // `written`, and made when running by `as_text`.
-    let debug = [lines[4], lines[5], lines[9]];
-    let trendy_hir::Value::Tuple(folded) = text(lines[10]) else {
-        panic!("{}", lines[10]);
+    // `greeting`, `point`, `rainfall` and `teams`, in name order: folded
+    // when compiling into `written`, and made when running by `as_text`.
+    let debug = [lines[4], lines[5], lines[10], lines[9]];
+    let trendy_hir::Value::Tuple(folded) = text(lines[12]) else {
+        panic!("{}", lines[12]);
     };
     let folded: Vec<_> = folded.attributes().map(|(_, v)| v.clone()).collect();
-    let run: Vec<_> = lines[14..].iter().map(|line| text(line)).collect();
+    let run: Vec<_> = lines[16..].iter().map(|line| text(line)).collect();
     let expected: Vec<_> = debug.iter().map(|line| written(line)).collect();
     assert_eq!(folded, expected);
     assert_eq!(run, expected);
@@ -525,6 +528,24 @@ fn run_time_failures_stop_the_program() {
         let (code, stderr) = run_source(name, &program(expr));
         assert_eq!((code, stderr), (1, format!("1\n{failure}\n")), "{expr}");
     }
+    // An array has no element at position 0, nor beyond its length.
+    for (name, expr) in [
+        ("fail_index_zero", "array [a][b]"),
+        ("fail_index_beyond", "array [a][b + 2]"),
+    ] {
+        let (code, stderr) = run_source(name, &program(expr));
+        assert_eq!(
+            (code, &stderr[..]),
+            (
+                1,
+                &*format!(
+                    "1\nerror[{}]: an array has no element at that position\n",
+                    Code::IndexOutOfRange.id()
+                )
+            ),
+            "{expr}"
+        );
+    }
     // Tuples that disagree on a common attribute have no join.
     let (code, stderr) = run_source(
         "fail_tuple_join",
@@ -804,6 +825,32 @@ fn relations() {
             // Per group, Puno with none; and the two born in 1815.
             r#"relation { crops: integer, region: text, tonnes: integer } { { crops: 0, region: "Puno", tonnes: 0 }, { crops: 1, region: "Mendoza", tonnes: 300 }, { crops: 2, region: "Nyeri", tonnes: 165 }, { crops: 2, region: "Punjab", tonnes: 1900 } }"#,
             r#"relation { born: integer, name: text, place: text } { { born: 1815, name: "Ada", place: "London" }, { born: 1815, name: "Édouard", place: "Paris" } }"#,
+        ]
+    );
+}
+
+#[test]
+fn arrays() {
+    assert_eq!(
+        folded_and_run("arrays"),
+        [
+            "array [1200, 950, 220]",
+            // Empty, with its elements' type.
+            "array text []",
+            "array [array [1, 2], array [3]]",
+            // Cairo's empty array took its type from Mumbai's.
+            r#"relation { city: text, rainy: array text } { { city: "Cairo", rainy: array text [] }, { city: "Mumbai", rainy: array ["Jun", "Jul", "Aug", "Sep"] } }"#,
+            // Element by element, a prefix first.
+            "relation { m: array integer } { { m: array integer [] }, { m: array [1, 9] }, { m: array [2] } }",
+            // Positions count from 1.
+            "950",
+            "2",
+            "3",
+            // Equal only in the same order.
+            "tuple { copied: true, reordered: false }",
+            // Generic over the elements' type.
+            "1200",
+            r#""Amara""#,
         ]
     );
 }

@@ -269,7 +269,8 @@ impl Namespaces {
         match (any, ty) {
             (hir::Any::Type, _)
             | (hir::Any::Tuple, hir::Type::Tuple(_))
-            | (hir::Any::Relation, hir::Type::Relation(_)) => true,
+            | (hir::Any::Relation, hir::Type::Relation(_))
+            | (hir::Any::Array, hir::Type::Array(_)) => true,
             (hir::Any::Kind(kind), hir::Type::Scalar(scalar)) => self
                 .kinds
                 .get(&kind.name)
@@ -1265,7 +1266,7 @@ mod tests {
     fn empty_relation_needs_a_heading() {
         let errors = errors(&format!("var r := relation {{}};{MAIN}"));
         assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].code, Code::UnknownRelationHeading);
+        assert_eq!(errors[0].code, Code::UnknownEmptyType);
     }
 
     #[test]
@@ -1305,7 +1306,7 @@ mod tests {
         let source = format!("var a := relation {{ {empty}, {empty} }};{MAIN}");
         assert_eq!(
             codes(&source),
-            [Code::UnknownRelationHeading, Code::UnknownRelationHeading]
+            [Code::UnknownEmptyType, Code::UnknownEmptyType]
         );
         // Another error in a tuple is reported, not taken for one that
         // needs a heading.
@@ -1335,7 +1336,7 @@ mod tests {
         // Not of a join, whose operands' headings differ.
         assert_eq!(
             codes(&format!("{r}var v := relation {{}} join r;{MAIN}")),
-            [Code::UnknownRelationHeading]
+            [Code::UnknownEmptyType]
         );
         // Operands of different headings are still reported together.
         let source = format!("{r}var s := relation {{ {{ c: 1 }} }};\nvar v := r union s;{MAIN}");
@@ -5286,5 +5287,185 @@ mod tests {
             "operator f{{}} [ var r := relation {{ {{ k: 1, v: 1 }}, {{ k: 1, v: 2 }} }} key {{ k }}; ];{MAIN}"
         );
         assert_eq!(codes(&source), [Code::KeyViolated]);
+    }
+
+    #[test]
+    fn arrays_are_evaluated_when_compiling() {
+        let vars = variables(
+            "var a := array [1200, 950, 220];\nvar second := a[2];\nvar n := length{a: a};\nvar same := a = array [1200, 950, 220];\nvar reordered := a = array [950, 1200, 220];\nvar nested := array [array [1, 2], array [3]][1][2];",
+        );
+        let values: Vec<String> = vars.iter().map(|v| v.init.to_string()).collect();
+        assert_eq!(
+            values,
+            ["array [1200, 950, 220]", "950", "3", "true", "false", "2"]
+        );
+        assert_eq!(
+            vars[0].ty,
+            hir::Type::Array(Box::new(hir::Type::Scalar(hir::Scalar::Integer)))
+        );
+        // The default is the empty array, written with its elements' type.
+        assert_eq!(
+            variables("var none: array text;")[0].init.to_string(),
+            "array text []"
+        );
+    }
+
+    #[test]
+    fn an_index_of_a_selector_takes_its_element() {
+        // Unless another element can fail, which it must still be computed
+        // to find out.
+        let program = analyze_str(&format!(
+            "operator kept{{x: integer}}: integer [ return array [x, 2][2]; ];\noperator failing{{x: integer}}: integer [ return array [x + 1, 2][2]; ];{MAIN}"
+        ))
+        .unwrap();
+        let value = |name: &str| {
+            let op = program.operators.iter().find(|o| o.name == name).unwrap();
+            let hir::OperatorKind::ReadOnly { value, .. } = &op.kind else {
+                panic!("{name} is read-only");
+            };
+            value.clone()
+        };
+        assert_eq!(value("kept"), hir::Expr::Constant(hir::Value::Integer(2)));
+        assert!(matches!(value("failing"), hir::Expr::Index(..)));
+    }
+
+    #[test]
+    fn an_empty_arrays_type_comes_from_context() {
+        for (source, written) in [
+            ("var a: array text := array [];", "array text []"),
+            ("var a := array integer [];", "array integer []"),
+            (
+                "var a := array [array [], array [1]];",
+                "array [array integer [], array [1]]",
+            ),
+            (
+                "var r := relation { { m: array [] }, { m: array [\"Jun\"] } };",
+                "relation { m: array text } { { m: array text [] }, { m: array [\"Jun\"] } }",
+            ),
+            (
+                "var t: tuple { a: array integer } := tuple { a: array [] };",
+                "tuple { a: array integer [] }",
+            ),
+            ("var same := array [] = array [1];", "false"),
+        ] {
+            assert_eq!(variables(source)[0].init.to_string(), written, "{source}");
+        }
+        for source in ["var a := array [];", "var a := array [array []];"] {
+            assert_eq!(
+                codes(&format!("{source}{MAIN}")),
+                [Code::UnknownEmptyType],
+                "{source}"
+            );
+        }
+        // Elements of different types.
+        assert_eq!(
+            codes(&format!("var a := array [1, \"x\"];{MAIN}")),
+            [Code::TypeMismatch]
+        );
+    }
+
+    #[test]
+    fn positions_out_of_range_are_reported_when_known() {
+        let a = "var a := array [1200, 950, 220];\n";
+        for position in ["0", "4", "-1"] {
+            let source = format!("{a}var x := a[{position}];{MAIN}");
+            assert_eq!(codes(&source), [Code::IndexOutOfRange], "{position}");
+        }
+        // Below 1, whatever the array.
+        let source = format!("operator f{{a: array integer}}: integer [ return a[0]; ];{MAIN}");
+        assert_eq!(codes(&source), [Code::IndexOutOfRange]);
+        // Other languages' first and last elements.
+        for (written, fixed) in [
+            ("a[0]", "a[1]"),
+            ("a[-1]", "a[length{a: a}]"),
+            ("a[-3]", "a[length{a: a} - 2]"),
+        ] {
+            let source = format!("{a}var x := {written};{MAIN}");
+            let fixed_source = format!("{a}var x := {fixed};{MAIN}");
+            assert_eq!(fix(&source), fixed_source, "{written}");
+            assert!(analyze_str(&fixed_source).is_ok(), "{fixed}");
+        }
+        let messages = messages(&format!(
+            "{a}var x := a[4];\nvar y := array [1][2];\nvar z := array integer [][1];{MAIN}"
+        ));
+        assert_eq!(
+            messages,
+            [
+                "the array has 3 elements, so none at position 4",
+                "the array has 1 element, so none at position 2",
+                "the array is empty, so it has no element at position 1",
+            ]
+        );
+    }
+
+    #[test]
+    fn only_arrays_are_indexed() {
+        let t = "var t := tuple { name: \"Amara\", city: \"Lagos\" };\n";
+        let source = format!("{t}var x := t[\"name\"];{MAIN}");
+        assert_eq!(codes(&source), [Code::WrongOperandType]);
+        assert_eq!(fix(&source), format!("{t}var x := t.name;{MAIN}"));
+        for source in [
+            "var r := relation { { a: 1 } };\nvar x := r[1];",
+            "var x := 5[1];",
+            "operator f{a: any array}: integer [ return a[1]; ];",
+        ] {
+            assert_eq!(
+                codes(&format!("{source}{MAIN}")),
+                [Code::WrongOperandType],
+                "{source}"
+            );
+        }
+        // A position is an integer.
+        assert_eq!(
+            codes(&format!("var x := array [1][\"1\"];{MAIN}")),
+            [Code::TypeMismatch]
+        );
+        // Arrays have no order.
+        assert_eq!(
+            codes(&format!("var x := array [1] < array [2];{MAIN}")),
+            [Code::WrongOperandType]
+        );
+        assert_eq!(
+            codes(&format!("var x := value from array [1];{MAIN}")),
+            [Code::WrongOperandType]
+        );
+    }
+
+    #[test]
+    fn an_arrays_elements_can_have_a_type_parameter() {
+        let first = "operator first{a: array E}: E types { E: any type } [ return a[1]; ];\n";
+        let vars = variables(&format!(
+            "{first}var n := first{{a: array [7, 8]}};\nvar t := first{{a: array [\"Kofi\"]}};"
+        ));
+        assert_eq!(vars[0].init, hir::Value::Integer(7));
+        assert_eq!(vars[1].init, hir::Value::Text("Kofi".to_string()));
+        let same = "operator same{a: array E, b: array E}: boolean types { E: any type } [ return a = b; ];\n";
+        assert_eq!(
+            codes(&format!(
+                "{same}var x := same{{a: array [1], b: array [\"1\"]}};{MAIN}"
+            )),
+            [Code::TypeMismatch]
+        );
+    }
+
+    #[test]
+    fn other_languages_habits_with_arrays_are_fixed() {
+        let a = "var a := array [1200, 950, 220];\nvar r := relation { { x: 1 } };\n";
+        for (written, fixed) in [
+            ("len{r: a}", "length{a: a}"),
+            ("len{a}", "length{a: a}"),
+            ("len{r}", "count{r: r}"),
+            ("size{x: a}", "length{a: a}"),
+            ("CARDINALITY{a: a}", "length{a: a}"),
+            ("count{r: a}", "length{a: a}"),
+            ("length{a: r}", "count{r: r}"),
+            ("ARRAY[1]", "array [1]"),
+            ("a.length{}", "length{a: a}"),
+        ] {
+            let source = format!("{a}var x := {written};{MAIN}");
+            let fixed_source = format!("{a}var x := {fixed};{MAIN}");
+            assert_eq!(fix(&source), fixed_source, "{written}");
+            assert!(analyze_str(&fixed_source).is_ok(), "{fixed}");
+        }
     }
 }

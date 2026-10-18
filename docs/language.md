@@ -177,9 +177,10 @@ operator main{} [
 
 ### Generic operators
 
-A parameter's type can be `any type`, `any tuple` or `any relation`: the
-operator takes an argument of any type, of any tuple type, or of any
-relation type, and each call gives the parameter its argument's type. It
+A parameter's type can be `any type`, `any tuple`, `any relation` or
+`any array`: the operator takes an argument of any type, of any tuple
+type, of any relation type, or of any array type, and each call gives the
+parameter its argument's type. It
 can also be `any` and a kind, a set of types (see [Kinds](#kinds)). A
 type parameter, declared after the signature with `types`, names such a
 type, to say that several types are one, as for `same`'s `a` and `b`, or
@@ -234,7 +235,8 @@ though the Manifesto leaves how to further study.
 
 - **`types { … }` declares the type parameters,** after the parameters
   and the result type: each a name, capitalized by convention, and what
-  it can be, `any type`, `any tuple` or `any relation` (A0040). Inside the
+  it can be, `any type`, `any tuple`, `any relation` or `any array`
+  (A0040). Inside the
   operator, a type parameter is a type, which the parameters' types, the
   result type and the body can use, in other types too, as in
   `relation { v: T }`. Each `any …` written as a parameter's type is a type
@@ -256,10 +258,12 @@ though the Manifesto leaves how to further study.
   type a type parameter can be applies to its values: `=` and `<>`, and
   passing them on, to operators and into tuples and relations; for
   `any relation`, which is ordered by inclusion, `<=`, `<`, `>=` and `>`;
-  and for a kind, what it requires. So `a < b` of `T`s of `any type` is an
-  error (A0022), even if every call gives `T` integers, whose help says to
-  make it `any ordered`; and so are the attributes of `any tuple` and
-  `any relation`, which aren't known.
+  for `any array`, `length`; and for a kind, what it requires. So `a < b`
+  of `T`s of `any type` is an error (A0022), even if every call gives `T`
+  integers, whose help says to make it `any ordered`; and so are the
+  attributes of `any tuple` and `any relation`, and the elements of
+  `any array`, which aren't known: to index an array, give its elements a
+  type parameter of their own, as in `a: array E`.
 - **Each list of types is compiled on its own,** as if the operator were
   written again with the types in place of its type parameters, and a call
   is evaluated when compiling where it can be, as any other is. So a call
@@ -273,7 +277,7 @@ though the Manifesto leaves how to further study.
 - **Other languages' spellings are fixed:** type parameters in angle
   brackets after the name, `same<T>{…}`, as Rust, TypeScript, Java and C++
   write them, to `types { T: any type }`, `relation any` to `any relation`
-  (P0027), and a bare `any`, as TypeScript and Go write it, to `any type`
+  and `array any` to `any array` (P0027), and a bare `any`, as TypeScript and Go write it, to `any type`
   (A0003).
 
 ```trendy,error
@@ -511,6 +515,9 @@ builtin operator debug_value{v: any type};
 
 builtin operator count{r: any relation}: integer;
 
+/* The number of elements of `a`. */
+builtin operator length{a: any array}: integer;
+
 /* The least value of `of` for a tuple of `r`, by `<`. Of no tuples, there
    is none, and the program fails (R0010). */
 builtin operator min{r: any relation, of: T per r}: T
@@ -560,7 +567,8 @@ builtin operator to_approximate{from: integer}: approximate;
 **`debug_value{v: any type}`** writes `v` to stderr, on one line, as trendy
 source. Tuples and relations are written with their attributes in name
 order, relations with their heading first and their tuples in a fixed order,
-so the output reads back as the same value. For example:
+and an empty array with its elements' type, as in `array integer []`, so
+the output reads back as the same value. For example:
 `relation { a: boolean, b: integer } { { a: false, b: 25 }, { a: true, b: 3 } }`.
 The one exception is the attribute a `per` parameter's relation wraps its
 tuples' own attributes in, which no source can name: it is written `…`,
@@ -1151,6 +1159,93 @@ var rivers: relation { name: text } key { name } := relation { { name: "Mekong" 
 operator main{} [];
 ```
 
+## Arrays
+
+An array is a list of values of one type, its elements, in order. An
+array type is written `array type`, and an array value
+`array [element, …]`, with the elements' type first where there is
+nothing else to give it, as in `array text []`. Arrays are values like
+any other: a tuple's attribute can be an array, and so can a relation's,
+or an array's element. *The Third Manifesto* describes `ARRAY` as a type
+generator, whose types can be used wherever a type can, an attribute's
+too, with a selector, subscripts, assignment and equality (chapter 3);
+Tutorial D keeps arrays special, as only the target of `LOAD`, but a
+fully orthogonal language would make them first-class (chapter 5), as
+trendy does.
+
+```trendy
+var rainfall := array [1200, 950, 220];
+var none: array text;
+var cities := relation {
+    { city: "Cairo", rainy: array [] },
+    { city: "Mumbai", rainy: array ["Jun", "Jul", "Aug", "Sep"] },
+};
+
+operator first{a: array E}: E
+    types { E: any type }
+[
+    return a[1];
+];
+
+operator main{} [
+    call debug_value{v: rainfall[2]};
+    call debug_value{v: length{a: rainfall}};
+    call debug_value{v: first{a: array ["Amara", "Kofi"]}};
+    call debug_value{v: cities};
+];
+```
+
+- **Positions count from 1.** `a[i]` is the element of `a` at the
+  position `i`, an integer from 1 up to `length{a: a}`, as in SQL and
+  Tutorial D. Any other position is an error (R0011): when compiling, if
+  the array's length and the position are known then, as a position below
+  1 always is, and otherwise when the program runs, which stops it. A `[`
+  right after a value always indexes it.
+- **The elements' type comes from context,** as a relation's heading
+  does: from the selector's own, from the type expected of the value, or
+  from an element whose type is known on its own, in that order. So an
+  empty array needs one of the first two (A0011), which another tuple of
+  a relation can give, as Mumbai's does Cairo's above.
+- **The default is the empty array.** An array variable declared without
+  a value starts with no elements.
+- **Equality is element by element.** Two arrays are equal when they have
+  the same length and equal elements at each position, so
+  `array [1, 2] <> array [2, 1]`. Arrays have no order among themselves,
+  so `<`, `<=`, `>` and `>=` don't apply to them (A0022).
+- **Elements can repeat,** as a relation's tuples can't: an array is a
+  list, not a set.
+- **A relation is not an array.** A relation's tuples have no order (RM
+  Proscription 2), so a relation has no positions, and indexing it is an
+  error (A0022).
+- **Other languages' habits are fixed:** a list written `[1, 2]`, as
+  Python and JavaScript write it, to `array [1, 2]` (P0002), and SQL's
+  `ARRAY[1, 2]` too (P0010); `a[0]` for the first element, to `a[1]`, and
+  `a[-1]` for the last, to `a[length{a: a}]` (R0011); `len`, `size` and
+  `CARDINALITY`, to `length` of an array and `count` of a relation, and
+  `count` and `length` given the other's kind of value to each other
+  (A0015, A0004); and `t["name"]` for a tuple's attribute, to `t.name`
+  (A0022).
+
+```trendy,error
+var unknown := array [];
+
+operator main{} [];
+```
+
+```trendy,error
+var rainfall := array [1200, 950, 220];
+var first := rainfall[0];
+
+operator main{} [];
+```
+
+```trendy,error
+var cities := relation { { city: "Cairo" }, { city: "Mumbai" } };
+var first := cities[1];
+
+operator main{} [];
+```
+
 ## Assignment
 
 An operator's body gives a variable a new value with an assignment
@@ -1493,8 +1588,9 @@ Two values are equal exactly when they are the same value, as *The Third
 Manifesto* requires (RM Prescription 8). Two tuples are equal when every
 attribute's values are equal, and two relations when they have the same
 tuples, in any order; the values inside are compared the same way, so
-`tuple { x: 0e0 } <> tuple { x: -0e0 }`. Tuples have no order, so `<`,
-`<=`, `>` and `>=` don't apply to them (A0022).
+`tuple { x: 0e0 } <> tuple { x: -0e0 }`. Two arrays are equal when they
+have equal elements at each position. Tuples and arrays have no order, so
+`<`, `<=`, `>` and `>=` don't apply to them (A0022).
 
 Relations are ordered as sets, by inclusion, as in Tutorial D: `r <= s`
 is true when every tuple of `r` is in `s` (subset), `r < s` when, too,
@@ -2254,7 +2350,7 @@ From tightest to loosest:
 | Operators | Grouping |
 |---|---|
 | `!!`, of a name or a parenthesized expression | none: see below |
-| postfix `.a`, projection `{…}`, `remove {…}`, `rename {…}`, `extend {…}`, `replace {…}`, `group {…}`, `ungroup {…}`, `wrap {…}` and `unwrap {…}` | left |
+| postfix `.a`, indexing `[…]`, projection `{…}`, `remove {…}`, `rename {…}`, `extend {…}`, `replace {…}`, `group {…}`, `ungroup {…}`, `wrap {…}` and `unwrap {…}` | left |
 | prefix `not`, `-`, `+`, `tuple from` and `value from` | |
 | `*`, `/`, `div`, `mod` | left |
 | `+`, `-`, `\|\|` | left |
@@ -2579,6 +2675,11 @@ line after a comment on its own line, such as a file's header, is kept.
 | `str(x)`, `x.to_string()`, `CAST(x AS VARCHAR)`, `CAST_AS_CHAR (X)` | `to_text{from: x}` |
 | `float(n)`, `n as f64`, `CAST(n AS DOUBLE PRECISION)`, `CAST_AS_RATIONAL (N)` | `to_approximate{from: n}` |
 | `{ x: 1 }`, `TUPLE { X 1 }` | `tuple { x: 1 }` |
+| `[1, 2]`, `ARRAY[1, 2]` | `array [1, 2]` |
+| `[]`, an empty list | `array integer []`, with its elements' type, or `array []` where it is known |
+| `a[0]`, the first element | `a[1]` |
+| `a[-1]`, the last element | `a[length{a: a}]` |
+| `len(a)`, `a.length()`, `CARDINALITY(a)`, `size(a)` | `length{a: a}` |
 | `tuple { x = 1 }` | `tuple { x: 1 }` |
 | `RELATION { TUPLE { … } }` | `relation { { … } }` |
 | `VAR`, `TUPLE`, `TRUE` | `var`, `tuple`, `true` |

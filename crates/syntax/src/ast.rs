@@ -84,6 +84,9 @@ ast_node!(AttributeType);
 ast_node!(Per);
 ast_node!(TupleType);
 ast_node!(RelationType);
+ast_node!(ArrayType);
+ast_node!(ArrayLiteral);
+ast_node!(IndexExpr);
 ast_node!(TupleLiteral);
 ast_node!(AttributeValue);
 ast_node!(RelationLiteral);
@@ -578,6 +581,33 @@ impl ParenExpr {
     }
 }
 
+impl IndexExpr {
+    /// The array, before the brackets.
+    #[must_use]
+    pub fn operand(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+
+    /// The position, in the brackets.
+    #[must_use]
+    pub fn index(&self) -> Option<Expr> {
+        self.0.children().filter_map(Expr::cast).nth(1)
+    }
+
+    /// The `[` that opens the brackets.
+    #[must_use]
+    pub fn l_bracket(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).find(|t| t.kind() == SyntaxKind::LBracket)
+    }
+
+    /// The brackets and the position in them, from the `[` to the end.
+    #[must_use]
+    pub fn brackets(&self) -> Option<Span> {
+        let open = self.l_bracket()?;
+        Some(Span::new(span(open.text_range()).start, self.span().end))
+    }
+}
+
 impl ExtractExpr {
     #[must_use]
     pub fn operand(&self) -> Option<Expr> {
@@ -860,12 +890,14 @@ fn preceded_from(element: &SyntaxElement) -> usize {
     .map_or(own, |e| span(e.text_range()).end)
 }
 
-/// A type as written: a name, a tuple type, or a relation type.
+/// A type as written: a name, a tuple type, a relation type, an array type,
+/// or what a type parameter can be.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeExpr {
     Named(TypeRef),
     Tuple(TupleType),
     Relation(RelationType),
+    Array(ArrayType),
     Any(AnyType),
 }
 
@@ -876,6 +908,7 @@ impl TypeExpr {
             .map(TypeExpr::Named)
             .or_else(|| TupleType::cast(node.clone()).map(TypeExpr::Tuple))
             .or_else(|| RelationType::cast(node.clone()).map(TypeExpr::Relation))
+            .or_else(|| ArrayType::cast(node.clone()).map(TypeExpr::Array))
             .or_else(|| AnyType::cast(node).map(TypeExpr::Any))
     }
 
@@ -885,6 +918,7 @@ impl TypeExpr {
             TypeExpr::Named(t) => t.syntax(),
             TypeExpr::Tuple(t) => t.syntax(),
             TypeExpr::Relation(t) => t.syntax(),
+            TypeExpr::Array(t) => t.syntax(),
             TypeExpr::Any(t) => t.syntax(),
         }
     }
@@ -901,11 +935,13 @@ pub enum Expr {
     Literal(Literal),
     Tuple(TupleLiteral),
     Relation(RelationLiteral),
+    Array(ArrayLiteral),
     Name(NameRef),
     Unary(UnaryExpr),
     Binary(BinaryExpr),
     Paren(ParenExpr),
     Extract(ExtractExpr),
+    Index(IndexExpr),
     Project(ProjectExpr),
     Postfix(PostfixExpr),
     Nary(NaryExpr),
@@ -921,11 +957,13 @@ impl Expr {
             .map(Expr::Literal)
             .or_else(|| TupleLiteral::cast(node.clone()).map(Expr::Tuple))
             .or_else(|| RelationLiteral::cast(node.clone()).map(Expr::Relation))
+            .or_else(|| ArrayLiteral::cast(node.clone()).map(Expr::Array))
             .or_else(|| NameRef::cast(node.clone()).map(Expr::Name))
             .or_else(|| UnaryExpr::cast(node.clone()).map(Expr::Unary))
             .or_else(|| BinaryExpr::cast(node.clone()).map(Expr::Binary))
             .or_else(|| ParenExpr::cast(node.clone()).map(Expr::Paren))
             .or_else(|| ExtractExpr::cast(node.clone()).map(Expr::Extract))
+            .or_else(|| IndexExpr::cast(node.clone()).map(Expr::Index))
             .or_else(|| ProjectExpr::cast(node.clone()).map(Expr::Project))
             .or_else(|| PostfixExpr::cast(node.clone()).map(Expr::Postfix))
             .or_else(|| NaryExpr::cast(node.clone()).map(Expr::Nary))
@@ -940,11 +978,13 @@ impl Expr {
             Expr::Literal(e) => e.syntax(),
             Expr::Tuple(e) => e.syntax(),
             Expr::Relation(e) => e.syntax(),
+            Expr::Array(e) => e.syntax(),
             Expr::Name(e) => e.syntax(),
             Expr::Unary(e) => e.syntax(),
             Expr::Binary(e) => e.syntax(),
             Expr::Paren(e) => e.syntax(),
             Expr::Extract(e) => e.syntax(),
+            Expr::Index(e) => e.syntax(),
             Expr::Project(e) => e.syntax(),
             Expr::Postfix(e) => e.syntax(),
             Expr::Nary(e) => e.syntax(),
@@ -1055,6 +1095,33 @@ impl TupleLiteral {
     #[must_use]
     pub fn removal(&self, attribute: &AttributeValue) -> Span {
         list_removal(attribute.syntax())
+    }
+}
+
+impl ArrayType {
+    /// The elements' type, after `array`.
+    #[must_use]
+    pub fn element(&self) -> Option<TypeExpr> {
+        self.0.children().find_map(TypeExpr::cast)
+    }
+}
+
+impl ArrayLiteral {
+    /// The `array` keyword, which a bare `[` lacks.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).find(|t| t.kind() == SyntaxKind::ArrayKw)
+    }
+
+    /// The elements' type, written before them, as in `array integer []`.
+    #[must_use]
+    pub fn element_type(&self) -> Option<TypeExpr> {
+        self.0.children().find_map(TypeExpr::cast)
+    }
+
+    /// The elements, in order.
+    pub fn elements(&self) -> impl Iterator<Item = Expr> {
+        self.0.children().filter_map(Expr::cast)
     }
 }
 

@@ -175,14 +175,15 @@ pub struct TypeParameter {
     pub any: Any,
 }
 
-/// What a type parameter can be: `any type`, every type; `any tuple` or
-/// `any relation`, every type that type generator makes; or any type of a
-/// kind, such as `any ordered`.
+/// What a type parameter can be: `any type`, every type; `any tuple`,
+/// `any relation` or `any array`, every type that type generator makes; or
+/// any type of a kind, such as `any ordered`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Any {
     Type,
     Tuple,
     Relation,
+    Array,
     Kind(Kind),
 }
 
@@ -234,6 +235,7 @@ impl std::fmt::Display for Any {
             Any::Type => f.write_str("any type"),
             Any::Tuple => f.write_str("any tuple"),
             Any::Relation => f.write_str("any relation"),
+            Any::Array => f.write_str("any array"),
             Any::Kind(kind) => write!(f, "any {}", kind.name),
         }
     }
@@ -280,6 +282,8 @@ pub enum Builtin {
     DebugValue,
     /// The number of tuples of a relation.
     Count,
+    /// The number of elements of an array.
+    Length,
     /// The least of a value computed for each tuple of a relation, by `<`.
     Min,
     /// The greatest of a value computed for each tuple of a relation, by
@@ -298,9 +302,10 @@ pub enum Builtin {
 }
 
 impl Builtin {
-    pub const ALL: [Builtin; 8] = [
+    pub const ALL: [Builtin; 9] = [
         Builtin::DebugValue,
         Builtin::Count,
+        Builtin::Length,
         Builtin::Min,
         Builtin::Max,
         Builtin::Sum,
@@ -314,6 +319,7 @@ impl Builtin {
         match self {
             Builtin::DebugValue => "debug_value",
             Builtin::Count => "count",
+            Builtin::Length => "length",
             Builtin::Min => "min",
             Builtin::Max => "max",
             Builtin::Sum => "sum",
@@ -355,6 +361,7 @@ impl Builtin {
         match self {
             Builtin::DebugValue | Builtin::ToText => vec![unnamed(0, Any::Type)],
             Builtin::Count => vec![unnamed(0, Any::Relation)],
+            Builtin::Length => vec![unnamed(0, Any::Array)],
             Builtin::ToApproximate => Vec::new(),
             Builtin::Min | Builtin::Max => of_kind("ordered", &[Requirement::Order]),
             Builtin::Sum | Builtin::Product => of_kind(
@@ -373,6 +380,7 @@ impl Builtin {
         match self {
             Builtin::DebugValue => [("v".to_string(), parameter(0))].into(),
             Builtin::Count => [("r".to_string(), parameter(0))].into(),
+            Builtin::Length => [("a".to_string(), parameter(0))].into(),
             Builtin::ToText => [("from".to_string(), parameter(0))].into(),
             Builtin::ToApproximate => [("from".to_string(), Type::Scalar(Scalar::Integer))].into(),
             Builtin::Min | Builtin::Max | Builtin::Sum | Builtin::Product => {
@@ -394,7 +402,7 @@ impl Builtin {
     pub fn result(self) -> Option<Type> {
         match self {
             Builtin::DebugValue => None,
-            Builtin::Count => Some(Type::Scalar(Scalar::Integer)),
+            Builtin::Count | Builtin::Length => Some(Type::Scalar(Scalar::Integer)),
             Builtin::Min | Builtin::Max | Builtin::Sum | Builtin::Product => {
                 Some(Type::Parameter(self.types()[0].clone()))
             }
@@ -433,6 +441,14 @@ impl Builtin {
                 let count = i64::try_from(tuples().len()).expect("a relation's tuples fit");
                 Ok(Value::Integer(count))
             }
+            Builtin::Length => match &args["a"] {
+                Value::Array(array) => {
+                    let length =
+                        i64::try_from(array.elements.len()).expect("an array's elements fit");
+                    Ok(Value::Integer(length))
+                }
+                other => panic!("`length` of {other:?}"),
+            },
             Builtin::Min => values()
                 .min_by(|a, b| compare(a, b))
                 .cloned()
@@ -690,6 +706,11 @@ pub enum Expr {
     /// Not Algebra A's AND with the relation of the tuples that satisfy
     /// the condition, which is usually infinite.
     Restrict(Box<Expr>, Box<Expr>),
+    /// An array selector: its elements, of this type, in order.
+    Array(Type, Vec<Expr>),
+    /// The element of the array at the position the second expression
+    /// gives, counting from 1, which fails if it has none there.
+    Index(Box<Expr>, Box<Expr>),
     /// The only tuple of a relation (`tuple from`), which fails if it has
     /// none or several. `value from` is the extraction of its only
     /// attribute.
@@ -718,6 +739,11 @@ impl Expr {
             Expr::Constant(value) => value.ty(),
             Expr::Variable(_) | Expr::Parameter(_) | Expr::Local(_) | Expr::Call(_) => leaf(self),
             Expr::Let(_, _, body) => body.type_with(leaf),
+            Expr::Array(element, _) => Type::Array(Box::new(element.clone())),
+            Expr::Index(array, _) => match array.type_with(leaf) {
+                Type::Array(element) => *element,
+                other => panic!("an element of {other}"),
+            },
             // Arithmetic on a type parameter's values has their type.
             Expr::Unary(op, operand) => op
                 .operand()
@@ -777,6 +803,11 @@ impl Expr {
             Expr::Constant(value) => Expr::Constant(value.instantiated(types)),
             Expr::Variable(_) | Expr::Parameter(_) | Expr::Local(_) => self.clone(),
             Expr::Let(local, value, body) => Expr::Let(*local, inst(value), inst(body)),
+            Expr::Array(element, elements) => Expr::Array(
+                element.instantiated(types),
+                elements.iter().map(|e| e.instantiated(types)).collect(),
+            ),
+            Expr::Index(array, index) => Expr::Index(inst(array), inst(index)),
             Expr::Unary(op, operand) => Expr::Unary(op.instantiated(types), inst(operand)),
             Expr::Binary(op, lhs, rhs) => {
                 Expr::Binary(op.instantiated(types), inst(lhs), inst(rhs))
@@ -817,6 +848,12 @@ pub enum Failure {
     /// The result is out of the range of this type.
     Overflow(Scalar),
     DivisionByZero,
+    /// An array has no element at the position `index`, which, counting
+    /// from 1, is below 1 or beyond its `length`, if that is known.
+    OutOfRange {
+        index: i64,
+        length: Option<usize>,
+    },
 }
 
 /// Whether relations `lhs` and `rhs` compare true by `comparison`, an
@@ -1033,6 +1070,9 @@ pub enum Compared {
     /// Relations of one relation type, equal when they have the same tuples,
     /// and one less than or equal to another when it is a subset of it.
     Relation,
+    /// Arrays of one array type, equal when they have the same elements in
+    /// the same order: only `=` and `<>`.
+    Array,
     /// Values of the type parameter with this index, compared as values of
     /// the type a call gives it: only `=` and `<>`, but for `any relation`,
     /// which is a relation, and a kind that requires an order.
@@ -1047,6 +1087,7 @@ impl Compared {
             Type::Scalar(scalar) => Compared::Scalar(*scalar),
             Type::Tuple(_) => Compared::Tuple,
             Type::Relation(_) => Compared::Relation,
+            Type::Array(_) => Compared::Array,
             Type::Parameter(p) => Compared::Parameter(p.index),
         }
     }
@@ -1109,8 +1150,8 @@ pub fn compare(lhs: &Value, rhs: &Value) -> std::cmp::Ordering {
 }
 
 impl BinaryOp {
-    /// The scalar type of both operands: `None` for tuples, relations and a
-    /// type parameter's values.
+    /// The scalar type of both operands: `None` for tuples, relations,
+    /// arrays and a type parameter's values.
     #[must_use]
     pub fn operand(self) -> Option<Scalar> {
         match self {
@@ -1124,9 +1165,10 @@ impl BinaryOp {
             BinaryOp::Div | BinaryOp::Mod => Some(Scalar::Integer),
             BinaryOp::Concatenate => Some(Scalar::Text),
             BinaryOp::Compare(_, Compared::Scalar(scalar)) => Some(scalar),
-            BinaryOp::Compare(_, Compared::Tuple | Compared::Relation | Compared::Parameter(_)) => {
-                None
-            }
+            BinaryOp::Compare(
+                _,
+                Compared::Tuple | Compared::Relation | Compared::Array | Compared::Parameter(_),
+            ) => None,
         }
     }
 
@@ -1188,7 +1230,7 @@ impl BinaryOp {
                 };
                 return Ok(Value::Boolean(holds));
             }
-            BinaryOp::Compare(..) => panic!("tuples aren't ordered"),
+            BinaryOp::Compare(..) => panic!("tuples and arrays aren't ordered"),
             _ => {}
         }
         match (lhs, rhs) {
@@ -1257,8 +1299,8 @@ pub struct Variable {
 /// A key: a set of a relation's attributes, by name.
 pub type Key = BTreeSet<String>;
 
-/// A type: a built-in scalar type, a tuple type, a relation type, or a
-/// type parameter of the operator it is written in.
+/// A type: a built-in scalar type, a tuple type, a relation type, an array
+/// type, or a type parameter of the operator it is written in.
 ///
 /// Types are structural: two tuple types, or two relation types, are the
 /// same type exactly when their headings are equal, wherever they are
@@ -1270,6 +1312,9 @@ pub enum Type {
     Scalar(Scalar),
     Tuple(Heading),
     Relation(Heading),
+    /// Arrays of elements of this type (TTM's ARRAY type generator, chapter
+    /// 3), of any length.
+    Array(Box<Type>),
     Parameter(TypeParameter),
 }
 
@@ -1282,6 +1327,7 @@ impl Type {
             Type::Scalar(_) => self.clone(),
             Type::Tuple(heading) => Type::Tuple(heading.instantiated(types)),
             Type::Relation(heading) => Type::Relation(heading.instantiated(types)),
+            Type::Array(element) => Type::Array(Box::new(element.instantiated(types))),
             Type::Parameter(p) => types[p.index].clone(),
         }
     }
@@ -1293,6 +1339,7 @@ impl Type {
             Type::Tuple(heading) | Type::Relation(heading) => {
                 Box::new(heading.0.values().flat_map(Type::parameters))
             }
+            Type::Array(element) => element.parameters(),
             Type::Parameter(p) => Box::new(std::iter::once(p)),
         }
     }
@@ -1319,6 +1366,10 @@ impl Type {
                 heading: heading.clone(),
                 tuples: BTreeSet::new(),
             }),
+            Type::Array(element) => Value::Array(ArrayValue {
+                element: (**element).clone(),
+                elements: Vec::new(),
+            }),
             Type::Parameter(p) => panic!("no variable has the type parameter {p}"),
         }
     }
@@ -1332,6 +1383,7 @@ impl std::fmt::Display for Type {
             Type::Scalar(scalar) => f.write_str(scalar.name()),
             Type::Tuple(heading) => write!(f, "tuple {heading}"),
             Type::Relation(heading) => write!(f, "relation {heading}"),
+            Type::Array(element) => write!(f, "array {element}"),
             Type::Parameter(p) => write!(f, "{p}"),
         }
     }
@@ -1569,6 +1621,7 @@ pub enum Value {
     Text(String),
     Tuple(TupleValue),
     Relation(RelationValue),
+    Array(ArrayValue),
 }
 
 impl Value {
@@ -1587,6 +1640,7 @@ impl Value {
                     .collect(),
             )),
             Value::Relation(relation) => Type::Relation(relation.heading.clone()),
+            Value::Array(array) => Type::Array(Box::new(array.element.clone())),
         }
     }
 
@@ -1603,6 +1657,14 @@ impl Value {
                     .tuples
                     .iter()
                     .map(|t| t.instantiated(types))
+                    .collect(),
+            }),
+            Value::Array(array) => Value::Array(ArrayValue {
+                element: array.element.instantiated(types),
+                elements: array
+                    .elements
+                    .iter()
+                    .map(|e| e.instantiated(types))
                     .collect(),
             }),
             _ => self.clone(),
@@ -1636,6 +1698,16 @@ impl std::fmt::Display for Value {
                 }
                 let tuples: Vec<String> = relation.tuples.iter().map(ToString::to_string).collect();
                 write!(f, "{{ {} }}", tuples.join(", "))
+            }
+            // An empty one with its elements' type, which there is no
+            // element to give.
+            Value::Array(array) if array.elements.is_empty() => {
+                write!(f, "array {} []", array.element)
+            }
+            Value::Array(array) => {
+                let elements: Vec<String> =
+                    array.elements.iter().map(ToString::to_string).collect();
+                write!(f, "array [{}]", elements.join(", "))
             }
         }
     }
@@ -1675,6 +1747,17 @@ impl std::fmt::Display for TupleValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write_attributes(f, self.attributes().map(|(name, value)| (name, value as _)))
     }
+}
+
+/// An array value: elements of one type, in order. Two arrays are equal
+/// when they have the same elements in the same order, and they compare
+/// element by element, a shorter one first if it is the other's start.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ArrayValue {
+    /// The elements' type, which an empty array has none to take it from.
+    pub element: Type,
+    /// In order, the first at position 1.
+    pub elements: Vec<Value>,
 }
 
 /// A relation value: a set of tuples, all with the relation's heading.

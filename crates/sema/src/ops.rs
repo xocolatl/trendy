@@ -917,7 +917,7 @@ impl Joining {
                 hir::Type::Tuple(_) => {
                     errors.push(errors::tuple_among_relations(self.kind.keyword(), operand));
                 }
-                hir::Type::Scalar(_) | hir::Type::Parameter(_) => {
+                hir::Type::Scalar(_) | hir::Type::Array(_) | hir::Type::Parameter(_) => {
                     errors.push(errors::not_joinable(
                         self.kind,
                         self.operator(),
@@ -1227,6 +1227,65 @@ pub(crate) fn relation(heading: hir::Heading, tuples: Vec<hir::Expr>) -> hir::Ex
     }
 }
 
+/// An array with elements of type `element`, in order, a constant if they
+/// all are.
+pub(crate) fn array(element: hir::Type, elements: Vec<hir::Expr>) -> hir::Expr {
+    let constants: Option<Vec<hir::Value>> = elements
+        .iter()
+        .map(|e| match e {
+            hir::Expr::Constant(value) => Some(value.clone()),
+            _ => None,
+        })
+        .collect();
+    match constants {
+        Some(elements) => {
+            hir::Expr::Constant(hir::Value::Array(hir::ArrayValue { element, elements }))
+        }
+        None => hir::Expr::Array(element, elements),
+    }
+}
+
+/// The element of `array` at `position`, counting from 1: evaluated if
+/// both are constants, and taken straight from a selector whose other
+/// elements can't fail.
+///
+/// # Errors
+///
+/// Returns why there is no element there: the position is out of range,
+/// known now if it is a constant and the array's length is, or the
+/// position is below 1, whatever the array.
+pub(crate) fn index(array: hir::Expr, position: hir::Expr) -> Result<hir::Expr, hir::Failure> {
+    let hir::Expr::Constant(hir::Value::Integer(index)) = position else {
+        return Ok(hir::Expr::Index(Box::new(array), Box::new(position)));
+    };
+    let length = match &array {
+        hir::Expr::Constant(hir::Value::Array(array)) => Some(array.elements.len()),
+        hir::Expr::Array(_, elements) => Some(elements.len()),
+        _ => None,
+    };
+    let at = usize::try_from(index)
+        .ok()
+        .and_then(|i| i.checked_sub(1))
+        .filter(|at| length.is_none_or(|length| *at < length));
+    let Some(at) = at else {
+        return Err(hir::Failure::OutOfRange { index, length });
+    };
+    match array {
+        hir::Expr::Constant(hir::Value::Array(mut array)) => {
+            Ok(hir::Expr::Constant(array.elements.swap_remove(at)))
+        }
+        hir::Expr::Array(_, mut elements)
+            if elements
+                .iter()
+                .enumerate()
+                .all(|(i, e)| i == at || !can_fail(e)) =>
+        {
+            Ok(elements.swap_remove(at))
+        }
+        array => Ok(hir::Expr::Index(Box::new(array), Box::new(position))),
+    }
+}
+
 /// `operand` with the relation-valued attributes `names` replaced by their
 /// attributes: evaluated if the operand is a constant.
 pub(crate) fn ungroup(operand: hir::Expr, names: BTreeSet<String>) -> hir::Expr {
@@ -1500,6 +1559,11 @@ fn shifted(expr: hir::Expr, cutoff: usize) -> hir::Expr {
         }
         hir::Expr::Antijoin(lhs, rhs) => hir::Expr::Antijoin(shift(lhs), shift(rhs)),
         hir::Expr::Let(local, value, body) => hir::Expr::Let(local, shift(value), shift(body)),
+        hir::Expr::Array(element, elements) => hir::Expr::Array(
+            element,
+            elements.into_iter().map(|e| shifted(e, cutoff)).collect(),
+        ),
+        hir::Expr::Index(array, position) => hir::Expr::Index(shift(array), shift(position)),
         // The condition is one tuple at hand further in.
         hir::Expr::Restrict(operand, condition) => {
             hir::Expr::Restrict(shift(operand), Box::new(shifted(*condition, cutoff + 1)))
@@ -1538,8 +1602,10 @@ pub(crate) fn uses_tuple(expr: &hir::Expr, depth: usize) -> bool {
         | hir::Expr::Combine(_, lhs, rhs)
         | hir::Expr::Semijoin(lhs, rhs)
         | hir::Expr::Antijoin(lhs, rhs)
-        | hir::Expr::Let(_, lhs, rhs) => uses(lhs) || uses(rhs),
+        | hir::Expr::Let(_, lhs, rhs)
+        | hir::Expr::Index(lhs, rhs) => uses(lhs) || uses(rhs),
         hir::Expr::Tuple(attributes) => attributes.values().any(uses),
+        hir::Expr::Array(_, elements) => elements.iter().any(uses),
         hir::Expr::Relation(_, tuples) => tuples.iter().any(uses),
         // The condition and the values are one tuple at hand further in.
         hir::Expr::Restrict(operand, condition) => {
@@ -1813,6 +1879,16 @@ fn substitute(
             binary(op, sub(lhs)?, sub(rhs)?).map_err(Failed::Scalar)?
         }
         hir::Expr::Extract(operand, name) => extract(sub(operand)?, name),
+        hir::Expr::Array(element, elements) => array(
+            element,
+            elements
+                .into_iter()
+                .map(|e| substitute(e, depth, substitution))
+                .collect::<Result<_, _>>()?,
+        ),
+        hir::Expr::Index(operand, position) => {
+            index(sub(operand)?, sub(position)?).map_err(Failed::Scalar)?
+        }
         hir::Expr::Tuple(attributes) => tuple_of(attributes, depth, substitution)?,
         hir::Expr::Relation(heading, tuples) => relation(
             heading,
@@ -2027,8 +2103,10 @@ fn can_fail(expr: &hir::Expr) -> bool {
         | hir::Expr::Current(..) => false,
         // Negating the smallest integer overflows, and building a relation,
         // removing, renaming or adding attributes, joining or ungrouping it,
-        // allocates the result; adding attributes computes them, which can
-        // fail too, as can a call, which computes its operator's value.
+        // allocates the result, as building an array does; adding
+        // attributes computes them, which can fail too, as can a call,
+        // which computes its operator's value, and an index can be out of
+        // range.
         hir::Expr::Unary(hir::UnaryOp::Negate(hir::Numeric::Integer), _)
         | hir::Expr::Call(..)
         | hir::Expr::Remove(..)
@@ -2041,7 +2119,9 @@ fn can_fail(expr: &hir::Expr) -> bool {
         | hir::Expr::Antijoin(..)
         | hir::Expr::Combine(..)
         | hir::Expr::Extend(..)
-        | hir::Expr::Relation(..) => true,
+        | hir::Expr::Relation(..)
+        | hir::Expr::Array(..)
+        | hir::Expr::Index(..) => true,
         hir::Expr::Unary(_, operand) => can_fail(operand),
         hir::Expr::Tuple(attributes) => attributes.values().any(can_fail),
         hir::Expr::Extract(tuple, _) => can_fail(tuple),

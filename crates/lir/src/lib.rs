@@ -22,6 +22,7 @@
 //!   canonical (sorted) order, and a [`Field::Usize`] with their number.
 //!   Since each struct is padded to its alignment, the array's stride is the
 //!   tuple's size.
+//! - an array: as a relation, of its elements, in its order.
 //! - a tuple: a [`Field::Struct`] of its attributes' values, in attribute
 //!   name order. Because a struct's layout doesn't depend on where it is, an
 //!   attribute that is itself a tuple can be used, or passed, on its own.
@@ -181,12 +182,13 @@ pub enum RuntimeFn {
     Release,
     /// `trendy_rt_begin(scope)`: begin a statement's scope, in a slot laid
     /// out as [`Layout::scope`]. Until [`RuntimeFn::End`], the statement
-    /// owns the memory of every text and relation that runtime functions
-    /// make. A variable's old value, once [`RuntimeFn::Assign`] replaces
-    /// it, is the outermost statement's that began while it was the value,
-    /// since those, and only those, can point into it. So a statement needs
-    /// a scope if it makes a text or relation, or passes one to an update
-    /// operator, whose assignments must not release it.
+    /// owns the memory of every text, relation and array that runtime
+    /// functions make. A variable's old value, once [`RuntimeFn::Assign`]
+    /// replaces it, is the outermost statement's that began while it was
+    /// the value, since those, and only those, can point into it. So a
+    /// statement needs a scope if it makes a text, relation or array, or
+    /// passes one to an update operator, whose assignments must not release
+    /// it.
     Begin,
     /// `trendy_rt_end(scope)`: end the scope at `scope`, the innermost,
     /// releasing the memory its statement owns.
@@ -251,10 +253,10 @@ pub enum RuntimeFn {
     /// has one the left lacks.
     Combine,
     /// `trendy_rt_allocate(dst, count, descriptor)`: store at `dst` a
-    /// relation, of the type the descriptor describes, of `count` (a
-    /// [`Layout::Usize`]) tuples, zeroed, in memory the statement owns, for
-    /// compiled code to fill in. [`RuntimeFn::Sort`] then puts them in the
-    /// canonical order.
+    /// relation or an array, of the type the descriptor describes, of
+    /// `count` (a [`Layout::Usize`]) tuples or elements, zeroed, in memory
+    /// the statement owns, for compiled code to fill in. [`RuntimeFn::Sort`]
+    /// then puts a relation's tuples in the canonical order.
     Allocate,
     /// `trendy_rt_sort(relation, descriptor)`: sort the tuples of the
     /// relation at `relation`, of the type the descriptor describes, into the
@@ -266,15 +268,15 @@ pub enum RuntimeFn {
     CompareText,
     /// `trendy_rt_equal(dst, lhs, rhs, descriptor)`: store at `dst`, a
     /// [`Layout::U8`], whether two values of the type the descriptor
-    /// describes are equal. For tuples and relations.
+    /// describes are equal. For tuples, relations and arrays.
     Equal,
     /// `trendy_rt_assign(dst, owner, src, descriptor)`: store at `dst`, a
     /// variable's value, a copy of the value at `src`, of the type the
     /// descriptor describes, with what it points to in memory of its own,
     /// which `owner`, a [`Layout::Address`] next to the value, then holds.
     /// The memory `owner` held before, if any, a statement owns (see
-    /// [`RuntimeFn::Begin`]). For values that point to texts or
-    /// relations; others are copied.
+    /// [`RuntimeFn::Begin`]). For values that point to texts, relations or
+    /// arrays; others are copied.
     Assign,
 }
 
@@ -337,14 +339,14 @@ pub enum Inst {
         lhs: Place,
         rhs: Place,
     },
-    /// Store at `dst`, a [`Layout::Address`], the address of tuple number
-    /// `index` (a [`Layout::Usize`]) of the relation at `relation`, whose
-    /// tuples have layout `tuple`.
+    /// Store at `dst`, a [`Layout::Address`], the address of element number
+    /// `index` (a [`Layout::Usize`], from 0) of `array`, a relation's tuples
+    /// or an array's elements, each laid out as `element`.
     Element {
         dst: Place,
-        relation: Place,
+        array: Place,
         index: Place,
-        tuple: Layout,
+        element: Layout,
     },
     /// Add 1 to the [`Layout::Usize`] at `place`, which counts a loop's
     /// iterations, and so never overflows.
@@ -367,7 +369,8 @@ pub enum Operand {
     Boolean,
     Numeric(Numeric),
     /// [`Layout::Usize`], such as a loop's index, compared unsigned. Only
-    /// comparisons and [`UnaryOp::Integer`] take it.
+    /// comparisons and [`UnaryOp::Integer`] take it, and only
+    /// [`UnaryOp::Usize`] makes it.
     Usize,
 }
 
@@ -382,6 +385,9 @@ pub enum UnaryOp {
     /// The integer a [`Layout::Usize`] is, such as a relation's count,
     /// which is never more than the largest integer.
     Integer,
+    /// The [`Layout::Usize`] an integer is, which is never negative, nor
+    /// more than an array's count: an array's position, less 1.
+    Usize,
     /// The approximate number nearest an integer, ties to even: the
     /// integer itself up to 2^53 in magnitude.
     Approximate,
@@ -394,7 +400,7 @@ impl UnaryOp {
             UnaryOp::Not => Operand::Boolean,
             UnaryOp::Negate(numeric) => Operand::Numeric(numeric),
             UnaryOp::Integer => Operand::Usize,
-            UnaryOp::Approximate => Operand::Numeric(Numeric::Integer),
+            UnaryOp::Usize | UnaryOp::Approximate => Operand::Numeric(Numeric::Integer),
         }
     }
 }
@@ -423,8 +429,8 @@ pub enum BinaryOp {
     Mod,
     /// A comparison, whose result is a boolean: `false` before `true`,
     /// integers numerically, and approximate numbers by IEEE 754 totalOrder.
-    /// Texts are compared by [`RuntimeFn::CompareText`], and tuples and
-    /// relations by [`RuntimeFn::Equal`].
+    /// Texts are compared by [`RuntimeFn::CompareText`], and tuples,
+    /// relations and arrays by [`RuntimeFn::Equal`].
     Compare(Comparison, Operand),
 }
 
@@ -475,6 +481,8 @@ pub enum Failure {
     /// A relation has no tuples, where the greatest value of an attribute
     /// is taken.
     NoMax,
+    /// An array has no element at the position it is indexed at.
+    IndexOutOfRange,
 }
 
 impl Failure {
@@ -491,6 +499,7 @@ impl Failure {
             Failure::KeyViolated => 9,
             Failure::NoMin => 11,
             Failure::NoMax => 12,
+            Failure::IndexOutOfRange => 13,
         }
     }
 }
@@ -570,9 +579,9 @@ pub struct Data {
 pub enum DataKind {
     /// A program variable. `name` is unique among variables; codegen derives
     /// the symbol from it. Its first field is its value; a value that
-    /// points to texts or relations has a second, a [`Field::Usize`] of 0,
-    /// where [`RuntimeFn::Assign`] keeps the address of the memory it
-    /// copies them to.
+    /// points to texts, relations or arrays has a second, a
+    /// [`Field::Usize`] of 0, where [`RuntimeFn::Assign`] keeps the address
+    /// of the memory it copies them to.
     Variable { name: String },
     /// Data with no name in the program, such as a text literal's bytes.
     Constant,

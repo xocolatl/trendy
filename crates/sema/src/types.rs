@@ -12,8 +12,8 @@ use trendy_diag::{Diagnostic, Span, edit_distance};
 use trendy_hir as hir;
 use trendy_syntax::SyntaxToken;
 use trendy_syntax::ast::{
-    self, AstNode, AttributeValue, Expr, Literal, LiteralError, LiteralValue, RelationLiteral,
-    TupleLiteral, TypeExpr,
+    self, ArrayLiteral, AstNode, AttributeValue, Expr, Literal, LiteralError, LiteralValue,
+    RelationLiteral, TupleLiteral, TypeExpr,
 };
 
 use crate::check::{Checker, Names};
@@ -114,6 +114,9 @@ impl Origin {
             Origin::Operator(token) if token.kind() == trendy_syntax::SyntaxKind::WhereKw => {
                 "`where` takes a boolean condition".to_string()
             }
+            Origin::Operator(token) if token.kind() == trendy_syntax::SyntaxKind::LBracket => {
+                "an array's positions are integers, counting from 1".to_string()
+            }
             // Only operators with a fixed operand type are origins.
             Origin::Operator(token) => match Operator::of(token).map(|op| (op, op.operands())) {
                 Some((op, Operands::Fixed(scalar))) if op.is_prefix() => {
@@ -156,6 +159,16 @@ impl Origin {
                 })?
                 .value()
                 .map(Origin::Value),
+            _ => None,
+        }
+    }
+
+    /// Where the expectation for an array's elements is written.
+    fn array_element(&self) -> Option<Origin> {
+        match self {
+            Origin::Variable(_, declared) => declared.array_element(),
+            Origin::Type(TypeExpr::Array(array)) => array.element().map(Origin::Type),
+            Origin::Value(Expr::Array(array)) => array.elements().next().map(Origin::Value),
             _ => None,
         }
     }
@@ -249,6 +262,7 @@ pub(crate) fn any_of(
     Some(match what.kind() {
         trendy_syntax::SyntaxKind::TupleKw => hir::Any::Tuple,
         trendy_syntax::SyntaxKind::RelationKw => hir::Any::Relation,
+        trendy_syntax::SyntaxKind::ArrayKw => hir::Any::Array,
         _ if what.text() == "type" => hir::Any::Type,
         _ => {
             let Some(kind) = namespaces.kind(what.text()) else {
@@ -286,6 +300,10 @@ pub(crate) fn resolve(
         TypeExpr::Relation(relation) => {
             resolve_heading(&relation.heading()?, parameters, namespaces, errors)
                 .map(hir::Type::Relation)
+        }
+        TypeExpr::Array(array) => {
+            let element = resolve(&array.element()?, parameters, namespaces, errors)?;
+            Some(hir::Type::Array(Box::new(element)))
         }
         TypeExpr::Any(written) => {
             let any = any_of(written, namespaces, errors)?;
@@ -707,9 +725,93 @@ impl<T> Alone<T> {
 /// then, aren't.
 fn given(error: &Diagnostic, span: Span) -> bool {
     let at = error.span();
-    error.code == trendy_diag::Code::UnknownRelationHeading
+    error.code == trendy_diag::Code::UnknownEmptyType
         && span.start <= at.start
         && at.end <= span.end
+}
+
+/// An array selector, checked against `expected` if given. Its elements'
+/// type comes from the selector, as in `array integer []`, the type
+/// expected of it, or an element that is valid on its own, whichever it is
+/// (see [`Alone`]).
+pub(crate) fn array_selector(
+    array: &ArrayLiteral,
+    expected: Option<&Expected>,
+    checker: &mut Checker,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<hir::Expr> {
+    let own = match array.element_type() {
+        Some(written) => {
+            let mut parameters = checker.type_parameters();
+            let ty = resolve(&written, &mut parameters, checker.namespaces(), errors)?;
+            Some(Expected {
+                ty: hir::Type::Array(Box::new(ty)),
+                origin: Origin::Type(written),
+            })
+        }
+        None => None,
+    };
+    let here = own.as_ref().or(expected);
+    let mut element = match here {
+        Some(Expected {
+            ty: hir::Type::Array(element),
+            origin,
+        }) => Some(Expected {
+            ty: (**element).clone(),
+            origin: origin.array_element().unwrap_or_else(|| origin.clone()),
+        }),
+        Some(_) => {
+            let out = array_selector(array, None, checker, errors)?;
+            return checker.matched(expected, out, &Expr::Array(array.clone()), errors);
+        }
+        None => None,
+    };
+    let elements: Vec<Expr> = array.elements().collect();
+    let mut alone: Vec<Option<Alone<hir::Expr>>> = vec![None; elements.len()];
+    if element.is_none() {
+        for (written, alone) in elements.iter().zip(&mut alone) {
+            let mut own_errors = Vec::new();
+            let out = checker.expr(written, None, &mut own_errors);
+            let on_its_own = Alone::of(out, own_errors, written.span());
+            if let Alone::Valid(out) = &on_its_own {
+                element = Some(Expected {
+                    ty: checker.ty(out),
+                    origin: Origin::Value(written.clone()),
+                });
+                *alone = Some(on_its_own);
+                break;
+            }
+            *alone = Some(on_its_own);
+        }
+    }
+    let mut ok = true;
+    let mut values = Vec::new();
+    for (written, alone) in elements.iter().zip(alone) {
+        let out = match alone {
+            Some(alone) => alone.finish(element.is_some(), written.span(), errors, |errors| {
+                checker.expr(written, element.as_ref(), errors)
+            }),
+            None => checker.expr(written, element.as_ref(), errors),
+        };
+        match out {
+            Some(out) => values.push(out),
+            None => ok = false,
+        }
+    }
+    // An element with errors was already reported; it may be why there is
+    // no type, so that isn't reported again.
+    if !ok {
+        return None;
+    }
+    let Some(Expected { ty: element, .. }) = element else {
+        errors.push(errors::unknown_array_type(array.span()));
+        return None;
+    };
+    let out = crate::ops::array(element, values);
+    match &own {
+        Some(_) => checker.matched(expected, out, &Expr::Array(array.clone()), errors),
+        None => Some(out),
+    }
 }
 
 pub(crate) fn literal_value(literal: &Literal, errors: &mut Vec<Diagnostic>) -> Option<hir::Value> {

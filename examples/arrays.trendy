@@ -1,0 +1,85 @@
+/* Arrays (The Third Manifesto, chapter 3: the `ARRAY` type generator):
+   values of one type, in order, each at a position counting from 1. Each
+   result below is printed twice, folded when compiling and computed when
+   running. */
+var rainfall := array [1200, 950, 220];
+var dry: array text;
+var grid := array [array [1, 2], array [3]];
+
+/* An attribute can be an array, and an empty one takes its elements' type
+   from another tuple's. */
+var cities := relation {
+    { city: "Mumbai", rainy: array ["Jun", "Jul", "Aug", "Sep"] },
+    { city: "Cairo", rainy: array [] },
+};
+
+/* A relation's tuples are in canonical order: arrays element by element,
+   a prefix first. */
+var ordered := relation {
+    { m: array [2] },
+    { m: array [1, 9] },
+    { m: array [] }
+};
+
+/* An element at a position, and how many there are. */
+var second := rainfall[2];
+var corner := grid[1][2];
+var months := length{a: rainfall};
+
+/* Equal when their elements at each position are. */
+var compared := tuple {
+    copied: rainfall = array [1200, 950, 220],
+    reordered: rainfall = array [950, 1200, 220],
+};
+
+operator first{a: array E}: E
+    types { E: any type }
+[
+    return a[1];
+];
+
+var wettest := first{a: rainfall};
+var named := first{a: array ["Amara", "Kofi"]};
+
+/* The same, of values known only when running. */
+operator computed{wet: integer, mid: integer, low: integer, two: integer, city: text, at: integer} [
+    var none: array text;
+    var r := array [wet, mid, low];
+    var g := array [array [1, two], array [3]];
+    call debug_value{v: r};
+    call debug_value{v: none};
+    call debug_value{v: g};
+    call debug_value{v: relation {
+        { city: city, rainy: array ["Jun", "Jul", "Aug", "Sep"] },
+        { city: "Cairo", rainy: array [] }
+    }};
+    call debug_value{v: relation {
+        { m: array [two] },
+        { m: array [1, 9] },
+        { m: array [] }
+    }};
+    call debug_value{v: r[at]};
+    call debug_value{v: g[1][at]};
+    call debug_value{v: length{a: r}};
+    call debug_value{
+        v: tuple { copied: r = array [wet, mid, low], reordered: r = array [mid, wet, low] }
+    };
+    call debug_value{v: first{a: r}};
+    call debug_value{v: first{a: array ["Amara", city]}};
+];
+
+operator main{} [
+    call debug_value{v: rainfall};
+    call debug_value{v: dry};
+    call debug_value{v: grid};
+    call debug_value{v: cities};
+    call debug_value{v: ordered};
+    call debug_value{v: second};
+    call debug_value{v: corner};
+    call debug_value{v: months};
+    call debug_value{v: compared};
+    call debug_value{v: wettest};
+    call debug_value{v: named};
+
+    call computed{wet: 1200, mid: 950, low: 220, two: 2, city: "Mumbai", at: 2};
+];

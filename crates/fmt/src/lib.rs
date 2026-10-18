@@ -13,8 +13,8 @@ mod order;
 use std::collections::HashSet;
 
 use trendy_syntax::ast::{
-    Arguments, AssignBlock, AssignList, AstNode, Body, Clause, GatherList, Heading, NameList,
-    NaryExpr, RelationLiteral, RenameList, SourceFile, TupleLiteral,
+    Arguments, ArrayLiteral, AssignBlock, AssignList, AstNode, Body, Clause, GatherList, Heading,
+    NameList, NaryExpr, RelationLiteral, RenameList, SourceFile, TupleLiteral,
 };
 use trendy_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
@@ -156,6 +156,7 @@ fn is_list(node: &SyntaxNode) -> bool {
             | SyntaxKind::RequirementList
             | SyntaxKind::TupleLiteral
             | SyntaxKind::RelationLiteral
+            | SyntaxKind::ArrayLiteral
             | SyntaxKind::NameList
             | SyntaxKind::RenameList
             | SyntaxKind::AssignList
@@ -426,6 +427,8 @@ fn is_multi_tuple_relation(node: &SyntaxNode) -> bool {
 fn items(node: &SyntaxNode) -> usize {
     if let Some(relation) = RelationLiteral::cast(node.clone()) {
         relation.elements().count()
+    } else if let Some(array) = ArrayLiteral::cast(node.clone()) {
+        array.elements().count()
     } else if let Some(tuple) = TupleLiteral::cast(node.clone()) {
         tuple.attributes().count()
     } else if let Some(args) = Arguments::cast(node.clone()) {
@@ -578,9 +581,14 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
         .parent()
         .is_some_and(|p| p.kind() == SyntaxKind::AnyType && p.last_token().as_ref() == Some(prev));
     // A body's `[` follows what comes before it after a space, whether the
-    // parameters or a read-only operator's result type: `f{}: integer [`.
-    let body =
-        next.kind() == LBracket && next.parent().is_some_and(|p| p.kind() == SyntaxKind::Body);
+    // parameters or a read-only operator's result type: `f{}: integer [`,
+    // and so does an array selector's, whether its keyword or its elements'
+    // type: `array [1, 2]`, `array text []`. An index's `[` follows its
+    // operand directly: `a[1]`.
+    let spaced_bracket = next.kind() == LBracket
+        && next
+            .parent()
+            .is_some_and(|p| matches!(p.kind(), SyntaxKind::Body | SyntaxKind::ArrayLiteral));
     // A projection's braces follow its operand directly: `r{a}{b}`.
     let projection = next.kind() == LBrace
         && next.parent().is_some_and(|list| {
@@ -592,7 +600,7 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
         // The variable an assignment assigns, as in `update r { … }`.
         _ if is_target(prev) => " ",
         _ if projection => "",
-        _ if body => " ",
+        _ if spaced_bracket => " ",
         (LBrace, RBrace) if list_brace(prev) => "",
         (LBrace, _) if list_brace(prev) => " ",
         (_, RBrace) if list_brace(next) => " ",
@@ -611,8 +619,8 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
 /// a name or an operand, or a separator.
 fn spaced_after(kind: SyntaxKind) -> bool {
     use SyntaxKind::{
-        AssignKw, BuiltinKw, CallKw, Colon, Comma, DInsertKw, DeleteKw, IDeleteKw, InsertKw, NotKw,
-        OperatorKw, RelationKw, ReturnKw, TupleKw, UpdateKw, VarKw,
+        ArrayKw, AssignKw, BuiltinKw, CallKw, Colon, Comma, DInsertKw, DeleteKw, IDeleteKw,
+        InsertKw, NotKw, OperatorKw, RelationKw, ReturnKw, TupleKw, UpdateKw, VarKw,
     };
     spaced_before(kind)
         || matches!(
@@ -621,6 +629,7 @@ fn spaced_after(kind: SyntaxKind) -> bool {
                 | VarKw
                 | TupleKw
                 | RelationKw
+                | ArrayKw
                 | CallKw
                 | BuiltinKw
                 | Colon
@@ -818,6 +827,23 @@ mod tests {
                 "var r:=relation{a:integer}{{a:1},tuple{a:2}};var e:relation{a:integer}:=relation{};var d:=relation{}{};var t:=tuple{a:integer}{a:1};"
             ),
             "var r := relation { a: integer } {\n    { a: 1 },\n    tuple { a: 2 }\n};\nvar e: relation { a: integer } := relation {};\nvar d := relation {} {};\nvar t := tuple { a: integer } { a: 1 };\n"
+        );
+    }
+
+    #[test]
+    fn arrays() {
+        // A selector's `[` after a space, an index's right after its value.
+        assert_eq!(
+            fmt(
+                "var a:array   integer:=array[1,2 ,3];var e:=array text[ ];var g:=array[array[1],array integer[]];var x:=a [ 1 ]+g[1][1];operator f{a:any   array}:integer[return length{a:a};];"
+            ),
+            "var a: array integer := array [1, 2, 3];\nvar e := array text [];\nvar g := array [array [1], array integer []];\nvar x := a[1] + g[1][1];\n\noperator f{a: any array}: integer [\n    return length{a: a};\n];\n"
+        );
+        // Too long for one line, one element per line.
+        let months = r#"var m := array ["January", "February", "March", "April", "May", "June", "July", "August", "September"];"#;
+        assert_eq!(
+            fmt(months),
+            "var m := array [\n    \"January\",\n    \"February\",\n    \"March\",\n    \"April\",\n    \"May\",\n    \"June\",\n    \"July\",\n    \"August\",\n    \"September\"\n];\n"
         );
     }
 

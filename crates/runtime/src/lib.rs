@@ -23,6 +23,7 @@ pub const KIND_APPROXIMATE: u8 = 2;
 pub const KIND_TEXT: u8 = 3;
 pub const KIND_TUPLE: u8 = 4;
 pub const KIND_RELATION: u8 = 5;
+pub const KIND_ARRAY: u8 = 6;
 
 /// An integer result out of range.
 pub const FAIL_INTEGER_OVERFLOW: u32 = 0;
@@ -53,6 +54,8 @@ pub const FAIL_NO_MIN: u32 = 11;
 /// A relation has no tuples, where the greatest value of an attribute is
 /// taken.
 pub const FAIL_NO_MAX: u32 = 12;
+/// An array has no element at the position it is indexed at.
+pub const FAIL_INDEX_OUT_OF_RANGE: u32 = 13;
 
 /// The line written to stderr for each `FAIL_` constant, with the
 /// compiler's error code, which `trendyc --explain` describes.
@@ -80,6 +83,7 @@ pub fn failure_message(failure: u32) -> &'static str {
         }
         FAIL_NO_MIN => "error[R0010]: the relation has no tuples, so it has no min\n",
         FAIL_NO_MAX => "error[R0010]: the relation has no tuples, so it has no max\n",
+        FAIL_INDEX_OUT_OF_RANGE => "error[R0011]: an array has no element at that position\n",
         // The compiler and the runtime disagree: a bug.
         _ => "error[X0000]: internal error: unknown run-time failure\n",
     }
@@ -120,9 +124,10 @@ pub unsafe extern "C" fn trendy_rt_concat(dst: *mut Text, lhs: *const Text, rhs:
 /// Store at `dst` 1 if `lhs` and `rhs`, of the type `desc` describes, are
 /// equal, and 0 if not. Two values are equal exactly when they are the same
 /// value: approximate numbers when they have the same bits (IEEE 754
-/// totalOrder), tuples attribute by attribute, and relations when they have
-/// the same tuples. The compiler keeps every relation's tuples in one
-/// canonical order, so equal relations have equal arrays.
+/// totalOrder), tuples attribute by attribute, relations when they have
+/// the same tuples, and arrays element by element. The compiler keeps every
+/// relation's tuples in one canonical order, so equal relations have equal
+/// arrays of tuples.
 ///
 /// # Safety
 ///
@@ -161,12 +166,13 @@ pub unsafe fn equal(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> bool {
                         == core::slice::from_raw_parts(b.0, b.1)
             }
             KIND_TUPLE => tuples_equal(lhs, rhs, desc),
-            KIND_RELATION => {
+            KIND_RELATION | KIND_ARRAY => {
                 let ((a, count), (b, other)) = (read_slice(lhs), read_slice(rhs));
+                let element = desc.element();
                 count == other
                     && (0..count).all(|i| {
-                        let offset = i * desc.element_size;
-                        tuples_equal(a.add(offset), b.add(offset), desc)
+                        let offset = i * element.size;
+                        equal(a.add(offset), b.add(offset), element)
                     })
             }
             _ => false,
@@ -214,7 +220,8 @@ unsafe fn text_bytes<'a>(text: Text) -> &'a [u8] {
 }
 
 /// The header of a block of memory holding what values point to: each
-/// text's bytes and each relation's tuples. A block is a statement's, in
+/// text's bytes, each relation's tuples and each array's elements. A block
+/// is a statement's, in
 /// its [`Scope`], or a variable's, holding what its value points to. Its
 /// alignment keeps the memory after it aligned for any value.
 #[cfg(not(test))]
@@ -228,9 +235,9 @@ struct Owned {
 }
 
 /// The memory a statement owns, from [`trendy_rt_begin`] to
-/// [`trendy_rt_end`]: every text and relation that runtime functions make
-/// while it runs, since no value outlives the statement that computes it,
-/// and variables' old values that it can still point into. So a value never
+/// [`trendy_rt_end`]: every text, relation and array that runtime functions
+/// make while it runs, since no value outlives the statement that computes
+/// it, and variables' old values that it can still point into. So a value never
 /// needs freeing on its own, however many times a loop made one.
 ///
 /// Scopes nest as calls do: a statement that calls an update operator holds
@@ -290,8 +297,8 @@ pub unsafe extern "C" fn trendy_rt_begin(scope: *mut Scope) {
 }
 
 /// End the scope at `scope`, releasing the memory its statement owns: the
-/// end of the lifetime of every text and relation runtime functions made
-/// while it ran.
+/// end of the lifetime of every text, relation and array runtime functions
+/// made while it ran.
 ///
 /// # Safety
 ///
@@ -448,13 +455,14 @@ impl Arena {
     }
 }
 
-/// The alignment of each relation's tuples in an [`Arena`]: that of any
-/// value, as the block's start is.
+/// The alignment of each relation's tuples, and each array's elements, in
+/// an [`Arena`]: that of any value, as the block's start is.
 const ARRAY_ALIGN: usize = 16;
 
 /// Copy what the value at `src`, of the type `desc` describes, points to
 /// into `arena`, and point the copy of the value at `dst` to it: each text's
-/// bytes and each relation's tuples, and what those point to in turn. While
+/// bytes, each relation's tuples and each array's elements, and what those
+/// point to in turn. While
 /// measuring, `dst` is null, and nothing is written.
 ///
 /// # Safety
@@ -475,20 +483,26 @@ unsafe fn persist(dst: *mut u8, src: *const u8, desc: &TypeDesc, arena: &mut Are
                 }
             }
             KIND_TUPLE => persist_tuple(dst, src, desc, arena),
-            KIND_RELATION => {
-                let (tuples, count) = read_slice(src);
-                let size = count * desc.element_size;
+            KIND_RELATION | KIND_ARRAY => {
+                let (elements, count) = read_slice(src);
+                let element = desc.element();
+                let size = count * element.size;
                 let to = arena.take(size, ARRAY_ALIGN);
                 if !to.is_null() {
-                    core::ptr::copy_nonoverlapping(tuples, to, size);
+                    core::ptr::copy_nonoverlapping(elements, to, size);
                     dst.cast::<Text>().write_unaligned(Text {
                         bytes: to,
                         len: count,
                     });
                 }
                 for i in 0..count {
-                    let offset = i * desc.element_size;
-                    persist_tuple(to.wrapping_add(offset), tuples.add(offset), desc, arena);
+                    let offset = i * element.size;
+                    persist(
+                        to.wrapping_add(offset),
+                        elements.add(offset),
+                        element,
+                        arena,
+                    );
                 }
             }
             _ => {}
@@ -517,7 +531,7 @@ unsafe fn persist_tuple(dst: *mut u8, src: *const u8, desc: &TypeDesc, arena: &m
 }
 
 /// Memory for `count` values of type `T`, at least one byte, so that even
-/// an empty text or relation has an address. `malloc`'s memory is aligned
+/// an empty text, relation or array has an address. `malloc`'s memory is aligned
 /// for any type. Stops the program if there is none.
 #[cfg(not(test))]
 fn allocate<T>(count: usize) -> *mut T {
@@ -559,7 +573,7 @@ pub unsafe extern "C" fn trendy_rt_reshape(
     unsafe {
         let (result, source) = (&*result, &*source);
         let (tuples, count) = read_slice(src);
-        let size = result.element_size;
+        let size = result.element().size;
         let Some(bytes) = count.checked_mul(size) else {
             trendy_rt_fail(FAIL_OUT_OF_MEMORY)
         };
@@ -569,7 +583,7 @@ pub unsafe extern "C" fn trendy_rt_reshape(
         let projected = allocate::<u8>(bytes);
         core::ptr::write_bytes(projected, 0, bytes);
         for i in 0..count {
-            let from = tuples.add(i * source.element_size);
+            let from = tuples.add(i * source.element().size);
             let to = projected.add(i * size);
             for (attr, &offset) in attributes.iter().zip(offsets) {
                 core::ptr::copy_nonoverlapping(
@@ -683,11 +697,11 @@ pub unsafe extern "C" fn trendy_rt_and(
         let result_attrs = attributes(result);
         let sources = array(sources, result_attrs.len());
         let common = array(common, common_count.read_unaligned());
-        let lhs_sorted = sorted_on(common, true, lhs, lhs_count, lhs_desc.element_size);
-        let rhs_sorted = sorted_on(common, false, rhs, rhs_count, rhs_desc.element_size);
+        let lhs_sorted = sorted_on(common, true, lhs, lhs_count, lhs_desc.element().size);
+        let rhs_sorted = sorted_on(common, false, rhs, rhs_count, rhs_desc.element().size);
         let (groups, total) = matching_runs(common, lhs_sorted, rhs_sorted);
 
-        let size = result.element_size;
+        let size = result.element().size;
         let Some(bytes) = total.checked_mul(size) else {
             trendy_rt_fail(FAIL_OUT_OF_MEMORY)
         };
@@ -769,7 +783,7 @@ pub unsafe extern "C" fn trendy_rt_ungroup(
         let result_attrs = attributes(result);
         let sources = array(sources, result_attrs.len());
         let ungrouped = array(ungrouped, ungrouped_count.read_unaligned());
-        let tuple = |i: usize| tuples.add(i * source.element_size);
+        let tuple = |i: usize| tuples.add(i * source.element().size);
         let total = (0..count)
             .map(|i| {
                 ungrouped.iter().try_fold(1usize, |product, u| {
@@ -777,7 +791,7 @@ pub unsafe extern "C" fn trendy_rt_ungroup(
                 })
             })
             .try_fold(0usize, |sum, n| sum.checked_add(n?));
-        let size = result.element_size;
+        let size = result.element().size;
         let Some((total, bytes)) = total.and_then(|total| Some((total, total.checked_mul(size)?)))
         else {
             trendy_rt_fail(FAIL_OUT_OF_MEMORY)
@@ -863,7 +877,7 @@ pub unsafe extern "C" fn trendy_rt_subset(
     unsafe {
         let desc = &*desc;
         let ((lhs, lhs_count), (rhs, rhs_count)) = (read_slice(lhs), read_slice(rhs));
-        let size = desc.element_size;
+        let size = desc.element().size;
         let mut j = 0;
         let mut subset = true;
         for i in 0..lhs_count {
@@ -930,7 +944,7 @@ pub unsafe extern "C" fn trendy_rt_combine(
         let ((lhs, lhs_count), (rhs, rhs_count)) = (read_slice(lhs), read_slice(rhs));
         let combination = combination.read_unaligned();
         let minus = matches!(combination, COMBINE_MINUS | COMBINE_INCLUDED_MINUS);
-        let size = desc.element_size;
+        let size = desc.element().size;
         let Some(room) = lhs_count.checked_add(rhs_count) else {
             trendy_rt_fail(FAIL_OUT_OF_MEMORY)
         };
@@ -1025,9 +1039,9 @@ pub unsafe extern "C" fn trendy_rt_matching(
         let ((lhs, lhs_count), (rhs, rhs_count)) = (read_slice(lhs), read_slice(rhs));
         let common = array(common, common_count.read_unaligned());
         let negated = negated.read_unaligned() == 1;
-        let lhs_sorted = sorted_on(common, true, lhs, lhs_count, lhs_desc.element_size);
-        let rhs_sorted = sorted_on(common, false, rhs, rhs_count, rhs_desc.element_size);
-        let size = lhs_desc.element_size;
+        let lhs_sorted = sorted_on(common, true, lhs, lhs_count, lhs_desc.element().size);
+        let rhs_sorted = sorted_on(common, false, rhs, rhs_count, rhs_desc.element().size);
+        let size = lhs_desc.element().size;
         let kept = allocate::<u8>(lhs_count * size);
         let (mut count, mut j) = (0, 0);
         // Both sorted on the common attributes, so each tuple of `lhs` is
@@ -1168,15 +1182,16 @@ unsafe fn matching_runs<'a>(
     }
 }
 
-/// Store at `dst` a relation of the type `desc` describes with `*count`
-/// tuples, all zero bytes, in memory the statement owns, for compiled code to
-/// fill in: a loop that computes each tuple of its result. Zeroing leaves
-/// the padding in tuples zero, as everywhere else.
+/// Store at `dst` a relation or an array of the type `desc` describes with
+/// `*count` tuples or elements, all zero bytes, in memory the statement
+/// owns, for compiled code to fill in: a loop that computes each tuple of
+/// its result, or each element of an array selector. Zeroing leaves the
+/// padding in them zero, as everywhere else.
 ///
 /// # Safety
 ///
-/// `count` must point to a `usize`, `desc` to a valid relation descriptor,
-/// and `dst` to memory for a relation.
+/// `count` must point to a `usize`, `desc` to a valid relation or array
+/// descriptor, and `dst` to memory for one.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn trendy_rt_allocate(
@@ -1187,7 +1202,7 @@ pub unsafe extern "C" fn trendy_rt_allocate(
     // SAFETY: guaranteed by the caller.
     unsafe {
         let count = count.read_unaligned();
-        let Some(bytes) = count.checked_mul((*desc).element_size) else {
+        let Some(bytes) = count.checked_mul((*desc).element().size) else {
             trendy_rt_fail(FAIL_OUT_OF_MEMORY)
         };
         let tuples = allocate_owned(bytes);
@@ -1227,9 +1242,9 @@ pub unsafe extern "C" fn trendy_rt_sort(relation: *mut Text, desc: *const TypeDe
 /// As for [`trendy_rt_reshape`]'s result.
 #[cfg(not(test))]
 unsafe fn canonical(tuples: *const u8, count: usize, desc: &TypeDesc) -> (*mut u8, usize) {
-    let size = desc.element_size;
     // SAFETY: guaranteed by the caller.
     unsafe {
+        let size = desc.element().size;
         let order = core::slice::from_raw_parts_mut(allocate::<*const u8>(count), count);
         for (i, tuple) in order.iter_mut().enumerate() {
             *tuple = tuples.add(i * size);
@@ -1253,7 +1268,7 @@ unsafe fn canonical(tuples: *const u8, count: usize, desc: &TypeDesc) -> (*mut u
 /// the compiler's (`hir::Value`'s): `false` before `true`, integers
 /// numerically, approximate numbers by IEEE 754 totalOrder, text by its
 /// bytes, tuples attribute by attribute in name order, and relations by their
-/// tuples, lexicographically.
+/// tuples and arrays by their elements, lexicographically, a prefix first.
 ///
 /// # Safety
 ///
@@ -1277,11 +1292,12 @@ pub unsafe fn order(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> core::cm
                 core::slice::from_raw_parts(a.0, a.1).cmp(core::slice::from_raw_parts(b.0, b.1))
             }
             KIND_TUPLE => compare_tuples(lhs, rhs, desc),
-            KIND_RELATION => {
+            KIND_RELATION | KIND_ARRAY => {
                 let ((a, count), (b, other)) = (read_slice(lhs), read_slice(rhs));
+                let element = desc.element();
                 for i in 0..count.min(other) {
-                    let offset = i * desc.element_size;
-                    let ordering = compare_tuples(a.add(offset), b.add(offset), desc);
+                    let offset = i * element.size;
+                    let ordering = order(a.add(offset), b.add(offset), element);
                     if ordering.is_ne() {
                         return ordering;
                     }
@@ -1335,8 +1351,22 @@ pub struct TypeDesc {
     /// For other kinds, `count` is 0 and this is not read.
     pub attributes: *const Attr,
     pub count: usize,
-    /// For a relation, the size of each tuple in its array, in bytes.
-    pub element_size: usize,
+    /// For a relation, its tuples' type, and for an array, its elements':
+    /// what each element of its memory is. For other kinds, null.
+    pub element: *const TypeDesc,
+}
+
+impl TypeDesc {
+    /// The type of each element of a relation's or an array's memory: its
+    /// tuples' or its elements'.
+    ///
+    /// # Safety
+    ///
+    /// The descriptor must be a valid relation or array descriptor.
+    unsafe fn element(&self) -> &TypeDesc {
+        // SAFETY: guaranteed by the caller.
+        unsafe { &*self.element }
+    }
 }
 
 /// An attribute of a heading.
@@ -1480,7 +1510,7 @@ impl Column {
             Column {
                 tuples,
                 count,
-                size: desc.element_size,
+                size: desc.element().size,
                 offset: attribute.offset,
                 kind: (*attribute.desc).kind,
             }
@@ -1614,8 +1644,9 @@ impl Write for Filled<'_> {
 }
 
 /// Write `value` as trendy source: tuples and relations with their
-/// attributes in name order, and relations with their heading first, so the
-/// output is a literal for the same value. An attribute without a name,
+/// attributes in name order, relations with their heading first, and an
+/// empty array with its elements' type, so the output is a literal for the
+/// same value. An attribute without a name,
 /// which the source can't name, is written `…`, last, without its type or
 /// value, as the compiler writes its type.
 ///
@@ -1660,9 +1691,26 @@ pub unsafe fn write_value(out: &mut impl Write, value: *const u8, desc: &TypeDes
                     if i > 0 {
                         out.write_str(", ")?;
                     }
-                    write_tuple(out, tuples.add(i * desc.element_size), desc)?;
+                    write_tuple(out, tuples.add(i * desc.element().size), desc)?;
                 }
                 out.write_str(" }")
+            }
+            KIND_ARRAY => {
+                let (elements, count) = read_slice(value);
+                let element = desc.element();
+                if count == 0 {
+                    out.write_str("array ")?;
+                    write_type(out, element)?;
+                    return out.write_str(" []");
+                }
+                out.write_str("array [")?;
+                for i in 0..count {
+                    if i > 0 {
+                        out.write_str(", ")?;
+                    }
+                    write_value(out, elements.add(i * element.size), element)?;
+                }
+                out.write_char(']')
             }
             _ => Err(fmt::Error),
         }
@@ -1689,6 +1737,11 @@ unsafe fn write_type(out: &mut impl Write, desc: &TypeDesc) -> fmt::Result {
             out.write_str("relation ")?;
             // SAFETY: guaranteed by the caller.
             unsafe { write_heading(out, desc) }
+        }
+        KIND_ARRAY => {
+            out.write_str("array ")?;
+            // SAFETY: guaranteed by the caller.
+            unsafe { write_type(out, desc.element()) }
         }
         _ => Err(fmt::Error),
     }
@@ -1808,7 +1861,8 @@ unsafe fn read_text<'a>(value: *const u8) -> &'a str {
     }
 }
 
-/// A pointer followed by a length, as in `text` and relation values.
+/// A pointer followed by a length, as in `text`, relation and array
+/// values.
 ///
 /// # Safety
 ///
@@ -1904,7 +1958,40 @@ mod tests {
             size,
             attributes: core::ptr::null(),
             count: 0,
-            element_size: 0,
+            element: core::ptr::null(),
+        }
+    }
+
+    /// A tuple of `size` bytes with `attributes`.
+    fn tuple_of(attributes: &[Attr], size: usize) -> TypeDesc {
+        TypeDesc {
+            kind: KIND_TUPLE,
+            size,
+            attributes: attributes.as_ptr(),
+            count: attributes.len(),
+            element: core::ptr::null(),
+        }
+    }
+
+    /// A relation whose tuples are `tuple`s.
+    fn relation_of(tuple: &TypeDesc) -> TypeDesc {
+        TypeDesc {
+            kind: KIND_RELATION,
+            size: 16,
+            attributes: tuple.attributes,
+            count: tuple.count,
+            element: tuple,
+        }
+    }
+
+    /// An array whose elements are `element`s.
+    fn array_of(element: &TypeDesc) -> TypeDesc {
+        TypeDesc {
+            kind: KIND_ARRAY,
+            size: 16,
+            attributes: core::ptr::null(),
+            count: 0,
+            element,
         }
     }
 
@@ -1942,13 +2029,8 @@ mod tests {
         // `relation { name: text } { { name: "Ada" }, { name: "李白" } }`.
         let text = scalar(KIND_TEXT, 16);
         let attrs = [attr("name", 0, &text)];
-        let relation = TypeDesc {
-            kind: KIND_RELATION,
-            size: 16,
-            attributes: attrs.as_ptr(),
-            count: 1,
-            element_size: 16,
-        };
+        let tuple = tuple_of(&attrs, 16);
+        let relation = relation_of(&tuple);
         let (ada, li) = ("Ada", "李白");
         let tuples = [
             [ada.as_ptr() as usize, ada.len()],
@@ -2034,13 +2116,7 @@ mod tests {
         let boolean = scalar(KIND_BOOLEAN, 1);
         let integer = scalar(KIND_INTEGER, 8);
         let heading = [attr("a", 0, &boolean), attr("b", 8, &integer)];
-        let tuple = TypeDesc {
-            kind: KIND_TUPLE,
-            size: 16,
-            attributes: heading.as_ptr(),
-            count: 2,
-            element_size: 0,
-        };
+        let tuple = tuple_of(&heading, 16);
         let value = |a: u8, b: i64| {
             let mut bytes = [0_u8; 16];
             bytes[0] = a;
@@ -2052,6 +2128,62 @@ mod tests {
         assert!(same_tuple(value(1, 7), value(1, 7)));
         assert!(!same_tuple(value(1, 7), value(0, 7)));
         assert!(!same_tuple(value(1, 7), value(1, 8)));
+        // array integer: element by element, and as long.
+        let integers = array_of(&integer);
+        let same_array = |x: &[i64], y: &[i64]| unsafe {
+            let (x, y) = (
+                [x.as_ptr() as usize, x.len()],
+                [y.as_ptr() as usize, y.len()],
+            );
+            equal(x.as_ptr().cast(), y.as_ptr().cast(), &integers)
+        };
+        assert!(same_array(&[1, 2], &[1, 2]));
+        assert!(!same_array(&[1, 2], &[2, 1]), "in order");
+        assert!(!same_array(&[1, 2], &[1, 2, 3]));
+        assert!(same_array(&[], &[]));
+    }
+
+    #[test]
+    fn arrays_are_ordered_element_by_element_a_prefix_first() {
+        let integer = scalar(KIND_INTEGER, 8);
+        let integers = array_of(&integer);
+        let ordering = |x: &[i64], y: &[i64]| unsafe {
+            let (x, y) = (
+                [x.as_ptr() as usize, x.len()],
+                [y.as_ptr() as usize, y.len()],
+            );
+            order(x.as_ptr().cast(), y.as_ptr().cast(), &integers)
+        };
+        assert!(ordering(&[1, 9], &[2]).is_lt());
+        assert!(ordering(&[1], &[1, 0]).is_lt());
+        assert!(ordering(&[], &[0]).is_lt());
+        assert!(ordering(&[3, 1], &[3, 1]).is_eq());
+    }
+
+    #[test]
+    fn arrays_are_written_as_selectors() {
+        let integer = scalar(KIND_INTEGER, 8);
+        let integers = array_of(&integer);
+        let rainfall: [i64; 3] = [1200, 950, 220];
+        let value: [usize; 2] = [rainfall.as_ptr() as usize, 3];
+        assert_eq!(
+            print(value.as_ptr().cast(), &integers),
+            "array [1200, 950, 220]"
+        );
+        let empty: [usize; 2] = [rainfall.as_ptr() as usize, 0];
+        assert_eq!(print(empty.as_ptr().cast(), &integers), "array integer []");
+        // array array integer, of none: its elements' type in full.
+        let nested = array_of(&integers);
+        assert_eq!(
+            print(empty.as_ptr().cast(), &nested),
+            "array array integer []"
+        );
+        let rows: [[usize; 2]; 2] = [value, empty];
+        let value: [usize; 2] = [rows.as_ptr() as usize, 2];
+        assert_eq!(
+            print(value.as_ptr().cast(), &nested),
+            "array [array [1200, 950, 220], array integer []]"
+        );
     }
 
     #[test]
@@ -2070,26 +2202,14 @@ mod tests {
         let integer = scalar(KIND_INTEGER, 8);
         // tuple { a: boolean, b: integer }: `a` at 0, `b` at 8, size 16.
         let heading = [attr("a", 0, &boolean), attr("b", 8, &integer)];
-        let tuple = TypeDesc {
-            kind: KIND_TUPLE,
-            size: 16,
-            attributes: heading.as_ptr(),
-            count: 2,
-            element_size: 0,
-        };
+        let tuple = tuple_of(&heading, 16);
         let one: [i64; 2] = [0, 25];
         assert_eq!(
             print(one.as_ptr().cast(), &tuple),
             "tuple { a: false, b: 25 }"
         );
 
-        let relation = TypeDesc {
-            kind: KIND_RELATION,
-            size: 16,
-            attributes: heading.as_ptr(),
-            count: 2,
-            element_size: 16,
-        };
+        let relation = relation_of(&tuple);
         let tuples: [i64; 4] = [0, 25, 1, 3];
         let value: [usize; 2] = [tuples.as_ptr() as usize, 2];
         assert_eq!(
@@ -2109,26 +2229,15 @@ mod tests {
         // tuple { "": integer, b: integer }, as a `per` relation's tuples
         // wrap their own attributes in one the source can't name.
         let heading = [attr("", 0, &integer), attr("b", 8, &integer)];
-        let relation = TypeDesc {
-            kind: KIND_RELATION,
-            size: 16,
-            attributes: heading.as_ptr(),
-            count: 2,
-            element_size: 16,
-        };
+        let tuple = tuple_of(&heading, 16);
+        let relation = relation_of(&tuple);
         let tuples: [i64; 4] = [1, 7, 2, 7];
         let value: [usize; 2] = [tuples.as_ptr() as usize, 2];
         assert_eq!(
             print(value.as_ptr().cast(), &relation),
             "relation { b: integer, … } { { b: 7, … }, { b: 7, … } }"
         );
-        let alone = TypeDesc {
-            kind: KIND_TUPLE,
-            size: 8,
-            attributes: heading.as_ptr(),
-            count: 1,
-            element_size: 0,
-        };
+        let alone = tuple_of(&heading[..1], 8);
         assert_eq!(print(tuples.as_ptr().cast(), &alone), "tuple { … }");
     }
 
@@ -2136,21 +2245,11 @@ mod tests {
     fn nested_relation_types_are_written_in_headings() {
         let integer = scalar(KIND_INTEGER, 8);
         let inner_heading = [attr("x", 0, &integer)];
-        let inner = TypeDesc {
-            kind: KIND_RELATION,
-            size: 16,
-            attributes: inner_heading.as_ptr(),
-            count: 1,
-            element_size: 8,
-        };
+        let inner_tuple = tuple_of(&inner_heading, 8);
+        let inner = relation_of(&inner_tuple);
         let outer_heading = [attr("r", 0, &inner)];
-        let outer = TypeDesc {
-            kind: KIND_RELATION,
-            size: 16,
-            attributes: outer_heading.as_ptr(),
-            count: 1,
-            element_size: 16,
-        };
+        let outer_tuple = tuple_of(&outer_heading, 16);
+        let outer = relation_of(&outer_tuple);
         let xs: [i64; 1] = [7];
         let inner_value: [usize; 2] = [xs.as_ptr() as usize, 1];
         let outer_value: [usize; 2] = [inner_value.as_ptr() as usize, 1];

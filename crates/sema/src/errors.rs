@@ -10,6 +10,7 @@ use trendy_syntax::ast::{
     AstNode, Expr, Key, NaryExpr, ProjectExpr, SourceFile, TypeExpr, VarDecl,
 };
 
+use crate::check::Written;
 use crate::globals::Pending;
 use crate::operators::Signature;
 use crate::types::{Origin, TypeParameters};
@@ -345,7 +346,7 @@ pub(crate) fn unknown_type(
     d
 }
 
-const ANY_ONLY_IN_PARAMETERS: &str = "only a parameter's type can be `any type`, `any tuple` or `any relation`: each call gives it the type of its argument, and nothing would give one written anywhere else a type";
+const ANY_ONLY_IN_PARAMETERS: &str = "only a parameter's type can be `any type`, `any tuple`, `any relation` or `any array`: each call gives it the type of its argument, and nothing would give one written anywhere else a type";
 const ANY_ELSEWHERE: &str = "to use the type of an argument here, declare a type parameter after the signature, `types { T: any type }`, and write `T` both here and as the parameter's type";
 const VARIABLE_TYPES: &str =
     "a variable's type is always a specific type, such as `integer` or `relation { name: text }`";
@@ -510,8 +511,8 @@ fn with_conversion(d: Diagnostic, subject: &str, builtin: hir::Builtin, expr: &E
 }
 
 /// An argument written `arg`, of type `actual`, for a parameter of type
-/// `parameter`, `any tuple` or `any relation`, written as `origin` says,
-/// which it isn't.
+/// `parameter`, `any tuple`, `any relation` or `any array`, written as
+/// `origin` says, which it isn't.
 pub(crate) fn not_of_kind(
     parameter: &hir::TypeParameter,
     origin: &Origin,
@@ -527,6 +528,10 @@ pub(crate) fn not_of_kind(
         hir::Any::Relation => (
             "a relation".to_string(),
             format!("a parameter of type `{parameter}` takes a relation of any heading"),
+        ),
+        hir::Any::Array => (
+            "an array".to_string(),
+            format!("a parameter of type `{parameter}` takes an array of any elements"),
         ),
         hir::Any::Kind(kind) => {
             let members: Vec<String> = namespaces
@@ -1284,7 +1289,8 @@ pub(crate) fn any_outside_parameter(
 }
 
 /// A name `name`, at `span`, that refers to nothing. `kind` is what was
-/// looked for ("value" or "operator"), and `candidates` the names in scope.
+/// looked for ("value" or "variable"), and `candidates` the names in
+/// scope.
 pub(crate) fn unknown_name(name: &str, span: Span, kind: &str, candidates: &[&str]) -> Diagnostic {
     let d = Diagnostic::error(
         Code::UnknownName,
@@ -1292,9 +1298,55 @@ pub(crate) fn unknown_name(name: &str, span: Span, kind: &str, candidates: &[&st
         span,
         "not defined",
     );
+    spelled_like(
+        d,
+        name,
+        span,
+        candidates,
+        "declare a variable with this name, or use a parameter",
+    )
+}
+
+/// The value `ARRAY`, or another spelling of `array`, at `span`, which
+/// refers to nothing, indexed: an array of one element, as SQL writes it,
+/// `ARRAY[1]`.
+pub(crate) fn miscased_array(name: &str, span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::UnknownName,
+        format!("unknown value `{name}`"),
+        span,
+        "not defined",
+    )
+    .with_note("keywords are case-sensitive, and every keyword is lowercase: an array value is written `array [element, …]`")
+    .with_suggestion(
+        "for an array, write `array`",
+        vec![Edit {
+            span,
+            replacement: "array ".to_string(),
+        }],
+    )
+}
+
+/// An operator `name`, at `span`, that refers to nothing, called with
+/// `written` arguments, if known, of which one is an array if `of_array`
+/// says so. `operators` are those in scope, each with its parameters'
+/// names.
+pub(crate) fn unknown_operator(
+    name: &str,
+    span: Span,
+    operators: &[(&str, Vec<&str>)],
+    written: Option<Written>,
+    of_array: bool,
+) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::UnknownName,
+        format!("unknown operator `{name}`"),
+        span,
+        "not defined",
+    );
     // `avg{…}`, as SQL writes a mean, which is no misspelling of `min`.
     let lowercase = name.to_lowercase();
-    if kind == "operator" && ["avg", "average", "mean"].contains(&&*lowercase) {
+    if ["avg", "average", "mean"].contains(&&*lowercase) {
         return d
             .with_note("a mean is the sum divided by the count, which the prelude's `sum` and `count` give; it has no mean of its own yet, as the mean of integers isn't an integer")
             .with_help("write `sum{r: r, of: x} / to_approximate{from: count{r: r}}`, and for integers, `to_approximate{from: sum{r: r, of: x}}` as the dividend");
@@ -1302,19 +1354,86 @@ pub(crate) fn unknown_name(name: &str, span: Span, kind: &str, candidates: &[&st
     // Other languages' names for the prelude's operators, such as Python's
     // `prod` and `len`, which no closeness of spelling finds, or finds
     // wrong: `len` is close to `min`.
-    let elsewhere = ELSEWHERE
-        .iter()
-        .find(|(other, _)| kind == "operator" && *other == lowercase)
-        .filter(|(_, ours)| candidates.contains(ours));
-    if let Some((_, ours)) = elsewhere {
-        return d.with_suggestion(
-            format!("use `{ours}`, as trendy calls it"),
-            vec![Edit {
-                span,
-                replacement: (*ours).to_string(),
-            }],
+    let ours = elsewhere(name).map(|(relation, array)| match array {
+        Some(array) if of_array => array,
+        _ => relation,
+    });
+    let Some((ours, params)) =
+        ours.and_then(|ours| operators.iter().find(|(name, _)| *name == ours))
+    else {
+        let names: Vec<&str> = operators.iter().map(|(name, _)| *name).collect();
+        return spelled_like(
+            d,
+            name,
+            span,
+            &names,
+            "define the operator, or call one that exists, such as `debug_value`",
         );
-    }
+    };
+    let mut edits = vec![Edit {
+        span,
+        replacement: (*ours).to_string(),
+    }];
+    // `len{r: a}` of an array, or Python's `len(a)`: `length`'s one
+    // parameter is `a`.
+    let named = match (written, params.as_slice()) {
+        (Some(written), [param]) => named_argument(written, param),
+        _ => None,
+    };
+    let named = match named {
+        Some((edit, param)) => {
+            edits.push(edit);
+            format!(", whose parameter is `{param}`")
+        }
+        None => String::new(),
+    };
+    d.with_suggestion(format!("use `{ours}`, as trendy calls it{named}"), edits)
+}
+
+/// The edit naming the one argument of a call, written `written`, `param`,
+/// the one parameter of the operator meant, if it has another name or
+/// none: a positional argument, or a name written as a projection's
+/// attribute, as in `len{a}`. Also `param`, for the fix's message.
+fn named_argument<'p>(written: Written, param: &'p str) -> Option<(Edit, &'p str)> {
+    let rename = |span| Edit {
+        span,
+        replacement: param.to_string(),
+    };
+    let name = |span: Span| Edit {
+        span: Span::empty(span.start),
+        replacement: format!("{param}: "),
+    };
+    let edit = match written {
+        Written::Arguments(args) => {
+            let named: Vec<_> = args.named().collect();
+            let positional: Vec<_> = args.positional().collect();
+            match (named.as_slice(), positional.as_slice()) {
+                ([only], []) => {
+                    let written = only.name()?;
+                    (written.ident()?.text() != param).then(|| rename(written.span()))?
+                }
+                ([], [only]) => name(only.span()),
+                _ => return None,
+            }
+        }
+        Written::Nothing(list) => {
+            let mut names = list.names();
+            let only = names.next().filter(|_| names.next().is_none())?;
+            name(only.span())
+        }
+    };
+    Some((edit, param))
+}
+
+/// `d`, about the name `name`, at `span`, with the fix to the closest of
+/// `candidates` in spelling, or else the help `otherwise`.
+fn spelled_like(
+    d: Diagnostic,
+    name: &str,
+    span: Span,
+    candidates: &[&str],
+    otherwise: &str,
+) -> Diagnostic {
     let closest = candidates
         .iter()
         .filter(|c| edit_distance(c, name) <= 2)
@@ -1327,16 +1446,63 @@ pub(crate) fn unknown_name(name: &str, span: Span, kind: &str, candidates: &[&st
                 replacement: (*closest).to_string(),
             }],
         ),
-        None => d.with_help(match kind {
-            "operator" => "define the operator, or call one that exists, such as `debug_value`",
-            _ => "declare a variable with this name, or use a parameter",
-        }),
+        None => d.with_help(otherwise),
     }
 }
 
 /// Other languages' names for operators of the prelude, lowercase, with
-/// the prelude's.
-const ELSEWHERE: &[(&str, &str)] = &[("len", "count"), ("length", "count"), ("prod", "product")];
+/// the prelude's, of a relation, and of an array if that is another:
+/// Python's `len` counts either, as SQL's `CARDINALITY` and Java's `size`
+/// do.
+const ELSEWHERE: &[(&str, &str, Option<&str>)] = &[
+    ("len", "count", Some("length")),
+    ("size", "count", Some("length")),
+    ("cardinality", "count", Some("length")),
+    ("prod", "product", None),
+];
+
+/// The prelude's operators that other languages call `name`, in any case:
+/// of a relation, and of an array if that is another, if there are any.
+pub(crate) fn elsewhere(name: &str) -> Option<(&'static str, Option<&'static str>)> {
+    let lowercase = name.to_lowercase();
+    ELSEWHERE
+        .iter()
+        .find(|(other, ..)| *other == lowercase)
+        .map(|&(_, relation, array)| (relation, array))
+}
+
+/// `d`, about the argument written `arg`, of type `actual`, of a call of
+/// the built-in `builtin`, with the fix calling the one for its kind of
+/// value instead: `count` counts a relation's tuples, and `length` an
+/// array's elements.
+pub(crate) fn counted_otherwise(
+    d: Diagnostic,
+    builtin: Option<hir::Builtin>,
+    actual: &hir::Type,
+    arg: &Expr,
+) -> Diagnostic {
+    let ours = match (builtin, actual) {
+        (Some(hir::Builtin::Count), hir::Type::Array(_)) => hir::Builtin::Length,
+        (Some(hir::Builtin::Length), hir::Type::Relation(_)) => hir::Builtin::Count,
+        _ => return d,
+    };
+    let call = arg
+        .syntax()
+        .parent()
+        .and_then(|p| p.ancestors().find_map(trendy_syntax::ast::CallExpr::cast));
+    let (Some(call), Some(param)) = (call, ours.params().into_keys().next()) else {
+        return d;
+    };
+    let name = ours.name();
+    let replacement = format!("{name}{{{param}: {}}}", arg.syntax().text());
+    d.with_suggestion(
+        format!("count it with `{name}`: `{replacement}`"),
+        vec![Edit {
+            span: call.span(),
+            replacement,
+        }],
+    )
+}
 
 /// The operator `name`, at `span`, used as a value.
 pub(crate) fn operator_as_value(name: &str, span: Span) -> Diagnostic {
@@ -2399,6 +2565,55 @@ pub(crate) fn not_extractable(name: &str, at: Span, ty: &hir::Type, operand: &Ex
     }
 }
 
+/// `index`, `a[i]`, whose operand `a`, written `operand`, has type `ty`,
+/// not an array's: only an array's elements have positions. A tuple's
+/// attribute named in quotes, as other languages index a dictionary, is
+/// its value instead.
+pub(crate) fn not_indexable(
+    index: &trendy_syntax::ast::IndexExpr,
+    ty: &hir::Type,
+    operand: &Expr,
+) -> Diagnostic {
+    let at = index.brackets().unwrap_or_else(|| index.span());
+    let d = Diagnostic::error(
+        Code::WrongOperandType,
+        format!("{} can't be indexed", plural(ty)),
+        at,
+        "only an array's elements have positions",
+    )
+    .with_parameter_note(ty)
+    .with_secondary(operand.span(), format!("this is `{ty}`"));
+    match ty {
+        hir::Type::Relation(_) => d.with_note(
+            "a relation's tuples have no order, so no positions (TTM RM Proscription 2): a tuple is found by its attribute values, as `tuple from (r where name = \"Amara\")` finds it",
+        ),
+        hir::Type::Tuple(heading) => {
+            let d = d.with_note("`t.name` is the value of the attribute `name` of the tuple `t`");
+            let name = index.index().and_then(|position| match position {
+                Expr::Literal(literal) => match literal.value() {
+                    Ok(trendy_syntax::ast::LiteralValue::Text(name)) => Some(name),
+                    _ => None,
+                },
+                _ => None,
+            });
+            match name.filter(|name| heading.get(name).is_some()) {
+                Some(name) => d.with_suggestion(
+                    format!("take the attribute's value: `.{name}`"),
+                    vec![Edit {
+                        span: at,
+                        replacement: format!(".{name}"),
+                    }],
+                ),
+                None => d,
+            }
+        }
+        hir::Type::Parameter(p) if p.any == hir::Any::Array => d.with_help(
+            "to index its elements, declare the parameter's type with theirs, a type parameter of its own: `a: array E` with `types { E: any type }`",
+        ),
+        _ => d,
+    }
+}
+
 /// `rename {}`, written `postfix` after `operand`, which renames nothing.
 pub(crate) fn empty_rename(
     postfix: &trendy_syntax::ast::PostfixExpr,
@@ -3286,13 +3501,26 @@ pub(crate) fn duplicate_tuple(span: Span, first: Span, removal: Span) -> Diagnos
 /// heading.
 pub(crate) fn unknown_relation_heading(span: Span) -> Diagnostic {
     Diagnostic::error(
-        Code::UnknownRelationHeading,
+        Code::UnknownEmptyType,
         "the heading of this empty relation is unknown",
         span,
         "no tuples, no heading, and no expected type",
     )
     .with_note("a relation's heading comes from its selector's heading, from its tuples, or from the type expected of it")
     .with_help("write the heading, as in `relation { name: text } {}`, or declare the variable's type, as in `var r: relation { name: text } := relation {};`")
+}
+
+/// An array value at `span` with no elements and nothing else giving
+/// their type.
+pub(crate) fn unknown_array_type(span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::UnknownEmptyType,
+        "the type of this empty array's elements is unknown",
+        span,
+        "no elements, no element type, and no expected type",
+    )
+    .with_note("an array's elements' type comes from its selector's element type, from its elements, or from the type expected of it")
+    .with_help("write the elements' type, as in `array text []`, or declare the variable's type, as in `var a: array text := array [];`")
 }
 
 pub(crate) fn approximate_out_of_range(span: Span) -> Diagnostic {
@@ -3322,9 +3550,11 @@ pub(crate) fn integer_out_of_range(span: Span) -> Diagnostic {
     ))
 }
 
-/// An operator written `expr` that has no result because of `failure`. `divisor` is its right operand, where a
-/// division by zero is reported.
-pub(crate) fn failure(failure: hir::Failure, expr: &Expr, divisor: Option<&Expr>) -> Diagnostic {
+/// An operator written `expr` that has no result because of `failure`.
+/// `at` is the operand the failure is reported at, if not the whole: the
+/// divisor of a division by zero, or the position of an index out of
+/// range.
+pub(crate) fn failure(failure: hir::Failure, expr: &Expr, at: Option<&Expr>) -> Diagnostic {
     match failure {
         hir::Failure::Overflow(hir::Scalar::Approximate) => Diagnostic::error(
             Code::Overflow,
@@ -3350,14 +3580,67 @@ pub(crate) fn failure(failure: hir::Failure, expr: &Expr, divisor: Option<&Expr>
         hir::Failure::DivisionByZero => Diagnostic::error(
             Code::DivisionByZero,
             "division by zero",
-            divisor.map_or(expr.span(), Expr::span),
+            at.map_or(expr.span(), Expr::span),
             "this is zero",
         )
         .with_note("`/`, `div` and `mod` have no result when the divisor is zero"),
+        hir::Failure::OutOfRange { index, length } => out_of_range(index, length, expr, at),
     }
 }
 
-/// How a type's values are named in the plural.
+/// The array `a[i]`, written `expr`, has no element at the position `i`,
+/// written `position`, whose value is `index`, as its `length`, if known,
+/// shows. Positions count from 1, so other languages' first element,
+/// `a[0]`, and elements counted from the end, as `a[-1]`, are fixed.
+fn out_of_range(
+    index: i64,
+    length: Option<usize>,
+    expr: &Expr,
+    position: Option<&Expr>,
+) -> Diagnostic {
+    let (message, label) = match length {
+        Some(0) => (
+            format!("the array is empty, so it has no element at position {index}"),
+            "an empty array has no positions".to_string(),
+        ),
+        Some(1) if index >= 1 => (
+            format!("the array has 1 element, so none at position {index}"),
+            "its only position is 1".to_string(),
+        ),
+        Some(length) if index >= 1 => (
+            format!("the array has {length} elements, so none at position {index}"),
+            format!("positions run from 1 to {length}"),
+        ),
+        _ => (
+            format!("an array has no element at position {index}"),
+            "positions count from 1".to_string(),
+        ),
+    };
+    let span = position.map_or(expr.span(), Expr::span);
+    let d = Diagnostic::error(Code::IndexOutOfRange, message, span, label).with_note(
+        "an array's elements are at positions 1 up to its length, counting from 1 as SQL and Tutorial D do",
+    );
+    let array = trendy_syntax::ast::IndexExpr::cast(expr.syntax().clone())
+        .and_then(|index| index.operand());
+    let (Some(array), true) = (array, position.and_then(written_literal).is_some()) else {
+        return d;
+    };
+    let length = format!("length{{a: {}}}", array.syntax().text());
+    let (message, replacement) = match index {
+        0 => ("for the first element, index it at 1", "1".to_string()),
+        -1 => (
+            "to count from the end, index from the array's length",
+            length,
+        ),
+        _ if index < 0 => (
+            "to count from the end, index from the array's length",
+            format!("{length} - {}", -(index + 1)),
+        ),
+        _ => return d,
+    };
+    d.with_suggestion(message, vec![Edit { span, replacement }])
+}
+
 /// A note on a type parameter's values: only what applies to any type of
 /// what it can be applies to them.
 trait ParameterNote {
@@ -3393,6 +3676,9 @@ impl ParameterNote for Diagnostic {
             hir::Any::Relation => format!(
                 "`{p}` can be any relation, so its attributes aren't known here: only `=` and `<>` apply to its values, and `<=`, `<`, `>=` and `>` as sets, and passing them on"
             ),
+            hir::Any::Array => format!(
+                "`{p}` can be any array, so its elements' type isn't known here: only `=` and `<>` apply to its values, and `length`, and passing them on"
+            ),
         })
     }
 }
@@ -3414,7 +3700,7 @@ fn kind_help(
     let none = std::collections::BTreeSet::new();
     let has = match &p.any {
         hir::Any::Kind(kind) => &kind.requires,
-        hir::Any::Type | hir::Any::Tuple | hir::Any::Relation => &none,
+        hir::Any::Type | hir::Any::Tuple | hir::Any::Relation | hir::Any::Array => &none,
     };
     let any = |fits: &dyn Fn(&hir::Kind) -> bool| {
         let names: Vec<String> = kinds
@@ -3461,6 +3747,7 @@ fn kind_help(
     }
 }
 
+/// How a type's values are named in the plural.
 fn plural(ty: &hir::Type) -> String {
     match ty {
         hir::Type::Scalar(hir::Scalar::Boolean) => "booleans".to_string(),
@@ -3469,6 +3756,7 @@ fn plural(ty: &hir::Type) -> String {
         hir::Type::Scalar(hir::Scalar::Text) => "text".to_string(),
         hir::Type::Tuple(_) => "tuples".to_string(),
         hir::Type::Relation(_) => "relations".to_string(),
+        hir::Type::Array(_) => "arrays".to_string(),
         hir::Type::Parameter(p) => format!("values of `{p}`"),
     }
 }
@@ -3504,6 +3792,9 @@ pub(crate) fn wrong_operand_type(
     let hir::Type::Scalar(scalar) = *ty else {
         return match (op, ty) {
             (_, hir::Type::Parameter(p)) => kind_help(d, op, p, token.text(), kinds),
+            (Operator::Compare(_), hir::Type::Array(_)) => d.with_note(
+                "arrays can only be compared with `=` and `<>`: they are equal if they have equal elements at each position",
+            ),
             (Operator::Compare(_), _) => d.with_note(
                 "tuples have no order: they can only be compared with `=` and `<>`; relations can also be compared as sets, with `<=` and `<` for subset and proper subset",
             ),

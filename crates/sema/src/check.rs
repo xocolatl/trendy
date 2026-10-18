@@ -172,20 +172,7 @@ impl<'a> Checker<'a> {
                 let value = types::literal_value(literal, errors)?;
                 self.matched(expected, hir::Expr::Constant(value), expr, errors)
             }
-            Expr::Name(name_ref) => {
-                let ident = name_ref.ident()?;
-                let (name, span) = (ident.text(), trendy_syntax::span(ident.text_range()));
-                match self.names.resolve(name, span, errors) {
-                    Lookup::Found(resolved) => self.matched(expected, resolved, expr, errors),
-                    Lookup::Reported => None,
-                    Lookup::Unknown => {
-                        let candidates = self.names.candidates();
-                        let candidates: Vec<&str> = candidates.iter().map(String::as_str).collect();
-                        errors.push(errors::unknown_name(name, span, "value", &candidates));
-                        None
-                    }
-                }
-            }
+            Expr::Name(name_ref) => self.named(name_ref, expr, expected, errors),
             Expr::Paren(paren) => self.expr(&paren.inner()?, expected, errors),
             Expr::Unary(unary) => {
                 if let Some(literal) = ops::negated_literal(unary) {
@@ -262,7 +249,74 @@ impl<'a> Checker<'a> {
             Expr::From(from) => self.taken(from, expr, expected, errors),
             Expr::Tuple(tuple) => types::tuple_selector(tuple, expected, self, errors),
             Expr::Relation(relation) => types::relation_selector(relation, expected, self, errors),
+            Expr::Array(array) => types::array_selector(array, expected, self, errors),
+            Expr::Index(index) => self.indexed(index, expr, expected, errors),
         }
+    }
+
+    /// The value `name_ref` names, written `expr`.
+    fn named(
+        &mut self,
+        name_ref: &ast::NameRef,
+        expr: &Expr,
+        expected: Option<&Expected>,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let ident = name_ref.ident()?;
+        let (name, span) = (ident.text(), trendy_syntax::span(ident.text_range()));
+        match self.names.resolve(name, span, errors) {
+            Lookup::Found(resolved) => self.matched(expected, resolved, expr, errors),
+            Lookup::Reported => None,
+            // `ARRAY[1]`, as SQL writes an array of one element.
+            Lookup::Unknown if name.eq_ignore_ascii_case("array") && indexed(name_ref) => {
+                errors.push(errors::miscased_array(name, span));
+                None
+            }
+            Lookup::Unknown => {
+                let candidates = self.names.candidates();
+                let candidates: Vec<&str> = candidates.iter().map(String::as_str).collect();
+                errors.push(errors::unknown_name(name, span, "value", &candidates));
+                None
+            }
+        }
+    }
+
+    /// `index`, `a[i]`, written `expr`: the element of the array `a` at the
+    /// position `i`, counting from 1.
+    fn indexed(
+        &mut self,
+        index: &ast::IndexExpr,
+        expr: &Expr,
+        expected: Option<&Expected>,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let operand_expr = index.operand()?;
+        let position_expr = index.index()?;
+        let operand = self.expr(&operand_expr, None, errors);
+        let ty = operand.as_ref().map(|operand| self.ty(operand));
+        let is_array = matches!(ty, Some(hir::Type::Array(_)));
+        if let Some(ty) = ty.as_ref().filter(|_| !is_array) {
+            errors.push(errors::not_indexable(index, ty, &operand_expr));
+        }
+        // Not an array's, the position has no type to expect, but can
+        // still have errors of its own.
+        let position = if let Some(token) = index.l_bracket().filter(|_| is_array) {
+            let integer = Expected {
+                ty: hir::Type::Scalar(hir::Scalar::Integer),
+                origin: types::Origin::Operator(token),
+            };
+            self.expr(&position_expr, Some(&integer), errors)
+        } else {
+            self.expr(&position_expr, None, errors);
+            None
+        };
+        let element = types::evaluated(
+            ops::index(operand?, position?),
+            expr,
+            Some(&position_expr),
+            errors,
+        )?;
+        self.matched(expected, element, expr, errors)
     }
 
     /// The error for `extract`, `x.f`, of `operand`, of type `ty`, which has
@@ -342,7 +396,9 @@ impl<'a> Checker<'a> {
     /// The operator's name and the list, if `project` is a call written as
     /// a projection: of a name right before `{}` that is an operator's, as
     /// it is after `call`, or of an operator's name before attribute names
-    /// when no value has it, which can then only be meant as a call.
+    /// when no value has it, which can then only be meant as a call, as is
+    /// another language's name for one of the prelude's, as in Python's
+    /// `len{a}`.
     fn projected_call(&self, project: &ast::ProjectExpr) -> Option<(SyntaxToken, ast::NameList)> {
         let Expr::Name(name_ref) = project.operand()? else {
             return None;
@@ -350,8 +406,13 @@ impl<'a> Checker<'a> {
         let ident = name_ref.ident()?;
         let list = project.names()?;
         let name = ident.text();
-        self.names.operators().named(name)?;
-        (list.names().next().is_none() || !self.names.has_value(name)).then_some((ident, list))
+        let operator = self.names.operators().named(name).is_some();
+        let call = if operator {
+            list.names().next().is_none() || !self.names.has_value(name)
+        } else {
+            errors::elsewhere(name).is_some() && !self.names.has_value(name)
+        };
+        call.then_some((ident, list))
     }
 
     /// `call`, written `expr`, with its arguments in braces.
@@ -369,7 +430,8 @@ impl<'a> Checker<'a> {
 
     /// A call of the operator `ident` names, written `expr` as a projection
     /// on `list`: without arguments if it is empty, and otherwise with the
-    /// names in it as positional arguments, which are reported.
+    /// names in it as positional arguments, which are reported, as is an
+    /// operator no one defined.
     fn projection_call(
         &mut self,
         ident: &SyntaxToken,
@@ -378,7 +440,8 @@ impl<'a> Checker<'a> {
         expected: Option<&Expected>,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Expr> {
-        if list.names().next().is_some() {
+        let known = self.names.operators().named(ident.text()).is_some();
+        if known && list.names().next().is_some() {
             self.positional_names(ident, list, errors);
             return None;
         }
@@ -412,6 +475,36 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Whether an argument of `written`, checked on its own, is an array,
+    /// as an unknown operator's argument is, to tell which of the prelude's
+    /// operators another language's name means. Its errors, if any, are
+    /// left for when the call names an operator.
+    fn of_array(&mut self, written: Written) -> bool {
+        let checked: Vec<hir::Expr> = match written {
+            Written::Arguments(args) => args
+                .named()
+                .filter_map(|a| a.value())
+                .chain(args.positional().filter_map(|a| a.value()))
+                .filter_map(|value| self.expr(&value, None, &mut Vec::new()))
+                .collect(),
+            // Names written as a projection's attributes, as in `len{a}`.
+            Written::Nothing(list) => list
+                .names()
+                .filter_map(|n| n.ident())
+                .filter_map(|ident| {
+                    let span = trendy_syntax::span(ident.text_range());
+                    match self.names.resolve(ident.text(), span, &mut Vec::new()) {
+                        Lookup::Found(value) => Some(value),
+                        Lookup::Reported | Lookup::Unknown => None,
+                    }
+                })
+                .collect(),
+        };
+        checked
+            .iter()
+            .any(|value| matches!(self.ty(value), hir::Type::Array(_)))
+    }
+
     /// A call of the operator `ident` names, with `written` arguments, as
     /// `expr`: a read-only operator's value, evaluated when compiling if
     /// its arguments are known then, and the variables it reads. One whose
@@ -431,8 +524,15 @@ impl<'a> Checker<'a> {
             if self.names.has_value(name) {
                 errors.push(errors::not_an_operator(name, span, "a value"));
             } else {
-                let operators: Vec<&str> = self.names.operators().names().collect();
-                errors.push(errors::unknown_name(name, span, "operator", &operators));
+                let of_array = self.of_array(written);
+                let operators = self.names.operators().names();
+                errors.push(errors::unknown_operator(
+                    name,
+                    span,
+                    &operators,
+                    Some(written),
+                    of_array,
+                ));
             }
             return None;
         };
@@ -770,7 +870,8 @@ impl<'a> Checker<'a> {
             let namespaces = self.names.namespaces();
             if let Err(error) = types.bind(name, ty, &actual, value, namespaces) {
                 let constant = Self::constant(&checked);
-                errors.push(error.diagnostic(&actual, constant, value, namespaces));
+                let builtin = types.signature.builtin;
+                errors.push(error.diagnostic(&actual, constant, value, namespaces, builtin));
                 return None;
             }
         }
@@ -1126,7 +1227,7 @@ impl<'a> Checker<'a> {
                 ));
                 return None;
             }
-            hir::Type::Scalar(_) | hir::Type::Parameter(_) => {
+            hir::Type::Scalar(_) | hir::Type::Array(_) | hir::Type::Parameter(_) => {
                 errors.push(errors::not_relational(operator, span, &ty, &operand_expr));
                 return None;
             }
@@ -1755,6 +1856,9 @@ fn bind(
                         .is_some_and(|other| bind(types, ty, other, arg, namespaces))
                 })
         }
+        (hir::Type::Array(pattern), hir::Type::Array(actual)) => {
+            bind(types, pattern, actual, arg, namespaces)
+        }
         _ => pattern == actual,
     }
 }
@@ -1771,23 +1875,36 @@ enum Unbound<'a> {
 
 impl Unbound<'_> {
     /// The error for an argument, written `arg`, of type `actual`, and
-    /// with the value `value` if it is a constant.
+    /// with the value `value` if it is a constant, of a call of the
+    /// built-in `builtin`, if it is one.
     fn diagnostic(
         &self,
         actual: &hir::Type,
         value: Option<&hir::Value>,
         arg: &Expr,
         namespaces: &Namespaces,
+        builtin: Option<hir::Builtin>,
     ) -> Diagnostic {
         match self {
             Unbound::Given(expected) => {
                 errors::type_mismatch(&expected.ty, &expected.origin, actual, value, arg)
             }
             Unbound::Kind(parameter, origin) => {
-                errors::not_of_kind(parameter, origin, actual, arg, namespaces)
+                let d = errors::not_of_kind(parameter, origin, actual, arg, namespaces);
+                errors::counted_otherwise(d, builtin, actual, arg)
             }
         }
     }
+}
+
+/// Whether `name_ref` is the operand of an index, as in `a[1]`.
+fn indexed(name_ref: &ast::NameRef) -> bool {
+    name_ref
+        .syntax()
+        .parent()
+        .and_then(ast::IndexExpr::cast)
+        .and_then(|index| index.operand())
+        .is_some_and(|operand| operand.syntax() == name_ref.syntax())
 }
 
 /// When an argument is checked, as [`TypeArguments`] says.

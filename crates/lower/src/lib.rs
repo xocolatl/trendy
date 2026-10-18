@@ -15,8 +15,8 @@ pub fn lower(program: &hir::Program) -> lir::Program {
     let mut variable_data = Vec::new();
     for variable in &program.variables {
         let mut fields = vec![cx.value_field(&variable.init)];
-        // Where an assigned value's texts and relations are: none yet, as
-        // the initial value's are constants.
+        // Where an assigned value's texts, relations and arrays are: none
+        // yet, as the initial value's are constants.
         if points(&variable.ty) {
             fields.push(lir::Field::Usize(0));
         }
@@ -43,8 +43,8 @@ pub fn lower(program: &hir::Program) -> lir::Program {
 }
 
 /// The function of the operator `id` instantiated with `types`, lowered
-/// when first called, and whether a call of it makes a text or relation
-/// that the calling statement owns, as a read-only operator's can.
+/// when first called, and whether a call of it makes a text, relation or
+/// array that the calling statement owns, as a read-only operator's can.
 ///
 /// An update operator's function runs each statement in a scope of its
 /// own. A read-only operator's computes its value, then stores it where the
@@ -141,6 +141,7 @@ fn type_text(ty: &hir::Type) -> String {
     match ty {
         hir::Type::Tuple(h) => format!("tuple {{ {} }}", heading(h)),
         hir::Type::Relation(h) => format!("relation {{ {} }}", heading(h)),
+        hir::Type::Array(element) => format!("array {}", type_text(element)),
         _ => ty.to_string(),
     }
 }
@@ -156,7 +157,7 @@ struct Lowering {
     /// once its body is lowered, after those it calls.
     functions: BTreeMap<usize, lir::Function>,
     /// The function of each operator and list of types lowered code calls
-    /// it with, and whether a call of it makes a text or relation.
+    /// it with, and whether a call of it makes a text, relation or array.
     functions_of: HashMap<(hir::OperatorId, Vec<hir::Type>), (lir::FunctionId, bool)>,
 }
 
@@ -217,11 +218,19 @@ impl Lowering {
                     lir::Field::Usize(len(relation.tuples.len())),
                 ])
             }
+            hir::Value::Array(array) => {
+                let elements = array.elements.iter().map(|e| self.value_field(e)).collect();
+                let elements = self.constant(elements);
+                lir::Field::Struct(vec![
+                    lir::Field::Address(elements),
+                    lir::Field::Usize(len(array.elements.len())),
+                ])
+            }
         }
     }
 
     /// The descriptor of `ty`, laid out as `trendy_runtime::TypeDesc`:
-    /// `{ kind: u8, size, attributes: *Attr, count, element_size }`.
+    /// `{ kind: u8, size, attributes: *Attr, count, element: *TypeDesc }`.
     fn descriptor(&mut self, ty: &hir::Type) -> lir::DataId {
         if let Some(&id) = self.descriptors.get(ty) {
             return id;
@@ -235,20 +244,25 @@ impl Lowering {
             hir::Type::Relation(heading) => (
                 KIND_RELATION,
                 Some(heading),
-                Some(layout(&hir::Type::Tuple(heading.clone()))),
+                Some(hir::Type::Tuple(heading.clone())),
             ),
+            hir::Type::Array(element) => (KIND_ARRAY, None, Some((**element).clone())),
             hir::Type::Parameter(_) => unreachable!("functions are of instantiated operators"),
         };
         let (attributes, count) = match heading {
             Some(heading) => (self.attributes(heading), heading.attributes().count()),
             None => (self.empty(), 0),
         };
+        // A relation's tuples' type, or an array's elements', or null.
+        let element = element.map_or(lir::Field::Usize(0), |element| {
+            lir::Field::Address(self.descriptor(&element))
+        });
         let id = self.constant(vec![
             lir::Field::U8(kind),
             lir::Field::Size(layout(ty)),
             lir::Field::Address(attributes),
             lir::Field::Usize(len(count)),
-            element.map_or(lir::Field::Usize(0), lir::Field::Size),
+            element,
         ]);
         self.descriptors.insert(ty.clone(), id);
         id
@@ -294,6 +308,7 @@ const KIND_APPROXIMATE: u8 = 2;
 const KIND_TEXT: u8 = 3;
 const KIND_TUPLE: u8 = 4;
 const KIND_RELATION: u8 = 5;
+const KIND_ARRAY: u8 = 6;
 
 /// The part of lowering for one function.
 struct FunctionBuilder<'a> {
@@ -318,9 +333,9 @@ struct FunctionBuilder<'a> {
     insts: Vec<lir::Inst>,
     /// Whether the current statement needs a scope (see
     /// [`lir::RuntimeFn::Begin`]): whether it calls a runtime function that
-    /// makes a text or relation, which the statement owns until it ends, or
-    /// passes one to an update operator. Only an assigned value outlives
-    /// its statement, copied into memory of the variable's own.
+    /// makes a text, relation or array, which the statement owns until it
+    /// ends, or passes one to an update operator. Only an assigned value
+    /// outlives its statement, copied into memory of the variable's own.
     scoped: bool,
     /// The slot of the statements' scopes, one at a time.
     scope: Option<lir::Place>,
@@ -378,9 +393,9 @@ impl<'a> FunctionBuilder<'a> {
     }
 
     /// Slots for the local variables `locals`, each with no memory of its
-    /// own yet: what holds its texts or relations starts as null, as a
-    /// variable's does, so that its declaration, the first assignment, has
-    /// nothing to release.
+    /// own yet: what holds its texts, relations or arrays starts as null,
+    /// as a variable's does, so that its declaration, the first assignment,
+    /// has nothing to release.
     fn declare(&mut self, locals: Vec<hir::Local>, cx: &mut Lowering) {
         for local in locals {
             let value = self.slot(layout(&local.ty));
@@ -538,6 +553,7 @@ impl<'a> FunctionBuilder<'a> {
             hir::OperatorKind::ReadOnly { .. }
             | hir::OperatorKind::Builtin(
                 hir::Builtin::Count
+                | hir::Builtin::Length
                 | hir::Builtin::Min
                 | hir::Builtin::Max
                 | hir::Builtin::Sum
@@ -607,9 +623,11 @@ impl<'a> FunctionBuilder<'a> {
         cx: &mut Lowering,
     ) -> lir::Place {
         match builtin {
-            // The relation's count, which it keeps after its tuples.
-            hir::Builtin::Count => {
-                let mut count = self.place(&call.args["r"], cx);
+            // The relation's or array's count, which it keeps after its
+            // tuples or elements.
+            hir::Builtin::Count | hir::Builtin::Length => {
+                let operand = call.args.values().next().expect("one argument");
+                let mut count = self.place(operand, cx);
                 count.path.push(1);
                 let dst = self.slot(lir::Layout::I64);
                 self.insts.push(lir::Inst::Unary {
@@ -851,8 +869,8 @@ impl<'a> FunctionBuilder<'a> {
     }
 
     /// Assign the value at `value` to the variable `target`, of the
-    /// program or local: copied, or, if it points to texts or relations,
-    /// copied with them into memory of the variable's own.
+    /// program or local: copied, or, if it points to texts, relations or
+    /// arrays, copied with them into memory of the variable's own.
     fn store(&mut self, target: hir::Target, value: lir::Place, cx: &mut Lowering) {
         let ty = self.assigned(target).0.clone();
         // Where the value goes, and what holds the memory of its own.
@@ -948,38 +966,10 @@ impl<'a> FunctionBuilder<'a> {
                 dst
             }
             hir::Expr::Relation(heading, tuples) => self.relation(heading, tuples, cx),
-            hir::Expr::Remove(operand, names) => {
-                let ty = self.type_of(operand);
-                let src = self.place(operand, cx);
-                // The kept attributes, in their own order, which is the
-                // result's too.
-                let sources: Vec<usize> = attribute_names(&ty)
-                    .enumerate()
-                    .filter(|(_, name)| !names.contains(*name))
-                    .map(|(i, _)| i)
-                    .collect();
-                self.reshape(&ty, &ty.without(names), &sources, src, cx)
-            }
-            hir::Expr::Rename(operand, renamings) => {
-                let ty = self.type_of(operand);
-                let src = self.place(operand, cx);
-                let result_ty = ty.renamed(renamings);
-                // Each result attribute comes from the operand's attribute
-                // with its old name.
-                let old: Vec<&str> = attribute_names(&ty).collect();
-                let sources: Vec<usize> = attribute_names(&result_ty)
-                    .map(|new| {
-                        let before = renamings
-                            .iter()
-                            .find(|(_, after)| after.as_str() == new)
-                            .map_or(new, |(before, _)| before.as_str());
-                        old.iter()
-                            .position(|name| *name == before)
-                            .expect("sema renames only attributes the operand has")
-                    })
-                    .collect();
-                self.reshape(&ty, &result_ty, &sources, src, cx)
-            }
+            hir::Expr::Array(element, elements) => self.array(element, elements, cx),
+            hir::Expr::Index(array, position) => self.index(array, position, cx),
+            hir::Expr::Remove(operand, names) => self.removed(operand, names, cx),
+            hir::Expr::Rename(operand, renamings) => self.renamed(operand, renamings, cx),
             hir::Expr::And(lhs, rhs) => self.joined(lhs, rhs, cx),
             hir::Expr::Ungroup(operand, names) => self.ungroup(operand, names, cx),
             hir::Expr::Only(operand) => self.only(operand, cx),
@@ -997,6 +987,53 @@ impl<'a> FunctionBuilder<'a> {
                 self.binary(*op, &operand_ty, lhs, rhs, cx)
             }
         }
+    }
+
+    /// `operand` without the attributes `names`, reshaped.
+    fn removed(
+        &mut self,
+        operand: &hir::Expr,
+        names: &BTreeSet<String>,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let ty = self.type_of(operand);
+        let src = self.place(operand, cx);
+        // The kept attributes, in their own order, which is the result's
+        // too.
+        let sources: Vec<usize> = attribute_names(&ty)
+            .enumerate()
+            .filter(|(_, name)| !names.contains(*name))
+            .map(|(i, _)| i)
+            .collect();
+        self.reshape(&ty, &ty.without(names), &sources, src, cx)
+    }
+
+    /// `operand` with its attributes renamed as `renamings` says, each
+    /// `old` to `new`, reshaped.
+    fn renamed(
+        &mut self,
+        operand: &hir::Expr,
+        renamings: &BTreeMap<String, String>,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let ty = self.type_of(operand);
+        let src = self.place(operand, cx);
+        let result_ty = ty.renamed(renamings);
+        // Each result attribute comes from the operand's attribute with its
+        // old name.
+        let old: Vec<&str> = attribute_names(&ty).collect();
+        let sources: Vec<usize> = attribute_names(&result_ty)
+            .map(|new| {
+                let before = renamings
+                    .iter()
+                    .find(|(_, after)| after.as_str() == new)
+                    .map_or(new, |(before, _)| before.as_str());
+                old.iter()
+                    .position(|name| *name == before)
+                    .expect("sema renames only attributes the operand has")
+            })
+            .collect();
+        self.reshape(&ty, &result_ty, &sources, src, cx)
     }
 
     /// Copy each of `attributes`, in name order, into a field of the tuple
@@ -1069,6 +1106,99 @@ impl<'a> FunctionBuilder<'a> {
         });
         self.scoped = true;
         dst
+    }
+
+    /// An array of `elements`, of type `element`, some known only when the
+    /// program runs: each computed into its place in memory the runtime
+    /// allocates, which is released when the statement ends.
+    fn array(
+        &mut self,
+        element: &hir::Type,
+        elements: &[hir::Expr],
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let ty = hir::Type::Array(Box::new(element.clone()));
+        let element_layout = layout(element);
+        let count = usize_constant(len(elements.len()), cx);
+        let dst = self.allocated(&ty, count, cx);
+        for (k, value) in elements.iter().enumerate() {
+            let src = self.place(value, cx);
+            let index = usize_constant(len(k), cx);
+            let to = self.element(&dst, &index, element_layout.clone());
+            self.insts.push(lir::Inst::Copy {
+                dst: to,
+                src,
+                layout: element_layout.clone(),
+            });
+        }
+        dst
+    }
+
+    /// The element of the array `array` at `position`, counting from 1: its
+    /// own place in the array, with no copy. The program stops if the array
+    /// has no element there.
+    fn index(&mut self, array: &hir::Expr, position: &hir::Expr, cx: &mut Lowering) -> lir::Place {
+        let hir::Type::Array(element) = self.type_of(array) else {
+            unreachable!("sema indexes only arrays");
+        };
+        let src = self.place(array, cx);
+        let at = self.place(position, cx);
+        let mut count = src.clone();
+        count.path.push(1);
+        let length = self.slot(lir::Layout::I64);
+        self.insts.push(lir::Inst::Unary {
+            dst: length.clone(),
+            op: lir::UnaryOp::Integer,
+            src: count,
+        });
+        let one = self.place(&hir::Expr::Constant(hir::Value::Integer(1)), cx);
+        let integers = lir::Operand::Numeric(lir::Numeric::Integer);
+        let below = self.slot(lir::Layout::U8);
+        self.insts.push(lir::Inst::Binary {
+            dst: below.clone(),
+            op: lir::BinaryOp::Compare(lir::Comparison::Less, integers),
+            lhs: at.clone(),
+            rhs: one.clone(),
+        });
+        let beyond = self.slot(lir::Layout::U8);
+        self.insts.push(lir::Inst::Binary {
+            dst: beyond.clone(),
+            op: lir::BinaryOp::Compare(lir::Comparison::Greater, integers),
+            lhs: at.clone(),
+            rhs: length,
+        });
+        let outside = self.slot(lir::Layout::U8);
+        self.insts.push(lir::Inst::Binary {
+            dst: outside.clone(),
+            op: lir::BinaryOp::Or,
+            lhs: below,
+            rhs: beyond,
+        });
+        let (fail, inside) = (self.new_block(), self.new_block());
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: outside,
+                then: fail,
+                otherwise: inside,
+            },
+            fail,
+        );
+        self.end_block(lir::Terminator::Fail(lir::Failure::IndexOutOfRange), inside);
+        // From 1 up to the count, so from 0 less 1, which can't overflow.
+        let from_zero = self.slot(lir::Layout::I64);
+        self.insts.push(lir::Inst::Binary {
+            dst: from_zero.clone(),
+            op: lir::BinaryOp::Subtract(lir::Numeric::Integer),
+            lhs: at,
+            rhs: one,
+        });
+        let index = self.slot(lir::Layout::Usize);
+        self.insts.push(lir::Inst::Unary {
+            dst: index.clone(),
+            op: lir::UnaryOp::Usize,
+            src: from_zero,
+        });
+        self.element(&src, &index, layout(&element))
     }
 
     /// `expr`, `operand` with `attributes` added or replaced, computed into
@@ -1224,9 +1354,9 @@ impl<'a> FunctionBuilder<'a> {
         dst
     }
 
-    /// A new relation of type `ty` with room for `count` tuples, a
-    /// [`lir::Layout::Usize`], zeroed, which the runtime allocates for the
-    /// statement.
+    /// A new relation or array of type `ty` with room for `count` tuples or
+    /// elements, a [`lir::Layout::Usize`], zeroed, which the runtime
+    /// allocates for the statement.
     fn allocated(&mut self, ty: &hir::Type, count: lir::Place, cx: &mut Lowering) -> lir::Place {
         let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(ty)));
         let dst = self.slot(layout(ty));
@@ -1280,24 +1410,25 @@ impl<'a> FunctionBuilder<'a> {
         self.end_block(lir::Terminator::Jump(head), done);
     }
 
-    /// The tuple at `index` of the relation at `relation`, laid out as
-    /// `tuple`: its address in a new slot, as a place.
+    /// The element at `index`, from 0, of `array`, a relation's tuples or
+    /// an array's elements, laid out as `element`: its address in a new
+    /// slot, as a place.
     fn element(
         &mut self,
-        relation: &lir::Place,
+        array: &lir::Place,
         index: &lir::Place,
-        tuple: lir::Layout,
+        element: lir::Layout,
     ) -> lir::Place {
         let slot = self.pointer_slot();
         self.insts.push(lir::Inst::Element {
             dst: lir::Place::whole(lir::Base::Slot(slot)),
-            relation: relation.clone(),
+            array: array.clone(),
             index: index.clone(),
-            tuple: tuple.clone(),
+            element: element.clone(),
         });
         lir::Place::whole(lir::Base::Indirect {
             slot,
-            pointee: tuple,
+            pointee: element,
         })
     }
 
@@ -1768,7 +1899,10 @@ impl<'a> FunctionBuilder<'a> {
                 });
                 return dst;
             }
-            hir::BinaryOp::Compare(comparison, hir::Compared::Tuple | hir::Compared::Relation) => {
+            hir::BinaryOp::Compare(
+                comparison,
+                hir::Compared::Tuple | hir::Compared::Relation | hir::Compared::Array,
+            ) => {
                 let equal = self.slot(lir::Layout::U8);
                 let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(operand_ty)));
                 self.insts.push(lir::Inst::CallRuntime {
@@ -1858,7 +1992,8 @@ fn lower_binary_op(op: hir::BinaryOp) -> lir::BinaryOp {
                 }
                 hir::Compared::Scalar(hir::Scalar::Text)
                 | hir::Compared::Tuple
-                | hir::Compared::Relation => unreachable!("compared by a runtime call"),
+                | hir::Compared::Relation
+                | hir::Compared::Array => unreachable!("compared by a runtime call"),
                 hir::Compared::Parameter(_) => {
                     unreachable!("functions are of instantiated operators")
                 }
@@ -1938,11 +2073,11 @@ fn scalar_layout(scalar: hir::Scalar) -> lir::Layout {
 }
 
 /// Whether a value of type `ty` points to memory: whether it is or has a
-/// text or a relation.
+/// text, a relation or an array.
 fn points(ty: &hir::Type) -> bool {
     match ty {
         hir::Type::Scalar(scalar) => *scalar == hir::Scalar::Text,
-        hir::Type::Relation(_) => true,
+        hir::Type::Relation(_) | hir::Type::Array(_) => true,
         hir::Type::Tuple(heading) => heading.attributes().any(|(_, ty)| points(ty)),
         hir::Type::Parameter(_) => unreachable!("functions are of instantiated operators"),
     }
@@ -1954,7 +2089,7 @@ fn layout(ty: &hir::Type) -> lir::Layout {
         hir::Type::Scalar(hir::Scalar::Boolean) => lir::Layout::U8,
         hir::Type::Scalar(hir::Scalar::Integer) => lir::Layout::I64,
         hir::Type::Scalar(hir::Scalar::Approximate) => lir::Layout::F64Bits,
-        hir::Type::Scalar(hir::Scalar::Text) | hir::Type::Relation(_) => {
+        hir::Type::Scalar(hir::Scalar::Text) | hir::Type::Relation(_) | hir::Type::Array(_) => {
             lir::Layout::Struct(vec![lir::Layout::Address, lir::Layout::Usize])
         }
         hir::Type::Tuple(heading) => {
@@ -3142,5 +3277,137 @@ mod tests {
             panic!("an attribute is a struct");
         };
         assert_eq!(b[2], lir::Field::Offset(tuple, 1));
+    }
+
+    #[test]
+    fn descriptors_point_to_their_elements_type() {
+        let mut cx = Lowering::new();
+        let element = |cx: &Lowering, id: lir::DataId| {
+            let lir::Field::Address(element) = cx.data[id.0].fields[4] else {
+                panic!("the element's descriptor is an address");
+            };
+            cx.data[element.0].fields[0].clone()
+        };
+        let array = cx.descriptor(&hir::Type::Array(Box::new(integer())));
+        assert_eq!(cx.data[array.0].fields[0], lir::Field::U8(KIND_ARRAY));
+        assert_eq!(element(&cx, array), lir::Field::U8(KIND_INTEGER));
+        // A relation's is its tuples' type.
+        let heading = hir::Heading::new([("a".to_string(), integer())].into());
+        let relation = cx.descriptor(&hir::Type::Relation(heading));
+        assert_eq!(element(&cx, relation), lir::Field::U8(KIND_TUPLE));
+        // Other types have none.
+        let scalar = cx.descriptor(&integer());
+        assert_eq!(cx.data[scalar.0].fields[4], lir::Field::Usize(0));
+    }
+
+    #[test]
+    fn an_array_selector_fills_memory_the_runtime_allocates() {
+        // `show{p: integer} [ call debug_value{v: array [p, 2]}; ]`.
+        let selector = hir::Expr::Array(
+            integer(),
+            vec![
+                hir::Expr::Parameter("p".to_string()),
+                hir::Expr::Constant(hir::Value::Integer(2)),
+            ],
+        );
+        let lowered = lower(&program(
+            vec![
+                debug_value(),
+                user("show", &["p"], vec![call(0, vec![("v", selector)])]),
+                user(
+                    "main",
+                    &[],
+                    vec![call(
+                        1,
+                        vec![("p", hir::Expr::Constant(hir::Value::Integer(1)))],
+                    )],
+                ),
+            ],
+            vec![],
+        ));
+        let insts = &lowered.functions[1].blocks[0].insts;
+        let runtime: Vec<lir::RuntimeFn> = insts
+            .iter()
+            .filter_map(|inst| match inst {
+                lir::Inst::CallRuntime { function, .. } => Some(*function),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            runtime,
+            [
+                lir::RuntimeFn::Begin,
+                lir::RuntimeFn::Allocate,
+                lir::RuntimeFn::DebugValue,
+                lir::RuntimeFn::End
+            ]
+        );
+        let elements = insts
+            .iter()
+            .filter(|inst| matches!(inst, lir::Inst::Element { .. }))
+            .count();
+        assert_eq!(elements, 2);
+    }
+
+    #[test]
+    fn an_index_checks_its_position_and_takes_the_elements_place() {
+        // `show{i: integer} [ call debug_value{v: rainfall[i]}; ]`.
+        let rainfall = hir::Value::Array(hir::ArrayValue {
+            element: integer(),
+            elements: vec![hir::Value::Integer(1200), hir::Value::Integer(950)],
+        });
+        let indexed = hir::Expr::Index(
+            Box::new(hir::Expr::Variable(hir::VariableId(0))),
+            Box::new(hir::Expr::Parameter("i".to_string())),
+        );
+        let lowered = lower(&program(
+            vec![
+                debug_value(),
+                user("show", &["i"], vec![call(0, vec![("v", indexed)])]),
+                user(
+                    "main",
+                    &[],
+                    vec![call(
+                        1,
+                        vec![("i", hir::Expr::Constant(hir::Value::Integer(1)))],
+                    )],
+                ),
+            ],
+            vec![variable("rainfall", rainfall)],
+        ));
+        let blocks = &lowered.functions[1].blocks;
+        assert!(
+            blocks
+                .iter()
+                .any(|b| b.terminator == lir::Terminator::Fail(lir::Failure::IndexOutOfRange)),
+            "{blocks:#?}"
+        );
+        let insts: Vec<&lir::Inst> = blocks.iter().flat_map(|b| &b.insts).collect();
+        assert!(
+            insts.iter().any(|i| matches!(
+                i,
+                lir::Inst::Unary {
+                    op: lir::UnaryOp::Usize,
+                    ..
+                }
+            )),
+            "{insts:#?}"
+        );
+        // The element is passed from its own place, with no copy.
+        let Some(lir::Inst::CallRuntime { args, .. }) = insts.iter().find(|i| {
+            matches!(
+                i,
+                lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::DebugValue,
+                    ..
+                }
+            )
+        }) else {
+            panic!("{insts:#?}");
+        };
+        assert!(
+            matches!(args[0].base, lir::Base::Indirect { .. }),
+            "{args:#?}"
+        );
     }
 }

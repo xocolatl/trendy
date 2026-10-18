@@ -142,8 +142,15 @@ fn call(
         if let Some(what) = what {
             errors.push(errors::not_an_operator(name, span, what));
         } else {
-            let operators: Vec<&str> = cx.operators.names().collect();
-            errors.push(errors::unknown_name(name, span, "operator", &operators));
+            let operators = cx.operators.names();
+            let args = stmt.arguments();
+            errors.push(errors::unknown_operator(
+                name,
+                span,
+                &operators,
+                args.as_ref().map(Written::Arguments),
+                false,
+            ));
         }
         return None;
     };

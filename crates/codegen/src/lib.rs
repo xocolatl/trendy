@@ -266,6 +266,8 @@ impl Functions {
                     lir::UnaryOp::Negate(lir::Numeric::Approximate) => b.ins().fneg(value),
                     lir::UnaryOp::Integer if ty == types::I64 => value,
                     lir::UnaryOp::Integer => b.ins().uextend(types::I64, value),
+                    lir::UnaryOp::Usize if self.config.pointer_type() == types::I64 => value,
+                    lir::UnaryOp::Usize => b.ins().ireduce(self.config.pointer_type(), value),
                     // Rounded to nearest, ties to even, as IEEE 754 rounds.
                     lir::UnaryOp::Approximate => b.ins().fcvt_from_sint(types::F64, value),
                 };
@@ -273,16 +275,16 @@ impl Functions {
             }
             lir::Inst::Element {
                 dst,
-                relation,
+                array,
                 index,
-                tuple,
+                element,
             } => {
                 let pointer = self.config.pointer_type();
-                let tuples = self.load(pointer, relation, frame, b)?;
+                let elements = self.load(pointer, array, frame, b)?;
                 let index = self.load(pointer, index, frame, b)?;
-                let size = i64::try_from(self.target.size(tuple)).map_err(|e| e.to_string())?;
+                let size = i64::try_from(self.target.size(element)).map_err(|e| e.to_string())?;
                 let offset = b.ins().imul_imm_s(index, size);
-                let address = b.ins().iadd(tuples, offset);
+                let address = b.ins().iadd(elements, offset);
                 self.store(dst, address, frame, b)?;
             }
             lir::Inst::Increment { place } => {

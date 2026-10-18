@@ -15,6 +15,9 @@ builtin operator debug_value{v: any type};
 
 builtin operator count{r: any relation}: integer;
 
+/* The number of elements of `a`. */
+builtin operator length{a: any array}: integer;
+
 /* The least value of `of` for a tuple of `r`, by `<`. Of no tuples, there
    is none, and the program fails (R0010). */
 builtin operator min{r: any relation, of: T per r}: T

@@ -98,9 +98,17 @@ impl Operators {
         self.list.iter()
     }
 
-    /// Every operator's name, which a misspelled one may be.
-    pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
-        self.by_name.keys().map(String::as_str)
+    /// Every operator's name, which a misspelled one, or another
+    /// language's, may be, with its parameters' names, as a call gives
+    /// their arguments.
+    pub(crate) fn names(&self) -> Vec<(&str, Vec<&str>)> {
+        self.by_name
+            .iter()
+            .map(|(name, &id)| {
+                let params = self.get(id).written.keys().map(String::as_str).collect();
+                (name.as_str(), params)
+            })
+            .collect()
     }
 }
 

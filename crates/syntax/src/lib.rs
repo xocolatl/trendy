@@ -33,6 +33,7 @@ pub enum SyntaxKind {
     FalseKw,
     TupleKw,
     RelationKw,
+    ArrayKw,
     CallKw,
     BuiltinKw,
     NotKw,
@@ -187,6 +188,8 @@ pub enum SyntaxKind {
     ParenExpr,
     /// `t.a`: an attribute's value.
     ExtractExpr,
+    /// `a[i]`: an array's element at position `i`, counting from 1.
+    IndexExpr,
     /// `r{a, b}`: a projection.
     ProjectExpr,
     /// `r remove {a, b}`, `r rename {a as b}`, `r extend { c := a + b }`,
@@ -251,6 +254,8 @@ pub enum SyntaxKind {
     TupleType,
     /// `relation { name: type, … }`
     RelationType,
+    /// `array type`
+    ArrayType,
     /// `tuple [heading] { name: value, … }`; in a relation, `tuple` may be
     /// left out.
     TupleLiteral,
@@ -258,6 +263,8 @@ pub enum SyntaxKind {
     AttributeValue,
     /// `relation [heading] { tuple, … }`
     RelationLiteral,
+    /// `array [type] [ element, … ]`
+    ArrayLiteral,
     Literal,
     /// Tokens the parser could not fit into the grammar.
     Error,
@@ -265,7 +272,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 127] = [
+    pub const ALL: [SyntaxKind; 131] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -275,6 +282,7 @@ impl SyntaxKind {
         SyntaxKind::FalseKw,
         SyntaxKind::TupleKw,
         SyntaxKind::RelationKw,
+        SyntaxKind::ArrayKw,
         SyntaxKind::CallKw,
         SyntaxKind::BuiltinKw,
         SyntaxKind::NotKw,
@@ -364,6 +372,7 @@ impl SyntaxKind {
         SyntaxKind::BinaryExpr,
         SyntaxKind::ParenExpr,
         SyntaxKind::ExtractExpr,
+        SyntaxKind::IndexExpr,
         SyntaxKind::ProjectExpr,
         SyntaxKind::PostfixExpr,
         SyntaxKind::NaryExpr,
@@ -388,9 +397,11 @@ impl SyntaxKind {
         SyntaxKind::Per,
         SyntaxKind::TupleType,
         SyntaxKind::RelationType,
+        SyntaxKind::ArrayType,
         SyntaxKind::TupleLiteral,
         SyntaxKind::AttributeValue,
         SyntaxKind::RelationLiteral,
+        SyntaxKind::ArrayLiteral,
         SyntaxKind::Literal,
         SyntaxKind::Error,
     ];
@@ -410,6 +421,7 @@ impl SyntaxKind {
                 | SyntaxKind::FalseKw
                 | SyntaxKind::TupleKw
                 | SyntaxKind::RelationKw
+                | SyntaxKind::ArrayKw
                 | SyntaxKind::CallKw
                 | SyntaxKind::BuiltinKw
                 | SyntaxKind::NotKw
@@ -594,6 +606,7 @@ impl SyntaxKind {
             SyntaxKind::FalseKw => "false",
             SyntaxKind::TupleKw => "tuple",
             SyntaxKind::RelationKw => "relation",
+            SyntaxKind::ArrayKw => "array",
             SyntaxKind::CallKw => "call",
             SyntaxKind::BuiltinKw => "builtin",
             SyntaxKind::NotKw => "not",
@@ -681,6 +694,7 @@ impl SyntaxKind {
             SyntaxKind::FalseKw => "`false`",
             SyntaxKind::TupleKw => "`tuple`",
             SyntaxKind::RelationKw => "`relation`",
+            SyntaxKind::ArrayKw => "`array`",
             SyntaxKind::CallKw => "`call`",
             SyntaxKind::BuiltinKw => "`builtin`",
             SyntaxKind::NotKw => "`not`",
@@ -765,6 +779,7 @@ impl SyntaxKind {
             | SyntaxKind::BinaryExpr
             | SyntaxKind::ParenExpr
             | SyntaxKind::ExtractExpr
+            | SyntaxKind::IndexExpr
             | SyntaxKind::ProjectExpr
             | SyntaxKind::PostfixExpr
             | SyntaxKind::NaryExpr
@@ -798,8 +813,10 @@ impl SyntaxKind {
             SyntaxKind::Heading => "heading",
             SyntaxKind::TupleType => "tuple type",
             SyntaxKind::RelationType => "relation type",
+            SyntaxKind::ArrayType => "array type",
             SyntaxKind::TupleLiteral => "tuple value",
             SyntaxKind::RelationLiteral => "relation value",
+            SyntaxKind::ArrayLiteral => "array value",
             SyntaxKind::AttributeType | SyntaxKind::AttributeValue => "attribute",
             SyntaxKind::Literal => "value",
             SyntaxKind::Error => "error",

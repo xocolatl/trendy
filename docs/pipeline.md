@@ -20,8 +20,9 @@ built-ins in scope, once, as a program's are (`sema::Source::Prelude`), and
 gives every program them as checked HIR. A built-in with a result type is
 read-only, and its call is a value, which sema evaluates when compiling
 where its arguments are known (`hir::Builtin::evaluate`), and lowering
-computes inline otherwise: `count` is the count every relation keeps
-after its tuples, `min` and `max` a loop over them (`extreme`), which
+computes inline otherwise: `count` and `length` are the count every
+relation keeps after its tuples, and every array after its elements, `min`
+and `max` a loop over them (`extreme`), which
 ends the block with `Terminator::Fail` for none (R0010), and
 `to_approximate` an instruction (`UnaryOp::Approximate`). `sum` and
 `product` are runtime calls (`trendy_rt_sum`, `trendy_rt_product`), which
@@ -752,8 +753,8 @@ result so far and the next operand, which must have an attribute in common
 
 Comparisons follow one order per type (`hir::compare`): `false` before `true`,
 integers numerically, approximate numbers by IEEE 754 totalOrder, and text by
-code point. Tuples and relations have only `=` and `<>` (`hir::Compared`), by
-value equality: when folding, `hir::Value`'s, and at run time
+code point. Tuples, relations and arrays have only `=` and `<>`
+(`hir::Compared`), by value equality: when folding, `hir::Value`'s, and at run time
 `trendy_rt_equal`, which walks the type descriptor. A relation's tuples are
 always in one canonical order, so equal relations have equal arrays; building
 relations at run time must keep that order. Codegen compares approximate
@@ -769,7 +770,8 @@ such as `and` for its operands. That tuple is the first that is valid on
 its own, wherever it is, since the tuples have no order; one that is valid
 but for an empty relation's heading in it waits, and is checked again with
 the type (`types::Alone`), and one with other errors keeps them, without
-the headings, if another gives the type. An operator's operands find their
+the headings, if another gives the type. An array selector's elements find
+their type the same way (`types::array_selector`). An operator's operands find their
 type the same way, the first operand that is valid on its own giving it,
 so that `relation {} = r` and `r = relation {}` both check (`ops::check_operands`),
 and so do the operands of a `union`, `intersect` or `minus`, each checked on
@@ -794,8 +796,9 @@ with a rename that fixes both.
 **Provides:** the low-level IR. A function is a control-flow graph of basic
 blocks: each block is a list of instructions (`Copy`, `Call`,
 `CallRuntime`, the boolean and integer `Unary` and `Binary`, `Unary`'s
-conversion of a count to an integer, and `Element` and `Increment` for
-loops) ending in a terminator: `Return`, `Jump` or `Branch`. Instructions refer to memory through places: a data object, a
+conversions of a count to an integer and of an array's position less 1 to
+an index, and `Element` and `Increment` for loops and indexes) ending in a
+terminator: `Return`, `Jump`, `Branch` or `Fail`. Instructions refer to memory through places: a data object, a
 stack slot, the parameter struct, or what the address in a slot points to
 (`Base::Indirect`, such as the tuple a loop is at), plus a path through
 nested structs. Every value's shape is a `Layout`. There is no nesting and
@@ -811,6 +814,7 @@ this:
 - a tuple: a `Struct` of its attributes' fields, in name order.
 - a relation: the address of a read-only array of its tuples, in sorted
   order, followed by the number of tuples.
+- an array: as a relation, of its elements, in its order.
 - `text`: the address of a read-only constant holding the UTF-8 bytes,
   followed by the length in bytes, the size of a pointer.
 
@@ -857,7 +861,7 @@ own memory, never the memory of the statement that called the operator,
 such as its arguments'.
 
 Only an assigned value outlives its statement. A variable whose type has a
-text or a relation in it has a second field, its owner, the address of the
+text, a relation or an array in it has a second field, its owner, the address of the
 memory its value points into, or null while that is the value compiled
 into the program. `trendy_rt_assign` copies the value, with everything it
 points to, into one new block, which the owner then holds. Other variables
@@ -879,10 +883,10 @@ has ended.
 A read-only operator's function begins no scope: what it makes, such as
 its result's texts, is the calling statement's, as if the caller had
 computed the value itself, which is what sema does when it evaluates a
-call. So a statement that calls one that makes a text or relation has a
-scope. Lowering knows whether one does from its function, lowered at its
-first call, before the caller's statement ends; read-only operators don't
-call themselves, so that ends.
+call. So a statement that calls one that makes a text, relation or array
+has a scope. Lowering knows whether one does from its function, lowered at
+its first call, before the caller's statement ends; read-only operators
+don't call themselves, so that ends.
 
 An assignment statement computes each value into a slot of its own: a
 copy, since a value can be a variable's own place, which assigning another
@@ -898,6 +902,15 @@ drops nothing that can fail. A tuple built at run time is a stack slot
 with each attribute copied into its field. A relation built at run time has its tuples built one after
 another in a stack slot, then `trendy_rt_relation` sorts them into the
 canonical order and drops duplicates, into memory released like a text's.
+An array built at run time is made by `trendy_rt_allocate`, as an
+extension's relation is, with each element computed into its place, in
+order. An index, `a[i]`, compares the position with 1 and the array's
+count, and outside them ends the block with `Terminator::Fail`, so the
+program stops with R0011; inside them it is the element's own place,
+`Element` at the position less 1, so it costs no copy. Sema folds an index
+of a constant array, or of a selector whose other elements can't fail, and
+reports a position out of range when compiling where it can: one below 1
+always, and one beyond the count where the count is known (`ops::index`).
 
 Removing attributes (`hir::Expr::Remove`, which a projection becomes) and
 renaming them (`hir::Expr::Rename`) are both reshaping: each attribute of
@@ -979,7 +992,9 @@ function then takes a pointer to where its result goes, a stack slot of
 the caller's. Runtime functions taking
 `any` get the value's address and a type descriptor: read-only data laid out
 as `trendy_runtime::TypeDesc` and `Attr`, built by lowering from ordinary
-fields. A wrapped attribute's `Attr` has no name, which `debug_value` writes
+fields. A relation's or an array's descriptor points to its tuples' or
+elements' type's, whose size is the stride of its memory. A wrapped
+attribute's `Attr` has no name, which `debug_value` writes
 as `…`, as a type's source text does, so the runtime needn't know how such
 attributes are named. Its sizes and offsets are LIR's `Size` and `Offset` fields, which
 codegen resolves with the same layout engine as everything else, so the

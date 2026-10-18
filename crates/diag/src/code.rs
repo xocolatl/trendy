@@ -50,7 +50,7 @@ pub enum Code {
     DuplicateAttribute,
     MissingAttribute,
     UnknownAttribute,
-    UnknownRelationHeading,
+    UnknownEmptyType,
     DuplicateTuple,
     BuiltinOutsidePrelude,
     AnyOutsideParameter,
@@ -95,6 +95,7 @@ pub enum Code {
     KeyViolated,
     ConflictingChanges,
     NoMinOrMax,
+    IndexOutOfRange,
     Internal,
 }
 
@@ -112,7 +113,7 @@ pub enum CodeKind {
 }
 
 impl Code {
-    pub const ALL: [Code; 83] = [
+    pub const ALL: [Code; 84] = [
         Code::UnexpectedCharacter,
         Code::MissingToken,
         Code::WrongDelimiter,
@@ -150,7 +151,7 @@ impl Code {
         Code::DuplicateAttribute,
         Code::MissingAttribute,
         Code::UnknownAttribute,
-        Code::UnknownRelationHeading,
+        Code::UnknownEmptyType,
         Code::DuplicateTuple,
         Code::BuiltinOutsidePrelude,
         Code::AnyOutsideParameter,
@@ -195,6 +196,7 @@ impl Code {
         Code::KeyViolated,
         Code::ConflictingChanges,
         Code::NoMinOrMax,
+        Code::IndexOutOfRange,
         Code::Internal,
     ];
 
@@ -238,7 +240,7 @@ impl Code {
             Code::DuplicateAttribute => "A0008",
             Code::MissingAttribute => "A0009",
             Code::UnknownAttribute => "A0010",
-            Code::UnknownRelationHeading => "A0011",
+            Code::UnknownEmptyType => "A0011",
             Code::DuplicateTuple => "A0012",
             Code::BuiltinOutsidePrelude => "A0013",
             Code::AnyOutsideParameter => "A0014",
@@ -283,6 +285,7 @@ impl Code {
             Code::KeyViolated => "R0008",
             Code::ConflictingChanges => "R0009",
             Code::NoMinOrMax => "R0010",
+            Code::IndexOutOfRange => "R0011",
             Code::Internal => "X0000",
         }
     }
@@ -355,7 +358,7 @@ impl Code {
             Code::DuplicateAttribute => include_str!("../errors/A0008.md"),
             Code::MissingAttribute => include_str!("../errors/A0009.md"),
             Code::UnknownAttribute => include_str!("../errors/A0010.md"),
-            Code::UnknownRelationHeading => include_str!("../errors/A0011.md"),
+            Code::UnknownEmptyType => include_str!("../errors/A0011.md"),
             Code::DuplicateTuple => include_str!("../errors/A0012.md"),
             Code::BuiltinOutsidePrelude => include_str!("../errors/A0013.md"),
             Code::AnyOutsideParameter => include_str!("../errors/A0014.md"),
@@ -400,6 +403,7 @@ impl Code {
             Code::KeyViolated => include_str!("../errors/R0008.md"),
             Code::ConflictingChanges => include_str!("../errors/R0009.md"),
             Code::NoMinOrMax => include_str!("../errors/R0010.md"),
+            Code::IndexOutOfRange => include_str!("../errors/R0011.md"),
             Code::Internal => include_str!("../errors/X0000.md"),
         }
     }

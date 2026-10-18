@@ -1225,7 +1225,10 @@ impl<'a> Parser<'a> {
             && after.is_some_and(|f| {
                 matches!(
                     f.kind,
-                    SyntaxKind::Ident | SyntaxKind::TupleKw | SyntaxKind::RelationKw
+                    SyntaxKind::Ident
+                        | SyntaxKind::TupleKw
+                        | SyntaxKind::RelationKw
+                        | SyntaxKind::ArrayKw
                 )
             })
         {
@@ -1234,7 +1237,10 @@ impl<'a> Parser<'a> {
             self.bump();
             self.builder.finish_node();
         } else if let Some(keyword) = next.filter(|f| {
-            matches!(f.kind, SyntaxKind::TupleKw | SyntaxKind::RelationKw) && word(after, "any")
+            matches!(
+                f.kind,
+                SyntaxKind::TupleKw | SyntaxKind::RelationKw | SyntaxKind::ArrayKw
+            ) && word(after, "any")
         }) {
             self.start_node(SyntaxKind::AnyType);
             let start = self.bump().start;
@@ -1253,6 +1259,11 @@ impl<'a> Parser<'a> {
             self.keyword(SyntaxKind::RelationKw);
             self.heading();
             self.builder.finish_node();
+        } else if self.at(SyntaxKind::ArrayKw) {
+            self.start_node(SyntaxKind::ArrayType);
+            self.bump();
+            self.type_expr();
+            self.builder.finish_node();
         } else if self.at(SyntaxKind::Ident) {
             self.start_node(SyntaxKind::TypeRef);
             self.bump();
@@ -1260,7 +1271,7 @@ impl<'a> Parser<'a> {
         } else {
             self.missing_with_help(
                 SyntaxKind::TypeRef,
-                "write a type, such as `integer`, `tuple { name: text }` or `relation { name: text }`",
+                "write a type, such as `integer`, `tuple { name: text }`, `relation { name: text }` or `array integer`",
             );
         }
     }
@@ -1629,8 +1640,13 @@ impl<'a> Parser<'a> {
         } else {
             self.primary();
         }
+        // Whether the value so far is an attribute's, `x.f`, which a method
+        // call, as other languages write one, follows with `()`.
+        let mut extracted = false;
         loop {
             let next = self.lookahead().map(|f| f.kind);
+            let method_call = extracted && next == Some(SyntaxKind::LParen);
+            extracted = next == Some(SyntaxKind::Dot);
             if next == Some(SyntaxKind::Dot) {
                 self.builder.start_node_at(start, SyntaxKind::ExtractExpr);
                 self.bump();
@@ -1644,9 +1660,21 @@ impl<'a> Parser<'a> {
                         "write the attribute's name after `.`, as in `t.name`",
                     );
                 }
-            } else if next == Some(SyntaxKind::LBrace) {
+            } else if next == Some(SyntaxKind::LBracket) {
+                // A `[` after a value is always an element's position.
+                self.builder.start_node_at(start, SyntaxKind::IndexExpr);
+                self.bump();
+                self.expression();
+                self.expect(SyntaxKind::RBracket);
+            } else if next == Some(SyntaxKind::LBrace) || method_call {
+                // `x.f()` is reported as `x.f{}` is, once its `()` is fixed.
                 self.builder.start_node_at(start, SyntaxKind::ProjectExpr);
-                self.names(errors::PROJECTION_FORM);
+                let what = if method_call {
+                    "arguments"
+                } else {
+                    "attribute names"
+                };
+                self.listed_names(what, errors::PROJECTION_FORM);
             } else if let Some((found, keyword)) = self.postfix_operator() {
                 self.builder.start_node_at(start, SyntaxKind::PostfixExpr);
                 self.operator_token(found, keyword);
@@ -1961,10 +1989,15 @@ impl<'a> Parser<'a> {
 
     /// `{ a, b }`: attribute names, in a construct of the given `form`.
     fn names(&mut self, form: &'static str) {
+        self.listed_names("attribute names", form);
+    }
+
+    /// [`Parser::names`], called `what` where they are reported in `()`.
+    fn listed_names(&mut self, what: &'static str, form: &'static str) {
         let outer_form = std::mem::replace(&mut self.form, form);
         self.delimited(
             Some(SyntaxKind::NameList),
-            "attribute names",
+            what,
             (SyntaxKind::LBrace, SyntaxKind::RBrace),
             &[(SyntaxKind::LParen, SyntaxKind::RParen)],
             |p| {
@@ -2018,6 +2051,11 @@ impl<'a> Parser<'a> {
             self.nary(found, keyword);
         } else if self.at_keyword(SyntaxKind::RelationKw) {
             self.relation_literal();
+        } else if self.at(SyntaxKind::ArrayKw)
+            || self.at(SyntaxKind::LBracket)
+            || self.at_miscased_array()
+        {
+            self.array_literal();
         } else if self.at_keyword(SyntaxKind::TupleKw) || self.at(SyntaxKind::LBrace) {
             self.tuple_literal(false);
         } else if let Some(found) = self
@@ -2042,7 +2080,7 @@ impl<'a> Parser<'a> {
         } else {
             self.missing_with_help(
                 SyntaxKind::Literal,
-                "write a value, such as `0`, `\"\"`, `tuple { name: \"x\" }` or `relation { { name: \"x\" } }`",
+                "write a value, such as `0`, `\"\"`, `tuple { name: \"x\" }`, `relation { { name: \"x\" } }` or `array [1, 2]`",
             );
         }
     }
@@ -2142,6 +2180,44 @@ impl<'a> Parser<'a> {
             |p| {
                 p.items(Self::at_attribute, |p| {
                     p.attribute(SyntaxKind::AttributeValue, Self::expression);
+                });
+            },
+        );
+        self.builder.finish_node();
+        self.form = outer_form;
+    }
+
+    /// `array [type] [ element, … ]`, its elements' type written only for
+    /// an empty one with no other. A bare `[`, as other languages write an
+    /// array, and SQL's `ARRAY[`, are reported, with fixes.
+    fn array_literal(&mut self) {
+        let outer_form = std::mem::replace(&mut self.form, errors::ARRAY_VALUE_FORM);
+        self.start_node(SyntaxKind::ArrayLiteral);
+        match self.found() {
+            // `ARRAY[1, 2]`, as SQL writes it.
+            Some(found) if found.kind == SyntaxKind::Ident => {
+                self.bump();
+                self.errors.push(errors::miscased_keyword(found, "array"));
+            }
+            _ => self.keyword(SyntaxKind::ArrayKw),
+        }
+        if self.peek().is_some_and(|k| k != SyntaxKind::LBracket) {
+            self.type_expr();
+        }
+        self.delimited(
+            None,
+            "array",
+            (SyntaxKind::LBracket, SyntaxKind::RBracket),
+            &[],
+            |p| {
+                // A tuple selector, its `tuple` keyword optional here, as in
+                // a relation, or any expression.
+                p.items(Self::at_operand, |p| {
+                    if p.at(SyntaxKind::LBrace) {
+                        p.tuple_literal(true);
+                    } else {
+                        p.expression();
+                    }
                 });
             },
         );
@@ -2287,6 +2363,42 @@ impl<'a> Parser<'a> {
         } else {
             self.missing(keyword);
         }
+    }
+
+    /// Whether an array selector starts here with its keyword in another
+    /// case, as SQL writes `ARRAY[1, 2]`: a word spelled `array`, then
+    /// brackets that no index could be, empty or with several elements. One
+    /// element, as in `ARRAY[1]`, is a value of that name indexed, to the
+    /// parser.
+    fn at_miscased_array(&mut self) -> bool {
+        if !self
+            .found()
+            .is_some_and(|f| f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case("array"))
+        {
+            return false;
+        }
+        let mut significant = (self.pos..self.tokens.len())
+            .map(|i| self.tokens[i].kind)
+            .filter(|&k| !is_skipped(k))
+            .skip(1);
+        if significant.next() != Some(SyntaxKind::LBracket) {
+            return false;
+        }
+        let mut depth = 1_usize;
+        for (i, kind) in significant.enumerate() {
+            match kind {
+                SyntaxKind::LBracket | SyntaxKind::LBrace | SyntaxKind::LParen => depth += 1,
+                SyntaxKind::RBracket | SyntaxKind::RBrace | SyntaxKind::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return i == 0;
+                    }
+                }
+                SyntaxKind::Comma if depth == 1 => return true,
+                _ => {}
+            }
+        }
+        false
     }
 
     /// Whether a selector's heading starts here: a brace group that looks
@@ -3012,8 +3124,8 @@ SourceFile
         // `=` as the separator.
         one_fix("var p := tuple { x = 1 };", "var p := tuple { x : 1 };");
         // A JavaScript object literal.
-        one_fix("var p := { x: 1 };", "var p :=tuple { x: 1 };");
-        one_fix("var p: { x: integer };", "var p:tuple { x: integer };");
+        one_fix("var p := { x: 1 };", "var p := tuple { x: 1 };");
+        one_fix("var p: { x: integer };", "var p: tuple { x: integer };");
         // Missing closing brace.
         one_fix("var p := tuple { x: 1;", "var p := tuple { x: 1};");
     }
@@ -3092,6 +3204,72 @@ SourceFile
             fix("var r: RELATION { a: integer };"),
             "var r: relation { a: integer };"
         );
+    }
+
+    #[test]
+    fn arrays() {
+        for source in [
+            "var a: array integer := array [1, 2, 3];",
+            "var e := array text [];",
+            "var n: array array integer := array [array [1], array integer []];",
+            "var t := array [{ a: 1 }, tuple { a: 2 }];",
+            "var r: relation { months: array text };",
+            "var x := a[1][2] + a[length{a: a}];",
+            "operator f{a: any array, b: array T}: T types { T: any type } [ return b[1]; ];",
+        ] {
+            let parse = parse_str(source);
+            assert!(parse.errors.is_empty(), "{source}: {:#?}", parse.errors);
+        }
+        let initializer = |source: &str| {
+            let decl = parse_str(source).tree.variables().next().unwrap();
+            decl.initializer().unwrap()
+        };
+        let Expr::Array(typed) = initializer("var e := array text [];") else {
+            panic!("an array value");
+        };
+        assert!(typed.element_type().is_some());
+        assert_eq!(typed.elements().count(), 0);
+        let Expr::Array(listed) = initializer("var a := array [1, 2];") else {
+            panic!("an array value");
+        };
+        assert!(listed.element_type().is_none());
+        assert_eq!(listed.elements().count(), 2);
+        // An index binds to what it follows, as `.` does.
+        let Expr::Binary(sum) = initializer("var x := -a[1] + a.b[2];") else {
+            panic!("a sum");
+        };
+        assert!(matches!(sum.lhs(), Some(Expr::Unary(_))));
+        let Some(Expr::Index(index)) = sum.rhs() else {
+            panic!("an index");
+        };
+        assert!(matches!(index.operand(), Some(Expr::Extract(_))));
+        assert!(matches!(index.index(), Some(Expr::Literal(_))));
+    }
+
+    #[test]
+    fn array_recovery() {
+        let one_fix = |source: &str, fixed: &str| {
+            let errors = parse_str(source).errors;
+            assert_eq!(errors.len(), 1, "{source}: {errors:#?}");
+            assert_eq!(fix(source), fixed, "{source}");
+        };
+        // Python's and JavaScript's lists, and SQL's arrays.
+        one_fix("var a := [1, 2];", "var a := array [1, 2];");
+        one_fix("var a := [];", "var a := array [];");
+        one_fix("var a := ARRAY[1, 2];", "var a := array[1, 2];");
+        one_fix("var a := Array[];", "var a := array[];");
+        // One element could be a value of that name indexed.
+        assert!(parse_str("var a := ARRAY[1];").errors.is_empty());
+        one_fix("var a: array any;", "var a: any array;");
+        // A method call's parentheses, fixed to braces, which sema then
+        // fixes to a call.
+        let errors = parse_str("var n := a.length();").errors;
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].code, Code::WrongDelimiter);
+        assert!(errors[0].message.contains("arguments"), "{errors:#?}");
+        assert_eq!(fix("var n := a.length();"), "var n := a.length{};");
+        // A missing `]`.
+        one_fix("var x := a[1;", "var x := a[1];");
     }
 
     #[test]

@@ -11,9 +11,12 @@ var people := relation {
     { name: "Edgar", born: 1923 },
 };
 var teams := relation { { team: "core", members: relation { { name: "Ada" } } } };
+var rainfall := array [1200, 950, 220];
+var dry: array text;
 var written := tuple {
     greeting: to_text{from: greeting},
     point: to_text{from: point},
+    rainfall: to_text{from: rainfall},
     teams: to_text{from: teams},
 };
 
@@ -39,10 +42,13 @@ operator main{} [
     call debug_value{v: nobody};
     call debug_value{v: people};
     call debug_value{v: teams};
+    call debug_value{v: rainfall};
+    call debug_value{v: dry};
     call debug_value{v: written};
     call debug_value{v: 7};
     call show{value: count, label: "count"};
     call as_text{v: greeting};
     call as_text{v: point};
+    call as_text{v: rainfall};
     call as_text{v: teams};
 ];

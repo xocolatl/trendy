@@ -9,6 +9,7 @@ use crate::Found;
 pub(crate) const OPERATOR_FORM: &str = "an operator definition has the form `operator name{} [];`, or, for a read-only operator, `operator name{}: type [return value;];`";
 pub(crate) const HEADING_FORM: &str = "a heading lists attributes with their types: `{ name: type, … }`, as in `tuple { name: text }` or `relation { name: text }`";
 pub(crate) const RELATION_VALUE_FORM: &str = "a relation value has the form `relation { tuple, … }`, optionally with a heading first: `relation { name: type, … } { … }`";
+pub(crate) const ARRAY_VALUE_FORM: &str = "an array value has the form `array [element, …]`, with its elements' type first if it has none: `array integer []`";
 pub(crate) const PROJECTION_FORM: &str =
     "a projection and `remove` take attribute names: `r{a, b}`, `r remove {a, b}`";
 pub(crate) const NARY_FORM: &str = "`{}` encloses what can be in any order, and `[]` what can't: `join{r, s, t}` and `times{r, s, t}` can be in any order, while `compose[r, s, t]` is `(r compose s) compose t`";
@@ -1007,10 +1008,12 @@ pub(crate) fn chained_comparison(found: Found, middle: &str, before: Option<char
 }
 
 /// `text`, with a space on either side where it would otherwise run into a
-/// word next to it, which would change how it lexes.
+/// word next to it, which would change how it lexes, and before a word
+/// after other punctuation than an opening delimiter, as in `:= tuple`.
 fn spaced(text: &str, (before, after): (Option<char>, Option<char>)) -> String {
     let mut spaced = text.to_string();
-    if before.is_some_and(is_word_char) && text.starts_with(is_word_char) {
+    let apart = |c: char| !c.is_whitespace() && !matches!(c, '(' | '[' | '{');
+    if before.is_some_and(apart) && text.starts_with(is_word_char) {
         spaced.insert(0, ' ');
     }
     if after.is_some_and(is_word_char) && text.ends_with(is_word_char) {
@@ -1088,7 +1091,7 @@ pub(crate) fn any_after(keyword: Found, span: Span) -> Diagnostic {
         span,
         "the words are the other way around",
     )
-    .with_note("a parameter that takes any tuple, or any relation, has the type `any tuple` or `any relation`, as one that takes any value has `any type`")
+    .with_note("a parameter that takes any tuple, any relation or any array has the type `any tuple`, `any relation` or `any array`, as one that takes any value has `any type`")
     .with_suggestion(
         format!("write `{fixed}`"),
         vec![Edit {
