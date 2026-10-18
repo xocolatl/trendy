@@ -1173,10 +1173,27 @@ pub(crate) fn unknown_name(name: &str, span: Span, kind: &str, candidates: &[&st
         "not defined",
     );
     // `avg{…}`, as SQL writes a mean, which is no misspelling of `min`.
-    if kind == "operator" && ["avg", "average", "mean"].contains(&&*name.to_lowercase()) {
+    let lowercase = name.to_lowercase();
+    if kind == "operator" && ["avg", "average", "mean"].contains(&&*lowercase) {
         return d
             .with_note("a mean is the sum divided by the count, which the prelude's `sum` and `count` give; it has no mean of its own yet, as the mean of integers isn't an integer")
             .with_help("write `sum{r: r, of: x} / to_approximate{from: count{r: r}}`, and for integers, `to_approximate{from: sum{r: r, of: x}}` as the dividend");
+    }
+    // Other languages' names for the prelude's operators, such as Python's
+    // `prod` and `len`, which no closeness of spelling finds, or finds
+    // wrong: `len` is close to `min`.
+    let elsewhere = ELSEWHERE
+        .iter()
+        .find(|(other, _)| kind == "operator" && *other == lowercase)
+        .filter(|(_, ours)| candidates.contains(ours));
+    if let Some((_, ours)) = elsewhere {
+        return d.with_suggestion(
+            format!("use `{ours}`, as trendy calls it"),
+            vec![Edit {
+                span,
+                replacement: (*ours).to_string(),
+            }],
+        );
     }
     let closest = candidates
         .iter()
@@ -1196,6 +1213,10 @@ pub(crate) fn unknown_name(name: &str, span: Span, kind: &str, candidates: &[&st
         }),
     }
 }
+
+/// Other languages' names for operators of the prelude, lowercase, with
+/// the prelude's.
+const ELSEWHERE: &[(&str, &str)] = &[("len", "count"), ("length", "count"), ("prod", "product")];
 
 /// The operator `name`, at `span`, used as a value.
 pub(crate) fn operator_as_value(name: &str, span: Span) -> Diagnostic {

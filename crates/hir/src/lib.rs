@@ -238,6 +238,9 @@ pub enum Builtin {
     /// The sum of a number computed for each tuple of a relation: exact,
     /// then rounded once, so that no order of adding them matters.
     Sum,
+    /// The product of a number computed for each tuple of a relation,
+    /// exact, then rounded once.
+    Product,
     /// A value as trendy source, the text `debug_value` writes.
     ToText,
     /// The approximate number nearest an integer.
@@ -245,12 +248,13 @@ pub enum Builtin {
 }
 
 impl Builtin {
-    pub const ALL: [Builtin; 7] = [
+    pub const ALL: [Builtin; 8] = [
         Builtin::DebugValue,
         Builtin::Count,
         Builtin::Min,
         Builtin::Max,
         Builtin::Sum,
+        Builtin::Product,
         Builtin::ToText,
         Builtin::ToApproximate,
     ];
@@ -263,6 +267,7 @@ impl Builtin {
             Builtin::Min => "min",
             Builtin::Max => "max",
             Builtin::Sum => "sum",
+            Builtin::Product => "product",
             Builtin::ToText => "to_text",
             Builtin::ToApproximate => "to_approximate",
         }
@@ -274,8 +279,8 @@ impl Builtin {
     }
 
     /// The type parameters the compiler's implementation takes: for `min`
-    /// and `max`, `T`, of the kind `ordered`, and for `sum`, of `numeric`,
-    /// and the tuples of `r`, whose `per` parameter `of` is.
+    /// and `max`, `T`, of the kind `ordered`, and for `sum` and `product`,
+    /// of `numeric`, and the tuples of `r`, whose `per` parameter `of` is.
     #[must_use]
     pub fn types(self) -> Vec<TypeParameter> {
         let unnamed = |index, any| TypeParameter {
@@ -302,7 +307,7 @@ impl Builtin {
             Builtin::Count => vec![unnamed(0, Any::Relation)],
             Builtin::ToApproximate => Vec::new(),
             Builtin::Min | Builtin::Max => of_kind("ordered", &[Requirement::Order]),
-            Builtin::Sum => of_kind(
+            Builtin::Sum | Builtin::Product => of_kind(
                 "numeric",
                 &[Requirement::Addition, Requirement::Multiplication],
             ),
@@ -320,7 +325,7 @@ impl Builtin {
             Builtin::Count => [("r".to_string(), parameter(0))].into(),
             Builtin::ToText => [("from".to_string(), parameter(0))].into(),
             Builtin::ToApproximate => [("from".to_string(), Type::Scalar(Scalar::Integer))].into(),
-            Builtin::Min | Builtin::Max | Builtin::Sum => {
+            Builtin::Min | Builtin::Max | Builtin::Sum | Builtin::Product => {
                 let tuples = Heading::new(
                     [
                         ("of".to_string(), parameter(0)),
@@ -340,7 +345,7 @@ impl Builtin {
         match self {
             Builtin::DebugValue => None,
             Builtin::Count => Some(Type::Scalar(Scalar::Integer)),
-            Builtin::Min | Builtin::Max | Builtin::Sum => {
+            Builtin::Min | Builtin::Max | Builtin::Sum | Builtin::Product => {
                 Some(Type::Parameter(self.types()[0].clone()))
             }
             Builtin::ToText => Some(Type::Scalar(Scalar::Text)),
@@ -354,7 +359,8 @@ impl Builtin {
     /// # Errors
     ///
     /// Returns why there is no value: `min` or `max` of a relation without
-    /// tuples, which has neither, or a `sum` out of its type's range.
+    /// tuples, which has neither, or a `sum` or `product` out of its type's
+    /// range.
     ///
     /// # Panics
     ///
@@ -385,9 +391,14 @@ impl Builtin {
                 .max_by(|a, b| compare(a, b))
                 .cloned()
                 .ok_or(BuiltinFailure::NoTuples),
-            Builtin::Sum => {
+            Builtin::Sum | Builtin::Product => {
                 let of = relation().heading.get("of").expect("`of` is an attribute");
-                sum(of, values()).map_err(BuiltinFailure::Failure)
+                let folded = if self == Builtin::Sum {
+                    sum(of, values())
+                } else {
+                    product(of, values())
+                };
+                folded.map_err(BuiltinFailure::Failure)
             }
             Builtin::ToText => Ok(Value::Text(args["from"].to_string())),
             Builtin::ToApproximate => match args["from"] {
@@ -412,28 +423,62 @@ fn sum<'a>(ty: &Type, values: impl Iterator<Item = &'a Value>) -> Result<Value, 
     match ty {
         Type::Scalar(Scalar::Integer) => {
             let mut sum = trendy_numeric::IntegerSum::default();
-            for value in values {
-                let Value::Integer(n) = value else {
-                    panic!("an integer sum of {value:?}");
-                };
-                sum.add(*n);
-            }
+            integers(values).for_each(|n| sum.add(n));
             let total = sum.total().ok_or(Failure::Overflow(Scalar::Integer))?;
             Ok(Value::Integer(total))
         }
         Type::Scalar(Scalar::Approximate) => {
             let mut sum = trendy_numeric::ApproximateSum::default();
-            for value in values {
-                let Value::Approximate(x) = value else {
-                    panic!("an approximate sum of {value:?}");
-                };
-                sum.add(x.get());
-            }
+            approximates(values).for_each(|x| sum.add(x));
             let total = sum.total().ok_or(Failure::Overflow(Scalar::Approximate))?;
             Ok(Value::Approximate(Approximate::new(total)))
         }
         other => panic!("a sum of {other}"),
     }
+}
+
+/// The exact product of `values`, of the numeric type `ty`, rounded once.
+fn product<'a>(
+    ty: &Type,
+    values: impl Iterator<Item = &'a Value> + Clone,
+) -> Result<Value, Failure> {
+    match ty {
+        Type::Scalar(Scalar::Integer) => {
+            let mut product = trendy_numeric::IntegerProduct::default();
+            integers(values).for_each(|n| product.multiply(n));
+            let total = product.total().ok_or(Failure::Overflow(Scalar::Integer))?;
+            Ok(Value::Integer(total))
+        }
+        Type::Scalar(Scalar::Approximate) => {
+            let mut product = trendy_numeric::ApproximateProduct::default();
+            approximates(values.clone()).for_each(|x| product.multiply(x));
+            let total = match product.total() {
+                trendy_numeric::Rounded::Nearest(total) => total,
+                trendy_numeric::Rounded::Exact(exact) => {
+                    exact.total(approximates(values), &mut vec![0; exact.limbs()])
+                }
+            };
+            let total = total.ok_or(Failure::Overflow(Scalar::Approximate))?;
+            Ok(Value::Approximate(Approximate::new(total)))
+        }
+        other => panic!("a product of {other}"),
+    }
+}
+
+/// `values`, integers.
+fn integers<'a>(values: impl Iterator<Item = &'a Value>) -> impl Iterator<Item = i64> {
+    values.map(|value| match value {
+        Value::Integer(n) => *n,
+        other => panic!("{other:?} as an integer"),
+    })
+}
+
+/// `values`, approximate numbers.
+fn approximates<'a>(values: impl Iterator<Item = &'a Value>) -> impl Iterator<Item = f64> {
+    values.map(|value| match value {
+        Value::Approximate(x) => x.get(),
+        other => panic!("{other:?} as an approximate number"),
+    })
 }
 
 /// A call of an operator: of an update operator, as a statement, or of a

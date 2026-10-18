@@ -164,6 +164,9 @@ pub enum RuntimeFn {
     /// exact sum, rounded once. It stops the program if the sum is beyond
     /// its type's range.
     Sum,
+    /// `trendy_rt_product(dst, src, descriptor, index)`: as
+    /// [`RuntimeFn::Sum`], of the product.
+    Product,
     /// `trendy_rt_fail(failure)`, which doesn't return. It takes a
     /// [`Failure::code`] by value, not a place, so only codegen calls it.
     Fail,
@@ -279,6 +282,7 @@ impl RuntimeFn {
             RuntimeFn::DebugValue => "trendy_rt_debug_value",
             RuntimeFn::ToText => "trendy_rt_to_text",
             RuntimeFn::Sum => "trendy_rt_sum",
+            RuntimeFn::Product => "trendy_rt_product",
             RuntimeFn::Fail => "trendy_rt_fail",
             RuntimeFn::Concat => "trendy_rt_concat",
             RuntimeFn::Begin => "trendy_rt_begin",

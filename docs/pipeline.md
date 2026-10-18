@@ -23,9 +23,10 @@ where its arguments are known (`hir::Builtin::evaluate`), and lowering
 computes inline otherwise: `count` is the count every relation keeps
 after its tuples, `min` and `max` a loop over them (`extreme`), which
 ends the block with `Terminator::Fail` for none (R0010), and
-`to_approximate` an instruction (`UnaryOp::Approximate`). `sum` is a
-runtime call (`trendy_rt_sum`), which walks the relation by its
-descriptor, and sums as sema folds it, with `trendy_numeric`. `to_text` is
+`to_approximate` an instruction (`UnaryOp::Approximate`). `sum` and
+`product` are runtime calls (`trendy_rt_sum`, `trendy_rt_product`), which
+walk the relation by its descriptor, and compute as sema folds them, with
+`trendy_numeric`. `to_text` is
 a runtime call, which writes the value as `debug_value` does; folded, it
 is `hir::Value`'s source text, which writes values the same way. Since
 that text has the value's type in it, as an empty relation's heading, a
@@ -53,11 +54,19 @@ object. **`trendy_text`**, `no_std` and dependency-free, holds the escape
 rules for text literals, so the compiler, which reads them and writes them
 in messages and in `to_text`'s folded values, and the runtime, which writes
 them, can't disagree. **`trendy_numeric`**, the same, holds the exact sums
-that `sum` folds and runs with: integers in an `i128`, and approximate
-numbers in a fixed-point accumulator of every finite binary64 (a Kulisch
-accumulator), each rounded once at the end. Since integer addition is
-associative, the sum doesn't depend on the order of a relation's tuples,
-which has no meaning.
+and products that `sum` and `product` fold and run with, each rounded once
+at the end (`nearest`), so that neither depends on the order of a
+relation's tuples, which has no meaning. A sum of integers is an `i128`,
+and of approximate numbers a fixed-point accumulator of every finite
+binary64 (a Kulisch accumulator). A product of integers is zero with a
+zero, and otherwise out of range once a partial product is, since the rest
+only grow it. A product of approximate numbers keeps the highest 128 bits
+of the significands' product, with the exponent apart, and counts the
+steps that dropped bits, which bounds the exact product above: if the
+bound rounds as the kept bits do, that is the product. Otherwise, within
+about 2^-74 of halfway between two approximate numbers, it is worked out
+in full (`Exact`), in memory the caller gives, which the runtime allocates
+and frees, and in time quadratic in the number of factors.
 
 ```mermaid
 flowchart TD

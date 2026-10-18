@@ -523,6 +523,13 @@ builtin operator max{r: any relation, of: T per r}: T
 builtin operator sum{r: any relation, of: T per r}: T
     types { T: any numeric };
 
+/* The product of `of` for the tuples of `r`, each tuple's counted, though
+   two have the same value: the exact product, rounded once. Of no tuples,
+   it is 1, or 1e0, and with a zero, zero. A product beyond its type's
+   range fails (R0001). */
+builtin operator product{r: any relation, of: T per r}: T
+    types { T: any numeric };
+
 /* Whether `of` is true for some tuple of `r`: whether `r where of` has
    one, which its projection on no attributes, `relation { {} }` or
    `relation {}`, says. Of no tuples, it is false. */
@@ -664,6 +671,38 @@ var harvests := relation {
 var total := sum{r: harvests{tonnes}};
 
 operator main{} [];
+```
+
+**`product{r: any relation, of: T per r}: T`**, for `T` of `any numeric`,
+is the product of `of` for the tuples of `r`. Tutorial D has no product
+aggregate, and SQL none either, which writes `EXP(SUM(LN(x)))` of positive
+numbers; TTM gives its value of no tuples: "the product of no numbers is
+one" (RM Prescription 10).
+
+- **Of no tuples, it is 1,** or `1e0`, and with a zero factor, zero,
+  whatever the others, of the sign of the rest for approximate numbers.
+- **It is exact, then rounded once,** as `sum` is. Below, the rates
+  compound to `1.0804500000000001e0`, the nearest to their exact product,
+  where `1.05e0 * 1.05e0 * 9.8e-1` is `1.08045e0`, rounded at each `*`. A
+  product fails only if the exact product is out of range (R0001), so a
+  partial product too large or too small on the way doesn't matter, and
+  of integers, `-9223372036854775808` is one, though its magnitude isn't.
+- **Other languages' names are fixed:** Python's `prod`, and `len` for
+  `count` (A0015).
+
+```trendy
+var rates := relation {
+    { year: 2021, rate: 1.05e0 },
+    { year: 2022, rate: 1.05e0 },
+    { year: 2023, rate: 9.8e-1 },
+};
+var compounded := product{r: rates, of: rate};
+var in_turn := 1.05e0 * 1.05e0 * 9.8e-1;
+
+operator main{} [
+    call debug_value{v: compounded};
+    call debug_value{v: in_turn};
+];
 ```
 
 **`some{r: any relation, of: boolean per r}`** and
@@ -2425,6 +2464,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `GROUP BY a` with `COUNT(*)` | `groups extend { n := count{r: !!r} }`, which keeps the empty groups |
 | `MIN(x)`, `MAX (R, X)` | `min{r: r, of: x}`, `max{r: r, of: x}` |
 | `SUM(x)`, `SUM (R, X)`, `sum(xs)` | `sum{r: r, of: x}`, which is 0 of no tuples, not `NULL` |
+| `EXP(SUM(LN(x)))`, `math.prod(xs)` | `product{r: r, of: x}`, exact, of any numbers, and 1 of no tuples |
 | `AVG(x)`, `mean(xs)` | `sum{r: r, of: x} / to_approximate{from: count{r: r}}` |
 | `GROUP BY a` with `MAX(x)` | `(groups matching r) extend { m := max{r: !!r, of: x} }`, since an empty group has no max |
 | `bool` | `boolean` |

@@ -790,6 +790,9 @@ fn relations() {
             "15",
             "-5e-1",
             "1923",
+            // 5!, and the rates compounded, exactly, then rounded once.
+            "120",
+            "1.0804500000000001e0",
             // Per group, Puno with none; and the two born in 1815.
             r#"relation { crops: integer, region: text, tonnes: integer } { { crops: 0, region: "Puno", tonnes: 0 }, { crops: 1, region: "Mendoza", tonnes: 300 }, { crops: 2, region: "Nyeri", tonnes: 165 }, { crops: 2, region: "Punjab", tonnes: 1900 } }"#,
             r#"relation { born: integer, name: text, place: text } { { born: 1815, name: "Ada", place: "London" }, { born: 1815, name: "Édouard", place: "Paris" } }"#,

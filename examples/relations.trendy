@@ -419,17 +419,27 @@ operator checked_names{
    computed for each tuple of a relation, `of`, with the tuple's attributes
    in scope by name, as in `where`. The prelude's `count`, `sum`, `min`,
    `max`, `some` and `every` are Tutorial D's COUNT, SUM, MIN, MAX, OR and
-   AND, called like any operator. Equal values in different tuples all
-   count: the sum of `signs`' `x` has -1.5 twice, which a projection on
-   `x` would merge. Of no tuples, `count` and `sum` are 0, and `min` and
-   `max` have no value, which is an error. A sum is exact, then rounded
-   once, so no order of adding matters.
+   AND, called like any operator, and `product` is the product. Equal
+   values in different tuples all count: the sum of `signs`' `x` has -1.5
+   twice, which a projection on `x` would merge. Of no tuples, `count` and
+   `sum` are 0, `product` 1, and `min` and `max` have no value, which is
+   an error. A sum or product is exact, then rounded once, so no order of
+   adding or multiplying matters: compounded, the rates below are
+   1.0804500000000001, the nearest to their exact product, where
+   multiplying them in turn gives 1.08045.
    Tutorial D: COUNT ( BIRTHS ), SUM ( SIGNS, X ), MAX ( BIRTHS, BORN ).
    Implemented, and printed twice like the projections. */
+var rates := relation {
+    { year: 2021, rate: 1.05e0 },
+    { year: 2022, rate: 1.05e0 },
+    { year: 2023, rate: 9.8e-1 },
+};
 var how_many := count{r: births};
 var total := sum{r: signs, of: n};
 var net := sum{r: signs, of: x};
 var latest := max{r: births, of: born};
+var factorial := product{r: signs, of: n};
+var compounded := product{r: rates, of: rate};
 
 /* Aggregates per group: an extend of the groups, each with an aggregate
    of its image relation, so trendy has no summarize. A group with no
@@ -464,6 +474,7 @@ var same_year := births where count{r: !!(births rename {name as other, place as
 operator aggregate{
     b: relation { name: text, born: integer, place: text },
     s: relation { x: approximate, n: integer },
+    p: relation { year: integer, rate: approximate },
     h: relation { region: text, crop: text, tonnes: integer },
     g: relation { region: text },
 } [
@@ -471,6 +482,8 @@ operator aggregate{
     call debug_value{v: sum{r: s, of: n}};
     call debug_value{v: sum{r: s, of: x}};
     call debug_value{v: max{r: b, of: born}};
+    call debug_value{v: product{r: s, of: n}};
+    call debug_value{v: product{r: p, of: rate}};
     call debug_value{v: g extend { crops := count{r: !!h}, tonnes := sum{r: !!h, of: tonnes} }};
     call debug_value{v: b where count{r: !!(b rename {name as other, place as elsewhere})} > 1};
 ];
@@ -525,6 +538,8 @@ operator main{} [
     call debug_value{v: total};
     call debug_value{v: net};
     call debug_value{v: latest};
+    call debug_value{v: factorial};
+    call debug_value{v: compounded};
     call debug_value{v: by_region};
     call debug_value{v: same_year};
 
@@ -562,5 +577,5 @@ operator main{} [
 
     call checked_names{b: births, c: cities};
 
-    call aggregate{b: births, s: signs, h: harvests, g: regions};
+    call aggregate{b: births, s: signs, p: rates, h: harvests, g: regions};
 ];

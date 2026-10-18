@@ -4868,6 +4868,51 @@ mod tests {
     }
 
     #[test]
+    fn product_is_exact_then_rounded_once() {
+        let growth = "var growth := relation { { year: 2021, factor: 1.05e0, units: 3 }, { year: 2022, factor: 1.05e0, units: 4 }, { year: 2023, factor: 9.8e-1, units: -5 } };\n";
+        let vars = variables(&format!(
+            "{growth}var units := product{{r: growth, of: units}};\nvar none := product{{r: growth where false, of: units}};\nvar factor := product{{r: growth, of: factor}};\nvar nothing := product{{r: growth where false, of: factor}};\nvar zero := product{{r: growth, of: year - 2022}};"
+        ));
+        assert_eq!(vars[1].init, hir::Value::Integer(-60));
+        // Of no tuples, 1 of the type.
+        assert_eq!(vars[2].init, hir::Value::Integer(1));
+        // The nearest to the exact product; multiplied in turn, in either
+        // order, the three are 1.08045.
+        assert_eq!(
+            vars[3].init,
+            hir::Value::Approximate(hir::Approximate::new(1.080_450_000_000_000_1))
+        );
+        assert_eq!(
+            vars[4].init,
+            hir::Value::Approximate(hir::Approximate::new(1.0))
+        );
+        assert_eq!(vars[5].init, hir::Value::Integer(0));
+        // Out of range only if the exact product is, whatever the order:
+        // 2^63 isn't an integer, but -2^63 is.
+        let big = "var big := relation { { n: 4611686018427387904 }, { n: 2 }, { n: -1 } };\n";
+        let vars = variables(&format!("{big}var p := product{{r: big, of: n}};"));
+        assert_eq!(vars[1].init, hir::Value::Integer(i64::MIN));
+        let source = format!("{big}var p := product{{r: big where n > 0, of: n}};{MAIN}");
+        assert_eq!(codes(&source), [Code::Overflow]);
+    }
+
+    #[test]
+    fn other_languages_names_for_aggregates_are_fixed() {
+        // Python's, which no closeness of spelling finds, or finds wrong.
+        for (written, ours) in [("prod", "product"), ("len", "count"), ("LEN", "count")] {
+            let of = if ours == "count" { "" } else { ", of: of" };
+            let source = format!("{PLOTS}var x := {written}{{r: plots{of}}};{MAIN}");
+            let fixed = fix(&source);
+            assert_eq!(
+                fixed,
+                format!("{PLOTS}var x := {ours}{{r: plots{of}}};{MAIN}"),
+                "{written}"
+            );
+            assert!(analyze_str(&fixed).is_ok(), "{fixed}");
+        }
+    }
+
+    #[test]
     fn a_projection_for_a_per_parameter_is_fixed_to_its_attribute() {
         // Projecting would merge equal values, which `of` counts each of.
         let source = format!("{PLOTS}var s := sum{{r: plots{{of}}}};{MAIN}");

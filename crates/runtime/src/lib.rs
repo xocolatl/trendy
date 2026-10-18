@@ -1368,30 +1368,143 @@ pub unsafe extern "C" fn trendy_rt_sum(
 ) {
     // SAFETY: guaranteed by the caller.
     unsafe {
-        let desc = &*desc;
-        let attribute = &attributes(desc)[index.read_unaligned()];
-        let (tuples, count) = read_slice(src);
-        let value = |i: usize| tuples.add(i * desc.element_size + attribute.offset);
-        if (*attribute.desc).kind == KIND_INTEGER {
+        let column = Column::new(src, &*desc, index.read_unaligned());
+        if column.kind == KIND_INTEGER {
             let mut sum = trendy_numeric::IntegerSum::default();
-            for i in 0..count {
-                sum.add(value(i).cast::<i64>().read_unaligned());
-            }
-            let Some(total) = sum.total() else {
-                trendy_rt_fail(FAIL_INTEGER_OVERFLOW)
-            };
-            dst.cast::<i64>().write_unaligned(total);
+            column.values().for_each(|n| sum.add(n));
+            store_integer(dst, sum.total());
         } else {
             let mut sum = trendy_numeric::ApproximateSum::default();
-            for i in 0..count {
-                sum.add(value(i).cast::<f64>().read_unaligned());
-            }
-            let Some(total) = sum.total() else {
-                trendy_rt_fail(FAIL_APPROXIMATE_OVERFLOW)
-            };
-            dst.cast::<f64>().write_unaligned(total);
+            column.values().for_each(|x| sum.add(x));
+            store_approximate(dst, sum.total());
         }
     }
+}
+
+/// Store at `dst` the product of the attribute at `index`, as
+/// [`trendy_rt_sum`] stores the sum: exact, rounded once, as the compiler
+/// multiplies. A product of approximate numbers too near halfway between two
+/// for 128 bits to tell which is worked out in full, in memory it frees.
+/// Stops the program if the product is beyond its type's range, or that
+/// memory can't be allocated.
+///
+/// # Safety
+///
+/// As for [`trendy_rt_sum`].
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_product(
+    dst: *mut u8,
+    src: *const u8,
+    desc: *const TypeDesc,
+    index: *const usize,
+) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let column = Column::new(src, &*desc, index.read_unaligned());
+        if column.kind == KIND_INTEGER {
+            let mut product = trendy_numeric::IntegerProduct::default();
+            column.values().for_each(|n| product.multiply(n));
+            store_integer(dst, product.total());
+            return;
+        }
+        let mut product = trendy_numeric::ApproximateProduct::default();
+        column.values().for_each(|x| product.multiply(x));
+        let total = match product.total() {
+            trendy_numeric::Rounded::Nearest(total) => total,
+            trendy_numeric::Rounded::Exact(exact) => {
+                let limbs = exact.limbs();
+                let memory = allocate::<u64>(limbs);
+                core::ptr::write_bytes(memory, 0, limbs);
+                let total = exact.total(
+                    column.values(),
+                    core::slice::from_raw_parts_mut(memory, limbs),
+                );
+                free(memory.cast());
+                total
+            }
+        };
+        store_approximate(dst, total);
+    }
+}
+
+/// The values of one attribute of the tuples of a relation, each `size`
+/// bytes from the last, at `offset` in each.
+#[cfg(not(test))]
+struct Column {
+    tuples: *const u8,
+    count: usize,
+    size: usize,
+    offset: usize,
+    /// The attribute's type, one of the `KIND_` constants.
+    kind: u8,
+}
+
+#[cfg(not(test))]
+impl Column {
+    /// The attribute at `index`, its position by name, of the tuples of
+    /// the relation `src`, of the type `desc` describes.
+    ///
+    /// # Safety
+    ///
+    /// `src` must point to a valid relation of that type, and `index` be a
+    /// position among its attributes.
+    unsafe fn new(src: *const u8, desc: &TypeDesc, index: usize) -> Column {
+        // SAFETY: guaranteed by the caller.
+        unsafe {
+            let attribute = &attributes(desc)[index];
+            let (tuples, count) = read_slice(src);
+            Column {
+                tuples,
+                count,
+                size: desc.element_size,
+                offset: attribute.offset,
+                kind: (*attribute.desc).kind,
+            }
+        }
+    }
+
+    /// The values, which must be of type `T`.
+    ///
+    /// # Safety
+    ///
+    /// `T` must be the attribute's type, and the relation still valid.
+    unsafe fn values<T: Copy>(&self) -> impl Iterator<Item = T> + Clone {
+        let (tuples, size, offset) = (self.tuples, self.size, self.offset);
+        // SAFETY: guaranteed by the caller of `new`, and of this.
+        (0..self.count)
+            .map(move |i| unsafe { tuples.add(i * size + offset).cast::<T>().read_unaligned() })
+    }
+}
+
+/// Store the integer `total` at `dst`, or stop the program if there is
+/// none, being out of range.
+///
+/// # Safety
+///
+/// `dst` must point to memory for an integer.
+#[cfg(not(test))]
+unsafe fn store_integer(dst: *mut u8, total: Option<i64>) {
+    let Some(total) = total else {
+        trendy_rt_fail(FAIL_INTEGER_OVERFLOW)
+    };
+    // SAFETY: guaranteed by the caller.
+    unsafe { dst.cast::<i64>().write_unaligned(total) }
+}
+
+/// Store the approximate number `total` at `dst`, or stop the program if
+/// there is none, being beyond the largest finite.
+///
+/// # Safety
+///
+/// `dst` must point to memory for an approximate number.
+#[cfg(not(test))]
+unsafe fn store_approximate(dst: *mut u8, total: Option<f64>) {
+    let Some(total) = total else {
+        trendy_rt_fail(FAIL_APPROXIMATE_OVERFLOW)
+    };
+    // SAFETY: guaranteed by the caller.
+    unsafe { dst.cast::<f64>().write_unaligned(total) }
 }
 
 /// Store at `dst` the text [`trendy_rt_debug_value`] writes for `value`,

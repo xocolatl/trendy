@@ -32,6 +32,13 @@ builtin operator max{r: any relation, of: T per r}: T
 builtin operator sum{r: any relation, of: T per r}: T
     types { T: any numeric };
 
+/* The product of `of` for the tuples of `r`, each tuple's counted, though
+   two have the same value: the exact product, rounded once. Of no tuples,
+   it is 1, or 1e0, and with a zero, zero. A product beyond its type's
+   range fails (R0001). */
+builtin operator product{r: any relation, of: T per r}: T
+    types { T: any numeric };
+
 /* Whether `of` is true for some tuple of `r`: whether `r where of` has
    one, which its projection on no attributes, `relation { {} }` or
    `relation {}`, says. Of no tuples, it is false. */

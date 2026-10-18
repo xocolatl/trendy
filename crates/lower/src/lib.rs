@@ -467,6 +467,7 @@ impl<'a> FunctionBuilder<'a> {
                 | hir::Builtin::Min
                 | hir::Builtin::Max
                 | hir::Builtin::Sum
+                | hir::Builtin::Product
                 | hir::Builtin::ToText
                 | hir::Builtin::ToApproximate,
             ) => {
@@ -552,27 +553,8 @@ impl<'a> FunctionBuilder<'a> {
                 let r = &call.args["r"];
                 self.extreme(r, hir::Comparison::Greater, lir::Failure::NoMax, cx)
             }
-            // A runtime call, which sums exactly as `hir::Builtin::evaluate`.
-            hir::Builtin::Sum => {
-                let r = &call.args["r"];
-                let ty = self.program.type_of(r, &self.params);
-                let hir::Type::Relation(heading) = &ty else {
-                    unreachable!("`sum` takes a relation");
-                };
-                let of = heading.get("of").expect("`of` is an attribute");
-                let index = attribute_names(&ty)
-                    .position(|a| a == "of")
-                    .expect("`of` is an attribute");
-                let dst = self.slot(layout(of));
-                let src = self.place(r, cx);
-                let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
-                let index = usize_constant(len(index), cx);
-                self.insts.push(lir::Inst::CallRuntime {
-                    function: lir::RuntimeFn::Sum,
-                    args: vec![dst.clone(), src, descriptor, index],
-                });
-                dst
-            }
+            hir::Builtin::Sum => self.numbers(lir::RuntimeFn::Sum, call, cx),
+            hir::Builtin::Product => self.numbers(lir::RuntimeFn::Product, call, cx),
             hir::Builtin::ToText => {
                 let from = &call.args["from"];
                 let ty = self.program.type_of(from, &self.params);
@@ -598,6 +580,36 @@ impl<'a> FunctionBuilder<'a> {
             }
             hir::Builtin::DebugValue => unreachable!("`debug_value` is an update operator"),
         }
+    }
+
+    /// The value of `call`, of `sum` or `product`, computed into a new
+    /// stack slot by the runtime function `function`, which computes it as
+    /// `hir::Builtin::evaluate` does, from the relation, its descriptor and
+    /// the position of `of` among its attributes.
+    fn numbers(
+        &mut self,
+        function: lir::RuntimeFn,
+        call: &hir::Call,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let r = &call.args["r"];
+        let ty = self.program.type_of(r, &self.params);
+        let hir::Type::Relation(heading) = &ty else {
+            unreachable!("`sum` and `product` take relations");
+        };
+        let of = heading.get("of").expect("`of` is an attribute");
+        let index = attribute_names(&ty)
+            .position(|a| a == "of")
+            .expect("`of` is an attribute");
+        let dst = self.slot(layout(of));
+        let src = self.place(r, cx);
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+        let index = usize_constant(len(index), cx);
+        self.insts.push(lir::Inst::CallRuntime {
+            function,
+            args: vec![dst.clone(), src, descriptor, index],
+        });
+        dst
     }
 
     /// The value of the attribute `of` of the relation `r`'s tuples that
@@ -2674,14 +2686,29 @@ mod tests {
     }
 
     #[test]
-    fn sum_is_a_runtime_call() {
-        // `debug_value{v: sum{r: r, of: of}}`, of a relation variable whose
-        // tuples have `of` beside their own attributes, as sema makes it.
-        let sum = hir::Operator {
-            name: "sum".to_string(),
-            types: hir::Builtin::Sum.types(),
-            params: hir::Builtin::Sum.params(),
-            kind: hir::OperatorKind::Builtin(hir::Builtin::Sum),
+    fn sum_and_product_are_runtime_calls() {
+        for (builtin, function) in [
+            (hir::Builtin::Sum, lir::RuntimeFn::Sum),
+            (hir::Builtin::Product, lir::RuntimeFn::Product),
+        ] {
+            assert_eq!(
+                numbers_calls(builtin),
+                [(function, 4), (lir::RuntimeFn::DebugValue, 2)]
+            );
+        }
+    }
+
+    /// The runtime calls of `debug_value{v: f{r: r, of: of}}`, for `f`,
+    /// `sum` or `product`, of a relation variable whose tuples have `of`
+    /// beside their own attributes, as sema makes it, with each one's
+    /// number of arguments: into an integer's slot, of the relation, its
+    /// descriptor and the position of `of`.
+    fn numbers_calls(builtin: hir::Builtin) -> Vec<(lir::RuntimeFn, usize)> {
+        let operator = hir::Operator {
+            name: builtin.name().to_string(),
+            types: builtin.types(),
+            params: builtin.params(),
+            kind: hir::OperatorKind::Builtin(builtin),
         };
         let own = hir::Heading::new(BTreeMap::new());
         let r = hir::Value::Relation(hir::RelationValue {
@@ -2694,7 +2721,7 @@ mod tests {
             ),
             tuples: BTreeSet::new(),
         });
-        let summed = hir::Expr::Call(hir::Call {
+        let folded = hir::Expr::Call(hir::Call {
             operator: hir::OperatorId(1),
             types: vec![integer(), hir::Type::Tuple(own)],
             args: [("r".to_string(), hir::Expr::Variable(hir::VariableId(0)))].into(),
@@ -2702,26 +2729,20 @@ mod tests {
         let lowered = lower(&program(
             vec![
                 debug_value(),
-                sum,
-                user("main", &[], vec![call(0, vec![("v", summed)])]),
+                operator,
+                user("main", &[], vec![call(0, vec![("v", folded)])]),
             ],
             vec![variable("r", r)],
         ));
         assert_eq!(lowered.functions.len(), 1, "a built-in has no function");
-        let calls: Vec<_> = lowered.functions[0].blocks[0]
+        lowered.functions[0].blocks[0]
             .insts
             .iter()
             .filter_map(|i| match i {
                 lir::Inst::CallRuntime { function, args } => Some((*function, args.len())),
                 _ => None,
             })
-            .collect();
-        // Into an integer's slot, of the relation, its descriptor and the
-        // position of `of`.
-        assert_eq!(
-            calls,
-            [(lir::RuntimeFn::Sum, 4), (lir::RuntimeFn::DebugValue, 2)]
-        );
+            .collect()
     }
 
     #[test]
