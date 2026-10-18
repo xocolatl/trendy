@@ -52,7 +52,9 @@
     ],
     "configurationDefaults": {
       "[trendy]": {
-        "editor.semanticHighlighting.enabled": true
+        "editor.semanticHighlighting.enabled": true,
+        "editor.defaultFormatter": "trendy.trendy",
+        "editor.formatOnSave": true
       }
     }
   },

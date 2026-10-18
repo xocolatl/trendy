@@ -1038,7 +1038,8 @@ results. They contain no language logic of their own.
   provides semantic highlighting by classifying tokens in the CST (so
   highlighting always agrees with the compiler, even in broken files), and answers formatting requests with fmt. It also converts
   byte spans to the UTF-16 positions LSP uses. The VS Code extension in
-  `editors/vscode` is its client. The extension's TextMate grammar, used
+  `editors/vscode` is its client, and makes it the formatter for trendy
+  files, run on every save. The extension's TextMate grammar, used
   for instant coloring before the server starts, is generated from the
   lexer by `crates/lsp/tests/textmate.rs`, which fails if the committed
   grammar is out of date.
