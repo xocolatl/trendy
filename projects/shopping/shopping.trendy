@@ -62,46 +62,30 @@ key { recipe };
    plan also leaves out the recipes not planned. */
 var planned := join{plan, recipes, ingredients};
 
-/* The rest of the list, as it should read once the language has what it
-   needs, in the order the features are needed:
+/* Each planned meal's ingredients, scaled from the people its recipe
+   serves to the people it's cooked for. Values never convert implicitly,
+   so the counts of people, integers, are converted to approximate
+   numbers. */
+var scaled := planned extend {
+    amount := quantity * to_approximate{from: people} / to_approximate{from: serves}
+};
 
-   1. Converting an integer to an approximate number, since values never
-      convert implicitly; spelled here as a read-only operator, which don't
-      exist yet either.
+/* What to buy: each ingredient and its unit, with the sum of its amounts
+   in its image relation in `scaled`, the tuples for that ingredient, and
+   the recipes that need it. The sum is of those tuples, not of their
+   distinct amounts: cumin is 5 g in both shakshuka and dal tadka, and the
+   list needs 10 g. The image relation keeps `recipe`, so both are
+   there. */
+var list := scaled{ingredient, unit} extend {
+    total := sum{r: !!scaled, of: amount},
+    recipes := (!!scaled){recipe}
+};
 
-   2. Extension, to scale each quantity from the people the recipe serves
-      to the people it's cooked for.
-
-        var scaled := planned extend {
-            amount := quantity * approximate{n: people} / approximate{n: serves}
-        };
-
-   3. Image relations and sum, to add up each ingredient across recipes:
-      each ingredient and unit, extended with the sum of the amounts in its
-      image relation in `scaled`, the tuples for that ingredient. The sum
-      must be of those tuples, not of their distinct amounts: cumin is 5 g
-      in both shakshuka and dal tadka, and the list needs 10 g. The image
-      relation keeps `recipe`, so both are there.
-
-        var list := scaled{ingredient, unit} extend {
-            total := sum{r: !!scaled, a: amount}
-        };
-
-   The list is then:
-
-        cumin 10 g, doubanjiang 60 g, egg 6 piece, garlic 13 clove,
-        ghee 30 g, ginger 40 g, minced pork 300 g, olive oil 30 ml,
-        onion 2 piece, red lentils 250 g, Sichuan pepper 6 g, tofu 800 g,
-        tomato 1000 g
-
-   Later: a pantry to subtract what's already at home, which needs
-   storage, and output for people rather than `debug_value`. */
-
-/* What can be said today: what to buy this week, without the amounts,
-   and which recipes need each, from its image relation in `planned`. */
-var needed := planned{ingredient, unit} extend { recipes := (!!planned){recipe} };
+/* What it can't say yet, as it should read once the language has what it
+   needs: a pantry to subtract what's already at home, which needs storage,
+   and output for people rather than `debug_value`. */
 
 operator main{} [
     call debug_value{v: plan};
-    call debug_value{v: needed};
+    call debug_value{v: list};
 ];
