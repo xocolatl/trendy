@@ -62,34 +62,6 @@ key { name };
    call debug_value{v: tuple { name: "Ada", born: 1815 } in people};
 */
 
-/* Aggregates (RM Prescription 18 and OO Prescription 6): count, sum, avg,
-   max, min, and, or, xor, exactly, union, disjoint union and intersect,
-   of a relation, or of one of its attributes.
-   Tutorial D: COUNT ( PEOPLE ), MAX ( PEOPLE, BORN )
-   Proposed: read-only built-in operators, called like any operator, once
-   read-only operators exist. The empty relation's sum is 0, while its max
-   has no value, which is an error.
-
-   call debug_value{v: count{r: people}};
-   call debug_value{v: max{r: people{born}}};
-*/
-
-/* Aggregates per group: an extend of the groups, each with an aggregate
-   of its image relation (see the image relations below), so trendy has
-   no summarize. A group with no tuples is still there, with a count of 0,
-   unlike with SQL's GROUP BY; and an aggregate is of the image relation's
-   tuples, so equal values in different tuples all count.
-   Tutorial D: EXTEND CITIES { CITY } : { N := COUNT ( !!PEOPLE ) }, from
-   Date and Darwen's Database Explorations, replacing SUMMARIZE PER and BY;
-   TTM's Appendix A expands SUMMARIZE into EXTEND the same way.
-   Needs the aggregate operators above, so read-only operators.
-
-   Per city, how many people live there: Nyeri has none, so its n is 0.
-   call debug_value{v: cities{city} extend { n := count{r: !!(people join cities)} }};
-
-   Who was born in the same year as someone else.
-   call debug_value{v: people where count{r: !!(people rename {name as other})} > 1};
-*/
 /* Transitive closure, of a relation of degree two whose attributes have
    the same type (RM Very Strong Suggestion 6).
    Tutorial D: TCLOSE R
@@ -443,6 +415,66 @@ operator checked_names{
     call debug_value{v: b{name} i_minus (b{name} intersect c{name})};
 ];
 
+/* Aggregates (RM Prescription 18 and OO Prescription 6): of a value
+   computed for each tuple of a relation, `of`, with the tuple's attributes
+   in scope by name, as in `where`. The prelude's `count`, `sum`, `min`,
+   `max`, `some` and `every` are Tutorial D's COUNT, SUM, MIN, MAX, OR and
+   AND, called like any operator. Equal values in different tuples all
+   count: the sum of `signs`' `x` has -1.5 twice, which a projection on
+   `x` would merge. Of no tuples, `count` and `sum` are 0, and `min` and
+   `max` have no value, which is an error. A sum is exact, then rounded
+   once, so no order of adding matters.
+   Tutorial D: COUNT ( BIRTHS ), SUM ( SIGNS, X ), MAX ( BIRTHS, BORN ).
+   Implemented, and printed twice like the projections. */
+var how_many := count{r: births};
+var total := sum{r: signs, of: n};
+var net := sum{r: signs, of: x};
+var latest := max{r: births, of: born};
+
+/* Aggregates per group: an extend of the groups, each with an aggregate
+   of its image relation, so trendy has no summarize. A group with no
+   tuples is still there, with a count and a sum of 0, unlike with SQL's
+   GROUP BY: below, Puno, with no harvests. Who was born in the same year
+   as someone else is a count of the image relation, too.
+   Tutorial D: EXTEND REGIONS : { TONNES := SUM ( !!HARVESTS, TONNES ) },
+   from Date and Darwen's Database Explorations, replacing SUMMARIZE PER
+   and BY; TTM's Appendix A expands SUMMARIZE into EXTEND the same way.
+   Implemented, and printed twice like the projections. */
+var harvests := relation {
+    { region: "Nyeri", crop: "tea", tonnes: 120 },
+    { region: "Nyeri", crop: "coffee", tonnes: 45 },
+    { region: "Mendoza", crop: "grapes", tonnes: 300 },
+    { region: "Punjab", crop: "wheat", tonnes: 950 },
+    { region: "Punjab", crop: "rice", tonnes: 950 },
+}
+key { region, crop };
+
+var regions := relation {
+    { region: "Nyeri" },
+    { region: "Mendoza" },
+    { region: "Punjab" },
+    { region: "Puno" },
+};
+var by_region := regions extend {
+    crops := count{r: !!harvests},
+    tonnes := sum{r: !!harvests, of: tonnes}
+};
+var same_year := births where count{r: !!(births rename {name as other, place as elsewhere})} > 1;
+
+operator aggregate{
+    b: relation { name: text, born: integer, place: text },
+    s: relation { x: approximate, n: integer },
+    h: relation { region: text, crop: text, tonnes: integer },
+    g: relation { region: text },
+} [
+    call debug_value{v: count{r: b}};
+    call debug_value{v: sum{r: s, of: n}};
+    call debug_value{v: sum{r: s, of: x}};
+    call debug_value{v: max{r: b, of: born}};
+    call debug_value{v: g extend { crops := count{r: !!h}, tonnes := sum{r: !!h, of: tonnes} }};
+    call debug_value{v: b where count{r: !!(b rename {name as other, place as elsewhere})} > 1};
+];
+
 operator main{} [
     call debug_value{v: names};
     call debug_value{v: places};
@@ -489,6 +521,12 @@ operator main{} [
     call debug_value{v: included};
     call debug_value{v: whole};
     call debug_value{v: others};
+    call debug_value{v: how_many};
+    call debug_value{v: total};
+    call debug_value{v: net};
+    call debug_value{v: latest};
+    call debug_value{v: by_region};
+    call debug_value{v: same_year};
 
     call project_births{r: births};
     call project_signs{r: signs};
@@ -523,4 +561,6 @@ operator main{} [
     call set_names{b: births, c: cities, p: people};
 
     call checked_names{b: births, c: cities};
+
+    call aggregate{b: births, s: signs, h: harvests, g: regions};
 ];

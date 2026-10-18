@@ -157,6 +157,13 @@ pub enum RuntimeFn {
     /// [`RuntimeFn::Begin`]). It stops the program if the memory can't be
     /// allocated.
     ToText,
+    /// `trendy_rt_sum(dst, src, descriptor, index)`: store at `dst` the
+    /// sum of the attribute `index` (a [`Field::Usize`], its position by
+    /// name) of the tuples of the relation `src`, of the type the
+    /// descriptor describes, whose type is integer or approximate: the
+    /// exact sum, rounded once. It stops the program if the sum is beyond
+    /// its type's range.
+    Sum,
     /// `trendy_rt_fail(failure)`, which doesn't return. It takes a
     /// [`Failure::code`] by value, not a place, so only codegen calls it.
     Fail,
@@ -271,6 +278,7 @@ impl RuntimeFn {
         match self {
             RuntimeFn::DebugValue => "trendy_rt_debug_value",
             RuntimeFn::ToText => "trendy_rt_to_text",
+            RuntimeFn::Sum => "trendy_rt_sum",
             RuntimeFn::Fail => "trendy_rt_fail",
             RuntimeFn::Concat => "trendy_rt_concat",
             RuntimeFn::Begin => "trendy_rt_begin",

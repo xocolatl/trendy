@@ -23,7 +23,9 @@ where its arguments are known (`hir::Builtin::evaluate`), and lowering
 computes inline otherwise: `count` is the count every relation keeps
 after its tuples, `min` and `max` a loop over them (`extreme`), which
 ends the block with `Terminator::Fail` for none (R0010), and
-`to_approximate` an instruction (`UnaryOp::Approximate`). `to_text` is
+`to_approximate` an instruction (`UnaryOp::Approximate`). `sum` is a
+runtime call (`trendy_rt_sum`), which walks the relation by its
+descriptor, and sums as sema folds it, with `trendy_numeric`. `to_text` is
 a runtime call, which writes the value as `debug_value` does; folded, it
 is `hir::Value`'s source text, which writes values the same way. Since
 that text has the value's type in it, as an empty relation's heading, a
@@ -50,7 +52,12 @@ directory of its own), embeds the archive, and passes it to `cc` with the
 object. **`trendy_text`**, `no_std` and dependency-free, holds the escape
 rules for text literals, so the compiler, which reads them and writes them
 in messages and in `to_text`'s folded values, and the runtime, which writes
-them, can't disagree.
+them, can't disagree. **`trendy_numeric`**, the same, holds the exact sums
+that `sum` folds and runs with: integers in an `i128`, and approximate
+numbers in a fixed-point accumulator of every finite binary64 (a Kulisch
+accumulator), each rounded once at the end. Since integer addition is
+associative, the sum doesn't depend on the order of a relation's tuples,
+which has no meaning.
 
 ```mermaid
 flowchart TD
@@ -1055,17 +1062,18 @@ section above that describes it, and create the crate.
 ```layers
 # crate          dependencies
 trendy_text    :
+trendy_numeric :
 trendy_prelude :
 trendy_diag    : serde_json
 trendy_syntax  : trendy_diag trendy_text rowan
 trendy_lexer   : trendy_diag trendy_syntax
 trendy_parser  : trendy_diag trendy_syntax trendy_lexer
 trendy_fmt     : trendy_syntax trendy_lexer
-trendy_hir     : trendy_text
+trendy_hir     : trendy_numeric trendy_text
 trendy_sema    : trendy_diag trendy_syntax trendy_hir
 trendy_lir     :
 trendy_lower   : trendy_hir trendy_lir
-trendy_runtime : trendy_text
+trendy_runtime : trendy_numeric trendy_text
 trendy_codegen : trendy_lir cranelift-codegen cranelift-frontend cranelift-module cranelift-native cranelift-object
 trendyc        : trendy_diag trendy_lexer trendy_parser trendy_prelude trendy_sema trendy_lower trendy_codegen
 trendyfmt      : trendy_diag trendy_lexer trendy_parser trendy_fmt

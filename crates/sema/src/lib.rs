@@ -1598,7 +1598,7 @@ mod tests {
         assert_eq!(at, "{r: any relation, of: T}");
         // A kind requiring what the compiler doesn't implement, or a type
         // declaring a kind whose requirement it doesn't have.
-        let (message, at) = wrong("kind numeric { +, * };", "kind numeric { +, - };");
+        let (message, at) = wrong("kind numeric { +, * };", "kind numeric { +, *, - };");
         assert_eq!(message, "`-` is not a requirement the compiler implements");
         assert_eq!(at, "-");
         let (message, at) = wrong(
@@ -4825,6 +4825,83 @@ mod tests {
             "{PLOTS}{source}var top := top{{r: plots, of: plot}};"
         ));
         assert_eq!(vars[1].init, hir::Value::Integer(3));
+    }
+
+    #[test]
+    fn sum_is_exact_then_rounded_once() {
+        let vars = variables(&format!(
+            "{PLOTS}var rain := sum{{r: plots, of: of}};\nvar none := sum{{r: plots where false, of: of}};\nvar halves := sum{{r: plots, of: to_approximate{{from: of}} * 5e-1}};\nvar nothing := sum{{r: plots where false, of: 1e-1 * to_approximate{{from: plot}}}};"
+        ));
+        assert_eq!(vars[1].init, hir::Value::Integer(2370));
+        // Of no tuples, 0 of the type.
+        assert_eq!(vars[2].init, hir::Value::Integer(0));
+        assert_eq!(
+            vars[3].init,
+            hir::Value::Approximate(hir::Approximate::new(1185.0))
+        );
+        assert_eq!(
+            vars[4].init,
+            hir::Value::Approximate(hir::Approximate::new(0.0))
+        );
+        // Ten tenths, which adding one at a time makes 0.9999999999999999.
+        let tenths: Vec<String> = (1..=10).map(|n| format!("{{ n: {n}, x: 1e-1 }}")).collect();
+        let vars = variables(&format!(
+            "var tenths := relation {{ {} }};\nvar s := sum{{r: tenths, of: x}};",
+            tenths.join(", ")
+        ));
+        assert_eq!(
+            vars[1].init,
+            hir::Value::Approximate(hir::Approximate::new(1.0))
+        );
+        // Out of range only if the exact sum is, whatever the order.
+        let big = "var big := relation { { n: 9223372036854775807 }, { n: 1 }, { n: -1 } };\n";
+        let vars = variables(&format!("{big}var s := sum{{r: big, of: n}};"));
+        assert_eq!(vars[1].init, hir::Value::Integer(i64::MAX));
+        let source = format!("{big}var s := sum{{r: big where n > 0, of: n}};{MAIN}");
+        assert_eq!(codes(&source), [Code::Overflow]);
+        // Only of numbers.
+        let source = format!("{PLOTS}var s := sum{{r: plots, of: region}};{MAIN}");
+        assert_eq!(
+            errors(&source)[0].message,
+            "mismatched types: expected a type of kind `numeric`, found `text`"
+        );
+    }
+
+    #[test]
+    fn a_projection_for_a_per_parameter_is_fixed_to_its_attribute() {
+        // Projecting would merge equal values, which `of` counts each of.
+        let source = format!("{PLOTS}var s := sum{{r: plots{{of}}}};{MAIN}");
+        let missing = errors(&source);
+        assert_eq!(missing[0].code, Code::MissingAttribute);
+        assert!(
+            missing[0]
+                .notes
+                .iter()
+                .any(|n| n.starts_with("`plots{of}` has one tuple for each value of `of`")),
+            "{missing:#?}"
+        );
+        assert_eq!(
+            fix(&source),
+            format!("{PLOTS}var s := sum{{r: plots, of: of}};{MAIN}")
+        );
+        // Not of several attributes, which aren't one argument.
+        let source = format!("{PLOTS}var s := sum{{r: plots{{of, plot}}}};{MAIN}");
+        assert!(errors(&source)[0].suggestions.is_empty(), "{source}");
+    }
+
+    #[test]
+    fn a_mean_is_a_sum_divided_by_a_count() {
+        // As SQL writes it, and not `min`, which `mean` is close to.
+        for name in ["avg", "AVG", "mean", "average"] {
+            let source = format!("{PLOTS}var m := {name}{{r: plots, of: of}};{MAIN}");
+            let errors = errors(&source);
+            assert_eq!(errors[0].code, Code::UnknownName, "{name}");
+            assert!(errors[0].suggestions.is_empty(), "{errors:#?}");
+            assert!(
+                errors[0].help[0].contains("sum{r: r, of: x} / to_approximate{from: count{r: r}}"),
+                "{errors:#?}"
+            );
+        }
     }
 
     #[test]

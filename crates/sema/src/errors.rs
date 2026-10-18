@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use trendy_diag::{Code, Diagnostic, Edit, Span, edit_distance};
 use trendy_hir as hir;
 use trendy_syntax::SyntaxToken;
-use trendy_syntax::ast::{AstNode, Expr, Key, NaryExpr, SourceFile, TypeExpr};
+use trendy_syntax::ast::{AstNode, Expr, Key, NaryExpr, ProjectExpr, SourceFile, TypeExpr};
 
 use crate::globals::Pending;
 use crate::operators::Signature;
@@ -651,6 +651,46 @@ pub(crate) fn missing_attributes(
     )
 }
 
+/// `d`, the error for a call without an argument for the `per` parameter
+/// `name`, with the argument for `relation` written as `projection`: if
+/// that is on one attribute, which was meant as the argument, a fix that
+/// gives it as that, inserted as `insertion` says, and `relation` all of
+/// the projection's operand.
+pub(crate) fn projected_relation(
+    d: Diagnostic,
+    name: &str,
+    relation: &str,
+    projection: &ProjectExpr,
+    insertion: (usize, &str, &str),
+) -> Diagnostic {
+    let (Some(operand), Some(names)) = (projection.operand(), projection.names()) else {
+        return d;
+    };
+    let names: Vec<_> = names.names().filter_map(|n| n.ident()).collect();
+    let [attribute] = names.as_slice() else {
+        return d;
+    };
+    let (attribute, operand_text) = (attribute.text(), operand.syntax().text().to_string());
+    let (offset, before, after) = insertion;
+    d.with_note(format!(
+        "`{}` has one tuple for each value of `{attribute}`, so tuples with equal values would count once; `{name}` is computed for each tuple of `{relation}`, so every one counts",
+        projection.syntax().text()
+    ))
+    .with_suggestion(
+        format!("give `{relation}` all of `{operand_text}`, and `{name}` the attribute: `{name}: {attribute}`"),
+        vec![
+            Edit {
+                span: projection.span(),
+                replacement: operand_text,
+            },
+            Edit {
+                span: Span::empty(offset),
+                replacement: format!("{before}{name}: {attribute}{after}"),
+            },
+        ],
+    )
+}
+
 /// An attribute or argument `name`, at `span`, that isn't expected.
 /// `context` is a note on what was expected; `rename` is the missing item it
 /// was probably meant to be, and `removal` the span that removes it, if
@@ -1132,6 +1172,12 @@ pub(crate) fn unknown_name(name: &str, span: Span, kind: &str, candidates: &[&st
         span,
         "not defined",
     );
+    // `avg{…}`, as SQL writes a mean, which is no misspelling of `min`.
+    if kind == "operator" && ["avg", "average", "mean"].contains(&&*name.to_lowercase()) {
+        return d
+            .with_note("a mean is the sum divided by the count, which the prelude's `sum` and `count` give; it has no mean of its own yet, as the mean of integers isn't an integer")
+            .with_help("write `sum{r: r, of: x} / to_approximate{from: count{r: r}}`, and for integers, `to_approximate{from: sum{r: r, of: x}}` as the dividend");
+    }
     let closest = candidates
         .iter()
         .filter(|c| edit_distance(c, name) <= 2)

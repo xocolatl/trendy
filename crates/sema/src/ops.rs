@@ -1667,9 +1667,10 @@ pub(crate) fn call(call: hir::Call, bindings: Bindings) -> Result<hir::Expr, Fai
         if call.types.iter().any(|t| t.parameters().next().is_some()) {
             return Ok(hir::Expr::Call(call));
         }
-        let value = builtin
-            .evaluate(&known)
-            .map_err(|hir::NoTuples| Failed::NoTuples(builtin))?;
+        let value = builtin.evaluate(&known).map_err(|failure| match failure {
+            hir::BuiltinFailure::NoTuples => Failed::NoTuples(builtin),
+            hir::BuiltinFailure::Failure(failure) => Failed::Scalar(failure),
+        })?;
         return Ok(hir::Expr::Constant(value));
     }
     // The callee's value for the types its type parameters are given.

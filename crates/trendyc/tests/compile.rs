@@ -785,6 +785,14 @@ fn relations() {
             // A disjoint union, and an included minus.
             r#"relation { name: text } { { name: "Ada" }, { name: "Edgar" }, { name: "Wangari" }, { name: "Édouard" } }"#,
             r#"relation { name: text } { { name: "Édouard" } }"#,
+            // Aggregates: -1.5 counts twice in the sum of `x`.
+            "4",
+            "15",
+            "-5e-1",
+            "1923",
+            // Per group, Puno with none; and the two born in 1815.
+            r#"relation { crops: integer, region: text, tonnes: integer } { { crops: 0, region: "Puno", tonnes: 0 }, { crops: 1, region: "Mendoza", tonnes: 300 }, { crops: 2, region: "Nyeri", tonnes: 165 }, { crops: 2, region: "Punjab", tonnes: 1900 } }"#,
+            r#"relation { born: integer, name: text, place: text } { { born: 1815, name: "Ada", place: "London" }, { born: 1815, name: "Édouard", place: "Paris" } }"#,
         ]
     );
 }

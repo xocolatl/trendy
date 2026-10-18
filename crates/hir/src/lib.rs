@@ -235,6 +235,9 @@ pub enum Builtin {
     /// The greatest of a value computed for each tuple of a relation, by
     /// `<`.
     Max,
+    /// The sum of a number computed for each tuple of a relation: exact,
+    /// then rounded once, so that no order of adding them matters.
+    Sum,
     /// A value as trendy source, the text `debug_value` writes.
     ToText,
     /// The approximate number nearest an integer.
@@ -242,11 +245,12 @@ pub enum Builtin {
 }
 
 impl Builtin {
-    pub const ALL: [Builtin; 6] = [
+    pub const ALL: [Builtin; 7] = [
         Builtin::DebugValue,
         Builtin::Count,
         Builtin::Min,
         Builtin::Max,
+        Builtin::Sum,
         Builtin::ToText,
         Builtin::ToApproximate,
     ];
@@ -258,6 +262,7 @@ impl Builtin {
             Builtin::Count => "count",
             Builtin::Min => "min",
             Builtin::Max => "max",
+            Builtin::Sum => "sum",
             Builtin::ToText => "to_text",
             Builtin::ToApproximate => "to_approximate",
         }
@@ -269,8 +274,8 @@ impl Builtin {
     }
 
     /// The type parameters the compiler's implementation takes: for `min`
-    /// and `max`, `T`, of the kind `ordered`, and the tuples of `r`, whose
-    /// `per` parameter `of` is.
+    /// and `max`, `T`, of the kind `ordered`, and for `sum`, of `numeric`,
+    /// and the tuples of `r`, whose `per` parameter `of` is.
     #[must_use]
     pub fn types(self) -> Vec<TypeParameter> {
         let unnamed = |index, any| TypeParameter {
@@ -278,21 +283,29 @@ impl Builtin {
             name: None,
             any,
         };
-        match self {
-            Builtin::DebugValue | Builtin::ToText => vec![unnamed(0, Any::Type)],
-            Builtin::Count => vec![unnamed(0, Any::Relation)],
-            Builtin::ToApproximate => Vec::new(),
-            Builtin::Min | Builtin::Max => vec![
+        // `T`, of the kind named, which requires `requires`, and the tuples.
+        let of_kind = |name: &str, requires: &[Requirement]| {
+            vec![
                 TypeParameter {
                     index: 0,
                     name: Some("T".to_string()),
                     any: Any::Kind(Kind {
-                        name: "ordered".to_string(),
-                        requires: [Requirement::Order].into(),
+                        name: name.to_string(),
+                        requires: requires.iter().copied().collect(),
                     }),
                 },
                 unnamed(1, Any::Tuple),
-            ],
+            ]
+        };
+        match self {
+            Builtin::DebugValue | Builtin::ToText => vec![unnamed(0, Any::Type)],
+            Builtin::Count => vec![unnamed(0, Any::Relation)],
+            Builtin::ToApproximate => Vec::new(),
+            Builtin::Min | Builtin::Max => of_kind("ordered", &[Requirement::Order]),
+            Builtin::Sum => of_kind(
+                "numeric",
+                &[Requirement::Addition, Requirement::Multiplication],
+            ),
         }
     }
 
@@ -307,7 +320,7 @@ impl Builtin {
             Builtin::Count => [("r".to_string(), parameter(0))].into(),
             Builtin::ToText => [("from".to_string(), parameter(0))].into(),
             Builtin::ToApproximate => [("from".to_string(), Type::Scalar(Scalar::Integer))].into(),
-            Builtin::Min | Builtin::Max => {
+            Builtin::Min | Builtin::Max | Builtin::Sum => {
                 let tuples = Heading::new(
                     [
                         ("of".to_string(), parameter(0)),
@@ -327,7 +340,9 @@ impl Builtin {
         match self {
             Builtin::DebugValue => None,
             Builtin::Count => Some(Type::Scalar(Scalar::Integer)),
-            Builtin::Min | Builtin::Max => Some(Type::Parameter(self.types()[0].clone())),
+            Builtin::Min | Builtin::Max | Builtin::Sum => {
+                Some(Type::Parameter(self.types()[0].clone()))
+            }
             Builtin::ToText => Some(Type::Scalar(Scalar::Text)),
             Builtin::ToApproximate => Some(Type::Scalar(Scalar::Approximate)),
         }
@@ -338,18 +353,19 @@ impl Builtin {
     ///
     /// # Errors
     ///
-    /// Returns [`NoTuples`] for `min` or `max` of a relation without
-    /// tuples, which has neither.
+    /// Returns why there is no value: `min` or `max` of a relation without
+    /// tuples, which has neither, or a `sum` out of its type's range.
     ///
     /// # Panics
     ///
     /// If the built-in is an update operator, which has no value, or the
     /// arguments aren't those of [`Builtin::params`], which sema rules out.
-    pub fn evaluate(self, args: &BTreeMap<String, Value>) -> Result<Value, NoTuples> {
-        let tuples = || match &args["r"] {
-            Value::Relation(r) => &r.tuples,
+    pub fn evaluate(self, args: &BTreeMap<String, Value>) -> Result<Value, BuiltinFailure> {
+        let relation = || match &args["r"] {
+            Value::Relation(r) => r,
             other => panic!("{} of {other:?}", self.name()),
         };
+        let tuples = || &relation().tuples;
         let values = || {
             tuples()
                 .iter()
@@ -364,11 +380,15 @@ impl Builtin {
             Builtin::Min => values()
                 .min_by(|a, b| compare(a, b))
                 .cloned()
-                .ok_or(NoTuples),
+                .ok_or(BuiltinFailure::NoTuples),
             Builtin::Max => values()
                 .max_by(|a, b| compare(a, b))
                 .cloned()
-                .ok_or(NoTuples),
+                .ok_or(BuiltinFailure::NoTuples),
+            Builtin::Sum => {
+                let of = relation().heading.get("of").expect("`of` is an attribute");
+                sum(of, values()).map_err(BuiltinFailure::Failure)
+            }
             Builtin::ToText => Ok(Value::Text(args["from"].to_string())),
             Builtin::ToApproximate => match args["from"] {
                 Value::Integer(n) => Ok(Value::Approximate(Approximate::nearest(n))),
@@ -378,9 +398,43 @@ impl Builtin {
     }
 }
 
-/// Why `min` or `max` of a relation has no value: it has no tuples.
+/// Why a call of a read-only built-in has no value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NoTuples;
+pub enum BuiltinFailure {
+    /// `min` or `max` of a relation without tuples, which has neither.
+    NoTuples,
+    /// An operator's failure, such as a `sum` out of its type's range.
+    Failure(Failure),
+}
+
+/// The exact sum of `values`, of the numeric type `ty`, rounded once.
+fn sum<'a>(ty: &Type, values: impl Iterator<Item = &'a Value>) -> Result<Value, Failure> {
+    match ty {
+        Type::Scalar(Scalar::Integer) => {
+            let mut sum = trendy_numeric::IntegerSum::default();
+            for value in values {
+                let Value::Integer(n) = value else {
+                    panic!("an integer sum of {value:?}");
+                };
+                sum.add(*n);
+            }
+            let total = sum.total().ok_or(Failure::Overflow(Scalar::Integer))?;
+            Ok(Value::Integer(total))
+        }
+        Type::Scalar(Scalar::Approximate) => {
+            let mut sum = trendy_numeric::ApproximateSum::default();
+            for value in values {
+                let Value::Approximate(x) = value else {
+                    panic!("an approximate sum of {value:?}");
+                };
+                sum.add(x.get());
+            }
+            let total = sum.total().ok_or(Failure::Overflow(Scalar::Approximate))?;
+            Ok(Value::Approximate(Approximate::new(total)))
+        }
+        other => panic!("a sum of {other}"),
+    }
+}
 
 /// A call of an operator: of an update operator, as a statement, or of a
 /// read-only one, as an expression.

@@ -557,6 +557,7 @@ dependencies = [
 name = "trendy_hir"
 version = "0.1.0"
 dependencies = [
+ "trendy_numeric",
  "trendy_text",
 ]
 
@@ -597,6 +598,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "trendy_numeric"
+version = "0.1.0"
+
+[[package]]
 name = "trendy_parser"
 version = "0.1.0"
 dependencies = [
@@ -613,6 +618,7 @@ version = "0.1.0"
 name = "trendy_runtime"
 version = "0.1.0"
 dependencies = [
+ "trendy_numeric",
  "trendy_text",
 ]
 

@@ -516,6 +516,13 @@ builtin operator min{r: any relation, of: T per r}: T
 builtin operator max{r: any relation, of: T per r}: T
     types { T: any ordered };
 
+/* The sum of `of` for the tuples of `r`, each tuple's counted, though
+   two have the same value: the exact sum, rounded once, so that no order
+   of adding them matters. Of no tuples, it is 0, or 0e0. A sum beyond
+   its type's range fails (R0001). */
+builtin operator sum{r: any relation, of: T per r}: T
+    types { T: any numeric };
+
 /* Whether `of` is true for some tuple of `r`: whether `r where of` has
    one, which its projection on no attributes, `relation { {} }` or
    `relation {}`, says. Of no tuples, it is false. */
@@ -600,6 +607,61 @@ operator main{} [
 ```trendy,error
 var plots := relation { plot: integer, rainfall: integer } {};
 var driest := min{r: plots, of: rainfall};
+
+operator main{} [];
+```
+
+**`sum{r: any relation, of: T per r}: T`**, for `T` of `any numeric`, is
+the sum of `of` for the tuples of `r`: Tutorial D's `SUM`, and SQL's.
+
+- **Each tuple's value counts,** even where two tuples' are equal: below,
+  both of Punjab's 950 tonnes. Projecting `r` on the attribute first would
+  merge them, so a call with a projection and no `of`, as in
+  `sum{r: harvests{tonnes}}`, is fixed to name the attribute as `of`
+  (A0009).
+- **Of no tuples, it is 0,** or `0e0` for approximate numbers: the sum of
+  no numbers is zero, as TTM has it (RM Prescription 10). A group's image
+  relation with no tuples sums to 0 too, so every group stays, unlike
+  with SQL's `GROUP BY`, which would leave Puno out, or give `NULL`.
+- **It is exact, then rounded once,** since a relation's tuples have no
+  order to add them in: the sum is the one nearest the exact sum of the
+  values, whatever order they are stored in. Below, `1e-1`, `2e-1` and
+  `3e-1` sum to `6e-1`, where `1e-1 + 2e-1 + 3e-1` is
+  `6.000000000000001e-1`, rounded at each `+`; and an integer sum fails
+  only if the exact sum is out of range (R0001), even where adding in some
+  order would overflow on the way.
+- **There is no mean yet,** since the mean of integers isn't an integer:
+  divide the sum by the count, `sum{r: r, of: x} / to_approximate{from:
+  count{r: r}}`, converting an integer sum with `to_approximate` too.
+  `avg{…}` is an error that says so (A0015).
+
+```trendy
+var harvests := relation {
+    { region: "Nyeri", crop: "tea", tonnes: 120 },
+    { region: "Nyeri", crop: "coffee", tonnes: 45 },
+    { region: "Punjab", crop: "wheat", tonnes: 950 },
+    { region: "Punjab", crop: "rice", tonnes: 950 },
+}
+key { region, crop };
+
+var regions := relation { { region: "Nyeri" }, { region: "Punjab" }, { region: "Puno" } };
+var total := sum{r: harvests, of: tonnes};
+var by_region := regions extend { tonnes := sum{r: !!harvests, of: tonnes} };
+var tenths := relation { { n: 1, x: 1e-1 }, { n: 2, x: 2e-1 }, { n: 3, x: 3e-1 } };
+
+operator main{} [
+    call debug_value{v: total};
+    call debug_value{v: by_region};
+    call debug_value{v: sum{r: tenths, of: x}};
+];
+```
+
+```trendy,error
+var harvests := relation {
+    { region: "Punjab", crop: "wheat", tonnes: 950 },
+    { region: "Punjab", crop: "rice", tonnes: 950 },
+};
+var total := sum{r: harvests{tonnes}};
 
 operator main{} [];
 ```
@@ -2362,6 +2424,8 @@ line after a comment on its own line, such as a file's header, is kept.
 | `COUNT(*)`, `COUNT (R)`, `len(r)`, `r.count()` | `count{r: r}` |
 | `GROUP BY a` with `COUNT(*)` | `groups extend { n := count{r: !!r} }`, which keeps the empty groups |
 | `MIN(x)`, `MAX (R, X)` | `min{r: r, of: x}`, `max{r: r, of: x}` |
+| `SUM(x)`, `SUM (R, X)`, `sum(xs)` | `sum{r: r, of: x}`, which is 0 of no tuples, not `NULL` |
+| `AVG(x)`, `mean(xs)` | `sum{r: r, of: x} / to_approximate{from: count{r: r}}` |
 | `GROUP BY a` with `MAX(x)` | `(groups matching r) extend { m := max{r: !!r, of: x} }`, since an empty group has no max |
 | `bool` | `boolean` |
 | `True`, `TRUE`, `1` for true | `true` |

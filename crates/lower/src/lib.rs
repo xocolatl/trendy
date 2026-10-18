@@ -466,6 +466,7 @@ impl<'a> FunctionBuilder<'a> {
                 hir::Builtin::Count
                 | hir::Builtin::Min
                 | hir::Builtin::Max
+                | hir::Builtin::Sum
                 | hir::Builtin::ToText
                 | hir::Builtin::ToApproximate,
             ) => {
@@ -550,6 +551,27 @@ impl<'a> FunctionBuilder<'a> {
             hir::Builtin::Max => {
                 let r = &call.args["r"];
                 self.extreme(r, hir::Comparison::Greater, lir::Failure::NoMax, cx)
+            }
+            // A runtime call, which sums exactly as `hir::Builtin::evaluate`.
+            hir::Builtin::Sum => {
+                let r = &call.args["r"];
+                let ty = self.program.type_of(r, &self.params);
+                let hir::Type::Relation(heading) = &ty else {
+                    unreachable!("`sum` takes a relation");
+                };
+                let of = heading.get("of").expect("`of` is an attribute");
+                let index = attribute_names(&ty)
+                    .position(|a| a == "of")
+                    .expect("`of` is an attribute");
+                let dst = self.slot(layout(of));
+                let src = self.place(r, cx);
+                let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+                let index = usize_constant(len(index), cx);
+                self.insts.push(lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::Sum,
+                    args: vec![dst.clone(), src, descriptor, index],
+                });
+                dst
             }
             hir::Builtin::ToText => {
                 let from = &call.args["from"];
@@ -2648,6 +2670,57 @@ mod tests {
                 }
             )),
             "{blocks:#?}"
+        );
+    }
+
+    #[test]
+    fn sum_is_a_runtime_call() {
+        // `debug_value{v: sum{r: r, of: of}}`, of a relation variable whose
+        // tuples have `of` beside their own attributes, as sema makes it.
+        let sum = hir::Operator {
+            name: "sum".to_string(),
+            types: hir::Builtin::Sum.types(),
+            params: hir::Builtin::Sum.params(),
+            kind: hir::OperatorKind::Builtin(hir::Builtin::Sum),
+        };
+        let own = hir::Heading::new(BTreeMap::new());
+        let r = hir::Value::Relation(hir::RelationValue {
+            heading: hir::Heading::new(
+                [
+                    ("of".to_string(), integer()),
+                    (hir::wrapped("r"), hir::Type::Tuple(own.clone())),
+                ]
+                .into(),
+            ),
+            tuples: BTreeSet::new(),
+        });
+        let summed = hir::Expr::Call(hir::Call {
+            operator: hir::OperatorId(1),
+            types: vec![integer(), hir::Type::Tuple(own)],
+            args: [("r".to_string(), hir::Expr::Variable(hir::VariableId(0)))].into(),
+        });
+        let lowered = lower(&program(
+            vec![
+                debug_value(),
+                sum,
+                user("main", &[], vec![call(0, vec![("v", summed)])]),
+            ],
+            vec![variable("r", r)],
+        ));
+        assert_eq!(lowered.functions.len(), 1, "a built-in has no function");
+        let calls: Vec<_> = lowered.functions[0].blocks[0]
+            .insts
+            .iter()
+            .filter_map(|i| match i {
+                lir::Inst::CallRuntime { function, args } => Some((*function, args.len())),
+                _ => None,
+            })
+            .collect();
+        // Into an integer's slot, of the relation, its descriptor and the
+        // position of `of`.
+        assert_eq!(
+            calls,
+            [(lir::RuntimeFn::Sum, 4), (lir::RuntimeFn::DebugValue, 2)]
         );
     }
 

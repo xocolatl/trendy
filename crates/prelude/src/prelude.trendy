@@ -25,6 +25,13 @@ builtin operator min{r: any relation, of: T per r}: T
 builtin operator max{r: any relation, of: T per r}: T
     types { T: any ordered };
 
+/* The sum of `of` for the tuples of `r`, each tuple's counted, though
+   two have the same value: the exact sum, rounded once, so that no order
+   of adding them matters. Of no tuples, it is 0, or 0e0. A sum beyond
+   its type's range fails (R0001). */
+builtin operator sum{r: any relation, of: T per r}: T
+    types { T: any numeric };
+
 /* Whether `of` is true for some tuple of `r`: whether `r where of` has
    one, which its projection on no attributes, `relation { {} }` or
    `relation {}`, says. Of no tuples, it is false. */

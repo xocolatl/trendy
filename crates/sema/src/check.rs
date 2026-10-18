@@ -1554,13 +1554,35 @@ fn missing_arguments(missing: &[&str], signature: &Signature, written: Written) 
         Written::Arguments(args) => (args.span(), args.insertion()),
         Written::Nothing(list) => (list.span(), list.insertion()),
     };
-    errors::missing_attributes(
+    let d = errors::missing_attributes(
         errors::Noun::Argument,
         &missing,
         &format!("the parameters are {}", signature.text()),
         span,
         insertion,
-    )
+    );
+    // `sum{r: plots{harvest}}`: the attribute was meant as the argument of
+    // the `per` parameter, for each tuple, not as a projection.
+    let ([(name, _)], Written::Arguments(args)) = (missing.as_slice(), written) else {
+        return d;
+    };
+    let Param::Per { relation, .. } = &signature.written[*name] else {
+        return d;
+    };
+    let projection = args
+        .named()
+        .find(|a| {
+            a.name()
+                .and_then(|n| n.ident())
+                .is_some_and(|i| i.text() == relation)
+        })
+        .and_then(|a| a.value());
+    match projection {
+        Some(Expr::Project(projection)) => {
+            errors::projected_relation(d, name, relation, &projection, insertion)
+        }
+        _ => d,
+    }
 }
 
 /// The types a call gives its operator's type parameters, as its arguments

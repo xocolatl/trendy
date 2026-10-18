@@ -1347,6 +1347,53 @@ pub unsafe extern "C" fn trendy_rt_debug_value(value: *const u8, desc: *const Ty
     out.flush();
 }
 
+/// Store at `dst` the sum of the attribute at `index`, its position by
+/// name, of the tuples of the relation `src`, of the type `desc` describes:
+/// the exact sum of the integers or approximate numbers, rounded once, as
+/// the compiler sums them. Stops the program if the sum is beyond its
+/// type's range.
+///
+/// # Safety
+///
+/// `src` must point to a valid relation of the type `desc` describes,
+/// `index` to a position among its attributes, of one that is an integer
+/// or an approximate number, and `dst` to memory for one.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_sum(
+    dst: *mut u8,
+    src: *const u8,
+    desc: *const TypeDesc,
+    index: *const usize,
+) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let desc = &*desc;
+        let attribute = &attributes(desc)[index.read_unaligned()];
+        let (tuples, count) = read_slice(src);
+        let value = |i: usize| tuples.add(i * desc.element_size + attribute.offset);
+        if (*attribute.desc).kind == KIND_INTEGER {
+            let mut sum = trendy_numeric::IntegerSum::default();
+            for i in 0..count {
+                sum.add(value(i).cast::<i64>().read_unaligned());
+            }
+            let Some(total) = sum.total() else {
+                trendy_rt_fail(FAIL_INTEGER_OVERFLOW)
+            };
+            dst.cast::<i64>().write_unaligned(total);
+        } else {
+            let mut sum = trendy_numeric::ApproximateSum::default();
+            for i in 0..count {
+                sum.add(value(i).cast::<f64>().read_unaligned());
+            }
+            let Some(total) = sum.total() else {
+                trendy_rt_fail(FAIL_APPROXIMATE_OVERFLOW)
+            };
+            dst.cast::<f64>().write_unaligned(total);
+        }
+    }
+}
+
 /// Store at `dst` the text [`trendy_rt_debug_value`] writes for `value`,
 /// of the type `desc` describes, in memory the statement owns. Stops the
 /// program if the memory can't be allocated.
