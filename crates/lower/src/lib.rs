@@ -86,10 +86,7 @@ fn function(
     let (lowered, makes) = match kind {
         hir::OperatorKind::Update { locals, body } => {
             builder.declare(locals, cx);
-            for statement in &body {
-                builder.statement(statement, cx);
-            }
-            builder.release();
+            builder.block(&body, cx);
             (builder.finish(None), false)
         }
         hir::OperatorKind::ReadOnly {
@@ -422,12 +419,20 @@ impl<'a> FunctionBuilder<'a> {
         self.locals = locals;
     }
 
-    /// Release the memory of the local variables' own, at the end of the
-    /// body: nothing points into it then, as an assignment copies a value
-    /// into memory of the variable's own, and every statement that could
-    /// point into it has ended.
-    fn release(&mut self) {
-        for place in self.local_places.iter().flatten() {
+    /// The statements of `block`, then the release of the memory of its
+    /// local variables' own: nothing points into it once the block ends,
+    /// as an assignment copies a value into memory of the variable's own,
+    /// and every statement that could point into it has ended. Releasing
+    /// empties the owner, so that one assigned again, when the block runs
+    /// again, has nothing to release.
+    fn block(&mut self, block: &hir::Block, cx: &mut Lowering) {
+        for statement in &block.statements {
+            self.statement(statement, cx);
+        }
+        for id in &block.locals {
+            let place = self.local_places[id.0]
+                .as_ref()
+                .expect("an update operator's local variables are placed first");
             if let Some(owner) = &place.owner {
                 self.insts.push(lir::Inst::CallRuntime {
                     function: lir::RuntimeFn::Release,
@@ -492,14 +497,64 @@ impl<'a> FunctionBuilder<'a> {
         insts.insert(index, inst);
     }
 
-    /// The statement, in a scope of its own if it needs one, which begins
-    /// before its first instruction and ends after its last.
+    /// The statement, in a scope of its own if it needs one: an `if`'s
+    /// statements each in their own, and its condition in another.
     fn statement(&mut self, statement: &hir::Statement, cx: &mut Lowering) {
-        let start = self.position();
         match statement {
-            hir::Statement::Call(call) => self.call(call, cx),
-            hir::Statement::Assign(assignments) => self.assign(assignments, cx),
+            hir::Statement::Call(call) => self.scoped(|this| this.call(call, cx)),
+            hir::Statement::Assign(assignments) => {
+                self.scoped(|this| this.assign(assignments, cx));
+            }
+            hir::Statement::If(condition, then, otherwise) => {
+                self.if_statement(condition, [then, otherwise], cx);
+            }
         }
+    }
+
+    /// `if condition then [ … ] else [ … ];`, of the blocks `branches`:
+    /// only the one taken, if the condition is a constant, or else a branch
+    /// on it, computed in a scope of its own, which ends before either
+    /// block runs, to a block of each, then on to one after both.
+    fn if_statement(
+        &mut self,
+        condition: &hir::Expr,
+        branches: [&hir::Block; 2],
+        cx: &mut Lowering,
+    ) {
+        if let hir::Expr::Constant(hir::Value::Boolean(taken)) = condition {
+            self.block(branches[usize::from(!taken)], cx);
+            return;
+        }
+        // Copied, so that nothing its scope owns is read once it ends.
+        let decided = self.slot(lir::Layout::U8);
+        self.scoped(|this| {
+            let src = this.place(condition, cx);
+            this.insts.push(lir::Inst::Copy {
+                dst: decided.clone(),
+                src,
+                layout: lir::Layout::U8,
+            });
+        });
+        let (then, otherwise, after) = (self.new_block(), self.new_block(), self.new_block());
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: decided,
+                then,
+                otherwise,
+            },
+            then,
+        );
+        for (branch, next) in branches.into_iter().zip([otherwise, after]) {
+            self.block(branch, cx);
+            self.end_block(lir::Terminator::Jump(after), next);
+        }
+    }
+
+    /// What `lower` adds, in a scope of its own if it needs one, which
+    /// begins before its first instruction and ends after its last.
+    fn scoped(&mut self, lower: impl FnOnce(&mut Self)) {
+        let start = self.position();
+        lower(self);
         if std::mem::take(&mut self.scoped) {
             let scope = self.scope_slot();
             self.insert(
@@ -2172,7 +2227,10 @@ mod tests {
                 .collect(),
             kind: hir::OperatorKind::Update {
                 locals: Vec::new(),
-                body,
+                body: hir::Block {
+                    statements: body,
+                    locals: Vec::new(),
+                },
             },
         }
     }
@@ -2691,7 +2749,7 @@ mod tests {
             params: [("t".to_string(), hir::Type::Scalar(hir::Scalar::Text))].into(),
             kind: hir::OperatorKind::Update {
                 locals: Vec::new(),
-                body: vec![],
+                body: hir::Block::default(),
             },
         };
         let lowered = lower(&program(
@@ -2823,11 +2881,14 @@ mod tests {
             params: [("v".to_string(), hir::Type::Parameter(parameter.clone()))].into(),
             kind: hir::OperatorKind::Update {
                 locals: Vec::new(),
-                body: vec![hir::Statement::Call(hir::Call {
-                    operator: hir::OperatorId(0),
-                    types: vec![hir::Type::Parameter(parameter)],
-                    args: [("v".to_string(), hir::Expr::Parameter("v".to_string()))].into(),
-                })],
+                body: hir::Block {
+                    statements: vec![hir::Statement::Call(hir::Call {
+                        operator: hir::OperatorId(0),
+                        types: vec![hir::Type::Parameter(parameter)],
+                        args: [("v".to_string(), hir::Expr::Parameter("v".to_string()))].into(),
+                    })],
+                    locals: Vec::new(),
+                },
             },
         };
         let text = hir::Type::Scalar(hir::Scalar::Text);
@@ -3009,11 +3070,14 @@ mod tests {
             params: BTreeMap::new(),
             kind: hir::OperatorKind::Update {
                 locals: vec![r, n],
-                body: vec![
-                    declared(0, empty),
-                    declared(1, hir::Value::Integer(1)),
-                    call(0, vec![("v", hir::Expr::Local(hir::LocalId(0)))]),
-                ],
+                body: hir::Block {
+                    statements: vec![
+                        declared(0, empty),
+                        declared(1, hir::Value::Integer(1)),
+                        call(0, vec![("v", hir::Expr::Local(hir::LocalId(0)))]),
+                    ],
+                    locals: vec![hir::LocalId(0), hir::LocalId(1)],
+                },
             },
         };
         let lowered = lower(&program(
@@ -3518,5 +3582,95 @@ mod tests {
             )),
             "{blocks:#?}"
         );
+    }
+
+    #[test]
+    fn an_if_statements_blocks_release_their_own_local_variables() {
+        // `f{p: integer} [ if p = 0 then [ var t := "zero"; call
+        // debug_value{v: t}; ] else [ call debug_value{v: p}; ]; ]`.
+        let t = hir::Local {
+            name: "t".to_string(),
+            ty: hir::Type::Scalar(hir::Scalar::Text),
+            keys: Vec::new(),
+        };
+        let condition = hir::Expr::Binary(
+            hir::BinaryOp::Compare(
+                hir::Comparison::Equal,
+                hir::Compared::Scalar(hir::Scalar::Integer),
+            ),
+            Box::new(hir::Expr::Parameter("p".to_string())),
+            Box::new(hir::Expr::Constant(hir::Value::Integer(0))),
+        );
+        let then = hir::Block {
+            statements: vec![
+                hir::Statement::Assign(vec![hir::Assignment {
+                    target: hir::Target::Local(hir::LocalId(0)),
+                    value: hir::Expr::Constant(hir::Value::Text("zero".to_string())),
+                }]),
+                call(0, vec![("v", hir::Expr::Local(hir::LocalId(0)))]),
+            ],
+            locals: vec![hir::LocalId(0)],
+        };
+        let otherwise = hir::Block {
+            statements: vec![call(0, vec![("v", hir::Expr::Parameter("p".to_string()))])],
+            locals: Vec::new(),
+        };
+        let f = hir::Operator {
+            name: "f".to_string(),
+            types: Vec::new(),
+            params: [("p".to_string(), integer())].into(),
+            kind: hir::OperatorKind::Update {
+                locals: vec![t],
+                body: hir::Block {
+                    statements: vec![hir::Statement::If(condition, then, otherwise)],
+                    locals: Vec::new(),
+                },
+            },
+        };
+        let lowered = lower(&program(
+            vec![
+                debug_value(),
+                f,
+                user(
+                    "main",
+                    &[],
+                    vec![call(
+                        1,
+                        vec![("p", hir::Expr::Constant(hir::Value::Integer(0)))],
+                    )],
+                ),
+            ],
+            vec![],
+        ));
+        let blocks = &lowered.functions[1].blocks;
+        let runtime = |b: lir::BlockId| -> Vec<lir::RuntimeFn> {
+            blocks[b.0]
+                .insts
+                .iter()
+                .filter_map(|inst| match inst {
+                    lir::Inst::CallRuntime { function, .. } => Some(*function),
+                    _ => None,
+                })
+                .collect()
+        };
+        let lir::Terminator::Branch {
+            then, otherwise, ..
+        } = blocks[0].terminator
+        else {
+            panic!("{blocks:#?}");
+        };
+        // `t` is assigned and released in its block, each statement in a
+        // scope of its own; the other block has nothing to release.
+        assert_eq!(
+            runtime(then),
+            [
+                lir::RuntimeFn::Begin,
+                lir::RuntimeFn::Assign,
+                lir::RuntimeFn::End,
+                lir::RuntimeFn::DebugValue,
+                lir::RuntimeFn::Release,
+            ]
+        );
+        assert_eq!(runtime(otherwise), [lir::RuntimeFn::DebugValue]);
     }
 }

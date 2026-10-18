@@ -390,19 +390,25 @@ no source can write, so that they stay distinct and never clash with what
 the operator names. Its type is a type parameter, `any tuple`. A type's
 source text writes it `…`.
 
-An update operator's body is a list of statements, with the operator's
-local variables (`OperatorKind::Update`, `hir::Local`): calls, and
-assignments (`Statement::Assign`), each a list of variables, all
-different, of the program or local (`hir::Target`), and their new values,
-made at once (TTM RM Prescription 21): every value is computed from the
-variables as they were. The shorthands are already expanded, and an
-`assign` block's changes to one variable merged into one value. A local
+An update operator's body is a block of statements, with the operator's
+local variables, every block's (`OperatorKind::Update`, `hir::Block`,
+`hir::Local`): calls, assignments (`Statement::Assign`), each a list of
+variables, all different, of the program or local (`hir::Target`), and
+their new values, made at once (TTM RM Prescription 21): every value is
+computed from the variables as they were; and `if` statements
+(`Statement::If`), of a condition and two blocks, the second empty
+without an `else`. The shorthands are already expanded, and an `assign`
+block's changes to one variable merged into one value. A local
 variable's declaration is the assignment of its initial value, or its
-type's default, and `Expr::Local` reads it. Sema finds a body's local
-variables before checking its statements (`body::Locals`), so that one is
-in scope in all of the body, hiding a variable of the program's with its
-name, but is reported if it is used before its declaration (A0045); and
-reports one with a parameter's name or another local variable's (A0001).
+type's default, and `Expr::Local` reads it. A block lists the local
+variables declared in it. Sema finds a block's local variables before
+checking its statements (`locals::Locals::enter`), so that one is in
+scope in all of the block, hiding a variable of the program's with its
+name, but is reported if it is used before its declaration (A0045), or
+after its block ends (A0015); and reports one with a parameter's name or
+that of another local variable in scope (A0001), so none hides another.
+An `if` statement whose condition is known when compiling runs only one
+block, and the other's failures aren't reported (`body::Statements`).
 `Combination::DisjointChanges` is the union of the tuples changes remove,
 which conflict (R0009) if two remove the same one.
 
@@ -882,9 +888,16 @@ A local variable is a slot in its operator's function for its value, and
 one for its owner if it has one, assigned by `trendy_rt_assign` as a
 variable is. The owner starts as null, so that the declaration, the first
 assignment, has nothing to release; `trendy_rt_release` frees what an
-owner holds at the end of the body, when nothing points into it: an assignment copies a value into
-memory of the variable's own, and every statement that could point into it
-has ended.
+owner holds at the end of its block, when nothing points into it: an
+assignment copies a value into memory of the variable's own, and every
+statement that could point into it has ended. It empties the owner, so a
+block run again starts as the first time did.
+
+An `if` statement has no scope of its own: its condition is computed in
+one, which ends before either block runs, and copied out first, and each
+statement in its blocks has its own, as any statement does. Then it
+branches to a block of each, which jump to the one after both. A
+condition known when compiling lowers only the block it runs.
 
 A read-only operator's function begins no scope: what it makes, such as
 its result's texts, is the calling statement's, as if the caller had

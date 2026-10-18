@@ -158,7 +158,8 @@ pub enum SyntaxKind {
     /// `var name: type := value;`
     VarDecl,
     Name,
-    /// `[statement …]`
+    /// `[statement …]`: an operator's body, or a branch of an `if`
+    /// statement.
     Body,
     /// `call name{arguments};`
     CallStmt,
@@ -170,6 +171,10 @@ pub enum SyntaxKind {
     AssignBlock,
     /// `return value;`: a read-only operator's value.
     ReturnStmt,
+    /// `if c then [ … ] else [ … ];`: statements run if `c` is true, and
+    /// else others, if any. An `else if` is one in another's `else`, with
+    /// no `;` of its own.
+    IfStmt,
     /// `v := x`, in an assignment statement.
     Assignment,
     /// `insert r s` or `d_insert r s`, in an assignment statement.
@@ -280,7 +285,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 135] = [
+    pub const ALL: [SyntaxKind; 136] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -372,6 +377,7 @@ impl SyntaxKind {
         SyntaxKind::AssignStmt,
         SyntaxKind::AssignBlock,
         SyntaxKind::ReturnStmt,
+        SyntaxKind::IfStmt,
         SyntaxKind::Assignment,
         SyntaxKind::Insertion,
         SyntaxKind::Deletion,
@@ -820,6 +826,7 @@ impl SyntaxKind {
             SyntaxKind::AssignStmt => "assignment statement",
             SyntaxKind::AssignBlock => "`assign` block",
             SyntaxKind::ReturnStmt => "`return` statement",
+            SyntaxKind::IfStmt => "`if` statement",
             SyntaxKind::Assignment => "assignment",
             SyntaxKind::Insertion => "insertion",
             SyntaxKind::Deletion => "deletion",

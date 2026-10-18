@@ -81,8 +81,8 @@ pub struct VariableId(pub usize);
 pub struct LocalId(pub usize);
 
 /// A local variable of an operator, purely local to it (TTM RM Prescription
-/// 3): in scope in its whole body, and assigned its initial value where it
-/// is declared, which is before any use. In an update operator, each is
+/// 3): in scope in the whole block it is declared in, and assigned its
+/// initial value where it is declared, which is before any use. In an update operator, each is
 /// assigned as a variable is; in a read-only one, its declaration and each
 /// assignment are a [`Expr::Let`] of a local variable of its own, which has
 /// the value from there on.
@@ -136,7 +136,7 @@ impl Operator {
         let kind = match &self.kind {
             OperatorKind::Update { locals, body } => OperatorKind::Update {
                 locals: locals.iter().map(|l| l.instantiated(types)).collect(),
-                body: body.iter().map(|s| s.instantiated(types)).collect(),
+                body: body.instantiated(types),
             },
             OperatorKind::ReadOnly {
                 result,
@@ -253,12 +253,9 @@ impl std::fmt::Display for TypeParameter {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OperatorKind {
-    /// An update operator defined in the program, with its local variables
-    /// and its statements.
-    Update {
-        locals: Vec<Local>,
-        body: Vec<Statement>,
-    },
+    /// An update operator defined in the program, with its local variables,
+    /// every block's, and its body.
+    Update { locals: Vec<Local>, body: Block },
     /// A read-only operator defined in the program: its value, of type
     /// `result`, computed from its parameters, with its local variables. It
     /// changes nothing else, and calls no operator but read-only ones, none
@@ -588,6 +585,10 @@ pub enum Statement {
     /// the variables' keys are checked once all the values are, before any
     /// is assigned.
     Assign(Vec<Assignment>),
+    /// `if condition then [ … ] else [ … ];`: the first block's statements
+    /// if the condition, a boolean, is true, and else the second's, which
+    /// is empty without an `else`.
+    If(Expr, Block, Block),
 }
 
 impl Statement {
@@ -605,6 +606,37 @@ impl Statement {
                     })
                     .collect(),
             ),
+            Statement::If(condition, then, otherwise) => Statement::If(
+                condition.instantiated(types),
+                then.instantiated(types),
+                otherwise.instantiated(types),
+            ),
+        }
+    }
+}
+
+/// Statements run in order, an update operator's body or a branch of an
+/// `if` statement, with the local variables declared among them, which are
+/// in scope from their declaration to its end.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Block {
+    pub statements: Vec<Statement>,
+    /// The local variables declared in it, not in a block within it: their
+    /// memory is released at its end.
+    pub locals: Vec<LocalId>,
+}
+
+impl Block {
+    /// The block, in an operator instantiated with `types`.
+    #[must_use]
+    pub fn instantiated(&self, types: &[Type]) -> Block {
+        Block {
+            statements: self
+                .statements
+                .iter()
+                .map(|s| s.instantiated(types))
+                .collect(),
+            locals: self.locals.clone(),
         }
     }
 }

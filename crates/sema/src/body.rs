@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use trendy_diag::{Diagnostic, Span};
+use trendy_diag::{CodeKind, Diagnostic, Span};
 use trendy_hir as hir;
 use trendy_syntax::ast::{self, VarDecl};
 
@@ -11,6 +11,7 @@ use crate::assign::{Assignee, Assigning};
 use crate::check::{Checker, Lookup, Names, Written};
 use crate::locals::{Local, Locals};
 use crate::operators::Operators;
+use crate::types::{Expected, Origin};
 use crate::{Namespaces, assign, errors, locals, ops};
 
 /// Everything a body can refer to.
@@ -60,39 +61,159 @@ pub(crate) fn body(
     cx: &Context,
     growing: &mut Vec<Growing>,
     errors: &mut Vec<Diagnostic>,
-) -> Option<(Vec<hir::Local>, Vec<hir::Statement>)> {
+) -> Option<(Vec<hir::Local>, hir::Block)> {
     let body = op.body()?;
     let name = &cx.operators.get(within).name;
-    // `main` with a result type is reported with its `return`s.
-    let returns_reported = name == "main" && op.result().is_some();
-    let (mut locals, mut ok) = locals::declarations(&body, cx.operators.get(within), errors);
-    let mut statements = Vec::new();
-    for stmt in body.statements() {
-        let mut names = BodyNames {
-            cx,
-            within,
-            locals: &locals,
-        };
-        let statement = match &stmt {
-            ast::Statement::Call(stmt) => call(stmt, within, cx, &locals, growing, errors),
-            ast::Statement::Assign(stmt) => {
-                assign::statement(&stmt.clauses().collect::<Vec<_>>(), &mut names, errors)
+    let mut statements = Statements {
+        cx,
+        within,
+        locals: Locals::default(),
+        growing,
+        // `main` with a result type is reported with its `return`s.
+        returns_reported: name == "main" && op.result().is_some(),
+    };
+    let checked: Vec<ast::Statement> = body.statements().collect();
+    let block = statements.block(&checked, errors)?;
+    Some((statements.locals.finish(), block))
+}
+
+/// Checks the statements of the update operator `within`, each block's
+/// local variables in scope in it.
+struct Statements<'a, 'b> {
+    cx: &'a Context<'b>,
+    within: hir::OperatorId,
+    locals: Locals,
+    /// Each call that gives a type parameter a type built from the
+    /// operator's own (see [`Growing`]).
+    growing: &'a mut Vec<Growing>,
+    /// Whether a `return`, of a `main` with a result type, is reported
+    /// already.
+    returns_reported: bool,
+}
+
+impl Statements<'_, '_> {
+    fn names(&self) -> BodyNames<'_, '_> {
+        BodyNames {
+            cx: self.cx,
+            within: self.within,
+            locals: &self.locals,
+        }
+    }
+
+    /// The block of `statements`, whose local variables are in scope in
+    /// all of it, or `None` after reporting its errors.
+    fn block(
+        &mut self,
+        statements: &[ast::Statement],
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Block> {
+        let op = self.cx.operators.get(self.within);
+        let mut ok = self.locals.enter(statements.iter().cloned(), op, errors);
+        let mut checked = Vec::new();
+        for stmt in statements {
+            match self.statement(stmt, errors) {
+                Some(statement) => checked.push(statement),
+                None => ok = false,
             }
-            ast::Statement::Block(block) => assign::block(block, &mut names, errors),
+        }
+        let locals = self.locals.exit();
+        ok.then_some(hir::Block {
+            statements: checked,
+            locals,
+        })
+    }
+
+    fn statement(
+        &mut self,
+        stmt: &ast::Statement,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Statement> {
+        let (cx, within) = (self.cx, self.within);
+        match stmt {
+            ast::Statement::Call(stmt) => {
+                call(stmt, within, cx, &self.locals, self.growing, errors)
+            }
+            ast::Statement::Assign(stmt) => {
+                let clauses: Vec<_> = stmt.clauses().collect();
+                assign::statement(&clauses, &mut self.names(), errors)
+            }
+            ast::Statement::Block(block) => assign::block(block, &mut self.names(), errors),
             ast::Statement::Return(stmt) => {
-                if !returns_reported {
+                if !self.returns_reported {
+                    let name = &cx.operators.get(within).name;
                     errors.push(errors::return_in_update(name, stmt));
                 }
                 None
             }
-            ast::Statement::Var(decl) => declaration(decl, within, cx, &mut locals, errors),
-        };
-        match statement {
-            Some(statement) => statements.push(statement),
-            None => ok = false,
+            ast::Statement::Var(decl) => declaration(decl, within, cx, &mut self.locals, errors),
+            ast::Statement::If(stmt) => self.if_stmt(stmt, errors),
         }
     }
-    ok.then(|| (locals.finish(), statements))
+
+    /// `if c then [ … ] else [ … ];`: each block checked, but a condition
+    /// known when compiling runs only one, so the other's failures aren't
+    /// reported.
+    fn if_stmt(
+        &mut self,
+        stmt: &ast::IfStmt,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Statement> {
+        let condition_expr = stmt.condition()?;
+        let then_block = stmt.then_block()?;
+        if let Some(error) = errors::pointless_if_statement(stmt) {
+            errors.push(error);
+        }
+        let boolean = Expected {
+            ty: hir::Type::Scalar(hir::Scalar::Boolean),
+            origin: Origin::Operator(stmt.keyword()?),
+        };
+        let condition =
+            Checker::new(&mut self.names()).expr(&condition_expr, Some(&boolean), errors);
+        let taken = match &condition {
+            Some(hir::Expr::Constant(hir::Value::Boolean(taken))) => Some(*taken),
+            _ => None,
+        };
+        let then = self.branch(
+            Some(ast::ElseBranch::Block(then_block)),
+            taken == Some(false),
+            errors,
+        );
+        let otherwise = self.branch(stmt.else_branch(), taken == Some(true), errors);
+        Some(hir::Statement::If(condition?, then?, otherwise?))
+    }
+
+    /// An `if` statement's branch, `branch`, as a block, empty if there is
+    /// none. One that is `skipped` never runs, so its failures aren't
+    /// reported, and it is empty if one would make it fail.
+    fn branch(
+        &mut self,
+        branch: Option<ast::ElseBranch>,
+        skipped: bool,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Block> {
+        let mut own = Vec::new();
+        let reported_to = if skipped { &mut own } else { &mut *errors };
+        let block = match branch {
+            None => Some(hir::Block::default()),
+            Some(ast::ElseBranch::Block(body)) => {
+                let statements: Vec<ast::Statement> = body.statements().collect();
+                self.block(&statements, reported_to)
+            }
+            Some(ast::ElseBranch::If(stmt)) => {
+                self.if_stmt(&stmt, reported_to)
+                    .map(|statement| hir::Block {
+                        statements: vec![statement],
+                        locals: Vec::new(),
+                    })
+            }
+        };
+        if !skipped {
+            return block;
+        }
+        let before = errors.len();
+        errors.extend(own.into_iter().filter(|d| d.code.kind() != CodeKind::Run));
+        (errors.len() == before).then(|| block.unwrap_or_default())
+    }
 }
 
 /// The declaration `decl` of a local variable in the body of `within`: its
@@ -185,19 +306,16 @@ fn call(
 /// each time around (see [`hir::Operator`]).
 pub(crate) fn growing_recursion(
     growing: &[Growing],
-    bodies: &HashMap<hir::OperatorId, (Vec<hir::Local>, Vec<hir::Statement>)>,
+    bodies: &HashMap<hir::OperatorId, (Vec<hir::Local>, hir::Block)>,
     operators: &Operators,
     errors: &mut Vec<Diagnostic>,
 ) {
     let calls = |id: &hir::OperatorId| {
-        bodies
-            .get(id)
-            .into_iter()
-            .flat_map(|(_, body)| body)
-            .filter_map(|s| match s {
-                hir::Statement::Call(call) => Some(call.operator),
-                hir::Statement::Assign(_) => None,
-            })
+        let mut called = Vec::new();
+        if let Some((_, body)) = bodies.get(id) {
+            calls_in(body, &mut called);
+        }
+        called
     };
     for call in growing {
         // Whether the callee reaches the caller.
@@ -219,6 +337,21 @@ pub(crate) fn growing_recursion(
                 &call.parameter,
                 &call.ty,
             ));
+        }
+    }
+}
+
+/// Add each operator `block`'s statements call, in blocks within it too, to
+/// `called`.
+fn calls_in(block: &hir::Block, called: &mut Vec<hir::OperatorId>) {
+    for statement in &block.statements {
+        match statement {
+            hir::Statement::Call(call) => called.push(call.operator),
+            hir::Statement::Assign(_) => {}
+            hir::Statement::If(_, then, otherwise) => {
+                calls_in(then, called);
+                calls_in(otherwise, called);
+            }
         }
     }
 }
@@ -259,6 +392,10 @@ impl Names for BodyNames<'_, '_> {
                     decl,
                     self.cx.variable_ids.contains_key(name),
                 ));
+                return Lookup::Reported;
+            }
+            Some(Local::Ended(decl)) => {
+                errors.push(errors::local_out_of_scope(name, span, decl));
                 return Lookup::Reported;
             }
             Some(Local::Invalid) => return Lookup::Reported,
@@ -343,6 +480,10 @@ impl Assigning for BodyNames<'_, '_> {
                     decl,
                     cx.variable_ids.contains_key(name),
                 ));
+                return None;
+            }
+            Some(Local::Ended(decl)) => {
+                errors.push(errors::local_out_of_scope(name, span, decl));
                 return None;
             }
             // Its declaration's errors are already reported.

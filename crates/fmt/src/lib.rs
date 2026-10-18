@@ -303,6 +303,7 @@ fn between(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool, layout: &La
                         | SyntaxKind::AssignStmt
                         | SyntaxKind::AssignBlock
                         | SyntaxKind::ReturnStmt
+                        | SyntaxKind::IfStmt
                 )
             });
         let blank = blank_line && statement_end && next.kind() != SyntaxKind::RBracket;
@@ -926,6 +927,22 @@ mod tests {
         assert_eq!(
             fmt("var r := if a then relation {{x: 1}, {x: 2}} else relation {{x: 3}};"),
             "var r := if a\n    then relation {\n        { x: 1 },\n        { x: 2 }\n    }\n    else relation { { x: 3 } };\n"
+        );
+    }
+
+    #[test]
+    fn if_statements() {
+        // Each statement on a line of its own, even one alone in a block.
+        assert_eq!(
+            fmt(
+                "operator f{n:integer}[if n=0 then[call g{};]else if n<0 then[n:=0;call g{};]else[call h{};];call g{};];"
+            ),
+            "operator f{n: integer} [\n    if n = 0 then [\n        call g{};\n    ] else if n < 0 then [\n        n := 0;\n        call g{};\n    ] else [\n        call h{};\n    ];\n    call g{};\n];\n"
+        );
+        // A blank line after one is kept.
+        assert_eq!(
+            fmt("operator f{} [\n    if a then [ call g{}; ];\n\n    call g{};\n];\n"),
+            "operator f{} [\n    if a then [\n        call g{};\n    ];\n\n    call g{};\n];\n"
         );
     }
 

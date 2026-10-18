@@ -126,9 +126,12 @@ impl Origin {
             }
             // An `if`'s keyword, or another language's `elif` for one.
             Origin::Operator(token)
-                if token
-                    .parent()
-                    .is_some_and(|p| p.kind() == trendy_syntax::SyntaxKind::IfExpr) =>
+                if token.parent().is_some_and(|p| {
+                    matches!(
+                        p.kind(),
+                        trendy_syntax::SyntaxKind::IfExpr | trendy_syntax::SyntaxKind::IfStmt
+                    )
+                }) =>
             {
                 "`if` takes a boolean condition".to_string()
             }

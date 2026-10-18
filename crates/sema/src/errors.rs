@@ -76,7 +76,7 @@ pub(crate) fn duplicate_name(
 }
 
 /// What a local variable's name must be.
-const LOCAL_NAMES: &str = "an operator's names, its parameters' and its local variables', each mean one thing in all of its body, so no two are the same; they hide the program's variables of their names";
+const LOCAL_NAMES: &str = "an operator's names, its parameters' and its local variables', each mean one thing wherever they are in scope, so no two there are the same, and a block's hide no other; they hide the program's variables of their names";
 
 /// The local variable `name`, declared in the body of the operator `op` by
 /// `decl`, which `first` declares already.
@@ -96,14 +96,16 @@ pub(crate) fn local_declared_again(
     .with_secondary(named(first), format!("`{name}` is first declared here"))
     .with_note(LOCAL_NAMES);
     // `var total := total + 1;`, as Rust declares a variable again to give
-    // it a new value: the first one's assignment was meant.
+    // it a new value: the first one's assignment was meant, if it is
+    // declared before.
+    let before = first.span().start < decl.span().start;
     match (
         decl.name(),
         decl.type_expr(),
         decl.initializer(),
         decl.keys().next(),
     ) {
-        (Some(new), None, Some(_), None) => d.with_suggestion(
+        (Some(new), None, Some(_), None) if before => d.with_suggestion(
             format!("assign the first one instead: `{name} := …;`"),
             vec![Edit {
                 span: Span::new(decl.span().start, new.span().start),
@@ -176,8 +178,25 @@ pub(crate) fn local_before_declaration(
         "used here",
     )
     .with_secondary(named, label)
-    .with_note("a local variable is in scope in all of its operator's body, so that its name means one thing there, hiding any variable of the program's, but it has a value only once its declaration gives it one")
+    .with_note("a local variable is in scope in all of the block it is declared in, so that its name means one thing there, hiding any variable of the program's, but it has a value only once its declaration gives it one")
     .with_help(help)
+}
+
+/// The local variable `name`, used at `span`, outside the block `decl`
+/// declares it in, which has ended.
+pub(crate) fn local_out_of_scope(name: &str, span: Span, decl: &VarDecl) -> Diagnostic {
+    let named = decl.name().map_or_else(|| decl.span(), |n| n.span());
+    Diagnostic::error(
+        Code::UnknownName,
+        format!("local variable `{name}` isn't in scope here"),
+        span,
+        "used outside its block",
+    )
+    .with_secondary(named, "declared in a block that ends before here")
+    .with_note("a local variable is in scope in the block it is declared in, from its declaration to the block's end")
+    .with_help(format!(
+        "to use `{name}` here too, declare it before the block, in the one that holds both"
+    ))
 }
 
 /// A variable `name`, of type `ty`, written `type_expr`, which has a type
@@ -2610,21 +2629,10 @@ pub(crate) fn pointless_if(
     };
     let at = Span::new(branches[0].span().start, branches[1].span().end);
     let (message, label, replacement) = if negated {
-        // `not` binds tightest, so all but a single operand needs
-        // parentheses after it.
-        let operand = match condition {
-            Expr::Name(_)
-            | Expr::Literal(_)
-            | Expr::Paren(_)
-            | Expr::Call(_)
-            | Expr::Extract(_)
-            | Expr::Index(_) => text(condition),
-            _ => format!("({})", text(condition)),
-        };
         (
             "its condition negated",
             "the opposite of the condition's value",
-            format!("not {operand}"),
+            negation(condition),
         )
     } else {
         (
@@ -2649,6 +2657,122 @@ pub(crate) fn pointless_if(
             }],
         ),
     )
+}
+
+/// `not` and `condition`, which needs parentheses unless it is a single
+/// operand, as `not` binds tightest.
+fn negation(condition: &Expr) -> String {
+    let text = condition.syntax().text();
+    match condition {
+        Expr::Name(_)
+        | Expr::Literal(_)
+        | Expr::Paren(_)
+        | Expr::Call(_)
+        | Expr::Extract(_)
+        | Expr::Index(_) => format!("not {text}"),
+        _ => format!("not ({text})"),
+    }
+}
+
+/// The error for the `if` statement `stmt`, if it decides nothing: its
+/// condition is written `true` or `false`, so only one branch ever runs,
+/// or its blocks are empty, so it runs nothing, or nothing either way.
+pub(crate) fn pointless_if_statement(stmt: &trendy_syntax::ast::IfStmt) -> Option<Diagnostic> {
+    use trendy_syntax::ast::ElseBranch;
+    let condition = stmt.condition()?;
+    let then = stmt.then_block()?;
+    let otherwise = stmt.else_branch();
+    // The statements of a block, as written, or nothing.
+    let inside = |block: &trendy_syntax::ast::Body| {
+        let statements: Vec<_> = block.statements().collect();
+        match (statements.first(), statements.last()) {
+            (Some(first), Some(last)) => {
+                let text = stmt.syntax().text().to_string();
+                let start = usize::from(stmt.syntax().text_range().start());
+                text[first.span().start - start..last.span().end - start].to_string()
+            }
+            _ => String::new(),
+        }
+    };
+    let empty = |block: &trendy_syntax::ast::Body| block.statements().next().is_none();
+    let note = "an `if` statement chooses which of its blocks runs by its condition, so it does something only if the condition can be either, and each block runs something";
+    let replace = |span: Span, replacement: String| vec![Edit { span, replacement }];
+    if let Expr::Literal(literal) = &condition
+        && let Ok(trendy_syntax::ast::LiteralValue::Boolean(always)) = literal.value()
+    {
+        let (runs, replacement) = match (always, &otherwise) {
+            (true, _) => ("the `then` block always runs", inside(&then)),
+            (false, Some(ElseBranch::Block(block))) => {
+                ("the `else` block always runs", inside(block))
+            }
+            (false, Some(ElseBranch::If(chained))) => (
+                "the `else if` always decides",
+                format!("{};", chained.syntax().text()),
+            ),
+            (false, None) => ("nothing ever runs", String::new()),
+        };
+        let fix = if replacement.is_empty() {
+            "remove the `if`"
+        } else {
+            "keep what always runs"
+        };
+        return Some(
+            Diagnostic::error(
+                Code::PointlessIf,
+                format!("the condition is always `{always}`"),
+                condition.span(),
+                format!("so {runs}"),
+            )
+            .with_note(note)
+            .with_suggestion(fix, replace(stmt.span(), replacement)),
+        );
+    }
+    let d = |message: &str, at: Span, label: &str| {
+        Diagnostic::error(
+            Code::PointlessIf,
+            message.to_string(),
+            at,
+            label.to_string(),
+        )
+        .with_note(note)
+    };
+    match (empty(&then), &otherwise) {
+        (true, None) => Some(
+            d("this `if` does nothing", stmt.span(), "its block is empty")
+                .with_suggestion("remove it", replace(stmt.span(), String::new())),
+        ),
+        (true, Some(ElseBranch::Block(block))) if empty(block) => Some(
+            d(
+                "this `if` does nothing",
+                stmt.span(),
+                "its blocks are empty",
+            )
+            .with_suggestion("remove it", replace(stmt.span(), String::new())),
+        ),
+        // `if c then [] else [ … ];`: `if not c then [ … ];`.
+        (true, Some(ElseBranch::Block(block))) => Some(
+            d("the `then` block is empty", then.span(), "runs nothing").with_suggestion(
+                "negate the condition, and run the `else` block's statements after `then`",
+                vec![
+                    Edit {
+                        span: condition.span(),
+                        replacement: negation(&condition),
+                    },
+                    Edit {
+                        span: Span::new(then.span().start, block.span().start),
+                        replacement: String::new(),
+                    },
+                ],
+            ),
+        ),
+        (false, Some(ElseBranch::Block(block))) if empty(block) => Some(
+            d("the `else` block is empty", block.span(), "runs nothing").with_suggestion(
+                "remove it",
+                replace(Span::new(then.span().end, block.span().end), String::new()),
+            ),
+        ),
+        _ => None,
+    }
 }
 
 /// `index`, `a[i]`, whose operand `a`, written `operand`, has type `ty`,
@@ -3451,6 +3575,26 @@ pub(crate) fn call_in_read_only(name: &str, stmt: &trendy_syntax::ast::CallStmt)
     .with_help(format!(
         "to change something, make `{name}` an update operator, without a result type, invoked by `call`"
     ))
+}
+
+/// An `if` statement, `stmt`, in the read-only operator `name`, which
+/// chooses between values with an `if` expression.
+pub(crate) fn if_in_read_only(name: &str, stmt: &trendy_syntax::ast::IfStmt) -> Diagnostic {
+    let at = match (stmt.keyword(), stmt.condition()) {
+        (Some(keyword), Some(condition)) => Span::new(
+            trendy_syntax::span(keyword.text_range()).start,
+            condition.span().end,
+        ),
+        _ => stmt.span(),
+    };
+    Diagnostic::error(
+        Code::Return,
+        "a read-only operator has no `if` statements",
+        at,
+        format!("an `if` statement in `{name}`"),
+    )
+    .with_note("a read-only operator's body declares and assigns its local variables and ends in `return value;`: it computes one value, choosing between values with `if` expressions, not statements")
+    .with_help("compute the value with an `if` expression, as in `x := if c then a else b;`, or make the operator an update operator, without a result type, invoked by `call`")
 }
 
 /// The variable `name`, at `span`, of the program's, assigned in the

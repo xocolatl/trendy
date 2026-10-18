@@ -46,6 +46,7 @@ ast_node!(Requirement);
 ast_node!(Body);
 ast_node!(CallStmt);
 ast_node!(ReturnStmt);
+ast_node!(IfStmt);
 ast_node!(AssignStmt);
 ast_node!(AssignBlock);
 ast_node!(Assignment);
@@ -277,6 +278,7 @@ impl Body {
                 .or_else(|| AssignStmt::cast(node.clone()).map(Statement::Assign))
                 .or_else(|| AssignBlock::cast(node.clone()).map(Statement::Block))
                 .or_else(|| ReturnStmt::cast(node.clone()).map(Statement::Return))
+                .or_else(|| IfStmt::cast(node.clone()).map(Statement::If))
                 .or_else(|| VarDecl::cast(node).map(Statement::Var))
         })
     }
@@ -299,6 +301,7 @@ pub enum Statement {
     Assign(AssignStmt),
     Block(AssignBlock),
     Return(ReturnStmt),
+    If(IfStmt),
     /// A local variable's declaration, as a program variable's is written.
     Var(VarDecl),
 }
@@ -311,6 +314,7 @@ impl Statement {
             Statement::Assign(s) => s.syntax(),
             Statement::Block(s) => s.syntax(),
             Statement::Return(s) => s.syntax(),
+            Statement::If(s) => s.syntax(),
             Statement::Var(s) => s.syntax(),
         }
     }
@@ -318,6 +322,49 @@ impl Statement {
     #[must_use]
     pub fn span(&self) -> Span {
         span(self.syntax().text_range())
+    }
+}
+
+/// What follows an `if` statement's `else`: a block, or, for `else if`,
+/// another `if`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ElseBranch {
+    Block(Body),
+    If(IfStmt),
+}
+
+impl IfStmt {
+    /// The `if`, or the word another language writes for it, which is
+    /// reported: Python's `elif` in an `else`.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    /// The condition, between `if` and `then`.
+    #[must_use]
+    pub fn condition(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+
+    /// The statements run if the condition is true.
+    #[must_use]
+    pub fn then_block(&self) -> Option<Body> {
+        self.0.children().find_map(Body::cast)
+    }
+
+    /// What is run if the condition is false, if anything: what follows
+    /// the block run if it is true.
+    #[must_use]
+    pub fn else_branch(&self) -> Option<ElseBranch> {
+        self.0
+            .children()
+            .filter_map(|node| {
+                Body::cast(node.clone())
+                    .map(ElseBranch::Block)
+                    .or_else(|| IfStmt::cast(node).map(ElseBranch::If))
+            })
+            .nth(1)
     }
 }
 

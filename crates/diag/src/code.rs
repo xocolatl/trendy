@@ -41,6 +41,7 @@ pub enum Code {
     ResultSpelling,
     TypeParameterSpelling,
     ConditionalSpelling,
+    BranchBrackets,
     DuplicateName,
     MissingMain,
     UnknownType,
@@ -115,7 +116,7 @@ pub enum CodeKind {
 }
 
 impl Code {
-    pub const ALL: [Code; 86] = [
+    pub const ALL: [Code; 87] = [
         Code::UnexpectedCharacter,
         Code::MissingToken,
         Code::WrongDelimiter,
@@ -144,6 +145,7 @@ impl Code {
         Code::ResultSpelling,
         Code::TypeParameterSpelling,
         Code::ConditionalSpelling,
+        Code::BranchBrackets,
         Code::DuplicateName,
         Code::MissingMain,
         Code::UnknownType,
@@ -235,6 +237,7 @@ impl Code {
             Code::ResultSpelling => "P0026",
             Code::TypeParameterSpelling => "P0027",
             Code::ConditionalSpelling => "P0028",
+            Code::BranchBrackets => "P0029",
             Code::DuplicateName => "A0001",
             Code::MissingMain => "A0002",
             Code::UnknownType => "A0003",
@@ -355,6 +358,7 @@ impl Code {
             Code::ResultSpelling => include_str!("../errors/P0026.md"),
             Code::TypeParameterSpelling => include_str!("../errors/P0027.md"),
             Code::ConditionalSpelling => include_str!("../errors/P0028.md"),
+            Code::BranchBrackets => include_str!("../errors/P0029.md"),
             Code::DuplicateName => include_str!("../errors/A0001.md"),
             Code::MissingMain => include_str!("../errors/A0002.md"),
             Code::UnknownType => include_str!("../errors/A0003.md"),

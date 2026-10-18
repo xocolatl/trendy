@@ -315,6 +315,10 @@ impl<'a> Globals<'a> {
                     errors.push(errors::call_in_read_only(&signature.name, stmt));
                     valid = false;
                 }
+                ast::Statement::If(stmt) => {
+                    errors.push(errors::if_in_read_only(&signature.name, stmt));
+                    valid = false;
+                }
             }
         }
         let Some((_, value)) = returned else {
@@ -436,6 +440,10 @@ impl Names for ReadOnlyNames<'_, '_, '_> {
                 ));
                 return Lookup::Reported;
             }
+            Some(Local::Ended(decl)) => {
+                errors.push(errors::local_out_of_scope(name, span, decl));
+                return Lookup::Reported;
+            }
             Some(Local::Invalid) => return Lookup::Reported,
             None => {}
         }
@@ -522,6 +530,10 @@ impl Assigning for ReadOnlyNames<'_, '_, '_> {
                 return None;
             }
             // Its declaration's errors are already reported.
+            Some(Local::Ended(decl)) => {
+                errors.push(errors::local_out_of_scope(name, span, decl));
+                return None;
+            }
             Some(Local::Invalid) => return None,
             None => {}
         }

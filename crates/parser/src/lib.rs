@@ -452,7 +452,17 @@ impl<'a> Parser<'a> {
 
     /// Statements up to the end of a body.
     fn statements(&mut self) {
+        self.statements_to(false);
+    }
+
+    /// Statements up to the end of a body, or, if `end_word`, up to an
+    /// `end`, in any case, which ends Pascal's `begin … end`.
+    fn statements_to(&mut self, end_word: bool) {
         while let Some(found) = self.found() {
+            if end_word && found.kind == SyntaxKind::Ident && found.text.eq_ignore_ascii_case("end")
+            {
+                break;
+            }
             // A statement can't start with `;`, so one here ends the body:
             // in `[;`, the `]` is missing.
             let ends_body = matches!(
@@ -500,15 +510,19 @@ impl<'a> Parser<'a> {
     }
 
     /// A statement: a call, an assignment statement, a local variable's
-    /// declaration, or a `return`.
+    /// declaration, an `if`, or a `return`.
     fn statement(&mut self) {
         let Some(found) = self.found() else {
             return;
         };
+        if self.at_if() {
+            self.if_stmt();
+            return;
+        }
         let call_like = self
             .found_after(1)
             .is_some_and(|f| matches!(f.kind, SyntaxKind::LBrace | SyntaxKind::LParen));
-        if found.kind == SyntaxKind::CallKw {
+        if self.at_call_keyword() {
             self.call_stmt();
         } else if found.kind == SyntaxKind::VarKw {
             self.var_decl();
@@ -525,7 +539,7 @@ impl<'a> Parser<'a> {
         } else {
             self.missing_with_help(
                 SyntaxKind::CallKw,
-                "statements are calls, such as `call debug_value{v: 1};`, assignments, such as `n := n + 1;`, local variables, such as `var n := 0;`, and, in a read-only operator, `return value;`",
+                "statements are calls, such as `call debug_value{v: 1};`, assignments, such as `n := n + 1;`, local variables, such as `var n := 0;`, and, in an update operator, `if` statements, such as `if n > 0 then [ n := n - 1; ];`, or, in a read-only operator, `return value;`",
             );
             self.skip_statement(&[
                 SyntaxKind::RBracket,
@@ -570,6 +584,152 @@ impl<'a> Parser<'a> {
         self.builder.finish_node();
     }
 
+    /// `if condition then [ … ] else [ … ];`: statements run if the
+    /// condition is true, and else others, if any, with `else if` chaining
+    /// another condition. Each branch is a block in brackets, even of one
+    /// statement: a statement without them, Pascal's `begin … end`, and C's
+    /// `{ … }`, are reported, with fixes, as are the spellings of other
+    /// languages an `if` expression's are (see [`Parser::if_expression`]).
+    fn if_stmt(&mut self) {
+        let outer_form = std::mem::replace(&mut self.form, errors::IF_STMT_FORM);
+        self.start_node(SyntaxKind::IfStmt);
+        self.any_case(SyntaxKind::IfKw);
+        let mut unbracketed = Vec::new();
+        let last_unbracketed = self.if_stmt_branches(&mut unbracketed);
+        self.end_if();
+        // A last branch without brackets ends with its statement's `;`,
+        // which ended the `if` as well.
+        let shared = last_unbracketed && !self.at(SyntaxKind::Semicolon);
+        for (i, &span) in unbracketed.iter().enumerate() {
+            let ends_if = shared && i + 1 == unbracketed.len();
+            self.errors.push(errors::unbracketed_branch(span, ends_if));
+        }
+        if !shared {
+            self.expect(SyntaxKind::Semicolon);
+        }
+        self.builder.finish_node();
+        self.form = outer_form;
+    }
+
+    /// What follows an `if` statement's keyword: the condition and its
+    /// branches. Whether the last branch was a statement without brackets,
+    /// each one's span added to `unbracketed`.
+    fn if_stmt_branches(&mut self, unbracketed: &mut Vec<Span>) -> bool {
+        self.expression();
+        self.any_case(SyntaxKind::ThenKw);
+        let mut last = self.branch(unbracketed);
+        if let Some(found) = self.at_else_if_spelling() {
+            self.start_node(SyntaxKind::IfStmt);
+            self.bump();
+            self.errors.push(errors::else_if_spelling(found));
+            last = self.if_stmt_branches(unbracketed);
+            self.builder.finish_node();
+        } else if self.found().is_some_and(|f| f.spells(SyntaxKind::ElseKw)) {
+            self.any_case(SyntaxKind::ElseKw);
+            if self.at_if() {
+                self.start_node(SyntaxKind::IfStmt);
+                self.any_case(SyntaxKind::IfKw);
+                last = self.if_stmt_branches(unbracketed);
+                self.builder.finish_node();
+            } else {
+                last = self.branch(unbracketed);
+            }
+        }
+        last
+    }
+
+    /// Python's `elif`, Perl's `elsif` or another's `elseif`, in any case,
+    /// for `else if`, if it is next.
+    fn at_else_if_spelling(&mut self) -> Option<Found<'a>> {
+        self.found().filter(|found| {
+            found.kind == SyntaxKind::Ident
+                && ["elif", "elsif", "elseif"]
+                    .iter()
+                    .any(|w| found.text.eq_ignore_ascii_case(w))
+        })
+    }
+
+    /// A branch of an `if` statement: a block in brackets, with C's `{ … }`
+    /// fixed as an operator's body's is. Pascal's `begin … end` is one too,
+    /// reported; so is a statement without brackets, whose span is added
+    /// to `unbracketed` for the `if` to report. Whether it was one.
+    fn branch(&mut self, unbracketed: &mut Vec<Span>) -> bool {
+        let Some(found) = self.found() else {
+            self.missing(SyntaxKind::LBracket);
+            return false;
+        };
+        match found.kind {
+            SyntaxKind::LBracket | SyntaxKind::LBrace => {
+                self.delimited(
+                    Some(SyntaxKind::Body),
+                    "block",
+                    (SyntaxKind::LBracket, SyntaxKind::RBracket),
+                    &[(SyntaxKind::LBrace, SyntaxKind::RBrace)],
+                    Self::statements,
+                );
+                false
+            }
+            SyntaxKind::Ident if found.text.eq_ignore_ascii_case("begin") => {
+                self.begin_end(found);
+                false
+            }
+            // No statement starts with these: the block is missing.
+            SyntaxKind::ElseKw | SyntaxKind::Semicolon | SyntaxKind::RBracket => {
+                self.missing(SyntaxKind::LBracket);
+                self.missing(SyntaxKind::RBracket);
+                false
+            }
+            _ => {
+                self.start_node(SyntaxKind::Body);
+                self.statement();
+                self.builder.finish_node();
+                let end = self.last_end.unwrap_or(found.span.end);
+                unbracketed.push(Span::new(found.span.start, end));
+                true
+            }
+        }
+    }
+
+    /// Pascal's `begin … end`, or Tutorial D's `BEGIN; … END`, starting at
+    /// `begin`, parsed as a block in brackets, and reported, with the fix
+    /// writing it as one. The `;` that ends Tutorial D's block, as a
+    /// statement, before an `else` or `END IF`, goes with it.
+    fn begin_end(&mut self, begin: Found) {
+        self.start_node(SyntaxKind::Body);
+        let mut opening = self.bump();
+        if self.at(SyntaxKind::Semicolon) {
+            opening.end = self.bump().end;
+        }
+        self.statements_to(true);
+        let end_if = self
+            .lookahead_nth(1)
+            .is_some_and(|f| f.spells(SyntaxKind::IfKw));
+        let closing = match self.found() {
+            Some(found)
+                if found.kind == SyntaxKind::Ident
+                    && found.text.eq_ignore_ascii_case("end")
+                    && !end_if =>
+            {
+                let mut closing = self.bump();
+                let after = self.lookahead_nth(1);
+                let continues = after.is_some_and(|f| {
+                    f.spells(SyntaxKind::ElseKw)
+                        || (f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case("end"))
+                });
+                if self.at(SyntaxKind::Semicolon) && continues {
+                    closing.end = self.bump().end;
+                }
+                Some(closing)
+            }
+            _ => {
+                self.missing(SyntaxKind::RBracket);
+                None
+            }
+        };
+        self.builder.finish_node();
+        self.errors.push(errors::begin_end(begin, opening, closing));
+    }
+
     /// `return value;`, with `return` in any case, as Tutorial D's
     /// `RETURN`, which is fixed.
     fn return_stmt(&mut self) {
@@ -591,11 +751,23 @@ impl<'a> Parser<'a> {
         self.builder.finish_node();
     }
 
+    /// Whether `call` is next, or Tutorial D's `CALL` in another case, which
+    /// the operator's name follows.
+    fn at_call_keyword(&mut self) -> bool {
+        self.found().is_some_and(|f| {
+            f.kind == SyntaxKind::CallKw
+                || (f.spells(SyntaxKind::CallKw)
+                    && self
+                        .found_after(1)
+                        .is_some_and(|n| n.kind == SyntaxKind::Ident))
+        })
+    }
+
     /// `call name{arguments};`, with `call` already reported if missing.
     fn call_stmt(&mut self) {
         self.start_node(SyntaxKind::CallStmt);
-        if self.at(SyntaxKind::CallKw) {
-            self.bump();
+        if self.at_call_keyword() {
+            self.any_case(SyntaxKind::CallKw);
         }
         if self.at(SyntaxKind::Ident) {
             self.start_node(SyntaxKind::NameRef);
@@ -1362,20 +1534,16 @@ impl<'a> Parser<'a> {
         self.expression();
         self.any_case(SyntaxKind::ThenKw);
         self.expression();
-        match self.found() {
+        if let Some(found) = self.at_else_if_spelling() {
             // `elif c then …`: an `else if`, whose `if` it is too.
-            Some(found)
-                if found.kind == SyntaxKind::Ident
-                    && ["elif", "elsif", "elseif"]
-                        .iter()
-                        .any(|w| found.text.eq_ignore_ascii_case(w)) =>
-            {
-                self.start_node(SyntaxKind::IfExpr);
-                self.bump();
-                self.errors.push(errors::else_if_spelling(found));
-                self.if_branches();
-                self.builder.finish_node();
-            }
+            self.start_node(SyntaxKind::IfExpr);
+            self.bump();
+            self.errors.push(errors::else_if_spelling(found));
+            self.if_branches();
+            self.builder.finish_node();
+            return;
+        }
+        match self.found() {
             Some(found) if found.spells(SyntaxKind::ElseKw) => {
                 self.any_case(SyntaxKind::ElseKw);
                 self.expression();
@@ -3333,6 +3501,11 @@ SourceFile
         assert_eq!(codes("VAR x := 1;"), [Code::MiscasedKeyword]);
         assert_eq!(fix("VAR x := 1;"), "var x := 1;");
         assert_eq!(fix("OPERATOR main{} [];"), "operator main{} [];");
+        // Tutorial D's `CALL`, not an operator named `CALL` without one.
+        assert_eq!(
+            fix("operator main{} [ CALL debug_value{v: 1}; ];"),
+            "operator main{} [ call debug_value{v: 1}; ];"
+        );
         // `TUPLE` alone is just a (wrong) type name.
         assert!(codes("var p: TUPLE;").is_empty());
     }
@@ -3562,6 +3735,76 @@ SourceFile
         assert_eq!(errors[0].code, Code::MissingToken);
         assert!(errors[0].suggestions.is_empty(), "{errors:#?}");
         one_fix("var x := if a 1 else 2;", "var x := if a then 1 else 2;");
+    }
+
+    #[test]
+    fn if_statements() {
+        let statement = |body: &str| {
+            let source = format!("operator f{{}} [ {body} ];");
+            let parse = parse_str(&source);
+            assert!(parse.errors.is_empty(), "{body}: {:#?}", parse.errors);
+            let op = parse.tree.operators().next().unwrap();
+            let statements: Vec<_> = op.body().unwrap().statements().collect();
+            assert_eq!(statements.len(), 1, "{body}");
+            match &statements[0] {
+                Statement::If(stmt) => stmt.clone(),
+                other => panic!("{body}: {other:?}"),
+            }
+        };
+        let plain = statement("if a then [ call f{}; call g{}; ];");
+        assert!(matches!(plain.condition(), Some(Expr::Name(_))));
+        assert_eq!(plain.then_block().unwrap().statements().count(), 2);
+        assert!(plain.else_branch().is_none());
+        let chain =
+            statement("if a then [ call f{}; ] else if b then [ var x := 1; ] else [ x := 2; ];");
+        let Some(trendy_syntax::ast::ElseBranch::If(chained)) = chain.else_branch() else {
+            panic!("an `else if`");
+        };
+        assert!(matches!(
+            chained.else_branch(),
+            Some(trendy_syntax::ast::ElseBranch::Block(_))
+        ));
+        // A block can be empty, and hold another `if`.
+        statement("if a then [] else [ if b then [ call f{}; ]; ];");
+    }
+
+    #[test]
+    fn if_statement_recovery() {
+        let body = |statements: &str| format!("operator f{{}} [ {statements} ];");
+        let one_fix = |source: &str, fixed: &str| {
+            let errors = parse_str(&body(source)).errors;
+            assert_eq!(errors.len(), 1, "{source}: {errors:#?}");
+            assert_eq!(fix(&body(source)), body(fixed), "{source}");
+        };
+        // Without brackets, the last statement's `;` ends the `if` too.
+        assert_eq!(
+            fix(&body("if a then call f{}; else call g{};")),
+            body("if a then [call f{};] else [call g{};];")
+        );
+        one_fix("if a then call f{};;", "if a then [call f{};];");
+        one_fix("if a then begin call f{}; end;", "if a then [ call f{}; ];");
+        one_fix("if a then { call f{}; };", "if a then [ call f{}; ];");
+        one_fix(
+            "if a then [ call f{}; ] elif b then [ call g{}; ];",
+            "if a then [ call f{}; ] else if b then [ call g{}; ];",
+        );
+        one_fix(
+            "if a then [ call f{}; ] end if;",
+            "if a then [ call f{}; ];",
+        );
+        one_fix("if a then [ call f{}; ]", "if a then [ call f{}; ];");
+        // `[` is inserted as an index's would be, which the formatter spaces.
+        one_fix(
+            "if a then else [ call g{}; ];",
+            "if a then[] else [ call g{}; ];",
+        );
+        // Tutorial D's, its keywords in capitals each fixed too.
+        assert_eq!(
+            fix(&body(
+                "IF a THEN BEGIN; CALL f{}; END; ELSE BEGIN; CALL g{}; END; END IF;"
+            )),
+            body("if a then [ call f{}; ] else [ call g{}; ];")
+        );
     }
 
     #[test]
@@ -3920,7 +4163,10 @@ SourceFile
                     .flat_map(|stmt| stmt.clauses())
                     .map(|clause| format!("assign: {}", describe(clause)))
                     .collect(),
-                Statement::Call(_) | Statement::Return(_) | Statement::Var(_) => Vec::new(),
+                Statement::Call(_)
+                | Statement::Return(_)
+                | Statement::Var(_)
+                | Statement::If(_) => Vec::new(),
             })
             .collect()
     }

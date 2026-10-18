@@ -86,6 +86,10 @@ fn variables() {
             r#"relation { guest: text, room: integer } { { guest: "Wanjiru", room: 3 } }"#,
             r#"relation { guest: text, room: integer } { { guest: "Amara", room: 2 }, { guest: "Kenji", room: 1 }, { guest: "Wanjiru", room: 3 } }"#,
             "2",
+            // Checked out, and an `if` for a guest without a room.
+            r#""Kenji leaves room 1""#,
+            r#""Bashō has no room""#,
+            r#"relation { guest: text, room: integer } { { guest: "Amara", room: 2 }, { guest: "Wanjiru", room: 3 } }"#,
             "relation { born: integer, name: text } {}",
         ]
     );

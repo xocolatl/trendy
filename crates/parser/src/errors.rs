@@ -32,6 +32,7 @@ pub(crate) const ASSIGN_BLOCK_FORM: &str =
 pub(crate) const UPDATE_FORM: &str = "`update` takes attributes the variable has, each `name := value`, then for a relation an optional `where` and condition: `update r { price := price * 2 } where id = 7;`";
 pub(crate) const TYPES_FORM: &str = "an operator's type parameters follow its parameters and result type, each `name: any type`, `any tuple`, `any relation`, `any array` or `any` and a kind: `operator pair{a: T, b: T}: relation { v: T } types { T: any type } [ … ];`";
 pub(crate) const IF_FORM: &str = "an `if` has the form `if condition then value else value`, and `else if` chains another: `if n = 1 then \"one\" else if n = 2 then \"two\" else \"many\"`";
+pub(crate) const IF_STMT_FORM: &str = "an `if` statement has the form `if condition then [ … ] else [ … ];`, each branch a block in brackets, and `else if` chains another condition";
 pub(crate) const VARIABLE_FORM: &str = "a variable declaration has the form `var name: type := value;`, where either the type or the value may be left out";
 
 /// Words other languages use to start a definition or declaration, which
@@ -660,6 +661,53 @@ pub(crate) fn foreign_conditional(
         vec![Edit { span, replacement }],
     )
 }
+
+/// A branch of an `if` statement, at `span`, that is a statement without
+/// brackets. `ends_if` says whether its `;` ended the `if` as well, which
+/// then needs one of its own after the brackets.
+pub(crate) fn unbracketed_branch(span: Span, ends_if: bool) -> Diagnostic {
+    let insert = |at: usize, text: &str| Edit {
+        span: Span::empty(at),
+        replacement: text.to_string(),
+    };
+    Diagnostic::error(
+        Code::BranchBrackets,
+        "an `if` statement's branch needs brackets",
+        span,
+        "a statement without brackets",
+    )
+    .with_note(BRANCH_BRACKETS)
+    .with_suggestion(
+        "enclose it in brackets",
+        vec![
+            insert(span.start, "["),
+            insert(span.end, if ends_if { "];" } else { "]" }),
+        ],
+    )
+}
+
+/// Pascal's `begin`, `begin`, or Tutorial D's `BEGIN;`, at `opening`, and
+/// its `end`, at `closing`, if there is one: a block, written `[ … ]`.
+pub(crate) fn begin_end(begin: Found, opening: Span, closing: Option<Span>) -> Diagnostic {
+    let mut edits = vec![Edit {
+        span: opening,
+        replacement: "[".to_string(),
+    }];
+    edits.extend(closing.map(|span| Edit {
+        span,
+        replacement: "]".to_string(),
+    }));
+    Diagnostic::error(
+        Code::BranchBrackets,
+        "`begin … end` is written `[ … ]`",
+        begin.span,
+        "Pascal's and Tutorial D's block",
+    )
+    .with_note(BRANCH_BRACKETS)
+    .with_suggestion("write the block in brackets", edits)
+}
+
+const BRANCH_BRACKETS: &str = "each branch of an `if` statement is a block in brackets, even of one statement, so that a statement added to it can't end up outside it, and an `else` always belongs to the `if` it follows";
 
 /// `elif`, `elsif` or `elseif`, `found`, in an `if`: `else if`.
 pub(crate) fn else_if_spelling(found: Found) -> Diagnostic {

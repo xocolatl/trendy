@@ -178,7 +178,7 @@ pub enum RuntimeFn {
     Concat,
     /// `trendy_rt_release(owner)`: release the memory of its own that a
     /// local variable's owner holds, set by [`RuntimeFn::Assign`], if any,
-    /// at the end of its operator's body.
+    /// at the end of its block, and empty the owner.
     Release,
     /// `trendy_rt_begin(scope)`: begin a statement's scope, in a slot laid
     /// out as [`Layout::scope`]. Until [`RuntimeFn::End`], the statement

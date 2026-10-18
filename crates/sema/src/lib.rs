@@ -65,7 +65,7 @@ pub(crate) struct Checked {
     operators: Operators,
     evaluated: globals::Evaluated,
     /// Each valid update operator's local variables and statements.
-    bodies: HashMap<hir::OperatorId, (Vec<hir::Local>, Vec<hir::Statement>)>,
+    bodies: HashMap<hir::OperatorId, (Vec<hir::Local>, hir::Block)>,
 }
 
 /// Check `file`, as `source` says, with `prelude`'s operators in scope.
@@ -1691,13 +1691,25 @@ mod tests {
             .iter()
             .find(|o| o.name == "greet")
             .unwrap();
-        let hir::OperatorKind::Update { body, .. } = &greet.kind else {
+        let hir::OperatorKind::Update {
+            body: hir::Block {
+                statements: body, ..
+            },
+            ..
+        } = &greet.kind
+        else {
             panic!("greet is a user operator");
         };
         // Inside `greet`, `r` is the parameter, which hides the variable.
         assert_eq!(*argument(&body[1]), hir::Expr::Parameter("r".to_string()));
         let main = program.operator(program.entry);
-        let hir::OperatorKind::Update { body, .. } = &main.kind else {
+        let hir::OperatorKind::Update {
+            body: hir::Block {
+                statements: body, ..
+            },
+            ..
+        } = &main.kind
+        else {
             panic!("main is a user operator");
         };
         assert_eq!(*argument(&body[0]), hir::Expr::Variable(hir::VariableId(0)));
@@ -1820,7 +1832,13 @@ mod tests {
         let body = |source: &str| {
             let program = analyze_str(source).unwrap();
             let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-            let hir::OperatorKind::Update { body, .. } = &f.kind else {
+            let hir::OperatorKind::Update {
+                body: hir::Block {
+                    statements: body, ..
+                },
+                ..
+            } = &f.kind
+            else {
                 panic!("f is a user operator");
             };
             body.clone()
@@ -1972,7 +1990,13 @@ mod tests {
 
     fn main_body(source: &str) -> Vec<hir::Statement> {
         let program = analyze_str(source).unwrap();
-        let hir::OperatorKind::Update { body, .. } = &program.operator(program.entry).kind else {
+        let hir::OperatorKind::Update {
+            body: hir::Block {
+                statements: body, ..
+            },
+            ..
+        } = &program.operator(program.entry).kind
+        else {
             panic!("main is a user operator");
         };
         body.clone()
@@ -2017,7 +2041,14 @@ mod tests {
             let body = |e: &str| {
                 let program = analyze_str(&source(e)).unwrap();
                 let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-                let hir::OperatorKind::Update { body, .. } = &f.kind else {
+                let hir::OperatorKind::Update {
+                    body:
+                        hir::Block {
+                            statements: body, ..
+                        },
+                    ..
+                } = &f.kind
+                else {
                     panic!("f is a user operator");
                 };
                 argument(&body[0]).clone()
@@ -2224,7 +2255,14 @@ mod tests {
             let body = |e: &str| {
                 let program = analyze_str(&source(e)).unwrap();
                 let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-                let hir::OperatorKind::Update { body, .. } = &f.kind else {
+                let hir::OperatorKind::Update {
+                    body:
+                        hir::Block {
+                            statements: body, ..
+                        },
+                    ..
+                } = &f.kind
+                else {
                     panic!("f is a user operator");
                 };
                 argument(&body[0]).clone()
@@ -2237,7 +2275,13 @@ mod tests {
         )
         .unwrap();
         let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-        let hir::OperatorKind::Update { body, .. } = &f.kind else {
+        let hir::OperatorKind::Update {
+            body: hir::Block {
+                statements: body, ..
+            },
+            ..
+        } = &f.kind
+        else {
             panic!("f is a user operator");
         };
         assert_eq!(
@@ -2316,7 +2360,14 @@ mod tests {
             let body = |e: &str| {
                 let program = analyze_str(&source(e)).unwrap();
                 let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-                let hir::OperatorKind::Update { body, .. } = &f.kind else {
+                let hir::OperatorKind::Update {
+                    body:
+                        hir::Block {
+                            statements: body, ..
+                        },
+                    ..
+                } = &f.kind
+                else {
                     panic!("f is a user operator");
                 };
                 argument(&body[0]).clone()
@@ -2562,7 +2613,13 @@ mod tests {
             ))
             .unwrap();
             let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-            let hir::OperatorKind::Update { body, .. } = &f.kind else {
+            let hir::OperatorKind::Update {
+                body: hir::Block {
+                    statements: body, ..
+                },
+                ..
+            } = &f.kind
+            else {
                 panic!("f is a user operator");
             };
             argument(&body[0]).clone()
@@ -3195,7 +3252,13 @@ mod tests {
         )
         .unwrap();
         let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-        let hir::OperatorKind::Update { body, .. } = &f.kind else {
+        let hir::OperatorKind::Update {
+            body: hir::Block {
+                statements: body, ..
+            },
+            ..
+        } = &f.kind
+        else {
             panic!("f is a user operator");
         };
         // An extend of the kept attributes, each with its image in `r`.
@@ -3291,7 +3354,13 @@ mod tests {
         )
         .unwrap();
         let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-        let hir::OperatorKind::Update { body, .. } = &f.kind else {
+        let hir::OperatorKind::Update {
+            body: hir::Block {
+                statements: body, ..
+            },
+            ..
+        } = &f.kind
+        else {
             panic!("f is a user operator");
         };
         let heading =
@@ -3647,7 +3716,13 @@ mod tests {
         )
         .unwrap();
         let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-        let hir::OperatorKind::Update { body, .. } = &f.kind else {
+        let hir::OperatorKind::Update {
+            body: hir::Block {
+                statements: body, ..
+            },
+            ..
+        } = &f.kind
+        else {
             panic!("f is a user operator");
         };
         assert!(matches!(argument(&body[0]), hir::Expr::Restrict(..)));
@@ -3752,7 +3827,13 @@ mod tests {
         )
         .unwrap();
         let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-        let hir::OperatorKind::Update { body, .. } = &f.kind else {
+        let hir::OperatorKind::Update {
+            body: hir::Block {
+                statements: body, ..
+            },
+            ..
+        } = &f.kind
+        else {
             panic!("f is a user operator");
         };
         let cities = || Box::new(hir::Expr::Variable(hir::VariableId(0)));
@@ -3776,7 +3857,13 @@ mod tests {
         )
         .unwrap();
         let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-        let hir::OperatorKind::Update { body, .. } = &f.kind else {
+        let hir::OperatorKind::Update {
+            body: hir::Block {
+                statements: body, ..
+            },
+            ..
+        } = &f.kind
+        else {
             panic!("f is a user operator");
         };
         let hir::Expr::And(constant, parameter) = argument(&body[0]) else {
@@ -3849,7 +3936,14 @@ mod tests {
             let body = |e: &str| {
                 let program = analyze_str(&source(e)).unwrap();
                 let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-                let hir::OperatorKind::Update { body, .. } = &f.kind else {
+                let hir::OperatorKind::Update {
+                    body:
+                        hir::Block {
+                            statements: body, ..
+                        },
+                    ..
+                } = &f.kind
+                else {
                     panic!("f is a user operator");
                 };
                 argument(&body[0]).clone()
@@ -3891,7 +3985,14 @@ mod tests {
             let body = |e: &str| {
                 let program = analyze_str(&source(e)).unwrap();
                 let f = program.operators.iter().find(|o| o.name == "f").unwrap();
-                let hir::OperatorKind::Update { body, .. } = &f.kind else {
+                let hir::OperatorKind::Update {
+                    body:
+                        hir::Block {
+                            statements: body, ..
+                        },
+                    ..
+                } = &f.kind
+                else {
                     panic!("f is a user operator");
                 };
                 argument(&body[0]).clone()
@@ -5091,7 +5192,7 @@ mod tests {
         let hir::OperatorKind::Update { locals, body } = &op.kind else {
             panic!("{name} is an update operator");
         };
-        (locals, body)
+        (locals, &body.statements)
     }
 
     #[test]
@@ -5118,7 +5219,7 @@ mod tests {
             .iter()
             .filter_map(|s| match s {
                 hir::Statement::Assign(a) => Some(a.iter().map(|a| a.target).collect()),
-                hir::Statement::Call(_) => None,
+                hir::Statement::Call(_) | hir::Statement::If(..) => None,
             })
             .collect();
         let local = |i| vec![hir::Target::Local(hir::LocalId(i))];
@@ -5547,5 +5648,111 @@ mod tests {
             ))
             .is_ok()
         );
+    }
+
+    #[test]
+    fn a_blocks_local_variables_are_in_scope_in_it_alone() {
+        let f = |body: &str| format!("operator f{{n: integer}} [ {body} ];{MAIN}");
+        // Side by side, each block can have one of a name.
+        let program = analyze_str(&f(
+            "if n > 0 then [ var note := \"positive\"; call debug_value{v: note}; ] else [ var note := 1; call debug_value{v: note}; ];",
+        ))
+        .unwrap();
+        let (locals, body) = update_body(&program, "f");
+        assert_eq!(locals.len(), 2);
+        let hir::Statement::If(_, then, otherwise) = &body[0] else {
+            panic!("an `if`");
+        };
+        assert_eq!(then.locals, [hir::LocalId(0)]);
+        assert_eq!(otherwise.locals, [hir::LocalId(1)]);
+        for (body, code) in [
+            (
+                "if n > 0 then [ var note := 1; ]; call debug_value{v: note};",
+                Code::UnknownName,
+            ),
+            (
+                "if n > 0 then [ var note := 1; ]; note := 2;",
+                Code::UnknownName,
+            ),
+            (
+                "var note := 0; if n > 0 then [ var note := 1; ];",
+                Code::DuplicateName,
+            ),
+            (
+                "if n > 0 then [ var note := 1; ]; var note := 2;",
+                Code::DuplicateName,
+            ),
+            ("if n > 0 then [ var n := 1; ];", Code::DuplicateName),
+            (
+                "if n > 0 then [ call debug_value{v: note}; var note := 1; ];",
+                Code::LocalBeforeDeclaration,
+            ),
+        ] {
+            assert!(
+                codes(&f(body)).contains(&code),
+                "{body}: {:?}",
+                codes(&f(body))
+            );
+        }
+        // Declared again in a block within, the first is assigned, if it
+        // comes first.
+        assert_eq!(
+            fix(&f("var note := 0; if n > 0 then [ var note := 1; ];")),
+            f("var note := 0; if n > 0 then [ note := 1; ];")
+        );
+    }
+
+    #[test]
+    fn an_if_statement_runs_one_block() {
+        let f = |body: &str| format!("operator f{{n: integer}} [ {body} ];{MAIN}");
+        // Known when compiling, the block it doesn't run has no failures.
+        for body in [
+            "if 1 = 2 then [ call debug_value{v: 1 div 0}; ];",
+            "if 1 = 1 then [ call debug_value{v: n}; ] else [ call debug_value{v: 1 div 0}; ];",
+            "if 1 = 1 then [ call debug_value{v: n}; ] else if 1 div 0 = 1 then [ call debug_value{v: n}; ];",
+        ] {
+            assert!(analyze_str(&f(body)).is_ok(), "{body}");
+        }
+        assert_eq!(
+            codes(&f("if n > 0 then [ call debug_value{v: 1 div 0}; ];")),
+            [Code::DivisionByZero]
+        );
+        assert_eq!(
+            codes(&f("if n then [ call debug_value{v: n}; ];")),
+            [Code::TypeMismatch]
+        );
+        // A read-only operator chooses with an `if` expression.
+        let source = format!(
+            "operator g{{n: integer}}: integer [ var x := 0; if n > 0 then [ x := 1; ]; return x; ];{MAIN}"
+        );
+        assert_eq!(codes(&source), [Code::Return]);
+    }
+
+    #[test]
+    fn an_if_statement_that_decides_nothing_is_fixed() {
+        let f = |body: &str| format!("operator f{{n: integer}} [ {body} ];{MAIN}");
+        let show = "call debug_value{v: n};";
+        for (written, fixed) in [
+            (format!("if true then [ {show} ];"), show.to_string()),
+            (format!("if false then [ {show} ];"), String::new()),
+            (
+                format!("if false then [ {show} ] else [ {show} call debug_value{{v: 1}}; ];"),
+                format!("{show} call debug_value{{v: 1}};"),
+            ),
+            ("if n > 0 then [];".to_string(), String::new()),
+            ("if n > 0 then [] else [];".to_string(), String::new()),
+            (
+                format!("if n > 0 then [] else [ {show} ];"),
+                format!("if not (n > 0) then [ {show} ];"),
+            ),
+            (
+                format!("if n > 0 then [ {show} ] else [];"),
+                format!("if n > 0 then [ {show} ];"),
+            ),
+        ] {
+            assert_eq!(codes(&f(&written)), [Code::PointlessIf], "{written}");
+            assert_eq!(fix(&f(&written)), f(&fixed), "{written}");
+            assert!(analyze_str(&f(&fixed)).is_ok(), "{fixed}");
+        }
     }
 }

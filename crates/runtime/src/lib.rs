@@ -404,9 +404,10 @@ pub unsafe extern "C" fn trendy_rt_assign(
 
 /// Release the memory of its own that `owner` holds for a local variable,
 /// which [`trendy_rt_assign`] stored there, if it did, at the end of its
-/// operator's body. Nothing points into it then: an assignment copies a
-/// value into memory of the variable's own, and every statement that could
-/// point into it has ended.
+/// block, and empty `owner`, so that the block, run again, has nothing to
+/// release. Nothing points into it then: an assignment copies a value into
+/// memory of the variable's own, and every statement that could point into
+/// it has ended.
 ///
 /// # Safety
 ///
@@ -422,6 +423,9 @@ pub unsafe extern "C" fn trendy_rt_release(owner: *mut *mut u8) {
         if !block.is_null() {
             free(block.cast());
         }
+        owner
+            .cast::<*mut Owned>()
+            .write_unaligned(core::ptr::null_mut());
     }
 }
 

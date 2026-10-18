@@ -1,7 +1,7 @@
-//! Operators' local variables (TTM RM Prescription 3): declared in a body,
-//! purely local to the operator, and in scope in all of the body, so that a
-//! name means one thing there, though one has no value before its
-//! declaration.
+//! Operators' local variables (TTM RM Prescription 3): declared in a
+//! block, purely local to the operator, and in scope in all of the block,
+//! so that a name means one thing there, though one has no value before
+//! its declaration.
 
 use trendy_diag::Diagnostic;
 use trendy_hir as hir;
@@ -12,16 +12,26 @@ use crate::operators::Signature;
 use crate::types::{self, Expected, Origin, TypeParameters};
 use crate::{Namespaces, errors, keys};
 
-/// The local variables of a body: each one declared in it, in order, and
-/// how many of their declarations come before the statement being checked.
+/// The local variables of a body: those of each block the statement being
+/// checked is in, and of the blocks that have ended.
 #[derive(Default)]
 pub(crate) struct Locals {
-    declared: Vec<Declared>,
+    /// The blocks the statement being checked is in, outermost first.
+    scopes: Vec<Scope>,
+    /// The declarations of the blocks that have ended, whose names are out
+    /// of scope.
+    ended: Vec<Declared>,
     /// Every local variable, by id: one for each declaration, and, in a
     /// read-only operator, one more for each assignment, which gives its
     /// variable a new value from there on.
     all: Vec<hir::Local>,
-    /// How many declarations come before the statement being checked.
+}
+
+/// A block's local variables: each declared in it, in order, and how many
+/// of their declarations come before the statement being checked.
+#[derive(Default)]
+struct Scope {
+    declared: Vec<Declared>,
     reached: usize,
 }
 
@@ -40,6 +50,8 @@ pub(crate) enum Local<'a> {
     Declared(hir::LocalId, &'a hir::Local, &'a VarDecl),
     /// One declared after here, or here, which has no value yet.
     Later(&'a VarDecl),
+    /// One declared in a block that has ended, out of scope here.
+    Ended(&'a VarDecl),
     /// One whose declaration has errors, already reported.
     Invalid,
 }
@@ -47,22 +59,32 @@ pub(crate) enum Local<'a> {
 impl Locals {
     /// The local variable named `name`, if there is one.
     pub(crate) fn find(&self, name: &str) -> Option<Local<'_>> {
-        let (index, declared) = self
-            .declared
+        for scope in self.scopes.iter().rev() {
+            let found = scope
+                .declared
+                .iter()
+                .enumerate()
+                .find(|(_, declared)| declared.name == name);
+            if let Some((index, declared)) = found {
+                return Some(match declared.current {
+                    _ if index >= scope.reached => Local::Later(&declared.decl),
+                    Some(id) => Local::Declared(id, &self.all[id.0], &declared.decl),
+                    None => Local::Invalid,
+                });
+            }
+        }
+        self.ended
             .iter()
-            .enumerate()
-            .find(|(_, declared)| declared.name == name)?;
-        Some(match declared.current {
-            _ if index >= self.reached => Local::Later(&declared.decl),
-            Some(id) => Local::Declared(id, &self.all[id.0], &declared.decl),
-            None => Local::Invalid,
-        })
+            .rev()
+            .find(|declared| declared.name == name)
+            .map(|declared| Local::Ended(&declared.decl))
     }
 
-    /// The names of the local variables declared before here.
+    /// The names of the local variables in scope and declared before here.
     pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
-        self.declared[..self.reached]
+        self.scopes
             .iter()
+            .flat_map(|scope| &scope.declared[..scope.reached])
             .filter(|declared| declared.current.is_some())
             .map(|declared| declared.name.as_str())
     }
@@ -80,11 +102,12 @@ impl Locals {
         decl: &VarDecl,
         local: Option<hir::Local>,
     ) -> Option<hir::LocalId> {
-        let declared = self.declared.get_mut(self.reached)?;
+        let scope = self.scopes.last_mut()?;
+        let declared = scope.declared.get_mut(scope.reached)?;
         if declared.decl != *decl {
             return None;
         }
-        self.reached += 1;
+        scope.reached += 1;
         let id = hir::LocalId(self.all.len());
         self.all.push(local?);
         declared.current = Some(id);
@@ -97,10 +120,90 @@ impl Locals {
     pub(crate) fn reassigned(&mut self, id: hir::LocalId) -> hir::LocalId {
         let new = hir::LocalId(self.all.len());
         self.all.push(self.all[id.0].clone());
-        if let Some(declared) = self.declared.iter_mut().find(|d| d.current == Some(id)) {
+        let declared = self
+            .scopes
+            .iter_mut()
+            .flat_map(|scope| &mut scope.declared)
+            .find(|d| d.current == Some(id));
+        if let Some(declared) = declared {
             declared.current = Some(new);
         }
         new
+    }
+
+    /// Enter a block, of `statements`, of the operator `op`, whose local
+    /// variables are in scope in all of it. Whether each has a name of its
+    /// own, after reporting each that doesn't: an operator's names, its
+    /// parameters' and its local variables', each mean one thing wherever
+    /// they are in scope, so a block's hide no other, though they hide the
+    /// program's variables.
+    pub(crate) fn enter(
+        &mut self,
+        statements: impl Iterator<Item = ast::Statement>,
+        op: &Signature,
+        errors: &mut Vec<Diagnostic>,
+    ) -> bool {
+        let mut scope = Scope::default();
+        let mut ok = true;
+        for stmt in statements {
+            let ast::Statement::Var(decl) = stmt else {
+                continue;
+            };
+            let Some(ident) = decl.name().and_then(|n| n.ident()) else {
+                continue;
+            };
+            let (name, span) = (ident.text(), trendy_syntax::span(ident.text_range()));
+            let first = scope
+                .declared
+                .iter()
+                .chain(self.scopes.iter().flat_map(|scope| &scope.declared))
+                .find(|other| other.name == name);
+            if let Some(first) = first {
+                errors.push(errors::local_declared_again(
+                    name,
+                    &decl,
+                    &first.decl,
+                    &op.name,
+                ));
+                ok = false;
+            } else if op.params.contains_key(name) {
+                let parameter =
+                    op.decl
+                        .as_ref()
+                        .and_then(ast::Operator::params)
+                        .and_then(|params| {
+                            params.attributes().find_map(|a| {
+                                let name_node = a.name()?;
+                                (name_node.ident()?.text() == name).then(|| name_node.span())
+                            })
+                        });
+                errors.push(errors::local_named_as_parameter(
+                    name, span, parameter, &op.name,
+                ));
+                ok = false;
+            } else {
+                scope.declared.push(Declared {
+                    name: name.to_string(),
+                    decl,
+                    current: None,
+                });
+            }
+        }
+        self.scopes.push(scope);
+        ok
+    }
+
+    /// Leave the innermost block: the local variables declared in it,
+    /// whose names are out of scope from here on.
+    pub(crate) fn exit(&mut self) -> Vec<hir::LocalId> {
+        let scope = self.scopes.pop().expect("a block was entered");
+        let ids = scope
+            .declared
+            .iter()
+            .filter_map(|declared| declared.current)
+            .collect();
+        self.ended.extend(scope.declared);
+        ids
     }
 
     /// Every local variable, by id.
@@ -109,57 +212,16 @@ impl Locals {
     }
 }
 
-/// The local variables that `body`, of the operator `op`, declares, and
-/// whether each has a name of its own, after reporting each that doesn't:
-/// an operator's names, its parameters' and its local variables', each mean
-/// one thing in its body, and hide the program's variables.
+/// The local variables of `body`, the body of the operator `op`, its block
+/// entered, and whether each has a name of its own (see
+/// [`Locals::enter`]).
 pub(crate) fn declarations(
     body: &ast::Body,
     op: &Signature,
     errors: &mut Vec<Diagnostic>,
 ) -> (Locals, bool) {
     let mut locals = Locals::default();
-    let mut ok = true;
-    for stmt in body.statements() {
-        let ast::Statement::Var(decl) = stmt else {
-            continue;
-        };
-        let Some(ident) = decl.name().and_then(|n| n.ident()) else {
-            continue;
-        };
-        let (name, span) = (ident.text(), trendy_syntax::span(ident.text_range()));
-        let first = locals.declared.iter().find(|other| other.name == name);
-        if let Some(first) = first {
-            errors.push(errors::local_declared_again(
-                name,
-                &decl,
-                &first.decl,
-                &op.name,
-            ));
-            ok = false;
-        } else if op.params.contains_key(name) {
-            let parameter = op
-                .decl
-                .as_ref()
-                .and_then(ast::Operator::params)
-                .and_then(|params| {
-                    params.attributes().find_map(|a| {
-                        let name_node = a.name()?;
-                        (name_node.ident()?.text() == name).then(|| name_node.span())
-                    })
-                });
-            errors.push(errors::local_named_as_parameter(
-                name, span, parameter, &op.name,
-            ));
-            ok = false;
-        } else {
-            locals.declared.push(Declared {
-                name: name.to_string(),
-                decl,
-                current: None,
-            });
-        }
-    }
+    let ok = locals.enter(body.statements(), op, errors);
     (locals, ok)
 }
 

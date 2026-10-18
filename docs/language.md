@@ -39,9 +39,10 @@ body in square brackets `[]`, and a closing `;`.
 - **Parameters are a heading:** `{name: type, …}`, with each name unique and
   in any order. `main` has none, since nothing passes it arguments.
 - **A body is a list of statements,** each ending with `;`: calls,
-  assignments (see [Assignment](#assignment)), and local variables'
-  declarations (see [Local variables](#local-variables)), and, ending a
-  read-only operator's, one `return` (see [Read-only
+  assignments (see [Assignment](#assignment)), local variables'
+  declarations (see [Local variables](#local-variables)), in an update
+  operator `if` statements (see [`if` statements](#if-statements)), and,
+  ending a read-only operator's, one `return` (see [Read-only
   operators](#read-only-operators)).
 - **Arguments are a tuple of the parameters:** `call greet{name: "Ada",
   count: 2};`. Every argument is named, every parameter gets one, and the
@@ -875,16 +876,18 @@ operator main{} [
   type parameter in it has no default, so a local variable of one needs
   an initial value (A0006). A relation's keys are checked whenever it is
   assigned (R0008), and when compiling if the value is known then.
-- **It is in scope in all of the body,** so that its name means one thing
-  there, and it hides a variable of the program's with its name before
-  its declaration as well as after. But it has a value only from its
-  declaration on, so a use before it is an error (A0045): as in Rust, a
-  local variable can't be declared from a program's variable of its name,
-  `var n := n + 1;`.
-- **No two of an operator's names are the same** (A0001): a local
-  variable can't have a parameter's name, or another local variable's. A
-  second declaration of one, as Rust gives a variable a new value, is
-  fixed to an assignment of the first.
+- **It is in scope in all of its block,** the body, or a branch of an
+  `if` statement, so that its name means one thing there, and it hides a
+  variable of the program's with its name before its declaration as well
+  as after. But it has a value only from its declaration on, so a use
+  before it is an error (A0045): as in Rust, a local variable can't be
+  declared from a program's variable of its name, `var n := n + 1;`. A
+  use after its block ends is an error too (A0015).
+- **No two of an operator's names in scope are the same** (A0001): a
+  local variable can't have a parameter's name, or that of another local
+  variable in scope, in its block or one around it, though blocks side by
+  side can each have one of a name. A second declaration of one, as Rust
+  gives a variable a new value, is fixed to an assignment of the first.
 - **A read-only operator's local variables name parts of its value,**
   each computed once, however many times it is used: below, `under`.
   Assigning one gives it a new value from there on, as in an update
@@ -932,6 +935,78 @@ operator main{} [];
 operator scale{n: integer} [
     var n := n * 2;
     call debug_value{v: n};
+];
+
+operator main{} [];
+```
+
+### `if` statements
+
+`if c then [ … ] else [ … ];` runs the statements of its first block if
+the boolean `c` is true, and else those of its second, if it has an
+`else`. Another condition is an `if` statement in the `else`, with one `;`
+at the end of all: `if a then [ … ] else if b then [ … ] else [ … ];`.
+Tutorial D's IF statement is the same (chapter 5), but for `END IF`.
+
+```trendy
+var stock := relation {
+    { item: "teff", kilos: 12 },
+    { item: "millet", kilos: 0 },
+}
+key { item };
+
+operator restock{item_name: text, added: integer} [
+    var held := stock where item = item_name;
+    if held = relation {} then [
+        insert stock relation { { item: item_name, kilos: added } };
+    ] else if added > 0 then [
+        var note := "adding to " || item_name;
+        update stock { kilos := kilos + added } where item = item_name;
+        call debug_value{v: note};
+    ] else [
+        var note := "nothing to add to " || item_name;
+        call debug_value{v: note};
+    ];
+];
+
+operator main{} [
+    call restock{item_name: "sorghum", added: 8};
+    call restock{item_name: "millet", added: 5};
+    call restock{item_name: "teff", added: 0};
+    call debug_value{v: stock};
+];
+```
+
+- **Each branch is a block in brackets,** even of one statement (P0029),
+  so that a statement added to it can't end up outside it, and an `else`
+  always belongs to the `if` it follows. A statement without brackets,
+  Pascal's `begin … end` and Tutorial D's `BEGIN; … END` are fixed to
+  brackets, and so is C's `{ … }` (P0003). The formatter puts each
+  statement of a block on a line of its own, even of one.
+- **A block's local variables are its own,** in scope in it alone, so two
+  blocks side by side can each declare a `note`, as above.
+- **Only in an update operator.** A read-only operator computes one value,
+  so it chooses between values with an `if` expression (A0035).
+- **A condition known when compiling runs one block only,** whose failures
+  are the only ones reported. One written `true` or `false`, and an empty
+  block, are errors, which the fix removes (A0046).
+- **Other languages' spellings are fixed,** as an `if` expression's are
+  (P0028): `elif` and its kin, and Tutorial D's `END IF`.
+
+```trendy,error
+operator report{n: integer} [
+    if n = 0 then call debug_value{v: "none"};
+];
+
+operator main{} [];
+```
+
+```trendy,error
+operator report{n: integer} [
+    if n > 0 then [
+        var note := "positive";
+    ];
+    call debug_value{v: note};
 ];
 
 operator main{} [];
@@ -2790,6 +2865,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `a < b < c` | `a < b and b < c` |
 | `a if c else b`, `c ? a : b`, `IF c THEN a ELSE b END IF` | `if c then a else b` |
 | `elif`, `elsif`, `ELSEIF` | `else if` |
+| `if (c) { … }`, `IF c THEN BEGIN; … END; END IF`, `if c then … ;` | `if c then [ … ];` |
 | `A FROM T`, `t["a"]` | `t.a` |
 | `R { A, B }`, `R { ALL BUT C }` | `r{a, b}`, `r remove {c}` |
 | `R RENAME ( A AS B )`, `rename(columns={'a': 'b'})` | `r rename {a as b}` |
