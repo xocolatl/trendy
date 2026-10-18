@@ -234,7 +234,10 @@ pub(crate) fn check_operands<T>(
             ty: hir::Type::Scalar(scalar),
             origin: Origin::Operator(token.clone()),
         }),
-        Operands::Inferred => context.cloned(),
+        Operands::Inferred => context.map(|e| Expected {
+            ty: e.ty.clone(),
+            origin: e.origin.operand(token),
+        }),
     };
     let mut checked = Vec::new();
     let mut ok = true;
@@ -271,7 +274,13 @@ pub(crate) fn check_operands<T>(
             // other operands are still checked against it, so that an empty
             // relation gets its heading and a mismatch is still reported.
             if op.resolve(&ty).is_none() {
-                errors.push(errors::wrong_operand_type(op, token, &ty, kinds));
+                errors.push(errors::wrong_operand_type(
+                    op,
+                    token,
+                    &ty,
+                    Some(&operand),
+                    kinds,
+                ));
                 ok = false;
                 wrong_type = true;
             }
@@ -290,7 +299,7 @@ pub(crate) fn check_operands<T>(
         return None;
     }
     let Some(resolved) = op.resolve(&ty) else {
-        errors.push(errors::wrong_operand_type(op, token, &ty, kinds));
+        errors.push(errors::wrong_operand_type(op, token, &ty, None, kinds));
         return None;
     };
     Some((resolved, checked))
@@ -1617,6 +1626,12 @@ pub(crate) fn call(call: hir::Call, bindings: Bindings) -> Result<hir::Expr, Fai
         return Ok(hir::Expr::Call(call));
     };
     if let Some(builtin) = bindings.operators.get(call.operator).builtin {
+        // An argument whose type has a type parameter, such as the empty
+        // `relation { v: T } {}`, is known only up to that type, which
+        // `to_text` writes: it is evaluated for each list of types instead.
+        if call.types.iter().any(|t| t.parameters().next().is_some()) {
+            return Ok(hir::Expr::Call(call));
+        }
         let value = builtin
             .evaluate(&known)
             .map_err(|hir::NoTuples| Failed::NoTuples(builtin))?;

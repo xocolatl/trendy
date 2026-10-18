@@ -556,6 +556,9 @@ dependencies = [
 [[package]]
 name = "trendy_hir"
 version = "0.1.0"
+dependencies = [
+ "trendy_text",
+]
 
 [[package]]
 name = "trendy_lexer"

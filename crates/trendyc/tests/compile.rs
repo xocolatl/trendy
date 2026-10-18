@@ -154,11 +154,37 @@ tuple {}
 relation { name: text } {}
 relation { born: integer, name: text } { { born: 1815, name: "Ada" }, { born: 1923, name: "Edgar" } }
 relation { members: relation { name: text }, team: text } { { members: relation { name: text } { { name: "Ada" } }, team: "core" } }
+tuple { greeting: "\"say \\\"hi\\\"\\n\\ttab \\\\ é\"", point: "tuple { x: 1e0, y: tuple { z: false } }", teams: "relation { members: relation { name: text }, team: text } { { members: relation { name: text } { { name: \"Ada\" } }, team: \"core\" } }" }
 7
 "count"
 42
+"\"say \\\"hi\\\"\\n\\ttab \\\\ é\""
+"tuple { x: 1e0, y: tuple { z: false } }"
+"relation { members: relation { name: text }, team: text } { { members: relation { name: text } { { name: \"Ada\" } }, team: \"core\" } }"
 "#
     );
+}
+
+#[test]
+fn to_text_is_what_debug_value_writes() {
+    let (_, stderr) = run_example("debug");
+    let lines: Vec<&str> = stderr.lines().collect();
+    let text = |line: &str| {
+        let program = analyze(&format!("var x := {line};\noperator main{{}} [];"));
+        program.variables[0].init.clone()
+    };
+    let written = |written: &str| trendy_hir::Value::Text(written.to_string());
+    // `greeting`, `point` and `teams`: folded when compiling into
+    // `written`, and made when running by `as_text`.
+    let debug = [lines[4], lines[5], lines[9]];
+    let trendy_hir::Value::Tuple(folded) = text(lines[10]) else {
+        panic!("{}", lines[10]);
+    };
+    let folded: Vec<_> = folded.attributes().map(|(_, v)| v.clone()).collect();
+    let run: Vec<_> = lines[14..].iter().map(|line| text(line)).collect();
+    let expected: Vec<_> = debug.iter().map(|line| written(line)).collect();
+    assert_eq!(folded, expected);
+    assert_eq!(run, expected);
 }
 
 /// The program `source` analyzed, with the prelude.
@@ -245,10 +271,13 @@ fn approximate_numbers() {
     assert_eq!(code, 0, "{stderr}");
     let lines: Vec<&str> = stderr.lines().collect();
     // Evaluated when compiling.
-    assert_eq!(lines[..4], ["5e-1", "1.875e1", "-0e0", "1e-310"]);
+    assert_eq!(
+        lines[..5],
+        ["5e-1", "1.875e1", "-0e0", "1e-310", "9.007199254740992e15"]
+    );
     // Each row: `-a`, `a + b`, `a - b`, `a * b`, `a / b`, rounded as IEEE
     // 754 rounds them, signed zeros included.
-    let rows: Vec<_> = lines[4..].chunks(5).collect();
+    let rows: Vec<_> = lines[5..25].chunks(5).collect();
     assert_eq!(
         rows,
         [
@@ -263,6 +292,11 @@ fn approximate_numbers() {
             ["-0e0", "-1e0", "1e0", "-0e0", "-0e0"],
             ["-1e300", "1e300", "1e300", "1e292", "1e308"],
         ]
+    );
+    // Integers widened when running: beyond 2^53, to the nearest.
+    assert_eq!(
+        lines[25..],
+        ["3e0", "9.007199254740992e15", "-9.223372036854776e18"]
     );
 }
 

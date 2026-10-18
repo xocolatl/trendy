@@ -33,3 +33,11 @@ operator some{r: any relation, of: boolean per r}: boolean [
 operator every{r: any relation, of: boolean per r}: boolean [
     return (r where not of){} = relation {};
 ];
+
+/* `from` as trendy source, the text `debug_value` writes: `42`, `5e-1`,
+   `"Lima"` with its quotes, or `tuple { city: "Lima" }`. */
+builtin operator to_text{from: any type}: text;
+
+/* The approximate number nearest `from`: `from` itself up to 2^53 in
+   magnitude, beyond which not every integer is one. */
+builtin operator to_approximate{from: integer}: approximate;

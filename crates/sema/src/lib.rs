@@ -883,6 +883,127 @@ mod tests {
     }
 
     #[test]
+    fn conversion_fixes() {
+        // Without a literal to rewrite, the value converts: the one of the
+        // wrong type, or the first operand, which set the type.
+        let show = |values: &[&str]| {
+            let calls: Vec<String> = values
+                .iter()
+                .map(|v| format!("    call debug_value{{v: {v}}};"))
+                .collect();
+            format!(
+                "operator show{{n: integer, x: approximate, v: any type}} [\n{}\n];\noperator label{{n: integer}}: text [ return n; ];{MAIN}",
+                calls.join("\n")
+            )
+        };
+        let source = show(&[
+            "\"n = \" || n",
+            "n || \"!\"",
+            "v || \"!\"",
+            "x * n",
+            "n * x",
+            "1 * x",
+            "n * 2 = x",
+        ]);
+        let fixed = show(&[
+            "\"n = \" || to_text{from: n}",
+            "to_text{from: n} || \"!\"",
+            "to_text{from: v} || \"!\"",
+            "x * to_approximate{from: n}",
+            "to_approximate{from: n} * x",
+            "1e0 * x",
+            "to_approximate{from: n * 2} = x",
+        ])
+        .replace("return n;", "return to_text{from: n};");
+        assert_eq!(fix(&source), fixed);
+        assert!(analyze_str(&fixed).is_ok(), "{fixed}");
+        // `/` of integers is likelier `div`, but of an integer by an
+        // approximate number, the integer converts.
+        let divided = errors(&show(&["n / x"]));
+        let titles: Vec<&str> = divided[0]
+            .suggestions
+            .iter()
+            .map(|s| s.message.as_str())
+            .collect();
+        assert_eq!(
+            titles,
+            [
+                "use integer division: `div`",
+                "convert `n` with `to_approximate`: `to_approximate{from: n}`"
+            ]
+        );
+        // Booleans, tuples and relations don't convert to text: `or` was
+        // meant, or an attribute's value.
+        let source = format!("var t := tuple {{ a: \"x\" }};\nvar s: text := t;{MAIN}");
+        assert!(
+            errors(&source)[0]
+                .suggestions
+                .iter()
+                .all(|s| !s.message.contains("to_text"))
+        );
+    }
+
+    #[test]
+    fn an_operand_is_expected_to_have_the_type_of_the_result() {
+        // The type isn't the operand's own to change: `"n = "` wouldn't fit
+        // `integer`, nor would `x`.
+        let source = format!(
+            "operator label{{n: integer}}: text [ return \"n = \" || n; ];\noperator scale{{x: approximate, n: integer}}: approximate [ return x * n; ];{MAIN}"
+        );
+        let errors = errors(&source);
+        assert_eq!(errors.len(), 2, "{errors:#?}");
+        for (error, (ty, operator)) in errors.iter().zip([("text", "||"), ("approximate", "*")]) {
+            let labels: Vec<(&str, &str)> = error
+                .secondary
+                .iter()
+                .map(|l| (&source[l.span.start..l.span.end], l.message.as_str()))
+                .collect();
+            assert_eq!(
+                labels,
+                [
+                    (ty, "expected because of this type"),
+                    (
+                        operator,
+                        &*format!("the result of `{operator}` has its operands' type")
+                    )
+                ]
+            );
+            assert!(
+                error
+                    .suggestions
+                    .iter()
+                    .all(|s| !s.message.starts_with("change the type")),
+                "{error:#?}"
+            );
+        }
+        let fixed = source
+            .replace("|| n", "|| to_text{from: n}")
+            .replace("* n", "* to_approximate{from: n}");
+        assert_eq!(fix(&source), fixed);
+        assert!(analyze_str(&fixed).is_ok(), "{fixed}");
+    }
+
+    #[test]
+    fn conversions_are_evaluated_when_compiling() {
+        let vars = variables(
+            "var a := to_text{from: -0e0};\nvar b := to_text{from: tuple { city: \"Lima\\n\", n: 1 }};\nvar c := to_text{from: relation { a: integer } {}};\nvar d := to_approximate{from: 9007199254740993};\noperator empty{v: T}: text\n    types { T: any type }\n[\n    return to_text{from: relation { v: T } {}};\n];\nvar e := empty{v: 1};",
+        );
+        let text = |i: usize| match &vars[i].init {
+            hir::Value::Text(text) => text.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(text(0), "-0e0");
+        assert_eq!(text(1), "tuple { city: \"Lima\\n\", n: 1 }");
+        assert_eq!(text(2), "relation { a: integer } {}");
+        assert_eq!(
+            vars[3].init,
+            hir::Value::Approximate(hir::Approximate::new(9_007_199_254_740_992.0))
+        );
+        // Of the type the call gives `T`, not of `T`.
+        assert_eq!(text(4), "relation { v: integer } {}");
+    }
+
+    #[test]
     fn approximate_type_aliases() {
         let source =
             format!("var a: float;\nvar b: double;\nvar c: Approximate;\nvar d: aproximate;{MAIN}");
@@ -4433,11 +4554,11 @@ mod tests {
         // The operator's `of` is its own, not the plots' attribute of that
         // name, which is in scope in the argument.
         assert_eq!(
-            text(&vars[1].init),
+            vars[1].init.to_string(),
             r#"relation { v: text } { { v: "Mendoza" }, { v: "Nyeri" } }"#
         );
         assert_eq!(
-            text(&vars[2].init),
+            vars[2].init.to_string(),
             "relation { v: boolean } { { v: false }, { v: true } }"
         );
         // The operator sees the relation's tuples with `of`, and their own
@@ -4456,14 +4577,9 @@ mod tests {
             "{PLOTS}{VALUES}{again}var regions := again{{r: plots, of: region}};"
         ));
         assert_eq!(
-            text(&vars[1].init),
+            vars[1].init.to_string(),
             r#"relation { v: text } { { v: "Mendoza" }, { v: "Nyeri" } }"#
         );
-    }
-
-    /// `value` as source text.
-    fn text(value: &hir::Value) -> String {
-        errors::source_text(value).unwrap()
     }
 
     #[test]
@@ -4612,11 +4728,11 @@ mod tests {
             "{PLOTS}{below}var dry := below{{r: plots, of: of, limit: 1000}};\nvar early := below{{r: plots, of: region, limit: \"N\"}};"
         ));
         assert_eq!(
-            text(&vars[1].init),
+            vars[1].init.to_string(),
             "relation { v: integer } { { v: 220 }, { v: 950 } }"
         );
         assert_eq!(
-            text(&vars[2].init),
+            vars[2].init.to_string(),
             r#"relation { v: text } { { v: "Mendoza" } }"#
         );
         // Only types of the kind are arguments.

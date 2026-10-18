@@ -11,6 +11,17 @@ var people := relation {
     { name: "Edgar", born: 1923 },
 };
 var teams := relation { { team: "core", members: relation { { name: "Ada" } } } };
+var written := tuple {
+    greeting: to_text{from: greeting},
+    point: to_text{from: point},
+    teams: to_text{from: teams},
+};
+
+/* `v` as text, which is what `debug_value` writes: made when running, since
+   `v` is known only then. */
+operator as_text{v: any type} [
+    call debug_value{v: to_text{from: v}};
+];
 
 operator show{label: text, value: integer} [
     call debug_value{v: label};
@@ -28,6 +39,10 @@ operator main{} [
     call debug_value{v: nobody};
     call debug_value{v: people};
     call debug_value{v: teams};
+    call debug_value{v: written};
     call debug_value{v: 7};
     call show{value: count, label: "count"};
+    call as_text{v: greeting};
+    call as_text{v: point};
+    call as_text{v: teams};
 ];

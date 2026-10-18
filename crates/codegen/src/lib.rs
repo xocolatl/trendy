@@ -266,6 +266,8 @@ impl Functions {
                     lir::UnaryOp::Negate(lir::Numeric::Approximate) => b.ins().fneg(value),
                     lir::UnaryOp::Integer if ty == types::I64 => value,
                     lir::UnaryOp::Integer => b.ins().uextend(types::I64, value),
+                    // Rounded to nearest, ties to even, as IEEE 754 rounds.
+                    lir::UnaryOp::Approximate => b.ins().fcvt_from_sint(types::F64, value),
                 };
                 self.store(dst, result, frame, b)?;
             }

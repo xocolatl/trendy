@@ -247,8 +247,8 @@ pub(crate) fn type_mismatch(
         format!("this is `{found}`"),
     )
     .with_note("values never convert to another type implicitly");
-    if let Some(span) = origin.span() {
-        d = d.with_secondary(span, origin.label());
+    for (span, label) in origin.labels() {
+        d = d.with_secondary(span, label);
     }
     let unnamed = |ty: &hir::Type| ty.parameters().any(|p| p.name.is_none());
     if unnamed(declared) || unnamed(found) {
@@ -261,30 +261,51 @@ pub(crate) fn type_mismatch(
         d = d.with_suggestion(message, edits);
     }
     // Rewriting the literal is the likelier fix when it is mechanical, so it
-    // comes first; changing the declared type always works.
-    // A literal, or a negative one such as `-1`.
-    let written = match expr {
-        Expr::Literal(literal) => literal.token().map(|t| t.text().to_string()),
-        Expr::Unary(unary) => crate::ops::negated_literal(unary)
-            .and_then(|literal| literal.token())
-            .map(|t| format!("-{}", t.text())),
+    // comes first, and then converting the value; changing the declared type
+    // comes last.
+    let rewritten = match (declared, written_literal(expr), value) {
+        (hir::Type::Scalar(scalar), Some(written), Some(value)) => {
+            rewrite_literal(*scalar, value, &written)
+        }
         _ => None,
     };
-    if let (hir::Type::Scalar(scalar), Some(written), Some(value)) = (declared, written, value) {
-        let written = Some(written);
-        if let Some(replacement) = written.and_then(|w| rewrite_literal(*scalar, value, &w)) {
-            d = d.with_suggestion(
-                format!("write it as `{declared}`: `{replacement}`"),
-                vec![Edit {
-                    span: expr.span(),
-                    replacement,
-                }],
-            );
-        }
+    if let Some(replacement) = rewritten {
+        d = d.with_suggestion(
+            format!("write it as `{declared}`: `{replacement}`"),
+            vec![Edit {
+                span: expr.span(),
+                replacement,
+            }],
+        );
+    } else if let Some(builtin) = conversion(found, declared) {
+        d = with_conversion(d, "it", builtin, expr);
     }
-    // Only a written type can be changed to fit the value.
+    // `n * x`, of an integer and an approximate number: the first operand
+    // set the type, and as an approximate number it takes the rest.
+    if let Origin::Value(first) = origin
+        && conversion(declared, found) == Some(hir::Builtin::ToApproximate)
+    {
+        let subject = format!("`{}`", first.syntax().text());
+        d = match written_literal(first) {
+            Some(written) => d.with_suggestion(
+                format!("write {subject} as `{found}`: `{written}e0`"),
+                vec![Edit {
+                    span: first.span(),
+                    replacement: format!("{written}e0"),
+                }],
+            ),
+            None => with_conversion(d, &subject, hir::Builtin::ToApproximate, first),
+        };
+    }
+    // Only a written type can be changed to fit the value, and only the
+    // value's own: the other operands of an operator whose result has the
+    // type, as `"n = "` in `"n = " || n` returned as `text`, wouldn't fit.
+    let (operand, origin) = match origin {
+        Origin::Operand(_, within) => (true, &**within),
+        origin => (false, origin),
+    };
     match origin {
-        Origin::Type(type_expr) => d.with_suggestion(
+        Origin::Type(type_expr) if !operand => d.with_suggestion(
             format!("change the type to `{found}`"),
             vec![Edit {
                 span: type_expr.span(),
@@ -299,12 +320,65 @@ pub(crate) fn type_mismatch(
         Origin::TypeParameter(name, _) => d.with_note(format!(
             "the operator's parameters of type `{name}` all take arguments of one type"
         )),
-        Origin::Variable(..)
+        Origin::Type(_)
+        | Origin::Variable(..)
         | Origin::Heading(_)
         | Origin::Value(_)
         | Origin::Builtin
-        | Origin::Operator(_) => d,
+        | Origin::Operator(_)
+        | Origin::Operand(..) => d,
     }
+}
+
+/// The literal `expr` is, as written, if it is one, or a negative one such
+/// as `-1`.
+fn written_literal(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Literal(literal) => literal.token().map(|t| t.text().to_string()),
+        Expr::Unary(unary) => crate::ops::negated_literal(unary)
+            .and_then(|literal| literal.token())
+            .map(|t| format!("-{}", t.text())),
+        _ => None,
+    }
+}
+
+/// The prelude's operator that converts every value of type `from` to type
+/// `to`, if there is one: `to_text` writes a value of any type as text, and
+/// `to_approximate` takes integers.
+fn conversion(from: &hir::Type, to: &hir::Type) -> Option<hir::Builtin> {
+    use hir::{Scalar, Type};
+    match (from, to) {
+        (Type::Scalar(Scalar::Integer), Type::Scalar(Scalar::Approximate)) => {
+            Some(hir::Builtin::ToApproximate)
+        }
+        (Type::Scalar(_) | Type::Parameter(_), Type::Scalar(Scalar::Text)) => {
+            Some(hir::Builtin::ToText)
+        }
+        _ => None,
+    }
+}
+
+/// `d`, with the fix converting `expr`, which the message calls `subject`,
+/// with the built-in `builtin`: a call of it around `expr`.
+fn with_conversion(d: Diagnostic, subject: &str, builtin: hir::Builtin, expr: &Expr) -> Diagnostic {
+    let name = builtin.name();
+    let span = expr.span();
+    d.with_suggestion(
+        format!(
+            "convert {subject} with `{name}`: `{name}{{from: {}}}`",
+            expr.syntax().text()
+        ),
+        vec![
+            Edit {
+                span: Span::empty(span.start),
+                replacement: format!("{name}{{from: "),
+            },
+            Edit {
+                span: Span::empty(span.end),
+                replacement: "}".to_string(),
+            },
+        ],
+    )
 }
 
 /// An argument written `arg`, of type `actual`, for a parameter of type
@@ -350,8 +424,8 @@ pub(crate) fn not_of_kind(
         format!("this is `{actual}`"),
     )
     .with_note(note);
-    if let Some(span) = origin.span() {
-        d = d.with_secondary(span, origin.label());
+    for (span, label) in origin.labels() {
+        d = d.with_secondary(span, label);
     }
     // A type parameter of the operator the call is in, which can be types
     // that aren't of the kind: it can be declared as the kind instead.
@@ -470,44 +544,6 @@ fn rewrite_literal(ty: hir::Scalar, value: &hir::Value, written: &str) -> Option
     }
 }
 
-/// Source text for `value`, if it can be written as a literal.
-pub(crate) fn source_text(value: &hir::Value) -> Option<String> {
-    Some(match value {
-        hir::Value::Boolean(b) => b.to_string(),
-        hir::Value::Integer(n) => n.to_string(),
-        hir::Value::Approximate(r) => r.literal()?,
-        hir::Value::Text(text) => format!("\"{}\"", trendy_syntax::literal::escape_text(text)),
-        hir::Value::Tuple(tuple) => {
-            let attributes = tuple
-                .attributes()
-                .map(|(name, v)| Some(format!("{name}: {}", source_text(v)?)))
-                .collect::<Option<Vec<_>>>()?;
-            if attributes.is_empty() {
-                "tuple {}".to_string()
-            } else {
-                format!("tuple {{ {} }}", attributes.join(", "))
-            }
-        }
-        // With its heading first, so that even an empty relation is
-        // self-describing.
-        hir::Value::Relation(relation) => {
-            let tuples = relation
-                .tuples
-                .iter()
-                .map(|t| {
-                    source_text(&hir::Value::Tuple(t.clone()))
-                        .map(|text| text.trim_start_matches("tuple ").to_string())
-                })
-                .collect::<Option<Vec<_>>>()?;
-            if tuples.is_empty() {
-                format!("relation {} {{}}", relation.heading)
-            } else {
-                format!("relation {} {{ {} }}", relation.heading, tuples.join(", "))
-            }
-        }
-    })
-}
-
 /// What a list of `name: value` items is: a tuple's attributes, or a call's
 /// arguments. They follow the same rules, and errors say which they are.
 #[derive(Debug, Clone, Copy)]
@@ -592,7 +628,7 @@ pub(crate) fn missing_attributes(
     // Defaults make the fix; an `any` parameter has none.
     let items = missing
         .iter()
-        .map(|(name, ty)| Some(format!("{name}: {}", source_text(&(*ty)?.default_value())?)))
+        .map(|(name, ty)| Some(format!("{name}: {}", (*ty)?.default_value())))
         .collect::<Option<Vec<_>>>();
     let Some(items) = items else {
         return d.with_help(format!("give {}", trendy_diag::conjoin(&names)));
@@ -961,8 +997,8 @@ pub(crate) fn per_relation_argument(
         .with_note(format!(
             "`{name}` takes a relation of any heading, whose tuples the `per` arguments are evaluated for"
         ));
-    if let Some(span) = origin.span() {
-        d = d.with_secondary(span, origin.label());
+    for (span, label) in origin.labels() {
+        d = d.with_secondary(span, label);
     }
     d
 }
@@ -1499,8 +1535,7 @@ pub(crate) fn conflicting_tuple(
     second: Span,
     tuple: &hir::TupleValue,
 ) -> Diagnostic {
-    let tuple = source_text(&hir::Value::Tuple(tuple.clone()))
-        .map_or_else(|| "a tuple".to_string(), |t| format!("`{t}`"));
+    let tuple = format!("`tuple {tuple}`");
     Diagnostic::error(
         Code::ConflictingChanges,
         format!("two changes to `{name}` remove the same tuple"),
@@ -2575,8 +2610,7 @@ pub(crate) fn gathering_exists(
 /// Computing a new attribute, or a condition, written `value`, fails for a
 /// tuple of a constant operand, as `failure` says.
 pub(crate) fn extension_failure(failure: &crate::ops::TupleFailure, value: &Expr) -> Diagnostic {
-    let tuple = source_text(&hir::Value::Tuple(failure.tuple.clone()))
-        .map_or_else(|| "a tuple".to_string(), |t| format!("`{t}`"));
+    let tuple = format!("`tuple {}`", failure.tuple);
     let computing = match &failure.attribute {
         Some(attribute) => format!("computing `{attribute}`"),
         None => "evaluating the condition".to_string(),
@@ -2617,8 +2651,7 @@ fn no_tuples(builtin: hir::Builtin, expr: &Expr) -> Diagnostic {
 /// `expr`, a disjoint union or an included minus of constants, which a
 /// tuple breaks, as `broken` says.
 fn broken_combination(broken: &hir::Broken, expr: &Expr) -> Diagnostic {
-    let tuple = source_text(&hir::Value::Tuple(broken.tuple.clone()))
-        .map_or_else(|| "a tuple".to_string(), |t| format!("`{t}`"));
+    let tuple = format!("`tuple {}`", broken.tuple);
     match broken.combination {
         hir::Combination::IncludedMinus => Diagnostic::error(
             Code::MissingTuple,
@@ -2740,8 +2773,7 @@ pub(crate) fn not_one_attribute(span: Span, operand: &Expr, heading: &hir::Headi
 /// The join `expr` of tuples that disagree on an attribute, as `mismatch`
 /// says.
 fn tuple_mismatch(mismatch: &hir::Mismatch, expr: &Expr) -> Diagnostic {
-    let value =
-        |v: &hir::Value| source_text(v).map_or_else(|| "a value".to_string(), |t| format!("`{t}`"));
+    let value = |v: &hir::Value| format!("`{v}`");
     let name = &mismatch.attribute;
     Diagnostic::error(
         Code::TupleMismatch,
@@ -3189,11 +3221,13 @@ fn plural(ty: &hir::Type) -> String {
 }
 
 /// The operator `op`, written `token`, applied to operands of type `ty`,
-/// which it doesn't take.
+/// which it doesn't take, as `first` is, if it is known: the first operand,
+/// which set the type.
 pub(crate) fn wrong_operand_type(
     op: crate::ops::Operator,
     token: &SyntaxToken,
     ty: &hir::Type,
+    first: Option<&Expr>,
     kinds: &[hir::Kind],
 ) -> Diagnostic {
     use crate::ops::Operator;
@@ -3206,6 +3240,14 @@ pub(crate) fn wrong_operand_type(
     )
     .with_parameter_note(ty)
     .with_note("values never convert to another type implicitly");
+    // `n || " people"`: the text was meant, not `||` of numbers or `T`s.
+    let to_text = conversion(ty, &hir::Type::Scalar(hir::Scalar::Text));
+    if let (Operator::Concatenate, Some(builtin), Some(first)) = (op, to_text, first)
+        && *ty != hir::Type::Scalar(hir::Scalar::Boolean)
+    {
+        let subject = format!("`{}`", first.syntax().text());
+        return with_conversion(d, &subject, builtin, first);
+    }
     let hir::Type::Scalar(scalar) = *ty else {
         return match op {
             Operator::Compare(_) if let hir::Type::Parameter(p) = ty => {
@@ -3232,13 +3274,24 @@ pub(crate) fn wrong_operand_type(
         d.with_suggestion(message, vec![Edit { span, replacement }])
     };
     match (op, scalar) {
-        (Operator::Divide, hir::Scalar::Integer) => replace(
-            d.with_note(
-                "`/` divides approximate numbers; integer division is `div`, which truncates toward zero",
-            ),
-            "div",
-            "use integer division: `div`",
-        ),
+        // Of integers, `div` was likelier meant; of an integer by an
+        // approximate number, the integer's conversion.
+        (Operator::Divide, hir::Scalar::Integer) => {
+            let d = replace(
+                d.with_note(
+                    "`/` divides approximate numbers; integer division is `div`, which truncates toward zero",
+                ),
+                "div",
+                "use integer division: `div`",
+            );
+            match first {
+                Some(first) => {
+                    let subject = format!("`{}`", first.syntax().text());
+                    with_conversion(d, &subject, hir::Builtin::ToApproximate, first)
+                }
+                None => d,
+            }
+        }
         (Operator::Div, hir::Scalar::Approximate) => replace(
             d.with_note("`div` is integer division; approximate numbers divide with `/`"),
             "/",
@@ -3365,10 +3418,7 @@ pub(crate) fn key_violated(
 ) -> Diagnostic {
     let attributes: Vec<String> = value
         .attributes()
-        .map(|(a, v)| match source_text(v) {
-            Some(v) => format!("{a}: {v}"),
-            None => a.to_string(),
-        })
+        .map(|(a, v)| format!("{a}: {v}"))
         .collect();
     let empty = attributes.is_empty();
     let shared = format!("`{}`", attributes.join(", "));

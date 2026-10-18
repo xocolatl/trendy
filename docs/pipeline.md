@@ -21,8 +21,14 @@ gives every program them as checked HIR. A built-in with a result type is
 read-only, and its call is a value, which sema evaluates when compiling
 where its arguments are known (`hir::Builtin::evaluate`), and lowering
 computes inline otherwise: `count` is the count every relation keeps
-after its tuples, and `min` and `max` a loop over them (`extreme`), which
-ends the block with `Terminator::Fail` for none (R0010). A built-in can
+after its tuples, `min` and `max` a loop over them (`extreme`), which
+ends the block with `Terminator::Fail` for none (R0010), and
+`to_approximate` an instruction (`UnaryOp::Approximate`). `to_text` is
+a runtime call, which writes the value as `debug_value` does; folded, it
+is `hir::Value`'s source text, which writes values the same way. Since
+that text has the value's type in it, as an empty relation's heading, a
+built-in isn't evaluated when compiling on an argument whose type has a
+type parameter, but for each list of types. A built-in can
 have type parameters, of a kind too, and `per` parameters, declared as an
 operator's are, and checked against the compiler's, written as the
 operator sees them. A wrong prelude is an internal
@@ -42,8 +48,9 @@ uses only the C library. `trendyc`'s `build.rs` builds it as a static library
 (`cargo rustc --crate-type staticlib` with `panic = "abort"`, in a target
 directory of its own), embeds the archive, and passes it to `cc` with the
 object. **`trendy_text`**, `no_std` and dependency-free, holds the escape
-rules for text literals, so the compiler, which reads them, and the runtime,
-which writes them, can't disagree.
+rules for text literals, so the compiler, which reads them and writes them
+in messages and in `to_text`'s folded values, and the runtime, which writes
+them, can't disagree.
 
 ```mermaid
 flowchart TD
@@ -718,7 +725,11 @@ Checking is bidirectional: the expected type flows down into a value
 written type, a selector's heading, or an earlier value such as a relation's
 first tuple, or an operator such as `and` for its operands. That is how an
 empty relation gets its heading from context, and how each error's secondary
-label points at the source of the expectation.
+label points at the source of the expectation. An operator such as `+` or
+`||`, whose result has its operands' type, passes the type expected of its
+result to its operands (`types::Origin::Operand`): a wrong operand is labeled
+with the operator too, and isn't offered a change to the declared type, which
+the other operands wouldn't fit.
 
 A value is checked against its expected type structurally, and a problem is
 reported at the innermost place it occurs. A wrong scalar deep inside a
@@ -1042,7 +1053,7 @@ trendy_syntax  : trendy_diag trendy_text rowan
 trendy_lexer   : trendy_diag trendy_syntax
 trendy_parser  : trendy_diag trendy_syntax trendy_lexer
 trendy_fmt     : trendy_syntax trendy_lexer
-trendy_hir     :
+trendy_hir     : trendy_text
 trendy_sema    : trendy_diag trendy_syntax trendy_hir
 trendy_lir     :
 trendy_lower   : trendy_hir trendy_lir

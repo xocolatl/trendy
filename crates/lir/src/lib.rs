@@ -151,6 +151,12 @@ pub enum Base {
 pub enum RuntimeFn {
     /// `trendy_rt_debug_value(value, descriptor)`.
     DebugValue,
+    /// `trendy_rt_to_text(dst, value, descriptor)`: store at `dst` the
+    /// text [`RuntimeFn::DebugValue`] writes for the value, of the type the
+    /// descriptor describes, in memory the statement owns (see
+    /// [`RuntimeFn::Begin`]). It stops the program if the memory can't be
+    /// allocated.
+    ToText,
     /// `trendy_rt_fail(failure)`, which doesn't return. It takes a
     /// [`Failure::code`] by value, not a place, so only codegen calls it.
     Fail,
@@ -264,6 +270,7 @@ impl RuntimeFn {
     pub fn symbol(self) -> &'static str {
         match self {
             RuntimeFn::DebugValue => "trendy_rt_debug_value",
+            RuntimeFn::ToText => "trendy_rt_to_text",
             RuntimeFn::Fail => "trendy_rt_fail",
             RuntimeFn::Concat => "trendy_rt_concat",
             RuntimeFn::Begin => "trendy_rt_begin",
@@ -358,6 +365,9 @@ pub enum UnaryOp {
     /// The integer a [`Layout::Usize`] is, such as a relation's count,
     /// which is never more than the largest integer.
     Integer,
+    /// The approximate number nearest an integer, ties to even: the
+    /// integer itself up to 2^53 in magnitude.
+    Approximate,
 }
 
 impl UnaryOp {
@@ -367,6 +377,7 @@ impl UnaryOp {
             UnaryOp::Not => Operand::Boolean,
             UnaryOp::Negate(numeric) => Operand::Numeric(numeric),
             UnaryOp::Integer => Operand::Usize,
+            UnaryOp::Approximate => Operand::Numeric(Numeric::Integer),
         }
     }
 }

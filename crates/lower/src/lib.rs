@@ -463,7 +463,11 @@ impl<'a> FunctionBuilder<'a> {
             }
             hir::OperatorKind::ReadOnly { .. }
             | hir::OperatorKind::Builtin(
-                hir::Builtin::Count | hir::Builtin::Min | hir::Builtin::Max,
+                hir::Builtin::Count
+                | hir::Builtin::Min
+                | hir::Builtin::Max
+                | hir::Builtin::ToText
+                | hir::Builtin::ToApproximate,
             ) => {
                 unreachable!("`call` invokes only update operators")
             }
@@ -546,6 +550,29 @@ impl<'a> FunctionBuilder<'a> {
             hir::Builtin::Max => {
                 let r = &call.args["r"];
                 self.extreme(r, hir::Comparison::Greater, lir::Failure::NoMax, cx)
+            }
+            hir::Builtin::ToText => {
+                let from = &call.args["from"];
+                let ty = self.program.type_of(from, &self.params);
+                let value = self.place(from, cx);
+                let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+                let dst = self.slot(scalar_layout(hir::Scalar::Text));
+                self.insts.push(lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::ToText,
+                    args: vec![dst.clone(), value, descriptor],
+                });
+                self.scoped = true;
+                dst
+            }
+            hir::Builtin::ToApproximate => {
+                let src = self.place(&call.args["from"], cx);
+                let dst = self.slot(lir::Layout::F64Bits);
+                self.insts.push(lir::Inst::Unary {
+                    dst: dst.clone(),
+                    op: lir::UnaryOp::Approximate,
+                    src,
+                });
+                dst
             }
             hir::Builtin::DebugValue => unreachable!("`debug_value` is an update operator"),
         }
@@ -2609,6 +2636,78 @@ mod tests {
                 }
             )),
             "{blocks:#?}"
+        );
+    }
+
+    #[test]
+    fn conversions_make_text_in_a_scope_and_round_integers() {
+        // `show{p: integer} [ call debug_value{v: to_text{from: p}};
+        // call debug_value{v: to_approximate{from: p}}; ]`.
+        let builtin = |builtin: hir::Builtin| hir::Operator {
+            name: builtin.name().to_string(),
+            types: builtin.types(),
+            params: builtin.params(),
+            kind: hir::OperatorKind::Builtin(builtin),
+        };
+        let converted = |operator, types| {
+            hir::Expr::Call(hir::Call {
+                operator: hir::OperatorId(operator),
+                types,
+                args: [("from".to_string(), hir::Expr::Parameter("p".to_string()))].into(),
+            })
+        };
+        let show = user(
+            "show",
+            &["p"],
+            vec![
+                call(0, vec![("v", converted(1, vec![integer()]))]),
+                call(0, vec![("v", converted(2, Vec::new()))]),
+            ],
+        );
+        let main_body = vec![call(
+            3,
+            vec![("p", hir::Expr::Constant(hir::Value::Integer(3)))],
+        )];
+        let lowered = lower(&program(
+            vec![
+                debug_value(),
+                builtin(hir::Builtin::ToText),
+                builtin(hir::Builtin::ToApproximate),
+                show,
+                user("main", &[], main_body),
+            ],
+            vec![],
+        ));
+        let show = lowered.functions.iter().find(|f| f.name == "show").unwrap();
+        let insts: Vec<&lir::Inst> = show.blocks.iter().flat_map(|b| &b.insts).collect();
+        let runtime: Vec<lir::RuntimeFn> = insts
+            .iter()
+            .filter_map(|i| match i {
+                lir::Inst::CallRuntime { function, .. } => Some(*function),
+                _ => None,
+            })
+            .collect();
+        // The text is the statement's, so it begins a scope; the integer
+        // converts inline.
+        assert_eq!(
+            runtime,
+            [
+                lir::RuntimeFn::Begin,
+                lir::RuntimeFn::ToText,
+                lir::RuntimeFn::DebugValue,
+                lir::RuntimeFn::End,
+                lir::RuntimeFn::DebugValue,
+            ]
+        );
+        assert!(
+            insts.iter().any(|i| matches!(
+                i,
+                lir::Inst::Unary {
+                    op: lir::UnaryOp::Approximate,
+                    ..
+                }
+            )),
+            "{insts:#?}"
         );
     }
 

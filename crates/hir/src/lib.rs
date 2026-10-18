@@ -229,14 +229,20 @@ pub enum Builtin {
     /// The greatest of a value computed for each tuple of a relation, by
     /// `<`.
     Max,
+    /// A value as trendy source, the text `debug_value` writes.
+    ToText,
+    /// The approximate number nearest an integer.
+    ToApproximate,
 }
 
 impl Builtin {
-    pub const ALL: [Builtin; 4] = [
+    pub const ALL: [Builtin; 6] = [
         Builtin::DebugValue,
         Builtin::Count,
         Builtin::Min,
         Builtin::Max,
+        Builtin::ToText,
+        Builtin::ToApproximate,
     ];
 
     #[must_use]
@@ -246,6 +252,8 @@ impl Builtin {
             Builtin::Count => "count",
             Builtin::Min => "min",
             Builtin::Max => "max",
+            Builtin::ToText => "to_text",
+            Builtin::ToApproximate => "to_approximate",
         }
     }
 
@@ -265,8 +273,9 @@ impl Builtin {
             any,
         };
         match self {
-            Builtin::DebugValue => vec![unnamed(0, Any::Type)],
+            Builtin::DebugValue | Builtin::ToText => vec![unnamed(0, Any::Type)],
             Builtin::Count => vec![unnamed(0, Any::Relation)],
+            Builtin::ToApproximate => Vec::new(),
             Builtin::Min | Builtin::Max => vec![
                 TypeParameter {
                     index: 0,
@@ -290,6 +299,8 @@ impl Builtin {
         match self {
             Builtin::DebugValue => [("v".to_string(), parameter(0))].into(),
             Builtin::Count => [("r".to_string(), parameter(0))].into(),
+            Builtin::ToText => [("from".to_string(), parameter(0))].into(),
+            Builtin::ToApproximate => [("from".to_string(), Type::Scalar(Scalar::Integer))].into(),
             Builtin::Min | Builtin::Max => {
                 let tuples = Heading::new(
                     [
@@ -311,6 +322,8 @@ impl Builtin {
             Builtin::DebugValue => None,
             Builtin::Count => Some(Type::Scalar(Scalar::Integer)),
             Builtin::Min | Builtin::Max => Some(Type::Parameter(self.types()[0].clone())),
+            Builtin::ToText => Some(Type::Scalar(Scalar::Text)),
+            Builtin::ToApproximate => Some(Type::Scalar(Scalar::Approximate)),
         }
     }
 
@@ -350,6 +363,11 @@ impl Builtin {
                 .max_by(|a, b| compare(a, b))
                 .cloned()
                 .ok_or(NoTuples),
+            Builtin::ToText => Ok(Value::Text(args["from"].to_string())),
+            Builtin::ToApproximate => match args["from"] {
+                Value::Integer(n) => Ok(Value::Approximate(Approximate::nearest(n))),
+                ref other => panic!("`to_approximate` of {other:?}"),
+            },
         }
     }
 }
@@ -1112,19 +1130,33 @@ impl std::fmt::Display for Type {
 /// wrapped attribute, which no source can name, is written `…`, last.
 impl std::fmt::Display for Heading {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.is_empty() {
-            return f.write_str("{}");
-        }
-        let mut written: Vec<String> = self
-            .attributes()
-            .filter(|(name, _)| !is_wrapped(name))
-            .map(|(name, ty)| format!("{name}: {ty}"))
-            .collect();
-        if self.attributes().any(|(name, _)| is_wrapped(name)) {
-            written.push("…".to_string());
-        }
-        write!(f, "{{ {} }}", written.join(", "))
+        write_attributes(f, self.attributes().map(|(name, ty)| (name, ty as _)))
     }
+}
+
+/// `{ name: item, … }` or `{}`, for `attributes`, in their order, with the
+/// wrapped ones, which no source can name, as one `…`, last, as the runtime
+/// writes them.
+fn write_attributes<'a>(
+    f: &mut std::fmt::Formatter<'_>,
+    attributes: impl Iterator<Item = (&'a str, &'a dyn std::fmt::Display)>,
+) -> std::fmt::Result {
+    let mut written = Vec::new();
+    let mut wrapped = false;
+    for (name, item) in attributes {
+        if is_wrapped(name) {
+            wrapped = true;
+        } else {
+            written.push(format!("{name}: {item}"));
+        }
+    }
+    if wrapped {
+        written.push("…".to_string());
+    }
+    if written.is_empty() {
+        return f.write_str("{}");
+    }
+    write!(f, "{{ {} }}", written.join(", "))
 }
 
 /// The name of the attribute that the tuples of a relation, passed for an
@@ -1356,6 +1388,37 @@ impl Value {
     }
 }
 
+/// The value as trendy source, as the runtime writes it
+/// (`trendy_runtime::write_value`), for `debug_value` and `to_text`: tuples
+/// and relations with their attributes in name order, and relations with
+/// their heading first, so it is a literal for the value. A wrapped
+/// attribute, which no source can name, is written `…`, last, without its
+/// value, as a [`Heading`]'s source text writes its type.
+impl std::fmt::Display for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use std::fmt::Write;
+        match self {
+            Value::Boolean(b) => write!(f, "{b}"),
+            Value::Integer(n) => write!(f, "{n}"),
+            Value::Approximate(r) => write!(f, "{r}"),
+            Value::Text(text) => {
+                f.write_char('"')?;
+                trendy_text::escape(text, f)?;
+                f.write_char('"')
+            }
+            Value::Tuple(tuple) => write!(f, "tuple {tuple}"),
+            Value::Relation(relation) => {
+                write!(f, "relation {} ", relation.heading)?;
+                if relation.tuples.is_empty() {
+                    return f.write_str("{}");
+                }
+                let tuples: Vec<String> = relation.tuples.iter().map(ToString::to_string).collect();
+                write!(f, "{{ {} }}", tuples.join(", "))
+            }
+        }
+    }
+}
+
 /// A tuple value: a value for each attribute of its heading. Two tuples are
 /// equal when every attribute's values are equal.
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1381,6 +1444,14 @@ impl TupleValue {
                 .map(|(name, value)| (name.clone(), value.instantiated(types)))
                 .collect(),
         )
+    }
+}
+
+/// Source text for the tuple's attributes, `{ a: 1, b: "Lima" }` or `{}`,
+/// with a wrapped attribute written `…`, last, as for a [`Heading`].
+impl std::fmt::Display for TupleValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write_attributes(f, self.attributes().map(|(name, value)| (name, value as _)))
     }
 }
 
@@ -1803,13 +1874,25 @@ impl Approximate {
         self.0.to_bits()
     }
 
-    /// The value as a literal, which always has an exponent: the shortest
-    /// one that reads back as the same value, as in `1e0`, `2.5e0`, `5e-1`
-    /// or `-0e0`. The runtime writes values the same way. `None` for an
-    /// infinity or a NaN, which no operator produces.
+    /// The approximate number nearest `n`, ties to even: `n` itself up to
+    /// 2^53 in magnitude, beyond which not every integer is one.
     #[must_use]
-    pub fn literal(self) -> Option<String> {
-        self.0.is_finite().then(|| format!("{:e}", self.0))
+    pub fn nearest(n: i64) -> Self {
+        // Each half is exact, and so is the high half times 2^32, so the one
+        // rounding is the sum's: to the number nearest `n`.
+        let [b0, b1, b2, b3, b4, b5, b6, b7] = n.to_le_bytes();
+        let high = i32::from_le_bytes([b4, b5, b6, b7]);
+        let low = u32::from_le_bytes([b0, b1, b2, b3]);
+        Approximate(f64::from(high) * 4_294_967_296.0 + f64::from(low))
+    }
+}
+
+/// The value as a literal, which always has an exponent: the shortest one
+/// that reads back as the same value, as in `1e0`, `2.5e0`, `5e-1` or
+/// `-0e0`. No operator makes an infinity or a NaN, which have none.
+impl std::fmt::Display for Approximate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:e}", self.0)
     }
 }
 

@@ -36,6 +36,10 @@ pub(crate) enum Origin {
     Builtin,
     /// An operator such as `and` or `+`, for its operands.
     Operator(SyntaxToken),
+    /// An operand of the operator written here, which gives a value of its
+    /// operands' type: the type expected of its result because of the
+    /// origin within, which is never itself an operand's.
+    Operand(SyntaxToken, Box<Origin>),
     /// The attribute named, of the operand written here, which a `replace`
     /// gives a new value of the same type.
     Replaced(Expr, String),
@@ -48,8 +52,37 @@ pub(crate) enum Origin {
 }
 
 impl Origin {
+    /// The secondary labels on a mismatch: where the expectation comes from,
+    /// if anywhere, and the operator that passed it to an operand.
+    pub(crate) fn labels(&self) -> Vec<(Span, String)> {
+        let Origin::Operand(token, within) = self else {
+            return self
+                .span()
+                .map(|span| (span, self.label()))
+                .into_iter()
+                .collect();
+        };
+        let mut labels = within.labels();
+        labels.push((
+            trendy_syntax::span(token.text_range()),
+            format!("the result of `{}` has its operands' type", token.text()),
+        ));
+        labels
+    }
+
+    /// The expectation of the result of the operator written `token`, as
+    /// the expectation of each of its operands.
+    pub(crate) fn operand(&self, token: &SyntaxToken) -> Origin {
+        // Only the innermost operator is labeled: it explains the rest.
+        let within = match self {
+            Origin::Operand(_, within) => within.clone(),
+            origin => Box::new(origin.clone()),
+        };
+        Origin::Operand(token.clone(), within)
+    }
+
     /// Where to point a secondary label, if anywhere.
-    pub(crate) fn span(&self) -> Option<Span> {
+    fn span(&self) -> Option<Span> {
         match self {
             Origin::Type(t) => Some(t.span()),
             Origin::Heading(h) => Some(h.span()),
@@ -58,11 +91,11 @@ impl Origin {
             }
             Origin::Builtin => None,
             Origin::Operator(token) => Some(trendy_syntax::span(token.text_range())),
-            Origin::Variable(_, declared) => declared.span(),
+            Origin::Variable(_, within) | Origin::Operand(_, within) => within.span(),
         }
     }
 
-    pub(crate) fn label(&self) -> String {
+    fn label(&self) -> String {
         match self {
             Origin::Type(_) | Origin::Heading(_) | Origin::Builtin => {
                 "expected because of this type".to_string()
@@ -76,6 +109,7 @@ impl Origin {
                 Origin::Type(_) => format!("`{name}` is declared with this type"),
                 _ => format!("`{name}` has this value's type"),
             },
+            Origin::Operand(_, within) => within.label(),
             Origin::Operator(token) if token.kind() == trendy_syntax::SyntaxKind::WhereKw => {
                 "`where` takes a boolean condition".to_string()
             }

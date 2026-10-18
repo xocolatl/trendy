@@ -16,16 +16,6 @@ pub fn escape_list() -> String {
         .join(" ")
 }
 
-/// The body of a text literal for `text`: the inverse of [`decode_text`].
-/// Quotes and backslashes are escaped, as are control characters.
-#[must_use]
-pub fn escape_text(text: &str) -> String {
-    let mut body = String::with_capacity(text.len());
-    // Writing to a `String` cannot fail.
-    let _ = trendy_text::escape(text, &mut body);
-    body
-}
-
 /// A problem inside a text literal. Ranges are byte offsets into the body,
 /// the text between the quotes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -296,11 +286,16 @@ mod tests {
 
     #[test]
     fn escape_is_the_inverse_of_decode() {
+        let escape = |text: &str| {
+            let mut body = String::new();
+            trendy_text::escape(text, &mut body).unwrap();
+            body
+        };
         for text in ["", "plain", "a\"b\\c\nd\re\tf\0g", "\u{7}bell", "é😀"] {
-            let body = escape_text(text);
+            let body = escape(text);
             assert_eq!(decode_text(&body), (text.to_string(), vec![]), "{body}");
         }
-        assert_eq!(escape_text("say \"hi\""), r#"say \"hi\""#);
+        assert_eq!(escape("say \"hi\""), r#"say \"hi\""#);
     }
 
     #[test]

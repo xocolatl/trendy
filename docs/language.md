@@ -503,6 +503,14 @@ operator some{r: any relation, of: boolean per r}: boolean [
 operator every{r: any relation, of: boolean per r}: boolean [
     return (r where not of){} = relation {};
 ];
+
+/* `from` as trendy source, the text `debug_value` writes: `42`, `5e-1`,
+   `"Lima"` with its quotes, or `tuple { city: "Lima" }`. */
+builtin operator to_text{from: any type}: text;
+
+/* The approximate number nearest `from`: `from` itself up to 2^53 in
+   magnitude, beyond which not every integer is one. */
+builtin operator to_approximate{from: integer}: approximate;
 ```
 
 **`debug_value{v: any type}`** writes `v` to stderr, on one line, as trendy
@@ -593,6 +601,50 @@ operator main{} [
 ];
 ```
 
+**`to_text{from: any type}: text`** and
+**`to_approximate{from: integer}: approximate`** convert values, which
+never convert implicitly: *The Third Manifesto* allows no coercion, only
+explicit conversions such as Tutorial D's `CAST_AS_CHAR` (chapter 3).
+
+- **`to_text` writes any value as trendy source,** the text `debug_value`
+  writes, so a value of every type has one, and it reads back as the same
+  value: `42`, `5e-1` for an approximate number, which is always written
+  with an exponent, and `"Lima"` for a text, with its quotes, which a
+  text never needs, being text already.
+- **`to_approximate` is the approximate number nearest an integer,** the
+  integer itself up to 2^53 in magnitude, beyond which not every integer
+  is one, so `9007199254740993` becomes `9.007199254740992e15`. There is
+  no conversion back yet: an approximate number has to be rounded to be
+  an integer, and how is the program's choice.
+- **The errors fix it:** a value of the wrong type where text or an
+  approximate number is expected, as in `"n = " || n` or `x * n`, has a fix
+  that converts it.
+
+```trendy
+var cities := relation {
+    { city: "Lima", people: 10883000, km2: 2672.3e0 },
+    { city: "Hanoi", people: 8435700, km2: 3358.6e0 },
+};
+var densities := cities extend { density := to_approximate{from: people} / km2 };
+
+operator describe{city: text, people: integer} [
+    call debug_value{v: city || " has " || to_text{from: people} || " people"};
+];
+
+operator main{} [
+    call debug_value{v: densities{city, density}};
+    call describe{city: "Lima", people: 10883000};
+];
+```
+
+```trendy,error
+operator describe{city: text, people: integer} [
+    call debug_value{v: city || " has " || people || " people"};
+];
+
+operator main{} [];
+```
+
 ## Variables
 
 ```trendy
@@ -679,7 +731,8 @@ Ordering and sorting use the same total order:
 
 Values never convert to another type implicitly, as *The Third Manifesto*
 requires. An integer literal can't initialize an `approximate`: write `1e0`,
-not `1`.
+not `1`. Other values convert explicitly, with `to_approximate` and
+`to_text` (see [The prelude](#the-prelude)).
 
 ```trendy,error
 var ratio: approximate := 1;
@@ -1105,8 +1158,10 @@ operator main{} [
 Values never convert to another type implicitly, so both operands have the
 same type: `1 + 1.5e0` and `1 + true` are errors. The type comes from the
 context when it says, as in `var r: approximate := 1 + 2;`, where `1` and `2`
-must be written `1e0` and `2e0`, and otherwise from the left operand. `/`
-doesn't divide integers, and `div` doesn't divide approximate numbers (A0022).
+must be written `1e0` and `2e0`, and otherwise from the left operand. An
+integer that isn't a literal converts with `to_approximate`, as in
+`to_approximate{from: n} * 1.5e0`. `/` doesn't divide integers, and `div`
+doesn't divide approximate numbers (A0022).
 
 ```trendy
 var seven := 1 + 2 * 3;
@@ -1167,7 +1222,8 @@ the smallest integer, `-9223372036854775808`, can be written, and so can
 
 `a || b` is the text `a` followed by the text `b`. Both operands must be
 text: `"n = " || 1` is an error, since values never convert implicitly, and
-`+` doesn't concatenate (A0022, with a fix to `||`).
+`+` doesn't concatenate (A0022, with a fix to `||`). `to_text` converts a
+value to text, as in `"n = " || to_text{from: n}`.
 
 ```trendy
 var greeting := "hello" || ", " || "world";
@@ -2286,6 +2342,8 @@ line after a comment on its own line, such as a file's header, is kept.
 | `float`, `double`, `real`, `f64` | `approximate` |
 | `0.5`, `.5`, `5.` | `0.5e0`, `5e0` |
 | `string`, `str`, `varchar` | `text` |
+| `str(x)`, `x.to_string()`, `CAST(x AS VARCHAR)`, `CAST_AS_CHAR (X)` | `to_text{from: x}` |
+| `float(n)`, `n as f64`, `CAST(n AS DOUBLE PRECISION)`, `CAST_AS_RATIONAL (N)` | `to_approximate{from: n}` |
 | `{ x: 1 }`, `TUPLE { X 1 }` | `tuple { x: 1 }` |
 | `tuple { x = 1 }` | `tuple { x: 1 }` |
 | `RELATION { TUPLE { … } }` | `relation { { … } }` |

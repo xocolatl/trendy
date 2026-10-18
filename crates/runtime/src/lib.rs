@@ -1347,6 +1347,89 @@ pub unsafe extern "C" fn trendy_rt_debug_value(value: *const u8, desc: *const Ty
     out.flush();
 }
 
+/// Store at `dst` the text [`trendy_rt_debug_value`] writes for `value`,
+/// of the type `desc` describes, in memory the statement owns. Stops the
+/// program if the memory can't be allocated.
+///
+/// # Safety
+///
+/// As for [`trendy_rt_debug_value`], and `dst` must point to memory for a
+/// text value. The statement must have begun a scope.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_to_text(
+    dst: *mut Text,
+    value: *const u8,
+    desc: *const TypeDesc,
+) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        // Too long to count is too long to allocate.
+        let Ok(text) = text_of(value, &*desc, allocate_owned) else {
+            trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+        };
+        dst.write_unaligned(text);
+    }
+}
+
+/// `value` as [`write_value`] writes it, in memory from `allocate`, which
+/// takes its length: written once to count its bytes, then again into that
+/// memory.
+///
+/// # Safety
+///
+/// As for [`write_value`], and `allocate` must return memory for as many
+/// bytes as it is given.
+///
+/// # Errors
+///
+/// Returns an error if the length doesn't fit in a `usize`.
+unsafe fn text_of(
+    value: *const u8,
+    desc: &TypeDesc,
+    allocate: impl FnOnce(usize) -> *mut u8,
+) -> Result<Text, fmt::Error> {
+    let mut counted = Counted(0);
+    // SAFETY, throughout: guaranteed by the caller.
+    unsafe {
+        write_value(&mut counted, value, desc)?;
+        let len = counted.0;
+        let bytes = allocate(len);
+        let mut filled = Filled {
+            bytes: core::slice::from_raw_parts_mut(bytes, len),
+            len: 0,
+        };
+        write_value(&mut filled, value, desc)?;
+        Ok(Text { bytes, len })
+    }
+}
+
+/// Counts the bytes written to it.
+struct Counted(usize);
+
+impl Write for Counted {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.0 = self.0.checked_add(s.len()).ok_or(fmt::Error)?;
+        Ok(())
+    }
+}
+
+/// Writes into `bytes`, the first `len` of which it has filled.
+struct Filled<'a> {
+    bytes: &'a mut [u8],
+    len: usize,
+}
+
+impl Write for Filled<'_> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        let end = self.len.checked_add(s.len()).ok_or(fmt::Error)?;
+        let rest = self.bytes.get_mut(self.len..end).ok_or(fmt::Error)?;
+        rest.copy_from_slice(s.as_bytes());
+        self.len = end;
+        Ok(())
+    }
+}
+
 /// Write `value` as trendy source: tuples and relations with their
 /// attributes in name order, and relations with their heading first, so the
 /// output is a literal for the same value. An attribute without a name,
@@ -1642,11 +1725,24 @@ mod tests {
         }
     }
 
+    /// The value as `to_text` makes it, in memory of exactly its length,
+    /// which is what `debug_value` writes.
     fn print(value: *const u8, desc: &TypeDesc) -> String {
-        let mut out = String::new();
-        // SAFETY: each test builds a value matching its descriptor.
-        unsafe { write_value(&mut out, value, desc) }.unwrap();
-        out
+        let mut written = String::new();
+        let mut memory = Vec::new();
+        // SAFETY: each test builds a value matching its descriptor, and the
+        // vector has room for the bytes asked for.
+        let text = unsafe {
+            write_value(&mut written, value, desc).unwrap();
+            text_of(value, desc, |len| {
+                memory = vec![0; len];
+                memory.as_mut_ptr()
+            })
+        }
+        .unwrap();
+        assert_eq!(text.len, memory.len());
+        assert_eq!(memory, written.as_bytes());
+        written
     }
 
     fn attr(name: &'static str, offset: usize, desc: &TypeDesc) -> Attr {
