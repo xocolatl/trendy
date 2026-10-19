@@ -39,11 +39,19 @@ fn run_file(name: &str, path: &Path) -> (i32, String) {
     // Each run gets its own executable, since tests run in parallel.
     let run = RUNS.fetch_add(1, Ordering::Relaxed);
     let output = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}-{run}"));
+    build_and_run(&input, &output)
+}
 
+/// Compile `input` into the executable `output`, run it, and return its
+/// exit code and what it wrote to stderr. The C library scribbles over
+/// memory as it is freed (`MallocScribble` on macOS, `MALLOC_PERTURB_`
+/// with glibc), so that a program that reads a value whose buffer was
+/// freed writes garbage, rather than, by luck, what it should.
+fn build_and_run(input: &Path, output: &Path) -> (i32, String) {
     let compile = Command::new(env!("CARGO_BIN_EXE_trendyc"))
-        .arg(&input)
+        .arg(input)
         .arg("-o")
-        .arg(&output)
+        .arg(output)
         .output()
         .unwrap();
     assert!(
@@ -52,11 +60,18 @@ fn run_file(name: &str, path: &Path) -> (i32, String) {
         String::from_utf8_lossy(&compile.stderr)
     );
 
-    let run = Command::new(&output).output().unwrap();
-    (
-        run.status.code().unwrap(),
-        String::from_utf8(run.stderr).unwrap(),
-    )
+    let run = Command::new(output)
+        .env("MallocScribble", "1")
+        .env("MallocPreScribble", "1")
+        .env("MALLOC_PERTURB_", "85")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr).into_owned();
+    let code = run
+        .status
+        .code()
+        .unwrap_or_else(|| panic!("the program crashed ({}): {stderr}", run.status));
+    (code, stderr)
 }
 
 #[test]
@@ -455,23 +470,7 @@ fn run_source(name: &str, source: &str) -> (i32, String) {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
     let input = dir.join(format!("{name}.trendy"));
     std::fs::write(&input, source).unwrap();
-    let output = dir.join(name);
-    let compile = Command::new(env!("CARGO_BIN_EXE_trendyc"))
-        .arg(&input)
-        .arg("-o")
-        .arg(&output)
-        .output()
-        .unwrap();
-    assert!(
-        compile.status.success(),
-        "trendyc failed: {}",
-        String::from_utf8_lossy(&compile.stderr)
-    );
-    let run = Command::new(&output).output().unwrap();
-    (
-        run.status.code().unwrap(),
-        String::from_utf8(run.stderr).unwrap(),
-    )
+    build_and_run(&input, &dir.join(name))
 }
 
 /// A program that writes 1, then `call`, computed from `a`, the largest
@@ -663,6 +662,64 @@ operator main{} [
             "relation {} { {} }",
             "7",
             r#""Habari, Kenji""#
+        ]
+    );
+}
+
+/// A value lasts as long as something holds it: an argument once the
+/// variable it came from, the only other holder, is assigned; variables
+/// swapped; a local variable declared again each time a loop runs; and
+/// texts made in a statement, in an array and a relation assigned there.
+/// Freed memory is scribbled over, so a value read after it is freed
+/// writes garbage.
+#[test]
+fn values_last_as_long_as_something_holds_them() {
+    let source = r#"var greeting := "hello";
+var left := "kushoto";
+var right := "kulia";
+var shouts := array ["none"];
+var cities := relation { { city: "Lagos" }, { city: "Lima" } };
+var loud := relation { { city: "none", shout: "none" } };
+
+operator say_goodbye{old: text} [
+    greeting := "goodbye";
+    call debug_value{v: old};
+];
+
+operator main{} [
+    greeting := greeting || ", world";
+    call say_goodbye{old: greeting};
+    left := left || "!";
+    right := right || "!";
+    assign {
+        left := right;
+        right := left;
+    };
+    call debug_value{v: left || " " || right};
+    var i := 0;
+    var all := "";
+    while i < 3 loop [
+        var t := to_text{from: i} || ",";
+        all := all || t;
+        i := i + 1;
+    ];
+    call debug_value{v: all};
+    shouts := array [greeting || "!", left || "?"];
+    call debug_value{v: shouts};
+    loud := (cities extend { shout := city || "!" }) where shout <> "Lima!";
+    call debug_value{v: loud};
+];
+"#;
+    let (code, stderr) = run_source("lifetimes", source);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            r#""hello, world""#,
+            r#""kulia! kushoto!""#,
+            r#""0,1,2,""#,
+            r#"array ["goodbye!", "kulia!?"]"#,
+            r#"relation { city: text, shout: text } { { city: "Lagos", shout: "Lagos!" } }"#,
         ]
     );
 }

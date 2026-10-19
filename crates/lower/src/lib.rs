@@ -14,12 +14,7 @@ pub fn lower(program: &hir::Program) -> lir::Program {
 
     let mut variable_data = Vec::new();
     for variable in &program.variables {
-        let mut fields = vec![cx.value_field(&variable.init)];
-        // Where an assigned value's texts, relations and arrays are: none
-        // yet, as the initial value's are constants.
-        if points(&variable.ty) {
-            fields.push(lir::Field::Usize(0));
-        }
+        let fields = vec![cx.value_field(&variable.init)];
         variable_data.push(cx.push(lir::Data {
             kind: lir::DataKind::Variable {
                 name: variable.name.clone(),
@@ -182,6 +177,13 @@ impl Lowering {
         })
     }
 
+    /// The address of a new constant buffer of `contents`, after a header
+    /// that says it is never released, so that sharing it costs nothing.
+    fn buffer(&mut self, contents: lir::Field) -> lir::Field {
+        let buffer = self.constant(vec![lir::Field::immortal_header(), contents]);
+        lir::Field::FieldAddress(buffer, 1)
+    }
+
     /// The field representing `value`, adding any constants it points to.
     fn value_field(&mut self, value: &hir::Value) -> lir::Field {
         match value {
@@ -189,11 +191,8 @@ impl Lowering {
             hir::Value::Integer(n) => lir::Field::I64(*n),
             hir::Value::Approximate(r) => lir::Field::F64Bits(r.to_bits()),
             hir::Value::Text(text) => {
-                let bytes = self.constant(vec![lir::Field::Bytes(text.as_bytes().to_vec())]);
-                lir::Field::Struct(vec![
-                    lir::Field::Address(bytes),
-                    lir::Field::Usize(len(text.len())),
-                ])
+                let bytes = self.buffer(lir::Field::Bytes(text.as_bytes().to_vec()));
+                lir::Field::Struct(vec![bytes, lir::Field::Usize(len(text.len()))])
             }
             // Attributes come in name order, the heading's order.
             hir::Value::Tuple(tuple) => lir::Field::Struct(
@@ -209,19 +208,13 @@ impl Lowering {
                     .iter()
                     .map(|t| self.value_field(&hir::Value::Tuple(t.clone())))
                     .collect();
-                let array = self.constant(elements);
-                lir::Field::Struct(vec![
-                    lir::Field::Address(array),
-                    lir::Field::Usize(len(relation.tuples.len())),
-                ])
+                let tuples = self.buffer(lir::Field::Struct(elements));
+                lir::Field::Struct(vec![tuples, lir::Field::Usize(len(relation.tuples.len()))])
             }
             hir::Value::Array(array) => {
                 let elements = array.elements.iter().map(|e| self.value_field(e)).collect();
-                let elements = self.constant(elements);
-                lir::Field::Struct(vec![
-                    lir::Field::Address(elements),
-                    lir::Field::Usize(len(array.elements.len())),
-                ])
+                let elements = self.buffer(lir::Field::Struct(elements));
+                lir::Field::Struct(vec![elements, lir::Field::Usize(len(array.elements.len()))])
             }
         }
     }
@@ -330,9 +323,9 @@ struct FunctionBuilder<'a> {
     insts: Vec<lir::Inst>,
     /// Whether the current statement needs a scope (see
     /// [`lir::RuntimeFn::Begin`]): whether it calls a runtime function that
-    /// makes a text, relation or array, which the statement owns until it
-    /// ends, or passes one to an update operator. Only an assigned value
-    /// outlives its statement, copied into memory of the variable's own.
+    /// makes a text, relation or array, which the statement holds until it
+    /// ends, assigns a value that points to one, or passes one to an update
+    /// operator. Only a variable's references outlive the statement.
     scoped: bool,
     /// The slot of the statements' scopes, one at a time.
     scope: Option<lir::Place>,
@@ -341,13 +334,15 @@ struct FunctionBuilder<'a> {
     tuples: Vec<lir::Place>,
 }
 
-/// Where a local variable is: its value's slot, and, if it points to texts
-/// or relations, the slot of the memory of its own that holds them, which
-/// [`lir::RuntimeFn::Assign`] takes as the owner, as a variable's.
+/// Where a local variable is: its value's place, and whether the variable
+/// holds references to the buffers its value points to, as a program's
+/// variable does, which the end of its block gives up: an update
+/// operator's variable does, while a `Let`'s, or a loop's, is the place of
+/// a value something else holds.
 #[derive(Debug, Clone)]
 struct LocalPlace {
     value: lir::Place,
-    owner: Option<lir::Place>,
+    holds: bool,
 }
 
 /// A block not built yet.
@@ -389,24 +384,24 @@ impl<'a> FunctionBuilder<'a> {
         self.program.type_of(expr, &self.params, &self.locals)
     }
 
-    /// Slots for the local variables `locals`, each with no memory of its
-    /// own yet: what holds its texts, relations or arrays starts as null,
-    /// as a variable's does, so that its declaration, the first assignment,
-    /// has nothing to release.
+    /// Slots for the local variables `locals`. One that points to texts,
+    /// relations or arrays starts with null pointers, as it is again at the
+    /// end of its block, so that its declaration, the first assignment, has
+    /// no references to give up.
     fn declare(&mut self, locals: Vec<hir::Local>, cx: &mut Lowering) {
         for local in locals {
-            let value = self.slot(layout(&local.ty));
-            let owner = points(&local.ty).then(|| {
-                let owner = self.slot(lir::Layout::Address);
+            let layout = layout(&local.ty);
+            let value = self.slot(layout.clone());
+            let holds = points(&local.ty);
+            if holds {
                 self.insts.push(lir::Inst::Copy {
-                    dst: owner.clone(),
-                    src: usize_constant(0, cx),
-                    layout: lir::Layout::Address,
+                    dst: value.clone(),
+                    src: zero_constant(&layout, cx),
+                    layout,
                 });
-                owner
-            });
+            }
             self.locals.push(local);
-            self.local_places.push(Some(LocalPlace { value, owner }));
+            self.local_places.push(Some(LocalPlace { value, holds }));
         }
     }
 
@@ -419,12 +414,11 @@ impl<'a> FunctionBuilder<'a> {
         self.locals = locals;
     }
 
-    /// The statements of `block`, then the release of the memory of its
-    /// local variables' own: nothing points into it once the block ends,
-    /// as an assignment copies a value into memory of the variable's own,
-    /// and every statement that could point into it has ended. Releasing
-    /// empties the owner, so that one assigned again, when the block runs
-    /// again, has nothing to release.
+    /// The statements of `block`, then the release of the references its
+    /// local variables hold: every statement that could point into what
+    /// they point to has ended, and holds its own. Releasing makes their
+    /// pointers null, so that one assigned again, when the block runs
+    /// again, has none to give up.
     fn block(&mut self, block: &hir::Block, cx: &mut Lowering) {
         for statement in &block.statements {
             self.statement(statement, cx);
@@ -433,10 +427,14 @@ impl<'a> FunctionBuilder<'a> {
             let place = self.local_places[id.0]
                 .as_ref()
                 .expect("an update operator's local variables are placed first");
-            if let Some(owner) = &place.owner {
+            if place.holds {
+                let descriptor = cx.descriptor(&self.locals[id.0].ty);
                 self.insts.push(lir::Inst::CallRuntime {
                     function: lir::RuntimeFn::Release,
-                    args: vec![owner.clone()],
+                    args: vec![
+                        place.value.clone(),
+                        lir::Place::whole(lir::Base::Data(descriptor)),
+                    ],
                 });
             }
         }
@@ -541,7 +539,7 @@ impl<'a> FunctionBuilder<'a> {
         self.each_tuple(&src, layout(&element), cx, |this, at_hand, _, cx| {
             this.local_places[variable.0] = Some(LocalPlace {
                 value: at_hand,
-                owner: None,
+                holds: false,
             });
             this.block(body, cx);
         });
@@ -684,11 +682,6 @@ impl<'a> FunctionBuilder<'a> {
             }
             hir::OperatorKind::Update { .. } => {
                 let params = params_of(callee, &call.types);
-                // An assignment the operator makes must not release what
-                // an argument points to.
-                if params.values().any(points) {
-                    self.scoped = true;
-                }
                 let (function, _) = function(
                     self.program,
                     self.variable_data,
@@ -697,6 +690,21 @@ impl<'a> FunctionBuilder<'a> {
                     cx,
                 );
                 let args = self.arguments(&params, &call.args, cx);
+                // An assignment the operator makes must not free what an
+                // argument points to, though it can replace the value of
+                // the only variable holding it.
+                for (i, ty) in params.values().enumerate() {
+                    if points(ty) {
+                        let mut arg = args.clone().expect("a parameter has a slot");
+                        arg.path.push(i);
+                        let descriptor = cx.descriptor(ty);
+                        self.insts.push(lir::Inst::CallRuntime {
+                            function: lir::RuntimeFn::Keep,
+                            args: vec![arg, lir::Place::whole(lir::Base::Data(descriptor))],
+                        });
+                        self.scoped = true;
+                    }
+                }
                 self.insts.push(lir::Inst::Call {
                     function,
                     args,
@@ -1022,40 +1030,34 @@ impl<'a> FunctionBuilder<'a> {
     }
 
     /// Assign the value at `value` to the variable `target`, of the
-    /// program or local: copied, or, if it points to texts, relations or
-    /// arrays, copied with them into memory of the variable's own.
+    /// program or local: copied, and, if it points to texts, relations or
+    /// arrays, with a reference taken to each, which the variable holds.
     fn store(&mut self, target: hir::Target, value: lir::Place, cx: &mut Lowering) {
         let ty = self.assigned(target).0.clone();
-        // Where the value goes, and what holds the memory of its own.
-        let (dst, owner) = match target {
-            hir::Target::Variable(id) => {
-                let field = |i| lir::Place {
-                    base: lir::Base::Data(self.variable_data[id.0]),
-                    path: vec![i],
-                };
-                (field(0), Some(field(1)))
-            }
-            hir::Target::Local(id) => {
-                let place = self.local_places[id.0]
-                    .as_ref()
-                    .expect("an update operator's local variables are placed first");
-                (place.value.clone(), place.owner.clone())
-            }
+        let dst = match target {
+            hir::Target::Variable(id) => lir::Place {
+                base: lir::Base::Data(self.variable_data[id.0]),
+                path: vec![0],
+            },
+            hir::Target::Local(id) => self.local_places[id.0]
+                .as_ref()
+                .expect("an update operator's local variables are placed first")
+                .value
+                .clone(),
         };
-        match owner.filter(|_| points(&ty)) {
-            Some(owner) => {
-                let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
-                self.insts.push(lir::Inst::CallRuntime {
-                    function: lir::RuntimeFn::Assign,
-                    args: vec![dst, owner, value, descriptor],
-                });
-                self.scoped = true;
-            }
-            None => self.insts.push(lir::Inst::Copy {
+        if points(&ty) {
+            let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+            self.insts.push(lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::Assign,
+                args: vec![dst, value, descriptor],
+            });
+            self.scoped = true;
+        } else {
+            self.insts.push(lir::Inst::Copy {
                 dst,
                 src: value,
                 layout: layout(&ty),
-            }),
+            });
         }
     }
 
@@ -1084,7 +1086,10 @@ impl<'a> FunctionBuilder<'a> {
             hir::Expr::Let(id, value, body) => {
                 let value = self.place(value, cx);
                 self.check_keys(hir::Target::Local(*id), &value, cx);
-                self.local_places[id.0] = Some(LocalPlace { value, owner: None });
+                self.local_places[id.0] = Some(LocalPlace {
+                    value,
+                    holds: false,
+                });
                 self.place(body, cx)
             }
             hir::Expr::Parameter(name) => {
@@ -1323,6 +1328,7 @@ impl<'a> FunctionBuilder<'a> {
                 layout: element_layout.clone(),
             });
         }
+        self.adopt(&dst, &ty, cx);
         dst
     }
 
@@ -1543,6 +1549,7 @@ impl<'a> FunctionBuilder<'a> {
             src: kept,
             layout: lir::Layout::Usize,
         });
+        self.adopt(&dst, &ty, cx);
         dst
     }
 
@@ -1558,6 +1565,24 @@ impl<'a> FunctionBuilder<'a> {
         });
         self.scoped = true;
         dst
+    }
+
+    /// Have the buffer of `filled`, a relation or array of type `ty` that
+    /// compiled code filled, hold what its tuples or elements point to, if
+    /// they point to anything: until now, only the statement holds that.
+    fn adopt(&mut self, filled: &lir::Place, ty: &hir::Type, cx: &mut Lowering) {
+        let element = match ty {
+            hir::Type::Relation(heading) => hir::Type::Tuple(heading.clone()),
+            hir::Type::Array(element) => (**element).clone(),
+            _ => unreachable!("only relations and arrays are filled"),
+        };
+        if points(&element) {
+            let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(ty)));
+            self.insts.push(lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::Adopt,
+                args: vec![filled.clone(), descriptor],
+            });
+        }
     }
 
     /// A loop over the tuples of the relation at `src`, each laid out as
@@ -2275,6 +2300,25 @@ fn common_attributes(lhs: &hir::Heading, rhs: &hir::Heading, cx: &mut Lowering) 
         .collect()
 }
 
+/// A constant of `layout` with every byte zero, as a place: a value whose
+/// pointers are null.
+fn zero_constant(layout: &lir::Layout, cx: &mut Lowering) -> lir::Place {
+    fn zero(layout: &lir::Layout) -> lir::Field {
+        match layout {
+            lir::Layout::U8 => lir::Field::U8(0),
+            lir::Layout::I64 => lir::Field::I64(0),
+            lir::Layout::F64Bits => lir::Field::F64Bits(0),
+            lir::Layout::Usize | lir::Layout::Address => lir::Field::Usize(0),
+            lir::Layout::Bytes(n) => lir::Field::Bytes(vec![0; *n]),
+            lir::Layout::Struct(fields) => lir::Field::Struct(fields.iter().map(zero).collect()),
+        }
+    }
+    lir::Place {
+        base: lir::Base::Data(cx.constant(vec![zero(layout)])),
+        path: vec![0],
+    }
+}
+
 /// A pointer-sized constant `n`, as a place.
 fn usize_constant(n: u64, cx: &mut Lowering) -> lir::Place {
     lir::Place {
@@ -2439,7 +2483,7 @@ mod tests {
     }
 
     #[test]
-    fn values_are_fields_with_an_owner_if_they_point() {
+    fn values_point_to_constant_buffers_after_a_header() {
         let lowered = lower(&program(
             vec![user("main", &[], vec![])],
             vec![
@@ -2449,21 +2493,20 @@ mod tests {
             ],
         ));
         assert_eq!(lowered.data[0].fields, [lir::Field::I64(-7)]);
+        // A text points to its bytes, a buffer that is never released.
         assert_eq!(
             lowered.data[1].fields,
-            [lir::Field::Bytes("hé".as_bytes().to_vec())]
+            [
+                lir::Field::immortal_header(),
+                lir::Field::Bytes("hé".as_bytes().to_vec())
+            ]
         );
-        // A text points to its bytes, so the variable has an owner for
-        // the bytes of a text assigned to it: none yet.
         assert_eq!(
             lowered.data[2].fields,
-            [
-                lir::Field::Struct(vec![
-                    lir::Field::Address(lir::DataId(1)),
-                    lir::Field::Usize(3)
-                ]),
-                lir::Field::Usize(0)
-            ]
+            [lir::Field::Struct(vec![
+                lir::Field::FieldAddress(lir::DataId(1), 1),
+                lir::Field::Usize(3)
+            ])]
         );
         assert_eq!(lowered.data[3].fields, [lir::Field::U8(1)]);
     }
@@ -2483,17 +2526,20 @@ mod tests {
             )],
         ));
         let element = |n| lir::Field::Struct(vec![lir::Field::I64(n)]);
-        assert_eq!(lowered.data[0].fields, [element(1), element(2)]);
+        assert_eq!(
+            lowered.data[0].fields,
+            [
+                lir::Field::immortal_header(),
+                lir::Field::Struct(vec![element(1), element(2)])
+            ]
+        );
         assert!(!lowered.data[0].writable);
         assert_eq!(
             lowered.data[1].fields,
-            [
-                lir::Field::Struct(vec![
-                    lir::Field::Address(lir::DataId(0)),
-                    lir::Field::Usize(2)
-                ]),
-                lir::Field::Usize(0)
-            ]
+            [lir::Field::Struct(vec![
+                lir::Field::FieldAddress(lir::DataId(0), 1),
+                lir::Field::Usize(2)
+            ])]
         );
     }
 
@@ -2662,16 +2708,15 @@ mod tests {
     }
 
     #[test]
-    fn assigned_texts_are_copied_into_memory_of_the_variables_own() {
+    fn assigned_texts_take_a_reference_to_their_bytes() {
         let t = hir::Expr::Variable(hir::VariableId(0));
         let lowered = lower(&program(
             vec![user("main", &[], vec![assign(vec![(0, t)])])],
             vec![variable("t", hir::Value::Text("a".to_string()))],
         ));
-        let variable = lir::DataId(1);
-        let field = |i| lir::Place {
-            base: lir::Base::Data(variable),
-            path: vec![i],
+        let variable = lir::Place {
+            base: lir::Base::Data(lir::DataId(1)),
+            path: vec![0],
         };
         let slot = |i| lir::Place::whole(lir::Base::Slot(lir::SlotId(i)));
         let insts = &lowered.functions[0].blocks[0].insts;
@@ -2679,9 +2724,9 @@ mod tests {
             panic!("expected a runtime call, found {:?}", insts[2]);
         };
         assert_eq!(*function, lir::RuntimeFn::Assign);
-        assert_eq!(args[..3], [field(0), field(1), slot(0)]);
-        // The statement has a scope, in case the variable's old memory is
-        // its.
+        assert_eq!(args[..2], [variable, slot(0)]);
+        // The statement has a scope, which takes over the variable's
+        // references to its old value's bytes.
         let scope = |function| lir::Inst::CallRuntime {
             function,
             args: vec![slot(1)],
@@ -2889,9 +2934,9 @@ mod tests {
     }
 
     #[test]
-    fn calls_passing_a_text_have_a_scope() {
-        // `call f{t: t};`, which makes nothing, but must keep `t`'s memory
-        // from being released by an assignment `f` makes.
+    fn calls_passing_a_text_keep_it() {
+        // `call f{t: t};`, which makes nothing, but must keep `t`'s bytes
+        // from being freed by an assignment `f` makes to `t`.
         let f = hir::Operator {
             types: Vec::new(),
             name: "f".to_string(),
@@ -2923,7 +2968,14 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(functions, [lir::RuntimeFn::Begin, lir::RuntimeFn::End]);
+        assert_eq!(
+            functions,
+            [
+                lir::RuntimeFn::Begin,
+                lir::RuntimeFn::Keep,
+                lir::RuntimeFn::End
+            ]
+        );
         assert!(matches!(insts[insts.len() - 2], lir::Inst::Call { .. }));
     }
 
@@ -3189,7 +3241,7 @@ mod tests {
     }
 
     #[test]
-    fn local_variables_own_their_memory_until_the_body_ends() {
+    fn local_variables_hold_references_until_the_body_ends() {
         // `f{} [ var r: relation { v: integer }; var n := 1; call
         // debug_value{v: r}; ]`.
         let heading = hir::Heading::new([("v".to_string(), integer())].into());
@@ -3235,26 +3287,27 @@ mod tests {
         ));
         let f = lowered.functions.iter().find(|f| f.name == "f").unwrap();
         let insts: Vec<&lir::Inst> = f.blocks.iter().flat_map(|b| &b.insts).collect();
-        // The relation's owner starts as null, and is the assignment's,
-        // then released last; the integer is copied.
-        let lir::Inst::Copy { dst: owner, .. } = insts[0] else {
+        // The relation starts with a null pointer, is assigned its
+        // value, and is released last; the integer is copied.
+        let lir::Inst::Copy { dst: value, .. } = insts[0] else {
             panic!("{insts:#?}");
         };
         let assigned = insts.iter().find_map(|i| match i {
             lir::Inst::CallRuntime {
                 function: lir::RuntimeFn::Assign,
                 args,
-            } => Some(&args[1]),
+            } => Some(&args[0]),
             _ => None,
         });
-        assert_eq!(assigned, Some(owner), "{insts:#?}");
-        assert_eq!(
-            insts.last(),
-            Some(&&lir::Inst::CallRuntime {
-                function: lir::RuntimeFn::Release,
-                args: vec![owner.clone()],
-            })
-        );
+        assert_eq!(assigned, Some(value), "{insts:#?}");
+        let lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Release,
+            args,
+        } = insts.last().unwrap()
+        else {
+            panic!("{insts:#?}");
+        };
+        assert_eq!(args[0], *value);
         let releases = insts
             .iter()
             .filter(|i| {
@@ -3267,7 +3320,7 @@ mod tests {
                 )
             })
             .count();
-        assert_eq!(releases, 1, "only the relation has memory of its own");
+        assert_eq!(releases, 1, "only the relation holds references");
     }
 
     #[test]

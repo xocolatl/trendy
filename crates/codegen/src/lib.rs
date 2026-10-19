@@ -625,10 +625,15 @@ fn define_data(
         let mut description = DataDescription::new();
         description.define(laid_out.bytes.into_boxed_slice());
         description.set_align(laid_out.align);
-        for (offset, target) in laid_out.addresses {
-            let target = module.declare_data_in_data(ids[target.0], &mut description);
+        for (offset, to, field) in laid_out.addresses {
+            let addend = match field {
+                Some(index) => target.field_offset(&data[to.0].fields, index)?,
+                None => 0,
+            };
+            let addend = i64::try_from(addend).map_err(|e| e.to_string())?;
+            let to = module.declare_data_in_data(ids[to.0], &mut description);
             let offset = u32::try_from(offset).map_err(|e| e.to_string())?;
-            description.write_data_addr(offset, target, 0);
+            description.write_data_addr(offset, to, addend);
         }
         module
             .define_data(id, &description)
@@ -641,8 +646,10 @@ fn define_data(
 struct LaidOut {
     bytes: Vec<u8>,
     align: u64,
-    /// The offsets of addresses, which need relocations, and their targets.
-    addresses: Vec<(usize, lir::DataId)>,
+    /// The offsets of addresses, which need relocations, their targets,
+    /// and the index of the field of the target each is the address of, if
+    /// not of the whole.
+    addresses: Vec<(usize, lir::DataId, Option<usize>)>,
 }
 
 /// The layout of a data field.
@@ -652,7 +659,7 @@ fn field_layout(field: &lir::Field) -> lir::Layout {
         lir::Field::I64(_) => lir::Layout::I64,
         lir::Field::F64Bits(_) => lir::Layout::F64Bits,
         lir::Field::Usize(_) | lir::Field::Size(_) | lir::Field::Offset(..) => lir::Layout::Usize,
-        lir::Field::Address(_) => lir::Layout::Address,
+        lir::Field::Address(_) | lir::Field::FieldAddress(..) => lir::Layout::Address,
         lir::Field::Bytes(raw) => lir::Layout::Bytes(raw.len()),
         lir::Field::Struct(inner) => lir::Layout::Struct(inner.iter().map(field_layout).collect()),
     }
@@ -720,6 +727,12 @@ impl Target {
         Ok(offset)
     }
 
+    /// The offset of field `index` of a data object of `fields`.
+    fn field_offset(&self, fields: &[lir::Field], index: usize) -> Result<usize, String> {
+        let layouts: Vec<lir::Layout> = fields.iter().map(field_layout).collect();
+        self.path_offset(&lir::Layout::Struct(layouts), &[index])
+    }
+
     /// Lay out a data object's fields, each at its natural alignment.
     fn lay_out(&self, fields: &[lir::Field]) -> Result<LaidOut, String> {
         let mut out = LaidOut {
@@ -770,7 +783,11 @@ impl Target {
                 self.usize(u64::try_from(offset).map_err(|e| e.to_string())?, out)?;
             }
             lir::Field::Address(target) => {
-                out.addresses.push((out.bytes.len(), *target));
+                out.addresses.push((out.bytes.len(), *target, None));
+                out.bytes.resize(out.bytes.len() + self.pointer_bytes, 0);
+            }
+            lir::Field::FieldAddress(target, index) => {
+                out.addresses.push((out.bytes.len(), *target, Some(*index)));
                 out.bytes.resize(out.bytes.len() + self.pointer_bytes, 0);
             }
             lir::Field::Bytes(raw) => out.bytes.extend(raw),
@@ -1030,7 +1047,7 @@ mod tests {
             .unwrap();
         assert_eq!(laid_out.bytes.len(), 16);
         assert_eq!(laid_out.align, 8);
-        assert_eq!(laid_out.addresses, [(8, lir::DataId(4))]);
+        assert_eq!(laid_out.addresses, [(8, lir::DataId(4), None)]);
 
         let empty = layout.lay_out(&[lir::Field::Bytes(Vec::new())]).unwrap();
         assert_eq!((empty.bytes.len(), empty.align), (1, 1));
@@ -1074,8 +1091,36 @@ mod tests {
                 ]),
             ])])
             .unwrap();
-        assert_eq!(laid_out.addresses, [(8, lir::DataId(5))]);
+        assert_eq!(laid_out.addresses, [(8, lir::DataId(5), None)]);
         assert_eq!(laid_out.bytes.len(), 24);
+    }
+
+    #[test]
+    fn a_constant_buffer_is_after_its_header() {
+        let layout = Target {
+            pointer_bytes: 8,
+            endianness: Endianness::Little,
+        };
+        // The text "é": a value addresses its bytes, not their header.
+        let buffer = [
+            lir::Field::immortal_header(),
+            lir::Field::Bytes("é".as_bytes().to_vec()),
+        ];
+        let value = layout
+            .lay_out(&[lir::Field::Struct(vec![
+                lir::Field::FieldAddress(lir::DataId(0), 1),
+                lir::Field::Usize(2),
+            ])])
+            .unwrap();
+        assert_eq!(value.addresses, [(0, lir::DataId(0), Some(1))]);
+        assert_eq!(layout.field_offset(&buffer, 1), Ok(24));
+        let laid_out = layout.lay_out(&buffer).unwrap();
+        assert_eq!(
+            laid_out.bytes[..8],
+            u64::MAX.to_le_bytes(),
+            "never released"
+        );
+        assert!(layout.field_offset(&buffer, 2).is_err());
     }
 
     #[test]

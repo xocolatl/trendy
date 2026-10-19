@@ -12,6 +12,16 @@
 //! data, laid out exactly like these `#[repr(C)]` structs. Every size and
 //! offset in a descriptor comes from the compiler, so the runtime never
 //! repeats its layout rules.
+//!
+//! # Memory
+//!
+//! A text, a relation or an array points to a buffer, which values share,
+//! after a [`Header`] that counts its references: those of the variables
+//! whose values point to it, of the buffers whose tuples or elements do,
+//! and of the [`Scope`] of the statement that made it, which gives its own
+//! up when the statement ends. A buffer is freed when its last reference
+//! is given up, so a value lasts as long as something holds it, and no
+//! longer, however many a loop makes.
 
 #![cfg_attr(not(test), no_std)]
 
@@ -114,7 +124,7 @@ pub unsafe extern "C" fn trendy_rt_concat(dst: *mut Text, lhs: *const Text, rhs:
         let Some(len) = lhs.len.checked_add(rhs.len) else {
             trendy_rt_fail(FAIL_OUT_OF_MEMORY)
         };
-        let bytes = allocate_owned(len);
+        let bytes = allocate_buffer(len, core::ptr::null());
         core::ptr::copy_nonoverlapping(lhs.bytes, bytes, lhs.len);
         core::ptr::copy_nonoverlapping(rhs.bytes, bytes.add(lhs.len), rhs.len);
         dst.write_unaligned(Text { bytes, len });
@@ -219,26 +229,42 @@ unsafe fn text_bytes<'a>(text: Text) -> &'a [u8] {
     unsafe { core::slice::from_raw_parts(text.bytes, text.len) }
 }
 
-/// The header of a block of memory holding what values point to: each
-/// text's bytes, each relation's tuples and each array's elements. A block
-/// is a statement's, in
-/// its [`Scope`], or a variable's, holding what its value points to. Its
-/// alignment keeps the memory after it aligned for any value.
-#[cfg(not(test))]
-#[repr(C, align(16))]
-struct Owned {
-    /// The scope's next block: a scope keeps its blocks in a list, newest
-    /// first.
-    next: *mut Owned,
-    /// For a variable's block, when it was made, on [`CLOCK`].
-    made: u64,
+/// The header just before every buffer that a value points to: each text's
+/// bytes, each relation's tuples and each array's elements, which values
+/// share. A value's pointer is just past it, so reading a value never
+/// sees it. A buffer compiled into the program has [`IMMORTAL`] references,
+/// and is never released.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Header {
+    /// The references to the buffer: from variables, from other buffers'
+    /// elements, and from statements' scopes, each of which releases its
+    /// own when it ends.
+    pub count: u64,
+    /// How many of its elements, from the first, the buffer holds references
+    /// through, to what they point to, which it releases when it is
+    /// released: compiled code fills a buffer the runtime allocates, then
+    /// has the runtime adopt its elements ([`trendy_rt_adopt`]).
+    pub len: usize,
+    /// The type of the relation or array whose tuples or elements the buffer
+    /// holds, or null for a text's bytes, which point to nothing.
+    pub desc: *const TypeDesc,
 }
 
-/// The memory a statement owns, from [`trendy_rt_begin`] to
-/// [`trendy_rt_end`]: every text, relation and array that runtime functions
-/// make while it runs, since no value outlives the statement that computes
-/// it, and variables' old values that it can still point into. So a value never
-/// needs freeing on its own, however many times a loop made one.
+/// [`Header::count`] of a buffer compiled into the program.
+pub const IMMORTAL: u64 = u64::MAX;
+
+/// The size of a [`Header`]: a multiple of 8, so that the buffer after it
+/// is aligned for any value.
+#[cfg(not(test))]
+const HEADER: usize = size_of::<Header>();
+
+/// The scope of a statement, from [`trendy_rt_begin`] to [`trendy_rt_end`]:
+/// a reference to each buffer that runtime functions make while it runs,
+/// which no value outlives unless a variable takes a reference too, and to
+/// each variable's old value that it replaces, which it may still point
+/// into. It releases them all when it ends, so a value never needs
+/// releasing on its own, however many times a loop made one.
 ///
 /// Scopes nest as calls do: a statement that calls an update operator holds
 /// its arguments while the operator's statements run. Compiled code keeps
@@ -247,13 +273,14 @@ struct Owned {
 #[cfg(not(test))]
 #[repr(C)]
 pub struct Scope {
-    /// The blocks it owns, newest first.
-    owned: *mut Owned,
+    /// The buffers it holds a reference to, `len` of them, in memory for
+    /// `capacity`, or null before the first.
+    buffers: *mut *mut u8,
+    len: usize,
+    capacity: usize,
     /// The scope of the statement this one's operator was called from, or
     /// null.
     outer: *mut Scope,
-    /// When the statement began, on [`CLOCK`].
-    begun: u64,
 }
 
 /// The scope of the statement running now.
@@ -261,20 +288,8 @@ pub struct Scope {
 static CURRENT: core::sync::atomic::AtomicPtr<Scope> =
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
-/// The time, one more for each statement that begins and each value
-/// assigned to a variable: whether a statement began while a variable had
-/// a value.
-#[cfg(not(test))]
-static CLOCK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-
-/// The next time on [`CLOCK`].
-#[cfg(not(test))]
-fn tick() -> u64 {
-    CLOCK.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1
-}
-
-/// Begin the scope at `scope` of a statement, which owns what runtime
-/// functions make until [`trendy_rt_end`] ends it.
+/// Begin the scope at `scope` of a statement, which holds a reference to
+/// what runtime functions make until [`trendy_rt_end`] ends it.
 ///
 /// # Safety
 ///
@@ -288,17 +303,18 @@ pub unsafe extern "C" fn trendy_rt_begin(scope: *mut Scope) {
     // SAFETY: guaranteed by the caller.
     unsafe {
         scope.write(Scope {
-            owned: core::ptr::null_mut(),
+            buffers: core::ptr::null_mut(),
+            len: 0,
+            capacity: 0,
             outer: CURRENT.load(Relaxed),
-            begun: tick(),
         });
     }
     CURRENT.store(scope, Relaxed);
 }
 
-/// End the scope at `scope`, releasing the memory its statement owns: the
-/// end of the lifetime of every text, relation and array runtime functions
-/// made while it ran.
+/// End the scope at `scope`, releasing each buffer it holds a reference
+/// to: the end of every text, relation and array the statement made that
+/// no variable holds.
 ///
 /// # Safety
 ///
@@ -308,205 +324,125 @@ pub unsafe extern "C" fn trendy_rt_begin(scope: *mut Scope) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn trendy_rt_end(scope: *mut Scope) {
     use core::sync::atomic::Ordering::Relaxed;
-    // SAFETY: guaranteed by the caller. Every block in the list was
-    // allocated by `allocate_owned` or `trendy_rt_assign`, and is in no
-    // other list, so is released only here, once.
+    // SAFETY: guaranteed by the caller. Each buffer in the list is one the
+    // scope holds a reference to, which it gives up once.
     unsafe {
-        let mut block = (*scope).owned;
-        while !block.is_null() {
-            let next = (*block).next;
-            free(block.cast());
-            block = next;
+        let scope = &*scope;
+        for i in 0..scope.len {
+            release_buffer(*scope.buffers.add(i));
         }
-        CURRENT.store((*scope).outer, Relaxed);
+        if !scope.buffers.is_null() {
+            free(scope.buffers.cast());
+        }
+        CURRENT.store(scope.outer, Relaxed);
     }
 }
 
-/// Memory for `bytes` bytes, owned by the current statement and released
-/// when it ends. Stops the program if there is none.
-#[cfg(not(test))]
-fn allocate_owned(bytes: usize) -> *mut u8 {
-    use core::sync::atomic::Ordering::Relaxed;
-    // In units of the header: one for it, then enough for the bytes.
-    let units = bytes.div_ceil(size_of::<Owned>()) + 1;
-    let block = allocate::<Owned>(units);
-    // SAFETY: `block` has room for the header and `bytes` more. Compiled
-    // code begins a scope for every statement that makes a text or
-    // relation, so there is a current one.
-    unsafe {
-        let scope = CURRENT.load(Relaxed);
-        block.write(Owned {
-            next: (*scope).owned,
-            made: 0,
-        });
-        (*scope).owned = block;
-        block.add(1).cast::<u8>()
-    }
-}
-
-/// Store at `dst` a copy of the value at `src`, of the type `desc`
-/// describes, in memory of its own, which outlives the statement: a
-/// variable's new value, which `owner` then holds. `owner` holds the memory
-/// of the variable's current value, or null while that is the value
-/// compiled into the program. That memory becomes the outermost scope's
-/// whose statement began while it was the variable's value, since those
-/// statements, and only those, can point into it, such as with an
-/// argument; it is released when that statement ends. Stops the program if
-/// the memory can't be allocated.
+/// Have the current statement's scope hold a reference to `buffer`, which
+/// it gives up when the statement ends. An immortal buffer needs none.
 ///
 /// # Safety
 ///
-/// `src` must point to a valid value of the type `desc` describes, `desc`
-/// to a valid descriptor, `dst` to memory for one value that doesn't
-/// overlap `src`, and `owner` to null or memory that an earlier call
-/// stored there. The statement must have begun a scope.
+/// `buffer` must be a buffer, just past its header, whose reference the
+/// scope takes over. A statement that makes or replaces values that point
+/// to buffers has begun a scope.
 #[cfg(not(test))]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn trendy_rt_assign(
-    dst: *mut u8,
-    owner: *mut *mut u8,
-    src: *const u8,
-    desc: *const TypeDesc,
-) {
+unsafe fn hold(buffer: *mut u8) {
     use core::sync::atomic::Ordering::Relaxed;
-    // SAFETY: guaranteed by the caller; the block has room for everything
-    // the value points to, as measured.
+    // SAFETY: guaranteed by the caller.
     unsafe {
-        let desc = &*desc;
-        let mut measured = Arena::measuring();
-        persist(core::ptr::null_mut(), src, desc, &mut measured);
-        let units = measured.used.div_ceil(size_of::<Owned>()) + 1;
-        let block = allocate::<Owned>(units);
-        block.write(Owned {
-            next: core::ptr::null_mut(),
-            made: tick(),
-        });
-        let mut arena = Arena {
-            base: block.add(1).cast(),
-            used: 0,
-        };
-        core::ptr::copy_nonoverlapping(src, dst, desc.size);
-        persist(dst, src, desc, &mut arena);
-        let old = owner.cast::<*mut Owned>().read_unaligned();
-        if !old.is_null() {
-            // The current statement began after the old value was made,
-            // and the scopes it is in began before it.
-            let mut scope = CURRENT.load(Relaxed);
-            while !(*scope).outer.is_null() && (*(*scope).outer).begun > (*old).made {
-                scope = (*scope).outer;
+        if header(buffer).count == IMMORTAL {
+            return;
+        }
+        let scope = &mut *CURRENT.load(Relaxed);
+        if scope.len == scope.capacity {
+            let capacity = (scope.capacity * 2).max(8);
+            let Some(bytes) = capacity.checked_mul(size_of::<*mut u8>()) else {
+                trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+            };
+            let grown = realloc(scope.buffers.cast(), bytes);
+            if grown.is_null() {
+                trendy_rt_fail(FAIL_OUT_OF_MEMORY);
             }
-            (*old).next = (*scope).owned;
-            (*scope).owned = old;
+            scope.buffers = grown.cast();
+            scope.capacity = capacity;
         }
-        owner.cast::<*mut Owned>().write_unaligned(block);
+        *scope.buffers.add(scope.len) = buffer;
+        scope.len += 1;
     }
 }
 
-/// Release the memory of its own that `owner` holds for a local variable,
-/// which [`trendy_rt_assign`] stored there, if it did, at the end of its
-/// block, and empty `owner`, so that the block, run again, has nothing to
-/// release. Nothing points into it then: an assignment copies a value into
-/// memory of the variable's own, and every statement that could point into
-/// it has ended.
+/// The header of `buffer`.
 ///
 /// # Safety
 ///
-/// `owner` must point to null or to memory that [`trendy_rt_assign`]
-/// stored there, which nothing points into.
+/// `buffer` must be a buffer, just past its header.
 #[cfg(not(test))]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn trendy_rt_release(owner: *mut *mut u8) {
-    // SAFETY: guaranteed by the caller. The block is in no scope's list:
-    // only a variable's old values are.
-    unsafe {
-        let block = owner.cast::<*mut Owned>().read_unaligned();
-        if !block.is_null() {
-            free(block.cast());
-        }
-        owner
-            .cast::<*mut Owned>()
-            .write_unaligned(core::ptr::null_mut());
-    }
+unsafe fn header(buffer: *const u8) -> Header {
+    // SAFETY: guaranteed by the caller.
+    unsafe { buffer.sub(HEADER).cast::<Header>().read_unaligned() }
 }
 
-/// Where [`persist`] puts what a value points to: one block, filled in
-/// order, or none while measuring how much it needs.
-struct Arena {
-    /// The block, or null while measuring.
-    base: *mut u8,
-    /// The bytes taken so far.
-    used: usize,
-}
-
-impl Arena {
-    fn measuring() -> Self {
-        Arena {
-            base: core::ptr::null_mut(),
-            used: 0,
-        }
-    }
-
-    /// Room for `size` bytes, aligned to `align` from the block's start:
-    /// its address, or null while measuring.
-    fn take(&mut self, size: usize, align: usize) -> *mut u8 {
-        let start = self.used.next_multiple_of(align);
-        self.used = start + size;
-        if self.base.is_null() {
-            core::ptr::null_mut()
-        } else {
-            self.base.wrapping_add(start)
-        }
-    }
-}
-
-/// The alignment of each relation's tuples, and each array's elements, in
-/// an [`Arena`]: that of any value, as the block's start is.
-const ARRAY_ALIGN: usize = 16;
-
-/// Copy what the value at `src`, of the type `desc` describes, points to
-/// into `arena`, and point the copy of the value at `dst` to it: each text's
-/// bytes, each relation's tuples and each array's elements, and what those
-/// point to in turn. While
-/// measuring, `dst` is null, and nothing is written.
+/// Replace the header of `buffer` with `header`.
 ///
 /// # Safety
 ///
-/// `src` must point to a valid value of the type `desc` describes, and,
-/// unless measuring, `dst` to a copy of it, and the arena have room for
-/// what it points to.
-unsafe fn persist(dst: *mut u8, src: *const u8, desc: &TypeDesc, arena: &mut Arena) {
+/// `buffer` must be a buffer, just past its header, or memory for one.
+#[cfg(not(test))]
+unsafe fn set_header(buffer: *mut u8, header: Header) {
+    // SAFETY: guaranteed by the caller.
+    unsafe { buffer.sub(HEADER).cast::<Header>().write_unaligned(header) }
+}
+
+/// A new buffer for `bytes` bytes, of the relation or array `desc`
+/// describes, or of a text's bytes if it is null, which the current
+/// statement's scope holds the only reference to, holding references
+/// through none of its elements yet. Stops the program if there is no
+/// memory for it.
+#[cfg(not(test))]
+fn allocate_buffer(bytes: usize, desc: *const TypeDesc) -> *mut u8 {
+    let Some(total) = bytes.checked_add(HEADER) else {
+        trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+    };
+    // SAFETY: the block has room for the header and the bytes.
+    unsafe {
+        let buffer = allocate::<u8>(total).add(HEADER);
+        set_header(
+            buffer,
+            Header {
+                count: 1,
+                len: 0,
+                desc,
+            },
+        );
+        hold(buffer);
+        buffer
+    }
+}
+
+/// Call `f` with each buffer that the value at `value`, of the type `desc`
+/// describes, points to directly: a text's, a relation's or an array's own,
+/// and those of a tuple's attributes. A null pointer, a local variable's
+/// before its first value and after its block, points to none.
+///
+/// # Safety
+///
+/// `value` must point to a valid value of the type `desc` describes, or one
+/// with null pointers.
+#[cfg(not(test))]
+unsafe fn each_buffer(value: *const u8, desc: &TypeDesc, f: &mut impl FnMut(*mut u8)) {
     // SAFETY: guaranteed by the caller.
     unsafe {
         match desc.kind {
-            KIND_TEXT => {
-                let (bytes, len) = read_slice(src);
-                let to = arena.take(len, 1);
-                if !to.is_null() {
-                    core::ptr::copy_nonoverlapping(bytes, to, len);
-                    dst.cast::<Text>().write_unaligned(Text { bytes: to, len });
+            KIND_TEXT | KIND_RELATION | KIND_ARRAY => {
+                let (buffer, _) = read_slice(value);
+                if !buffer.is_null() {
+                    f(buffer.cast_mut());
                 }
             }
-            KIND_TUPLE => persist_tuple(dst, src, desc, arena),
-            KIND_RELATION | KIND_ARRAY => {
-                let (elements, count) = read_slice(src);
-                let element = desc.element();
-                let size = count * element.size;
-                let to = arena.take(size, ARRAY_ALIGN);
-                if !to.is_null() {
-                    core::ptr::copy_nonoverlapping(elements, to, size);
-                    dst.cast::<Text>().write_unaligned(Text {
-                        bytes: to,
-                        len: count,
-                    });
-                }
-                for i in 0..count {
-                    let offset = i * element.size;
-                    persist(
-                        to.wrapping_add(offset),
-                        elements.add(offset),
-                        element,
-                        arena,
-                    );
+            KIND_TUPLE => {
+                for attr in attributes(desc) {
+                    each_buffer(value.add(attr.offset), &*attr.desc, f);
                 }
             }
             _ => {}
@@ -514,23 +450,212 @@ unsafe fn persist(dst: *mut u8, src: *const u8, desc: &TypeDesc, arena: &mut Are
     }
 }
 
-/// [`persist`] for a tuple with the attributes of `desc`, a tuple or
-/// relation descriptor.
+/// Whether a value of the type `desc` describes points to buffers.
 ///
 /// # Safety
 ///
-/// As for [`persist`].
-unsafe fn persist_tuple(dst: *mut u8, src: *const u8, desc: &TypeDesc, arena: &mut Arena) {
+/// `desc` must be a valid descriptor.
+#[cfg(not(test))]
+unsafe fn points(desc: &TypeDesc) -> bool {
     // SAFETY: guaranteed by the caller.
     unsafe {
-        for attr in attributes(desc) {
-            persist(
-                dst.wrapping_add(attr.offset),
-                src.add(attr.offset),
-                &*attr.desc,
-                arena,
-            );
+        match desc.kind {
+            KIND_TEXT | KIND_RELATION | KIND_ARRAY => true,
+            KIND_TUPLE => attributes(desc).iter().any(|attr| points(&*attr.desc)),
+            _ => false,
         }
+    }
+}
+
+/// Take a reference to each buffer the value at `value`, of the type `desc`
+/// describes, points to.
+///
+/// # Safety
+///
+/// As for [`each_buffer`].
+#[cfg(not(test))]
+unsafe fn retain(value: *const u8, desc: &TypeDesc) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        each_buffer(value, desc, &mut |buffer| {
+            let mut counted = header(buffer);
+            if counted.count != IMMORTAL {
+                counted.count += 1;
+                set_header(buffer, counted);
+            }
+        });
+    }
+}
+
+/// Give up a reference to `buffer`: the last one frees it, after giving up
+/// those it holds through its elements.
+///
+/// # Safety
+///
+/// `buffer` must be a buffer, just past its header, that the caller holds
+/// a reference to.
+#[cfg(not(test))]
+unsafe fn release_buffer(buffer: *mut u8) {
+    // SAFETY: guaranteed by the caller; a buffer's elements, up to its
+    // header's `len`, are valid values of its element type.
+    unsafe {
+        let mut counted = header(buffer);
+        if counted.count == IMMORTAL {
+            return;
+        }
+        counted.count -= 1;
+        if counted.count > 0 {
+            set_header(buffer, counted);
+            return;
+        }
+        if let Some(desc) = counted.desc.as_ref() {
+            let element = desc.element();
+            if points(element) {
+                for i in 0..counted.len {
+                    release(buffer.add(i * element.size), element);
+                }
+            }
+        }
+        free(buffer.sub(HEADER).cast());
+    }
+}
+
+/// Give up a reference to each buffer the value at `value`, of the type
+/// `desc` describes, points to.
+///
+/// # Safety
+///
+/// As for [`each_buffer`], and the caller must hold those references.
+#[cfg(not(test))]
+unsafe fn release(value: *const u8, desc: &TypeDesc) {
+    // SAFETY: guaranteed by the caller.
+    unsafe { each_buffer(value, desc, &mut |buffer| release_buffer(buffer)) }
+}
+
+/// Store at `dst`, a variable's value, the value at `src`, of the type
+/// `desc` describes, taking a reference to each buffer it points to. The
+/// variable's references to the buffers of its old value go to the current
+/// statement's scope, which releases them when it ends, since the statement
+/// may still point into them, as an `assign` block that swaps two variables
+/// does.
+///
+/// # Safety
+///
+/// `src` must point to a valid value of the type `desc` describes, `desc`
+/// to a valid descriptor, and `dst` to a variable's value, which holds
+/// references to what it points to, or null pointers, and doesn't overlap
+/// `src`. The statement must have begun a scope.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_assign(dst: *mut u8, src: *const u8, desc: *const TypeDesc) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let desc = &*desc;
+        retain(src, desc);
+        each_buffer(dst, desc, &mut |buffer| hold(buffer));
+        core::ptr::copy_nonoverlapping(src, dst, desc.size);
+    }
+}
+
+/// Have the current statement's scope hold a reference to each buffer the
+/// value at `value`, of the type `desc` describes, points to, until it
+/// ends: an update operator's argument, which the operator's assignments
+/// must not free, since an argument can be the value of a variable the
+/// operator assigns.
+///
+/// # Safety
+///
+/// `value` must point to a valid value of the type `desc` describes, and
+/// `desc` to a valid descriptor. The statement must have begun a scope.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_keep(value: *const u8, desc: *const TypeDesc) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let desc = &*desc;
+        retain(value, desc);
+        each_buffer(value, desc, &mut |buffer| hold(buffer));
+    }
+}
+
+/// Give up the references that the value at `value`, a local variable's of
+/// the type `desc` describes, holds, at the end of its block, and make its
+/// pointers null, so that the block, run again, has nothing to give up when
+/// it first assigns it. Nothing points into what is freed: every statement
+/// that could has ended, and a statement's scope holds its own references.
+///
+/// # Safety
+///
+/// `value` must point to a local variable's value of the type `desc`
+/// describes, which holds references to what it points to, or null
+/// pointers.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_release(value: *mut u8, desc: *const TypeDesc) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let desc = &*desc;
+        release(value, desc);
+        core::ptr::write_bytes(value, 0, desc.size);
+    }
+}
+
+/// Take a reference, for the buffer of the relation or array at `value`,
+/// of the type `desc` describes, to what each of its tuples or elements
+/// points to: compiled code has filled the buffer, which the runtime
+/// allocated ([`trendy_rt_allocate`]), so that it holds them.
+///
+/// # Safety
+///
+/// `value` must point to a valid relation or array of the type `desc`
+/// describes, whose buffer [`trendy_rt_allocate`] made, holding references
+/// through none of its elements.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_adopt(value: *const u8, desc: *const TypeDesc) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let element = (*desc).element();
+        let (buffer, len) = read_slice(value);
+        if points(element) {
+            for i in 0..len {
+                retain(buffer.add(i * element.size), element);
+            }
+        }
+        set_header(
+            buffer.cast_mut(),
+            Header {
+                len,
+                ..header(buffer)
+            },
+        );
+    }
+}
+
+/// Copy the tuple or element at `src`, of the type `desc` describes, to
+/// `dst` in the buffer `buffer`, taking a reference for it to what the
+/// tuple points to, and count one more element the buffer holds them
+/// through.
+///
+/// # Safety
+///
+/// `src` must point to a valid value of the type `desc` describes, `dst` to
+/// the buffer's next element after those it holds references through, and
+/// `buffer` to a buffer the runtime allocated.
+#[cfg(not(test))]
+unsafe fn copy_element(buffer: *mut u8, dst: *mut u8, src: *const u8, desc: &TypeDesc) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        core::ptr::copy_nonoverlapping(src, dst, desc.size);
+        retain(src, desc);
+        let counted = header(buffer);
+        set_header(
+            buffer,
+            Header {
+                len: counted.len + 1,
+                ..counted
+            },
+        );
     }
 }
 
@@ -955,10 +1080,11 @@ pub unsafe extern "C" fn trendy_rt_combine(
         let Some(bytes) = room.checked_mul(size) else {
             trendy_rt_fail(FAIL_OUT_OF_MEMORY)
         };
-        let out = allocate_owned(bytes);
+        let out = allocate_buffer(bytes, desc);
+        let tuple_desc = desc.element();
         let mut count = 0;
         let mut keep = |tuple: *const u8| {
-            core::ptr::copy_nonoverlapping(tuple, out.add(count * size), size);
+            copy_element(out, out.add(count * size), tuple, tuple_desc);
             count += 1;
         };
         let (mut i, mut j) = (0, 0);
@@ -1209,7 +1335,7 @@ pub unsafe extern "C" fn trendy_rt_allocate(
         let Some(bytes) = count.checked_mul((*desc).element().size) else {
             trendy_rt_fail(FAIL_OUT_OF_MEMORY)
         };
-        let tuples = allocate_owned(bytes);
+        let tuples = allocate_buffer(bytes, desc);
         core::ptr::write_bytes(tuples, 0, bytes);
         dst.write_unaligned(Text {
             bytes: tuples,
@@ -1282,9 +1408,9 @@ pub unsafe extern "C" fn trendy_rt_load(
         order.sort_unstable_by(|a, b| {
             on_items(items, *a, *b).then_with(|| compare_tuples(*a, *b, desc))
         });
-        let out = allocate_owned(len * size);
+        let out = allocate_buffer(len * size, desc);
         for (i, tuple) in order.iter().enumerate() {
-            core::ptr::copy_nonoverlapping(*tuple, out.add(i * size), size);
+            copy_element(out, out.add(i * size), *tuple, desc.element());
         }
         free(order.as_mut_ptr().cast());
         dst.write_unaligned(Text { bytes: out, len });
@@ -1330,13 +1456,13 @@ unsafe fn canonical(tuples: *const u8, count: usize, desc: &TypeDesc) -> (*mut u
             *tuple = tuples.add(i * size);
         }
         order.sort_unstable_by(|a, b| compare_tuples(*a, *b, desc));
-        let out = allocate_owned(count * size);
+        let out = allocate_buffer(count * size, desc);
         let mut kept = 0;
         for i in 0..count {
             if i > 0 && compare_tuples(order[i - 1], order[i], desc).is_eq() {
                 continue;
             }
-            core::ptr::copy_nonoverlapping(order[i], out.add(kept * size), size);
+            copy_element(out, out.add(kept * size), order[i], desc.element());
             kept += 1;
         }
         free(order.as_mut_ptr().cast());
@@ -1659,7 +1785,9 @@ pub unsafe extern "C" fn trendy_rt_to_text(
     // SAFETY: guaranteed by the caller.
     unsafe {
         // Too long to count is too long to allocate.
-        let Ok(text) = text_of(value, &*desc, allocate_owned) else {
+        let Ok(text) = text_of(value, &*desc, |bytes| {
+            allocate_buffer(bytes, core::ptr::null())
+        }) else {
             trendy_rt_fail(FAIL_OUT_OF_MEMORY)
         };
         dst.write_unaligned(text);
@@ -2020,6 +2148,8 @@ unsafe extern "C" {
     fn malloc(size: usize) -> *mut core::ffi::c_void;
     #[cfg(not(test))]
     fn free(pointer: *mut core::ffi::c_void);
+    #[cfg(not(test))]
+    fn realloc(pointer: *mut core::ffi::c_void, size: usize) -> *mut core::ffi::c_void;
 }
 
 #[cfg(not(test))]
@@ -2103,59 +2233,6 @@ mod tests {
             offset,
             desc,
         }
-    }
-
-    #[test]
-    fn persisted_values_point_only_into_their_arena() {
-        // `relation { name: text } { { name: "Ada" }, { name: "李白" } }`.
-        let text = scalar(KIND_TEXT, 16);
-        let attrs = [attr("name", 0, &text)];
-        let tuple = tuple_of(&attrs, 16);
-        let relation = relation_of(&tuple);
-        let (ada, li) = ("Ada", "李白");
-        let tuples = [
-            [ada.as_ptr() as usize, ada.len()],
-            [li.as_ptr() as usize, li.len()],
-        ];
-        let src = [tuples.as_ptr() as usize, 2];
-        let mut measured = Arena::measuring();
-        // SAFETY: the value matches its descriptor, and nothing is written
-        // while measuring.
-        unsafe {
-            persist(
-                core::ptr::null_mut(),
-                src.as_ptr().cast(),
-                &relation,
-                &mut measured,
-            );
-        };
-        assert_eq!(measured.used, 2 * 16 + ada.len() + li.len());
-
-        let mut memory = vec![0_u128; measured.used.div_ceil(16)];
-        let base: *mut u8 = memory.as_mut_ptr().cast();
-        let mut arena = Arena { base, used: 0 };
-        let mut dst = src;
-        // SAFETY: `dst` is a copy of the value, and the arena has the room
-        // measured.
-        unsafe {
-            persist(
-                dst.as_mut_ptr().cast(),
-                src.as_ptr().cast(),
-                &relation,
-                &mut arena,
-            );
-        };
-        assert_eq!(arena.used, measured.used);
-        assert_eq!(
-            print(dst.as_ptr().cast(), &relation),
-            print(src.as_ptr().cast(), &relation)
-        );
-        let inside =
-            |address: usize| (base as usize..base as usize + arena.used).contains(&address);
-        assert!(inside(dst[0]), "the tuples are copied");
-        // SAFETY: the copied tuples are texts, in the arena.
-        let copied = unsafe { core::slice::from_raw_parts(dst[0] as *const [usize; 2], 2) };
-        assert!(copied.iter().all(|t| inside(t[0])), "so are their texts");
     }
 
     #[test]

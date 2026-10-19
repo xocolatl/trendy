@@ -14,18 +14,29 @@
 //! - `boolean`: [`Field::U8`], `0` for false and `1` for true.
 //! - `integer`: [`Field::I64`].
 //! - `approximate`: [`Field::F64Bits`], a 64-bit IEEE 754 binary float.
-//! - `text`: a [`Field::Struct`] of the [`Field::Address`] of a read-only
-//!   constant holding the UTF-8 bytes, and a [`Field::Usize`] with their
-//!   length.
-//! - a relation: a [`Field::Struct`] of the [`Field::Address`] of a
-//!   read-only constant holding its tuples, as consecutive structs in their
-//!   canonical (sorted) order, and a [`Field::Usize`] with their number.
-//!   Since each struct is padded to its alignment, the array's stride is the
-//!   tuple's size.
+//! - `text`: a [`Field::Struct`] of the address of its buffer, holding the
+//!   UTF-8 bytes, and a [`Field::Usize`] with their length.
+//! - a relation: a [`Field::Struct`] of the address of its buffer, holding
+//!   its tuples, as consecutive structs in their canonical (sorted) order,
+//!   and a [`Field::Usize`] with their number. Since each struct is padded
+//!   to its alignment, the array's stride is the tuple's size.
 //! - an array: as a relation, of its elements, in its order.
 //! - a tuple: a [`Field::Struct`] of its attributes' values, in attribute
 //!   name order. Because a struct's layout doesn't depend on where it is, an
 //!   attribute that is itself a tuple can be used, or passed, on its own.
+//!
+//! # Memory
+//!
+//! Values share the buffers they point to, each after a header that
+//! counts its references: a copy of a value is a copy of its pointers, so
+//! assigning a variable, or passing an argument, never copies a buffer. A
+//! constant's buffer is a read-only constant of two fields,
+//! [`Field::immortal_header`], then the buffer, which the value points
+//! to, with a [`Field::FieldAddress`] of field 1. The runtime
+//! counts the references of the buffers its functions make: from the
+//! statement that makes one (see [`RuntimeFn::Begin`]), from each variable
+//! assigned it ([`RuntimeFn::Assign`]), and from each buffer whose tuples
+//! or elements point to it.
 //!
 //! # Calling convention
 //!
@@ -103,11 +114,17 @@ pub enum Layout {
 
 impl Layout {
     /// A statement's scope (see [`RuntimeFn::Begin`]), which only the
-    /// runtime reads: `trendy_runtime::Scope`, of two addresses and a
-    /// 64-bit time.
+    /// runtime reads: `trendy_runtime::Scope`, of the address of its list
+    /// of buffers, the list's length and capacity, and the address of the
+    /// scope it is in.
     #[must_use]
     pub fn scope() -> Layout {
-        Layout::Struct(vec![Layout::Address, Layout::Address, Layout::I64])
+        Layout::Struct(vec![
+            Layout::Address,
+            Layout::Usize,
+            Layout::Usize,
+            Layout::Address,
+        ])
     }
 }
 
@@ -177,23 +194,33 @@ pub enum RuntimeFn {
     /// [`RuntimeFn::Begin`]). It stops the program if the memory can't be
     /// allocated.
     Concat,
-    /// `trendy_rt_release(owner)`: release the memory of its own that a
-    /// local variable's owner holds, set by [`RuntimeFn::Assign`], if any,
-    /// at the end of its block, and empty the owner.
+    /// `trendy_rt_release(value, descriptor)`: give up the references
+    /// that a local variable's value, of the type the descriptor
+    /// describes, holds, at the end of its block, and make its pointers
+    /// null, as they are before its declaration.
     Release,
     /// `trendy_rt_begin(scope)`: begin a statement's scope, in a slot laid
-    /// out as [`Layout::scope`]. Until [`RuntimeFn::End`], the statement
-    /// owns the memory of every text, relation and array that runtime
-    /// functions make. A variable's old value, once [`RuntimeFn::Assign`]
-    /// replaces it, is the outermost statement's that began while it was
-    /// the value, since those, and only those, can point into it. So a
-    /// statement needs a scope if it makes a text, relation or array, or
-    /// passes one to an update operator, whose assignments must not release
-    /// it.
+    /// out as [`Layout::scope`]. Until [`RuntimeFn::End`], it holds a
+    /// reference to each buffer that runtime functions make, so a value
+    /// that no variable holds lasts until its statement ends, and no
+    /// longer. A statement needs a scope if it makes a text, relation or
+    /// array, assigns a value that points to one, or passes one to an
+    /// update operator.
     Begin,
     /// `trendy_rt_end(scope)`: end the scope at `scope`, the innermost,
-    /// releasing the memory its statement owns.
+    /// giving up its references.
     End,
+    /// `trendy_rt_keep(value, descriptor)`: have the statement's scope hold
+    /// a reference to each buffer a value, of the type the descriptor
+    /// describes, points to: an update operator's argument, which a
+    /// variable the operator assigns may hold the only other reference to.
+    Keep,
+    /// `trendy_rt_adopt(value, descriptor)`: have the buffer of a relation
+    /// or array, of the type the descriptor describes, that
+    /// [`RuntimeFn::Allocate`] made and compiled code filled, take a
+    /// reference to what each of its tuples or elements points to, which
+    /// it then holds.
+    Adopt,
     /// `trendy_rt_reshape(dst, src, result, source, offsets)`: store at
     /// `dst` the relation `src` with its tuples reshaped into the
     /// attributes the descriptor `result` describes, sorted canonically and
@@ -256,12 +283,14 @@ pub enum RuntimeFn {
     /// `trendy_rt_allocate(dst, count, descriptor)`: store at `dst` a
     /// relation or an array, of the type the descriptor describes, of
     /// `count` (a [`Layout::Usize`]) tuples or elements, zeroed, in memory
-    /// the statement owns, for compiled code to fill in. [`RuntimeFn::Sort`]
-    /// then puts a relation's tuples in the canonical order.
+    /// the statement owns, for compiled code to fill in. Then either
+    /// [`RuntimeFn::Sort`] copies a relation's tuples, or
+    /// [`RuntimeFn::Adopt`] has the buffer hold what they point to.
     Allocate,
-    /// `trendy_rt_sort(relation, descriptor)`: sort the tuples of the
-    /// relation at `relation`, of the type the descriptor describes, into the
-    /// canonical order, in place, and drop duplicates, shortening it.
+    /// `trendy_rt_sort(relation, descriptor)`: replace the relation at
+    /// `relation`, of the type the descriptor describes, with one of its
+    /// tuples in the canonical order, without duplicates, in memory the
+    /// statement owns.
     Sort,
     /// `trendy_rt_load(dst, src, descriptor, items, count)`: store at `dst`
     /// the array of the tuples of the relation `src`, of the type the
@@ -282,13 +311,13 @@ pub enum RuntimeFn {
     /// [`Layout::U8`], whether two values of the type the descriptor
     /// describes are equal. For tuples, relations and arrays.
     Equal,
-    /// `trendy_rt_assign(dst, owner, src, descriptor)`: store at `dst`, a
-    /// variable's value, a copy of the value at `src`, of the type the
-    /// descriptor describes, with what it points to in memory of its own,
-    /// which `owner`, a [`Layout::Address`] next to the value, then holds.
-    /// The memory `owner` held before, if any, a statement owns (see
-    /// [`RuntimeFn::Begin`]). For values that point to texts, relations or
-    /// arrays; others are copied.
+    /// `trendy_rt_assign(dst, src, descriptor)`: store at `dst`, a
+    /// variable's value, the value at `src`, of the type the descriptor
+    /// describes, taking a reference to each buffer it points to. The
+    /// statement's scope takes over the variable's references to the
+    /// buffers of its old value, which the statement may still point into.
+    /// For values that point to texts, relations or arrays; others are
+    /// copied.
     Assign,
 }
 
@@ -306,6 +335,8 @@ impl RuntimeFn {
             RuntimeFn::Release => "trendy_rt_release",
             RuntimeFn::Begin => "trendy_rt_begin",
             RuntimeFn::End => "trendy_rt_end",
+            RuntimeFn::Keep => "trendy_rt_keep",
+            RuntimeFn::Adopt => "trendy_rt_adopt",
             RuntimeFn::Reshape => "trendy_rt_reshape",
             RuntimeFn::Relation => "trendy_rt_relation",
             RuntimeFn::And => "trendy_rt_and",
@@ -590,11 +621,8 @@ pub struct Data {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataKind {
-    /// A program variable. `name` is unique among variables; codegen derives
-    /// the symbol from it. Its first field is its value; a value that
-    /// points to texts, relations or arrays has a second, a
-    /// [`Field::Usize`] of 0, where [`RuntimeFn::Assign`] keeps the address
-    /// of the memory it copies them to.
+    /// A program variable, whose only field is its value. `name` is unique
+    /// among variables; codegen derives the symbol from it.
     Variable { name: String },
     /// Data with no name in the program, such as a text literal's bytes.
     Constant,
@@ -611,6 +639,9 @@ pub enum Field {
     Usize(u64),
     /// The address of another data object.
     Address(DataId),
+    /// The address of field `index` of another data object: a constant
+    /// buffer's, after its [`Field::immortal_header`].
+    FieldAddress(DataId, usize),
     /// Raw bytes, with no alignment.
     Bytes(Vec<u8>),
     /// Fields laid out together. A struct is aligned to its widest field
@@ -622,4 +653,17 @@ pub enum Field {
     /// The offset of field `index` in a [`Layout::Struct`], as a
     /// pointer-sized integer.
     Offset(Layout, usize),
+}
+
+impl Field {
+    /// The header of a buffer compiled into the program, laid out as
+    /// `trendy_runtime::Header`: `trendy_runtime::IMMORTAL` references,
+    /// `u64::MAX`, so that it is never released, through none of its
+    /// elements, and no type, which only a buffer that is released needs.
+    /// Its size is a multiple of every value's alignment, so the buffer
+    /// right after it is aligned.
+    #[must_use]
+    pub fn immortal_header() -> Field {
+        Field::Struct(vec![Field::I64(-1), Field::Usize(0), Field::Usize(0)])
+    }
 }

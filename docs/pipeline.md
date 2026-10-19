@@ -516,8 +516,8 @@ for each use would copy it, as many times again for each local variable
 computed from it. Assignments are checked as an update operator's are,
 through `assign::Assigning`. Evaluating a call substitutes a `Let`'s value
 in the rest once it is known (`ops::Substitution::locals`); lowering places
-the local variable where the value is, with no copy and no owner, since
-nothing changes it while the expression is computed. Checking a call checks its
+the local variable where the value is, with no copy and no references of
+its own, since nothing changes it while the expression is computed. Checking a call checks its
 callee's value first, so every operator a call's evaluation reaches is
 checked already, and recursion is found then, not when it would loop. The
 call's arguments are checked as `call`'s are (`Checker::arguments`). An
@@ -871,11 +871,15 @@ this:
 - `integer`: one 64-bit field.
 - `approximate`: one 64-bit IEEE 754 binary floating-point field.
 - a tuple: a `Struct` of its attributes' fields, in name order.
-- a relation: the address of a read-only array of its tuples, in sorted
-  order, followed by the number of tuples.
+- a relation: the address of its buffer, an array of its tuples, in
+  sorted order, followed by the number of tuples.
 - an array: as a relation, of its elements, in its order.
-- `text`: the address of a read-only constant holding the UTF-8 bytes,
-  followed by the length in bytes, the size of a pointer.
+- `text`: the address of its buffer, holding the UTF-8 bytes, followed by
+  the length in bytes, the size of a pointer.
+
+A buffer compiled into the program is read-only data after a header that
+says it is never released (`Field::immortal_header`), which the value
+points past (`Field::FieldAddress`).
 
 A `Struct` is aligned to its widest field and padded to a multiple of that
 alignment, so a tuple has the same layout embedded in another tuple as it has
@@ -908,37 +912,41 @@ never called. A computed expression, such as
 `not p`, is evaluated into a stack slot of its own, which the instruction
 that uses it then reads.
 
-It also owns the lifetime of allocated values. A concatenation done at run
-time calls `trendy_rt_concat`, which allocates the result's bytes with
-`malloc`, as do the runtime functions that make relations. The statement
-owns them all, in its scope: a stack slot that `trendy_rt_begin` begins
-before the statement's first instruction, where the runtime lists what it
-makes, and `trendy_rt_end` ends after its last, freeing the list. That
-holds however many values a loop made, which per-value freeing couldn't
-track. Scopes nest as calls do, so an operator's statements release their
-own memory, never the memory of the statement that called the operator,
-such as its arguments'.
+It also owns the lifetime of allocated values. A text, a relation or an
+array points to a buffer, of its bytes, tuples or elements, which values
+share: assigning or passing a value copies its pointers, never its
+buffer. Each buffer comes after a header that counts its references. A
+concatenation done at run time calls `trendy_rt_concat`, which allocates
+the result's buffer with `malloc`, as do the runtime functions that make
+relations and arrays. A new buffer's first reference is its statement's
+scope's: a stack slot that `trendy_rt_begin` begins before the
+statement's first instruction, where the runtime lists the references
+the statement holds, and `trendy_rt_end` ends after its last, giving
+them up. That holds however many values a loop made. Scopes nest as
+calls do. A buffer that compiled code fills (`trendy_rt_allocate`) holds
+no references through its tuples or elements until `trendy_rt_adopt`
+takes them for it, or `trendy_rt_sort` copies its tuples into a buffer
+that takes them. A buffer compiled into the program is never released,
+so sharing it costs nothing.
 
-Only an assigned value outlives its statement. A variable whose type has a
-text, a relation or an array in it has a second field, its owner, the address of the
-memory its value points into, or null while that is the value compiled
-into the program. `trendy_rt_assign` copies the value, with everything it
-points to, into one new block, which the owner then holds. Other variables
-are assigned by a copy. The old block becomes the outermost scope's whose
-statement began while it was the variable's value, by a clock the runtime
-keeps, since those statements, and only those, can point into it: with
-the assigning statement's own values, or with arguments, which a caller
-can have passed from the variable. So a statement that passes a text or
-relation to an update operator has a scope even if it makes nothing.
+Only a variable's references outlive a statement. `trendy_rt_assign`
+stores a value in a variable, taking a reference to each buffer it
+points to, and hands the variable's references to the buffers of its old
+value to the statement's scope, since the statement can still point into
+them, as an `assign` that swaps two variables does. A buffer is freed
+when its last reference is given up, after it gives up those it holds
+through its elements. A statement that passes a text, a relation or an
+array to an update operator has its scope keep it (`trendy_rt_keep`),
+since the operator can assign the only variable that holds it, so it has
+a scope even if it makes nothing. Other values are assigned by a copy.
 
-A local variable is a slot in its operator's function for its value, and
-one for its owner if it has one, assigned by `trendy_rt_assign` as a
-variable is. The owner starts as null, so that the declaration, the first
-assignment, has nothing to release; `trendy_rt_release` frees what an
-owner holds at the end of its block, when nothing points into it: an
-assignment copies a value into memory of the variable's own, and every
-statement that could point into it has ended. It empties the owner, so a
-block run again starts as the first time did.
+A local variable is a slot in its operator's function, assigned by
+`trendy_rt_assign` as a variable is. One that points to buffers starts
+with null pointers, so that its declaration, the first assignment, has no
+references to give up; `trendy_rt_release` gives them up at the end of
+its block, when every statement that could point into its buffers has
+ended, and makes its pointers null again, so a block run again starts as
+the first time did.
 
 An `if` statement has no scope of its own: its condition is computed in
 one, which ends before either block runs, and copied out first, and each
