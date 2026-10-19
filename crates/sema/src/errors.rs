@@ -2120,7 +2120,7 @@ pub(crate) fn image_outside(image: &trendy_syntax::ast::ImageExpr) -> Diagnostic
         "no tuple to match",
     )
     .with_note(IMAGE_RULE)
-    .with_note("there is a tuple at hand only in the values of an `extend` or a `replace`")
+    .with_note("there is a tuple at hand only in the values of an `extend` or a `replace`, a `where`'s condition, and an argument for a `per` parameter")
     .with_help("compute it for each tuple of another relation: `groups extend { members := !!r }`")
 }
 

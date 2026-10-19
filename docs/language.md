@@ -416,7 +416,7 @@ operator values{r: any relation, of: T per r}: relation { v: T }
 ];
 
 operator holds_for_any{r: any relation, holds: boolean per r}: boolean [
-    (r where holds){} = relation { tuple {} }
+    not is_empty{r: r where holds}
 ];
 
 operator main{} [
@@ -521,6 +521,11 @@ builtin operator debug_value{v: any type};
 
 builtin operator count{r: any relation}: integer;
 
+/* Whether `r` has no tuples, Tutorial D's `IS_EMPTY`. */
+operator is_empty{r: any relation}: boolean [
+    count{r: r} = 0
+];
+
 /* The number of elements of `a`. */
 builtin operator length{a: any array}: integer;
 
@@ -549,16 +554,15 @@ builtin operator product{r: any relation, of: T per r}: T
     types { T: any numeric };
 
 /* Whether `of` is true for some tuple of `r`: whether `r where of` has
-   one, which its projection on no attributes, `relation { {} }` or
-   `relation {}`, says. Of no tuples, it is false. */
+   one. Of no tuples, it is false. */
 operator some{r: any relation, of: boolean per r}: boolean [
-    (r where of){} = relation { {} }
+    not is_empty{r: r where of}
 ];
 
 /* Whether `of` is true for every tuple of `r`: whether no tuple makes it
    false. Of no tuples, it is true. */
 operator every{r: any relation, of: boolean per r}: boolean [
-    (r where not of){} = relation {}
+    is_empty{r: r where not of}
 ];
 
 /* `from` as trendy source, the text `debug_value` writes: `42`, `5e-1`,
@@ -598,6 +602,27 @@ var counted := regions extend { plots := count{r: !!plots} };
 
 operator main{} [
     call debug_value{v: counted};
+];
+```
+
+**`is_empty{r: any relation}: boolean`** is whether `r` has no tuples,
+Tutorial D's `IS_EMPTY`, written in the prelude as `count{r: r} = 0`.
+With an image relation, it asks whether a group has no matches, as SQL's
+`NOT EXISTS` does: below, which regions have no plots.
+
+```trendy
+var plots := relation {
+    { plot: 1, region: "Nyeri" },
+    { plot: 2, region: "Nyeri" },
+    { plot: 3, region: "Mendoza" },
+}
+key { plot };
+
+var regions := relation { { region: "Nyeri" }, { region: "Mendoza" }, { region: "Hokkaido" } };
+var unplanted := regions where is_empty{r: !!plots};
+
+operator main{} [
+    call debug_value{v: unplanted};
 ];
 ```
 
@@ -962,7 +987,7 @@ key { item };
 
 operator restock{item_name: text, added: integer} [
     var held := stock where item = item_name;
-    if held = relation {} then [
+    if is_empty{r: held} then [
         insert stock relation { { item: item_name, kilos: added } };
     ] else if added > 0 then [
         var note := "adding to " || item_name;
@@ -1989,7 +2014,7 @@ var dishes := relation {
 var label := if count{r: dishes} = 1 then "dish" else "dishes";
 
 operator mean{r: relation { dish: text, price: integer }}: integer [
-    if count{r: r} = 0 then 0 else sum{r: r, of: price} div count{r: r}
+    if is_empty{r: r} then 0 else sum{r: r, of: price} div count{r: r}
 ];
 
 operator sign{n: integer}: text [
@@ -2367,8 +2392,9 @@ operator main{} [];
 
 ### Image relations
 
-In the values of an `extend` or a `replace`, `!!r` is the image
-relation of the tuple at hand in the relation `r`: the tuples of `r` that
+In the values of an `extend` or a `replace`, a `where`'s condition, or
+an argument for a `per` parameter, `!!r` is the image relation of the
+tuple at hand in the relation `r`: the tuples of `r` that
 match it on their common attributes, without those attributes. A tuple of
 departments, say, has as its image in a relation of employees the
 department's employees. It is Tutorial D's image relation, with its
@@ -2384,7 +2410,7 @@ var cities := relation {
 };
 var countries := relation { { country: "Ghana" }, { country: "Japan" }, { country: "Peru" } };
 var by_country := countries extend { cities := !!cities };
-var listed := countries extend { has_cities := !!(cities{country}) = relation { {} } };
+var listed := countries extend { has_cities := not is_empty{r: !!cities} };
 
 operator main{} [
     call debug_value{v: by_country};
@@ -2397,12 +2423,13 @@ operator main{} [
   hand (A0028), with the same type (A0027).
 - **A tuple with no match has an empty image,** so every tuple at hand
   gets one: above, Peru's `cities` is empty, and so its `has_cities` is
-  false, since its image in `cities{country}` isn't `relation { {} }`.
+  false.
   This is grouping without SQL's GROUP BY, which loses the empty groups;
   with aggregate operators, it will also be how to summarize.
 - **The tuple at hand is the innermost one:** in a nested `extend`, the
   inner tuple's. There is none outside an `extend`'s or a `replace`'s
-  values, so `!!` there is an error (A0030).
+  values, a `where`'s condition and a `per` argument, so `!!` there is an
+  error (A0030).
 - **Its operand is a single one:** a name, or an expression in
   parentheses. A postfix operator or a join right after it could apply
   to the image or to its operand, so it needs parentheses to say which

@@ -54,7 +54,7 @@ operator check_in{room: integer, guest: text} [
    `note`. */
 operator check_out{name: text} [
     var leaving := rooms where guest = name;
-    if leaving = relation {} then [
+    if is_empty{r: leaving} then [
         var note := name || " has no room";
         call debug_value{v: note};
     ] else [

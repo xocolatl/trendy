@@ -15,6 +15,11 @@ builtin operator debug_value{v: any type};
 
 builtin operator count{r: any relation}: integer;
 
+/* Whether `r` has no tuples, Tutorial D's `IS_EMPTY`. */
+operator is_empty{r: any relation}: boolean [
+    count{r: r} = 0
+];
+
 /* The number of elements of `a`. */
 builtin operator length{a: any array}: integer;
 
@@ -43,16 +48,15 @@ builtin operator product{r: any relation, of: T per r}: T
     types { T: any numeric };
 
 /* Whether `of` is true for some tuple of `r`: whether `r where of` has
-   one, which its projection on no attributes, `relation { {} }` or
-   `relation {}`, says. Of no tuples, it is false. */
+   one. Of no tuples, it is false. */
 operator some{r: any relation, of: boolean per r}: boolean [
-    (r where of){} = relation { {} }
+    not is_empty{r: r where of}
 ];
 
 /* Whether `of` is true for every tuple of `r`: whether no tuple makes it
    false. Of no tuples, it is true. */
 operator every{r: any relation, of: boolean per r}: boolean [
-    (r where not of){} = relation {}
+    is_empty{r: r where not of}
 ];
 
 /* `from` as trendy source, the text `debug_value` writes: `42`, `5e-1`,

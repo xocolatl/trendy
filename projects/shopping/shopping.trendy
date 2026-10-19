@@ -113,7 +113,7 @@ var list := scaled{ingredient, unit} extend {
      operator bought{item: text, added: approximate, unit: text} [
          transaction [
              var held := kitchen.pantry where ingredient = item;
-             if held = relation {} then [
+             if is_empty{r: held} then [
                  update kitchen {
                      insert pantry relation { { ingredient: item, quantity: added, unit: unit } },
                  };
@@ -128,7 +128,7 @@ var list := scaled{ingredient, unit} extend {
      operator used{item: text, taken: approximate} [
          transaction [
              var held := kitchen.pantry where ingredient = item;
-             if held = relation {} then [
+             if is_empty{r: held} then [
                  rollback;
              ] else if value from held{quantity} < taken then [
                  rollback;

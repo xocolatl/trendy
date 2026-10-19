@@ -268,7 +268,7 @@ mod tests {
             Some(NumberOrString::String("X0000".to_string()))
         );
         // And an error in an operator it defines is reported as a program's.
-        let wrong = trendy_prelude::SOURCE.replace("(r where of){}", "(r where 1){}");
+        let wrong = trendy_prelude::SOURCE.replace("r where of}", "r where 1}");
         let diags = diagnostics(&prelude, &wrong);
         assert_eq!(
             diags[0].code,

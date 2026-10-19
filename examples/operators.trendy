@@ -94,13 +94,13 @@ operator cheapest{limit: integer}: tuple { dishes: integer, lowest: integer } [
    computes only the branch it takes, so the mean of none is 0, and no
    division by zero. */
 operator mean{r: relation { dish: text, country: text, price: integer }}: integer [
-    if count{r: r} = 0 then 0 else sum{r: r, of: taxed{price: price}} div count{r: r}
+    if is_empty{r: r} then 0 else sum{r: r, of: taxed{price: price}} div count{r: r}
 ];
 
 /* A word for how many dishes `r` has: an `else if` chains another
    condition. */
 operator how_many{r: relation { dish: text, country: text, price: integer }}: text [
-    if count{r: r} = 0 then "none" else if count{r: r} = 1 then "one" else "several"
+    if is_empty{r: r} then "none" else if count{r: r} = 1 then "one" else "several"
 ];
 
 /* An order's cost, of any numeric type: `*` and `+` are what `numeric`,
