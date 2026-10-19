@@ -10,7 +10,7 @@ use trendy_syntax::ast::{self, AstNode, VarDecl};
 use crate::check::{Checker, Names};
 use crate::operators::Signature;
 use crate::types::{self, Expected, Origin, TypeParameters};
-use crate::{Namespaces, errors, keys};
+use crate::{errors, keys};
 
 /// The local variables of a body: those of each block the statement being
 /// checked is in, and of the blocks that have ended.
@@ -114,6 +114,14 @@ impl Locals {
         Some(id)
     }
 
+    /// The id of `local`, a value block's local variable, which its block
+    /// keeps track of itself.
+    pub(crate) fn fresh(&mut self, local: hir::Local) -> hir::LocalId {
+        let id = hir::LocalId(self.all.len());
+        self.all.push(local);
+        id
+    }
+
     /// A new id for the local variable `id`, which an assignment in a
     /// read-only operator gives a new value: its name refers to it from
     /// here on.
@@ -163,7 +171,7 @@ impl Locals {
                     name,
                     &decl,
                     &first.decl,
-                    &op.name,
+                    &format!("`{}`", op.name),
                 ));
                 ok = false;
             } else if op.params.contains_key(name) {
@@ -225,23 +233,26 @@ pub(crate) fn declarations(
     (locals, ok)
 }
 
-/// The local variable `decl` declares in the body of the operator `op`,
-/// whose names `names` resolves, and its initial value: the one given, or
-/// else its type's default, which a type parameter's type has none of. It
-/// is checked as a program variable's declaration is, but with a value
-/// known only when running.
+/// The local variable `decl` declares in the body of an operator with the
+/// type parameters `types`, or in a value block, whose names `names`
+/// resolves, and its initial value: the one given, or else its type's
+/// default, which a type parameter's type has none of. It is checked as a
+/// program variable's declaration is, but with a value known only when
+/// running.
 pub(crate) fn local(
     decl: &VarDecl,
-    op: &Signature,
-    namespaces: &Namespaces,
+    types: &[hir::TypeParameter],
     names: &mut dyn Names,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<(hir::Local, hir::Expr)> {
     let ident = decl.name()?.ident()?;
     let (name, span) = (ident.text(), trendy_syntax::span(ident.text_range()));
     let declared = decl.type_expr().map(|t| {
-        let mut parameters = TypeParameters::Fixed(&op.types);
-        (types::resolve(&t, &mut parameters, namespaces, errors), t)
+        let mut parameters = TypeParameters::Fixed(types);
+        (
+            types::resolve(&t, &mut parameters, names.namespaces(), errors),
+            t,
+        )
     });
     let mut checker = Checker::new(&mut *names);
     let (ty, value) = match (declared, decl.initializer()) {

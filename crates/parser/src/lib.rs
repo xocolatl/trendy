@@ -501,10 +501,12 @@ impl<'a> Parser<'a> {
         ) || self.at_unclosed_declaration(found)
     }
 
-    /// A read-only operator's body: statements, then its value, an
-    /// expression without `;`. A `;` after the value is reported, with a
-    /// fix deleting it, and so is a value before other statements.
-    fn valued_statements(&mut self) {
+    /// A read-only operator's body, or a value block's contents:
+    /// statements, then the value, an expression without `;`. A `;` after
+    /// the value is reported, with a fix deleting it, and so is a value
+    /// before other statements. Whether there is a value.
+    fn valued_statements(&mut self) -> bool {
+        let mut valued = false;
         while let Some(found) = self.found() {
             if self.ends_statements(&found) {
                 break;
@@ -526,6 +528,7 @@ impl<'a> Parser<'a> {
                     Span::new(found.span.start, value),
                     semicolon.map(|s| s.span),
                 ));
+                valued = true;
                 break;
             }
             if !self.at_value() {
@@ -533,6 +536,7 @@ impl<'a> Parser<'a> {
                 continue;
             }
             self.expression();
+            valued = true;
             let value = Span::new(found.span.start, self.last_end.unwrap_or(found.span.end));
             let Some(semicolon) = self.found().filter(|f| f.kind == SyntaxKind::Semicolon) else {
                 break;
@@ -544,18 +548,77 @@ impl<'a> Parser<'a> {
                 break;
             }
             self.errors.push(errors::value_before_statements(value));
+            valued = false;
         }
+        valued
+    }
+
+    /// Whether a value block starts here: a `[` before a statement, which
+    /// a `var` starts, or a `;` ends before the `]`. Anything else in
+    /// brackets is an array without its keyword, as other languages write
+    /// one. Braces before a `var`, as Rust and C write a block, can't be a
+    /// tuple, so they are one too, reported.
+    fn at_value_block(&mut self) -> bool {
+        let declares = self.found_after(1).is_some_and(|f| {
+            f.kind == SyntaxKind::VarKw
+                || (f.kind == SyntaxKind::Ident && errors::foreign_keyword(f.text))
+        }) && self
+            .found_after(2)
+            .is_some_and(|f| f.kind == SyntaxKind::Ident);
+        if self.at(SyntaxKind::LBrace) {
+            return declares;
+        }
+        if !self.at(SyntaxKind::LBracket) {
+            return false;
+        }
+        if declares {
+            return true;
+        }
+        let mut depth = 0_usize;
+        for token in &self.tokens[self.pos + 1..] {
+            match token.kind {
+                SyntaxKind::LBrace | SyntaxKind::LBracket | SyntaxKind::LParen => depth += 1,
+                SyntaxKind::RBrace | SyntaxKind::RBracket | SyntaxKind::RParen if depth == 0 => {
+                    return false;
+                }
+                SyntaxKind::RBrace | SyntaxKind::RBracket | SyntaxKind::RParen => depth -= 1,
+                SyntaxKind::Semicolon if depth == 0 => return true,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// `[ var x := …; x * 2 ]`: statements, then the value they compute,
+    /// as in a read-only operator's body. One without a value is reported,
+    /// and so are braces, fixed to brackets.
+    fn value_block(&mut self) {
+        let outer_form = std::mem::replace(&mut self.form, errors::VALUE_BLOCK_FORM);
+        self.delimited(
+            Some(SyntaxKind::ValueBlock),
+            "value block",
+            (SyntaxKind::LBracket, SyntaxKind::RBracket),
+            &[(SyntaxKind::LBrace, SyntaxKind::RBrace)],
+            |p| {
+                if !p.valued_statements() {
+                    let at = p.last_end.unwrap_or(0);
+                    p.errors.push(errors::block_without_value(Span::empty(at)));
+                }
+            },
+        );
+        self.form = outer_form;
     }
 
     /// Whether a read-only body's value starts here, rather than a
-    /// statement: an operand that doesn't start one. An `if` whose `then`
-    /// a block follows is a statement, and any other an expression.
+    /// statement: an operand that doesn't start one.
     fn at_value(&mut self) -> bool {
         let Some(found) = self.found() else {
             return false;
         };
+        // An `if` that runs to the end is the value, an `if` expression,
+        // and one that a `;` ends a statement.
         if self.at_if() {
-            return !self.if_has_blocks();
+            return self.runs_to_end();
         }
         // `a = b` is a comparison that ends the body, and otherwise
         // assignment's `=` in place of `:=`, which is reported.
@@ -569,6 +632,7 @@ impl<'a> Parser<'a> {
                 || !(self.at_call_keyword()
                     || matches!(found.kind, SyntaxKind::VarKw | SyntaxKind::AssignKw)
                     || self.at_assignment()
+                    || self.at_foreign_declaration()
                     || found.spells(SyntaxKind::ReturnKw)))
     }
 
@@ -624,28 +688,6 @@ impl<'a> Parser<'a> {
         false
     }
 
-    /// Whether the `if` that starts here has blocks for branches: whether a
-    /// `[` follows its `then`, which is the first outside any delimiters.
-    fn if_has_blocks(&mut self) -> bool {
-        let mut depth = 0_usize;
-        for i in self.pos + 1..self.tokens.len() {
-            match self.tokens[i].kind {
-                SyntaxKind::LBrace | SyntaxKind::LBracket | SyntaxKind::LParen => depth += 1,
-                SyntaxKind::RBrace | SyntaxKind::RBracket | SyntaxKind::RParen if depth == 0 => {
-                    return false;
-                }
-                SyntaxKind::RBrace | SyntaxKind::RBracket | SyntaxKind::RParen => depth -= 1,
-                _ if depth == 0 && self.found_at(i).spells(SyntaxKind::ThenKw) => {
-                    return (i + 1..self.tokens.len())
-                        .find(|&j| !is_skipped(self.tokens[j].kind))
-                        .is_some_and(|j| self.tokens[j].kind == SyntaxKind::LBracket);
-                }
-                _ => {}
-            }
-        }
-        false
-    }
-
     /// Whether `found`, the next token, is a `var` at the start of an
     /// unindented line, in a body that no `]` closes before the next
     /// definition: the declaration of a program's variable, before which
@@ -691,6 +733,10 @@ impl<'a> Parser<'a> {
             self.call_stmt();
         } else if found.kind == SyntaxKind::VarKw {
             self.var_decl();
+        } else if self.at_foreign_declaration() {
+            // `let x = 1;`, as Rust and JavaScript declare one.
+            self.errors.push(errors::foreign_declaration(found));
+            self.var_decl();
         } else if found.kind == SyntaxKind::AssignKw {
             self.assign_block();
         } else if self.at_assignment() {
@@ -712,6 +758,26 @@ impl<'a> Parser<'a> {
                 SyntaxKind::VarKw,
             ]);
         }
+    }
+
+    /// Whether a declaration starts here with another language's keyword,
+    /// as in `let x = 1;` or `int x = 1;`: the word, a name, and what follows
+    /// a variable's name.
+    fn at_foreign_declaration(&mut self) -> bool {
+        self.found()
+            .is_some_and(|f| f.kind == SyntaxKind::Ident && errors::foreign_keyword(f.text))
+            && self
+                .found_after(1)
+                .is_some_and(|f| f.kind == SyntaxKind::Ident)
+            && self.found_after(2).is_some_and(|f| {
+                matches!(
+                    f.kind,
+                    SyntaxKind::Eq
+                        | SyntaxKind::ColonEq
+                        | SyntaxKind::Colon
+                        | SyntaxKind::Semicolon
+                )
+            })
     }
 
     /// Whether an assignment, or a shorthand for one, starts here. A
@@ -2791,6 +2857,8 @@ impl<'a> Parser<'a> {
             self.nary(found, keyword);
         } else if self.at_keyword(SyntaxKind::RelationKw) {
             self.relation_literal();
+        } else if self.at_value_block() {
+            self.value_block();
         } else if self.at(SyntaxKind::ArrayKw)
             || self.at(SyntaxKind::LBracket)
             || self.at_miscased_array()
@@ -3762,6 +3830,11 @@ SourceFile
     #[test]
     fn foreign_variable_keywords() {
         assert_eq!(fix("let x = 0;"), "var x = 0;");
+        // In a body, the declaration is parsed as what it means.
+        assert_eq!(
+            fix("operator f{} [ let x = 0; const y: integer = x; ];"),
+            "operator f{} [ var x := 0; var y: integer := x; ];"
+        );
         assert_eq!(fix("const x: integer := 0;"), "var x: integer := 0;");
         assert_eq!(fix("int x;"), "var x;");
         assert_eq!(fix("int main() {}"), "operator main() {}");
@@ -4226,6 +4299,48 @@ SourceFile
     }
 
     #[test]
+    fn value_blocks() {
+        let initial = |value: &str| {
+            let source = format!("var x := {value};");
+            let parse = parse_str(&source);
+            (
+                parse.tree.variables().next().unwrap().initializer(),
+                parse.errors,
+            )
+        };
+        let (block, errors) = initial("[ var a := 1; a := a + 1; a * 2 ]");
+        assert!(errors.is_empty(), "{errors:#?}");
+        let Some(Expr::Block(block)) = block else {
+            panic!("{block:?}");
+        };
+        assert_eq!(block.statements().count(), 2);
+        assert!(matches!(block.value(), Some(Expr::Binary(_))));
+        // Without a statement, brackets are an array's, as other languages
+        // write one.
+        for list in ["[1, 2]", "[x]", "[]"] {
+            let (array, errors) = initial(list);
+            assert!(matches!(array, Some(Expr::Array(_))), "{list}");
+            assert_eq!(errors[0].code, Code::MissingToken, "{list}");
+        }
+        assert_eq!(
+            initial("[ var a := 1; ]").1[0].message,
+            "a value block ends with its value"
+        );
+        // Braces, as Rust and C write a block, and Rust's `let`.
+        assert_eq!(
+            fix("var x := { let a = 1; a * 2 };"),
+            "var x := [ var a := 1; a * 2 ];"
+        );
+        // An `if` whose branches are value blocks, which runs to the end, is
+        // a body's value; with a `;`, it is a statement.
+        let source = "operator f{c: boolean}: integer [ if c then [ var a := 1; a ] else [ var b := 2; b ] ];";
+        let parse = parse_str(source);
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let body = parse.tree.operators().next().unwrap().body().unwrap();
+        assert!(matches!(body.value(), Some(Expr::If(_))));
+    }
+
+    #[test]
     fn body_value_recovery() {
         let body = |statements: &str| format!("operator f{{}}: integer [ {statements} ];");
         // Other languages' `return`, in any case, and a `;` after the value.
@@ -4234,7 +4349,7 @@ SourceFile
         assert_eq!(fix(&body("var y := 2; y;")), body("var y := 2; y"));
         assert_eq!(
             messages(&body("x; var y := 2; y")),
-            ["only the last item of a body is its value"]
+            ["only the last item is the value"]
         );
         // `return` before the end, an early exit, parses: sema reports it.
         assert!(messages(&body("return x; var y := 2; y")).is_empty());

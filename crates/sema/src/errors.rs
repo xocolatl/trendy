@@ -78,18 +78,18 @@ pub(crate) fn duplicate_name(
 /// What a local variable's name must be.
 const LOCAL_NAMES: &str = "an operator's names, its parameters' and its local variables', each mean one thing wherever they are in scope, so no two there are the same, and a block's hide no other; they hide the program's variables of their names";
 
-/// The local variable `name`, declared in the body of the operator `op` by
-/// `decl`, which `first` declares already.
+/// The local variable `name`, declared by `decl` in what `within`
+/// describes, such as an operator's body, which `first` declares already.
 pub(crate) fn local_declared_again(
     name: &str,
     decl: &VarDecl,
     first: &VarDecl,
-    op: &str,
+    within: &str,
 ) -> Diagnostic {
     let named = |decl: &VarDecl| decl.name().map_or_else(|| decl.span(), |n| n.span());
     let d = Diagnostic::error(
         Code::DuplicateName,
-        format!("`{name}` is declared again in `{op}`"),
+        format!("`{name}` is declared again in {within}"),
         named(decl),
         "declared again here",
     )
@@ -4352,4 +4352,83 @@ pub(crate) fn repeated_order_item(
             replacement: String::new(),
         }],
     )
+}
+
+/// What a value block is, for notes.
+const BLOCK: &str = "a value block declares and assigns its own local variables, then ends with the value they compute; it changes nothing else, as a read-only operator's body doesn't";
+
+/// A value block's local variable `name`, declared at `span`, whose name
+/// means something around the block already.
+pub(crate) fn block_local_hides(name: &str, span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::DuplicateName,
+        format!("`{name}` already names something here"),
+        span,
+        "a local variable with a name in use",
+    )
+    .with_note("a name means one thing wherever it is in scope, so a value block's local variables hide no parameter, local variable or attribute of the tuple at hand around them, though they hide the program's variables")
+    .with_help(format!(
+        "give it a name of its own, as in `var new_{name} := …;`"
+    ))
+}
+
+/// `stmt`, a `call` in a value block, which would change something.
+pub(crate) fn call_in_block(stmt: &trendy_syntax::ast::CallStmt) -> Diagnostic {
+    Diagnostic::error(
+        Code::ReadOnlyEffect,
+        "a value block can't call an operator",
+        stmt.span(),
+        "a `call` in a value block",
+    )
+    .with_note(BLOCK)
+}
+
+/// `stmt`, an `if` statement in a value block.
+pub(crate) fn if_in_block(stmt: &trendy_syntax::ast::IfStmt) -> Diagnostic {
+    let at = match (stmt.keyword(), stmt.condition()) {
+        (Some(keyword), Some(condition)) => Span::new(
+            trendy_syntax::span(keyword.text_range()).start,
+            condition.span().end,
+        ),
+        _ => stmt.span(),
+    };
+    Diagnostic::error(
+        Code::Return,
+        "a value block has no `if` statements",
+        at,
+        "an `if` statement in a value block",
+    )
+    .with_note(BLOCK)
+    .with_help("choose between values with an `if` expression, as in `x := if c then a else b;`, whose branches can be value blocks")
+}
+
+/// `stmt`, a `return` in a value block: an early exit from the operator
+/// it is in, which no operator has yet.
+pub(crate) fn return_in_block(stmt: &trendy_syntax::ast::ReturnStmt) -> Diagnostic {
+    let span = stmt
+        .keyword()
+        .map_or_else(|| stmt.span(), |t| trendy_syntax::span(t.text_range()));
+    Diagnostic::error(
+        Code::Return,
+        "a value block can't return early",
+        span,
+        "an early exit",
+    )
+    .with_note(EARLY_EXIT)
+    .with_help("end the block with its value, without `return`")
+}
+
+/// `name`, at `span`, assigned in a value block, which isn't one of its
+/// local variables.
+pub(crate) fn assigned_outside_block(name: &str, span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::ReadOnlyEffect,
+        format!("a value block can't assign `{name}`"),
+        span,
+        "not one of the block's local variables",
+    )
+    .with_note(BLOCK)
+    .with_help(format!(
+        "compute the new value in the block, and assign it outside: `{name} := [ … ];`"
+    ))
 }

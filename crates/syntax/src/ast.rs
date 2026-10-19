@@ -54,6 +54,7 @@ ast_node!(Insertion);
 ast_node!(Deletion);
 ast_node!(Update);
 ast_node!(Load);
+ast_node!(ValueBlock);
 ast_node!(OrderList);
 ast_node!(OrderItem);
 ast_node!(Arguments);
@@ -288,15 +289,7 @@ impl Body {
     }
 
     pub fn statements(&self) -> impl Iterator<Item = Statement> {
-        self.0.children().filter_map(|node| {
-            CallStmt::cast(node.clone())
-                .map(Statement::Call)
-                .or_else(|| AssignStmt::cast(node.clone()).map(Statement::Assign))
-                .or_else(|| AssignBlock::cast(node.clone()).map(Statement::Block))
-                .or_else(|| ReturnStmt::cast(node.clone()).map(Statement::Return))
-                .or_else(|| IfStmt::cast(node.clone()).map(Statement::If))
-                .or_else(|| VarDecl::cast(node).map(Statement::Var))
-        })
+        statements_of(&self.0)
     }
 
     /// Where something missing from the end of the body goes: just before
@@ -320,6 +313,31 @@ pub enum Statement {
     If(IfStmt),
     /// A local variable's declaration, as a program variable's is written.
     Var(VarDecl),
+}
+
+/// The statements among `node`'s children.
+fn statements_of(node: &SyntaxNode) -> impl Iterator<Item = Statement> + use<> {
+    node.children().filter_map(|node| {
+        CallStmt::cast(node.clone())
+            .map(Statement::Call)
+            .or_else(|| AssignStmt::cast(node.clone()).map(Statement::Assign))
+            .or_else(|| AssignBlock::cast(node.clone()).map(Statement::Block))
+            .or_else(|| ReturnStmt::cast(node.clone()).map(Statement::Return))
+            .or_else(|| IfStmt::cast(node.clone()).map(Statement::If))
+            .or_else(|| VarDecl::cast(node).map(Statement::Var))
+    })
+}
+
+impl ValueBlock {
+    pub fn statements(&self) -> impl Iterator<Item = Statement> {
+        statements_of(&self.0)
+    }
+
+    /// The value, the expression the block ends with.
+    #[must_use]
+    pub fn value(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
 }
 
 impl Statement {
@@ -1089,6 +1107,7 @@ pub enum Expr {
     Image(ImageExpr),
     From(FromExpr),
     Call(CallExpr),
+    Block(ValueBlock),
 }
 
 impl Expr {
@@ -1111,7 +1130,8 @@ impl Expr {
             .or_else(|| NaryExpr::cast(node.clone()).map(Expr::Nary))
             .or_else(|| ImageExpr::cast(node.clone()).map(Expr::Image))
             .or_else(|| FromExpr::cast(node.clone()).map(Expr::From))
-            .or_else(|| CallExpr::cast(node).map(Expr::Call))
+            .or_else(|| CallExpr::cast(node.clone()).map(Expr::Call))
+            .or_else(|| ValueBlock::cast(node).map(Expr::Block))
     }
 
     #[must_use]
@@ -1134,6 +1154,7 @@ impl Expr {
             Expr::Image(e) => e.syntax(),
             Expr::From(e) => e.syntax(),
             Expr::Call(e) => e.syntax(),
+            Expr::Block(e) => e.syntax(),
         }
     }
 

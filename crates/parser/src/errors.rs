@@ -34,6 +34,7 @@ pub(crate) const TYPES_FORM: &str = "an operator's type parameters follow its pa
 pub(crate) const IF_FORM: &str = "an `if` has the form `if condition then value else value`, and `else if` chains another: `if n = 1 then \"one\" else if n = 2 then \"two\" else \"many\"`";
 pub(crate) const IF_STMT_FORM: &str = "an `if` statement has the form `if condition then [ … ] else [ … ];`, each branch a block in brackets, and `else if` chains another condition";
 pub(crate) const LOAD_FORM: &str = "a load has the form `load a from r order [asc x, desc y];`: the array `a` given the tuples of the relation `r`, or the values of its only attribute, in the order of the attributes listed";
+pub(crate) const VALUE_BLOCK_FORM: &str = "a value block has the form `[ var x := …; value ]`: local variables declared and assigned, then the value they compute";
 pub(crate) const VARIABLE_FORM: &str = "a variable declaration has the form `var name: type := value;`, where either the type or the value may be left out";
 
 /// Words other languages use to start a definition or declaration, which
@@ -62,6 +63,36 @@ const FOREIGN_KEYWORDS: &[&str] = &[
     "val",
     "void",
 ];
+
+/// Whether `word` is a keyword another language starts a declaration with,
+/// such as `let`, or a type name that C-family languages put first.
+pub(crate) fn foreign_keyword(word: &str) -> bool {
+    FOREIGN_KEYWORDS.contains(&word)
+}
+
+/// `found`, another language's keyword, starting a local variable's
+/// declaration: `var`.
+pub(crate) fn foreign_declaration(found: Found) -> Diagnostic {
+    Diagnostic::error(
+        Code::ExpectedDefinition,
+        format!(
+            "a local variable is declared with `var`, not `{}`",
+            found.text
+        ),
+        found.span,
+        "another language's keyword",
+    )
+    .with_note(
+        "a local variable is declared as a program's variable is: `var name: type := value;`",
+    )
+    .with_suggestion(
+        format!("replace `{}` with `var`", found.text),
+        vec![Edit {
+            span: found.span,
+            replacement: "var".to_string(),
+        }],
+    )
+}
 
 /// `expected` should have come right before `found`, at `at`, in a
 /// definition of the given `form`. `neighbors` are the characters before and
@@ -1704,13 +1735,13 @@ pub(crate) fn order_nulls(span: Span, removal: Span) -> Diagnostic {
     )
 }
 
-const BODY_VALUE: &str = "a read-only operator's body declares and assigns its local variables, if it has any, then ends with its value: an expression, without `;`";
+const BODY_VALUE: &str = "a read-only operator's body, and a value block, declares and assigns its local variables, if it has any, then ends with its value: an expression, without `;`";
 
 /// A `;`, at `span`, after a read-only body's value.
 pub(crate) fn value_semicolon(span: Span) -> Diagnostic {
     Diagnostic::error(
         Code::BodyValue,
-        "a body's value takes no `;`",
+        "the value at the end takes no `;`",
         span,
         "after the value",
     )
@@ -1737,7 +1768,7 @@ pub(crate) fn returned_value(keyword: Span, semicolon: Option<Span>) -> Diagnost
     }));
     Diagnostic::error(
         Code::BodyValue,
-        "a body's value is written without `return`",
+        "the value at the end is written without `return`",
         keyword,
         "`return` is for leaving an operator early",
     )
@@ -1745,12 +1776,23 @@ pub(crate) fn returned_value(keyword: Span, semicolon: Option<Span>) -> Diagnost
     .with_suggestion("write the value alone", edits)
 }
 
+/// A value block with no value, which goes at `at`.
+pub(crate) fn block_without_value(at: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::BodyValue,
+        "a value block ends with its value",
+        at,
+        "no value",
+    )
+    .with_note("a value block declares and assigns its local variables, then ends with the value they compute: an expression, without `;`, as in `[ var x := 2; x * x ]`")
+}
+
 /// An expression, at `span`, in a read-only body before other statements:
 /// a value where only the last is.
 pub(crate) fn value_before_statements(span: Span) -> Diagnostic {
     Diagnostic::error(
         Code::BodyValue,
-        "only the last item of a body is its value",
+        "only the last item is the value",
         span,
         "a value before the end",
     )

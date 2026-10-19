@@ -162,6 +162,14 @@ fn operators() {
             r#""several""#,
             r#""the menu's""#,
             r#""dishes""#,
+            // Value blocks: the spread at 16, folded, and at 25, when
+            // running, 1500 less 937; pozole's band, at 937.
+            r#""spread""#,
+            "522",
+            r#""spread now""#,
+            "563",
+            r#""pozole""#,
+            r#""under 1000 by 63""#,
         ]
     );
 }

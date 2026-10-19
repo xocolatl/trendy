@@ -86,11 +86,11 @@ struct Statements<'a, 'b> {
 }
 
 impl Statements<'_, '_> {
-    fn names(&self) -> BodyNames<'_, '_> {
+    fn names(&mut self) -> BodyNames<'_, '_> {
         BodyNames {
             cx: self.cx,
             within: self.within,
-            locals: &self.locals,
+            locals: &mut self.locals,
         }
     }
 
@@ -125,7 +125,7 @@ impl Statements<'_, '_> {
         let (cx, within) = (self.cx, self.within);
         match stmt {
             ast::Statement::Call(stmt) => {
-                call(stmt, within, cx, &self.locals, self.growing, errors)
+                call(stmt, within, cx, &mut self.locals, self.growing, errors)
             }
             ast::Statement::Assign(stmt) => {
                 let clauses: Vec<_> = stmt.clauses().collect();
@@ -221,7 +221,7 @@ fn declaration(
     let op = cx.operators.get(within);
     let checked = {
         let mut names = BodyNames { cx, within, locals };
-        locals::local(decl, op, cx.namespaces, &mut names, errors)
+        locals::local(decl, &op.types, &mut names, errors)
     };
     let (local, value) = checked.unzip();
     let id = locals.declare(decl, local)?;
@@ -237,7 +237,7 @@ fn call(
     stmt: &ast::CallStmt,
     within: hir::OperatorId,
     cx: &Context,
-    locals: &Locals,
+    locals: &mut Locals,
     growing: &mut Vec<Growing>,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Statement> {
@@ -353,7 +353,7 @@ fn calls_in(block: &hir::Block, called: &mut Vec<hir::OperatorId>) {
 pub(crate) struct BodyNames<'a, 'b> {
     pub(crate) cx: &'a Context<'b>,
     pub(crate) within: hir::OperatorId,
-    pub(crate) locals: &'a Locals,
+    pub(crate) locals: &'a mut Locals,
 }
 
 impl BodyNames<'_, '_> {
@@ -432,6 +432,18 @@ impl Names for BodyNames<'_, '_> {
             hir::Expr::Local(id) => self.locals.get(*id).ty.clone(),
             _ => unreachable!("only variables, parameters and local variables are leaves"),
         }
+    }
+
+    fn fresh_local(&mut self, local: hir::Local) -> hir::LocalId {
+        self.locals.fresh(local)
+    }
+
+    fn hides(&self, name: &str) -> bool {
+        self.params().contains_key(name)
+            || matches!(
+                self.locals.find(name),
+                Some(Local::Declared(..) | Local::Later(_) | Local::Invalid)
+            )
     }
 
     fn type_parameters(&self) -> Option<&[hir::TypeParameter]> {

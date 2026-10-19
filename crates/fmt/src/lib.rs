@@ -132,6 +132,7 @@ impl Layout {
             SyntaxKind::IfExpr => self.broken_if(node) && !self.chained_if(node),
             SyntaxKind::Body => Body::cast(node.clone())
                 .is_some_and(|b| b.statements().next().is_some() || b.value().is_some()),
+            SyntaxKind::ValueBlock => true,
             SyntaxKind::AssignBlock => {
                 AssignBlock::cast(node.clone()).is_some_and(|b| b.statements().next().is_some())
             }
@@ -156,15 +157,25 @@ impl Layout {
     /// across lines is followed by more on its last line.
     fn broken_if(&self, node: &SyntaxNode) -> bool {
         node.kind() == SyntaxKind::IfExpr
-            && (self.broken.contains(node)
-                || self.chained_if(node)
-                || node.descendants().skip(1).any(|n| {
-                    if n.kind() == SyntaxKind::IfExpr {
-                        self.broken.contains(&n)
-                    } else {
-                        self.own_block(&n)
-                    }
-                }))
+            && (self.broken.contains(node) || self.chained_if(node) || self.spans_lines(node))
+    }
+
+    /// Whether something in the `if` `node` is laid out across lines, but
+    /// for a value block that is a branch, of it or of an `else if` chained
+    /// to it, which is laid out as an `if` statement's branch is: `then [`,
+    /// then `] else [`.
+    fn spans_lines(&self, node: &SyntaxNode) -> bool {
+        node.children().any(|child| match child.kind() {
+            SyntaxKind::ValueBlock => false,
+            SyntaxKind::IfExpr => self.broken.contains(&child) || self.spans_lines(&child),
+            _ => child.descendants().any(|n| {
+                if n.kind() == SyntaxKind::IfExpr {
+                    self.broken.contains(&n)
+                } else {
+                    self.own_block(&n)
+                }
+            }),
+        })
     }
 
     /// Whether `node` is an `if` in the `else` branch of a broken `if`,
@@ -960,6 +971,16 @@ mod tests {
         assert_eq!(
             fmt(months),
             "var m := array [\n    \"January\",\n    \"February\",\n    \"March\",\n    \"April\",\n    \"May\",\n    \"June\",\n    \"July\",\n    \"August\",\n    \"September\",\n];\n"
+        );
+    }
+
+    #[test]
+    fn value_blocks() {
+        // Each item on a line of its own, and an `if`'s blocks laid out as
+        // an `if` statement's.
+        assert_eq!(
+            fmt("var x:=[var a:=1;a*2];var y:=if c then[var a:=1;a]else[var b:=2;b];"),
+            "var x := [\n    var a := 1;\n    a * 2\n];\nvar y := if c then [\n    var a := 1;\n    a\n] else [\n    var b := 2;\n    b\n];\n"
         );
     }
 

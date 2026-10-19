@@ -232,8 +232,9 @@ A read-only operator has its result type after its parameters, as a
 `TypeAnnotation`, and its body ends with its value: an expression, a child
 of the `Body`, without `;`. The parser knows the body is a read-only
 operator's from the result type, and reads an operand that doesn't start a
-statement as the value: an `if` whose `then` a `[` follows is a
-statement, and `a = b` running to the `]` a comparison, not `=` for `:=`.
+statement as the value: an `if`, or `a = b`, that runs to the `]` with no
+`;` is the value, an `if` expression and a comparison, and otherwise an
+`if` statement and `=` for `:=`.
 A `;` after the value, and a value before other statements, are reported
 (P0031), and so is `return x;` at the end, which other languages write,
 parsed as the value it means. Other languages' spellings of the result
@@ -503,6 +504,20 @@ checked already, and recursion is found then, not when it would loop. The
 call's arguments are checked as `call`'s are (`Checker::arguments`). An
 update operator has no value, so calling one in an expression is an error
 (A0016), and `call` of a read-only operator would lose its value (A0037).
+
+A value block (`ValueBlock`) is a `[` in an operand's place before a
+statement, which a `var` starts or a `;` ends; anything else in brackets
+is an array without its keyword. Its contents are a read-only body's, and
+braces before a `var`, as Rust writes a block, are fixed to brackets.
+Sema checks it with `block::BlockNames`, which resolves its own local
+variables and hands every other name to the names around it, as
+`TupleNames` does for the tuple at hand, and lets it assign only its own.
+Each local variable gets its id from those names (`Names::fresh_local`):
+from the operator's `Locals`, or, in an initial value, from the globals.
+A local variable whose value is known when compiling is that value
+wherever its name is used, and each other one is a `Let`, so a block in
+an initial value is evaluated whole, but for values computed for each
+tuple of a relation, which are substituted when each tuple is.
 
 The kinds, which only the prelude declares (A0013), are in `Namespaces`,
 each with the built-in types that declare it. Loading the prelude reads the

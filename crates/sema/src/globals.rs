@@ -50,6 +50,11 @@ pub(crate) struct Globals<'a> {
     locals: HashMap<hir::OperatorId, Vec<hir::Local>>,
     /// The globals being evaluated, innermost last.
     stack: Vec<Pending>,
+    /// The local variables of value blocks in initial values, by id. Most
+    /// have values known when compiling, which their names stand for; those
+    /// computed for each tuple of a relation, as in an `extend`'s values,
+    /// are substituted when each tuple is.
+    block_locals: Vec<hir::Local>,
 }
 
 /// Where a global's evaluation is.
@@ -109,6 +114,7 @@ impl<'a> Globals<'a> {
             values,
             locals: HashMap::new(),
             stack: Vec::new(),
+            block_locals: Vec::new(),
         }
     }
 
@@ -264,7 +270,6 @@ impl<'a> Globals<'a> {
         let decl = signature.decl.as_ref()?;
         let written = decl.result()?;
         let body = decl.body()?;
-        let namespaces = self.namespaces;
         let (mut locals, mut valid) = locals::declarations(&body, signature, errors);
         valid &= signature.valid;
         let mut lets: Vec<(hir::LocalId, hir::Expr)> = Vec::new();
@@ -274,7 +279,7 @@ impl<'a> Globals<'a> {
             let mut names = ReadOnlyNames {
                 globals: self,
                 within: signature.id,
-                locals: &locals,
+                locals: &mut locals,
             };
             match statement {
                 ast::Statement::Return(stmt) => {
@@ -288,7 +293,7 @@ impl<'a> Globals<'a> {
                     valid = false;
                 }
                 ast::Statement::Var(decl) => {
-                    let checked = locals::local(decl, signature, namespaces, &mut names, errors);
+                    let checked = locals::local(decl, &signature.types, &mut names, errors);
                     let (local, value) = checked.unzip();
                     match (locals.declare(decl, local), value) {
                         (Some(id), Some(value)) => lets.push((id, value)),
@@ -321,7 +326,7 @@ impl<'a> Globals<'a> {
         let mut names = ReadOnlyNames {
             globals: self,
             within: signature.id,
-            locals: &locals,
+            locals: &mut locals,
         };
         let expected = signature.result.clone().map(|ty| Expected {
             ty,
@@ -387,7 +392,20 @@ impl Names for Globals<'_> {
     }
 
     fn leaf_type(&self, leaf: &hir::Expr) -> hir::Type {
-        unreachable!("an initial value's names are constants, not {leaf:?}")
+        match leaf {
+            hir::Expr::Local(id) => self.block_locals[id.0].ty.clone(),
+            _ => unreachable!("an initial value's other names are constants, not {leaf:?}"),
+        }
+    }
+
+    fn fresh_local(&mut self, local: hir::Local) -> hir::LocalId {
+        let id = hir::LocalId(self.block_locals.len());
+        self.block_locals.push(local);
+        id
+    }
+
+    fn hides(&self, _: &str) -> bool {
+        false
     }
 
     fn checked(&mut self, id: hir::OperatorId, at: Span, errors: &mut Vec<Diagnostic>) -> bool {
@@ -409,7 +427,7 @@ impl Names for Globals<'_> {
 struct ReadOnlyNames<'g, 'a, 'l> {
     globals: &'g mut Globals<'a>,
     within: hir::OperatorId,
-    locals: &'l Locals,
+    locals: &'l mut Locals,
 }
 
 impl ReadOnlyNames<'_, '_, '_> {
@@ -486,6 +504,18 @@ impl Names for ReadOnlyNames<'_, '_, '_> {
             },
             _ => unreachable!("only variables, parameters and local variables are leaves"),
         }
+    }
+
+    fn fresh_local(&mut self, local: hir::Local) -> hir::LocalId {
+        self.locals.fresh(local)
+    }
+
+    fn hides(&self, name: &str) -> bool {
+        self.params().contains_key(name)
+            || matches!(
+                self.locals.find(name),
+                Some(Local::Declared(..) | Local::Later(_) | Local::Invalid)
+            )
     }
 
     fn type_parameters(&self) -> Option<&[hir::TypeParameter]> {

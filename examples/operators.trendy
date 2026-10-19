@@ -1,6 +1,6 @@
 /* Operators, read-only and update (TTM RM Prescription 3). A read-only
-   operator has a result type, and its body ends in one `return`: its call
-   is a value. An update operator returns nothing, and is invoked by `call`. A
+   operator has a result type, and its body ends with its value: its call
+   is that value. An update operator returns nothing, and is invoked by `call`. A
    call is evaluated when compiling where it can be, and made when the
    program runs elsewhere. A parameter's type can be `any type`, and type
    parameters, declared with `types`, say that several types are one: each
@@ -18,7 +18,7 @@ key { dish };
 
 /* A price in cents with VAT, rounded down. It reads `vat`, as it is when
    the operator is called. A read-only operator's local variables name
-   parts of its value, which `return` ends with. */
+   parts of its value, which its body ends with. */
 operator taxed{price: integer}: integer [
     var tax := price * vat div 100;
     price + tax
@@ -111,6 +111,18 @@ operator cost{price: T, quantity: T, delivery: T}: T
     price * quantity + delivery
 ];
 
+/* A label for a price: an `if`'s branches can be value blocks, which
+   compute a value in steps, as a read-only operator's body does. */
+operator band{price: integer}: text [
+    if price < 1000 then [
+        var under := 1000 - price;
+        "under 1000 by " || to_text{from: under}
+    ] else [
+        var over := price - 1000;
+        "over 1000 by " || to_text{from: over}
+    ]
+];
+
 var special := "ramen";
 var previous := "none";
 
@@ -128,6 +140,15 @@ operator rotate{next: text} [
 var totals := dishes extend { total := taxed{price: price} } remove {price};
 var affordable := under{limit: 1000}{dish};
 var plural := if count{r: dishes} = 1 then "dish" else "dishes";
+
+/* A value block in place: the spread between the dearest dish and the
+   cheapest, with VAT. Its local variables are its own, and it is
+   evaluated when compiling, as `vat` and `dishes` are known then. */
+var spread := [
+    var dearest := max{r: dishes, of: taxed{price: price}};
+    var lowest := min{r: dishes, of: taxed{price: price}};
+    dearest - lowest
+];
 
 operator main{} [
     call debug_value{v: totals};
@@ -176,4 +197,15 @@ operator main{} [
     };
     /* Decided when compiling, as `dishes` is known then. */
     call show{label: "the menu's", value: plural};
+    /* With `vat` at 25, known only when running. */
+    call show{label: "spread", value: spread};
+    call show{
+        label: "spread now",
+        value: [
+            var dearest := max{r: dishes, of: taxed{price: price}};
+            var lowest := min{r: dishes, of: taxed{price: price}};
+            dearest - lowest
+        ],
+    };
+    call show{label: "pozole", value: band{price: taxed{price: 750}}};
 ];

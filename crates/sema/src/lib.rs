@@ -1,4 +1,5 @@
 mod assign;
+mod block;
 mod body;
 mod check;
 mod errors;
@@ -5328,6 +5329,82 @@ mod tests {
             variables(swapped)[0].init.to_string(),
             "tuple { a: 2, b: 1 }"
         );
+    }
+
+    #[test]
+    fn value_blocks_compute_a_value_in_steps() {
+        // Known when compiling, the value is too.
+        let vars = variables(
+            "var people := relation { { name: \"Ada\", born: 1815 }, { name: \"Alan\", born: 1912 } };\nvar span := [ var first := min{r: people, of: born}; var last := max{r: people, of: born}; last - first ];\nvar step := [ var n := 1; n := n + 1; assign { n := n * 10; }; n ];",
+        );
+        let values: Vec<String> = vars.iter().skip(1).map(|v| v.init.to_string()).collect();
+        assert_eq!(values, ["97", "20"]);
+        // Known only when running, each local variable is a `Let`.
+        let program = analyze_str(&format!(
+            "operator f{{n: integer}}: integer [ [ var d := n * 2; d := d + 1; d * 10 ] ];{MAIN}"
+        ))
+        .unwrap();
+        let f = program.operators.iter().find(|o| o.name == "f").unwrap();
+        let hir::OperatorKind::ReadOnly { value, locals, .. } = &f.kind else {
+            panic!("f is read-only");
+        };
+        assert!(
+            matches!(value, hir::Expr::Let(_, _, body) if matches!(**body, hir::Expr::Let(..)))
+        );
+        assert_eq!(locals.len(), 2);
+        // In an `if`'s branches, and in an `extend`'s values, with the
+        // tuple's attributes in scope.
+        let source = format!(
+            "operator g{{c: boolean}}: integer [ if c then [ var a := 1; a ] else [ var b := 2; b ] ];\nvar e := relation {{ {{ x: 1 }} }} extend {{ y := [ var z := x + 1; z * z ] }};{MAIN}"
+        );
+        assert!(analyze_str(&source).is_ok(), "{:#?}", errors(&source));
+        assert_eq!(
+            variables("var e := relation { { x: 1 }, { x: 3 } } extend { y := [ var z := x + 1; z * z ] };")[0]
+                .init
+                .to_string(),
+            "relation { x: integer, y: integer } { { x: 1, y: 4 }, { x: 3, y: 16 } }"
+        );
+    }
+
+    #[test]
+    fn value_blocks_change_nothing_else() {
+        let in_f = |block: &str| {
+            errors(&format!(
+                "var total := 0;\noperator f{{n: integer}}: integer [ var m := 1; {block} ];{MAIN}"
+            ))
+        };
+        let codes = |block: &str| in_f(block).iter().map(|e| e.code).collect::<Vec<_>>();
+        // A local variable of its own hides nothing but a program's
+        // variable.
+        assert_eq!(codes("[ var n := 1; n ]"), [Code::DuplicateName]);
+        assert_eq!(codes("[ var m := 1; m ]"), [Code::DuplicateName]);
+        assert_eq!(
+            codes("[ var a := 1; var a := 2; a ]"),
+            [Code::DuplicateName]
+        );
+        let hiding = format!(
+            "var total := 0;\noperator f{{n: integer}}: integer [ [ var total := n; total ] ];{MAIN}"
+        );
+        assert!(analyze_str(&hiding).is_ok());
+        // It changes nothing outside.
+        assert_eq!(
+            in_f("[ var a := 1; m := a; a ]")[0].message,
+            "a value block can't assign `m`"
+        );
+        assert_eq!(
+            codes("[ var a := 1; total := a; a ]"),
+            [Code::ReadOnlyEffect]
+        );
+        assert_eq!(
+            codes("[ var a := 1; call debug_value{v: a}; a ]"),
+            [Code::ReadOnlyEffect]
+        );
+        assert_eq!(
+            codes("[ var a := 1; if a > 0 then [ a := 2; ]; a ]"),
+            [Code::Return]
+        );
+        // Its local variables are out of scope after it.
+        assert_eq!(codes("[ var a := 1; a ] + a"), [Code::UnknownName]);
     }
 
     #[test]

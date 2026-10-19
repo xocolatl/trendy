@@ -50,6 +50,16 @@ pub(crate) trait Names {
     /// gave.
     fn leaf_type(&self, leaf: &hir::Expr) -> hir::Type;
 
+    /// The id of `local`, a value block's local variable, among those of the
+    /// operator whose body this is, or of the initial value being checked.
+    fn fresh_local(&mut self, local: hir::Local) -> hir::LocalId;
+
+    /// Whether a local variable named `name`, declared here, would hide a
+    /// name that means something here: a parameter, a local variable or an
+    /// attribute of the tuple at hand. It may hide a variable of the
+    /// program's.
+    fn hides(&self, name: &str) -> bool;
+
     /// The heading of the tuple at hand, `Current(0, …)`, if there is one:
     /// in the values of an `extend` or a `replace`.
     fn tuple_at_hand(&self) -> Option<&hir::Heading> {
@@ -173,6 +183,7 @@ impl<'a> Checker<'a> {
                 self.matched(expected, hir::Expr::Constant(value), expr, errors)
             }
             Expr::Name(name_ref) => self.named(name_ref, expr, expected, errors),
+            Expr::Block(block) => crate::block::value(block, &mut *self.names, expected, errors),
             Expr::Paren(paren) => self.expr(&paren.inner()?, expected, errors),
             Expr::Unary(unary) => {
                 if let Some(literal) = ops::negated_literal(unary) {
@@ -2072,6 +2083,14 @@ impl Names for TupleNames<'_> {
 
     fn leaf_type(&self, leaf: &hir::Expr) -> hir::Type {
         self.outer.leaf_type(leaf)
+    }
+
+    fn fresh_local(&mut self, local: hir::Local) -> hir::LocalId {
+        self.outer.fresh_local(local)
+    }
+
+    fn hides(&self, name: &str) -> bool {
+        self.heading.get(name).is_some() || self.outer.hides(name)
     }
 
     fn tuple_at_hand(&self) -> Option<&hir::Heading> {

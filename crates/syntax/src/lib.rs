@@ -213,6 +213,9 @@ pub enum SyntaxKind {
     IndexExpr,
     /// `if c then a else b`: `a` if `c` is true, and else `b`.
     IfExpr,
+    /// `[ var x := …; x * 2 ]`: statements, then the value they compute,
+    /// as a read-only operator's body is.
+    ValueBlock,
     /// `r{a, b}`: a projection.
     ProjectExpr,
     /// `r remove {a, b}`, `r rename {a as b}`, `r extend { c := a + b }`,
@@ -295,7 +298,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 139] = [
+    pub const ALL: [SyntaxKind; 140] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -404,6 +407,7 @@ impl SyntaxKind {
         SyntaxKind::ExtractExpr,
         SyntaxKind::IndexExpr,
         SyntaxKind::IfExpr,
+        SyntaxKind::ValueBlock,
         SyntaxKind::ProjectExpr,
         SyntaxKind::PostfixExpr,
         SyntaxKind::NaryExpr,
@@ -821,6 +825,7 @@ impl SyntaxKind {
             | SyntaxKind::ExtractExpr
             | SyntaxKind::IndexExpr
             | SyntaxKind::IfExpr
+            | SyntaxKind::ValueBlock
             | SyntaxKind::ProjectExpr
             | SyntaxKind::PostfixExpr
             | SyntaxKind::NaryExpr

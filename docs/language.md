@@ -1891,6 +1891,86 @@ operator label{n: integer}: text [
 operator main{} [];
 ```
 
+### Value blocks
+
+A value block computes a value in steps, where the value goes: local
+variables declared and assigned, then the value, an expression without
+`;`. It is a read-only operator's body in place, and Tutorial D's
+`WITH … : exp` (TTM chapter 5), which introduces names in turn, then
+gives the value.
+
+```trendy
+var people := relation {
+    { name: "Ada", born: 1815 },
+    { name: "Alan", born: 1912 },
+};
+var span := [
+    var first := min{r: people, of: born};
+    var last := max{r: people, of: born};
+    last - first
+];
+
+operator label{n: integer}: text [
+    if n < 100 then [
+        var short := 100 - n;
+        "short by " || to_text{from: short}
+    ] else [
+        var over := n - 100;
+        "over by " || to_text{from: over}
+    ]
+];
+
+operator main{} [
+    call debug_value{v: span};
+    call debug_value{v: label{n: span}};
+    call debug_value{v: people extend { age_at_50 := [ var at := born + 50; at - born ] }};
+];
+```
+
+- **It goes wherever a value does:** in an initial value, a body, an
+  argument, an `if`'s branches, or an `extend`'s values, where the tuple's
+  attributes are in scope, as above.
+- **It has a statement before its value,** which a `var` starts or a `;`
+  ends; brackets with no statement are an array's habit (see
+  [Arrays](#arrays)). One that doesn't end with a value is an error
+  (P0031), and so are braces, as Rust and C write a block, fixed to
+  brackets (P0003).
+- **Its local variables are its own.** They are in scope in all of it,
+  but have no value before their declarations, and none after it. They
+  hide no name around it, a parameter's, a local variable's or an
+  attribute of the tuple at hand (A0001), but they hide a variable of the
+  program's.
+- **It changes nothing else,** as a read-only operator doesn't: it can't
+  assign a variable that isn't its own, `call` an operator (A0034), or
+  have an `if` statement or a `return` (A0035). It chooses between values
+  with an `if` expression, whose branches can be value blocks; an `if`
+  that runs to the end of a body or block, with no `;`, is its value.
+- **It is evaluated when compiling** where its values are known, as any
+  expression is.
+
+```trendy,error
+operator twice{n: integer}: integer [
+    [
+        var n := 2;
+        n * n
+    ]
+];
+
+operator main{} [];
+```
+
+```trendy,error
+var total := 0;
+
+operator main{} [
+    call debug_value{v: [
+        var a := 1;
+        total := a;
+        a
+    ]};
+];
+```
+
 ### Attribute values
 
 `t.a` is the value of the tuple `t`'s attribute `a`, and `t.a.b` reaches
@@ -2905,6 +2985,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `fn`, `def`, `function`, `void main()` | `operator main{} [];` |
 | `fn f(x: i64) -> i64 { x + 1 }`, `RETURNS INTEGER` | `operator f{x: integer}: integer [x + 1];` |
 | `return x;`, `RETURN x` at the end of a body | `x` |
+| `{ let x = 1; x * 2 }`, Rust's block, in an expression | `[ var x := 1; x * 2 ]` |
 | `print(x)`, `f(x)` | `call debug_value{v: x};` |
 | `f(x)` in an expression | `f{x: x}`, every argument named |
 | `let`, `const`, `int x` | `var x`, at the top level or in an operator's body |
