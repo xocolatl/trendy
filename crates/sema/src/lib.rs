@@ -4147,6 +4147,117 @@ mod tests {
     }
 
     #[test]
+    fn an_element_is_assigned_as_its_array() {
+        let source = |body: &str| {
+            format!(
+                "var a := array [1, 2, 3];\nvar g := array [array [1], array [2]];\noperator main{{}} [ var i := 1; {body} ];"
+            )
+        };
+        // `a[i] := x` assigns `a` the array with the element changed.
+        let body = main_body(&source("a[i] := 5;"));
+        let [_, hir::Statement::Assign(assignments)] = &body[..] else {
+            panic!("{body:?}");
+        };
+        let [
+            hir::Assignment {
+                target: hir::Target::Variable(id),
+                value: hir::Expr::WithElements(array, changes),
+            },
+        ] = &assignments[..]
+        else {
+            panic!("{assignments:?}");
+        };
+        assert_eq!(**array, hir::Expr::Variable(*id));
+        let [change] = &changes[..] else {
+            panic!("{changes:?}");
+        };
+        assert_eq!(change.value, hir::Expr::Constant(hir::Value::Integer(5)));
+        // Changes to an array's elements, at any depth, are one.
+        let body = main_body(&source("assign { g[i][1] := 3; g[2] := array [4]; };"));
+        let [_, hir::Statement::Assign(assignments)] = &body[..] else {
+            panic!("{body:?}");
+        };
+        let [
+            hir::Assignment {
+                value: hir::Expr::WithElements(_, changes),
+                ..
+            },
+        ] = &assignments[..]
+        else {
+            panic!("{assignments:?}");
+        };
+        let depths: Vec<usize> = changes.iter().map(|c| c.path.len()).collect();
+        assert_eq!(depths, [2, 1]);
+        // Known when compiling, the new value is too.
+        assert_eq!(
+            variables("var b := [ var c := array [1, 2]; c[2] := 20; c ];")[0]
+                .init
+                .to_string(),
+            "array [1, 20]"
+        );
+        // Changes known to overlap now are reported now, and others stop
+        // the program if they do.
+        let codes = |body: &str| codes(&source(body));
+        for overlapping in [
+            "assign { a[1] := 1; a[1] := 2; };",
+            "assign { a[i] := 1; a[i] := 2; };",
+            "assign { g[1] := array [0]; g[1][1] := 2; };",
+            "assign { a := array [0]; a[1] := 2; };",
+        ] {
+            assert_eq!(
+                codes(overlapping),
+                [Code::ConflictingChanges],
+                "{overlapping}"
+            );
+        }
+        let apart = source("assign { a[i] := 1; a[2] := 2; g[1][1] := 3; g[2][1] := 4; };");
+        assert!(analyze_str(&apart).is_ok(), "{:#?}", errors(&apart));
+        // As are those of a call evaluated when compiling.
+        let evaluated = "operator f{i: integer, j: integer}: array integer [ var c := array [1, 2]; assign { c[i] := 5; c[j] := 6; }; c ];\nvar x := f{i: 1, j: 1};";
+        assert_eq!(
+            errors(&format!("{evaluated}{MAIN}"))
+                .iter()
+                .map(|e| e.code)
+                .collect::<Vec<_>>(),
+            [Code::ConflictingChanges]
+        );
+        // A position below 1, a value that is the element's own, of another
+        // type, or an element of what isn't an array.
+        assert_eq!(codes("a[0] := 1;"), [Code::IndexOutOfRange]);
+        assert_eq!(codes("a[i] := a[i];"), [Code::NoChange]);
+        assert_eq!(codes("a[1] := \"one\";"), [Code::TypeMismatch]);
+        assert_eq!(codes("i[1] := 1;"), [Code::WrongOperandType]);
+        assert_eq!(
+            fix(&source("a[0] := 1;")),
+            source("a[1] := 1;"),
+            "positions count from 1"
+        );
+    }
+
+    #[test]
+    fn attributes_are_changed_by_update() {
+        let source = |body: &str| {
+            format!(
+                "var t := tuple {{ name: \"Ada\", born: 1815 }};\nvar people := array [{{ name: \"Ada\", born: 1815 }}];\noperator main{{}} [ var name := \"Kenji\"; {body} ];"
+            )
+        };
+        assert_eq!(
+            fix(&source("t.name := \"Ada Lovelace\";")),
+            source("update t { name := \"Ada Lovelace\" };")
+        );
+        assert_eq!(
+            fix(&source("people[1].born := 1816;")),
+            source("people[1] := people[1] replace { born := 1816 };")
+        );
+        // Inside the braces, `name` would be the attribute.
+        let [error] = &errors(&source("t.name := name;"))[..] else {
+            panic!("one error");
+        };
+        assert_eq!(error.code, Code::AttributeAssigned);
+        assert!(error.suggestions.is_empty());
+    }
+
+    #[test]
     fn a_blocks_changes_to_a_variable_are_merged() {
         let main = |body: &str| main_body(&assigning(POETS, body));
         // Two updates: the old value less the tuples either selects, which

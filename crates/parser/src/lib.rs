@@ -814,17 +814,52 @@ impl<'a> Parser<'a> {
             })
     }
 
-    /// Whether an assignment, or a shorthand for one, starts here. A
-    /// keyword before `:=` is one too, reported as a name that can't be one.
+    /// Whether an assignment, or a shorthand for one, starts here: a
+    /// target, then `:=`, or `=`, which is reported. A keyword before it is
+    /// one too, reported as a name that can't be one.
     fn at_assignment(&mut self) -> bool {
         let Some(found) = self.found() else {
             return false;
         };
+        let after = self.after_target_path(1);
         let assigned = (found.kind == SyntaxKind::Ident || found.kind.is_keyword())
             && self
-                .found_after(1)
+                .found_after(after)
                 .is_some_and(|f| matches!(f.kind, SyntaxKind::ColonEq | SyntaxKind::Eq));
         assigned || self.at_clause_keyword().is_some() || self.at_load()
+    }
+
+    /// The offset, as [`Parser::found_after`] counts, of the first token
+    /// from offset `n` on that isn't part of a target's path after its
+    /// variable: positions, `[…]`, and attributes, `.name`.
+    fn after_target_path(&mut self, mut n: usize) -> usize {
+        loop {
+            match self.found_after(n).map(|f| f.kind) {
+                Some(SyntaxKind::LBracket) => {
+                    let mut depth = 0usize;
+                    loop {
+                        match self.found_after(n).map(|f| f.kind) {
+                            Some(SyntaxKind::LBracket) => depth += 1,
+                            Some(SyntaxKind::RBracket) => depth -= 1,
+                            Some(SyntaxKind::Semicolon) | None => return n,
+                            _ => {}
+                        }
+                        n += 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                }
+                Some(SyntaxKind::Dot)
+                    if self
+                        .found_after(n + 1)
+                        .is_some_and(|f| f.kind == SyntaxKind::Ident) =>
+                {
+                    n += 2;
+                }
+                _ => return n,
+            }
+        }
     }
 
     /// Whether a `load` starts here: `load`, a contextual keyword, in any
@@ -1506,7 +1541,7 @@ impl<'a> Parser<'a> {
                 self.peek();
                 let start = self.builder.checkpoint();
                 let target = self.found().map_or(0, |f| f.span.start);
-                self.target();
+                self.assignment_target();
                 let mut with_eq = None;
                 let assign = match self.found() {
                     Some(found) if found.kind == SyntaxKind::Eq => {
@@ -1766,6 +1801,44 @@ impl<'a> Parser<'a> {
             ));
         }
         None
+    }
+
+    /// What an assignment, `target := value`, assigns: a variable, or an
+    /// element of one, as in `grid[i][j]`, its positions each an
+    /// `IndexExpr` around what is before it. TTM's pseudovariables nest
+    /// (RM Prescription 5). An attribute, as in `t.name`, an `ExtractExpr`,
+    /// is parsed for sema to report: a tuple's attributes are changed by
+    /// `update`.
+    fn assignment_target(&mut self) {
+        self.peek();
+        let start = self.builder.checkpoint();
+        self.target();
+        loop {
+            match self.lookahead().map(|f| f.kind) {
+                Some(SyntaxKind::LBracket) => {
+                    self.builder.start_node_at(start, SyntaxKind::IndexExpr);
+                    self.bump();
+                    self.expression();
+                    self.expect(SyntaxKind::RBracket);
+                }
+                Some(SyntaxKind::Dot) => {
+                    self.builder.start_node_at(start, SyntaxKind::ExtractExpr);
+                    self.bump();
+                    if self.at(SyntaxKind::Ident) {
+                        self.start_node(SyntaxKind::Name);
+                        self.bump();
+                        self.builder.finish_node();
+                    } else {
+                        self.missing_with_help(
+                            SyntaxKind::Ident,
+                            "write the attribute's name after `.`, as in `t.name`",
+                        );
+                    }
+                }
+                _ => break,
+            }
+            self.builder.finish_node();
+        }
     }
 
     /// The variable an assignment assigns, and its name, if it is there.
@@ -5250,6 +5323,18 @@ SourceFile
             ["Update r update b = 2"]
         );
         assert_eq!(clauses("update t { a := 1 };"), ["Update t update -"]);
+        // An element, at any depth, and an attribute, which sema reports.
+        assert_eq!(
+            clauses("a[i + 1] := 2; g[1][j] := x; t.name := y; a[1].b := z;"),
+            [
+                "Assignment a[i + 1] - 2",
+                "Assignment g[1][j] - x",
+                "Assignment t.name - y",
+                "Assignment a[1].b - z"
+            ]
+        );
+        let main = |body: &str| format!("operator main{{}} [ {body} ];");
+        assert_eq!(fix(&main("a[1] = 2;")), main("a[1] := 2;"));
     }
 
     #[test]

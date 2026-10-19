@@ -684,6 +684,45 @@ pub enum Target {
     Local(LocalId),
 }
 
+/// A change to an element of an array, as in `a[i][j] := x`: the element
+/// at `path`, its positions, from the outermost array in, counting from 1,
+/// given `value`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ElementChange {
+    pub path: Vec<Expr>,
+    pub value: Expr,
+}
+
+impl ElementChange {
+    /// Whether this change and `other` overlap, one's path being the
+    /// other's or the start of it, as far as their positions show now:
+    /// `Some(true)` if every position the two paths have in common is
+    /// known to be the same, the same constant or expression, `Some(false)`
+    /// if one is known to differ, and `None` if that is known only when
+    /// running.
+    #[must_use]
+    pub fn overlaps(&self, other: &ElementChange) -> Option<bool> {
+        let mut same = true;
+        for (p, q) in self.path.iter().zip(&other.path) {
+            match (p, q) {
+                (Expr::Constant(p), Expr::Constant(q)) if p != q => return Some(false),
+                _ if p == q => {}
+                _ => same = false,
+            }
+        }
+        same.then_some(true)
+    }
+
+    /// The change, in an operator instantiated with `types`.
+    #[must_use]
+    pub fn instantiated(&self, types: &[Type]) -> ElementChange {
+        ElementChange {
+            path: self.path.iter().map(|p| p.instantiated(types)).collect(),
+            value: self.value.instantiated(types),
+        }
+    }
+}
+
 /// An attribute a `load` orders a relation's tuples by, and in which
 /// direction: `asc a` or `desc a`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -808,6 +847,15 @@ pub enum Expr {
     /// The element of the array at the position the second expression
     /// gives, counting from 1, which fails if it has none there.
     Index(Box<Expr>, Box<Expr>),
+    /// The array with an element changed for each change, at its path:
+    /// what `a[i] := x` assigns `a`, as TTM's pseudovariables are shorthand
+    /// for an assignment of the whole variable (RM Prescription 5). Every
+    /// position and value is computed from the array as it was. It fails if
+    /// a position is out of range, as `Index` does, or if two changes'
+    /// paths overlap, one's being the other's or the start of it, since no
+    /// order of the two would be the right one. The changes are at least
+    /// one.
+    WithElements(Box<Expr>, Vec<ElementChange>),
     /// The second expression's value if the first, a boolean, is true, and
     /// else the third's: only that one is computed, so the other's failure
     /// never happens.
@@ -852,6 +900,7 @@ impl Expr {
                 Type::Array(element) => *element,
                 other => panic!("an element of {other}"),
             },
+            Expr::WithElements(array, _) => array.type_with(leaf),
             Expr::If(_, then, _) => then.type_with(leaf),
             Expr::Load(relation, _, loaded) => match relation.type_with(leaf) {
                 Type::Relation(heading) => Type::Array(Box::new(loaded.element(&heading))),
@@ -921,6 +970,10 @@ impl Expr {
                 elements.iter().map(|e| e.instantiated(types)).collect(),
             ),
             Expr::Index(array, index) => Expr::Index(inst(array), inst(index)),
+            Expr::WithElements(array, changes) => Expr::WithElements(
+                inst(array),
+                changes.iter().map(|c| c.instantiated(types)).collect(),
+            ),
             Expr::If(condition, then, otherwise) => {
                 Expr::If(inst(condition), inst(then), inst(otherwise))
             }

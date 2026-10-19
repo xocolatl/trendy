@@ -479,6 +479,7 @@ pub(crate) fn type_mismatch(
         Origin::Type(_)
         | Origin::Variable(..)
         | Origin::Loaded(..)
+        | Origin::Element(..)
         | Origin::Heading(_)
         | Origin::Value(_)
         | Origin::Builtin
@@ -1753,6 +1754,38 @@ pub(crate) fn own_value(
     deleted(d, statement)
 }
 
+/// An assignment whose target, at `target`, is attribute `attribute`, as
+/// other languages assign an object's field, `t.name := x`. `fix`, if
+/// there is one, is the assignment's span and its rewriting, by `update`
+/// of a variable, if the third is true, or else as an assignment of an
+/// array's element with the attribute replaced.
+pub(crate) fn attribute_assigned(
+    target: Span,
+    attribute: &str,
+    fix: Option<(Span, String, bool)>,
+) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::AttributeAssigned,
+        format!("attribute `{attribute}` can't be assigned on its own"),
+        target,
+        "an attribute of a tuple",
+    )
+    .with_note("a tuple's attributes are changed by `update t { a := x }`, shorthand for `t := t replace { a := x }`; as in Tutorial D, an attribute is no variable to assign");
+    match fix {
+        Some((span, replacement, true)) => d.with_suggestion(
+            "change the attribute with `update`",
+            vec![Edit { span, replacement }],
+        ),
+        Some((span, replacement, false)) => d.with_suggestion(
+            "assign the element with the attribute replaced",
+            vec![Edit { span, replacement }],
+        ),
+        None => d.with_help(
+            "give the tuple a new value with the attribute replaced, by `update` or `replace`",
+        ),
+    }
+}
+
 /// An `insert`, a `d_insert` or an `i_delete`, after `keyword`, at `span`,
 /// in `statement`, of the empty relation.
 pub(crate) fn no_tuples_given(
@@ -1862,7 +1895,7 @@ pub(crate) fn own_attribute_value(
 }
 
 /// Why giving something its own value is an error, for notes.
-const OWN_VALUE_RULE: &str = "a variable or an attribute that isn't given a new value keeps its own, so giving it its own value changes nothing";
+const OWN_VALUE_RULE: &str = "a variable, an attribute or an element that isn't given a new value keeps its own, so giving it its own value changes nothing";
 
 /// An `update` with an empty `list`, in `statement`, which would change
 /// nothing.
@@ -1939,7 +1972,7 @@ pub(crate) fn conflicting_tuple(
 }
 
 /// How an `assign` block's changes to one variable combine, for notes.
-const CHANGES_RULE: &str = "the changes in an `assign` block are made at once, each computed from the variables as they were before it: changes to a variable's tuples or attributes combine, unless two remove the same tuple or set the same attribute, and `v := …` can't combine with any other change to `v`";
+const CHANGES_RULE: &str = "the changes in an `assign` block are made at once, each computed from the variables as they were before it: changes to a variable's tuples, attributes or elements combine, unless two remove the same tuple, set the same attribute, or set the same element or one in it, and `v := …` can't combine with any other change to `v`";
 
 /// `call name{…}`, at `span`, where `name` is `what`, not an operator.
 pub(crate) fn not_an_operator(name: &str, span: Span, what: &str) -> Diagnostic {
@@ -3372,7 +3405,24 @@ pub(crate) fn failed(failed: &crate::ops::Failed, expr: &Expr) -> Diagnostic {
         crate::ops::Failed::NotOne(count) => not_one_tuple(*count, expr),
         crate::ops::Failed::Broken(broken) => broken_combination(broken, expr),
         crate::ops::Failed::NoTuples(builtin) => no_tuples(*builtin, expr),
+        crate::ops::Failed::Overlap => overlapping_elements(expr),
     }
+}
+
+/// `expr`, evaluated when compiling, changes an array twice where the
+/// changes overlap: they set the same element, or one sets an element in
+/// the other's.
+fn overlapping_elements(expr: &Expr) -> Diagnostic {
+    Diagnostic::error(
+        Code::ConflictingChanges,
+        "two changes to an array set the same element",
+        expr.span(),
+        "evaluating this sets one element twice",
+    )
+    .with_note(CHANGES_RULE)
+    .with_help(
+        "give the changes different positions, or make them in two statements, one after the other",
+    )
 }
 
 /// `expr`, which takes `builtin`, `min` or `max`, of a relation without

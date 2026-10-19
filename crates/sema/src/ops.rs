@@ -1091,6 +1091,9 @@ pub(crate) enum Failed {
     Broken(Box<hir::Broken>),
     /// This built-in, `min` or `max`, is of a relation without tuples.
     NoTuples(hir::Builtin),
+    /// Two changes to an array overlap: they set one element, or one sets
+    /// an element of the other's.
+    Overlap,
 }
 
 /// The tuples of `operand` for which `condition`, computed from the tuple at
@@ -1299,6 +1302,97 @@ pub(crate) fn index(array: hir::Expr, position: hir::Expr) -> Result<hir::Expr, 
         }
         array => Ok(hir::Expr::Index(Box::new(array), Box::new(position))),
     }
+}
+
+/// `array` with `changes` made, as [`hir::Expr::WithElements`] makes
+/// them: evaluated if the array, each position and each value are
+/// constants.
+///
+/// # Errors
+///
+/// Returns why it has no value: two changes overlap, known now if their
+/// positions are, or a position is out of range, known now if it is a
+/// constant and the array's length is, or it is below 1, whatever the
+/// array.
+pub(crate) fn with_elements(
+    array: hir::Expr,
+    changes: Vec<hir::ElementChange>,
+) -> Result<hir::Expr, Failed> {
+    for (i, change) in changes.iter().enumerate() {
+        if changes[..i]
+            .iter()
+            .any(|other| other.overlaps(change) == Some(true))
+        {
+            return Err(Failed::Overlap);
+        }
+        for position in &change.path {
+            if let hir::Expr::Constant(hir::Value::Integer(index)) = *position
+                && index < 1
+            {
+                return Err(Failed::Scalar(hir::Failure::OutOfRange {
+                    index,
+                    length: None,
+                }));
+            }
+        }
+    }
+    let known = |e: &hir::Expr| matches!(e, hir::Expr::Constant(_));
+    let hir::Expr::Constant(hir::Value::Array(mut value)) = array else {
+        return Ok(hir::Expr::WithElements(Box::new(array), changes));
+    };
+    if !changes
+        .iter()
+        .all(|change| change.path.iter().all(known) && known(&change.value))
+    {
+        let array = hir::Expr::Constant(hir::Value::Array(value));
+        return Ok(hir::Expr::WithElements(Box::new(array), changes));
+    }
+    for change in changes {
+        let path: Vec<i64> = change
+            .path
+            .iter()
+            .map(|p| match p {
+                hir::Expr::Constant(hir::Value::Integer(index)) => *index,
+                _ => unreachable!("sema checks positions are integers"),
+            })
+            .collect();
+        let hir::Expr::Constant(element) = change.value else {
+            unreachable!("every value is known");
+        };
+        changed(&mut value, &path, element).map_err(Failed::Scalar)?;
+    }
+    Ok(hir::Expr::Constant(hir::Value::Array(value)))
+}
+
+/// Give the element of `array` at `path`, positions from the outermost
+/// array in, `element`.
+///
+/// # Errors
+///
+/// Returns the position that is out of range, if one is.
+fn changed(
+    array: &mut hir::ArrayValue,
+    path: &[i64],
+    element: hir::Value,
+) -> Result<(), hir::Failure> {
+    let (&index, rest) = path.split_first().expect("a path has a position");
+    let length = array.elements.len();
+    let at = usize::try_from(index)
+        .ok()
+        .and_then(|i| i.checked_sub(1))
+        .filter(|at| *at < length)
+        .ok_or(hir::Failure::OutOfRange {
+            index,
+            length: Some(length),
+        })?;
+    if rest.is_empty() {
+        array.elements[at] = element;
+        return Ok(());
+    }
+    let hir::Value::Array(inner) = &mut array.elements[at] else {
+        unreachable!("sema indexes only arrays");
+    };
+    changed(inner, rest, element)
 }
 
 /// `then` if `condition` is true, and else `otherwise`: decided now if the
@@ -1595,6 +1689,20 @@ fn shifted(expr: hir::Expr, cutoff: usize) -> hir::Expr {
             elements.into_iter().map(|e| shifted(e, cutoff)).collect(),
         ),
         hir::Expr::Index(array, position) => hir::Expr::Index(shift(array), shift(position)),
+        hir::Expr::WithElements(array, changes) => hir::Expr::WithElements(
+            shift(array),
+            changes
+                .into_iter()
+                .map(|change| hir::ElementChange {
+                    path: change
+                        .path
+                        .into_iter()
+                        .map(|p| shifted(p, cutoff))
+                        .collect(),
+                    value: shifted(change.value, cutoff),
+                })
+                .collect(),
+        ),
         hir::Expr::Load(relation, items, loaded) => hir::Expr::Load(shift(relation), items, loaded),
         hir::Expr::If(condition, then, otherwise) => {
             hir::Expr::If(shift(condition), shift(then), shift(otherwise))
@@ -1663,6 +1771,15 @@ pub(crate) fn targets_read(expr: &hir::Expr) -> Vec<hir::Target> {
                     walk(value, read);
                 }
             }
+            hir::Expr::WithElements(array, changes) => {
+                walk(array, read);
+                for change in changes {
+                    for position in &change.path {
+                        walk(position, read);
+                    }
+                    walk(&change.value, read);
+                }
+            }
         }
     }
     let mut read = Vec::new();
@@ -1707,6 +1824,12 @@ pub(crate) fn uses_tuple(expr: &hir::Expr, depth: usize) -> bool {
         }
         hir::Expr::Extend(operand, _, attributes) => {
             uses(operand) || attributes.values().any(|e| uses_tuple(e, depth + 1))
+        }
+        hir::Expr::WithElements(array, changes) => {
+            uses(array)
+                || changes
+                    .iter()
+                    .any(|change| change.path.iter().any(uses) || uses(&change.value))
         }
     }
 }
@@ -1905,6 +2028,30 @@ pub(crate) fn call(call: hir::Call, bindings: Bindings) -> Result<hir::Expr, Fai
     })
 }
 
+/// `array` with `changes` made, substituted as for [`substitute`].
+///
+/// # Errors
+///
+/// Returns why a position, a value or the changes fail.
+fn substituted_elements(
+    array: hir::Expr,
+    changes: Vec<hir::ElementChange>,
+    depth: usize,
+    substitution: &Substitution,
+) -> Result<hir::Expr, Failed> {
+    let sub = |e: hir::Expr| substitute(e, depth, substitution);
+    let changes = changes
+        .into_iter()
+        .map(|change| {
+            Ok(hir::ElementChange {
+                path: change.path.into_iter().map(sub).collect::<Result<_, _>>()?,
+                value: sub(change.value)?,
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    with_elements(sub(array)?, changes)
+}
+
 /// `if condition then then else otherwise`, with what `substitution`
 /// knows substituted, as [`substitute`] does: only the branch taken is
 /// computed.
@@ -2010,6 +2157,9 @@ fn substitute(
         ),
         hir::Expr::Index(operand, position) => {
             index(sub(operand)?, sub(position)?).map_err(Failed::Scalar)?
+        }
+        hir::Expr::WithElements(array, changes) => {
+            substituted_elements(*array, changes, depth, substitution)?
         }
         hir::Expr::Load(relation, items, loaded) => load(sub(relation)?, items, loaded),
         hir::Expr::If(condition, then, otherwise) => {
@@ -2248,7 +2398,8 @@ fn can_fail(expr: &hir::Expr) -> bool {
         | hir::Expr::Relation(..)
         | hir::Expr::Array(..)
         | hir::Expr::Load(..)
-        | hir::Expr::Index(..) => true,
+        | hir::Expr::Index(..)
+        | hir::Expr::WithElements(..) => true,
         hir::Expr::Unary(_, operand) => can_fail(operand),
         hir::Expr::Tuple(attributes) => attributes.values().any(can_fail),
         hir::Expr::Extract(tuple, _) => can_fail(tuple),

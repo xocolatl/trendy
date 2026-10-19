@@ -70,6 +70,23 @@ operator alphabetical{r: relation { city: text, rain: integer }}: array text [
 var ranked := wettest_first{r: yearly};
 var names := alphabetical{r: yearly};
 
+/* An element given a new value, `a[i] := x`, which is shorthand for
+   assigning the whole array, so that a value it was copied to keeps its
+   own (TTM's pseudovariables, RM Prescription 5). The changes of an
+   `assign` block are made at once, from the array as it was before them,
+   so these two swap. */
+var revised := [
+    var r := rainfall;
+    r[3] := 250;
+    var g := grid;
+    g[2][1] := 30;
+    assign {
+        r[1] := r[2];
+        r[2] := r[1];
+    };
+    tuple { rainfall: r, grid: g, kept: rainfall }
+];
+
 /* The same, of values known only when running. */
 operator computed{wet: integer, mid: integer, low: integer, two: integer, city: text, at: integer} [
     var none: array text;
@@ -105,6 +122,15 @@ operator computed{wet: integer, mid: integer, low: integer, two: integer, city: 
     load ranked from yearly order [desc rain, asc city];
     call debug_value{v: ranked};
     call debug_value{v: alphabetical{r: yearly}};
+    var revised := r;
+    revised[3] := 250;
+    var h := g;
+    h[2][1] := 30;
+    assign {
+        revised[1] := revised[2];
+        revised[2] := revised[1];
+    };
+    call debug_value{v: tuple { rainfall: revised, grid: h, kept: r }};
 ];
 
 operator main{} [
@@ -121,6 +147,7 @@ operator main{} [
     call debug_value{v: named};
     call debug_value{v: ranked};
     call debug_value{v: names};
+    call debug_value{v: revised};
 
     call computed{wet: 1200, mid: 950, low: 220, two: 2, city: "Mumbai", at: 2};
 ];

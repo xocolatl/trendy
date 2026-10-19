@@ -287,6 +287,17 @@ pub enum RuntimeFn {
     /// [`RuntimeFn::Sort`] copies a relation's tuples, or
     /// [`RuntimeFn::Adopt`] has the buffer hold what they point to.
     Allocate,
+    /// `trendy_rt_unique(array, descriptor)`: make the array at `array`,
+    /// of the type the descriptor describes, the only holder of its
+    /// buffer, copying it if anything else holds it, so that its elements
+    /// can be changed in place. The array is a variable's value, or an
+    /// element of a buffer that only its holder holds.
+    Unique,
+    /// `trendy_rt_duplicate(dst, src, descriptor)`: store at `dst` a copy
+    /// of the array `src`, of the type the descriptor describes, in a new
+    /// buffer that only the statement holds, whose elements can be changed
+    /// in place.
+    Duplicate,
     /// `trendy_rt_sort(relation, descriptor)`: replace the relation at
     /// `relation`, of the type the descriptor describes, with one of its
     /// tuples in the canonical order, without duplicates, in memory the
@@ -345,6 +356,8 @@ impl RuntimeFn {
             RuntimeFn::Combine => "trendy_rt_combine",
             RuntimeFn::Subset => "trendy_rt_subset",
             RuntimeFn::Allocate => "trendy_rt_allocate",
+            RuntimeFn::Unique => "trendy_rt_unique",
+            RuntimeFn::Duplicate => "trendy_rt_duplicate",
             RuntimeFn::Sort => "trendy_rt_sort",
             RuntimeFn::Load => "trendy_rt_load",
             RuntimeFn::CompareText => "trendy_rt_compare_text",
@@ -527,6 +540,9 @@ pub enum Failure {
     NoMax,
     /// An array has no element at the position it is indexed at.
     IndexOutOfRange,
+    /// Two changes to an array in an `assign` block set the same element,
+    /// or one sets an element in the other's.
+    ElementConflict,
 }
 
 impl Failure {
@@ -544,6 +560,7 @@ impl Failure {
             Failure::NoMin => 11,
             Failure::NoMax => 12,
             Failure::IndexOutOfRange => 13,
+            Failure::ElementConflict => 14,
         }
     }
 }

@@ -50,6 +50,10 @@ pub(crate) enum Origin {
     /// The array variable named, of tuples, which a load fills from a
     /// relation of their heading: where the variable's type is set.
     Loaded(String, Box<Origin>),
+    /// The elements of the array written as the text, which an element
+    /// assignment, as in `a[i] := x`, gives a value: where their type is
+    /// set.
+    Element(String, Box<Origin>),
     /// The type parameter named, of an operator called, given its type by
     /// the argument written here.
     TypeParameter(String, Expr),
@@ -97,6 +101,7 @@ impl Origin {
             Origin::Operator(token) => Some(trendy_syntax::span(token.text_range())),
             Origin::Variable(_, within)
             | Origin::Loaded(_, within)
+            | Origin::Element(_, within)
             | Origin::Operand(_, within) => within.span(),
         }
     }
@@ -125,6 +130,10 @@ impl Origin {
             Origin::Loaded(name, _) => {
                 format!("a load into `{name}` takes a relation of its elements' heading")
             }
+            Origin::Element(array, within) => match **within {
+                Origin::Type(_) => format!("`{array}`'s elements are declared with this type"),
+                _ => format!("`{array}`'s elements have this value's type"),
+            },
             Origin::Operand(_, within) => within.label(),
             Origin::Operator(token) if token.kind() == trendy_syntax::SyntaxKind::WhereKw => {
                 "`where` takes a boolean condition".to_string()
@@ -172,10 +181,20 @@ impl Origin {
         }
     }
 
+    /// The expectation for the elements of the array written `array`,
+    /// whose own this is: where their type is written, if anywhere, and
+    /// else the array's.
+    pub(crate) fn elements(&self, array: &str) -> Origin {
+        let within = self.array_element().unwrap_or_else(|| self.clone());
+        Origin::Element(array.to_string(), Box::new(within))
+    }
+
     /// Where the expectation for attribute `name` is written.
     fn attribute(&self, name: &str) -> Option<Origin> {
         match self {
-            Origin::Variable(_, declared) => declared.attribute(name),
+            Origin::Variable(_, declared) | Origin::Element(_, declared) => {
+                declared.attribute(name)
+            }
             Origin::Loaded(_, declared) => declared.array_element()?.attribute(name),
             Origin::Type(TypeExpr::Tuple(t)) => Origin::Heading(t.heading()?).attribute(name),
             Origin::Heading(h) => h
@@ -203,7 +222,9 @@ impl Origin {
     /// Where the expectation for an array's elements is written.
     fn array_element(&self) -> Option<Origin> {
         match self {
-            Origin::Variable(_, declared) => declared.array_element(),
+            Origin::Variable(_, declared) | Origin::Element(_, declared) => {
+                declared.array_element()
+            }
             Origin::Type(TypeExpr::Array(array)) => array.element().map(Origin::Type),
             Origin::Value(Expr::Array(array)) => array.elements().next().map(Origin::Value),
             _ => None,
@@ -213,7 +234,7 @@ impl Origin {
     /// Where the expectation for a relation's tuples is written.
     fn element(&self) -> Option<Origin> {
         match self {
-            Origin::Variable(_, declared) => declared.element(),
+            Origin::Variable(_, declared) | Origin::Element(_, declared) => declared.element(),
             Origin::Loaded(_, declared) => declared.array_element(),
             Origin::Type(TypeExpr::Relation(r)) => r.heading().map(Origin::Heading),
             Origin::Heading(h) => Some(Origin::Heading(h.clone())),

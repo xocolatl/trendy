@@ -11,11 +11,11 @@ use std::collections::BTreeMap;
 
 use trendy_diag::{Diagnostic, Span};
 use trendy_hir as hir;
-use trendy_syntax::ast::{self, Clause, VarDecl};
+use trendy_syntax::ast::{self, AstNode, Clause, VarDecl};
 use trendy_syntax::{SyntaxKind, SyntaxToken};
 
 use crate::check::{Assigned, Checker, Names, Unchanged};
-use crate::types::{Expected, Origin};
+use crate::types::{self, Expected, Origin};
 use crate::{errors, keys, ops};
 
 /// What names in an operator's body refer to, which an assignment there
@@ -138,10 +138,19 @@ fn assignments(
 enum Change {
     /// `v := x`: the whole new value, and where it is written.
     Value(hir::Expr, ast::Expr),
+    /// `a[i] := x`, of an array: its element at a path given a new value.
+    Element(ElementAt),
     /// An `update` of a tuple: its attributes given new values.
     Attributes(hir::Heading, BTreeMap<String, hir::Expr>),
     /// A change to a relation's tuples.
     Tuples(TupleChange),
+}
+
+/// An element an assignment gives a new value: the change, and where its
+/// target is written.
+struct ElementAt {
+    change: hir::ElementChange,
+    written: ast::Expr,
 }
 
 /// A change to a relation's tuples: those it removes from the old value,
@@ -176,7 +185,10 @@ fn change(
     errors: &mut Vec<Diagnostic>,
 ) -> Option<(Assignee, Change)> {
     let written = clause.target()?;
-    let ast::Expr::Name(name) = &written else {
+    let Some((name, positions)) = target_path(&written) else {
+        if let Some(error) = attribute_assigned(clause, &written, names, errors) {
+            errors.push(error);
+        }
         return None;
     };
     let ident = name.ident()?;
@@ -198,6 +210,9 @@ fn change(
     let mut checker = Checker::new(names);
     let change = match (clause, clause.keyword()) {
         (Clause::Load(load), _) => loaded(clause, load, &target, &mut checker, errors)?,
+        (Clause::Assignment(_), _) if !positions.is_empty() => {
+            Change::Element(element(clause, &target, &positions, &mut checker, errors)?)
+        }
         (Clause::Assignment(_), _) => {
             let written = clause.operand()?;
             let value = checker.expr(&written, Some(&target.expected), errors)?;
@@ -221,6 +236,157 @@ fn change(
         (_, None) => return None,
     };
     Some((target.assignee, change))
+}
+
+/// The variable that `written`, an assignment's target, names, and the
+/// brackets of each position after it, from the variable's array in, if
+/// the target is a variable, or an element of one, as in `grid[i][j]`.
+fn target_path(written: &ast::Expr) -> Option<(ast::NameRef, Vec<ast::IndexExpr>)> {
+    let mut positions = Vec::new();
+    let mut at = written.clone();
+    loop {
+        match at {
+            ast::Expr::Name(name) => {
+                positions.reverse();
+                return Some((name, positions));
+            }
+            ast::Expr::Index(index) => {
+                at = index.operand()?;
+                positions.push(index);
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// `clause`, an assignment of an element of `target`, an array variable,
+/// at `positions`, each array's brackets, from the variable's in: a
+/// pseudovariable, as TTM calls one (RM Prescription 5), shorthand for an
+/// assignment of the whole array. Its path and value, or `None` after
+/// reporting why it has none.
+fn element(
+    clause: &Clause,
+    target: &Target,
+    positions: &[ast::IndexExpr],
+    checker: &mut Checker,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<ElementAt> {
+    // The array at each position's level, as it is, which shows a position
+    // out of range now if its value is known, and as its name reads it,
+    // which shows a value that is the element's own.
+    let mut array = target.assignee.current.clone();
+    let mut itself = target.assignee.itself();
+    let mut ty = target.assignee.ty.clone();
+    let mut origin = target.expected.origin.clone();
+    let mut path = Vec::new();
+    for index in positions {
+        let operand = index.operand()?;
+        let hir::Type::Array(element) = ty else {
+            errors.push(errors::not_indexable(index, &ty, &operand));
+            return None;
+        };
+        let integer = Expected {
+            ty: hir::Type::Scalar(hir::Scalar::Integer),
+            origin: Origin::Operator(index.l_bracket()?),
+        };
+        let written_position = index.index()?;
+        let position = checker.expr(&written_position, Some(&integer), errors)?;
+        let written = ast::Expr::Index(index.clone());
+        array = types::evaluated(
+            ops::index(array, position.clone()),
+            &written,
+            Some(&written_position),
+            errors,
+        )?;
+        itself = hir::Expr::Index(Box::new(itself), Box::new(position.clone()));
+        path.push(position);
+        origin = origin.elements(&operand.syntax().text().to_string());
+        ty = *element;
+    }
+    let value = checker.expr(&clause.operand()?, Some(&Expected { ty, origin }), errors)?;
+    if value == itself {
+        let statement = clause.statement()?;
+        let text = target.written.syntax().text().to_string();
+        errors.push(errors::own_value(&text, clause.span(), &statement));
+        return None;
+    }
+    Some(ElementAt {
+        change: hir::ElementChange { path, value },
+        written: target.written.clone(),
+    })
+}
+
+/// The error for `clause`, whose target, `written`, is an attribute, as
+/// other languages assign an object's field, `t.name := x`: a tuple's
+/// attributes are changed by `update`, as Tutorial D has no attribute
+/// pseudovariables (TTM chapter 3). It has a fix when the attributes end
+/// the target, after a variable or an element of one, and the value names
+/// none of the attributes that the fix brings into scope.
+fn attribute_assigned(
+    clause: &Clause,
+    written: &ast::Expr,
+    names: &mut dyn Assigning,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<Diagnostic> {
+    // The attributes at the end, outermost first, and what they are of.
+    let mut attributes = Vec::new();
+    let mut base = written.clone();
+    while let ast::Expr::Extract(extract) = &base {
+        let name = extract.attribute()?.ident()?.text().to_string();
+        attributes.push(name);
+        base = extract.operand()?;
+    }
+    attributes.reverse();
+    let fix = (|| {
+        let (name, positions) = target_path(&base)?;
+        let ident = name.ident()?;
+        let span = trendy_syntax::span(ident.text_range());
+        let mut ty = names.assigned(ident.text(), span, errors)?.ty;
+        for _ in &positions {
+            let hir::Type::Array(element) = ty else {
+                return None;
+            };
+            ty = *element;
+        }
+        // Each attribute's tuple, whose attributes are in scope where the
+        // fix gives the attribute its value.
+        let mut opened = Vec::new();
+        for attribute in &attributes {
+            let hir::Type::Tuple(heading) = ty else {
+                return None;
+            };
+            ty = heading.get(attribute)?.clone();
+            opened.push(heading);
+        }
+        let value = clause.operand()?;
+        let captured = value
+            .syntax()
+            .descendants()
+            .filter_map(ast::NameRef::cast)
+            .filter_map(|name| name.ident())
+            .any(|ident| opened.iter().any(|h| h.get(ident.text()).is_some()));
+        if captured {
+            return None;
+        }
+        // `a := a replace { b := x }`, inside out.
+        let mut nested = value.syntax().text().to_string();
+        for (i, attribute) in attributes.iter().enumerate().skip(1).rev() {
+            nested = format!(
+                "{} replace {{ {attribute} := {nested} }}",
+                attributes[i - 1]
+            );
+        }
+        let first = &attributes[0];
+        let base = base.syntax().text().to_string();
+        let replacement = if positions.is_empty() {
+            format!("update {base} {{ {first} := {nested} }}")
+        } else {
+            format!("{base} := {base} replace {{ {first} := {nested} }}")
+        };
+        Some((clause.span(), replacement, positions.is_empty()))
+    })();
+    let attribute = attributes.last()?;
+    Some(errors::attribute_assigned(written.span(), attribute, fix))
 }
 
 /// `load`, the clause `clause`, of `target`: the array of the tuples of
@@ -568,7 +734,61 @@ fn merged(
             }
             tuples_merged(&assignee.current, name, changes, names.bindings(), errors)
         }
+        Change::Element(change) => {
+            let mut changes = vec![(clause, change)];
+            for (clause, change) in list {
+                let Change::Element(change) = change else {
+                    unreachable!("an array variable's changes are to its elements");
+                };
+                changes.push((clause, change));
+            }
+            elements_merged(assignee.current.clone(), name, changes, errors)
+        }
     }
+}
+
+/// The new value of the array variable `name`, whose value is `current`,
+/// from the `changes` to its elements, if no two are known to overlap now:
+/// to set the same element, or one an element in the other's. One known
+/// only when running stops the program then.
+fn elements_merged(
+    current: hir::Expr,
+    name: &str,
+    changes: Vec<(&Clause, ElementAt)>,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<hir::Expr> {
+    for (i, (clause, at)) in changes.iter().enumerate() {
+        let Some((first, earlier)) = changes[..i]
+            .iter()
+            .find(|(_, earlier)| earlier.change.overlaps(&at.change) == Some(true))
+        else {
+            continue;
+        };
+        let text = |at: &ElementAt| at.written.syntax().text().to_string();
+        let why = match earlier.change.path.len().cmp(&at.change.path.len()) {
+            std::cmp::Ordering::Equal => format!("both set `{}`", text(at)),
+            std::cmp::Ordering::Less => format!("`{}` is in `{}`", text(at), text(earlier)),
+            std::cmp::Ordering::Greater => format!("`{}` is in `{}`", text(earlier), text(at)),
+        };
+        errors.push(errors::conflicting_changes(
+            name,
+            first.span(),
+            clause.span(),
+            &why,
+        ));
+        return None;
+    }
+    let written = changes[0].1.written.clone();
+    let changes = changes.into_iter().map(|(_, at)| at.change).collect();
+    types::evaluated(
+        ops::with_elements(current, changes).map_err(|failed| match failed {
+            ops::Failed::Scalar(failure) => failure,
+            _ => unreachable!("overlapping changes are reported above"),
+        }),
+        &written,
+        None,
+        errors,
+    )
 }
 
 /// Whether a change in `list`, the changes to the variable `name`, whose

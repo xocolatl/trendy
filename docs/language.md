@@ -1433,6 +1433,73 @@ var first := cities[1];
 operator main{} [];
 ```
 
+### Changing an element
+
+`a[i] := x;` gives the element of the array variable `a` at position `i`
+the value `x`. It is shorthand for assigning `a` the array with that
+element changed and the others as they were: *The Third Manifesto* calls
+such a target a pseudovariable, and any assignment to one shorthand for an
+assignment to the variable (RM Prescription 5). Pseudovariables nest, so
+`grid[i][j] := x;` changes an element of an element.
+
+```trendy
+var rainfall := array [1200, 950, 220];
+var grid := array [array [1, 2], array [3, 4]];
+
+operator main{} [
+    var before := rainfall;
+    rainfall[3] := 250;
+    grid[2][1] := 30;
+    call debug_value{v: rainfall};
+    call debug_value{v: before};
+    call debug_value{v: grid};
+];
+```
+
+- **Arrays are values,** so changing one changes no other: `before` above
+  keeps the old elements, where other languages' variables share a list.
+  A change copies nothing when nothing else holds the array, which it then
+  changes in place, and copies the array otherwise.
+- **The position is one the array has,** as for reading one: any other is
+  an error (R0011), and `a[0]` and `a[-1]` are fixed as they are there. An
+  assignment never adds an element: give the variable a new array for
+  that, as in `a := array [1, 2, 3];`.
+- **A tuple's attributes are no variables to assign,** as Tutorial D's
+  aren't, so `t.name := x;` is fixed to `update t { name := x };`, and an
+  attribute of an array's element, `a[i].name := x;`, to
+  `a[i] := a[i] replace { name := x };` (A0048).
+- **In an `assign` block, changes to an array's elements merge,** each
+  computed from the array as it was (see
+  [Assigning at once](#assigning-at-once)), so
+  `assign { a[1] := a[2]; a[2] := a[1]; };` swaps two elements. Two that
+  set the same element, or one an element in the other's, conflict
+  (R0009): when their positions are known only when running, they stop the
+  program if they are the same then.
+- **An array a `for` loop goes through can't be changed in it** (A0026):
+  go through its positions with a `while` loop instead.
+- **A value block, or a read-only operator's body, can change its own
+  local variable's elements,** and so compute an array with an element
+  changed, as a value: `[ var b := a; b[i] := x; b ]`.
+
+```trendy,error
+var people := array [{ name: "Wangari", born: 1940 }];
+
+operator main{} [
+    people[1].name := "Wangari Maathai";
+];
+```
+
+```trendy,error
+var rainfall := array [1200, 950, 220];
+
+operator main{} [
+    assign {
+        rainfall[1] := 0;
+        rainfall[1] := 1;
+    };
+];
+```
+
 ### Loading a relation
 
 `load a from r order [asc x, desc y];` gives the array variable `a` the
@@ -1534,10 +1601,12 @@ operator main{} [
 - **The value has the variable's type,** which never changes: an
   assignment of another type is an error (A0004). `=` is equality, not
   assignment (P0005).
-- **Only variables are assigned.** An operator's parameters are
-  read-only, and an operator is not a variable (A0026).
+- **Only variables are assigned,** and an array variable's elements (see
+  [Changing an element](#changing-an-element)). An operator's parameters
+  are read-only, and an operator is not a variable (A0026).
 - **The shorthands are for relation variables,** but for `update`, which
-  is also for tuple variables. Each means an assignment:
+  is also for tuple variables, and an element's assignment, for array
+  variables. Each means an assignment:
 
 | Statement | Means |
 |---|---|
@@ -1548,6 +1617,7 @@ operator main{} [
 | `update r { a := x };` | `r := r replace { a := x };`, of a relation or a tuple |
 | `update r { a := x } where p;` | `r := (r where not (p)) union ((r where p) replace { a := x });` |
 | `load a from r order [asc x];` | `a :=` the array of the tuples of `r`, in order (see [Loading a relation](#loading-a-relation)) |
+| `a[i] := x;` | `a :=` the array `a` with its element at position `i` changed to `x` (see [Changing an element](#changing-an-element)) |
 
 - **`delete` needs `where` and a condition** (P0023), so that every tuple
   isn't deleted by accident. To delete them all, assign the empty relation:
@@ -1643,12 +1713,14 @@ operator main{} [
   remove, which a `delete` or an `update` selects and an `i_delete` names,
   with every tuple they add. Each condition sees the old tuples, so the two
   `update`s above swap the guests. An `update` of a tuple changes its
-  attributes, and `update`s of different attributes merge.
-- **Changes that touch the same tuple or attribute conflict,** since
-  neither order would be the right one. Two changes that remove the same
-  tuple stop the program (R0009), as do two `update`s of the same
-  attribute of a tuple, and `v := …` with any other change to `v`; each is
-  an error when compiling when it is known then. This program compiles,
+  attributes, and `update`s of different attributes merge, as do
+  assignments of an array's different elements.
+- **Changes that touch the same tuple, attribute or element conflict,**
+  since neither order would be the right one. Two changes that remove the
+  same tuple stop the program (R0009), as do two `update`s of the same
+  attribute of a tuple, two assignments of the same element of an array,
+  or of an element and an element in it, and `v := …` with any other
+  change to `v`; each is an error when compiling when it is known then. This program compiles,
   but stops when it runs, writing `error[R0009]: two changes in an assign
   block remove the same tuple`, since both changes remove Kenji's:
 

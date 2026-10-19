@@ -952,6 +952,8 @@ fn arrays() {
             // Loaded: the wettest first, and the names alphabetically.
             r#"array [tuple { city: "Mumbai", rain: 2200 }, tuple { city: "Lagos", rain: 1500 }, tuple { city: "Cairo", rain: 25 }, tuple { city: "Lima", rain: 15 }]"#,
             r#"array ["Cairo", "Lagos", "Lima", "Mumbai"]"#,
+            // Elements changed, and swapped, in a copy.
+            "tuple { grid: array [array [1, 2], array [30]], kept: array [1200, 950, 220], rainfall: array [950, 1200, 250] }",
         ]
     );
 }

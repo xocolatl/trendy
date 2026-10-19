@@ -66,6 +66,9 @@ pub const FAIL_NO_MIN: u32 = 11;
 pub const FAIL_NO_MAX: u32 = 12;
 /// An array has no element at the position it is indexed at.
 pub const FAIL_INDEX_OUT_OF_RANGE: u32 = 13;
+/// Two changes to an array in an `assign` block set the same element, or
+/// one sets an element in the other's.
+pub const FAIL_ELEMENT_CONFLICT: u32 = 14;
 
 /// The line written to stderr for each `FAIL_` constant, with the
 /// compiler's error code, which `trendyc --explain` describes.
@@ -94,6 +97,9 @@ pub fn failure_message(failure: u32) -> &'static str {
         FAIL_NO_MIN => "error[R0010]: the relation has no tuples, so it has no min\n",
         FAIL_NO_MAX => "error[R0010]: the relation has no tuples, so it has no max\n",
         FAIL_INDEX_OUT_OF_RANGE => "error[R0011]: an array has no element at that position\n",
+        FAIL_ELEMENT_CONFLICT => {
+            "error[R0009]: two changes in an assign block set the same element\n"
+        }
         // The compiler and the runtime disagree: a bug.
         _ => "error[X0000]: internal error: unknown run-time failure\n",
     }
@@ -401,6 +407,16 @@ unsafe fn set_header(buffer: *mut u8, header: Header) {
 /// memory for it.
 #[cfg(not(test))]
 fn allocate_buffer(bytes: usize, desc: *const TypeDesc) -> *mut u8 {
+    let buffer = new_buffer(bytes, desc);
+    // SAFETY: the buffer is new, and its one reference the scope's.
+    unsafe { hold(buffer) };
+    buffer
+}
+
+/// A new buffer, as for [`allocate_buffer`], whose one reference is the
+/// caller's to give to what holds it.
+#[cfg(not(test))]
+fn new_buffer(bytes: usize, desc: *const TypeDesc) -> *mut u8 {
     let Some(total) = bytes.checked_add(HEADER) else {
         trendy_rt_fail(FAIL_OUT_OF_MEMORY)
     };
@@ -415,7 +431,6 @@ fn allocate_buffer(bytes: usize, desc: *const TypeDesc) -> *mut u8 {
                 desc,
             },
         );
-        hold(buffer);
         buffer
     }
 }
@@ -656,6 +671,83 @@ unsafe fn copy_element(buffer: *mut u8, dst: *mut u8, src: *const u8, desc: &Typ
                 ..counted
             },
         );
+    }
+}
+
+/// Make the array at `value`, of the type `desc` describes, the only
+/// holder of its buffer, so that compiled code can change its elements in
+/// place: as it is, if nothing else holds the buffer, or else a copy of
+/// it, whose elements take references to what they point to. The holder's
+/// reference to the old buffer goes to the current statement's scope,
+/// which may still point into it.
+///
+/// # Safety
+///
+/// `value` must point to a valid array of the type `desc` describes that
+/// holds a reference to its buffer: a variable's value, or an element of a
+/// buffer that only its holder holds. The statement must have begun a
+/// scope.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_unique(value: *mut Text, desc: *const TypeDesc) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let (buffer, len) = read_slice(value.cast());
+        if header(buffer).count == 1 {
+            return;
+        }
+        let copy = copied(buffer, len, &*desc);
+        hold(buffer.cast_mut());
+        value.write_unaligned(Text { bytes: copy, len });
+    }
+}
+
+/// Store at `dst` a copy of the array at `src`, of the type `desc`
+/// describes, in a new buffer, which the current statement's scope holds
+/// the only reference to, so that compiled code can change its elements in
+/// place: an array with some elements changed, as a value.
+///
+/// # Safety
+///
+/// `src` must point to a valid array of the type `desc` describes, and
+/// `dst` to memory for one. The statement must have begun a scope.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_duplicate(
+    dst: *mut Text,
+    src: *const u8,
+    desc: *const TypeDesc,
+) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let (buffer, len) = read_slice(src);
+        let copy = copied(buffer, len, &*desc);
+        hold(copy);
+        dst.write_unaligned(Text { bytes: copy, len });
+    }
+}
+
+/// A new buffer of copies of the `len` elements of `buffer`, an array's of
+/// the type `desc` describes, which take references to what they point to,
+/// and whose one reference is the caller's.
+///
+/// # Safety
+///
+/// `buffer` must hold `len` valid elements of the array's type.
+#[cfg(not(test))]
+unsafe fn copied(buffer: *const u8, len: usize, desc: &TypeDesc) -> *mut u8 {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let element = desc.element();
+        let Some(bytes) = len.checked_mul(element.size) else {
+            trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+        };
+        let copy = new_buffer(bytes, desc);
+        for i in 0..len {
+            let at = i * element.size;
+            copy_element(copy, copy.add(at), buffer.add(at), element);
+        }
+        copy
     }
 }
 

@@ -92,6 +92,7 @@ pub enum Code {
     LocalBeforeDeclaration,
     PointlessCondition,
     LoadMismatch,
+    AttributeAssigned,
     Overflow,
     DivisionByZero,
     OutOfMemory,
@@ -120,7 +121,7 @@ pub enum CodeKind {
 }
 
 impl Code {
-    pub const ALL: [Code; 91] = [
+    pub const ALL: [Code; 92] = [
         Code::UnexpectedCharacter,
         Code::MissingToken,
         Code::WrongDelimiter,
@@ -200,6 +201,7 @@ impl Code {
         Code::LocalBeforeDeclaration,
         Code::PointlessCondition,
         Code::LoadMismatch,
+        Code::AttributeAssigned,
         Code::Overflow,
         Code::DivisionByZero,
         Code::OutOfMemory,
@@ -296,6 +298,7 @@ impl Code {
             Code::LocalBeforeDeclaration => "A0045",
             Code::PointlessCondition => "A0046",
             Code::LoadMismatch => "A0047",
+            Code::AttributeAssigned => "A0048",
             Code::Overflow => "R0001",
             Code::DivisionByZero => "R0002",
             Code::OutOfMemory => "R0003",
@@ -421,6 +424,7 @@ impl Code {
             Code::LocalBeforeDeclaration => include_str!("../errors/A0045.md"),
             Code::PointlessCondition => include_str!("../errors/A0046.md"),
             Code::LoadMismatch => include_str!("../errors/A0047.md"),
+            Code::AttributeAssigned => include_str!("../errors/A0048.md"),
             Code::Overflow => include_str!("../errors/R0001.md"),
             Code::DivisionByZero => include_str!("../errors/R0002.md"),
             Code::OutOfMemory => include_str!("../errors/R0003.md"),

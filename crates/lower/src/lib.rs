@@ -345,6 +345,29 @@ struct LocalPlace {
     holds: bool,
 }
 
+/// A change to an array's element, computed: the slot of each position,
+/// from the outermost array in, and of the value.
+struct Computed {
+    positions: Vec<lir::Place>,
+    value: lir::Place,
+}
+
+/// The variable `target`, as its name reads it.
+fn read(target: hir::Target) -> hir::Expr {
+    match target {
+        hir::Target::Variable(id) => hir::Expr::Variable(id),
+        hir::Target::Local(id) => hir::Expr::Local(id),
+    }
+}
+
+/// The type of the elements `depth` arrays into one of type `ty`.
+fn element_at(ty: &hir::Type, depth: usize) -> hir::Type {
+    (0..depth).fold(ty.clone(), |ty, _| match ty {
+        hir::Type::Array(element) => *element,
+        _ => unreachable!("sema indexes only arrays"),
+    })
+}
+
 /// A block not built yet.
 fn placeholder() -> lir::Block {
     lir::Block {
@@ -941,11 +964,26 @@ impl<'a> FunctionBuilder<'a> {
 
     /// Assignments made at once, each to a different variable. Each value
     /// is computed and copied into a slot of its own, since it can be in a
-    /// variable that another assignment changes. Then each variable's value
-    /// is checked against its keys, and only then assigned.
+    /// variable that another assignment changes; an array's that is the
+    /// array with elements changed, as `a[i] := x` assigns `a`, has each
+    /// change's positions and value computed instead, to make it in place.
+    /// Then each variable's value is checked against its keys, and each
+    /// array's changes against each other, and only then assigned: whole
+    /// values first, which take a reference to what they point to, so that
+    /// a change in place copies any buffer they hold.
     fn assign(&mut self, assignments: &[hir::Assignment], cx: &mut Lowering) {
         let mut values: Vec<(hir::Target, lir::Place)> = Vec::new();
+        let mut changed: Vec<(hir::Target, Vec<Computed>)> = Vec::new();
         for assignment in assignments {
+            if let hir::Expr::WithElements(array, changes) = &assignment.value
+                && **array == read(assignment.target)
+            {
+                let computed: Vec<Computed> =
+                    changes.iter().map(|c| self.computed(c, cx)).collect();
+                self.check_overlaps(changes, &computed);
+                changed.push((assignment.target, computed));
+                continue;
+            }
             let value = self.place(&assignment.value, cx);
             let ty = layout(self.assigned(assignment.target).0);
             let slot = self.slot(ty.clone());
@@ -959,8 +997,21 @@ impl<'a> FunctionBuilder<'a> {
         for (target, value) in &values {
             self.check_keys(*target, value, cx);
         }
+        if changed.iter().map(|(_, c)| c.len()).sum::<usize>() > 1 {
+            for (target, computed) in &changed {
+                let ty = self.assigned(*target).0.clone();
+                self.keep_values(&ty, computed, cx);
+            }
+        }
         for (target, value) in values {
             self.store(target, value, cx);
+        }
+        for (target, computed) in changed {
+            let ty = self.assigned(target).0.clone();
+            let holder = self.holder(target);
+            for change in computed {
+                self.changed_at(holder.clone(), &ty, change, cx);
+            }
         }
     }
 
@@ -1029,12 +1080,9 @@ impl<'a> FunctionBuilder<'a> {
         }
     }
 
-    /// Assign the value at `value` to the variable `target`, of the
-    /// program or local: copied, and, if it points to texts, relations or
-    /// arrays, with a reference taken to each, which the variable holds.
-    fn store(&mut self, target: hir::Target, value: lir::Place, cx: &mut Lowering) {
-        let ty = self.assigned(target).0.clone();
-        let dst = match target {
+    /// Where the variable `target`'s value is, of the program or local.
+    fn holder(&self, target: hir::Target) -> lir::Place {
+        match target {
             hir::Target::Variable(id) => lir::Place {
                 base: lir::Base::Data(self.variable_data[id.0]),
                 path: vec![0],
@@ -1044,7 +1092,15 @@ impl<'a> FunctionBuilder<'a> {
                 .expect("an update operator's local variables are placed first")
                 .value
                 .clone(),
-        };
+        }
+    }
+
+    /// Assign the value at `value` to the variable `target`, of the
+    /// program or local: copied, and, if it points to texts, relations or
+    /// arrays, with a reference taken to each, which the variable holds.
+    fn store(&mut self, target: hir::Target, value: lir::Place, cx: &mut Lowering) {
+        let ty = self.assigned(target).0.clone();
+        let dst = self.holder(target);
         if points(&ty) {
             let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
             self.insts.push(lir::Inst::CallRuntime {
@@ -1126,6 +1182,7 @@ impl<'a> FunctionBuilder<'a> {
             hir::Expr::Relation(heading, tuples) => self.relation(heading, tuples, cx),
             hir::Expr::Array(element, elements) => self.array(element, elements, cx),
             hir::Expr::Index(array, position) => self.index(array, position, cx),
+            hir::Expr::WithElements(array, changes) => self.with_elements(array, changes, cx),
             hir::Expr::Load(relation, items, _) => self.load(expr, relation, items, cx),
             hir::Expr::If(condition, then, otherwise) => {
                 self.conditional(expr, condition, [then, otherwise], cx)
@@ -1341,6 +1398,14 @@ impl<'a> FunctionBuilder<'a> {
         };
         let src = self.place(array, cx);
         let at = self.place(position, cx);
+        let index = self.checked_index(&src, at, cx);
+        self.element(&src, &index, layout(&element))
+    }
+
+    /// The index, from 0, a [`lir::Layout::Usize`], of the element of the
+    /// array at `src` at `at`, an integer position counting from 1. The
+    /// program stops if the array has no element there.
+    fn checked_index(&mut self, src: &lir::Place, at: lir::Place, cx: &mut Lowering) -> lir::Place {
         let mut count = src.clone();
         count.path.push(1);
         let length = self.slot(lir::Layout::I64);
@@ -1396,7 +1461,165 @@ impl<'a> FunctionBuilder<'a> {
             op: lir::UnaryOp::Usize,
             src: from_zero,
         });
-        self.element(&src, &index, layout(&element))
+        index
+    }
+
+    /// `array` with `changes` made, a new array, in a buffer of the
+    /// statement's that the changes are then made in, in place.
+    fn with_elements(
+        &mut self,
+        array: &hir::Expr,
+        changes: &[hir::ElementChange],
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let ty = self.type_of(array);
+        let src = self.place(array, cx);
+        let computed: Vec<Computed> = changes.iter().map(|c| self.computed(c, cx)).collect();
+        self.check_overlaps(changes, &computed);
+        if computed.len() > 1 {
+            self.keep_values(&ty, &computed, cx);
+        }
+        let dst = self.slot(layout(&ty));
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Duplicate,
+            args: vec![dst.clone(), src, descriptor],
+        });
+        self.scoped = true;
+        for change in computed {
+            self.changed_at(dst.clone(), &ty, change, cx);
+        }
+        dst
+    }
+
+    /// The positions and the value of `change`, each computed and copied
+    /// into a slot of its own, as the variables they read can be changed
+    /// by the statement's other assignments.
+    fn computed(&mut self, change: &hir::ElementChange, cx: &mut Lowering) -> Computed {
+        let mut copied = |this: &mut Self, expr: &hir::Expr| {
+            let src = this.place(expr, cx);
+            let layout = layout(&this.type_of(expr));
+            let slot = this.slot(layout.clone());
+            this.insts.push(lir::Inst::Copy {
+                dst: slot.clone(),
+                src,
+                layout,
+            });
+            slot
+        };
+        let positions = change.path.iter().map(|p| copied(self, p)).collect();
+        let value = copied(self, &change.value);
+        Computed { positions, value }
+    }
+
+    /// Stop the program if two of `changes`, to one array, computed as
+    /// `computed`, overlap, unless their paths show they don't: if they
+    /// have the same position at each level both have, so that they set
+    /// one element, or one sets an element in the other's.
+    fn check_overlaps(&mut self, changes: &[hir::ElementChange], computed: &[Computed]) {
+        let integers = lir::Operand::Numeric(lir::Numeric::Integer);
+        for j in 0..changes.len() {
+            for i in 0..j {
+                if changes[i].overlaps(&changes[j]) == Some(false) {
+                    continue;
+                }
+                let mut overlap: Option<lir::Place> = None;
+                for (p, q) in computed[i].positions.iter().zip(&computed[j].positions) {
+                    let same = self.slot(lir::Layout::U8);
+                    self.insts.push(lir::Inst::Binary {
+                        dst: same.clone(),
+                        op: lir::BinaryOp::Compare(lir::Comparison::Equal, integers),
+                        lhs: p.clone(),
+                        rhs: q.clone(),
+                    });
+                    overlap = Some(match overlap {
+                        None => same,
+                        Some(so_far) => {
+                            let both = self.slot(lir::Layout::U8);
+                            self.insts.push(lir::Inst::Binary {
+                                dst: both.clone(),
+                                op: lir::BinaryOp::And,
+                                lhs: so_far,
+                                rhs: same,
+                            });
+                            both
+                        }
+                    });
+                }
+                let overlap = overlap.expect("a path has a position");
+                let (fail, apart) = (self.new_block(), self.new_block());
+                self.end_block(
+                    lir::Terminator::Branch {
+                        condition: overlap,
+                        then: fail,
+                        otherwise: apart,
+                    },
+                    fail,
+                );
+                self.end_block(lir::Terminator::Fail(lir::Failure::ElementConflict), apart);
+            }
+        }
+    }
+
+    /// Have the statement keep the values of `computed`, changes to the
+    /// elements of arrays of type `ty`, that point to buffers, until it
+    /// ends: one change made in place must not change a buffer another's
+    /// value is, or is in, which is then held by more than one, and copied.
+    fn keep_values(&mut self, ty: &hir::Type, computed: &[Computed], cx: &mut Lowering) {
+        for change in computed {
+            let element = element_at(ty, change.positions.len());
+            if points(&element) {
+                let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&element)));
+                self.insts.push(lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::Keep,
+                    args: vec![change.value.clone(), descriptor],
+                });
+                self.scoped = true;
+            }
+        }
+    }
+
+    /// Make `change` in the array at `holder`, of type `ty`, which holds a
+    /// reference to its buffer: at each level, the array is made the only
+    /// holder of its buffer, then the element at the position is the next
+    /// level's, until the last, which is given the value, as a variable is
+    /// assigned one.
+    fn changed_at(
+        &mut self,
+        holder: lir::Place,
+        ty: &hir::Type,
+        change: Computed,
+        cx: &mut Lowering,
+    ) {
+        let mut at = holder;
+        let mut ty = ty.clone();
+        for position in change.positions {
+            let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+            let hir::Type::Array(element) = ty else {
+                unreachable!("sema indexes only arrays");
+            };
+            let index = self.checked_index(&at, position, cx);
+            self.insts.push(lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::Unique,
+                args: vec![at.clone(), descriptor],
+            });
+            at = self.element(&at, &index, layout(&element));
+            ty = *element;
+        }
+        if points(&ty) {
+            let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+            self.insts.push(lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::Assign,
+                args: vec![at, change.value, descriptor],
+            });
+        } else {
+            self.insts.push(lir::Inst::Copy {
+                dst: at,
+                src: change.value,
+                layout: layout(&ty),
+            });
+        }
+        self.scoped = true;
     }
 
     /// `expr`, `operand` with `attributes` added or replaced, computed into
@@ -2705,6 +2928,127 @@ mod tests {
                 copy(data(1), slot(1)),
             ]
         );
+    }
+
+    #[test]
+    fn elements_are_changed_in_place() {
+        // `a[2] := 5;`, of `var a := array [1, 2, 3];`.
+        let integers = |ns: &[i64]| {
+            hir::Value::Array(hir::ArrayValue {
+                element: integer(),
+                elements: ns.iter().map(|n| hir::Value::Integer(*n)).collect(),
+            })
+        };
+        let int = |n| hir::Expr::Constant(hir::Value::Integer(n));
+        let changes = vec![hir::ElementChange {
+            path: vec![int(2)],
+            value: int(5),
+        }];
+        let a = hir::Expr::Variable(hir::VariableId(0));
+        let new_value = hir::Expr::WithElements(Box::new(a), changes.clone());
+        let lowered = lower(&program(
+            vec![user("main", &[], vec![assign(vec![(0, new_value)])])],
+            vec![variable("a", integers(&[1, 2, 3]))],
+        ));
+        let runtime_calls = |function: &lir::Function| -> Vec<(lir::RuntimeFn, lir::Place)> {
+            function
+                .blocks
+                .iter()
+                .flat_map(|b| &b.insts)
+                .filter_map(|inst| match inst {
+                    lir::Inst::CallRuntime { function, args } => Some((*function, args[0].clone())),
+                    _ => None,
+                })
+                .collect()
+        };
+        let calls = runtime_calls(&lowered.functions[0]);
+        let functions: Vec<lir::RuntimeFn> = calls.iter().map(|(f, _)| *f).collect();
+        // The variable is made the only holder of its buffer, which is
+        // then changed: an integer is copied in, with no reference to take.
+        assert_eq!(
+            functions,
+            [
+                lir::RuntimeFn::Begin,
+                lir::RuntimeFn::Unique,
+                lir::RuntimeFn::End
+            ]
+        );
+        assert_eq!(
+            calls[1].1,
+            lir::Place {
+                base: lir::Base::Data(lir::DataId(1)),
+                path: vec![0],
+            }
+        );
+        let fails = |function: &lir::Function, failure| {
+            function
+                .blocks
+                .iter()
+                .any(|b| b.terminator == lir::Terminator::Fail(failure))
+        };
+        assert!(fails(&lowered.functions[0], lir::Failure::IndexOutOfRange));
+        // As a value, as a value block computes one, the change is made in
+        // a copy, which the statement holds.
+        let value =
+            hir::Expr::WithElements(Box::new(hir::Expr::Constant(integers(&[1, 2, 3]))), changes);
+        let lowered = lower(&program(
+            vec![
+                debug_value(),
+                user("main", &[], vec![call(0, vec![("v", value)])]),
+            ],
+            Vec::new(),
+        ));
+        let functions: Vec<lir::RuntimeFn> = runtime_calls(&lowered.functions[0])
+            .into_iter()
+            .map(|(f, _)| f)
+            .collect();
+        assert_eq!(
+            functions,
+            [
+                lir::RuntimeFn::Begin,
+                lir::RuntimeFn::Duplicate,
+                lir::RuntimeFn::Unique,
+                lir::RuntimeFn::DebugValue,
+                lir::RuntimeFn::End
+            ]
+        );
+    }
+
+    #[test]
+    fn changes_that_may_overlap_are_checked_when_running() {
+        // `assign { a[i] := 1; a[j] := 2; a[3] := 3; };`, of parameters
+        // `i` and `j`: the first two may set one element, but not the
+        // third.
+        let param = |name: &str| hir::Expr::Parameter(name.to_string());
+        let int = |n| hir::Expr::Constant(hir::Value::Integer(n));
+        let change = |position, n| hir::ElementChange {
+            path: vec![position],
+            value: int(n),
+        };
+        let changed = hir::Expr::WithElements(
+            Box::new(hir::Expr::Variable(hir::VariableId(0))),
+            vec![
+                change(param("i"), 1),
+                change(param("j"), 2),
+                change(int(3), 3),
+            ],
+        );
+        let array = hir::Value::Array(hir::ArrayValue {
+            element: integer(),
+            elements: vec![hir::Value::Integer(0); 3],
+        });
+        let lowered = lower(&program(
+            vec![user("main", &["i", "j"], vec![assign(vec![(0, changed)])])],
+            vec![variable("a", array)],
+        ));
+        let conflicts = lowered.functions[0]
+            .blocks
+            .iter()
+            .filter(|b| b.terminator == lir::Terminator::Fail(lir::Failure::ElementConflict))
+            .count();
+        // `i` with `j`, and each with 3, as their values are known only
+        // when running; 3 with itself never.
+        assert_eq!(conflicts, 3);
     }
 
     #[test]

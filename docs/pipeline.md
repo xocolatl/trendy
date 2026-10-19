@@ -212,11 +212,15 @@ A statement is a call, an assignment statement (`AssignStmt`), an
 `assign` block (`AssignBlock`) of assignment statements, made at once, or a
 `return` (`ReturnStmt`), for leaving an operator early, which sema
 rejects until there are early exits. An
-assignment is `name := value` (`Assignment`) or a shorthand starting with
-its keyword:
+assignment is `target := value` (`Assignment`) or a shorthand starting
+with its keyword:
 `insert` and `d_insert` (`Insertion`), `delete` and `i_delete`
-(`Deletion`), and `update` (`Update`). A statement starting with a name and
-`:=` or `=` is an assignment, `=` fixed to `:=` (P0005). A `delete`'s
+(`Deletion`), and `update` (`Update`). An assignment's target is a name,
+then any positions and attributes (`Parser::assignment_target`), each an
+`IndexExpr` or an `ExtractExpr` around what is before it, as in
+`grid[i][j]`: an array's element, which sema checks, or an attribute,
+which it reports. A statement starting with a target and `:=` or `=` is an
+assignment, `=` fixed to `:=` (P0005). A `delete`'s
 condition and an `update`'s are all that follows `where`, as in an
 expression, which is why an `update`'s new values come before it. Other
 languages' habits are parsed as what they mean and fixed: Tutorial D's
@@ -443,7 +447,14 @@ directly or through the operators it calls, is reported once every body
 is checked (`body::Deferred`, `deferred_checks`), as a call that recurs
 with ever larger types is.
 `Combination::DisjointChanges` is the union of the tuples changes remove,
-which conflict (R0009) if two remove the same one.
+which conflict (R0009) if two remove the same one. An element's
+assignment, `a[i] := x`, is a pseudovariable's, which TTM makes shorthand
+for an assignment of the variable (RM Prescription 5): the new value is
+`Expr::WithElements`, of the array as it was and each change, its path
+of positions from the outermost array in and its value, and an `assign`
+block's changes to one array's elements are one, whose paths must not
+overlap, one's being the other's or the start of it
+(`ElementChange::overlaps`).
 
 A read-only operator is its value, an expression of its parameters and the
 variables it reads (`OperatorKind::ReadOnly`). A call of one
@@ -660,8 +671,19 @@ change, as it would conflict with others; a condition that folds to
 `false` selects none (A0033); and an `insert` or a `d_insert` of the
 variable into itself changes nothing (A0033) only as its one change, since
 it adds back the tuples others remove. Conflicts known when
-compiling are reported then (R0009): those, and two `i_delete`s of the
-same constant tuple. A variable's new value that is known when compiling
+compiling are reported then (R0009): those, two `i_delete`s of the same
+constant tuple, and two assignments of elements whose positions show they
+overlap, constants or one expression (`assign::elements_merged`); others
+overlap only if their positions are the same when the program runs. An
+element's target is checked level by level (`assign::element`): each
+array's type, each position an integer, checked as an index is
+(`ops::index`), so a position below 1 is reported, and `a[0]` fixed, as
+there, and the value against the elements' type (`Origin::Element`). An
+attribute target, as other languages assign a field, `t.name := x`, is
+reported (A0048), as Tutorial D has no attribute pseudovariables (TTM
+chapter 3), with a fix to `update t { name := x }`, or, for an attribute
+of an array's element, to `a[i] := a[i] replace { name := x }`, unless
+the value names an attribute the braces would bring into scope. A variable's new value that is known when compiling
 is checked against its keys then (R0008), pointing at the tuples as for
 an initial value; any other is checked when running.
 
@@ -1003,6 +1025,24 @@ program stops with R0011; inside them it is the element's own place,
 of a constant array, or of a selector whose other elements can't fail, and
 reports a position out of range when compiling where it can: one below 1
 always, and one beyond the count where the count is known (`ops::index`).
+
+An assignment of an array's elements, `a := WithElements(a, …)`, changes
+them in place. Each change's positions and value are computed into slots
+of their own, with the statement's other values (`computed`), and two
+changes whose paths may overlap have their positions compared, which
+fails with R0009 if they are the same at each level both have
+(`check_overlaps`). Once the whole values are stored, which takes a
+reference to each buffer they point to, each change goes down its path
+(`changed_at`): at each level, the position is checked as an index's is,
+`trendy_rt_unique` makes the array the only holder of its buffer, copying
+it if anything else holds it, and the element is the next level's array;
+the last is assigned its value as a variable is. So a change copies an
+array only when something else holds it, such as a variable it was
+assigned to, or the statement that passed it to an update operator. A
+statement with several element changes has its scope keep their values
+first, so that one change in place never changes a buffer another's
+value holds. A `WithElements` as a value, as a value block computes one,
+is made in a copy that `trendy_rt_duplicate` makes, the same way.
 
 A load (`Load`) is a clause of an assignment statement, whose `load`,
 `from` and `order` are contextual keywords: `load` before a name starts
