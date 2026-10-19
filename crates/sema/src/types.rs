@@ -132,6 +132,16 @@ impl Origin {
             Origin::Operator(token) if token.kind() == trendy_syntax::SyntaxKind::LBracket => {
                 "an array's positions are integers, counting from 1".to_string()
             }
+            Origin::Operator(token)
+                if token.parent().is_some_and(|p| {
+                    matches!(
+                        p.kind(),
+                        trendy_syntax::SyntaxKind::WhileStmt | trendy_syntax::SyntaxKind::LoopStmt
+                    )
+                }) =>
+            {
+                "`while` takes a boolean condition".to_string()
+            }
             // An `if`'s keyword, or another language's `elif` for one.
             Origin::Operator(token)
                 if token.parent().is_some_and(|p| {

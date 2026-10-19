@@ -234,7 +234,12 @@ of the `Body`, without `;`. The parser knows the body is a read-only
 operator's from the result type, and reads an operand that doesn't start a
 statement as the value: an `if`, or `a = b`, that runs to the `]` with no
 `;` is the value, an `if` expression and a comparison, and otherwise an
-`if` statement and `=` for `:=`.
+`if` statement and `=` for `:=`. Loops are statements of their own:
+`while c loop [ … ];` (`WhileStmt`) and `loop [ … ] while c;`
+(`LoopStmt`), whose blocks are bodies, parsed and fixed as an `if`
+statement's branches are, and whose other languages' spellings are fixed
+(P0032). A `{` after an operand with a `;` or `:=` right inside it is a
+block, as C writes one after a condition, not a projection.
 A `;` after the value, and a value before other statements, are reported
 (P0031), and so is `return x;` at the end, which other languages write,
 parsed as the value it means. Other languages' spellings of the result
@@ -409,9 +414,10 @@ local variables, every block's (`OperatorKind::Update`, `hir::Block`,
 `hir::Local`): calls, assignments (`Statement::Assign`), each a list of
 variables, all different, of the program or local (`hir::Target`), and
 their new values, made at once (TTM RM Prescription 21): every value is
-computed from the variables as they were; and `if` statements
+computed from the variables as they were; `if` statements
 (`Statement::If`), of a condition and two blocks, the second empty
-without an `else`. The shorthands are already expanded, and an `assign`
+without an `else`; and loops (`Statement::Loop`), of a condition, checked
+before or after each run of the block (`hir::Check`), and the block. The shorthands are already expanded, and an `assign`
 block's changes to one variable merged into one value. A local
 variable's declaration is the assignment of its initial value, or its
 type's default, and `Expr::Local` reads it. A block lists the local
@@ -422,7 +428,9 @@ name, but is reported if it is used before its declaration (A0045), or
 after its block ends (A0015); and reports one with a parameter's name or
 that of another local variable in scope (A0001), so none hides another.
 An `if` statement whose condition is known when compiling runs only one
-block, and the other's failures aren't reported (`body::Statements`).
+block, and the other's failures aren't reported (`body::Statements`). A
+loop whose condition is known to be true would never end, since nothing
+leaves a loop early, and is reported (A0046).
 `Combination::DisjointChanges` is the union of the tuples changes remove,
 which conflict (R0009) if two remove the same one.
 
@@ -926,6 +934,14 @@ one, which ends before either block runs, and copied out first, and each
 statement in its blocks has its own, as any statement does. Then it
 branches to a block of each, which jump to the one after both. A
 condition known when compiling lowers only the block it runs.
+
+A loop lowers to a block that computes its condition, in a scope of its
+own, and branches to the loop's block or on to one after the loop, and
+the loop's block, which releases its local variables' memory at its end,
+as every block does, and jumps back to the first. A `while` jumps to the
+condition's block first, and a `loop … while` to its own. One whose
+condition is known to be false when compiling lowers to its block, for a
+`loop`, or to nothing.
 
 A read-only operator's function begins no scope: what it makes, such as
 its result's texts, is the calling statement's, as if the caller had

@@ -90,6 +90,10 @@ pub enum SyntaxKind {
     ThenKw,
     /// `else`, in an `if`.
     ElseKw,
+    /// `while`, before a loop's condition.
+    WhileKw,
+    /// `loop`, before a loop's block.
+    LoopKw,
     LBrace,
     RBrace,
     LBracket,
@@ -175,6 +179,12 @@ pub enum SyntaxKind {
     /// else others, if any. An `else if` is one in another's `else`, with
     /// no `;` of its own.
     IfStmt,
+    /// `while c loop [ … ];`: statements run again and again while `c` is
+    /// true, checked before each run.
+    WhileStmt,
+    /// `loop [ … ] while c;`: statements run, then again while `c` is
+    /// true, checked after each run.
+    LoopStmt,
     /// `v := x`, in an assignment statement.
     Assignment,
     /// `insert r s` or `d_insert r s`, in an assignment statement.
@@ -298,7 +308,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 140] = [
+    pub const ALL: [SyntaxKind; 144] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -348,6 +358,8 @@ impl SyntaxKind {
         SyntaxKind::IfKw,
         SyntaxKind::ThenKw,
         SyntaxKind::ElseKw,
+        SyntaxKind::WhileKw,
+        SyntaxKind::LoopKw,
         SyntaxKind::LBrace,
         SyntaxKind::RBrace,
         SyntaxKind::LBracket,
@@ -391,6 +403,8 @@ impl SyntaxKind {
         SyntaxKind::AssignBlock,
         SyntaxKind::ReturnStmt,
         SyntaxKind::IfStmt,
+        SyntaxKind::WhileStmt,
+        SyntaxKind::LoopStmt,
         SyntaxKind::Assignment,
         SyntaxKind::Insertion,
         SyntaxKind::Deletion,
@@ -496,6 +510,8 @@ impl SyntaxKind {
                 | SyntaxKind::IfKw
                 | SyntaxKind::ThenKw
                 | SyntaxKind::ElseKw
+                | SyntaxKind::WhileKw
+                | SyntaxKind::LoopKw
         )
     }
 
@@ -684,6 +700,8 @@ impl SyntaxKind {
             SyntaxKind::IfKw => "if",
             SyntaxKind::ThenKw => "then",
             SyntaxKind::ElseKw => "else",
+            SyntaxKind::WhileKw => "while",
+            SyntaxKind::LoopKw => "loop",
             SyntaxKind::LBrace => "{",
             SyntaxKind::RBrace => "}",
             SyntaxKind::LBracket => "[",
@@ -775,6 +793,8 @@ impl SyntaxKind {
             SyntaxKind::IfKw => "`if`",
             SyntaxKind::ThenKw => "`then`",
             SyntaxKind::ElseKw => "`else`",
+            SyntaxKind::WhileKw => "`while`",
+            SyntaxKind::LoopKw => "`loop`",
             SyntaxKind::ForeignOperator => "operator",
             SyntaxKind::LBrace => "`{`",
             SyntaxKind::RBrace => "`}`",
@@ -845,6 +865,7 @@ impl SyntaxKind {
             SyntaxKind::AssignBlock => "`assign` block",
             SyntaxKind::ReturnStmt => "`return` statement",
             SyntaxKind::IfStmt => "`if` statement",
+            SyntaxKind::WhileStmt | SyntaxKind::LoopStmt => "loop",
             SyntaxKind::Assignment => "assignment",
             SyntaxKind::Insertion => "insertion",
             SyntaxKind::Deletion => "deletion",

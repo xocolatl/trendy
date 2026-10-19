@@ -694,17 +694,18 @@ pub(crate) fn foreign_conditional(
     )
 }
 
-/// A branch of an `if` statement, at `span`, that is a statement without
-/// brackets. `ends_if` says whether its `;` ended the `if` as well, which
-/// then needs one of its own after the brackets.
-pub(crate) fn unbracketed_branch(span: Span, ends_if: bool) -> Diagnostic {
+/// A block, `what`, an `if` statement's branch or a loop's, at `span`,
+/// that is a statement without brackets. `ends_statement` says whether its
+/// `;` ended the `if` or the loop as well, which then needs one of its own
+/// after the brackets.
+pub(crate) fn unbracketed_branch(span: Span, ends_statement: bool, what: &str) -> Diagnostic {
     let insert = |at: usize, text: &str| Edit {
         span: Span::empty(at),
         replacement: text.to_string(),
     };
     Diagnostic::error(
         Code::BranchBrackets,
-        "an `if` statement's branch needs brackets",
+        format!("{what} needs brackets"),
         span,
         "a statement without brackets",
     )
@@ -713,7 +714,7 @@ pub(crate) fn unbracketed_branch(span: Span, ends_if: bool) -> Diagnostic {
         "enclose it in brackets",
         vec![
             insert(span.start, "["),
-            insert(span.end, if ends_if { "];" } else { "]" }),
+            insert(span.end, if ends_statement { "];" } else { "]" }),
         ],
     )
 }
@@ -739,7 +740,135 @@ pub(crate) fn begin_end(begin: Found, opening: Span, closing: Option<Span>) -> D
     .with_suggestion("write the block in brackets", edits)
 }
 
-const BRANCH_BRACKETS: &str = "each branch of an `if` statement is a block in brackets, even of one statement, so that a statement added to it can't end up outside it, and an `else` always belongs to the `if` it follows";
+const BRANCH_BRACKETS: &str = "an `if` statement's branches, and a loop's block, are each a block in brackets, even of one statement, so that a statement added to one can't end up outside it, and an `else` always belongs to the `if` it follows";
+
+pub(crate) const LOOP_FORM: &str = "a loop has the form `while condition loop [ … ];`, which checks the condition before each run of its block, or `loop [ … ] while condition;`, which checks it after";
+
+const LOOP_RULE: &str = "a loop runs its block, in brackets after `loop`, again and again while its condition is true, checked after `while`: `while c loop [ … ];` checks it before each run, and `loop [ … ] while c;` after";
+
+/// `do` or `repeat`, `found`, where a loop's `loop` goes, as Pascal, Lua
+/// and C write a loop.
+pub(crate) fn loop_spelling(found: Found) -> Diagnostic {
+    Diagnostic::error(
+        Code::LoopSpelling,
+        format!("a loop's block follows `loop`, not `{}`", found.text),
+        found.span,
+        "another language's keyword",
+    )
+    .with_note(LOOP_RULE)
+    .with_suggestion(
+        "write `loop`",
+        vec![Edit {
+            span: found.span,
+            replacement: "loop".to_string(),
+        }],
+    )
+}
+
+/// A `while` loop's block, which opens at `open`, without the `loop` that
+/// goes after its condition, which ends at `condition_end`.
+pub(crate) fn missing_loop(condition_end: usize, open: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::LoopSpelling,
+        "a loop's block follows `loop`",
+        open,
+        "no `loop` before the block",
+    )
+    .with_note(LOOP_RULE)
+    .with_suggestion(
+        "insert `loop`",
+        vec![Edit {
+            span: Span::empty(condition_end),
+            replacement: " loop".to_string(),
+        }],
+    )
+}
+
+/// Python's `:`, `colon`, after a loop's condition.
+pub(crate) fn python_loop(colon: Found) -> Diagnostic {
+    Diagnostic::error(
+        Code::LoopSpelling,
+        "`while c:` is written `while c loop [ … ];`",
+        colon.span,
+        "Python's loop",
+    )
+    .with_note(LOOP_RULE)
+    .with_help("write `loop` after the condition, and the statements to run in brackets after it, each ending with `;`")
+}
+
+/// Tutorial D's `WHILE c; … END WHILE`: the `;` after the condition at
+/// `semicolon`, and `END WHILE` at `end`, written `loop [` and `]`.
+pub(crate) fn tutorial_while(semicolon: Span, end: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::LoopSpelling,
+        "`WHILE c; … END WHILE` is written `while c loop [ … ]`",
+        semicolon,
+        "Tutorial D's loop",
+    )
+    .with_note(LOOP_RULE)
+    .with_suggestion(
+        "write the block in brackets after `loop`",
+        vec![
+            Edit {
+                span: semicolon,
+                replacement: " loop [".to_string(),
+            },
+            Edit {
+                span: end,
+                replacement: "]".to_string(),
+            },
+        ],
+    )
+}
+
+/// Pascal's and Lua's `until`, `until`, before the condition at
+/// `condition`, which ends a loop when it is true: `while not (…)`.
+pub(crate) fn loop_until(until: Found, condition: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::LoopSpelling,
+        "`until c` is written `while not (c)`",
+        until.span,
+        "Pascal's and Lua's loop",
+    )
+    .with_note(LOOP_RULE)
+    .with_suggestion(
+        "write the condition it runs while",
+        vec![
+            Edit {
+                span: Span::new(until.span.start, condition.start),
+                replacement: "while not (".to_string(),
+            },
+            Edit {
+                span: Span::empty(condition.end),
+                replacement: ")".to_string(),
+            },
+        ],
+    )
+}
+
+/// `break`, `continue` or Tutorial D's `LEAVE`, `found`: an early exit.
+pub(crate) fn loop_exit(found: Found) -> Diagnostic {
+    Diagnostic::error(
+        Code::LoopSpelling,
+        format!("trendy has no `{}`", found.text),
+        found.span,
+        "an early exit",
+    )
+    .with_note("a loop ends once its condition is false, checked before or after each run of its block: no loop leaves early, or skips the rest of its block")
+    .with_help("make the condition false, as by assigning a variable it reads, or run the rest of the block in an `if` statement")
+}
+
+/// `for`, `found`: a loop over the values of something.
+pub(crate) fn for_loop(found: Found) -> Diagnostic {
+    Diagnostic::error(
+        Code::LoopSpelling,
+        "trendy has no `for` loop",
+        found.span,
+        "a `for` loop",
+    )
+    .with_note(LOOP_RULE)
+    .with_help("compute from a whole relation at once, as in `sum{r: r, of: x}` or `r extend { … }`, or loop over an array's positions: `var i := 1; while i <= length{a: a} loop [ …; i := i + 1; ];`")
+}
 
 /// `elif`, `elsif` or `elseif`, `found`, in an `if`: `else if`.
 pub(crate) fn else_if_spelling(found: Found) -> Diagnostic {

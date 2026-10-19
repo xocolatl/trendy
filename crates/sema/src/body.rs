@@ -5,7 +5,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use trendy_diag::{CodeKind, Diagnostic, Span};
 use trendy_hir as hir;
-use trendy_syntax::ast::{self, VarDecl};
+use trendy_syntax::SyntaxToken;
+use trendy_syntax::ast::{self, AstNode, VarDecl};
 
 use crate::assign::{Assignee, Assigning};
 use crate::check::{Checker, Lookup, Names, Written};
@@ -139,7 +140,53 @@ impl Statements<'_, '_> {
             }
             ast::Statement::Var(decl) => declaration(decl, within, cx, &mut self.locals, errors),
             ast::Statement::If(stmt) => self.if_stmt(stmt, errors),
+            ast::Statement::While(stmt) => self.loop_stmt(
+                stmt.keyword(),
+                stmt.condition(),
+                stmt.body(),
+                hir::Check::Before,
+                stmt.span(),
+                errors,
+            ),
+            ast::Statement::Loop(stmt) => self.loop_stmt(
+                stmt.while_keyword(),
+                stmt.condition(),
+                stmt.body(),
+                hir::Check::After,
+                stmt.span(),
+                errors,
+            ),
         }
+    }
+
+    /// A loop, written at `span`, whose condition, after `keyword`, is
+    /// checked as `check` says: its block run while the condition is
+    /// true. One that does nothing, or never ends, as one whose condition
+    /// is known to be true when compiling, is reported.
+    fn loop_stmt(
+        &mut self,
+        keyword: Option<SyntaxToken>,
+        condition: Option<ast::Expr>,
+        body: Option<ast::Body>,
+        check: hir::Check,
+        span: Span,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Statement> {
+        let (keyword, written, body) = (keyword?, condition?, body?);
+        let pointless = errors::pointless_loop(span, &written, &body, check);
+        let reported = pointless.is_some();
+        errors.extend(pointless);
+        let boolean = Expected {
+            ty: hir::Type::Scalar(hir::Scalar::Boolean),
+            origin: Origin::Operator(keyword),
+        };
+        let condition = Checker::new(&mut self.names()).expr(&written, Some(&boolean), errors);
+        if !reported && condition == Some(hir::Expr::Constant(hir::Value::Boolean(true))) {
+            errors.push(errors::endless_loop(&written));
+        }
+        let statements: Vec<ast::Statement> = body.statements().collect();
+        let block = self.block(&statements, errors);
+        Some(hir::Statement::Loop(condition?, block?, check))
     }
 
     /// `if c then [ … ] else [ … ];`: each block checked, but a condition
@@ -344,6 +391,7 @@ fn calls_in(block: &hir::Block, called: &mut Vec<hir::OperatorId>) {
                 calls_in(then, called);
                 calls_in(otherwise, called);
             }
+            hir::Statement::Loop(_, body, _) => calls_in(body, called),
         }
     }
 }

@@ -589,6 +589,19 @@ pub enum Statement {
     /// if the condition, a boolean, is true, and else the second's, which
     /// is empty without an `else`.
     If(Expr, Block, Block),
+    /// The block's statements run while the condition, a boolean, is true,
+    /// checked before each run, `while condition loop [ … ];`, or after,
+    /// `loop [ … ] while condition;`, which runs them at least once.
+    Loop(Expr, Block, Check),
+}
+
+/// When a loop checks its condition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Check {
+    /// Before each run of its block: `while c loop [ … ];`.
+    Before,
+    /// After each run of its block: `loop [ … ] while c;`.
+    After,
 }
 
 impl Statement {
@@ -610,6 +623,11 @@ impl Statement {
                 condition.instantiated(types),
                 then.instantiated(types),
                 otherwise.instantiated(types),
+            ),
+            Statement::Loop(condition, body, check) => Statement::Loop(
+                condition.instantiated(types),
+                body.instantiated(types),
+                *check,
             ),
         }
     }

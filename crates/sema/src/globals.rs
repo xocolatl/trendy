@@ -317,6 +317,10 @@ impl<'a> Globals<'a> {
                     errors.push(errors::if_in_read_only(&signature.name, stmt));
                     valid = false;
                 }
+                ast::Statement::While(_) | ast::Statement::Loop(_) => {
+                    errors.push(errors::loop_in_read_only(&signature.name, statement));
+                    valid = false;
+                }
             }
         }
         let Some(written_value) = written_value else {

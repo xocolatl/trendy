@@ -47,6 +47,8 @@ ast_node!(Body);
 ast_node!(CallStmt);
 ast_node!(ReturnStmt);
 ast_node!(IfStmt);
+ast_node!(WhileStmt);
+ast_node!(LoopStmt);
 ast_node!(AssignStmt);
 ast_node!(AssignBlock);
 ast_node!(Assignment);
@@ -311,6 +313,8 @@ pub enum Statement {
     Block(AssignBlock),
     Return(ReturnStmt),
     If(IfStmt),
+    While(WhileStmt),
+    Loop(LoopStmt),
     /// A local variable's declaration, as a program variable's is written.
     Var(VarDecl),
 }
@@ -324,6 +328,8 @@ fn statements_of(node: &SyntaxNode) -> impl Iterator<Item = Statement> + use<> {
             .or_else(|| AssignBlock::cast(node.clone()).map(Statement::Block))
             .or_else(|| ReturnStmt::cast(node.clone()).map(Statement::Return))
             .or_else(|| IfStmt::cast(node.clone()).map(Statement::If))
+            .or_else(|| WhileStmt::cast(node.clone()).map(Statement::While))
+            .or_else(|| LoopStmt::cast(node.clone()).map(Statement::Loop))
             .or_else(|| VarDecl::cast(node).map(Statement::Var))
     })
 }
@@ -349,6 +355,8 @@ impl Statement {
             Statement::Block(s) => s.syntax(),
             Statement::Return(s) => s.syntax(),
             Statement::If(s) => s.syntax(),
+            Statement::While(s) => s.syntax(),
+            Statement::Loop(s) => s.syntax(),
             Statement::Var(s) => s.syntax(),
         }
     }
@@ -365,6 +373,53 @@ impl Statement {
 pub enum ElseBranch {
     Block(Body),
     If(IfStmt),
+}
+
+impl WhileStmt {
+    /// The `while`.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    /// The condition, between `while` and `loop`.
+    #[must_use]
+    pub fn condition(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+
+    /// The statements run while the condition is true.
+    #[must_use]
+    pub fn body(&self) -> Option<Body> {
+        self.0.children().find_map(Body::cast)
+    }
+}
+
+impl LoopStmt {
+    /// The `loop`, or the word another language writes for it, which is
+    /// reported: C's `do`.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    /// The statements run once, then again while the condition is true.
+    #[must_use]
+    pub fn body(&self) -> Option<Body> {
+        self.0.children().find_map(Body::cast)
+    }
+
+    /// The `while` after the block.
+    #[must_use]
+    pub fn while_keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).find(|t| t.kind() == SyntaxKind::WhileKw)
+    }
+
+    /// The condition, after `while`.
+    #[must_use]
+    pub fn condition(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
 }
 
 impl IfStmt {

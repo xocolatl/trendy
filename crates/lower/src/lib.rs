@@ -508,7 +508,58 @@ impl<'a> FunctionBuilder<'a> {
             hir::Statement::If(condition, then, otherwise) => {
                 self.if_statement(condition, [then, otherwise], cx);
             }
+            hir::Statement::Loop(condition, body, check) => {
+                self.loop_statement(condition, body, *check, cx);
+            }
         }
+    }
+
+    /// A loop of `body`, run while `condition` is true, checked as `check`
+    /// says: a block that computes the condition, in a scope of its own,
+    /// each time, and branches to the body's block, which jumps back to
+    /// it, or on to one after the loop. A condition known to be false when
+    /// compiling runs a `loop`'s block once, and a `while`'s never; sema
+    /// reports one known to be true, which would never end.
+    fn loop_statement(
+        &mut self,
+        condition: &hir::Expr,
+        body: &hir::Block,
+        check: hir::Check,
+        cx: &mut Lowering,
+    ) {
+        if let hir::Expr::Constant(hir::Value::Boolean(runs)) = condition {
+            assert!(!runs, "sema reports a loop that never ends");
+            if check == hir::Check::After {
+                self.block(body, cx);
+            }
+            return;
+        }
+        let (test, run, after) = (self.new_block(), self.new_block(), self.new_block());
+        let first = match check {
+            hir::Check::Before => test,
+            hir::Check::After => run,
+        };
+        self.end_block(lir::Terminator::Jump(first), test);
+        // Copied, so that nothing its scope owns is read once it ends.
+        let decided = self.slot(lir::Layout::U8);
+        self.scoped(|this| {
+            let src = this.place(condition, cx);
+            this.insts.push(lir::Inst::Copy {
+                dst: decided.clone(),
+                src,
+                layout: lir::Layout::U8,
+            });
+        });
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: decided,
+                then: run,
+                otherwise: after,
+            },
+            run,
+        );
+        self.block(body, cx);
+        self.end_block(lir::Terminator::Jump(test), after);
     }
 
     /// `if condition then [ … ] else [ … ];`, of the blocks `branches`:

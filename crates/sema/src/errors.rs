@@ -2600,7 +2600,7 @@ pub(crate) fn pointless_if(
         let which = if always { "then" } else { "else" };
         return Some(
             Diagnostic::error(
-                Code::PointlessIf,
+                Code::PointlessCondition,
                 format!("the condition is always `{always}`"),
                 condition.span(),
                 format!("so the `{which}` branch is always taken"),
@@ -2636,7 +2636,7 @@ pub(crate) fn pointless_if(
     };
     Some(
         Diagnostic::error(
-            Code::PointlessIf,
+            Code::PointlessCondition,
             format!("this `if` is {message}"),
             at,
             label,
@@ -2711,7 +2711,7 @@ pub(crate) fn pointless_if_statement(stmt: &trendy_syntax::ast::IfStmt) -> Optio
         };
         return Some(
             Diagnostic::error(
-                Code::PointlessIf,
+                Code::PointlessCondition,
                 format!("the condition is always `{always}`"),
                 condition.span(),
                 format!("so {runs}"),
@@ -2722,7 +2722,7 @@ pub(crate) fn pointless_if_statement(stmt: &trendy_syntax::ast::IfStmt) -> Optio
     }
     let d = |message: &str, at: Span, label: &str| {
         Diagnostic::error(
-            Code::PointlessIf,
+            Code::PointlessCondition,
             message.to_string(),
             at,
             label.to_string(),
@@ -2766,6 +2766,130 @@ pub(crate) fn pointless_if_statement(stmt: &trendy_syntax::ast::IfStmt) -> Optio
         ),
         _ => None,
     }
+}
+
+/// What a loop does, for notes.
+const LOOP: &str = "a loop runs its block again and again while its condition is true, so it ends only once its block makes the condition false: no loop leaves early";
+
+/// A loop, at `span`, whose condition, `condition`, is checked as `check`
+/// says, and whose block is `body`, if it does nothing or never ends: a
+/// condition written `true`, which never ends; one written `false`, which
+/// never runs a `while`'s block, and runs a `loop`'s once; or an empty
+/// block, which does nothing, or never ends.
+pub(crate) fn pointless_loop(
+    span: Span,
+    condition: &Expr,
+    body: &trendy_syntax::ast::Body,
+    check: hir::Check,
+) -> Option<Diagnostic> {
+    let d = |message: &str, at: Span, label: &str| {
+        Diagnostic::error(
+            Code::PointlessCondition,
+            message.to_string(),
+            at,
+            label.to_string(),
+        )
+        .with_note(LOOP)
+    };
+    let written = match condition {
+        Expr::Literal(literal) => match literal.value() {
+            Ok(trendy_syntax::ast::LiteralValue::Boolean(always)) => Some(always),
+            _ => None,
+        },
+        _ => None,
+    };
+    let replaced = |replacement: String| vec![Edit { span, replacement }];
+    match (written, check) {
+        (Some(true), _) => Some(
+            d(
+                "the condition is always `true`",
+                condition.span(),
+                "so the loop never ends",
+            )
+            .with_help("write a condition that its block makes false, as in `while n > 0 loop [ n := n - 1; ];`"),
+        ),
+        (Some(false), hir::Check::Before) => Some(
+            d(
+                "the condition is always `false`",
+                condition.span(),
+                "so the block never runs",
+            )
+            .with_suggestion("remove the loop", replaced(String::new())),
+        ),
+        (Some(false), hir::Check::After) => {
+            let statements: Vec<_> = body.statements().collect();
+            let inside = match (statements.first(), statements.last()) {
+                (Some(first), Some(last)) => {
+                    let text = body.syntax().text().to_string();
+                    let start = body.span().start;
+                    text[first.span().start - start..last.span().end - start].to_string()
+                }
+                _ => String::new(),
+            };
+            Some(
+                d(
+                    "the condition is always `false`",
+                    condition.span(),
+                    "so the block runs once",
+                )
+                .with_suggestion("keep the block's statements", replaced(inside)),
+            )
+        }
+        (None, _) if body.statements().next().is_none() => Some(
+            d("this loop does nothing", body.span(), "its block is empty")
+                .with_note("with nothing in its block to make its condition false, it either never runs or never ends")
+                .with_help("give the block something to do that makes the condition false"),
+        ),
+        (None, _) => None,
+    }
+}
+
+/// A loop's condition, `condition`, known when compiling to be true, from
+/// the values it is computed from: the loop never ends.
+pub(crate) fn endless_loop(condition: &Expr) -> Diagnostic {
+    Diagnostic::error(
+        Code::PointlessCondition,
+        "the condition is always true",
+        condition.span(),
+        "known when compiling, so the loop never ends",
+    )
+    .with_note(LOOP)
+    .with_help(
+        "write a condition that its block makes false, as in `while n > 0 loop [ n := n - 1; ];`",
+    )
+}
+
+/// `stmt`, a loop in the read-only operator `name`.
+pub(crate) fn loop_in_read_only(name: &str, stmt: &trendy_syntax::ast::Statement) -> Diagnostic {
+    Diagnostic::error(
+        Code::Return,
+        "a read-only operator has no loops",
+        loop_start(stmt),
+        format!("a loop in `{name}`"),
+    )
+    .with_note("a read-only operator's body declares and assigns its local variables, then ends with its value: it computes one value, and changes nothing, so a loop would have nothing to do again")
+    .with_help("compute the value from the whole relation, as in `sum{r: r, of: x}` or `r extend { … }`, or make the operator an update operator, without a result type, invoked by `call`")
+}
+
+/// `stmt`, a loop in a value block.
+pub(crate) fn loop_in_block(stmt: &trendy_syntax::ast::Statement) -> Diagnostic {
+    Diagnostic::error(
+        Code::Return,
+        "a value block has no loops",
+        loop_start(stmt),
+        "a loop in a value block",
+    )
+    .with_note(BLOCK)
+    .with_help(
+        "compute the value from the whole relation, as in `sum{r: r, of: x}` or `r extend { … }`",
+    )
+}
+
+/// Where to point at the loop `stmt`: its first keyword.
+fn loop_start(stmt: &trendy_syntax::ast::Statement) -> Span {
+    stmt.syntax()
+        .first_token()
+        .map_or_else(|| stmt.span(), |t| trendy_syntax::span(t.text_range()))
 }
 
 /// `index`, `a[i]`, whose operand `a`, written `operand`, has type `ty`,

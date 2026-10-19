@@ -633,6 +633,8 @@ impl<'a> Parser<'a> {
                     || matches!(found.kind, SyntaxKind::VarKw | SyntaxKind::AssignKw)
                     || self.at_assignment()
                     || self.at_foreign_declaration()
+                    || found.spells(SyntaxKind::WhileKw)
+                    || self.at_loop()
                     || found.spells(SyntaxKind::ReturnKw)))
     }
 
@@ -724,6 +726,37 @@ impl<'a> Parser<'a> {
         };
         if self.at_if() {
             self.if_stmt();
+            return;
+        }
+        if found.spells(SyntaxKind::WhileKw) {
+            self.while_stmt();
+            return;
+        }
+        if self.at_loop() {
+            self.loop_stmt();
+            return;
+        }
+        // `break;`, `LEAVE name;` and `for x in …`: names, before what no
+        // statement starting with a name has after it.
+        let next = self.found_after(1).map(|f| f.kind);
+        let exit = ["break", "continue", "leave"]
+            .iter()
+            .any(|word| found.text.eq_ignore_ascii_case(word))
+            && matches!(next, Some(SyntaxKind::Semicolon | SyntaxKind::Ident));
+        let for_loop = found.text.eq_ignore_ascii_case("for")
+            && matches!(next, Some(SyntaxKind::Ident | SyntaxKind::LParen));
+        if found.kind == SyntaxKind::Ident && (exit || for_loop) {
+            let error = if exit {
+                errors::loop_exit(found)
+            } else {
+                errors::for_loop(found)
+            };
+            self.errors.push(error);
+            self.skip_statement(&[
+                SyntaxKind::RBracket,
+                SyntaxKind::OperatorKw,
+                SyntaxKind::VarKw,
+            ]);
             return;
         }
         let call_like = self
@@ -824,6 +857,170 @@ impl<'a> Parser<'a> {
         self.builder.finish_node();
     }
 
+    /// Whether a `loop … while` starts here: `loop`, or C's `do` or Pascal's
+    /// and Lua's `repeat`, in any case, before a block.
+    fn at_loop(&mut self) -> bool {
+        let Some(found) = self.found() else {
+            return false;
+        };
+        let foreign = ["do", "repeat"]
+            .iter()
+            .any(|word| found.text.eq_ignore_ascii_case(word));
+        let block = self.found_after(1).is_some_and(|f| {
+            matches!(f.kind, SyntaxKind::LBracket | SyntaxKind::LBrace)
+                || (f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case("begin"))
+        });
+        found.kind == SyntaxKind::LoopKw
+            || (found.kind == SyntaxKind::Ident
+                && block
+                && (foreign || found.spells(SyntaxKind::LoopKw)))
+    }
+
+    /// `while condition loop [ … ];`: the block run while the condition is
+    /// true, checked before each run. Pascal's and Lua's `do`, a missing
+    /// `loop`, Tutorial D's `WHILE c; … END WHILE`, Python's `:`, and the
+    /// block's habits, as an `if` statement's (see [`Parser::branch`]), are
+    /// reported, with fixes where they are mechanical.
+    fn while_stmt(&mut self) {
+        let outer_form = std::mem::replace(&mut self.form, errors::LOOP_FORM);
+        self.start_node(SyntaxKind::WhileStmt);
+        self.any_case(SyntaxKind::WhileKw);
+        self.expression();
+        let mut unbracketed = Vec::new();
+        let mut last_unbracketed = false;
+        match self.found() {
+            Some(found) if found.spells(SyntaxKind::LoopKw) => {
+                self.any_case(SyntaxKind::LoopKw);
+                last_unbracketed = self.branch(&mut unbracketed);
+            }
+            Some(found)
+                if found.kind == SyntaxKind::Ident && found.text.eq_ignore_ascii_case("do") =>
+            {
+                self.bump();
+                self.errors.push(errors::loop_spelling(found));
+                last_unbracketed = self.branch(&mut unbracketed);
+            }
+            Some(found) if found.kind == SyntaxKind::Semicolon && self.at_tutorial_while() => {
+                self.tutorial_while(found);
+            }
+            Some(found) if found.kind == SyntaxKind::Colon => {
+                self.bump();
+                self.errors.push(errors::python_loop(found));
+            }
+            Some(found) if matches!(found.kind, SyntaxKind::LBracket | SyntaxKind::LBrace) => {
+                let condition_end = self.last_end.unwrap_or(found.span.start);
+                self.errors
+                    .push(errors::missing_loop(condition_end, found.span));
+                last_unbracketed = self.branch(&mut unbracketed);
+            }
+            _ => self.missing_with_help(
+                SyntaxKind::LoopKw,
+                "write `loop` and the block after the condition, as in `while c loop [ … ];`",
+            ),
+        }
+        // A block without brackets ends with its statement's `;`, which
+        // ended the loop as well.
+        let shared = last_unbracketed && !self.at(SyntaxKind::Semicolon);
+        for &span in &unbracketed {
+            self.errors
+                .push(errors::unbracketed_branch(span, shared, "a loop's block"));
+        }
+        if !shared {
+            self.expect(SyntaxKind::Semicolon);
+        }
+        self.builder.finish_node();
+        self.form = outer_form;
+    }
+
+    /// Whether Tutorial D's `WHILE c; … END WHILE` goes on here, at the `;`
+    /// after the condition: whether `END WHILE` comes before the body ends.
+    fn at_tutorial_while(&self) -> bool {
+        let mut depth = 0_usize;
+        for i in self.pos + 1..self.tokens.len() {
+            match self.tokens[i].kind {
+                SyntaxKind::LBrace | SyntaxKind::LBracket | SyntaxKind::LParen => depth += 1,
+                SyntaxKind::RBrace | SyntaxKind::RBracket | SyntaxKind::RParen if depth == 0 => {
+                    return false;
+                }
+                SyntaxKind::RBrace | SyntaxKind::RBracket | SyntaxKind::RParen => depth -= 1,
+                SyntaxKind::Ident
+                    if depth == 0 && self.found_at(i).text.eq_ignore_ascii_case("end") =>
+                {
+                    return (i + 1..self.tokens.len())
+                        .find(|&j| !is_skipped(self.tokens[j].kind))
+                        .is_some_and(|j| self.found_at(j).spells(SyntaxKind::WhileKw));
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Tutorial D's `WHILE c; … END WHILE`, at the `;`, `semicolon`, after
+    /// the condition: the statements up to `END WHILE` as the block, and
+    /// the fix writing them in brackets after `loop`.
+    fn tutorial_while(&mut self, semicolon: Found) {
+        self.start_node(SyntaxKind::Error);
+        self.bump();
+        self.builder.finish_node();
+        self.start_node(SyntaxKind::Body);
+        self.statements_to(true);
+        self.builder.finish_node();
+        self.start_node(SyntaxKind::Error);
+        let start = self.bump().start;
+        let end = self.bump().end;
+        self.builder.finish_node();
+        self.errors.push(errors::tutorial_while(
+            semicolon.span,
+            Span::new(start, end),
+        ));
+    }
+
+    /// `loop [ … ] while condition;`: the block run, then again while the
+    /// condition is true, checked after each run. C's `do`, Pascal's and
+    /// Lua's `repeat … until c`, and the block's habits, as an `if`
+    /// statement's (see [`Parser::branch`]), are reported, with fixes.
+    fn loop_stmt(&mut self) {
+        let outer_form = std::mem::replace(&mut self.form, errors::LOOP_FORM);
+        self.start_node(SyntaxKind::LoopStmt);
+        let found = self.found().expect("at a loop");
+        if found.spells(SyntaxKind::LoopKw) {
+            self.any_case(SyntaxKind::LoopKw);
+        } else {
+            self.bump();
+            self.errors.push(errors::loop_spelling(found));
+        }
+        let mut unbracketed = Vec::new();
+        self.branch(&mut unbracketed);
+        for &span in &unbracketed {
+            self.errors
+                .push(errors::unbracketed_branch(span, false, "a loop's block"));
+        }
+        match self.found() {
+            Some(found) if found.spells(SyntaxKind::WhileKw) => {
+                self.any_case(SyntaxKind::WhileKw);
+                self.expression();
+            }
+            Some(found)
+                if found.kind == SyntaxKind::Ident && found.text.eq_ignore_ascii_case("until") =>
+            {
+                self.bump();
+                let start = self.found().map_or(found.span.end, |f| f.span.start);
+                self.expression();
+                let end = self.last_end.unwrap_or(start);
+                self.errors
+                    .push(errors::loop_until(found, Span::new(start, end)));
+            }
+            _ => self.missing_with_help(
+                SyntaxKind::WhileKw,
+                "end the loop with `while` and its condition, as in `loop [ … ] while c;`",
+            ),
+        }
+        self.expect(SyntaxKind::Semicolon);
+        self.builder.finish_node();
+        self.form = outer_form;
+    }
+
     /// `if condition then [ … ] else [ … ];`: statements run if the
     /// condition is true, and else others, if any, with `else if` chaining
     /// another condition. Each branch is a block in brackets, even of one
@@ -842,7 +1039,11 @@ impl<'a> Parser<'a> {
         let shared = last_unbracketed && !self.at(SyntaxKind::Semicolon);
         for (i, &span) in unbracketed.iter().enumerate() {
             let ends_if = shared && i + 1 == unbracketed.len();
-            self.errors.push(errors::unbracketed_branch(span, ends_if));
+            self.errors.push(errors::unbracketed_branch(
+                span,
+                ends_if,
+                "an `if` statement's branch",
+            ));
         }
         if !shared {
             self.expect(SyntaxKind::Semicolon);
@@ -2479,7 +2680,9 @@ impl<'a> Parser<'a> {
                 self.bump();
                 self.expression();
                 self.expect(SyntaxKind::RBracket);
-            } else if next == Some(SyntaxKind::LBrace) || method_call {
+            } else if (next == Some(SyntaxKind::LBrace) && !self.at_braced_statements())
+                || method_call
+            {
                 // `x.f()` is reported as `x.f{}` is, once its `()` is fixed.
                 self.builder.start_node_at(start, SyntaxKind::ProjectExpr);
                 let what = if method_call {
@@ -2503,6 +2706,27 @@ impl<'a> Parser<'a> {
             }
             self.builder.finish_node();
         }
+    }
+
+    /// Whether the `{` next starts statements, as C writes a block, in
+    /// `while (c) { … }`: a `;` or `:=` is right inside it, which a
+    /// projection's names never have.
+    fn at_braced_statements(&self) -> bool {
+        let mut depth = 0_usize;
+        for token in &self.tokens[self.pos..] {
+            match token.kind {
+                SyntaxKind::LBrace | SyntaxKind::LBracket | SyntaxKind::LParen => depth += 1,
+                SyntaxKind::RBrace | SyntaxKind::RBracket | SyntaxKind::RParen => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return false;
+                    }
+                }
+                SyntaxKind::Semicolon | SyntaxKind::ColonEq if depth == 1 => return true,
+                _ => {}
+            }
+        }
+        false
     }
 
     /// The postfix operator at the next token, if any, and the keyword it is
@@ -4427,6 +4651,70 @@ SourceFile
     }
 
     #[test]
+    fn loops() {
+        let statement = |body: &str| {
+            let source = format!("operator f{{}} [ {body} ];");
+            let parse = parse_str(&source);
+            assert!(parse.errors.is_empty(), "{body}: {:#?}", parse.errors);
+            let op = parse.tree.operators().next().unwrap();
+            let statements: Vec<_> = op.body().unwrap().statements().collect();
+            assert_eq!(statements.len(), 1, "{body}");
+            statements[0].clone()
+        };
+        let Statement::While(before) = statement("while n > 0 loop [ n := n - 1; call f{}; ];")
+        else {
+            panic!("a `while`");
+        };
+        assert!(matches!(before.condition(), Some(Expr::Binary(_))));
+        assert_eq!(before.body().unwrap().statements().count(), 2);
+        let Statement::Loop(after) = statement("loop [ n := n + 1; ] while n < 3;") else {
+            panic!("a `loop`");
+        };
+        assert!(matches!(after.condition(), Some(Expr::Binary(_))));
+        assert_eq!(after.body().unwrap().statements().count(), 1);
+        // `for`, `break` and `continue` are names, where a statement can
+        // start with one.
+        let parse =
+            parse_str("operator f{for: integer} [ var break := for; break := break + 1; ];");
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+    }
+
+    #[test]
+    fn loop_recovery() {
+        let body = |statements: &str| format!("operator f{{}} [ {statements} ];");
+        // C's, without `loop`, its block in braces.
+        assert_eq!(
+            fix(&body("while (n > 0) { n := n - 1; };")),
+            body("while (n > 0) loop [ n := n - 1; ];")
+        );
+        // Pascal's and Lua's `do`, a statement without brackets.
+        assert_eq!(
+            fix(&body("while n > 0 do n := n - 1;")),
+            body("while n > 0 loop [n := n - 1;];")
+        );
+        // C's `do … while`, and Pascal's `repeat … until`.
+        assert_eq!(
+            fix(&body("do { n := n + 1; } while (n < 3);")),
+            body("loop [ n := n + 1; ] while (n < 3);")
+        );
+        assert_eq!(
+            fix(&body("repeat [ n := n + 1; ] until n = 3;")),
+            body("loop [ n := n + 1; ] while not (n = 3);")
+        );
+        // Tutorial D's, in capitals.
+        assert_eq!(
+            fix(&body("WHILE n < 5; n := n + 1; END WHILE;")),
+            body("while n < 5 loop [ n := n + 1; ];")
+        );
+        // No early exits, and no `for`.
+        assert_eq!(messages(&body("break;")), ["trendy has no `break`"]);
+        assert_eq!(
+            messages(&body("for x in r { call f{}; }")),
+            ["trendy has no `for` loop"]
+        );
+    }
+
+    #[test]
     fn nodes_start_at_tokens() {
         for source in [
             "var x: tuple { a: integer } := tuple { a: 1 };",
@@ -4782,7 +5070,9 @@ SourceFile
                 Statement::Call(_)
                 | Statement::Return(_)
                 | Statement::Var(_)
-                | Statement::If(_) => Vec::new(),
+                | Statement::If(_)
+                | Statement::While(_)
+                | Statement::Loop(_) => Vec::new(),
             })
             .collect()
     }

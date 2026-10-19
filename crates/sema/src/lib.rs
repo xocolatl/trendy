@@ -5202,7 +5202,7 @@ mod tests {
             .iter()
             .filter_map(|s| match s {
                 hir::Statement::Assign(a) => Some(a.iter().map(|a| a.target).collect()),
-                hir::Statement::Call(_) | hir::Statement::If(..) => None,
+                hir::Statement::Call(_) | hir::Statement::If(..) | hir::Statement::Loop(..) => None,
             })
             .collect();
         let local = |i| vec![hir::Target::Local(hir::LocalId(i))];
@@ -5405,6 +5405,76 @@ mod tests {
         );
         // Its local variables are out of scope after it.
         assert_eq!(codes("[ var a := 1; a ] + a"), [Code::UnknownName]);
+    }
+
+    #[test]
+    fn loops_run_while_their_condition_is_true() {
+        let body = main_body(
+            "operator main{} [ var n := 3; while n > 0 loop [ var m := n; n := m - 1; ]; loop [ n := n + 1; ] while n < 2; ];",
+        );
+        let [
+            _,
+            hir::Statement::Loop(_, before, hir::Check::Before),
+            hir::Statement::Loop(_, after, hir::Check::After),
+        ] = &body[..]
+        else {
+            panic!("{body:?}");
+        };
+        // Each run's local variables are the block's own.
+        assert_eq!(before.locals.len(), 1);
+        assert!(after.locals.is_empty());
+        let codes_of = |statements: &str| {
+            codes(&format!(
+                "operator f{{n: integer}} [ var i := n; {statements} ];{MAIN}"
+            ))
+        };
+        // A condition that decides nothing, or a block that does nothing.
+        for (statements, message) in [
+            (
+                "while true loop [ i := i - 1; ];",
+                "the condition is always `true`",
+            ),
+            (
+                "while false loop [ i := i - 1; ];",
+                "the condition is always `false`",
+            ),
+            (
+                "loop [ i := i - 1; ] while false;",
+                "the condition is always `false`",
+            ),
+            ("while i > 0 loop [];", "this loop does nothing"),
+            (
+                "while 1 = 1 loop [ i := i + 1; ];",
+                "the condition is always true",
+            ),
+        ] {
+            let errors = errors(&format!(
+                "operator f{{n: integer}} [ var i := n; {statements} ];{MAIN}"
+            ));
+            assert_eq!(errors[0].code, Code::PointlessCondition, "{statements}");
+            assert_eq!(errors[0].message, message, "{statements}");
+        }
+        assert_eq!(codes_of("while i loop [ i := 0; ];"), [Code::TypeMismatch]);
+        // A loop's block runs again, so a fix keeps it, or removes it.
+        assert_eq!(
+            fix(&format!(
+                "operator f{{}} [ loop [ call g{{}}; ] while false; ];\noperator g{{}} [];{MAIN}"
+            )),
+            format!("operator f{{}} [ call g{{}}; ];\noperator g{{}} [];{MAIN}")
+        );
+        // Only in an update operator.
+        assert_eq!(
+            codes(&format!(
+                "operator f{{n: integer}}: integer [ var i := n; while i > 0 loop [ i := i - 1; ]; i ];{MAIN}"
+            )),
+            [Code::Return]
+        );
+        assert_eq!(
+            codes(&format!(
+                "var x := [ var i := 0; while i < 3 loop [ i := i + 1; ]; i ];{MAIN}"
+            )),
+            [Code::Return]
+        );
     }
 
     #[test]
@@ -5854,7 +5924,7 @@ mod tests {
             ("if n > 0 then false else true", "not (n > 0)"),
             ("if (n > 0) then false else true", "not (n > 0)"),
         ] {
-            assert_eq!(codes(&f(written)), [Code::PointlessIf], "{written}");
+            assert_eq!(codes(&f(written)), [Code::PointlessCondition], "{written}");
             assert_eq!(fix(&f(written)), f(fixed), "{written}");
             assert!(analyze_str(&f(fixed)).is_ok(), "{fixed}");
         }
@@ -5967,7 +6037,7 @@ mod tests {
                 format!("if n > 0 then [ {show} ];"),
             ),
         ] {
-            assert_eq!(codes(&f(&written)), [Code::PointlessIf], "{written}");
+            assert_eq!(codes(&f(&written)), [Code::PointlessCondition], "{written}");
             assert_eq!(fix(&f(&written)), f(&fixed), "{written}");
             assert!(analyze_str(&f(&fixed)).is_ok(), "{fixed}");
         }

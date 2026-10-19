@@ -771,17 +771,20 @@ fn spaced_after(kind: SyntaxKind) -> bool {
 }
 
 /// Whether a space always goes before, and after, a token of this kind:
-/// `:=`, and the postfix operators and other words between two parts.
+/// `:=`, and the postfix operators and other words between two parts, such
+/// as a loop's `while` and `loop`.
 fn spaced_before(kind: SyntaxKind) -> bool {
     use SyntaxKind::{
-        AsKw, ColonEq, ElseKw, ExtendKw, GroupKw, RemoveKw, RenameKw, ReplaceKw, ThenKw, UngroupKw,
-        UnwrapKw, WhereKw, WrapKw,
+        AsKw, ColonEq, ElseKw, ExtendKw, GroupKw, LoopKw, RemoveKw, RenameKw, ReplaceKw, ThenKw,
+        UngroupKw, UnwrapKw, WhereKw, WhileKw, WrapKw,
     };
     matches!(
         kind,
         ColonEq
             | ThenKw
             | ElseKw
+            | WhileKw
+            | LoopKw
             | RemoveKw
             | RenameKw
             | ExtendKw
@@ -971,6 +974,14 @@ mod tests {
         assert_eq!(
             fmt(months),
             "var m := array [\n    \"January\",\n    \"February\",\n    \"March\",\n    \"April\",\n    \"May\",\n    \"June\",\n    \"July\",\n    \"August\",\n    \"September\",\n];\n"
+        );
+    }
+
+    #[test]
+    fn loops() {
+        assert_eq!(
+            fmt("operator f{}[while n>0 loop[n:=n-1;];loop[n:=n+1;]while n<3;];"),
+            "operator f{} [\n    while n > 0 loop [\n        n := n - 1;\n    ];\n    loop [\n        n := n + 1;\n    ] while n < 3;\n];\n"
         );
     }
 

@@ -41,7 +41,8 @@ body in square brackets `[]`, and a closing `;`.
 - **A body is a list of statements,** each ending with `;`: calls,
   assignments (see [Assignment](#assignment)), local variables'
   declarations (see [Local variables](#local-variables)), and in an update
-  operator `if` statements (see [`if` statements](#if-statements)). A
+  operator `if` statements (see [`if` statements](#if-statements)) and
+  loops (see [Loops](#loops)). A
   read-only operator's ends with its value, an expression without `;`
   (see [Read-only operators](#read-only-operators)).
 - **Arguments are a tuple of the parameters:** `call greet{name: "Ada",
@@ -1011,6 +1012,80 @@ operator report{n: integer} [
         var note := "positive";
     ];
     call debug_value{v: note};
+];
+
+operator main{} [];
+```
+
+### Loops
+
+A loop runs the statements of its block again and again while a boolean
+condition is true. `while c loop [ … ];` checks the condition before each
+run, so its block may never run, and `loop [ … ] while c;` checks it
+after, so its block runs at least once. Tutorial D's WHILE loop is the
+first (chapter 5).
+
+```trendy
+var queue := array ["Amara", "Kofi", "Wanjiru"];
+
+operator serve{} [
+    var i := 1;
+    while i <= length{a: queue} loop [
+        var next := queue[i];
+        call debug_value{v: to_text{from: i} || ". " || next};
+        i := i + 1;
+    ];
+    var tries := 0;
+    loop [
+        tries := tries + 1;
+    ] while tries < 3;
+    call debug_value{v: tries};
+];
+
+operator main{} [
+    call serve{};
+];
+```
+
+- **A loop ends once its block makes its condition false.** No loop
+  leaves early: trendy has no `break`, `continue` or Tutorial D's `LEAVE`
+  (P0032), as it has no early `return`. A condition written `true`, or
+  known when compiling to be true, never ends, and is an error, and so is
+  one written `false`, and an empty block (A0046).
+- **Its block is a block in brackets,** even of one statement, as an `if`
+  statement's branches are (P0029), with the same fixes for other
+  languages' blocks (P0003). Each run's local variables are its own,
+  declared afresh, and out of scope after the loop, in its condition too.
+- **Only in an update operator.** A read-only operator and a value block
+  compute one value from whole relations, and change nothing that a loop
+  could do again (A0035).
+- **There is no `for`** (P0032): a relation's tuples have no order to
+  visit them in (TTM RM Proscription 7), so an operator applies to a whole
+  relation at once, as `sum` and `extend` do, and an array's elements are
+  visited by their positions, as above.
+- **Other languages' spellings are fixed** (P0032): C's
+  `while (c) { … }` and `do { … } while (c);`, Pascal's and Lua's
+  `while c do … end` and `repeat … until c`, written
+  `loop [ … ] while not (c);`, and Tutorial D's
+  `WHILE c; … END WHILE;`.
+
+```trendy,error
+operator count_down{n: integer} [
+    var i := n;
+    while (i > 0) {
+        i := i - 1;
+    };
+];
+
+operator main{} [];
+```
+
+```trendy,error
+operator count_down{n: integer} [
+    var i := n;
+    while true loop [
+        i := i - 1;
+    ];
 ];
 
 operator main{} [];
@@ -2861,10 +2936,11 @@ are case-sensitive. The keywords are `operator`, `var`, `call`, `builtin`,
 `ungroup`, `wrap`, `unwrap`, `join`, `times`, `compose`, `matching`,
 `union`, `d_union`, `xunion`, `intersect`, `minus`, `i_minus`, `where`,
 `as`, `insert`, `d_insert`, `delete`, `i_delete`, `update`, `assign`,
-`return`, `if`, `then` and `else`, all lowercase, and a keyword can't be a
-name (P0017).
+`return`, `if`, `then`, `else`, `while` and `loop`, all lowercase, and a
+keyword can't be a name (P0017).
 `type` is a keyword only after `builtin`, `key` only where a variable's
-keys go, and `value` and `from` only in `tuple from` and `value from`.
+keys go, `value` and `from` only in `tuple from` and `value from`, and
+`load`, `from`, `order`, `asc` and `desc` only in a load.
 
 Operators, values and types each have a namespace of their own. Values
 are variables and parameters, and a parameter hides a variable of its
@@ -2986,6 +3062,9 @@ line after a comment on its own line, such as a file's header, is kept.
 | `fn f(x: i64) -> i64 { x + 1 }`, `RETURNS INTEGER` | `operator f{x: integer}: integer [x + 1];` |
 | `return x;`, `RETURN x` at the end of a body | `x` |
 | `{ let x = 1; x * 2 }`, Rust's block, in an expression | `[ var x := 1; x * 2 ]` |
+| `while (c) { … }`, `while c do … end`, `WHILE c; … END WHILE` | `while c loop [ … ];` |
+| `do { … } while (c);`, `repeat … until c` | `loop [ … ] while c;`, `loop [ … ] while not (c);` |
+| `break`, `continue`, `LEAVE`, `for` | none: a loop ends when its condition is false |
 | `print(x)`, `f(x)` | `call debug_value{v: x};` |
 | `f(x)` in an expression | `f{x: x}`, every argument named |
 | `let`, `const`, `int x` | `var x`, at the top level or in an operator's body |

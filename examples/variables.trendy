@@ -64,6 +64,26 @@ operator check_out{name: text} [
     ];
 ];
 
+/* Loops run their block again and again while a condition is true: a
+   `while` checks it before each run, and a `loop` after, so that its
+   block runs at least once. Each run's local variables are its own. Here,
+   the guests in turn, from an array of their names. */
+operator roll_call{} [
+    var guests: array text;
+    load guests from rooms{guest} order [asc guest];
+    var i := 1;
+    while i <= length{a: guests} loop [
+        var line := to_text{from: i} || ". " || guests[i];
+        call debug_value{v: line};
+        i := i + 1;
+    ];
+    var knocks := 0;
+    loop [
+        knocks := knocks + 1;
+    ] while knocks < 3;
+    call debug_value{v: knocks};
+];
+
 operator main{} [
     t := t || "kwaheri";
     call debug_value{v: t};
@@ -107,6 +127,7 @@ operator main{} [
     call check_out{name: "Kenji"};
     call check_out{name: "Bashō"};
     call debug_value{v: rooms};
+    call roll_call{};
 
     /* Two changes that touch the same tuple conflict, since neither
        order is the right one: this stops the program, writing
