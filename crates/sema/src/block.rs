@@ -307,8 +307,16 @@ impl Assigning for BlockNames<'_> {
                 ));
                 return None;
             }
-            let (id, variable, _) = local.current.as_ref()?;
-            return Some(Assignee::local(*id, variable, &local.decl));
+            let (id, variable, known) = local.current.as_ref()?;
+            let assignee = Assignee::local(*id, variable, &local.decl);
+            return Some(match known {
+                // No `Let` binds it: its name stands for its value.
+                Some(value) => Assignee {
+                    current: hir::Expr::Constant(value.clone()),
+                    ..assignee
+                },
+                None => assignee,
+            });
         }
         if self.outer.has_value(name) {
             errors.push(errors::assigned_outside_block(name, span));

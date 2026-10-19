@@ -36,6 +36,10 @@ pub(crate) trait Assigning: Names {
 /// operator, as it is declared.
 pub(crate) struct Assignee {
     pub(crate) target: hir::Target,
+    /// Its value before the assignment: the variable itself, or, for a
+    /// value block's local variable whose value is known when compiling,
+    /// that value, which no `Let` binds.
+    pub(crate) current: hir::Expr,
     pub(crate) name: String,
     pub(crate) ty: hir::Type,
     pub(crate) keys: Vec<hir::Key>,
@@ -47,6 +51,7 @@ impl Assignee {
     pub(crate) fn local(id: hir::LocalId, local: &hir::Local, declaration: &VarDecl) -> Self {
         Assignee {
             target: hir::Target::Local(id),
+            current: hir::Expr::Local(id),
             name: local.name.clone(),
             ty: local.ty.clone(),
             keys: local.keys.clone(),
@@ -54,8 +59,8 @@ impl Assignee {
         }
     }
 
-    /// The variable's value before the assignment.
-    fn current(&self) -> hir::Expr {
+    /// The variable itself, as a name reads it.
+    fn itself(&self) -> hir::Expr {
         match self.target {
             hir::Target::Variable(id) => hir::Expr::Variable(id),
             hir::Target::Local(id) => hir::Expr::Local(id),
@@ -196,7 +201,7 @@ fn change(
         (Clause::Assignment(_), _) => {
             let written = clause.operand()?;
             let value = checker.expr(&written, Some(&target.expected), errors)?;
-            if value == target.assignee.current() {
+            if value == target.assignee.itself() {
                 let statement = clause.statement()?;
                 errors.push(errors::own_value(
                     &target.assignee.name,
@@ -378,9 +383,12 @@ fn update(
         Unchanged::OwnValues => errors::own_values_updated(clause.span(), &statement),
     };
     match (clause.where_keyword(), &target.assignee.ty) {
+        // Of the variable itself, whose value isn't known until it runs,
+        // so that the attributes' values come back: the changes are
+        // merged, then applied to its value (`attributes_merged`).
         (None, hir::Type::Tuple(_)) => {
             match checker.assign_attributes(
-                target.assignee.current(),
+                target.assignee.itself(),
                 &assigned,
                 unchanged,
                 errors,
@@ -404,7 +412,7 @@ fn update(
             let hir::Type::Relation(heading) = ty else {
                 // A scalar has no attributes to update.
                 checker.assign_attributes(
-                    target.assignee.current(),
+                    target.assignee.current.clone(),
                     &assigned,
                     unchanged,
                     errors,
@@ -418,7 +426,7 @@ fn update(
                 None => hir::Expr::Constant(hir::Value::Boolean(true)),
             };
             let selected = restricted(
-                target.assignee.current(),
+                target.assignee.current.clone(),
                 condition.clone(),
                 checker.bindings(),
             );
@@ -499,7 +507,7 @@ fn merged(
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Expr> {
     let name = assignee.name.as_str();
-    if known_effects(&assignee.current(), name, &list, errors) {
+    if known_effects(&assignee.current, name, &list, errors) {
         return None;
     }
     // A whole new value conflicts with any other change.
@@ -542,7 +550,13 @@ fn merged(
                 };
                 changes.push((clause, computed, values));
             }
-            attributes_merged(assignee.current(), name, changes, names.bindings(), errors)
+            attributes_merged(
+                assignee.current.clone(),
+                name,
+                changes,
+                names.bindings(),
+                errors,
+            )
         }
         Change::Tuples(change) => {
             let mut changes = vec![(clause, change)];
@@ -552,7 +566,7 @@ fn merged(
                 };
                 changes.push((clause, change));
             }
-            tuples_merged(&assignee.current(), name, changes, names.bindings(), errors)
+            tuples_merged(&assignee.current, name, changes, names.bindings(), errors)
         }
     }
 }

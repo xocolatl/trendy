@@ -5343,6 +5343,14 @@ mod tests {
         );
         let values: Vec<String> = vars.iter().skip(1).map(|v| v.init.to_string()).collect();
         assert_eq!(values, ["97", "20"]);
+        // A local variable whose value is known has no `Let`, so a change
+        // to it starts from that value, whether the change is known too or
+        // only when running.
+        let vars = variables(
+            "var known := [ var t := tuple { a: 1, b: 2 }; update t { a := 7 }; t ];\noperator later{n: integer}: tuple { a: integer, b: integer } [ [ var t := tuple { a: 1, b: 2 }; update t { a := n }; t ] ];\nvar called := later{n: 5};",
+        );
+        let values: Vec<String> = vars.iter().map(|v| v.init.to_string()).collect();
+        assert_eq!(values, ["tuple { a: 7, b: 2 }", "tuple { a: 5, b: 2 }"]);
         // Known only when running, each local variable is a `Let`.
         let program = analyze_str(&format!(
             "operator f{{n: integer}}: integer [ [ var d := n * 2; d := d + 1; d * 10 ] ];{MAIN}"

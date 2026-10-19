@@ -778,6 +778,7 @@ impl BodyNames<'_, '_> {
             let variable = cx.variables[id.0].as_ref()?;
             return Some(Assignee {
                 target: hir::Target::Variable(id),
+                current: hir::Expr::Variable(id),
                 name: variable.name.clone(),
                 ty: variable.ty.clone(),
                 keys: variable.keys.clone(),
