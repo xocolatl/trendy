@@ -242,6 +242,17 @@ fn load_rule(identifier: &str) -> Value {
     })
 }
 
+/// `for x in`: `in` is a keyword only after a `for` loop's variable.
+fn for_rule(identifier: &str) -> Value {
+    json!({
+        "match": format!("\\b(for)\\s+({identifier})\\s+(in)\\b"),
+        "captures": {
+            "1": { "name": "keyword.other.trendy" },
+            "3": { "name": "keyword.other.trendy" },
+        },
+    })
+}
+
 /// `order [`: `order` is a keyword only before a load's order items.
 fn order_rule() -> Value {
     json!({
@@ -317,6 +328,7 @@ fn generate(probed: &Probed) -> Value {
             { "include": "#key" },
             { "include": "#load" },
             { "include": "#order" },
+            { "include": "#for" },
             { "include": "#keywords" },
             { "include": "#operator-word" },
             { "include": "#boolean" },
@@ -352,6 +364,7 @@ fn generate(probed: &Probed) -> Value {
             "key": key_rule(),
             "load": load_rule(identifier),
             "order": order_rule(),
+            "for": for_rule(identifier),
             "call": {
                 "match": format!("\\b({})\\s+({identifier})", keyword(SyntaxKind::CallKw)),
                 "captures": {

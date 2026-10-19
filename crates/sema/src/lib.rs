@@ -106,15 +106,16 @@ pub(crate) fn check(
         declarations: &declarations,
     };
     let mut bodies = HashMap::new();
-    let mut growing = Vec::new();
+    let mut deferred = body::Deferred::default();
     for signature in operators.iter().filter(|s| !s.read_only) {
         if let Some(decl) = &signature.decl
-            && let Some(statements) = body::body(decl, signature.id, &context, &mut growing, errors)
+            && let Some(statements) =
+                body::body(decl, signature.id, &context, &mut deferred, errors)
         {
             bodies.insert(signature.id, statements);
         }
     }
-    body::growing_recursion(&growing, &bodies, &operators, errors);
+    body::deferred_checks(&deferred, &bodies, &operators, errors);
     Checked {
         namespaces,
         operators,
@@ -5202,7 +5203,10 @@ mod tests {
             .iter()
             .filter_map(|s| match s {
                 hir::Statement::Assign(a) => Some(a.iter().map(|a| a.target).collect()),
-                hir::Statement::Call(_) | hir::Statement::If(..) | hir::Statement::Loop(..) => None,
+                hir::Statement::Call(_)
+                | hir::Statement::If(..)
+                | hir::Statement::Loop(..)
+                | hir::Statement::For(..) => None,
             })
             .collect();
         let local = |i| vec![hir::Target::Local(hir::LocalId(i))];
@@ -5472,6 +5476,77 @@ mod tests {
         assert_eq!(
             codes(&format!(
                 "var x := [ var i := 0; while i < 3 loop [ i := i + 1; ]; i ];{MAIN}"
+            )),
+            [Code::Return]
+        );
+    }
+
+    #[test]
+    fn for_loops_go_through_an_array() {
+        let body = main_body(
+            "operator main{} [ var total := 0; for n in array [3, 1, 2] loop [ var doubled := n * 2; total := total + doubled; ]; ];",
+        );
+        let [_, hir::Statement::For(variable, array, block)] = &body[..] else {
+            panic!("{body:?}");
+        };
+        assert!(matches!(array, hir::Expr::Constant(hir::Value::Array(_))));
+        // The loop's variable, and the block's own, are the block's.
+        assert_eq!(block.locals.len(), 2);
+        assert!(block.locals.contains(variable));
+        let source = |statements: &str| {
+            format!(
+                "var queue := array [\"Amara\", \"Kofi\"];\nvar rooms := relation {{ {{ room: 1 }} }};\noperator reset{{}} [ queue := array [\"Ama\"]; ];\noperator indirectly{{}} [ call reset{{}}; ];\noperator f{{}} [ {statements} ];{MAIN}"
+            )
+        };
+        let message = |statements: &str| {
+            let errors = errors(&source(statements));
+            assert_eq!(errors.len(), 1, "{statements}: {errors:#?}");
+            (errors[0].code, errors[0].message.clone())
+        };
+        // Neither its variable nor its array changes while it runs, even by
+        // a call, of an operator that assigns one through another.
+        assert_eq!(
+            message("for name in queue loop [ name := \"x\"; ];"),
+            (
+                Code::NotAssignable,
+                "`name`, a loop's variable, can't be assigned".to_string()
+            )
+        );
+        assert_eq!(
+            message("for name in queue loop [ if name = \"Kofi\" then [ queue := array []; ]; ];"),
+            (
+                Code::NotAssignable,
+                "`queue` can't be assigned in a loop that goes through it".to_string()
+            )
+        );
+        assert_eq!(
+            message("for name in queue loop [ call indirectly{}; ];"),
+            (
+                Code::NotAssignable,
+                "`indirectly` assigns `queue`, which this loop goes through".to_string()
+            )
+        );
+        // But other variables do, and after the loop, it does too.
+        let fine = source(
+            "var seen := 0; for name in queue loop [ seen := seen + 1; call debug_value{v: name}; ]; call reset{};",
+        );
+        assert!(analyze_str(&fine).is_ok(), "{:#?}", errors(&fine));
+        // Only arrays, and only in an update operator.
+        assert_eq!(
+            message("for r in rooms loop [ call reset{}; ];").0,
+            Code::WrongOperandType
+        );
+        assert_eq!(
+            message("var x := 0; for x in queue loop [ call debug_value{v: x}; ];").0,
+            Code::DuplicateName
+        );
+        assert_eq!(
+            message("for x in queue loop [];").0,
+            Code::PointlessCondition
+        );
+        assert_eq!(
+            codes(&format!(
+                "operator g{{}}: integer [ var n := 0; for x in array [1] loop [ n := n + x; ]; n ];{MAIN}"
             )),
             [Code::Return]
         );

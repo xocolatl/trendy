@@ -1023,7 +1023,8 @@ A loop runs the statements of its block again and again while a boolean
 condition is true. `while c loop [ … ];` checks the condition before each
 run, so its block may never run, and `loop [ … ] while c;` checks it
 after, so its block runs at least once. Tutorial D's WHILE loop is the
-first (chapter 5).
+first (chapter 5). `for x in a loop [ … ];` runs its block for each
+element of the array `a`, in order, with `x` the element's value.
 
 ```trendy
 var queue := array ["Amara", "Kofi", "Wanjiru"];
@@ -1040,6 +1041,9 @@ operator serve{} [
         tries := tries + 1;
     ] while tries < 3;
     call debug_value{v: tries};
+    for name in queue loop [
+        call debug_value{v: "karibu, " || name};
+    ];
 ];
 
 operator main{} [
@@ -1059,15 +1063,25 @@ operator main{} [
 - **Only in an update operator.** A read-only operator and a value block
   compute one value from whole relations, and change nothing that a loop
   could do again (A0035).
-- **There is no `for`** (P0032): a relation's tuples have no order to
-  visit them in (TTM RM Proscription 7), so an operator applies to a whole
-  relation at once, as `sum` and `extend` do, and an array's elements are
-  visited by their positions, as above.
+- **A `for` loop goes through an array** (A0022), computed once, before
+  its first run. A relation's tuples have no order to go through them in
+  (TTM RM Proscriptions 2 and 7), so an operator applies to a whole
+  relation at once, as `sum` and `extend` do, or a load puts its tuples in
+  an array first (see [Loading a relation](#loading-a-relation)).
+- **Neither the loop's variable nor its array changes while it runs**
+  (A0026): the block can't assign the variable, or a variable the array is
+  computed from, and can't call an update operator that assigns one,
+  directly or through the operators it calls. So a loop never goes past
+  the end of an array that shrinks. To visit what a run adds, go through
+  the positions with a `while` loop, which reads the array anew each time.
+  An empty block does nothing, which the fix removes (A0046).
 - **Other languages' spellings are fixed** (P0032): C's
   `while (c) { … }` and `do { … } while (c);`, Pascal's and Lua's
   `while c do … end` and `repeat … until c`, written
-  `loop [ … ] while not (c);`, and Tutorial D's
-  `WHILE c; … END WHILE;`.
+  `loop [ … ] while not (c);`, Tutorial D's `WHILE c; … END WHILE;`,
+  C#'s `foreach`, and JavaScript's `for (x of a)`. C's
+  `for (…; …; …)` is reported, as a `while` loop with a counter of its
+  own.
 
 ```trendy,error
 operator count_down{n: integer} [
@@ -1085,6 +1099,18 @@ operator count_down{n: integer} [
     var i := n;
     while true loop [
         i := i - 1;
+    ];
+];
+
+operator main{} [];
+```
+
+```trendy,error
+var queue := array ["Amara", "Kofi"];
+
+operator serve{} [
+    for name in queue loop [
+        queue := array ["Wanjiru"];
     ];
 ];
 
@@ -2936,11 +2962,12 @@ are case-sensitive. The keywords are `operator`, `var`, `call`, `builtin`,
 `ungroup`, `wrap`, `unwrap`, `join`, `times`, `compose`, `matching`,
 `union`, `d_union`, `xunion`, `intersect`, `minus`, `i_minus`, `where`,
 `as`, `insert`, `d_insert`, `delete`, `i_delete`, `update`, `assign`,
-`return`, `if`, `then`, `else`, `while` and `loop`, all lowercase, and a
-keyword can't be a name (P0017).
+`return`, `if`, `then`, `else`, `while`, `loop` and `for`, all lowercase,
+and a keyword can't be a name (P0017).
 `type` is a keyword only after `builtin`, `key` only where a variable's
 keys go, `value` and `from` only in `tuple from` and `value from`, and
-`load`, `from`, `order`, `asc` and `desc` only in a load.
+`load`, `from`, `order`, `asc` and `desc` only in a load, and `in` only
+in a `for` loop.
 
 Operators, values and types each have a namespace of their own. Values
 are variables and parameters, and a parameter hides a variable of its
@@ -3064,7 +3091,9 @@ line after a comment on its own line, such as a file's header, is kept.
 | `{ let x = 1; x * 2 }`, Rust's block, in an expression | `[ var x := 1; x * 2 ]` |
 | `while (c) { … }`, `while c do … end`, `WHILE c; … END WHILE` | `while c loop [ … ];` |
 | `do { … } while (c);`, `repeat … until c` | `loop [ … ] while c;`, `loop [ … ] while not (c);` |
-| `break`, `continue`, `LEAVE`, `for` | none: a loop ends when its condition is false |
+| `break`, `continue`, `LEAVE` | none: a loop ends when its condition is false |
+| `foreach (x in a) { … }`, `for x of a`, `for x in a:` | `for x in a loop [ … ];` |
+| `for (i = 0; i < n; i++)` | `var i := 1; while i <= n loop [ …; i := i + 1; ];` |
 | `print(x)`, `f(x)` | `call debug_value{v: x};` |
 | `f(x)` in an expression | `f{x: x}`, every argument named |
 | `let`, `const`, `int x` | `var x`, at the top level or in an operator's body |

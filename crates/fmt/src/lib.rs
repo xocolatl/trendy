@@ -660,7 +660,8 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
     // `value` and `from`, in `tuple from r` and `value from r`, `any`, in
     // `any type`, `types`, before an operator's type parameters, `per`,
     // which a space also comes before, `load`, `from` and `order`, which
-    // one comes before too, and an order item's `asc` and `desc`.
+    // one comes before too, an order item's `asc` and `desc`, and a `for`
+    // loop's `in`.
     let contextual_keyword = prev.kind() == Ident
         && prev.parent().is_some_and(|p| match p.kind() {
             BuiltinType => prev.text() == "type",
@@ -671,7 +672,8 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
             | SyntaxKind::Per
             | SyntaxKind::KindDecl
             | SyntaxKind::Load
-            | SyntaxKind::OrderItem => true,
+            | SyntaxKind::OrderItem
+            | SyntaxKind::ForStmt => true,
             _ => false,
         });
     let load_keyword =
@@ -982,6 +984,14 @@ mod tests {
         assert_eq!(
             fmt("operator f{}[while n>0 loop[n:=n-1;];loop[n:=n+1;]while n<3;];"),
             "operator f{} [\n    while n > 0 loop [\n        n := n - 1;\n    ];\n    loop [\n        n := n + 1;\n    ] while n < 3;\n];\n"
+        );
+    }
+
+    #[test]
+    fn for_loops() {
+        assert_eq!(
+            fmt("operator f{}[for   x   in a loop[call g{};];];"),
+            "operator f{} [\n    for x in a loop [\n        call g{};\n    ];\n];\n"
         );
     }
 

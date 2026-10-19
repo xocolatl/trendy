@@ -90,11 +90,13 @@ fn variables() {
             r#""Kenji leaves room 1""#,
             r#""Bashō has no room""#,
             r#"relation { guest: text, room: integer } { { guest: "Amara", room: 2 }, { guest: "Wanjiru", room: 3 } }"#,
-            // A roll call, by a `while` over the guests, and three knocks,
-            // by a `loop`.
+            // A roll call, by a `while` over the guests' positions, three
+            // knocks, by a `loop`, and goodbyes, by a `for` over the guests.
             r#""1. Amara""#,
             r#""2. Wanjiru""#,
             "3",
+            r#""kwaheri, Amara""#,
+            r#""kwaheri, Wanjiru""#,
             "relation { born: integer, name: text } {}",
         ]
     );

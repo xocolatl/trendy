@@ -71,7 +71,8 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
     let (parent, grandparent) = (above(0), above(1));
     // The contextual keywords: `type`, in `builtin type name;`, `key`,
     // `value` and `from`, `any` and `type`, in `any type`, `types`, `per`,
-    // `kind`, and a load's `load`, `from`, `order`, `asc` and `desc`.
+    // `kind`, a load's `load`, `from`, `order`, `asc` and `desc`, and a
+    // `for` loop's `in`.
     let keyword = match parent {
         Some(SyntaxKind::BuiltinType) => token.text() == "type",
         Some(SyntaxKind::AnyType) => matches!(token.text(), "any" | "type"),
@@ -82,7 +83,8 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
             | SyntaxKind::Per
             | SyntaxKind::KindDecl
             | SyntaxKind::Load
-            | SyntaxKind::OrderItem,
+            | SyntaxKind::OrderItem
+            | SyntaxKind::ForStmt,
         ) => true,
         _ => false,
     };
@@ -109,7 +111,9 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
         (Some(SyntaxKind::Name), Some(SyntaxKind::Operator | SyntaxKind::BuiltinOperator)) => {
             (Class::Operator, true)
         }
-        (Some(SyntaxKind::Name), Some(SyntaxKind::VarDecl)) => (Class::Variable, true),
+        (Some(SyntaxKind::Name), Some(SyntaxKind::VarDecl | SyntaxKind::ForStmt)) => {
+            (Class::Variable, true)
+        }
         (Some(SyntaxKind::Name), Some(SyntaxKind::AttributeType | SyntaxKind::Gathering)) => {
             (Class::Attribute, true)
         }

@@ -35,10 +35,30 @@ struct Scope {
     reached: usize,
 }
 
+/// What declares a local variable.
+#[derive(Clone)]
+pub(crate) enum Declaration {
+    /// `var name …;`.
+    Var(VarDecl),
+    /// A `for` loop, of whose array's elements its variable, `name`, takes
+    /// each in turn.
+    Loop(ast::Name),
+}
+
+impl Declaration {
+    /// Where the variable's name is written.
+    pub(crate) fn name_span(&self) -> trendy_diag::Span {
+        match self {
+            Declaration::Var(decl) => decl.name().map_or_else(|| decl.span(), |n| n.span()),
+            Declaration::Loop(name) => name.span(),
+        }
+    }
+}
+
 /// A local variable's declaration, by the name it declares.
 struct Declared {
     name: String,
-    decl: VarDecl,
+    decl: Declaration,
     /// The local variable its name refers to here, once its declaration is
     /// checked: `None` before then, or after reporting its errors.
     current: Option<hir::LocalId>,
@@ -47,11 +67,11 @@ struct Declared {
 /// What a name is among a body's local variables.
 pub(crate) enum Local<'a> {
     /// A local variable declared before here, by the id its name refers to.
-    Declared(hir::LocalId, &'a hir::Local, &'a VarDecl),
+    Declared(hir::LocalId, &'a hir::Local, &'a Declaration),
     /// One declared after here, or here, which has no value yet.
     Later(&'a VarDecl),
     /// One declared in a block that has ended, out of scope here.
-    Ended(&'a VarDecl),
+    Ended(&'a Declaration),
     /// One whose declaration has errors, already reported.
     Invalid,
 }
@@ -66,10 +86,10 @@ impl Locals {
                 .enumerate()
                 .find(|(_, declared)| declared.name == name);
             if let Some((index, declared)) = found {
-                return Some(match declared.current {
-                    _ if index >= scope.reached => Local::Later(&declared.decl),
-                    Some(id) => Local::Declared(id, &self.all[id.0], &declared.decl),
-                    None => Local::Invalid,
+                return Some(match (&declared.decl, declared.current) {
+                    (Declaration::Var(decl), _) if index >= scope.reached => Local::Later(decl),
+                    (_, Some(id)) => Local::Declared(id, &self.all[id.0], &declared.decl),
+                    (_, None) => Local::Invalid,
                 });
             }
         }
@@ -104,7 +124,7 @@ impl Locals {
     ) -> Option<hir::LocalId> {
         let scope = self.scopes.last_mut()?;
         let declared = scope.declared.get_mut(scope.reached)?;
-        if declared.decl != *decl {
+        if !matches!(&declared.decl, Declaration::Var(declaring) if declaring == decl) {
             return None;
         }
         scope.reached += 1;
@@ -151,7 +171,69 @@ impl Locals {
         op: &Signature,
         errors: &mut Vec<Diagnostic>,
     ) -> bool {
+        self.enter_scope(Scope::default(), statements, op, errors)
+    }
+
+    /// Enter the block of a `for` loop, of `statements`, of the operator
+    /// `op`, whose variable is `name`, declared by the loop: `local`, in
+    /// scope in all of the block. Its id, if its name is its own, as for
+    /// [`Locals::enter`], and whether each of the block's local variables
+    /// has one.
+    pub(crate) fn enter_loop(
+        &mut self,
+        name: &ast::Name,
+        local: hir::Local,
+        statements: impl Iterator<Item = ast::Statement>,
+        op: &Signature,
+        errors: &mut Vec<Diagnostic>,
+    ) -> (Option<hir::LocalId>, bool) {
         let mut scope = Scope::default();
+        let span = name.span();
+        let first = self
+            .scopes
+            .iter()
+            .flat_map(|scope| &scope.declared)
+            .find(|other| other.name == local.name);
+        let id = if let Some(first) = first {
+            errors.push(errors::loop_variable_declared_again(
+                &local.name,
+                span,
+                &first.decl,
+                &op.name,
+            ));
+            None
+        } else if op.params.contains_key(&local.name) {
+            errors.push(errors::local_named_as_parameter(
+                &local.name,
+                span,
+                None,
+                &op.name,
+            ));
+            None
+        } else {
+            let id = hir::LocalId(self.all.len());
+            scope.declared.push(Declared {
+                name: local.name.clone(),
+                decl: Declaration::Loop(name.clone()),
+                current: Some(id),
+            });
+            scope.reached = 1;
+            self.all.push(local);
+            Some(id)
+        };
+        let ok = self.enter_scope(scope, statements, op, errors);
+        (id, ok && id.is_some())
+    }
+
+    /// Enter a block, `scope` holding any local variable it declares
+    /// before its statements, of `statements`, as for [`Locals::enter`].
+    fn enter_scope(
+        &mut self,
+        mut scope: Scope,
+        statements: impl Iterator<Item = ast::Statement>,
+        op: &Signature,
+        errors: &mut Vec<Diagnostic>,
+    ) -> bool {
         let mut ok = true;
         for stmt in statements {
             let ast::Statement::Var(decl) = stmt else {
@@ -192,7 +274,7 @@ impl Locals {
             } else {
                 scope.declared.push(Declared {
                     name: name.to_string(),
-                    decl,
+                    decl: Declaration::Var(decl),
                     current: None,
                 });
             }

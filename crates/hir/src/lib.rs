@@ -593,6 +593,11 @@ pub enum Statement {
     /// checked before each run, `while condition loop [ … ];`, or after,
     /// `loop [ … ] while condition;`, which runs them at least once.
     Loop(Expr, Block, Check),
+    /// `for x in a loop [ … ];`: the block's statements run for each
+    /// element of the array, computed once, in order, with the local
+    /// variable, which the block lists, the element's value. Neither it nor
+    /// a variable the array is computed from changes while the loop runs.
+    For(LocalId, Expr, Block),
 }
 
 /// When a loop checks its condition.
@@ -628,6 +633,11 @@ impl Statement {
                 condition.instantiated(types),
                 body.instantiated(types),
                 *check,
+            ),
+            Statement::For(variable, array, body) => Statement::For(
+                *variable,
+                array.instantiated(types),
+                body.instantiated(types),
             ),
         }
     }

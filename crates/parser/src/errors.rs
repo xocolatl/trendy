@@ -744,6 +744,59 @@ const BRANCH_BRACKETS: &str = "an `if` statement's branches, and a loop's block,
 
 pub(crate) const LOOP_FORM: &str = "a loop has the form `while condition loop [ … ];`, which checks the condition before each run of its block, or `loop [ … ] while condition;`, which checks it after";
 
+pub(crate) const FOR_FORM: &str = "a `for` loop has the form `for x in a loop [ … ];`: its block run for each element of the array `a`, in order, with `x` its value";
+
+/// C#'s and PHP's `foreach`, `found`: `for`.
+pub(crate) fn foreach(found: Found) -> Diagnostic {
+    Diagnostic::error(
+        Code::LoopSpelling,
+        format!(
+            "a loop over an array's elements is written `for`, not `{}`",
+            found.text
+        ),
+        found.span,
+        "another language's keyword",
+    )
+    .with_note(FOR_FORM)
+    .with_suggestion(
+        "write `for`",
+        vec![Edit {
+            span: found.span,
+            replacement: "for".to_string(),
+        }],
+    )
+}
+
+/// JavaScript's `of`, `found`, in a `for` loop: `in`.
+pub(crate) fn for_of(found: Found) -> Diagnostic {
+    Diagnostic::error(
+        Code::LoopSpelling,
+        "a `for` loop's array follows `in`, not `of`",
+        found.span,
+        "JavaScript's spelling",
+    )
+    .with_note(FOR_FORM)
+    .with_suggestion(
+        "write `in`",
+        vec![Edit {
+            span: found.span,
+            replacement: "in".to_string(),
+        }],
+    )
+}
+
+/// C's `for (…; …; …)`, at `span`, which counts with a variable.
+pub(crate) fn c_for(span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::LoopSpelling,
+        "C's `for (…; …; …)` is written as a `while` loop",
+        span,
+        "C's loop",
+    )
+    .with_note(FOR_FORM)
+    .with_help("count with a variable of your own: `var i := 1; while i <= n loop [ …; i := i + 1; ];`, or go through an array's elements: `for x in a loop [ … ];`")
+}
+
 const LOOP_RULE: &str = "a loop runs its block, in brackets after `loop`, again and again while its condition is true, checked after `while`: `while c loop [ … ];` checks it before each run, and `loop [ … ] while c;` after";
 
 /// `do` or `repeat`, `found`, where a loop's `loop` goes, as Pascal, Lua
@@ -784,11 +837,12 @@ pub(crate) fn missing_loop(condition_end: usize, open: Span) -> Diagnostic {
     )
 }
 
-/// Python's `:`, `colon`, after a loop's condition.
-pub(crate) fn python_loop(colon: Found) -> Diagnostic {
+/// Python's `:`, `colon`, after a loop's condition or array: the loop
+/// written as `spelled` says.
+pub(crate) fn python_loop(colon: Found, spelled: &str) -> Diagnostic {
     Diagnostic::error(
         Code::LoopSpelling,
-        "`while c:` is written `while c loop [ … ];`",
+        spelled.to_string(),
         colon.span,
         "Python's loop",
     )
@@ -856,18 +910,6 @@ pub(crate) fn loop_exit(found: Found) -> Diagnostic {
     )
     .with_note("a loop ends once its condition is false, checked before or after each run of its block: no loop leaves early, or skips the rest of its block")
     .with_help("make the condition false, as by assigning a variable it reads, or run the rest of the block in an `if` statement")
-}
-
-/// `for`, `found`: a loop over the values of something.
-pub(crate) fn for_loop(found: Found) -> Diagnostic {
-    Diagnostic::error(
-        Code::LoopSpelling,
-        "trendy has no `for` loop",
-        found.span,
-        "a `for` loop",
-    )
-    .with_note(LOOP_RULE)
-    .with_help("compute from a whole relation at once, as in `sum{r: r, of: x}` or `r extend { … }`, or loop over an array's positions: `var i := 1; while i <= length{a: a} loop [ …; i := i + 1; ];`")
 }
 
 /// `elif`, `elsif` or `elseif`, `found`, in an `if`: `else if`.

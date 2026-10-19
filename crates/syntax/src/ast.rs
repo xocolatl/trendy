@@ -49,6 +49,7 @@ ast_node!(ReturnStmt);
 ast_node!(IfStmt);
 ast_node!(WhileStmt);
 ast_node!(LoopStmt);
+ast_node!(ForStmt);
 ast_node!(AssignStmt);
 ast_node!(AssignBlock);
 ast_node!(Assignment);
@@ -315,6 +316,7 @@ pub enum Statement {
     If(IfStmt),
     While(WhileStmt),
     Loop(LoopStmt),
+    For(ForStmt),
     /// A local variable's declaration, as a program variable's is written.
     Var(VarDecl),
 }
@@ -330,6 +332,7 @@ fn statements_of(node: &SyntaxNode) -> impl Iterator<Item = Statement> + use<> {
             .or_else(|| IfStmt::cast(node.clone()).map(Statement::If))
             .or_else(|| WhileStmt::cast(node.clone()).map(Statement::While))
             .or_else(|| LoopStmt::cast(node.clone()).map(Statement::Loop))
+            .or_else(|| ForStmt::cast(node.clone()).map(Statement::For))
             .or_else(|| VarDecl::cast(node).map(Statement::Var))
     })
 }
@@ -357,6 +360,7 @@ impl Statement {
             Statement::If(s) => s.syntax(),
             Statement::While(s) => s.syntax(),
             Statement::Loop(s) => s.syntax(),
+            Statement::For(s) => s.syntax(),
             Statement::Var(s) => s.syntax(),
         }
     }
@@ -419,6 +423,33 @@ impl LoopStmt {
     #[must_use]
     pub fn condition(&self) -> Option<Expr> {
         self.0.children().find_map(Expr::cast)
+    }
+}
+
+impl ForStmt {
+    /// The `for`, or the word another language writes for it, which is
+    /// reported: C#'s `foreach`.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    /// The variable, which takes each element's value in turn.
+    #[must_use]
+    pub fn variable(&self) -> Option<Name> {
+        self.0.children().find_map(Name::cast)
+    }
+
+    /// The array whose elements the loop goes through, after `in`.
+    #[must_use]
+    pub fn array(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+
+    /// The statements run for each element.
+    #[must_use]
+    pub fn body(&self) -> Option<Body> {
+        self.0.children().find_map(Body::cast)
     }
 }
 

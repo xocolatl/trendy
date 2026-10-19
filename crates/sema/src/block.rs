@@ -54,7 +54,7 @@ pub(crate) fn value(
                 errors.push(errors::if_in_block(stmt));
                 ok = false;
             }
-            ast::Statement::While(_) | ast::Statement::Loop(_) => {
+            ast::Statement::While(_) | ast::Statement::Loop(_) | ast::Statement::For(_) => {
                 errors.push(errors::loop_in_block(statement));
                 ok = false;
             }
@@ -116,7 +116,7 @@ impl<'a> BlockNames<'a> {
                 errors.push(errors::local_declared_again(
                     name,
                     decl,
-                    &first.decl,
+                    &locals::Declaration::Var(first.decl.clone()),
                     "a value block",
                 ));
                 ok = false;

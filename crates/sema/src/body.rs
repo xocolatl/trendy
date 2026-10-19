@@ -10,7 +10,7 @@ use trendy_syntax::ast::{self, AstNode, VarDecl};
 
 use crate::assign::{Assignee, Assigning};
 use crate::check::{Checker, Lookup, Names, Written};
-use crate::locals::{Local, Locals};
+use crate::locals::{Declaration, Local, Locals};
 use crate::operators::Operators;
 use crate::types::{Expected, Origin};
 use crate::{Namespaces, assign, errors, locals, ops};
@@ -53,14 +53,43 @@ pub(crate) struct Growing {
     pub(crate) ty: hir::Type,
 }
 
+/// What can only be checked once every update operator's body is (see
+/// [`deferred_checks`]).
+#[derive(Default)]
+pub(crate) struct Deferred {
+    /// Each call that gives a type parameter a type built from its
+    /// caller's own.
+    growing: Vec<Growing>,
+    /// Each call in a `for` loop.
+    in_loops: Vec<LoopCall>,
+}
+
+/// A call, at `span`, in one or more `for` loops, of the update operator
+/// `callee`, which mustn't assign a variable of the program's that a loop's
+/// array is computed from.
+struct LoopCall {
+    callee: hir::OperatorId,
+    span: Span,
+    /// Each such variable, its name, and where its loop's array is written.
+    looped: Vec<(hir::VariableId, String, Span)>,
+}
+
+/// What a `for` loop keeps from changing while it runs: the variables its
+/// array is computed from, of the program and local, by name, and where the
+/// array is written.
+pub(crate) struct Frozen {
+    targets: Vec<(hir::Target, String)>,
+    array: Span,
+}
+
 /// The statements of the update operator `op`, whose id is `within`, and
-/// its local variables. Each call that gives a type parameter a type built
-/// from `op`'s own is added to `growing`.
+/// its local variables. What can only be checked once every body is goes
+/// in `deferred`.
 pub(crate) fn body(
     op: &ast::Operator,
     within: hir::OperatorId,
     cx: &Context,
-    growing: &mut Vec<Growing>,
+    deferred: &mut Deferred,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<(Vec<hir::Local>, hir::Block)> {
     let body = op.body()?;
@@ -68,7 +97,8 @@ pub(crate) fn body(
         cx,
         within,
         locals: Locals::default(),
-        growing,
+        deferred,
+        frozen: Vec::new(),
     };
     let checked: Vec<ast::Statement> = body.statements().collect();
     let block = statements.block(&checked, errors)?;
@@ -81,9 +111,11 @@ struct Statements<'a, 'b> {
     cx: &'a Context<'b>,
     within: hir::OperatorId,
     locals: Locals,
-    /// Each call that gives a type parameter a type built from the
-    /// operator's own (see [`Growing`]).
-    growing: &'a mut Vec<Growing>,
+    /// What can only be checked once every body is.
+    deferred: &'a mut Deferred,
+    /// What each `for` loop the statement being checked is in keeps from
+    /// changing, outermost first.
+    frozen: Vec<Frozen>,
 }
 
 impl Statements<'_, '_> {
@@ -92,6 +124,7 @@ impl Statements<'_, '_> {
             cx: self.cx,
             within: self.within,
             locals: &mut self.locals,
+            frozen: &self.frozen,
         }
     }
 
@@ -125,9 +158,7 @@ impl Statements<'_, '_> {
     ) -> Option<hir::Statement> {
         let (cx, within) = (self.cx, self.within);
         match stmt {
-            ast::Statement::Call(stmt) => {
-                call(stmt, within, cx, &mut self.locals, self.growing, errors)
-            }
+            ast::Statement::Call(stmt) => self.call(stmt, errors),
             ast::Statement::Assign(stmt) => {
                 let clauses: Vec<_> = stmt.clauses().collect();
                 assign::statement(&clauses, &mut self.names(), errors)
@@ -138,7 +169,7 @@ impl Statements<'_, '_> {
                 errors.push(errors::return_in_update(name, stmt));
                 None
             }
-            ast::Statement::Var(decl) => declaration(decl, within, cx, &mut self.locals, errors),
+            ast::Statement::Var(decl) => self.declaration(decl, errors),
             ast::Statement::If(stmt) => self.if_stmt(stmt, errors),
             ast::Statement::While(stmt) => self.loop_stmt(
                 stmt.keyword(),
@@ -156,7 +187,175 @@ impl Statements<'_, '_> {
                 stmt.span(),
                 errors,
             ),
+            ast::Statement::For(stmt) => self.for_stmt(stmt, errors),
         }
+    }
+
+    /// `for x in a loop [ … ];`: the block run for each element of the
+    /// array, with the loop's variable its value. Neither the variable nor
+    /// a variable the array is computed from is assigned in the block:
+    /// directly, which is reported here, or by a call, once every body is
+    /// checked (see [`deferred_checks`]).
+    fn for_stmt(
+        &mut self,
+        stmt: &ast::ForStmt,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Statement> {
+        let (variable, written, body) = (stmt.variable()?, stmt.array()?, stmt.body()?);
+        let name = variable.ident()?.text().to_string();
+        let statements: Vec<ast::Statement> = body.statements().collect();
+        if statements.is_empty() {
+            errors.push(errors::empty_for(stmt.span(), &body));
+        }
+        let (array, ty) = {
+            let mut names = self.names();
+            let mut checker = Checker::new(&mut names);
+            let array = checker.expr(&written, None, errors)?;
+            let ty = checker.ty(&array);
+            (array, ty)
+        };
+        let hir::Type::Array(element) = ty else {
+            errors.push(errors::not_iterable(&written, &ty));
+            return None;
+        };
+        let targets = ops::targets_read(&array)
+            .into_iter()
+            .map(|target| {
+                let name = match target {
+                    hir::Target::Variable(id) => self.cx.variables[id.0]
+                        .as_ref()
+                        .map_or_else(String::new, |v| v.name.clone()),
+                    hir::Target::Local(id) => self.locals.get(id).name.clone(),
+                };
+                (target, name)
+            })
+            .collect();
+        self.frozen.push(Frozen {
+            targets,
+            array: written.span(),
+        });
+        let local = hir::Local {
+            name,
+            ty: *element,
+            keys: Vec::new(),
+        };
+        let op = self.cx.operators.get(self.within);
+        let (id, mut ok) =
+            self.locals
+                .enter_loop(&variable, local, statements.iter().cloned(), op, errors);
+        let mut checked = Vec::new();
+        for statement in &statements {
+            match self.statement(statement, errors) {
+                Some(statement) => checked.push(statement),
+                None => ok = false,
+            }
+        }
+        let locals = self.locals.exit();
+        self.frozen.pop();
+        let body = hir::Block {
+            statements: checked,
+            locals,
+        };
+        ok.then_some(hir::Statement::For(id?, array, body))
+    }
+
+    /// The declaration `decl` of a local variable: its initial value's
+    /// assignment. Its local variable is declared from then on.
+    fn declaration(
+        &mut self,
+        decl: &VarDecl,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Statement> {
+        let op = self.cx.operators.get(self.within);
+        let checked = locals::local(decl, &op.types, &mut self.names(), errors);
+        let (local, value) = checked.unzip();
+        let id = self.locals.declare(decl, local)?;
+        Some(hir::Statement::Assign(vec![hir::Assignment {
+            target: hir::Target::Local(id),
+            value: value?,
+        }]))
+    }
+
+    /// `call name{arguments};`, of an update operator. One in a `for` loop
+    /// is checked once every body is, for what it assigns.
+    fn call(
+        &mut self,
+        stmt: &ast::CallStmt,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Statement> {
+        let (cx, within) = (self.cx, self.within);
+        let ident = stmt.callee()?.ident()?;
+        let name = ident.text();
+        let span = trendy_syntax::span(ident.text_range());
+        let Some(signature) = cx.operators.named(name) else {
+            let what = if cx.operators.get(within).params.contains_key(name) {
+                Some("a parameter")
+            } else if self.locals.find(name).is_some() {
+                Some("a local variable")
+            } else {
+                cx.namespaces.variable(name).map(|_| "a variable")
+            };
+            if let Some(what) = what {
+                errors.push(errors::not_an_operator(name, span, what));
+            } else {
+                let operators = cx.operators.names();
+                let args = stmt.arguments();
+                errors.push(errors::unknown_operator(
+                    name,
+                    span,
+                    &operators,
+                    args.as_ref().map(Written::Arguments),
+                    false,
+                ));
+            }
+            return None;
+        };
+        if signature.read_only {
+            errors.push(errors::call_of_read_only(name, span, signature.defined()));
+            return None;
+        }
+        let args = stmt.arguments()?;
+        if !signature.valid {
+            return None;
+        }
+        let call = Checker::new(&mut self.names()).arguments(
+            Written::Arguments(&args),
+            signature,
+            errors,
+        )?;
+        // A type parameter passed on as it is never grows.
+        for (parameter, ty) in signature.types.iter().zip(&call.types) {
+            if !matches!(ty, hir::Type::Parameter(_)) && ty.parameters().next().is_some() {
+                self.deferred.growing.push(Growing {
+                    caller: within,
+                    callee: signature.id,
+                    span,
+                    parameter: parameter.clone(),
+                    ty: ty.clone(),
+                });
+            }
+        }
+        let looped: Vec<(hir::VariableId, String, Span)> = self
+            .frozen
+            .iter()
+            .flat_map(|frozen| {
+                frozen
+                    .targets
+                    .iter()
+                    .filter_map(|(target, name)| match target {
+                        hir::Target::Variable(id) => Some((*id, name.clone(), frozen.array)),
+                        hir::Target::Local(_) => None,
+                    })
+            })
+            .collect();
+        if !looped.is_empty() {
+            self.deferred.in_loops.push(LoopCall {
+                callee: signature.id,
+                span: stmt.span(),
+                looped,
+            });
+        }
+        Some(hir::Statement::Call(call))
     }
 
     /// A loop, written at `span`, whose condition, after `keyword`, is
@@ -255,95 +454,88 @@ impl Statements<'_, '_> {
     }
 }
 
-/// The declaration `decl` of a local variable in the body of `within`: its
-/// initial value's assignment. Its local variable is declared from then on
-/// in `locals`.
-fn declaration(
-    decl: &VarDecl,
-    within: hir::OperatorId,
-    cx: &Context,
-    locals: &mut Locals,
+/// Report what can only be checked once every update operator's body is,
+/// in `bodies`: each call that leads back to its caller with ever larger
+/// types (see [`growing_recursion`]), and each call in a `for` loop that
+/// assigns a variable of the program's that the loop's array is computed
+/// from, in the operator called or in those it calls.
+pub(crate) fn deferred_checks(
+    deferred: &Deferred,
+    bodies: &HashMap<hir::OperatorId, (Vec<hir::Local>, hir::Block)>,
+    operators: &Operators,
     errors: &mut Vec<Diagnostic>,
-) -> Option<hir::Statement> {
-    let op = cx.operators.get(within);
-    let checked = {
-        let mut names = BodyNames { cx, within, locals };
-        locals::local(decl, &op.types, &mut names, errors)
-    };
-    let (local, value) = checked.unzip();
-    let id = locals.declare(decl, local)?;
-    Some(hir::Statement::Assign(vec![hir::Assignment {
-        target: hir::Target::Local(id),
-        value: value?,
-    }]))
-}
-
-/// `call name{arguments};`, of an update operator, in the body of
-/// `within`, whose local variables are `locals`.
-fn call(
-    stmt: &ast::CallStmt,
-    within: hir::OperatorId,
-    cx: &Context,
-    locals: &mut Locals,
-    growing: &mut Vec<Growing>,
-    errors: &mut Vec<Diagnostic>,
-) -> Option<hir::Statement> {
-    let ident = stmt.callee()?.ident()?;
-    let name = ident.text();
-    let span = trendy_syntax::span(ident.text_range());
-    let Some(signature) = cx.operators.named(name) else {
-        let what = if cx.operators.get(within).params.contains_key(name) {
-            Some("a parameter")
-        } else if locals.find(name).is_some() {
-            Some("a local variable")
-        } else {
-            cx.namespaces.variable(name).map(|_| "a variable")
-        };
-        if let Some(what) = what {
-            errors.push(errors::not_an_operator(name, span, what));
-        } else {
-            let operators = cx.operators.names();
-            let args = stmt.arguments();
-            errors.push(errors::unknown_operator(
+) {
+    growing_recursion(&deferred.growing, bodies, operators, errors);
+    for call in &deferred.in_loops {
+        let assigned = assigned_variables(call.callee, bodies);
+        if let Some((_, name, array)) = call.looped.iter().find(|(id, ..)| assigned.contains(id)) {
+            errors.push(errors::call_assigns_looped(
+                &operators.get(call.callee).name,
                 name,
-                span,
-                &operators,
-                args.as_ref().map(Written::Arguments),
-                false,
+                call.span,
+                *array,
             ));
         }
-        return None;
-    };
-    if signature.read_only {
-        errors.push(errors::call_of_read_only(name, span, signature.defined()));
-        return None;
     }
-    let args = stmt.arguments()?;
-    if !signature.valid {
-        return None;
-    }
-    let mut names = BodyNames { cx, within, locals };
-    let call = Checker::new(&mut names).arguments(Written::Arguments(&args), signature, errors)?;
-    // A type parameter passed on as it is never grows.
-    for (parameter, ty) in signature.types.iter().zip(&call.types) {
-        if !matches!(ty, hir::Type::Parameter(_)) && ty.parameters().next().is_some() {
-            growing.push(Growing {
-                caller: within,
-                callee: signature.id,
-                span,
-                parameter: parameter.clone(),
-                ty: ty.clone(),
-            });
+}
+
+/// The variables of the program that the update operator `id` assigns, in
+/// its body or in those of the operators it calls, in `bodies`.
+fn assigned_variables(
+    id: hir::OperatorId,
+    bodies: &HashMap<hir::OperatorId, (Vec<hir::Local>, hir::Block)>,
+) -> Vec<hir::VariableId> {
+    let mut assigned = Vec::new();
+    let mut seen = vec![id];
+    let mut next = vec![id];
+    while let Some(id) = next.pop() {
+        let Some((_, body)) = bodies.get(&id) else {
+            continue;
+        };
+        assigned_in(body, &mut assigned);
+        let mut called = Vec::new();
+        calls_in(body, &mut called);
+        for callee in called {
+            if !seen.contains(&callee) {
+                seen.push(callee);
+                next.push(callee);
+            }
         }
     }
-    Some(hir::Statement::Call(call))
+    assigned
+}
+
+/// Add each variable of the program that `block`'s statements assign, in
+/// blocks within it too, to `assigned`.
+fn assigned_in(block: &hir::Block, assigned: &mut Vec<hir::VariableId>) {
+    for statement in &block.statements {
+        match statement {
+            hir::Statement::Assign(assignments) => {
+                for assignment in assignments {
+                    if let hir::Target::Variable(id) = assignment.target
+                        && !assigned.contains(&id)
+                    {
+                        assigned.push(id);
+                    }
+                }
+            }
+            hir::Statement::Call(_) => {}
+            hir::Statement::If(_, then, otherwise) => {
+                assigned_in(then, assigned);
+                assigned_in(otherwise, assigned);
+            }
+            hir::Statement::Loop(_, body, _) | hir::Statement::For(_, _, body) => {
+                assigned_in(body, assigned);
+            }
+        }
+    }
 }
 
 /// Report each call in `growing` that leads back to its caller through
 /// the calls in the update operators' `bodies`: the operator would need a
 /// function for each of the ever larger types the type parameter is given
 /// each time around (see [`hir::Operator`]).
-pub(crate) fn growing_recursion(
+fn growing_recursion(
     growing: &[Growing],
     bodies: &HashMap<hir::OperatorId, (Vec<hir::Local>, hir::Block)>,
     operators: &Operators,
@@ -391,7 +583,9 @@ fn calls_in(block: &hir::Block, called: &mut Vec<hir::OperatorId>) {
                 calls_in(then, called);
                 calls_in(otherwise, called);
             }
-            hir::Statement::Loop(_, body, _) => calls_in(body, called),
+            hir::Statement::Loop(_, body, _) | hir::Statement::For(_, _, body) => {
+                calls_in(body, called);
+            }
         }
     }
 }
@@ -402,6 +596,9 @@ pub(crate) struct BodyNames<'a, 'b> {
     pub(crate) cx: &'a Context<'b>,
     pub(crate) within: hir::OperatorId,
     pub(crate) locals: &'a mut Locals,
+    /// What the `for` loops the statement being checked is in keep from
+    /// changing.
+    frozen: &'a [Frozen],
 }
 
 impl BodyNames<'_, '_> {
@@ -509,7 +706,33 @@ impl Names for BodyNames<'_, '_> {
 }
 
 impl Assigning for BodyNames<'_, '_> {
+    /// The variable `name`, unless a `for` loop that the assignment is in
+    /// goes through an array computed from it.
     fn assigned(
+        &mut self,
+        name: &str,
+        span: Span,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<Assignee> {
+        let assignee = self.variable(name, span, errors)?;
+        let frozen = self.frozen.iter().find(|frozen| {
+            frozen
+                .targets
+                .iter()
+                .any(|(target, _)| *target == assignee.target)
+        });
+        if let Some(frozen) = frozen {
+            errors.push(errors::assigned_in_loop(name, span, frozen.array));
+            return None;
+        }
+        Some(assignee)
+    }
+}
+
+impl BodyNames<'_, '_> {
+    /// The variable `name`, of the program or local, that an assignment at
+    /// `span` assigns, or `None` after reporting why it can't be.
+    fn variable(
         &mut self,
         name: &str,
         span: Span,
@@ -522,8 +745,16 @@ impl Assigning for BodyNames<'_, '_> {
             return None;
         }
         match self.locals.find(name) {
-            Some(Local::Declared(id, local, declaration)) => {
+            Some(Local::Declared(id, local, Declaration::Var(declaration))) => {
                 return Some(Assignee::local(id, local, declaration));
+            }
+            Some(Local::Declared(_, _, declaration @ Declaration::Loop(_))) => {
+                errors.push(errors::assigned_loop_variable(
+                    name,
+                    span,
+                    declaration.name_span(),
+                ));
+                return None;
             }
             Some(Local::Later(decl)) => {
                 errors.push(errors::local_before_declaration(

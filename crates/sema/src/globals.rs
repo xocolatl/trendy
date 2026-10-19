@@ -13,7 +13,7 @@ use trendy_syntax::ast::{self, SourceFile, VarDecl};
 
 use crate::assign::{self, Assignee, Assigning};
 use crate::check::{Checker, Lookup, Names};
-use crate::locals::{self, Local, Locals};
+use crate::locals::{self, Declaration, Local, Locals};
 use crate::operators::{Operators, Signature};
 use crate::types::{self, Expected, Origin};
 use crate::{Namespaces, Prelude, errors, keys, ops};
@@ -317,7 +317,7 @@ impl<'a> Globals<'a> {
                     errors.push(errors::if_in_read_only(&signature.name, stmt));
                     valid = false;
                 }
-                ast::Statement::While(_) | ast::Statement::Loop(_) => {
+                ast::Statement::While(_) | ast::Statement::Loop(_) | ast::Statement::For(_) => {
                     errors.push(errors::loop_in_read_only(&signature.name, statement));
                     valid = false;
                 }
@@ -553,8 +553,18 @@ impl Assigning for ReadOnlyNames<'_, '_, '_> {
             return None;
         }
         match self.locals.find(name) {
-            Some(Local::Declared(id, local, declaration)) => {
+            Some(Local::Declared(id, local, Declaration::Var(declaration))) => {
                 return Some(Assignee::local(id, local, declaration));
+            }
+            // A loop's variable is in no read-only operator, which has no
+            // loops.
+            Some(Local::Declared(_, _, declaration @ Declaration::Loop(_))) => {
+                errors.push(errors::assigned_loop_variable(
+                    name,
+                    span,
+                    declaration.name_span(),
+                ));
+                return None;
             }
             Some(Local::Later(decl)) => {
                 errors.push(errors::local_before_declaration(

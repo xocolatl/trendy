@@ -66,8 +66,10 @@ operator check_out{name: text} [
 
 /* Loops run their block again and again while a condition is true: a
    `while` checks it before each run, and a `loop` after, so that its
-   block runs at least once. Each run's local variables are its own. Here,
-   the guests in turn, from an array of their names. */
+   block runs at least once. A `for` loop runs it for each element of an
+   array, in order, which doesn't change while it runs. Each run's local
+   variables are its own. Here, the guests in turn, from an array of their
+   names. */
 operator roll_call{} [
     var guests: array text;
     load guests from rooms{guest} order [asc guest];
@@ -82,6 +84,9 @@ operator roll_call{} [
         knocks := knocks + 1;
     ] while knocks < 3;
     call debug_value{v: knocks};
+    for guest in guests loop [
+        call debug_value{v: "kwaheri, " || guest};
+    ];
 ];
 
 operator main{} [

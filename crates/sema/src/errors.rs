@@ -83,22 +83,26 @@ const LOCAL_NAMES: &str = "an operator's names, its parameters' and its local va
 pub(crate) fn local_declared_again(
     name: &str,
     decl: &VarDecl,
-    first: &VarDecl,
+    first: &crate::locals::Declaration,
     within: &str,
 ) -> Diagnostic {
-    let named = |decl: &VarDecl| decl.name().map_or_else(|| decl.span(), |n| n.span());
+    let named = decl.name().map_or_else(|| decl.span(), |n| n.span());
     let d = Diagnostic::error(
         Code::DuplicateName,
         format!("`{name}` is declared again in {within}"),
-        named(decl),
+        named,
         "declared again here",
     )
-    .with_secondary(named(first), format!("`{name}` is first declared here"))
+    .with_secondary(
+        first.name_span(),
+        format!("`{name}` is first declared here"),
+    )
     .with_note(LOCAL_NAMES);
     // `var total := total + 1;`, as Rust declares a variable again to give
     // it a new value: the first one's assignment was meant, if it is
-    // declared before.
-    let before = first.span().start < decl.span().start;
+    // declared before, by a `var`, as a loop's variable can't be assigned.
+    let before = matches!(first, crate::locals::Declaration::Var(_))
+        && first.name_span().start < decl.span().start;
     match (
         decl.name(),
         decl.type_expr(),
@@ -184,8 +188,12 @@ pub(crate) fn local_before_declaration(
 
 /// The local variable `name`, used at `span`, outside the block `decl`
 /// declares it in, which has ended.
-pub(crate) fn local_out_of_scope(name: &str, span: Span, decl: &VarDecl) -> Diagnostic {
-    let named = decl.name().map_or_else(|| decl.span(), |n| n.span());
+pub(crate) fn local_out_of_scope(
+    name: &str,
+    span: Span,
+    decl: &crate::locals::Declaration,
+) -> Diagnostic {
+    let named = decl.name_span();
     Diagnostic::error(
         Code::UnknownName,
         format!("local variable `{name}` isn't in scope here"),
@@ -4555,4 +4563,127 @@ pub(crate) fn assigned_outside_block(name: &str, span: Span) -> Diagnostic {
     .with_help(format!(
         "compute the new value in the block, and assign it outside: `{name} := [ … ];`"
     ))
+}
+
+/// A `for` loop's variable, `name`, at `span`, in the body of the operator
+/// `op`, which `first` declares already, in a block around the loop.
+pub(crate) fn loop_variable_declared_again(
+    name: &str,
+    span: Span,
+    first: &crate::locals::Declaration,
+    op: &str,
+) -> Diagnostic {
+    Diagnostic::error(
+        Code::DuplicateName,
+        format!("`{name}` is declared again in `{op}`"),
+        span,
+        "a loop's variable with a name in use",
+    )
+    .with_secondary(
+        first.name_span(),
+        format!("`{name}` is first declared here"),
+    )
+    .with_note(LOCAL_NAMES)
+    .with_help(format!(
+        "give the loop's variable a name of its own, as in `for each_{name} in …`"
+    ))
+}
+
+/// What a `for` loop keeps from changing, for notes.
+const FOR_UNCHANGED: &str = "a `for` loop goes through the elements of its array in order, with its variable each one's value, so neither the variable nor the variables its array is computed from change while it runs";
+
+/// `name`, a `for` loop's variable, declared at `declared`, assigned at
+/// `span`.
+pub(crate) fn assigned_loop_variable(name: &str, span: Span, declared: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::NotAssignable,
+        format!("`{name}`, a loop's variable, can't be assigned"),
+        span,
+        "assigned in its loop",
+    )
+    .with_secondary(
+        declared,
+        format!("`{name}` takes each element's value in turn"),
+    )
+    .with_note(FOR_UNCHANGED)
+    .with_help(format!(
+        "compute the new value in a local variable of its own: `var new_{name} := …;`"
+    ))
+}
+
+/// `name`, a variable the array of the `for` loop written at `array` is
+/// computed from, assigned at `span`, in the loop.
+pub(crate) fn assigned_in_loop(name: &str, span: Span, array: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::NotAssignable,
+        format!("`{name}` can't be assigned in a loop that goes through it"),
+        span,
+        "assigned in the loop",
+    )
+    .with_secondary(array, format!("the loop goes through this, computed from `{name}`"))
+    .with_note(FOR_UNCHANGED)
+    .with_help(format!(
+        "assign it after the loop, or go through its positions with a `while` loop, which reads `{name}` anew each time"
+    ))
+}
+
+/// A call, at `span`, in a `for` loop, of the update operator `callee`,
+/// which assigns `name`, directly or through the operators it calls, a
+/// variable the array of the loop, written at `array`, is computed from.
+pub(crate) fn call_assigns_looped(callee: &str, name: &str, span: Span, array: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::NotAssignable,
+        format!("`{callee}` assigns `{name}`, which this loop goes through"),
+        span,
+        format!("assigns `{name}`"),
+    )
+    .with_secondary(array, format!("the loop goes through this, computed from `{name}`"))
+    .with_note(FOR_UNCHANGED)
+    .with_help(format!(
+        "call `{callee}` after the loop, or go through `{name}`'s positions with a `while` loop, which reads it anew each time"
+    ))
+}
+
+/// The array a `for` loop goes through, `array`, of type `ty`, which isn't
+/// an array's.
+pub(crate) fn not_iterable(array: &Expr, ty: &hir::Type) -> Diagnostic {
+    let what = match ty {
+        hir::Type::Relation(_) => "a relation's tuples".to_string(),
+        _ => plural(ty),
+    };
+    let d = Diagnostic::error(
+        Code::WrongOperandType,
+        format!("a `for` loop goes through an array's elements, not {what}"),
+        array.span(),
+        format!("this is `{ty}`"),
+    )
+    .with_parameter_note(ty);
+    match ty {
+        hir::Type::Relation(_) => d
+            .with_note("a relation's tuples have no order to go through them in (TTM RM Proscription 2), and D has no operators of a tuple at a time (RM Proscription 7)")
+            .with_help("load the tuples into an array first, in the order to go through them in: `load a from r order [asc x]; for t in a loop [ … ];`"),
+        hir::Type::Scalar(hir::Scalar::Integer) => d.with_help(
+            "to count, go through the positions with a `while` loop: `var i := 1; while i <= n loop [ …; i := i + 1; ];`",
+        ),
+        _ => d,
+    }
+}
+
+/// A `for` loop, written at `span`, whose block, `body`, is empty: it does
+/// nothing.
+pub(crate) fn empty_for(span: Span, body: &trendy_syntax::ast::Body) -> Diagnostic {
+    Diagnostic::error(
+        Code::PointlessCondition,
+        "this loop does nothing",
+        body.span(),
+        "its block is empty",
+    )
+    .with_note(FOR_UNCHANGED)
+    .with_suggestion(
+        "remove it",
+        vec![Edit {
+            span,
+            replacement: String::new(),
+        }],
+    )
 }

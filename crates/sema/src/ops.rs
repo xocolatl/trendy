@@ -1615,6 +1615,61 @@ fn shifted(expr: hir::Expr, cutoff: usize) -> hir::Expr {
     }
 }
 
+/// The variables, of the program and local, that `expr` reads, each once.
+pub(crate) fn targets_read(expr: &hir::Expr) -> Vec<hir::Target> {
+    fn walk(expr: &hir::Expr, read: &mut Vec<hir::Target>) {
+        let mut add = |target: hir::Target| {
+            if !read.contains(&target) {
+                read.push(target);
+            }
+        };
+        match expr {
+            hir::Expr::Variable(id) => add(hir::Target::Variable(*id)),
+            hir::Expr::Local(id) => add(hir::Target::Local(*id)),
+            hir::Expr::Constant(_) | hir::Expr::Parameter(_) | hir::Expr::Current(..) => {}
+            hir::Expr::Call(call) => call.args.values().for_each(|arg| walk(arg, read)),
+            hir::Expr::Unary(_, operand)
+            | hir::Expr::Extract(operand, _)
+            | hir::Expr::Remove(operand, _)
+            | hir::Expr::Rename(operand, _)
+            | hir::Expr::Ungroup(operand, _)
+            | hir::Expr::Only(operand)
+            | hir::Expr::Load(operand, ..) => walk(operand, read),
+            hir::Expr::Binary(_, lhs, rhs)
+            | hir::Expr::And(lhs, rhs)
+            | hir::Expr::Combine(_, lhs, rhs)
+            | hir::Expr::Semijoin(lhs, rhs)
+            | hir::Expr::Antijoin(lhs, rhs)
+            | hir::Expr::Let(_, lhs, rhs)
+            | hir::Expr::Index(lhs, rhs)
+            | hir::Expr::Restrict(lhs, rhs) => {
+                walk(lhs, read);
+                walk(rhs, read);
+            }
+            hir::Expr::If(condition, then, otherwise) => {
+                walk(condition, read);
+                walk(then, read);
+                walk(otherwise, read);
+            }
+            hir::Expr::Tuple(attributes) => attributes.values().for_each(|e| walk(e, read)),
+            hir::Expr::Array(_, elements) | hir::Expr::Relation(_, elements) => {
+                for element in elements {
+                    walk(element, read);
+                }
+            }
+            hir::Expr::Extend(operand, _, attributes) => {
+                walk(operand, read);
+                for value in attributes.values() {
+                    walk(value, read);
+                }
+            }
+        }
+    }
+    let mut read = Vec::new();
+    walk(expr, &mut read);
+    read
+}
+
 /// Whether `expr` uses the tuple at hand `depth` `Extend`s out from it:
 /// one of its attributes, or an image relation of it, which names none.
 pub(crate) fn uses_tuple(expr: &hir::Expr, depth: usize) -> bool {

@@ -28,6 +28,9 @@
       "include": "#order"
     },
     {
+      "include": "#for"
+    },
+    {
       "include": "#keywords"
     },
     {
@@ -86,6 +89,17 @@
         }
       ]
     },
+    "for": {
+      "captures": {
+        "1": {
+          "name": "keyword.other.trendy"
+        },
+        "3": {
+          "name": "keyword.other.trendy"
+        }
+      },
+      "match": "\\b(for)\\s+([A-Z_a-z][0-9A-Z_a-z]*)\\s+(in)\\b"
+    },
     "key": {
       "captures": {
         "1": {
@@ -95,7 +109,7 @@
       "match": "\\b(key)\\s*(?=\\{)"
     },
     "keywords": {
-      "match": "\\b(?:operator|var|tuple|relation|array|call|builtin|as|insert|d_insert|delete|i_delete|update|assign|return|if|then|else|while|loop)\\b",
+      "match": "\\b(?:operator|var|tuple|relation|array|call|builtin|as|insert|d_insert|delete|i_delete|update|assign|return|if|then|else|while|loop|for)\\b",
       "name": "keyword.other.trendy"
     },
     "load": {
@@ -218,7 +232,7 @@
           "name": "entity.name.type.trendy"
         }
       },
-      "match": "\\b(var)\\s+([A-Z_a-z][0-9A-Z_a-z]*)(?:\\s*(\\:)\\s*(?!(?:operator|var|true|false|tuple|relation|array|call|builtin|not|and|or|xor|implies|div|mod|remove|rename|extend|replace|group|ungroup|wrap|unwrap|join|times|compose|matching|union|d_union|xunion|intersect|minus|i_minus|where|as|insert|d_insert|delete|i_delete|update|assign|return|if|then|else|while|loop)\\b)([A-Z_a-z][0-9A-Z_a-z]*))?"
+      "match": "\\b(var)\\s+([A-Z_a-z][0-9A-Z_a-z]*)(?:\\s*(\\:)\\s*(?!(?:operator|var|true|false|tuple|relation|array|call|builtin|not|and|or|xor|implies|div|mod|remove|rename|extend|replace|group|ungroup|wrap|unwrap|join|times|compose|matching|union|d_union|xunion|intersect|minus|i_minus|where|as|insert|d_insert|delete|i_delete|update|assign|return|if|then|else|while|loop|for)\\b)([A-Z_a-z][0-9A-Z_a-z]*))?"
     }
   },
   "scopeName": "source.trendy"

@@ -511,6 +511,53 @@ impl<'a> FunctionBuilder<'a> {
             hir::Statement::Loop(condition, body, check) => {
                 self.loop_statement(condition, body, *check, cx);
             }
+            hir::Statement::For(variable, array, body) => {
+                self.for_statement(*variable, array, body, cx);
+            }
+        }
+    }
+
+    /// A `for` loop of `body` over `array`, with the local variable
+    /// `variable` the element at hand: the array computed once, then a
+    /// loop over its elements, as over a relation's tuples, the variable
+    /// each one's own place, so no copy. Sema rules out assigning what the
+    /// array is computed from in the loop, so a variable's value stays put;
+    /// an array the expression makes is kept, by a scope of the loop's own,
+    /// until the loop ends. Its slot is its own, as the statements in the
+    /// block each begin theirs in the one they share.
+    fn for_statement(
+        &mut self,
+        variable: hir::LocalId,
+        array: &hir::Expr,
+        body: &hir::Block,
+        cx: &mut Lowering,
+    ) {
+        let hir::Type::Array(element) = self.type_of(array) else {
+            unreachable!("sema loops only over arrays");
+        };
+        let start = self.position();
+        let src = self.place(array, cx);
+        let makes = std::mem::take(&mut self.scoped);
+        self.each_tuple(&src, layout(&element), cx, |this, at_hand, _, cx| {
+            this.local_places[variable.0] = Some(LocalPlace {
+                value: at_hand,
+                owner: None,
+            });
+            this.block(body, cx);
+        });
+        if makes {
+            let scope = self.slot(lir::Layout::scope());
+            self.insert(
+                start,
+                lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::Begin,
+                    args: vec![scope.clone()],
+                },
+            );
+            self.insts.push(lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::End,
+                args: vec![scope],
+            });
         }
     }
 

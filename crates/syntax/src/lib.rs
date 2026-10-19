@@ -94,6 +94,8 @@ pub enum SyntaxKind {
     WhileKw,
     /// `loop`, before a loop's block.
     LoopKw,
+    /// `for`, before a `for` loop's variable.
+    ForKw,
     LBrace,
     RBrace,
     LBracket,
@@ -185,6 +187,10 @@ pub enum SyntaxKind {
     /// `loop [ … ] while c;`: statements run, then again while `c` is
     /// true, checked after each run.
     LoopStmt,
+    /// `for x in a loop [ … ];`: statements run for each element of the
+    /// array `a`, in order, with `x` its value. `in` is a contextual
+    /// keyword, an identifier elsewhere.
+    ForStmt,
     /// `v := x`, in an assignment statement.
     Assignment,
     /// `insert r s` or `d_insert r s`, in an assignment statement.
@@ -308,7 +314,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 144] = [
+    pub const ALL: [SyntaxKind; 146] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -360,6 +366,7 @@ impl SyntaxKind {
         SyntaxKind::ElseKw,
         SyntaxKind::WhileKw,
         SyntaxKind::LoopKw,
+        SyntaxKind::ForKw,
         SyntaxKind::LBrace,
         SyntaxKind::RBrace,
         SyntaxKind::LBracket,
@@ -405,6 +412,7 @@ impl SyntaxKind {
         SyntaxKind::IfStmt,
         SyntaxKind::WhileStmt,
         SyntaxKind::LoopStmt,
+        SyntaxKind::ForStmt,
         SyntaxKind::Assignment,
         SyntaxKind::Insertion,
         SyntaxKind::Deletion,
@@ -512,6 +520,7 @@ impl SyntaxKind {
                 | SyntaxKind::ElseKw
                 | SyntaxKind::WhileKw
                 | SyntaxKind::LoopKw
+                | SyntaxKind::ForKw
         )
     }
 
@@ -702,6 +711,7 @@ impl SyntaxKind {
             SyntaxKind::ElseKw => "else",
             SyntaxKind::WhileKw => "while",
             SyntaxKind::LoopKw => "loop",
+            SyntaxKind::ForKw => "for",
             SyntaxKind::LBrace => "{",
             SyntaxKind::RBrace => "}",
             SyntaxKind::LBracket => "[",
@@ -795,6 +805,7 @@ impl SyntaxKind {
             SyntaxKind::ElseKw => "`else`",
             SyntaxKind::WhileKw => "`while`",
             SyntaxKind::LoopKw => "`loop`",
+            SyntaxKind::ForKw => "`for`",
             SyntaxKind::ForeignOperator => "operator",
             SyntaxKind::LBrace => "`{`",
             SyntaxKind::RBrace => "`}`",
@@ -865,7 +876,7 @@ impl SyntaxKind {
             SyntaxKind::AssignBlock => "`assign` block",
             SyntaxKind::ReturnStmt => "`return` statement",
             SyntaxKind::IfStmt => "`if` statement",
-            SyntaxKind::WhileStmt | SyntaxKind::LoopStmt => "loop",
+            SyntaxKind::WhileStmt | SyntaxKind::LoopStmt | SyntaxKind::ForStmt => "loop",
             SyntaxKind::Assignment => "assignment",
             SyntaxKind::Insertion => "insertion",
             SyntaxKind::Deletion => "deletion",

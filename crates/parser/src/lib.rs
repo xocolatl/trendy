@@ -634,6 +634,7 @@ impl<'a> Parser<'a> {
                     || self.at_assignment()
                     || self.at_foreign_declaration()
                     || found.spells(SyntaxKind::WhileKw)
+                    || found.spells(SyntaxKind::ForKw)
                     || self.at_loop()
                     || found.spells(SyntaxKind::ReturnKw)))
     }
@@ -736,22 +737,22 @@ impl<'a> Parser<'a> {
             self.loop_stmt();
             return;
         }
-        // `break;`, `LEAVE name;` and `for x in …`: names, before what no
-        // statement starting with a name has after it.
-        let next = self.found_after(1).map(|f| f.kind);
+        if found.spells(SyntaxKind::ForKw)
+            || (found.kind == SyntaxKind::Ident && found.text.eq_ignore_ascii_case("foreach"))
+        {
+            self.for_stmt();
+            return;
+        }
+        // `break;` and `LEAVE name;`: names, before what no statement
+        // starting with a name has after it.
         let exit = ["break", "continue", "leave"]
             .iter()
             .any(|word| found.text.eq_ignore_ascii_case(word))
-            && matches!(next, Some(SyntaxKind::Semicolon | SyntaxKind::Ident));
-        let for_loop = found.text.eq_ignore_ascii_case("for")
-            && matches!(next, Some(SyntaxKind::Ident | SyntaxKind::LParen));
-        if found.kind == SyntaxKind::Ident && (exit || for_loop) {
-            let error = if exit {
-                errors::loop_exit(found)
-            } else {
-                errors::for_loop(found)
-            };
-            self.errors.push(error);
+            && self
+                .found_after(1)
+                .is_some_and(|f| matches!(f.kind, SyntaxKind::Semicolon | SyntaxKind::Ident));
+        if found.kind == SyntaxKind::Ident && exit {
+            self.errors.push(errors::loop_exit(found));
             self.skip_statement(&[
                 SyntaxKind::RBracket,
                 SyntaxKind::OperatorKw,
@@ -887,49 +888,164 @@ impl<'a> Parser<'a> {
         self.any_case(SyntaxKind::WhileKw);
         self.expression();
         let mut unbracketed = Vec::new();
-        let mut last_unbracketed = false;
+        let last_unbracketed = match self.found() {
+            Some(found) if found.kind == SyntaxKind::Semicolon && self.at_tutorial_while() => {
+                self.tutorial_while(found);
+                false
+            }
+            _ => self.loop_block(
+                &mut unbracketed,
+                "`while c:` is written `while c loop [ … ];`",
+            ),
+        };
+        self.end_loop(&unbracketed, last_unbracketed);
+        self.builder.finish_node();
+        self.form = outer_form;
+    }
+
+    /// A `while` or `for` loop's `loop` and block, after its condition or
+    /// array. Pascal's and Lua's `do`, a missing `loop`, Python's `:`, its
+    /// spelling `python`, and the block's habits, as an `if` statement's
+    /// (see [`Parser::branch`]), are reported. Whether the block is a
+    /// statement without brackets, each one's span added to `unbracketed`.
+    fn loop_block(&mut self, unbracketed: &mut Vec<Span>, python: &'static str) -> bool {
         match self.found() {
             Some(found) if found.spells(SyntaxKind::LoopKw) => {
                 self.any_case(SyntaxKind::LoopKw);
-                last_unbracketed = self.branch(&mut unbracketed);
+                self.branch(unbracketed)
             }
             Some(found)
                 if found.kind == SyntaxKind::Ident && found.text.eq_ignore_ascii_case("do") =>
             {
                 self.bump();
                 self.errors.push(errors::loop_spelling(found));
-                last_unbracketed = self.branch(&mut unbracketed);
+                self.branch(unbracketed)
             }
-            Some(found) if found.kind == SyntaxKind::Semicolon && self.at_tutorial_while() => {
-                self.tutorial_while(found);
-            }
+            // Python's block is what its lines' indentation says, so only
+            // the first statement is taken for it, reported once.
             Some(found) if found.kind == SyntaxKind::Colon => {
                 self.bump();
-                self.errors.push(errors::python_loop(found));
+                self.errors.push(errors::python_loop(found, python));
+                self.branch(&mut Vec::new())
             }
             Some(found) if matches!(found.kind, SyntaxKind::LBracket | SyntaxKind::LBrace) => {
-                let condition_end = self.last_end.unwrap_or(found.span.start);
-                self.errors
-                    .push(errors::missing_loop(condition_end, found.span));
-                last_unbracketed = self.branch(&mut unbracketed);
+                let before = self.last_end.unwrap_or(found.span.start);
+                self.errors.push(errors::missing_loop(before, found.span));
+                self.branch(unbracketed)
             }
-            _ => self.missing_with_help(
-                SyntaxKind::LoopKw,
-                "write `loop` and the block after the condition, as in `while c loop [ … ];`",
-            ),
+            _ => {
+                self.missing_with_help(
+                    SyntaxKind::LoopKw,
+                    "write `loop` and the block, as in `while c loop [ … ];` or `for x in a loop [ … ];`",
+                );
+                false
+            }
         }
-        // A block without brackets ends with its statement's `;`, which
-        // ended the loop as well.
+    }
+
+    /// The end of a `while` or `for` loop: each block in `unbracketed`
+    /// reported, and the `;`, which a last block without brackets, if
+    /// `last_unbracketed`, ended with its statement's.
+    fn end_loop(&mut self, unbracketed: &[Span], last_unbracketed: bool) {
         let shared = last_unbracketed && !self.at(SyntaxKind::Semicolon);
-        for &span in &unbracketed {
+        for &span in unbracketed {
             self.errors
                 .push(errors::unbracketed_branch(span, shared, "a loop's block"));
         }
         if !shared {
             self.expect(SyntaxKind::Semicolon);
         }
+    }
+
+    /// `for x in a loop [ … ];`: the block run for each element of the
+    /// array `a`, in order, with `x` its value. `in` is a contextual
+    /// keyword. C#'s and PHP's `foreach`, JavaScript's `of`, C's
+    /// `for (…; …; …)`, and the habits of a `while` loop's block (see
+    /// [`Parser::loop_block`]), are reported, with fixes where they are
+    /// mechanical.
+    fn for_stmt(&mut self) {
+        let outer_form = std::mem::replace(&mut self.form, errors::FOR_FORM);
+        self.start_node(SyntaxKind::ForStmt);
+        let found = self.found().expect("at `for`");
+        if found.spells(SyntaxKind::ForKw) {
+            self.any_case(SyntaxKind::ForKw);
+        } else {
+            self.bump();
+            self.errors.push(errors::foreach(found));
+        }
+        if self.at_c_for() {
+            let header = self.found().map_or(found.span, |f| f.span);
+            self.skip_statement(&[
+                SyntaxKind::RBracket,
+                SyntaxKind::OperatorKw,
+                SyntaxKind::VarKw,
+            ]);
+            self.errors
+                .push(errors::c_for(Span::new(found.span.start, header.end)));
+            self.builder.finish_node();
+            self.form = outer_form;
+            return;
+        }
+        if self.at(SyntaxKind::Ident) {
+            self.start_node(SyntaxKind::Name);
+            self.bump();
+            self.builder.finish_node();
+        } else {
+            self.missing_with_help(
+                SyntaxKind::Ident,
+                "name the variable that takes each element's value, as in `for name in names loop [ … ];`",
+            );
+        }
+        if self.at_word("in") {
+            self.contextual_keyword("in");
+        } else if let Some(of) = self.found_word("of") {
+            self.bump();
+            self.errors.push(errors::for_of(of));
+        } else {
+            self.missing_with_help(
+                SyntaxKind::Ident,
+                "write `in` and the array after the variable, as in `for name in names loop [ … ];`",
+            );
+        }
+        if self.at_operand() && !self.at(SyntaxKind::LoopKw) {
+            self.expression();
+        } else {
+            self.missing_with_help(
+                SyntaxKind::Ident,
+                "write the array to go through after `in`, as in `for name in names loop [ … ];`",
+            );
+        }
+        let mut unbracketed = Vec::new();
+        let last_unbracketed = self.loop_block(
+            &mut unbracketed,
+            "`for x in a:` is written `for x in a loop [ … ];`",
+        );
+        self.end_loop(&unbracketed, last_unbracketed);
         self.builder.finish_node();
         self.form = outer_form;
+    }
+
+    /// Whether C's `for (…; …; …)` is next: parentheses with a `;` right
+    /// inside them.
+    fn at_c_for(&self) -> bool {
+        let mut depth = 0_usize;
+        for token in &self.tokens[self.pos..] {
+            match token.kind {
+                kind if is_skipped(kind) => {}
+                SyntaxKind::LParen if depth == 0 => depth = 1,
+                _ if depth == 0 => return false,
+                SyntaxKind::LBrace | SyntaxKind::LBracket | SyntaxKind::LParen => depth += 1,
+                SyntaxKind::RBrace | SyntaxKind::RBracket | SyntaxKind::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return false;
+                    }
+                }
+                SyntaxKind::Semicolon if depth == 1 => return true,
+                _ => {}
+            }
+        }
+        false
     }
 
     /// Whether Tutorial D's `WHILE c; … END WHILE` goes on here, at the `;`
@@ -4672,11 +4788,54 @@ SourceFile
         };
         assert!(matches!(after.condition(), Some(Expr::Binary(_))));
         assert_eq!(after.body().unwrap().statements().count(), 1);
-        // `for`, `break` and `continue` are names, where a statement can
-        // start with one.
-        let parse =
-            parse_str("operator f{for: integer} [ var break := for; break := break + 1; ];");
+        // `break` and `continue` are names, where a statement can start
+        // with one.
+        let parse = parse_str(
+            "operator f{continue: integer} [ var break := continue; break := break + 1; ];",
+        );
         assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+    }
+
+    #[test]
+    fn for_loops() {
+        let source = "operator f{} [ for name in names{x} loop [ call g{}; call h{}; ]; ];";
+        let parse = parse_str(source);
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let op = parse.tree.operators().next().unwrap();
+        let statements: Vec<_> = op.body().unwrap().statements().collect();
+        let [Statement::For(stmt)] = &statements[..] else {
+            panic!("{statements:?}");
+        };
+        assert_eq!(stmt.variable().unwrap().ident().unwrap().text(), "name");
+        assert!(matches!(stmt.array(), Some(Expr::Project(_))));
+        assert_eq!(stmt.body().unwrap().statements().count(), 2);
+        // `in` is a name elsewhere.
+        let parse = parse_str("operator f{in: integer} [ var x := in; ];");
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+    }
+
+    #[test]
+    fn for_loop_recovery() {
+        let body = |statements: &str| format!("operator f{{}} [ {statements} ];");
+        // C#'s `foreach`, JavaScript's `of`, a block in braces without
+        // `loop`, Lua's `do`.
+        assert_eq!(
+            fix(&body("foreach x of a { call f{}; };")),
+            body("for x in a loop [ call f{}; ];")
+        );
+        assert_eq!(
+            fix(&body("for x in a do call f{};")),
+            body("for x in a loop [call f{};];")
+        );
+        // C's counting loop, and Python's, without fixes.
+        assert_eq!(
+            messages(&body("for (i = 0; i < n; i := i + 1) { call f{}; };")),
+            ["C's `for (…; …; …)` is written as a `while` loop"]
+        );
+        assert_eq!(
+            messages(&body("for x in a: call f{};")),
+            ["`for x in a:` is written `for x in a loop [ … ];`"]
+        );
     }
 
     #[test]
@@ -4706,12 +4865,8 @@ SourceFile
             fix(&body("WHILE n < 5; n := n + 1; END WHILE;")),
             body("while n < 5 loop [ n := n + 1; ];")
         );
-        // No early exits, and no `for`.
+        // No early exits.
         assert_eq!(messages(&body("break;")), ["trendy has no `break`"]);
-        assert_eq!(
-            messages(&body("for x in r { call f{}; }")),
-            ["trendy has no `for` loop"]
-        );
     }
 
     #[test]
@@ -5072,7 +5227,8 @@ SourceFile
                 | Statement::Var(_)
                 | Statement::If(_)
                 | Statement::While(_)
-                | Statement::Loop(_) => Vec::new(),
+                | Statement::Loop(_)
+                | Statement::For(_) => Vec::new(),
             })
             .collect()
     }
