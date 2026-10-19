@@ -240,7 +240,7 @@ impl<'a> Parser<'a> {
         );
         let angled = self.angled_type_parameters();
         self.params();
-        self.result_type();
+        let valued = self.result_type();
         let declared = self.type_parameters();
         if let Some(angled) = angled {
             let at = self.last_end.unwrap_or(angled.span.end);
@@ -255,7 +255,13 @@ impl<'a> Parser<'a> {
                 (SyntaxKind::LBrace, SyntaxKind::RBrace),
                 (SyntaxKind::LParen, SyntaxKind::RParen),
             ],
-            Self::statements,
+            |p| {
+                if valued {
+                    p.valued_statements();
+                } else {
+                    p.statements();
+                }
+            },
         );
         self.expect(SyntaxKind::Semicolon);
         self.builder.finish_node();
@@ -302,11 +308,12 @@ impl<'a> Parser<'a> {
     }
 
     /// A read-only operator's result type, `: type`, after its parameters,
-    /// if it has one. Other languages' spellings, `-> type` and Tutorial
-    /// D's `RETURNS type`, are parsed as it and fixed.
-    fn result_type(&mut self) {
+    /// if it has one, which it returns. Other languages' spellings,
+    /// `-> type` and Tutorial D's `RETURNS type`, are parsed as it and
+    /// fixed.
+    fn result_type(&mut self) -> bool {
         let Some(found) = self.found() else {
-            return;
+            return false;
         };
         let starts_type = self.found_after(1).is_some_and(|f| {
             matches!(
@@ -321,7 +328,7 @@ impl<'a> Parser<'a> {
             SyntaxKind::Colon => false,
             SyntaxKind::ForeignOperator if found.text == "->" && starts_type => true,
             SyntaxKind::Ident if found.text.eq_ignore_ascii_case("returns") && starts_type => true,
-            _ => return,
+            _ => return false,
         };
         let before = self.last_end.unwrap_or(found.span.start);
         self.start_node(SyntaxKind::TypeAnnotation);
@@ -334,6 +341,7 @@ impl<'a> Parser<'a> {
         }
         self.type_expr();
         self.builder.finish_node();
+        true
     }
 
     /// An operator's type parameters, `types { T: any type, … }`, after its
@@ -471,22 +479,171 @@ impl<'a> Parser<'a> {
             {
                 break;
             }
-            // A statement can't start with `;`, so one here ends the body:
-            // in `[;`, the `]` is missing.
-            let ends_body = matches!(
-                found.kind,
-                SyntaxKind::RBracket
-                    | SyntaxKind::RBrace
-                    | SyntaxKind::RParen
-                    | SyntaxKind::Semicolon
-                    | SyntaxKind::OperatorKw
-                    | SyntaxKind::BuiltinKw
-            );
-            if ends_body || self.at_unclosed_declaration(&found) {
+            if self.ends_statements(&found) {
                 break;
             }
             self.statement();
         }
+    }
+
+    /// Whether `found`, the next token, ends a body's statements. A
+    /// statement can't start with `;`, so one here ends the body: in `[;`,
+    /// the `]` is missing.
+    fn ends_statements(&self, found: &Found) -> bool {
+        matches!(
+            found.kind,
+            SyntaxKind::RBracket
+                | SyntaxKind::RBrace
+                | SyntaxKind::RParen
+                | SyntaxKind::Semicolon
+                | SyntaxKind::OperatorKw
+                | SyntaxKind::BuiltinKw
+        ) || self.at_unclosed_declaration(found)
+    }
+
+    /// A read-only operator's body: statements, then its value, an
+    /// expression without `;`. A `;` after the value is reported, with a
+    /// fix deleting it, and so is a value before other statements.
+    fn valued_statements(&mut self) {
+        while let Some(found) = self.found() {
+            if self.ends_statements(&found) {
+                break;
+            }
+            if found.spells(SyntaxKind::ReturnKw) && self.returns_value_last() {
+                // `return x;`, the value written as other languages do.
+                self.start_node(SyntaxKind::Error);
+                self.bump();
+                self.builder.finish_node();
+                let value = self.found().map_or(found.span.end, |f| f.span.start);
+                self.expression();
+                let semicolon = self.found().filter(|f| f.kind == SyntaxKind::Semicolon);
+                if semicolon.is_some() {
+                    self.start_node(SyntaxKind::Error);
+                    self.bump();
+                    self.builder.finish_node();
+                }
+                self.errors.push(errors::returned_value(
+                    Span::new(found.span.start, value),
+                    semicolon.map(|s| s.span),
+                ));
+                break;
+            }
+            if !self.at_value() {
+                self.statement();
+                continue;
+            }
+            self.expression();
+            let value = Span::new(found.span.start, self.last_end.unwrap_or(found.span.end));
+            let Some(semicolon) = self.found().filter(|f| f.kind == SyntaxKind::Semicolon) else {
+                break;
+            };
+            self.bump();
+            let last = self.found().is_none_or(|next| self.ends_statements(&next));
+            if last {
+                self.errors.push(errors::value_semicolon(semicolon.span));
+                break;
+            }
+            self.errors.push(errors::value_before_statements(value));
+        }
+    }
+
+    /// Whether a read-only body's value starts here, rather than a
+    /// statement: an operand that doesn't start one. An `if` whose `then`
+    /// a block follows is a statement, and any other an expression.
+    fn at_value(&mut self) -> bool {
+        let Some(found) = self.found() else {
+            return false;
+        };
+        if self.at_if() {
+            return !self.if_has_blocks();
+        }
+        // `a = b` is a comparison that ends the body, and otherwise
+        // assignment's `=` in place of `:=`, which is reported.
+        let compared = found.kind == SyntaxKind::Ident
+            && self
+                .found_after(1)
+                .is_some_and(|f| f.kind == SyntaxKind::Eq)
+            && self.runs_to_end();
+        self.at_operand()
+            && (compared
+                || !(self.at_call_keyword()
+                    || matches!(found.kind, SyntaxKind::VarKw | SyntaxKind::AssignKw)
+                    || self.at_assignment()
+                    || found.spells(SyntaxKind::ReturnKw)))
+    }
+
+    /// Whether the `return` here has a value and ends the body it is in:
+    /// whether the first `;` outside any delimiters, if any, is the last
+    /// thing before the `]`.
+    fn returns_value_last(&self) -> bool {
+        let significant = |i: usize| {
+            (i..self.tokens.len())
+                .find(|&j| !is_skipped(self.tokens[j].kind))
+                .map(|j| self.tokens[j].kind)
+        };
+        let closes = |kind: Option<SyntaxKind>| {
+            matches!(
+                kind,
+                None | Some(SyntaxKind::RBracket | SyntaxKind::RBrace | SyntaxKind::RParen)
+            )
+        };
+        let after = significant(self.pos + 1);
+        if after == Some(SyntaxKind::Semicolon) || closes(after) {
+            return false;
+        }
+        let mut depth = 0_usize;
+        for i in self.pos + 1..self.tokens.len() {
+            match self.tokens[i].kind {
+                SyntaxKind::LBrace | SyntaxKind::LBracket | SyntaxKind::LParen => depth += 1,
+                SyntaxKind::RBrace | SyntaxKind::RBracket | SyntaxKind::RParen if depth == 0 => {
+                    return true;
+                }
+                SyntaxKind::RBrace | SyntaxKind::RBracket | SyntaxKind::RParen => depth -= 1,
+                SyntaxKind::Semicolon if depth == 0 => return closes(significant(i + 1)),
+                _ => {}
+            }
+        }
+        true
+    }
+
+    /// Whether what starts here runs to the end of the body it is in, with
+    /// no `;` before the `]`, outside any delimiters it opens.
+    fn runs_to_end(&self) -> bool {
+        let mut depth = 0_usize;
+        for token in &self.tokens[self.pos..] {
+            match token.kind {
+                SyntaxKind::LBrace | SyntaxKind::LBracket | SyntaxKind::LParen => depth += 1,
+                SyntaxKind::RBrace | SyntaxKind::RBracket | SyntaxKind::RParen if depth == 0 => {
+                    return true;
+                }
+                SyntaxKind::RBrace | SyntaxKind::RBracket | SyntaxKind::RParen => depth -= 1,
+                SyntaxKind::Semicolon if depth == 0 => return false,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Whether the `if` that starts here has blocks for branches: whether a
+    /// `[` follows its `then`, which is the first outside any delimiters.
+    fn if_has_blocks(&mut self) -> bool {
+        let mut depth = 0_usize;
+        for i in self.pos + 1..self.tokens.len() {
+            match self.tokens[i].kind {
+                SyntaxKind::LBrace | SyntaxKind::LBracket | SyntaxKind::LParen => depth += 1,
+                SyntaxKind::RBrace | SyntaxKind::RBracket | SyntaxKind::RParen if depth == 0 => {
+                    return false;
+                }
+                SyntaxKind::RBrace | SyntaxKind::RBracket | SyntaxKind::RParen => depth -= 1,
+                _ if depth == 0 && self.found_at(i).spells(SyntaxKind::ThenKw) => {
+                    return (i + 1..self.tokens.len())
+                        .find(|&j| !is_skipped(self.tokens[j].kind))
+                        .is_some_and(|j| self.tokens[j].kind == SyntaxKind::LBracket);
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     /// Whether `found`, the next token, is a `var` at the start of an
@@ -518,7 +675,7 @@ impl<'a> Parser<'a> {
     }
 
     /// A statement: a call, an assignment statement, a local variable's
-    /// declaration, an `if`, or a `return`.
+    /// declaration, an `if`, or a `return`, for leaving early.
     fn statement(&mut self) {
         let Some(found) = self.found() else {
             return;
@@ -547,7 +704,7 @@ impl<'a> Parser<'a> {
         } else {
             self.missing_with_help(
                 SyntaxKind::CallKw,
-                "statements are calls, such as `call debug_value{v: 1};`, assignments, such as `n := n + 1;`, local variables, such as `var n := 0;`, and, in an update operator, `if` statements, such as `if n > 0 then [ n := n - 1; ];`, or, in a read-only operator, `return value;`",
+                "statements are calls, such as `call debug_value{v: 1};`, assignments, such as `n := n + 1;`, local variables, such as `var n := 0;`, and, in an update operator, `if` statements, such as `if n > 0 then [ n := n - 1; ];`; a read-only operator's body ends with its value, an expression without `;`",
             );
             self.skip_statement(&[
                 SyntaxKind::RBracket,
@@ -747,8 +904,9 @@ impl<'a> Parser<'a> {
         self.errors.push(errors::begin_end(begin, opening, closing));
     }
 
-    /// `return value;`, with `return` in any case, as Tutorial D's
-    /// `RETURN`, which is fixed.
+    /// `return;` or `return value;`, with `return` in any case, as Tutorial
+    /// D's `RETURN`, which is fixed: an early exit, which sema rejects until
+    /// there are early exits.
     fn return_stmt(&mut self) {
         self.start_node(SyntaxKind::ReturnStmt);
         let found = self.found().expect("at `return`");
@@ -756,13 +914,9 @@ impl<'a> Parser<'a> {
         if found.kind != SyntaxKind::ReturnKw {
             self.errors.push(errors::miscased_keyword(found, "return"));
         }
+        // An update operator's has none, which sema reports either way.
         if self.at_operand() {
             self.expression();
-        } else {
-            self.missing_with_help(
-                SyntaxKind::Literal,
-                "write the value to return after `return`, as in `return x + 1;`",
-            );
         }
         self.expect(SyntaxKind::Semicolon);
         self.builder.finish_node();
@@ -3818,7 +3972,7 @@ SourceFile
             "var t := array [{ a: 1 }, tuple { a: 2 }];",
             "var r: relation { months: array text };",
             "var x := a[1][2] + a[length{a: a}];",
-            "operator f{a: any array, b: array T}: T types { T: any type } [ return b[1]; ];",
+            "operator f{a: any array, b: array T}: T types { T: any type } [ b[1] ];",
         ] {
             let parse = parse_str(source);
             assert!(parse.errors.is_empty(), "{source}: {:#?}", parse.errors);
@@ -3919,7 +4073,7 @@ SourceFile
             "var x := tuple { a: if b then 1 else 2 };",
             "var x := array [if a then 1 else 2];",
             "var x := r extend { y := if a > 0 then a else -a };",
-            "operator f{n: integer}: integer [ return if n < 0 then -n else n; ];",
+            "operator f{n: integer}: integer [ if n < 0 then -n else n ];",
         ] {
             let parse = parse_str(source);
             assert!(parse.errors.is_empty(), "{source}: {:#?}", parse.errors);
@@ -4048,6 +4202,45 @@ SourceFile
     }
 
     #[test]
+    fn read_only_bodies_end_with_their_value() {
+        let value = |body: &str| {
+            let source = format!("operator f{{}}: integer [ {body} ];");
+            let parse = parse_str(&source);
+            assert!(parse.errors.is_empty(), "{body}: {:#?}", parse.errors);
+            let body = parse.tree.operators().next().unwrap().body().unwrap();
+            (body.statements().count(), body.value())
+        };
+        assert!(matches!(value("x * 2"), (0, Some(Expr::Binary(_)))));
+        assert!(matches!(value("var y := 2; y"), (1, Some(Expr::Name(_)))));
+        // An `if` without blocks is an expression, the value, and a
+        // comparison is no assignment.
+        assert!(matches!(
+            value("if c then 1 else 2"),
+            (0, Some(Expr::If(_)))
+        ));
+        assert!(matches!(value("a = b"), (0, Some(Expr::Binary(_)))));
+        // A call is the value, not a `call` without its keyword.
+        assert!(matches!(value("f{a: 1}"), (0, Some(Expr::Call(_)))));
+        // An `if` statement isn't one, which sema reports.
+        assert!(matches!(value("if c then [ x := 1; ]; x"), (1, Some(_))));
+    }
+
+    #[test]
+    fn body_value_recovery() {
+        let body = |statements: &str| format!("operator f{{}}: integer [ {statements} ];");
+        // Other languages' `return`, in any case, and a `;` after the value.
+        assert_eq!(fix(&body("return x * 2;")), body("x * 2"));
+        assert_eq!(fix(&body("var y := 2; RETURN y;")), body("var y := 2; y"));
+        assert_eq!(fix(&body("var y := 2; y;")), body("var y := 2; y"));
+        assert_eq!(
+            messages(&body("x; var y := 2; y")),
+            ["only the last item of a body is its value"]
+        );
+        // `return` before the end, an early exit, parses: sema reports it.
+        assert!(messages(&body("return x; var y := 2; y")).is_empty());
+    }
+
+    #[test]
     fn loads() {
         let load = |body: &str| {
             let source = format!("operator f{{}} [ {body} ];");
@@ -4166,15 +4359,14 @@ SourceFile
 
     #[test]
     fn read_only_operators_and_calls() {
-        let source = "operator double{x: integer}: integer [ return x * 2; ];\nvar four := double{x: 2} + 0;";
+        let source =
+            "operator double{x: integer}: integer [ x * 2 ];\nvar four := double{x: 2} + 0;";
         let parse = parse_str(source);
         assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
         let op = parse.tree.operators().next().unwrap();
         assert!(matches!(op.result(), Some(TypeExpr::Named(_))));
-        let Some(Statement::Return(stmt)) = op.body().unwrap().statements().next() else {
-            panic!("a return");
-        };
-        assert!(stmt.value().is_some());
+        assert!(op.body().unwrap().statements().next().is_none());
+        assert!(matches!(op.body().unwrap().value(), Some(Expr::Binary(_))));
         let initial = |source: &str| {
             let parse = parse_str(&format!("var x := {source};"));
             assert!(parse.errors.is_empty(), "{source}: {:#?}", parse.errors);
@@ -4200,11 +4392,11 @@ SourceFile
         // Other languages' spellings are fixed.
         assert_eq!(
             fix("operator f{x: integer} -> integer [ RETURN x; ];"),
-            "operator f{x: integer}: integer [ return x; ];"
+            "operator f{x: integer}: integer [ x ];"
         );
         assert_eq!(
-            fix("operator f{x: integer} returns integer [ return x; ];"),
-            "operator f{x: integer}: integer [ return x; ];"
+            fix("operator f{x: integer} returns integer [ x ];"),
+            "operator f{x: integer}: integer [ x ];"
         );
         assert_eq!(fix("var x := f(a: 1);"), "var x := f{a: 1};");
         // Tutorial D's `update`, whose values follow the condition in
@@ -4213,15 +4405,14 @@ SourceFile
             fix("operator main{} [ update r where c (a := 1); ];"),
             "operator main{} [ update r { a := 1 } where c; ];"
         );
-        assert_eq!(
-            messages("operator f{}: integer [ return; ];"),
-            ["expected value, found `;`"]
-        );
+        // Without a value, `return` parses, as an update operator's would:
+        // sema reports it.
+        assert!(messages("operator f{}: integer [ return; ];").is_empty());
     }
 
     #[test]
     fn type_parameters() {
-        let source = "operator pair{a: T, b: any tuple, r: any relation}: relation { v: T } types { T: any type } [ return relation {}; ];";
+        let source = "operator pair{a: T, b: any tuple, r: any relation}: relation { v: T } types { T: any type } [ relation {} ];";
         let parse = parse_str(source);
         assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
         let op = parse.tree.operators().next().unwrap();
@@ -4248,8 +4439,8 @@ SourceFile
 
         // Other languages' spellings are fixed.
         assert_eq!(
-            fix("operator same<T, U>{a: T, b: U}: boolean [ return true; ];"),
-            "operator same{a: T, b: U}: boolean types { T: any type, U: any type } [ return true; ];"
+            fix("operator same<T, U>{a: T, b: U}: boolean [ true ];"),
+            "operator same{a: T, b: U}: boolean types { T: any type, U: any type } [ true ];"
         );
         assert_eq!(
             fix("operator same<T>{a: T, b: T} types { T: any type } [];"),
@@ -4264,12 +4455,11 @@ SourceFile
             "operator f{v: T} types { T: any type } [];"
         );
         // A bound has no fix, but is reported once.
-        let errors = parse_str("operator max<T: Ord>{a: T}: T [ return a; ];").errors;
+        let errors = parse_str("operator max<T: Ord>{a: T}: T [ a ];").errors;
         assert_eq!(errors.len(), 1, "{errors:#?}");
         assert_eq!(errors[0].code, Code::TypeParameterSpelling);
         assert!(errors[0].suggestions.is_empty());
-        let errors =
-            parse_str("operator max<T extends Comparable<T>>{a: T}: T [ return a; ];").errors;
+        let errors = parse_str("operator max<T extends Comparable<T>>{a: T}: T [ a ];").errors;
         assert_eq!(errors.len(), 1, "{errors:#?}");
     }
 

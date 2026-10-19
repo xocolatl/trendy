@@ -542,7 +542,7 @@ mod tests {
     }
 
     /// Read-only operators for the tests below.
-    const READ_ONLY: &str = "var rate := 3;\nvar poets := relation { { name: \"Ada\", born: 1815 }, { name: \"Rumi\", born: 1207 } };\noperator double{x: integer}: integer [ return x * 2; ];\noperator quadruple{x: integer}: integer [ return double{x: double{x: x}}; ];\noperator scaled{x: integer}: integer [ return x * rate; ];\noperator born_before{year: integer}: relation { name: text, born: integer } [ return poets where born < year; ];";
+    const READ_ONLY: &str = "var rate := 3;\nvar poets := relation { { name: \"Ada\", born: 1815 }, { name: \"Rumi\", born: 1207 } };\noperator double{x: integer}: integer [ x * 2 ];\noperator quadruple{x: integer}: integer [ double{x: double{x: x}} ];\noperator scaled{x: integer}: integer [ x * rate ];\noperator born_before{year: integer}: relation { name: text, born: integer } [ poets where born < year ];";
 
     #[test]
     fn read_only_operators_are_evaluated_when_compiling() {
@@ -598,34 +598,37 @@ mod tests {
     }
 
     #[test]
-    fn read_only_operators_change_nothing_and_return_once() {
+    fn read_only_operators_change_nothing_and_end_with_their_value() {
         let codes_of = |body: &str| {
             codes(&format!(
                 "var n := 0;\noperator f{{x: integer}}: integer [ {body} ];{MAIN}"
             ))
         };
         assert_eq!(
-            codes_of("call debug_value{v: x}; n := x; return x;"),
+            codes_of("call debug_value{v: x}; n := x; x"),
             [Code::ReadOnlyEffect, Code::ReadOnlyEffect]
         );
         assert_eq!(codes_of(""), [Code::Return]);
-        let source =
-            "operator f{x: integer}: integer [ return x; return 1; ];\noperator main{} [];";
-        assert_eq!(codes(source), [Code::Return]);
-        assert_eq!(
-            fix(source),
-            "operator f{x: integer}: integer [ return x; ];\noperator main{} [];"
-        );
-        // A `return` in an update operator.
+        assert_eq!(codes_of("var y := x;"), [Code::Return]);
+        // There are no early exits yet.
+        let early = errors("operator f{x: integer}: integer [ return x; 1 ];\noperator main{} [];");
+        assert_eq!(early[0].code, Code::Return);
+        assert_eq!(early[0].message, "a read-only operator can't return early");
+        assert!(early[0].suggestions.is_empty());
+        // A `return` in an update operator, of a value or not.
         assert_eq!(
             codes("operator f{} [ return 1; ];\noperator main{} [];"),
             [Code::Return]
         );
-        // A `return` of the wrong type, reported at the value.
-        let errors = errors("operator f{}: integer [ return \"one\"; ];\noperator main{} [];");
+        assert_eq!(
+            messages("operator f{} [ return; ];\noperator main{} [];"),
+            ["`f` can't return early"]
+        );
+        // A value of the wrong type, reported at the value.
+        let errors = errors("operator f{}: integer [ \"one\" ];\noperator main{} [];");
         assert_eq!(errors[0].code, Code::TypeMismatch);
-        // `main` has no result type: the fix removes it with its `return`s.
-        let source = "operator main{}: integer [ call debug_value{v: 1}; return 0; ];";
+        // `main` has no result type: the fix removes it with its value.
+        let source = "operator main{}: integer [ call debug_value{v: 1}; 0 ];";
         assert_eq!(codes(source), [Code::MainSignature]);
         assert_eq!(fix(source), "operator main{} [ call debug_value{v: 1}; ];");
     }
@@ -690,18 +693,18 @@ mod tests {
     #[test]
     fn read_only_operators_dont_call_themselves() {
         let mutual = errors(
-            "operator f{}: integer [ return g{}; ];\noperator g{}: integer [ return f{}; ];\noperator main{} [];",
+            "operator f{}: integer [ g{} ];\noperator g{}: integer [ f{} ];\noperator main{} [];",
         );
         assert_eq!(mutual.len(), 1, "{mutual:#?}");
         assert_eq!(mutual[0].code, Code::Recursion);
         assert_eq!(mutual[0].message, "`f` and `g` call each other");
         assert_eq!(
-            messages("operator f{x: integer}: integer [ return f{x: x}; ];\noperator main{} [];"),
+            messages("operator f{x: integer}: integer [ f{x: x} ];\noperator main{} [];"),
             ["`f` calls itself"]
         );
         // A cycle through an operator's value is an initial values' cycle.
         let cycle = errors(&format!(
-            "var a := f{{}};\noperator f{{}}: integer [ return a + 1; ];{MAIN}"
+            "var a := f{{}};\noperator f{{}}: integer [ a + 1 ];{MAIN}"
         ));
         assert_eq!(cycle.len(), 1, "{cycle:#?}");
         assert_eq!(cycle[0].code, Code::CyclicInitialValues);
@@ -901,7 +904,7 @@ mod tests {
                 .map(|v| format!("    call debug_value{{v: {v}}};"))
                 .collect();
             format!(
-                "operator show{{n: integer, x: approximate, v: any type}} [\n{}\n];\noperator label{{n: integer}}: text [ return n; ];{MAIN}",
+                "operator show{{n: integer, x: approximate, v: any type}} [\n{}\n];\noperator label{{n: integer}}: text [ n ];{MAIN}",
                 calls.join("\n")
             )
         };
@@ -923,7 +926,7 @@ mod tests {
             "1e0 * x",
             "to_approximate{from: n * 2} = x",
         ])
-        .replace("return n;", "return to_text{from: n};");
+        .replace("[ n ]", "[ to_text{from: n} ]");
         assert_eq!(fix(&source), fixed);
         assert!(analyze_str(&fixed).is_ok(), "{fixed}");
         // `/` of integers is likelier `div`, but of an integer by an
@@ -957,7 +960,7 @@ mod tests {
         // The type isn't the operand's own to change: `"n = "` wouldn't fit
         // `integer`, nor would `x`.
         let source = format!(
-            "operator label{{n: integer}}: text [ return \"n = \" || n; ];\noperator scale{{x: approximate, n: integer}}: approximate [ return x * n; ];{MAIN}"
+            "operator label{{n: integer}}: text [ \"n = \" || n ];\noperator scale{{x: approximate, n: integer}}: approximate [ x * n ];{MAIN}"
         );
         let errors = errors(&source);
         assert_eq!(errors.len(), 2, "{errors:#?}");
@@ -995,7 +998,7 @@ mod tests {
     #[test]
     fn conversions_are_evaluated_when_compiling() {
         let vars = variables(
-            "var a := to_text{from: -0e0};\nvar b := to_text{from: tuple { city: \"Lima\\n\", n: 1 }};\nvar c := to_text{from: relation { a: integer } {}};\nvar d := to_approximate{from: 9007199254740993};\noperator empty{v: T}: text\n    types { T: any type }\n[\n    return to_text{from: relation { v: T } {}};\n];\nvar e := empty{v: 1};",
+            "var a := to_text{from: -0e0};\nvar b := to_text{from: tuple { city: \"Lima\\n\", n: 1 }};\nvar c := to_text{from: relation { a: integer } {}};\nvar d := to_approximate{from: 9007199254740993};\noperator empty{v: T}: text\n    types { T: any type }\n[\n    to_text{from: relation { v: T } {}}\n];\nvar e := empty{v: 1};",
         );
         let text = |i: usize| match &vars[i].init {
             hir::Value::Text(text) => text.clone(),
@@ -1786,7 +1789,8 @@ mod tests {
             [Code::BuiltinOutsidePrelude]
         );
         // `any type` is only a parameter's.
-        let source = "var x: any type := 1;\noperator f{v: integer}: any type [ return v; ];\noperator main{} [];";
+        let source =
+            "var x: any type := 1;\noperator f{v: integer}: any type [ v ];\noperator main{} [];";
         assert_eq!(
             codes(source),
             [Code::AnyOutsideParameter, Code::AnyOutsideParameter]
@@ -4510,8 +4514,7 @@ mod tests {
         &source[span.start..span.end]
     }
 
-    const SAME: &str =
-        "operator same{a: T, b: T}: boolean types { T: any type } [ return a = b; ];\n";
+    const SAME: &str = "operator same{a: T, b: T}: boolean types { T: any type } [ a = b ];\n";
 
     #[test]
     fn generic_operators_are_called_with_their_arguments_types() {
@@ -4566,13 +4569,14 @@ mod tests {
         );
         // A structured type takes its type parameters' types from its
         // argument's, and gives them to others.
-        let only = "operator only{r: relation { v: T }}: T types { T: any type } [ return value from r; ];\n";
+        let only =
+            "operator only{r: relation { v: T }}: T types { T: any type } [ value from r ];\n";
         let vars = variables(&format!(
             "{only}var a := only{{r: relation {{ {{ v: 5 }} }}}};\nvar b := only{{r: relation {{ {{ v: \"Kyiv\" }} }}}};"
         ));
         assert_eq!(vars[0].init, hir::Value::Integer(5));
         assert_eq!(vars[1].init, hir::Value::Text("Kyiv".to_string()));
-        let pick = "operator pick{a: T, r: relation { v: T }}: boolean types { T: any type } [ return r = relation {}; ];\n";
+        let pick = "operator pick{a: T, r: relation { v: T }}: boolean types { T: any type } [ r = relation {} ];\n";
         // `relation {}` is expected to have `T`'s heading, once `a` gives
         // `T` its type, whichever is written first.
         for args in ["a: 1, r: relation {}", "r: relation {}, a: 1"] {
@@ -4590,18 +4594,18 @@ mod tests {
     #[test]
     fn generic_bodies_are_checked_for_every_type() {
         // Only `=` and `<>` apply to any type.
-        let source = "operator f{a: T, b: T}: boolean types { T: any type } [ return a < b; ];\noperator main{} [];";
+        let source =
+            "operator f{a: T, b: T}: boolean types { T: any type } [ a < b ];\noperator main{} [];";
         assert_eq!(codes(source), [Code::WrongOperandType]);
         assert_eq!(messages(source), ["`<` can't be applied to values of `T`"]);
-        let source =
-            "operator f{a: T}: T types { T: any type } [ return a + a; ];\noperator main{} [];";
+        let source = "operator f{a: T}: T types { T: any type } [ a + a ];\noperator main{} [];";
         assert_eq!(codes(source), [Code::WrongOperandType]);
         // Two type parameters are two types.
-        let source = "operator f{a: T, b: U, c: T, d: U}: boolean types { T: any type, U: any type } [ return a = b; ];\noperator main{} [];";
+        let source = "operator f{a: T, b: U, c: T, d: U}: boolean types { T: any type, U: any type } [ a = b ];\noperator main{} [];";
         assert_eq!(codes(source), [Code::TypeMismatch]);
         // So are two written `any type`, which one declared can make one.
         let source =
-            "operator f{a: any type, b: any type}: boolean [ return a = b; ];\noperator main{} [];";
+            "operator f{a: any type, b: any type}: boolean [ a = b ];\noperator main{} [];";
         let errors = errors(source);
         assert_eq!(errors[0].code, Code::TypeMismatch);
         assert!(
@@ -4613,12 +4617,12 @@ mod tests {
         );
         // Relations are ordered by inclusion, so `any relation` is.
         analyze_str(
-            "operator sub{r: R, s: R}: boolean types { R: any relation } [ return r <= s; ];\nvar yes := sub{r: relation { { a: 1 } }, s: relation { { a: 1 }, { a: 2 } }};\noperator main{} [];",
+            "operator sub{r: R, s: R}: boolean types { R: any relation } [ r <= s ];\nvar yes := sub{r: relation { { a: 1 } }, s: relation { { a: 1 }, { a: 2 } }};\noperator main{} [];",
         )
         .unwrap();
         // A type parameter can be written in the body.
         let program = analyze_str(
-            "operator none{a: T}: relation { v: T } types { T: any type } [ return relation { v: T } {}; ];\nvar e := none{a: \"Accra\"};\noperator main{} [];",
+            "operator none{a: T}: relation { v: T } types { T: any type } [ relation { v: T } {} ];\nvar e := none{a: \"Accra\"};\noperator main{} [];",
         )
         .unwrap();
         assert_eq!(program.variables[0].ty.to_string(), "relation { v: text }");
@@ -4639,7 +4643,7 @@ mod tests {
             fix(source),
             "operator f{a: T, b: T} types { T: any type } [];\noperator main{} [];"
         );
-        let source = "operator f{a: integer}: relation { v: T } types { T: any type } [ return relation {}; ];\noperator main{} [];";
+        let source = "operator f{a: integer}: relation { v: T } types { T: any type } [ relation {} ];\noperator main{} [];";
         assert_eq!(codes(source), [Code::UndeterminedTypeParameter]);
         assert!(errors(source)[0].suggestions.is_empty());
         // Used once, it needs no name.
@@ -4651,10 +4655,8 @@ mod tests {
             "operator f{r: any relation, n: integer} [];\noperator main{} [];"
         );
         // Twice, or in the result or the body, it does.
-        analyze_str(
-            "operator f{a: T}: T types { T: any type } [ return a; ];\noperator main{} [];",
-        )
-        .unwrap();
+        analyze_str("operator f{a: T}: T types { T: any type } [ a ];\noperator main{} [];")
+            .unwrap();
         analyze_str(
             "operator f{a: T} types { T: any type } [ call debug_value{v: relation { a: T } {}}; ];\noperator main{} [];",
         )
@@ -4706,7 +4708,7 @@ mod tests {
 
     const PLOTS: &str = "var plots := relation {\n    { plot: 1, region: \"Nyeri\", of: 1200 },\n    { plot: 2, region: \"Nyeri\", of: 950 },\n    { plot: 3, region: \"Mendoza\", of: 220 },\n}\nkey { plot };\n";
 
-    const VALUES: &str = "operator values{r: any relation, of: T per r}: relation { v: T } types { T: any type } [ return r{of} rename {of as v}; ];\n";
+    const VALUES: &str = "operator values{r: any relation, of: T per r}: relation { v: T } types { T: any type } [ r{of} rename {of as v} ];\n";
 
     #[test]
     fn per_arguments_are_evaluated_for_each_tuple() {
@@ -4734,7 +4736,7 @@ mod tests {
         assert_eq!(values.params.len(), 1);
         assert_eq!(values.params["r"].to_string(), "relation { of: T, … }");
         // A relation passed on keeps its tuples, and its `per` attribute.
-        let again = "operator again{r: any relation, of: T per r}: relation { v: T } types { T: any type } [ return values{r: r, of: of}; ];\n";
+        let again = "operator again{r: any relation, of: T per r}: relation { v: T } types { T: any type } [ values{r: r, of: of} ];\n";
         let vars = variables(&format!(
             "{PLOTS}{VALUES}{again}var regions := again{{r: plots, of: region}};"
         ));
@@ -4762,7 +4764,8 @@ mod tests {
             [Code::PerRelation]
         );
         // Inside the operator, a `per` parameter is an attribute.
-        let source = "operator f{r: any relation, of: integer per r}: integer [ return of; ];\noperator main{} [];";
+        let source =
+            "operator f{r: any relation, of: integer per r}: integer [ of ];\noperator main{} [];";
         assert_eq!(codes(source), [Code::PerAsValue]);
         // Attributes are named bare, whatever the type: in quotes, one is a
         // text, the same for every tuple.
@@ -4778,7 +4781,7 @@ mod tests {
         // constant, is the same for every tuple.
         for of in ["true", "n", "region = \"Nyeri\"", "false and of > 0"] {
             let source = format!(
-                "{PLOTS}operator total{{r: any relation, of: boolean per r}}: boolean [ return every{{r: r, of: of}}; ];\nvar regions := relation {{ {{ region: \"Nyeri\", n: true }} }};\nvar x := regions extend {{ t := total{{r: !!plots, of: {of}}} }};{MAIN}"
+                "{PLOTS}operator total{{r: any relation, of: boolean per r}}: boolean [ every{{r: r, of: of}} ];\nvar regions := relation {{ {{ region: \"Nyeri\", n: true }} }};\nvar x := regions extend {{ t := total{{r: !!plots, of: {of}}} }};{MAIN}"
             );
             let errors = errors(&source);
             assert_eq!(errors[0].code, Code::ConstantPer, "{of}: {errors:#?}");
@@ -4805,7 +4808,7 @@ mod tests {
         assert_eq!(codes(&source), [Code::DivisionByZero]);
         // The wrapped attribute is never suggested.
         let source = format!(
-            "{VALUES}operator f{{r: any relation, of: integer per r}}: relation {{ of: integer }} [ return r{{x}}; ];{MAIN}"
+            "{VALUES}operator f{{r: any relation, of: integer per r}}: relation {{ of: integer }} [ r{{x}} ];{MAIN}"
         );
         let errors = errors(&source);
         assert_eq!(errors[0].code, Code::UnknownAttribute);
@@ -4885,7 +4888,7 @@ mod tests {
 
     #[test]
     fn a_kind_says_what_its_type_parameters_can_be() {
-        let below = "operator below{r: any relation, of: T per r, limit: T}: relation { v: T } types { T: any ordered } [ return (r where of < limit){of} rename {of as v}; ];\n";
+        let below = "operator below{r: any relation, of: T per r, limit: T}: relation { v: T } types { T: any ordered } [ (r where of < limit){of} rename {of as v} ];\n";
         let vars = variables(&format!(
             "{PLOTS}{below}var dry := below{{r: plots, of: of, limit: 1000}};\nvar early := below{{r: plots, of: region, limit: \"N\"}};"
         ));
@@ -4908,7 +4911,7 @@ mod tests {
             "mismatched types: expected a type of kind `ordered`, found `tuple {}`"
         );
         // `<` is for a kind that requires it, and the error says which.
-        let source = "operator less{a: T, b: T}: boolean types { T: any type } [ return a < b; ];\noperator main{} [];";
+        let source = "operator less{a: T, b: T}: boolean types { T: any type } [ a < b ];\noperator main{} [];";
         let unordered = errors(source);
         assert_eq!(unordered[0].code, Code::WrongOperandType);
         assert!(
@@ -4964,14 +4967,14 @@ mod tests {
             )),
             [Code::TypeMismatch]
         );
-        let source = "operator top{r: any relation, of: T per r}: T types { T: any type } [ return max{r: r, of: of}; ];\noperator main{} [];";
+        let source = "operator top{r: any relation, of: T per r}: T types { T: any type } [ max{r: r, of: of} ];\noperator main{} [];";
         let unordered = errors(source);
         assert_eq!(unordered[0].code, Code::TypeMismatch);
         assert_eq!(
             unordered[0].help,
             ["declare `T` as `any ordered`, whose types all declare it"]
         );
-        let source = "operator top{r: any relation, of: T per r}: T types { T: any ordered } [ return max{r: r, of: of}; ];\n";
+        let source = "operator top{r: any relation, of: T per r}: T types { T: any ordered } [ max{r: r, of: of} ];\n";
         let vars = variables(&format!(
             "{PLOTS}{source}var top := top{{r: plots, of: plot}};"
         ));
@@ -5102,7 +5105,7 @@ mod tests {
 
     #[test]
     fn values_of_any_numeric_are_added_and_multiplied() {
-        let generic = "operator twice{x: T}: T types { T: any numeric } [ return x + +x; ];\noperator area{w: T, h: T}: T types { T: any numeric } [ return w * h; ];\n";
+        let generic = "operator twice{x: T}: T types { T: any numeric } [ x + +x ];\noperator area{w: T, h: T}: T types { T: any numeric } [ w * h ];\n";
         let vars = variables(&format!(
             "{generic}var a := twice{{x: 21}};\nvar b := area{{w: 2.5e0, h: 4e0}};"
         ));
@@ -5124,7 +5127,7 @@ mod tests {
         // that would allow the rest.
         let body = |any: &str, body: &str| {
             errors(&format!(
-                "operator f{{x: T, y: T}}: T types {{ T: any {any} }} [ return {body}; ];{MAIN}"
+                "operator f{{x: T, y: T}}: T types {{ T: any {any} }} [ {body} ];{MAIN}"
             ))
         };
         let subtracted = body("numeric", "x - y");
@@ -5142,7 +5145,7 @@ mod tests {
         );
         // No kind requires both, so switching loses what one requires.
         let ordered = errors(&format!(
-            "operator f{{x: T, y: T}}: boolean types {{ T: any numeric }} [ return x < y; ];{MAIN}"
+            "operator f{{x: T, y: T}}: boolean types {{ T: any numeric }} [ x < y ];{MAIN}"
         ));
         assert_eq!(
             ordered[0].help,
@@ -5278,7 +5281,7 @@ mod tests {
     #[test]
     fn a_read_only_operators_local_variables_are_lets() {
         let program = analyze_str(&format!(
-            "var vat := 16;\noperator taxed{{price: integer}}: integer [\n    var tax := price * vat div 100;\n    var total := price + tax;\n    total := total + 1;\n    return total;\n];\nvar folded := taxed{{price: 1000}};{MAIN}"
+            "var vat := 16;\noperator taxed{{price: integer}}: integer [\n    var tax := price * vat div 100;\n    var total := price + tax;\n    total := total + 1;\n    total\n];\nvar folded := taxed{{price: 1000}};{MAIN}"
         ))
         .unwrap();
         let op = program
@@ -5304,7 +5307,7 @@ mod tests {
         assert_eq!(program.variables[1].init, hir::Value::Integer(1161));
         // Each value is computed once: doubling a relation six times is six
         // `Let`s, not 64 copies of it.
-        let doubled = "operator doubled{r: relation { a: integer }}: relation { a: integer } [ var a := r union r; var b := a union a; var c := b union b; var d := c union c; var e := d union d; return e union e; ];\n";
+        let doubled = "operator doubled{r: relation { a: integer }}: relation { a: integer } [ var a := r union r; var b := a union a; var c := b union b; var d := c union c; var e := d union d; e union e ];\n";
         let program = analyze_str(&format!("{doubled}{MAIN}")).unwrap();
         let op = program
             .operators
@@ -5320,7 +5323,7 @@ mod tests {
             "{value:?}"
         );
         // Swapped at once, in an `assign` block.
-        let swapped = "operator swapped{a: integer, b: integer}: tuple { a: integer, b: integer } [ var x := a; var y := b; assign { x := y; y := x; }; return tuple { a: x, b: y }; ];\nvar t := swapped{a: 1, b: 2};";
+        let swapped = "operator swapped{a: integer, b: integer}: tuple { a: integer, b: integer } [ var x := a; var y := b; assign { x := y; y := x; }; tuple { a: x, b: y } ];\nvar t := swapped{a: 1, b: 2};";
         assert_eq!(
             variables(swapped)[0].init.to_string(),
             "tuple { a: 2, b: 1 }"
@@ -5334,26 +5337,23 @@ mod tests {
                 "var total := 0;\noperator f{{n: integer}}: integer [ {body} ];{MAIN}"
             ))
         };
-        let assigned = read_only("total := total + n; return total;");
+        let assigned = read_only("total := total + n; total");
         assert_eq!(assigned[0].code, Code::ReadOnlyEffect);
         assert_eq!(
             assigned[0].message,
             "a read-only operator can't assign a variable of the program's"
         );
-        let called = read_only("var k := n; call debug_value{v: k}; return k;");
+        let called = read_only("var k := n; call debug_value{v: k}; k");
         assert_eq!(
             called[0].message,
             "a read-only operator can't call an operator"
         );
-        // Its `return` is last.
+        // Its value is last.
         let after = read_only("return n; var later := 1;");
         assert_eq!(after[0].code, Code::Return);
-        assert_eq!(
-            after[0].message,
-            "a statement after `return` would never run"
-        );
+        assert_eq!(after[0].message, "a read-only operator can't return early");
         // A local variable can't be computed from itself.
-        let own = read_only("var m := m + 1; return n;");
+        let own = read_only("var m := m + 1; n");
         assert_eq!(own[0].code, Code::LocalBeforeDeclaration);
         assert_eq!(
             own[0].help,
@@ -5468,7 +5468,7 @@ mod tests {
         // Of a read-only operator's local variable, and in an `assign`
         // block, which can't change the array otherwise as well.
         let source = format!(
-            "operator first{{r: relation {{ v: integer }}}}: integer [ var a: array integer; load a from r order [asc v]; return a[1]; ];\noperator f{{}} [ var a: array integer; var n := 0; assign {{ load a from relation {{ {{ v: 2 }}, {{ v: 1 }} }} order [asc v]; n := 1; }}; ];{MAIN}"
+            "operator first{{r: relation {{ v: integer }}}}: integer [ var a: array integer; load a from r order [asc v]; a[1] ];\noperator f{{}} [ var a: array integer; var n := 0; assign {{ load a from relation {{ {{ v: 2 }}, {{ v: 1 }} }} order [asc v]; n := 1; }}; ];{MAIN}"
         );
         assert!(analyze_str(&source).is_ok(), "{:#?}", errors(&source));
         let source = assigning(
@@ -5555,7 +5555,7 @@ mod tests {
         // Unless another element can fail, which it must still be computed
         // to find out.
         let program = analyze_str(&format!(
-            "operator kept{{x: integer}}: integer [ return array [x, 2][2]; ];\noperator failing{{x: integer}}: integer [ return array [x + 1, 2][2]; ];{MAIN}"
+            "operator kept{{x: integer}}: integer [ array [x, 2][2] ];\noperator failing{{x: integer}}: integer [ array [x + 1, 2][2] ];{MAIN}"
         ))
         .unwrap();
         let value = |name: &str| {
@@ -5612,7 +5612,7 @@ mod tests {
             assert_eq!(codes(&source), [Code::IndexOutOfRange], "{position}");
         }
         // Below 1, whatever the array.
-        let source = format!("operator f{{a: array integer}}: integer [ return a[0]; ];{MAIN}");
+        let source = format!("operator f{{a: array integer}}: integer [ a[0] ];{MAIN}");
         assert_eq!(codes(&source), [Code::IndexOutOfRange]);
         // Other languages' first and last elements.
         for (written, fixed) in [
@@ -5647,7 +5647,7 @@ mod tests {
         for source in [
             "var r := relation { { a: 1 } };\nvar x := r[1];",
             "var x := 5[1];",
-            "operator f{a: any array}: integer [ return a[1]; ];",
+            "operator f{a: any array}: integer [ a[1] ];",
         ] {
             assert_eq!(
                 codes(&format!("{source}{MAIN}")),
@@ -5673,13 +5673,14 @@ mod tests {
 
     #[test]
     fn an_arrays_elements_can_have_a_type_parameter() {
-        let first = "operator first{a: array E}: E types { E: any type } [ return a[1]; ];\n";
+        let first = "operator first{a: array E}: E types { E: any type } [ a[1] ];\n";
         let vars = variables(&format!(
             "{first}var n := first{{a: array [7, 8]}};\nvar t := first{{a: array [\"Kofi\"]}};"
         ));
         assert_eq!(vars[0].init, hir::Value::Integer(7));
         assert_eq!(vars[1].init, hir::Value::Text("Kofi".to_string()));
-        let same = "operator same{a: array E, b: array E}: boolean types { E: any type } [ return a = b; ];\n";
+        let same =
+            "operator same{a: array E, b: array E}: boolean types { E: any type } [ a = b ];\n";
         assert_eq!(
             codes(&format!(
                 "{same}var x := same{{a: array [1], b: array [\"1\"]}};{MAIN}"
@@ -5717,16 +5718,16 @@ mod tests {
         assert_eq!(vars[1].init, hir::Value::Integer(0));
         assert_eq!(vars[2].init, hir::Value::Text("none".to_string()));
         // A call evaluated when compiling takes only one branch too.
-        let safe = "operator safe{a: integer, b: integer}: integer [ return if b = 0 then 0 else a div b; ];\n";
+        let safe =
+            "operator safe{a: integer, b: integer}: integer [ if b = 0 then 0 else a div b ];\n";
         assert_eq!(
             variables(&format!("{safe}var x := safe{{a: 7, b: 0}};"))[0].init,
             hir::Value::Integer(0)
         );
         // Unknown when compiling, a branch that fails whenever it is taken
         // is an error.
-        let source = format!(
-            "operator f{{n: integer}}: integer [ return if n > 0 then 1 else 1 div 0; ];{MAIN}"
-        );
+        let source =
+            format!("operator f{{n: integer}}: integer [ if n > 0 then 1 else 1 div 0 ];{MAIN}");
         assert_eq!(codes(&source), [Code::DivisionByZero]);
     }
 
@@ -5735,9 +5736,9 @@ mod tests {
         // An empty relation takes its heading from the other branch, in
         // either order.
         for source in [
-            "operator f{n: integer}: boolean [ return (if n > 0 then relation {} else relation { { a: 1 } }) = relation {}; ];",
-            "operator f{n: integer}: boolean [ return (if n > 0 then relation { { a: 1 } } else relation {}) = relation {}; ];",
-            "operator f{n: integer}: relation { a: integer } [ return if n > 0 then relation {} else relation {}; ];",
+            "operator f{n: integer}: boolean [ (if n > 0 then relation {} else relation { { a: 1 } }) = relation {} ];",
+            "operator f{n: integer}: boolean [ (if n > 0 then relation { { a: 1 } } else relation {}) = relation {} ];",
+            "operator f{n: integer}: relation { a: integer } [ if n > 0 then relation {} else relation {} ];",
         ] {
             assert!(analyze_str(&format!("{source}{MAIN}")).is_ok(), "{source}");
         }
@@ -5756,7 +5757,7 @@ mod tests {
         }
         // Both alike, it is the one, if the condition can't fail.
         let program = analyze_str(&format!(
-            "operator same{{n: integer}}: integer [ return if n > 0 then n else n; ];{MAIN}"
+            "operator same{{n: integer}}: integer [ if n > 0 then n else n ];{MAIN}"
         ))
         .unwrap();
         let op = program.operators.iter().find(|o| o.name == "same").unwrap();
@@ -5768,7 +5769,7 @@ mod tests {
 
     #[test]
     fn an_if_that_decides_nothing_is_fixed() {
-        let f = |body: &str| format!("operator f{{n: integer}}: boolean [ return {body}; ];{MAIN}");
+        let f = |body: &str| format!("operator f{{n: integer}}: boolean [ {body} ];{MAIN}");
         for (written, fixed) in [
             ("if true then n > 0 else n < 0", "n > 0"),
             ("if false then n > 0 else n < 0", "n < 0"),
@@ -5862,7 +5863,7 @@ mod tests {
         );
         // A read-only operator chooses with an `if` expression.
         let source = format!(
-            "operator g{{n: integer}}: integer [ var x := 0; if n > 0 then [ x := 1; ]; return x; ];{MAIN}"
+            "operator g{{n: integer}}: integer [ var x := 0; if n > 0 then [ x := 1; ]; x ];{MAIN}"
         );
         assert_eq!(codes(&source), [Code::Return]);
     }

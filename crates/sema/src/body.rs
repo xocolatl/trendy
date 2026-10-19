@@ -63,14 +63,11 @@ pub(crate) fn body(
     errors: &mut Vec<Diagnostic>,
 ) -> Option<(Vec<hir::Local>, hir::Block)> {
     let body = op.body()?;
-    let name = &cx.operators.get(within).name;
     let mut statements = Statements {
         cx,
         within,
         locals: Locals::default(),
         growing,
-        // `main` with a result type is reported with its `return`s.
-        returns_reported: name == "main" && op.result().is_some(),
     };
     let checked: Vec<ast::Statement> = body.statements().collect();
     let block = statements.block(&checked, errors)?;
@@ -86,9 +83,6 @@ struct Statements<'a, 'b> {
     /// Each call that gives a type parameter a type built from the
     /// operator's own (see [`Growing`]).
     growing: &'a mut Vec<Growing>,
-    /// Whether a `return`, of a `main` with a result type, is reported
-    /// already.
-    returns_reported: bool,
 }
 
 impl Statements<'_, '_> {
@@ -139,10 +133,8 @@ impl Statements<'_, '_> {
             }
             ast::Statement::Block(block) => assign::block(block, &mut self.names(), errors),
             ast::Statement::Return(stmt) => {
-                if !self.returns_reported {
-                    let name = &cx.operators.get(within).name;
-                    errors.push(errors::return_in_update(name, stmt));
-                }
+                let name = &cx.operators.get(within).name;
+                errors.push(errors::return_in_update(name, stmt));
                 None
             }
             ast::Statement::Var(decl) => declaration(decl, within, cx, &mut self.locals, errors),

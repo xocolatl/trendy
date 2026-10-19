@@ -46,13 +46,13 @@ builtin operator product{r: any relation, of: T per r}: T
    one, which its projection on no attributes, `relation { {} }` or
    `relation {}`, says. Of no tuples, it is false. */
 operator some{r: any relation, of: boolean per r}: boolean [
-    return (r where of){} = relation { {} };
+    (r where of){} = relation { {} }
 ];
 
 /* Whether `of` is true for every tuple of `r`: whether no tuple makes it
    false. Of no tuples, it is true. */
 operator every{r: any relation, of: boolean per r}: boolean [
-    return (r where not of){} = relation {};
+    (r where not of){} = relation {}
 ];
 
 /* `from` as trendy source, the text `debug_value` writes: `42`, `5e-1`,

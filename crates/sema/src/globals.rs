@@ -250,9 +250,9 @@ impl<'a> Globals<'a> {
     }
 
     /// The value of the read-only operator `signature`, and its local
-    /// variables: its body declares and assigns those, and ends in one
-    /// `return`, of a value of its result type; it changes nothing else
-    /// (TTM RM Prescription 3). Each declaration and assignment is a `Let`
+    /// variables: its body declares and assigns those, and ends with its
+    /// value, of its result type; it changes nothing else (TTM RM
+    /// Prescription 3). Each declaration and assignment is a `Let`
     /// of a local variable of its own, which has the value from there on,
     /// so that the value is one expression, which computes each local
     /// variable's value once. `None` after reporting why it has none.
@@ -268,31 +268,24 @@ impl<'a> Globals<'a> {
         let (mut locals, mut valid) = locals::declarations(&body, signature, errors);
         valid &= signature.valid;
         let mut lets: Vec<(hir::LocalId, hir::Expr)> = Vec::new();
-        let mut returned: Option<(ast::ReturnStmt, Option<hir::Expr>)> = None;
-        for statement in body.statements() {
-            if let Some((first, _)) = &returned {
-                errors.push(match &statement {
-                    ast::Statement::Return(stmt) => errors::extra_return(stmt, first),
-                    other => errors::after_return(other, first),
-                });
-                valid = false;
-                continue;
-            }
+        let statements: Vec<ast::Statement> = body.statements().collect();
+        let written_value = body.value();
+        for (i, statement) in statements.iter().enumerate() {
             let mut names = ReadOnlyNames {
                 globals: self,
                 within: signature.id,
                 locals: &locals,
             };
-            match &statement {
+            match statement {
                 ast::Statement::Return(stmt) => {
-                    let expected = signature.result.clone().map(|ty| Expected {
-                        ty,
-                        origin: Origin::Type(written.clone()),
-                    });
-                    let value = stmt.value().and_then(|value| {
-                        Checker::new(&mut names).expr(&value, expected.as_ref(), errors)
-                    });
-                    returned = Some((stmt.clone(), value));
+                    // `return;` at the end, with no value, is the body
+                    // without one, reported below; the parser makes
+                    // `return x;` there the value.
+                    let last = i + 1 == statements.len() && written_value.is_none();
+                    if !last {
+                        errors.push(errors::early_return(stmt));
+                    }
+                    valid = false;
                 }
                 ast::Statement::Var(decl) => {
                     let checked = locals::local(decl, signature, namespaces, &mut names, errors);
@@ -321,11 +314,20 @@ impl<'a> Globals<'a> {
                 }
             }
         }
-        let Some((_, value)) = returned else {
-            errors.push(errors::missing_return(&signature.name, &body, &written));
+        let Some(written_value) = written_value else {
+            errors.push(errors::missing_value(&signature.name, &body, &written));
             return None;
         };
-        let value = value?;
+        let mut names = ReadOnlyNames {
+            globals: self,
+            within: signature.id,
+            locals: &locals,
+        };
+        let expected = signature.result.clone().map(|ty| Expected {
+            ty,
+            origin: Origin::Type(written.clone()),
+        });
+        let value = Checker::new(&mut names).expr(&written_value, expected.as_ref(), errors)?;
         valid.then(|| {
             let value = lets.into_iter().rev().fold(value, |body, (id, value)| {
                 hir::Expr::Let(id, Box::new(value), Box::new(body))

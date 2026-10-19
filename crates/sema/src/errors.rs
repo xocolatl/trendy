@@ -1975,28 +1975,18 @@ pub(crate) fn positional_argument(
 }
 
 /// `operator main{…}: type`, the definition `decl`, which has no result
-/// type: the fix removes it, and the `return`s with it.
+/// type: the fix removes it, and the value its body ends with.
 pub(crate) fn main_with_result(decl: &trendy_syntax::ast::Operator) -> Diagnostic {
-    let mut edits: Vec<Edit> = decl
+    let value = decl.body().and_then(|body| body.value_removal());
+    let edits: Vec<Edit> = decl
         .result_removal()
         .into_iter()
+        .chain(value)
         .map(|span| Edit {
             span,
             replacement: String::new(),
         })
         .collect();
-    for statement in decl
-        .body()
-        .iter()
-        .flat_map(trendy_syntax::ast::Body::statements)
-    {
-        if let trendy_syntax::ast::Statement::Return(stmt) = statement {
-            edits.push(Edit {
-                span: stmt.removal(),
-                replacement: String::new(),
-            });
-        }
-    }
     let span = decl.result().map_or_else(|| decl.span(), |t| t.span());
     Diagnostic::error(
         Code::MainSignature,
@@ -2005,7 +1995,7 @@ pub(crate) fn main_with_result(decl: &trendy_syntax::ast::Operator) -> Diagnosti
         "nothing receives `main`'s value",
     )
     .with_note("execution starts in `main`, an update operator, which returns no value")
-    .with_suggestion("remove the result type, and the `return`s", edits)
+    .with_suggestion("remove the result type, and the value", edits)
 }
 
 /// `operator main{…}`, whose parameters `params` must be empty.
@@ -3543,11 +3533,22 @@ pub(crate) fn call_of_read_only(name: &str, span: Span, defined: Option<Span>) -
     ))
 }
 
-/// `stmt`, a `return` in the update operator `name`.
+/// `stmt`, a `return` in the update operator `name`: of a value, which
+/// it hasn't, or, without one, an early exit, which no operator has yet.
 pub(crate) fn return_in_update(name: &str, stmt: &trendy_syntax::ast::ReturnStmt) -> Diagnostic {
     let span = stmt
         .keyword()
         .map_or_else(|| stmt.span(), |t| trendy_syntax::span(t.text_range()));
+    if stmt.value().is_none() {
+        return Diagnostic::error(
+            Code::Return,
+            format!("`{name}` can't return early"),
+            span,
+            "an early exit",
+        )
+        .with_note(EARLY_EXIT)
+        .with_help("put what the rest does in an `if` statement's `else`");
+    }
     Diagnostic::error(
         Code::Return,
         format!("`{name}` is an update operator, which returns no value"),
@@ -3555,12 +3556,34 @@ pub(crate) fn return_in_update(name: &str, stmt: &trendy_syntax::ast::ReturnStmt
         "returns a value",
     )
     .with_note(
-        "only a read-only operator, which has a result type, returns a value: `operator name{params}: type [return value;];`",
+        "only a read-only operator, which has a result type, has a value, which its body ends with: `operator name{params}: type [value];`",
     )
     .with_help(format!(
         "give `{name}` a result type to make it read-only, or delete the `return`"
     ))
 }
+
+/// `stmt`, a `return` in a read-only operator before the end of its body:
+/// an early exit, which no operator has yet.
+pub(crate) fn early_return(stmt: &trendy_syntax::ast::ReturnStmt) -> Diagnostic {
+    let span = stmt
+        .keyword()
+        .map_or_else(|| stmt.span(), |t| trendy_syntax::span(t.text_range()));
+    Diagnostic::error(
+        Code::Return,
+        "a read-only operator can't return early",
+        span,
+        "an early exit",
+    )
+    .with_note(EARLY_EXIT)
+    .with_help("choose between values with an `if` expression, and end the body with it")
+}
+
+/// Why there are no early exits, for notes.
+const EARLY_EXIT: &str = "`return` leaves an operator before the end of its body, which no operator does yet: a body runs to its end, where a read-only operator's value is";
+
+/// A read-only operator's body, for notes.
+const BODY_VALUE: &str = "a read-only operator's body declares and assigns its local variables, if it has any, then ends with its value, an expression of its result type, without `;`";
 
 /// What a read-only operator changes, for notes.
 const READ_ONLY: &str = "a read-only operator changes nothing but its own local variables (TTM RM Prescription 3): its value is computed from its parameters and the variables it reads";
@@ -3596,7 +3619,7 @@ pub(crate) fn if_in_read_only(name: &str, stmt: &trendy_syntax::ast::IfStmt) -> 
         at,
         format!("an `if` statement in `{name}`"),
     )
-    .with_note("a read-only operator's body declares and assigns its local variables and ends in `return value;`: it computes one value, choosing between values with `if` expressions, not statements")
+    .with_note("a read-only operator's body declares and assigns its local variables and ends with its value: it computes one value, choosing between values with `if` expressions, not statements")
     .with_help("compute the value with an `if` expression, as in `x := if c then a else b;`, or make the operator an update operator, without a result type, invoked by `call`")
 }
 
@@ -3615,25 +3638,9 @@ pub(crate) fn assigned_in_read_only(name: &str, span: Span, op: &str) -> Diagnos
     ))
 }
 
-/// `stmt`, after `returned`, the `return` of a read-only operator.
-pub(crate) fn after_return(
-    stmt: &trendy_syntax::ast::Statement,
-    returned: &trendy_syntax::ast::ReturnStmt,
-) -> Diagnostic {
-    Diagnostic::error(
-        Code::Return,
-        "a statement after `return` would never run",
-        stmt.span(),
-        "after the `return`",
-    )
-    .with_secondary(returned.span(), "the operator returns here")
-    .with_note(RETURN_RULE)
-    .with_help("move it before the `return`, or delete it")
-}
-
-/// The read-only operator `name`, whose `body` has no `return`, and whose
-/// result type is `written`.
-pub(crate) fn missing_return(
+/// The read-only operator `name`, whose `body` doesn't end with a value,
+/// and whose result type is `written`.
+pub(crate) fn missing_value(
     name: &str,
     body: &trendy_syntax::ast::Body,
     written: &trendy_syntax::ast::TypeExpr,
@@ -3641,42 +3648,14 @@ pub(crate) fn missing_return(
     let at = body.end().map_or_else(|| body.span(), Span::empty);
     Diagnostic::error(
         Code::Return,
-        format!("read-only operator `{name}` has no `return`"),
+        format!("read-only operator `{name}` has no value"),
         at,
-        "no `return`",
+        "no value at the end",
     )
-    .with_secondary(
-        written.span(),
-        format!("`{name}` returns a value of this type"),
-    )
-    .with_note(RETURN_RULE)
-    .with_help("return its value: `return …;`")
+    .with_secondary(written.span(), format!("`{name}` has a value of this type"))
+    .with_note(BODY_VALUE)
+    .with_help("end the body with its value, as in `x * 2`")
 }
-
-/// `stmt`, a `return` after `first` in a read-only operator.
-pub(crate) fn extra_return(
-    stmt: &trendy_syntax::ast::ReturnStmt,
-    first: &trendy_syntax::ast::ReturnStmt,
-) -> Diagnostic {
-    Diagnostic::error(
-        Code::Return,
-        "a read-only operator returns once",
-        stmt.span(),
-        "another `return`",
-    )
-    .with_secondary(first.span(), "the first, which gives its value")
-    .with_note(RETURN_RULE)
-    .with_suggestion(
-        "delete it",
-        vec![Edit {
-            span: stmt.removal(),
-            replacement: String::new(),
-        }],
-    )
-}
-
-/// A read-only operator's body, for notes.
-const RETURN_RULE: &str = "a read-only operator's body declares and assigns its local variables, if it has any, and ends in one `return value;`, with a value of its result type";
 
 /// `expr`, a call of `signature` with constant arguments, whose value
 /// fails, as `failed` says.

@@ -2831,7 +2831,7 @@ mod tests {
 
     #[test]
     fn read_only_operators_become_functions_once_called() {
-        // `shout{t: text}: text [ return t || "!"; ]`, called when running
+        // `shout{t: text}: text [ t || "!" ]`, called when running
         // as `debug_value{v: shout{t: t}}`, and `unused`, which isn't.
         let text = || hir::Type::Scalar(hir::Scalar::Text);
         let read_only = |name: &str, value| hir::Operator {
@@ -3174,7 +3174,7 @@ mod tests {
 
     #[test]
     fn a_let_computes_its_value_once() {
-        // `f{p: integer}: integer [ var n := p + 1; return n * n; ]`.
+        // `f{p: integer}: integer [ var n := p + 1; n * n ]`.
         let n = || Box::new(hir::Expr::Local(hir::LocalId(0)));
         let value = hir::Expr::Let(
             hir::LocalId(0),

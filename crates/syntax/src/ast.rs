@@ -274,6 +274,19 @@ impl Requirement {
 }
 
 impl Body {
+    /// A read-only operator's value, the expression its body ends with.
+    #[must_use]
+    pub fn value(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+
+    /// The span to delete to remove the value, with the whitespace before
+    /// it, as for a statement.
+    #[must_use]
+    pub fn value_removal(&self) -> Option<Span> {
+        self.value().map(|value| statement_removal(value.syntax()))
+    }
+
     pub fn statements(&self) -> impl Iterator<Item = Statement> {
         self.0.children().filter_map(|node| {
             CallStmt::cast(node.clone())

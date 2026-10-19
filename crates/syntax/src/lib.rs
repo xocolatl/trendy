@@ -82,7 +82,7 @@ pub enum SyntaxKind {
     UpdateKw,
     /// `assign`, in `assign { x := y; y := x; };`.
     AssignKw,
-    /// `return`, in a read-only operator's `return value;`.
+    /// `return`, for leaving an operator early.
     ReturnKw,
     /// `if`, in `if condition then value else value`.
     IfKw,
@@ -138,7 +138,7 @@ pub enum SyntaxKind {
     // Nodes.
     SourceFile,
     /// `operator name{params} [body];`, or, for a read-only operator,
-    /// `operator name{params}: type [return value;];`.
+    /// `operator name{params}: type [value];`.
     Operator,
     /// `builtin operator name{params};`, or, for a read-only one,
     /// `builtin operator name{params}: type;`, only in the prelude.
@@ -169,7 +169,7 @@ pub enum SyntaxKind {
     /// `assign { a := x; insert r s; };`: assignments all made at once
     /// (TTM RM Prescription 21).
     AssignBlock,
-    /// `return value;`: a read-only operator's value.
+    /// `return;` or `return value;`: leaving an operator early.
     ReturnStmt,
     /// `if c then [ … ] else [ … ];`: statements run if `c` is true, and
     /// else others, if any. An `else if` is one in another's `else`, with

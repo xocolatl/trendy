@@ -35,7 +35,7 @@ var compared := tuple {
 operator first{a: array E}: E
     types { E: any type }
 [
-    return a[1];
+    a[1]
 ];
 
 var wettest := first{a: rainfall};
@@ -58,13 +58,13 @@ operator wettest_first{
 }: array tuple { city: text, rain: integer } [
     var ranked: array tuple { city: text, rain: integer };
     load ranked from r order [desc rain, asc city];
-    return ranked;
+    ranked
 ];
 
 operator alphabetical{r: relation { city: text, rain: integer }}: array text [
     var names: array text;
     load names from r{city} order [asc city];
-    return names;
+    names
 ];
 
 var ranked := wettest_first{r: yearly};

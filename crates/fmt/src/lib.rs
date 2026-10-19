@@ -130,9 +130,8 @@ impl Layout {
             // An `else if` chained to a broken `if` is laid out with it, at
             // its level.
             SyntaxKind::IfExpr => self.broken_if(node) && !self.chained_if(node),
-            SyntaxKind::Body => {
-                Body::cast(node.clone()).is_some_and(|b| b.statements().next().is_some())
-            }
+            SyntaxKind::Body => Body::cast(node.clone())
+                .is_some_and(|b| b.statements().next().is_some() || b.value().is_some()),
             SyntaxKind::AssignBlock => {
                 AssignBlock::cast(node.clone()).is_some_and(|b| b.statements().next().is_some())
             }
@@ -952,9 +951,9 @@ mod tests {
         // A selector's `[` after a space, an index's right after its value.
         assert_eq!(
             fmt(
-                "var a:array   integer:=array[1,2 ,3];var e:=array text[ ];var g:=array[array[1],array integer[]];var x:=a [ 1 ]+g[1][1];operator f{a:any   array}:integer[return length{a:a};];"
+                "var a:array   integer:=array[1,2 ,3];var e:=array text[ ];var g:=array[array[1],array integer[]];var x:=a [ 1 ]+g[1][1];operator f{a:any   array}:integer[length{a:a}];"
             ),
-            "var a: array integer := array [1, 2, 3];\nvar e := array text [];\nvar g := array [array [1], array integer []];\nvar x := a[1] + g[1][1];\n\noperator f{a: any array}: integer [\n    return length{a: a};\n];\n"
+            "var a: array integer := array [1, 2, 3];\nvar e := array text [];\nvar g := array [array [1], array integer []];\nvar x := a[1] + g[1][1];\n\noperator f{a: any array}: integer [\n    length{a: a}\n];\n"
         );
         // Too long for one line, one element per line.
         let months = r#"var m := array ["January", "February", "March", "April", "May", "June", "July", "August", "September"];"#;
@@ -990,9 +989,9 @@ mod tests {
         // an `else if` chain stays at that level.
         assert_eq!(
             fmt(
-                "operator sign{n: integer}: text [ return if n < 0 then \"negative\" else if n = 0 then \"zero\" else \"positive, and more words to be long\"; ];"
+                "operator sign{n: integer}: text [ if n < 0 then \"negative\" else if n = 0 then \"zero\" else \"positive, and more words to make it long\" ];"
             ),
-            "operator sign{n: integer}: text [\n    return if n < 0\n        then \"negative\"\n        else if n = 0\n        then \"zero\"\n        else \"positive, and more words to be long\";\n];\n"
+            "operator sign{n: integer}: text [\n    if n < 0\n        then \"negative\"\n        else if n = 0\n        then \"zero\"\n        else \"positive, and more words to make it long\"\n];\n"
         );
         // A branch across lines breaks the `if`, so nothing follows it on
         // its last line.
@@ -1074,13 +1073,13 @@ mod tests {
     fn read_only_operators_and_calls() {
         assert_eq!(
             fmt(
-                "operator double { x : integer } : integer [ return x*2 ; ];operator main{}[call debug_value{v:double{x:1}};];"
+                "operator double { x : integer } : integer [ x*2  ];operator main{}[call debug_value{v:double{x:1}};];"
             ),
-            "operator double{x: integer}: integer [\n    return x * 2;\n];\n\noperator main{} [\n    call debug_value{v: double{x: 1}};\n];\n"
+            "operator double{x: integer}: integer [\n    x * 2\n];\n\noperator main{} [\n    call debug_value{v: double{x: 1}};\n];\n"
         );
         assert_eq!(
-            fmt("operator f{}:tuple{a:integer}[return tuple{a:1};];"),
-            "operator f{}: tuple { a: integer } [\n    return tuple { a: 1 };\n];\n"
+            fmt("operator f{}:tuple{a:integer}[tuple{a:1}];"),
+            "operator f{}: tuple { a: integer } [\n    tuple { a: 1 }\n];\n"
         );
     }
 
@@ -1102,8 +1101,8 @@ mod tests {
     fn type_parameters() {
         // On a line of their own, and then the body's `[`.
         assert_eq!(
-            fmt("operator same{a:T,b:T,r:any   relation}:boolean types{T:any type}[return a=b;];"),
-            "operator same{a: T, b: T, r: any relation}: boolean\n    types { T: any type }\n[\n    return a = b;\n];\n"
+            fmt("operator same{a:T,b:T,r:any   relation}:boolean types{T:any type}[a=b];"),
+            "operator same{a: T, b: T, r: any relation}: boolean\n    types { T: any type }\n[\n    a = b\n];\n"
         );
         assert_eq!(
             fmt("operator show{t:any tuple}types{}[];"),
@@ -1134,8 +1133,8 @@ mod tests {
         );
         // A comment before them stays on its line.
         assert_eq!(
-            fmt("operator f{a: T}: T /* the same */ types { T: any type } [ return a; ];"),
-            "operator f{a: T}: T /* the same */\n    types { T: any type }\n[\n    return a;\n];\n"
+            fmt("operator f{a: T}: T /* the same */ types { T: any type } [ a ];"),
+            "operator f{a: T}: T /* the same */\n    types { T: any type }\n[\n    a\n];\n"
         );
     }
 
@@ -1483,7 +1482,7 @@ mod tests {
             "var r:=relation{a:integer}{{a:1},tuple{a:2},};",
             "var r:relation{a:boolean,b:integer}:=relation{{b:1,a:true},{a:false,b:2},};",
             "builtin type text;builtin operator f{v:any type};operator main{}[call f{v:1};call f{v:2};];",
-            "operator f{a:T,b:any  relation}:T types{T:any type}[return a;];",
+            "operator f{a:T,b:any  relation}:T types{T:any type}[a];",
         ] {
             let once = fmt(source);
             assert_eq!(fmt(&once), once, "not idempotent for {source:?}");

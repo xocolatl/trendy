@@ -21,17 +21,17 @@ key { dish };
    parts of its value, which `return` ends with. */
 operator taxed{price: integer}: integer [
     var tax := price * vat div 100;
-    return price + tax;
+    price + tax
 ];
 
 /* A relation, of the dishes whose price with VAT is under `limit`: the
    condition calls `taxed` for each. */
 operator under{limit: integer}: relation { dish: text, country: text, price: integer } [
-    return dishes where taxed{price: price} < limit;
+    dishes where taxed{price: price} < limit
 ];
 
 operator half{n: integer}: integer [
-    return n div 2;
+    n div 2
 ];
 
 /* An update operator, invoked by `call`. `value` can be of any type. */
@@ -44,10 +44,10 @@ operator show{label: text, value: any type} [
 operator both{a: T, b: T}: relation { v: T }
     types { T: any type }
 [
-    return relation {
+    relation {
         tuple { v: a },
         tuple { v: b },
-    };
+    }
 ];
 
 /* Whether every tuple of `r` is one of `of`'s, whatever their heading, as
@@ -55,7 +55,7 @@ operator both{a: T, b: T}: relation { v: T }
 operator within{r: R, of: R}: boolean
     types { R: any relation }
 [
-    return r <= of;
+    r <= of
 ];
 
 /* The values `of` takes for the tuples of `r`: `per r` evaluates its
@@ -64,7 +64,7 @@ operator within{r: R, of: R}: boolean
 operator values{r: any relation, of: T per r}: relation { v: T }
     types { T: any type }
 [
-    return r{of} rename {of as v};
+    r{of} rename {of as v}
 ];
 
 /* The values of `of` below `limit`, of any type with an order: a kind,
@@ -72,7 +72,7 @@ operator values{r: any relation, of: T per r}: relation { v: T }
 operator below{r: any relation, of: T per r, limit: T}: relation { v: T }
     types { T: any ordered }
 [
-    return (r where of < limit){of} rename {of as v};
+    (r where of < limit){of} rename {of as v}
 ];
 
 /* The least and the greatest value of `of`, of any ordered type, from the
@@ -80,27 +80,27 @@ operator below{r: any relation, of: T per r, limit: T}: relation { v: T }
 operator range{r: any relation, of: T per r}: tuple { low: T, high: T }
     types { T: any ordered }
 [
-    return tuple { low: min{r: r, of: of}, high: max{r: r, of: of} };
+    tuple { low: min{r: r, of: of}, high: max{r: r, of: of} }
 ];
 
 /* How many dishes are under `limit` with VAT, and the cheapest's price:
    `under` is computed once, for both. */
 operator cheapest{limit: integer}: tuple { dishes: integer, lowest: integer } [
     var under := dishes where taxed{price: price} < limit;
-    return tuple { dishes: count{r: under}, lowest: min{r: under, of: taxed{price: price}} };
+    tuple { dishes: count{r: under}, lowest: min{r: under, of: taxed{price: price}} }
 ];
 
 /* The mean price of `r`'s dishes with VAT, rounded down. An `if`
    computes only the branch it takes, so the mean of none is 0, and no
    division by zero. */
 operator mean{r: relation { dish: text, country: text, price: integer }}: integer [
-    return if count{r: r} = 0 then 0 else sum{r: r, of: taxed{price: price}} div count{r: r};
+    if count{r: r} = 0 then 0 else sum{r: r, of: taxed{price: price}} div count{r: r}
 ];
 
 /* A word for how many dishes `r` has: an `else if` chains another
    condition. */
 operator how_many{r: relation { dish: text, country: text, price: integer }}: text [
-    return if count{r: r} = 0 then "none" else if count{r: r} = 1 then "one" else "several";
+    if count{r: r} = 0 then "none" else if count{r: r} = 1 then "one" else "several"
 ];
 
 /* An order's cost, of any numeric type: `*` and `+` are what `numeric`,
@@ -108,7 +108,7 @@ operator how_many{r: relation { dish: text, country: text, price: integer }}: te
 operator cost{price: T, quantity: T, delivery: T}: T
     types { T: any numeric }
 [
-    return price * quantity + delivery;
+    price * quantity + delivery
 ];
 
 var special := "ramen";

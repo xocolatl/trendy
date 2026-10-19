@@ -6,7 +6,7 @@ use trendy_syntax::SyntaxKind;
 
 use crate::Found;
 
-pub(crate) const OPERATOR_FORM: &str = "an operator definition has the form `operator name{} [];`, or, for a read-only operator, `operator name{}: type [return value;];`";
+pub(crate) const OPERATOR_FORM: &str = "an operator definition has the form `operator name{} [];`, or, for a read-only operator, `operator name{}: type [value];`";
 pub(crate) const HEADING_FORM: &str = "a heading lists attributes with their types: `{ name: type, … }`, as in `tuple { name: text }` or `relation { name: text }`";
 pub(crate) const RELATION_VALUE_FORM: &str = "a relation value has the form `relation { tuple, … }`, optionally with a heading first: `relation { name: type, … } { … }`";
 pub(crate) const ARRAY_VALUE_FORM: &str = "an array value has the form `array [element, …]`, with its elements' type first if it has none: `array integer []`";
@@ -1186,7 +1186,7 @@ pub(crate) fn result_spelling(found: Found, span: Span) -> Diagnostic {
         found.span,
         "another language's spelling",
     )
-    .with_note("a read-only operator has the form `operator name{params}: type [return value;];`, with the result type written as a variable's is")
+    .with_note("a read-only operator has the form `operator name{params}: type [value];`, with the result type written as a variable's is")
     .with_suggestion(
         format!("replace `{}` with `:`", found.text),
         vec![Edit {
@@ -1702,6 +1702,60 @@ pub(crate) fn order_nulls(span: Span, removal: Span) -> Diagnostic {
             replacement: String::new(),
         }],
     )
+}
+
+const BODY_VALUE: &str = "a read-only operator's body declares and assigns its local variables, if it has any, then ends with its value: an expression, without `;`";
+
+/// A `;`, at `span`, after a read-only body's value.
+pub(crate) fn value_semicolon(span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::BodyValue,
+        "a body's value takes no `;`",
+        span,
+        "after the value",
+    )
+    .with_note(BODY_VALUE)
+    .with_suggestion(
+        "delete the `;`",
+        vec![Edit {
+            span,
+            replacement: String::new(),
+        }],
+    )
+}
+
+/// A read-only body's value written with `return`, at `keyword` up to the
+/// value, and with the `;` after it, at `semicolon`, if there is one.
+pub(crate) fn returned_value(keyword: Span, semicolon: Option<Span>) -> Diagnostic {
+    let mut edits = vec![Edit {
+        span: keyword,
+        replacement: String::new(),
+    }];
+    edits.extend(semicolon.map(|span| Edit {
+        span,
+        replacement: String::new(),
+    }));
+    Diagnostic::error(
+        Code::BodyValue,
+        "a body's value is written without `return`",
+        keyword,
+        "`return` is for leaving an operator early",
+    )
+    .with_note(BODY_VALUE)
+    .with_suggestion("write the value alone", edits)
+}
+
+/// An expression, at `span`, in a read-only body before other statements:
+/// a value where only the last is.
+pub(crate) fn value_before_statements(span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::BodyValue,
+        "only the last item of a body is its value",
+        span,
+        "a value before the end",
+    )
+    .with_note(BODY_VALUE)
+    .with_help("assign it to a local variable, as in `var x := …;`, or move it to the end")
 }
 
 #[cfg(test)]

@@ -40,10 +40,10 @@ body in square brackets `[]`, and a closing `;`.
   in any order. `main` has none, since nothing passes it arguments.
 - **A body is a list of statements,** each ending with `;`: calls,
   assignments (see [Assignment](#assignment)), local variables'
-  declarations (see [Local variables](#local-variables)), in an update
-  operator `if` statements (see [`if` statements](#if-statements)), and,
-  ending a read-only operator's, one `return` (see [Read-only
-  operators](#read-only-operators)).
+  declarations (see [Local variables](#local-variables)), and in an update
+  operator `if` statements (see [`if` statements](#if-statements)). A
+  read-only operator's ends with its value, an expression without `;`
+  (see [Read-only operators](#read-only-operators)).
 - **Arguments are a tuple of the parameters:** `call greet{name: "Ada",
   count: 2};`. Every argument is named, every parameter gets one, and the
   order doesn't matter.
@@ -91,9 +91,10 @@ included, as in `tuple { n: n }`; see [Tuples](#tuples).
 ### Read-only operators
 
 A read-only operator has a result type after its parameters, written as a
-variable's type is, and its body ends in one `return`, of a value of that
-type (TTM RM Prescription 3), which local variables can name parts of (see
-[Local variables](#local-variables)). A call of it, `name{arguments}` in
+variable's type is, and its body ends with its value, an expression of
+that type, without `;` (TTM RM Prescription 3), which local variables can
+name parts of (see [Local variables](#local-variables)). It is Tutorial
+D's `WITH … : exp`: names introduced in turn, then the value. A call of it, `name{arguments}` in
 an expression, is that value, computed from the arguments.
 
 ```trendy
@@ -104,15 +105,15 @@ var poets := relation {
 };
 
 operator double{x: integer}: integer [
-    return x * 2;
+    x * 2
 ];
 
 operator scaled{x: integer}: integer [
-    return double{x: x} * rate;
+    double{x: x} * rate
 ];
 
 operator born_before{year: integer}: relation { name: text, born: integer } [
-    return poets where born < year;
+    poets where born < year
 ];
 
 var twelve := scaled{x: 2};
@@ -131,12 +132,15 @@ operator main{} [
 - **It changes nothing but its own local variables.** It can't assign a
   variable of the program's or `call` an operator, not even `debug_value`
   (A0034). It can read variables, and call read-only operators.
-- **Its body ends in one `return`** (A0035), after which nothing could
-  run. An update operator, which has no result type, has none: it returns
-  nothing. So `call` invokes only update
+- **Its body ends with its value** (A0035), which is its last item, and
+  takes no `;` (P0031). An update operator, which has no result type, has
+  no value. So `call` invokes only update
   operators, as `call` of a read-only one would lose its value (A0037),
   and only read-only operators are called in expressions, as an update
   operator has no value (A0016).
+- **`return` is for leaving an operator early,** which no operator does
+  yet: a body runs to its end (A0035). So a body's value is written alone,
+  and `return x;` at its end is fixed to `x` (P0031).
 - **It doesn't call itself,** directly or through others (A0036): without
   a conditional, nothing could stop the calls.
 - **A call is evaluated when compiling where it can be.** An initial value
@@ -160,7 +164,7 @@ var calls := 0;
 
 operator double{x: integer}: integer [
     calls := calls + 1;
-    return x * 2;
+    x * 2
 ];
 
 operator main{} [];
@@ -168,7 +172,7 @@ operator main{} [];
 
 ```trendy,error
 operator double{x: integer}: integer [
-    return x * 2;
+    x * 2
 ];
 
 operator main{} [
@@ -202,22 +206,22 @@ operator show{v: any type} [
 operator same{a: T, b: T}: boolean
     types { T: any type }
 [
-    return a = b;
+    a = b
 ];
 
 operator pair{a: T, b: T}: relation { v: T }
     types { T: any type }
 [
-    return relation {
+    relation {
         tuple { v: a },
         tuple { v: b }
-    };
+    }
 ];
 
 operator within{r: R, of: R}: boolean
     types { R: any relation }
 [
-    return r <= of;
+    r <= of
 ];
 
 operator main{} [
@@ -285,7 +289,7 @@ though the Manifesto leaves how to further study.
 operator same{a: T, b: T}: boolean
     types { T: any type }
 [
-    return a = b;
+    a = b
 ];
 
 var different := same{a: 1, b: "Lima"};
@@ -297,7 +301,7 @@ operator main{} [];
 operator less{a: T, b: T}: boolean
     types { T: any type }
 [
-    return a < b;
+    a < b
 ];
 
 operator main{} [];
@@ -305,7 +309,7 @@ operator main{} [];
 
 ```trendy,error
 operator same<T>{a: T, b: T}: boolean [
-    return a = b;
+    a = b
 ];
 
 operator main{} [];
@@ -331,7 +335,7 @@ key { plot };
 operator below{r: any relation, of: T per r, limit: T}: relation { v: T }
     types { T: any ordered }
 [
-    return (r where of < limit){of} rename {of as v};
+    (r where of < limit){of} rename {of as v}
 ];
 
 operator main{} [
@@ -370,7 +374,7 @@ operator main{} [
 operator cost{price: T, quantity: T, delivery: T}: T
     types { T: any numeric }
 [
-    return price * quantity + delivery;
+    price * quantity + delivery
 ];
 
 operator main{} [
@@ -381,7 +385,7 @@ operator main{} [
 
 ```trendy,error
 operator before{a: T, b: T}: boolean types { T: any ordered } [
-    return a < b;
+    a < b
 ];
 
 var x := before{a: tuple { n: 1 }, b: tuple { n: 2 }};
@@ -407,11 +411,11 @@ key { plot };
 operator values{r: any relation, of: T per r}: relation { v: T }
     types { T: any type }
 [
-    return r{of} rename {of as v};
+    r{of} rename {of as v}
 ];
 
 operator holds_for_any{r: any relation, holds: boolean per r}: boolean [
-    return (r where holds){} = relation { tuple {} };
+    (r where holds){} = relation { tuple {} }
 ];
 
 operator main{} [
@@ -462,11 +466,11 @@ generalizes that attribute to any expression of each tuple's attributes.
 operator values{r: any relation, of: T per r}: relation { v: T }
     types { T: any type }
 [
-    return r{of} rename {of as v};
+    r{of} rename {of as v}
 ];
 
 operator first{r: any relation, of: integer per r}: integer [
-    return of;
+    of
 ];
 
 operator main{} [];
@@ -547,13 +551,13 @@ builtin operator product{r: any relation, of: T per r}: T
    one, which its projection on no attributes, `relation { {} }` or
    `relation {}`, says. Of no tuples, it is false. */
 operator some{r: any relation, of: boolean per r}: boolean [
-    return (r where of){} = relation { {} };
+    (r where of){} = relation { {} }
 ];
 
 /* Whether `of` is true for every tuple of `r`: whether no tuple makes it
    false. Of no tuples, it is true. */
 operator every{r: any relation, of: boolean per r}: boolean [
-    return (r where not of){} = relation {};
+    (r where not of){} = relation {}
 ];
 
 /* `from` as trendy source, the text `debug_value` writes: `42`, `5e-1`,
@@ -904,14 +908,14 @@ key { dish };
 
 operator cheapest{limit: integer}: tuple { dishes: integer, lowest: integer } [
     var under := dishes where price < limit;
-    return tuple { dishes: count{r: under}, lowest: min{r: under, of: price} };
+    tuple { dishes: count{r: under}, lowest: min{r: under, of: price} }
 ];
 
 operator discounted{price: integer, percent: integer}: integer [
     var discount := price * percent div 100;
     var paid := price - discount;
     paid := paid - paid mod 10;
-    return paid;
+    paid
 ];
 
 operator main{} [
@@ -1265,7 +1269,7 @@ var cities := relation {
 operator first{a: array E}: E
     types { E: any type }
 [
-    return a[1];
+    a[1]
 ];
 
 operator main{} [
@@ -1812,11 +1816,11 @@ var dishes := relation {
 var label := if count{r: dishes} = 1 then "dish" else "dishes";
 
 operator mean{r: relation { dish: text, price: integer }}: integer [
-    return if count{r: r} = 0 then 0 else sum{r: r, of: price} div count{r: r};
+    if count{r: r} = 0 then 0 else sum{r: r, of: price} div count{r: r}
 ];
 
 operator sign{n: integer}: text [
-    return if n < 0 then "negative" else if n = 0 then "zero" else "positive";
+    if n < 0 then "negative" else if n = 0 then "zero" else "positive"
 ];
 
 operator main{} [
@@ -1851,7 +1855,7 @@ operator main{} [
 
 ```trendy,error
 operator label{n: integer}: text [
-    return if n = 1 then "one";
+    if n = 1 then "one"
 ];
 
 operator main{} [];
@@ -1859,7 +1863,7 @@ operator main{} [];
 
 ```trendy,error
 operator label{n: integer}: text [
-    return if n = 1 then "one" else 2;
+    if n = 1 then "one" else 2
 ];
 
 operator main{} [];
@@ -1867,7 +1871,7 @@ operator main{} [];
 
 ```trendy,error
 operator positive{n: integer}: boolean [
-    return if n > 0 then true else false;
+    if n > 0 then true else false
 ];
 
 operator main{} [];
@@ -1881,7 +1885,7 @@ operator main{} [];
 
 ```trendy,error
 operator label{n: integer}: text [
-    return "one" if n = 1 else "many";
+    "one" if n = 1 else "many"
 ];
 
 operator main{} [];
@@ -2866,7 +2870,7 @@ operator main{} [
   operator same{a: T, b: T}: boolean
       types { T: any type }
   [
-      return a = b;
+      a = b
   ];
   ```
 
@@ -2899,8 +2903,8 @@ line after a comment on its own line, such as a file's header, is kept.
 | Elsewhere | In trendy |
 |---|---|
 | `fn`, `def`, `function`, `void main()` | `operator main{} [];` |
-| `fn f(x: i64) -> i64 { x + 1 }`, `RETURNS INTEGER` | `operator f{x: integer}: integer [return x + 1;];` |
-| `RETURN x` | `return x;` |
+| `fn f(x: i64) -> i64 { x + 1 }`, `RETURNS INTEGER` | `operator f{x: integer}: integer [x + 1];` |
+| `return x;`, `RETURN x` at the end of a body | `x` |
 | `print(x)`, `f(x)` | `call debug_value{v: x};` |
 | `f(x)` in an expression | `f{x: x}`, every argument named |
 | `let`, `const`, `int x` | `var x`, at the top level or in an operator's body |

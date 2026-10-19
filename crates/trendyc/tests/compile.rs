@@ -933,7 +933,7 @@ error[P0002]: expected `]`, found `;`
   |
 2 |   [;
   |    ^ expected `]` here
-  = note: an operator definition has the form `operator name{} [];`, or, for a read-only operator, `operator name{}: type [return value;];`
+  = note: an operator definition has the form `operator name{} [];`, or, for a read-only operator, `operator name{}: type [value];`
 help: insert `]`
   |
 2 |   [];

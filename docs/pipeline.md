@@ -210,7 +210,8 @@ since the name can't be guessed.
 
 A statement is a call, an assignment statement (`AssignStmt`), an
 `assign` block (`AssignBlock`) of assignment statements, made at once, or a
-`return` (`ReturnStmt`). An
+`return` (`ReturnStmt`), for leaving an operator early, which sema
+rejects until there are early exits. An
 assignment is `name := value` (`Assignment`) or a shorthand starting with
 its keyword:
 `insert` and `d_insert` (`Insertion`), `delete` and `i_delete`
@@ -228,10 +229,15 @@ without `where` is reported, with the assignment Tutorial D's would mean
 as the fix (P0023).
 
 A read-only operator has its result type after its parameters, as a
-`TypeAnnotation`, and its body is a `return` statement (`ReturnStmt`),
-which the parser accepts in any body and sema restricts. Other languages'
-spellings of the result type, `-> type` and `returns type`, are fixed to
-`: type` (P0026), and `RETURN` to `return` (P0010). A call of one in an
+`TypeAnnotation`, and its body ends with its value: an expression, a child
+of the `Body`, without `;`. The parser knows the body is a read-only
+operator's from the result type, and reads an operand that doesn't start a
+statement as the value: an `if` whose `then` a `[` follows is a
+statement, and `a = b` running to the `]` a comparison, not `=` for `:=`.
+A `;` after the value, and a value before other statements, are reported
+(P0031), and so is `return x;` at the end, which other languages write,
+parsed as the value it means. Other languages' spellings of the result
+type, `-> type` and `returns type`, are fixed to `: type` (P0026). A call of one in an
 expression (`CallExpr`) is a name before arguments that a projection
 can't have: named ones, `f{a: x}`, or one starting with a value, `f{1}`,
 which sema reports. `f{}` and `f{a}` stay projections (`ProjectExpr`),
@@ -479,7 +485,7 @@ known before any is evaluated, so that a read-only operator's value can
 refer to one.
 
 A read-only operator's body declares and assigns its local variables, and
-ends in one `return`, of a value of its result type (A0035): assigning a
+ends with its value, of its result type (A0035): assigning a
 variable of the program's or a `call` would change something (A0034),
 which TTM RM Prescription 3 rules out, and which evaluating a call when
 compiling would skip. Its value stays one expression: each declaration
