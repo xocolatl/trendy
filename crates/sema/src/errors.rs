@@ -7,7 +7,7 @@ use trendy_diag::{Code, Diagnostic, Edit, Span, edit_distance};
 use trendy_hir as hir;
 use trendy_syntax::SyntaxToken;
 use trendy_syntax::ast::{
-    AstNode, Expr, Key, NaryExpr, ProjectExpr, SourceFile, TypeExpr, VarDecl,
+    AstNode, Expr, Key, NaryExpr, OrderList, ProjectExpr, SourceFile, TypeExpr, VarDecl,
 };
 
 use crate::check::Written;
@@ -470,6 +470,7 @@ pub(crate) fn type_mismatch(
         )),
         Origin::Type(_)
         | Origin::Variable(..)
+        | Origin::Loaded(..)
         | Origin::Heading(_)
         | Origin::Value(_)
         | Origin::Builtin
@@ -707,19 +708,21 @@ pub(crate) enum Noun {
     Projected,
     /// An attribute named in a key, which must be one of the relation's.
     Key,
+    /// An attribute a load orders by, which must be one of the relation's.
+    Ordered,
 }
 
 impl Noun {
     fn one(self) -> &'static str {
         match self {
-            Noun::Attribute | Noun::Projected | Noun::Key => "attribute",
+            Noun::Attribute | Noun::Projected | Noun::Key | Noun::Ordered => "attribute",
             Noun::Argument => "argument",
         }
     }
 
     fn many(self) -> &'static str {
         match self {
-            Noun::Attribute | Noun::Projected | Noun::Key => "attributes",
+            Noun::Attribute | Noun::Projected | Noun::Key | Noun::Ordered => "attributes",
             Noun::Argument => "arguments",
         }
     }
@@ -730,7 +733,7 @@ impl Noun {
 pub(crate) fn duplicate_attribute(noun: Noun, name: &str, span: Span, first: Span) -> Diagnostic {
     let set = match noun {
         Noun::Attribute => "a tuple's attributes are a set, so each name can appear only once",
-        Noun::Projected | Noun::Key => "each attribute is named once",
+        Noun::Projected | Noun::Key | Noun::Ordered => "each attribute is named once",
         Noun::Argument => "arguments are a tuple of the parameters, so each one is given once",
     };
     Diagnostic::error(
@@ -771,7 +774,7 @@ pub(crate) fn missing_attributes(
     )
     .with_note(context.to_string())
     .with_note(match noun {
-        Noun::Attribute | Noun::Projected | Noun::Key => {
+        Noun::Attribute | Noun::Projected | Noun::Key | Noun::Ordered => {
             "a tuple value must have every attribute of its type"
         }
         Noun::Argument => "every parameter needs an argument",
@@ -850,7 +853,7 @@ pub(crate) fn unknown_attribute(
     let label = match noun {
         Noun::Attribute => "not an attribute of the expected type",
         Noun::Projected => "not an attribute of the operand",
-        Noun::Key => "not an attribute of the relation",
+        Noun::Key | Noun::Ordered => "not an attribute of the relation",
         Noun::Argument => "not a parameter of this operator",
     };
     let mut d = Diagnostic::error(
@@ -4218,4 +4221,156 @@ pub(crate) fn key_violated(
             "no two tuples can have the same values for a key's attributes"
         })
         .with_help("correct or remove one of these tuples, or declare the key that was meant")
+}
+
+const LOAD: &str = "a load gives an array of tuples the tuples of a relation of their heading, and an array of other values the values of a relation's only attribute, of their type";
+
+/// A load into `name`, of type `ty`, written `target`, which isn't an
+/// array, of the relation `source`, of type `relation`, written as the
+/// clause at `clause`. A relation of `ty` is assigned instead.
+pub(crate) fn load_into_non_array(
+    name: &str,
+    ty: &hir::Type,
+    target: &Expr,
+    relation: &hir::Type,
+    clause: Span,
+    source: &Expr,
+) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::LoadMismatch,
+        format!("`{name}` isn't an array, so a load can't fill it"),
+        target.span(),
+        format!("of type `{ty}`"),
+    )
+    .with_note(LOAD);
+    if ty == relation {
+        d.with_suggestion(
+            format!("assign the relation to `{name}`"),
+            vec![Edit {
+                span: clause,
+                replacement: format!("{name} := {}", source.syntax().text()),
+            }],
+        )
+    } else {
+        d
+    }
+}
+
+/// A load of `source`, of type `ty`, into `name`, an array of `element`s,
+/// which aren't tuples, that it can't fill: it isn't a relation of one
+/// attribute of their type. The fix projects it onto `projected`, its
+/// attribute of that type, if it has one, which the order names alone.
+pub(crate) fn load_mismatch(
+    name: &str,
+    element: &hir::Type,
+    ty: &hir::Type,
+    source: &Expr,
+    projected: Option<&str>,
+) -> Diagnostic {
+    let label = match ty {
+        hir::Type::Relation(_) => format!("not a relation of one `{element}` attribute"),
+        _ => "not a relation".to_string(),
+    };
+    let d = Diagnostic::error(
+        Code::LoadMismatch,
+        format!("a load can't fill `{name}`, an `array {element}`, from `{ty}`"),
+        source.span(),
+        label,
+    )
+    .with_note(LOAD);
+    let Some(attribute) = projected else {
+        return d;
+    };
+    let written = source.syntax().text().to_string();
+    let operand = match source {
+        Expr::Name(_) => written,
+        _ => format!("({written})"),
+    };
+    d.with_suggestion(
+        format!("load the values of `{attribute}`"),
+        vec![Edit {
+            span: source.span(),
+            replacement: format!("{operand}{{{attribute}}}"),
+        }],
+    )
+}
+
+/// A load's order, `order`, with no items, of a relation with `heading`.
+pub(crate) fn empty_order(order: &OrderList, heading: &hir::Heading) -> Diagnostic {
+    let example = heading
+        .attributes()
+        .next()
+        .map_or_else(|| "name".to_string(), |(name, _)| name.to_string());
+    Diagnostic::error(
+        Code::EmptyList,
+        "a load's order needs at least one attribute",
+        order.span(),
+        "no attributes to order by",
+    )
+    .with_note("a relation's tuples have no order, so a load says which to put them in")
+    .with_help(format!(
+        "list the attributes to order by, each after `asc` or `desc`, as in `[asc {example}]`"
+    ))
+}
+
+/// An attribute, `name`, at `span`, that a load orders by, which its
+/// relation, with `heading`, hasn't.
+pub(crate) fn unknown_order_attribute(
+    name: &str,
+    span: Span,
+    heading: &hir::Heading,
+) -> Diagnostic {
+    let names: Vec<&str> = heading.attributes().map(|(a, _)| a).collect();
+    let rename = names
+        .iter()
+        .copied()
+        .filter(|a| edit_distance(a, name) <= 2)
+        .min_by_key(|a| edit_distance(a, name));
+    let listed: Vec<String> = names.iter().map(|a| format!("`{a}`")).collect();
+    let context = match listed.len() {
+        0 => "the relation has no attributes".to_string(),
+        _ => format!("the relation's attributes are {}", listed.join(", ")),
+    };
+    unknown_attribute(Noun::Ordered, name, span, &context, rename, None)
+}
+
+/// An attribute, `name`, at `span`, of type `ty`, which has no order, that
+/// a load orders by.
+pub(crate) fn unordered_attribute(name: &str, span: Span, ty: &hir::Type) -> Diagnostic {
+    Diagnostic::error(
+        Code::WrongOperandType,
+        format!("a load can't order by `{name}`, of type `{ty}`"),
+        span,
+        format!("{} have no total order", plural(ty)),
+    )
+    .with_parameter_note(ty)
+    .with_note("a load orders by attributes of types with `<`: booleans, integers, approximate numbers and text; tuples and arrays have no order, and relations are ordered only as sets, by inclusion")
+}
+
+/// An attribute, `name`, at `span`, that a load orders by again, first at
+/// `first`: the repeat, deleted with `removal`, orders nothing, since the
+/// tuples it would are equal on it.
+pub(crate) fn repeated_order_item(
+    name: &str,
+    span: Span,
+    first: Span,
+    removal: Span,
+) -> Diagnostic {
+    Diagnostic::error(
+        Code::DuplicateAttribute,
+        format!("the order names `{name}` more than once"),
+        span,
+        "named again here",
+    )
+    .with_secondary(first, format!("`{name}` is first named here"))
+    .with_note(
+        "an item orders only the tuples equal on the items before it, so a repeat orders nothing",
+    )
+    .with_suggestion(
+        "remove the repeat",
+        vec![Edit {
+            span: removal,
+            replacement: String::new(),
+        }],
+    )
 }

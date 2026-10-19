@@ -229,6 +229,27 @@ fn key_rule() -> Value {
     })
 }
 
+/// `load a from`: `load` and `from` are keywords only around a load's
+/// array. Semantic highlighting covers the rest of a load, `asc` and
+/// `desc`, which a grammar can't tell from attributes so named.
+fn load_rule(identifier: &str) -> Value {
+    json!({
+        "match": format!("\\b(load)\\s+({identifier})\\s+(from)\\b"),
+        "captures": {
+            "1": { "name": "keyword.other.trendy" },
+            "3": { "name": "keyword.other.trendy" },
+        },
+    })
+}
+
+/// `order [`: `order` is a keyword only before a load's order items.
+fn order_rule() -> Value {
+    json!({
+        "match": "\\b(order)\\s*(?=\\[)",
+        "captures": { "1": { "name": "keyword.other.trendy" } },
+    })
+}
+
 /// `/* … */`. Comments nest, so the rule includes itself.
 fn comment_rule() -> Value {
     json!({
@@ -294,6 +315,8 @@ fn generate(probed: &Probed) -> Value {
             { "include": "#call" },
             { "include": "#variable-declaration" },
             { "include": "#key" },
+            { "include": "#load" },
+            { "include": "#order" },
             { "include": "#keywords" },
             { "include": "#operator-word" },
             { "include": "#boolean" },
@@ -327,6 +350,8 @@ fn generate(probed: &Probed) -> Value {
             },
             "builtin-type": builtin_type_rule(identifier),
             "key": key_rule(),
+            "load": load_rule(identifier),
+            "order": order_rule(),
             "call": {
                 "match": format!("\\b({})\\s+({identifier})", keyword(SyntaxKind::CallKw)),
                 "captures": {

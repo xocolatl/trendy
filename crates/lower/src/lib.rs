@@ -1023,6 +1023,7 @@ impl<'a> FunctionBuilder<'a> {
             hir::Expr::Relation(heading, tuples) => self.relation(heading, tuples, cx),
             hir::Expr::Array(element, elements) => self.array(element, elements, cx),
             hir::Expr::Index(array, position) => self.index(array, position, cx),
+            hir::Expr::Load(relation, items, _) => self.load(expr, relation, items, cx),
             hir::Expr::If(condition, then, otherwise) => {
                 self.conditional(expr, condition, [then, otherwise], cx)
             }
@@ -1698,6 +1699,56 @@ impl<'a> FunctionBuilder<'a> {
         self.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::And,
             args: [vec![dst.clone()], args].concat(),
+        });
+        self.scoped = true;
+        dst
+    }
+
+    /// `expr`, the array of the tuples of `relation`, or of their values,
+    /// in the order of `items`, computed by the runtime into a new stack
+    /// slot. Lowering works out each item's offset and type, so the runtime
+    /// never finds attributes by name. The values of a relation of one
+    /// attribute are its tuples, laid out the same.
+    fn load(
+        &mut self,
+        expr: &hir::Expr,
+        relation: &hir::Expr,
+        items: &[hir::OrderItem],
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let relation_ty = self.type_of(relation);
+        let hir::Type::Relation(heading) = &relation_ty else {
+            unreachable!("sema loads only relations");
+        };
+        let tuple = layout(&hir::Type::Tuple(heading.clone()));
+        let items: Vec<lir::Field> = items
+            .iter()
+            .map(|item| {
+                let (i, (_, ty)) = heading
+                    .attributes()
+                    .enumerate()
+                    .find(|(_, (name, _))| *name == item.attribute)
+                    .expect("sema orders only by the relation's attributes");
+                lir::Field::Struct(vec![
+                    lir::Field::Offset(tuple.clone(), i),
+                    lir::Field::Address(cx.descriptor(ty)),
+                    lir::Field::Usize(u64::from(item.descending)),
+                ])
+            })
+            .collect();
+        let count = usize_constant(len(items.len()), cx);
+        let src = self.place(relation, cx);
+        let dst = self.slot(layout(&self.type_of(expr)));
+        let args = vec![
+            dst.clone(),
+            src,
+            lir::Place::whole(lir::Base::Data(cx.descriptor(&relation_ty))),
+            lir::Place::whole(lir::Base::Data(cx.constant(items))),
+            count,
+        ];
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Load,
+            args,
         });
         self.scoped = true;
         dst

@@ -1297,7 +1297,8 @@ operator main{} [
   list, not a set.
 - **A relation is not an array.** A relation's tuples have no order (RM
   Proscription 2), so a relation has no positions, and indexing it is an
-  error (A0022).
+  error (A0022). A load puts its tuples into an array, in an order (see
+  [Loading a relation](#loading-a-relation)).
 - **Other languages' habits are fixed:** a list written `[1, 2]`, as
   Python and JavaScript write it, to `array [1, 2]` (P0002), and SQL's
   `ARRAY[1, 2]` too (P0010); `a[0]` for the first element, to `a[1]`, and
@@ -1325,6 +1326,79 @@ var cities := relation { { city: "Cairo" }, { city: "Mumbai" } };
 var first := cities[1];
 
 operator main{} [];
+```
+
+### Loading a relation
+
+`load a from r order [asc x, desc y];` gives the array variable `a` the
+tuples of the relation `r`, in order: by `x`, ascending, then, among
+tuples with equal values of `x`, by `y`, descending. It is Tutorial D's
+`LOAD a FROM r ORDER (ASC x, DESC y)` (chapter 5). An array of tuples
+takes the relation's tuples, of their heading, and an array of other
+values takes the values of a relation of one attribute, of their type,
+such as a projection's.
+
+```trendy
+var yearly := relation {
+    { city: "Mumbai", rain: 2200 },
+    { city: "Cairo", rain: 25 },
+    { city: "Lagos", rain: 1500 },
+}
+key { city };
+
+operator main{} [
+    var ranked: array tuple { city: text, rain: integer };
+    load ranked from yearly order [desc rain, asc city];
+    var names: array text;
+    load names from yearly{city} order [asc city];
+    call debug_value{v: ranked[1].city};
+    call debug_value{v: names};
+];
+```
+
+- **The order is undefined unless it is total.** Tuples equal on every
+  item ordered by come out in an order the language doesn't define, which
+  a program must not depend on. An order is total when its items include
+  a key of the relation, as `city` is above; all of its attributes always
+  do, and so does the one attribute of a relation of values.
+- **A load is an assignment,** of the whole array, and not written as one,
+  since that would convert a relation into an array implicitly, which
+  values never do (TTM chapter 5). So it can be in an `assign` block, and
+  assign a read-only operator's local variable. There is no expression
+  that orders a relation, which would make one a list (RM Proscription
+  7): an array of its tuples is a value of another type.
+- **Each item names its direction,** `asc` or `desc`, before an
+  attribute of the relation (P0030, A0010), of a type with an order:
+  booleans, integers, approximate numbers and text (A0022). The order
+  names at least one attribute (A0029), each once (A0008).
+- **The array's elements set what fits** (A0004, A0047): of tuples, the
+  relation has their heading, which an empty relation can take from them;
+  of other values, it has one attribute, of their type.
+- **`load`, `from`, `order`, `asc` and `desc` are contextual keywords:**
+  they are names elsewhere, so an attribute can be called `order` or
+  `desc`.
+- **Other languages' habits are fixed** (P0030): SQL's `ORDER BY x DESC`
+  to `order [desc x]`, its `NULLS FIRST` and `NULLS LAST` deleted, an item
+  without a direction given `asc`, LINQ's `descending` written `desc`,
+  Tutorial D's capitals and parentheses, and an ordering written as an
+  assignment's value, `a := r order [asc x];`, to a load.
+
+```trendy,error
+var yearly := relation { { city: "Mumbai", rain: 2200 } };
+
+operator main{} [
+    var names: array text;
+    load names from yearly ORDER BY city DESC;
+];
+```
+
+```trendy,error
+var yearly := relation { { city: "Mumbai", rain: 2200 } };
+
+operator main{} [
+    var names: array text;
+    load names from yearly order [asc city];
+];
 ```
 
 ## Assignment
@@ -1368,6 +1442,7 @@ operator main{} [
 | `i_delete r s;` | `r := r i_minus s;`, which fails if a tuple of `s` isn't in `r` (R0007) |
 | `update r { a := x };` | `r := r replace { a := x };`, of a relation or a tuple |
 | `update r { a := x } where p;` | `r := (r where not (p)) union ((r where p) replace { a := x });` |
+| `load a from r order [asc x];` | `a :=` the array of the tuples of `r`, in order (see [Loading a relation](#loading-a-relation)) |
 
 - **`delete` needs `where` and a condition** (P0023), so that every tuple
   isn't deleted by accident. To delete them all, assign the empty relation:
@@ -2862,6 +2937,9 @@ line after a comment on its own line, such as a file's header, is kept.
 | `a[0]`, the first element | `a[1]` |
 | `a[-1]`, the last element | `a[length{a: a}]` |
 | `len(a)`, `a.length()`, `CARDINALITY(a)`, `size(a)` | `length{a: a}` |
+| `ORDER BY x DESC`, `LOAD A FROM R ORDER (DESC X)`, `orderby x descending` | `load a from r order [desc x];` |
+| `a := r order [asc x];` | `load a from r order [asc x];` |
+| `NULLS FIRST`, `NULLS LAST` | nothing: there are no nulls |
 | `tuple { x = 1 }` | `tuple { x: 1 }` |
 | `RELATION { TUPLE { … } }` | `relation { { … } }` |
 | `VAR`, `TUPLE`, `TRUE` | `var`, `tuple`, `true` |

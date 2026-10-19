@@ -16,7 +16,7 @@ use std::collections::HashSet;
 
 use trendy_syntax::ast::{
     Arguments, ArrayLiteral, AssignBlock, AssignList, AstNode, Body, Clause, GatherList, Heading,
-    IfExpr, NameList, NaryExpr, RelationLiteral, RenameList, SourceFile, TupleLiteral,
+    IfExpr, NameList, NaryExpr, OrderList, RelationLiteral, RenameList, SourceFile, TupleLiteral,
 };
 use trendy_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
@@ -201,7 +201,8 @@ impl Layout {
 
 /// Whether `node` is a list that can be broken across lines, one item per
 /// line: parameters, arguments, headings, tuple and relation values, lists
-/// of names, new attributes, and the operands of `join{…}` and `times{…}`.
+/// of names, new attributes, the operands of `join{…}` and `times{…}`, and
+/// a load's order.
 fn is_list(node: &SyntaxNode) -> bool {
     matches!(
         node.kind(),
@@ -216,6 +217,7 @@ fn is_list(node: &SyntaxNode) -> bool {
             | SyntaxKind::AssignList
             | SyntaxKind::GatherList
             | SyntaxKind::NaryExpr
+            | SyntaxKind::OrderList
     )
 }
 
@@ -539,6 +541,8 @@ fn items(node: &SyntaxNode) -> usize {
         gatherings.gatherings().count()
     } else if let Some(nary) = NaryExpr::cast(node.clone()) {
         nary.operands().count()
+    } else if let Some(order) = OrderList::cast(node.clone()) {
+        order.items().count()
     } else {
         0
     }
@@ -644,8 +648,9 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
     };
     // The contextual keywords: `type`, in `builtin type name;`, `key`,
     // `value` and `from`, in `tuple from r` and `value from r`, `any`, in
-    // `any type`, `types`, before an operator's type parameters, and `per`,
-    // which a space also comes before.
+    // `any type`, `types`, before an operator's type parameters, `per`,
+    // which a space also comes before, `load`, `from` and `order`, which
+    // one comes before too, and an order item's `asc` and `desc`.
     let contextual_keyword = prev.kind() == Ident
         && prev.parent().is_some_and(|p| match p.kind() {
             BuiltinType => prev.text() == "type",
@@ -654,9 +659,13 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
             | SyntaxKind::AnyType
             | SyntaxKind::TypeParameters
             | SyntaxKind::Per
-            | SyntaxKind::KindDecl => true,
+            | SyntaxKind::KindDecl
+            | SyntaxKind::Load
+            | SyntaxKind::OrderItem => true,
             _ => false,
         });
+    let load_keyword =
+        next.kind() == Ident && next.parent().is_some_and(|p| p.kind() == SyntaxKind::Load);
     // A kind's requirements follow its name after a space.
     let requirements = next.kind() == LBrace
         && next
@@ -682,17 +691,23 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
     // A body's `[` follows what comes before it after a space, whether the
     // parameters or a read-only operator's result type: `f{}: integer [`,
     // and so does an array selector's, whether its keyword or its elements'
-    // type: `array [1, 2]`, `array text []`. An index's `[` follows its
-    // operand directly: `a[1]`.
+    // type: `array [1, 2]`, `array text []`, and a load's order's, after
+    // `order`. An index's `[` follows its operand directly: `a[1]`.
     let spaced_bracket = next.kind() == LBracket
-        && next
-            .parent()
-            .is_some_and(|p| matches!(p.kind(), SyntaxKind::Body | SyntaxKind::ArrayLiteral));
-    // A projection's braces follow its operand directly: `r{a}{b}`.
+        && next.parent().is_some_and(|p| {
+            matches!(
+                p.kind(),
+                SyntaxKind::Body | SyntaxKind::ArrayLiteral | SyntaxKind::OrderList
+            )
+        });
+    // A projection's braces follow its operand directly: `r{a}{b}`. Those
+    // of a selector it projects don't: `tuple { a: 1 }{a}`.
     let projection = next.kind() == LBrace
         && next.parent().is_some_and(|list| {
-            list.parent()
-                .is_some_and(|p| p.kind() == SyntaxKind::ProjectExpr)
+            list.kind() == SyntaxKind::NameList
+                && list
+                    .parent()
+                    .is_some_and(|p| p.kind() == SyntaxKind::ProjectExpr)
         });
     match (prev.kind(), next.kind()) {
         _ if key_start(next).is_some() || per || requirements => " ",
@@ -704,7 +719,7 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
         (LBrace, _) if list_brace(prev) => " ",
         (_, RBrace) if list_brace(next) => " ",
         _ if ends_any => "",
-        _ if contextual_keyword => " ",
+        _ if contextual_keyword || load_keyword => " ",
         _ if dyadic(prev) || dyadic(next) => " ",
         // `- -a`, not `--a`.
         _ if sign(prev) && sign(next) => " ",
@@ -946,6 +961,22 @@ mod tests {
         assert_eq!(
             fmt(months),
             "var m := array [\n    \"January\",\n    \"February\",\n    \"March\",\n    \"April\",\n    \"May\",\n    \"June\",\n    \"July\",\n    \"August\",\n    \"September\",\n];\n"
+        );
+    }
+
+    #[test]
+    fn loads() {
+        assert_eq!(
+            fmt("operator f{} [ load   a   from r{x}where x>1   order[ asc   x ,desc y];];"),
+            "operator f{} [\n    load a from r{x} where x > 1 order [asc x, desc y];\n];\n"
+        );
+        // Too long for one line, the order's items each on a line of their
+        // own, as any list's.
+        assert_eq!(
+            fmt(
+                "operator f{} [ load everyone from people where born > 1900 and name <> \"Ada Lovelace\" order [desc born, asc name]; ];"
+            ),
+            "operator f{} [\n    load everyone from people where born > 1900 and name <> \"Ada Lovelace\" order [\n        desc born,\n        asc name,\n    ];\n];\n"
         );
     }
 
@@ -1400,6 +1431,11 @@ mod tests {
         assert_eq!(
             fmt("var a:=b rename{ c  as d,e as f }{d};"),
             "var a := b rename {c as d, e as f}{d};\n"
+        );
+        // A selector projected keeps its own spacing.
+        assert_eq!(
+            fmt("var a:=relation{{c:1}}{c};var t:=tuple{c:1}{c};"),
+            "var a := relation { { c: 1 } }{c};\nvar t := tuple { c: 1 }{c};\n"
         );
     }
 

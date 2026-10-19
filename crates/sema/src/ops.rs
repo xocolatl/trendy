@@ -1245,6 +1245,21 @@ pub(crate) fn array(element: hir::Type, elements: Vec<hir::Expr>) -> hir::Expr {
     }
 }
 
+/// The array a `load` makes of `relation`, in the order of `items`:
+/// evaluated if the relation is a constant.
+pub(crate) fn load(
+    relation: hir::Expr,
+    items: Vec<hir::OrderItem>,
+    loaded: hir::Loaded,
+) -> hir::Expr {
+    match relation {
+        hir::Expr::Constant(hir::Value::Relation(relation)) => {
+            hir::Expr::Constant(hir::Value::Array(relation.loaded(&items, loaded)))
+        }
+        relation => hir::Expr::Load(Box::new(relation), items, loaded),
+    }
+}
+
 /// The element of `array` at `position`, counting from 1: evaluated if
 /// both are constants, and taken straight from a selector whose other
 /// elements can't fail.
@@ -1580,6 +1595,7 @@ fn shifted(expr: hir::Expr, cutoff: usize) -> hir::Expr {
             elements.into_iter().map(|e| shifted(e, cutoff)).collect(),
         ),
         hir::Expr::Index(array, position) => hir::Expr::Index(shift(array), shift(position)),
+        hir::Expr::Load(relation, items, loaded) => hir::Expr::Load(shift(relation), items, loaded),
         hir::Expr::If(condition, then, otherwise) => {
             hir::Expr::If(shift(condition), shift(then), shift(otherwise))
         }
@@ -1615,7 +1631,8 @@ pub(crate) fn uses_tuple(expr: &hir::Expr, depth: usize) -> bool {
         | hir::Expr::Remove(operand, _)
         | hir::Expr::Rename(operand, _)
         | hir::Expr::Ungroup(operand, _)
-        | hir::Expr::Only(operand) => uses(operand),
+        | hir::Expr::Only(operand)
+        | hir::Expr::Load(operand, ..) => uses(operand),
         hir::Expr::Binary(_, lhs, rhs)
         | hir::Expr::And(lhs, rhs)
         | hir::Expr::Combine(_, lhs, rhs)
@@ -1833,6 +1850,34 @@ pub(crate) fn call(call: hir::Call, bindings: Bindings) -> Result<hir::Expr, Fai
     })
 }
 
+/// `if condition then then else otherwise`, with what `substitution`
+/// knows substituted, as [`substitute`] does: only the branch taken is
+/// computed.
+///
+/// # Errors
+///
+/// Returns why the branch taken fails, or the condition does.
+fn substituted_if(
+    condition: hir::Expr,
+    then: hir::Expr,
+    otherwise: hir::Expr,
+    depth: usize,
+    substitution: &Substitution,
+) -> Result<hir::Expr, Failed> {
+    Ok(match substitute(condition, depth, substitution)? {
+        hir::Expr::Constant(hir::Value::Boolean(taken)) => {
+            substitute(if taken { then } else { otherwise }, depth, substitution)?
+        }
+        // Either may be taken when running, or neither: one that fails now
+        // stays as it is, to fail only if it is. The whole is no constant,
+        // so it isn't the value of what it is in.
+        condition => {
+            let branch = |e: hir::Expr| substitute(e.clone(), depth, substitution).unwrap_or(e);
+            conditional(condition, branch(then), branch(otherwise))
+        }
+    })
+}
+
 /// `expr` with what `substitution` says replaced, and simplified as when
 /// it was checked, so that what then depends only on constants is
 /// evaluated: the tuple at hand `depth` `Extend`s out, the parameters of a
@@ -1911,20 +1956,10 @@ fn substitute(
         hir::Expr::Index(operand, position) => {
             index(sub(operand)?, sub(position)?).map_err(Failed::Scalar)?
         }
-        // Only the branch taken is computed.
-        hir::Expr::If(condition, then, otherwise) => match sub(condition)? {
-            hir::Expr::Constant(hir::Value::Boolean(taken)) => {
-                sub(if taken { then } else { otherwise })?
-            }
-            // Either may be taken when running, or neither: one that fails
-            // now stays as it is, to fail only if it is. The whole is no
-            // constant, so it isn't the value of what it is in.
-            condition => {
-                let branch =
-                    |e: Box<hir::Expr>| substitute((*e).clone(), depth, substitution).unwrap_or(*e);
-                conditional(condition, branch(then), branch(otherwise))
-            }
-        },
+        hir::Expr::Load(relation, items, loaded) => load(sub(relation)?, items, loaded),
+        hir::Expr::If(condition, then, otherwise) => {
+            substituted_if(*condition, *then, *otherwise, depth, substitution)?
+        }
         hir::Expr::Tuple(attributes) => tuple_of(attributes, depth, substitution)?,
         hir::Expr::Relation(heading, tuples) => relation(
             heading,
@@ -2139,7 +2174,7 @@ fn can_fail(expr: &hir::Expr) -> bool {
         | hir::Expr::Current(..) => false,
         // Negating the smallest integer overflows, and building a relation,
         // removing, renaming or adding attributes, joining or ungrouping it,
-        // allocates the result, as building an array does; adding
+        // allocates the result, as building or loading an array does; adding
         // attributes computes them, which can fail too, as can a call,
         // which computes its operator's value, and an index can be out of
         // range.
@@ -2157,6 +2192,7 @@ fn can_fail(expr: &hir::Expr) -> bool {
         | hir::Expr::Extend(..)
         | hir::Expr::Relation(..)
         | hir::Expr::Array(..)
+        | hir::Expr::Load(..)
         | hir::Expr::Index(..) => true,
         hir::Expr::Unary(_, operand) => can_fail(operand),
         hir::Expr::Tuple(attributes) => attributes.values().any(can_fail),

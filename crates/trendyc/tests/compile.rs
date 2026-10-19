@@ -877,6 +877,9 @@ fn arrays() {
             // Generic over the elements' type.
             "1200",
             r#""Amara""#,
+            // Loaded: the wettest first, and the names alphabetically.
+            r#"array [tuple { city: "Mumbai", rain: 2200 }, tuple { city: "Lagos", rain: 1500 }, tuple { city: "Cairo", rain: 25 }, tuple { city: "Lima", rain: 15 }]"#,
+            r#"array ["Cairo", "Lagos", "Lima", "Mumbai"]"#,
         ]
     );
 }

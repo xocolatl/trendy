@@ -33,6 +33,7 @@ pub(crate) const UPDATE_FORM: &str = "`update` takes attributes the variable has
 pub(crate) const TYPES_FORM: &str = "an operator's type parameters follow its parameters and result type, each `name: any type`, `any tuple`, `any relation`, `any array` or `any` and a kind: `operator pair{a: T, b: T}: relation { v: T } types { T: any type } [ … ];`";
 pub(crate) const IF_FORM: &str = "an `if` has the form `if condition then value else value`, and `else if` chains another: `if n = 1 then \"one\" else if n = 2 then \"two\" else \"many\"`";
 pub(crate) const IF_STMT_FORM: &str = "an `if` statement has the form `if condition then [ … ] else [ … ];`, each branch a block in brackets, and `else if` chains another condition";
+pub(crate) const LOAD_FORM: &str = "a load has the form `load a from r order [asc x, desc y];`: the array `a` given the tuples of the relation `r`, or the values of its only attribute, in the order of the attributes listed";
 pub(crate) const VARIABLE_FORM: &str = "a variable declaration has the form `var name: type := value;`, where either the type or the value may be left out";
 
 /// Words other languages use to start a definition or declaration, which
@@ -1512,6 +1513,194 @@ pub(crate) fn values_after_where(
                 replacement: String::new(),
             },
         ],
+    )
+}
+
+const ORDER_ITEMS: &str = "a load's order lists, in brackets, the attributes to order by, each after its direction, `asc` or `desc`, as in `order [desc born, asc name]`";
+
+/// An empty edit, inserting `text` at `at`.
+fn insertion(at: usize, text: &str) -> Edit {
+    Edit {
+        span: Span::empty(at),
+        replacement: text.to_string(),
+    }
+}
+
+/// A `load` with no `from` at `at`, where its relation goes, which starts
+/// at `relation` if it is there.
+pub(crate) fn load_without_from(at: Span, relation: Option<usize>) -> Diagnostic {
+    let diagnostic = Diagnostic::error(
+        Code::LoadOrder,
+        "a load takes its relation after `from`",
+        at,
+        "no `from`",
+    )
+    .with_note(LOAD_FORM);
+    match relation {
+        Some(start) => diagnostic.with_suggestion("insert `from`", vec![insertion(start, "from ")]),
+        None => diagnostic,
+    }
+}
+
+/// A `load` with no order after its relation, which ends at `at`.
+pub(crate) fn load_without_order(at: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::LoadOrder,
+        "a load needs an order",
+        at,
+        "no `order` after the relation",
+    )
+    .with_note("a relation's tuples have no order, so a load says which to put them in")
+    .with_help(ORDER_ITEMS)
+}
+
+/// An assignment whose value, after `:=` at `assign`, is followed by an
+/// order, at `order`: a load, written as one. The assignment's variable
+/// starts at `target`.
+pub(crate) fn assigned_order(assign: Span, target: usize, order: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::LoadOrder,
+        "a relation is put in order by a load, not an assignment",
+        order,
+        "an order for an assigned value",
+    )
+    .with_note("a relation has no order, so no value orders one; a load puts its tuples into an array, and isn't an assignment, since that would convert a relation into an array implicitly (TTM chapter 5)")
+    .with_suggestion(
+        "write a load",
+        vec![
+            insertion(target, "load "),
+            Edit {
+                span: assign,
+                replacement: "from".to_string(),
+            },
+        ],
+    )
+}
+
+/// SQL's `by`, `by`, after a load's `order`: deleted up to the first item,
+/// `gap`, or, if the items have no brackets, replaced with the opening one,
+/// and the closing one inserted where they end, at `close`.
+pub(crate) fn order_by(by: Found, gap: Span, close: Option<usize>) -> Diagnostic {
+    let mut edits = vec![Edit {
+        span: gap,
+        replacement: if close.is_some() { "[" } else { "" }.to_string(),
+    }];
+    edits.extend(close.map(|close| insertion(close, "]")));
+    let fix = if close.is_some() {
+        format!("write the items in brackets instead of `{}`", by.text)
+    } else {
+        format!("delete `{}`", by.text)
+    };
+    Diagnostic::error(
+        Code::LoadOrder,
+        format!("`order` takes no `{}`", by.text),
+        by.span,
+        "SQL's spelling",
+    )
+    .with_note(ORDER_ITEMS)
+    .with_suggestion(fix, edits)
+}
+
+/// A load's order items without brackets, after `order` and the space
+/// before them, `gap`, ending at `close`.
+pub(crate) fn unbracketed_order(gap: Span, close: usize) -> Diagnostic {
+    Diagnostic::error(
+        Code::LoadOrder,
+        "a load's order items go in brackets",
+        Span::new(gap.end, close),
+        "items without brackets",
+    )
+    .with_note(ORDER_ITEMS)
+    .with_suggestion(
+        "enclose them in brackets",
+        vec![
+            Edit {
+                span: gap,
+                replacement: " [".to_string(),
+            },
+            insertion(close, "]"),
+        ],
+    )
+}
+
+/// `ascending` or `descending`, `found`, before an order item's
+/// attribute: `asc` or `desc`, `spelled`.
+pub(crate) fn long_direction(found: Found, spelled: &str) -> Diagnostic {
+    Diagnostic::error(
+        Code::LoadOrder,
+        format!("`{}` is written `{spelled}`", found.text),
+        found.span,
+        "a direction spelled out",
+    )
+    .with_note(ORDER_ITEMS)
+    .with_suggestion(
+        format!("write `{spelled}`"),
+        vec![Edit {
+            span: found.span,
+            replacement: spelled.to_string(),
+        }],
+    )
+}
+
+/// A direction, `found`, written `spelled`, after its order item's
+/// attribute, `attribute`, as SQL writes it: moved before it, `removal`
+/// deleted.
+pub(crate) fn misplaced_direction(
+    found: Found,
+    spelled: &str,
+    attribute: Found,
+    removal: Span,
+) -> Diagnostic {
+    Diagnostic::error(
+        Code::LoadOrder,
+        format!(
+            "the direction goes before the attribute: `{spelled} {}`",
+            attribute.text
+        ),
+        found.span,
+        "after the attribute",
+    )
+    .with_note(ORDER_ITEMS)
+    .with_suggestion(
+        format!("write `{spelled} {}`", attribute.text),
+        vec![
+            insertion(attribute.span.start, &format!("{spelled} ")),
+            Edit {
+                span: removal,
+                replacement: String::new(),
+            },
+        ],
+    )
+}
+
+/// An order item, its attribute at `attribute`, without a direction.
+pub(crate) fn missing_direction(attribute: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::LoadOrder,
+        "an order item needs its direction",
+        attribute,
+        "no `asc` or `desc`",
+    )
+    .with_note(ORDER_ITEMS)
+    .with_suggestion("order ascending", vec![insertion(attribute.start, "asc ")])
+}
+
+/// SQL's `nulls first` or `nulls last`, at `span`, deleted with the space
+/// before it, `removal`.
+pub(crate) fn order_nulls(span: Span, removal: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::LoadOrder,
+        "there are no nulls to order",
+        span,
+        "SQL's nulls",
+    )
+    .with_note("trendy has no nulls (TTM RM Proscription 4): every tuple is ordered by its values")
+    .with_suggestion(
+        "delete it",
+        vec![Edit {
+            span: removal,
+            replacement: String::new(),
+        }],
     )
 }
 

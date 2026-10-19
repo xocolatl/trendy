@@ -1237,6 +1237,82 @@ pub unsafe extern "C" fn trendy_rt_sort(relation: *mut Text, desc: *const TypeDe
     }
 }
 
+/// An attribute [`trendy_rt_load`] orders tuples by: its offset in a tuple,
+/// its type, and whether in descending order, 1, or ascending, 0. The
+/// compiler emits an array of these, laid out like this struct.
+#[repr(C)]
+pub struct OrderItem {
+    pub offset: usize,
+    pub desc: *const TypeDesc,
+    pub descending: usize,
+}
+
+/// Store at `dst` the array of the tuples of the relation `src`, which
+/// `desc` describes, in the order of the `*count` `items`: by the first,
+/// then, among tuples equal on it, by the next, and so on, in memory the
+/// statement owns. Tuples equal on every item are in canonical order, which
+/// the language leaves undefined.
+///
+/// # Safety
+///
+/// `src` must point to a valid relation of the type `desc` describes, and
+/// `items` to `*count` items, each with the offset and type of one of its
+/// attributes.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_load(
+    dst: *mut Text,
+    src: *const u8,
+    desc: *const TypeDesc,
+    items: *const OrderItem,
+    count: *const usize,
+) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let desc = &*desc;
+        let items = array(items, count.read_unaligned());
+        let (tuples, len) = read_slice(src);
+        let size = desc.element().size;
+        let order = core::slice::from_raw_parts_mut(allocate::<*const u8>(len), len);
+        for (i, tuple) in order.iter_mut().enumerate() {
+            *tuple = tuples.add(i * size);
+        }
+        // A relation's tuples are distinct, so no two are equal in
+        // canonical order, and the sort has one result.
+        order.sort_unstable_by(|a, b| {
+            on_items(items, *a, *b).then_with(|| compare_tuples(*a, *b, desc))
+        });
+        let out = allocate_owned(len * size);
+        for (i, tuple) in order.iter().enumerate() {
+            core::ptr::copy_nonoverlapping(*tuple, out.add(i * size), size);
+        }
+        free(order.as_mut_ptr().cast());
+        dst.write_unaligned(Text { bytes: out, len });
+    }
+}
+
+/// The order of two tuples by the `items` of a load.
+///
+/// # Safety
+///
+/// `x` and `y` must point to valid tuples with the items' attributes.
+#[cfg(not(test))]
+unsafe fn on_items(items: &[OrderItem], x: *const u8, y: *const u8) -> core::cmp::Ordering {
+    for item in items {
+        // SAFETY: guaranteed by the caller.
+        let ordering = unsafe { order(x.add(item.offset), y.add(item.offset), &*item.desc) };
+        let ordering = if item.descending == 1 {
+            ordering.reverse()
+        } else {
+            ordering
+        };
+        if ordering.is_ne() {
+            return ordering;
+        }
+    }
+    core::cmp::Ordering::Equal
+}
+
 /// The `count` tuples at `tuples`, with the attributes of `desc`, sorted
 /// canonically and without duplicates, copied into memory the current
 /// statement owns: that memory and how many tuples it holds.

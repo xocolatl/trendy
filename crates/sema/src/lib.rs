@@ -5390,6 +5390,166 @@ mod tests {
         );
     }
 
+    const PEOPLE: &str = "var people := relation { { name: \"Ada\", born: 1815 }, { name: \"Edgar\", born: 1923 }, { name: \"Alan\", born: 1912 } };";
+
+    /// The values assigned in `main`'s body, `body`, after declaring
+    /// `PEOPLE`, written as literals; `None` for one known only when
+    /// running.
+    fn loaded(body: &str) -> Vec<Option<String>> {
+        main_body(&assigning(PEOPLE, body))
+            .iter()
+            .flat_map(|statement| match statement {
+                hir::Statement::Assign(assignments) => assignments.clone(),
+                other => panic!("{other:?}"),
+            })
+            .map(|a| match a.value {
+                hir::Expr::Constant(value) => Some(value.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn loads_order_a_relation_into_an_array() {
+        // Known when compiling, the array is too: of the values of a
+        // relation of one attribute, or of the tuples.
+        let people = r#"relation { { name: "Ada", born: 1815 }, { name: "Edgar", born: 1923 }, { name: "Alan", born: 1912 } }"#;
+        assert_eq!(
+            loaded(&format!(
+                "var names: array text; load names from {people}{{name}} order [desc name]; var by_birth: array tuple {{ name: text, born: integer }}; load by_birth from {people} where born > 1900 order [asc born];"
+            )),
+            [
+                Some("array text []".to_string()),
+                Some(r#"array ["Edgar", "Alan", "Ada"]"#.to_string()),
+                Some("array tuple { born: integer, name: text } []".to_string()),
+                Some(
+                    r#"array [tuple { born: 1912, name: "Alan" }, tuple { born: 1923, name: "Edgar" }]"#
+                        .to_string()
+                ),
+            ]
+        );
+        // An empty relation takes its heading from the array's elements.
+        assert_eq!(
+            loaded(
+                "var none: array tuple { a: integer }; load none from relation {} order [asc a];"
+            ),
+            [
+                Some("array tuple { a: integer } []".to_string()),
+                Some("array tuple { a: integer } []".to_string()),
+            ]
+        );
+        // Known only when running.
+        let program = analyze_str(&format!(
+            "operator f{{r: relation {{ v: integer }}}} [ var a: array integer; load a from r order [desc v]; ];{MAIN}"
+        ))
+        .unwrap();
+        let f = program.operators.iter().find(|o| o.name == "f").unwrap();
+        let hir::OperatorKind::Update { body, .. } = &f.kind else {
+            panic!("f is an update operator");
+        };
+        let hir::Statement::Assign(assignments) = &body.statements[1] else {
+            panic!("{:?}", body.statements);
+        };
+        assert_eq!(
+            assignments[0].value,
+            hir::Expr::Load(
+                Box::new(hir::Expr::Parameter("r".to_string())),
+                vec![hir::OrderItem {
+                    attribute: "v".to_string(),
+                    descending: true,
+                }],
+                hir::Loaded::Values,
+            )
+        );
+    }
+
+    #[test]
+    fn loads_are_assignments() {
+        // Of a read-only operator's local variable, and in an `assign`
+        // block, which can't change the array otherwise as well.
+        let source = format!(
+            "operator first{{r: relation {{ v: integer }}}}: integer [ var a: array integer; load a from r order [asc v]; return a[1]; ];\noperator f{{}} [ var a: array integer; var n := 0; assign {{ load a from relation {{ {{ v: 2 }}, {{ v: 1 }} }} order [asc v]; n := 1; }}; ];{MAIN}"
+        );
+        assert!(analyze_str(&source).is_ok(), "{:#?}", errors(&source));
+        let source = assigning(
+            PEOPLE,
+            "var a: array text; assign { load a from people{name} order [asc name]; a := array [\"Ada\"]; };",
+        );
+        assert_eq!(
+            messages(&source),
+            ["two changes to `a` conflict: `load a from …` gives `a` a whole new value"]
+        );
+    }
+
+    #[test]
+    fn a_load_orders_by_attributes_with_an_order() {
+        let source = |any: &str| {
+            format!(
+                "operator f{{r: relation {{ v: T }}}} types {{ T: {any} }} [ var a: array T := array []; load a from r order [asc v]; ];{MAIN}"
+            )
+        };
+        assert!(analyze_str(&source("any ordered")).is_ok());
+        assert_eq!(codes(&source("any type")), [Code::WrongOperandType]);
+        let source = assigning(
+            "var teams := relation { { team: \"core\", members: relation { { name: \"Ada\" } } } };",
+            "var a: array tuple { team: text, members: relation { name: text } }; load a from teams order [asc members];",
+        );
+        assert_eq!(codes(&source), [Code::WrongOperandType]);
+    }
+
+    #[test]
+    fn load_errors() {
+        let declared = "var names: array text; var n := 0; var others: relation { name: text, born: integer }; var everyone: array tuple { name: text, born: integer };";
+        let source = |load: &str| assigning(PEOPLE, &format!("{declared} {load}"));
+        let fixed = |load: &str, fixed: &str| {
+            assert_eq!(fix(&source(load)), source(fixed), "{load}");
+        };
+        // Into an array of values, the relation of one attribute.
+        fixed(
+            "load names from people order [asc name];",
+            "load names from people{name} order [asc name];",
+        );
+        fixed(
+            "load names from people where born > 1900 order [asc name];",
+            "load names from (people where born > 1900){name} order [asc name];",
+        );
+        // Ordered by another attribute, the tuples are needed.
+        assert_eq!(
+            codes(&source("load names from people order [asc born];")),
+            [Code::LoadMismatch]
+        );
+        assert_eq!(
+            fix(&source("load names from people order [asc born];")),
+            source("load names from people order [asc born];")
+        );
+        assert_eq!(
+            codes(&source("load n from people order [asc name];")),
+            [Code::LoadMismatch]
+        );
+        // A relation is assigned.
+        fixed(
+            "load others from people order [asc name];",
+            "others := people;",
+        );
+        // Into an array of tuples, the relation of their heading.
+        assert_eq!(
+            codes(&source("load everyone from people{name} order [asc name];")),
+            [Code::TypeMismatch]
+        );
+        assert_eq!(
+            codes(&source("load everyone from people order [];")),
+            [Code::EmptyList]
+        );
+        fixed(
+            "load everyone from people order [asc nam];",
+            "load everyone from people order [asc name];",
+        );
+        fixed(
+            "load everyone from people order [desc born, asc name, asc born];",
+            "load everyone from people order [desc born, asc name];",
+        );
+    }
+
     #[test]
     fn an_index_of_a_selector_takes_its_element() {
         // Unless another element can fail, which it must still be computed

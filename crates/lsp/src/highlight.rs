@@ -70,8 +70,8 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
     let above = |n: usize| token.parent_ancestors().nth(n).map(|p| p.kind());
     let (parent, grandparent) = (above(0), above(1));
     // The contextual keywords: `type`, in `builtin type name;`, `key`,
-    // `value` and `from`, `any` and `type`, in `any type`, `types`, `per`
-    // and `kind`.
+    // `value` and `from`, `any` and `type`, in `any type`, `types`, `per`,
+    // `kind`, and a load's `load`, `from`, `order`, `asc` and `desc`.
     let keyword = match parent {
         Some(SyntaxKind::BuiltinType) => token.text() == "type",
         Some(SyntaxKind::AnyType) => matches!(token.text(), "any" | "type"),
@@ -80,7 +80,9 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
             | SyntaxKind::FromExpr
             | SyntaxKind::TypeParameters
             | SyntaxKind::Per
-            | SyntaxKind::KindDecl,
+            | SyntaxKind::KindDecl
+            | SyntaxKind::Load
+            | SyntaxKind::OrderItem,
         ) => true,
         _ => false,
     };
@@ -121,7 +123,8 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
                 SyntaxKind::AttributeValue
                 | SyntaxKind::NameList
                 | SyntaxKind::Renaming
-                | SyntaxKind::ExtractExpr,
+                | SyntaxKind::ExtractExpr
+                | SyntaxKind::OrderItem,
             ),
         ) => (Class::Attribute, false),
         _ => return None,
@@ -587,6 +590,34 @@ mod tests {
                 ("integer", Class::Type, false),
                 ("per", Class::Keyword, false),
                 ("r", Class::Parameter, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn loads() {
+        assert_eq!(
+            highlight(
+                "operator f{r: relation { name: text }} [ var a: array text; load a from r order [desc name]; ];"
+            ),
+            [
+                ("operator", Class::Keyword, false),
+                ("f", Class::Operator, true),
+                ("r", Class::Parameter, true),
+                ("relation", Class::Keyword, false),
+                ("name", Class::Attribute, true),
+                ("text", Class::Type, false),
+                ("var", Class::Keyword, false),
+                ("a", Class::Variable, true),
+                ("array", Class::Keyword, false),
+                ("text", Class::Type, false),
+                ("load", Class::Keyword, false),
+                ("a", Class::Variable, false),
+                ("from", Class::Keyword, false),
+                ("r", Class::Parameter, false),
+                ("order", Class::Keyword, false),
+                ("desc", Class::Keyword, false),
+                ("name", Class::Attribute, false),
             ]
         );
     }

@@ -53,6 +53,9 @@ ast_node!(Assignment);
 ast_node!(Insertion);
 ast_node!(Deletion);
 ast_node!(Update);
+ast_node!(Load);
+ast_node!(OrderList);
+ast_node!(OrderItem);
 ast_node!(Arguments);
 ast_node!(PositionalArg);
 ast_node!(NameRef);
@@ -454,6 +457,8 @@ pub enum Clause {
     Deletion(Deletion),
     /// `update r { a := x } where p`
     Update(Update),
+    /// `load a from r order [asc x]`
+    Load(Load),
 }
 
 impl Clause {
@@ -463,7 +468,8 @@ impl Clause {
             .map(Clause::Assignment)
             .or_else(|| Insertion::cast(node.clone()).map(Clause::Insertion))
             .or_else(|| Deletion::cast(node.clone()).map(Clause::Deletion))
-            .or_else(|| Update::cast(node).map(Clause::Update))
+            .or_else(|| Update::cast(node.clone()).map(Clause::Update))
+            .or_else(|| Load::cast(node).map(Clause::Load))
     }
 
     #[must_use]
@@ -473,6 +479,7 @@ impl Clause {
             Clause::Insertion(c) => c.syntax(),
             Clause::Deletion(c) => c.syntax(),
             Clause::Update(c) => c.syntax(),
+            Clause::Load(c) => c.syntax(),
         }
     }
 
@@ -495,7 +502,8 @@ impl Clause {
     }
 
     /// The expression after the target: the value assigned, the relation
-    /// inserted or deleted, or the condition of a `delete` or an `update`.
+    /// inserted, deleted or loaded, or the condition of a `delete` or an
+    /// `update`.
     #[must_use]
     pub fn operand(&self) -> Option<Expr> {
         self.syntax().children().filter_map(Expr::cast).nth(1)
@@ -526,6 +534,50 @@ impl Clause {
     #[must_use]
     pub fn assignments(&self) -> Option<AssignList> {
         self.syntax().children().find_map(AssignList::cast)
+    }
+}
+
+impl Load {
+    /// The order items, in brackets.
+    #[must_use]
+    pub fn order(&self) -> Option<OrderList> {
+        self.0.children().find_map(OrderList::cast)
+    }
+}
+
+impl OrderList {
+    pub fn items(&self) -> impl Iterator<Item = OrderItem> {
+        self.0.children().filter_map(OrderItem::cast)
+    }
+
+    /// The span to delete to remove `item` from the list, with a comma that
+    /// separates it from a neighbor.
+    #[must_use]
+    pub fn removal(&self, item: &OrderItem) -> Span {
+        list_removal(item.syntax())
+    }
+}
+
+impl OrderItem {
+    /// `asc` or `desc`.
+    #[must_use]
+    pub fn direction(&self) -> Option<SyntaxToken> {
+        self.0
+            .children_with_tokens()
+            .filter_map(SyntaxElement::into_token)
+            .find(|t| t.kind() == SyntaxKind::Ident)
+    }
+
+    /// Whether the direction is `desc`.
+    #[must_use]
+    pub fn descending(&self) -> bool {
+        self.direction().is_some_and(|t| t.text() == "desc")
+    }
+
+    /// The attribute ordered by.
+    #[must_use]
+    pub fn attribute(&self) -> Option<Name> {
+        self.0.children().find_map(Name::cast)
     }
 }
 

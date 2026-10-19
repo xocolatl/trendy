@@ -942,6 +942,25 @@ of a constant array, or of a selector whose other elements can't fail, and
 reports a position out of range when compiling where it can: one below 1
 always, and one beyond the count where the count is known (`ops::index`).
 
+A load (`Load`) is a clause of an assignment statement, whose `load`,
+`from` and `order` are contextual keywords: `load` before a name starts
+one, and `order` is the keyword only before its items' `[`, or SQL's
+`by`, so a relation named `order` can be loaded. Sema checks it as an
+assignment of the array variable, whose new value is `hir::Expr::Load`:
+the relation, the order items, and whether the array takes the tuples or
+the values of a relation of one attribute, as its elements' type says.
+It is an expression only in HIR, as no expression of the language orders
+a relation (TTM chapter 5), so that a load is an assignment like any
+other: in an `assign` block, of a read-only operator's local variable, and
+folded when its relation is a constant (`RelationValue::loaded`).
+Lowering calls `trendy_rt_load`, with each item's offset, type and
+direction; it sorts pointers to the tuples on the items, then
+canonically, and copies the tuples into an array. Tuples equal on every
+item are so in canonical order, when folding and when running alike,
+which the language leaves undefined. A tuple of one attribute is laid out
+as its attribute is, so the values of a relation of one attribute are its
+tuples.
+
 Removing attributes (`hir::Expr::Remove`, which a projection becomes) and
 renaming them (`hir::Expr::Rename`) are both reshaping: each attribute of
 the result is one of the operand's. For a tuple, lowering copies each into

@@ -184,6 +184,16 @@ pub enum SyntaxKind {
     /// `update r { a := x } where p`, in an assignment statement; for a
     /// tuple, without `where`.
     Update,
+    /// `load a from r order [asc x, desc y]`, in an assignment statement:
+    /// an array given a relation's tuples, or their values, in order.
+    /// `load`, `from` and `order` are contextual keywords, identifiers
+    /// elsewhere.
+    Load,
+    /// `[asc x, desc y]`: the order items of a `load`.
+    OrderList,
+    /// `asc x` or `desc x`: an attribute a `load` orders by, and the
+    /// direction, a contextual keyword.
+    OrderItem,
     /// `{name: value, …}`: a call's arguments, a tuple of its parameters.
     Arguments,
     /// An argument without a name, which is reported with a fix.
@@ -285,7 +295,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 136] = [
+    pub const ALL: [SyntaxKind; 139] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -382,6 +392,9 @@ impl SyntaxKind {
         SyntaxKind::Insertion,
         SyntaxKind::Deletion,
         SyntaxKind::Update,
+        SyntaxKind::Load,
+        SyntaxKind::OrderList,
+        SyntaxKind::OrderItem,
         SyntaxKind::Arguments,
         SyntaxKind::PositionalArg,
         SyntaxKind::NameRef,
@@ -831,6 +844,9 @@ impl SyntaxKind {
             SyntaxKind::Insertion => "insertion",
             SyntaxKind::Deletion => "deletion",
             SyntaxKind::Update => "update",
+            SyntaxKind::Load => "load",
+            SyntaxKind::OrderList => "order",
+            SyntaxKind::OrderItem => "order item",
             SyntaxKind::Arguments => "arguments",
             SyntaxKind::PositionalArg => "argument",
             SyntaxKind::TypeAnnotation => "type annotation",

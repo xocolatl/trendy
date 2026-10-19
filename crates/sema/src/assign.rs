@@ -192,6 +192,7 @@ fn change(
     };
     let mut checker = Checker::new(names);
     let change = match (clause, clause.keyword()) {
+        (Clause::Load(load), _) => loaded(clause, load, &target, &mut checker, errors)?,
         (Clause::Assignment(_), _) => {
             let written = clause.operand()?;
             let value = checker.expr(&written, Some(&target.expected), errors)?;
@@ -215,6 +216,135 @@ fn change(
         (_, None) => return None,
     };
     Some((target.assignee, change))
+}
+
+/// `load`, the clause `clause`, of `target`: the array of the tuples of
+/// its relation, or of the values of the relation's only attribute, in the
+/// order of its items. Which is up to the array's elements: tuples, or
+/// other values.
+fn loaded(
+    clause: &Clause,
+    load: &ast::Load,
+    target: &Target,
+    checker: &mut Checker,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<Change> {
+    let written = clause.operand()?;
+    let order = load.order()?;
+    let name = &target.assignee.name;
+    let hir::Type::Array(element) = &target.assignee.ty else {
+        let relation = checker.expr(&written, None, errors)?;
+        errors.push(errors::load_into_non_array(
+            name,
+            &target.assignee.ty,
+            target.written,
+            &checker.ty(&relation),
+            clause.span(),
+            &written,
+        ));
+        return None;
+    };
+    let (expected, loaded) = match &**element {
+        hir::Type::Tuple(heading) => (
+            Some(Expected {
+                ty: hir::Type::Relation(heading.clone()),
+                origin: Origin::Loaded(name.clone(), Box::new(target.expected.origin.clone())),
+            }),
+            hir::Loaded::Tuples,
+        ),
+        _ => (None, hir::Loaded::Values),
+    };
+    let relation = checker.expr(&written, expected.as_ref(), errors)?;
+    let ty = checker.ty(&relation);
+    let heading = match &ty {
+        hir::Type::Relation(heading)
+            if loaded == hir::Loaded::Tuples
+                || heading.attributes().map(|(_, ty)| ty).eq([&**element]) =>
+        {
+            heading
+        }
+        _ => {
+            errors.push(errors::load_mismatch(
+                name,
+                element,
+                &ty,
+                &written,
+                projected(&ty, element, &order).as_deref(),
+            ));
+            return None;
+        }
+    };
+    let items = order_items(&order, heading, errors)?;
+    Some(Change::Value(ops::load(relation, items, loaded), written))
+}
+
+/// The attribute of `ty`, a relation, of type `element`, that every item of
+/// `order` names, if it is the only one of that type: what to project the
+/// relation onto to load its values.
+fn projected(ty: &hir::Type, element: &hir::Type, order: &ast::OrderList) -> Option<String> {
+    let hir::Type::Relation(heading) = ty else {
+        return None;
+    };
+    let mut of_type = heading.attributes().filter(|(_, ty)| *ty == element);
+    let (name, _) = of_type.next()?;
+    let only = of_type.next().is_none();
+    let named = order.items().all(|item| {
+        item.attribute()
+            .and_then(|a| a.ident())
+            .is_some_and(|i| i.text() == name)
+    });
+    (only && named).then(|| name.to_string())
+}
+
+/// The items of a load's `order`, each a different attribute of `heading`,
+/// of a type with an order, at least one, or `None` after reporting why
+/// they aren't.
+fn order_items(
+    order: &ast::OrderList,
+    heading: &hir::Heading,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<Vec<hir::OrderItem>> {
+    let items: Vec<ast::OrderItem> = order.items().collect();
+    if items.is_empty() {
+        errors.push(errors::empty_order(order, heading));
+        return None;
+    }
+    let mut ok = true;
+    let mut ordered: Vec<(hir::OrderItem, Span)> = Vec::new();
+    for item in &items {
+        let Some(ident) = item.attribute().and_then(|a| a.ident()) else {
+            ok = false;
+            continue;
+        };
+        let name = ident.text();
+        let span = trendy_syntax::span(ident.text_range());
+        let Some(ty) = heading.get(name) else {
+            errors.push(errors::unknown_order_attribute(name, span, heading));
+            ok = false;
+            continue;
+        };
+        if !ty.has(hir::Requirement::Order) {
+            errors.push(errors::unordered_attribute(name, span, ty));
+            ok = false;
+            continue;
+        }
+        if let Some((_, first)) = ordered.iter().find(|(o, _)| o.attribute == name) {
+            errors.push(errors::repeated_order_item(
+                name,
+                span,
+                *first,
+                order.removal(item),
+            ));
+            ok = false;
+            continue;
+        }
+        let item = hir::OrderItem {
+            attribute: name.to_string(),
+            descending: item.descending(),
+        };
+        ordered.push((item, span));
+    }
+    ok.then(|| ordered.into_iter().map(|(item, _)| item).collect())
 }
 
 /// The variable an assignment assigns, where it is written, and the type
@@ -380,11 +510,15 @@ fn merged(
         // The first other change.
         let other = usize::from(i == 0);
         let (first, second) = (i.min(other), i.max(other));
+        let written = match list[i].0 {
+            Clause::Load(_) => format!("`load {name} from …`"),
+            _ => format!("`{name} := …`"),
+        };
         errors.push(errors::conflicting_changes(
             name,
             list[first].0.span(),
             list[second].0.span(),
-            &format!("`{name} := …` gives `{name}` a whole new value"),
+            &format!("{written} gives `{name}` a whole new value"),
         ));
         return None;
     }

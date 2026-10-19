@@ -41,6 +41,35 @@ operator first{a: array E}: E
 var wettest := first{a: rainfall};
 var named := first{a: array ["Amara", "Kofi"]};
 
+/* A relation's tuples into an array, in order, by a load (Tutorial D's
+   LOAD): an array of tuples takes the tuples, and an array of other values
+   the values of a relation of one attribute. Each item orders the tuples
+   equal on the items before it, and tuples equal on every item come in an
+   undefined order, so an order whose items include a key is a total one. */
+var yearly := relation {
+    { city: "Mumbai", rain: 2200 },
+    { city: "Cairo", rain: 25 },
+    { city: "Lagos", rain: 1500 },
+    { city: "Lima", rain: 15 },
+};
+
+operator wettest_first{
+    r: relation { city: text, rain: integer },
+}: array tuple { city: text, rain: integer } [
+    var ranked: array tuple { city: text, rain: integer };
+    load ranked from r order [desc rain, asc city];
+    return ranked;
+];
+
+operator alphabetical{r: relation { city: text, rain: integer }}: array text [
+    var names: array text;
+    load names from r{city} order [asc city];
+    return names;
+];
+
+var ranked := wettest_first{r: yearly};
+var names := alphabetical{r: yearly};
+
 /* The same, of values known only when running. */
 operator computed{wet: integer, mid: integer, low: integer, two: integer, city: text, at: integer} [
     var none: array text;
@@ -66,6 +95,16 @@ operator computed{wet: integer, mid: integer, low: integer, two: integer, city: 
     };
     call debug_value{v: first{a: r}};
     call debug_value{v: first{a: array ["Amara", city]}};
+    var yearly := relation {
+        { city: city, rain: 2200 },
+        { city: "Cairo", rain: 25 },
+        { city: "Lagos", rain: 1500 },
+        { city: "Lima", rain: 15 },
+    };
+    var ranked: array tuple { city: text, rain: integer };
+    load ranked from yearly order [desc rain, asc city];
+    call debug_value{v: ranked};
+    call debug_value{v: alphabetical{r: yearly}};
 ];
 
 operator main{} [
@@ -80,6 +119,8 @@ operator main{} [
     call debug_value{v: compared};
     call debug_value{v: wettest};
     call debug_value{v: named};
+    call debug_value{v: ranked};
+    call debug_value{v: names};
 
     call computed{wet: 1200, mid: 950, low: 220, two: 2, city: "Mumbai", at: 2};
 ];

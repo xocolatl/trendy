@@ -22,6 +22,12 @@
       "include": "#key"
     },
     {
+      "include": "#load"
+    },
+    {
+      "include": "#order"
+    },
+    {
       "include": "#keywords"
     },
     {
@@ -92,6 +98,17 @@
       "match": "\\b(?:operator|var|tuple|relation|array|call|builtin|as|insert|d_insert|delete|i_delete|update|assign|return|if|then|else)\\b",
       "name": "keyword.other.trendy"
     },
+    "load": {
+      "captures": {
+        "1": {
+          "name": "keyword.other.trendy"
+        },
+        "3": {
+          "name": "keyword.other.trendy"
+        }
+      },
+      "match": "\\b(load)\\s+([A-Z_a-z][0-9A-Z_a-z]*)\\s+(from)\\b"
+    },
     "number": {
       "match": "\\b[0-9](?:[eE][+\\-]|[\\x{2E}0-9A-Z_a-z])*",
       "name": "constant.numeric.trendy"
@@ -110,6 +127,14 @@
     "operator-word": {
       "match": "\\b(?:not|and|or|xor|implies|div|mod|remove|rename|extend|replace|group|ungroup|wrap|unwrap|join|times|compose|matching|union|d_union|xunion|intersect|minus|i_minus|where)\\b",
       "name": "keyword.operator.word.trendy"
+    },
+    "order": {
+      "captures": {
+        "1": {
+          "name": "keyword.other.trendy"
+        }
+      },
+      "match": "\\b(order)\\s*(?=\\[)"
     },
     "punctuation": {
       "patterns": [

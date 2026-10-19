@@ -86,7 +86,8 @@ pub struct SlotId(pub usize);
 
 /// The shape of a value in memory. Codegen derives sizes, alignments and
 /// offsets from it for the target: every field at its natural alignment, and
-/// every struct padded to its alignment.
+/// every struct padded to its alignment, so that a struct of one field is
+/// laid out as that field is.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Layout {
     U8,
@@ -262,6 +263,17 @@ pub enum RuntimeFn {
     /// relation at `relation`, of the type the descriptor describes, into the
     /// canonical order, in place, and drop duplicates, shortening it.
     Sort,
+    /// `trendy_rt_load(dst, src, descriptor, items, count)`: store at `dst`
+    /// the array of the tuples of the relation `src`, of the type the
+    /// descriptor describes, in the order of `items`, in memory the
+    /// statement owns. `items` is an array of `count` (a [`Field::Usize`])
+    /// structs, one per order item: its attribute's [`Field::Offset`] in a
+    /// tuple, the [`Field::Address`] of the attribute's type's descriptor,
+    /// and a [`Field::Usize`], 1 if descending and 0 if ascending. Tuples
+    /// equal on every item are in canonical order. A tuple of one attribute
+    /// is laid out as that attribute is (see [`Layout`]), so the array is
+    /// one of its values as well.
+    Load,
     /// `trendy_rt_compare_text(dst, lhs, rhs)`: store -1, 0 or 1 at `dst`,
     /// an [`Layout::I64`], as `lhs` is before, equal to or after `rhs` in
     /// code point order.
@@ -303,6 +315,7 @@ impl RuntimeFn {
             RuntimeFn::Subset => "trendy_rt_subset",
             RuntimeFn::Allocate => "trendy_rt_allocate",
             RuntimeFn::Sort => "trendy_rt_sort",
+            RuntimeFn::Load => "trendy_rt_load",
             RuntimeFn::CompareText => "trendy_rt_compare_text",
             RuntimeFn::Equal => "trendy_rt_equal",
             RuntimeFn::Assign => "trendy_rt_assign",

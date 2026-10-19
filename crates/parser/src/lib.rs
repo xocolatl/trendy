@@ -130,6 +130,14 @@ struct Found<'a> {
     text: &'a str,
 }
 
+/// The direction an order item's word, in any case, is written: `asc` for
+/// `asc` and `ascending`, `desc` for `desc` and `descending`.
+fn direction(word: &str) -> Option<&'static str> {
+    ["asc", "desc"].into_iter().find(|spelled| {
+        word.eq_ignore_ascii_case(spelled) || word.eq_ignore_ascii_case(&format!("{spelled}ending"))
+    })
+}
+
 /// Whether a value can start with a token of this kind, other than a name:
 /// a literal, a selector, a parenthesized expression, a prefix operator or
 /// an image relation.
@@ -559,7 +567,16 @@ impl<'a> Parser<'a> {
             && self
                 .found_after(1)
                 .is_some_and(|f| matches!(f.kind, SyntaxKind::ColonEq | SyntaxKind::Eq));
-        assigned || self.at_clause_keyword().is_some()
+        assigned || self.at_clause_keyword().is_some() || self.at_load()
+    }
+
+    /// Whether a `load` starts here: `load`, a contextual keyword, in any
+    /// case, before the array's name.
+    fn at_load(&mut self) -> bool {
+        self.at_word("load")
+            && self
+                .found_after(1)
+                .is_some_and(|f| f.kind == SyntaxKind::Ident)
     }
 
     /// Wrap the tokens of a statement that isn't one in an error node, up
@@ -895,6 +912,12 @@ impl<'a> Parser<'a> {
 
     /// One assignment: `v := x`, or a shorthand for one.
     fn clause(&mut self) {
+        if self.at_load() {
+            self.start_node(SyntaxKind::Load);
+            self.load();
+            self.builder.finish_node();
+            return;
+        }
         match self.at_clause_keyword() {
             Some(keyword @ (SyntaxKind::InsertKw | SyntaxKind::DInsertKw)) => {
                 self.start_node(SyntaxKind::Insertion);
@@ -943,20 +966,237 @@ impl<'a> Parser<'a> {
                 }
             }
             None => {
-                self.start_node(SyntaxKind::Assignment);
+                self.peek();
+                let start = self.builder.checkpoint();
+                let target = self.found().map_or(0, |f| f.span.start);
                 self.target();
-                match self.found() {
+                let mut with_eq = None;
+                let assign = match self.found() {
                     Some(found) if found.kind == SyntaxKind::Eq => {
                         let span = self.bump();
-                        self.errors
-                            .push(errors::assignment_with_eq(span, "in an assignment"));
+                        with_eq = Some(errors::assignment_with_eq(span, "in an assignment"));
+                        Some(span)
                     }
-                    _ => self.expect(SyntaxKind::ColonEq),
-                }
+                    Some(found) if found.kind == SyntaxKind::ColonEq => Some(self.bump()),
+                    _ => {
+                        self.missing(SyntaxKind::ColonEq);
+                        None
+                    }
+                };
                 self.expression();
+                // `a := r order [asc x]`: an ordering as a value, which
+                // only a `load` makes.
+                let order = self.found_word("order").filter(|_| self.at_order());
+                if let (Some(assign), Some(order)) = (assign, order) {
+                    self.builder.start_node_at(start, SyntaxKind::Load);
+                    self.errors
+                        .push(errors::assigned_order(assign, target, order.span));
+                    let outer_form = std::mem::replace(&mut self.form, errors::LOAD_FORM);
+                    self.load_order();
+                    self.form = outer_form;
+                } else {
+                    self.builder.start_node_at(start, SyntaxKind::Assignment);
+                    self.errors.extend(with_eq);
+                }
             }
         }
         self.builder.finish_node();
+    }
+
+    /// `load a from r order [asc x, desc y]`, after its node starts: the
+    /// array `a` given the tuples of the relation `r`, or the values of its
+    /// only attribute, in order. `load`, `from` and `order` are contextual
+    /// keywords.
+    fn load(&mut self) {
+        let outer_form = std::mem::replace(&mut self.form, errors::LOAD_FORM);
+        self.contextual_keyword("load");
+        self.target();
+        if self.at_word("from") {
+            self.contextual_keyword("from");
+        } else {
+            let at = self.last_end.unwrap_or(0);
+            let operand = self.at_operand() && !self.at_order();
+            let before = self.found().filter(|_| operand).map(|f| f.span.start);
+            self.errors
+                .push(errors::load_without_from(Span::empty(at), before));
+        }
+        if self.at_operand() && !self.at_order() {
+            self.relation_expression();
+        } else {
+            self.missing_with_help(
+                SyntaxKind::Ident,
+                "write the relation to load after `from`, as in `load a from r order [asc x]`",
+            );
+        }
+        self.load_order();
+        self.form = outer_form;
+    }
+
+    /// A load's order, after its relation: `order [asc x, desc y]`. SQL's
+    /// `order by`, items without brackets, Tutorial D's `ORDER ( … )`, and
+    /// items' habits (see [`Parser::order_item`]), are reported with fixes.
+    fn load_order(&mut self) {
+        let Some(order) = self.found_word("order") else {
+            let at = self.last_end.unwrap_or(0);
+            self.errors
+                .push(errors::load_without_order(Span::empty(at)));
+            return;
+        };
+        self.contextual_keyword("order");
+        let by = self.found_word("by");
+        if by.is_some() {
+            self.bump();
+        }
+        let next = self.found();
+        let first = next.map_or(order.span.end, |f| f.span.start);
+        if next.is_some_and(|f| {
+            matches!(
+                f.kind,
+                SyntaxKind::LBracket | SyntaxKind::LParen | SyntaxKind::LBrace
+            )
+        }) {
+            if let Some(by) = by {
+                let gap = Span::new(by.span.start, first);
+                self.errors.push(errors::order_by(by, gap, None));
+            }
+            self.delimited(
+                Some(SyntaxKind::OrderList),
+                "order",
+                (SyntaxKind::LBracket, SyntaxKind::RBracket),
+                &[
+                    (SyntaxKind::LParen, SyntaxKind::RParen),
+                    (SyntaxKind::LBrace, SyntaxKind::RBrace),
+                ],
+                |p| p.items(Self::at_attribute, Self::order_item),
+            );
+        } else if self.at(SyntaxKind::Ident) {
+            // `order by name desc`, as SQL writes it: the items without
+            // brackets.
+            self.start_node(SyntaxKind::OrderList);
+            self.items(Self::at_attribute, Self::order_item);
+            self.builder.finish_node();
+            let close = self.last_end.unwrap_or(first);
+            self.errors.push(match by {
+                Some(by) => errors::order_by(by, Span::new(by.span.start, first), Some(close)),
+                None => errors::unbracketed_order(Span::new(order.span.end, first), close),
+            });
+        } else {
+            self.missing_with_help(
+                SyntaxKind::LBracket,
+                "list the attributes to order by in brackets, each after `asc` or `desc`, as in `order [asc name]`",
+            );
+        }
+    }
+
+    /// An item of a load's order: `asc x` or `desc x`. A direction after
+    /// the attribute, as SQL writes it, or spelled out, as in LINQ's
+    /// `descending`, an item without one, and SQL's `nulls first` and
+    /// `nulls last`, are reported with fixes.
+    fn order_item(&mut self) {
+        self.start_node(SyntaxKind::OrderItem);
+        let first = self.found().expect("at an attribute");
+        let prefix = direction(first.text).filter(|_| {
+            self.found_after(1)
+                .is_some_and(|f| f.kind == SyntaxKind::Ident)
+        });
+        if let Some(spelled) = prefix {
+            self.bump();
+            if first.text.eq_ignore_ascii_case(spelled) {
+                if first.text != spelled {
+                    self.errors.push(errors::miscased_keyword(first, spelled));
+                }
+            } else {
+                self.errors.push(errors::long_direction(first, spelled));
+            }
+            self.order_attribute();
+        } else {
+            let attribute = self.order_attribute();
+            let after = self
+                .found()
+                .filter(|f| f.kind == SyntaxKind::Ident)
+                .and_then(|f| Some((f, direction(f.text)?)));
+            match after {
+                Some((found, spelled)) => {
+                    self.bump();
+                    self.errors.push(errors::misplaced_direction(
+                        found,
+                        spelled,
+                        first,
+                        Span::new(attribute.end, found.span.end),
+                    ));
+                }
+                None => self.errors.push(errors::missing_direction(attribute)),
+            }
+        }
+        // SQL's `nulls first` or `nulls last`.
+        let nulls = self.found_word("nulls").filter(|_| {
+            self.found_after(1).is_some_and(|f| {
+                f.kind == SyntaxKind::Ident
+                    && (f.text.eq_ignore_ascii_case("first") || f.text.eq_ignore_ascii_case("last"))
+            })
+        });
+        if let Some(nulls) = nulls {
+            let before = self.last_end.unwrap_or(nulls.span.start);
+            self.start_node(SyntaxKind::Error);
+            self.bump();
+            self.bump();
+            self.builder.finish_node();
+            let end = self.last_end.unwrap_or(nulls.span.end);
+            self.errors.push(errors::order_nulls(
+                Span::new(nulls.span.start, end),
+                Span::new(before, end),
+            ));
+        }
+        self.builder.finish_node();
+    }
+
+    /// The attribute of an order item, which is next, and its span.
+    fn order_attribute(&mut self) -> Span {
+        if !self.at(SyntaxKind::Ident) {
+            self.missing_with_help(
+                SyntaxKind::Ident,
+                "name the attribute to order by after its direction, as in `asc name`",
+            );
+            return Span::empty(self.last_end.unwrap_or(0));
+        }
+        self.start_node(SyntaxKind::Name);
+        let span = self.bump();
+        self.builder.finish_node();
+        span
+    }
+
+    /// Whether a load's order is next: `order`, in any case, before its
+    /// items, or SQL's `by`. Elsewhere, as where a load's relation goes,
+    /// `order` is a name.
+    fn at_order(&mut self) -> bool {
+        self.at_word("order")
+            && self.found_after(1).is_some_and(|f| {
+                matches!(
+                    f.kind,
+                    SyntaxKind::LBracket | SyntaxKind::LParen | SyntaxKind::LBrace
+                ) || (f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case("by"))
+            })
+    }
+
+    /// Whether the contextual keyword `word` is next, in any case.
+    fn at_word(&mut self, word: &str) -> bool {
+        self.found_word(word).is_some()
+    }
+
+    /// The contextual keyword `word`, in any case, if it is next.
+    fn found_word(&mut self, word: &str) -> Option<Found<'a>> {
+        self.found()
+            .filter(|f| f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case(word))
+    }
+
+    /// Consume the contextual keyword `word`, which is next in some case,
+    /// reporting any case but lowercase.
+    fn contextual_keyword(&mut self, word: &str) {
+        let found = self.found().expect("the word is next");
+        self.bump();
+        if found.text != word {
+            self.errors.push(errors::miscased_keyword(found, word));
+        }
     }
 
     /// Consume `keyword`, which [`Parser::at_clause_keyword`] found,
@@ -3026,7 +3266,7 @@ fn is_skipped(kind: SyntaxKind) -> bool {
 mod tests {
     use super::*;
     use trendy_diag::Code;
-    use trendy_syntax::ast::{AstNode, Expr, Statement, TypeExpr};
+    use trendy_syntax::ast::{AstNode, Clause, Expr, Statement, TypeExpr};
     use trendy_syntax::outline;
 
     fn parse_str(source: &str) -> Parse {
@@ -3805,6 +4045,77 @@ SourceFile
             )),
             body("if a then [ call f{}; ] else [ call g{}; ];")
         );
+    }
+
+    #[test]
+    fn loads() {
+        let load = |body: &str| {
+            let source = format!("operator f{{}} [ {body} ];");
+            let parse = parse_str(&source);
+            assert!(parse.errors.is_empty(), "{body}: {:#?}", parse.errors);
+            let op = parse.tree.operators().next().unwrap();
+            let statements: Vec<_> = op.body().unwrap().statements().collect();
+            let [Statement::Assign(stmt)] = &statements[..] else {
+                panic!("{body}: {statements:?}");
+            };
+            let clauses: Vec<_> = stmt.clauses().collect();
+            let [Clause::Load(load)] = &clauses[..] else {
+                panic!("{body}: {clauses:?}");
+            };
+            (clauses[0].clone(), load.clone())
+        };
+        let (clause, plain) = load("load a from r where x > 1 order [asc x, desc y];");
+        assert_eq!(clause.target().unwrap().syntax().text(), "a");
+        assert_eq!(clause.operand().unwrap().syntax().text(), "r where x > 1");
+        let items: Vec<_> = plain
+            .order()
+            .unwrap()
+            .items()
+            .map(|item| {
+                let name = item.attribute().unwrap().ident().unwrap();
+                (name.text().to_string(), item.descending())
+            })
+            .collect();
+        assert_eq!(items, [("x".to_string(), false), ("y".to_string(), true)]);
+        // The words are contextual keywords: names elsewhere, even in a load,
+        // as an attribute ordered by.
+        load("load desc from order order [asc desc];");
+        let parse = parse_str("operator f{load: integer} [ load := load + 1; ];");
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+    }
+
+    #[test]
+    fn load_recovery() {
+        let body = |statements: &str| format!("operator f{{}} [ {statements} ];");
+        // SQL's order, its keywords in capitals, its directions after the
+        // attributes, and its nulls; an item without a direction.
+        assert_eq!(
+            fix(&body("load a from r ORDER BY x DESC nulls last, y;")),
+            body("load a from r order [desc x, asc y];")
+        );
+        assert_eq!(
+            fix(&body("load a from r order by [asc x];")),
+            body("load a from r order [asc x];")
+        );
+        assert_eq!(
+            fix(&body("load a from r order asc x;")),
+            body("load a from r order [asc x];")
+        );
+        // Tutorial D's, without `from`; LINQ's direction, spelled out.
+        assert_eq!(
+            fix(&body("LOAD a r ORDER (descending x);")),
+            body("load a from r order [desc x];")
+        );
+        assert_eq!(
+            fix(&body("load a from r order {x ascending};")),
+            body("load a from r order [asc x];")
+        );
+        // An ordering as a value, which only a load makes.
+        assert_eq!(
+            fix(&body("a := r order [asc x];")),
+            body("load a from r order [asc x];")
+        );
+        assert_eq!(messages(&body("load a from r;")), ["a load needs an order"]);
     }
 
     #[test]

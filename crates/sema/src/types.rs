@@ -47,6 +47,9 @@ pub(crate) enum Origin {
     /// The variable named, assigned a value: where its type is set, by its
     /// declared type or else its initial value.
     Variable(String, Box<Origin>),
+    /// The array variable named, of tuples, which a load fills from a
+    /// relation of their heading: where the variable's type is set.
+    Loaded(String, Box<Origin>),
     /// The type parameter named, of an operator called, given its type by
     /// the argument written here.
     TypeParameter(String, Expr),
@@ -92,7 +95,9 @@ impl Origin {
             }
             Origin::Builtin => None,
             Origin::Operator(token) => Some(trendy_syntax::span(token.text_range())),
-            Origin::Variable(_, within) | Origin::Operand(_, within) => within.span(),
+            Origin::Variable(_, within)
+            | Origin::Loaded(_, within)
+            | Origin::Operand(_, within) => within.span(),
         }
     }
 
@@ -117,6 +122,9 @@ impl Origin {
                 Origin::Type(_) => format!("`{name}` is declared with this type"),
                 _ => format!("`{name}` has this value's type"),
             },
+            Origin::Loaded(name, _) => {
+                format!("a load into `{name}` takes a relation of its elements' heading")
+            }
             Origin::Operand(_, within) => within.label(),
             Origin::Operator(token) if token.kind() == trendy_syntax::SyntaxKind::WhereKw => {
                 "`where` takes a boolean condition".to_string()
@@ -158,6 +166,7 @@ impl Origin {
     fn attribute(&self, name: &str) -> Option<Origin> {
         match self {
             Origin::Variable(_, declared) => declared.attribute(name),
+            Origin::Loaded(_, declared) => declared.array_element()?.attribute(name),
             Origin::Type(TypeExpr::Tuple(t)) => Origin::Heading(t.heading()?).attribute(name),
             Origin::Heading(h) => h
                 .attributes()
@@ -195,6 +204,7 @@ impl Origin {
     fn element(&self) -> Option<Origin> {
         match self {
             Origin::Variable(_, declared) => declared.element(),
+            Origin::Loaded(_, declared) => declared.array_element(),
             Origin::Type(TypeExpr::Relation(r)) => r.heading().map(Origin::Heading),
             Origin::Heading(h) => Some(Origin::Heading(h.clone())),
             Origin::Value(Expr::Relation(r)) => r.elements().next().map(Origin::Value),

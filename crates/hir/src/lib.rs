@@ -656,6 +656,43 @@ pub enum Target {
     Local(LocalId),
 }
 
+/// An attribute a `load` orders a relation's tuples by, and in which
+/// direction: `asc a` or `desc a`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OrderItem {
+    pub attribute: String,
+    pub descending: bool,
+}
+
+/// What an array loaded from a relation holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Loaded {
+    /// The relation's tuples.
+    Tuples,
+    /// The values of the relation's only attribute.
+    Values,
+}
+
+impl Loaded {
+    /// The type of the elements of an array loaded from a relation with
+    /// `heading`.
+    ///
+    /// # Panics
+    ///
+    /// For [`Loaded::Values`], if the heading hasn't exactly one attribute,
+    /// which sema rules out.
+    #[must_use]
+    pub fn element(self, heading: &Heading) -> Type {
+        match self {
+            Loaded::Tuples => Type::Tuple(heading.clone()),
+            Loaded::Values => match heading.attributes().collect::<Vec<_>>()[..] {
+                [(_, ty)] => ty.clone(),
+                _ => panic!("the values of {heading:?}, which hasn't one attribute"),
+            },
+        }
+    }
+}
+
 /// An expression whose value is known only when the program runs. Parts
 /// known at compile time are already evaluated to constants.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -747,6 +784,13 @@ pub enum Expr {
     /// else the third's: only that one is computed, so the other's failure
     /// never happens.
     If(Box<Expr>, Box<Expr>, Box<Expr>),
+    /// The array a `load` makes of a relation: its tuples, or the values
+    /// of its only attribute, as `Loaded` says, in the order of the items,
+    /// by the first, then, among tuples equal on it, by the next, and so
+    /// on. Tuples equal on every item come in canonical order, which the
+    /// language leaves undefined. The items are at least one, each a
+    /// different attribute of the relation, of an ordered type.
+    Load(Box<Expr>, Vec<OrderItem>, Loaded),
     /// The only tuple of a relation (`tuple from`), which fails if it has
     /// none or several. `value from` is the extraction of its only
     /// attribute.
@@ -781,6 +825,10 @@ impl Expr {
                 other => panic!("an element of {other}"),
             },
             Expr::If(_, then, _) => then.type_with(leaf),
+            Expr::Load(relation, _, loaded) => match relation.type_with(leaf) {
+                Type::Relation(heading) => Type::Array(Box::new(loaded.element(&heading))),
+                other => panic!("loading {other}"),
+            },
             // Arithmetic on a type parameter's values has their type.
             Expr::Unary(op, operand) => op
                 .operand()
@@ -847,6 +895,9 @@ impl Expr {
             Expr::Index(array, index) => Expr::Index(inst(array), inst(index)),
             Expr::If(condition, then, otherwise) => {
                 Expr::If(inst(condition), inst(then), inst(otherwise))
+            }
+            Expr::Load(relation, items, loaded) => {
+                Expr::Load(inst(relation), items.clone(), *loaded)
             }
             Expr::Unary(op, operand) => Expr::Unary(op.instantiated(types), inst(operand)),
             Expr::Binary(op, lhs, rhs) => {
@@ -1810,6 +1861,58 @@ pub struct RelationValue {
     pub tuples: BTreeSet<TupleValue>,
 }
 
+impl RelationValue {
+    /// The array a `load` makes of the relation, as [`Expr::Load`] says:
+    /// its tuples, or their values, ordered by `items`, which are
+    /// attributes of scalar types.
+    ///
+    /// # Panics
+    ///
+    /// If an item isn't an attribute of a scalar type, or the values are
+    /// loaded of a relation of more attributes than one, which sema rules
+    /// out.
+    #[must_use]
+    pub fn loaded(&self, items: &[OrderItem], loaded: Loaded) -> ArrayValue {
+        fn key<'t>(tuple: &'t TupleValue, item: &OrderItem) -> &'t Value {
+            tuple
+                .get(&item.attribute)
+                .expect("sema orders only by the relation's attributes")
+        }
+        let mut tuples: Vec<&TupleValue> = self.tuples.iter().collect();
+        // A stable sort of the tuples in canonical order, which so breaks
+        // ties, as the runtime does.
+        tuples.sort_by(|a, b| {
+            items
+                .iter()
+                .map(|item| {
+                    let ordering = compare(key(a, item), key(b, item));
+                    if item.descending {
+                        ordering.reverse()
+                    } else {
+                        ordering
+                    }
+                })
+                .find(|ordering| ordering.is_ne())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let elements = tuples
+            .into_iter()
+            .map(|tuple| match loaded {
+                Loaded::Tuples => Value::Tuple(tuple.clone()),
+                Loaded::Values => tuple
+                    .attributes()
+                    .next()
+                    .map(|(_, value)| value.clone())
+                    .expect("sema loads the values only of one attribute"),
+            })
+            .collect();
+        ArrayValue {
+            element: loaded.element(&self.heading),
+            elements,
+        }
+    }
+}
+
 impl Value {
     /// The tuple or relation without the attributes named, which it has.
     /// A relation's tuples can become duplicates, which are dropped.
@@ -2166,6 +2269,18 @@ impl Type {
             (Type::Relation(lhs), Type::Relation(rhs)) => Type::Relation(lhs.and(rhs)),
             (Type::Tuple(lhs), Type::Tuple(rhs)) => Type::Tuple(lhs.and(rhs)),
             _ => panic!("the AND of {self} and {other}"),
+        }
+    }
+
+    /// Whether the type has what `requirement` names: a scalar type as
+    /// [`Scalar::has`] says, and a type parameter if its kind requires it.
+    /// Tuples, relations and arrays have no total order, and no arithmetic.
+    #[must_use]
+    pub fn has(&self, requirement: Requirement) -> bool {
+        match self {
+            Type::Scalar(scalar) => scalar.has(requirement),
+            Type::Parameter(parameter) => parameter.any.requires(requirement),
+            _ => false,
         }
     }
 
@@ -2632,6 +2747,55 @@ mod tests {
         assert_eq!(
             UnaryOp::Negate(Numeric::Integer).apply(&Value::Integer(5)),
             ok(-5)
+        );
+    }
+
+    #[test]
+    fn loads_order_tuples_by_their_items() {
+        let tuple = |a: i64, b: &str| {
+            TupleValue::new(
+                [
+                    ("a".to_string(), Value::Integer(a)),
+                    ("b".to_string(), Value::Text(b.to_string())),
+                ]
+                .into(),
+            )
+        };
+        let relation = RelationValue {
+            heading: Heading::new(
+                [
+                    ("a".to_string(), Type::Scalar(Scalar::Integer)),
+                    ("b".to_string(), Type::Scalar(Scalar::Text)),
+                ]
+                .into(),
+            ),
+            tuples: [tuple(1, "x"), tuple(2, "y"), tuple(1, "z")].into(),
+        };
+        let item = |attribute: &str, descending| OrderItem {
+            attribute: attribute.to_string(),
+            descending,
+        };
+        let loaded =
+            |items: &[OrderItem]| Value::Array(relation.loaded(items, Loaded::Tuples)).to_string();
+        assert_eq!(
+            loaded(&[item("a", true), item("b", true)]),
+            r#"array [tuple { a: 2, b: "y" }, tuple { a: 1, b: "z" }, tuple { a: 1, b: "x" }]"#
+        );
+        // Tuples equal on every item come in canonical order, as in the
+        // runtime, which the language leaves undefined.
+        assert_eq!(
+            loaded(&[item("a", false)]),
+            r#"array [tuple { a: 1, b: "x" }, tuple { a: 1, b: "z" }, tuple { a: 2, b: "y" }]"#
+        );
+        let names = RelationValue {
+            heading: Heading::new([("b".to_string(), Type::Scalar(Scalar::Text))].into()),
+            tuples: ["x", "z", "y"]
+                .map(|b| TupleValue::new([("b".to_string(), Value::Text(b.to_string()))].into()))
+                .into(),
+        };
+        assert_eq!(
+            Value::Array(names.loaded(&[item("b", true)], Loaded::Values)).to_string(),
+            r#"array ["z", "y", "x"]"#
         );
     }
 
