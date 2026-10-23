@@ -328,14 +328,25 @@ Everything else goes on one line, except that a relation value with more than
 one tuple is broken across lines: each tuple on its own line, indented four
 spaces per level of nesting, with the closing brace on a line of its own.
 A tuple value, relation value or call's arguments with several items, one of
-them broken, puts each item on its own line too. Lines are at most 100
+them broken, puts each item on its own line too, and so does one with a
+broken chain in it outside any block. Lines are at most 100
 characters: the formatter lays everything out, then breaks the outermost
 unbroken list on the first line that's too long, one item per line, or
-`if` expression, its `then` and its `else` each starting a line, and
-repeats until every line fits or none can be broken further. An `if` with
-a part that spans lines is broken too, and an `else if` with the `if` it
-is in. A block of an `if` statement, as an operator's body, has each
-statement on its own line.
+`if` expression, its `then` and its `else` each starting a line, or chain
+of dyadic operators of one precedence (`SyntaxKind::precedence`, which the
+parser parses by), each operator starting a line, a list before a chain
+beside it, and repeats until every line fits or none can be broken
+further. An `if` with a part that spans lines is broken too, and an
+`else if` with the `if` it is in. A block of an `if` statement, as an
+operator's body, has each statement on its own line.
+
+Indentation follows the lines as they are written, which the renderer
+records as it goes (`Starts`): a block's items go one level in from the
+line it opens on, and its closing delimiter back to that line's level; a
+broken chain's operators, and a broken `if`'s `then` and `else`, one
+level in from the line the chain or `if` starts on, or, when that is the
+first line of another broken chain or `if`, in whose first operand or
+condition it is, one level in from that one's lines (`Layout::continued`).
 
 The formatter reprints the CST's tokens and decides the whitespace between
 them. The only tokens it adds or drops are the commas after lists' last

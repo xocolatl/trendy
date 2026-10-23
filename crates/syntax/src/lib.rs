@@ -15,6 +15,41 @@ use std::fmt::Write;
 
 use trendy_diag::Span;
 
+/// How tightly a dyadic operator binds: an operator binds tighter than one
+/// of a lower precedence, so `a or b and c` is `a or (b and c)`. All group
+/// to the left but `implies`, and the comparisons don't chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Precedence(u8);
+
+impl Precedence {
+    /// `where`, the loosest: its condition is all that follows.
+    pub const WHERE: Precedence = Precedence(0);
+    /// `implies`, which groups to the right.
+    pub const IMPLIES: Precedence = Precedence(1);
+    pub const OR: Precedence = Precedence(2);
+    pub const XOR: Precedence = Precedence(3);
+    pub const AND: Precedence = Precedence(4);
+    /// `=`, `<>`, `<`, `<=`, `>` and `>=`.
+    pub const COMPARISON: Precedence = Precedence(5);
+    /// `union`, `d_union` and `xunion`: Algebra A's OR, looser than the AND
+    /// of the joins, as `or` is than `and`.
+    pub const UNION: Precedence = Precedence(6);
+    /// The joins, `join`, `times`, `compose` and the matchings, and
+    /// `intersect`, `minus` and `i_minus`, which are AND too.
+    pub const JOIN: Precedence = Precedence(7);
+    /// `+`, `-` and `||`.
+    pub const ADDITION: Precedence = Precedence(8);
+    /// `*`, `/`, `div` and `mod`, the tightest.
+    pub const MULTIPLICATION: Precedence = Precedence(9);
+
+    /// The next precedence up, which the right operand of an operator of
+    /// this one that groups to the left binds at least as tightly as.
+    #[must_use]
+    pub fn tighter(self) -> Precedence {
+        Precedence(self.0 + 1)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u16)]
 pub enum SyntaxKind {
@@ -615,6 +650,31 @@ impl SyntaxKind {
                 | SyntaxKind::ComposeKw
                 | SyntaxKind::MatchingKw
         )
+    }
+
+    /// How tightly this binds as a dyadic operator, if it is one. `-` is
+    /// one too, as well as a prefix operator; `not` is only the prefix
+    /// one, and `not matching` binds as `matching` does.
+    #[must_use]
+    pub fn precedence(self) -> Option<Precedence> {
+        Some(match self {
+            SyntaxKind::WhereKw => Precedence::WHERE,
+            SyntaxKind::ImpliesKw => Precedence::IMPLIES,
+            SyntaxKind::OrKw => Precedence::OR,
+            SyntaxKind::XorKw => Precedence::XOR,
+            SyntaxKind::AndKw => Precedence::AND,
+            kind if kind.is_comparison() => Precedence::COMPARISON,
+            SyntaxKind::UnionKw | SyntaxKind::DUnionKw | SyntaxKind::XUnionKw => Precedence::UNION,
+            kind if kind.is_join() => Precedence::JOIN,
+            SyntaxKind::IntersectKw | SyntaxKind::MinusKw | SyntaxKind::IMinusKw => {
+                Precedence::JOIN
+            }
+            SyntaxKind::Plus | SyntaxKind::Minus | SyntaxKind::PipePipe => Precedence::ADDITION,
+            SyntaxKind::Star | SyntaxKind::Slash | SyntaxKind::DivKw | SyntaxKind::ModKw => {
+                Precedence::MULTIPLICATION
+            }
+            _ => return None,
+        })
     }
 
     /// Whether this keyword starts a shorthand for an assignment: `insert`,

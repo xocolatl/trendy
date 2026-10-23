@@ -5,7 +5,7 @@ mod unordered;
 use trendy_diag::{Diagnostic, Span};
 use trendy_lexer::{Lexed, Token};
 use trendy_syntax::ast::{AstNode, SourceFile};
-use trendy_syntax::{SyntaxKind, TreeBuilder};
+use trendy_syntax::{Precedence, SyntaxKind, TreeBuilder};
 
 use crate::sequences::bracketed_lists;
 use crate::unordered::unordered_operators;
@@ -85,23 +85,11 @@ enum KeySpelling {
     Unique,
 }
 
-/// The precedence of `where`, the loosest operator: its condition is a
-/// whole boolean expression.
-const WHERE: u8 = 0;
-/// The precedence of the comparison operators.
-const COMPARISON: u8 = 6;
-/// The precedence of `union`, Algebra A's OR, looser than the AND of the
-/// joins, as `or` is than `and`.
-const UNION: u8 = 7;
-/// The precedence of the joins, `join`, `times`, `compose` and the
-/// matchings, and of `intersect` and `minus`, which are AND too.
-const JOIN: u8 = 8;
-
 /// A dyadic operator at the next token: its precedence, its first token,
 /// and the keyword it is or stands for.
 #[derive(Clone, Copy)]
 struct BinaryOperator<'a> {
-    precedence: u8,
+    precedence: Precedence,
     found: Found<'a>,
     keyword: SyntaxKind,
     words: Words,
@@ -1530,7 +1518,7 @@ impl<'a> Parser<'a> {
                 if self.at(SyntaxKind::WhereKw) {
                     let where_span = self.bump();
                     let outer = std::mem::replace(&mut self.paren_calls, values_first);
-                    self.binary(WHERE + 1);
+                    self.binary(Precedence::WHERE.tighter());
                     self.paren_calls = outer;
                     if !values_first {
                         self.values_after_where(where_span);
@@ -1863,7 +1851,7 @@ impl<'a> Parser<'a> {
     fn condition(&mut self, start: usize, target: Option<&str>) {
         if self.at(SyntaxKind::WhereKw) {
             self.bump();
-            self.binary(WHERE + 1);
+            self.binary(Precedence::WHERE.tighter());
             return;
         }
         let target_end = self.last_end.unwrap_or(start);
@@ -1920,7 +1908,7 @@ impl<'a> Parser<'a> {
         self.start_node(SyntaxKind::AssignList);
         let set = self.bump();
         loop {
-            self.assign(errors::Assigning::Update, WHERE + 1);
+            self.assign(errors::Assigning::Update, Precedence::WHERE.tighter());
             // A comma before another `name =`, as SQL writes them,
             // continues the list; any other ends the assignment, as the one
             // before `n := …` does.
@@ -1956,7 +1944,9 @@ impl<'a> Parser<'a> {
         let condition_end = self.last_end.unwrap_or_default();
         self.start_node(SyntaxKind::AssignList);
         let open = self.bump();
-        self.items(Self::at_operand, |p| p.assign(errors::Assigning::Update, 0));
+        self.items(Self::at_operand, |p| {
+            p.assign(errors::Assigning::Update, Precedence::WHERE);
+        });
         let close = self.at(SyntaxKind::RParen).then(|| self.bump());
         self.builder.finish_node();
         let Some(close) = close else {
@@ -2316,7 +2306,7 @@ impl<'a> Parser<'a> {
         if self.at_if() {
             self.if_expression();
         } else {
-            self.binary(0);
+            self.binary(Precedence::WHERE);
         }
         if let Some(from) = from {
             self.foreign_conditional(start, from);
@@ -2326,8 +2316,8 @@ impl<'a> Parser<'a> {
     /// An expression whose operators bind at least as tightly as `min`: a
     /// whole one, an `if` too, at 0, and else one that an `if`'s `else`
     /// branch would run past the end of, unless parenthesized.
-    fn value(&mut self, min: u8) {
-        if min == 0 {
+    fn value(&mut self, min: Precedence) {
+        if min == Precedence::WHERE {
             self.expression();
         } else {
             self.binary(min);
@@ -2485,20 +2475,16 @@ impl<'a> Parser<'a> {
     /// to `where`.
     fn part(&mut self) -> String {
         let from = self.lookahead().map_or(0, |f| f.span.start);
-        self.binary(0);
+        self.binary(Precedence::WHERE);
         let end = self.last_end.unwrap_or(from).max(from);
         self.source[from..end].to_string()
     }
 
     /// An expression whose dyadic operators bind at least as tightly as
-    /// `min`, by precedence climbing. From loosest to tightest: `where` (0),
-    /// whose condition is all that follows, `implies` (1, grouping to the
-    /// right), `or` (2), `xor` (3), `and` (4), the comparisons (6), which
-    /// don't chain, `union` (7), the joins, `intersect` and `minus` (8),
-    /// `+`, `-` and `||` (9), and `*`, `/`, `div` and `mod` (10), all
-    /// grouping to the left. The prefix operators, `not`, `-` and `+`, bind
-    /// tightest, so `not a = b` is `(not a) = b`.
-    fn binary(&mut self, min: u8) {
+    /// `min`, by precedence climbing (see [`Precedence`]). The prefix
+    /// operators, `not`, `-` and `+`, bind tightest, so `not a = b` is
+    /// `(not a) = b`.
+    fn binary(&mut self, min: Precedence) {
         self.peek();
         let start = self.builder.checkpoint();
         self.unary();
@@ -2515,7 +2501,7 @@ impl<'a> Parser<'a> {
             if precedence < min {
                 break;
             }
-            if let Some(middle) = compared.filter(|_| precedence == COMPARISON) {
+            if let Some(middle) = compared.filter(|_| precedence == Precedence::COMPARISON) {
                 let before = self.source[..found.span.start].chars().next_back();
                 self.errors.push(errors::chained_comparison(
                     found,
@@ -2545,13 +2531,17 @@ impl<'a> Parser<'a> {
             self.binary(if right_grouping {
                 precedence
             } else {
-                precedence + 1
+                precedence.tighter()
             });
-            compared = match (precedence == COMPARISON, rhs_start, self.last_end) {
+            compared = match (
+                precedence == Precedence::COMPARISON,
+                rhs_start,
+                self.last_end,
+            ) {
                 (true, Some(start), Some(end)) if start < end => Some(Span::new(start, end)),
                 _ => None,
             };
-            if precedence == JOIN {
+            if precedence == Precedence::JOIN {
                 self.join_condition();
             }
             self.builder.finish_node();
@@ -2563,7 +2553,7 @@ impl<'a> Parser<'a> {
         let found = self.lookahead_nth(0)?;
         if let Some((keyword, tokens)) = self.sql_join_at() {
             return Some(BinaryOperator {
-                precedence: JOIN,
+                precedence: Precedence::JOIN,
                 found,
                 keyword,
                 words: Words::Sql(tokens),
@@ -2573,11 +2563,7 @@ impl<'a> Parser<'a> {
             && let Some((keyword, spelled)) = errors::operator_name(found.text)
         {
             return Some(BinaryOperator {
-                precedence: if keyword == SyntaxKind::UnionKw {
-                    UNION
-                } else {
-                    JOIN
-                },
+                precedence: keyword.precedence()?,
                 found,
                 keyword,
                 words: Words::Renamed { spelled },
@@ -2592,28 +2578,14 @@ impl<'a> Parser<'a> {
         let matching = |f: Found| f.spells(SyntaxKind::MatchingKw);
         if keyword == SyntaxKind::NotKw && self.lookahead_nth(1).is_some_and(matching) {
             return Some(BinaryOperator {
-                precedence: JOIN,
+                precedence: Precedence::JOIN,
                 found,
                 keyword: SyntaxKind::MatchingKw,
                 words: Words::NotMatching,
             });
         }
-        let precedence = match keyword {
-            SyntaxKind::WhereKw => WHERE,
-            SyntaxKind::ImpliesKw => 1,
-            SyntaxKind::OrKw => 2,
-            SyntaxKind::XorKw => 3,
-            SyntaxKind::AndKw => 4,
-            kind if kind.is_comparison() => COMPARISON,
-            SyntaxKind::UnionKw | SyntaxKind::DUnionKw | SyntaxKind::XUnionKw => UNION,
-            kind if kind.is_join() => JOIN,
-            SyntaxKind::IntersectKw | SyntaxKind::MinusKw | SyntaxKind::IMinusKw => JOIN,
-            SyntaxKind::Plus | SyntaxKind::Minus | SyntaxKind::PipePipe => 9,
-            SyntaxKind::Star | SyntaxKind::Slash | SyntaxKind::DivKw | SyntaxKind::ModKw => 10,
-            _ => return None,
-        };
         Some(BinaryOperator {
-            precedence,
+            precedence: keyword.precedence()?,
             found,
             keyword,
             words: Words::One,
@@ -2690,14 +2662,14 @@ impl<'a> Parser<'a> {
         self.start_node(SyntaxKind::Error);
         self.bump();
         if found.text.eq_ignore_ascii_case("on") {
-            self.binary(JOIN + 1);
+            self.binary(Precedence::JOIN.tighter());
             while self
                 .lookahead_nth(0)
                 .is_some_and(|f| f.kind.is_comparison() || f.kind == SyntaxKind::AndKw)
             {
                 // `on a.x = b.y and a.z = b.w`: the whole condition.
                 self.bump();
-                self.binary(JOIN + 1);
+                self.binary(Precedence::JOIN.tighter());
             }
         } else if self.at(SyntaxKind::LParen) {
             while !matches!(
@@ -2799,14 +2771,14 @@ impl<'a> Parser<'a> {
     fn relation_expression(&mut self) {
         self.peek();
         let start = self.builder.checkpoint();
-        self.binary(UNION);
+        self.binary(Precedence::UNION);
         if let Some(operator) = self
             .binary_operator()
             .filter(|o| o.keyword == SyntaxKind::WhereKw)
         {
             self.builder.start_node_at(start, SyntaxKind::BinaryExpr);
             self.operator_token(operator.found, operator.keyword);
-            self.binary(WHERE + 1);
+            self.binary(Precedence::WHERE.tighter());
             self.builder.finish_node();
         }
     }
@@ -3020,7 +2992,11 @@ impl<'a> Parser<'a> {
             assigning.list(),
             delimiters,
             mistakes,
-            move |p| p.items(Self::at_operand, move |p| p.assign(assigning, 0)),
+            move |p| {
+                p.items(Self::at_operand, move |p| {
+                    p.assign(assigning, Precedence::WHERE);
+                });
+            },
         );
         self.form = outer_form;
     }
@@ -3029,7 +3005,7 @@ impl<'a> Parser<'a> {
     /// are written, are fixed to `a := x`, and `x as a`, as SQL and Tutorial
     /// D's `ADD` write it, to `a := x`. The value's operators bind at least
     /// as tightly as `min`: after SQL's `set`, a `where` ends it.
-    fn assign(&mut self, assigning: errors::Assigning, min: u8) {
+    fn assign(&mut self, assigning: errors::Assigning, min: Precedence) {
         self.start_node(SyntaxKind::Assign);
         let separator = self.found_after(1).map(|f| f.kind);
         let named = self.at(SyntaxKind::Ident)

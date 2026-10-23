@@ -12,13 +12,14 @@
 
 mod order;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use trendy_syntax::ast::{
-    Arguments, ArrayLiteral, AssignBlock, AssignList, AstNode, Body, Clause, GatherList, Heading,
-    IfExpr, NameList, NaryExpr, OrderList, RelationLiteral, RenameList, SourceFile, TupleLiteral,
+    Arguments, ArrayLiteral, AssignBlock, AssignList, AstNode, BinaryExpr, Body, Clause,
+    GatherList, Heading, IfExpr, NameList, NaryExpr, OrderList, RelationLiteral, RenameList,
+    SourceFile, TupleLiteral,
 };
-use trendy_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
+use trendy_syntax::{Precedence, SyntaxKind, SyntaxNode, SyntaxToken};
 
 /// Render a file in canonical style.
 ///
@@ -28,14 +29,18 @@ use trendy_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 #[must_use]
 pub fn format(file: &SourceFile) -> String {
     // Lay everything out flat but for the blocks the structure demands, then
-    // break the outermost list, or a variable's keys, on the first line
-    // that's too long, until every line fits or nothing more can be broken.
+    // break the outermost list, chain of operators, or a variable's keys,
+    // on the first line that's too long, until every line fits or nothing
+    // more can be broken.
     let mut layout = Layout::default();
     loop {
         let (out, lines) = render(file, &layout);
         match layout.too_long(&out, &lines) {
             Some(Break::Node(node)) => {
                 layout.broken.insert(node);
+            }
+            Some(Break::Chain(top)) => {
+                layout.broken_chains.insert(top);
             }
             Some(Break::Keys(decl)) => {
                 layout.broken_keys.insert(decl);
@@ -50,26 +55,33 @@ enum Break {
     /// A list, one item per line, or an `if`, with its `then` and its
     /// `else` each starting a line.
     Node(SyntaxNode),
+    /// A chain of dyadic operators of one precedence, given by its
+    /// outermost operator's expression: each operator starts a line, one
+    /// level in from the line the chain starts on, as in `r` then
+    /// `where p`, or `a` then `and b` then `and c`.
+    Chain(SyntaxNode),
     /// The keys of a variable declaration, each on a line of its own.
     Keys(SyntaxNode),
 }
 
 /// The widest a line may be, in characters, before the formatter breaks a
-/// list or an `if` in it across lines.
+/// list, an `if` or a chain of operators in it across lines.
 const MAX_WIDTH: usize = 100;
 
-/// Which lists and `if`s, and which variable declarations' keys, are broken
-/// across lines beyond those the structure demands.
+/// Which lists and `if`s, chains of operators, and variable declarations'
+/// keys are broken across lines beyond those the structure demands.
 #[derive(Default)]
 struct Layout {
     broken: HashSet<SyntaxNode>,
+    /// The chains broken, each by its outermost operator's expression.
+    broken_chains: HashSet<SyntaxNode>,
     broken_keys: HashSet<SyntaxNode>,
 }
 
 impl Layout {
-    /// The outermost list or keys that can still be broken on the first
-    /// line of `out` that is too long, given `lines`, the line each
-    /// significant token was written on.
+    /// The outermost list, `if`, chain or keys that can still be broken on
+    /// the first line of `out` that is too long, given `lines`, the line
+    /// each significant token was written on.
     fn too_long(&self, out: &str, lines: &[(SyntaxToken, usize)]) -> Option<Break> {
         for (line, text) in out.lines().enumerate() {
             if text.chars().count() <= MAX_WIDTH {
@@ -85,42 +97,71 @@ impl Layout {
             if let Some(decl) = keys {
                 return Some(Break::Keys(decl));
             }
-            // The outermost list or `if` that starts on the line and isn't
-            // broken yet, and of those the first: in `r{a, b} extend {…}`,
-            // the `extend`'s list, which the projection is within.
+            // The outermost list or `if` that starts on the line, or chain
+            // with an operator on it, that isn't broken yet, and of those
+            // the first: in `r{a, b} extend {…}`, the `extend`'s list, which
+            // the projection is within. A list goes before a chain beside
+            // it, as a load's order does before its relation's `where`.
             let breakable = lines
                 .iter()
                 .filter(|(_, l)| *l == line)
-                .filter_map(|(token, _)| {
-                    let node = token.parent()?;
-                    let opens = match token.kind() {
-                        SyntaxKind::LBrace | SyntaxKind::LBracket => {
-                            is_list(&node) && items(&node) > 0
-                        }
-                        SyntaxKind::IfKw => node.kind() == SyntaxKind::IfExpr,
-                        _ => false,
-                    };
-                    (opens && !self.is_block(&node) && !self.chained_if(&node)).then_some(node)
-                })
-                .min_by_key(|node| node.ancestors().count());
-            if let Some(node) = breakable {
-                return Some(Break::Node(node));
+                .filter_map(|(token, _)| self.breakable_at(token))
+                .min_by_key(|b| match b {
+                    Break::Chain(top) => (top.ancestors().count(), 1),
+                    Break::Node(node) | Break::Keys(node) => (node.ancestors().count(), 0),
+                });
+            if breakable.is_some() {
+                return breakable;
             }
         }
         None
     }
 
+    /// What breaking at `token` would break, if anything not broken yet:
+    /// the list it opens, the `if` it starts, or the chain it is an
+    /// operator of.
+    fn breakable_at(&self, token: &SyntaxToken) -> Option<Break> {
+        let node = token.parent()?;
+        if is_operator_of(token, &node) {
+            let top = chain_top(&node);
+            return (!self.broken_chains.contains(&top)).then_some(Break::Chain(top));
+        }
+        let opens = match token.kind() {
+            SyntaxKind::LBrace | SyntaxKind::LBracket => is_list(&node) && items(&node) > 0,
+            SyntaxKind::IfKw => node.kind() == SyntaxKind::IfExpr,
+            _ => false,
+        };
+        (opens && !self.is_block(&node) && !self.chained_if(&node)).then_some(Break::Node(node))
+    }
+
     /// Whether a node is laid out one item per line, indented: a body with
     /// statements, a relation value with more than one tuple, a list broken
-    /// because it was too long, and a list with several items, one of them
-    /// laid out across lines. So a value broken across lines is never
-    /// followed by more items on its last line; a single item stays hugged by
-    /// its braces, as in `call f{v: relation {` … `}};`.
+    /// because it was too long, a list with several items, one of them
+    /// laid out across lines, and a list with a broken chain in it outside
+    /// any block. So a value broken across lines is never followed by more
+    /// items on its last line; a single item stays hugged by its braces if
+    /// a closing delimiter ends it, as in `call f{v: relation {` … `}};`.
     fn is_block(&self, node: &SyntaxNode) -> bool {
         self.own_block(node)
             || (is_list(node)
-                && items(node) > 1
-                && node.descendants().skip(1).any(|n| self.own_block(&n)))
+                && node.descendants().skip(1).any(|n| {
+                    (items(node) > 1 && self.across_lines(&n))
+                        || (self.broken_chains.contains(&n) && self.outside_blocks(&n, node))
+                }))
+    }
+
+    /// Whether `node` is laid out across lines of its own accord: a block,
+    /// or a broken chain.
+    fn across_lines(&self, node: &SyntaxNode) -> bool {
+        self.own_block(node) || self.broken_chains.contains(node)
+    }
+
+    /// Whether no block is between `node` and its ancestor `outer`.
+    fn outside_blocks(&self, node: &SyntaxNode, outer: &SyntaxNode) -> bool {
+        node.ancestors()
+            .skip(1)
+            .take_while(|a| a != outer)
+            .all(|a| !self.is_block(&a))
     }
 
     /// Whether `node` is a block in its own right, not because of what's in
@@ -148,7 +189,10 @@ impl Layout {
             || decl
                 .children()
                 .filter(|n| n.kind() != SyntaxKind::Key)
-                .any(|n| n.descendants().any(|d| self.is_block(&d)))
+                .any(|n| {
+                    n.descendants()
+                        .any(|d| self.is_block(&d) || self.broken_chains.contains(&d))
+                })
     }
 
     /// Whether `node` is an `if` whose `then` and `else` each start a line:
@@ -172,7 +216,7 @@ impl Layout {
                 if n.kind() == SyntaxKind::IfExpr {
                     self.broken.contains(&n)
                 } else {
-                    self.own_block(&n)
+                    self.across_lines(&n)
                 }
             }),
         })
@@ -199,14 +243,97 @@ impl Layout {
         start
     }
 
-    /// How many blocks enclose `node`, not counting itself: the indentation
-    /// level of its own lines' start.
-    fn level(&self, node: &SyntaxNode) -> usize {
-        node.ancestors()
+    /// The level a broken chain's operators, or a broken `if`'s `then`
+    /// and `else`, start lines at, `node` being the chain's outermost
+    /// expression or the `if`: one in from the line it starts on. A chain or
+    /// `if` that starts on the first line of another one, in its first
+    /// operand or its condition, goes one in from that one's lines
+    /// instead, so that its lines don't look like that one's, as the `=`
+    /// does in `a` then `= b` then `and c`.
+    fn continued(&self, node: &SyntaxNode, starts: &Starts) -> Option<usize> {
+        let outer = node
+            .ancestors()
             .skip(1)
-            .filter(|n| self.is_block(n))
-            .count()
+            .find(|a| self.broken_chains.contains(a) || self.broken_if(a));
+        if let Some(outer) = outer
+            && starts.line(&outer) == starts.line(node)
+        {
+            return Some(self.continued(&self.chain_start(&outer), starts)? + 1);
+        }
+        Some(starts.level(node)? + 1)
     }
+}
+
+/// Where each node written so far starts: the line its first significant
+/// token is on, and that line's indentation level.
+#[derive(Default)]
+struct Starts(HashMap<SyntaxNode, (usize, usize)>);
+
+impl Starts {
+    /// Record that `token` is written on `line`, at `level`, and so are
+    /// the starts of the nodes it starts.
+    fn record(&mut self, token: &SyntaxToken, line: usize, level: usize) {
+        for node in token.parent_ancestors() {
+            if first_significant(&node).as_ref() != Some(token) {
+                break;
+            }
+            self.0.insert(node, (line, level));
+        }
+    }
+
+    /// The line `node` starts on.
+    fn line(&self, node: &SyntaxNode) -> Option<usize> {
+        self.0.get(node).map(|&(line, _)| line)
+    }
+
+    /// The indentation level of the line `node` starts on: what its
+    /// block's closing delimiter goes back to, and its items go one in
+    /// from.
+    fn level(&self, node: &SyntaxNode) -> Option<usize> {
+        self.0.get(node).map(|&(_, level)| level)
+    }
+}
+
+/// The first token of `node` that isn't trivia.
+fn first_significant(node: &SyntaxNode) -> Option<SyntaxToken> {
+    let mut token = node.first_token();
+    while let Some(t) = token.as_ref().filter(|t| t.kind().is_trivia()) {
+        token = t.next_token();
+    }
+    token
+}
+
+/// How tightly the dyadic operator of `node` binds, if it is one's
+/// expression. `not matching` binds as `matching` does.
+fn precedence(node: &SyntaxNode) -> Option<Precedence> {
+    BinaryExpr::cast(node.clone())?
+        .operators()
+        .last()?
+        .kind()
+        .precedence()
+}
+
+/// Whether `token` is the operator of the expression `node`, or its first
+/// word: the token a broken chain's line starts with.
+fn is_operator_of(token: &SyntaxToken, node: &SyntaxNode) -> bool {
+    BinaryExpr::cast(node.clone())
+        .and_then(|b| b.operator())
+        .as_ref()
+        == Some(token)
+}
+
+/// The outermost expression of the chain of operators of one precedence
+/// that the dyadic operator's expression `node` is in: in `a and b and c`,
+/// the second `and`'s, which the first's is the left operand of.
+fn chain_top(node: &SyntaxNode) -> SyntaxNode {
+    let mut top = node.clone();
+    while let Some(parent) = top
+        .parent()
+        .filter(|p| precedence(p).is_some() && precedence(p) == precedence(&top))
+    {
+        top = parent;
+    }
+    top
 }
 
 /// Whether `node` is a list that can be broken across lines, one item per
@@ -245,6 +372,10 @@ fn render(file: &SourceFile, layout: &Layout) -> (String, Vec<(SyntaxToken, usiz
     // token or comment.
     let mut newline = false;
     let mut blank_since = false;
+    // Where the nodes written so far start, and the indentation level of
+    // the line being written.
+    let mut starts = Starts::default();
+    let mut level = 0;
     let tokens = order::tokens(file);
     for (i, token) in tokens.iter().cloned().enumerate() {
         match token.kind() {
@@ -274,10 +405,17 @@ fn render(file: &SourceFile, layout: &Layout) -> (String, Vec<(SyntaxToken, usiz
         if trailing_comma(&token, next).is_some_and(|list| !layout.is_block(&list)) {
             continue;
         }
+        let line_break = prev
+            .as_ref()
+            .and_then(|prev| broken_line(prev, &token, layout, &starts));
         let sep = match &prev {
-            Some(prev) => between(prev, &token, blank_line, layout),
+            Some(prev) => between(prev, &token, blank_line, layout, line_break),
             None => String::new(),
         };
+        // A line break the layout doesn't indent is between definitions.
+        if sep.contains('\n') {
+            level = line_break.unwrap_or(0);
+        }
         let gap = Gap {
             sep: &sep,
             prev: prev.as_ref(),
@@ -294,6 +432,7 @@ fn render(file: &SourceFile, layout: &Layout) -> (String, Vec<(SyntaxToken, usiz
         gap.write(&std::mem::take(&mut comments), &mut out);
         line += out[before..].matches('\n').count();
         lines.push((token.clone(), line));
+        starts.record(&token, line, level);
         out.push_str(token.text());
         prev = Some(token);
         blank_line = false;
@@ -343,9 +482,17 @@ fn needs_trailing_comma(prev: &SyntaxToken, closer: &SyntaxToken, layout: &Layou
             .is_some_and(|list| is_list(&list) && items(&list) > 0 && layout.is_block(&list))
 }
 
-/// The whitespace between two adjacent significant tokens.
-fn between(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool, layout: &Layout) -> String {
-    if let Some(indent) = broken_line(prev, next, layout) {
+/// The whitespace between two adjacent significant tokens, given
+/// `line_break`, the indentation level of the line `next` starts if the
+/// layout breaks the line between them.
+fn between(
+    prev: &SyntaxToken,
+    next: &SyntaxToken,
+    blank_line: bool,
+    layout: &Layout,
+    line_break: Option<usize>,
+) -> String {
+    if let Some(indent) = line_break {
         // Statements in a row go on adjacent lines, unless the source groups
         // them with a blank line, which is kept; several become one.
         let statement_end = prev.kind() == SyntaxKind::Semicolon
@@ -559,52 +706,73 @@ fn items(node: &SyntaxNode) -> usize {
 }
 
 /// If a line break goes between `prev` and `next`, the indentation level of
-/// the new line. In a block, each item starts its own line, one level in,
-/// and the closing delimiter goes on a line of its own.
-fn broken_line(prev: &SyntaxToken, next: &SyntaxToken, layout: &Layout) -> Option<usize> {
+/// the new line, given `starts`, where the nodes before `next` start. In a
+/// block, each item starts its own line, one level in from the line the
+/// block starts on, and the closing delimiter goes on a line of its own, at
+/// that line's level.
+fn broken_line(
+    prev: &SyntaxToken,
+    next: &SyntaxToken,
+    layout: &Layout,
+    starts: &Starts,
+) -> Option<usize> {
     let block = |token: &SyntaxToken| token.parent().filter(|p| layout.is_block(p));
     if matches!(next.kind(), SyntaxKind::RBrace | SyntaxKind::RBracket)
         && let Some(block) = block(next)
     {
-        return Some(layout.level(&block));
+        return starts.level(&block);
     }
     // A variable's keys, when they don't stay on the line before, each on a
     // line of its own, in the column of the declaration's start, and so of a
     // relation value's closing brace.
-    if let Some(key) = key_start(next)
-        && key.parent().is_some_and(|decl| layout.keys_broken(&decl))
+    if let Some(decl) = key_start(next)
+        .and_then(|key| key.parent())
+        .filter(|decl| layout.keys_broken(decl))
     {
-        return Some(layout.level(&key));
+        return starts.level(&decl);
     }
     // An operator's type parameters, on a line of their own, one level in,
     // and then its body's `[`, in the operator's column.
     if let Some(types) = type_parameters_start(next) {
-        return Some(layout.level(&types) + 1);
+        return Some(starts.level(&types.parent()?)? + 1);
     }
     // A broken `if`'s `then` and `else`, each starting a line one level
     // in from the `if`, or from the one it is chained to.
     if matches!(next.kind(), SyntaxKind::ThenKw | SyntaxKind::ElseKw)
         && let Some(if_expr) = next.parent().filter(|p| layout.broken_if(p))
     {
-        return Some(layout.level(&layout.chain_start(&if_expr)) + 1);
+        return layout.continued(&layout.chain_start(&if_expr), starts);
+    }
+    // A broken chain's operators, each starting a line one level in from
+    // the line the chain starts on.
+    if let Some(top) = next
+        .parent()
+        .filter(|p| is_operator_of(next, p))
+        .map(|p| chain_top(&p))
+        .filter(|top| layout.broken_chains.contains(top))
+    {
+        return layout.continued(&top, starts);
     }
     if next.kind() == SyntaxKind::LBracket
-        && let Some(body) = next.parent().filter(|p| p.kind() == SyntaxKind::Body)
-        && body.parent().is_some_and(|op| {
-            op.children()
-                .any(|n| n.kind() == SyntaxKind::TypeParameters)
-        })
+        && let Some(operator) = next
+            .parent()
+            .filter(|p| p.kind() == SyntaxKind::Body)
+            .and_then(|body| body.parent())
+            .filter(|op| {
+                op.children()
+                    .any(|n| n.kind() == SyntaxKind::TypeParameters)
+            })
     {
-        return Some(layout.level(&body));
+        return starts.level(&operator);
     }
     match prev.kind() {
         SyntaxKind::LBrace | SyntaxKind::LBracket | SyntaxKind::Comma => {
-            block(prev).map(|b| layout.level(&b) + 1)
+            Some(starts.level(&block(prev)?)? + 1)
         }
         // A statement's `;`, inside a body.
         SyntaxKind::Semicolon => {
             let body = prev.parent()?.parent().filter(|p| layout.is_block(p))?;
-            Some(layout.level(&body) + 1)
+            Some(starts.level(&body)? + 1)
         }
         _ => None,
     }
@@ -1082,6 +1250,76 @@ mod tests {
                 "var list := scaled{ingredient, unit} extend { total := sum{r: !!scaled, of: amount}, recipes := (!!scaled){recipe} };"
             ),
             "var list := scaled{ingredient, unit} extend {\n    total := sum{r: !!scaled, of: amount},\n    recipes := (!!scaled){recipe},\n};\n"
+        );
+    }
+
+    #[test]
+    fn chains_break_at_their_operators() {
+        // Too long, a `where` starts a line one level in.
+        assert_eq!(
+            fmt(
+                "var big := cities where country = \"France\" and people > 1000000 and city <> \"Paris\" and city <> \"Marseille\";"
+            ),
+            "var big := cities\n    where country = \"France\" and people > 1000000 and city <> \"Paris\" and city <> \"Marseille\";\n"
+        );
+        // Still too long, so does each `and` of its condition, one level
+        // further in, as the condition is within the `where`.
+        assert_eq!(
+            fmt(
+                "var later := cities where people_in_the_year_two_thousand = people_in_the_year_nineteen_hundred + 1 and city <> \"Lyon\";"
+            ),
+            "var later := cities\n    where people_in_the_year_two_thousand = people_in_the_year_nineteen_hundred + 1\n        and city <> \"Lyon\";\n"
+        );
+    }
+
+    #[test]
+    fn a_chain_on_the_first_line_of_another_goes_further_in() {
+        // The `=` is within the first operand of the `and`s, so its line
+        // goes in from theirs.
+        assert_eq!(
+            fmt(
+                "var x := streets where value from (street where color = \"green\"){house} = (value from (street where color = \"ivory\"){house}) + 1 and is_empty{r: street};"
+            ),
+            "var x := streets\n    where value from (street where color = \"green\"){house}\n            = (value from (street where color = \"ivory\"){house}) + 1\n        and is_empty{r: street};\n"
+        );
+        // So does an `if`'s condition from its `then` and `else`.
+        assert_eq!(
+            fmt(
+                "var x := if population_in_the_year_two_thousand > 1000000 and population_in_the_year_nineteen_hundred < 10000 then \"grew\" else \"didn't\";"
+            ),
+            "var x := if population_in_the_year_two_thousand > 1000000\n        and population_in_the_year_nineteen_hundred < 10000\n    then \"grew\"\n    else \"didn't\";\n"
+        );
+    }
+
+    #[test]
+    fn lists_indent_from_the_line_they_open_on() {
+        // The `extend`'s list opens on the line the `times` starts.
+        assert_eq!(
+            fmt(
+                "var r := (people_who_were_born_in_lima times places_where_somebody_was_born_in_the_nineteenth_century) extend { b := 1 };"
+            ),
+            "var r := (people_who_were_born_in_lima\n    times places_where_somebody_was_born_in_the_nineteenth_century) extend {\n        b := 1,\n    };\n"
+        );
+    }
+
+    #[test]
+    fn a_broken_chain_breaks_the_list_it_is_in() {
+        // So the chain's last line isn't followed by the list's end.
+        assert_eq!(
+            fmt(
+                "operator main{} [ call debug_value{v: relation { { city: \"Paris\", people: 2100000 }, { city: \"Lyon\", people: 520000 } } where people > 1000000 and city <> \"Marseille\" and city <> \"Toulouse\" and city <> \"Nice\" and city <> \"Lille\"}; ];"
+            ),
+            "operator main{} [\n    call debug_value{\n        v: relation {\n            { city: \"Paris\", people: 2100000 },\n            { city: \"Lyon\", people: 520000 },\n        }\n            where people > 1000000\n                and city <> \"Marseille\"\n                and city <> \"Toulouse\"\n                and city <> \"Nice\"\n                and city <> \"Lille\",\n    };\n];\n"
+        );
+    }
+
+    #[test]
+    fn keys_after_a_broken_chain_go_on_lines_of_their_own() {
+        assert_eq!(
+            fmt(
+                "var cities := relation { city: text, country: text } {} where country = \"France\" and city <> \"Paris\" and city <> \"Lyon\" key { city };"
+            ),
+            "var cities := relation { city: text, country: text } {}\n    where country = \"France\" and city <> \"Paris\" and city <> \"Lyon\"\nkey { city };\n"
         );
     }
 

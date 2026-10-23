@@ -3123,12 +3123,30 @@ operator main{} [
   them with a blank line to group them; several blank lines become one;
 - a blank line between other definitions;
 - single spaces around `:=` and after `:`;
-- lines are at most 100 characters where a list or an `if` expression can
-  be broken: a line that would be longer has its outermost list, such as
-  an operator's parameters, a call's arguments, a heading or a tuple value,
-  written one item per line, or its outermost `if`'s `then` and `else`
-  each starting a line, one level in, until it fits; an `else if` chain
-  stays at its `if`'s level;
+- lines are at most 100 characters where a list, an `if` expression or
+  a chain of operators can be broken: a line that would be longer has its
+  outermost list, such as an operator's parameters, a call's arguments, a
+  heading or a tuple value, written one item per line, its outermost
+  `if`'s `then` and `else` each starting a line, one level in, or its
+  outermost chain of operators of one precedence, such as a `where` or
+  the `and`s of a condition, with each operator starting a line, one
+  level in, until it fits; an `else if` chain stays at its `if`'s level,
+  and a list goes before a chain beside it:
+
+  ```
+  var later := cities
+      where people_in_2000 > 2 * people_in_1900 + 1000000
+          and country <> "France"
+          and country <> "Ghana";
+  ```
+
+- a block's items go one level in from the line it opens on, and its
+  closing delimiter back at that line's level; a chain's operators, or an
+  `if`'s `then` and `else`, go one level in from the line the chain or
+  `if` starts on, or, when that is the first line of another, one level
+  in from that one's, so the `and`s above aren't mistaken for the
+  `where`'s, nor a broken comparison in the first `and`'s operand for the
+  `and`s;
 - an `if` statement's blocks, as an operator's body, have each statement
   on its own line, even one alone;
 - a relation value with more than one tuple has each tuple on its own line,
@@ -3136,7 +3154,8 @@ operator main{} [
 - a tuple value, relation value or call's arguments with several items, one
   of which spans lines, has each item on its own line too, so nothing
   follows a value's last line but its closing braces; a single item stays
-  inside its braces, as in `call f{v: relation {` … `}};`;
+  inside its braces, as in `call f{v: relation {` … `}};`, unless a chain
+  of operators broken across lines is in it;
 - a relation's tuples list their attributes in the order of the relation's
   heading: the selector's own heading, else the declared type, else the first
   tuple's order;
