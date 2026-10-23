@@ -27,8 +27,10 @@ pub(crate) enum Origin {
     /// A written type: a declaration's, or an attribute's in a heading.
     Type(TypeExpr),
     /// A selector's heading, as in `relation { a: integer } { … }`, which
-    /// sets the attributes of a tuple, or of a relation's tuples.
-    Heading(ast::Heading),
+    /// sets the attributes of a tuple, or of a relation's tuples, or one
+    /// after `relation` or `tuple` in a type. A declared heading's name
+    /// leads to its attributes' types, where it is declared.
+    Heading(ast::HeadingExpr),
     /// Another value that set the type, such as the tuple of a relation
     /// selector that gives the others theirs.
     Value(Expr),
@@ -198,6 +200,7 @@ impl Origin {
             Origin::Loaded(_, declared) => declared.array_element()?.attribute(name),
             Origin::Type(TypeExpr::Tuple(t)) => Origin::Heading(t.heading()?).attribute(name),
             Origin::Heading(h) => h
+                .attributes_written()?
                 .attributes()
                 .find(|a| {
                     a.name()
@@ -284,7 +287,8 @@ pub(crate) fn result_type(
 /// The type parameters a type can name, besides the built-in types, by
 /// where it is written.
 pub(crate) enum TypeParameters<'a> {
-    /// None: in a variable's type, which is always a specific type.
+    /// None: in a variable's type, or a heading's declaration, which are
+    /// always of specific types.
     None,
     /// The operator's own: in its result type, or in its body.
     Fixed(&'a [hir::TypeParameter]),
@@ -349,15 +353,19 @@ pub(crate) fn resolve(
             }
             let scalar = hir::Scalar::from_name(ident.text());
             if scalar.is_none() {
-                errors.push(errors::unknown_type(&ident, namespaces, parameters));
+                errors.push(match namespaces.heading(ident.text()) {
+                    Some((declared, _)) => errors::heading_as_type(&ident, declared),
+                    None => errors::unknown_type(&ident, namespaces, parameters),
+                });
             }
             scalar.map(hir::Type::Scalar)
         }
         TypeExpr::Tuple(tuple) => {
-            resolve_heading(&tuple.heading()?, parameters, namespaces, errors).map(hir::Type::Tuple)
+            resolve_heading_expr(&tuple.heading()?, parameters, namespaces, errors)
+                .map(hir::Type::Tuple)
         }
         TypeExpr::Relation(relation) => {
-            resolve_heading(&relation.heading()?, parameters, namespaces, errors)
+            resolve_heading_expr(&relation.heading()?, parameters, namespaces, errors)
                 .map(hir::Type::Relation)
         }
         TypeExpr::Array(array) => {
@@ -381,6 +389,31 @@ pub(crate) fn resolve(
             };
             list.push(parameter.clone());
             Some(hir::Type::Parameter(parameter))
+        }
+    }
+}
+
+/// The heading `written` after `relation` or `tuple` denotes: its own
+/// attributes, or those of the heading it names, as for [`resolve`], or
+/// `None` after reporting why it denotes none. A declared heading with
+/// errors was reported where it is declared.
+pub(crate) fn resolve_heading_expr(
+    written: &ast::HeadingExpr,
+    parameters: &mut TypeParameters,
+    namespaces: &Namespaces,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<hir::Heading> {
+    match written {
+        ast::HeadingExpr::Written(heading) => {
+            resolve_heading(heading, parameters, namespaces, errors)
+        }
+        ast::HeadingExpr::Named(named) => {
+            let ident = named.ident()?;
+            let Some((_, attributes)) = namespaces.heading(ident.text()) else {
+                errors.push(errors::unknown_heading(&ident, namespaces));
+                return None;
+            };
+            attributes.cloned()
         }
     }
 }
@@ -481,7 +514,7 @@ struct Reported;
 /// A selector's own heading, which takes precedence over the context:
 /// `Ok(None)` if it has none.
 fn own_heading(
-    heading: Option<ast::Heading>,
+    heading: Option<ast::HeadingExpr>,
     wrap: fn(hir::Heading) -> hir::Type,
     checker: &Checker,
     errors: &mut Vec<Diagnostic>,
@@ -490,8 +523,8 @@ fn own_heading(
         return Ok(None);
     };
     let mut parameters = checker.type_parameters();
-    let resolved =
-        resolve_heading(&heading, &mut parameters, checker.namespaces(), errors).ok_or(Reported)?;
+    let resolved = resolve_heading_expr(&heading, &mut parameters, checker.namespaces(), errors)
+        .ok_or(Reported)?;
     Ok(Some(Expected {
         ty: wrap(resolved),
         origin: Origin::Heading(heading),

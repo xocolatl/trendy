@@ -4,6 +4,7 @@ mod body;
 mod check;
 mod errors;
 mod globals;
+mod headings;
 mod keys;
 mod locals;
 mod operators;
@@ -76,7 +77,10 @@ pub(crate) fn check(
     source: Source,
     errors: &mut Vec<Diagnostic>,
 ) -> Checked {
-    let namespaces = collect_names(prelude, file, errors);
+    let mut namespaces = collect_names(prelude, file, errors);
+
+    // The headings' attributes first, which any type can name.
+    headings::resolve(file, &mut namespaces, errors);
 
     // Every operator's signature first, so that anything can refer to an
     // operator defined after it.
@@ -207,6 +211,9 @@ pub(crate) enum Kind {
     /// An operator the prelude defines in trendy.
     Prelude,
     Variable,
+    Heading,
+    /// A built-in type.
+    Type,
 }
 
 impl Kind {
@@ -215,6 +222,8 @@ impl Kind {
             Kind::Operator | Kind::Prelude => "an operator",
             Kind::Builtin => "a built-in operator",
             Kind::Variable => "a variable",
+            Kind::Heading => "a heading",
+            Kind::Type => "a built-in type",
         }
     }
 }
@@ -222,12 +231,17 @@ impl Kind {
 /// The program's top-level names, each in its namespace: its first
 /// definition, and where it is (built-ins are in the prelude, so they have
 /// no span). Operators and variables have a namespace each, so a variable
-/// can have an operator's name; types have a third.
+/// can have an operator's name; types and headings have a third.
 #[derive(Default)]
 pub(crate) struct Namespaces {
     /// User and built-in operators.
     operators: HashMap<String, (Kind, Option<Span>)>,
     variables: HashMap<String, Span>,
+    /// Where each heading is declared.
+    headings: HashMap<String, Span>,
+    /// Each heading's attributes, unless they have errors, which are
+    /// reported: [`headings::resolve`] fills it in.
+    attributes: HashMap<String, hir::Heading>,
     /// The kinds, which only the prelude declares, by name, each with the
     /// built-in types of it.
     kinds: HashMap<String, (hir::Kind, BTreeSet<hir::Scalar>)>,
@@ -293,6 +307,24 @@ impl Namespaces {
         self.variables.get(name).copied()
     }
 
+    /// The heading named `name`: where it is declared, and its attributes,
+    /// unless they have errors.
+    pub(crate) fn heading(&self, name: &str) -> Option<(Span, Option<&hir::Heading>)> {
+        let span = *self.headings.get(name)?;
+        Some((span, self.attributes.get(name)))
+    }
+
+    /// The headings' names.
+    pub(crate) fn headings(&self) -> impl Iterator<Item = &str> {
+        self.headings.keys().map(String::as_str)
+    }
+
+    /// Whether `ident` is its heading name's first declaration, not a
+    /// duplicate.
+    pub(crate) fn is_first_heading(&self, ident: &SyntaxToken) -> bool {
+        self.headings.get(ident.text()) == Some(&trendy_syntax::span(ident.text_range()))
+    }
+
     pub(crate) fn operators(&self) -> impl Iterator<Item = (&str, Kind, Option<Span>)> {
         self.operators
             .iter()
@@ -329,12 +361,13 @@ fn collect_names(prelude: &Prelude, file: &SourceFile, errors: &mut Vec<Diagnost
                 (op.name.clone(), (kind, None))
             })
             .collect(),
-        variables: HashMap::new(),
+        ..Namespaces::default()
     };
     for item in file.items() {
         let (kind, name) = match item {
             Item::Operator(op) => (Kind::Operator, op.name()),
             Item::Variable(decl) => (Kind::Variable, decl.name()),
+            Item::Heading(decl) => (Kind::Heading, decl.name()),
             // Reported as being outside the prelude, or the prelude's own,
             // already in it.
             Item::Builtin(_) | Item::BuiltinType(_) | Item::Kind(_) => continue,
@@ -345,12 +378,19 @@ fn collect_names(prelude: &Prelude, file: &SourceFile, errors: &mut Vec<Diagnost
         let (name, span) = (ident.text(), trendy_syntax::span(ident.text_range()));
         let first = match kind {
             Kind::Variable => namespaces.variable(name).map(|s| (kind, Some(s))),
+            Kind::Heading => namespaces
+                .heading(name)
+                .map(|(s, _)| (kind, Some(s)))
+                .or_else(|| hir::Scalar::from_name(name).map(|_| (Kind::Type, None))),
             _ => namespaces.operator(name),
         };
         match (first, kind) {
             (Some(first), _) => errors.push(errors::duplicate_name(name, (kind, span), first)),
             (None, Kind::Variable) => {
                 namespaces.variables.insert(name.to_string(), span);
+            }
+            (None, Kind::Heading) => {
+                namespaces.headings.insert(name.to_string(), span);
             }
             (None, _) => {
                 namespaces
@@ -6235,5 +6275,89 @@ mod tests {
             assert_eq!(fix(&f(&written)), f(&fixed), "{written}");
             assert!(analyze_str(&f(&fixed)).is_ok(), "{fixed}");
         }
+    }
+
+    #[test]
+    fn named_headings() {
+        // A heading's name stands for its attributes, after `relation` and
+        // `tuple`, in types and selectors, declared in any order, and nested.
+        let source = "var r: relation home := relation home { { city: \"Lima\", rooms: 3 } };
+var t: tuple home := tuple from r;
+var s := relation street { { homes: r } };
+heading street := { homes: relation home };
+heading home := { city: text, rooms: integer };
+";
+        let home = hir::Heading::new(
+            [
+                ("city".to_string(), hir::Type::Scalar(hir::Scalar::Text)),
+                ("rooms".to_string(), hir::Type::Scalar(hir::Scalar::Integer)),
+            ]
+            .into(),
+        );
+        let types: Vec<hir::Type> = variables(source).into_iter().map(|v| v.ty).collect();
+        assert_eq!(
+            types,
+            [
+                hir::Type::Relation(home.clone()),
+                hir::Type::Tuple(home.clone()),
+                hir::Type::Relation(hir::Heading::new(
+                    [("homes".to_string(), hir::Type::Relation(home))].into()
+                )),
+            ]
+        );
+        // The same type as its attributes written out.
+        assert!(
+            analyze_str(&format!(
+                "heading home := {{ city: text }};\nvar r: relation {{ city: text }} := relation home {{}};{MAIN}"
+            ))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn named_heading_errors() {
+        let home = "heading home := { city: text, rooms: integer };\n";
+        // Its name alone isn't a type: a relation's or a tuple's is.
+        let source = format!("{home}operator show{{h: home}} [];{MAIN}");
+        assert_eq!(messages(&source)[0], "`home` is a heading, not a type");
+        assert_eq!(
+            fix(&source),
+            format!("{home}operator show{{h: relation home}} [];{MAIN}")
+        );
+        // An unknown name, close to one, or a type's.
+        let source = format!("{home}var r: relation hom;{MAIN}");
+        assert_eq!(fix(&source), format!("{home}var r: relation home;{MAIN}"));
+        assert_eq!(
+            messages(&format!("var r: relation integer;{MAIN}")),
+            ["unknown heading `integer`"]
+        );
+        // Defined once, and not as a type.
+        assert_eq!(
+            codes(&format!(
+                "{home}{home}heading text := {{ a: integer }};{MAIN}"
+            )),
+            [Code::DuplicateName, Code::DuplicateName]
+        );
+        // Not containing itself, directly or through others; a heading
+        // that names one of a cycle isn't reported too.
+        assert_eq!(
+            messages(&format!(
+                "heading part := {{ parts: relation part }};\nheading a := {{ b: tuple b }};\nheading b := {{ a: relation a }};\nheading c := {{ a: tuple a }};{MAIN}"
+            )),
+            [
+                "the heading `part` contains itself",
+                "the headings `a` and `b` contain each other",
+            ]
+        );
+        // Its attributes are of specific types.
+        assert_eq!(
+            codes(&format!("heading h := {{ a: any type }};{MAIN}")),
+            [Code::AnyOutsideParameter]
+        );
+        // A value against it is checked against its declaration's types.
+        let mismatch = errors(&format!(
+            "{home}var r: relation home := relation {{ {{ city: \"Lima\", rooms: \"3\" }} }};{MAIN}"
+        ));
+        assert_eq!(mismatch[0].code, Code::TypeMismatch);
     }
 }

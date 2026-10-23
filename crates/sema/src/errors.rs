@@ -67,6 +67,9 @@ pub(crate) fn duplicate_name(
         Kind::Variable => {
             "variables have a namespace of their own, so no two can have the same name, though a variable can have an operator's"
         }
+        Kind::Heading | Kind::Type => {
+            "headings share a namespace with the types, so no two can have the same name, nor a heading a built-in type's, though a heading can have a variable's or an operator's"
+        }
         _ => {
             "operators have a namespace of their own, so no two can have the same name, though an operator can have a variable's"
         }
@@ -375,8 +378,94 @@ pub(crate) fn unknown_type(
 
 const ANY_ONLY_IN_PARAMETERS: &str = "only a parameter's type can be `any type`, `any tuple`, `any relation` or `any array`: each call gives it the type of its argument, and nothing would give one written anywhere else a type";
 const ANY_ELSEWHERE: &str = "to use the type of an argument here, declare a type parameter after the signature, `types { T: any type }`, and write `T` both here and as the parameter's type";
-const VARIABLE_TYPES: &str =
-    "a variable's type is always a specific type, such as `integer` or `relation { name: text }`";
+const VARIABLE_TYPES: &str = "a variable's type, and a heading's attributes', are always specific types, such as `integer` or `relation { name: text }`";
+
+/// The heading named `ident`, declared at `declared`, written as a type,
+/// as other languages name a type of records: its tuple and relation types
+/// are what the fixes write.
+pub(crate) fn heading_as_type(ident: &SyntaxToken, declared: Span) -> Diagnostic {
+    let name = ident.text();
+    let span = trendy_syntax::span(ident.text_range());
+    let fix = |word: &str| Edit {
+        span: Span::empty(span.start),
+        replacement: format!("{word} "),
+    };
+    Diagnostic::error(
+        Code::UnknownType,
+        format!("`{name}` is a heading, not a type"),
+        span,
+        "a heading",
+    )
+    .with_secondary(declared, format!("`{name}` is declared here"))
+    .with_note(format!(
+        "a heading is the attributes of tuples and relations alike, so it has two types: `relation {name}`, of relations, and `tuple {name}`, of tuples"
+    ))
+    .with_suggestion(format!("a relation: `relation {name}`"), vec![fix("relation")])
+    .with_suggestion(format!("a tuple: `tuple {name}`"), vec![fix("tuple")])
+}
+
+/// The heading named `ident`, after `relation` or `tuple`, which isn't one.
+pub(crate) fn unknown_heading(ident: &SyntaxToken, namespaces: &Namespaces) -> Diagnostic {
+    let name = ident.text();
+    let span = trendy_syntax::span(ident.text_range());
+    let d = Diagnostic::error(
+        Code::UnknownType,
+        format!("unknown heading `{name}`"),
+        span,
+        "not a heading",
+    )
+    .with_note(
+        "after `relation` or `tuple` comes a heading: its attributes, as in `relation { name: text }`, or the name of one declared with `heading name := { name: text };`",
+    );
+    let kind = hir::Scalar::from_name(name)
+        .map(|_| Kind::Type)
+        .or_else(|| namespaces.variable(name).map(|_| Kind::Variable))
+        .or_else(|| namespaces.operator(name).map(|(kind, _)| kind));
+    if let Some(kind) = kind {
+        return d
+            .with_note(format!("`{name}` is {}, not a heading", kind.describe()))
+            .with_help("write the attributes in braces, or declare a heading and write its name");
+    }
+    let mut headings: Vec<&str> = namespaces.headings().collect();
+    headings.sort_unstable();
+    spelled_like(
+        d,
+        name,
+        span,
+        &headings,
+        &format!("declare it: `heading {name} := {{ … }};`, or write the attributes in braces"),
+    )
+}
+
+/// The headings in `cycle`, each naming the next in its attributes' types,
+/// and the last the first.
+pub(crate) fn cyclic_headings(cycle: &[crate::headings::Cycled]) -> Diagnostic {
+    let first = &cycle[0];
+    let names: Vec<String> = cycle.iter().map(|c| format!("`{}`", c.name)).collect();
+    let message = match names.as_slice() {
+        [_] => format!("the heading `{}` contains itself", first.name),
+        _ => format!(
+            "the headings {} contain each other",
+            trendy_diag::conjoin(&names)
+        ),
+    };
+    let d = Diagnostic::error(Code::CyclicHeadings, message, first.declared, "declared here")
+        .with_note(
+            "a heading's attributes can be of other headings' types, but not of its own, directly or through others: its type would contain itself (TTM, chapter 6, RM Prescription 6)",
+        )
+        .with_help(
+            "keep a hierarchy as a relation of pairs instead, each with one it contains, as in `heading assembly := { major: text, minor: text };`",
+        );
+    cycle.iter().enumerate().fold(d, |d, (i, cycled)| {
+        let next = &cycle[(i + 1) % cycle.len()];
+        let label = if next.name == cycled.name {
+            format!("`{}` contains itself here", cycled.name)
+        } else {
+            format!("`{}` contains `{}` here", cycled.name, next.name)
+        };
+        d.with_secondary(cycled.via, label)
+    })
+}
 
 /// A value written as `expr`, of type `found`, where `declared` is expected
 /// because of `origin`. `value` is the value, if it is a constant, for fixes

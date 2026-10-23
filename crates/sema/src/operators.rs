@@ -205,7 +205,7 @@ pub(crate) fn signatures(
                 builtin.keyword(),
                 builtin.syntax(),
             )),
-            Item::Variable(_) => {}
+            Item::Variable(_) | Item::Heading(_) => {}
         }
     }
     let by_name = list.iter().map(|s| (s.name.clone(), s.id)).collect();

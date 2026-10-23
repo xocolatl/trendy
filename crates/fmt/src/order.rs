@@ -78,14 +78,17 @@ fn relation_order(relation: &RelationLiteral, file: &SourceFile) -> Option<Vec<S
     )
 }
 
-/// `relation`'s own heading, else the heading of the type expected of it.
+/// `relation`'s own heading, else the heading of the type expected of it,
+/// where its attributes are written: in a declared heading's declaration,
+/// for one named.
 fn relation_heading(relation: &RelationLiteral, file: &SourceFile) -> Option<Heading> {
     relation
         .heading()
         .or_else(|| match expected_type(relation.syntax(), file)? {
             TypeExpr::Relation(r) => r.heading(),
             _ => None,
-        })
+        })?
+        .attributes_written()
 }
 
 fn names(heading: &Heading) -> Vec<String> {
@@ -139,17 +142,18 @@ fn expected_type(expr: &SyntaxNode, file: &SourceFile) -> Option<TypeExpr> {
     }
 }
 
-/// The heading a tuple value must have, if the program writes one.
+/// The heading a tuple value must have, if the program writes one, where
+/// its attributes are written.
 fn tuple_heading(tuple: &TupleLiteral, file: &SourceFile) -> Option<Heading> {
     if let Some(heading) = tuple.heading() {
-        return Some(heading);
+        return heading.attributes_written();
     }
     let parent = tuple.syntax().parent()?;
     if let Some(relation) = RelationLiteral::cast(parent) {
         return relation_heading(&relation, file);
     }
     match expected_type(tuple.syntax(), file)? {
-        TypeExpr::Tuple(t) => t.heading(),
+        TypeExpr::Tuple(t) => t.heading()?.attributes_written(),
         _ => None,
     }
 }

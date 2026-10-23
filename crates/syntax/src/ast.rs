@@ -41,6 +41,7 @@ ast_node!(Operator);
 ast_node!(BuiltinOperator);
 ast_node!(BuiltinType);
 ast_node!(KindDecl);
+ast_node!(HeadingDecl);
 ast_node!(RequirementList);
 ast_node!(Requirement);
 ast_node!(Body);
@@ -88,6 +89,7 @@ ast_node!(AnyType);
 ast_node!(TypeParameters);
 ast_node!(Literal);
 ast_node!(Heading);
+ast_node!(HeadingRef);
 ast_node!(AttributeType);
 ast_node!(Per);
 ast_node!(TupleType);
@@ -107,6 +109,7 @@ pub enum Item {
     Builtin(BuiltinOperator),
     BuiltinType(BuiltinType),
     Kind(KindDecl),
+    Heading(HeadingDecl),
     Variable(VarDecl),
 }
 
@@ -119,7 +122,23 @@ impl SourceFile {
                 .or_else(|| BuiltinOperator::cast(node.clone()).map(Item::Builtin))
                 .or_else(|| BuiltinType::cast(node.clone()).map(Item::BuiltinType))
                 .or_else(|| KindDecl::cast(node.clone()).map(Item::Kind))
+                .or_else(|| HeadingDecl::cast(node.clone()).map(Item::Heading))
                 .or_else(|| VarDecl::cast(node).map(Item::Variable))
+        })
+    }
+
+    pub fn headings(&self) -> impl Iterator<Item = HeadingDecl> {
+        self.0.children().filter_map(HeadingDecl::cast)
+    }
+
+    /// The heading named `name`'s declaration: the first with its name, as
+    /// a second is an error.
+    #[must_use]
+    pub fn heading(&self, name: &str) -> Option<HeadingDecl> {
+        self.headings().find(|decl| {
+            decl.name()
+                .and_then(|n| n.ident())
+                .is_some_and(|i| i.text() == name)
         })
     }
 
@@ -240,6 +259,26 @@ impl BuiltinType {
     #[must_use]
     pub fn keyword(&self) -> Option<SyntaxToken> {
         significant_tokens(&self.0).find(|t| t.kind() == SyntaxKind::BuiltinKw)
+    }
+}
+
+impl HeadingDecl {
+    /// The word `heading`, or another language's for a type, which the
+    /// parser reports.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    #[must_use]
+    pub fn name(&self) -> Option<Name> {
+        self.0.children().find_map(Name::cast)
+    }
+
+    /// The attributes it names.
+    #[must_use]
+    pub fn heading(&self) -> Option<Heading> {
+        self.0.children().find_map(Heading::cast)
     }
 }
 
@@ -1269,15 +1308,69 @@ impl Heading {
 
 impl TupleType {
     #[must_use]
-    pub fn heading(&self) -> Option<Heading> {
-        self.0.children().find_map(Heading::cast)
+    pub fn heading(&self) -> Option<HeadingExpr> {
+        self.0.children().find_map(HeadingExpr::cast)
     }
 }
 
 impl RelationType {
     #[must_use]
-    pub fn heading(&self) -> Option<Heading> {
-        self.0.children().find_map(Heading::cast)
+    pub fn heading(&self) -> Option<HeadingExpr> {
+        self.0.children().find_map(HeadingExpr::cast)
+    }
+}
+
+/// A heading as written after `relation` or `tuple`: its attributes, or the
+/// name of a declared heading.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum HeadingExpr {
+    Written(Heading),
+    Named(HeadingRef),
+}
+
+impl HeadingExpr {
+    #[must_use]
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        Heading::cast(node.clone())
+            .map(HeadingExpr::Written)
+            .or_else(|| HeadingRef::cast(node).map(HeadingExpr::Named))
+    }
+
+    #[must_use]
+    pub fn syntax(&self) -> &SyntaxNode {
+        match self {
+            HeadingExpr::Written(h) => h.syntax(),
+            HeadingExpr::Named(h) => h.syntax(),
+        }
+    }
+
+    #[must_use]
+    pub fn span(&self) -> Span {
+        span(self.syntax().text_range())
+    }
+
+    /// Where its attributes are written: here, or in the declaration of
+    /// the heading it names.
+    #[must_use]
+    pub fn attributes_written(&self) -> Option<Heading> {
+        match self {
+            HeadingExpr::Written(heading) => Some(heading.clone()),
+            HeadingExpr::Named(named) => named.declaration()?.heading(),
+        }
+    }
+}
+
+impl HeadingRef {
+    #[must_use]
+    pub fn ident(&self) -> Option<SyntaxToken> {
+        ident_of(&self.0)
+    }
+
+    /// The declaration of the heading it names, in its file.
+    #[must_use]
+    pub fn declaration(&self) -> Option<HeadingDecl> {
+        let file = SourceFile::cast(self.0.ancestors().last()?)?;
+        file.heading(self.ident()?.text())
     }
 }
 
@@ -1322,10 +1415,10 @@ impl Per {
 
 impl TupleLiteral {
     /// The heading written before the attributes, as in
-    /// `tuple { a: integer } { a: 1 }`.
+    /// `tuple { a: integer } { a: 1 }` or `tuple home { … }`.
     #[must_use]
-    pub fn heading(&self) -> Option<Heading> {
-        self.0.children().find_map(Heading::cast)
+    pub fn heading(&self) -> Option<HeadingExpr> {
+        self.0.children().find_map(HeadingExpr::cast)
     }
 
     pub fn attributes(&self) -> impl Iterator<Item = AttributeValue> {
@@ -1377,10 +1470,10 @@ impl ArrayLiteral {
 
 impl RelationLiteral {
     /// The heading written before the tuples, as in
-    /// `relation { a: integer } {}`.
+    /// `relation { a: integer } {}` or `relation home {}`.
     #[must_use]
-    pub fn heading(&self) -> Option<Heading> {
-        self.0.children().find_map(Heading::cast)
+    pub fn heading(&self) -> Option<HeadingExpr> {
+        self.0.children().find_map(HeadingExpr::cast)
     }
 
     /// The tuples: tuple selectors, or any expressions of tuples.

@@ -71,8 +71,8 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
     let (parent, grandparent) = (above(0), above(1));
     // The contextual keywords: `type`, in `builtin type name;`, `key`,
     // `value` and `from`, `any` and `type`, in `any type`, `types`, `per`,
-    // `kind`, a load's `load`, `from`, `order`, `asc` and `desc`, and a
-    // `for` loop's `in`.
+    // `kind`, a load's `load`, `from`, `order`, `asc` and `desc`, a `for`
+    // loop's `in`, and `heading`.
     let keyword = match parent {
         Some(SyntaxKind::BuiltinType) => token.text() == "type",
         Some(SyntaxKind::AnyType) => matches!(token.text(), "any" | "type"),
@@ -84,7 +84,8 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
             | SyntaxKind::KindDecl
             | SyntaxKind::Load
             | SyntaxKind::OrderItem
-            | SyntaxKind::ForStmt,
+            | SyntaxKind::ForStmt
+            | SyntaxKind::HeadingDecl,
         ) => true,
         _ => false,
     };
@@ -145,10 +146,14 @@ fn type_name(
     fourth: Option<SyntaxKind>,
 ) -> Option<(Class, bool)> {
     let definition = match (parent?, grandparent) {
-        // A type, named, or a kind, after `any`, as in `any ordered`.
-        (SyntaxKind::TypeRef | SyntaxKind::AnyType, _) => false,
-        // A built-in type, or a kind, declared.
-        (SyntaxKind::Name, Some(SyntaxKind::BuiltinType | SyntaxKind::KindDecl)) => true,
+        // A type or a heading, named, or a kind, after `any`, as in
+        // `any ordered`.
+        (SyntaxKind::TypeRef | SyntaxKind::HeadingRef | SyntaxKind::AnyType, _) => false,
+        // A built-in type, a kind, or a heading, declared.
+        (
+            SyntaxKind::Name,
+            Some(SyntaxKind::BuiltinType | SyntaxKind::KindDecl | SyntaxKind::HeadingDecl),
+        ) => true,
         // A kind, among a built-in type's.
         (SyntaxKind::Name, Some(SyntaxKind::NameList))
             if third == Some(SyntaxKind::BuiltinType) =>
@@ -555,6 +560,25 @@ mod tests {
                 ("v", Class::Parameter, true),
                 ("any", Class::Keyword, false),
                 ("type", Class::Keyword, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn headings() {
+        assert_eq!(
+            highlight("heading home := { city: text };\nvar r: relation home := relation home {};"),
+            [
+                ("heading", Class::Keyword, false),
+                ("home", Class::Type, true),
+                ("city", Class::Attribute, true),
+                ("text", Class::Type, false),
+                ("var", Class::Keyword, false),
+                ("r", Class::Variable, true),
+                ("relation", Class::Keyword, false),
+                ("home", Class::Type, false),
+                ("relation", Class::Keyword, false),
+                ("home", Class::Type, false),
             ]
         );
     }

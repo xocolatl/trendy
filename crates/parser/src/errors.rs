@@ -7,7 +7,8 @@ use trendy_syntax::SyntaxKind;
 use crate::Found;
 
 pub(crate) const OPERATOR_FORM: &str = "an operator definition has the form `operator name{} [];`, or, for a read-only operator, `operator name{}: type [value];`";
-pub(crate) const HEADING_FORM: &str = "a heading lists attributes with their types: `{ name: type, … }`, as in `tuple { name: text }` or `relation { name: text }`";
+pub(crate) const HEADING_FORM: &str = "a heading lists attributes with their types: `{ name: type, … }`, as in `tuple { name: text }` or `relation { name: text }`, or names a declared one, as in `relation home`";
+pub(crate) const HEADING_DECL_FORM: &str = "a heading is declared as `heading name := { attribute: type, … };`, and `relation name` and `tuple name` are its types";
 pub(crate) const RELATION_VALUE_FORM: &str = "a relation value has the form `relation { tuple, … }`, optionally with a heading first: `relation { name: type, … } { … }`";
 pub(crate) const ARRAY_VALUE_FORM: &str = "an array value has the form `array [element, …]`, with its elements' type first if it has none: `array integer []`";
 pub(crate) const PROJECTION_FORM: &str =
@@ -68,6 +69,162 @@ const FOREIGN_KEYWORDS: &[&str] = &[
 /// such as `let`, or a type name that C-family languages put first.
 pub(crate) fn foreign_keyword(word: &str) -> bool {
     FOREIGN_KEYWORDS.contains(&word)
+}
+
+/// Keywords other languages declare a type of records with, which a
+/// heading's declaration is in trendy, and the languages that use each.
+const RECORD_KEYWORDS: &[(&str, &str)] = &[
+    ("interface", "TypeScript's"),
+    ("struct", "C's and Rust's"),
+    ("type", "TypeScript's"),
+];
+
+/// The languages that declare a type of records with `word`, if any do.
+pub(crate) fn record_keyword(word: &str) -> Option<&'static str> {
+    RECORD_KEYWORDS
+        .iter()
+        .find(|(keyword, _)| *keyword == word)
+        .map(|&(_, languages)| languages)
+}
+
+/// Another language's declaration of a type of records, parsed as a
+/// heading's: what it lacks of one.
+pub(crate) struct ForeignHeading<'a> {
+    keyword: Found<'a>,
+    /// `=`, where `:=` goes.
+    pub(crate) eq: Option<Span>,
+    /// Where `:=` goes, missing.
+    pub(crate) colon_eq: Option<usize>,
+    /// Where `;` goes, missing.
+    pub(crate) semicolon: Option<usize>,
+}
+
+impl<'a> ForeignHeading<'a> {
+    pub(crate) fn new(keyword: Found<'a>) -> Self {
+        ForeignHeading {
+            keyword,
+            eq: None,
+            colon_eq: None,
+            semicolon: None,
+        }
+    }
+}
+
+/// `type Home = { … }`, `interface Home { … }` or `struct Home { … }`, as
+/// another language declares a type of records: a heading, in trendy,
+/// fixed to its declaration.
+pub(crate) fn foreign_heading(foreign: &ForeignHeading) -> Diagnostic {
+    let keyword = foreign.keyword;
+    let languages = record_keyword(keyword.text).unwrap_or("another language's");
+    let mut edits = vec![Edit {
+        span: keyword.span,
+        replacement: "heading".to_string(),
+    }];
+    edits.extend(foreign.eq.map(|span| Edit {
+        span,
+        replacement: ":=".to_string(),
+    }));
+    edits.extend(foreign.colon_eq.map(|at| Edit {
+        span: Span::empty(at),
+        replacement: " :=".to_string(),
+    }));
+    edits.extend(foreign.semicolon.map(|at| Edit {
+        span: Span::empty(at),
+        replacement: ";".to_string(),
+    }));
+    Diagnostic::error(
+        Code::ExpectedDefinition,
+        format!("a heading is declared with `heading`, not `{}`", keyword.text),
+        keyword.span,
+        format!("{languages} keyword for a type of records"),
+    )
+    .with_note(
+        "a tuple's or a relation's attributes, with their types, are its heading, which `heading name := { attribute: type, … };` names; `relation name` and `tuple name` are its types",
+    )
+    .with_suggestion("declare a heading", edits)
+}
+
+/// A heading's declaration in a body, whose `heading` is `keyword`, written
+/// `text`, where `span` deletes it with the whitespace before: it goes
+/// after the top-level definition that ends at `previous`, or first.
+pub(crate) fn nested_heading(
+    keyword: Span,
+    text: &str,
+    span: Span,
+    previous: Option<usize>,
+) -> Diagnostic {
+    let insertion = match previous {
+        Some(end) => Edit {
+            span: Span::empty(end),
+            replacement: format!("\n\n{text}"),
+        },
+        None => Edit {
+            span: Span::empty(0),
+            replacement: format!("{text}\n\n"),
+        },
+    };
+    Diagnostic::error(
+        Code::NestedDefinition,
+        "a heading is declared at the top level, not in an operator",
+        keyword,
+        "inside an operator's body",
+    )
+    .with_note(
+        "headings, as operators and the program's variables, are definitions of the program, which any operator can use; an operator's body declares only local variables",
+    )
+    .with_suggestion(
+        "move it before the operator",
+        vec![
+            insertion,
+            Edit {
+                span,
+                replacement: String::new(),
+            },
+        ],
+    )
+}
+
+/// `relation home` without tuples, which go at `at`, before `found`.
+pub(crate) fn relation_without_tuples(at: usize, found: Option<Found>) -> Diagnostic {
+    let found_desc = found.map_or_else(|| "end of file".to_string(), |f| f.describe());
+    Diagnostic::error(
+        Code::MissingToken,
+        format!("expected `{{`, found {found_desc}"),
+        Span::empty(at),
+        "expected the relation's tuples here",
+    )
+    .with_note(
+        "a relation value lists its tuples in braces after its heading, so `relation home {}` is the empty relation of `home`'s attributes; its type, as a variable's, is `relation home`",
+    )
+    .with_suggestion(
+        "the empty relation: `{}`",
+        vec![Edit {
+            span: Span::empty(at),
+            replacement: " {}".to_string(),
+        }],
+    )
+}
+
+/// `relation` or `tuple`, `found`, before a heading's attributes in its
+/// declaration, where `span` deletes it.
+pub(crate) fn heading_as_type(found: Found, span: Span) -> Diagnostic {
+    let word = found.text;
+    Diagnostic::error(
+        Code::HeadingAsType,
+        format!("a heading's declaration lists its attributes, without `{word}`"),
+        found.span,
+        "not part of a heading",
+    )
+    .with_note(
+        "a heading is the attributes of tuples and relations alike, so `relation name` and `tuple name` are both its types: the word goes where it is used",
+    )
+    .with_suggestion(
+        format!("delete `{word}`"),
+        vec![Edit {
+            span,
+            replacement: String::new(),
+        }],
+    )
 }
 
 /// `found`, another language's keyword, starting a local variable's
@@ -1367,7 +1524,13 @@ pub(crate) fn chained_comparison(found: Found, middle: &str, before: Option<char
 /// `text`, with a space on either side where it would otherwise run into a
 /// word next to it, which would change how it lexes, and before a word
 /// after other punctuation than an opening delimiter, as in `:= tuple`.
-fn spaced(text: &str, (before, after): (Option<char>, Option<char>)) -> String {
+/// `:=`, which canonical code spaces as an operator, as in `var x := 1;`,
+/// gets a space on each side.
+fn spaced(text: &str, neighbors: (Option<char>, Option<char>)) -> String {
+    if text == ":=" {
+        return spaced_operator(text, neighbors);
+    }
+    let (before, after) = neighbors;
     let mut spaced = text.to_string();
     let apart = |c: char| !c.is_whitespace() && !matches!(c, '(' | '[' | '{');
     if before.is_some_and(apart) && text.starts_with(is_word_char) {

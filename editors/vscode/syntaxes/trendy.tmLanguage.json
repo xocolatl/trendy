@@ -13,6 +13,9 @@
       "include": "#builtin-type"
     },
     {
+      "include": "#heading"
+    },
+    {
       "include": "#call"
     },
     {
@@ -99,6 +102,17 @@
         }
       },
       "match": "\\b(for)\\s+([A-Z_a-z][0-9A-Z_a-z]*)\\s+(in)\\b"
+    },
+    "heading": {
+      "captures": {
+        "1": {
+          "name": "keyword.other.trendy"
+        },
+        "2": {
+          "name": "entity.name.type.trendy"
+        }
+      },
+      "match": "\\b(heading)\\s+([A-Z_a-z][0-9A-Z_a-z]*)\\s*(?=\\:\\=)"
     },
     "key": {
       "captures": {

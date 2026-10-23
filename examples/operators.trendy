@@ -7,9 +7,13 @@
    call gives them its arguments' types, which can be limited to a kind,
    as `ordered` or `numeric`. A `per` parameter's argument is evaluated
    for each tuple of a relation, as the prelude's `min` and `max` take
-   `of`. main prints each result. */
+   `of`. main prints each result. A heading the operators share is
+   declared once, with a name, which stands for it after `relation` and
+   `tuple`. */
+heading menu_item := { dish: text, country: text, price: integer };
+
 var vat := 16;
-var dishes := relation {
+var dishes := relation menu_item {
     { dish: "jollof rice", country: "Ghana", price: 1200 },
     { dish: "ramen", country: "Japan", price: 900 },
     { dish: "pozole", country: "Mexico", price: 750 },
@@ -26,7 +30,7 @@ operator taxed{price: integer}: integer [
 
 /* A relation, of the dishes whose price with VAT is under `limit`: the
    condition calls `taxed` for each. */
-operator under{limit: integer}: relation { dish: text, country: text, price: integer } [
+operator under{limit: integer}: relation menu_item [
     dishes where taxed{price: price} < limit
 ];
 
@@ -93,13 +97,13 @@ operator cheapest{limit: integer}: tuple { dishes: integer, lowest: integer } [
 /* The mean price of `r`'s dishes with VAT, rounded down. An `if`
    computes only the branch it takes, so the mean of none is 0, and no
    division by zero. */
-operator mean{r: relation { dish: text, country: text, price: integer }}: integer [
+operator mean{r: relation menu_item}: integer [
     if is_empty{r: r} then 0 else sum{r: r, of: taxed{price: price}} div count{r: r}
 ];
 
 /* A word for how many dishes `r` has: an `else if` chains another
    condition. */
-operator how_many{r: relation { dish: text, country: text, price: integer }}: text [
+operator how_many{r: relation menu_item}: text [
     if is_empty{r: r} then "none" else if count{r: r} = 1 then "one" else "several"
 ];
 

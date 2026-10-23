@@ -783,22 +783,10 @@ fn broken_line(
 fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'static str {
     use SyntaxKind::{
         BuiltinType, Heading, Ident, LBrace, LBracket, Minus, Plus, RBrace, RelationLiteral,
-        Semicolon, TupleLiteral, VarDecl,
+        Semicolon, TupleLiteral,
     };
     if prev.kind() == Semicolon {
-        // Between definitions: variable declarations in a row go on adjacent
-        // lines unless the source groups them with a blank line, and
-        // everything else is separated by a blank line.
-        let both_variables = item_kind(prev) == Some(VarDecl) && item_kind(next) == Some(VarDecl);
-        let both_builtin_types =
-            item_kind(prev) == Some(BuiltinType) && item_kind(next) == Some(BuiltinType);
-        let both_kinds = item_kind(prev) == Some(SyntaxKind::KindDecl)
-            && item_kind(next) == Some(SyntaxKind::KindDecl);
-        return if (both_variables || both_builtin_types || both_kinds) && !blank_line {
-            "\n"
-        } else {
-            "\n\n"
-        };
+        return between_definitions(prev, next, blank_line);
     }
     // Braces with spaces inside: a heading, a tuple, a relation or new
     // attributes, as in `tuple { a: integer }` and `r extend { b := 1 }`.
@@ -828,8 +816,8 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
     // `value` and `from`, in `tuple from r` and `value from r`, `any`, in
     // `any type`, `types`, before an operator's type parameters, `per`,
     // which a space also comes before, `load`, `from` and `order`, which
-    // one comes before too, an order item's `asc` and `desc`, and a `for`
-    // loop's `in`.
+    // one comes before too, an order item's `asc` and `desc`, a `for`
+    // loop's `in`, and `heading`, before a heading's name.
     let contextual_keyword = prev.kind() == Ident
         && prev.parent().is_some_and(|p| match p.kind() {
             BuiltinType => prev.text() == "type",
@@ -839,6 +827,7 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
             | SyntaxKind::TypeParameters
             | SyntaxKind::Per
             | SyntaxKind::KindDecl
+            | SyntaxKind::HeadingDecl
             | SyntaxKind::Load
             | SyntaxKind::OrderItem
             | SyntaxKind::ForStmt => true,
@@ -880,6 +869,12 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
                 SyntaxKind::Body | SyntaxKind::ArrayLiteral | SyntaxKind::OrderList
             )
         });
+    // A selector's braces follow a declared heading's name after a space:
+    // `relation home {}`.
+    let named_heading = next.kind() == LBrace
+        && prev
+            .parent()
+            .is_some_and(|p| p.kind() == SyntaxKind::HeadingRef);
     // A projection's braces follow its operand directly: `r{a}{b}`. Those
     // of a selector it projects don't: `tuple { a: 1 }{a}`.
     let projection = next.kind() == LBrace
@@ -890,7 +885,7 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
                     .is_some_and(|p| p.kind() == SyntaxKind::ProjectExpr)
         });
     match (prev.kind(), next.kind()) {
-        _ if key_start(next).is_some() || per || requirements => " ",
+        _ if key_start(next).is_some() || per || requirements || named_heading => " ",
         // The variable an assignment assigns, as in `update r { … }`.
         _ if is_target(prev) => " ",
         _ if projection => "",
@@ -906,6 +901,28 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
         (RBrace, LBracket | LBrace) => " ",
         (prev, next) if spaced_after(prev) || spaced_before(next) => " ",
         _ => "",
+    }
+}
+
+/// The whitespace between definitions, after `prev`, a `;`: declarations
+/// of one kind in a row, variables', headings', built-in types' or
+/// kinds', go on adjacent lines unless the source groups them with a blank
+/// line, as `blank_line` says, and everything else is separated by a blank
+/// line.
+fn between_definitions(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'static str {
+    let both = |kind| item_kind(prev) == Some(kind) && item_kind(next) == Some(kind);
+    let in_a_row = [
+        SyntaxKind::VarDecl,
+        SyntaxKind::HeadingDecl,
+        SyntaxKind::BuiltinType,
+        SyntaxKind::KindDecl,
+    ]
+    .into_iter()
+    .any(both);
+    if in_a_row && !blank_line {
+        "\n"
+    } else {
+        "\n\n"
     }
 }
 
@@ -1269,6 +1286,30 @@ mod tests {
                 "var later := cities where people_in_the_year_two_thousand = people_in_the_year_nineteen_hundred + 1 and city <> \"Lyon\";"
             ),
             "var later := cities\n    where people_in_the_year_two_thousand = people_in_the_year_nineteen_hundred + 1\n        and city <> \"Lyon\";\n"
+        );
+    }
+
+    #[test]
+    fn headings() {
+        assert_eq!(
+            fmt(
+                "heading  home:={city:text,rooms:integer};heading street:={homes:relation home};var r:relation home:=relation home{};"
+            ),
+            "heading home := { city: text, rooms: integer };\nheading street := { homes: relation home };\n\nvar r: relation home := relation home {};\n"
+        );
+        // Tuples' attributes in the order of a named heading's declaration.
+        assert_eq!(
+            fmt(
+                "heading home := { city: text, rooms: integer };\nvar r := relation home { { rooms: 3, city: \"Lima\" } };\nvar s: relation home := relation { { rooms: 2, city: \"Pune\" } };"
+            ),
+            "heading home := { city: text, rooms: integer };\n\nvar r := relation home { { city: \"Lima\", rooms: 3 } };\nvar s: relation home := relation { { city: \"Pune\", rooms: 2 } };\n"
+        );
+        // A long one breaks as any heading does.
+        assert_eq!(
+            fmt(
+                "heading home := { house: integer, color: text, nation: text, drink: text, dish: text, pet: text, garden: boolean };"
+            ),
+            "heading home := {\n    house: integer,\n    color: text,\n    nation: text,\n    drink: text,\n    dish: text,\n    pet: text,\n    garden: boolean,\n};\n"
         );
     }
 

@@ -219,6 +219,21 @@ fn builtin_type_rule(identifier: &str) -> Value {
     })
 }
 
+/// `heading name :=`: `heading` is a keyword only before a heading's name
+/// and `:=`, which an attribute so named never has.
+fn heading_rule(identifier: &str) -> Value {
+    json!({
+        "match": format!(
+            "\\b(heading)\\s+({identifier})\\s*(?={})",
+            regex_escape(SyntaxKind::ColonEq.fixed_text().unwrap())
+        ),
+        "captures": {
+            "1": { "name": "keyword.other.trendy" },
+            "2": { "name": "entity.name.type.trendy" },
+        },
+    })
+}
+
 /// `key {`: `key` is a keyword only before a variable's key attributes,
 /// which a grammar can't tell from a projection of a variable named `key`;
 /// semantic highlighting can.
@@ -323,6 +338,7 @@ fn generate(probed: &Probed) -> Value {
             { "include": "#comment" },
             { "include": "#operator-definition" },
             { "include": "#builtin-type" },
+            { "include": "#heading" },
             { "include": "#call" },
             { "include": "#variable-declaration" },
             { "include": "#key" },
@@ -361,6 +377,7 @@ fn generate(probed: &Probed) -> Value {
                 },
             },
             "builtin-type": builtin_type_rule(identifier),
+            "heading": heading_rule(identifier),
             "key": key_rule(),
             "load": load_rule(identifier),
             "order": order_rule(),

@@ -313,6 +313,12 @@ impl Prelude {
                     decl.span(),
                     "a variable",
                 )),
+                Item::Heading(decl) => errors.push(Diagnostic::error(
+                    Code::Internal,
+                    "the prelude declares no headings",
+                    decl.span(),
+                    "a heading",
+                )),
             }
         }
         // What is missing goes at the end.

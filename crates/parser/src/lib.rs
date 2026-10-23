@@ -35,6 +35,7 @@ pub fn parse(source: &str, lexed: Lexed) -> Parse {
         form: errors::OPERATOR_FORM,
         missing: None,
         paren_calls: true,
+        previous_item: None,
         builder: TreeBuilder::new(),
         errors: lexed.errors,
     };
@@ -65,6 +66,9 @@ struct Parser<'a> {
     /// one: everywhere but in Tutorial D's `UPDATE R WHERE p ( … )`, whose
     /// condition the parenthesized new values follow.
     paren_calls: bool,
+    /// Where the top-level definition before the one being parsed ends, if
+    /// there is one: where a definition written inside this one goes.
+    previous_item: Option<usize>,
     builder: TreeBuilder,
     errors: Vec<Diagnostic>,
 }
@@ -168,11 +172,13 @@ impl<'a> Parser<'a> {
     /// The builder opens and closes the root node itself.
     fn source_file(&mut self) {
         while let Some(found) = self.found() {
+            self.previous_item = self.last_end;
             match found.kind {
                 SyntaxKind::OperatorKw => self.operator(),
                 SyntaxKind::BuiltinKw => self.builtin(),
                 SyntaxKind::VarKw => self.var_decl(),
                 SyntaxKind::Ident if self.at_kind() => self.kind_decl(),
+                SyntaxKind::Ident if self.at_heading_decl() => self.heading_decl(),
                 _ => self.junk(found),
             }
         }
@@ -212,6 +218,98 @@ impl<'a> Parser<'a> {
         );
         self.expect(SyntaxKind::Semicolon);
         self.builder.finish_node();
+    }
+
+    /// Whether a heading declaration starts here: `heading`, a contextual
+    /// keyword, in any case, before a name, or another language's keyword
+    /// for a type of records before a name, then `{`, or `=` or `:=` and
+    /// `{`, as in TypeScript's `type Home = {…}` and `interface Home {…}`.
+    fn at_heading_decl(&mut self) -> bool {
+        let Some(first) = self.found().filter(|f| f.kind == SyntaxKind::Ident) else {
+            return false;
+        };
+        if self
+            .found_after(1)
+            .is_none_or(|f| f.kind != SyntaxKind::Ident)
+        {
+            return false;
+        }
+        if first.text.eq_ignore_ascii_case("heading") {
+            return true;
+        }
+        let kind = |p: &mut Self, n| p.found_after(n).map(|f| f.kind);
+        errors::record_keyword(first.text).is_some()
+            && match kind(self, 2) {
+                Some(SyntaxKind::LBrace) => true,
+                Some(SyntaxKind::Eq | SyntaxKind::ColonEq) => {
+                    kind(self, 3) == Some(SyntaxKind::LBrace)
+                }
+                _ => false,
+            }
+    }
+
+    /// `heading name := { name: type, … };`: a heading with a name, which
+    /// stands for it after `relation` and `tuple`. Another language's
+    /// declaration of a type of records, such as TypeScript's
+    /// `type Home = {…};` or Rust's `struct Home {…}`, is parsed as one,
+    /// and fixed to one in a single edit. `=` for `:=`, and `relation` or
+    /// `tuple` before the attributes, are reported, with fixes.
+    fn heading_decl(&mut self) {
+        let outer_form = std::mem::replace(&mut self.form, errors::HEADING_DECL_FORM);
+        self.start_node(SyntaxKind::HeadingDecl);
+        let keyword = self.found().expect("at a heading declaration");
+        self.bump();
+        let mut foreign = (!keyword.text.eq_ignore_ascii_case("heading"))
+            .then(|| errors::ForeignHeading::new(keyword));
+        if foreign.is_none() && keyword.text != "heading" {
+            self.errors
+                .push(errors::miscased_keyword(keyword, "heading"));
+        }
+        self.name(
+            "add the heading's name after `heading`, as in `heading home := { city: text };`",
+            &[SyntaxKind::ColonEq, SyntaxKind::Eq, SyntaxKind::LBrace],
+        );
+        let at = self.last_end.unwrap_or(keyword.span.end);
+        match (self.peek(), &mut foreign) {
+            (Some(SyntaxKind::ColonEq), _) => {
+                self.bump();
+            }
+            (Some(SyntaxKind::Eq), Some(foreign)) => foreign.eq = Some(self.bump()),
+            (Some(SyntaxKind::Eq), None) => {
+                let span = self.bump();
+                self.errors
+                    .push(errors::assignment_with_eq(span, "to declare a heading"));
+            }
+            (_, Some(foreign)) => foreign.colon_eq = Some(at),
+            (_, None) => self.missing(SyntaxKind::ColonEq),
+        }
+        if let Some(found) = self
+            .found()
+            .filter(|f| matches!(f.kind, SyntaxKind::TupleKw | SyntaxKind::RelationKw))
+        {
+            // `heading home := relation { … }`: `relation` and `tuple` go
+            // where it is used.
+            let next = self.found_after(1).map_or(found.span.end, |f| f.span.start);
+            self.bump();
+            self.errors.push(errors::heading_as_type(
+                found,
+                Span::new(found.span.start, next),
+            ));
+        }
+        self.heading();
+        match foreign {
+            Some(mut foreign) => {
+                if self.at(SyntaxKind::Semicolon) {
+                    self.bump();
+                } else {
+                    foreign.semicolon = Some(self.last_end.unwrap_or(at));
+                }
+                self.errors.push(errors::foreign_heading(&foreign));
+            }
+            None => self.expect(SyntaxKind::Semicolon),
+        }
+        self.builder.finish_node();
+        self.form = outer_form;
     }
 
     /// Whether a requirement starts here: an operator, or a name.
@@ -731,6 +829,20 @@ impl<'a> Parser<'a> {
             || (found.kind == SyntaxKind::Ident && found.text.eq_ignore_ascii_case("foreach"))
         {
             self.for_stmt();
+            return;
+        }
+        if found.text == "heading" && self.at_heading_decl() {
+            // A heading declared in a body, as a local type: parsed as
+            // one, and moved before the definition it is in.
+            let before = self.last_end.unwrap_or(found.span.start);
+            self.heading_decl();
+            let end = self.last_end.unwrap_or(found.span.end);
+            self.errors.push(errors::nested_heading(
+                found.span,
+                &self.source[found.span.start..end],
+                Span::new(before, end),
+                self.previous_item,
+            ));
             return;
         }
         // `break;` and `LEAVE name;`: names, before what no statement
@@ -2276,12 +2388,12 @@ impl<'a> Parser<'a> {
             // A bare `{`, as in TypeScript, is a tuple type without `tuple`.
             self.start_node(SyntaxKind::TupleType);
             self.keyword(SyntaxKind::TupleKw);
-            self.heading();
+            self.heading_expr();
             self.builder.finish_node();
         } else if self.at_keyword(SyntaxKind::RelationKw) {
             self.start_node(SyntaxKind::RelationType);
             self.keyword(SyntaxKind::RelationKw);
-            self.heading();
+            self.heading_expr();
             self.builder.finish_node();
         } else if self.at(SyntaxKind::ArrayKw) {
             self.start_node(SyntaxKind::ArrayType);
@@ -3371,8 +3483,9 @@ impl<'a> Parser<'a> {
         )
     }
 
-    /// `tuple [heading] { name: value, … }`. In a relation, the `tuple`
-    /// keyword may be left out; elsewhere a bare `{` is reported, with a fix.
+    /// `tuple [heading] { name: value, … }`, its heading written out or a
+    /// declared one's name. In a relation, the `tuple` keyword may be left
+    /// out; elsewhere a bare `{` is reported, with a fix.
     fn tuple_literal(&mut self, in_relation: bool) {
         let outer_form = std::mem::replace(&mut self.form, errors::TUPLE_VALUE_FORM);
         self.start_node(SyntaxKind::TupleLiteral);
@@ -3384,6 +3497,8 @@ impl<'a> Parser<'a> {
         }
         if has_keyword && self.at_heading() {
             self.heading();
+        } else if has_keyword && self.at(SyntaxKind::Ident) {
+            self.heading_ref();
         }
         self.delimited(
             None,
@@ -3438,13 +3553,25 @@ impl<'a> Parser<'a> {
         self.form = outer_form;
     }
 
-    /// `relation [heading] { tuple, … }`.
+    /// `relation [heading] { tuple, … }`, its heading written out or a
+    /// declared one's name.
     fn relation_literal(&mut self) {
         let outer_form = std::mem::replace(&mut self.form, errors::RELATION_VALUE_FORM);
         self.start_node(SyntaxKind::RelationLiteral);
         self.keyword(SyntaxKind::RelationKw);
         if self.at_heading() {
             self.heading();
+        } else if self.at(SyntaxKind::Ident) {
+            self.heading_ref();
+            if !self.at(SyntaxKind::LBrace) {
+                // `relation home;`: a declared heading's type, as a value.
+                let at = self.last_end.unwrap_or(0);
+                let found = self.found();
+                self.errors.push(errors::relation_without_tuples(at, found));
+                self.builder.finish_node();
+                self.form = outer_form;
+                return;
+            }
         } else if self.at(SyntaxKind::LBrace)
             && self
                 .found_after(1)
@@ -3482,6 +3609,23 @@ impl<'a> Parser<'a> {
         );
         self.builder.finish_node();
         self.form = outer_form;
+    }
+
+    /// A heading after `relation` or `tuple` in a type: a declared one's
+    /// name, or its attributes written out.
+    fn heading_expr(&mut self) {
+        if self.at(SyntaxKind::Ident) {
+            self.heading_ref();
+        } else {
+            self.heading();
+        }
+    }
+
+    /// A declared heading's name.
+    fn heading_ref(&mut self) {
+        self.start_node(SyntaxKind::HeadingRef);
+        self.bump();
+        self.builder.finish_node();
     }
 
     /// `{ name: type, … }`.
@@ -3728,7 +3872,8 @@ impl<'a> Parser<'a> {
                 k,
                 SyntaxKind::OperatorKw | SyntaxKind::VarKw | SyntaxKind::BuiltinKw
             )
-        }) {
+        }) && !self.at_heading_decl()
+        {
             self.bump();
         }
         self.builder.finish_node();
@@ -4212,7 +4357,7 @@ SourceFile
 
     #[test]
     fn missing_assignment_before_value() {
-        assert_eq!(fix("var i: integer 0;"), "var i: integer:= 0;");
+        assert_eq!(fix("var i: integer 0;"), "var i: integer := 0;");
     }
 
     #[test]
@@ -5172,6 +5317,108 @@ SourceFile
     }
 
     #[test]
+    fn heading_declarations() {
+        let parse = parse_str("heading home := { city: text, rooms: integer };");
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let Some(trendy_syntax::ast::Item::Heading(home)) = parse.tree.items().next() else {
+            panic!("a heading's declaration");
+        };
+        assert_eq!(home.name().and_then(|n| n.ident()).unwrap().text(), "home");
+        assert_eq!(home.heading().unwrap().attributes().count(), 2);
+        // `heading` is a name elsewhere, such as a ship's.
+        assert!(
+            parse_str("var heading := relation { { heading: 90 } };")
+                .errors
+                .is_empty()
+        );
+        // Its name stands for its attributes after `relation` and `tuple`,
+        // in types and in selectors.
+        for source in [
+            "var r: relation home := relation home {};",
+            "var r: relation home key { city };",
+            "var t := tuple home { city: \"Lima\", rooms: 3 };",
+            "var a: array tuple home := array tuple home [];",
+            "var r := relation { tuple home { city: \"Lima\", rooms: 3 } };",
+            "operator only{r: relation home}: tuple home [ tuple from r ];",
+        ] {
+            let parse = parse_str(source);
+            assert!(parse.errors.is_empty(), "{source}: {:#?}", parse.errors);
+            assert!(
+                parse
+                    .tree
+                    .syntax()
+                    .descendants()
+                    .any(|n| n.kind() == SyntaxKind::HeadingRef),
+                "{source}"
+            );
+        }
+        // A name finds its declaration in the file.
+        let parse =
+            parse_str("var r: relation home := relation {};\nheading home := { city: text };");
+        let named = parse
+            .tree
+            .syntax()
+            .descendants()
+            .find_map(trendy_syntax::ast::HeadingRef::cast)
+            .unwrap();
+        assert_eq!(named.declaration(), parse.tree.heading("home"));
+        assert!(named.declaration().is_some());
+    }
+
+    #[test]
+    fn heading_habits() {
+        let fixed = "heading home := { city: text };";
+        for source in [
+            "heading home = { city: text };",
+            "heading home { city: text };",
+            "heading home := relation { city: text };",
+            "heading home := tuple { city: text };",
+            "Heading home := { city: text };",
+        ] {
+            assert_eq!(fix(source), fixed, "{source}");
+        }
+        // Other languages' types of records, fixed in one edit.
+        for (source, fixed) in [
+            (
+                "type Home = { city: text };",
+                "heading Home := { city: text };",
+            ),
+            (
+                "interface Home { city: text }",
+                "heading Home := { city: text };",
+            ),
+            (
+                "struct Home { city: text }\nvar x := 1;",
+                "heading Home := { city: text };\nvar x := 1;",
+            ),
+        ] {
+            let parse = parse_str(source);
+            assert_eq!(parse.errors.len(), 1, "{source}: {:#?}", parse.errors);
+            assert_eq!(parse.errors[0].code, Code::ExpectedDefinition);
+            assert_eq!(fix(source), fixed);
+        }
+        let errors = parse_str("heading home := relation { city: text };").errors;
+        assert_eq!(errors[0].code, Code::HeadingAsType);
+        // Junk stops before a heading's declaration.
+        let parse = parse_str("junk heading home := { city: text };");
+        assert_eq!(parse.errors.len(), 1);
+        assert_eq!(parse.tree.headings().count(), 1);
+        // One in a body moves before its operator, after the one before.
+        assert_eq!(
+            fix(
+                "var x := 1;\n\noperator main{} [\n    heading home := { city: text };\n    var r: relation home;\n];"
+            ),
+            "var x := 1;\n\nheading home := { city: text };\n\noperator main{} [\n    var r: relation home;\n];"
+        );
+        assert_eq!(
+            fix("operator main{} [\n    heading home := { city: text };\n];"),
+            "heading home := { city: text };\n\noperator main{} [\n];"
+        );
+        // A heading's name as a relation value: the empty relation.
+        assert_eq!(fix("var r := relation home;"), "var r := relation home {};");
+    }
+
+    #[test]
     fn call_recovery() {
         let one_fix = |source: &str, fixed: &str| {
             let errors = parse_str(source).errors;
@@ -5911,10 +6158,10 @@ SourceFile
             fix("var x := r GROUP ({a, b} AS g);"),
             "var x := r group {g := {a, b}};"
         );
-        // A missing `:=` is inserted; the formatter spaces it.
+        // A missing `:=` is inserted, spaced.
         assert_eq!(
             fix("var x := r group { g {a} };"),
-            "var x := r group { g:= {a} };"
+            "var x := r group { g := {a} };"
         );
         // SQL's `group by` names the other attributes: no mechanical fix.
         assert_eq!(

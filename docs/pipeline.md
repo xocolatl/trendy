@@ -277,6 +277,16 @@ before a name; looking for it leaves the whitespace after the type to what
 follows. The parser accepts it in every heading, and sema in an operator's
 parameters only.
 
+`heading name := { … };` (`HeadingDecl`) is a definition, `heading` a
+contextual keyword recognized at a definition's start before a name.
+After `relation` or `tuple`, in a type or a selector, a name in place of
+the braces is a declared heading's (`HeadingRef`); `ast::HeadingExpr` is
+either, and `HeadingRef::declaration` finds the declaration by name in
+the file, the first with it, as sema's namespace keeps. Other languages'
+declarations of a type of records, TypeScript's `type Home = {…}` and
+`interface Home {…}` and C's and Rust's `struct Home {…}`, are parsed as
+a heading's, reported once with a fix that makes them one (P0004).
+
 `!!r` (`ImageExpr`), Tutorial D's image relation, takes a single operand:
 a name, a literal or a parenthesized expression. The lexer makes `!!` one
 token only when the two `!`s are together; a lone `!` is C's `not`, fixed
@@ -357,7 +367,8 @@ placed by where they were: one on its own line stays on its own line where
 the layout breaks the line anyway, and otherwise goes inline, which a block
 comment always can; one after code on the same line stays there. The only tokens it moves are the attributes of a relation's
 tuples, which it writes in the order of the relation's heading (the
-selector's own, else the expected type's, else the first tuple's).
+selector's own, else the expected type's, else the first tuple's), a
+declared heading's name standing for its declaration's.
 Attributes are unordered, so that can't change what a program means. It must
 also be idempotent: formatting its own output changes nothing.
 
@@ -493,8 +504,8 @@ or every semantic error found.
 **It is the last layer allowed to report an error to the user.**
 
 There are three namespaces (`Namespaces`): operators, values, which are
-variables and parameters, and types, so a variable can have an operator's
-name or a type's. Where a name is says which namespace it is in: after
+variables and parameters, and types, with the headings, so a variable can
+have an operator's name or a type's. Where a name is says which namespace it is in: after
 `call`, it is an operator, and in an expression, a value. A name right
 before `{}` could be either, a projection on no attributes or a call
 without arguments: it is the operator if there is one, so it is a call,
@@ -502,8 +513,14 @@ and a value of the same name is projected as `(x){}`. An update operator
 has no value, so calling one in an expression is an error (A0016).
 
 Sema collects every name before checking anything, so errors can refer to
-definitions anywhere in the file. Then it checks, in order, every
-operator's signature, its parameters and result type (`signatures`), so
+definitions anywhere in the file. Then it resolves the headings'
+attributes (`headings::resolve`), each after those of the headings it
+names, so that any type can name one, and reports each cycle among them
+(A0049). A heading's name is only a shorter way to write its attributes:
+`relation home` resolves to the `hir::Type` its attributes written out
+would, so HIR has no headings' names, and an expectation's origin follows
+the name to the declaration, where the attributes' types are written.
+Then it checks, in order, every operator's signature, its parameters and result type (`signatures`), so
 that anything can refer to an operator defined after it; the globals,
 which are the variables, whose initial values it evaluates, and the
 read-only operators' values, which initial values can call; and the update

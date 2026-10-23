@@ -194,6 +194,10 @@ pub enum SyntaxKind {
     /// declares it, and what each must have, such as `<`. `kind` is a
     /// contextual keyword, an identifier elsewhere.
     KindDecl,
+    /// `heading name := { name: type, … };`: a heading with a name, which
+    /// stands for it after `relation` and `tuple`. `heading` is a
+    /// contextual keyword, an identifier elsewhere.
+    HeadingDecl,
     /// `{ <, … }`: what a kind's types must have.
     RequirementList,
     /// One thing a kind's types must have: an operator, such as `<`.
@@ -323,6 +327,9 @@ pub enum SyntaxKind {
     /// `{ name: type, … }`: the attributes of a tuple or relation type, or
     /// of a selector.
     Heading,
+    /// A declared heading's name, after `relation` or `tuple`, in place of
+    /// the attributes it stands for.
+    HeadingRef,
     /// `name: type`, in a heading.
     AttributeType,
     /// `per r`, after a parameter's type: its argument is evaluated for each
@@ -351,7 +358,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 146] = [
+    pub const ALL: [SyntaxKind; 148] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -437,6 +444,7 @@ impl SyntaxKind {
         SyntaxKind::BuiltinOperator,
         SyntaxKind::BuiltinType,
         SyntaxKind::KindDecl,
+        SyntaxKind::HeadingDecl,
         SyntaxKind::RequirementList,
         SyntaxKind::Requirement,
         SyntaxKind::VarDecl,
@@ -487,6 +495,7 @@ impl SyntaxKind {
         SyntaxKind::Initializer,
         SyntaxKind::Key,
         SyntaxKind::Heading,
+        SyntaxKind::HeadingRef,
         SyntaxKind::AttributeType,
         SyntaxKind::Per,
         SyntaxKind::TupleType,
@@ -908,6 +917,7 @@ impl SyntaxKind {
             SyntaxKind::BuiltinOperator => "built-in operator declaration",
             SyntaxKind::BuiltinType => "built-in type declaration",
             SyntaxKind::KindDecl => "kind declaration",
+            SyntaxKind::HeadingDecl => "heading declaration",
             SyntaxKind::RequirementList => "requirements",
             SyntaxKind::Requirement => "requirement",
             SyntaxKind::VarDecl => "variable declaration",
@@ -954,7 +964,7 @@ impl SyntaxKind {
             SyntaxKind::Per => "`per`",
             SyntaxKind::Initializer => "initial value",
             SyntaxKind::Key => "key",
-            SyntaxKind::Heading => "heading",
+            SyntaxKind::Heading | SyntaxKind::HeadingRef => "heading",
             SyntaxKind::TupleType => "tuple type",
             SyntaxKind::RelationType => "relation type",
             SyntaxKind::ArrayType => "array type",

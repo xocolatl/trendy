@@ -11,8 +11,9 @@ syntax is its own, and in particular it is not Tutorial D's.
 ## Programs
 
 A source file is a sequence of top-level definitions, in any order: operator
-definitions and variable declarations. Execution starts in the operator named
-`main`, which every program must define.
+definitions, variable declarations and heading declarations (see
+[Headings](#headings)). Execution starts in the operator named `main`, which
+every program must define.
 
 ```trendy
 var greeting: text := "hello";
@@ -1298,6 +1299,76 @@ operator main{} [];
 
 ```trendy,error
 var twice := relation { { a: 1 }, { a: 1 } };
+
+operator main{} [];
+```
+
+## Headings
+
+A heading is the attributes of a tuple or a relation, with their types,
+such as `{ city: text, rooms: integer }`. `heading name := { … };`
+declares one with a name, and the name stands for the attributes wherever
+a heading follows `relation` or `tuple`: in types, and in selectors.
+
+```trendy
+heading home := { city: text, rooms: integer };
+heading street := { name: text, homes: relation home };
+
+var homes: relation home := relation home {
+    { city: "Lima", rooms: 3 },
+    { city: "Pune", rooms: 5 },
+};
+var high_street := tuple street { name: "Jalan Besar", homes: homes };
+
+operator largest{homes: relation home}: tuple home [
+    tuple from (homes where rooms = max{r: homes, of: rooms})
+];
+
+operator main{} [
+    call debug_value{v: largest{homes: high_street.homes}};
+];
+```
+
+- **It names attributes, not a type.** A heading is the attributes of
+  tuples and relations alike, so it has two types, `relation home` and
+  `tuple home`, which are the types its attributes written out make:
+  `relation home` is `relation { city: text, rooms: integer }`. In *The
+  Third Manifesto*, a tuple type's name is, precisely, `TUPLE H`, where
+  `H` is its heading (RM Prescriptions 6 and 7), and two such types are
+  equal when their headings are, so a value fits wherever its attributes
+  do, named or not. Values print with their attributes written out.
+- **Declared at the top level, in any order,** as operators are: one
+  declared in an operator's body is moved out (P0034). A heading's
+  attributes can be of other headings' types, but it can't contain
+  itself, directly or through others (A0049): TTM leaves open whether a
+  heading can, and assumes it can't (chapter 6, RM Prescription 6).
+- **Its attributes have specific types,** as a variable's do: not
+  `any type`, nor an operator's type parameter (A0014, A0003).
+- **Headings share a namespace with the types,** so no two have the same
+  name, nor a heading a built-in type's (A0001), but a heading can have a
+  variable's, an operator's or an attribute's name. `heading` is a keyword
+  only before a heading's name, so an attribute can be called `heading`,
+  as a ship's is.
+- **A heading's name alone is not a type** (A0003), as a type of records'
+  is in other languages: `{h: home}` is fixed to `relation home` or
+  `tuple home`. Their declarations are fixed to a heading's (P0004):
+  TypeScript's `type Home = { … }` and `interface Home { … }`, and C's and
+  Rust's `struct Home { … }`. So is `heading home := relation { … }`
+  (P0033).
+
+```trendy,error
+heading home := { city: text, rooms: integer };
+
+operator describe{h: home} [];
+
+operator main{} [];
+```
+
+```trendy,error
+interface Home {
+    city: text,
+    rooms: integer,
+}
 
 operator main{} [];
 ```
@@ -3073,15 +3144,16 @@ are case-sensitive. The keywords are `operator`, `var`, `call`, `builtin`,
 and a keyword can't be a name (P0017).
 `type` is a keyword only after `builtin`, `key` only where a variable's
 keys go, `value` and `from` only in `tuple from` and `value from`, and
-`load`, `from`, `order`, `asc` and `desc` only in a load, and `in` only
-in a `for` loop.
+`load`, `from`, `order`, `asc` and `desc` only in a load, `in` only
+in a `for` loop, and `heading` only before a heading's name.
 
-Operators, values and types each have a namespace of their own. Values
-are variables and parameters, and a parameter hides a variable of its
-name. So a variable can have an operator's name, or a type's, and which
-one a name is depends on where it is: in `call greet{…};` it is an
-operator, and as a value it is a variable or a parameter. No two
-operators can have the same name, nor two variables (A0001).
+Operators, values, and types with headings each have a namespace of
+their own. Values are variables and parameters, and a parameter hides a
+variable of its name. So a variable can have an operator's name, or a
+type's, and which one a name is depends on where it is: in
+`call greet{…};` it is an operator, and as a value it is a variable or a
+parameter. No two operators can have the same name, nor two variables,
+nor two headings, nor a heading and a built-in type (A0001).
 
 ```trendy
 var greet := "Hello";
@@ -3128,7 +3200,8 @@ operator main{} [
 
 - one definition per line;
 - consecutive variable declarations on adjacent lines, unless you separate
-  them with a blank line to group them; several blank lines become one;
+  them with a blank line to group them, and so for headings'; several
+  blank lines become one;
 - a blank line between other definitions;
 - single spaces around `:=` and after `:`;
 - lines are at most 100 characters where a list, an `if` expression or
@@ -3166,7 +3239,7 @@ operator main{} [
   of operators broken across lines is in it;
 - a relation's tuples list their attributes in the order of the relation's
   heading: the selector's own heading, else the declared type, else the first
-  tuple's order;
+  tuple's order, where a heading's name stands for its declaration's;
 - an operator's body has each statement on its own line, indented, on
   adjacent lines unless you separate them with a blank line to group them;
   several blank lines become one, and a read-only operator's result type
@@ -3251,6 +3324,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `str(x)`, `x.to_string()`, `CAST(x AS VARCHAR)`, `CAST_AS_CHAR (X)` | `to_text{from: x}` |
 | `float(n)`, `n as f64`, `CAST(n AS DOUBLE PRECISION)`, `CAST_AS_RATIONAL (N)` | `to_approximate{from: n}` |
 | `{ x: 1 }`, `TUPLE { X 1 }` | `tuple { x: 1 }` |
+| `type Home = { … }`, `interface Home { … }`, `struct Home { … }` | `heading home := { … };`, whose types are `relation home` and `tuple home` |
 | `[1, 2]`, `ARRAY[1, 2]` | `array [1, 2]` |
 | `[]`, an empty list | `array integer []`, with its elements' type, or `array []` where it is known |
 | `a[0]`, the first element | `a[1]` |
