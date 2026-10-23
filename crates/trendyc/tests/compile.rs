@@ -826,9 +826,11 @@ fn tuples() {
             r#"tuple { city: "Paris", country: "France", district: "1st", street: "1 Rue de Rivoli" }"#,
             r#"tuple { city: "Paris", country: "France", postal_code: "75001", street: "1 Rue de Rivoli", year: 2024 }"#,
             r#"tuple { city: "Paris", country: "France", district: "1st", postal_code: "75001", region: "Île-de-France", street: "1 Rue de Rivoli" }"#,
-            // The only tuple, and the only value of it.
+            // The only tuple, and the only value of it, and that value
+            // joined to more text.
             r#"tuple { city: "Paris", country: "France" }"#,
             r#""France""#,
+            r#""Kumasi, Ghana""#,
         ]
     );
 }

@@ -2,6 +2,8 @@ mod errors;
 mod sequences;
 mod unordered;
 
+use std::ops::RangeInclusive;
+
 use trendy_diag::{Diagnostic, Span};
 use trendy_lexer::{Lexed, Token};
 use trendy_syntax::ast::{AstNode, SourceFile};
@@ -1581,7 +1583,10 @@ impl<'a> Parser<'a> {
                 .push(errors::load_without_from(Span::empty(at), before));
         }
         if self.at_operand() && !self.at_order() {
-            self.relation_expression();
+            // A whole expression, which ends before `order`: a load is a
+            // statement, so, unlike a `tuple from`'s relation, nothing
+            // after it could be outside it.
+            self.expression();
         } else {
             self.missing_with_help(
                 SyntaxKind::Ident,
@@ -2485,6 +2490,14 @@ impl<'a> Parser<'a> {
     /// operators, `not`, `-` and `+`, bind tightest, so `not a = b` is
     /// `(not a) = b`.
     fn binary(&mut self, min: Precedence) {
+        self.binary_within(min..=Precedence::TIGHTEST);
+    }
+
+    /// An expression whose dyadic operators' precedences are in
+    /// `precedences`: it ends before an operator that binds more loosely,
+    /// as every expression does, or more tightly, as the relation of a
+    /// `tuple from` does before arithmetic.
+    fn binary_within(&mut self, precedences: RangeInclusive<Precedence>) {
         self.peek();
         let start = self.builder.checkpoint();
         self.unary();
@@ -2498,7 +2511,7 @@ impl<'a> Parser<'a> {
                 keyword,
                 words,
             } = operator;
-            if precedence < min {
+            if !precedences.contains(&precedence) {
                 break;
             }
             if let Some(middle) = compared.filter(|_| precedence == Precedence::COMPARISON) {
@@ -2528,11 +2541,12 @@ impl<'a> Parser<'a> {
             }
             let rhs_start = self.lookahead().map(|f| f.span.start);
             let right_grouping = keyword == SyntaxKind::ImpliesKw;
-            self.binary(if right_grouping {
+            let right = if right_grouping {
                 precedence
             } else {
                 precedence.tighter()
-            });
+            };
+            self.binary_within(right..=*precedences.end());
             compared = match (
                 precedence == Precedence::COMPARISON,
                 rhs_start,
@@ -2765,13 +2779,15 @@ impl<'a> Parser<'a> {
     }
 
     /// A relation's expression, as Tutorial D's `TUPLE FROM` takes: its
-    /// operators down to the joins, and a `where` with its condition. So
-    /// `tuple from r where p` is of `r where p`, while
-    /// `(tuple from r) = t` compares, as a comparison binds more loosely.
+    /// relational operators, from the unions to the joins, and a `where`
+    /// with its condition. So `tuple from r where p` is of `r where p`,
+    /// while `tuple from r = t` compares the tuple, as a comparison binds
+    /// more loosely, and `value from r{a} + 1` adds to the value, as no
+    /// relation has arithmetic (TTM, Appendix I's `<relation exp>`).
     fn relation_expression(&mut self) {
         self.peek();
         let start = self.builder.checkpoint();
-        self.binary(Precedence::UNION);
+        self.binary_within(Precedence::UNION..=Precedence::JOIN);
         if let Some(operator) = self
             .binary_operator()
             .filter(|o| o.keyword == SyntaxKind::WhereKw)
@@ -5423,6 +5439,14 @@ SourceFile
                     show(&u.operand().unwrap())
                 ),
                 Expr::Paren(p) => show(&p.inner().unwrap()),
+                Expr::From(f) => format!(
+                    "({} from {})",
+                    match f.taken() {
+                        trendy_syntax::ast::Taken::Tuple => "tuple",
+                        trendy_syntax::ast::Taken::Value => "value",
+                    },
+                    show(&f.operand().unwrap())
+                ),
                 other => other.syntax().to_string().trim().to_string(),
             }
         }
@@ -5807,25 +5831,31 @@ SourceFile
         );
         assert_eq!(shape("r where a where b"), "((r where a) where b)");
         assert_eq!(fix("var x := r WHERE a = 1;"), "var x := r where a = 1;");
-        // `tuple from` takes a relation's expression, `where` included,
-        // but not a comparison after it.
-        let from = |source: &str| {
-            parse_str(source)
-                .tree
-                .syntax()
-                .descendants()
-                .find_map(trendy_syntax::ast::FromExpr::cast)
-                .unwrap()
-                .operand()
-                .unwrap()
-                .syntax()
-                .to_string()
-        };
+    }
+
+    #[test]
+    fn taken_relations() {
+        // A relation's expression: its relational operators, and a `where`
+        // with all of its condition.
         assert_eq!(
-            from("var x := tuple from r join s where a = 1 and b;"),
-            "r join s where a = 1 and b"
+            shape("tuple from r union s join t where a = b + 1 and c"),
+            "(tuple from ((r union (s join t)) where ((a = (b + 1)) and c)))"
         );
-        assert_eq!(from("var x := tuple from r = t;"), "r");
+        // Not a comparison after it, or arithmetic, which no relation has.
+        assert_eq!(shape("tuple from r = t"), "((tuple from r) = t)");
+        assert_eq!(shape("value from r{a} + 1"), "((value from r{a}) + 1)");
+        assert_eq!(
+            shape("value from r{a} * 2 + value from s{a}"),
+            "(((value from r{a}) * 2) + (value from s{a}))"
+        );
+        assert_eq!(
+            shape("value from r join s{a} || \"!\""),
+            "((value from (r join s{a})) || \"!\")"
+        );
+        assert_eq!(
+            shape("a = value from (r where b = 1){c} - 1"),
+            "(a = ((value from (r where b = 1){c}) - 1))"
+        );
     }
 
     #[test]

@@ -39,8 +39,10 @@ impl Precedence {
     pub const JOIN: Precedence = Precedence(7);
     /// `+`, `-` and `||`.
     pub const ADDITION: Precedence = Precedence(8);
-    /// `*`, `/`, `div` and `mod`, the tightest.
+    /// `*`, `/`, `div` and `mod`.
     pub const MULTIPLICATION: Precedence = Precedence(9);
+    /// The tightest of all.
+    pub const TIGHTEST: Precedence = Precedence::MULTIPLICATION;
 
     /// The next precedence up, which the right operand of an operator of
     /// this one that groups to the left binds at least as tightly as.

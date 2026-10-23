@@ -1278,9 +1278,9 @@ mod tests {
         // goes in from theirs.
         assert_eq!(
             fmt(
-                "var x := streets where value from (street where color = \"green\"){house} = (value from (street where color = \"ivory\"){house}) + 1 and is_empty{r: street};"
+                "var x := streets where value from (street where color = \"green\"){house} = value from (street where color = \"ivory\"){house} + 1 and is_empty{r: street};"
             ),
-            "var x := streets\n    where value from (street where color = \"green\"){house}\n            = (value from (street where color = \"ivory\"){house}) + 1\n        and is_empty{r: street};\n"
+            "var x := streets\n    where value from (street where color = \"green\"){house}\n            = value from (street where color = \"ivory\"){house} + 1\n        and is_empty{r: street};\n"
         );
         // So does an `if`'s condition from its `then` and `else`.
         assert_eq!(

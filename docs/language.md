@@ -2645,12 +2645,15 @@ operator main{} [
 - **`value from` takes one attribute:** project on it, as in
   `value from r{country}`. A relation of several attributes is an error
   (A0022), with a fix for each attribute.
-- **It takes a relation's expression,** as Tutorial D's does: the rest of
-  it down to the joins, and a `where` with its condition, so
-  `tuple from r where p` is of `r where p`. Postfix operators bind tighter,
-  so `value from r{country}` takes from `r{country}`; to project after a
-  `where`, parenthesize it, as above. A comparison binds more loosely, so
-  `tuple from r = t` compares the tuple.
+- **It takes a relation's expression,** as Tutorial D's does: its
+  relational operators, from the unions to the joins, and a `where` with
+  its condition, so `tuple from r where p` is of `r where p`. Postfix
+  operators bind tighter, so `value from r{country}` takes from
+  `r{country}`; to project after a `where`, parenthesize it, as above.
+  What no relation has ends it: a comparison, so `tuple from r = t`
+  compares the tuple, and arithmetic, so `value from r{born} + 1` adds to
+  the value, as in Tutorial D, whose `<relation exp>` has neither (TTM,
+  Appendix I).
 - **`value` and `from` are names elsewhere:** they are keywords only in
   `tuple from` and `value from`, as `key` is only where keys go.
   Tutorial D's capitals, `TUPLE FROM R`, are fixed.
@@ -2901,7 +2904,12 @@ parenthesization; SQL and Python read it that way.
 `implies` groups from the right, as in logic: `a implies b implies c`
 means `a implies (b implies c)`. The joins bind looser than arithmetic,
 since their operands are relations, and tighter than the comparisons, so
-`r join s = t` compares the join. Parentheses group explicitly.
+`r join s = t` compares the join. `tuple from` and `value from` take the
+relational operators after them, from the unions to the joins, and a
+`where` with its condition, but not arithmetic or a comparison, so
+`value from r{a} + 1` is `(value from r{a}) + 1` (see
+[Taking the only tuple](#taking-the-only-tuple)). Parentheses group
+explicitly.
 
 Precedence is a partial order: where a pair of operators could reasonably
 be read either way, neither reading is assumed, and parentheses must say

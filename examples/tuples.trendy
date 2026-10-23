@@ -160,11 +160,12 @@ operator join_addr{
 /* Tuple extraction: `tuple from r` is the only tuple of a relation, and
    `value from r` the only value of it, of a relation of one attribute;
    with no tuples or several, it is an error, when compiling if the
-   relation is known then, and otherwise when running (R0005). It takes the
-   rest of a relation's expression, `where` included, so
-   `tuple from r where p` is of `r where p`; a projection after the `where`
-   needs parentheses (RM Prescription 7's relation operators). `value` and
-   `from` are names elsewhere.
+   relation is known then, and otherwise when running (R0005). It takes a
+   relation's expression, its relational operators and a `where` with its
+   condition, so `tuple from r where p` is of `r where p`; a projection
+   after the `where` needs parentheses (RM Prescription 7's relation
+   operators). Arithmetic and comparisons end it, so `value from r{a} || x`
+   joins the value's text. `value` and `from` are names elsewhere.
    Tutorial D: TUPLE FROM R. Implemented, and printed twice like the
    projections. */
 var cities := relation {
@@ -173,10 +174,12 @@ var cities := relation {
 };
 var paris := tuple from cities where city = "Paris";
 var country := value from (cities where city = "Paris"){country};
+var place := value from (cities where country = "Ghana"){city} || ", Ghana";
 
 operator take_city{c: relation { city: text, country: text }} [
     call debug_value{v: tuple from c where city = "Paris"};
     call debug_value{v: value from (c where city = "Paris"){country}};
+    call debug_value{v: value from (c where country = "Ghana"){city} || ", Ghana"};
 ];
 
 operator main{} [
@@ -203,6 +206,7 @@ operator main{} [
     call debug_value{v: regioned};
     call debug_value{v: paris};
     call debug_value{v: country};
+    call debug_value{v: place};
 
     call project_addr{a: addr};
 
