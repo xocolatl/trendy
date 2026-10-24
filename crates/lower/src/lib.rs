@@ -694,14 +694,10 @@ impl<'a> FunctionBuilder<'a> {
         let callee = self.program.operator(call.operator);
         match &callee.kind {
             hir::OperatorKind::Builtin(hir::Builtin::DebugValue) => {
-                let value = &call.args["v"];
-                let ty = self.type_of(value);
-                let value = self.place(value, cx);
-                let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
-                self.insts.push(lir::Inst::CallRuntime {
-                    function: lir::RuntimeFn::DebugValue,
-                    args: vec![value, descriptor],
-                });
+                self.write(&call.args["v"], lir::RuntimeFn::DebugValue, cx);
+            }
+            hir::OperatorKind::Builtin(hir::Builtin::DebugTable) => {
+                self.write(&call.args["r"], lir::RuntimeFn::DebugTable, cx);
             }
             hir::OperatorKind::Update { .. } => {
                 let params = params_of(callee, &call.types);
@@ -748,6 +744,18 @@ impl<'a> FunctionBuilder<'a> {
                 unreachable!("`call` invokes only update operators")
             }
         }
+    }
+
+    /// A call of the runtime function `function`, which writes `value`,
+    /// given its address and its type's descriptor.
+    fn write(&mut self, value: &hir::Expr, function: lir::RuntimeFn, cx: &mut Lowering) {
+        let ty = self.type_of(value);
+        let value = self.place(value, cx);
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+        self.insts.push(lir::Inst::CallRuntime {
+            function,
+            args: vec![value, descriptor],
+        });
     }
 
     /// The arguments of a call, for `params`: a tuple, built in a stack
@@ -854,7 +862,9 @@ impl<'a> FunctionBuilder<'a> {
                 });
                 dst
             }
-            hir::Builtin::DebugValue => unreachable!("`debug_value` is an update operator"),
+            hir::Builtin::DebugValue | hir::Builtin::DebugTable => {
+                unreachable!("`{}` is an update operator", builtin.name())
+            }
         }
     }
 

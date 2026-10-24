@@ -170,6 +170,10 @@ pub enum Base {
 pub enum RuntimeFn {
     /// `trendy_rt_debug_value(value, descriptor)`.
     DebugValue,
+    /// `trendy_rt_debug_table(value, descriptor)`, of a relation. It stops
+    /// the program if the memory for its columns' widths can't be
+    /// allocated.
+    DebugTable,
     /// `trendy_rt_to_text(dst, value, descriptor)`: store at `dst` the
     /// text [`RuntimeFn::DebugValue`] writes for the value, of the type the
     /// descriptor describes, in memory the statement owns (see
@@ -338,6 +342,7 @@ impl RuntimeFn {
     pub fn symbol(self) -> &'static str {
         match self {
             RuntimeFn::DebugValue => "trendy_rt_debug_value",
+            RuntimeFn::DebugTable => "trendy_rt_debug_table",
             RuntimeFn::ToText => "trendy_rt_to_text",
             RuntimeFn::Sum => "trendy_rt_sum",
             RuntimeFn::Product => "trendy_rt_product",

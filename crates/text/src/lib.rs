@@ -25,7 +25,27 @@ pub const SIMPLE_ESCAPES: &[(char, char)] = &[
 ///
 /// Returns an error if `out` does.
 pub fn escape(text: &str, out: &mut impl fmt::Write) -> fmt::Result {
+    escape_but(text, out, None)
+}
+
+/// Write `text` with nothing around it, as a table's cell shows it: as
+/// [`escape`] writes a literal's body, so that a control character can't
+/// break the line, but with quotes as they are, since none end it.
+///
+/// # Errors
+///
+/// Returns an error if `out` does.
+pub fn escape_bare(text: &str, out: &mut impl fmt::Write) -> fmt::Result {
+    escape_but(text, out, Some('"'))
+}
+
+/// As [`escape`], but with `kept` written as it is.
+fn escape_but(text: &str, out: &mut impl fmt::Write, kept: Option<char>) -> fmt::Result {
     for c in text.chars() {
+        if Some(c) == kept {
+            out.write_char(c)?;
+            continue;
+        }
         match SIMPLE_ESCAPES.iter().find(|(_, value)| *value == c) {
             Some((name, _)) => {
                 out.write_char('\\')?;

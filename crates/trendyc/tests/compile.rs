@@ -197,7 +197,7 @@ fn operators() {
 }
 
 #[test]
-fn debug_value_prints_every_type() {
+fn debug_value_prints_every_type_and_debug_table_relations() {
     let (code, stderr) = run_example("debug");
     assert_eq!(code, 0);
     assert_eq!(
@@ -222,6 +222,28 @@ tuple { greeting: "\"say \\\"hi\\\"\\n\\ttab \\\\ é\"", point: "tuple { x: 1e0,
 "tuple { x: 1e0, y: tuple { z: false } }"
 "array [1200, 950, 220]"
 "relation { members: relation { name: text }, team: text } { { members: relation { name: text } { { name: \"Ada\" } }, team: \"core\" } }"
+┌──────┬───────┐
+│ born │ name  │
+├──────┼───────┤
+│ 1815 │ Ada   │
+│ 1923 │ Edgar │
+└──────┴───────┘
+┌──────┐
+│ name │
+├──────┤
+└──────┘
+┌─────────────────────────────────────────────┬──────┐
+│ members                                     │ team │
+├─────────────────────────────────────────────┼──────┤
+│ relation { name: text } { { name: "Ada" } } │ core │
+└─────────────────────────────────────────────┴──────┘
+┌───────┬──────────┬────────┐
+│ city  │ millions │ native │
+├───────┼──────────┼────────┤
+│ Kyiv  │        3 │ Київ   │
+│ Lima  │       10 │ Lima   │
+│ Xi'an │       13 │ 西安   │
+└───────┴──────────┴────────┘
 "#
     );
 }
@@ -242,7 +264,7 @@ fn to_text_is_what_debug_value_writes() {
         panic!("{}", lines[12]);
     };
     let folded: Vec<_> = folded.attributes().map(|(_, v)| v.clone()).collect();
-    let run: Vec<_> = lines[16..].iter().map(|line| text(line)).collect();
+    let run: Vec<_> = lines[16..20].iter().map(|line| text(line)).collect();
     let expected: Vec<_> = debug.iter().map(|line| written(line)).collect();
     assert_eq!(folded, expected);
     assert_eq!(run, expected);

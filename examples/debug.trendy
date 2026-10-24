@@ -51,4 +51,12 @@ operator main{} [
     call as_text{v: point};
     call as_text{v: rainfall};
     call as_text{v: teams};
+    call debug_table{r: people};
+    call debug_table{r: nobody};
+    call debug_table{r: teams};
+    call debug_table{r: relation {
+        { city: "Lima", native: "Lima", millions: 10 },
+        { city: "Xi'an", native: "西安", millions: 13 },
+        { city: "Kyiv", native: "Київ", millions: 3 },
+    }};
 ];

@@ -13,6 +13,10 @@ builtin type text: { ordered };
 
 builtin operator debug_value{v: any type};
 
+/* Write `r` to stderr as a table: a column for each attribute, in name
+   order, and a line for each tuple. */
+builtin operator debug_table{r: any relation};
+
 builtin operator count{r: any relation}: integer;
 
 /* Whether `r` has no tuples, Tutorial D's `IS_EMPTY`. */

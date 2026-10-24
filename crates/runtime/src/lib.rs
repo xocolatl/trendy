@@ -1,8 +1,10 @@
 //! The runtime library linked into every trendy executable.
 //!
-//! It is `no_std` and depends only on the platform's C library, so it stays
-//! small. In the workspace it builds as an `rlib`, so that its tests run with
-//! `std`; `trendyc`'s build script builds it again as a `staticlib`, with
+//! It is `no_std` and links only the platform's C library, so it stays
+//! small. Of the crates outside the workspace, it uses only
+//! `unicode-width`, for the columns a terminal gives a table's cell. In
+//! the workspace it builds as an `rlib`, so that its tests run with `std`;
+//! `trendyc`'s build script builds it again as a `staticlib`, with
 //! `panic = "abort"`, and embeds that archive for linking.
 //!
 //! # Type descriptors
@@ -26,6 +28,8 @@
 #![cfg_attr(not(test), no_std)]
 
 use core::fmt::{self, Write};
+
+use unicode_width::UnicodeWidthStr;
 
 pub const KIND_BOOLEAN: u8 = 0;
 pub const KIND_INTEGER: u8 = 1;
@@ -1699,6 +1703,35 @@ pub unsafe extern "C" fn trendy_rt_debug_value(value: *const u8, desc: *const Ty
     out.flush();
 }
 
+/// Print the relation `value`, of the type `desc` describes, to stderr as
+/// a table, as [`write_table`] writes it. Stops the program if there is no
+/// memory for its columns' widths.
+///
+/// # Safety
+///
+/// As for [`trendy_rt_debug_value`], of a relation.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_debug_table(value: *const u8, desc: *const TypeDesc) {
+    // SAFETY: guaranteed by the caller; `allocate` gives memory for a width
+    // of each attribute, aligned, which nothing else holds, freed once
+    // the table is written.
+    unsafe {
+        let desc = &*desc;
+        let widths = allocate::<usize>(desc.count);
+        let mut out = Stderr::default();
+        // There is nowhere to report a failure to write to stderr.
+        let _ = write_table(
+            &mut out,
+            value,
+            desc,
+            core::slice::from_raw_parts_mut(widths, desc.count),
+        );
+        out.flush();
+        free(widths.cast());
+    }
+}
+
 /// Store at `dst` the sum of the attribute at `index`, its position by
 /// name, of the tuples of the relation `src`, of the type `desc` describes:
 /// the exact sum of the integers or approximate numbers, rounded once, as
@@ -2015,6 +2048,182 @@ pub unsafe fn write_value(out: &mut impl Write, value: *const u8, desc: &TypeDes
             }
             _ => Err(fmt::Error),
         }
+    }
+}
+
+/// Write the relation at `value` as a table: its attributes' names, in name
+/// order, then a line for each tuple, in the relation's order, with
+/// borders of box-drawing characters. A cell holds its value as
+/// [`write_value`] writes it, but a text without quotes, as
+/// [`trendy_text::escape_bare`] writes it. A column is as wide as its
+/// widest cell, in a terminal's columns, with numbers to the right and
+/// anything else to the left. The attributes without a name, which the
+/// source can't name, are one column, last, of `…`, as [`write_value`]
+/// writes them.
+///
+/// # Safety
+///
+/// As for [`write_value`], with `desc` describing a relation, and `widths`
+/// with room for a width of each of its attributes.
+///
+/// # Errors
+///
+/// Returns an error if `out` does.
+pub unsafe fn write_table<W: Write>(
+    out: &mut W,
+    value: *const u8,
+    desc: &TypeDesc,
+    widths: &mut [usize],
+) -> fmt::Result {
+    // SAFETY, throughout: guaranteed by the caller; each tuple is the
+    // element's size apart, and each attribute at its offset in it.
+    unsafe {
+        let attributes = attributes(desc);
+        let (tuples, count) = read_slice(value);
+        let size = desc.element().size;
+        let tuple = |i: usize| tuples.add(i * size);
+        for (attr, width) in attributes.iter().zip(widths.iter_mut()) {
+            if name(attr).is_empty() {
+                continue;
+            }
+            let mut widest = Measured(0);
+            widest.write_str(name(attr))?;
+            for i in 0..count {
+                let mut measured = Measured(0);
+                write_cell(&mut measured, tuple(i), Some(attr))?;
+                widest.0 = widest.0.max(measured.0);
+            }
+            *width = widest.0;
+        }
+        let widths = &*widths;
+        border(out, columns(attributes, widths), ('┌', '┬', '┐'))?;
+        row(out, columns(attributes, widths), |out, attr, width| {
+            let mut measured = Measured(0);
+            let heading = attr.map_or("…", |a| name(a));
+            measured.write_str(heading)?;
+            out.write_str(heading)?;
+            pad(out, width, measured.0)
+        })?;
+        border(out, columns(attributes, widths), ('├', '┼', '┤'))?;
+        for i in 0..count {
+            row(out, columns(attributes, widths), |out, attr, width| {
+                let mut measured = Measured(0);
+                write_cell(&mut measured, tuple(i), attr)?;
+                let number =
+                    attr.is_some_and(|a| matches!((*a.desc).kind, KIND_INTEGER | KIND_APPROXIMATE));
+                if number {
+                    pad(out, width, measured.0)?;
+                    write_cell(out, tuple(i), attr)
+                } else {
+                    write_cell(out, tuple(i), attr)?;
+                    pad(out, width, measured.0)
+                }
+            })?;
+        }
+        border(out, columns(attributes, widths), ('└', '┴', '┘'))
+    }
+}
+
+/// A table's columns: the named attributes among `attributes`, each with
+/// its width in `widths`, then, if there are any without a name, one
+/// column of `…` for them, `None`.
+///
+/// # Safety
+///
+/// The attributes must be valid.
+unsafe fn columns<'a>(
+    attributes: &'a [Attr],
+    widths: &'a [usize],
+) -> impl Iterator<Item = (Option<&'a Attr>, usize)> {
+    // SAFETY: guaranteed by the caller.
+    let named = |attr: &Attr| unsafe { !name(attr).is_empty() };
+    let unnamed = attributes.iter().any(|attr| !named(attr));
+    attributes
+        .iter()
+        .zip(widths)
+        .filter(move |(attr, _)| named(attr))
+        .map(|(attr, &width)| (Some(attr), width))
+        .chain(unnamed.then_some((None, "…".width())))
+}
+
+/// A table's border, across `columns`, from `left` to `right`, with
+/// `middle` between two columns.
+fn border<'a>(
+    out: &mut impl Write,
+    columns: impl Iterator<Item = (Option<&'a Attr>, usize)>,
+    (left, middle, right): (char, char, char),
+) -> fmt::Result {
+    out.write_char(left)?;
+    for (j, (_, width)) in columns.enumerate() {
+        if j > 0 {
+            out.write_char(middle)?;
+        }
+        for _ in 0..width + 2 {
+            out.write_char('─')?;
+        }
+    }
+    out.write_char(right)?;
+    out.write_char('\n')
+}
+
+/// A table's line across `columns`, each cell written `width` wide by
+/// `cell`, between bars.
+fn row<'a, W: Write>(
+    out: &mut W,
+    columns: impl Iterator<Item = (Option<&'a Attr>, usize)>,
+    mut cell: impl FnMut(&mut W, Option<&'a Attr>, usize) -> fmt::Result,
+) -> fmt::Result {
+    out.write_char('│')?;
+    for (j, (attr, width)) in columns.enumerate() {
+        if j > 0 {
+            out.write_char('│')?;
+        }
+        out.write_char(' ')?;
+        cell(out, attr, width)?;
+        out.write_char(' ')?;
+    }
+    out.write_char('│')?;
+    out.write_char('\n')
+}
+
+/// Spaces after `written` columns, up to `width`.
+fn pad(out: &mut impl Write, width: usize, written: usize) -> fmt::Result {
+    for _ in written..width {
+        out.write_char(' ')?;
+    }
+    Ok(())
+}
+
+/// The cell of the attribute `attr` of the tuple at `tuple`, as
+/// [`write_table`] writes it, or `…`, of the attributes without a name.
+///
+/// # Safety
+///
+/// As for [`write_value`], with `attr` an attribute of the tuple's type.
+unsafe fn write_cell(out: &mut impl Write, tuple: *const u8, attr: Option<&Attr>) -> fmt::Result {
+    let Some(attr) = attr else {
+        return out.write_char('…');
+    };
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let (value, desc) = (tuple.add(attr.offset), &*attr.desc);
+        if desc.kind == KIND_TEXT {
+            trendy_text::escape_bare(read_text(value), out)
+        } else {
+            write_value(out, value, desc)
+        }
+    }
+}
+
+/// Counts the columns of a terminal that what is written to it takes, by
+/// Unicode's rules for East Asian width (UAX #11): two for a wide
+/// character, such as `李`, and none for a combining one.
+struct Measured(usize);
+
+impl Write for Measured {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.0 = self.0.saturating_add(s.width());
+        Ok(())
     }
 }
 
@@ -2489,6 +2698,101 @@ mod tests {
         );
         let alone = tuple_of(&heading[..1], 8);
         assert_eq!(print(tuples.as_ptr().cast(), &alone), "tuple { … }");
+    }
+
+    /// The relation as `debug_table` writes it.
+    fn table(value: *const u8, desc: &TypeDesc) -> String {
+        let mut written = String::new();
+        let mut widths = vec![0; desc.count];
+        // SAFETY: each test builds a value matching its descriptor.
+        unsafe { write_table(&mut written, value, desc, &mut widths) }.unwrap();
+        written
+    }
+
+    /// A `text` value of `text`, which must outlive it.
+    fn text_value(text: &str) -> [usize; 2] {
+        [text.as_ptr() as usize, text.len()]
+    }
+
+    #[test]
+    fn tables() {
+        let integer = scalar(KIND_INTEGER, 8);
+        let text = scalar(KIND_TEXT, 16);
+        let boolean = scalar(KIND_BOOLEAN, 1);
+        let inner_tuple = tuple_of(&[], 0);
+        // relation { city: text, flag: tuple {}, people: integer, seen: boolean }
+        let heading = [
+            attr("city", 0, &text),
+            attr("flag", 16, &inner_tuple),
+            attr("people", 16, &integer),
+            attr("seen", 24, &boolean),
+        ];
+        let relation = relation_of(&tuple_of(&heading, 32));
+        let (lima, xian, quoted) = ("Lima", "西安", "\"Q\"\n");
+        let row = |city: [usize; 2], people: i64, seen: bool| -> [usize; 4] {
+            [
+                city[0],
+                city[1],
+                usize::from_ne_bytes(people.to_ne_bytes()),
+                usize::from(seen),
+            ]
+        };
+        let tuples = [
+            row(text_value(lima), 10_000_000, true),
+            row(text_value(xian), 13, false),
+            row(text_value(quoted), -1, false),
+        ];
+        let value: [usize; 2] = [tuples.as_ptr() as usize, 3];
+        // Numbers to the right; wide characters take two columns; a
+        // text's control characters are escaped, and its quotes kept.
+        assert_eq!(
+            table(value.as_ptr().cast(), &relation),
+            "\
+┌───────┬──────────┬──────────┬───────┐
+│ city  │ flag     │ people   │ seen  │
+├───────┼──────────┼──────────┼───────┤
+│ Lima  │ tuple {} │ 10000000 │ true  │
+│ 西安  │ tuple {} │       13 │ false │
+│ \"Q\"\\n │ tuple {} │       -1 │ false │
+└───────┴──────────┴──────────┴───────┘
+"
+        );
+        let empty: [usize; 2] = [tuples.as_ptr() as usize, 0];
+        assert_eq!(
+            table(empty.as_ptr().cast(), &relation),
+            "\
+┌──────┬──────┬────────┬──────┐
+│ city │ flag │ people │ seen │
+├──────┼──────┼────────┼──────┤
+└──────┴──────┴────────┴──────┘
+"
+        );
+    }
+
+    #[test]
+    fn tables_of_no_attributes() {
+        let relation = relation_of(&tuple_of(&[], 0));
+        let tuples = [0_u8; 1];
+        let dee: [usize; 2] = [tuples.as_ptr() as usize, 1];
+        assert_eq!(
+            table(dee.as_ptr().cast(), &relation),
+            "┌┐\n││\n├┤\n││\n└┘\n"
+        );
+        let dum: [usize; 2] = [tuples.as_ptr() as usize, 0];
+        assert_eq!(table(dum.as_ptr().cast(), &relation), "┌┐\n││\n├┤\n└┘\n");
+    }
+
+    #[test]
+    fn tables_put_unnamed_attributes_last_as_an_ellipsis() {
+        let integer = scalar(KIND_INTEGER, 8);
+        let heading = [attr("", 0, &integer), attr("b", 8, &integer)];
+        let relation = relation_of(&tuple_of(&heading, 16));
+        let tuples: [i64; 2] = [1, 7];
+        let value: [usize; 2] = [tuples.as_ptr() as usize, 1];
+        assert_eq!(
+            table(value.as_ptr().cast(), &relation),
+            "┌───┬───┐\n│ b │ … │\n├───┼───┤\n│ 7 │ … │\n└───┴───┘\n"
+        );
     }
 
     #[test]

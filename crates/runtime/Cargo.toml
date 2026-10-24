@@ -9,3 +9,4 @@ workspace = true
 [dependencies]
 trendy_numeric.workspace = true
 trendy_text.workspace = true
+unicode-width = { version = "0.2.2", default-features = false }

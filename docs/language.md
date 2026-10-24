@@ -520,6 +520,10 @@ builtin type text: { ordered };
 
 builtin operator debug_value{v: any type};
 
+/* Write `r` to stderr as a table: a column for each attribute, in name
+   order, and a line for each tuple. */
+builtin operator debug_table{r: any relation};
+
 builtin operator count{r: any relation}: integer;
 
 /* Whether `r` has no tuples, Tutorial D's `IS_EMPTY`. */
@@ -584,6 +588,39 @@ the output reads back as the same value. For example:
 The one exception is the attribute a `per` parameter's relation wraps its
 tuples' own attributes in, which no source can name: it is written `…`,
 as in `relation { of: text, … } { { of: "Nyeri", … } }`.
+
+**`debug_table{r: any relation}`** writes `r` to stderr as a table, for
+reading rather than as source: a column for each attribute, in name order,
+headed by its name, and a line for each tuple, in the same order as
+`debug_value`'s. A cell is as wide as its column's widest, in a
+terminal's columns, which a wide character, such as `李`, takes two of.
+Numbers go to the right, and everything else to the left: a text without
+its quotes, its control characters escaped as in a literal, and a tuple,
+a relation or an array as `debug_value` writes it.
+
+```trendy
+var cities := relation {
+    { city: "Lima", native: "Lima", millions: 10 },
+    { city: "Xi'an", native: "西安", millions: 13 },
+    { city: "Kyiv", native: "Київ", millions: 3 },
+};
+
+operator main{} [
+    call debug_table{r: cities};
+];
+```
+
+writes
+
+```
+┌───────┬──────────┬────────┐
+│ city  │ millions │ native │
+├───────┼──────────┼────────┤
+│ Kyiv  │        3 │ Київ   │
+│ Lima  │       10 │ Lima   │
+│ Xi'an │       13 │ 西安   │
+└───────┴──────────┴────────┘
+```
 
 **`count{r: any relation}: integer`** is the number of tuples of `r`,
 Tutorial D's `COUNT` and SQL's `COUNT(*)`. With an image relation, it

@@ -277,6 +277,8 @@ pub enum OperatorKind {
 pub enum Builtin {
     /// Print a value to stderr as one line of trendy source.
     DebugValue,
+    /// Print a relation to stderr as a table.
+    DebugTable,
     /// The number of tuples of a relation.
     Count,
     /// The number of elements of an array.
@@ -299,8 +301,9 @@ pub enum Builtin {
 }
 
 impl Builtin {
-    pub const ALL: [Builtin; 9] = [
+    pub const ALL: [Builtin; 10] = [
         Builtin::DebugValue,
+        Builtin::DebugTable,
         Builtin::Count,
         Builtin::Length,
         Builtin::Min,
@@ -315,6 +318,7 @@ impl Builtin {
     pub fn name(self) -> &'static str {
         match self {
             Builtin::DebugValue => "debug_value",
+            Builtin::DebugTable => "debug_table",
             Builtin::Count => "count",
             Builtin::Length => "length",
             Builtin::Min => "min",
@@ -357,7 +361,7 @@ impl Builtin {
         };
         match self {
             Builtin::DebugValue | Builtin::ToText => vec![unnamed(0, Any::Type)],
-            Builtin::Count => vec![unnamed(0, Any::Relation)],
+            Builtin::Count | Builtin::DebugTable => vec![unnamed(0, Any::Relation)],
             Builtin::Length => vec![unnamed(0, Any::Array)],
             Builtin::ToApproximate => Vec::new(),
             Builtin::Min | Builtin::Max => of_kind("ordered", &[Requirement::Order]),
@@ -376,7 +380,7 @@ impl Builtin {
         let parameter = |index: usize| Type::Parameter(types[index].clone());
         match self {
             Builtin::DebugValue => [("v".to_string(), parameter(0))].into(),
-            Builtin::Count => [("r".to_string(), parameter(0))].into(),
+            Builtin::Count | Builtin::DebugTable => [("r".to_string(), parameter(0))].into(),
             Builtin::Length => [("a".to_string(), parameter(0))].into(),
             Builtin::ToText => [("from".to_string(), parameter(0))].into(),
             Builtin::ToApproximate => [("from".to_string(), Type::Scalar(Scalar::Integer))].into(),
@@ -398,7 +402,7 @@ impl Builtin {
     #[must_use]
     pub fn result(self) -> Option<Type> {
         match self {
-            Builtin::DebugValue => None,
+            Builtin::DebugValue | Builtin::DebugTable => None,
             Builtin::Count | Builtin::Length => Some(Type::Scalar(Scalar::Integer)),
             Builtin::Min | Builtin::Max | Builtin::Sum | Builtin::Product => {
                 Some(Type::Parameter(self.types()[0].clone()))
@@ -433,7 +437,9 @@ impl Builtin {
                 .map(|t| t.get("of").expect("`of` is an attribute"))
         };
         match self {
-            Builtin::DebugValue => panic!("`debug_value` is an update operator"),
+            Builtin::DebugValue | Builtin::DebugTable => {
+                panic!("`{}` is an update operator", self.name())
+            }
             Builtin::Count => {
                 let count = i64::try_from(tuples().len()).expect("a relation's tuples fit");
                 Ok(Value::Integer(count))

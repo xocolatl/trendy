@@ -27,7 +27,9 @@ ends the block with `Terminator::Fail` for none (R0010), and
 `to_approximate` an instruction (`UnaryOp::Approximate`). `sum` and
 `product` are runtime calls (`trendy_rt_sum`, `trendy_rt_product`), which
 walk the relation by its descriptor, and compute as sema folds them, with
-`trendy_numeric`. `to_text` is
+`trendy_numeric`. `debug_value` and `debug_table`, update operators, are runtime calls
+given their argument and its type's descriptor (`trendy_rt_debug_value`,
+`trendy_rt_debug_table`). `to_text` is
 a runtime call, which writes the value as `debug_value` does; folded, it
 is `hir::Value`'s source text, which writes values the same way. Since
 that text has the value's type in it, as an empty relation's heading, a
@@ -48,7 +50,9 @@ the prelude instead, and each new language feature is a reason to look for
 a built-in it can replace.
 
 **`trendy_runtime`** is a `no_std` library linked into every executable. It
-uses only the C library. `trendyc`'s `build.rs` builds it as a static library
+links only the C library, and of the crates outside the workspace uses
+only `unicode-width`, for the columns a terminal gives a table's cell
+(UAX #11), which a wide character, such as `李`, takes two of. `trendyc`'s `build.rs` builds it as a static library
 (`cargo rustc --crate-type staticlib` with `panic = "abort"`, in a target
 directory of its own), embeds the archive, and passes it to `cc` with the
 object. **`trendy_text`**, `no_std` and dependency-free, holds the escape
@@ -1311,7 +1315,7 @@ trendy_hir     : trendy_numeric trendy_text
 trendy_sema    : trendy_diag trendy_syntax trendy_hir
 trendy_lir     :
 trendy_lower   : trendy_hir trendy_lir
-trendy_runtime : trendy_numeric trendy_text
+trendy_runtime : trendy_numeric trendy_text unicode-width
 trendy_codegen : trendy_lir cranelift-codegen cranelift-frontend cranelift-module cranelift-native cranelift-object
 trendyc        : trendy_diag trendy_lexer trendy_parser trendy_prelude trendy_sema trendy_lower trendy_codegen
 trendyfmt      : trendy_diag trendy_lexer trendy_parser trendy_fmt
