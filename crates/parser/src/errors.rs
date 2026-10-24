@@ -36,6 +36,7 @@ pub(crate) const IF_FORM: &str = "an `if` has the form `if condition then value 
 pub(crate) const IF_STMT_FORM: &str = "an `if` statement has the form `if condition then [ … ] else [ … ];`, each branch a block in brackets, and `else if` chains another condition";
 pub(crate) const LOAD_FORM: &str = "a load has the form `load a from r order [asc x, desc y];`: the array `a` given the tuples of the relation `r`, or the values of its only attribute, in the order of the attributes listed";
 pub(crate) const VALUE_BLOCK_FORM: &str = "a value block has the form `[ var x := …; value ]`: local variables declared and assigned, then the value they compute";
+pub(crate) const STATEMENT_FORM: &str = "statements are calls, such as `call debug_value{v: 1};`, assignments, such as `n := n + 1;`, local variables, such as `var n := 0;`, and, in an update operator, `if` statements and loops, such as `if n > 0 then [ n := n - 1; ];`; a read-only operator's body ends with its value, an expression without `;`";
 pub(crate) const VARIABLE_FORM: &str = "a variable declaration has the form `var name: type := value;`, where either the type or the value may be left out";
 
 /// Words other languages use to start a definition or declaration, which
@@ -1619,6 +1620,70 @@ pub(crate) fn any_after(keyword: Found, span: Span) -> Diagnostic {
             replacement: fixed,
         }],
     )
+}
+
+/// `found`, which can't start a statement, where one starts: one is
+/// missing at `at`, after the previous token.
+pub(crate) fn expected_statement(found: Found, at: Span) -> Diagnostic {
+    let found_desc = found.describe();
+    let d = Diagnostic::error(
+        Code::MissingToken,
+        format!("expected a statement, found {found_desc}"),
+        at,
+        "expected a statement here",
+    )
+    .with_note(STATEMENT_FORM);
+    if found.span.start == at.start {
+        d
+    } else {
+        d.with_secondary(found.span, format!("found {found_desc}"))
+    }
+}
+
+/// An expression, at `span`, where a statement goes, as C and JavaScript
+/// allow one: a value that nothing uses.
+pub(crate) fn expression_statement(span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::ExpressionStatement,
+        "an expression is not a statement",
+        span,
+        "a value that nothing uses",
+    )
+    .with_note(STATEMENT_FORM)
+    .with_help("to see the value, write it with `call debug_value{v: …};`; to keep it, assign it, as in `x := …;`")
+}
+
+/// `found`, an operand that can't start a statement, right after a
+/// statement, where its `;` goes, at `at`. A `;` alone doesn't fix it,
+/// and `after_value`, an operator before the operand may be what's
+/// missing, so nothing is inserted.
+pub(crate) fn operand_after_statement(
+    found: Found,
+    at: Span,
+    form: &str,
+    after_value: bool,
+) -> Diagnostic {
+    let found_desc = found.describe();
+    let (label, help) = if after_value {
+        (
+            "expected `;` or an operator here",
+            "an operator joins two operands, as in `1 + 2`: write one between them, or delete what follows the value",
+        )
+    } else {
+        (
+            "expected `;` here",
+            "the statement ends here: delete what follows it",
+        )
+    };
+    Diagnostic::error(
+        Code::MissingToken,
+        format!("expected `;`, found {found_desc}"),
+        at,
+        label,
+    )
+    .with_secondary(found.span, format!("found {found_desc}"))
+    .with_note(form)
+    .with_help(help)
 }
 
 /// A call statement, starting with the operator's name `found`, without

@@ -33,6 +33,7 @@ pub fn parse(source: &str, lexed: Lexed) -> Parse {
         pos: 0,
         last_end: None,
         form: errors::OPERATOR_FORM,
+        value_end: None,
         missing: None,
         paren_calls: true,
         previous_item: None,
@@ -59,6 +60,9 @@ struct Parser<'a> {
     last_end: Option<usize>,
     /// The form of the definition being parsed, for notes on errors in it.
     form: &'static str,
+    /// Where the last expression parsed ended: a statement that ends there
+    /// ends with a value, which an operator could continue.
+    value_end: Option<usize>,
     /// Tokens found missing at `pos`, reported together as one error once
     /// the parser moves on, so one mistake gives one error.
     missing: Option<Missing>,
@@ -89,6 +93,30 @@ enum KeySpelling {
     Key,
     PrimaryKey,
     Unique,
+}
+
+/// What a statement starting at the next token is, by its first tokens:
+/// trendy's statements, and other languages' that are reported.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StatementStart {
+    If,
+    While,
+    Loop,
+    For,
+    /// A heading's declaration, which goes at the top level.
+    Heading,
+    /// `break;` or `LEAVE name;`, which trendy has none of.
+    Exit,
+    Call,
+    Var,
+    /// `let x = 1;`, as Rust and JavaScript declare a variable.
+    ForeignVar,
+    AssignBlock,
+    Assignment,
+    Return,
+    /// `debug_value{v: r};`, a call without `call`, or, where a value
+    /// goes, a read-only operator's call.
+    BareCall,
 }
 
 /// A dyadic operator at the next token: its precedence, its first token,
@@ -715,16 +743,14 @@ impl<'a> Parser<'a> {
                 .found_after(1)
                 .is_some_and(|f| f.kind == SyntaxKind::Eq)
             && self.runs_to_end();
+        // A name before `{` is a read-only operator's call, where a value
+        // goes.
         self.at_operand()
             && (compared
-                || !(self.at_call_keyword()
-                    || matches!(found.kind, SyntaxKind::VarKw | SyntaxKind::AssignKw)
-                    || self.at_assignment()
-                    || self.at_foreign_declaration()
-                    || found.spells(SyntaxKind::WhileKw)
-                    || found.spells(SyntaxKind::ForKw)
-                    || self.at_loop()
-                    || found.spells(SyntaxKind::ReturnKw)))
+                || matches!(
+                    self.statement_start(),
+                    None | Some(StatementStart::BareCall)
+                ))
     }
 
     /// Whether the `return` here has a value and ends the body it is in:
@@ -807,92 +833,154 @@ impl<'a> Parser<'a> {
         true
     }
 
+    /// What statement starts at the next token, if one does.
+    fn statement_start(&mut self) -> Option<StatementStart> {
+        let found = self.found()?;
+        let call_like = self
+            .found_after(1)
+            .is_some_and(|f| matches!(f.kind, SyntaxKind::LBrace | SyntaxKind::LParen));
+        // `break;` and `LEAVE name;`: names, before what no statement
+        // starting with a name has after it.
+        let exit = found.kind == SyntaxKind::Ident
+            && ["break", "continue", "leave"]
+                .iter()
+                .any(|word| found.text.eq_ignore_ascii_case(word))
+            && self
+                .found_after(1)
+                .is_some_and(|f| matches!(f.kind, SyntaxKind::Semicolon | SyntaxKind::Ident));
+        Some(if self.at_if() {
+            StatementStart::If
+        } else if found.spells(SyntaxKind::WhileKw) {
+            StatementStart::While
+        } else if self.at_loop() {
+            StatementStart::Loop
+        } else if found.spells(SyntaxKind::ForKw)
+            || (found.kind == SyntaxKind::Ident && found.text.eq_ignore_ascii_case("foreach"))
+        {
+            StatementStart::For
+        } else if found.text == "heading" && self.at_heading_decl() {
+            StatementStart::Heading
+        } else if exit {
+            StatementStart::Exit
+        } else if self.at_call_keyword() {
+            StatementStart::Call
+        } else if found.kind == SyntaxKind::VarKw {
+            StatementStart::Var
+        } else if self.at_foreign_declaration() {
+            StatementStart::ForeignVar
+        } else if found.kind == SyntaxKind::AssignKw {
+            StatementStart::AssignBlock
+        } else if self.at_assignment() {
+            StatementStart::Assignment
+        } else if found.spells(SyntaxKind::ReturnKw) {
+            StatementStart::Return
+        } else if found.kind == SyntaxKind::Ident && call_like {
+            StatementStart::BareCall
+        } else {
+            return None;
+        })
+    }
+
     /// A statement: a call, an assignment statement, a local variable's
-    /// declaration, an `if`, or a `return`, for leaving early.
+    /// declaration, an `if`, a loop, or a `return`, for leaving early.
+    /// Anything else is reported, and an expression, as C and JavaScript
+    /// allow one, is parsed first, so that an error in it is reported
+    /// instead.
     fn statement(&mut self) {
         let Some(found) = self.found() else {
             return;
         };
-        if self.at_if() {
-            self.if_stmt();
+        match self.statement_start() {
+            Some(StatementStart::If) => self.if_stmt(),
+            Some(StatementStart::While) => self.while_stmt(),
+            Some(StatementStart::Loop) => self.loop_stmt(),
+            Some(StatementStart::For) => self.for_stmt(),
+            Some(StatementStart::Heading) => {
+                // A heading declared in a body, as a local type: parsed as
+                // one, and moved before the definition it is in.
+                let before = self.last_end.unwrap_or(found.span.start);
+                self.heading_decl();
+                let end = self.last_end.unwrap_or(found.span.end);
+                self.errors.push(errors::nested_heading(
+                    found.span,
+                    &self.source[found.span.start..end],
+                    Span::new(before, end),
+                    self.previous_item,
+                ));
+            }
+            Some(StatementStart::Exit) => {
+                self.errors.push(errors::loop_exit(found));
+                self.skip_statement(&STATEMENT_STOPS);
+            }
+            Some(StatementStart::Call) => self.call_stmt(),
+            Some(StatementStart::Var) => self.var_decl(),
+            Some(StatementStart::ForeignVar) => {
+                self.errors.push(errors::foreign_declaration(found));
+                self.var_decl();
+            }
+            Some(StatementStart::AssignBlock) => self.assign_block(),
+            Some(StatementStart::Assignment) => self.assign_stmt(false),
+            Some(StatementStart::Return) => self.return_stmt(),
+            Some(StatementStart::BareCall) => {
+                self.errors.push(errors::missing_call(found));
+                self.call_stmt();
+            }
+            None if self.at_expression() => {
+                self.flush_missing();
+                self.start_node(SyntaxKind::Error);
+                let before = self.errors.len();
+                self.expression();
+                self.flush_missing();
+                // One that isn't an expression after all, such as `x += 1`,
+                // has its own error.
+                if self.errors.len() == before {
+                    let end = self.last_end.unwrap_or(found.span.end);
+                    self.errors.push(errors::expression_statement(Span::new(
+                        found.span.start,
+                        end,
+                    )));
+                }
+                if self.at(SyntaxKind::Semicolon) {
+                    self.bump();
+                } else {
+                    self.skip_statement(&STATEMENT_STOPS);
+                }
+                self.builder.finish_node();
+            }
+            None => {
+                self.flush_missing();
+                let at = self.last_end.unwrap_or(found.span.start);
+                self.errors
+                    .push(errors::expected_statement(found, Span::empty(at)));
+                self.skip_statement(&STATEMENT_STOPS);
+            }
+        }
+    }
+
+    /// The `;` that ends a statement. Before an expression that can't
+    /// start another statement, as the `2` in `a := 1 2;`, a `;` alone
+    /// doesn't fix it, and after a value an operator may be what's
+    /// missing, so nothing is inserted: the rest of the statement is
+    /// skipped, with one error.
+    fn end_statement(&mut self) {
+        if self.at(SyntaxKind::Semicolon) {
+            self.bump();
             return;
         }
-        if found.spells(SyntaxKind::WhileKw) {
-            self.while_stmt();
-            return;
-        }
-        if self.at_loop() {
-            self.loop_stmt();
-            return;
-        }
-        if found.spells(SyntaxKind::ForKw)
-            || (found.kind == SyntaxKind::Ident && found.text.eq_ignore_ascii_case("foreach"))
-        {
-            self.for_stmt();
-            return;
-        }
-        if found.text == "heading" && self.at_heading_decl() {
-            // A heading declared in a body, as a local type: parsed as
-            // one, and moved before the definition it is in.
-            let before = self.last_end.unwrap_or(found.span.start);
-            self.heading_decl();
-            let end = self.last_end.unwrap_or(found.span.end);
-            self.errors.push(errors::nested_heading(
-                found.span,
-                &self.source[found.span.start..end],
-                Span::new(before, end),
-                self.previous_item,
-            ));
-            return;
-        }
-        // `break;` and `LEAVE name;`: names, before what no statement
-        // starting with a name has after it.
-        let exit = ["break", "continue", "leave"]
-            .iter()
-            .any(|word| found.text.eq_ignore_ascii_case(word))
-            && self
-                .found_after(1)
-                .is_some_and(|f| matches!(f.kind, SyntaxKind::Semicolon | SyntaxKind::Ident));
-        if found.kind == SyntaxKind::Ident && exit {
-            self.errors.push(errors::loop_exit(found));
-            self.skip_statement(&[
-                SyntaxKind::RBracket,
-                SyntaxKind::OperatorKw,
-                SyntaxKind::VarKw,
-            ]);
-            return;
-        }
-        let call_like = self
-            .found_after(1)
-            .is_some_and(|f| matches!(f.kind, SyntaxKind::LBrace | SyntaxKind::LParen));
-        if self.at_call_keyword() {
-            self.call_stmt();
-        } else if found.kind == SyntaxKind::VarKw {
-            self.var_decl();
-        } else if self.at_foreign_declaration() {
-            // `let x = 1;`, as Rust and JavaScript declare one.
-            self.errors.push(errors::foreign_declaration(found));
-            self.var_decl();
-        } else if found.kind == SyntaxKind::AssignKw {
-            self.assign_block();
-        } else if self.at_assignment() {
-            self.assign_stmt(false);
-        } else if found.spells(SyntaxKind::ReturnKw) {
-            self.return_stmt();
-        } else if found.kind == SyntaxKind::Ident && call_like {
-            // `debug_value{v: r};`: a call without `call`.
-            self.errors.push(errors::missing_call(found));
-            self.call_stmt();
-        } else {
-            self.missing_with_help(
-                SyntaxKind::CallKw,
-                "statements are calls, such as `call debug_value{v: 1};`, assignments, such as `n := n + 1;`, local variables, such as `var n := 0;`, and, in an update operator, `if` statements, such as `if n > 0 then [ n := n - 1; ];`; a read-only operator's body ends with its value, an expression without `;`",
-            );
-            self.skip_statement(&[
-                SyntaxKind::RBracket,
-                SyntaxKind::OperatorKw,
-                SyntaxKind::VarKw,
-            ]);
+        match self.found() {
+            Some(found) if self.at_expression() && self.statement_start().is_none() => {
+                self.flush_missing();
+                let at = self.last_end.unwrap_or(found.span.start);
+                let after_value = self.value_end.is_some() && self.value_end == self.last_end;
+                self.errors.push(errors::operand_after_statement(
+                    found,
+                    Span::empty(at),
+                    self.form,
+                    after_value,
+                ));
+                self.skip_statement(&STATEMENT_STOPS);
+            }
+            _ => self.missing(SyntaxKind::Semicolon),
         }
     }
 
@@ -1112,11 +1200,7 @@ impl<'a> Parser<'a> {
         }
         if self.at_c_for() {
             let header = self.found().map_or(found.span, |f| f.span);
-            self.skip_statement(&[
-                SyntaxKind::RBracket,
-                SyntaxKind::OperatorKw,
-                SyntaxKind::VarKw,
-            ]);
+            self.skip_statement(&STATEMENT_STOPS);
             self.errors
                 .push(errors::c_for(Span::new(found.span.start, header.end)));
             self.builder.finish_node();
@@ -1438,7 +1522,7 @@ impl<'a> Parser<'a> {
         if self.at_operand() {
             self.expression();
         }
-        self.expect(SyntaxKind::Semicolon);
+        self.end_statement();
         self.builder.finish_node();
     }
 
@@ -1477,7 +1561,7 @@ impl<'a> Parser<'a> {
             &[(SyntaxKind::LParen, SyntaxKind::RParen)],
             |p| p.items(Self::at_argument, Self::argument),
         );
-        self.expect(SyntaxKind::Semicolon);
+        self.end_statement();
         self.builder.finish_node();
     }
 
@@ -1500,7 +1584,7 @@ impl<'a> Parser<'a> {
             }
             commas.push(self.bump());
         }
-        self.expect(SyntaxKind::Semicolon);
+        self.end_statement();
         self.builder.finish_node();
         self.form = outer_form;
         if !commas.is_empty() {
@@ -2221,7 +2305,7 @@ impl<'a> Parser<'a> {
             ));
         }
         self.keys();
-        self.expect(SyntaxKind::Semicolon);
+        self.end_statement();
         self.builder.finish_node();
         self.form = outer_form;
     }
@@ -2672,6 +2756,7 @@ impl<'a> Parser<'a> {
             }
             self.builder.finish_node();
         }
+        self.value_end = self.last_end;
     }
 
     /// The dyadic operator at the next token, if any.
@@ -3347,6 +3432,35 @@ impl<'a> Parser<'a> {
 
     /// An operand: a literal, a tuple or relation value, a name, or an
     /// expression in parentheses.
+    /// Whether an expression starts at the next token: an operand that
+    /// [`Parser::primary`] takes, or a prefix operator before one.
+    fn at_expression(&mut self) -> bool {
+        let Some(found) = self.found() else {
+            return false;
+        };
+        let prefix = match found.kind {
+            SyntaxKind::ForeignOperator => errors::foreign_operator(found.text),
+            kind => Some(kind),
+        };
+        found.kind.is_literal()
+            || matches!(
+                found.kind,
+                SyntaxKind::Ident
+                    | SyntaxKind::LParen
+                    | SyntaxKind::LBracket
+                    | SyntaxKind::LBrace
+                    | SyntaxKind::TupleKw
+                    | SyntaxKind::RelationKw
+                    | SyntaxKind::ArrayKw
+            )
+            || matches!(
+                prefix,
+                Some(SyntaxKind::NotKw | SyntaxKind::Minus | SyntaxKind::Plus)
+            )
+            || self.at_if()
+            || self.at_nary().is_some()
+    }
+
     fn primary(&mut self) {
         if self.at(SyntaxKind::LParen) {
             self.start_node(SyntaxKind::ParenExpr);
@@ -4029,6 +4143,14 @@ impl<'a> Parser<'a> {
         ));
     }
 }
+
+/// Where a statement being skipped ends, before its `;`: at its body's
+/// `]`, or at the keyword of the next definition or declaration.
+const STATEMENT_STOPS: [SyntaxKind; 3] = [
+    SyntaxKind::RBracket,
+    SyntaxKind::OperatorKw,
+    SyntaxKind::VarKw,
+];
 
 fn is_skipped(kind: SyntaxKind) -> bool {
     kind.is_trivia() || kind == SyntaxKind::ErrorToken
@@ -5457,10 +5579,12 @@ SourceFile
     fn statements_that_arent_calls() {
         let parse = parse_str("operator main{} [ 42; call f{}; ];");
         assert_eq!(parse.errors.len(), 1, "{:#?}", parse.errors);
-        assert_eq!(
-            parse.errors[0].message,
-            "expected `call`, found integer literal"
-        );
+        let error = &parse.errors[0];
+        assert_eq!(error.code, Code::ExpressionStatement);
+        assert_eq!(error.message, "an expression is not a statement");
+        assert_eq!(error.primary.span, Span::new(18, 20));
+        // Whether to assign it or write it is a decision, so no fix.
+        assert!(error.suggestions.is_empty());
         assert_eq!(
             parse
                 .tree
@@ -5472,6 +5596,48 @@ SourceFile
                 .statements()
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn what_cant_start_a_statement() {
+        let parse = parse_str("operator main{} [ , x; call f{}; ];");
+        assert_eq!(parse.errors.len(), 1, "{:#?}", parse.errors);
+        assert_eq!(parse.errors[0].message, "expected a statement, found `,`");
+        assert!(parse.errors[0].suggestions.is_empty());
+        // Not an expression after all: its own error, alone.
+        let errors = parse_str("var x := 0;\noperator main{} [ x += 1; ];").errors;
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].message, "expected value, found `=`");
+        // In a read-only body, a statement is one too.
+        let errors = parse_str("operator f{}: integer [ break; 1 ];").errors;
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].code, Code::LoopSpelling);
+    }
+
+    #[test]
+    fn an_operand_after_a_statement_inserts_nothing() {
+        // `1 + 2`, `12` or `1`: a `;` alone wouldn't do, so none is
+        // inserted, and `2` is skipped, so it is one error.
+        let source = "operator main{} [ a := 1 2; call f{}; ];";
+        let parse = parse_str(source);
+        assert_eq!(parse.errors.len(), 1, "{:#?}", parse.errors);
+        let error = &parse.errors[0];
+        assert_eq!(error.code, Code::MissingToken);
+        assert_eq!(error.message, "expected `;`, found integer literal");
+        assert_eq!(error.primary.span, Span::empty(24));
+        assert_eq!(error.primary.message, "expected `;` or an operator here");
+        assert!(error.suggestions.is_empty());
+        let body = parse.tree.operators().next().unwrap().body().unwrap();
+        assert_eq!(body.statements().count(), 2);
+        // After a call, no operator could go there.
+        let errors = parse_str("operator main{} [ call f{} 2; ];").errors;
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].primary.message, "expected `;` here");
+        // Before another statement, the `;` was forgotten.
+        assert_eq!(
+            fix("operator main{} [\n    a := 1\n    b := 2;\n];"),
+            "operator main{} [\n    a := 1;\n    b := 2;\n];"
         );
     }
 

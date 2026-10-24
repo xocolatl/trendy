@@ -45,7 +45,8 @@ body in square brackets `[]`, and a closing `;`.
   operator `if` statements (see [`if` statements](#if-statements)) and
   loops (see [Loops](#loops)). A
   read-only operator's ends with its value, an expression without `;`
-  (see [Read-only operators](#read-only-operators)).
+  (see [Read-only operators](#read-only-operators)). An expression alone
+  isn't a statement, as its value would go unused (P0035).
 - **Arguments are a tuple of the parameters:** `call greet{name: "Ada",
   count: 2};`. Every argument is named, every parameter gets one, and the
   order doesn't matter.
@@ -63,6 +64,12 @@ operator main{} [
 ```trendy,error
 operator main{} [
     call debug_value{1};
+];
+```
+
+```trendy,error
+operator main{} [
+    1 + 2;
 ];
 ```
 
@@ -3331,6 +3338,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `foreach (x in a) { … }`, `for x of a`, `for x in a:` | `for x in a loop [ … ];` |
 | `for (i = 0; i < n; i++)` | `var i := 1; while i <= n loop [ …; i := i + 1; ];` |
 | `print(x)`, `f(x)` | `call debug_value{v: x};` |
+| `x + 1;`, an expression as a statement | `x := x + 1;` to keep its value, `call debug_value{v: x + 1};` to see it |
 | `f(x)` in an expression | `f{x: x}`, every argument named |
 | `let`, `const`, `int x` | `var x`, at the top level or in an operator's body |
 | `let x = x + 1;`, declaring a variable again | `x := x + 1;`, assigning it |

@@ -47,6 +47,7 @@ pub enum Code {
     LoopSpelling,
     HeadingAsType,
     NestedDefinition,
+    ExpressionStatement,
     DuplicateName,
     MissingMain,
     UnknownType,
@@ -124,7 +125,7 @@ pub enum CodeKind {
 }
 
 impl Code {
-    pub const ALL: [Code; 95] = [
+    pub const ALL: [Code; 96] = [
         Code::UnexpectedCharacter,
         Code::MissingToken,
         Code::WrongDelimiter,
@@ -159,6 +160,7 @@ impl Code {
         Code::LoopSpelling,
         Code::HeadingAsType,
         Code::NestedDefinition,
+        Code::ExpressionStatement,
         Code::DuplicateName,
         Code::MissingMain,
         Code::UnknownType,
@@ -259,6 +261,7 @@ impl Code {
             Code::LoopSpelling => "P0032",
             Code::HeadingAsType => "P0033",
             Code::NestedDefinition => "P0034",
+            Code::ExpressionStatement => "P0035",
             Code::DuplicateName => "A0001",
             Code::MissingMain => "A0002",
             Code::UnknownType => "A0003",
@@ -388,6 +391,7 @@ impl Code {
             Code::LoopSpelling => include_str!("../errors/P0032.md"),
             Code::HeadingAsType => include_str!("../errors/P0033.md"),
             Code::NestedDefinition => include_str!("../errors/P0034.md"),
+            Code::ExpressionStatement => include_str!("../errors/P0035.md"),
             Code::DuplicateName => include_str!("../errors/A0001.md"),
             Code::MissingMain => include_str!("../errors/A0002.md"),
             Code::UnknownType => include_str!("../errors/A0003.md"),

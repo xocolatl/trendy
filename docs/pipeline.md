@@ -236,6 +236,17 @@ block is reported and skipped, up to its `;`. A `delete`
 without `where` is reported, with the assignment Tutorial D's would mean
 as the fix (P0023).
 
+What starts a statement is decided in one place
+(`Parser::statement_start`), which a statement's start and its end both
+use. An expression where a statement starts, as C and JavaScript allow
+one, is parsed, so that an error in it is reported instead, and is
+otherwise reported without a fix, since its value might be kept or
+written (P0035). Anything else is a missing statement (P0002). A
+statement that ends before an expression that can't start another, as in
+`n := 1 2;`, is reported without inserting its `;`, which alone wouldn't
+make the code right, and skipped to its `;`: after a value, which
+`Parser::value_end` tells, an operator may be what's missing instead.
+
 A read-only operator has its result type after its parameters, as a
 `TypeAnnotation`, and its body ends with its value: an expression, a child
 of the `Body`, without `;`. The parser knows the body is a read-only
