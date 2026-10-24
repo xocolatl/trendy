@@ -202,7 +202,7 @@ impl Locals {
                 &op.name,
             ));
             None
-        } else if op.params.contains_key(&local.name) {
+        } else if op.is_parameter(&local.name) {
             errors.push(errors::local_named_as_parameter(
                 &local.name,
                 span,
@@ -256,7 +256,7 @@ impl Locals {
                     &format!("`{}`", op.name),
                 ));
                 ok = false;
-            } else if op.params.contains_key(name) {
+            } else if op.is_parameter(name) {
                 let parameter =
                     op.decl
                         .as_ref()

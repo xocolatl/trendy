@@ -540,7 +540,12 @@ that anything can refer to an operator defined after it; the globals,
 which are the variables, whose initial values it evaluates, and the
 read-only operators' values, which initial values can call; and the update
 operators' bodies, which refer to both. The program's HIR operators are
-made at the end, from the signatures and what the bodies checked to.
+made at the end, from the signatures and what the bodies checked to. A
+parameter whose type is invalid, or that is written twice, is a
+parameter all the same, without a type (`Signature::unresolved`), as a
+variable with errors in its declaration is a variable: a use of it is
+already reported, and its operator's other parameters are checked as
+usual, so one mistake gives one error.
 
 A variable without a value gets its type's default (`0`, `""`), and one
 without a type gets its value's type. These are the two options *The Third

@@ -6,7 +6,7 @@
 //! problem is reported at the innermost place it occurs, with a label at
 //! where the expectation came from.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use trendy_diag::{Diagnostic, Span, edit_distance};
 use trendy_hir as hir;
@@ -437,43 +437,76 @@ pub(crate) fn resolve_heading(
 }
 
 /// The attributes of `heading`, with their types, as for
-/// [`resolve_heading`], leaving any `per` to the caller.
+/// [`resolve_heading`], leaving any `per` to the caller. `None` after
+/// reporting why one is invalid.
 pub(crate) fn resolve_attributes(
     heading: &ast::Heading,
     parameters: &mut TypeParameters,
     namespaces: &Namespaces,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Heading> {
-    let mut attributes = BTreeMap::new();
+    let Attributes {
+        resolved,
+        unresolved,
+    } = attributes(heading, parameters, namespaces, errors);
+    unresolved.is_empty().then(|| hir::Heading::new(resolved))
+}
+
+/// A heading's attributes, as [`attributes`] resolves them.
+pub(crate) struct Attributes {
+    /// Those whose types are valid.
+    pub(crate) resolved: BTreeMap<String, hir::Type>,
+    /// The names of the others, already reported: those whose types are
+    /// invalid, and those written twice.
+    pub(crate) unresolved: BTreeSet<String>,
+}
+
+/// The attributes of `heading`, each with its type, or among those
+/// reported as invalid.
+pub(crate) fn attributes(
+    heading: &ast::Heading,
+    parameters: &mut TypeParameters,
+    namespaces: &Namespaces,
+    errors: &mut Vec<Diagnostic>,
+) -> Attributes {
+    let mut resolved = BTreeMap::new();
+    let mut unresolved = BTreeSet::new();
     let mut first_spans = HashMap::new();
-    let mut ok = true;
     for attribute in heading.attributes() {
         let Some(ident) = attribute.name().and_then(|n| n.ident()) else {
             continue;
         };
+        let name = ident.text().to_string();
         let span = trendy_syntax::span(ident.text_range());
-        if let Some(&first) = first_spans.get(ident.text()) {
+        if let Some(&first) = first_spans.get(&name) {
             errors.push(errors::duplicate_attribute(
                 errors::Noun::Attribute,
-                ident.text(),
+                &name,
                 span,
                 first,
             ));
-            ok = false;
+            // Which of the two types it has is for the fix to decide.
+            resolved.remove(&name);
+            unresolved.insert(name);
             continue;
         }
-        first_spans.insert(ident.text().to_string(), span);
+        first_spans.insert(name.clone(), span);
         match attribute
             .type_expr()
             .and_then(|t| resolve(&t, parameters, namespaces, errors))
         {
             Some(ty) => {
-                attributes.insert(ident.text().to_string(), ty);
+                resolved.insert(name, ty);
             }
-            None => ok = false,
+            None => {
+                unresolved.insert(name);
+            }
         }
     }
-    ok.then(|| hir::Heading::new(attributes))
+    Attributes {
+        resolved,
+        unresolved,
+    }
 }
 
 /// The value `expr` denotes, evaluated when compiling and checked against

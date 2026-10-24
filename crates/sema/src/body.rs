@@ -1,7 +1,7 @@
 //! Update operators' bodies: their statements, their local variables, and
 //! the expressions in them.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use trendy_diag::{CodeKind, Diagnostic, Span};
 use trendy_hir as hir;
@@ -11,7 +11,7 @@ use trendy_syntax::ast::{self, AstNode, VarDecl};
 use crate::assign::{Assignee, Assigning};
 use crate::check::{Checker, Lookup, Names, Written};
 use crate::locals::{Declaration, Local, Locals};
-use crate::operators::Operators;
+use crate::operators::{Operators, Signature};
 use crate::types::{Expected, Origin};
 use crate::{Namespaces, assign, errors, locals, ops};
 
@@ -288,7 +288,7 @@ impl Statements<'_, '_> {
         let name = ident.text();
         let span = trendy_syntax::span(ident.text_range());
         let Some(signature) = cx.operators.named(name) else {
-            let what = if cx.operators.get(within).params.contains_key(name) {
+            let what = if cx.operators.get(within).is_parameter(name) {
                 Some("a parameter")
             } else if self.locals.find(name).is_some() {
                 Some("a local variable")
@@ -602,8 +602,8 @@ pub(crate) struct BodyNames<'a, 'b> {
 }
 
 impl BodyNames<'_, '_> {
-    fn params(&self) -> &BTreeMap<String, hir::Type> {
-        &self.cx.operators.get(self.within).params
+    fn signature(&self) -> &Signature {
+        self.cx.operators.get(self.within)
     }
 }
 
@@ -617,8 +617,8 @@ impl Names for BodyNames<'_, '_> {
     }
 
     fn resolve(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {
-        if self.params().contains_key(name) {
-            return Lookup::Found(hir::Expr::Parameter(name.to_string()));
+        if let Some(lookup) = self.signature().parameter(name) {
+            return lookup;
         }
         match self.locals.find(name) {
             Some(Local::Declared(id, ..)) => return Lookup::Found(hir::Expr::Local(id)),
@@ -657,9 +657,8 @@ impl Names for BodyNames<'_, '_> {
     }
 
     fn candidates(&self) -> Vec<String> {
-        self.params()
-            .keys()
-            .map(String::as_str)
+        self.signature()
+            .parameter_names()
             .chain(self.locals.names())
             .chain(self.cx.variable_ids.keys().map(String::as_str))
             .map(str::to_string)
@@ -673,7 +672,7 @@ impl Names for BodyNames<'_, '_> {
                 .expect("only valid variables are resolved")
                 .ty
                 .clone(),
-            hir::Expr::Parameter(name) => self.params()[name].clone(),
+            hir::Expr::Parameter(name) => self.signature().params[name].clone(),
             hir::Expr::Local(id) => self.locals.get(*id).ty.clone(),
             _ => unreachable!("only variables, parameters and local variables are leaves"),
         }
@@ -684,7 +683,7 @@ impl Names for BodyNames<'_, '_> {
     }
 
     fn hides(&self, name: &str) -> bool {
-        self.params().contains_key(name)
+        self.signature().is_parameter(name)
             || matches!(
                 self.locals.find(name),
                 Some(Local::Declared(..) | Local::Later(_) | Local::Invalid)
@@ -739,7 +738,7 @@ impl BodyNames<'_, '_> {
         errors: &mut Vec<Diagnostic>,
     ) -> Option<Assignee> {
         let cx = self.cx;
-        if self.params().contains_key(name) {
+        if self.signature().is_parameter(name) {
             let hidden = cx.variable_ids.contains_key(name);
             errors.push(errors::assigned_parameter(name, span, hidden));
             return None;

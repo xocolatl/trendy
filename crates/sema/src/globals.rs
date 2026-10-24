@@ -435,8 +435,8 @@ struct ReadOnlyNames<'g, 'a, 'l> {
 }
 
 impl ReadOnlyNames<'_, '_, '_> {
-    fn params(&self) -> &std::collections::BTreeMap<String, hir::Type> {
-        &self.globals.operators.get(self.within).params
+    fn signature(&self) -> &Signature {
+        self.globals.operators.get(self.within)
     }
 }
 
@@ -450,8 +450,8 @@ impl Names for ReadOnlyNames<'_, '_, '_> {
     }
 
     fn resolve(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {
-        if self.params().contains_key(name) {
-            return Lookup::Found(hir::Expr::Parameter(name.to_string()));
+        if let Some(lookup) = self.signature().parameter(name) {
+            return lookup;
         }
         match self.locals.find(name) {
             Some(Local::Declared(id, ..)) => return Lookup::Found(hir::Expr::Local(id)),
@@ -489,9 +489,8 @@ impl Names for ReadOnlyNames<'_, '_, '_> {
     }
 
     fn candidates(&self) -> Vec<String> {
-        self.params()
-            .keys()
-            .map(String::as_str)
+        self.signature()
+            .parameter_names()
             .chain(self.locals.names())
             .chain(self.globals.ids.keys().map(String::as_str))
             .map(str::to_string)
@@ -500,7 +499,7 @@ impl Names for ReadOnlyNames<'_, '_, '_> {
 
     fn leaf_type(&self, leaf: &hir::Expr) -> hir::Type {
         match leaf {
-            hir::Expr::Parameter(name) => self.params()[name].clone(),
+            hir::Expr::Parameter(name) => self.signature().params[name].clone(),
             hir::Expr::Local(id) => self.locals.get(*id).ty.clone(),
             hir::Expr::Variable(id) => match &self.globals.variables[id.0] {
                 Some(State::Done(Some(variable))) => variable.ty.clone(),
@@ -515,7 +514,7 @@ impl Names for ReadOnlyNames<'_, '_, '_> {
     }
 
     fn hides(&self, name: &str) -> bool {
-        self.params().contains_key(name)
+        self.signature().is_parameter(name)
             || matches!(
                 self.locals.find(name),
                 Some(Local::Declared(..) | Local::Later(_) | Local::Invalid)
@@ -547,7 +546,7 @@ impl Assigning for ReadOnlyNames<'_, '_, '_> {
         errors: &mut Vec<Diagnostic>,
     ) -> Option<Assignee> {
         let op = self.globals.operators.get(self.within);
-        if self.params().contains_key(name) {
+        if op.is_parameter(name) {
             let hidden = self.globals.ids.contains_key(name);
             errors.push(errors::assigned_parameter(name, span, hidden));
             return None;

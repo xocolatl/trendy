@@ -76,10 +76,11 @@ fn builtin_operator(
         |d| operators::declared_types(&d, namespaces, errors),
     );
     let heading = decl.params()?;
-    let params = operators::params(&heading, &mut types, namespaces, errors)?;
-    if !declared_valid {
+    let params = operators::params(&heading, &mut types, namespaces, errors);
+    if !declared_valid || !params.unresolved.is_empty() {
         return None;
     }
+    let params = params.seen;
     let written = decl.result();
     let result = match &written {
         Some(written) => {

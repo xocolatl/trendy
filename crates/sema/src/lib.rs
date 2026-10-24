@@ -844,6 +844,29 @@ mod tests {
     }
 
     #[test]
+    fn a_parameter_without_a_type_is_a_parameter_all_the_same() {
+        // Its uses aren't reported again, and the others' are checked.
+        let source = "operator show{x: intger, label: text} [\n    call debug_value{v: x};\n    call debug_value{v: label + 1};\n    call debug_value{v: nothing};\n];\n\noperator double{n: integr}: integer [\n    n * 2\n];\n\noperator main{} [];";
+        assert_eq!(
+            messages(source),
+            [
+                "unknown type `intger`",
+                "`+` can't be applied to text",
+                "unknown value `nothing`",
+                "unknown type `integr`",
+            ]
+        );
+        // Nor are a parameter's written twice, or, with a `per` that's
+        // wrong, those of its relation.
+        assert_eq!(
+            codes(
+                "operator f{a: integer, a: text} [\n    call debug_value{v: a};\n];\n\noperator total{r: integer, of: integer per r}: integer [\n    sum{r: r, of: of}\n];\n\noperator main{} [];"
+            ),
+            [Code::DuplicateAttribute, Code::PerRelation]
+        );
+    }
+
+    #[test]
     fn value_used_as_type() {
         let errors = errors(&format!("var x: main;{MAIN}"));
         assert_eq!(errors[0].code, Code::UnknownType);
