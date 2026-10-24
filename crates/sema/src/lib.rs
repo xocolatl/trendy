@@ -3763,6 +3763,40 @@ mod tests {
     }
 
     #[test]
+    fn a_product_is_restricted_as_it_is_made() {
+        let vars = variables(
+            "var r := relation { { a: 1 }, { a: 2 }, { a: 3 } };\nvar s := relation { { b: 1 }, { b: 2 } };\nvar t := relation { { c: 1, d: 7 }, { c: 2, d: 7 } };\nvar u := relation { { d: 7 }, { d: 8 } };\nvar product := times{r, s, t} where a = b and c < 2 and a + c = 2;\nvar unread := times{r, s, t} where a = b;\nvar joined := ((t join u) times r) where d = 7 and a = c;\nvar expected := relation { { a: 1, b: 1, c: 1, d: 7 } };\nvar expected_joined := relation { { a: 1, c: 1, d: 7 }, { a: 2, c: 2, d: 7 } };",
+        );
+        let value = |name: &str| &vars.iter().find(|v| v.name == name).unwrap().init;
+        assert_eq!(value("product"), value("expected"));
+        // An operand the condition reads nothing of is in the result whole.
+        let hir::Value::Relation(unread) = value("unread") else {
+            panic!("a relation");
+        };
+        assert_eq!(unread.tuples.len(), 4);
+        assert_eq!(value("joined"), value("expected_joined"));
+    }
+
+    #[test]
+    fn a_product_restricted_as_it_is_made_fails_as_the_whole_would() {
+        // For `a: 0`, `b = 2` is false, but the division is made all the
+        // same.
+        let codes = codes(&format!(
+            "var r := relation {{ {{ a: 1 }}, {{ a: 0 }} }};\nvar s := relation {{ {{ b: 1 }} }};\nvar x := times{{r, s}} where b = 2 and 10 div a = 1;{MAIN}"
+        ));
+        assert_eq!(codes, [Code::DivisionByZero]);
+        // Of no tuples, nothing is divided.
+        let vars = variables(
+            "var r := relation { { a: 1 }, { a: 0 } };\nvar none := relation { b: integer } {};\nvar x := times{r, none} where 10 div a = 1;",
+        );
+        let hir::Value::Relation(x) = &vars[2].init else {
+            panic!("a relation");
+        };
+        assert!(x.tuples.is_empty());
+        assert_eq!(x.heading.attributes().count(), 2);
+    }
+
+    #[test]
     fn restrict_in_bodies() {
         let program = analyze_str(
             "operator f{r: relation { n: integer }} [\n    call debug_table{r: r where n > 1};\n    call debug_table{r: r where true};\n];\noperator main{} [];",

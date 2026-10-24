@@ -76,27 +76,21 @@ operator next_door{x: integer, y: integer}: boolean [
     x - y = 1 or y - x = 1
 ];
 
-/* The clues about two kinds, each kind joined with the clues it allows
-   checking. Restricting the product of all five at once would mean the
-   same, but would make its 199 million tuples first, as nothing takes a
-   restriction into a product yet. Once something does, as a database's
-   optimizer would, it can read as the clues do:
-
-     var solutions := times{colors, nations, drinks, dishes, pets}
-         where english = red
-             and spanish = dog
-             and coffee = green
-             and …;
-*/
-var lived := (colors times nations) where english = red and next_door{x: norwegian, y: blue};
-var drunk := (lived times drinks) where coffee = green and ukrainian = tea;
-var cooked := (drunk times dishes)
-    where mapo_doufu = yellow and dal_tadka = orange_juice and japanese = shakshuka;
-var solutions := (cooked times pets)
-    where spanish = dog
+/* The clues about two kinds, which restrict every way to put them all in
+   the houses. That is 199 million ways, but a restriction is computed
+   only for the values each clue reads, so they are never all made. */
+var solutions := times{colors, nations, drinks, dishes, pets}
+    where english = red
+        and spanish = dog
+        and coffee = green
+        and ukrainian = tea
         and borshch = snails
+        and mapo_doufu = yellow
         and next_door{x: jollof_rice, y: fox}
-        and next_door{x: mapo_doufu, y: horse};
+        and next_door{x: mapo_doufu, y: horse}
+        and dal_tadka = orange_juice
+        and japanese = shakshuka
+        and next_door{x: norwegian, y: blue};
 
 /* The street, from the only solution: each thing in its house. */
 var solved := tuple from solutions;

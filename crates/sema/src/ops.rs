@@ -1141,6 +1141,138 @@ pub(crate) fn restrict(
     )))
 }
 
+/// The tuples of the AND of `operands` for which `condition`, computed
+/// from the tuple at hand, is true, evaluated without making the whole
+/// AND. As Algebra A defines restriction (TTM, Appendix A), it is the AND
+/// with the relation of the tuples the condition is true of, which here is
+/// finite: each conjunct of the condition gives the relation of the values
+/// it is true of, among those the operands have for the attributes it
+/// reads, and the result is the AND of the operands and those.
+///
+/// The condition is evaluated for every tuple of the whole AND, and a
+/// failure for one the result wouldn't have still stops the program; each
+/// conjunct is evaluated here for every combination of the values it reads
+/// that the operands have, which includes every one the whole AND has, so
+/// if it fails for none, the condition fails for no tuple.
+///
+/// `None` unless every operand is a constant relation, and every conjunct
+/// reads the tuple at hand, and is known, without failing, for every
+/// combination; otherwise only the whole AND, restricted, says what
+/// happens.
+pub(crate) fn restricted_and(
+    operands: &[hir::Expr],
+    condition: &hir::Expr,
+    bindings: Bindings,
+) -> Option<hir::Expr> {
+    let relations: Vec<&hir::RelationValue> = operands
+        .iter()
+        .map(|operand| match operand {
+            hir::Expr::Constant(hir::Value::Relation(relation)) => Some(relation),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    let names = |relation: &hir::RelationValue| -> BTreeSet<String> {
+        relation
+            .heading
+            .attributes()
+            .map(|(name, _)| name.to_string())
+            .collect()
+    };
+    let own: Vec<BTreeSet<String>> = relations.iter().map(|r| names(r)).collect();
+    let all: BTreeSet<String> = own.iter().flatten().cloned().collect();
+    let mut parts: Vec<hir::Value> = Vec::new();
+    for conjunct in conjuncts(condition) {
+        let read = tuple_read(conjunct, 0);
+        let reads = if read.whole {
+            all.clone()
+        } else {
+            read.attributes
+        };
+        if reads.is_empty() {
+            return None;
+        }
+        let reading: Vec<usize> = (0..relations.len())
+            .filter(|&i| !own[i].is_disjoint(&reads))
+            .collect();
+        // Of each operand that has some of what it reads, that, and what
+        // joins the operand to another of them.
+        let joins = |name: &String| reading.iter().filter(|&&j| own[j].contains(name)).count() > 1;
+        let values: Vec<hir::Value> = reading
+            .iter()
+            .map(|&i| {
+                let dropped = own[i]
+                    .iter()
+                    .filter(|name| !reads.contains(*name) && !joins(name))
+                    .cloned()
+                    .collect();
+                hir::Value::Relation(relations[i].clone()).without(&dropped)
+            })
+            .collect();
+        // The combinations of the values it reads.
+        let values = and_values(values)?;
+        let joining = names(relation_of(&values))
+            .difference(&reads)
+            .cloned()
+            .collect();
+        let values = values.without(&joining);
+        match restrict(hir::Expr::Constant(values), conjunct.clone(), bindings) {
+            Ok(hir::Expr::Constant(allowed)) => parts.push(allowed),
+            _ => return None,
+        }
+    }
+    parts.extend(
+        relations
+            .iter()
+            .map(|relation| hir::Value::Relation((*relation).clone())),
+    );
+    and_values(parts).map(hir::Expr::Constant)
+}
+
+/// The relation `value` is.
+fn relation_of(value: &hir::Value) -> &hir::RelationValue {
+    match value {
+        hir::Value::Relation(relation) => relation,
+        _ => unreachable!("only relations are ANDed here"),
+    }
+}
+
+/// The AND of the constant relations `parts`, made in an order that keeps
+/// each step small: the smallest first, then each next the one with the most
+/// attributes in common with the result so far, the smallest among those,
+/// so that it restricts the result as much as it can. `None` of no parts,
+/// whose AND has no heading to have.
+fn and_values(mut parts: Vec<hir::Value>) -> Option<hir::Value> {
+    let size = |part: &hir::Value| relation_of(part).tuples.len();
+    let first = (0..parts.len()).min_by_key(|&i| size(&parts[i]))?;
+    let mut result = parts.swap_remove(first);
+    while !parts.is_empty() {
+        let so_far = relation_of(&result).heading.clone();
+        let next = (0..parts.len())
+            .max_by_key(|&i| {
+                let common = so_far.common(&relation_of(&parts[i]).heading).len();
+                (common, std::cmp::Reverse(size(&parts[i])))
+            })
+            .expect("a part is left");
+        result = result
+            .and(&parts.swap_remove(next))
+            .expect("relations always have an AND");
+    }
+    Some(result)
+}
+
+/// The conjuncts of `condition`: the operands of its `and`s, through any
+/// number of them, or the condition itself.
+fn conjuncts(condition: &hir::Expr) -> Vec<&hir::Expr> {
+    match condition {
+        hir::Expr::Binary(hir::BinaryOp::And, lhs, rhs) => {
+            let mut all = conjuncts(lhs);
+            all.extend(conjuncts(rhs));
+            all
+        }
+        _ => vec![condition],
+    }
+}
+
 /// The relations `lhs` and `rhs`, of one heading, combined as
 /// `combination` says: evaluated if both are constants.
 ///
@@ -1790,48 +1922,84 @@ pub(crate) fn targets_read(expr: &hir::Expr) -> Vec<hir::Target> {
 /// Whether `expr` uses the tuple at hand `depth` `Extend`s out from it:
 /// one of its attributes, or an image relation of it, which names none.
 pub(crate) fn uses_tuple(expr: &hir::Expr, depth: usize) -> bool {
-    let uses = |e: &hir::Expr| uses_tuple(e, depth);
-    match expr {
-        hir::Expr::Current(d, _) => *d == depth,
-        hir::Expr::Constant(_)
-        | hir::Expr::Variable(_)
-        | hir::Expr::Parameter(_)
-        | hir::Expr::Local(_) => false,
-        hir::Expr::Call(call) => call.args.values().any(uses),
-        hir::Expr::Unary(_, operand)
-        | hir::Expr::Extract(operand, _)
-        | hir::Expr::Remove(operand, _)
-        | hir::Expr::Rename(operand, _)
-        | hir::Expr::Ungroup(operand, _)
-        | hir::Expr::Only(operand)
-        | hir::Expr::Load(operand, ..) => uses(operand),
-        hir::Expr::Binary(_, lhs, rhs)
-        | hir::Expr::And(lhs, rhs)
-        | hir::Expr::Combine(_, lhs, rhs)
-        | hir::Expr::Semijoin(lhs, rhs)
-        | hir::Expr::Antijoin(lhs, rhs)
-        | hir::Expr::Let(_, lhs, rhs)
-        | hir::Expr::Index(lhs, rhs) => uses(lhs) || uses(rhs),
-        hir::Expr::If(condition, then, otherwise) => {
-            uses(condition) || uses(then) || uses(otherwise)
-        }
-        hir::Expr::Tuple(attributes) => attributes.values().any(uses),
-        hir::Expr::Array(_, elements) => elements.iter().any(uses),
-        hir::Expr::Relation(_, tuples) => tuples.iter().any(uses),
-        // The condition and the values are one tuple at hand further in.
-        hir::Expr::Restrict(operand, condition) => {
-            uses(operand) || uses_tuple(condition, depth + 1)
-        }
-        hir::Expr::Extend(operand, _, attributes) => {
-            uses(operand) || attributes.values().any(|e| uses_tuple(e, depth + 1))
-        }
-        hir::Expr::WithElements(array, changes) => {
-            uses(array)
-                || changes
-                    .iter()
-                    .any(|change| change.path.iter().any(uses) || uses(&change.value))
+    let read = tuple_read(expr, depth);
+    read.whole || !read.attributes.is_empty()
+}
+
+/// What an expression reads of the tuple at hand (see [`tuple_read`]).
+#[derive(Default)]
+pub(crate) struct TupleRead {
+    /// The attributes it reads, each by name.
+    pub(crate) attributes: BTreeSet<String>,
+    /// Whether it reads the tuple other than an attribute at a time, as an
+    /// image relation does.
+    pub(crate) whole: bool,
+}
+
+/// What `expr` reads of the tuple at hand `depth` `Extend`s out from it.
+pub(crate) fn tuple_read(expr: &hir::Expr, depth: usize) -> TupleRead {
+    fn walk(expr: &hir::Expr, depth: usize, read: &mut TupleRead) {
+        let mut at = |e: &hir::Expr| walk(e, depth, read);
+        match expr {
+            hir::Expr::Extract(operand, name) if matches!(**operand, hir::Expr::Current(d, _) if d == depth) =>
+            {
+                read.attributes.insert(name.clone());
+            }
+            hir::Expr::Current(d, _) => read.whole |= *d == depth,
+            hir::Expr::Constant(_)
+            | hir::Expr::Variable(_)
+            | hir::Expr::Parameter(_)
+            | hir::Expr::Local(_) => {}
+            hir::Expr::Call(call) => call.args.values().for_each(at),
+            hir::Expr::Unary(_, operand)
+            | hir::Expr::Extract(operand, _)
+            | hir::Expr::Remove(operand, _)
+            | hir::Expr::Rename(operand, _)
+            | hir::Expr::Ungroup(operand, _)
+            | hir::Expr::Only(operand)
+            | hir::Expr::Load(operand, ..) => at(operand),
+            hir::Expr::Binary(_, lhs, rhs)
+            | hir::Expr::And(lhs, rhs)
+            | hir::Expr::Combine(_, lhs, rhs)
+            | hir::Expr::Semijoin(lhs, rhs)
+            | hir::Expr::Antijoin(lhs, rhs)
+            | hir::Expr::Let(_, lhs, rhs)
+            | hir::Expr::Index(lhs, rhs) => {
+                at(lhs);
+                at(rhs);
+            }
+            hir::Expr::If(condition, then, otherwise) => {
+                at(condition);
+                at(then);
+                at(otherwise);
+            }
+            hir::Expr::Tuple(attributes) => attributes.values().for_each(at),
+            hir::Expr::Array(_, elements) | hir::Expr::Relation(_, elements) => {
+                elements.iter().for_each(at);
+            }
+            // The condition and the values are one tuple at hand further in.
+            hir::Expr::Restrict(operand, condition) => {
+                at(operand);
+                walk(condition, depth + 1, read);
+            }
+            hir::Expr::Extend(operand, _, attributes) => {
+                at(operand);
+                for value in attributes.values() {
+                    walk(value, depth + 1, read);
+                }
+            }
+            hir::Expr::WithElements(array, changes) => {
+                at(array);
+                for change in changes {
+                    change.path.iter().for_each(&mut at);
+                    at(&change.value);
+                }
+            }
         }
     }
+    let mut read = TupleRead::default();
+    walk(expr, depth, &mut read);
+    read
 }
 
 /// The image relation of the tuple at hand, with heading `at_hand`, in

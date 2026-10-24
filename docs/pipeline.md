@@ -814,7 +814,20 @@ tuple at hand in scope, as `extend`'s values are, and it becomes
 `Restrict`: not Algebra A's AND with the relation of the tuples that
 satisfy it, which is usually infinite. Folding substitutes each tuple of
 a constant operand, so a failure names the tuple; a condition true of
-every tuple keeps the operand. Lowering loops over the tuples, as for
+every tuple keeps the operand. A `join` or `times` of constant
+relations, restricted, is folded as Algebra A defines it, with that
+relation finite (`ops::restricted_and`): the checker keeps the join's
+operands apart (`Checker::join_operands`), and each conjunct of the
+condition is evaluated for the values the operands have of the
+attributes it reads (`ops::tuple_read`), projected from the AND of only
+the operands that have them, giving the relation of those it is true of;
+the result is the AND of the operands and those relations, the smallest
+first, then each next the one with the most attributes in common with
+the result so far. Every combination a tuple of the whole AND has is
+among those, so a conjunct that fails for none fails for no tuple; if
+one fails, or isn't known when compiling, the whole AND is made and
+restricted, which says what happens. So the zebra's
+`times{…} where …`, of 199 million tuples, is made from a few hundred. Lowering loops over the tuples, as for
 `extend` (`each_tuple`), copying those that pass into a relation
 allocated for all of them, then setting its count: they stay in the
 canonical order, so they need no sorting.

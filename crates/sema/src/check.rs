@@ -29,6 +29,64 @@ pub(crate) enum Lookup {
     Unknown,
 }
 
+/// What a `where` restricts: a relation, or the operands of a join or a
+/// product of relations, kept apart, so that the condition restricts them
+/// as they are joined (see [`ops::restricted_and`]).
+enum Restricted {
+    Relation(hir::Expr),
+    Joined {
+        operands: Vec<hir::Expr>,
+        heading: hir::Heading,
+    },
+}
+
+/// `operands`, of the join written `expr`, combined as `combined` says.
+/// `None` after reporting why constants have no result.
+fn combine(
+    operands: Vec<hir::Expr>,
+    combined: ops::Combined,
+    expr: &Expr,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<hir::Expr> {
+    let result = match combined {
+        ops::Combined::And => ops::and(operands),
+        ops::Combined::Combine(combination) => {
+            let mut operands = operands.into_iter();
+            let first = operands.next()?;
+            operands.try_fold(first, |result, operand| {
+                ops::combined(result, operand, combination)
+            })
+        }
+        ops::Combined::Matching { negated } => {
+            let mut operands = operands.into_iter();
+            let (lhs, rhs) = (operands.next()?, operands.next()?);
+            Ok(ops::matching(lhs, rhs, negated))
+        }
+        ops::Combined::Composed(steps) => {
+            let mut operands = operands.into_iter();
+            let first = operands.next()?;
+            operands
+                .zip(steps)
+                .try_fold(first, |result, (operand, common)| {
+                    Ok(ops::remove(ops::and(vec![result, operand])?, common))
+                })
+        }
+    };
+    result
+        .map_err(|failed| errors.push(errors::failed(&failed, expr)))
+        .ok()
+}
+
+/// `expr` without the parentheses around it, if it has any.
+fn unparenthesized(expr: &Expr) -> Expr {
+    match expr {
+        Expr::Paren(paren) => paren
+            .inner()
+            .map_or_else(|| expr.clone(), |e| unparenthesized(&e)),
+        _ => expr.clone(),
+    }
+}
+
 /// What names in an expression refer to.
 pub(crate) trait Names {
     /// The program's top-level names.
@@ -1369,6 +1427,10 @@ impl<'a> Checker<'a> {
     /// `binary`, a `where`, written `expr`: the tuples of its operand, a
     /// relation, for which its condition, a boolean checked with the
     /// attributes of the tuple at hand in scope, is true.
+    ///
+    /// A join or a product of relations is restricted as it is made
+    /// (`ops::restricted_and`), so that what the condition rules out is
+    /// never made when it needn't be.
     fn restricted(
         &mut self,
         binary: &ast::BinaryExpr,
@@ -1377,17 +1439,59 @@ impl<'a> Checker<'a> {
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Expr> {
         let operand_expr = binary.lhs()?;
-        let operand = self.expr(&operand_expr, None, errors)?;
         let token = binary.operator()?;
-        let ty = self.ty(&operand);
-        let hir::Type::Relation(heading) = ty else {
-            let span = trendy_syntax::span(token.text_range());
-            errors.push(errors::not_restrictable(span, &ty, &operand_expr));
-            return None;
-        };
         let condition_expr = binary.rhs()?;
+        let written = unparenthesized(&operand_expr);
+        let restricted = match ops::Joining::of(&written) {
+            Some(joining) => {
+                let (operands, combined) = self.join_operands(&joining, None, errors)?;
+                let headings: Option<Vec<hir::Heading>> = operands
+                    .iter()
+                    .map(|o| match self.ty(o) {
+                        hir::Type::Relation(heading) => Some(heading),
+                        _ => None,
+                    })
+                    .collect();
+                match (combined, headings) {
+                    (ops::Combined::And, Some(headings)) => Restricted::Joined {
+                        heading: headings
+                            .iter()
+                            .fold(hir::Heading::default(), |so_far, h| so_far.and(h)),
+                        operands,
+                    },
+                    (combined, _) => {
+                        Restricted::Relation(combine(operands, combined, &written, errors)?)
+                    }
+                }
+            }
+            None => Restricted::Relation(self.expr(&operand_expr, None, errors)?),
+        };
+        let heading = match &restricted {
+            Restricted::Joined { heading, .. } => heading.clone(),
+            Restricted::Relation(operand) => match self.ty(operand) {
+                hir::Type::Relation(heading) => heading,
+                ty => {
+                    let span = trendy_syntax::span(token.text_range());
+                    errors.push(errors::not_restrictable(span, &ty, &operand_expr));
+                    return None;
+                }
+            },
+        };
         let condition = self.condition(heading, &condition_expr, token, errors)?;
-        match ops::restrict(operand, condition, self.bindings()) {
+        let result = match restricted {
+            Restricted::Relation(operand) => ops::restrict(operand, condition, self.bindings()),
+            Restricted::Joined { operands, .. } => {
+                if let Some(result) = ops::restricted_and(&operands, &condition, self.bindings()) {
+                    Ok(result)
+                } else {
+                    let product = ops::and(operands)
+                        .map_err(|failed| errors.push(errors::failed(&failed, &written)))
+                        .ok()?;
+                    ops::restrict(product, condition, self.bindings())
+                }
+            }
+        };
+        match result {
             Ok(result) => self.matched(expected, result, expr, errors),
             Err(failure) => {
                 errors.push(errors::extension_failure(&failure, &condition_expr));
@@ -1479,6 +1583,18 @@ impl<'a> Checker<'a> {
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Expr> {
         let joining = ops::Joining::of(expr)?;
+        let (operands, combined) = self.join_operands(&joining, expected, errors)?;
+        let result = combine(operands, combined, expr, errors)?;
+        self.matched(expected, result, expr, errors)
+    }
+
+    /// The operands of `joining`, checked, and how the join combines them.
+    fn join_operands(
+        &mut self,
+        joining: &ops::Joining,
+        expected: Option<&Expected>,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<(Vec<hir::Expr>, ops::Combined)> {
         // Every operand is checked on its own, so that each one's errors are
         // reported, and operands of different headings are, together. Of
         // operands of one heading, one whose own can't be known, as an empty
@@ -1521,37 +1637,7 @@ impl<'a> Checker<'a> {
         let operands: Vec<hir::Expr> = operands.into_iter().collect::<Option<_>>()?;
         let types: Vec<hir::Type> = operands.iter().map(|o| self.ty(o)).collect();
         let combined = joining.combined(&types, errors)?;
-        let result = match combined {
-            ops::Combined::And => ops::and(operands),
-            ops::Combined::Combine(combination) => {
-                let mut operands = operands.into_iter();
-                let first = operands.next()?;
-                operands.try_fold(first, |result, operand| {
-                    ops::combined(result, operand, combination)
-                })
-            }
-            ops::Combined::Matching { negated } => {
-                let mut operands = operands.into_iter();
-                let (lhs, rhs) = (operands.next()?, operands.next()?);
-                Ok(ops::matching(lhs, rhs, negated))
-            }
-            ops::Combined::Composed(steps) => {
-                let mut operands = operands.into_iter();
-                let first = operands.next()?;
-                operands
-                    .zip(steps)
-                    .try_fold(first, |result, (operand, common)| {
-                        Ok(ops::remove(ops::and(vec![result, operand])?, common))
-                    })
-            }
-        };
-        match result {
-            Ok(result) => self.matched(expected, result, expr, errors),
-            Err(failed) => {
-                errors.push(errors::failed(&failed, expr));
-                None
-            }
-        }
+        Some((operands, combined))
     }
 
     /// The operator written `token`, its checked `operands` and the type of
