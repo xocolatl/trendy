@@ -231,7 +231,10 @@ languages' habits are parsed as what they mean and fixed: Tutorial D's
 capitals; SQL's `insert into`, `delete from` and `update … set a = x`
 (P0021); Tutorial D's `update r where p (a := x)` (P0024); and its
 multiple assignment, separated by commas, which is parsed into one
-statement and fixed to a block (P0025). Anything but an assignment in a
+statement and fixed to a block (P0025); and C's and Python's `x += y`,
+`x++` and `--x`, their operator's characters written together, fixed to
+the assignment they mean, the value parenthesized where the operator
+would take only part of it (P0036). Anything but an assignment in a
 block is reported and skipped, up to its `;`. A `delete`
 without `where` is reported, with the assignment Tutorial D's would mean
 as the fix (P0023).

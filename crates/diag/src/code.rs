@@ -48,6 +48,7 @@ pub enum Code {
     HeadingAsType,
     NestedDefinition,
     ExpressionStatement,
+    CompoundAssignment,
     DuplicateName,
     MissingMain,
     UnknownType,
@@ -125,7 +126,7 @@ pub enum CodeKind {
 }
 
 impl Code {
-    pub const ALL: [Code; 96] = [
+    pub const ALL: [Code; 97] = [
         Code::UnexpectedCharacter,
         Code::MissingToken,
         Code::WrongDelimiter,
@@ -161,6 +162,7 @@ impl Code {
         Code::HeadingAsType,
         Code::NestedDefinition,
         Code::ExpressionStatement,
+        Code::CompoundAssignment,
         Code::DuplicateName,
         Code::MissingMain,
         Code::UnknownType,
@@ -262,6 +264,7 @@ impl Code {
             Code::HeadingAsType => "P0033",
             Code::NestedDefinition => "P0034",
             Code::ExpressionStatement => "P0035",
+            Code::CompoundAssignment => "P0036",
             Code::DuplicateName => "A0001",
             Code::MissingMain => "A0002",
             Code::UnknownType => "A0003",
@@ -392,6 +395,7 @@ impl Code {
             Code::HeadingAsType => include_str!("../errors/P0033.md"),
             Code::NestedDefinition => include_str!("../errors/P0034.md"),
             Code::ExpressionStatement => include_str!("../errors/P0035.md"),
+            Code::CompoundAssignment => include_str!("../errors/P0036.md"),
             Code::DuplicateName => include_str!("../errors/A0001.md"),
             Code::MissingMain => include_str!("../errors/A0002.md"),
             Code::UnknownType => include_str!("../errors/A0003.md"),

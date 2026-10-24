@@ -1686,6 +1686,31 @@ pub(crate) fn operand_after_statement(
     .with_help(help)
 }
 
+/// `written`, at `operator`, as in `x += 1` or `x++`, with which C and
+/// Python change a variable from its own value: `statement`, all of it but
+/// its `;`, is fixed to `fixed`, the assignment it means.
+pub(crate) fn compound_assignment(
+    written: &str,
+    operator: Span,
+    statement: Span,
+    fixed: String,
+) -> Diagnostic {
+    Diagnostic::error(
+        Code::CompoundAssignment,
+        format!("trendy has no `{written}`"),
+        operator,
+        "not an assignment",
+    )
+    .with_note("an assignment gives a variable its new value in full, `x := x + 1`; as in Tutorial D, there is no shorthand for changing a variable from its own value")
+    .with_suggestion(
+        format!("write `{fixed}`"),
+        vec![Edit {
+            span: statement,
+            replacement: fixed,
+        }],
+    )
+}
+
 /// A call statement, starting with the operator's name `found`, without
 /// `call`.
 pub(crate) fn missing_call(found: Found) -> Diagnostic {

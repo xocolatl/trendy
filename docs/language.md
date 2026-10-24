@@ -1741,6 +1741,9 @@ operator main{} [
 - **The value has the variable's type,** which never changes: an
   assignment of another type is an error (A0004). `=` is equality, not
   assignment (P0005).
+- **The new value is written in full,** as `visits := visits + 1`: there
+  is no `+=`, `++` or `--`, which are fixed to the assignment they mean
+  (P0036).
 - **Only variables are assigned,** and an array variable's elements (see
   [Changing an element](#changing-an-element)). An operator's parameters
   are read-only, and an operator is not a variable (A0026).
@@ -3343,6 +3346,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `let`, `const`, `int x` | `var x`, at the top level or in an operator's body |
 | `let x = x + 1;`, declaring a variable again | `x := x + 1;`, assigning it |
 | `x = 0` | `x := 0` |
+| `x += 1`, `x++`, `++x` | `x := x + 1;` |
 | `INSERT R …`, `INSERT INTO r …` | `insert r …;` |
 | `DELETE R WHERE P`, `DELETE FROM r WHERE p` | `delete r where p;` |
 | `DELETE R`, `DELETE FROM r`, `… WHERE 1 = 1` | `r := relation {};` |

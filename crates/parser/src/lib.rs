@@ -113,10 +113,24 @@ enum StatementStart {
     ForeignVar,
     AssignBlock,
     Assignment,
+    /// `x += 1;`, `x++;` or `++x;`, as C and Python change a variable.
+    Compound(Compound),
     Return,
     /// `debug_value{v: r};`, a call without `call`, or, where a value
     /// goes, a read-only operator's call.
     BareCall,
+}
+
+/// How another language writes a change to a variable from its own
+/// value.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Compound {
+    /// `x += value`, with `+`, `-`, `*`, `/` or `%`.
+    Infix,
+    /// `x++` or `x--`.
+    Postfix,
+    /// `++x` or `--x`.
+    Prefix,
 }
 
 /// A dyadic operator at the next token: its precedence, its first token,
@@ -872,6 +886,8 @@ impl<'a> Parser<'a> {
             StatementStart::AssignBlock
         } else if self.at_assignment() {
             StatementStart::Assignment
+        } else if let Some(compound) = self.at_compound() {
+            StatementStart::Compound(compound)
         } else if found.spells(SyntaxKind::ReturnKw) {
             StatementStart::Return
         } else if found.kind == SyntaxKind::Ident && call_like {
@@ -920,6 +936,7 @@ impl<'a> Parser<'a> {
             }
             Some(StatementStart::AssignBlock) => self.assign_block(),
             Some(StatementStart::Assignment) => self.assign_stmt(false),
+            Some(StatementStart::Compound(compound)) => self.compound_assignment(compound),
             Some(StatementStart::Return) => self.return_stmt(),
             Some(StatementStart::BareCall) => {
                 self.errors.push(errors::missing_call(found));
@@ -982,6 +999,130 @@ impl<'a> Parser<'a> {
             }
             _ => self.missing(SyntaxKind::Semicolon),
         }
+    }
+
+    /// Whether a change to a variable from its own value starts here, as
+    /// another language writes one: a target, then an operator and `=`, or
+    /// `++` or `--`, or one of those before the target. The operators'
+    /// characters are written together, as they are one token there.
+    fn at_compound(&mut self) -> Option<Compound> {
+        let found = self.found()?;
+        let together = |a: &Found, b: &Found| a.span.end == b.span.start;
+        let doubled = |a: Option<Found>, b: Option<Found>| {
+            a.zip(b).is_some_and(|(a, b)| {
+                matches!(a.kind, SyntaxKind::Plus | SyntaxKind::Minus)
+                    && a.kind == b.kind
+                    && together(&a, &b)
+            })
+        };
+        if found.kind == SyntaxKind::Ident {
+            let n = self.after_target_path(1);
+            let (operator, next) = (self.found_after(n), self.found_after(n + 1));
+            if let (Some(operator), Some(next)) = (operator, next)
+                && compound_operator(operator).is_some()
+                && next.kind == SyntaxKind::Eq
+                && together(&operator, &next)
+            {
+                return Some(Compound::Infix);
+            }
+            let ends = self
+                .found_after(n + 2)
+                .is_none_or(|f| matches!(f.kind, SyntaxKind::Semicolon | SyntaxKind::RBracket));
+            if doubled(operator, next) && ends {
+                return Some(Compound::Postfix);
+            }
+        }
+        let target = self
+            .found_after(2)
+            .is_some_and(|f| f.kind == SyntaxKind::Ident);
+        (doubled(Some(found), self.found_after(1)) && target).then_some(Compound::Prefix)
+    }
+
+    /// `x += value;`, `x++;` or `++x;`, as C and Python change a variable
+    /// from its own value: kept as an error, since trendy has no such
+    /// statement, and reported with the assignment it means as the fix.
+    fn compound_assignment(&mut self, compound: Compound) {
+        let outer_form = std::mem::replace(&mut self.form, errors::ASSIGNMENT_FORM);
+        self.start_node(SyntaxKind::Error);
+        let start = self.found().map_or(0, |f| f.span.start);
+        let mut target = Span::empty(start);
+        if compound != Compound::Prefix {
+            self.assignment_target();
+            target = Span::new(start, self.last_end.unwrap_or(start));
+        }
+        let first = self.found().expect("an operator follows");
+        self.bump();
+        let last = self.bump();
+        let written = Span::new(first.span.start, last.end);
+        if compound == Compound::Prefix {
+            let from = self.found().map_or(last.end, |f| f.span.start);
+            self.assignment_target();
+            target = Span::new(from, self.last_end.unwrap_or(from));
+        }
+        let operator = compound_operator(first).expect("an operator of a compound assignment");
+        let value = if compound == Compound::Infix {
+            let from = self.pos;
+            let value_start = self.found().map_or(last.end, |f| f.span.start);
+            self.expression();
+            let value = &self.source[value_start..self.last_end.unwrap_or(value_start)];
+            let precedence = operator.precedence().expect("an arithmetic operator");
+            if self.groups_looser(from..self.pos, precedence) {
+                format!("({value})")
+            } else {
+                value.to_string()
+            }
+        } else {
+            "1".to_string()
+        };
+        let statement = Span::new(start, self.last_end.unwrap_or(start));
+        let target = &self.source[target.start..target.end];
+        let operator = operator.fixed_text().expect("operators have fixed text");
+        self.errors.push(errors::compound_assignment(
+            &self.source[written.start..written.end],
+            written,
+            statement,
+            format!("{target} := {target} {operator} {value}"),
+        ));
+        self.end_statement();
+        self.builder.finish_node();
+        self.form = outer_form;
+    }
+
+    /// Whether the tokens at `tokens`, an expression, have outside any
+    /// delimiters a dyadic operator, or an `if`, that groups as loosely as
+    /// `precedence` or more, so that the expression needs parentheses as
+    /// that operator's right operand.
+    fn groups_looser(&self, tokens: std::ops::Range<usize>, precedence: Precedence) -> bool {
+        let mut depth = 0_usize;
+        // An operator after an operand is dyadic; before one, monadic.
+        let mut after_operand = false;
+        for token in self.tokens[tokens].iter().filter(|t| !is_skipped(t.kind)) {
+            let text = &self.source[token.span.start..token.span.end];
+            match token.kind {
+                SyntaxKind::LParen | SyntaxKind::LBrace | SyntaxKind::LBracket => depth += 1,
+                SyntaxKind::RParen | SyntaxKind::RBrace | SyntaxKind::RBracket => {
+                    depth = depth.saturating_sub(1);
+                }
+                SyntaxKind::IfKw if depth == 0 => return true,
+                _ if depth == 0 => {
+                    let keyword = match token.kind {
+                        SyntaxKind::ForeignOperator => errors::foreign_operator(text),
+                        SyntaxKind::Ident => errors::operator_spelling(text),
+                        kind => Some(kind),
+                    };
+                    let grouping = keyword.and_then(SyntaxKind::precedence);
+                    if after_operand && grouping.is_some_and(|g| g <= precedence) {
+                        return true;
+                    }
+                    let operator = grouping.is_some() || keyword == Some(SyntaxKind::NotKw);
+                    after_operand = !operator;
+                    continue;
+                }
+                _ => {}
+            }
+            after_operand = depth == 0;
+        }
+        false
     }
 
     /// Whether a declaration starts here with another language's keyword,
@@ -4144,6 +4285,18 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// The arithmetic operator `found` is, before `=` in another language's
+/// compound assignment, or doubled in its `++` and `--`.
+fn compound_operator(found: Found) -> Option<SyntaxKind> {
+    match found.kind {
+        SyntaxKind::Plus | SyntaxKind::Minus | SyntaxKind::Star | SyntaxKind::Slash => {
+            Some(found.kind)
+        }
+        SyntaxKind::ForeignOperator if found.text == "%" => Some(SyntaxKind::ModKw),
+        _ => None,
+    }
+}
+
 /// Where a statement being skipped ends, before its `;`: at its body's
 /// `]`, or at the keyword of the next definition or declaration.
 const STATEMENT_STOPS: [SyntaxKind; 3] = [
@@ -5606,13 +5759,42 @@ SourceFile
         assert_eq!(parse.errors[0].message, "expected a statement, found `,`");
         assert!(parse.errors[0].suggestions.is_empty());
         // Not an expression after all: its own error, alone.
-        let errors = parse_str("var x := 0;\noperator main{} [ x += 1; ];").errors;
+        let errors = parse_str("var x := 0;\noperator main{} [ x + = 1; ];").errors;
         assert_eq!(errors.len(), 1, "{errors:#?}");
         assert_eq!(errors[0].message, "expected value, found `=`");
         // In a read-only body, a statement is one too.
         let errors = parse_str("operator f{}: integer [ break; 1 ];").errors;
         assert_eq!(errors.len(), 1, "{errors:#?}");
         assert_eq!(errors[0].code, Code::LoopSpelling);
+    }
+
+    #[test]
+    fn compound_assignments_are_fixed() {
+        let one_fix = |statement: &str, fixed: &str| {
+            let source = format!("operator main{{}} [ {statement} ];");
+            let errors = parse_str(&source).errors;
+            assert_eq!(errors.len(), 1, "{statement}: {errors:#?}");
+            assert_eq!(errors[0].code, Code::CompoundAssignment, "{statement}");
+            assert_eq!(
+                fix(&source),
+                format!("operator main{{}} [ {fixed} ];"),
+                "{statement}"
+            );
+        };
+        one_fix("x += 1;", "x := x + 1;");
+        one_fix("x %= 3;", "x := x mod 3;");
+        one_fix("a[i] += n * 2;", "a[i] := a[i] + n * 2;");
+        one_fix("x++;", "x := x + 1;");
+        one_fix("--x;", "x := x - 1;");
+        // The value whole, where the operator would take only part of it.
+        one_fix("x -= n - 2;", "x := x - (n - 2);");
+        one_fix("x *= n + 1;", "x := x * (n + 1);");
+        one_fix("x *= (n + 1);", "x := x * (n + 1);");
+        one_fix("x += -1;", "x := x + -1;");
+        one_fix("x += if c then 1 else 2;", "x := x + (if c then 1 else 2);");
+        // Written apart, they are no other language's.
+        let errors = parse_str("operator main{} [ x + = 1; ];").errors;
+        assert!(errors.iter().all(|e| e.code != Code::CompoundAssignment));
     }
 
     #[test]
