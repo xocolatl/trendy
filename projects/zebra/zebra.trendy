@@ -1,0 +1,145 @@
+/* Einstein's zebra puzzle, solved with relations alone: every way to put
+   each kind of thing in the houses, restricted by the clues. No loop
+   searches for the answer; every variable is a constant, so the compiler
+   finds it, and the program only prints it.
+
+   The puzzle as Life International printed it in 1962, with dishes in
+   place of its brands of cigarettes:
+
+    1. There are five houses.
+    2. The Englishman lives in the red house.
+    3. The Spaniard owns the dog.
+    4. Coffee is drunk in the green house.
+    5. The Ukrainian drinks tea.
+    6. The green house is immediately to the right of the ivory house.
+    7. The borshch cook owns snails.
+    8. Mapo doufu is cooked in the yellow house.
+    9. Milk is drunk in the middle house.
+   10. The Norwegian lives in the first house.
+   11. The jollof rice cook lives next to the owner of the fox.
+   12. Mapo doufu is cooked next to the house where the horse is kept.
+   13. The dal tadka cook drinks orange juice.
+   14. The Japanese cooks shakshuka.
+   15. The Norwegian lives next to the blue house.
+
+   Who drinks water? Who owns the zebra? */
+
+var houses := relation {
+    { house: 1 },
+    { house: 2 },
+    { house: 3 },
+    { house: 4 },
+    { house: 5 },
+};
+
+/* Every way to give five things a house each, a to e: their houses are
+   all five only if no two share one. */
+var orders := times{
+    houses rename {house as a},
+    houses rename {house as b},
+    houses rename {house as c},
+    houses rename {house as d},
+    houses rename {house as e},
+}
+    where relation {
+        { house: a },
+        { house: b },
+        { house: c },
+        { house: d },
+        { house: e },
+    } = houses;
+
+/* Every way to put each kind of thing in the houses, each thing an
+   attribute whose value is its house, with the clues about one kind. */
+var colors := orders rename {a as red, b as green, c as ivory, d as yellow, e as blue}
+    where green = ivory + 1;
+var nations := orders rename {
+    a as english,
+    b as spanish,
+    c as ukrainian,
+    d as norwegian,
+    e as japanese,
+}
+    where norwegian = 1;
+var drinks := orders rename {a as coffee, b as tea, c as milk, d as orange_juice, e as water}
+    where milk = 3;
+var dishes := orders rename {
+    a as borshch,
+    b as mapo_doufu,
+    c as jollof_rice,
+    d as dal_tadka,
+    e as shakshuka,
+};
+var pets := orders rename {a as dog, b as snails, c as fox, d as horse, e as zebra};
+
+operator next_door{x: integer, y: integer}: boolean [
+    x - y = 1 or y - x = 1
+];
+
+/* The clues about two kinds, each kind joined with the clues it allows
+   checking. Restricting the product of all five at once would mean the
+   same, but would make its 199 million tuples first, as nothing takes a
+   restriction into a product yet. Once something does, as a database's
+   optimizer would, it can read as the clues do:
+
+     var solutions := times{colors, nations, drinks, dishes, pets}
+         where english = red
+             and spanish = dog
+             and coffee = green
+             and …;
+*/
+var lived := (colors times nations) where english = red and next_door{x: norwegian, y: blue};
+var drunk := (lived times drinks) where coffee = green and ukrainian = tea;
+var cooked := (drunk times dishes)
+    where mapo_doufu = yellow and dal_tadka = orange_juice and japanese = shakshuka;
+var solutions := (cooked times pets)
+    where spanish = dog
+        and borshch = snails
+        and next_door{x: jollof_rice, y: fox}
+        and next_door{x: mapo_doufu, y: horse};
+
+/* The street, from the only solution: each thing in its house. */
+var solved := tuple from solutions;
+var street := join{
+    relation {
+        { house: solved.red, color: "red" },
+        { house: solved.green, color: "green" },
+        { house: solved.ivory, color: "ivory" },
+        { house: solved.yellow, color: "yellow" },
+        { house: solved.blue, color: "blue" },
+    },
+    relation {
+        { house: solved.english, nation: "English" },
+        { house: solved.spanish, nation: "Spanish" },
+        { house: solved.ukrainian, nation: "Ukrainian" },
+        { house: solved.norwegian, nation: "Norwegian" },
+        { house: solved.japanese, nation: "Japanese" },
+    },
+    relation {
+        { house: solved.coffee, drink: "coffee" },
+        { house: solved.tea, drink: "tea" },
+        { house: solved.milk, drink: "milk" },
+        { house: solved.orange_juice, drink: "orange juice" },
+        { house: solved.water, drink: "water" },
+    },
+    relation {
+        { house: solved.borshch, dish: "borshch" },
+        { house: solved.mapo_doufu, dish: "mapo doufu" },
+        { house: solved.jollof_rice, dish: "jollof rice" },
+        { house: solved.dal_tadka, dish: "dal tadka" },
+        { house: solved.shakshuka, dish: "shakshuka" },
+    },
+    relation {
+        { house: solved.dog, pet: "dog" },
+        { house: solved.snails, pet: "snails" },
+        { house: solved.fox, pet: "fox" },
+        { house: solved.horse, pet: "horse" },
+        { house: solved.zebra, pet: "zebra" },
+    },
+};
+
+operator main{} [
+    call debug_table{r: street};
+    call debug_value{v: value from (street where drink = "water"){nation}};
+    call debug_value{v: value from (street where pet = "zebra"){nation}};
+];

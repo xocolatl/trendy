@@ -1373,6 +1373,30 @@ fn shopping() {
     );
 }
 
+#[test]
+fn zebra() {
+    let (code, stderr) = run_project("zebra");
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            // The only street the clues allow, then who drinks water, and
+            // who owns the zebra.
+            "┌────────┬─────────────┬──────────────┬───────┬───────────┬────────┐",
+            "│ color  │ dish        │ drink        │ house │ nation    │ pet    │",
+            "├────────┼─────────────┼──────────────┼───────┼───────────┼────────┤",
+            "│ blue   │ jollof rice │ tea          │     2 │ Ukrainian │ horse  │",
+            "│ green  │ shakshuka   │ coffee       │     5 │ Japanese  │ zebra  │",
+            "│ ivory  │ dal tadka   │ orange juice │     4 │ Spanish   │ dog    │",
+            "│ red    │ borshch     │ milk         │     3 │ English   │ snails │",
+            "│ yellow │ mapo doufu  │ water        │     1 │ Norwegian │ fox    │",
+            "└────────┴─────────────┴──────────────┴───────┴───────────┴────────┘",
+            r#""Norwegian""#,
+            r#""Japanese""#,
+        ]
+    );
+}
+
 /// Run `trendyc` on `source` with `args`, returning (success, stdout, stderr).
 fn trendyc(name: &str, source: &str, args: &[&str]) -> (bool, String, String) {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
