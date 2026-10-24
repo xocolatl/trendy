@@ -95,11 +95,11 @@ operator computed{wet: integer, mid: integer, low: integer, two: integer, city: 
     call debug_value{v: r};
     call debug_value{v: none};
     call debug_value{v: g};
-    call debug_value{v: relation {
+    call debug_table{r: relation {
         { city: city, rainy: array ["Jun", "Jul", "Aug", "Sep"] },
         { city: "Cairo", rainy: array [] },
     }};
-    call debug_value{v: relation {
+    call debug_table{r: relation {
         { m: array [two] },
         { m: array [1, 9] },
         { m: array [] },
@@ -137,8 +137,8 @@ operator main{} [
     call debug_value{v: rainfall};
     call debug_value{v: dry};
     call debug_value{v: grid};
-    call debug_value{v: cities};
-    call debug_value{v: ordered};
+    call debug_table{r: cities};
+    call debug_table{r: ordered};
     call debug_value{v: second};
     call debug_value{v: corner};
     call debug_value{v: months};

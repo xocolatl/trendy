@@ -88,23 +88,68 @@ fn variables() {
         [
             r#""kwaheri""#,
             // Inserted, deleted, updated; inserted and deleted again.
-            r#"relation { born: integer, name: text } { { born: 701, name: "李白" }, { born: 1644, name: "Bashō" }, { born: 1815, name: "Ada" }, { born: 1923, name: "Wisława" } }"#,
-            r#"relation { born: integer, name: text } { { born: 701, name: "李白" }, { born: 1644, name: "Bashō" }, { born: 1815, name: "Ada" } }"#,
-            r#"relation { born: integer, name: text } { { born: 701, name: "李白" }, { born: 1644, name: "Bashō" }, { born: 1814, name: "Ada" } }"#,
-            r#"relation { born: integer, name: text } { { born: 701, name: "李白" }, { born: 1644, name: "Bashō" }, { born: 1814, name: "Ada" } }"#,
+            "┌──────┬─────────┐",
+            "│ born │ name    │",
+            "├──────┼─────────┤",
+            "│  701 │ 李白    │",
+            "│ 1644 │ Bashō   │",
+            "│ 1815 │ Ada     │",
+            "│ 1923 │ Wisława │",
+            "└──────┴─────────┘",
+            "┌──────┬───────┐",
+            "│ born │ name  │",
+            "├──────┼───────┤",
+            "│  701 │ 李白  │",
+            "│ 1644 │ Bashō │",
+            "│ 1815 │ Ada   │",
+            "└──────┴───────┘",
+            "┌──────┬───────┐",
+            "│ born │ name  │",
+            "├──────┼───────┤",
+            "│  701 │ 李白  │",
+            "│ 1644 │ Bashō │",
+            "│ 1814 │ Ada   │",
+            "└──────┴───────┘",
+            "┌──────┬───────┐",
+            "│ born │ name  │",
+            "├──────┼───────┤",
+            "│  701 │ 李白  │",
+            "│ 1644 │ Bashō │",
+            "│ 1814 │ Ada   │",
+            "└──────┴───────┘",
             r#"tuple { city: "Nairobi", postal_code: "00200" }"#,
             // Swapped, and two guests swapped between rooms.
             "tuple { x: 2, y: 1 }",
-            r#"relation { guest: text, room: integer } { { guest: "Amara", room: 2 }, { guest: "Kenji", room: 1 } }"#,
+            "┌───────┬──────┐",
+            "│ guest │ room │",
+            "├───────┼──────┤",
+            "│ Amara │    2 │",
+            "│ Kenji │    1 │",
+            "└───────┴──────┘",
             // A check-in, with local variables, one of them hiding `x`.
             r#""karibu, Wanjiru""#,
-            r#"relation { guest: text, room: integer } { { guest: "Wanjiru", room: 3 } }"#,
-            r#"relation { guest: text, room: integer } { { guest: "Amara", room: 2 }, { guest: "Kenji", room: 1 }, { guest: "Wanjiru", room: 3 } }"#,
+            "┌─────────┬──────┐",
+            "│ guest   │ room │",
+            "├─────────┼──────┤",
+            "│ Wanjiru │    3 │",
+            "└─────────┴──────┘",
+            "┌─────────┬──────┐",
+            "│ guest   │ room │",
+            "├─────────┼──────┤",
+            "│ Amara   │    2 │",
+            "│ Kenji   │    1 │",
+            "│ Wanjiru │    3 │",
+            "└─────────┴──────┘",
             "2",
             // Checked out, and an `if` for a guest without a room.
             r#""Kenji leaves room 1""#,
             r#""Bashō has no room""#,
-            r#"relation { guest: text, room: integer } { { guest: "Amara", room: 2 }, { guest: "Wanjiru", room: 3 } }"#,
+            "┌─────────┬──────┐",
+            "│ guest   │ room │",
+            "├─────────┼──────┤",
+            "│ Amara   │    2 │",
+            "│ Wanjiru │    3 │",
+            "└─────────┴──────┘",
             // A roll call, by a `while` over the guests' positions, three
             // knocks, by a `loop`, and goodbyes, by a `for` over the guests.
             r#""1. Amara""#,
@@ -112,7 +157,10 @@ fn variables() {
             "3",
             r#""kwaheri, Amara""#,
             r#""kwaheri, Wanjiru""#,
-            "relation { born: integer, name: text } {}",
+            "┌──────┬──────┐",
+            "│ born │ name │",
+            "├──────┼──────┤",
+            "└──────┴──────┘",
         ]
     );
 }
@@ -125,8 +173,18 @@ fn operators() {
         stderr.lines().collect::<Vec<_>>(),
         [
             // Each dish's price with VAT, by a call for each tuple.
-            r#"relation { country: text, dish: text, total: integer } { { country: "Ghana", dish: "jollof rice", total: 1392 }, { country: "Japan", dish: "ramen", total: 1044 }, { country: "Mexico", dish: "pozole", total: 870 } }"#,
-            r#"relation { dish: text } { { dish: "pozole" } }"#,
+            "┌─────────┬─────────────┬───────┐",
+            "│ country │ dish        │ total │",
+            "├─────────┼─────────────┼───────┤",
+            "│ Ghana   │ jollof rice │  1392 │",
+            "│ Japan   │ ramen       │  1044 │",
+            "│ Mexico  │ pozole      │   870 │",
+            "└─────────┴─────────────┴───────┘",
+            "┌────────┐",
+            "│ dish   │",
+            "├────────┤",
+            "│ pozole │",
+            "└────────┘",
             r#""half of 1200""#,
             "600",
             // The second argument is `previous`, which `rotate` assigns.
@@ -135,9 +193,24 @@ fn operators() {
             r#""spicy ramen → ramen""#,
             r#""ramen""#,
             // Calls made when running, with `vat` at 16, then at 25.
-            r#"relation { dish: text } { { dish: "pozole" }, { dish: "ramen" } }"#,
-            r#"relation { dish: text } { { dish: "pozole" } }"#,
-            r#"relation { country: text, dish: text, total: integer } { { country: "Ghana", dish: "jollof rice", total: 1500 }, { country: "Japan", dish: "ramen", total: 1125 }, { country: "Mexico", dish: "pozole", total: 937 } }"#,
+            "┌────────┐",
+            "│ dish   │",
+            "├────────┤",
+            "│ pozole │",
+            "│ ramen  │",
+            "└────────┘",
+            "┌────────┐",
+            "│ dish   │",
+            "├────────┤",
+            "│ pozole │",
+            "└────────┘",
+            "┌─────────┬─────────────┬───────┐",
+            "│ country │ dish        │ total │",
+            "├─────────┼─────────────┼───────┤",
+            "│ Ghana   │ jollof rice │  1500 │",
+            "│ Japan   │ ramen       │  1125 │",
+            "│ Mexico  │ pozole      │   937 │",
+            "└─────────┴─────────────┴───────┘",
             // Generic operators, for texts, relations and relations of
             // relations.
             r#""specials""#,
@@ -669,7 +742,7 @@ operator greet{name: text} [
 
 operator main{} [
     call greet{name: "Amara"};
-    call debug_value{v: (debug_value){}};
+    call debug_table{r: (debug_value){}};
     call debug_value{v: main};
     greet := "Habari";
     call greet{name: "Kenji"};
@@ -681,7 +754,11 @@ operator main{} [
         stderr.lines().collect::<Vec<_>>(),
         [
             r#""Hello, Amara""#,
-            "relation {} { {} }",
+            "┌┐",
+            "││",
+            "├┤",
+            "││",
+            "└┘",
             "7",
             r#""Habari, Kenji""#
         ]
@@ -729,7 +806,7 @@ operator main{} [
     shouts := array [greeting || "!", left || "?"];
     call debug_value{v: shouts};
     loud := (cities extend { shout := city || "!" }) where shout <> "Lima!";
-    call debug_value{v: loud};
+    call debug_table{r: loud};
 ];
 "#;
     let (code, stderr) = run_source("lifetimes", source);
@@ -741,7 +818,11 @@ operator main{} [
             r#""kulia! kushoto!""#,
             r#""0,1,2,""#,
             r#"array ["goodbye!", "kulia!?"]"#,
-            r#"relation { city: text, shout: text } { { city: "Lagos", shout: "Lagos!" } }"#,
+            "┌───────┬────────┐",
+            "│ city  │ shout  │",
+            "├───────┼────────┤",
+            "│ Lagos │ Lagos! │",
+            "└───────┴────────┘",
         ]
     );
 }
@@ -857,98 +938,358 @@ fn tuples() {
     );
 }
 
+/// The lines `relations.trendy` prints, each result's once, as
+/// [`folded_and_run`] gives them.
+const RELATIONS: &[&str] = &[
+    // Duplicates dropped; text by code point, so `É` after `E`.
+    "┌─────────┐",
+    "│ name    │",
+    "├─────────┤",
+    "│ Ada     │",
+    "│ Edgar   │",
+    "│ Édouard │",
+    "└─────────┘",
+    "┌──────────┐",
+    "│ place    │",
+    "├──────────┤",
+    "│ London   │",
+    "│ Paris    │",
+    "│ Portland │",
+    "└──────────┘",
+    "┌──────┬──────────┐",
+    "│ born │ place    │",
+    "├──────┼──────────┤",
+    "│ 1815 │ London   │",
+    "│ 1815 │ Paris    │",
+    "│ 1816 │ London   │",
+    "│ 1923 │ Portland │",
+    "└──────┴──────────┘",
+    "┌┐",
+    "││",
+    "├┤",
+    "││",
+    "└┘",
+    // Approximate numbers numerically, and `-0e0` is `0e0`.
+    "┌────────┐",
+    "│ x      │",
+    "├────────┤",
+    "│ -1.5e0 │",
+    "│    0e0 │",
+    "│  2.5e0 │",
+    "└────────┘",
+    // Relations by their tuples: the empty one first.
+    "┌────────────────────────────────────────────────────────────────┐",
+    "│ members                                                        │",
+    "├────────────────────────────────────────────────────────────────┤",
+    "│ relation { name: text } {}                                     │",
+    r#"│ relation { name: text } { { name: "Ada" }, { name: "Edgar" } } │"#,
+    "└────────────────────────────────────────────────────────────────┘",
+    "┌┐",
+    "││",
+    "├┤",
+    "└┘",
+    // Renamed, and sorted again by the new first attribute.
+    "┌─────────┬──────┬──────────┐",
+    "│ alias   │ born │ place    │",
+    "├─────────┼──────┼──────────┤",
+    "│ Ada     │ 1815 │ London   │",
+    "│ Ada     │ 1816 │ London   │",
+    "│ Edgar   │ 1923 │ Portland │",
+    "│ Édouard │ 1815 │ Paris    │",
+    "└─────────┴──────┴──────────┘",
+    "┌────────┬───┐",
+    "│ n      │ x │",
+    "├────────┼───┤",
+    "│ -1.5e0 │ 3 │",
+    "│ -1.5e0 │ 5 │",
+    "│    0e0 │ 2 │",
+    "│    0e0 │ 4 │",
+    "│  2.5e0 │ 1 │",
+    "└────────┴───┘",
+    // Built from run-time values, sorted, and with the tuples that
+    // turn out equal made one.
+    "┌──────┬──────┐",
+    "│ born │ name │",
+    "├──────┼──────┤",
+    "│  701 │ 李白 │",
+    "│ 1815 │ Ada  │",
+    "└──────┴──────┘",
+    "┌───┐",
+    "│ x │",
+    "├───┤",
+    "│ 1 │",
+    "└───┘",
+    r#"tuple { members: relation { name: text } { { name: "Ada" }, { name: "李白" } }, who: "core" }"#,
+    // Joined on `name`, which only Ada and Edgar have in both, and
+    // composed, without it.
+    "┌──────┬──────────┬───────┐",
+    "│ born │ city     │ name  │",
+    "├──────┼──────────┼───────┤",
+    "│ 1815 │ London   │ Ada   │",
+    "│ 1923 │ Portland │ Edgar │",
+    "└──────┴──────────┴───────┘",
+    "┌──────┬──────────┐",
+    "│ born │ city     │",
+    "├──────┼──────────┤",
+    "│ 1815 │ London   │",
+    "│ 1923 │ Portland │",
+    "└──────┴──────────┘",
+    "┌──────────┬──────┐",
+    "│ city     │ year │",
+    "├──────────┼──────┤",
+    "│ London   │ 2024 │",
+    "│ London   │ 2025 │",
+    "│ Nyeri    │ 2024 │",
+    "│ Nyeri    │ 2025 │",
+    "│ Portland │ 2024 │",
+    "│ Portland │ 2025 │",
+    "└──────────┴──────┘",
+    // Joins and times of lists.
+    "┌──────┬──────────┬───────┐",
+    "│ born │ city     │ name  │",
+    "├──────┼──────────┼───────┤",
+    "│ 1815 │ London   │ Ada   │",
+    "│ 1923 │ Portland │ Edgar │",
+    "└──────┴──────────┴───────┘",
+    "┌──────┬──────────┬──────┐",
+    "│ born │ city     │ year │",
+    "├──────┼──────────┼──────┤",
+    "│ 1815 │ London   │ 2024 │",
+    "│ 1815 │ London   │ 2025 │",
+    "│ 1815 │ Nyeri    │ 2024 │",
+    "│ 1815 │ Nyeri    │ 2025 │",
+    "│ 1815 │ Portland │ 2024 │",
+    "│ 1815 │ Portland │ 2025 │",
+    "│ 1923 │ London   │ 2024 │",
+    "│ 1923 │ London   │ 2025 │",
+    "│ 1923 │ Nyeri    │ 2024 │",
+    "│ 1923 │ Nyeri    │ 2025 │",
+    "│ 1923 │ Portland │ 2024 │",
+    "│ 1923 │ Portland │ 2025 │",
+    "└──────┴──────────┴──────┘",
+    // Composed from the left: on `name`, then on `city`.
+    "┌──────┬────────────────┐",
+    "│ born │ country        │",
+    "├──────┼────────────────┤",
+    "│ 1815 │ United Kingdom │",
+    "│ 1923 │ United States  │",
+    "└──────┴────────────────┘",
+    // Extended, each tuple computing its own; a relation-valued
+    // attribute extended in turn, empty or not.
+    "┌─────┬──────┬───────────┬───────┐",
+    "│ age │ born │ greeting  │ name  │",
+    "├─────┼──────┼───────────┼───────┤",
+    "│ 101 │ 1923 │ Hi, Edgar │ Edgar │",
+    "│ 209 │ 1815 │ Hi, Ada   │ Ada   │",
+    "└─────┴──────┴───────────┴───────┘",
+    "┌────────────────────────────────────────────────────────────────┬────────────────────────────────────────────────────────────────────────────────────────────────────────────┬──────┐",
+    "│ members                                                        │ roster                                                                                                     │ team │",
+    "├────────────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────┼──────┤",
+    "│ relation { name: text } {}                                     │ relation { name: text, role: text } {}                                                                     │ docs │",
+    r#"│ relation { name: text } { { name: "Ada" }, { name: "Edgar" } } │ relation { name: text, role: text } { { name: "Ada", role: "member" }, { name: "Edgar", role: "member" } } │ core │"#,
+    "└────────────────────────────────────────────────────────────────┴────────────────────────────────────────────────────────────────────────────────────────────────────────────┴──────┘",
+    // Replaced, each tuple computing its own; tuples that become
+    // equal are one.
+    "┌──────┬───────┐",
+    "│ born │ name  │",
+    "├──────┼───────┤",
+    "│ 1816 │ Ada   │",
+    "│ 1924 │ Edgar │",
+    "└──────┴───────┘",
+    "┌──────┐",
+    "│ born │",
+    "├──────┤",
+    "│    1 │",
+    "└──────┘",
+    // Image relations: Nyeri's is empty; and a relation comparison
+    // of each.
+    "┌──────────┬─────────────────────────────────────────────────────────────────────────────────────────────────────┐",
+    "│ city     │ natives                                                                                             │",
+    "├──────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────┤",
+    r#"│ London   │ relation { born: integer, name: text } { { born: 1815, name: "Ada" }, { born: 1816, name: "Ada" } } │"#,
+    "│ Nyeri    │ relation { born: integer, name: text } {}                                                           │",
+    r#"│ Portland │ relation { born: integer, name: text } { { born: 1923, name: "Edgar" } }                            │"#,
+    "└──────────┴─────────────────────────────────────────────────────────────────────────────────────────────────────┘",
+    "┌─────────┬─────────────┐",
+    "│ name    │ only_london │",
+    "├─────────┼─────────────┤",
+    "│ Ada     │ true        │",
+    "│ Edgar   │ false       │",
+    "│ Édouard │ false       │",
+    "└─────────┴─────────────┘",
+    // Grouped: one tuple per place; two groupings at once, each of
+    // the same births; and every attribute of each team's members,
+    // so one tuple, or none for a team without members.
+    "┌─────────────────────────────────────────────────────────────────────────────────────────────────────┬──────────┐",
+    "│ births                                                                                              │ place    │",
+    "├─────────────────────────────────────────────────────────────────────────────────────────────────────┼──────────┤",
+    r#"│ relation { born: integer, name: text } { { born: 1815, name: "Ada" }, { born: 1816, name: "Ada" } } │ London   │"#,
+    r#"│ relation { born: integer, name: text } { { born: 1815, name: "Édouard" } }                          │ Paris    │"#,
+    r#"│ relation { born: integer, name: text } { { born: 1923, name: "Edgar" } }                            │ Portland │"#,
+    "└─────────────────────────────────────────────────────────────────────────────────────────────────────┴──────────┘",
+    "┌─────────────────────────────────────────────────┬──────────┬───────────────────────────────────────────────────────────────┐",
+    "│ names                                           │ place    │ years                                                         │",
+    "├─────────────────────────────────────────────────┼──────────┼───────────────────────────────────────────────────────────────┤",
+    r#"│ relation { name: text } { { name: "Ada" } }     │ London   │ relation { born: integer } { { born: 1815 }, { born: 1816 } } │"#,
+    r#"│ relation { name: text } { { name: "Edgar" } }   │ Portland │ relation { born: integer } { { born: 1923 } }                 │"#,
+    r#"│ relation { name: text } { { name: "Édouard" } } │ Paris    │ relation { born: integer } { { born: 1815 } }                 │"#,
+    "└─────────────────────────────────────────────────┴──────────┴───────────────────────────────────────────────────────────────┘",
+    "┌────────────────────────────────────────────────────────────────┬───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┬──────┐",
+    "│ members                                                        │ roster                                                                                                                    │ team │",
+    "├────────────────────────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┼──────┤",
+    "│ relation { name: text } {}                                     │ relation { names: relation { name: text } } {}                                                                            │ docs │",
+    r#"│ relation { name: text } { { name: "Ada" }, { name: "Edgar" } } │ relation { names: relation { name: text } } { { names: relation { name: text } { { name: "Ada" }, { name: "Edgar" } } } } │ core │"#,
+    "└────────────────────────────────────────────────────────────────┴───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┴──────┘",
+    // Ungrouped: the docs team, with no members, has no tuples; and
+    // grouping then ungrouping gives the births back.
+    "┌───────┬──────┐",
+    "│ name  │ team │",
+    "├───────┼──────┤",
+    "│ Ada   │ core │",
+    "│ Edgar │ core │",
+    "└───────┴──────┘",
+    "┌──────┬─────────┬──────────┐",
+    "│ born │ name    │ place    │",
+    "├──────┼─────────┼──────────┤",
+    "│ 1815 │ Ada     │ London   │",
+    "│ 1815 │ Édouard │ Paris    │",
+    "│ 1816 │ Ada     │ London   │",
+    "│ 1923 │ Edgar   │ Portland │",
+    "└──────┴─────────┴──────────┘",
+    // Wrapped, and unwrapped back.
+    "┌──────────┬───────────────────────────────────────┐",
+    "│ place    │ who                                   │",
+    "├──────────┼───────────────────────────────────────┤",
+    r#"│ London   │ tuple { born: 1815, name: "Ada" }     │"#,
+    r#"│ London   │ tuple { born: 1816, name: "Ada" }     │"#,
+    r#"│ Paris    │ tuple { born: 1815, name: "Édouard" } │"#,
+    r#"│ Portland │ tuple { born: 1923, name: "Edgar" }   │"#,
+    "└──────────┴───────────────────────────────────────┘",
+    "┌──────┬─────────┬──────────┐",
+    "│ born │ name    │ place    │",
+    "├──────┼─────────┼──────────┤",
+    "│ 1815 │ Ada     │ London   │",
+    "│ 1815 │ Édouard │ Paris    │",
+    "│ 1816 │ Ada     │ London   │",
+    "│ 1923 │ Edgar   │ Portland │",
+    "└──────┴─────────┴──────────┘",
+    // Restricted, by a condition, by two, and of a join.
+    "┌──────┬─────────┬────────┐",
+    "│ born │ name    │ place  │",
+    "├──────┼─────────┼────────┤",
+    "│ 1815 │ Ada     │ London │",
+    "│ 1815 │ Édouard │ Paris  │",
+    "│ 1816 │ Ada     │ London │",
+    "└──────┴─────────┴────────┘",
+    "┌──────┬─────────┬───────┐",
+    "│ born │ name    │ place │",
+    "├──────┼─────────┼───────┤",
+    "│ 1815 │ Édouard │ Paris │",
+    "└──────┴─────────┴───────┘",
+    "┌──────┬──────────┬───────┬──────────┐",
+    "│ born │ city     │ name  │ place    │",
+    "├──────┼──────────┼───────┼──────────┤",
+    "│ 1815 │ London   │ Ada   │ London   │",
+    "│ 1816 │ London   │ Ada   │ London   │",
+    "│ 1923 │ Portland │ Edgar │ Portland │",
+    "└──────┴──────────┴───────┴──────────┘",
+    // Matching, and not matching without the common attribute.
+    "┌──────┬───────┐",
+    "│ born │ name  │",
+    "├──────┼───────┤",
+    "│ 1815 │ Ada   │",
+    "│ 1923 │ Edgar │",
+    "└──────┴───────┘",
+    "┌──────┬─────────┐",
+    "│ born │ name    │",
+    "├──────┼─────────┤",
+    "│ 1815 │ Édouard │",
+    "└──────┴─────────┘",
+    // Union, intersection, difference, of lists, an exclusive union,
+    // and inclusion.
+    "┌─────────┐",
+    "│ name    │",
+    "├─────────┤",
+    "│ Ada     │",
+    "│ Edgar   │",
+    "│ Wangari │",
+    "│ Édouard │",
+    "└─────────┘",
+    "┌───────┐",
+    "│ name  │",
+    "├───────┤",
+    "│ Ada   │",
+    "│ Edgar │",
+    "└───────┘",
+    "┌─────────┐",
+    "│ name    │",
+    "├─────────┤",
+    "│ Édouard │",
+    "└─────────┘",
+    "┌─────────┐",
+    "│ name    │",
+    "├─────────┤",
+    "│ Ada     │",
+    "│ Edgar   │",
+    "│ Wangari │",
+    "│ Édouard │",
+    "└─────────┘",
+    "┌─────────┐",
+    "│ name    │",
+    "├─────────┤",
+    "│ Édouard │",
+    "└─────────┘",
+    "┌─────────┐",
+    "│ name    │",
+    "├─────────┤",
+    "│ Wangari │",
+    "│ Édouard │",
+    "└─────────┘",
+    // Included, as sets: everyone in `people` is in `cities`, but
+    // not everyone in `births`.
+    "tuple { born: false, listed: true }",
+    // A disjoint union, and an included minus.
+    "┌─────────┐",
+    "│ name    │",
+    "├─────────┤",
+    "│ Ada     │",
+    "│ Edgar   │",
+    "│ Wangari │",
+    "│ Édouard │",
+    "└─────────┘",
+    "┌─────────┐",
+    "│ name    │",
+    "├─────────┤",
+    "│ Édouard │",
+    "└─────────┘",
+    // Aggregates: -1.5 counts twice in the sum of `x`.
+    "4",
+    "15",
+    "-5e-1",
+    "1923",
+    // 5!, and the rates compounded, exactly, then rounded once.
+    "120",
+    "1.0804500000000001e0",
+    // Per group, Puno with none; and the two born in 1815.
+    "┌───────┬─────────┬────────┐",
+    "│ crops │ region  │ tonnes │",
+    "├───────┼─────────┼────────┤",
+    "│     0 │ Puno    │      0 │",
+    "│     1 │ Mendoza │    300 │",
+    "│     2 │ Nyeri   │    165 │",
+    "│     2 │ Punjab  │   1900 │",
+    "└───────┴─────────┴────────┘",
+    "┌──────┬─────────┬────────┐",
+    "│ born │ name    │ place  │",
+    "├──────┼─────────┼────────┤",
+    "│ 1815 │ Ada     │ London │",
+    "│ 1815 │ Édouard │ Paris  │",
+    "└──────┴─────────┴────────┘",
+];
+
 #[test]
 fn relations() {
-    assert_eq!(
-        folded_and_run("relations"),
-        [
-            // Duplicates dropped; text by code point, so `É` after `E`.
-            r#"relation { name: text } { { name: "Ada" }, { name: "Edgar" }, { name: "Édouard" } }"#,
-            r#"relation { place: text } { { place: "London" }, { place: "Paris" }, { place: "Portland" } }"#,
-            r#"relation { born: integer, place: text } { { born: 1815, place: "London" }, { born: 1815, place: "Paris" }, { born: 1816, place: "London" }, { born: 1923, place: "Portland" } }"#,
-            "relation {} { {} }",
-            // Approximate numbers numerically, and `-0e0` is `0e0`.
-            "relation { x: approximate } { { x: -1.5e0 }, { x: 0e0 }, { x: 2.5e0 } }",
-            // Relations by their tuples: the empty one first.
-            r#"relation { members: relation { name: text } } { { members: relation { name: text } {} }, { members: relation { name: text } { { name: "Ada" }, { name: "Edgar" } } } }"#,
-            "relation {} {}",
-            // Renamed, and sorted again by the new first attribute.
-            r#"relation { alias: text, born: integer, place: text } { { alias: "Ada", born: 1815, place: "London" }, { alias: "Ada", born: 1816, place: "London" }, { alias: "Edgar", born: 1923, place: "Portland" }, { alias: "Édouard", born: 1815, place: "Paris" } }"#,
-            "relation { n: approximate, x: integer } { { n: -1.5e0, x: 3 }, { n: -1.5e0, x: 5 }, { n: 0e0, x: 2 }, { n: 0e0, x: 4 }, { n: 2.5e0, x: 1 } }",
-            // Built from run-time values, sorted, and with the tuples that
-            // turn out equal made one.
-            r#"relation { born: integer, name: text } { { born: 701, name: "李白" }, { born: 1815, name: "Ada" } }"#,
-            "relation { x: integer } { { x: 1 } }",
-            r#"tuple { members: relation { name: text } { { name: "Ada" }, { name: "李白" } }, who: "core" }"#,
-            // Joined on `name`, which only Ada and Edgar have in both, and
-            // composed, without it.
-            r#"relation { born: integer, city: text, name: text } { { born: 1815, city: "London", name: "Ada" }, { born: 1923, city: "Portland", name: "Edgar" } }"#,
-            r#"relation { born: integer, city: text } { { born: 1815, city: "London" }, { born: 1923, city: "Portland" } }"#,
-            r#"relation { city: text, year: integer } { { city: "London", year: 2024 }, { city: "London", year: 2025 }, { city: "Nyeri", year: 2024 }, { city: "Nyeri", year: 2025 }, { city: "Portland", year: 2024 }, { city: "Portland", year: 2025 } }"#,
-            // Joins and times of lists.
-            r#"relation { born: integer, city: text, name: text } { { born: 1815, city: "London", name: "Ada" }, { born: 1923, city: "Portland", name: "Edgar" } }"#,
-            r#"relation { born: integer, city: text, year: integer } { { born: 1815, city: "London", year: 2024 }, { born: 1815, city: "London", year: 2025 }, { born: 1815, city: "Nyeri", year: 2024 }, { born: 1815, city: "Nyeri", year: 2025 }, { born: 1815, city: "Portland", year: 2024 }, { born: 1815, city: "Portland", year: 2025 }, { born: 1923, city: "London", year: 2024 }, { born: 1923, city: "London", year: 2025 }, { born: 1923, city: "Nyeri", year: 2024 }, { born: 1923, city: "Nyeri", year: 2025 }, { born: 1923, city: "Portland", year: 2024 }, { born: 1923, city: "Portland", year: 2025 } }"#,
-            // Composed from the left: on `name`, then on `city`.
-            r#"relation { born: integer, country: text } { { born: 1815, country: "United Kingdom" }, { born: 1923, country: "United States" } }"#,
-            // Extended, each tuple computing its own; a relation-valued
-            // attribute extended in turn, empty or not.
-            r#"relation { age: integer, born: integer, greeting: text, name: text } { { age: 101, born: 1923, greeting: "Hi, Edgar", name: "Edgar" }, { age: 209, born: 1815, greeting: "Hi, Ada", name: "Ada" } }"#,
-            r#"relation { members: relation { name: text }, roster: relation { name: text, role: text }, team: text } { { members: relation { name: text } {}, roster: relation { name: text, role: text } {}, team: "docs" }, { members: relation { name: text } { { name: "Ada" }, { name: "Edgar" } }, roster: relation { name: text, role: text } { { name: "Ada", role: "member" }, { name: "Edgar", role: "member" } }, team: "core" } }"#,
-            // Replaced, each tuple computing its own; tuples that become
-            // equal are one.
-            r#"relation { born: integer, name: text } { { born: 1816, name: "Ada" }, { born: 1924, name: "Edgar" } }"#,
-            "relation { born: integer } { { born: 1 } }",
-            // Image relations: Nyeri's is empty; and a relation comparison
-            // of each.
-            r#"relation { city: text, natives: relation { born: integer, name: text } } { { city: "London", natives: relation { born: integer, name: text } { { born: 1815, name: "Ada" }, { born: 1816, name: "Ada" } } }, { city: "Nyeri", natives: relation { born: integer, name: text } {} }, { city: "Portland", natives: relation { born: integer, name: text } { { born: 1923, name: "Edgar" } } } }"#,
-            r#"relation { name: text, only_london: boolean } { { name: "Ada", only_london: true }, { name: "Edgar", only_london: false }, { name: "Édouard", only_london: false } }"#,
-            // Grouped: one tuple per place; two groupings at once, each of
-            // the same births; and every attribute of each team's members,
-            // so one tuple, or none for a team without members.
-            r#"relation { births: relation { born: integer, name: text }, place: text } { { births: relation { born: integer, name: text } { { born: 1815, name: "Ada" }, { born: 1816, name: "Ada" } }, place: "London" }, { births: relation { born: integer, name: text } { { born: 1815, name: "Édouard" } }, place: "Paris" }, { births: relation { born: integer, name: text } { { born: 1923, name: "Edgar" } }, place: "Portland" } }"#,
-            r#"relation { names: relation { name: text }, place: text, years: relation { born: integer } } { { names: relation { name: text } { { name: "Ada" } }, place: "London", years: relation { born: integer } { { born: 1815 }, { born: 1816 } } }, { names: relation { name: text } { { name: "Edgar" } }, place: "Portland", years: relation { born: integer } { { born: 1923 } } }, { names: relation { name: text } { { name: "Édouard" } }, place: "Paris", years: relation { born: integer } { { born: 1815 } } } }"#,
-            r#"relation { members: relation { name: text }, roster: relation { names: relation { name: text } }, team: text } { { members: relation { name: text } {}, roster: relation { names: relation { name: text } } {}, team: "docs" }, { members: relation { name: text } { { name: "Ada" }, { name: "Edgar" } }, roster: relation { names: relation { name: text } } { { names: relation { name: text } { { name: "Ada" }, { name: "Edgar" } } } }, team: "core" } }"#,
-            // Ungrouped: the docs team, with no members, has no tuples; and
-            // grouping then ungrouping gives the births back.
-            r#"relation { name: text, team: text } { { name: "Ada", team: "core" }, { name: "Edgar", team: "core" } }"#,
-            r#"relation { born: integer, name: text, place: text } { { born: 1815, name: "Ada", place: "London" }, { born: 1815, name: "Édouard", place: "Paris" }, { born: 1816, name: "Ada", place: "London" }, { born: 1923, name: "Edgar", place: "Portland" } }"#,
-            // Wrapped, and unwrapped back.
-            r#"relation { place: text, who: tuple { born: integer, name: text } } { { place: "London", who: tuple { born: 1815, name: "Ada" } }, { place: "London", who: tuple { born: 1816, name: "Ada" } }, { place: "Paris", who: tuple { born: 1815, name: "Édouard" } }, { place: "Portland", who: tuple { born: 1923, name: "Edgar" } } }"#,
-            r#"relation { born: integer, name: text, place: text } { { born: 1815, name: "Ada", place: "London" }, { born: 1815, name: "Édouard", place: "Paris" }, { born: 1816, name: "Ada", place: "London" }, { born: 1923, name: "Edgar", place: "Portland" } }"#,
-            // Restricted, by a condition, by two, and of a join.
-            r#"relation { born: integer, name: text, place: text } { { born: 1815, name: "Ada", place: "London" }, { born: 1815, name: "Édouard", place: "Paris" }, { born: 1816, name: "Ada", place: "London" } }"#,
-            r#"relation { born: integer, name: text, place: text } { { born: 1815, name: "Édouard", place: "Paris" } }"#,
-            r#"relation { born: integer, city: text, name: text, place: text } { { born: 1815, city: "London", name: "Ada", place: "London" }, { born: 1816, city: "London", name: "Ada", place: "London" }, { born: 1923, city: "Portland", name: "Edgar", place: "Portland" } }"#,
-            // Matching, and not matching without the common attribute.
-            r#"relation { born: integer, name: text } { { born: 1815, name: "Ada" }, { born: 1923, name: "Edgar" } }"#,
-            r#"relation { born: integer, name: text } { { born: 1815, name: "Édouard" } }"#,
-            // Union, intersection, difference, of lists, an exclusive union,
-            // and inclusion.
-            r#"relation { name: text } { { name: "Ada" }, { name: "Edgar" }, { name: "Wangari" }, { name: "Édouard" } }"#,
-            r#"relation { name: text } { { name: "Ada" }, { name: "Edgar" } }"#,
-            r#"relation { name: text } { { name: "Édouard" } }"#,
-            r#"relation { name: text } { { name: "Ada" }, { name: "Edgar" }, { name: "Wangari" }, { name: "Édouard" } }"#,
-            r#"relation { name: text } { { name: "Édouard" } }"#,
-            r#"relation { name: text } { { name: "Wangari" }, { name: "Édouard" } }"#,
-            // Included, as sets: everyone in `people` is in `cities`, but
-            // not everyone in `births`.
-            "tuple { born: false, listed: true }",
-            // A disjoint union, and an included minus.
-            r#"relation { name: text } { { name: "Ada" }, { name: "Edgar" }, { name: "Wangari" }, { name: "Édouard" } }"#,
-            r#"relation { name: text } { { name: "Édouard" } }"#,
-            // Aggregates: -1.5 counts twice in the sum of `x`.
-            "4",
-            "15",
-            "-5e-1",
-            "1923",
-            // 5!, and the rates compounded, exactly, then rounded once.
-            "120",
-            "1.0804500000000001e0",
-            // Per group, Puno with none; and the two born in 1815.
-            r#"relation { crops: integer, region: text, tonnes: integer } { { crops: 0, region: "Puno", tonnes: 0 }, { crops: 1, region: "Mendoza", tonnes: 300 }, { crops: 2, region: "Nyeri", tonnes: 165 }, { crops: 2, region: "Punjab", tonnes: 1900 } }"#,
-            r#"relation { born: integer, name: text, place: text } { { born: 1815, name: "Ada", place: "London" }, { born: 1815, name: "Édouard", place: "Paris" } }"#,
-        ]
-    );
+    assert_eq!(folded_and_run("relations"), RELATIONS);
 }
 
 #[test]
@@ -961,9 +1302,20 @@ fn arrays() {
             "array text []",
             "array [array [1, 2], array [3]]",
             // Cairo's empty array took its type from Mumbai's.
-            r#"relation { city: text, rainy: array text } { { city: "Cairo", rainy: array text [] }, { city: "Mumbai", rainy: array ["Jun", "Jul", "Aug", "Sep"] } }"#,
+            "┌────────┬────────────────────────────────────┐",
+            "│ city   │ rainy                              │",
+            "├────────┼────────────────────────────────────┤",
+            "│ Cairo  │ array text []                      │",
+            r#"│ Mumbai │ array ["Jun", "Jul", "Aug", "Sep"] │"#,
+            "└────────┴────────────────────────────────────┘",
             // Element by element, a prefix first.
-            "relation { m: array integer } { { m: array integer [] }, { m: array [1, 9] }, { m: array [2] } }",
+            "┌──────────────────┐",
+            "│ m                │",
+            "├──────────────────┤",
+            "│ array integer [] │",
+            "│ array [1, 9]     │",
+            "│ array [2]        │",
+            "└──────────────────┘",
             // Positions count from 1.
             "950",
             "2",
@@ -989,12 +1341,34 @@ fn shopping() {
     assert_eq!(
         stderr.lines().collect::<Vec<_>>(),
         [
-            r#"relation { people: integer, recipe: text } { { people: 4, recipe: "dal tadka" }, { people: 4, recipe: "shakshuka" }, { people: 6, recipe: "mapo doufu" } }"#,
+            "┌────────┬────────────┐",
+            "│ people │ recipe     │",
+            "├────────┼────────────┤",
+            "│      4 │ dal tadka  │",
+            "│      4 │ shakshuka  │",
+            "│      6 │ mapo doufu │",
+            "└────────┴────────────┘",
             // No borshch this week, so no beetroot, cabbage, carrot or
             // potato; each ingredient scaled to the people it's cooked for,
             // summed across recipes, cumin 5 g in each of two, and with the
             // recipes that need it.
-            r#"relation { ingredient: text, recipes: relation { recipe: text }, total: approximate, unit: text } { { ingredient: "Sichuan pepper", recipes: relation { recipe: text } { { recipe: "mapo doufu" } }, total: 6e0, unit: "g" }, { ingredient: "cumin", recipes: relation { recipe: text } { { recipe: "dal tadka" }, { recipe: "shakshuka" } }, total: 1e1, unit: "g" }, { ingredient: "doubanjiang", recipes: relation { recipe: text } { { recipe: "mapo doufu" } }, total: 6e1, unit: "g" }, { ingredient: "egg", recipes: relation { recipe: text } { { recipe: "shakshuka" } }, total: 6e0, unit: "piece" }, { ingredient: "garlic", recipes: relation { recipe: text } { { recipe: "dal tadka" }, { recipe: "mapo doufu" }, { recipe: "shakshuka" } }, total: 1.3e1, unit: "clove" }, { ingredient: "ghee", recipes: relation { recipe: text } { { recipe: "dal tadka" } }, total: 3e1, unit: "g" }, { ingredient: "ginger", recipes: relation { recipe: text } { { recipe: "dal tadka" }, { recipe: "mapo doufu" } }, total: 4e1, unit: "g" }, { ingredient: "minced pork", recipes: relation { recipe: text } { { recipe: "mapo doufu" } }, total: 3e2, unit: "g" }, { ingredient: "olive oil", recipes: relation { recipe: text } { { recipe: "shakshuka" } }, total: 3e1, unit: "ml" }, { ingredient: "onion", recipes: relation { recipe: text } { { recipe: "dal tadka" }, { recipe: "shakshuka" } }, total: 2e0, unit: "piece" }, { ingredient: "red lentils", recipes: relation { recipe: text } { { recipe: "dal tadka" } }, total: 2.5e2, unit: "g" }, { ingredient: "tofu", recipes: relation { recipe: text } { { recipe: "mapo doufu" } }, total: 8e2, unit: "g" }, { ingredient: "tomato", recipes: relation { recipe: text } { { recipe: "dal tadka" }, { recipe: "shakshuka" } }, total: 1e3, unit: "g" } }"#,
+            "┌────────────────┬──────────────────────────────────────────────────────────────────────────────────────────────────────────┬───────┬───────┐",
+            "│ ingredient     │ recipes                                                                                                  │ total │ unit  │",
+            "├────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────┼───────┼───────┤",
+            r#"│ Sichuan pepper │ relation { recipe: text } { { recipe: "mapo doufu" } }                                                   │   6e0 │ g     │"#,
+            r#"│ cumin          │ relation { recipe: text } { { recipe: "dal tadka" }, { recipe: "shakshuka" } }                           │   1e1 │ g     │"#,
+            r#"│ doubanjiang    │ relation { recipe: text } { { recipe: "mapo doufu" } }                                                   │   6e1 │ g     │"#,
+            r#"│ egg            │ relation { recipe: text } { { recipe: "shakshuka" } }                                                    │   6e0 │ piece │"#,
+            r#"│ garlic         │ relation { recipe: text } { { recipe: "dal tadka" }, { recipe: "mapo doufu" }, { recipe: "shakshuka" } } │ 1.3e1 │ clove │"#,
+            r#"│ ghee           │ relation { recipe: text } { { recipe: "dal tadka" } }                                                    │   3e1 │ g     │"#,
+            r#"│ ginger         │ relation { recipe: text } { { recipe: "dal tadka" }, { recipe: "mapo doufu" } }                          │   4e1 │ g     │"#,
+            r#"│ minced pork    │ relation { recipe: text } { { recipe: "mapo doufu" } }                                                   │   3e2 │ g     │"#,
+            r#"│ olive oil      │ relation { recipe: text } { { recipe: "shakshuka" } }                                                    │   3e1 │ ml    │"#,
+            r#"│ onion          │ relation { recipe: text } { { recipe: "dal tadka" }, { recipe: "shakshuka" } }                           │   2e0 │ piece │"#,
+            r#"│ red lentils    │ relation { recipe: text } { { recipe: "dal tadka" } }                                                    │ 2.5e2 │ g     │"#,
+            r#"│ tofu           │ relation { recipe: text } { { recipe: "mapo doufu" } }                                                   │   8e2 │ g     │"#,
+            r#"│ tomato         │ relation { recipe: text } { { recipe: "dal tadka" }, { recipe: "shakshuka" } }                           │   1e3 │ g     │"#,
+            "└────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────────────────┴───────┴───────┘",
         ]
     );
 }

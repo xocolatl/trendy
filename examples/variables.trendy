@@ -46,7 +46,7 @@ operator check_in{room: integer, guest: text} [
     greeting := "karibu, " || guest;
     rooms := rooms union x;
     call debug_value{v: greeting};
-    call debug_value{v: x};
+    call debug_table{r: x};
 ];
 
 /* An `if` statement runs one block or the other, each a block of its own,
@@ -94,14 +94,14 @@ operator main{} [
     call debug_value{v: t};
 
     insert poets relation { { name: "李白", born: 701 } };
-    call debug_value{v: poets};
+    call debug_table{r: poets};
     delete poets where born > 1900;
-    call debug_value{v: poets};
+    call debug_table{r: poets};
     update poets { born := born - 1 } where name = "Ada";
-    call debug_value{v: poets};
+    call debug_table{r: poets};
     d_insert poets relation { { name: "Rumi", born: 1207 } };
     i_delete poets relation { { name: "Rumi", born: 1207 } };
-    call debug_value{v: poets};
+    call debug_table{r: poets};
 
     update address { postal_code := "00200" };
     call debug_value{v: address};
@@ -122,16 +122,16 @@ operator main{} [
         update rooms { guest := "Kenji" } where room = 1;
         update rooms { guest := "Amara" } where room = 2;
     };
-    call debug_value{v: rooms};
+    call debug_table{r: rooms};
 
     /* The program's `x` is unchanged by the local variable `x`. */
     call check_in{room: 3, guest: "Wanjiru"};
-    call debug_value{v: rooms};
+    call debug_table{r: rooms};
     call debug_value{v: x};
 
     call check_out{name: "Kenji"};
     call check_out{name: "Bashō"};
-    call debug_value{v: rooms};
+    call debug_table{r: rooms};
     call roll_call{};
 
     /* Two changes that touch the same tuple conflict, since neither
@@ -148,5 +148,5 @@ operator main{} [
     /* Every tuple is deleted by assigning the empty relation, which says
        so: `delete poets where true;` is an error. */
     poets := relation {};
-    call debug_value{v: poets};
+    call debug_table{r: poets};
 ];

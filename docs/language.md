@@ -125,7 +125,7 @@ var doubled := poets extend { twice := double{x: born} };
 operator main{} [
     call debug_value{v: twelve};
     call debug_value{v: double{x: 21}};
-    call debug_value{v: doubled};
+    call debug_table{r: doubled};
     rate := 4;
     call debug_value{v: scaled{x: 2}};
 ];
@@ -341,8 +341,8 @@ operator below{r: any relation, of: T per r, limit: T}: relation { v: T }
 ];
 
 operator main{} [
-    call debug_value{v: below{r: plots, of: rainfall, limit: 1000}};
-    call debug_value{v: below{r: plots, of: region, limit: "N"}};
+    call debug_table{r: below{r: plots, of: rainfall, limit: 1000}};
+    call debug_table{r: below{r: plots, of: region, limit: "N"}};
 ];
 ```
 
@@ -421,8 +421,8 @@ operator holds_for_any{r: any relation, holds: boolean per r}: boolean [
 ];
 
 operator main{} [
-    call debug_value{v: values{r: plots, of: region}};
-    call debug_value{v: values{r: plots where region = "Nyeri", of: rainfall div 100}};
+    call debug_table{r: values{r: plots, of: region}};
+    call debug_table{r: values{r: plots where region = "Nyeri", of: rainfall div 100}};
     call debug_value{v: holds_for_any{r: plots, holds: rainfall < 500}};
 ];
 ```
@@ -639,7 +639,7 @@ var regions := relation { { region: "Nyeri" }, { region: "Mendoza" }, { region: 
 var counted := regions extend { plots := count{r: !!plots} };
 
 operator main{} [
-    call debug_value{v: counted};
+    call debug_table{r: counted};
 ];
 ```
 
@@ -660,7 +660,7 @@ var regions := relation { { region: "Nyeri" }, { region: "Mendoza" }, { region: 
 var unplanted := regions where is_empty{r: !!plots};
 
 operator main{} [
-    call debug_value{v: unplanted};
+    call debug_table{r: unplanted};
 ];
 ```
 
@@ -689,7 +689,7 @@ var wettest := (regions matching plots) extend { rainfall := max{r: !!plots, of:
 
 operator main{} [
     call debug_value{v: driest};
-    call debug_value{v: wettest};
+    call debug_table{r: wettest};
 ];
 ```
 
@@ -740,7 +740,7 @@ var tenths := relation { { n: 1, x: 1e-1 }, { n: 2, x: 2e-1 }, { n: 3, x: 3e-1 }
 
 operator main{} [
     call debug_value{v: total};
-    call debug_value{v: by_region};
+    call debug_table{r: by_region};
     call debug_value{v: sum{r: tenths, of: x}};
 ];
 ```
@@ -840,7 +840,7 @@ operator describe{city: text, people: integer} [
 ];
 
 operator main{} [
-    call debug_value{v: densities{city, density}};
+    call debug_table{r: densities{city, density}};
     call describe{city: "Lima", people: 10883000};
 ];
 ```
@@ -934,7 +934,7 @@ operator welcome{city: text, guests: integer} [
 operator main{} [
     call welcome{city: "Mombasa", guests: 3};
     call welcome{city: "Kisumu", guests: 2};
-    call debug_value{v: visits};
+    call debug_table{r: visits};
 ];
 ```
 
@@ -1041,7 +1041,7 @@ operator main{} [
     call restock{item_name: "sorghum", added: 8};
     call restock{item_name: "millet", added: 5};
     call restock{item_name: "teff", added: 0};
-    call debug_value{v: stock};
+    call debug_table{r: stock};
 ];
 ```
 
@@ -1510,7 +1510,7 @@ operator main{} [
     call debug_value{v: rainfall[2]};
     call debug_value{v: length{a: rainfall}};
     call debug_value{v: first{a: array ["Amara", "Kofi"]}};
-    call debug_value{v: cities};
+    call debug_table{r: cities};
 ];
 ```
 
@@ -2229,7 +2229,7 @@ operator label{n: integer}: text [
 operator main{} [
     call debug_value{v: span};
     call debug_value{v: label{n: span}};
-    call debug_value{v: people extend { age_at_50 := [ var at := born + 50; at - born ] }};
+    call debug_table{r: people extend { age_at_50 := [ var at := born + 50; at - born ] }};
 ];
 ```
 
@@ -2326,7 +2326,7 @@ var years := people remove {name};
 var ada := tuple { name: "Ada", born: 1815 } remove {born};
 
 operator main{} [
-    call debug_value{v: names};
+    call debug_table{r: names};
 ];
 ```
 
@@ -2418,7 +2418,7 @@ var totals := items extend { total := price * quantity, label := name || "!" };
 var point := tuple { x: 1, y: 2 } extend { sum := x + y };
 
 operator main{} [
-    call debug_value{v: totals};
+    call debug_table{r: totals};
 ];
 ```
 
@@ -2467,7 +2467,7 @@ var doubled := items replace { price := price * 2 };
 var point := tuple { x: 1, y: 2 } replace { x := y, y := x };
 
 operator main{} [
-    call debug_value{v: doubled};
+    call debug_table{r: doubled};
     call debug_value{v: point};
 ];
 ```
@@ -2521,7 +2521,7 @@ var by_country := countries extend { cities := !!cities };
 var listed := countries extend { has_cities := not is_empty{r: !!cities} };
 
 operator main{} [
-    call debug_value{v: by_country};
+    call debug_table{r: by_country};
 ];
 ```
 
@@ -2571,7 +2571,7 @@ var by_place := births group { births := {name, born} };
 var names_years := births group { names := {name}, years := {born} };
 
 operator main{} [
-    call debug_value{v: by_place};
+    call debug_table{r: by_place};
 ];
 ```
 
@@ -2620,7 +2620,7 @@ var teams := relation {
 var memberships := teams ungroup {members};
 
 operator main{} [
-    call debug_value{v: memberships};
+    call debug_table{r: memberships};
 ];
 ```
 
@@ -2705,7 +2705,7 @@ var french := cities where country = "France";
 var big_french := cities where country = "France" and people > 1000000;
 
 operator main{} [
-    call debug_value{v: big_french};
+    call debug_table{r: big_french};
 ];
 ```
 
@@ -2803,7 +2803,7 @@ var continents := cities compose countries;
 var both := countries{continent} times sizes;
 
 operator main{} [
-    call debug_value{v: placed};
+    call debug_table{r: placed};
 ];
 ```
 
@@ -2846,7 +2846,7 @@ var everything := times{cities, sizes};
 var areas := compose[cities, countries, continents];
 
 operator main{} [
-    call debug_value{v: placed};
+    call debug_table{r: placed};
 ];
 ```
 ```trendy
@@ -2898,7 +2898,7 @@ var elsewhere := people not matching kenyan;
 var names_elsewhere := (people not matching kenyan) remove {city};
 
 operator main{} [
-    call debug_value{v: elsewhere};
+    call debug_table{r: elsewhere};
 ];
 ```
 
@@ -2946,7 +2946,7 @@ var partition := (born minus listed) d_union listed;
 var checked := born i_minus (born intersect listed);
 
 operator main{} [
-    call debug_value{v: anyone};
+    call debug_table{r: anyone};
 ];
 ```
 
@@ -3227,7 +3227,7 @@ var poets := relation { { name: "Ada" } };
 operator poets{} [];
 
 operator main{} [
-    call debug_value{v: poets{}};
+    call debug_table{r: poets{}};
 ];
 ```
 

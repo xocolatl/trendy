@@ -155,17 +155,17 @@ var spread := [
 ];
 
 operator main{} [
-    call debug_value{v: totals};
-    call debug_value{v: affordable};
+    call debug_table{r: totals};
+    call debug_table{r: affordable};
     call show{label: "half of 1200", value: half{n: 1200}};
     call rotate{next: "spicy " || special};
     call rotate{next: previous};
     /* A call of an operator that reads a variable is made when the program
        runs, and reads the variable as it is then. */
-    call debug_value{v: under{limit: 1100}{dish}};
+    call debug_table{r: under{limit: 1100}{dish}};
     vat := 25;
-    call debug_value{v: under{limit: 1100}{dish}};
-    call debug_value{v: dishes extend { total := taxed{price: price} } remove {price}};
+    call debug_table{r: under{limit: 1100}{dish}};
+    call debug_table{r: dishes extend { total := taxed{price: price} } remove {price}};
     /* A generic operator is compiled for each list of types it is called
        with when the program runs. */
     call show{label: "specials", value: both{a: special, b: previous}};

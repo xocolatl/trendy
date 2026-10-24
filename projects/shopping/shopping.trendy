@@ -148,13 +148,13 @@ var list := scaled{ingredient, unit} extend {
              var to_buy := list
                  extend { buy := total - sum{r: !!(kitchen.pantry), of: quantity} }
                  where buy > 0e0;
-             call debug_value{v: to_buy{ingredient, buy, unit}};
+             call debug_table{r: to_buy{ingredient, buy, unit}};
          ];
      ];
 
-   Later: output for people rather than `debug_value`. */
+   Later: output for people rather than `debug_table`. */
 
 operator main{} [
-    call debug_value{v: plan};
-    call debug_value{v: list};
+    call debug_table{r: plan};
+    call debug_table{r: list};
 ];

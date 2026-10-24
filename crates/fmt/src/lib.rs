@@ -1348,9 +1348,9 @@ mod tests {
         // So the chain's last line isn't followed by the list's end.
         assert_eq!(
             fmt(
-                "operator main{} [ call debug_value{v: relation { { city: \"Paris\", people: 2100000 }, { city: \"Lyon\", people: 520000 } } where people > 1000000 and city <> \"Marseille\" and city <> \"Toulouse\" and city <> \"Nice\" and city <> \"Lille\"}; ];"
+                "operator main{} [ call debug_table{r: relation { { city: \"Paris\", people: 2100000 }, { city: \"Lyon\", people: 520000 } } where people > 1000000 and city <> \"Marseille\" and city <> \"Toulouse\" and city <> \"Nice\" and city <> \"Lille\"}; ];"
             ),
-            "operator main{} [\n    call debug_value{\n        v: relation {\n            { city: \"Paris\", people: 2100000 },\n            { city: \"Lyon\", people: 520000 },\n        }\n            where people > 1000000\n                and city <> \"Marseille\"\n                and city <> \"Toulouse\"\n                and city <> \"Nice\"\n                and city <> \"Lille\",\n    };\n];\n"
+            "operator main{} [\n    call debug_table{\n        r: relation {\n            { city: \"Paris\", people: 2100000 },\n            { city: \"Lyon\", people: 520000 },\n        }\n            where people > 1000000\n                and city <> \"Marseille\"\n                and city <> \"Toulouse\"\n                and city <> \"Nice\"\n                and city <> \"Lille\",\n    };\n];\n"
         );
     }
 
@@ -1462,8 +1462,8 @@ mod tests {
     #[test]
     fn relations_in_calls_indent_inside_the_body() {
         assert_eq!(
-            fmt("operator main{}[call debug_value{v:relation{{a:1},{a:2}}};];"),
-            "operator main{} [\n    call debug_value{v: relation {\n        { a: 1 },\n        { a: 2 },\n    }};\n];\n"
+            fmt("operator main{}[call debug_table{r:relation{{a:1},{a:2}}};];"),
+            "operator main{} [\n    call debug_table{r: relation {\n        { a: 1 },\n        { a: 2 },\n    }};\n];\n"
         );
     }
 

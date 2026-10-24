@@ -53,7 +53,7 @@ key { name };
    Proposed: they're relation {} {{}} and relation {} {}, so no keywords
    are needed; perhaps built-in constants in the prelude, named dee and dum.
 
-   call debug_value{v: relation {} { {} }};
+   call debug_table{r: relation {} { {} }};
 */
 
 /* Membership: whether a tuple is in a relation (RM Prescription 22).
@@ -68,7 +68,7 @@ key { name };
    the same type (RM Very Strong Suggestion 6).
    Tutorial D: TCLOSE R
 
-   call debug_value{v: tclose relation { { from: 1, to: 2 }, { from: 2, to: 3 } }};
+   call debug_table{r: tclose relation { { from: 1, to: 2 }, { from: 2, to: 3 } }};
 */
 
 /* Projection, and its complement, remove (Algebra A's REMOVE). The result
@@ -99,22 +99,22 @@ var dee := births{};
 var dum := empty{};
 
 operator project_births{r: relation { name: text, born: integer, place: text }} [
-    call debug_value{v: r{name}};
-    call debug_value{v: r remove {born, name}};
-    call debug_value{v: r{born, place}};
-    call debug_value{v: r{}};
+    call debug_table{r: r{name}};
+    call debug_table{r: r remove {born, name}};
+    call debug_table{r: r{born, place}};
+    call debug_table{r: r{}};
 ];
 
 operator project_signs{r: relation { x: approximate, n: integer }} [
-    call debug_value{v: r remove {n}};
+    call debug_table{r: r remove {n}};
 ];
 
 operator project_teams{r: relation { team: text, members: relation { name: text } }} [
-    call debug_value{v: r remove {team}};
+    call debug_table{r: r remove {team}};
 ];
 
 operator project_empty{r: relation { a: boolean, b: integer }} [
-    call debug_value{v: r{}};
+    call debug_table{r: r{}};
 ];
 
 /* Renaming attributes (Algebra A's RENAME), each `old as new`, all at
@@ -124,11 +124,11 @@ var aliases := births rename {name as alias};
 var swapped := signs rename {x as n, n as x};
 
 operator rename_births{r: relation { name: text, born: integer, place: text }} [
-    call debug_value{v: r rename {name as alias}};
+    call debug_table{r: r rename {name as alias}};
 ];
 
 operator rename_signs{r: relation { x: approximate, n: integer }} [
-    call debug_value{v: r rename {x as n, n as x}};
+    call debug_table{r: r rename {x as n, n as x}};
 ];
 
 /* Building relations from run-time values (RM Prescription 10). Tuples
@@ -149,14 +149,14 @@ var held := tuple {
 };
 
 operator build_people{name: text, born: integer} [
-    call debug_value{v: relation {
+    call debug_table{r: relation {
         { name: name, born: born },
         { name: "Ada", born: 1815 },
     }};
 ];
 
 operator build_duplicates{a: integer, b: integer} [
-    call debug_value{v: relation {
+    call debug_table{r: relation {
         { x: a },
         { x: b },
         { x: 1 },
@@ -210,12 +210,12 @@ operator join_people{
     y: relation { year: integer },
     k: relation { city: text, country: text },
 } [
-    call debug_value{v: p join c};
-    call debug_value{v: p compose c};
-    call debug_value{v: c{city} times y};
-    call debug_value{v: join{p, c, p}};
-    call debug_value{v: times{c{city}, y, p{born}}};
-    call debug_value{v: compose[p, c, k]};
+    call debug_table{r: p join c};
+    call debug_table{r: p compose c};
+    call debug_table{r: c{city} times y};
+    call debug_table{r: join{p, c, p}};
+    call debug_table{r: times{c{city}, y, p{born}}};
+    call debug_table{r: compose[p, c, k]};
 ];
 
 /* Extension: each tuple with attributes added, each `name := value`,
@@ -232,8 +232,8 @@ operator extend_people{
     p: relation { name: text, born: integer },
     t: relation { team: text, members: relation { name: text } },
 } [
-    call debug_value{v: p extend { age := 2024 - born, greeting := "Hi, " || name }};
-    call debug_value{v: t extend { roster := members extend { role := "member" } }};
+    call debug_table{r: p extend { age := 2024 - born, greeting := "Hi, " || name }};
+    call debug_table{r: t extend { roster := members extend { role := "member" } }};
 ];
 
 /* Substitution: each tuple with attributes the relation has given new
@@ -246,8 +246,8 @@ var older := people replace { born := born + 1 };
 var millennia := people{born} replace { born := born div 1000 };
 
 operator replace_people{p: relation { name: text, born: integer }} [
-    call debug_value{v: p replace { born := born + 1 }};
-    call debug_value{v: p{born} replace { born := born div 1000 }};
+    call debug_table{r: p replace { born := born + 1 }};
+    call debug_table{r: p{born} replace { born := born div 1000 }};
 ];
 
 /* Image relations: in the values of an extend or a replace, `!!r`
@@ -267,8 +267,8 @@ operator image_births{
     b: relation { name: text, born: integer, place: text },
     c: relation { name: text, city: text },
 } [
-    call debug_value{v: c{city} extend { natives := !!(b rename {place as city}) }};
-    call debug_value{v: b{name} extend { only_london := (!!b){place} = london }};
+    call debug_table{r: c{city} extend { natives := !!(b rename {place as city}) }};
+    call debug_table{r: b{name} extend { only_london := (!!b){place} = london }};
 ];
 
 /* Grouping: gather attributes into a relation-valued attribute, one tuple
@@ -288,9 +288,9 @@ operator group_births{
     b: relation { name: text, born: integer, place: text },
     t: relation { team: text, members: relation { name: text } },
 } [
-    call debug_value{v: b group { births := {name, born} }};
-    call debug_value{v: b group { names := {name}, years := {born} }};
-    call debug_value{v: t extend { roster := members group { names := {name} } }};
+    call debug_table{r: b group { births := {name, born} }};
+    call debug_table{r: b group { names := {name}, years := {born} }};
+    call debug_table{r: t extend { roster := members group { names := {name} } }};
 ];
 
 /* Ungrouping: replace relation-valued attributes with their attributes,
@@ -307,8 +307,8 @@ operator ungroup_teams{
     t: relation { team: text, members: relation { name: text } },
     b: relation { name: text, born: integer, place: text },
 } [
-    call debug_value{v: t ungroup {members}};
-    call debug_value{v: b group { births := {name, born} } ungroup {births}};
+    call debug_table{r: t ungroup {members}};
+    call debug_table{r: b group { births := {name, born} } ungroup {births}};
 ];
 
 /* Wrapping and unwrapping, of each tuple (RM Prescription 7: nesting).
@@ -319,8 +319,8 @@ var who_where := births wrap { who := {name, born} };
 var unwrapped := births wrap { who := {name, born} } unwrap {who};
 
 operator wrap_births{b: relation { name: text, born: integer, place: text }} [
-    call debug_value{v: b wrap { who := {name, born} }};
-    call debug_value{v: b wrap { who := {name, born} } unwrap {who}};
+    call debug_table{r: b wrap { who := {name, born} }};
+    call debug_table{r: b wrap { who := {name, born} } unwrap {who}};
 ];
 
 /* Restriction: the tuples for which a condition holds, a boolean in which
@@ -338,9 +338,9 @@ operator restrict_births{
     b: relation { name: text, born: integer, place: text },
     c: relation { name: text, city: text },
 } [
-    call debug_value{v: b where born < 1900};
-    call debug_value{v: b where born < 1900 and name <> "Ada"};
-    call debug_value{v: b join c where place = city};
+    call debug_table{r: b where born < 1900};
+    call debug_table{r: b where born < 1900 and name <> "Ada"};
+    call debug_table{r: b join c where place = city};
 ];
 
 /* Semijoin and antijoin: the tuples of the first relation that have a
@@ -359,8 +359,8 @@ operator matching_people{
     b: relation { name: text, born: integer, place: text },
     c: relation { name: text, city: text },
 } [
-    call debug_value{v: p matching c};
-    call debug_value{v: (b rename {place as city} not matching c{city}) remove {city}};
+    call debug_table{r: p matching c};
+    call debug_table{r: (b rename {place as city} not matching c{city}) remove {city}};
 ];
 
 /* Union, intersection and difference, of relations of one heading: the
@@ -388,12 +388,12 @@ operator set_names{
     c: relation { name: text, city: text },
     p: relation { name: text, born: integer },
 } [
-    call debug_value{v: b{name} union c{name}};
-    call debug_value{v: b{name} intersect c{name}};
-    call debug_value{v: b{name} minus c{name}};
-    call debug_value{v: union{b{name}, c{name}, p{name}}};
-    call debug_value{v: minus[b{name}, c{name}, p{name}]};
-    call debug_value{v: b{name} xunion c{name}};
+    call debug_table{r: b{name} union c{name}};
+    call debug_table{r: b{name} intersect c{name}};
+    call debug_table{r: b{name} minus c{name}};
+    call debug_table{r: union{b{name}, c{name}, p{name}}};
+    call debug_table{r: minus[b{name}, c{name}, p{name}]};
+    call debug_table{r: b{name} xunion c{name}};
     call debug_value{v: tuple { listed: p{name} < c{name}, born: b{name} <= c{name} }};
 ];
 
@@ -413,8 +413,8 @@ operator checked_names{
     b: relation { name: text, born: integer, place: text },
     c: relation { name: text, city: text },
 } [
-    call debug_value{v: (b{name} minus c{name}) d_union c{name}};
-    call debug_value{v: b{name} i_minus (b{name} intersect c{name})};
+    call debug_table{r: (b{name} minus c{name}) d_union c{name}};
+    call debug_table{r: b{name} i_minus (b{name} intersect c{name})};
 ];
 
 /* Aggregates (RM Prescription 18 and OO Prescription 6): of a value
@@ -486,64 +486,64 @@ operator aggregate{
     call debug_value{v: max{r: b, of: born}};
     call debug_value{v: product{r: s, of: n}};
     call debug_value{v: product{r: p, of: rate}};
-    call debug_value{v: g extend { crops := count{r: !!h}, tonnes := sum{r: !!h, of: tonnes} }};
-    call debug_value{v: b where count{r: !!(b rename {name as other, place as elsewhere})} > 1};
+    call debug_table{r: g extend { crops := count{r: !!h}, tonnes := sum{r: !!h, of: tonnes} }};
+    call debug_table{r: b where count{r: !!(b rename {name as other, place as elsewhere})} > 1};
 ];
 
 operator main{} [
-    call debug_value{v: names};
-    call debug_value{v: places};
-    call debug_value{v: by_year};
-    call debug_value{v: dee};
-    call debug_value{v: xs};
-    call debug_value{v: members};
-    call debug_value{v: dum};
-    call debug_value{v: aliases};
-    call debug_value{v: swapped};
-    call debug_value{v: added};
-    call debug_value{v: collapsed};
+    call debug_table{r: names};
+    call debug_table{r: places};
+    call debug_table{r: by_year};
+    call debug_table{r: dee};
+    call debug_table{r: xs};
+    call debug_table{r: members};
+    call debug_table{r: dum};
+    call debug_table{r: aliases};
+    call debug_table{r: swapped};
+    call debug_table{r: added};
+    call debug_table{r: collapsed};
     call debug_value{v: held};
-    call debug_value{v: lived};
-    call debug_value{v: born_in};
-    call debug_value{v: every_year};
-    call debug_value{v: lived_born};
-    call debug_value{v: grid};
-    call debug_value{v: born_where};
-    call debug_value{v: ages};
-    call debug_value{v: rosters};
-    call debug_value{v: older};
-    call debug_value{v: millennia};
-    call debug_value{v: natives};
-    call debug_value{v: london_only};
-    call debug_value{v: by_place};
-    call debug_value{v: names_years};
-    call debug_value{v: rosters_by};
-    call debug_value{v: memberships};
-    call debug_value{v: regrouped};
-    call debug_value{v: who_where};
-    call debug_value{v: unwrapped};
-    call debug_value{v: early};
-    call debug_value{v: early_not_ada};
-    call debug_value{v: at_home};
-    call debug_value{v: listed};
-    call debug_value{v: born_elsewhere};
-    call debug_value{v: named};
-    call debug_value{v: both};
-    call debug_value{v: unlisted};
-    call debug_value{v: everyone};
-    call debug_value{v: nobody_else};
-    call debug_value{v: in_one};
+    call debug_table{r: lived};
+    call debug_table{r: born_in};
+    call debug_table{r: every_year};
+    call debug_table{r: lived_born};
+    call debug_table{r: grid};
+    call debug_table{r: born_where};
+    call debug_table{r: ages};
+    call debug_table{r: rosters};
+    call debug_table{r: older};
+    call debug_table{r: millennia};
+    call debug_table{r: natives};
+    call debug_table{r: london_only};
+    call debug_table{r: by_place};
+    call debug_table{r: names_years};
+    call debug_table{r: rosters_by};
+    call debug_table{r: memberships};
+    call debug_table{r: regrouped};
+    call debug_table{r: who_where};
+    call debug_table{r: unwrapped};
+    call debug_table{r: early};
+    call debug_table{r: early_not_ada};
+    call debug_table{r: at_home};
+    call debug_table{r: listed};
+    call debug_table{r: born_elsewhere};
+    call debug_table{r: named};
+    call debug_table{r: both};
+    call debug_table{r: unlisted};
+    call debug_table{r: everyone};
+    call debug_table{r: nobody_else};
+    call debug_table{r: in_one};
     call debug_value{v: included};
-    call debug_value{v: whole};
-    call debug_value{v: others};
+    call debug_table{r: whole};
+    call debug_table{r: others};
     call debug_value{v: how_many};
     call debug_value{v: total};
     call debug_value{v: net};
     call debug_value{v: latest};
     call debug_value{v: factorial};
     call debug_value{v: compounded};
-    call debug_value{v: by_region};
-    call debug_value{v: same_year};
+    call debug_table{r: by_region};
+    call debug_table{r: same_year};
 
     call project_births{r: births};
     call project_signs{r: signs};

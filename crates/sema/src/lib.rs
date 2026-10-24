@@ -769,7 +769,7 @@ mod tests {
         // parentheses.
         let program = |value: &str| {
             format!(
-                "var poets := relation {{ {{ name: \"Ada\" }} }};\noperator poets{{}} [];\noperator main{{}} [ call debug_value{{v: {value}}}; ];"
+                "var poets := relation {{ {{ name: \"Ada\" }} }};\noperator poets{{}} [];\noperator main{{}} [ call debug_table{{r: {value}}}; ];"
             )
         };
         let called = errors(&program("poets{}"));
@@ -1728,7 +1728,7 @@ mod tests {
     #[test]
     fn calls_with_parameters_and_variables() {
         let program = analyze_str(
-            "var r := relation { { a: 1 } };\n\noperator greet{name: text, r: integer} [\n    call debug_value{v: name};\n    call debug_value{v: r};\n];\n\noperator main{} [\n    call debug_value{v: r};\n    call greet{r: 2, name: \"Ada\"};\n];",
+            "var r := relation { { a: 1 } };\n\noperator greet{name: text, r: integer} [\n    call debug_value{v: name};\n    call debug_value{v: r};\n];\n\noperator main{} [\n    call debug_table{r: r};\n    call greet{r: 2, name: \"Ada\"};\n];",
         )
         .unwrap();
         let greet = program
@@ -1890,7 +1890,7 @@ mod tests {
             body.clone()
         };
         let statements = body(
-            "operator f{p: integer} [\n    call debug_value{v: tuple { x: p, y: 1 }};\n    call debug_value{v: relation { { x: p }, { x: 1 } }};\n    call debug_value{v: tuple { x: 1 + 1 }};\n];\noperator main{} [];",
+            "operator f{p: integer} [\n    call debug_value{v: tuple { x: p, y: 1 }};\n    call debug_table{r: relation { { x: p }, { x: 1 } }};\n    call debug_value{v: tuple { x: 1 + 1 }};\n];\noperator main{} [];",
         );
         let p = || hir::Expr::Parameter("p".to_string());
         let one = || hir::Expr::Constant(hir::Value::Integer(1));
@@ -1911,15 +1911,15 @@ mod tests {
         // turn out equal, and become one.
         assert_eq!(
             codes(
-                "operator f{p: integer} [ call debug_value{v: relation { { x: 1 }, { x: p }, { x: 1 } }}; ];\noperator main{} [];"
+                "operator f{p: integer} [ call debug_table{r: relation { { x: 1 }, { x: p }, { x: 1 } }}; ];\noperator main{} [];"
             ),
             [Code::DuplicateTuple]
         );
-        analyze_str("operator f{p: integer, q: integer} [ call debug_value{v: relation { { x: p }, { x: q } }}; ];\noperator main{} [];").unwrap();
+        analyze_str("operator f{p: integer, q: integer} [ call debug_table{r: relation { { x: p }, { x: q } }}; ];\noperator main{} [];").unwrap();
         // The checks are the same as for constants.
         assert_eq!(
             codes(
-                "operator f{p: integer} [ call debug_value{v: relation { { x: p }, { y: p } }}; ];\noperator main{} [];"
+                "operator f{p: integer} [ call debug_table{r: relation { { x: p }, { y: p } }}; ];\noperator main{} [];"
             ),
             [Code::UnknownAttribute]
         );
@@ -2048,11 +2048,16 @@ mod tests {
         body.clone()
     }
 
+    /// The only argument of a call, such as `debug_value`'s or
+    /// `debug_table`'s.
     fn argument(statement: &hir::Statement) -> &hir::Expr {
         let hir::Statement::Call(call) = statement else {
             panic!("a call");
         };
-        &call.args["v"]
+        let [argument] = call.args.values().collect::<Vec<_>>()[..] else {
+            panic!("one argument");
+        };
+        argument
     }
 
     #[test]
@@ -3273,7 +3278,7 @@ mod tests {
     #[test]
     fn group_in_bodies() {
         let program = analyze_str(
-            "operator f{r: relation { k: integer, a: text }} [\n    call debug_value{v: r group { g := {a} }};\n];\noperator main{} [];",
+            "operator f{r: relation { k: integer, a: text }} [\n    call debug_table{r: r group { g := {a} }};\n];\noperator main{} [];",
         )
         .unwrap();
         let f = program.operators.iter().find(|o| o.name == "f").unwrap();
@@ -3375,7 +3380,7 @@ mod tests {
     #[test]
     fn extend_in_bodies() {
         let program = analyze_str(
-            "var factor := 3;\noperator f{r: relation { n: integer }, t: tuple { n: integer }} [\n    call debug_value{v: r extend { m := n * factor }};\n    call debug_value{v: t extend { m := n }};\n    call debug_value{v: relation { { n: 2 } } extend { m := n * 2 }};\n];\noperator main{} [];",
+            "var factor := 3;\noperator f{r: relation { n: integer }, t: tuple { n: integer }} [\n    call debug_table{r: r extend { m := n * factor }};\n    call debug_value{v: t extend { m := n }};\n    call debug_table{r: relation { { n: 2 } } extend { m := n * 2 }};\n];\noperator main{} [];",
         )
         .unwrap();
         let f = program.operators.iter().find(|o| o.name == "f").unwrap();
@@ -3737,7 +3742,7 @@ mod tests {
     #[test]
     fn restrict_in_bodies() {
         let program = analyze_str(
-            "operator f{r: relation { n: integer }} [\n    call debug_value{v: r where n > 1};\n    call debug_value{v: r where true};\n];\noperator main{} [];",
+            "operator f{r: relation { n: integer }} [\n    call debug_table{r: r where n > 1};\n    call debug_table{r: r where true};\n];\noperator main{} [];",
         )
         .unwrap();
         let f = program.operators.iter().find(|o| o.name == "f").unwrap();
@@ -3848,7 +3853,7 @@ mod tests {
     #[test]
     fn joins_in_bodies() {
         let program = analyze_str(
-            "var cities := relation { { city: \"Kumasi\", country: \"Ghana\" } };\noperator f{r: relation { country: text, continent: text }} [\n    call debug_value{v: cities join r};\n    call debug_value{v: cities compose r};\n    call debug_value{v: cities join r join cities};\n];\noperator main{} [];",
+            "var cities := relation { { city: \"Kumasi\", country: \"Ghana\" } };\noperator f{r: relation { country: text, continent: text }} [\n    call debug_table{r: cities join r};\n    call debug_table{r: cities compose r};\n    call debug_table{r: cities join r join cities};\n];\noperator main{} [];",
         )
         .unwrap();
         let f = program.operators.iter().find(|o| o.name == "f").unwrap();
@@ -3878,7 +3883,7 @@ mod tests {
         // In a list, the constant operands are joined together when
         // compiling, and the result joined with the others when running.
         let program = analyze_str(
-            "operator f{r: relation { z: integer }} [\n    call debug_value{v: join{relation { { x: 1, y: 2 } }, r, relation { { y: 2, z: 3 } }}};\n    call debug_value{v: join{r}};\n];\noperator main{} [];",
+            "operator f{r: relation { z: integer }} [\n    call debug_table{r: join{relation { { x: 1, y: 2 } }, r, relation { { y: 2, z: 3 } }}};\n    call debug_table{r: join{r}};\n];\noperator main{} [];",
         )
         .unwrap();
         let f = program.operators.iter().find(|o| o.name == "f").unwrap();
@@ -3904,7 +3909,7 @@ mod tests {
         assert_eq!(**parameter, *r());
         assert_eq!(argument(&body[1]), &*r());
         let errors = errors(
-            "var cities := relation { { city: \"Kumasi\", country: \"Ghana\" } };\noperator f{r: relation { size: integer }} [\n    call debug_value{v: cities join r};\n];\noperator main{} [];",
+            "var cities := relation { { city: \"Kumasi\", country: \"Ghana\" } };\noperator f{r: relation { size: integer }} [\n    call debug_table{r: cities join r};\n];\noperator main{} [];",
         );
         assert_eq!(errors[0].code, Code::CommonAttributes, "{errors:#?}");
     }
@@ -4811,7 +4816,7 @@ mod tests {
         analyze_str("operator f{a: T}: T types { T: any type } [ a ];\noperator main{} [];")
             .unwrap();
         analyze_str(
-            "operator f{a: T} types { T: any type } [ call debug_value{v: relation { a: T } {}}; ];\noperator main{} [];",
+            "operator f{a: T} types { T: any type } [ call debug_table{r: relation { a: T } {}}; ];\noperator main{} [];",
         )
         .unwrap();
         // It is `any …`, under a name of its own.
@@ -5333,7 +5338,7 @@ mod tests {
     #[test]
     fn local_variables_are_their_operators_own() {
         let program = analyze_str(
-            "var x := 1;\noperator f{n: integer} [\n    var x := n * 2;\n    var seen: relation { v: integer } key { v };\n    insert seen relation { { v: x } };\n    call debug_value{v: seen};\n];\noperator main{} [ call f{n: x}; ];",
+            "var x := 1;\noperator f{n: integer} [\n    var x := n * 2;\n    var seen: relation { v: integer } key { v };\n    insert seen relation { { v: x } };\n    call debug_table{r: seen};\n];\noperator main{} [ call f{n: x}; ];",
         )
         .unwrap();
         let (locals, body) = update_body(&program, "f");
@@ -5378,7 +5383,7 @@ mod tests {
         let hir::Statement::Call(call) = &body[3] else {
             panic!("a call");
         };
-        assert_eq!(call.args["v"], hir::Expr::Local(hir::LocalId(1)));
+        assert_eq!(call.args["r"], hir::Expr::Local(hir::LocalId(1)));
         let (_, main) = update_body(&program, "main");
         let hir::Statement::Call(call) = &main[0] else {
             panic!("a call");
