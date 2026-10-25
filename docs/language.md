@@ -1924,6 +1924,33 @@ operator main{} [
 The operands must be booleans: there is no truthiness, so `not 0` and
 `"" or true` are errors.
 
+- **An operand that can't fail guards those that can.** In a chain of
+  `and`s, `a and b and c`, however it is grouped, the operands that can't
+  fail are computed first, and if one is `false`, the result is `false`
+  and the others aren't computed; otherwise every one that can fail is.
+  `or` is the same with `true`, and `implies` is `not a or b`. So
+  `y div x > 1 and x <> 0` never divides by zero, wherever the guard is
+  written, unlike in languages that guard only from the left, or SQL,
+  which doesn't say. As nothing depends on which operand runs first, an
+  optimizer can choose.
+- **An expression can fail** if it does arithmetic, `+`, `-`, `*`, `/`,
+  `div`, `mod` or a prefix `-` of an integer, which can overflow or divide
+  by zero; joins texts, `||`, or builds, changes, combines or loads a
+  relation or an array, which can run out of memory; takes an element or
+  the only tuple; or calls an operator. Comparisons, the boolean
+  operators, literals, names, attributes and tuple selectors can't fail
+  themselves; an expression made of them can fail only if a part of it
+  can.
+
+```trendy
+var points := relation { { x: 0, y: 5 }, { x: 2, y: 6 } };
+var steep := points where y div x > 1 and x <> 0;
+
+operator main{} [
+    call debug_table{r: steep};
+];
+```
+
 ```trendy
 var a := true;
 var b := not a or a and false;
@@ -2733,9 +2760,8 @@ operator main{} [
   the operands have of the attributes it reads, so
   `times{r, s, t} where a = b and c < 2` never makes the whole product,
   and a product of many relations can be restricted all at once, as the
-  conditions read, rather than a join at a time. A failure for a tuple
-  the result wouldn't have still stops the program, as every tuple's
-  condition is computed.
+  conditions read, rather than a join at a time. The parts that can't fail
+  are computed first; the others, for the tuples those keep.
 - Other languages' operators, such as `==` and `&&`, are fixed, as
   everywhere.
 
@@ -3081,12 +3107,17 @@ operator main{} [];
 ### Evaluation
 
 Expressions have no side effects. Every operand is evaluated, so an error in
-one is never skipped, but for an `if`'s branches: only the one its
-condition takes is computed. Whatever doesn't depend on parameters or variables is
-evaluated when compiling, and so is whatever a constant operand decides, when
-the other operand can't fail: `p and false` is just `false`, `true and p` is
-just `p`, and `n * 1` is just `n`. But `(n + 1) * 0` is still computed, since
-`n + 1` can overflow. Approximate numbers are simplified the same way, since
+one is never skipped, but for an `if`'s branches, only the one its
+condition takes, and for the operands of `and`, `or` and `implies` that
+can fail, which those that can't guard (see [Boolean
+operators](#boolean-operators)). Whatever doesn't depend on parameters or variables is
+evaluated when compiling, and so is whatever a constant operand decides: `p
+and false` is just `false`, whatever `p` is, `true and p` is just `p`, and
+`n * 1` is just `n`. But `(n + 1) * 0` is still computed, since `n + 1` can
+overflow. A failure in an operand a guard known when compiling skips isn't
+reported, as one in an `if`'s branch not taken isn't; one known to fail
+behind a guard known only when the program runs is an error, since it
+fails whenever it is computed. Approximate numbers are simplified the same way, since
 they are finite and have one zero: `x + 0e0` is `x`, and `x * 0e0` is `0e0`.
 
 ## Literals

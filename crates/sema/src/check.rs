@@ -268,6 +268,16 @@ impl<'a> Checker<'a> {
             {
                 self.restricted(binary, expr, expected, errors)
             }
+            Expr::Binary(binary)
+                if binary
+                    .operator()
+                    .and_then(|t| Operator::of(&t))
+                    .is_some_and(|op| {
+                        matches!(op, Operator::And | Operator::Or | Operator::Implies)
+                    }) =>
+            {
+                self.connective(binary, expr, expected, errors)
+            }
             Expr::Binary(_) | Expr::Nary(_) if ops::Joining::of(expr).is_some() => {
                 self.joined(expr, expected, errors)
             }
@@ -1424,6 +1434,76 @@ impl<'a> Checker<'a> {
         self.matched(expected, result, expr, errors)
     }
 
+    /// `binary`, an `and`, an `or` or an `implies`, written `expr`, each
+    /// operand checked as a boolean with its own errors. Where an operand
+    /// is known when compiling and decides the result, the other isn't
+    /// computed (see `hir::BinaryOp::And`), so its failures aren't
+    /// reported, as for an `if`'s branch not taken; otherwise one known to
+    /// fail is an error, since it fails whenever it is computed.
+    fn connective(
+        &mut self,
+        binary: &ast::BinaryExpr,
+        expr: &Expr,
+        expected: Option<&Expected>,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let token = binary.operator()?;
+        let boolean = hir::Type::Scalar(hir::Scalar::Boolean);
+        let Some(Resolved::Binary(op)) = Operator::of(&token)?.resolve(&boolean) else {
+            unreachable!("`and`, `or` and `implies` take booleans");
+        };
+        let operand_expected = Expected {
+            ty: boolean.clone(),
+            origin: types::Origin::Operator(token),
+        };
+        let checked: Vec<(Option<hir::Expr>, Vec<Diagnostic>)> = [binary.lhs(), binary.rhs()]
+            .into_iter()
+            .map(|operand| {
+                let mut own = Vec::new();
+                let out = operand.and_then(|o| self.expr(&o, Some(&operand_expected), &mut own));
+                (out, own)
+            })
+            .collect();
+        // The result, if a constant operand decides it, and the other
+        // operand, which then isn't computed.
+        let decided = (0..2).find_map(|i| match checked[i].0 {
+            Some(hir::Expr::Constant(hir::Value::Boolean(value))) => {
+                Some((op.decided(i, value)?, 1 - i))
+            }
+            _ => None,
+        });
+        let skipped = decided.map(|(_, i)| i);
+        let mut ok = true;
+        let mut operands = Vec::new();
+        for (i, (out, own)) in checked.into_iter().enumerate() {
+            if skipped == Some(i) {
+                let before = errors.len();
+                errors.extend(own.into_iter().filter(|d| d.code.kind() != CodeKind::Run));
+                ok &= out.is_some() || errors.len() == before;
+            } else {
+                ok &= out.is_some();
+                errors.extend(own);
+            }
+            operands.push(out);
+        }
+        if !ok {
+            return None;
+        }
+        types::result_type(expected, &boolean, expr, errors)?;
+        if let Some((result, _)) = decided {
+            return Some(hir::Expr::Constant(hir::Value::Boolean(result)));
+        }
+        let [Some(lhs), Some(rhs)] = <[Option<hir::Expr>; 2]>::try_from(operands).ok()? else {
+            return None;
+        };
+        types::evaluated(
+            ops::binary(op, lhs, rhs),
+            expr,
+            binary.rhs().as_ref(),
+            errors,
+        )
+    }
+
     /// `binary`, a `where`, written `expr`: the tuples of its operand, a
     /// relation, for which its condition, a boolean checked with the
     /// attributes of the tuple at hand in scope, is true.
@@ -1482,7 +1562,7 @@ impl<'a> Checker<'a> {
             Restricted::Relation(operand) => ops::restrict(operand, condition, self.bindings()),
             Restricted::Joined { operands, .. } => {
                 if let Some(result) = ops::restricted_and(&operands, &condition, self.bindings()) {
-                    Ok(result)
+                    result
                 } else {
                     let product = ops::and(operands)
                         .map_err(|failed| errors.push(errors::failed(&failed, &written)))

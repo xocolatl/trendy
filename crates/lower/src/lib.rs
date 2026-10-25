@@ -352,6 +352,21 @@ struct Computed {
     value: lir::Place,
 }
 
+/// Whether `expr` is only read from where it is, not computed: a
+/// constant, a variable, a parameter, a local variable, the tuple at
+/// hand, or an attribute of one of those.
+fn is_read(expr: &hir::Expr) -> bool {
+    match expr {
+        hir::Expr::Constant(_)
+        | hir::Expr::Variable(_)
+        | hir::Expr::Parameter(_)
+        | hir::Expr::Local(_)
+        | hir::Expr::Current(..) => true,
+        hir::Expr::Extract(tuple, _) => is_read(tuple),
+        _ => false,
+    }
+}
+
 /// The variable `target`, as its name reads it.
 fn read(target: hir::Target) -> hir::Expr {
     match target {
@@ -1209,6 +1224,28 @@ impl<'a> FunctionBuilder<'a> {
             hir::Expr::Current(depth, _) => self.tuples[self.tuples.len() - 1 - depth].clone(),
             hir::Expr::Call(call) => self.read_only_call(call, cx),
             hir::Expr::Extend(operand, _, attributes) => self.extend(expr, operand, attributes, cx),
+            // Of the operands of `and`, `or` and `implies`, those that can
+            // fail are computed only when those that can't don't decide the
+            // result.
+            hir::Expr::Binary(..) if let Some(guarded) = expr.guarded() => self.place(&guarded, cx),
+            // Otherwise, if the right operand can't fail, neither can the
+            // left, and the right is computed only if the left doesn't
+            // decide the result: since it can't fail, that only saves the
+            // work, which is worth a branch unless it is only read.
+            hir::Expr::Binary(
+                op @ (hir::BinaryOp::And | hir::BinaryOp::Or | hir::BinaryOp::Implies),
+                lhs,
+                rhs,
+            ) if !rhs.can_fail() && !is_read(rhs) => {
+                // The result when the left is true and when it is false, if
+                // that decides it.
+                let decided = [true, false].map(|value| {
+                    op.decided(0, value)
+                        .map(|result| hir::Expr::Constant(hir::Value::Boolean(result)))
+                });
+                let branches = decided.each_ref().map(|d| d.as_ref().unwrap_or(rhs));
+                self.conditional(expr, lhs, branches, cx)
+            }
             hir::Expr::Binary(op, lhs, rhs) => {
                 let operand_ty = self.type_of(lhs);
                 let lhs = self.place(lhs, cx);
@@ -4138,6 +4175,59 @@ mod tests {
             )),
             "{blocks:#?}"
         );
+    }
+
+    #[test]
+    fn a_guard_computes_the_next_only_if_it_doesnt_decide_the_result() {
+        // `show{p: integer} [ call debug_value{v: p = 0 or p > 1}; ]`.
+        let p = || Box::new(hir::Expr::Parameter("p".to_string()));
+        let compare = |comparison, n| {
+            Box::new(hir::Expr::Binary(
+                hir::BinaryOp::Compare(comparison, hir::Compared::Scalar(hir::Scalar::Integer)),
+                p(),
+                Box::new(hir::Expr::Constant(hir::Value::Integer(n))),
+            ))
+        };
+        let either = hir::Expr::Binary(
+            hir::BinaryOp::Or,
+            compare(hir::Comparison::Equal, 0),
+            compare(hir::Comparison::Greater, 1),
+        );
+        let lowered = lower(&program(
+            vec![
+                debug_value(),
+                user("show", &["p"], vec![call(0, vec![("v", either)])]),
+                user(
+                    "main",
+                    &[],
+                    vec![call(
+                        1,
+                        vec![("p", hir::Expr::Constant(hir::Value::Integer(1)))],
+                    )],
+                ),
+            ],
+            vec![],
+        ));
+        let blocks = &lowered.functions[1].blocks;
+        let lir::Terminator::Branch {
+            then, otherwise, ..
+        } = blocks[0].terminator
+        else {
+            panic!("{blocks:#?}");
+        };
+        // `p > 1` is computed only when `p = 0` is false.
+        let compares = |b: lir::BlockId| {
+            blocks[b.0].insts.iter().any(|i| {
+                matches!(
+                    i,
+                    lir::Inst::Binary {
+                        op: lir::BinaryOp::Compare(..),
+                        ..
+                    }
+                )
+            })
+        };
+        assert!(!compares(then) && compares(otherwise), "{blocks:#?}");
     }
 
     #[test]

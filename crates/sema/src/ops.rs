@@ -1143,27 +1143,26 @@ pub(crate) fn restrict(
 
 /// The tuples of the AND of `operands` for which `condition`, computed
 /// from the tuple at hand, is true, evaluated without making the whole
-/// AND. As Algebra A defines restriction (TTM, Appendix A), it is the AND
-/// with the relation of the tuples the condition is true of, which here is
-/// finite: each conjunct of the condition gives the relation of the values
-/// it is true of, among those the operands have for the attributes it
-/// reads, and the result is the AND of the operands and those.
+/// AND, as for every tuple of the whole AND, so that it fails if the
+/// condition does for one.
 ///
-/// The condition is evaluated for every tuple of the whole AND, and a
-/// failure for one the result wouldn't have still stops the program; each
-/// conjunct is evaluated here for every combination of the values it reads
-/// that the operands have, which includes every one the whole AND has, so
-/// if it fails for none, the condition fails for no tuple.
+/// The conjuncts of the condition that can't fail are computed first (see
+/// `hir::BinaryOp::And`), so they restrict as Algebra A defines
+/// restriction (TTM, Appendix A): the AND with the relation of the tuples
+/// they are true of, which here is finite, as each gives the relation of
+/// the values it is true of, among those the operands have for the
+/// attributes it reads. The others are computed for the tuples of the AND
+/// of the operands and those relations, which are the tuples of the whole
+/// AND that every one that can't fail is true of.
 ///
 /// `None` unless every operand is a constant relation, and every conjunct
-/// reads the tuple at hand, and is known, without failing, for every
-/// combination; otherwise only the whole AND, restricted, says what
-/// happens.
+/// reads the tuple at hand and is known when compiling; otherwise only the
+/// whole AND, restricted, says what happens.
 pub(crate) fn restricted_and(
     operands: &[hir::Expr],
     condition: &hir::Expr,
     bindings: Bindings,
-) -> Option<hir::Expr> {
+) -> Option<Result<hir::Expr, TupleFailure>> {
     let relations: Vec<&hir::RelationValue> = operands
         .iter()
         .map(|operand| match operand {
@@ -1180,9 +1179,13 @@ pub(crate) fn restricted_and(
     };
     let own: Vec<BTreeSet<String>> = relations.iter().map(|r| names(r)).collect();
     let all: BTreeSet<String> = own.iter().flatten().cloned().collect();
+    let (failing, guards): (Vec<&hir::Expr>, Vec<&hir::Expr>) = condition
+        .chained(hir::BinaryOp::And)
+        .into_iter()
+        .partition(|conjunct| conjunct.can_fail());
     let mut parts: Vec<hir::Value> = Vec::new();
-    for conjunct in conjuncts(condition) {
-        let read = tuple_read(conjunct, 0);
+    for guard in guards {
+        let read = tuple_read(guard, 0);
         let reads = if read.whole {
             all.clone()
         } else {
@@ -1215,7 +1218,7 @@ pub(crate) fn restricted_and(
             .cloned()
             .collect();
         let values = values.without(&joining);
-        match restrict(hir::Expr::Constant(values), conjunct.clone(), bindings) {
+        match restrict(hir::Expr::Constant(values), guard.clone(), bindings) {
             Ok(hir::Expr::Constant(allowed)) => parts.push(allowed),
             _ => return None,
         }
@@ -1225,7 +1228,17 @@ pub(crate) fn restricted_and(
             .iter()
             .map(|relation| hir::Value::Relation((*relation).clone())),
     );
-    and_values(parts).map(hir::Expr::Constant)
+    let guarded = hir::Expr::Constant(and_values(parts)?);
+    let Some(failing) = failing.into_iter().cloned().reduce(|so_far, conjunct| {
+        hir::Expr::Binary(hir::BinaryOp::And, Box::new(so_far), Box::new(conjunct))
+    }) else {
+        return Some(Ok(guarded));
+    };
+    match restrict(guarded, failing, bindings) {
+        Ok(hir::Expr::Constant(restricted)) => Some(Ok(hir::Expr::Constant(restricted))),
+        Ok(_) => None,
+        Err(failure) => Some(Err(failure)),
+    }
 }
 
 /// The relation `value` is.
@@ -1258,19 +1271,6 @@ fn and_values(mut parts: Vec<hir::Value>) -> Option<hir::Value> {
             .expect("relations always have an AND");
     }
     Some(result)
-}
-
-/// The conjuncts of `condition`: the operands of its `and`s, through any
-/// number of them, or the condition itself.
-fn conjuncts(condition: &hir::Expr) -> Vec<&hir::Expr> {
-    match condition {
-        hir::Expr::Binary(hir::BinaryOp::And, lhs, rhs) => {
-            let mut all = conjuncts(lhs);
-            all.extend(conjuncts(rhs));
-            all
-        }
-        _ => vec![condition],
-    }
 }
 
 /// The relations `lhs` and `rhs`, of one heading, combined as
@@ -1428,7 +1428,7 @@ pub(crate) fn index(array: hir::Expr, position: hir::Expr) -> Result<hir::Expr, 
             if elements
                 .iter()
                 .enumerate()
-                .all(|(i, e)| i == at || !can_fail(e)) =>
+                .all(|(i, e)| i == at || !e.can_fail()) =>
         {
             Ok(elements.swap_remove(at))
         }
@@ -1538,7 +1538,7 @@ pub(crate) fn conditional(
     match condition {
         hir::Expr::Constant(hir::Value::Boolean(true)) => then,
         hir::Expr::Constant(hir::Value::Boolean(false)) => otherwise,
-        condition if then == otherwise && !can_fail(&condition) => then,
+        condition if then == otherwise && !condition.can_fail() => then,
         condition => hir::Expr::If(Box::new(condition), Box::new(then), Box::new(otherwise)),
     }
 }
@@ -2220,6 +2220,31 @@ fn substituted_elements(
     with_elements(sub(array)?, changes)
 }
 
+/// `lhs op rhs`, with what `substitution` knows substituted, as
+/// [`substitute`] does. The right operand of an `and`, `or` or `implies`
+/// that can't fail is computed only if the left doesn't decide the
+/// result: since it can't fail, that only saves the work.
+///
+/// # Errors
+///
+/// Returns why an operand fails, or the operator does.
+fn substituted_binary(
+    op: hir::BinaryOp,
+    lhs: hir::Expr,
+    rhs: hir::Expr,
+    depth: usize,
+    substitution: &Substitution,
+) -> Result<hir::Expr, Failed> {
+    let lhs = substitute(lhs, depth, substitution)?;
+    if let hir::Expr::Constant(hir::Value::Boolean(value)) = lhs
+        && let Some(result) = op.decided(0, value)
+        && !rhs.can_fail()
+    {
+        return Ok(hir::Expr::Constant(hir::Value::Boolean(result)));
+    }
+    binary(op, lhs, substitute(rhs, depth, substitution)?).map_err(Failed::Scalar)
+}
+
 /// `if condition then then else otherwise`, with what `substitution`
 /// knows substituted, as [`substitute`] does: only the branch taken is
 /// computed.
@@ -2262,6 +2287,11 @@ fn substitute(
     depth: usize,
     substitution: &Substitution,
 ) -> Result<hir::Expr, Failed> {
+    // Of the operands of `and`, `or` and `implies`, those that can fail are
+    // computed only when those that can't don't decide the result.
+    if let Some(guarded) = expr.guarded() {
+        return substitute(guarded, depth, substitution);
+    }
     let sub = |e: Box<hir::Expr>| substitute(*e, depth, substitution);
     Ok(match expr {
         hir::Expr::Current(d, _) if d == depth && substitution.tuple.is_some() => {
@@ -2312,9 +2342,7 @@ fn substitute(
             call(hir::Call { args, ..called }, substitution.bindings)?
         }
         hir::Expr::Unary(op, operand) => unary(op, sub(operand)?).map_err(Failed::Scalar)?,
-        hir::Expr::Binary(op, lhs, rhs) => {
-            binary(op, sub(lhs)?, sub(rhs)?).map_err(Failed::Scalar)?
-        }
+        hir::Expr::Binary(op, lhs, rhs) => substituted_binary(op, *lhs, *rhs, depth, substitution)?,
         hir::Expr::Extract(operand, name) => extract(sub(operand)?, name),
         hir::Expr::Array(element, elements) => array(
             element,
@@ -2430,7 +2458,7 @@ pub(crate) fn extract(operand: hir::Expr, name: String) -> hir::Expr {
         hir::Expr::Tuple(mut attributes)
             if attributes
                 .iter()
-                .all(|(other, e)| *other == name || !can_fail(e)) =>
+                .all(|(other, e)| *other == name || !e.can_fail()) =>
         {
             attributes
                 .remove(&name)
@@ -2535,62 +2563,6 @@ pub(crate) fn negative_value(
     }
 }
 
-/// Whether evaluating `expr` can fail when the program runs. An operand that
-/// can fail is never simplified away, so that every operand is evaluated
-/// and its failure never skipped.
-fn can_fail(expr: &hir::Expr) -> bool {
-    match expr {
-        hir::Expr::Constant(_)
-        | hir::Expr::Variable(_)
-        | hir::Expr::Parameter(_)
-        | hir::Expr::Local(_)
-        | hir::Expr::Current(..) => false,
-        // Negating the smallest integer overflows, and building a relation,
-        // removing, renaming or adding attributes, joining or ungrouping it,
-        // allocates the result, as building or loading an array does; adding
-        // attributes computes them, which can fail too, as can a call,
-        // which computes its operator's value, and an index can be out of
-        // range.
-        hir::Expr::Unary(hir::UnaryOp::Negate(hir::Numeric::Integer), _)
-        | hir::Expr::Call(..)
-        | hir::Expr::Remove(..)
-        | hir::Expr::Rename(..)
-        | hir::Expr::And(..)
-        | hir::Expr::Ungroup(..)
-        | hir::Expr::Only(..)
-        | hir::Expr::Restrict(..)
-        | hir::Expr::Semijoin(..)
-        | hir::Expr::Antijoin(..)
-        | hir::Expr::Combine(..)
-        | hir::Expr::Extend(..)
-        | hir::Expr::Relation(..)
-        | hir::Expr::Array(..)
-        | hir::Expr::Load(..)
-        | hir::Expr::Index(..)
-        | hir::Expr::WithElements(..) => true,
-        hir::Expr::Unary(_, operand) => can_fail(operand),
-        hir::Expr::Tuple(attributes) => attributes.values().any(can_fail),
-        hir::Expr::Extract(tuple, _) => can_fail(tuple),
-        hir::Expr::Binary(op, lhs, rhs) => {
-            // Arithmetic and concatenation can fail themselves; the boolean
-            // operators and comparisons can't.
-            let itself = !matches!(
-                op,
-                hir::BinaryOp::And
-                    | hir::BinaryOp::Or
-                    | hir::BinaryOp::Xor
-                    | hir::BinaryOp::Implies
-                    | hir::BinaryOp::Compare(..)
-            );
-            itself || can_fail(lhs) || can_fail(rhs)
-        }
-        hir::Expr::Let(_, value, body) => can_fail(value) || can_fail(body),
-        hir::Expr::If(condition, then, otherwise) => {
-            can_fail(condition) || can_fail(then) || can_fail(otherwise)
-        }
-    }
-}
-
 /// A constant that simplification knows the effect of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Known {
@@ -2690,7 +2662,7 @@ pub(crate) fn binary(
             Side::Lhs => &lhs,
             Side::Rhs => &rhs,
         };
-        if can_fail(dropped) {
+        if dropped.can_fail() {
             hir::Expr::Binary(op, Box::new(lhs), Box::new(rhs))
         } else {
             result
@@ -2721,20 +2693,17 @@ pub(crate) fn binary(
         (Div | Mod | Divide, _, Some(Zero)) => {
             return Err(hir::Failure::DivisionByZero);
         }
-        (And, Some(False), _) | (Multiply(_), Some(Zero), _) => {
-            unless_fails(Side::Rhs, lhs.clone(), lhs, rhs)
+        // A constant that decides `and`, `or` or `implies` can't fail, so
+        // the other operand isn't computed (see `hir::BinaryOp::And`),
+        (And, Some(False), _) | (And, _, Some(False)) => constant(hir::Value::Boolean(false)),
+        (Or, Some(True), _) | (Implies, Some(False), _) | (Or | Implies, _, Some(True)) => {
+            constant(hir::Value::Boolean(true))
         }
-        (And, _, Some(False)) | (Multiply(_), _, Some(Zero)) => {
-            unless_fails(Side::Lhs, rhs.clone(), lhs, rhs)
-        }
+        // and of the others, every operand is.
+        (Multiply(_), Some(Zero), _) => unless_fails(Side::Rhs, lhs.clone(), lhs, rhs),
+        (Multiply(_), _, Some(Zero)) => unless_fails(Side::Lhs, rhs.clone(), lhs, rhs),
         (Mod, _, Some(One | MinusOne)) => {
             unless_fails(Side::Lhs, constant(hir::Value::Integer(0)), lhs, rhs)
-        }
-        (Or, Some(True), _) | (Implies, Some(False), _) => {
-            unless_fails(Side::Rhs, constant(hir::Value::Boolean(true)), lhs, rhs)
-        }
-        (Or | Implies, _, Some(True)) => {
-            unless_fails(Side::Lhs, constant(hir::Value::Boolean(true)), lhs, rhs)
         }
         _ => hir::Expr::Binary(op, Box::new(lhs), Box::new(rhs)),
     })

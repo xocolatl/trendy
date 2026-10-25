@@ -956,6 +956,117 @@ impl Expr {
 }
 
 impl Expr {
+    /// Whether computing the expression can fail when the program runs:
+    /// an integer overflow, a division by zero, running out of memory, or
+    /// a failure in an operator it calls. This is part of the language: of
+    /// the operands of `and`, `or` and `implies`, those that can fail are
+    /// computed only when those that can't don't decide the result (see
+    /// [`BinaryOp::And`]).
+    #[must_use]
+    pub fn can_fail(&self) -> bool {
+        match self {
+            Expr::Constant(_)
+            | Expr::Variable(_)
+            | Expr::Parameter(_)
+            | Expr::Local(_)
+            | Expr::Current(..) => false,
+            // Negating the smallest integer overflows, and building a relation,
+            // removing, renaming or adding attributes, joining or ungrouping it,
+            // allocates the result, as building or loading an array does; adding
+            // attributes computes them, which can fail too, as can a call,
+            // which computes its operator's value, and an index can be out of
+            // range.
+            Expr::Unary(UnaryOp::Negate(Numeric::Integer), _)
+            | Expr::Call(..)
+            | Expr::Remove(..)
+            | Expr::Rename(..)
+            | Expr::And(..)
+            | Expr::Ungroup(..)
+            | Expr::Only(..)
+            | Expr::Restrict(..)
+            | Expr::Semijoin(..)
+            | Expr::Antijoin(..)
+            | Expr::Combine(..)
+            | Expr::Extend(..)
+            | Expr::Relation(..)
+            | Expr::Array(..)
+            | Expr::Load(..)
+            | Expr::Index(..)
+            | Expr::WithElements(..) => true,
+            Expr::Unary(_, operand) => operand.can_fail(),
+            Expr::Tuple(attributes) => attributes.values().any(Expr::can_fail),
+            Expr::Extract(tuple, _) => tuple.can_fail(),
+            Expr::Binary(op, lhs, rhs) => {
+                // Arithmetic and concatenation can fail themselves; the boolean
+                // operators and comparisons can't.
+                let itself = !matches!(
+                    op,
+                    BinaryOp::And
+                        | BinaryOp::Or
+                        | BinaryOp::Xor
+                        | BinaryOp::Implies
+                        | BinaryOp::Compare(..)
+                );
+                itself || lhs.can_fail() || rhs.can_fail()
+            }
+            Expr::Let(_, value, body) => value.can_fail() || body.can_fail(),
+            Expr::If(condition, then, otherwise) => {
+                condition.can_fail() || then.can_fail() || otherwise.can_fail()
+            }
+        }
+    }
+
+    /// The expression with the operands that can fail computed only when
+    /// those that can't don't decide its result, as an `If`, if it is an
+    /// `and`, `or` or `implies` with operands of both kinds (see
+    /// [`BinaryOp::And`]). The operands of the `and`s at the top, through
+    /// any number of them, are one conjunction, and likewise those of the
+    /// `or`s; `a implies b` is `not a or b`.
+    #[must_use]
+    pub fn guarded(&self) -> Option<Expr> {
+        let Expr::Binary(op @ (BinaryOp::And | BinaryOp::Or | BinaryOp::Implies), lhs, rhs) = self
+        else {
+            return None;
+        };
+        let operands: Vec<Expr> = match op {
+            BinaryOp::Implies => vec![Expr::Unary(UnaryOp::Not, lhs.clone()), (**rhs).clone()],
+            _ => self.chained(*op).into_iter().cloned().collect(),
+        };
+        let (failing, guards): (Vec<Expr>, Vec<Expr>) =
+            operands.into_iter().partition(Expr::can_fail);
+        let either = if *op == BinaryOp::And {
+            BinaryOp::And
+        } else {
+            BinaryOp::Or
+        };
+        let all = |operands: Vec<Expr>| {
+            operands
+                .into_iter()
+                .reduce(|so_far, operand| Expr::Binary(either, Box::new(so_far), Box::new(operand)))
+        };
+        let (guards, failing) = (all(guards)?, all(failing)?);
+        let decided = Box::new(Expr::Constant(Value::Boolean(either == BinaryOp::Or)));
+        Some(if either == BinaryOp::And {
+            Expr::If(Box::new(guards), Box::new(failing), decided)
+        } else {
+            Expr::If(Box::new(guards), decided, Box::new(failing))
+        })
+    }
+
+    /// The operands of the `op`s at the top of the expression, through any
+    /// number of them.
+    #[must_use]
+    pub fn chained(&self, op: BinaryOp) -> Vec<&Expr> {
+        match self {
+            Expr::Binary(o, lhs, rhs) if *o == op => {
+                let mut all = lhs.chained(op);
+                all.extend(rhs.chained(op));
+                all
+            }
+            _ => vec![self],
+        }
+    }
+
     /// The expression, in an operator instantiated with `types`: each type
     /// parameter in it replaced by its type, by index.
     #[must_use]
@@ -1214,11 +1325,21 @@ impl UnaryOp {
 /// A dyadic operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BinaryOp {
+    /// True when both are. The operands of a chain of them, `a and b and
+    /// c`, however grouped, are one conjunction: those that can't fail (see
+    /// [`Expr::can_fail`]) are computed first, and if one is false, the
+    /// result is false and the others aren't computed; otherwise every one
+    /// that can fail is. So a condition that can't fail guards the others,
+    /// wherever it is written: `x div y > 1 and y <> 0` never divides by
+    /// zero. Which runs first is then for an optimizer to choose.
     And,
+    /// True when either is, its operands computed as `And`'s are, but for
+    /// true: one that can't fail and is true decides the result.
     Or,
     /// Exactly one is true.
     Xor,
-    /// False only when the left operand is true and the right is false.
+    /// False only when the left operand is true and the right is false:
+    /// `not a or b`, its operands computed as `Or`'s are.
     Implies,
     Add(Numeric),
     Subtract(Numeric),
@@ -1355,6 +1476,20 @@ impl BinaryOp {
         match self {
             BinaryOp::Compare(..) => Some(Scalar::Boolean),
             _ => self.operand(),
+        }
+    }
+
+    /// The result of an `and`, `or` or `implies` whose operand on `side`,
+    /// 0 for the left and 1 for the right, is `value`, if that decides it
+    /// whatever the other is: a false operand of `and`, a true one of `or`,
+    /// and a false left or a true right operand of `implies`.
+    #[must_use]
+    pub fn decided(self, side: usize, value: bool) -> Option<bool> {
+        match self {
+            BinaryOp::And => (!value).then_some(false),
+            BinaryOp::Or => value.then_some(true),
+            BinaryOp::Implies => ((side == 0) != value).then_some(true),
+            _ => None,
         }
     }
 

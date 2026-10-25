@@ -748,15 +748,34 @@ constant, and so is
 whatever a constant operand decides (`p and false` is `false`, `true and p`
 is `p`, and `n * 1` is `n`): expressions have no side effects, so this never
 changes what a program does. An operand is dropped only if it can't fail,
-so that every operand is evaluated and no run-time error is skipped. A
+so that every operand is evaluated and no run-time error is skipped,
+but for those that guards skip. A
 constant overflow, or a division by a constant zero, is a compile error
-(R0001, R0002). An `if` (`hir::Expr::If`) is the one exception to
+(R0001, R0002). An `if` (`hir::Expr::If`) is one exception to
 evaluating every operand: only the branch its condition takes is
 computed. A constant condition makes the `if` that branch
 (`ops::conditional`), and the checker drops the failures of the branch
 not taken (`Checker::branches`), which it still checks; a call evaluated
-when compiling computes only the branch taken (`ops::substitute`). `-`
-directly before a number literal makes a negative literal, so that the
+when compiling computes only the branch taken (`ops::substitute`).
+
+The other is `and`, `or` and `implies` (`hir::BinaryOp::And`): of the
+operands of a chain of `and`s, those that can't fail
+(`hir::Expr::can_fail`, which is part of the language) are computed
+first, and the others only if none of those is false, and likewise for
+`or` with true. `hir::Expr::guarded` writes such a chain as the `If` it
+means, the guards its condition, which folding (`ops::substitute`) and
+lowering both compute. The checker checks each operand of one with its
+own errors, dropping the failures of one a constant operand decides the
+result without (`Checker::connective`), as for an `if`'s branch; and a
+constant that decides it is the result, whatever the other operand
+(`ops::binary`). Since a guard can't fail, which runs first changes
+nothing, which leaves an optimizer free to order them. Folding
+(`ops::substituted_binary`) and lowering compute the guards from the
+left, each only if those before it don't decide the result
+(`hir::BinaryOp::decided`): as they can't fail, this only saves work, so
+lowering branches past one it computes, never one it only reads.
+
+`-` directly before a number literal makes a negative literal, so that the
 smallest integer can be written. Approximate folding and
 simplification are exact IEEE 754 binary64, the same arithmetic the program
 does at run time, so folding never changes a result.
@@ -818,16 +837,17 @@ every tuple keeps the operand. A `join` or `times` of constant
 relations, restricted, is folded as Algebra A defines it, with that
 relation finite (`ops::restricted_and`): the checker keeps the join's
 operands apart (`Checker::join_operands`), and each conjunct of the
-condition is evaluated for the values the operands have of the
-attributes it reads (`ops::tuple_read`), projected from the AND of only
-the operands that have them, giving the relation of those it is true of;
-the result is the AND of the operands and those relations, the smallest
-first, then each next the one with the most attributes in common with
-the result so far. Every combination a tuple of the whole AND has is
-among those, so a conjunct that fails for none fails for no tuple; if
-one fails, or isn't known when compiling, the whole AND is made and
-restricted, which says what happens. So the zebra's
-`times{…} where …`, of 199 million tuples, is made from a few hundred. Lowering loops over the tuples, as for
+condition that can't fail, which are computed first, is evaluated for
+the values the operands have of the attributes it reads
+(`ops::tuple_read`), projected from the AND of only the operands that
+have them, giving the relation of those it is true of. The AND of the
+operands and those relations, the smallest first, then each next the
+one with the most attributes in common with the result so far, is the
+tuples of the whole AND they are all true of, for which the conjuncts
+that can fail are then computed, so that one of those fails just when
+it would. One that isn't known when compiling leaves the whole AND to be
+made and restricted. So the zebra's `times{…} where …`, of 199 million
+tuples, is made from a few hundred. Lowering loops over the tuples, as for
 `extend` (`each_tuple`), copying those that pass into a relation
 allocated for all of them, then setting its count: they stay in the
 canonical order, so they need no sorting.

@@ -2,6 +2,27 @@ var u := t or false;
 var t := not f;
 var f: boolean;
 var chain := f implies f implies f;
+/* Guards: of the operands of `and`, `or` and `implies`, those that can't
+   fail are computed first, wherever they are written, and those that can
+   only if they don't decide the result. So nothing here divides by zero:
+   when compiling, `steep`, and when running, `guards`. */
+var points := relation {
+    { x: 0, y: 5 },
+    { x: 2, y: 6 },
+    { x: 3, y: 1 },
+};
+var steep := points where y div x > 1 and x <> 0;
+
+operator steep_at{x: integer, y: integer}: boolean [
+    y div x > 1 and x <> 0
+];
+
+operator guards{r: relation { x: integer, y: integer }, zero: integer} [
+    call debug_table{r: r where y div x > 1 and x <> zero};
+    call debug_table{r: r where x <> zero implies y div x > 1};
+    call debug_value{v: steep_at{x: zero, y: 5}};
+    call debug_value{v: zero = 0 or 1 div zero = 1};
+];
 
 operator table{a: boolean, b: boolean} [
     call debug_value{v: not a};
@@ -19,4 +40,6 @@ operator main{} [
     call table{a: true, b: false};
     call table{a: true, b: true};
     call debug_value{v: not (t and f) xor t};
+    call debug_table{r: steep};
+    call guards{r: points, zero: 0};
 ];

@@ -388,7 +388,32 @@ fn booleans() {
             ["false", "true", "true", "false", "true"],
         ]
     );
-    assert_eq!(lines[22..], ["false"]);
+    assert_eq!(lines[22], "false");
+    // Guards, wherever they are written: `steep` when compiling, then the
+    // same, `implies`, a call and an `or` when running, with no division
+    // by zero.
+    let steep = [
+        "┌───┬───┐",
+        "│ x │ y │",
+        "├───┼───┤",
+        "│ 2 │ 6 │",
+        "└───┴───┘",
+    ];
+    assert_eq!(lines[23..28], steep);
+    assert_eq!(lines[28..33], steep);
+    assert_eq!(
+        lines[33..],
+        [
+            "┌───┬───┐",
+            "│ x │ y │",
+            "├───┼───┤",
+            "│ 0 │ 5 │",
+            "│ 2 │ 6 │",
+            "└───┴───┘",
+            "false",
+            "true",
+        ]
+    );
 }
 
 #[test]

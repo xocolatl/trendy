@@ -3779,21 +3779,65 @@ mod tests {
 
     #[test]
     fn a_product_restricted_as_it_is_made_fails_as_the_whole_would() {
-        // For `a: 0`, `b = 2` is false, but the division is made all the
-        // same.
+        // `b = 1`, which can't fail, holds for `a: 0`, so the division is
+        // made.
         let codes = codes(&format!(
-            "var r := relation {{ {{ a: 1 }}, {{ a: 0 }} }};\nvar s := relation {{ {{ b: 1 }} }};\nvar x := times{{r, s}} where b = 2 and 10 div a = 1;{MAIN}"
+            "var r := relation {{ {{ a: 1 }}, {{ a: 0 }} }};\nvar s := relation {{ {{ b: 1 }} }};\nvar x := times{{r, s}} where b = 1 and 10 div a = 1;{MAIN}"
         ));
         assert_eq!(codes, [Code::DivisionByZero]);
-        // Of no tuples, nothing is divided.
+        // `b = 2` doesn't, so it isn't; and of no tuples, nothing is
+        // divided.
         let vars = variables(
-            "var r := relation { { a: 1 }, { a: 0 } };\nvar none := relation { b: integer } {};\nvar x := times{r, none} where 10 div a = 1;",
+            "var r := relation { { a: 1 }, { a: 0 } };\nvar s := relation { { b: 1 } };\nvar none := relation { b: integer } {};\nvar x := times{r, s} where b = 2 and 10 div a = 1;\nvar y := times{r, none} where 10 div a = 1;",
         );
-        let hir::Value::Relation(x) = &vars[2].init else {
-            panic!("a relation");
+        for restricted in &vars[3..] {
+            let hir::Value::Relation(restricted) = &restricted.init else {
+                panic!("a relation");
+            };
+            assert!(restricted.tuples.is_empty());
+            assert_eq!(restricted.heading.attributes().count(), 2);
+        }
+    }
+
+    #[test]
+    fn guards_decide_which_operands_are_computed() {
+        // A constant that decides the result: the other isn't computed.
+        let vars = variables(
+            "var a := false and 1 div 0 = 1;\nvar b := 1 div 0 = 1 and false;\nvar c := true or 1 div 0 = 1;\nvar d := false implies 1 div 0 = 1;\nvar e := 1 div 0 = 1 implies true;\nvar points := relation { { x: 0, y: 5 }, { x: 2, y: 6 } };\nvar steep := points where y div x > 1 and x <> 0;\nvar expected := relation { { x: 2, y: 6 } };",
+        );
+        let value = |name: &str| &vars.iter().find(|v| v.name == name).unwrap().init;
+        for (name, result) in [
+            ("a", false),
+            ("b", false),
+            ("c", true),
+            ("d", true),
+            ("e", true),
+        ] {
+            assert_eq!(value(name), &hir::Value::Boolean(result), "{name}");
+        }
+        // A guard after what it guards guards it too.
+        assert_eq!(value("steep"), value("expected"));
+        // One that doesn't decide it leaves the division to be made, and
+        // one known only when running leaves one known to fail an error.
+        for source in [
+            "var f := true and 1 div 0 = 1;{MAIN}".to_string(),
+            "operator f{x: integer}: boolean [ x <> 0 and 1 div 0 = 1 ];{MAIN}".to_string(),
+        ] {
+            assert_eq!(
+                codes(&source.replace("{MAIN}", MAIN)),
+                [Code::DivisionByZero]
+            );
+        }
+        // Guards known only when running are guards there.
+        let program = analyze_str(
+            "operator f{x: integer, y: integer}: boolean [ y div x > 1 and x <> 0 ];\noperator main{} [];",
+        )
+        .unwrap();
+        let f = program.operators.iter().find(|o| o.name == "f").unwrap();
+        let hir::OperatorKind::ReadOnly { value, .. } = &f.kind else {
+            panic!("a read-only operator");
         };
-        assert!(x.tuples.is_empty());
-        assert_eq!(x.heading.attributes().count(), 2);
+        assert!(matches!(value.guarded(), Some(hir::Expr::If(..))));
     }
 
     #[test]
