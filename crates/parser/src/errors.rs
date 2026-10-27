@@ -14,6 +14,7 @@ pub(crate) const ARRAY_VALUE_FORM: &str = "an array value has the form `array [e
 pub(crate) const PROJECTION_FORM: &str =
     "a projection and `remove` take attribute names: `r{a, b}`, `r remove {a, b}`";
 pub(crate) const NARY_FORM: &str = "`{}` encloses what can be in any order, and `[]` what can't: `join{r, s, t}` and `times{r, s, t}` can be in any order, while `compose[r, s, t]` is `(r compose s) compose t`";
+pub(crate) const CONNECTIVE_FORM: &str = "`and{a, b, c}`, `or{a, b, c}` and `xor{a, b, c}` take any number of booleans, in braces, as their order doesn't matter, and are true when every one is, when one is, and when an odd number are";
 pub(crate) const EXTEND_FORM: &str = "`extend` takes new attributes, each `name := value`, where the value is computed from the tuple's own attributes: `r extend { total := price * quantity }`";
 pub(crate) const REPLACE_FORM: &str = "`replace` takes attributes the operand has, each `name := value`, where the new value is computed from the tuple's own attributes: `r replace { price := price * 2 }`";
 pub(crate) const IMAGE_FORM: &str = "in an `extend`'s or a `replace`'s values, `!!r` is the tuples of `r` that match the tuple at hand on their common attributes, without those attributes; `r` is a name, or an expression in parentheses";
@@ -1494,6 +1495,60 @@ pub(crate) fn foreign_operator_used(
         vec![Edit {
             span: found.span,
             replacement: spaced(spelled, neighbors),
+        }],
+    )
+}
+
+/// Python's `all` or `any`, `found`, of a list, which trendy writes as a
+/// list of `keyword`: `and{a, b}` or `or{a, b}`. `fix` is where the list
+/// opens, from the name, and where it closes, if it does.
+pub(crate) fn listed_booleans(
+    found: Found,
+    keyword: SyntaxKind,
+    fix: Option<(Span, Span)>,
+) -> Diagnostic {
+    let spelled = keyword.fixed_text().expect("keywords have fixed text");
+    let d = Diagnostic::error(
+        Code::ForeignOperator,
+        format!("`{}` is not an operator; write `{spelled}{{…}}`", found.text),
+        found.span,
+        format!("trendy writes this `{spelled}{{…}}`"),
+    )
+    .with_note("`and{a, b, c}` is true when every operand is, and `or{a, b, c}` when one is; of a relation's tuples, `every{r: r, of: c}` says whether `c` is true of every one, and `some{r: r, of: c}` whether it is of one");
+    match fix {
+        Some((open, close)) => d.with_suggestion(
+            format!("write `{spelled}{{…}}`"),
+            vec![
+                Edit {
+                    span: open,
+                    replacement: format!("{spelled}{{"),
+                },
+                Edit {
+                    span: close,
+                    replacement: "}".to_string(),
+                },
+            ],
+        ),
+        None => d,
+    }
+}
+
+/// An operand of a list, such as `and{…}`, written with a name, `name:`
+/// at `span`, as a call's argument is. The fix removes `removed`, the name
+/// up to the value.
+pub(crate) fn named_operand(span: Span, removed: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::NamedOperand,
+        "a list's operands have no names",
+        span,
+        "a name",
+    )
+    .with_note("a list's operands are values, as in `and{a, b}` and `join{r, s}`, while a call's arguments are named, as in `count{r: r}`, since they are a tuple of the operator's parameters")
+    .with_suggestion(
+        "remove the name",
+        vec![Edit {
+            span: removed,
+            replacement: String::new(),
         }],
     )
 }

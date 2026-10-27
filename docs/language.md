@@ -1920,19 +1920,32 @@ operator main{} [
 | `a or b` | `true` when either is `true`, or both |
 | `a xor b` | `true` when exactly one is `true` |
 | `a implies b` | `false` only when `a` is `true` and `b` is `false`: the same as `not a or b` |
+| `and{a, b, c}` | `true` when every one is `true` |
+| `or{a, b, c}` | `true` when one is `true` |
+| `xor{a, b, c}` | `true` when an odd number are `true` |
 
 The operands must be booleans: there is no truthiness, so `not 0` and
 `"" or true` are errors.
 
+- **Lists:** `and{…}`, `or{…}` and `xor{…}` take any number of
+  operands, in braces, since their order doesn't matter, as Tutorial D's
+  `AND {…}`, `OR {…}` and `XOR {…}` do (TTM, chapter 5): `and{a, b, c}`
+  is `a and b and c`. Of one operand, each is that operand, and of none,
+  `and{}` is `true`, and `or{}` and `xor{}` are `false`, which leave a
+  result as the other operands make it. An operand written twice counts
+  once in `and{…}` and `or{…}`, but twice in `xor{…}`, so that it is the
+  chain of `xor`s, as TTM's exercise 5.6 justifies its definition, though
+  Tutorial D's braces would count it once: `xor{a, a}` is `false`. The
+  operands have no names, as a call's arguments do (P0037).
 - **An operand that can't fail guards those that can.** In a chain of
-  `and`s, `a and b and c`, however it is grouped, the operands that can't
-  fail are computed first, and if one is `false`, the result is `false`
-  and the others aren't computed; otherwise every one that can fail is.
-  `or` is the same with `true`, and `implies` is `not a or b`. So
-  `y div x > 1 and x <> 0` never divides by zero, wherever the guard is
-  written, unlike in languages that guard only from the left, or SQL,
-  which doesn't say. As nothing depends on which operand runs first, an
-  optimizer can choose.
+  `and`s, `a and b and c`, however it is grouped, or `and{a, b, c}`, the
+  operands that can't fail are computed first, and if one is `false`,
+  the result is `false` and the others aren't computed; otherwise every
+  one that can fail is. `or` is the same with `true`, and `implies` is
+  `not a or b`. So `y div x > 1 and x <> 0` never divides by zero,
+  wherever the guard is written, unlike in languages that guard only from
+  the left, or SQL, which doesn't say. As nothing depends on which
+  operand runs first, an optimizer can choose.
 - **An expression can fail** if it does arithmetic, `+`, `-`, `*`, `/`,
   `div`, `mod` or a prefix `-` of an integer, which can overflow or divide
   by zero; joins texts, `||`, or builds, changes, combines or loads a
@@ -1956,10 +1969,12 @@ var a := true;
 var b := not a or a and false;
 var c := (a or b) and not b;
 var d := a implies b implies c;
+var e := or{a, b, not c};
 
 operator check{p: boolean, q: boolean} [
     call debug_value{v: p xor q};
     call debug_value{v: not (p and q)};
+    call debug_value{v: xor{p, q, true}};
 ];
 
 operator main{} [
@@ -3002,7 +3017,7 @@ operator main{} [
   like the joins, while `union` is an OR and binds more loosely, as `or`
   does than `and`: `r union s join t` is `r union (s join t)`. `xunion`
   binds as `union` does. `xunion{r, s, t}` is the tuples of an odd number
-  of them, as a chain of `xor`s is true of an odd number of operands. SQL reads
+  of them, as `xor{a, b, c}` is true of an odd number of operands. SQL reads
   set operators from the left, so `r union s minus t`, which the algebra
   would read as `r union (s minus t)`, needs parentheses (P0022).
 - **Lists:** `union{…}`, `xunion{…}` and `intersect{…}` in braces, since
@@ -3429,6 +3444,8 @@ line after a comment on its own line, such as a file's header, is kept.
 | `"a" + "b"`, `concat("a", "b")` | `"a" \|\| "b"` |
 | `a ^ b`, `a != b` for booleans | `a xor b` |
 | `a -> b`, `a => b` | `a implies b` |
+| `AND { a, b, c }`, Python's `all([a, b, c])` | `and{a, b, c}` |
+| Python's `any([a, b, c])` | `or{a, b, c}` |
 | `AND`, `Or`, `NOT` | `and`, `or`, `not` |
 | `a == b`, `a != b` | `a = b`, `a <> b` |
 | `a < b < c` | `a < b and b < c` |

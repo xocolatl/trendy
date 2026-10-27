@@ -2,10 +2,15 @@ var u := t or false;
 var t := not f;
 var f: boolean;
 var chain := f implies f implies f;
+/* Lists of any number of operands, in braces, as their order doesn't
+   matter: whether every one is true, and whether an odd number are. */
+var every_one := and{t, u, not f};
+var odd := xor{t, u, f};
 /* Guards: of the operands of `and`, `or` and `implies`, those that can't
    fail are computed first, wherever they are written, and those that can
-   only if they don't decide the result. So nothing here divides by zero:
-   when compiling, `steep`, and when running, `guards`. */
+   only if they don't decide the result, in a list as in a chain. So
+   nothing here divides by zero: when compiling, `steep`, and when
+   running, `guards`. */
 var points := relation {
     { x: 0, y: 5 },
     { x: 2, y: 6 },
@@ -22,6 +27,7 @@ operator guards{r: relation { x: integer, y: integer }, zero: integer} [
     call debug_table{r: r where x <> zero implies y div x > 1};
     call debug_value{v: steep_at{x: zero, y: 5}};
     call debug_value{v: zero = 0 or 1 div zero = 1};
+    call debug_value{v: and{5 div zero > 1, zero <> 0}};
 ];
 
 operator table{a: boolean, b: boolean} [
@@ -30,11 +36,14 @@ operator table{a: boolean, b: boolean} [
     call debug_value{v: a or b};
     call debug_value{v: a xor b};
     call debug_value{v: a implies b};
+    call debug_value{v: xor{a, b, true}};
 ];
 
 operator main{} [
     call debug_value{v: u};
     call debug_value{v: chain};
+    call debug_value{v: every_one};
+    call debug_value{v: odd};
     call table{a: false, b: false};
     call table{a: false, b: true};
     call table{a: true, b: false};

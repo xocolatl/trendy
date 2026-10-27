@@ -197,12 +197,20 @@ an error node the same way, with no fix. The list of an `extend`, a
 finished tree (`sequences`) reports it: its items apply all at once, so
 the fix for an order asked for with brackets is a chain of the operator,
 not braces, which would change the meaning. A relation selector's elements are any expressions, a bare `{` or `tuple`
-starting a tuple selector, as Tutorial D's take any tuple expressions. A join of a list, `join{r, s, t}`, `times{…}` or
+starting a tuple selector, as Tutorial D's take any tuple expressions. An
+operator of a list, such as `join{r, s, t}`, `union{…}`, `and{a, b, c}` or
 `compose[…]`, is an operand (`NaryExpr`), recognized where an operand
 starts by the keyword followed by `{`, `[` or `(`. Braces enclose what can
-be in any order and brackets what can't, so join's and times's operands
+be in any order and brackets what can't, so join's and `and`'s operands
 go in braces, and compose's in brackets; the others are fixed to them
-(P0003).
+(P0003). An operand written with a name, `x: r`, as a call's argument is,
+is reported, with a fix removing the name (P0037). A list ends where no
+operand can start, as every list does: one whose item takes no token
+leaves that token to what encloses it. Python's `all([a, b])` and
+`any([a, b])`, the list in brackets or parentheses, are parsed as the
+`and{…}` and `or{…}` they mean and fixed to them (P0014); in braces,
+`any{a, b}` is a projection, and sema fixes it when no value has the
+name.
 
 `extend` and `replace`, like `remove` and `rename`, are postfix, and take a
 list of attribute assignments, each `name := value` (`Assign`), new
@@ -783,7 +791,9 @@ HIR's constructors make it (`hir::Connective::of`, `hir::Expr::negated`,
 it, when a type parameter becomes a boolean or another scalar:
 
 - **A chain is one connective,** however it is grouped, so no `and` is
-  an operand of an `and`. `a implies b` is `not a or b` (`ops::Resolved`).
+  an operand of an `and`, and `and{a, b, c}` is `a and b and c`.
+  `a implies b` is `not a or b` (`ops::Resolved`). Sema checks every
+  connective, a list or two operands, in `Checker::connective`.
   Of booleans, `a <> b` is `a xor b`, and `a = b` is `not (a xor b)`,
   so that `(a = b) xor c` is `not (a xor b xor c)`, and `a = true` is
   `a`.

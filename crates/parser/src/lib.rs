@@ -3627,6 +3627,8 @@ impl<'a> Parser<'a> {
             self.builder.finish_node();
         } else if let Some((found, keyword)) = self.at_nary() {
             self.nary(found, keyword);
+        } else if let Some((found, keyword)) = self.at_listed_booleans() {
+            self.listed_booleans(found, keyword);
         } else if self.at_keyword(SyntaxKind::RelationKw) {
             self.relation_literal();
         } else if self.at_value_block() {
@@ -3665,10 +3667,12 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// A join of any number of operands at the next token, if there is one:
-    /// `join`, `times` or `compose`, in any case, followed by its operands
-    /// in braces or brackets, or in parentheses as a call elsewhere is
-    /// written. The token, and the keyword it is or stands for.
+    /// An operator of any number of operands at the next token, if there is
+    /// one: a join, such as `join` or `compose`, a set operator, such as
+    /// `union` or `minus`, or `and`, `or` or `xor`, in any case, followed by
+    /// its operands in braces or brackets, or in parentheses as a call
+    /// elsewhere is written. The token, and the keyword it is or stands
+    /// for.
     fn at_nary(&mut self) -> Option<(Found<'a>, SyntaxKind)> {
         let found = self.found()?;
         let keyword = match found.kind {
@@ -3693,16 +3697,28 @@ impl<'a> Parser<'a> {
                 | SyntaxKind::IntersectKw
                 | SyntaxKind::MinusKw
                 | SyntaxKind::IMinusKw
+                | SyntaxKind::AndKw
+                | SyntaxKind::OrKw
+                | SyntaxKind::XorKw
         );
         (nary && list).then_some((found, keyword))
     }
 
     /// `join{r, s, t}`, `times{…}`, `union{…}`, `intersect{…}`,
-    /// `compose[r, s, t]` or `minus[…]`: the keyword, found as `found`, and
-    /// the operands. Braces enclose what can be in any order, and brackets
-    /// what can't, the left folds, so the others are fixed to them.
+    /// `and{a, b, c}`, `or{…}`, `xor{…}`, `compose[r, s, t]` or `minus[…]`:
+    /// the keyword, found as `found`, and the operands. Braces enclose what
+    /// can be in any order, and brackets what can't, the left folds, so the
+    /// others are fixed to them.
     fn nary(&mut self, found: Found<'a>, keyword: SyntaxKind) {
-        let outer_form = std::mem::replace(&mut self.form, errors::NARY_FORM);
+        let form = if matches!(
+            keyword,
+            SyntaxKind::AndKw | SyntaxKind::OrKw | SyntaxKind::XorKw
+        ) {
+            errors::CONNECTIVE_FORM
+        } else {
+            errors::NARY_FORM
+        };
+        let outer_form = std::mem::replace(&mut self.form, form);
         self.start_node(SyntaxKind::NaryExpr);
         self.operator_token(found, keyword);
         let braces = (SyntaxKind::LBrace, SyntaxKind::RBrace);
@@ -3718,10 +3734,88 @@ impl<'a> Parser<'a> {
             (braces, [brackets, parens])
         };
         self.delimited(None, "operands", delims, &mistakes, |p| {
-            p.items(Self::at_operand, Self::expression);
+            p.items(Self::at_operand, Self::listed_operand);
         });
         self.builder.finish_node();
         self.form = outer_form;
+    }
+
+    /// Python's `all([a, b])` or `any([a, b])` at the next token, its list
+    /// in brackets or parentheses, if it is there: the name, and the
+    /// keyword trendy writes it with, `and` or `or`.
+    fn at_listed_booleans(&mut self) -> Option<(Found<'a>, SyntaxKind)> {
+        let found = self.found().filter(|f| f.kind == SyntaxKind::Ident)?;
+        let keyword = match found.text {
+            "all" => SyntaxKind::AndKw,
+            "any" => SyntaxKind::OrKw,
+            _ => return None,
+        };
+        let listed = self.paren_calls
+            && self
+                .found_after(1)
+                .is_some_and(|f| f.kind == SyntaxKind::LParen)
+            && self
+                .found_after(2)
+                .is_some_and(|f| matches!(f.kind, SyntaxKind::LBracket | SyntaxKind::LParen));
+        listed.then_some((found, keyword))
+    }
+
+    /// `all([a, b])` or `any([a, b])`, at [`Parser::at_listed_booleans`]:
+    /// the name, found as `found`, and the operands, kept as the list of
+    /// `keyword` they mean, `and{a, b}` or `or{a, b}`, which the fix writes.
+    fn listed_booleans(&mut self, found: Found<'a>, keyword: SyntaxKind) {
+        let outer_form = std::mem::replace(&mut self.form, errors::CONNECTIVE_FORM);
+        self.start_node(SyntaxKind::NaryExpr);
+        self.bump();
+        self.bump();
+        let close = if self.at(SyntaxKind::LBracket) {
+            SyntaxKind::RBracket
+        } else {
+            SyntaxKind::RParen
+        };
+        let list_open = self.bump();
+        self.items(Self::at_operand, Self::listed_operand);
+        let list_close = self.at(close).then(|| self.bump());
+        if list_close.is_none() {
+            self.missing(close);
+        }
+        let call_close = self.at(SyntaxKind::RParen).then(|| self.bump());
+        if call_close.is_none() {
+            self.missing(SyntaxKind::RParen);
+        }
+        self.builder.finish_node();
+        // Where the list opens, from the name, and where it closes.
+        let fix = list_close.zip(call_close).map(|(list, call)| {
+            (
+                Span::new(found.span.start, list_open.end),
+                Span::new(list.start, call.end),
+            )
+        });
+        self.errors
+            .push(errors::listed_booleans(found, keyword, fix));
+        self.form = outer_form;
+    }
+
+    /// An operand in a list, such as `join{r, s}`: a value. One written
+    /// with a name, `x: r`, as a call's argument is, is reported, with the
+    /// fix removing the name.
+    fn listed_operand(&mut self) {
+        if let Some(name) = self.found().filter(|f| f.kind == SyntaxKind::Ident)
+            && self
+                .found_after(1)
+                .is_some_and(|f| f.kind == SyntaxKind::Colon)
+        {
+            self.start_node(SyntaxKind::Error);
+            self.bump();
+            let colon = self.bump();
+            self.builder.finish_node();
+            let value = self.found().map_or(colon.end, |f| f.span.start);
+            self.errors.push(errors::named_operand(
+                Span::new(name.span.start, colon.end),
+                Span::new(name.span.start, value),
+            ));
+        }
+        self.expression();
     }
 
     /// Whether an operand can start at the next token, in a list of them.
@@ -3908,7 +4002,13 @@ impl<'a> Parser<'a> {
     /// says whether an item starts at the next token, and `item` parses one.
     fn items(&mut self, starts_item: fn(&mut Self) -> bool, item: impl Fn(&mut Self)) {
         while starts_item(self) {
+            let before = self.last_end;
             item(self);
+            // An item that took no token, as no value starts at `:`, leaves
+            // it to what encloses the list.
+            if self.last_end == before {
+                break;
+            }
             if self.at(SyntaxKind::Comma) {
                 self.bump();
             } else if starts_item(self) {
@@ -6274,6 +6374,40 @@ SourceFile
         assert_eq!(fix("var x := compose{a, b};"), "var x := compose[a, b];");
         assert_eq!(fix("var x := join[a, b];"), "var x := join{a, b};");
         assert_eq!(fix("var x := compose(a, b);"), "var x := compose[a, b];");
+    }
+
+    #[test]
+    fn connectives_of_lists() {
+        assert_eq!(shape("and{a, b, c}"), "and{a, b, c}");
+        assert_eq!(shape("not or{a, b} and c"), "((not or{a, b}) and c)");
+        assert_eq!(shape("a or xor{b, c}"), "(a or xor{b, c})");
+        assert_eq!(shape("and{}"), "and{}");
+        // Tutorial D's capitals, Haskell's `and [a, b]` and a call's
+        // parentheses.
+        assert_eq!(fix("var x := AND { a, b };"), "var x := and { a, b };");
+        assert_eq!(fix("var x := or [a, b];"), "var x := or {a, b};");
+        assert_eq!(fix("var x := xor(a, b);"), "var x := xor{a, b};");
+        // Python's `all` and `any` of a list.
+        assert_eq!(fix("var x := all([a, b]);"), "var x := and{a, b};");
+        assert_eq!(fix("var x := any( (a, b) );"), "var x := or{a, b};");
+        assert_eq!(
+            messages("var x := all([a, b);"),
+            [
+                "`all` is not an operator; write `and{…}`",
+                "expected `]`, found `)`"
+            ]
+        );
+        // An operand has no name, as an argument does.
+        assert_eq!(fix("var x := and{p: a, q: b};"), "var x := and{a, b};");
+        assert_eq!(fix("var x := join{r: a};"), "var x := join{a};");
+        // A list ends where no operand can start.
+        assert_eq!(
+            messages("var x := and{:};"),
+            [
+                "expected value, found `:`",
+                "expected a definition, found `:`"
+            ]
+        );
     }
 
     #[test]

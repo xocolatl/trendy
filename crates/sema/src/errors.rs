@@ -1447,6 +1447,27 @@ pub(crate) fn miscased_array(name: &str, span: Span) -> Diagnostic {
     )
 }
 
+/// The value `name`, Python's `all` or `any`, at `span`, which refers to
+/// nothing, projected, as a list of booleans is written: `any{a, b}`,
+/// which trendy writes `or{a, b}`.
+pub(crate) fn listed_booleans(name: &str, span: Span) -> Diagnostic {
+    let keyword = if name == "all" { "and" } else { "or" };
+    Diagnostic::error(
+        Code::UnknownName,
+        format!("unknown value `{name}`"),
+        span,
+        "not defined",
+    )
+    .with_note("`and{a, b, c}` is true when every operand is, and `or{a, b, c}` when one is")
+    .with_suggestion(
+        format!("for a list of booleans, write `{keyword}`"),
+        vec![Edit {
+            span,
+            replacement: keyword.to_string(),
+        }],
+    )
+}
+
 /// An operator `name`, at `span`, that refers to nothing, called with
 /// `written` arguments, if known, of which one is an array if `of_array`
 /// says so. `operators` are those in scope, each with its parameters'

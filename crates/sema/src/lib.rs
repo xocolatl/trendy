@@ -3803,7 +3803,7 @@ mod tests {
     fn guards_decide_which_operands_are_computed() {
         // A constant that decides the result: the other isn't computed.
         let vars = variables(
-            "var a := false and 1 div 0 = 1;\nvar b := 1 div 0 = 1 and false;\nvar c := true or 1 div 0 = 1;\nvar d := false implies 1 div 0 = 1;\nvar e := 1 div 0 = 1 implies true;\nvar points := relation { { x: 0, y: 5 }, { x: 2, y: 6 } };\nvar steep := points where y div x > 1 and x <> 0;\nvar expected := relation { { x: 2, y: 6 } };",
+            "var a := false and 1 div 0 = 1;\nvar b := 1 div 0 = 1 and false;\nvar c := true or 1 div 0 = 1;\nvar d := false implies 1 div 0 = 1;\nvar e := 1 div 0 = 1 implies true;\nvar g := and{1 div 0 = 1, true, false};\nvar h := or{1 div 0 = 1, 1 div 0 = 2, true};\nvar points := relation { { x: 0, y: 5 }, { x: 2, y: 6 } };\nvar steep := points where y div x > 1 and x <> 0;\nvar expected := relation { { x: 2, y: 6 } };",
         );
         let value = |name: &str| &vars.iter().find(|v| v.name == name).unwrap().init;
         for (name, result) in [
@@ -3812,6 +3812,8 @@ mod tests {
             ("c", true),
             ("d", true),
             ("e", true),
+            ("g", false),
+            ("h", true),
         ] {
             assert_eq!(value(name), &hir::Value::Boolean(result), "{name}");
         }
@@ -3821,6 +3823,7 @@ mod tests {
         // one known only when running leaves one known to fail an error.
         for source in [
             "var f := true and 1 div 0 = 1;{MAIN}".to_string(),
+            "var f := xor{false, 1 div 0 = 1};{MAIN}".to_string(),
             "operator f{x: integer}: boolean [ x <> 0 and 1 div 0 = 1 ];{MAIN}".to_string(),
         ] {
             assert_eq!(
@@ -3891,6 +3894,16 @@ mod tests {
             ("a = false", "not a"),
             ("(a = b) xor c", "not (a xor b xor c)"),
             ("(a xor b) = c", "not (a xor b xor c)"),
+            // A list is the chain of its operands, and of none, its
+            // operator's identity.
+            ("and{a, b, c}", "a and b and c"),
+            ("or{a, or{b, c}, a}", "a or b or c"),
+            ("xor{a, b, a}", "b"),
+            ("and{a}", "a"),
+            ("and{}", "true"),
+            ("or{}", "false"),
+            ("xor{}", "false"),
+            ("not and{a, x < y}", "not a or x >= y"),
         ] {
             assert_eq!(value(written), value(normal), "{written}");
         }
@@ -6275,6 +6288,24 @@ mod tests {
             assert_eq!(fix(&source), fixed_source, "{written}");
             assert!(analyze_str(&fixed_source).is_ok(), "{fixed}");
         }
+    }
+
+    #[test]
+    fn pythons_all_and_any_are_fixed() {
+        // With a list's braces; in parentheses, the parser fixes them.
+        for (written, fixed) in [("all{t, f}", "and{t, f}"), ("any{t, f}", "or{t, f}")] {
+            let source = format!("var t := true;\nvar f := false;\nvar x := {written};{MAIN}");
+            let fixed_source = source.replace(written, fixed);
+            assert_eq!(fix(&source), fixed_source, "{written}");
+            assert!(analyze_str(&fixed_source).is_ok(), "{fixed}");
+        }
+        // A relation of that name is projected as any other.
+        assert!(
+            analyze_str(&format!(
+                "var all := relation {{ {{ t: 1 }} }};\nvar x := all{{t}};{MAIN}"
+            ))
+            .is_ok()
+        );
     }
 
     #[test]

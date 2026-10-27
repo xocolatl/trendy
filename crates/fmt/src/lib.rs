@@ -338,8 +338,8 @@ fn chain_top(node: &SyntaxNode) -> SyntaxNode {
 
 /// Whether `node` is a list that can be broken across lines, one item per
 /// line: parameters, arguments, headings, tuple and relation values, lists
-/// of names, new attributes, the operands of `join{…}` and `times{…}`, and
-/// a load's order.
+/// of names, new attributes, the operands of `join{…}`, `and{…}` and the
+/// like, and a load's order.
 fn is_list(node: &SyntaxNode) -> bool {
     matches!(
         node.kind(),
@@ -1589,10 +1589,14 @@ mod tests {
     }
 
     #[test]
-    fn joins_of_lists() {
+    fn lists_of_operands() {
         assert_eq!(
             fmt("var a:=join { b,c{x} ,times{d,e} }join f;"),
             "var a := join{b, c{x}, times{d, e}} join f;\n"
+        );
+        assert_eq!(
+            fmt("var a:=and { b,c } or xor{ b , not c};"),
+            "var a := and{b, c} or xor{b, not c};\n"
         );
         assert_eq!(
             fmt("var a := compose [ b,c ,d ];"),

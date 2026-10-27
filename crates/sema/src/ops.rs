@@ -57,7 +57,7 @@ pub(crate) enum Resolved {
     Binary(hir::BinaryOp),
     /// `and`, `or` or `xor`, or another that is one of them of its
     /// operands, the left one negated if `not_left`: `a implies b` is `not
-    /// a or b`, and `a <> b`, of booleans, is `a xor b`.
+    /// a or b`.
     Connective {
         connective: hir::Connective,
         not_left: bool,
@@ -92,6 +92,15 @@ impl Operator {
             (SyntaxKind::GtEq, _) => Operator::Compare(hir::Comparison::GreaterOrEqual),
             _ => return None,
         })
+    }
+
+    /// Whether the operator is a connective of booleans: `and`, `or`,
+    /// `xor` or `implies`.
+    fn is_connective(self) -> bool {
+        matches!(
+            self,
+            Operator::And | Operator::Or | Operator::Xor | Operator::Implies
+        )
     }
 
     pub(crate) fn is_prefix(self) -> bool {
@@ -723,6 +732,27 @@ impl JoinKind {
             JoinKind::Minus => "minus",
             JoinKind::IncludedMinus => "i_minus",
         }
+    }
+}
+
+/// A connective as written: dyadic, `a and b`, or of a list, `and{a, b, c}`.
+pub(crate) struct Connecting {
+    pub(crate) token: SyntaxToken,
+    /// The operands, each of which may be missing from a dyadic one.
+    pub(crate) operands: Vec<Option<Expr>>,
+}
+
+impl Connecting {
+    /// The connective `expr` is, if it is one.
+    pub(crate) fn of(expr: &Expr) -> Option<Connecting> {
+        let (token, operands) = match expr {
+            Expr::Binary(binary) => (binary.operator()?, vec![binary.lhs(), binary.rhs()]),
+            Expr::Nary(nary) => (nary.operator()?, nary.operands().map(Some).collect()),
+            _ => return None,
+        };
+        Operator::of(&token)?
+            .is_connective()
+            .then_some(Connecting { token, operands })
     }
 }
 
@@ -2640,31 +2670,6 @@ pub(crate) fn unary(op: hir::UnaryOp, operand: hir::Expr) -> Result<hir::Expr, h
         ) => *inner,
         (op, operand) => hir::Expr::Unary(op, Box::new(operand)),
     })
-}
-
-/// `lhs op rhs`, for `op` a dyadic operator, simplified as [`binary`]
-/// simplifies it, or, for a connective, in normal form (see
-/// `hir::Connective::of`).
-///
-/// # Errors
-///
-/// Returns why the result can't exist, as [`binary`] does.
-pub(crate) fn dyadic(
-    op: Resolved,
-    lhs: hir::Expr,
-    rhs: hir::Expr,
-) -> Result<hir::Expr, hir::Failure> {
-    match op {
-        Resolved::Binary(op) => binary(op, lhs, rhs),
-        Resolved::Connective {
-            connective,
-            not_left,
-        } => {
-            let lhs = if not_left { lhs.negated() } else { lhs };
-            Ok(connective.of(vec![lhs, rhs]))
-        }
-        Resolved::Identity | Resolved::Unary(_) => unreachable!("a monadic operator"),
-    }
 }
 
 /// An operand of a dyadic operator.

@@ -268,15 +268,8 @@ impl<'a> Checker<'a> {
             {
                 self.restricted(binary, expr, expected, errors)
             }
-            Expr::Binary(binary)
-                if binary
-                    .operator()
-                    .and_then(|t| Operator::of(&t))
-                    .is_some_and(|op| {
-                        matches!(op, Operator::And | Operator::Or | Operator::Implies)
-                    }) =>
-            {
-                self.connective(binary, expr, expected, errors)
+            Expr::Binary(_) | Expr::Nary(_) if ops::Connecting::of(expr).is_some() => {
+                self.connective(expr, expected, errors)
             }
             Expr::Binary(_) | Expr::Nary(_) if ops::Joining::of(expr).is_some() => {
                 self.joined(expr, expected, errors)
@@ -290,8 +283,11 @@ impl<'a> Checker<'a> {
                 let Ok([lhs, rhs]) = <[hir::Expr; 2]>::try_from(operands) else {
                     return None;
                 };
+                let Resolved::Binary(op) = resolved else {
+                    unreachable!("a connective, which `Checker::connective` checks");
+                };
                 types::evaluated(
-                    ops::dyadic(resolved, lhs, rhs),
+                    ops::binary(op, lhs, rhs),
                     expr,
                     binary.rhs().as_ref(),
                     errors,
@@ -445,6 +441,11 @@ impl<'a> Checker<'a> {
             // `ARRAY[1]`, as SQL writes an array of one element.
             Lookup::Unknown if name.eq_ignore_ascii_case("array") && indexed(name_ref) => {
                 errors.push(errors::miscased_array(name, span));
+                None
+            }
+            // `any{a, b}`: Python's `any` or `all` with a list's braces.
+            Lookup::Unknown if matches!(name, "all" | "any") && projected(name_ref) => {
+                errors.push(errors::listed_booleans(name, span));
                 None
             }
             Lookup::Unknown => {
@@ -1432,36 +1433,33 @@ impl<'a> Checker<'a> {
         self.matched(expected, result, expr, errors)
     }
 
-    /// `binary`, an `and`, an `or` or an `implies`, written `expr`, each
-    /// operand checked as a boolean with its own errors. Where an operand
-    /// is known when compiling and decides the result, the other isn't
-    /// computed (see `hir::Connective::And`), so its failures aren't
-    /// reported, as for an `if`'s branch not taken; otherwise one known to
-    /// fail is an error, since it fails whenever it is computed.
+    /// An `and`, an `or`, an `xor` or an `implies`, written `expr`, each
+    /// operand checked as a boolean with its own errors: two, or, of a list
+    /// such as `and{a, b, c}`, any number. Where an operand is known when
+    /// compiling and decides the result, the others aren't computed (see
+    /// `hir::Connective::And`), so their failures aren't reported, as for
+    /// an `if`'s branch not taken; otherwise one known to fail is an error,
+    /// since it fails whenever it is computed.
     fn connective(
         &mut self,
-        binary: &ast::BinaryExpr,
         expr: &Expr,
         expected: Option<&Expected>,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Expr> {
-        let token = binary.operator()?;
+        let ops::Connecting { token, operands } = ops::Connecting::of(expr)?;
         let boolean = hir::Type::Scalar(hir::Scalar::Boolean);
-        let resolved = Operator::of(&token)?.resolve(&boolean);
-        let Some(
-            resolved @ Resolved::Connective {
-                connective,
-                not_left,
-            },
-        ) = resolved
+        let Some(Resolved::Connective {
+            connective,
+            not_left,
+        }) = Operator::of(&token)?.resolve(&boolean)
         else {
-            unreachable!("`and`, `or` and `implies` are connectives of booleans");
+            unreachable!("`and`, `or`, `xor` and `implies` are connectives of booleans");
         };
         let operand_expected = Expected {
             ty: boolean.clone(),
             origin: types::Origin::Operator(token),
         };
-        let checked: Vec<(Option<hir::Expr>, Vec<Diagnostic>)> = [binary.lhs(), binary.rhs()]
+        let checked: Vec<(Option<hir::Expr>, Vec<Diagnostic>)> = operands
             .into_iter()
             .map(|operand| {
                 let mut own = Vec::new();
@@ -1469,20 +1467,22 @@ impl<'a> Checker<'a> {
                 (out, own)
             })
             .collect();
-        // The result, if a constant operand decides it, and the other
-        // operand, which then isn't computed.
-        let decided = (0..2).find_map(|i| match checked[i].0 {
-            Some(hir::Expr::Constant(hir::Value::Boolean(value))) => {
-                let negated = i == 0 && not_left;
-                Some((connective.decided(value != negated)?, 1 - i))
-            }
-            _ => None,
-        });
-        let skipped = decided.map(|(_, i)| i);
+        // The result, if a constant operand decides it, and that operand:
+        // the others then aren't computed.
+        let decided = checked
+            .iter()
+            .enumerate()
+            .find_map(|(i, (out, _))| match out {
+                Some(hir::Expr::Constant(hir::Value::Boolean(value))) => {
+                    let negated = i == 0 && not_left;
+                    Some((connective.decided(*value != negated)?, i))
+                }
+                _ => None,
+            });
         let mut ok = true;
         let mut operands = Vec::new();
         for (i, (out, own)) in checked.into_iter().enumerate() {
-            if skipped == Some(i) {
+            if decided.is_some_and(|(_, decider)| decider != i) {
                 let before = errors.len();
                 errors.extend(own.into_iter().filter(|d| d.code.kind() != CodeKind::Run));
                 ok &= out.is_some() || errors.len() == before;
@@ -1499,15 +1499,12 @@ impl<'a> Checker<'a> {
         if let Some((result, _)) = decided {
             return Some(hir::Expr::Constant(hir::Value::Boolean(result)));
         }
-        let [Some(lhs), Some(rhs)] = <[Option<hir::Expr>; 2]>::try_from(operands).ok()? else {
-            return None;
-        };
-        types::evaluated(
-            ops::dyadic(resolved, lhs, rhs),
-            expr,
-            binary.rhs().as_ref(),
-            errors,
-        )
+        let operands = operands
+            .into_iter()
+            .enumerate()
+            .map(|(i, operand)| operand.map(|o| if i == 0 && not_left { o.negated() } else { o }))
+            .collect::<Option<_>>()?;
+        Some(connective.of(operands))
     }
 
     /// `binary`, a `where`, written `expr`: the tuples of its operand, a
@@ -2176,6 +2173,16 @@ impl Unbound<'_> {
             }
         }
     }
+}
+
+/// Whether `name_ref` is the operand of a projection, as in `r{a, b}`.
+fn projected(name_ref: &ast::NameRef) -> bool {
+    name_ref
+        .syntax()
+        .parent()
+        .and_then(ast::ProjectExpr::cast)
+        .and_then(|project| project.operand())
+        .is_some_and(|operand| operand.syntax() == name_ref.syntax())
 }
 
 /// Whether `name_ref` is the operand of an index, as in `a[1]`.

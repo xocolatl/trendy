@@ -375,23 +375,24 @@ fn booleans() {
     let (code, stderr) = run_example("booleans");
     assert_eq!(code, 0);
     let lines: Vec<&str> = stderr.lines().collect();
-    // `u` and `chain`, evaluated when compiling.
-    assert_eq!(lines[..2], ["true", "true"]);
-    // Each row: `not a`, `a and b`, `a or b`, `a xor b`, `a implies b`.
-    let rows: Vec<_> = lines[2..22].chunks(5).collect();
+    // `u`, `chain`, `every_one` and `odd`, evaluated when compiling.
+    assert_eq!(lines[..4], ["true", "true", "true", "false"]);
+    // Each row: `not a`, `a and b`, `a or b`, `a xor b`, `a implies b`,
+    // `xor{a, b, true}`.
+    let rows: Vec<_> = lines[4..28].chunks(6).collect();
     assert_eq!(
         rows,
         [
-            ["true", "false", "false", "false", "true"],
-            ["true", "false", "true", "true", "true"],
-            ["false", "false", "true", "true", "false"],
-            ["false", "true", "true", "false", "true"],
+            ["true", "false", "false", "false", "true", "true"],
+            ["true", "false", "true", "true", "true", "false"],
+            ["false", "false", "true", "true", "false", "false"],
+            ["false", "true", "true", "false", "true", "true"],
         ]
     );
-    assert_eq!(lines[22], "false");
+    assert_eq!(lines[28], "false");
     // Guards, wherever they are written: `steep` when compiling, then the
-    // same, `implies`, a call and an `or` when running, with no division
-    // by zero.
+    // same, `implies`, a call, an `or` and an `and{…}` when running, with
+    // no division by zero.
     let steep = [
         "┌───┬───┐",
         "│ x │ y │",
@@ -399,10 +400,10 @@ fn booleans() {
         "│ 2 │ 6 │",
         "└───┴───┘",
     ];
-    assert_eq!(lines[23..28], steep);
-    assert_eq!(lines[28..33], steep);
+    assert_eq!(lines[29..34], steep);
+    assert_eq!(lines[34..39], steep);
     assert_eq!(
-        lines[33..],
+        lines[39..],
         [
             "┌───┬───┐",
             "│ x │ y │",
@@ -412,6 +413,7 @@ fn booleans() {
             "└───┴───┘",
             "false",
             "true",
+            "false",
         ]
     );
 }
