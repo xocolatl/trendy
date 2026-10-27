@@ -351,10 +351,6 @@ impl Functions {
             lir::BinaryOp::And => b.ins().band(lhs, rhs),
             lir::BinaryOp::Or => b.ins().bor(lhs, rhs),
             lir::BinaryOp::Xor => b.ins().bxor(lhs, rhs),
-            lir::BinaryOp::Implies => {
-                let not_lhs = b.ins().bxor_imm_u(lhs, 1);
-                b.ins().bor(not_lhs, rhs)
-            }
             lir::BinaryOp::Add(Integer) => {
                 let sum = b.ins().sadd_overflow(lhs, rhs);
                 checked(self, sum, b)?

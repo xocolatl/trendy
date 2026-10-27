@@ -925,7 +925,7 @@ fn tuples_merged(
     let kept = match (&wheres[..], included.is_empty()) {
         ([], true) => current(),
         // One condition, and nothing else removed: the others.
-        ([condition], true) => restricted(current(), negated(condition.clone()), bindings),
+        ([condition], true) => restricted(current(), condition.clone().negated(), bindings),
         _ => {
             // Only relations named by `i_delete`s are known now, so a
             // conflict found now is between two of those.
@@ -999,11 +999,6 @@ fn shared<'a>(
 fn restricted(operand: hir::Expr, condition: hir::Expr, bindings: ops::Bindings) -> hir::Expr {
     ops::restrict(operand, condition, bindings)
         .unwrap_or_else(|_| unreachable!("a variable's value is known only when running"))
-}
-
-/// `not condition`.
-fn negated(condition: hir::Expr) -> hir::Expr {
-    ops::unary(hir::UnaryOp::Not, condition).unwrap_or_else(|_| unreachable!("`not` never fails"))
 }
 
 /// `lhs` and `rhs`, relations, combined as `combination` says.

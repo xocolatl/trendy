@@ -758,22 +758,62 @@ computed. A constant condition makes the `if` that branch
 not taken (`Checker::branches`), which it still checks; a call evaluated
 when compiling computes only the branch taken (`ops::substitute`).
 
-The other is `and`, `or` and `implies` (`hir::BinaryOp::And`): of the
-operands of a chain of `and`s, those that can't fail
-(`hir::Expr::can_fail`, which is part of the language) are computed
-first, and the others only if none of those is false, and likewise for
-`or` with true. `hir::Expr::guarded` writes such a chain as the `If` it
-means, the guards its condition, which folding (`ops::substitute`) and
-lowering both compute. The checker checks each operand of one with its
-own errors, dropping the failures of one a constant operand decides the
+The other is `and` and `or` (`hir::Connective::And`): of the operands
+of a chain of `and`s, those that can't fail (`hir::Expr::can_fail`,
+which is part of the language) are computed first, and the others only
+if none of those is false, and likewise for `or` with true.
+`hir::Connective::guarded` writes such a chain as the `If` it means, the
+guards its condition, which folding (`ops::substitute`) and lowering
+both compute. The checker checks each operand of one with its own
+errors, dropping the failures of one a constant operand decides the
 result without (`Checker::connective`), as for an `if`'s branch; and a
-constant that decides it is the result, whatever the other operand
-(`ops::binary`). Since a guard can't fail, which runs first changes
+constant that decides it is the result, whatever the others
+(`hir::Connective::of`). Since a guard can't fail, which runs first changes
 nothing, which leaves an optimizer free to order them. Folding
-(`ops::substituted_binary`) and lowering compute the guards from the
-left, each only if those before it don't decide the result
-(`hir::BinaryOp::decided`): as they can't fail, this only saves work, so
-lowering branches past one it computes, never one it only reads.
+(`ops::substituted_connective`) and lowering compute the guards from
+the left, each only if those before it don't decide the result
+(`hir::Connective::decided`): as they can't fail, this only saves work,
+so lowering branches past one it computes, never one it only reads.
+
+`and`, `or` and `xor` are each one `hir::Expr::Connective` of any
+number of operands, as Tutorial D's n-adic `AND`, `OR` and `XOR` are
+(TTM, chapter 5), kept in a normal form that an optimizer can rely on.
+HIR's constructors make it (`hir::Connective::of`, `hir::Expr::negated`,
+`hir::Expr::compared`), so that instantiating a generic operator keeps
+it, when a type parameter becomes a boolean or another scalar:
+
+- **A chain is one connective,** however it is grouped, so no `and` is
+  an operand of an `and`. `a implies b` is `not a or b` (`ops::Resolved`).
+  Of booleans, `a <> b` is `a xor b`, and `a = b` is `not (a xor b)`,
+  so that `(a = b) xor c` is `not (a xor b xor c)`, and `a = true` is
+  `a`.
+- **A `not` goes in as far as it can**, so that the
+  conjuncts at the top are as many as they can be: `not (a and b)` is
+  `not a or not b`, `not not a` is `a`, and `not (a < b)` is `a >= b`,
+  since every scalar type is totally ordered, with no null or NaN
+  (`hir::Comparison::negated`). It stops at a comparison of relations
+  by inclusion, of which neither may include the other, and at an
+  `xor`, out of whose operands it comes: `a xor not b` is `not (a xor
+  b)`. On an `xor` of two, it makes an equality, so `not (a xor b)` is
+  `a = b`, which a join on equal attributes can then be made of, as of
+  any other type, as `not (a <> b)` is `a = b` of every type.
+- **A constant that doesn't decide the result is dropped,** and an
+  operand of an `and` or an `or` written twice is kept once. Two of an
+  `xor`'s that can't fail cancel, as an `xor` counts each operand as
+  often as it is written, which is what a chain of the dyadic one does
+  (TTM's exercise 5.6), unlike its other braces, which are sets.
+- **Nothing is distributed**, so the result is neither conjunctive nor
+  disjunctive normal form. Distributing can make an expression
+  exponentially larger, which is why PostgreSQL's planner gave it up,
+  and it can take an operand from under its guard:
+  `(x <> 0 and 1 div x = 1) or 1 div y = 1` is true for x = 0 and
+  y = 1, but its conjunctive form,
+  `(x <> 0 or 1 div y = 1) and (1 div x = 1 or 1 div y = 1)`, divides
+  by zero. Every rewrite here keeps each operand that can fail under the
+  same guards, and De Morgan's laws do, as they swap `and` and `or`
+  together with false and true.
+
+The operands' order doesn't matter, but they stay in it.
 
 `-` directly before a number literal makes a negative literal, so that the
 smallest integer can be written. Approximate folding and

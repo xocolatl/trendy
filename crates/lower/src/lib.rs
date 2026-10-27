@@ -1224,27 +1224,15 @@ impl<'a> FunctionBuilder<'a> {
             hir::Expr::Current(depth, _) => self.tuples[self.tuples.len() - 1 - depth].clone(),
             hir::Expr::Call(call) => self.read_only_call(call, cx),
             hir::Expr::Extend(operand, _, attributes) => self.extend(expr, operand, attributes, cx),
-            // Of the operands of `and`, `or` and `implies`, those that can
-            // fail are computed only when those that can't don't decide the
-            // result.
-            hir::Expr::Binary(..) if let Some(guarded) = expr.guarded() => self.place(&guarded, cx),
-            // Otherwise, if the right operand can't fail, neither can the
-            // left, and the right is computed only if the left doesn't
-            // decide the result: since it can't fail, that only saves the
-            // work, which is worth a branch unless it is only read.
-            hir::Expr::Binary(
-                op @ (hir::BinaryOp::And | hir::BinaryOp::Or | hir::BinaryOp::Implies),
-                lhs,
-                rhs,
-            ) if !rhs.can_fail() && !is_read(rhs) => {
-                // The result when the left is true and when it is false, if
-                // that decides it.
-                let decided = [true, false].map(|value| {
-                    op.decided(0, value)
-                        .map(|result| hir::Expr::Constant(hir::Value::Boolean(result)))
-                });
-                let branches = decided.each_ref().map(|d| d.as_ref().unwrap_or(rhs));
-                self.conditional(expr, lhs, branches, cx)
+            // Of the operands of `and` and `or`, those that can fail are
+            // computed only when those that can't don't decide the result.
+            hir::Expr::Connective(connective, operands)
+                if let Some(guarded) = connective.guarded(operands) =>
+            {
+                self.place(&guarded, cx)
+            }
+            hir::Expr::Connective(connective, operands) => {
+                self.connective(expr, *connective, operands, cx)
             }
             hir::Expr::Binary(op, lhs, rhs) => {
                 let operand_ty = self.type_of(lhs);
@@ -1288,6 +1276,52 @@ impl<'a> FunctionBuilder<'a> {
             self.end_block(lir::Terminator::Jump(after), next);
         }
         dst
+    }
+
+    /// `expr`, the `connective` of `operands`, all of which can fail or
+    /// none of which can (see [`hir::Connective::guarded`]). Of an `and` or an
+    /// `or` of those that can't, each is computed only if those before it
+    /// don't decide the result: since they can't fail, that only saves
+    /// work, which is worth a branch unless those after it are only read.
+    /// Otherwise every operand is computed.
+    fn connective(
+        &mut self,
+        expr: &hir::Expr,
+        connective: hir::Connective,
+        operands: &[hir::Expr],
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let (first, rest) = operands.split_first().expect("a connective has operands");
+        // The result when the first is true and when it is false, if that
+        // decides it.
+        let decided = [true, false].map(|value| {
+            connective
+                .decided(value)
+                .map(|result| hir::Expr::Constant(hir::Value::Boolean(result)))
+        });
+        if !expr.can_fail() && decided.iter().any(Option::is_some) && !rest.iter().all(is_read) {
+            let rest = connective.of(rest.to_vec());
+            let branches = decided.each_ref().map(|d| d.as_ref().unwrap_or(&rest));
+            return self.conditional(expr, first, branches, cx);
+        }
+        let op = match connective {
+            hir::Connective::And => lir::BinaryOp::And,
+            hir::Connective::Or => lir::BinaryOp::Or,
+            hir::Connective::Xor => lir::BinaryOp::Xor,
+        };
+        let mut result = self.place(first, cx);
+        for operand in rest {
+            let rhs = self.place(operand, cx);
+            let dst = self.slot(scalar_layout(hir::Scalar::Boolean));
+            self.insts.push(lir::Inst::Binary {
+                dst: dst.clone(),
+                op,
+                lhs: result,
+                rhs,
+            });
+            result = dst;
+        }
+        result
     }
 
     /// `operand` without the attributes `names`, reshaped.
@@ -2507,10 +2541,6 @@ impl<'a> FunctionBuilder<'a> {
 /// The instruction for `op`, which isn't one done by a runtime call.
 fn lower_binary_op(op: hir::BinaryOp) -> lir::BinaryOp {
     match op {
-        hir::BinaryOp::And => lir::BinaryOp::And,
-        hir::BinaryOp::Or => lir::BinaryOp::Or,
-        hir::BinaryOp::Xor => lir::BinaryOp::Xor,
-        hir::BinaryOp::Implies => lir::BinaryOp::Implies,
         hir::BinaryOp::Add(numeric) => lir::BinaryOp::Add(lower_numeric(numeric)),
         hir::BinaryOp::Subtract(numeric) => lir::BinaryOp::Subtract(lower_numeric(numeric)),
         hir::BinaryOp::Multiply(numeric) => lir::BinaryOp::Multiply(lower_numeric(numeric)),
@@ -2820,7 +2850,10 @@ mod tests {
         let b = || Box::new(hir::Expr::Variable(hir::VariableId(1)));
         let expr = hir::Expr::Unary(
             hir::UnaryOp::Not,
-            Box::new(hir::Expr::Binary(hir::BinaryOp::And, a(), b())),
+            Box::new(hir::Expr::Connective(
+                hir::Connective::And,
+                vec![*a(), *b()],
+            )),
         );
         let lowered = lower(&program(
             vec![
@@ -4182,16 +4215,18 @@ mod tests {
         // `show{p: integer} [ call debug_value{v: p = 0 or p > 1}; ]`.
         let p = || Box::new(hir::Expr::Parameter("p".to_string()));
         let compare = |comparison, n| {
-            Box::new(hir::Expr::Binary(
+            hir::Expr::Binary(
                 hir::BinaryOp::Compare(comparison, hir::Compared::Scalar(hir::Scalar::Integer)),
                 p(),
                 Box::new(hir::Expr::Constant(hir::Value::Integer(n))),
-            ))
+            )
         };
-        let either = hir::Expr::Binary(
-            hir::BinaryOp::Or,
-            compare(hir::Comparison::Equal, 0),
-            compare(hir::Comparison::Greater, 1),
+        let either = hir::Expr::Connective(
+            hir::Connective::Or,
+            vec![
+                compare(hir::Comparison::Equal, 0),
+                compare(hir::Comparison::Greater, 1),
+            ],
         );
         let lowered = lower(&program(
             vec![

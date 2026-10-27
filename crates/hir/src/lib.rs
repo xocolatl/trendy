@@ -783,8 +783,17 @@ pub enum Expr {
     Let(LocalId, Box<Expr>, Box<Expr>),
     /// A monadic operator: `not x` or `-x`.
     Unary(UnaryOp, Box<Expr>),
-    /// A dyadic operator, such as `x and y` or `x + y`.
+    /// A dyadic operator, such as `x + y` or `x < y`.
     Binary(BinaryOp, Box<Expr>, Box<Expr>),
+    /// `and`, `or` or `xor` of its operands, booleans, of which there are
+    /// at least two. Sema keeps them in a normal form: an operand is never
+    /// a constant, nor the same connective, as a chain of them, however it
+    /// is grouped, is one; the operands of `and` and `or` are distinct; and
+    /// a `not` is in them only where it can't go further in, which is never
+    /// on an operand of an `xor`, but on the `xor`, if it has more than two
+    /// (see [`Connective`]). `not (a xor b)` is `a = b`, which is never an
+    /// operand of an `xor` either.
+    Connective(Connective, Vec<Expr>),
     /// The value of a tuple's attribute: `t.a`. The attribute is one of the
     /// tuple's.
     Extract(Box<Expr>, String),
@@ -919,6 +928,7 @@ impl Expr {
             Expr::Binary(op, lhs, _) => op
                 .result()
                 .map_or_else(|| lhs.type_with(leaf), Type::Scalar),
+            Expr::Connective(..) => Type::Scalar(Scalar::Boolean),
             Expr::Extract(tuple, name) => match tuple.type_with(leaf) {
                 Type::Tuple(heading) => heading
                     .get(name)
@@ -959,9 +969,9 @@ impl Expr {
     /// Whether computing the expression can fail when the program runs:
     /// an integer overflow, a division by zero, running out of memory, or
     /// a failure in an operator it calls. This is part of the language: of
-    /// the operands of `and`, `or` and `implies`, those that can fail are
-    /// computed only when those that can't don't decide the result (see
-    /// [`BinaryOp::And`]).
+    /// the operands of `and` and `or`, those that can fail are computed
+    /// only when those that can't don't decide the result (see
+    /// [`Connective::And`]).
     #[must_use]
     pub fn can_fail(&self) -> bool {
         match self {
@@ -995,18 +1005,12 @@ impl Expr {
             | Expr::WithElements(..) => true,
             Expr::Unary(_, operand) => operand.can_fail(),
             Expr::Tuple(attributes) => attributes.values().any(Expr::can_fail),
+            Expr::Connective(_, operands) => operands.iter().any(Expr::can_fail),
             Expr::Extract(tuple, _) => tuple.can_fail(),
             Expr::Binary(op, lhs, rhs) => {
-                // Arithmetic and concatenation can fail themselves; the boolean
-                // operators and comparisons can't.
-                let itself = !matches!(
-                    op,
-                    BinaryOp::And
-                        | BinaryOp::Or
-                        | BinaryOp::Xor
-                        | BinaryOp::Implies
-                        | BinaryOp::Compare(..)
-                );
+                // Arithmetic and concatenation can fail themselves;
+                // comparisons can't.
+                let itself = !matches!(op, BinaryOp::Compare(..));
                 itself || lhs.can_fail() || rhs.can_fail()
             }
             Expr::Let(_, value, body) => value.can_fail() || body.can_fail(),
@@ -1016,54 +1020,76 @@ impl Expr {
         }
     }
 
-    /// The expression with the operands that can fail computed only when
-    /// those that can't don't decide its result, as an `If`, if it is an
-    /// `and`, `or` or `implies` with operands of both kinds (see
-    /// [`BinaryOp::And`]). The operands of the `and`s at the top, through
-    /// any number of them, are one conjunction, and likewise those of the
-    /// `or`s; `a implies b` is `not a or b`.
+    /// `not self`, taken as far into it as it goes, so that a `not` is
+    /// only where it can't go further: `not not a` is `a`, `not (a and b)`
+    /// is `not a or not b` and `not (a or b)` is `not a and not b` (De
+    /// Morgan), `not (a < b)` is `a >= b`, and `not (a xor b)` is `a = b`.
+    /// None of these changes which operands can fail, nor which guard
+    /// which, as `and` and `or` swap together with false and true (see
+    /// [`Connective::And`]). It stops at an `xor` of more than two, and at
+    /// a comparison of relations by inclusion (see [`Comparison::negated`]).
     #[must_use]
-    pub fn guarded(&self) -> Option<Expr> {
-        let Expr::Binary(op @ (BinaryOp::And | BinaryOp::Or | BinaryOp::Implies), lhs, rhs) = self
-        else {
-            return None;
-        };
-        let operands: Vec<Expr> = match op {
-            BinaryOp::Implies => vec![Expr::Unary(UnaryOp::Not, lhs.clone()), (**rhs).clone()],
-            _ => self.chained(*op).into_iter().cloned().collect(),
-        };
-        let (failing, guards): (Vec<Expr>, Vec<Expr>) =
-            operands.into_iter().partition(Expr::can_fail);
-        let either = if *op == BinaryOp::And {
-            BinaryOp::And
-        } else {
-            BinaryOp::Or
-        };
-        let all = |operands: Vec<Expr>| {
-            operands
-                .into_iter()
-                .reduce(|so_far, operand| Expr::Binary(either, Box::new(so_far), Box::new(operand)))
-        };
-        let (guards, failing) = (all(guards)?, all(failing)?);
-        let decided = Box::new(Expr::Constant(Value::Boolean(either == BinaryOp::Or)));
-        Some(if either == BinaryOp::And {
-            Expr::If(Box::new(guards), Box::new(failing), decided)
-        } else {
-            Expr::If(Box::new(guards), decided, Box::new(failing))
-        })
+    pub fn negated(self) -> Expr {
+        match self {
+            Expr::Constant(Value::Boolean(value)) => Expr::Constant(Value::Boolean(!value)),
+            Expr::Unary(UnaryOp::Not, inner) => *inner,
+            Expr::Connective(Connective::Xor, operands) => match <[Expr; 2]>::try_from(operands) {
+                Ok([lhs, rhs]) => Expr::Binary(
+                    BinaryOp::Compare(Comparison::Equal, Compared::Scalar(Scalar::Boolean)),
+                    Box::new(lhs),
+                    Box::new(rhs),
+                ),
+                Err(operands) => Expr::Unary(
+                    UnaryOp::Not,
+                    Box::new(Expr::Connective(Connective::Xor, operands)),
+                ),
+            },
+            Expr::Connective(c @ (Connective::And | Connective::Or), operands) => {
+                let swapped = if c == Connective::And {
+                    Connective::Or
+                } else {
+                    Connective::And
+                };
+                swapped.of(operands.into_iter().map(Expr::negated).collect())
+            }
+            Expr::Binary(BinaryOp::Compare(comparison, compared), lhs, rhs)
+                if matches!(comparison, Comparison::Equal | Comparison::NotEqual)
+                    || matches!(compared, Compared::Scalar(_)) =>
+            {
+                Expr::compared(comparison.negated(), compared, *lhs, *rhs)
+            }
+            operand => Expr::Unary(UnaryOp::Not, Box::new(operand)),
+        }
     }
 
-    /// The operands of the `op`s at the top of the expression, through any
-    /// number of them.
+    /// `lhs` compared with `rhs`, in normal form: `<>` of booleans is
+    /// `xor`, and `=` of them `not xor`, which is `=` again unless the
+    /// operands make it more or less than an `xor` of two, as `a = true` is
+    /// `a`.
     #[must_use]
-    pub fn chained(&self, op: BinaryOp) -> Vec<&Expr> {
-        match self {
-            Expr::Binary(o, lhs, rhs) if *o == op => {
-                let mut all = lhs.chained(op);
-                all.extend(rhs.chained(op));
-                all
+    pub fn compared(comparison: Comparison, compared: Compared, lhs: Expr, rhs: Expr) -> Expr {
+        match (comparison, compared) {
+            (Comparison::NotEqual, Compared::Scalar(Scalar::Boolean)) => {
+                Connective::Xor.of(vec![lhs, rhs])
             }
-            _ => vec![self],
+            (Comparison::Equal, Compared::Scalar(Scalar::Boolean)) => {
+                Connective::Xor.of(vec![lhs, rhs]).negated()
+            }
+            _ => Expr::Binary(
+                BinaryOp::Compare(comparison, compared),
+                Box::new(lhs),
+                Box::new(rhs),
+            ),
+        }
+    }
+
+    /// The conjuncts of the expression, a boolean: the operands of an
+    /// `and`, or else the expression itself.
+    #[must_use]
+    pub fn conjuncts(&self) -> &[Expr] {
+        match self {
+            Expr::Connective(Connective::And, operands) => operands,
+            _ => std::slice::from_ref(self),
         }
     }
 
@@ -1097,9 +1123,21 @@ impl Expr {
             Expr::Load(relation, items, loaded) => {
                 Expr::Load(inst(relation), items.clone(), *loaded)
             }
+            // A type parameter's comparisons and `not`s of them are kept in
+            // normal form when it becomes a boolean, or a scalar.
+            Expr::Unary(UnaryOp::Not, operand) => operand.instantiated(types).negated(),
             Expr::Unary(op, operand) => Expr::Unary(op.instantiated(types), inst(operand)),
-            Expr::Binary(op, lhs, rhs) => {
-                Expr::Binary(op.instantiated(types), inst(lhs), inst(rhs))
+            Expr::Binary(op, lhs, rhs) => match op.instantiated(types) {
+                BinaryOp::Compare(comparison, compared) => Expr::compared(
+                    comparison,
+                    compared,
+                    lhs.instantiated(types),
+                    rhs.instantiated(types),
+                ),
+                op => Expr::Binary(op, inst(lhs), inst(rhs)),
+            },
+            Expr::Connective(connective, operands) => {
+                connective.of(operands.iter().map(|e| e.instantiated(types)).collect())
             }
             Expr::Extract(tuple, name) => Expr::Extract(inst(tuple), name.clone()),
             Expr::Tuple(attributes) => Expr::Tuple(all(attributes)),
@@ -1322,25 +1360,145 @@ impl UnaryOp {
     }
 }
 
-/// A dyadic operator.
+/// A boolean connective, of any number of operands (Tutorial D's n-adic
+/// `AND`, `OR` and `XOR`), whose order doesn't matter. `a implies b` is
+/// `not a or b`; and of booleans, `a <> b` is `a xor b`, and `a = b` is
+/// `not (a xor b)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum BinaryOp {
-    /// True when both are. The operands of a chain of them, `a and b and
-    /// c`, however grouped, are one conjunction: those that can't fail (see
+pub enum Connective {
+    /// True when every operand is. Those that can't fail (see
     /// [`Expr::can_fail`]) are computed first, and if one is false, the
     /// result is false and the others aren't computed; otherwise every one
     /// that can fail is. So a condition that can't fail guards the others,
     /// wherever it is written: `x div y > 1 and y <> 0` never divides by
     /// zero. Which runs first is then for an optimizer to choose.
     And,
-    /// True when either is, its operands computed as `And`'s are, but for
-    /// true: one that can't fail and is true decides the result.
+    /// True when an operand is, its operands computed as `And`'s are, but
+    /// for true: one that can't fail and is true decides the result.
     Or,
-    /// Exactly one is true.
+    /// True when an odd number of operands are, each counted as often as
+    /// it is written, so that it is a chain of the dyadic `xor` (TTM,
+    /// chapter 5, exercise 5.6). No operand decides it, so every one is
+    /// computed.
     Xor,
-    /// False only when the left operand is true and the right is false:
-    /// `not a or b`, its operands computed as `Or`'s are.
-    Implies,
+}
+
+impl Connective {
+    /// The result when an operand is `value`, if that decides it whatever
+    /// the others are: false for `and`, and true for `or`.
+    #[must_use]
+    pub fn decided(self, value: bool) -> Option<bool> {
+        match self {
+            Connective::And => (!value).then_some(false),
+            Connective::Or => value.then_some(true),
+            Connective::Xor => None,
+        }
+    }
+
+    /// The result of none: true for `and`, false for `or` and `xor`. An
+    /// operand with this value leaves the result as the others make it.
+    #[must_use]
+    pub fn identity(self) -> bool {
+        self == Connective::And
+    }
+
+    /// The connective of `operands` with those that can fail computed only
+    /// when those that can't don't decide its result, as an `If`, if it is
+    /// an `and` or an `or` with operands of both kinds (see
+    /// [`Connective::And`]).
+    #[must_use]
+    pub fn guarded(self, operands: &[Expr]) -> Option<Expr> {
+        let (failing, guards): (Vec<Expr>, Vec<Expr>) =
+            operands.iter().cloned().partition(Expr::can_fail);
+        // No operand decides an `xor`, so none guards another.
+        if self == Connective::Xor || failing.is_empty() || guards.is_empty() {
+            return None;
+        }
+        let (guards, failing) = (self.of(guards), self.of(failing));
+        let decided = Box::new(Expr::Constant(Value::Boolean(!self.identity())));
+        Some(if self == Connective::And {
+            Expr::If(Box::new(guards), Box::new(failing), decided)
+        } else {
+            Expr::If(Box::new(guards), decided, Box::new(failing))
+        })
+    }
+
+    /// `operands`, booleans, combined by the connective, in normal form
+    /// (see [`Expr::Connective`]): the operands of one of the same
+    /// connective are its own, as a chain of them is one however it is
+    /// grouped. A constant that decides an `and` or an `or` is the result,
+    /// as it can't fail, and so guards the others; one that doesn't is
+    /// dropped. Of an `and` or an `or`, an operand written twice is kept
+    /// once. Of an `xor`, two of one that can't fail cancel, and a true
+    /// one, or a `not` on one, negates the rest, so that `a xor not b` is
+    /// `not (a xor b)`, and `(a = b) xor c` is `not (a xor b xor c)`. Order
+    /// doesn't matter, but the operands stay in it.
+    /// The connective of one operand is that operand, and of none, its
+    /// identity.
+    #[must_use]
+    pub fn of(self, operands: Vec<Expr>) -> Expr {
+        let mut flat = Vec::new();
+        // Whether the result is the negation of the operands', as of an
+        // `xor` of an odd number of trues.
+        let mut negated = false;
+        for operand in operands {
+            let operand = match operand {
+                // A `not` comes out of an operand of an `xor`, to stop at it,
+                Expr::Unary(UnaryOp::Not, inner) if self == Connective::Xor => {
+                    negated = !negated;
+                    *inner
+                }
+                // as it does out of `a = b`, which is `not (a xor b)`.
+                Expr::Binary(
+                    BinaryOp::Compare(Comparison::Equal, Compared::Scalar(Scalar::Boolean)),
+                    lhs,
+                    rhs,
+                ) if self == Connective::Xor => {
+                    negated = !negated;
+                    Expr::Connective(Connective::Xor, vec![*lhs, *rhs])
+                }
+                operand => operand,
+            };
+            match operand {
+                Expr::Connective(c, inner) if c == self => flat.extend(inner),
+                operand => flat.push(operand),
+            }
+        }
+        let mut kept: Vec<Expr> = Vec::new();
+        for operand in flat {
+            match operand {
+                Expr::Constant(Value::Boolean(value)) => {
+                    if let Some(result) = self.decided(value) {
+                        return Expr::Constant(Value::Boolean(result));
+                    }
+                    negated ^= value != self.identity();
+                }
+                operand if self != Connective::Xor => {
+                    if !kept.contains(&operand) {
+                        kept.push(operand);
+                    }
+                }
+                operand => match kept.iter().position(|k| *k == operand) {
+                    Some(i) if !operand.can_fail() => {
+                        kept.remove(i);
+                    }
+                    _ => kept.push(operand),
+                },
+            }
+        }
+        let result = if kept.len() > 1 {
+            Expr::Connective(self, kept)
+        } else {
+            kept.pop()
+                .unwrap_or(Expr::Constant(Value::Boolean(self.identity())))
+        };
+        if negated { result.negated() } else { result }
+    }
+}
+
+/// A dyadic operator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BinaryOp {
     Add(Numeric),
     Subtract(Numeric),
     Multiply(Numeric),
@@ -1413,6 +1571,22 @@ pub enum Comparison {
 }
 
 impl Comparison {
+    /// The comparison true exactly when this one is false, of values of a
+    /// type whose values are all ordered, as scalars are. Of two
+    /// relations, ordered by inclusion, neither may include the other, so
+    /// only `=` and `<>` negate each other there.
+    #[must_use]
+    pub fn negated(self) -> Comparison {
+        match self {
+            Comparison::Equal => Comparison::NotEqual,
+            Comparison::NotEqual => Comparison::Equal,
+            Comparison::Less => Comparison::GreaterOrEqual,
+            Comparison::LessOrEqual => Comparison::Greater,
+            Comparison::Greater => Comparison::LessOrEqual,
+            Comparison::GreaterOrEqual => Comparison::Less,
+        }
+    }
+
     /// Whether two values in the order `ordering` compare true.
     #[must_use]
     pub fn holds(self, ordering: std::cmp::Ordering) -> bool {
@@ -1452,9 +1626,6 @@ impl BinaryOp {
     #[must_use]
     pub fn operand(self) -> Option<Scalar> {
         match self {
-            BinaryOp::And | BinaryOp::Or | BinaryOp::Xor | BinaryOp::Implies => {
-                Some(Scalar::Boolean)
-            }
             BinaryOp::Add(numeric) | BinaryOp::Subtract(numeric) | BinaryOp::Multiply(numeric) => {
                 numeric.scalar()
             }
@@ -1476,20 +1647,6 @@ impl BinaryOp {
         match self {
             BinaryOp::Compare(..) => Some(Scalar::Boolean),
             _ => self.operand(),
-        }
-    }
-
-    /// The result of an `and`, `or` or `implies` whose operand on `side`,
-    /// 0 for the left and 1 for the right, is `value`, if that decides it
-    /// whatever the other is: a false operand of `and`, a true one of `or`,
-    /// and a false left or a true right operand of `implies`.
-    #[must_use]
-    pub fn decided(self, side: usize, value: bool) -> Option<bool> {
-        match self {
-            BinaryOp::And => (!value).then_some(false),
-            BinaryOp::Or => value.then_some(true),
-            BinaryOp::Implies => ((side == 0) != value).then_some(true),
-            _ => None,
         }
     }
 
@@ -1545,13 +1702,6 @@ impl BinaryOp {
             _ => {}
         }
         match (lhs, rhs) {
-            (Value::Boolean(a), Value::Boolean(b)) => Ok(Value::Boolean(match self {
-                BinaryOp::And => *a && *b,
-                BinaryOp::Or => *a || *b,
-                BinaryOp::Xor => a != b,
-                BinaryOp::Implies => !a || *b,
-                _ => panic!("`{self:?}` of booleans"),
-            })),
             (&Value::Integer(a), &Value::Integer(b)) => {
                 let result = match self {
                     BinaryOp::Add(_) => a.checked_add(b),
@@ -2719,18 +2869,79 @@ mod tests {
 
     #[test]
     fn boolean_operators() {
-        let table = |op: BinaryOp| {
-            [(false, false), (false, true), (true, false), (true, true)]
-                .map(|(a, b)| op.apply(&Value::Boolean(a), &Value::Boolean(b)).unwrap())
-                .map(|v| v == Value::Boolean(true))
-        };
-        assert_eq!(table(BinaryOp::And), [false, false, false, true]);
-        assert_eq!(table(BinaryOp::Or), [false, true, true, true]);
-        assert_eq!(table(BinaryOp::Xor), [false, true, true, false]);
-        assert_eq!(table(BinaryOp::Implies), [true, true, false, true]);
+        let decided = |c: Connective| [false, true].map(|value| c.decided(value));
+        assert_eq!(decided(Connective::And), [Some(false), None]);
+        assert_eq!(decided(Connective::Or), [None, Some(true)]);
+        assert_eq!(decided(Connective::Xor), [None, None]);
+        let identities =
+            [Connective::And, Connective::Or, Connective::Xor].map(Connective::identity);
+        assert_eq!(identities, [true, false, false]);
         assert_eq!(
             UnaryOp::Not.apply(&Value::Boolean(true)),
             Ok(Value::Boolean(false))
+        );
+    }
+
+    #[test]
+    fn instantiating_keeps_connectives_in_normal_form() {
+        let t = Type::Parameter(TypeParameter {
+            index: 0,
+            name: Some("T".to_string()),
+            any: Any::Type,
+        });
+        let param = |name: &str| Box::new(Expr::Parameter(name.to_string()));
+        let compare = |comparison| {
+            Expr::Binary(
+                BinaryOp::Compare(comparison, Compared::of(&t)),
+                param("a"),
+                param("b"),
+            )
+        };
+        let boolean = [Type::Scalar(Scalar::Boolean)];
+        let integer = [Type::Scalar(Scalar::Integer)];
+        // `a <> b` of booleans is `a xor b`,
+        assert_eq!(
+            compare(Comparison::NotEqual).instantiated(&boolean),
+            Expr::Connective(Connective::Xor, vec![*param("a"), *param("b")])
+        );
+        // `a = b` is `not (a xor b)`, which an `xor` takes in,
+        let c = *param("c");
+        let Expr::Unary(UnaryOp::Not, xor) =
+            Expr::Connective(Connective::Xor, vec![compare(Comparison::Equal), c.clone()])
+                .instantiated(&boolean)
+        else {
+            panic!("a `not`");
+        };
+        assert_eq!(
+            *xor,
+            Expr::Connective(Connective::Xor, vec![*param("a"), *param("b"), c])
+        );
+        // and a `not` goes into a comparison of scalars,
+        let not = |e| Expr::Unary(UnaryOp::Not, Box::new(e));
+        let Expr::Binary(op, ..) = not(compare(Comparison::Less)).instantiated(&integer) else {
+            panic!("a comparison");
+        };
+        assert_eq!(
+            op,
+            BinaryOp::Compare(
+                Comparison::GreaterOrEqual,
+                Compared::Scalar(Scalar::Integer)
+            )
+        );
+        // in the operands of a connective too.
+        let either = Expr::Connective(
+            Connective::Or,
+            vec![
+                not(compare(Comparison::Less)),
+                not(compare(Comparison::Greater)),
+            ],
+        );
+        let Expr::Connective(Connective::Or, operands) = either.instantiated(&integer) else {
+            panic!("an `or`");
+        };
+        assert!(
+            operands.iter().all(|o| matches!(o, Expr::Binary(..))),
+            "{operands:?}"
         );
     }
 

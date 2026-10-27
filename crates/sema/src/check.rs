@@ -258,7 +258,7 @@ impl<'a> Checker<'a> {
                     Resolved::Unary(op) => {
                         types::evaluated(ops::unary(op, operand), expr, None, errors)
                     }
-                    Resolved::Binary(_) => None,
+                    Resolved::Binary(_) | Resolved::Connective { .. } => None,
                 }
             }
             Expr::Binary(binary)
@@ -287,13 +287,11 @@ impl<'a> Checker<'a> {
                 let (resolved, operands, result) =
                     self.operands(&token, vec![binary.lhs(), binary.rhs()], expected, errors)?;
                 types::result_type(expected, &result, expr, errors)?;
-                let (Resolved::Binary(op), Ok([lhs, rhs])) =
-                    (resolved, <[hir::Expr; 2]>::try_from(operands))
-                else {
+                let Ok([lhs, rhs]) = <[hir::Expr; 2]>::try_from(operands) else {
                     return None;
                 };
                 types::evaluated(
-                    ops::binary(op, lhs, rhs),
+                    ops::dyadic(resolved, lhs, rhs),
                     expr,
                     binary.rhs().as_ref(),
                     errors,
@@ -1437,7 +1435,7 @@ impl<'a> Checker<'a> {
     /// `binary`, an `and`, an `or` or an `implies`, written `expr`, each
     /// operand checked as a boolean with its own errors. Where an operand
     /// is known when compiling and decides the result, the other isn't
-    /// computed (see `hir::BinaryOp::And`), so its failures aren't
+    /// computed (see `hir::Connective::And`), so its failures aren't
     /// reported, as for an `if`'s branch not taken; otherwise one known to
     /// fail is an error, since it fails whenever it is computed.
     fn connective(
@@ -1449,8 +1447,15 @@ impl<'a> Checker<'a> {
     ) -> Option<hir::Expr> {
         let token = binary.operator()?;
         let boolean = hir::Type::Scalar(hir::Scalar::Boolean);
-        let Some(Resolved::Binary(op)) = Operator::of(&token)?.resolve(&boolean) else {
-            unreachable!("`and`, `or` and `implies` take booleans");
+        let resolved = Operator::of(&token)?.resolve(&boolean);
+        let Some(
+            resolved @ Resolved::Connective {
+                connective,
+                not_left,
+            },
+        ) = resolved
+        else {
+            unreachable!("`and`, `or` and `implies` are connectives of booleans");
         };
         let operand_expected = Expected {
             ty: boolean.clone(),
@@ -1468,7 +1473,8 @@ impl<'a> Checker<'a> {
         // operand, which then isn't computed.
         let decided = (0..2).find_map(|i| match checked[i].0 {
             Some(hir::Expr::Constant(hir::Value::Boolean(value))) => {
-                Some((op.decided(i, value)?, 1 - i))
+                let negated = i == 0 && not_left;
+                Some((connective.decided(value != negated)?, 1 - i))
             }
             _ => None,
         });
@@ -1497,7 +1503,7 @@ impl<'a> Checker<'a> {
             return None;
         };
         types::evaluated(
-            ops::binary(op, lhs, rhs),
+            ops::dyadic(resolved, lhs, rhs),
             expr,
             binary.rhs().as_ref(),
             errors,

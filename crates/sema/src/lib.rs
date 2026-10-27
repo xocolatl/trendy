@@ -3837,7 +3837,86 @@ mod tests {
         let hir::OperatorKind::ReadOnly { value, .. } = &f.kind else {
             panic!("a read-only operator");
         };
-        assert!(matches!(value.guarded(), Some(hir::Expr::If(..))));
+        let hir::Expr::Connective(connective, operands) = value else {
+            panic!("{value:?}");
+        };
+        assert!(matches!(
+            connective.guarded(operands),
+            Some(hir::Expr::If(..))
+        ));
+    }
+
+    #[test]
+    fn connectives_are_kept_in_a_normal_form() {
+        // The value of a read-only operator of parameters, written `value`.
+        let value = |value: &str| {
+            let program = analyze_str(&format!(
+                "operator f{{a: boolean, b: boolean, c: boolean, x: integer, y: integer, r: relation {{ n: integer }}, s: relation {{ n: integer }}}}: boolean [ {value} ];\noperator main{{}} [];"
+            ))
+            .unwrap();
+            let f = program.operators.iter().find(|o| o.name == "f").unwrap();
+            let hir::OperatorKind::ReadOnly { value, .. } = &f.kind else {
+                panic!("a read-only operator");
+            };
+            value.clone()
+        };
+        for (written, normal) in [
+            // A chain is one connective, however grouped,
+            ("a and (b and c)", "(a and b) and c"),
+            ("a or (b or c) or a", "a or b or c"),
+            // `not` goes in as far as it can,
+            ("not (a and x < y)", "not a or x >= y"),
+            ("not (a or b and c)", "not a and (not b or not c)"),
+            ("not not a", "a"),
+            ("not (r = s)", "r <> s"),
+            ("a implies b", "not a or b"),
+            // an operand is written once, and a constant that doesn't
+            // decide the result is dropped,
+            ("a and b and a", "a and b"),
+            ("a and true", "a"),
+            ("a or false", "a"),
+            // and of an `xor`, two of one that can't fail cancel, and a
+            // true operand negates the rest. Of booleans, `<>` is an `xor`,
+            // and `=` its negation, which is `=` only of two operands.
+            ("a xor b xor a", "b"),
+            ("true xor a xor b", "not (a xor b)"),
+            ("a xor not b", "not (a xor b)"),
+            ("not (a xor b) xor c", "not (a xor b xor c)"),
+            ("a <> b", "a xor b"),
+            ("not (a = b)", "a xor b"),
+            ("not (a xor b)", "a = b"),
+            ("not (a <> b)", "a = b"),
+            ("a = not b", "a xor b"),
+            ("a = true", "a"),
+            ("a = false", "not a"),
+            ("(a = b) xor c", "not (a xor b xor c)"),
+            ("(a xor b) = c", "not (a xor b xor c)"),
+        ] {
+            assert_eq!(value(written), value(normal), "{written}");
+        }
+        assert!(matches!(
+            value("not (a xor b)"),
+            hir::Expr::Binary(
+                hir::BinaryOp::Compare(hir::Comparison::Equal, hir::Compared::Scalar(_)),
+                ..
+            )
+        ));
+        let hir::Expr::Connective(hir::Connective::Or, operands) = value("a or (b or c)") else {
+            panic!("an `or`");
+        };
+        assert_eq!(operands.len(), 3);
+        // Two of one that can fail are both computed.
+        let hir::Expr::Connective(hir::Connective::Xor, operands) =
+            value("x div y = 1 xor x div y = 1")
+        else {
+            panic!("an `xor`");
+        };
+        assert_eq!(operands.len(), 2);
+        // Neither of two relations need include the other.
+        assert!(matches!(
+            value("not (r <= s)"),
+            hir::Expr::Unary(hir::UnaryOp::Not, _)
+        ));
     }
 
     #[test]
@@ -4263,7 +4342,8 @@ mod tests {
                 )
             )]
         );
-        // The tuples for which the condition is false are kept.
+        // The tuples for which the condition is false are kept: `born <=
+        // 1900`, the negation of `born > 1900`.
         let [(_, hir::Expr::Restrict(operand, condition))] =
             &assigned("delete poets where born > 1900;")[..]
         else {
@@ -4272,7 +4352,7 @@ mod tests {
         assert_eq!(*operand, poets());
         assert!(matches!(
             **condition,
-            hir::Expr::Unary(hir::UnaryOp::Not, _)
+            hir::Expr::Binary(hir::BinaryOp::Compare(hir::Comparison::LessOrEqual, _), ..)
         ));
         // Those for which it is true are replaced, in union with the others.
         let [(_, hir::Expr::Combine(hir::Combination::Union, kept, changed))] =

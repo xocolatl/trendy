@@ -477,8 +477,6 @@ pub enum BinaryOp {
     And,
     Or,
     Xor,
-    /// `!lhs || rhs`.
-    Implies,
     Add(Numeric),
     Subtract(Numeric),
     Multiply(Numeric),
@@ -511,7 +509,7 @@ impl BinaryOp {
     #[must_use]
     pub fn operand(self) -> Operand {
         match self {
-            BinaryOp::And | BinaryOp::Or | BinaryOp::Xor | BinaryOp::Implies => Operand::Boolean,
+            BinaryOp::And | BinaryOp::Or | BinaryOp::Xor => Operand::Boolean,
             BinaryOp::Add(numeric) | BinaryOp::Subtract(numeric) | BinaryOp::Multiply(numeric) => {
                 Operand::Numeric(numeric)
             }

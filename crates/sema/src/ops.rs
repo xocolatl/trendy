@@ -55,6 +55,13 @@ pub(crate) enum Resolved {
     Identity,
     Unary(hir::UnaryOp),
     Binary(hir::BinaryOp),
+    /// `and`, `or` or `xor`, or another that is one of them of its
+    /// operands, the left one negated if `not_left`: `a implies b` is `not
+    /// a or b`, and `a <> b`, of booleans, is `a xor b`.
+    Connective {
+        connective: hir::Connective,
+        not_left: bool,
+    },
 }
 
 impl Operator {
@@ -217,12 +224,16 @@ impl Operator {
             };
         };
         let numeric = hir::Numeric::of(scalar);
+        let connective = |connective, not_left| Resolved::Connective {
+            connective,
+            not_left,
+        };
         Some(match (self, numeric) {
             (Operator::Not, _) => Resolved::Unary(hir::UnaryOp::Not),
-            (Operator::And, _) => Resolved::Binary(B::And),
-            (Operator::Or, _) => Resolved::Binary(B::Or),
-            (Operator::Xor, _) => Resolved::Binary(B::Xor),
-            (Operator::Implies, _) => Resolved::Binary(B::Implies),
+            (Operator::And, _) => connective(hir::Connective::And, false),
+            (Operator::Or, _) => connective(hir::Connective::Or, false),
+            (Operator::Xor, _) => connective(hir::Connective::Xor, false),
+            (Operator::Implies, _) => connective(hir::Connective::Or, true),
             (Operator::Plus, Some(_)) => Resolved::Identity,
             (Operator::Negate, Some(n)) => Resolved::Unary(hir::UnaryOp::Negate(n)),
             (Operator::Add, Some(n)) => Resolved::Binary(B::Add(n)),
@@ -1147,7 +1158,7 @@ pub(crate) fn restrict(
 /// condition does for one.
 ///
 /// The conjuncts of the condition that can't fail are computed first (see
-/// `hir::BinaryOp::And`), so they restrict as Algebra A defines
+/// `hir::Connective::And`), so they restrict as Algebra A defines
 /// restriction (TTM, Appendix A): the AND with the relation of the tuples
 /// they are true of, which here is finite, as each gives the relation of
 /// the values it is true of, among those the operands have for the
@@ -1180,8 +1191,8 @@ pub(crate) fn restricted_and(
     let own: Vec<BTreeSet<String>> = relations.iter().map(|r| names(r)).collect();
     let all: BTreeSet<String> = own.iter().flatten().cloned().collect();
     let (failing, guards): (Vec<&hir::Expr>, Vec<&hir::Expr>) = condition
-        .chained(hir::BinaryOp::And)
-        .into_iter()
+        .conjuncts()
+        .iter()
         .partition(|conjunct| conjunct.can_fail());
     let mut parts: Vec<hir::Value> = Vec::new();
     for guard in guards {
@@ -1229,11 +1240,10 @@ pub(crate) fn restricted_and(
             .map(|relation| hir::Value::Relation((*relation).clone())),
     );
     let guarded = hir::Expr::Constant(and_values(parts)?);
-    let Some(failing) = failing.into_iter().cloned().reduce(|so_far, conjunct| {
-        hir::Expr::Binary(hir::BinaryOp::And, Box::new(so_far), Box::new(conjunct))
-    }) else {
+    if failing.is_empty() {
         return Some(Ok(guarded));
-    };
+    }
+    let failing = hir::Connective::And.of(failing.into_iter().cloned().collect());
     match restrict(guarded, failing, bindings) {
         Ok(hir::Expr::Constant(restricted)) => Some(Ok(hir::Expr::Constant(restricted))),
         Ok(_) => None,
@@ -1794,6 +1804,10 @@ fn shifted(expr: hir::Expr, cutoff: usize) -> hir::Expr {
         }),
         hir::Expr::Unary(op, operand) => hir::Expr::Unary(op, shift(operand)),
         hir::Expr::Binary(op, lhs, rhs) => hir::Expr::Binary(op, shift(lhs), shift(rhs)),
+        hir::Expr::Connective(connective, operands) => hir::Expr::Connective(
+            connective,
+            operands.into_iter().map(|e| shifted(e, cutoff)).collect(),
+        ),
         hir::Expr::Extract(operand, name) => hir::Expr::Extract(shift(operand), name),
         hir::Expr::Tuple(attributes) => hir::Expr::Tuple(
             attributes
@@ -1892,7 +1906,9 @@ pub(crate) fn targets_read(expr: &hir::Expr) -> Vec<hir::Target> {
                 walk(otherwise, read);
             }
             hir::Expr::Tuple(attributes) => attributes.values().for_each(|e| walk(e, read)),
-            hir::Expr::Array(_, elements) | hir::Expr::Relation(_, elements) => {
+            hir::Expr::Array(_, elements)
+            | hir::Expr::Relation(_, elements)
+            | hir::Expr::Connective(_, elements) => {
                 for element in elements {
                     walk(element, read);
                 }
@@ -1974,7 +1990,9 @@ pub(crate) fn tuple_read(expr: &hir::Expr, depth: usize) -> TupleRead {
                 at(otherwise);
             }
             hir::Expr::Tuple(attributes) => attributes.values().for_each(at),
-            hir::Expr::Array(_, elements) | hir::Expr::Relation(_, elements) => {
+            hir::Expr::Array(_, elements)
+            | hir::Expr::Relation(_, elements)
+            | hir::Expr::Connective(_, elements) => {
                 elements.iter().for_each(at);
             }
             // The condition and the values are one tuple at hand further in.
@@ -2220,29 +2238,38 @@ fn substituted_elements(
     with_elements(sub(array)?, changes)
 }
 
-/// `lhs op rhs`, with what `substitution` knows substituted, as
-/// [`substitute`] does. The right operand of an `and`, `or` or `implies`
-/// that can't fail is computed only if the left doesn't decide the
-/// result: since it can't fail, that only saves the work.
+/// The `connective` of `operands`, with what `substitution` knows
+/// substituted, as [`substitute`] does. Of the operands of an `and` or an
+/// `or`, those that can fail are computed only when those that can't don't
+/// decide the result (see [`hir::Connective::guarded`]), and of those that
+/// can't, each only if those before it don't: since they can't fail, that
+/// only saves the work.
 ///
 /// # Errors
 ///
-/// Returns why an operand fails, or the operator does.
-fn substituted_binary(
-    op: hir::BinaryOp,
-    lhs: hir::Expr,
-    rhs: hir::Expr,
+/// Returns why an operand fails.
+fn substituted_connective(
+    connective: hir::Connective,
+    operands: Vec<hir::Expr>,
     depth: usize,
     substitution: &Substitution,
 ) -> Result<hir::Expr, Failed> {
-    let lhs = substitute(lhs, depth, substitution)?;
-    if let hir::Expr::Constant(hir::Value::Boolean(value)) = lhs
-        && let Some(result) = op.decided(0, value)
-        && !rhs.can_fail()
-    {
-        return Ok(hir::Expr::Constant(hir::Value::Boolean(result)));
+    if let Some(guarded) = connective.guarded(&operands) {
+        return substitute(guarded, depth, substitution);
     }
-    binary(op, lhs, substitute(rhs, depth, substitution)?).map_err(Failed::Scalar)
+    let guards = !operands.iter().any(hir::Expr::can_fail);
+    let mut substituted = Vec::new();
+    for operand in operands {
+        let operand = substitute(operand, depth, substitution)?;
+        if guards
+            && let hir::Expr::Constant(hir::Value::Boolean(value)) = operand
+            && let Some(result) = connective.decided(value)
+        {
+            return Ok(hir::Expr::Constant(hir::Value::Boolean(result)));
+        }
+        substituted.push(operand);
+    }
+    Ok(connective.of(substituted))
 }
 
 /// `if condition then then else otherwise`, with what `substitution`
@@ -2287,11 +2314,6 @@ fn substitute(
     depth: usize,
     substitution: &Substitution,
 ) -> Result<hir::Expr, Failed> {
-    // Of the operands of `and`, `or` and `implies`, those that can fail are
-    // computed only when those that can't don't decide the result.
-    if let Some(guarded) = expr.guarded() {
-        return substitute(guarded, depth, substitution);
-    }
     let sub = |e: Box<hir::Expr>| substitute(*e, depth, substitution);
     Ok(match expr {
         hir::Expr::Current(d, _) if d == depth && substitution.tuple.is_some() => {
@@ -2342,7 +2364,12 @@ fn substitute(
             call(hir::Call { args, ..called }, substitution.bindings)?
         }
         hir::Expr::Unary(op, operand) => unary(op, sub(operand)?).map_err(Failed::Scalar)?,
-        hir::Expr::Binary(op, lhs, rhs) => substituted_binary(op, *lhs, *rhs, depth, substitution)?,
+        hir::Expr::Binary(op, lhs, rhs) => {
+            binary(op, sub(lhs)?, sub(rhs)?).map_err(Failed::Scalar)?
+        }
+        hir::Expr::Connective(connective, operands) => {
+            substituted_connective(connective, operands, depth, substitution)?
+        }
         hir::Expr::Extract(operand, name) => extract(sub(operand)?, name),
         hir::Expr::Array(element, elements) => array(
             element,
@@ -2566,8 +2593,6 @@ pub(crate) fn negative_value(
 /// A constant that simplification knows the effect of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Known {
-    True,
-    False,
     /// `0` or `0.0`.
     Zero,
     /// `""`
@@ -2581,8 +2606,6 @@ fn known(expr: &hir::Expr) -> Option<Known> {
         return None;
     };
     Some(match value {
-        hir::Value::Boolean(true) => Known::True,
-        hir::Value::Boolean(false) => Known::False,
         hir::Value::Integer(0) => Known::Zero,
         hir::Value::Integer(1) => Known::One,
         hir::Value::Integer(-1) => Known::MinusOne,
@@ -2608,15 +2631,40 @@ pub(crate) fn unary(op: hir::UnaryOp, operand: hir::Expr) -> Result<hir::Expr, h
         return op.apply(value).map(hir::Expr::Constant);
     }
     Ok(match (op, operand) {
+        (hir::UnaryOp::Not, operand) => operand.negated(),
         // `-(-x)` is `x` for an approximate number, but not for an integer:
         // for the smallest one, `-x` fails.
-        (hir::UnaryOp::Not, hir::Expr::Unary(hir::UnaryOp::Not, inner))
-        | (
+        (
             hir::UnaryOp::Negate(hir::Numeric::Approximate),
             hir::Expr::Unary(hir::UnaryOp::Negate(hir::Numeric::Approximate), inner),
         ) => *inner,
         (op, operand) => hir::Expr::Unary(op, Box::new(operand)),
     })
+}
+
+/// `lhs op rhs`, for `op` a dyadic operator, simplified as [`binary`]
+/// simplifies it, or, for a connective, in normal form (see
+/// `hir::Connective::of`).
+///
+/// # Errors
+///
+/// Returns why the result can't exist, as [`binary`] does.
+pub(crate) fn dyadic(
+    op: Resolved,
+    lhs: hir::Expr,
+    rhs: hir::Expr,
+) -> Result<hir::Expr, hir::Failure> {
+    match op {
+        Resolved::Binary(op) => binary(op, lhs, rhs),
+        Resolved::Connective {
+            connective,
+            not_left,
+        } => {
+            let lhs = if not_left { lhs.negated() } else { lhs };
+            Ok(connective.of(vec![lhs, rhs]))
+        }
+        Resolved::Identity | Resolved::Unary(_) => unreachable!("a monadic operator"),
+    }
 }
 
 /// An operand of a dyadic operator.
@@ -2641,11 +2689,8 @@ pub(crate) fn binary(
     lhs: hir::Expr,
     rhs: hir::Expr,
 ) -> Result<hir::Expr, hir::Failure> {
-    use Known::{Empty, False, MinusOne, One, True, Zero};
-    use hir::BinaryOp::{
-        Add, And, Compare, Concatenate, Div, Divide, Implies, Mod, Multiply, Or, Subtract, Xor,
-    };
-    use hir::Comparison::{Equal, NotEqual};
+    use Known::{Empty, MinusOne, One, Zero};
+    use hir::BinaryOp::{Add, Compare, Concatenate, Div, Divide, Mod, Multiply, Subtract};
     if let (hir::Expr::Constant(a), hir::Expr::Constant(b)) = (&lhs, &rhs) {
         return op.apply(a, b).map(hir::Expr::Constant);
     }
@@ -2670,36 +2715,26 @@ pub(crate) fn binary(
     };
     let constant = |value| hir::Expr::Constant(value);
     Ok(match (op, known(&lhs), known(&rhs)) {
+        // A comparison is in normal form, in which a constant boolean
+        // leaves the other operand as it is, or negates it.
+        (Compare(comparison, compared), _, _) => {
+            hir::Expr::compared(comparison, compared, lhs, rhs)
+        }
         // The constant leaves the other operand as it is,
-        (And | Implies | Compare(Equal, _), Some(True), _)
-        | (Or | Xor | Compare(NotEqual, _), Some(False), _)
-        | (Add(_), Some(Zero), _)
-        | (Multiply(_), Some(One), _)
-        | (Concatenate, Some(Empty), _) => rhs,
-        (And | Compare(Equal, _), _, Some(True))
-        | (Or | Xor | Compare(NotEqual, _), _, Some(False))
-        | (Add(_) | Subtract(_), _, Some(Zero))
+        (Add(_), Some(Zero), _) | (Multiply(_), Some(One), _) | (Concatenate, Some(Empty), _) => {
+            rhs
+        }
+        (Add(_) | Subtract(_), _, Some(Zero))
         | (Multiply(_) | Div | Divide, _, Some(One))
         | (Concatenate, _, Some(Empty)) => lhs,
         // negates it,
-        (Xor | Compare(NotEqual, _), Some(True), _) | (Compare(Equal, _), Some(False), _) => {
-            unary(hir::UnaryOp::Not, rhs)?
-        }
-        (Xor | Compare(NotEqual, _), _, Some(True))
-        | (Compare(Equal, _) | Implies, _, Some(False)) => unary(hir::UnaryOp::Not, lhs)?,
         (Subtract(_), Some(Zero), _) | (Multiply(_), Some(MinusOne), _) => negate(rhs)?,
         (Multiply(_) | Div | Divide, _, Some(MinusOne)) => negate(lhs)?,
         // or decides the result.
         (Div | Mod | Divide, _, Some(Zero)) => {
             return Err(hir::Failure::DivisionByZero);
         }
-        // A constant that decides `and`, `or` or `implies` can't fail, so
-        // the other operand isn't computed (see `hir::BinaryOp::And`),
-        (And, Some(False), _) | (And, _, Some(False)) => constant(hir::Value::Boolean(false)),
-        (Or, Some(True), _) | (Implies, Some(False), _) | (Or | Implies, _, Some(True)) => {
-            constant(hir::Value::Boolean(true))
-        }
-        // and of the others, every operand is.
+        // though every operand is still computed.
         (Multiply(_), Some(Zero), _) => unless_fails(Side::Rhs, lhs.clone(), lhs, rhs),
         (Multiply(_), _, Some(Zero)) => unless_fails(Side::Lhs, rhs.clone(), lhs, rhs),
         (Mod, _, Some(One | MinusOne)) => {
