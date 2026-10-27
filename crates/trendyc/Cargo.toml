@@ -11,6 +11,7 @@ trendy_diag.workspace = true
 trendy_lexer.workspace = true
 trendy_parser.workspace = true
 trendy_sema.workspace = true
+trendy_opt.workspace = true
 trendy_prelude.workspace = true
 trendy_lower.workspace = true
 trendy_codegen.workspace = true

@@ -1226,7 +1226,7 @@ pub(crate) fn restricted_and(
         .partition(|conjunct| conjunct.can_fail());
     let mut parts: Vec<hir::Value> = Vec::new();
     for guard in guards {
-        let read = tuple_read(guard, 0);
+        let read = guard.tuple_read(0);
         let reads = if read.whole {
             all.clone()
         } else {
@@ -1814,150 +1814,24 @@ pub(crate) fn deeper(expr: hir::Expr) -> hir::Expr {
 /// `expr` with each tuple at hand `cutoff` or more `Extend`s out from it
 /// one further out; those nearer are inside it, and stay.
 fn shifted(expr: hir::Expr, cutoff: usize) -> hir::Expr {
-    let shift = |e: Box<hir::Expr>| Box::new(shifted(*e, cutoff));
     match expr {
         hir::Expr::Current(depth, heading) if depth >= cutoff => {
             hir::Expr::Current(depth + 1, heading)
         }
-        hir::Expr::Current(..)
-        | hir::Expr::Constant(_)
-        | hir::Expr::Variable(_)
-        | hir::Expr::Parameter(_)
-        | hir::Expr::Local(_) => expr,
-        hir::Expr::Call(call) => hir::Expr::Call(hir::Call {
-            args: call
-                .args
-                .into_iter()
-                .map(|(name, e)| (name, shifted(e, cutoff)))
-                .collect(),
-            ..call
-        }),
-        hir::Expr::Unary(op, operand) => hir::Expr::Unary(op, shift(operand)),
-        hir::Expr::Binary(op, lhs, rhs) => hir::Expr::Binary(op, shift(lhs), shift(rhs)),
-        hir::Expr::Connective(connective, operands) => hir::Expr::Connective(
-            connective,
-            operands.into_iter().map(|e| shifted(e, cutoff)).collect(),
-        ),
-        hir::Expr::Extract(operand, name) => hir::Expr::Extract(shift(operand), name),
-        hir::Expr::Tuple(attributes) => hir::Expr::Tuple(
-            attributes
-                .into_iter()
-                .map(|(name, e)| (name, shifted(e, cutoff)))
-                .collect(),
-        ),
-        hir::Expr::Relation(heading, tuples) => hir::Expr::Relation(
-            heading,
-            tuples.into_iter().map(|t| shifted(t, cutoff)).collect(),
-        ),
-        hir::Expr::Remove(operand, names) => hir::Expr::Remove(shift(operand), names),
-        hir::Expr::Rename(operand, renamings) => hir::Expr::Rename(shift(operand), renamings),
-        hir::Expr::And(lhs, rhs) => hir::Expr::And(shift(lhs), shift(rhs)),
-        hir::Expr::Ungroup(operand, names) => hir::Expr::Ungroup(shift(operand), names),
-        hir::Expr::Only(operand) => hir::Expr::Only(shift(operand)),
-        hir::Expr::Semijoin(lhs, rhs) => hir::Expr::Semijoin(shift(lhs), shift(rhs)),
-        hir::Expr::Combine(combination, lhs, rhs) => {
-            hir::Expr::Combine(combination, shift(lhs), shift(rhs))
-        }
-        hir::Expr::Antijoin(lhs, rhs) => hir::Expr::Antijoin(shift(lhs), shift(rhs)),
-        hir::Expr::Let(local, value, body) => hir::Expr::Let(local, shift(value), shift(body)),
-        hir::Expr::Array(element, elements) => hir::Expr::Array(
-            element,
-            elements.into_iter().map(|e| shifted(e, cutoff)).collect(),
-        ),
-        hir::Expr::Index(array, position) => hir::Expr::Index(shift(array), shift(position)),
-        hir::Expr::WithElements(array, changes) => hir::Expr::WithElements(
-            shift(array),
-            changes
-                .into_iter()
-                .map(|change| hir::ElementChange {
-                    path: change
-                        .path
-                        .into_iter()
-                        .map(|p| shifted(p, cutoff))
-                        .collect(),
-                    value: shifted(change.value, cutoff),
-                })
-                .collect(),
-        ),
-        hir::Expr::Load(relation, items, loaded) => hir::Expr::Load(shift(relation), items, loaded),
-        hir::Expr::If(condition, then, otherwise) => {
-            hir::Expr::If(shift(condition), shift(then), shift(otherwise))
-        }
-        // The condition is one tuple at hand further in.
-        hir::Expr::Restrict(operand, condition) => {
-            hir::Expr::Restrict(shift(operand), Box::new(shifted(*condition, cutoff + 1)))
-        }
-        // The values are one `Extend` further in.
-        hir::Expr::Extend(operand, computed, attributes) => hir::Expr::Extend(
-            shift(operand),
-            computed,
-            attributes
-                .into_iter()
-                .map(|(name, e)| (name, shifted(e, cutoff + 1)))
-                .collect(),
-        ),
+        expr => expr.map_children(|child, deeper| shifted(child, cutoff + deeper)),
     }
 }
 
 /// The variables, of the program and local, that `expr` reads, each once.
 pub(crate) fn targets_read(expr: &hir::Expr) -> Vec<hir::Target> {
     fn walk(expr: &hir::Expr, read: &mut Vec<hir::Target>) {
-        let mut add = |target: hir::Target| {
-            if !read.contains(&target) {
-                read.push(target);
-            }
+        let target = match expr {
+            hir::Expr::Variable(id) => hir::Target::Variable(*id),
+            hir::Expr::Local(id) => hir::Target::Local(*id),
+            _ => return expr.for_each_child(|child, _| walk(child, read)),
         };
-        match expr {
-            hir::Expr::Variable(id) => add(hir::Target::Variable(*id)),
-            hir::Expr::Local(id) => add(hir::Target::Local(*id)),
-            hir::Expr::Constant(_) | hir::Expr::Parameter(_) | hir::Expr::Current(..) => {}
-            hir::Expr::Call(call) => call.args.values().for_each(|arg| walk(arg, read)),
-            hir::Expr::Unary(_, operand)
-            | hir::Expr::Extract(operand, _)
-            | hir::Expr::Remove(operand, _)
-            | hir::Expr::Rename(operand, _)
-            | hir::Expr::Ungroup(operand, _)
-            | hir::Expr::Only(operand)
-            | hir::Expr::Load(operand, ..) => walk(operand, read),
-            hir::Expr::Binary(_, lhs, rhs)
-            | hir::Expr::And(lhs, rhs)
-            | hir::Expr::Combine(_, lhs, rhs)
-            | hir::Expr::Semijoin(lhs, rhs)
-            | hir::Expr::Antijoin(lhs, rhs)
-            | hir::Expr::Let(_, lhs, rhs)
-            | hir::Expr::Index(lhs, rhs)
-            | hir::Expr::Restrict(lhs, rhs) => {
-                walk(lhs, read);
-                walk(rhs, read);
-            }
-            hir::Expr::If(condition, then, otherwise) => {
-                walk(condition, read);
-                walk(then, read);
-                walk(otherwise, read);
-            }
-            hir::Expr::Tuple(attributes) => attributes.values().for_each(|e| walk(e, read)),
-            hir::Expr::Array(_, elements)
-            | hir::Expr::Relation(_, elements)
-            | hir::Expr::Connective(_, elements) => {
-                for element in elements {
-                    walk(element, read);
-                }
-            }
-            hir::Expr::Extend(operand, _, attributes) => {
-                walk(operand, read);
-                for value in attributes.values() {
-                    walk(value, read);
-                }
-            }
-            hir::Expr::WithElements(array, changes) => {
-                walk(array, read);
-                for change in changes {
-                    for position in &change.path {
-                        walk(position, read);
-                    }
-                    walk(&change.value, read);
-                }
-            }
+        if !read.contains(&target) {
+            read.push(target);
         }
     }
     let mut read = Vec::new();
@@ -1968,86 +1842,8 @@ pub(crate) fn targets_read(expr: &hir::Expr) -> Vec<hir::Target> {
 /// Whether `expr` uses the tuple at hand `depth` `Extend`s out from it:
 /// one of its attributes, or an image relation of it, which names none.
 pub(crate) fn uses_tuple(expr: &hir::Expr, depth: usize) -> bool {
-    let read = tuple_read(expr, depth);
+    let read = expr.tuple_read(depth);
     read.whole || !read.attributes.is_empty()
-}
-
-/// What an expression reads of the tuple at hand (see [`tuple_read`]).
-#[derive(Default)]
-pub(crate) struct TupleRead {
-    /// The attributes it reads, each by name.
-    pub(crate) attributes: BTreeSet<String>,
-    /// Whether it reads the tuple other than an attribute at a time, as an
-    /// image relation does.
-    pub(crate) whole: bool,
-}
-
-/// What `expr` reads of the tuple at hand `depth` `Extend`s out from it.
-pub(crate) fn tuple_read(expr: &hir::Expr, depth: usize) -> TupleRead {
-    fn walk(expr: &hir::Expr, depth: usize, read: &mut TupleRead) {
-        let mut at = |e: &hir::Expr| walk(e, depth, read);
-        match expr {
-            hir::Expr::Extract(operand, name) if matches!(**operand, hir::Expr::Current(d, _) if d == depth) =>
-            {
-                read.attributes.insert(name.clone());
-            }
-            hir::Expr::Current(d, _) => read.whole |= *d == depth,
-            hir::Expr::Constant(_)
-            | hir::Expr::Variable(_)
-            | hir::Expr::Parameter(_)
-            | hir::Expr::Local(_) => {}
-            hir::Expr::Call(call) => call.args.values().for_each(at),
-            hir::Expr::Unary(_, operand)
-            | hir::Expr::Extract(operand, _)
-            | hir::Expr::Remove(operand, _)
-            | hir::Expr::Rename(operand, _)
-            | hir::Expr::Ungroup(operand, _)
-            | hir::Expr::Only(operand)
-            | hir::Expr::Load(operand, ..) => at(operand),
-            hir::Expr::Binary(_, lhs, rhs)
-            | hir::Expr::And(lhs, rhs)
-            | hir::Expr::Combine(_, lhs, rhs)
-            | hir::Expr::Semijoin(lhs, rhs)
-            | hir::Expr::Antijoin(lhs, rhs)
-            | hir::Expr::Let(_, lhs, rhs)
-            | hir::Expr::Index(lhs, rhs) => {
-                at(lhs);
-                at(rhs);
-            }
-            hir::Expr::If(condition, then, otherwise) => {
-                at(condition);
-                at(then);
-                at(otherwise);
-            }
-            hir::Expr::Tuple(attributes) => attributes.values().for_each(at),
-            hir::Expr::Array(_, elements)
-            | hir::Expr::Relation(_, elements)
-            | hir::Expr::Connective(_, elements) => {
-                elements.iter().for_each(at);
-            }
-            // The condition and the values are one tuple at hand further in.
-            hir::Expr::Restrict(operand, condition) => {
-                at(operand);
-                walk(condition, depth + 1, read);
-            }
-            hir::Expr::Extend(operand, _, attributes) => {
-                at(operand);
-                for value in attributes.values() {
-                    walk(value, depth + 1, read);
-                }
-            }
-            hir::Expr::WithElements(array, changes) => {
-                at(array);
-                for change in changes {
-                    change.path.iter().for_each(&mut at);
-                    at(&change.value);
-                }
-            }
-        }
-    }
-    let mut read = TupleRead::default();
-    walk(expr, depth, &mut read);
-    read
 }
 
 /// The image relation of the tuple at hand, with heading `at_hand`, in

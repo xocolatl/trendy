@@ -1220,6 +1220,13 @@ const RELATIONS: &[&str] = &[
     "│ 1816 │ London   │ Ada   │ London   │",
     "│ 1923 │ Portland │ Edgar │ Portland │",
     "└──────┴──────────┴───────┴──────────┘",
+    // Restricted as it is joined.
+    "┌──────┬────────┬──────┬────────┐",
+    "│ born │ city   │ name │ place  │",
+    "├──────┼────────┼──────┼────────┤",
+    "│ 1815 │ London │ Ada  │ London │",
+    "│ 1816 │ London │ Ada  │ London │",
+    "└──────┴────────┴──────┴────────┘",
     // Matching, and not matching without the common attribute.
     "┌──────┬───────┐",
     "│ born │ name  │",

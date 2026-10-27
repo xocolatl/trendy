@@ -2770,13 +2770,17 @@ operator main{} [
   `!!s` is its image relation in `s`.
 - **Computed for each tuple** when the program runs, or when compiling if
   the relation is known then, where a failure names the tuple.
-- **A join or a product is restricted as it is made,** when compiling: each
-  part of the condition that `and` joins is computed only for the values
-  the operands have of the attributes it reads, so
+- **A join or a product is restricted as it is made.** When compiling,
+  each part of the condition that `and` joins is computed only for the
+  values the operands have of the attributes it reads, so
   `times{r, s, t} where a = b and c < 2` never makes the whole product,
   and a product of many relations can be restricted all at once, as the
-  conditions read, rather than a join at a time. The parts that can't fail
-  are computed first; the others, for the tuples those keep.
+  conditions read, rather than a join at a time. When running, each part
+  that can't fail restricts the join as soon as it has the attributes the
+  part reads, and operands related by a common attribute, or by a part
+  that reads both, are joined before anything is multiplied. Either way,
+  the parts that can't fail are computed first; the others, for the
+  tuples those keep.
 - Other languages' operators, such as `==` and `&&`, are fixed, as
   everywhere.
 

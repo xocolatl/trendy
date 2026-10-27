@@ -602,6 +602,17 @@ name = "trendy_numeric"
 version = "0.1.0"
 
 [[package]]
+name = "trendy_opt"
+version = "0.1.0"
+dependencies = [
+ "trendy_hir",
+ "trendy_lexer",
+ "trendy_parser",
+ "trendy_prelude",
+ "trendy_sema",
+]
+
+[[package]]
 name = "trendy_parser"
 version = "0.1.0"
 dependencies = [
@@ -658,6 +669,7 @@ dependencies = [
  "trendy_hir",
  "trendy_lexer",
  "trendy_lower",
+ "trendy_opt",
  "trendy_parser",
  "trendy_prelude",
  "trendy_sema",

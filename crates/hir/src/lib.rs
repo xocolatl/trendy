@@ -1,8 +1,8 @@
 //! High-level IR: the checked program handed from sema onward.
 //!
 //! Tree-shaped like the source, but every name is resolved and every
-//! invariant sema promises holds. This is where relational algebra will live
-//! and where the optimizer will rewrite it. Nothing here refers to syntax.
+//! invariant sema promises holds. This is where relational algebra lives,
+//! and where the optimizer rewrites it. Nothing here refers to syntax.
 //!
 //! Operators, variables and types each have a namespace of their own.
 
@@ -1093,6 +1093,180 @@ impl Expr {
         }
     }
 
+    /// The expression with each expression directly in it replaced by what
+    /// `f` makes of it, given how many tuples at hand further in that one
+    /// is: one for a `Restrict`'s condition and an `Extend`'s values, whose
+    /// tuple at hand is `Current(0, …)` in them, and none for the others.
+    #[must_use]
+    pub fn map_children(self, mut f: impl FnMut(Expr, usize) -> Expr) -> Expr {
+        let all = |exprs: Vec<Expr>, f: &mut dyn FnMut(Expr, usize) -> Expr| {
+            exprs.into_iter().map(|e| f(e, 0)).collect()
+        };
+        match self {
+            Expr::Constant(_)
+            | Expr::Variable(_)
+            | Expr::Parameter(_)
+            | Expr::Local(_)
+            | Expr::Current(..) => self,
+            Expr::Let(local, value, body) => {
+                Expr::Let(local, Box::new(f(*value, 0)), Box::new(f(*body, 0)))
+            }
+            Expr::Unary(op, operand) => Expr::Unary(op, Box::new(f(*operand, 0))),
+            Expr::Binary(op, lhs, rhs) => {
+                Expr::Binary(op, Box::new(f(*lhs, 0)), Box::new(f(*rhs, 0)))
+            }
+            Expr::Connective(connective, operands) => {
+                Expr::Connective(connective, all(operands, &mut f))
+            }
+            Expr::Extract(tuple, name) => Expr::Extract(Box::new(f(*tuple, 0)), name),
+            Expr::Tuple(attributes) => Expr::Tuple(
+                attributes
+                    .into_iter()
+                    .map(|(name, e)| (name, f(e, 0)))
+                    .collect(),
+            ),
+            Expr::Relation(heading, tuples) => Expr::Relation(heading, all(tuples, &mut f)),
+            Expr::Remove(operand, names) => Expr::Remove(Box::new(f(*operand, 0)), names),
+            Expr::Rename(operand, renamings) => Expr::Rename(Box::new(f(*operand, 0)), renamings),
+            Expr::And(lhs, rhs) => Expr::And(Box::new(f(*lhs, 0)), Box::new(f(*rhs, 0))),
+            Expr::Combine(combination, lhs, rhs) => {
+                Expr::Combine(combination, Box::new(f(*lhs, 0)), Box::new(f(*rhs, 0)))
+            }
+            Expr::Semijoin(lhs, rhs) => Expr::Semijoin(Box::new(f(*lhs, 0)), Box::new(f(*rhs, 0))),
+            Expr::Antijoin(lhs, rhs) => Expr::Antijoin(Box::new(f(*lhs, 0)), Box::new(f(*rhs, 0))),
+            Expr::Extend(operand, computed, attributes) => Expr::Extend(
+                Box::new(f(*operand, 0)),
+                computed,
+                attributes
+                    .into_iter()
+                    .map(|(name, e)| (name, f(e, 1)))
+                    .collect(),
+            ),
+            Expr::Ungroup(operand, names) => Expr::Ungroup(Box::new(f(*operand, 0)), names),
+            Expr::Restrict(operand, condition) => {
+                Expr::Restrict(Box::new(f(*operand, 0)), Box::new(f(*condition, 1)))
+            }
+            Expr::Array(element, elements) => Expr::Array(element, all(elements, &mut f)),
+            Expr::Index(array, position) => {
+                Expr::Index(Box::new(f(*array, 0)), Box::new(f(*position, 0)))
+            }
+            Expr::WithElements(array, changes) => Expr::WithElements(
+                Box::new(f(*array, 0)),
+                changes
+                    .into_iter()
+                    .map(|change| ElementChange {
+                        path: all(change.path, &mut f),
+                        value: f(change.value, 0),
+                    })
+                    .collect(),
+            ),
+            Expr::If(condition, then, otherwise) => Expr::If(
+                Box::new(f(*condition, 0)),
+                Box::new(f(*then, 0)),
+                Box::new(f(*otherwise, 0)),
+            ),
+            Expr::Load(relation, items, loaded) => {
+                Expr::Load(Box::new(f(*relation, 0)), items, loaded)
+            }
+            Expr::Only(operand) => Expr::Only(Box::new(f(*operand, 0))),
+            Expr::Call(call) => Expr::Call(Call {
+                args: call
+                    .args
+                    .into_iter()
+                    .map(|(name, e)| (name, f(e, 0)))
+                    .collect(),
+                ..call
+            }),
+        }
+    }
+
+    /// `f` of each expression directly in this one, given how many tuples
+    /// at hand further in it is, as for [`Expr::map_children`].
+    pub fn for_each_child(&self, mut f: impl FnMut(&Expr, usize)) {
+        match self {
+            Expr::Constant(_)
+            | Expr::Variable(_)
+            | Expr::Parameter(_)
+            | Expr::Local(_)
+            | Expr::Current(..) => {}
+            Expr::Unary(_, operand)
+            | Expr::Extract(operand, _)
+            | Expr::Remove(operand, _)
+            | Expr::Rename(operand, _)
+            | Expr::Ungroup(operand, _)
+            | Expr::Only(operand)
+            | Expr::Load(operand, ..) => f(operand, 0),
+            Expr::Let(_, lhs, rhs)
+            | Expr::Binary(_, lhs, rhs)
+            | Expr::And(lhs, rhs)
+            | Expr::Combine(_, lhs, rhs)
+            | Expr::Semijoin(lhs, rhs)
+            | Expr::Antijoin(lhs, rhs)
+            | Expr::Index(lhs, rhs) => {
+                f(lhs, 0);
+                f(rhs, 0);
+            }
+            Expr::Connective(_, exprs) | Expr::Relation(_, exprs) | Expr::Array(_, exprs) => {
+                for e in exprs {
+                    f(e, 0);
+                }
+            }
+            Expr::Tuple(attributes) => {
+                for e in attributes.values() {
+                    f(e, 0);
+                }
+            }
+            Expr::Extend(operand, _, attributes) => {
+                f(operand, 0);
+                for e in attributes.values() {
+                    f(e, 1);
+                }
+            }
+            Expr::Restrict(operand, condition) => {
+                f(operand, 0);
+                f(condition, 1);
+            }
+            Expr::WithElements(array, changes) => {
+                f(array, 0);
+                for change in changes {
+                    for position in &change.path {
+                        f(position, 0);
+                    }
+                    f(&change.value, 0);
+                }
+            }
+            Expr::If(condition, then, otherwise) => {
+                f(condition, 0);
+                f(then, 0);
+                f(otherwise, 0);
+            }
+            Expr::Call(call) => {
+                for e in call.args.values() {
+                    f(e, 0);
+                }
+            }
+        }
+    }
+
+    /// What the expression reads of the tuple at hand `depth` of them out
+    /// from it (see [`Expr::Current`]).
+    #[must_use]
+    pub fn tuple_read(&self, depth: usize) -> TupleRead {
+        fn walk(expr: &Expr, depth: usize, read: &mut TupleRead) {
+            match expr {
+                Expr::Extract(tuple, name) if matches!(**tuple, Expr::Current(d, _) if d == depth) =>
+                {
+                    read.attributes.insert(name.clone());
+                }
+                Expr::Current(d, _) => read.whole |= *d == depth,
+                _ => expr.for_each_child(|child, deeper| walk(child, depth + deeper, read)),
+            }
+        }
+        let mut read = TupleRead::default();
+        walk(self, depth, &mut read);
+        read
+    }
+
     /// The expression, in an operator instantiated with `types`: each type
     /// parameter in it replaced by its type, by index.
     #[must_use]
@@ -1163,6 +1337,16 @@ impl Expr {
             Expr::Call(call) => Expr::Call(call.instantiated(types)),
         }
     }
+}
+
+/// What an expression reads of a tuple at hand ([`Expr::tuple_read`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TupleRead {
+    /// The attributes it reads, each by name.
+    pub attributes: BTreeSet<String>,
+    /// Whether it reads the tuple other than an attribute at a time, as an
+    /// image relation does.
+    pub whole: bool,
 }
 
 /// Why an operator has no result: it is out of its type's range (for an

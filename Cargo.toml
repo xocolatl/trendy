@@ -19,6 +19,7 @@ trendy_hir = { path = "crates/hir" }
 trendy_lir = { path = "crates/lir" }
 trendy_lower = { path = "crates/lower" }
 trendy_sema = { path = "crates/sema" }
+trendy_opt = { path = "crates/opt" }
 trendy_codegen = { path = "crates/codegen" }
 trendy_fmt = { path = "crates/fmt" }
 

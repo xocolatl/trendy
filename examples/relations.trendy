@@ -326,13 +326,16 @@ operator wrap_births{b: relation { name: text, born: integer, place: text }} [
 /* Restriction: the tuples for which a condition holds, a boolean in which
    the tuple's attributes are in scope by name. `where` binds loosest, so
    its condition is the rest of the expression, and what comes before it is
-   restricted: below, the people who live where they were born. The tuples that pass
-   stay in order, so none are sorted again.
+   restricted: below, the people who live where they were born. The tuples
+   that pass stay in order, so none are sorted again. A join is restricted
+   as it is made: below, `born < 1900` restricts the births before they are
+   joined, and `place = city` the join.
    Tutorial D: PEOPLE WHERE BORN < 1900. Implemented, and printed twice like
    the projections. */
 var early := births where born < 1900;
 var early_not_ada := births where born < 1900 and name <> "Ada";
 var at_home := births join cities where place = city;
+var early_at_home := births join cities where born < 1900 and place = city;
 
 operator restrict_births{
     b: relation { name: text, born: integer, place: text },
@@ -341,6 +344,7 @@ operator restrict_births{
     call debug_table{r: b where born < 1900};
     call debug_table{r: b where born < 1900 and name <> "Ada"};
     call debug_table{r: b join c where place = city};
+    call debug_table{r: b join c where born < 1900 and place = city};
 ];
 
 /* Semijoin and antijoin: the tuples of the first relation that have a
@@ -525,6 +529,7 @@ operator main{} [
     call debug_table{r: early};
     call debug_table{r: early_not_ada};
     call debug_table{r: at_home};
+    call debug_table{r: early_at_home};
     call debug_table{r: listed};
     call debug_table{r: born_elsewhere};
     call debug_table{r: named};

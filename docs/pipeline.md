@@ -403,7 +403,7 @@ also be idempotent: formatting its own output changes nothing.
 **Provides:** the high-level IR, which is the checked program. It is
 tree-shaped like the source, but names are resolved into indices (such as
 `OperatorId`), and every invariant sema promises holds. Relational algebra
-will live here, and the optimizer will rewrite it.
+lives here, and the optimizer rewrites it.
 
 It holds the operators, the variables, and the built-in types (`Type`) and
 values (`Value`). Every variable has an explicit type and initial value: sema
@@ -889,14 +889,15 @@ relation finite (`ops::restricted_and`): the checker keeps the join's
 operands apart (`Checker::join_operands`), and each conjunct of the
 condition that can't fail, which are computed first, is evaluated for
 the values the operands have of the attributes it reads
-(`ops::tuple_read`), projected from the AND of only the operands that
+(`hir::Expr::tuple_read`), projected from the AND of only the operands that
 have them, giving the relation of those it is true of. The AND of the
 operands and those relations, the smallest first, then each next the
 one with the most attributes in common with the result so far, is the
 tuples of the whole AND they are all true of, for which the conjuncts
 that can fail are then computed, so that one of those fails just when
-it would. One that isn't known when compiling leaves the whole AND to be
-made and restricted. So the zebra's `times{…} where …`, of 199 million
+it would. One that isn't known when compiling leaves the AND, restricted,
+for the program to compute when it runs, as the optimizer plans it (see
+opt). So the zebra's `times{…} where …`, of 199 million
 tuples, is made from a few hundred. Lowering loops over the tuples, as for
 `extend` (`each_tuple`), copying those that pass into a relation
 allocated for all of them, then setting its count: they stay in the
@@ -1005,6 +1006,47 @@ nested tuple is reported at that literal, with the attribute's declared type
 as the secondary label. Missing and unknown attributes are reported at the
 tuple value. An unknown attribute close to a missing one is reported once,
 with a rename that fixes both.
+
+### opt (`trendy_opt`)
+
+**Provides:** the optimizer, from HIR to HIR: a program that means the same
+and costs less to run. Sema computes, when compiling, whatever it can, so
+this rewrites what is left for the program to compute when it runs. It is
+a layer of its own so that sema checks and lower translates, and neither
+has to optimize. A rewrite never changes what a program means, which
+includes the failures it can have: every operand is still computed, and
+one that can fail only where it would be.
+
+An AND of relations, restricted or not, is planned (`Optimizer::planned`),
+as one AND of any number of operands, since a chain of `And`s is one
+however it is grouped:
+
+- **Each conjunct of the condition that can't fail,** and reads the tuple
+  at hand an attribute at a time (`hir::Expr::tuple_read`), restricts the
+  AND as soon as it has every attribute the conjunct reads, and one that
+  reads none, the first operand: that only drops tuples the whole
+  restriction would, and it can't fail on the others. Its tuple at hand
+  then has the heading of what it restricts (`at_hand`). The rest restrict
+  the whole AND, as they did: one that can fail is computed only for the
+  tuples of the whole AND that every one that can't is true of, so it
+  would fail on a tuple that never gets that far, and one that reads the
+  tuple whole, as an image relation does, can't be given part of it.
+- **The operands are joined in an order** (`order`) that keeps what is
+  made small, without knowing how big each is. Operands are related when
+  they have an attribute in common, or a guard reads attributes of both,
+  and those related, directly or through others, are joined a part at a
+  time, so that the parts are only multiplied, last, when nothing more can
+  restrict them. In a part, the first operand is the one the most guards
+  read only attributes of, and each next is related to those so far, with
+  the most attributes in common with them, then the one that lets the most
+  guards be computed, then the first written. Folding, which knows how big
+  each is, orders by that instead (`ops::restricted_and`).
+
+So of `a`, `b` and `c`, of the attributes `x`, `y` and `z`,
+`times{a, b, c} where x = z and y > 1` is
+`((a times c) where x = z) times (b where y > 1)`, and `join{a, b, d}`,
+with `d` of `x` and `y`, is `(a join d) join b`, so that it makes no
+product. Each is lowered as written.
 
 ### lir (`trendy_lir`)
 
@@ -1299,7 +1341,7 @@ compiler error.
 Drivers read input, run the layers they need in order, and present the
 results. They contain no language logic of their own.
 
-- **`trendyc`**, the compiler: runs lexer, parser, sema, lower and codegen,
+- **`trendyc`**, the compiler: runs lexer, parser, sema, opt, lower and codegen,
   renders diagnostics (`--error-format=human|json`), and links the object
   with the system `cc`. `trendyc --explain <code>` prints an error code's
   explanation.
@@ -1375,8 +1417,9 @@ message, and offers each suggestion as a quick fix.
 1. **Dependencies point down.** A layer may depend only on layers above it in
    the `layers` block below, and only on the ones listed for it there.
 2. **One handoff type per boundary.** Layers communicate through one data
-   type: tokens, then the CST, then HIR, then LIR. Nothing reaches past the
-   layer next to it, so codegen never imports HIR, for example.
+   type: tokens, then the CST, then HIR, which opt rewrites, then LIR.
+   Nothing reaches past the layer next to it, so codegen never imports HIR,
+   for example.
 3. **User errors stop at sema.** After sema, failures are internal errors.
 4. **Only drivers wire layers together.** No layer calls the next one.
 5. **Tests may look upstream.** A crate's tests may use layers earlier in the
@@ -1415,26 +1458,12 @@ trendy_parser  : trendy_diag trendy_syntax trendy_lexer
 trendy_fmt     : trendy_syntax trendy_lexer
 trendy_hir     : trendy_numeric trendy_text
 trendy_sema    : trendy_diag trendy_syntax trendy_hir
+trendy_opt     : trendy_hir
 trendy_lir     :
 trendy_lower   : trendy_hir trendy_lir
 trendy_runtime : trendy_numeric trendy_text unicode-width
 trendy_codegen : trendy_lir cranelift-codegen cranelift-frontend cranelift-module cranelift-native cranelift-object
-trendyc        : trendy_diag trendy_lexer trendy_parser trendy_prelude trendy_sema trendy_lower trendy_codegen
+trendyc        : trendy_diag trendy_lexer trendy_parser trendy_prelude trendy_sema trendy_opt trendy_lower trendy_codegen
 trendyfmt      : trendy_diag trendy_lexer trendy_parser trendy_fmt
 trendy_lsp     : trendy_diag trendy_syntax trendy_lexer trendy_parser trendy_prelude trendy_sema trendy_fmt lsp-server lsp-types serde_json
 ```
-
-## Planned layers
-
-None of these exist yet. They're here so the boundaries are planned before the
-code needs them.
-
-- **Relational algebra in HIR**, once relations arrive. Sema would translate
-  relational expressions into algebra operators over known headings.
-- **Optimizer** (`trendy_opt`), from HIR to HIR, placed between sema and
-  lower. It would apply algebraic rewrites such as predicate pushdown and join
-  ordering. It goes in its own layer so that sema checks and lower translates,
-  and neither has to optimize.
-- **Runtime** (`trendy_runtime`), a `no_std` static library linked into every
-  executable. It isn't part of the compiler pipeline, so no compiler layer
-  depends on it; codegen only emits calls to symbols it exports.
