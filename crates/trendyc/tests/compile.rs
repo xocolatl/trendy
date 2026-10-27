@@ -42,8 +42,9 @@ fn run_file(name: &str, path: &Path) -> (i32, String) {
     build_and_run(&input, &output)
 }
 
-/// Compile `input` into the executable `output`, run it, and return its
-/// exit code and what it wrote to stderr. The C library scribbles over
+/// Compile `input` into the executable `output`, run it in the workspace
+/// root, from which the examples' paths to files are relative, and return
+/// its exit code and what it wrote to stderr. The C library scribbles over
 /// memory as it is freed (`MallocScribble` on macOS, `MALLOC_PERTURB_`
 /// with glibc), so that a program that reads a value whose buffer was
 /// freed writes garbage, rather than, by luck, what it should.
@@ -61,6 +62,7 @@ fn build_and_run(input: &Path, output: &Path) -> (i32, String) {
     );
 
     let run = Command::new(output)
+        .current_dir(workspace_root())
         .env("MallocScribble", "1")
         .env("MallocPreScribble", "1")
         .env("MALLOC_PERTURB_", "85")
@@ -532,7 +534,94 @@ fn text() {
             r#""hello, ""#,
             r#""""#,
             folded,
+            // The file's lines but the empty one, in canonical order, then
+            // how many it has.
+            "┌─────────┬─────┐",
+            "│ line    │ seq │",
+            "├─────────┼─────┤",
+            "│ Amazon  │   2 │",
+            "│ Mekong  │   6 │",
+            "│ Nile    │   1 │",
+            "│ Paraná  │   5 │",
+            "│ Volga   │   7 │",
+            "│ Yangtze │   3 │",
+            "└─────────┴─────┘",
+            "7",
         ]
+    );
+}
+
+#[test]
+fn load_text_file_reads_a_files_lines() {
+    use trendy_diag::Code;
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("load_text_file");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = |name: &str, contents: &[u8]| {
+        let path = dir.join(name);
+        std::fs::write(&path, contents).unwrap();
+        path
+    };
+    // A path as a trendy text literal: Rust's `Debug` writes the same
+    // escapes.
+    let literal = |path: &Path| format!("{:?}", path.to_str().unwrap());
+    let lines = |path: &Path| {
+        let source = format!(
+            "operator main{{}} [\n    call debug_value{{v: load_text_file{{path: {}}}}};\n];\n",
+            literal(path)
+        );
+        let stem = path.file_stem().unwrap().to_str().unwrap();
+        run_source(&format!("load_text_file_{stem}"), &source)
+    };
+    let relation = |tuples: &str| format!("relation {{ line: text, seq: integer }} {tuples}\n");
+    // A line ends at a line feed, or a carriage return and a line feed,
+    // and the last needs neither; a carriage return alone is text.
+    for (name, contents, expected) in [
+        (
+            "lf",
+            &b"a\nb\n"[..],
+            r#"{ { line: "a", seq: 1 }, { line: "b", seq: 2 } }"#,
+        ),
+        (
+            "crlf",
+            b"a\r\n\r\nb\r",
+            r#"{ { line: "", seq: 2 }, { line: "a", seq: 1 }, { line: "b\r", seq: 3 } }"#,
+        ),
+        ("unended", b"a", r#"{ { line: "a", seq: 1 } }"#),
+        ("empty_line", b"\n", r#"{ { line: "", seq: 1 } }"#),
+        ("empty", b"", "{}"),
+        (
+            "repeated",
+            "é\né\n".as_bytes(),
+            r#"{ { line: "é", seq: 1 }, { line: "é", seq: 2 } }"#,
+        ),
+    ] {
+        let path = file(&format!("{name}.txt"), contents);
+        assert_eq!(lines(&path), (0, relation(expected)), "{name}");
+    }
+
+    let missing = dir.join("missing.txt");
+    assert_eq!(
+        lines(&missing),
+        (
+            1,
+            format!(
+                "error[{}]: can't read {}: No such file or directory\n",
+                Code::UnreadableFile.id(),
+                literal(&missing)
+            )
+        )
+    );
+    let not_utf8 = file("latin1.txt", b"Nile\nParan\xe1\n");
+    assert_eq!(
+        lines(&not_utf8),
+        (
+            1,
+            format!(
+                "error[{}]: line 2 of {} isn't UTF-8 text\n",
+                Code::NotUtf8.id(),
+                literal(&not_utf8)
+            )
+        )
     );
 }
 

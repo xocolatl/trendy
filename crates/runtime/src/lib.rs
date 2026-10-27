@@ -1635,9 +1635,16 @@ unsafe fn compare_tuples(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> cor
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub extern "C" fn trendy_rt_fail(failure: u32) -> ! {
+    fail_with(|out| out.write_str(failure_message(failure)))
+}
+
+/// Stop the program, writing the message `write` writes to stderr, a line
+/// that starts with the compiler's error code, and exiting with status 1.
+#[cfg(not(test))]
+fn fail_with(write: impl FnOnce(&mut Stderr) -> fmt::Result) -> ! {
     let mut out = Stderr::default();
     // There is nowhere to report a failure to write to stderr.
-    let _ = out.write_str(failure_message(failure));
+    let _ = write(&mut out);
     out.flush();
     // SAFETY: `exit` has no preconditions.
     unsafe { exit(1) }
@@ -1916,6 +1923,152 @@ pub unsafe extern "C" fn trendy_rt_to_text(
             trendy_rt_fail(FAIL_OUT_OF_MEMORY)
         };
         dst.write_unaligned(text);
+    }
+}
+
+/// Store at `dst` the relation of the lines of the text file at `path`, of
+/// the type `desc` describes, `relation { line: text, seq: integer }`, in
+/// memory the statement owns: each line, without the line feed, or the
+/// carriage return and line feed, that ends it, and its position in the
+/// file, counting from 1. The last line needs no ending. Stops the
+/// program if the file can't be read (R0012), or isn't UTF-8 text
+/// (R0013), or the memory can't be allocated.
+///
+/// # Safety
+///
+/// `path` must point to a valid text value, `desc` to a valid descriptor
+/// of that relation type, and `dst` to memory for a relation. The
+/// statement must have begun a scope.
+///
+/// # Panics
+///
+/// If `desc` describes another relation type, which the compiler rules
+/// out.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_load_text_file(
+    dst: *mut Text,
+    path: *const Text,
+    desc: *const TypeDesc,
+) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let path = read_text(path.cast());
+        let (contents, len) = read_file(path);
+        let bytes = array(contents, len);
+        let text = match core::str::from_utf8(bytes) {
+            Ok(text) => text,
+            Err(error) => {
+                let before = &bytes[..error.valid_up_to()];
+                let line = before.split(|&b| b == b'\n').count();
+                fail_with(|out| {
+                    write!(out, "error[R0013]: line {line} of \"")?;
+                    trendy_text::escape(path, out)?;
+                    out.write_str("\" isn't UTF-8 text\n")
+                })
+            }
+        };
+        let desc = &*desc;
+        let tuple = desc.element();
+        // A descriptor's attributes are in name order.
+        let [line, seq] = attributes(tuple) else {
+            panic!("`load_text_file`'s tuples have two attributes");
+        };
+        let count = text.lines().count();
+        let Some(size) = count.checked_mul(tuple.size) else {
+            trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+        };
+        // Zeroed, as everywhere, so that the padding in them is zero.
+        let tuples = allocate::<u8>(size);
+        core::ptr::write_bytes(tuples, 0, size);
+        for (i, (seq_value, text)) in (1_i64..).zip(text.lines()).enumerate() {
+            let at = tuples.add(i * tuple.size);
+            let bytes = allocate_buffer(text.len(), core::ptr::null());
+            core::ptr::copy_nonoverlapping(text.as_ptr(), bytes, text.len());
+            at.add(line.offset).cast::<Text>().write_unaligned(Text {
+                bytes,
+                len: text.len(),
+            });
+            at.add(seq.offset).cast::<i64>().write_unaligned(seq_value);
+        }
+        let (bytes, len) = canonical(tuples, count, desc);
+        free(tuples.cast());
+        free(contents.cast());
+        dst.write_unaligned(Text { bytes, len });
+    }
+}
+
+/// The bytes of the file at `path`, and their number, in memory from
+/// `malloc`, which the caller frees. Stops the program if the file can't
+/// be read (R0012), or the memory can't be allocated.
+#[cfg(not(test))]
+fn read_file(path: &str) -> (*mut u8, usize) {
+    // `open` takes the path as a C string, which ends at the first NUL.
+    if path.contains('\0') {
+        cant_read(path, "a path can't contain the character U+0000");
+    }
+    let Some(terminated) = path.len().checked_add(1) else {
+        trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+    };
+    // SAFETY: the memory is for the path's bytes and a NUL, read by `open`
+    // and then freed; the descriptor is read, then closed, and `read`
+    // writes at most the room left in the memory.
+    unsafe {
+        let c_path = allocate::<u8>(terminated);
+        core::ptr::copy_nonoverlapping(path.as_ptr(), c_path, path.len());
+        *c_path.add(path.len()) = 0;
+        let fd = open(c_path, O_RDONLY);
+        free(c_path.cast());
+        if fd < 0 {
+            cant_read(path, reason());
+        }
+        let mut capacity = 4096;
+        let mut contents = allocate::<u8>(capacity);
+        let mut len = 0;
+        loop {
+            if len == capacity {
+                let Some(grown) = capacity.checked_mul(2) else {
+                    trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+                };
+                contents = realloc(contents.cast(), grown).cast();
+                if contents.is_null() {
+                    trendy_rt_fail(FAIL_OUT_OF_MEMORY);
+                }
+                capacity = grown;
+            }
+            let Ok(n) = usize::try_from(read(fd, contents.add(len), capacity - len)) else {
+                cant_read(path, reason());
+            };
+            if n == 0 {
+                break;
+            }
+            len += n;
+        }
+        close(fd);
+        (contents, len)
+    }
+}
+
+/// Stop the program because the file at `path` can't be read, for
+/// `reason`.
+#[cfg(not(test))]
+fn cant_read(path: &str, reason: &str) -> ! {
+    fail_with(|out| {
+        out.write_str("error[R0012]: can't read \"")?;
+        trendy_text::escape(path, out)?;
+        writeln!(out, "\": {reason}")
+    })
+}
+
+/// The system's description of why the last call of the C library that
+/// failed did, such as "No such file or directory".
+#[cfg(not(test))]
+fn reason() -> &'static str {
+    // SAFETY: `errno_location` is the calling thread's `errno`, and
+    // `strerror` returns a C string, which no other call here replaces.
+    unsafe {
+        let description = core::ffi::CStr::from_ptr(strerror(*errno_location()));
+        description.to_str().unwrap_or("an unknown error")
     }
 }
 
@@ -2439,8 +2592,26 @@ impl Write for Stderr {
     }
 }
 
+/// `open`'s flag to open a file for reading only, 0 on every system.
+#[cfg(not(test))]
+const O_RDONLY: i32 = 0;
+
 unsafe extern "C" {
     fn write(fd: i32, buf: *const u8, count: usize) -> isize;
+    #[cfg(not(test))]
+    fn open(path: *const u8, flags: i32, ...) -> i32;
+    #[cfg(not(test))]
+    fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
+    #[cfg(not(test))]
+    fn close(fd: i32) -> i32;
+    #[cfg(not(test))]
+    fn strerror(errnum: i32) -> *const core::ffi::c_char;
+    /// The address of the calling thread's `errno`, which C reaches
+    /// through a macro, under each system's own name.
+    #[cfg(not(test))]
+    #[cfg_attr(target_vendor = "apple", link_name = "__error")]
+    #[cfg_attr(target_os = "linux", link_name = "__errno_location")]
+    fn errno_location() -> *mut i32;
     #[cfg(not(test))]
     fn abort() -> !;
     #[cfg(not(test))]

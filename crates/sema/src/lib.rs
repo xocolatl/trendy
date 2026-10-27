@@ -5419,6 +5419,67 @@ mod tests {
     }
 
     #[test]
+    fn other_languages_names_for_reading_lines_are_fixed() {
+        // R's and Kotlin's, Python's and Ruby's, and .NET's.
+        for written in ["readLines", "readlines", "ReadAllLines"] {
+            let source = format!(
+                "operator main{{}} [\n    var lines := {written}{{\"rivers.txt\"}};\n    call debug_table{{r: lines}};\n];\n"
+            );
+            let fixed = fix(&source);
+            assert_eq!(
+                fixed,
+                source.replace(&format!("{written}{{"), "load_text_file{path: "),
+                "{written}"
+            );
+            assert!(analyze_str(&fixed).is_ok(), "{fixed}");
+        }
+    }
+
+    /// An operator that reads a file, through `load_text_file`.
+    const RIVERS: &str = "operator rivers{}: relation { seq: integer, line: text } [\n    load_text_file{path: \"rivers.txt\"}\n];\n";
+
+    #[test]
+    fn an_initial_value_reads_no_input() {
+        for init in [
+            "load_text_file{path: \"rivers.txt\"}",
+            // Through an operator that reads it.
+            "count{r: rivers{}}",
+            // For each tuple, though its path isn't known until then.
+            "relation { { p: \"rivers.txt\" } } extend { n := count{r: load_text_file{path: p}} }",
+        ] {
+            let source = format!("{RIVERS}var lines := {init};{MAIN}");
+            let found = errors(&source);
+            assert_eq!(
+                found.iter().map(|e| e.code).collect::<Vec<_>>(),
+                [Code::InputInInitialValue],
+                "{init}"
+            );
+            assert!(
+                found[0].primary.message.contains("reads input"),
+                "{found:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn input_is_read_when_the_program_runs() {
+        // Though its path is known when compiling, and through an
+        // operator whose value would otherwise be.
+        let source = format!(
+            "{RIVERS}operator main{{}} [\n    call debug_table{{r: rivers{{}}}};\n    call debug_value{{v: count{{r: load_text_file{{path: \"rivers.txt\"}}}}}};\n];\n"
+        );
+        let body = main_body(&source);
+        assert!(
+            matches!(argument(&body[0]), hir::Expr::Call(_)),
+            "{body:#?}"
+        );
+        assert!(
+            matches!(argument(&body[1]), hir::Expr::Call(_)),
+            "{body:#?}"
+        );
+    }
+
+    #[test]
     fn a_projection_for_a_per_parameter_is_fixed_to_its_attribute() {
         // Projecting would merge equal values, which `of` counts each of.
         let source = format!("{PLOTS}var s := sum{{r: plots{{of}}}};{MAIN}");

@@ -521,6 +521,7 @@ pub(crate) fn value(
 ) -> Option<hir::Value> {
     match Checker::new(names).expr(expr, expected, errors)? {
         hir::Expr::Constant(value) => Some(value),
+        // Nothing in one reads input (`Checker::call`).
         other => unreachable!("an expression of constants folds to a constant: {other:?}"),
     }
 }

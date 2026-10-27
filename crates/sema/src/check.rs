@@ -731,13 +731,22 @@ impl<'a> Checker<'a> {
         if signature.builtin.is_none() && !self.names.checked(signature.id, span, errors) {
             return None;
         }
-        let result = match ops::call(call, self.names.bindings()) {
+        let bindings = self.names.bindings();
+        let result = match ops::call(call, bindings) {
             Ok(result) => result,
             Err(failed) => {
                 errors.push(errors::call_failure(&failed, expr, &signature));
                 return None;
             }
         };
+        // Variables are known in an initial value, which is computed when
+        // compiling, where nothing can read input.
+        if bindings.variables.is_some()
+            && let Some(builtin) = ops::input(&result, bindings)
+        {
+            errors.push(errors::input_in_initial_value(name, builtin, expr));
+            return None;
+        }
         self.matched(expected, result, expr, errors)
     }
 

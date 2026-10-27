@@ -180,6 +180,13 @@ pub enum RuntimeFn {
     /// [`RuntimeFn::Begin`]). It stops the program if the memory can't be
     /// allocated.
     ToText,
+    /// `trendy_rt_load_text_file(dst, path, descriptor)`: store at `dst` the
+    /// relation of the lines of the text file at `path`, a text, of the
+    /// type the descriptor describes, `relation { line: text, seq: integer
+    /// }`, in memory the statement owns. It stops the program if the file
+    /// can't be read, or isn't UTF-8 text, or if the memory can't be
+    /// allocated.
+    LoadTextFile,
     /// `trendy_rt_sum(dst, src, descriptor, index)`: store at `dst` the
     /// sum of the attribute `index` (a [`Field::Usize`], its position by
     /// name) of the tuples of the relation `src`, of the type the
@@ -344,6 +351,7 @@ impl RuntimeFn {
             RuntimeFn::DebugValue => "trendy_rt_debug_value",
             RuntimeFn::DebugTable => "trendy_rt_debug_table",
             RuntimeFn::ToText => "trendy_rt_to_text",
+            RuntimeFn::LoadTextFile => "trendy_rt_load_text_file",
             RuntimeFn::Sum => "trendy_rt_sum",
             RuntimeFn::Product => "trendy_rt_product",
             RuntimeFn::Fail => "trendy_rt_fail",

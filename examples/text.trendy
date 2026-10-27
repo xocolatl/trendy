@@ -7,10 +7,20 @@ operator greet{name: text, punctuation: text} [
     call debug_value{v: tuple { t: "constant " || "parts fold" }};
 ];
 
+/* A text file's lines, read when the program runs, each with its
+   position in the file, `seq`, counting from 1. A relative path is from
+   the directory the program runs in: here, the repository's. */
+operator list_rivers{} [
+    var rivers := load_text_file{path: "examples/rivers.txt"};
+    call debug_table{r: rivers where line <> ""};
+    call debug_value{v: count{r: rivers}};
+];
+
 operator main{} [
     call debug_value{v: greeting};
     call debug_value{v: nothing};
     call greet{name: "Ada", punctuation: "!"};
     call greet{name: "é\u{1F600}\"", punctuation: "\n"};
     call greet{name: "", punctuation: ""};
+    call list_rivers{};
 ];

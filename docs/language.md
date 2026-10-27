@@ -584,6 +584,16 @@ builtin operator to_text{from: any type}: text;
 /* The approximate number nearest `from`: `from` itself up to 2^53 in
    magnitude, beyond which not every integer is one. */
 builtin operator to_approximate{from: integer}: approximate;
+
+/* The lines of the text file at `path`, which is relative to the
+   directory the program runs in, unless it is absolute: each with its
+   position in the file, `seq`, counting from 1. A line ends at a line
+   feed, or a carriage return and a line feed, which aren't part of it;
+   the last needs neither. Each call reads the file as it is when the
+   program runs: the compiler never opens it, so it needn't exist until
+   then. A file that can't be read fails (R0012), as does one that isn't
+   UTF-8 text (R0013). */
+builtin operator load_text_file{path: text}: relation { seq: integer, line: text };
 ```
 
 **`debug_value{v: any type}`** writes `v` to stderr, on one line, as trendy
@@ -860,6 +870,42 @@ operator describe{city: text, people: integer} [
 operator main{} [];
 ```
 
+**`load_text_file{path: text}: relation { seq: integer, line: text }`**
+reads input: the lines of a text file.
+
+- **Each line is a tuple:** `line`, without the line feed, or the carriage
+  return and line feed, that ends it, and `seq`, its position in the
+  file, counting from 1. So two equal lines are two tuples, and the
+  file's order is kept, as `load a from lines order [asc seq];` gives it
+  back.
+- **The last line needs no ending,** so a file that ends with one has no
+  empty line after it, and an empty file has no lines.
+- **The path is relative to the directory the program runs in,** not the
+  one its source is in, unless it is absolute.
+- **Each call reads the file as it is when the program runs.** The
+  compiler never opens it, even if its path is known then, so the file
+  needn't exist until the program runs, and it can change between two
+  runs, or between two calls. Reading updates nothing, so the operator
+  is read-only (TTM, RM Prescription 3). A variable's initial value is
+  computed when compiling, so it can't read a file (A0050).
+- **A file that can't be read stops the program** (R0012), writing its
+  path and the system's reason, as does one that isn't UTF-8 text
+  (R0013), writing the first line that isn't.
+
+```trendy
+operator main{} [
+    var lines := load_text_file{path: "rivers.txt"};
+    call debug_table{r: lines where line <> ""};
+    call debug_value{v: count{r: lines}};
+];
+```
+
+```trendy,error
+var lines := load_text_file{path: "rivers.txt"};
+
+operator main{} [];
+```
+
 ## Variables
 
 ```trendy
@@ -891,7 +937,9 @@ not assignment.
 An initial value is any expression, and can refer to other variables,
 declared before or after it. Initial values are evaluated when compiling,
 each after the ones it refers to, so the program starts with every variable
-already holding its value: below, `ready` is simply `true`.
+already holding its value: below, `ready` is simply `true`. So an initial
+value can't read input, such as a file, which is known only when the
+program runs (A0050).
 
 ```trendy
 var ready := started or false;
@@ -3129,8 +3177,8 @@ Expressions have no side effects. Every operand is evaluated, so an error in
 one is never skipped, but for an `if`'s branches, only the one its
 condition takes, and for the operands of `and`, `or` and `implies` that
 can fail, which those that can't guard (see [Boolean
-operators](#boolean-operators)). Whatever doesn't depend on parameters or variables is
-evaluated when compiling, and so is whatever a constant operand decides: `p
+operators](#boolean-operators)). Whatever doesn't depend on parameters,
+variables or input is evaluated when compiling, and so is whatever a constant operand decides: `p
 and false` is just `false`, whatever `p` is, `true and p` is just `p`, and
 `n * 1` is just `n`. But `(n + 1) * 0` is still computed, since `n + 1` can
 overflow. A failure in an operand a guard known when compiling skips isn't
@@ -3430,6 +3478,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `string`, `str`, `varchar` | `text` |
 | `str(x)`, `x.to_string()`, `CAST(x AS VARCHAR)`, `CAST_AS_CHAR (X)` | `to_text{from: x}` |
 | `float(n)`, `n as f64`, `CAST(n AS DOUBLE PRECISION)`, `CAST_AS_RATIONAL (N)` | `to_approximate{from: n}` |
+| `readLines(path)`, `File.readlines(path)`, `File.ReadAllLines(path)` | `load_text_file{path: path}`, with each line's `seq` |
 | `{ x: 1 }`, `TUPLE { X 1 }` | `tuple { x: 1 }` |
 | `type Home = { … }`, `interface Home { … }`, `struct Home { … }` | `heading home := { … };`, whose types are `relation home` and `tuple home` |
 | `[1, 2]`, `ARRAY[1, 2]` | `array [1, 2]` |

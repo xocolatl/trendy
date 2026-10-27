@@ -34,7 +34,12 @@ a runtime call, which writes the value as `debug_value` does; folded, it
 is `hir::Value`'s source text, which writes values the same way. Since
 that text has the value's type in it, as an empty relation's heading, a
 built-in isn't evaluated when compiling on an argument whose type has a
-type parameter, but for each list of types. A built-in can
+type parameter, but for each list of types. Nor is one that reads input
+(`hir::Builtin::reads_input`), as `load_text_file` reads a file, whose
+contents are known only when the program runs: its call stays a call,
+which lowering makes a runtime call (`trendy_rt_load_text_file`), and an
+initial value, computed when compiling, can't make one, directly or
+through an operator whose value does (`ops::input`, A0050). A built-in can
 have type parameters, of a kind too, and `per` parameters, declared as an
 operator's are, and checked against the compiler's, written as the
 operator sees them. A wrong prelude is an internal
@@ -50,7 +55,9 @@ the prelude instead, and each new language feature is a reason to look for
 a built-in it can replace.
 
 **`trendy_runtime`** is a `no_std` library linked into every executable. It
-links only the C library, and of the crates outside the workspace uses
+links only the C library, from which it reads files (`open`, `read`) and
+writes the system's reason one can't be (`strerror`, with `errno` under
+each system's name for it), and of the crates outside the workspace uses
 only `unicode-width`, for the columns a terminal gives a table's cell
 (UAX #11), which a wide character, such as `李`, takes two of. `trendyc`'s `build.rs` builds it as a static library
 (`cargo rustc --crate-type staticlib` with `panic = "abort"`, in a target

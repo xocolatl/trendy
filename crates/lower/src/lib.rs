@@ -754,7 +754,8 @@ impl<'a> FunctionBuilder<'a> {
                 | hir::Builtin::Sum
                 | hir::Builtin::Product
                 | hir::Builtin::ToText
-                | hir::Builtin::ToApproximate,
+                | hir::Builtin::ToApproximate
+                | hir::Builtin::LoadTextFile,
             ) => {
                 unreachable!("`call` invokes only update operators")
             }
@@ -875,6 +876,18 @@ impl<'a> FunctionBuilder<'a> {
                     op: lir::UnaryOp::Approximate,
                     src,
                 });
+                dst
+            }
+            hir::Builtin::LoadTextFile => {
+                let path = self.place(&call.args["path"], cx);
+                let ty = self.program.result(call);
+                let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+                let dst = self.slot(layout(&ty));
+                self.insts.push(lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::LoadTextFile,
+                    args: vec![dst.clone(), path, descriptor],
+                });
+                self.scoped = true;
                 dst
             }
             hir::Builtin::DebugValue | hir::Builtin::DebugTable => {

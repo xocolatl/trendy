@@ -298,10 +298,13 @@ pub enum Builtin {
     ToText,
     /// The approximate number nearest an integer.
     ToApproximate,
+    /// The lines of a text file, numbered from 1, which the program reads
+    /// when it runs.
+    LoadTextFile,
 }
 
 impl Builtin {
-    pub const ALL: [Builtin; 10] = [
+    pub const ALL: [Builtin; 11] = [
         Builtin::DebugValue,
         Builtin::DebugTable,
         Builtin::Count,
@@ -312,6 +315,7 @@ impl Builtin {
         Builtin::Product,
         Builtin::ToText,
         Builtin::ToApproximate,
+        Builtin::LoadTextFile,
     ];
 
     #[must_use]
@@ -327,6 +331,7 @@ impl Builtin {
             Builtin::Product => "product",
             Builtin::ToText => "to_text",
             Builtin::ToApproximate => "to_approximate",
+            Builtin::LoadTextFile => "load_text_file",
         }
     }
 
@@ -363,7 +368,7 @@ impl Builtin {
             Builtin::DebugValue | Builtin::ToText => vec![unnamed(0, Any::Type)],
             Builtin::Count | Builtin::DebugTable => vec![unnamed(0, Any::Relation)],
             Builtin::Length => vec![unnamed(0, Any::Array)],
-            Builtin::ToApproximate => Vec::new(),
+            Builtin::ToApproximate | Builtin::LoadTextFile => Vec::new(),
             Builtin::Min | Builtin::Max => of_kind("ordered", &[Requirement::Order]),
             Builtin::Sum | Builtin::Product => of_kind(
                 "numeric",
@@ -384,6 +389,7 @@ impl Builtin {
             Builtin::Length => [("a".to_string(), parameter(0))].into(),
             Builtin::ToText => [("from".to_string(), parameter(0))].into(),
             Builtin::ToApproximate => [("from".to_string(), Type::Scalar(Scalar::Integer))].into(),
+            Builtin::LoadTextFile => [("path".to_string(), Type::Scalar(Scalar::Text))].into(),
             Builtin::Min | Builtin::Max | Builtin::Sum | Builtin::Product => {
                 let tuples = Heading::new(
                     [
@@ -409,7 +415,24 @@ impl Builtin {
             }
             Builtin::ToText => Some(Type::Scalar(Scalar::Text)),
             Builtin::ToApproximate => Some(Type::Scalar(Scalar::Approximate)),
+            Builtin::LoadTextFile => Some(Type::Relation(Heading::new(
+                [
+                    ("line".to_string(), Type::Scalar(Scalar::Text)),
+                    ("seq".to_string(), Type::Scalar(Scalar::Integer)),
+                ]
+                .into(),
+            ))),
         }
+    }
+
+    /// Whether a call reads input, from outside the program, such as a
+    /// file: its value is known only when the program runs, and so is
+    /// never computed when compiling, as a variable's isn't. It updates no
+    /// variable, so the operator is still read-only (TTM, RM Prescription
+    /// 3).
+    #[must_use]
+    pub fn reads_input(self) -> bool {
+        self == Builtin::LoadTextFile
     }
 
     /// The value of a call of the read-only built-in with the arguments
@@ -423,8 +446,9 @@ impl Builtin {
     ///
     /// # Panics
     ///
-    /// If the built-in is an update operator, which has no value, or the
-    /// arguments aren't those of [`Builtin::params`], which sema rules out.
+    /// If the built-in is an update operator, which has no value, or one
+    /// that reads input (see [`Builtin::reads_input`]), or the arguments
+    /// aren't those of [`Builtin::params`], which sema rules out.
     pub fn evaluate(self, args: &BTreeMap<String, Value>) -> Result<Value, BuiltinFailure> {
         let relation = || match &args["r"] {
             Value::Relation(r) => r,
@@ -474,6 +498,9 @@ impl Builtin {
                 Value::Integer(n) => Ok(Value::Approximate(Approximate::nearest(n))),
                 ref other => panic!("`to_approximate` of {other:?}"),
             },
+            Builtin::LoadTextFile => {
+                panic!("`{}` reads input, known only when running", self.name())
+            }
         }
     }
 }

@@ -1592,14 +1592,17 @@ fn spelled_like(
 }
 
 /// Other languages' names for operators of the prelude, lowercase, with
-/// the prelude's, of a relation, and of an array if that is another:
-/// Python's `len` counts either, as SQL's `CARDINALITY` and Java's `size`
-/// do.
+/// the prelude's, of a relation if it takes one, and of an array if that is
+/// another: Python's `len` counts either, as SQL's `CARDINALITY` and Java's
+/// `size` do, and R's and Kotlin's `readLines` read a file's lines, as
+/// Python's and Ruby's `readlines` and .NET's `ReadAllLines` do.
 const ELSEWHERE: &[(&str, &str, Option<&str>)] = &[
     ("len", "count", Some("length")),
     ("size", "count", Some("length")),
     ("cardinality", "count", Some("length")),
     ("prod", "product", None),
+    ("readlines", "load_text_file", None),
+    ("readalllines", "load_text_file", None),
 ];
 
 /// The prelude's operators that other languages call `name`, in any case:
@@ -3978,6 +3981,29 @@ pub(crate) fn call_failure(
         Some(value) => d.with_secondary(value.span(), format!("`{}`'s value", signature.name)),
         None => d,
     }
+}
+
+/// A call, `expr`, of the operator `name` in an initial value, which is
+/// computed when compiling, though it reads input through the built-in
+/// `builtin`, which is known only when the program runs.
+pub(crate) fn input_in_initial_value(name: &str, builtin: hir::Builtin, expr: &Expr) -> Diagnostic {
+    let through = if name == builtin.name() {
+        String::new()
+    } else {
+        format!(", with `{}`,", builtin.name())
+    };
+    Diagnostic::error(
+        Code::InputInInitialValue,
+        "an initial value can't read input",
+        expr.span(),
+        format!("`{name}` reads input{through} when the program runs"),
+    )
+    .with_note(
+        "a variable's initial value is computed when compiling, so that the program starts with every variable holding its value, and input is known only when the program runs",
+    )
+    .with_help(
+        "read it in an operator that runs when the program does, such as `main`, into a local variable, or into this one declared with its type and no value",
+    )
 }
 
 /// A tuple at `span` that the relation already has, first at `first`.

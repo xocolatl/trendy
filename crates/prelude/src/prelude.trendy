@@ -70,3 +70,13 @@ builtin operator to_text{from: any type}: text;
 /* The approximate number nearest `from`: `from` itself up to 2^53 in
    magnitude, beyond which not every integer is one. */
 builtin operator to_approximate{from: integer}: approximate;
+
+/* The lines of the text file at `path`, which is relative to the
+   directory the program runs in, unless it is absolute: each with its
+   position in the file, `seq`, counting from 1. A line ends at a line
+   feed, or a carriage return and a line feed, which aren't part of it;
+   the last needs neither. Each call reads the file as it is when the
+   program runs: the compiler never opens it, so it needn't exist until
+   then. A file that can't be read fails (R0012), as does one that isn't
+   UTF-8 text (R0013). */
+builtin operator load_text_file{path: text}: relation { seq: integer, line: text };
