@@ -7,13 +7,18 @@ operator greet{name: text, punctuation: text} [
     call debug_value{v: tuple { t: "constant " || "parts fold" }};
 ];
 
-/* A text file's lines, read when the program runs, each with its
-   position in the file, `seq`, counting from 1. A relative path is from
+/* A text file's lines, read when the program runs: an array, in the
+   file's order, the first line its element 1. A relative path is from
    the directory the program runs in: here, the repository's. */
 operator list_rivers{} [
     var rivers := load_text_file{path: "examples/rivers.txt"};
-    call debug_table{r: rivers where line <> ""};
-    call debug_value{v: count{r: rivers}};
+    call debug_value{v: rivers};
+    call debug_value{v: length{a: rivers}};
+    for river in rivers loop [
+        if river <> "" then [
+            call debug_value{v: river};
+        ];
+    ];
 ];
 
 operator main{} [

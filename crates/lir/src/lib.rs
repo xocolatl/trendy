@@ -190,11 +190,10 @@ pub enum RuntimeFn {
     /// writes none.
     ParseApproximate,
     /// `trendy_rt_load_text_file(dst, path, descriptor)`: store at `dst` the
-    /// relation of the lines of the text file at `path`, a text, of the
-    /// type the descriptor describes, `relation { line: text, seq: integer
-    /// }`, in memory the statement owns. It stops the program if the file
-    /// can't be read, or isn't UTF-8 text, or if the memory can't be
-    /// allocated.
+    /// array of the lines of the text file at `path`, a text, in order, of
+    /// the type the descriptor describes, `array text`, in memory the
+    /// statement owns. It stops the program if the file can't be read, or
+    /// isn't UTF-8 text, or if the memory can't be allocated.
     LoadTextFile,
     /// `trendy_rt_sum(dst, src, descriptor, index)`: store at `dst` the
     /// sum of the attribute `index` (a [`Field::Usize`], its position by

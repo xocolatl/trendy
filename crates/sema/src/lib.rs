@@ -5882,16 +5882,17 @@ mod tests {
     }
 
     /// An operator that reads a file, through `load_text_file`.
-    const RIVERS: &str = "operator rivers{}: relation { seq: integer, line: text } [\n    load_text_file{path: \"rivers.txt\"}\n];\n";
+    const RIVERS: &str =
+        "operator rivers{}: array text [\n    load_text_file{path: \"rivers.txt\"}\n];\n";
 
     #[test]
     fn an_initial_value_reads_no_input() {
         for init in [
             "load_text_file{path: \"rivers.txt\"}",
             // Through an operator that reads it.
-            "count{r: rivers{}}",
+            "length{a: rivers{}}",
             // For each tuple, though its path isn't known until then.
-            "relation { { p: \"rivers.txt\" } } extend { n := count{r: load_text_file{path: p}} }",
+            "relation { { p: \"rivers.txt\" } } extend { n := length{a: load_text_file{path: p}} }",
         ] {
             let source = format!("{RIVERS}var lines := {init};{MAIN}");
             let found = errors(&source);
@@ -5912,7 +5913,7 @@ mod tests {
         // Though its path is known when compiling, and through an
         // operator whose value would otherwise be.
         let source = format!(
-            "{RIVERS}operator main{{}} [\n    call debug_table{{r: rivers{{}}}};\n    call debug_value{{v: count{{r: load_text_file{{path: \"rivers.txt\"}}}}}};\n];\n"
+            "{RIVERS}operator main{{}} [\n    call debug_value{{v: rivers{{}}}};\n    call debug_value{{v: length{{a: load_text_file{{path: \"rivers.txt\"}}}}}};\n];\n"
         );
         let body = main_body(&source);
         assert!(

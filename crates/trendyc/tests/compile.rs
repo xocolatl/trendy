@@ -626,19 +626,16 @@ fn text() {
             r#""hello, ""#,
             r#""""#,
             folded,
-            // The file's lines but the empty one, in canonical order, then
-            // how many it has.
-            "┌─────────┬─────┐",
-            "│ line    │ seq │",
-            "├─────────┼─────┤",
-            "│ Amazon  │   2 │",
-            "│ Mekong  │   6 │",
-            "│ Nile    │   1 │",
-            "│ Paraná  │   5 │",
-            "│ Volga   │   7 │",
-            "│ Yangtze │   3 │",
-            "└─────────┴─────┘",
+            // The file's lines, in its order, how many it has, and those
+            // that aren't empty.
+            r#"array ["Nile", "Amazon", "Yangtze", "", "Paraná", "Mekong", "Volga"]"#,
             "7",
+            r#""Nile""#,
+            r#""Amazon""#,
+            r#""Yangtze""#,
+            r#""Paraná""#,
+            r#""Mekong""#,
+            r#""Volga""#,
         ]
     );
 }
@@ -664,31 +661,20 @@ fn load_text_file_reads_a_files_lines() {
         let stem = path.file_stem().unwrap().to_str().unwrap();
         run_source(&format!("load_text_file_{stem}"), &source)
     };
-    let relation = |tuples: &str| format!("relation {{ line: text, seq: integer }} {tuples}\n");
     // A line ends at a line feed, or a carriage return and a line feed,
-    // and the last needs neither; a carriage return alone is text.
+    // and the last needs neither; a carriage return alone is text. The
+    // lines are in the file's order, and equal ones are each there.
     for (name, contents, expected) in [
-        (
-            "lf",
-            &b"a\nb\n"[..],
-            r#"{ { line: "a", seq: 1 }, { line: "b", seq: 2 } }"#,
-        ),
-        (
-            "crlf",
-            b"a\r\n\r\nb\r",
-            r#"{ { line: "", seq: 2 }, { line: "a", seq: 1 }, { line: "b\r", seq: 3 } }"#,
-        ),
-        ("unended", b"a", r#"{ { line: "a", seq: 1 } }"#),
-        ("empty_line", b"\n", r#"{ { line: "", seq: 1 } }"#),
-        ("empty", b"", "{}"),
-        (
-            "repeated",
-            "é\né\n".as_bytes(),
-            r#"{ { line: "é", seq: 1 }, { line: "é", seq: 2 } }"#,
-        ),
+        ("lf", &b"a\nb\n"[..], r#"array ["a", "b"]"#),
+        ("crlf", b"a\r\n\r\nb\r", r#"array ["a", "", "b\r"]"#),
+        ("unended", b"a", r#"array ["a"]"#),
+        ("empty_line", b"\n", r#"array [""]"#),
+        ("empty", b"", "array text []"),
+        ("repeated", "é\né\n".as_bytes(), r#"array ["é", "é"]"#),
+        ("reversed", b"b\na\n", r#"array ["b", "a"]"#),
     ] {
         let path = file(&format!("{name}.txt"), contents);
-        assert_eq!(lines(&path), (0, relation(expected)), "{name}");
+        assert_eq!(lines(&path), (0, format!("{expected}\n")), "{name}");
     }
 
     let missing = dir.join("missing.txt");

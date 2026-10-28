@@ -361,8 +361,8 @@ pub enum Builtin {
     ParseInteger,
     /// The approximate number nearest the decimal number a text writes.
     ParseApproximate,
-    /// The lines of a text file, numbered from 1, which the program reads
-    /// when it runs.
+    /// The lines of a text file, in order, which the program reads when it
+    /// runs.
     LoadTextFile,
 }
 
@@ -496,13 +496,7 @@ impl Builtin {
             Builtin::ToApproximate | Builtin::ParseApproximate => {
                 Some(Type::Scalar(Scalar::Approximate))
             }
-            Builtin::LoadTextFile => Some(Type::Relation(Heading::new(
-                [
-                    ("line".to_string(), Type::Scalar(Scalar::Text)),
-                    ("seq".to_string(), Type::Scalar(Scalar::Integer)),
-                ]
-                .into(),
-            ))),
+            Builtin::LoadTextFile => Some(Type::Array(Box::new(Type::Scalar(Scalar::Text)))),
         }
     }
 

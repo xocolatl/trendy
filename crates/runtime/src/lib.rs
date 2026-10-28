@@ -1982,24 +1982,18 @@ fn unparsable(text: &str, a: &str, why: trendy_numeric::Unparsable) -> ! {
     })
 }
 
-/// Store at `dst` the relation of the lines of the text file at `path`, of
-/// the type `desc` describes, `relation { line: text, seq: integer }`, in
-/// memory the statement owns: each line, without the line feed, or the
-/// carriage return and line feed, that ends it, and its position in the
-/// file, counting from 1. The last line needs no ending. Stops the
-/// program if the file can't be read (R0012), or isn't UTF-8 text
-/// (R0013), or the memory can't be allocated.
+/// Store at `dst` the array of the lines of the text file at `path`, in
+/// the file's order, of the type `desc` describes, `array text`, in memory
+/// the statement owns: each line without the line feed, or the carriage
+/// return and line feed, that ends it. The last line needs no ending.
+/// Stops the program if the file can't be read (R0012), or isn't UTF-8
+/// text (R0013), or the memory can't be allocated.
 ///
 /// # Safety
 ///
 /// `path` must point to a valid text value, `desc` to a valid descriptor
-/// of that relation type, and `dst` to memory for a relation. The
-/// statement must have begun a scope.
-///
-/// # Panics
-///
-/// If `desc` describes another relation type, which the compiler rules
-/// out.
+/// of that array type, and `dst` to memory for an array. The statement
+/// must have begun a scope.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn trendy_rt_load_text_file(
@@ -2025,32 +2019,31 @@ pub unsafe extern "C" fn trendy_rt_load_text_file(
             }
         };
         let desc = &*desc;
-        let tuple = desc.element();
-        // A descriptor's attributes are in name order.
-        let [line, seq] = attributes(tuple) else {
-            panic!("`load_text_file`'s tuples have two attributes");
-        };
+        let element = desc.element();
         let count = text.lines().count();
-        let Some(size) = count.checked_mul(tuple.size) else {
+        let Some(size) = count.checked_mul(element.size) else {
             trendy_rt_fail(FAIL_OUT_OF_MEMORY)
         };
-        // Zeroed, as everywhere, so that the padding in them is zero.
-        let tuples = allocate::<u8>(size);
-        core::ptr::write_bytes(tuples, 0, size);
-        for (i, (seq_value, text)) in (1_i64..).zip(text.lines()).enumerate() {
-            let at = tuples.add(i * tuple.size);
-            let bytes = allocate_buffer(text.len(), core::ptr::null());
-            core::ptr::copy_nonoverlapping(text.as_ptr(), bytes, text.len());
-            at.add(line.offset).cast::<Text>().write_unaligned(Text {
+        let lines = allocate_buffer(size, desc);
+        for (i, line) in text.lines().enumerate() {
+            let bytes = allocate_buffer(line.len(), core::ptr::null());
+            core::ptr::copy_nonoverlapping(line.as_ptr(), bytes, line.len());
+            let value = Text {
                 bytes,
-                len: text.len(),
-            });
-            at.add(seq.offset).cast::<i64>().write_unaligned(seq_value);
+                len: line.len(),
+            };
+            copy_element(
+                lines,
+                lines.add(i * element.size),
+                (&raw const value).cast(),
+                element,
+            );
         }
-        let (bytes, len) = canonical(tuples, count, desc);
-        free(tuples.cast());
         free(contents.cast());
-        dst.write_unaligned(Text { bytes, len });
+        dst.write_unaligned(Text {
+            bytes: lines,
+            len: count,
+        });
     }
 }
 

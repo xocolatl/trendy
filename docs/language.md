@@ -742,15 +742,15 @@ builtin operator parse_integer{from: text}: integer;
    exponent. Other text fails (R0014), as does a number out of range. */
 builtin operator parse_approximate{from: text}: approximate;
 
-/* The lines of the text file at `path`, which is relative to the
-   directory the program runs in, unless it is absolute: each with its
-   position in the file, `seq`, counting from 1. A line ends at a line
-   feed, or a carriage return and a line feed, which aren't part of it;
-   the last needs neither. Each call reads the file as it is when the
+/* The lines of the text file at `path`, in the file's order, so that its
+   first line is the array's element 1. `path` is relative to the
+   directory the program runs in, unless it is absolute. A line ends at a
+   line feed, or a carriage return and a line feed, which aren't part of
+   it; the last needs neither. Each call reads the file as it is when the
    program runs: the compiler never opens it, so it needn't exist until
    then. A file that can't be read fails (R0012), as does one that isn't
    UTF-8 text (R0013). */
-builtin operator load_text_file{path: text}: relation { seq: integer, line: text };
+builtin operator load_text_file{path: text}: array text;
 ```
 
 **`debug_value{v: any type}`** writes `v` to stderr, on one line, as trendy
@@ -1058,14 +1058,14 @@ var people := parse_integer{from: "8.4e6"};
 operator main{} [];
 ```
 
-**`load_text_file{path: text}: relation { seq: integer, line: text }`**
-reads input: the lines of a text file.
+**`load_text_file{path: text}: array text`** reads input: the lines of a
+text file.
 
-- **Each line is a tuple:** `line`, without the line feed, or the carriage
-  return and line feed, that ends it, and `seq`, its position in the
-  file, counting from 1. So two equal lines are two tuples, and the
-  file's order is kept, as `load a from lines order [asc seq];` gives it
-  back.
+- **The lines are an array, in the file's order,** each without the line
+  feed, or the carriage return and line feed, that ends it. So the first
+  line is element 1, and two equal lines are two elements: a file's lines
+  have an order and can repeat, which a relation of them would have to
+  spell out with each one's position.
 - **The last line needs no ending,** so a file that ends with one has no
   empty line after it, and an empty file has no lines.
 - **The path is relative to the directory the program runs in,** not the
@@ -1083,8 +1083,12 @@ reads input: the lines of a text file.
 ```trendy
 operator main{} [
     var lines := load_text_file{path: "rivers.txt"};
-    call debug_table{r: lines where line <> ""};
-    call debug_value{v: count{r: lines}};
+    call debug_value{v: length{a: lines}};
+    for line in lines loop [
+        if line <> "" then [
+            call debug_value{v: line};
+        ];
+    ];
 ];
 ```
 
@@ -3675,7 +3679,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `float(n)`, `n as f64`, `CAST(n AS DOUBLE PRECISION)`, `CAST_AS_RATIONAL (N)` | `to_approximate{from: n}` |
 | `int(s)`, `parseInt(s)`, `atoi(s)`, `CAST(s AS INTEGER)`, `CAST_AS_INTEGER (S)` | `parse_integer{from: s}` |
 | `float(s)`, `parseFloat(s)`, `atof(s)`, `CAST(s AS DOUBLE PRECISION)` | `parse_approximate{from: s}` |
-| `readLines(path)`, `File.readlines(path)`, `File.ReadAllLines(path)` | `load_text_file{path: path}`, with each line's `seq` |
+| `readLines(path)`, `File.readlines(path)`, `File.ReadAllLines(path)` | `load_text_file{path: path}`, an array of the lines |
 | `{ x: 1 }`, `TUPLE { X 1 }` | `tuple { x: 1 }` |
 | `type Home = { … }`, `interface Home { … }`, `struct Home { … }` | `heading home := { … };`, whose types are `relation home` and `tuple home` |
 | `[1, 2]`, `ARRAY[1, 2]` | `array [1, 2]` |
