@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use trendy_diag::{Diagnostic, Span, edit_distance};
+use trendy_diag::{Diagnostic, Span, closest};
 use trendy_hir as hir;
 use trendy_syntax::ast::{self, AstNode, Expr, Literal, LiteralError};
 use trendy_syntax::{SyntaxKind, SyntaxToken, literal};
@@ -482,12 +482,13 @@ pub(crate) fn listed(
         } else if heading.get(text).is_none() {
             // The closest attribute not already named is probably the one
             // meant.
-            let rename = heading
-                .named()
-                .map(|(a, _)| a)
-                .filter(|a| !named.iter().any(|(_, n, _)| n == a))
-                .filter(|a| edit_distance(a, text) <= 2)
-                .min_by_key(|a| edit_distance(a, text));
+            let rename = closest(
+                text,
+                heading
+                    .named()
+                    .map(|(a, _)| a)
+                    .filter(|a| !named.iter().any(|(_, n, _)| n == a)),
+            );
             errors.push(errors::unknown_attribute(
                 noun,
                 text,
@@ -563,12 +564,13 @@ pub(crate) fn renamed(
                     &context,
                 ));
             } else {
-                let rename = heading
-                    .named()
-                    .map(|(a, _)| a)
-                    .filter(|a| !entries.iter().any(|(_, (b, _), _)| b == a))
-                    .filter(|a| edit_distance(a, before) <= 2)
-                    .min_by_key(|a| edit_distance(a, before));
+                let rename = closest(
+                    before,
+                    heading
+                        .named()
+                        .map(|(a, _)| a)
+                        .filter(|a| !entries.iter().any(|(_, (b, _), _)| b == a)),
+                );
                 errors.push(errors::unknown_attribute(
                     errors::Noun::Projected,
                     before,
@@ -1438,6 +1440,17 @@ pub(crate) fn load(relation: hir::Expr, loading: hir::Loading) -> hir::Expr {
     }
 }
 
+/// The relation a `load` makes of `array`, as `unloading` says: evaluated
+/// if the array is a constant.
+pub(crate) fn unload(array: hir::Expr, unloading: hir::Unloading) -> hir::Expr {
+    match array {
+        hir::Expr::Constant(hir::Value::Array(array)) => {
+            hir::Expr::Constant(hir::Value::Relation(array.unloaded(&unloading)))
+        }
+        array => hir::Expr::Unload(Box::new(array), unloading),
+    }
+}
+
 /// The element of `array` at `position`, counting from 1: evaluated if
 /// both are constants, and taken straight from a selector whose other
 /// elements can't fail.
@@ -2221,6 +2234,7 @@ fn substitute(
             substituted_elements(*array, changes, depth, substitution)?
         }
         hir::Expr::Load(relation, loading) => load(sub(relation)?, loading),
+        hir::Expr::Unload(array, unloading) => unload(sub(array)?, unloading),
         hir::Expr::If(condition, then, otherwise) => {
             substituted_if(*condition, *then, *otherwise, depth, substitution)?
         }
@@ -2288,11 +2302,7 @@ pub(crate) fn extracted(
         return None;
     };
     if heading.get(&name).is_none() {
-        let rename = heading
-            .named()
-            .map(|(a, _)| a)
-            .filter(|a| edit_distance(a, &name) <= 2)
-            .min_by_key(|a| edit_distance(a, &name));
+        let rename = closest(&name, heading.named().map(|(a, _)| a));
         let context = errors::attributes_note("tuple", ty);
         errors.push(errors::unknown_attribute(
             errors::Noun::Projected,

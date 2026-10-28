@@ -61,6 +61,9 @@ ast_node!(Load);
 ast_node!(ValueBlock);
 ast_node!(OrderList);
 ast_node!(Keeping);
+ast_node!(ElementName);
+ast_node!(Numbering);
+ast_node!(LoadCondition);
 ast_node!(OrderItem);
 ast_node!(Arguments);
 ast_node!(PositionalArg);
@@ -715,6 +718,12 @@ impl Load {
             .find(|t| t.kind() == SyntaxKind::Ident && t.text().eq_ignore_ascii_case(word))
     }
 
+    /// `order`, before the order items.
+    #[must_use]
+    pub fn order_keyword(&self) -> Option<SyntaxToken> {
+        self.word("order")
+    }
+
     /// The order items, in brackets.
     #[must_use]
     pub fn order(&self) -> Option<OrderList> {
@@ -726,6 +735,91 @@ impl Load {
     /// parser checks.
     pub fn keepings(&self) -> impl Iterator<Item = Keeping> + use<> {
         self.0.children().filter_map(Keeping::cast)
+    }
+
+    /// The span to delete to remove its order, with what follows it, and
+    /// the whitespace before.
+    #[must_use]
+    pub fn order_removal(&self) -> Option<Span> {
+        let word = self.order_keyword()?;
+        let end = self
+            .keepings()
+            .last()
+            .map(|k| k.span().end)
+            .or_else(|| Some(self.order()?.span().end))
+            .unwrap_or_else(|| span(word.text_range()).end);
+        Some(Span::new(preceded_from(&word.into()), end))
+    }
+
+    /// `as x`, after an array loaded into a relation.
+    #[must_use]
+    pub fn element_name(&self) -> Option<ElementName> {
+        self.0.children().find_map(ElementName::cast)
+    }
+
+    /// `numbered n`, after an array loaded into a relation.
+    #[must_use]
+    pub fn numbering(&self) -> Option<Numbering> {
+        self.0.children().find_map(Numbering::cast)
+    }
+
+    /// `where c`: the tuples the load keeps.
+    #[must_use]
+    pub fn condition(&self) -> Option<LoadCondition> {
+        self.0.children().find_map(LoadCondition::cast)
+    }
+
+    /// Where its relation or array ends, which the clauses after it follow:
+    /// the expression after its target.
+    #[must_use]
+    pub fn source_end(&self) -> Option<usize> {
+        let source = self.0.children().filter_map(Expr::cast).nth(1)?;
+        Some(span(source.syntax().text_range()).end)
+    }
+}
+
+impl ElementName {
+    #[must_use]
+    pub fn name(&self) -> Option<Name> {
+        self.0.children().find_map(Name::cast)
+    }
+
+    /// The span to delete to remove it, with the whitespace before.
+    #[must_use]
+    pub fn removal(&self) -> Span {
+        Span::new(preceded_from(&self.0.clone().into()), self.span().end)
+    }
+}
+
+impl Numbering {
+    #[must_use]
+    pub fn name(&self) -> Option<Name> {
+        self.0.children().find_map(Name::cast)
+    }
+
+    /// The span to delete to remove it, with the whitespace before.
+    #[must_use]
+    pub fn removal(&self) -> Span {
+        Span::new(preceded_from(&self.0.clone().into()), self.span().end)
+    }
+}
+
+impl LoadCondition {
+    /// The word `where`.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    #[must_use]
+    pub fn condition(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+
+    /// The span to delete to remove it, with the whitespace before.
+    #[must_use]
+    pub fn removal(&self) -> Span {
+        Span::new(preceded_from(&self.0.clone().into()), self.span().end)
     }
 }
 

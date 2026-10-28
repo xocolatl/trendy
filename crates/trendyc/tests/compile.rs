@@ -704,6 +704,65 @@ fn load_text_file_reads_a_files_lines() {
 }
 
 #[test]
+fn loads_make_relations_of_arrays_when_running() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("unload");
+    std::fs::create_dir_all(&dir).unwrap();
+    // A file's lines, read when running, into relations: numbered, each
+    // line is there, and, without positions, equal ones are one. The
+    // relations keep their texts once the array is gone. An array of
+    // tuples, loaded back, gives their own tuples, or a tuple-valued
+    // attribute.
+    let unloaded = |name: &str, contents: &str| {
+        let path = dir.join(format!("{name}.txt"));
+        std::fs::write(&path, contents).unwrap();
+        let source = format!(
+            "operator main{{}} [
+    var lines: array text;
+    call load_text_file{{path: {:?}, out lines: lines}};
+    var numbered: relation {{ line: text, n: integer }};
+    load numbered from lines as line numbered n;
+    var distinct: relation {{ line: text }};
+    load distinct from lines as line where line <> \"\";
+    lines := array text [];
+    call debug_value{{v: numbered}};
+    call debug_value{{v: distinct}};
+    var pairs: array tuple {{ line: text, n: integer }};
+    load pairs from numbered order [desc n];
+    var again: relation {{ line: text, n: integer, at: integer }};
+    load again from pairs numbered at where at < 4;
+    call debug_value{{v: again}};
+    var nested: relation {{ t: tuple {{ line: text, n: integer }} }};
+    load nested from pairs as t;
+    call debug_value{{v: count{{r: nested}}}};
+];
+",
+            path.to_str().unwrap()
+        );
+        let (code, stderr) = run_source(&format!("unload_{name}"), &source);
+        assert_eq!(code, 0, "{stderr}");
+        stderr.lines().map(str::to_string).collect::<Vec<_>>()
+    };
+    assert_eq!(
+        unloaded("lines", "b\na\n\nb\n"),
+        [
+            r#"relation { line: text, n: integer } { { line: "", n: 3 }, { line: "a", n: 2 }, { line: "b", n: 1 }, { line: "b", n: 4 } }"#,
+            r#"relation { line: text } { { line: "a" }, { line: "b" } }"#,
+            r#"relation { at: integer, line: text, n: integer } { { at: 1, line: "b", n: 4 }, { at: 2, line: "", n: 3 }, { at: 3, line: "a", n: 2 } }"#,
+            "4",
+        ]
+    );
+    assert_eq!(
+        unloaded("empty", ""),
+        [
+            "relation { line: text, n: integer } {}",
+            "relation { line: text } {}",
+            "relation { at: integer, line: text, n: integer } {}",
+            "0",
+        ]
+    );
+}
+
+#[test]
 fn comparisons() {
     let (code, stderr) = run_example("comparisons");
     assert_eq!(code, 0, "{stderr}");
@@ -1531,6 +1590,21 @@ fn arrays() {
             r#"array ["Cairo", "Lagos", "Lima", "Mumbai"]"#,
             // Ordered by year, then without it: teff twice.
             r#"array ["teff", "sorghum", "teff"]"#,
+            // Loaded back into relations: each city with its place in the
+            // array, and the crops, teff once, without sorghum.
+            "┌────────┬──────┬──────┐",
+            "│ city   │ rain │ rank │",
+            "├────────┼──────┼──────┤",
+            "│ Cairo  │   25 │    3 │",
+            "│ Lagos  │ 1500 │    2 │",
+            "│ Lima   │   15 │    4 │",
+            "│ Mumbai │ 2200 │    1 │",
+            "└────────┴──────┴──────┘",
+            "┌──────┐",
+            "│ crop │",
+            "├──────┤",
+            "│ teff │",
+            "└──────┘",
             // Elements changed, and swapped, in a copy.
             "tuple { grid: array [array [1, 2], array [30]], kept: array [1200, 950, 220], rainfall: array [950, 1200, 250] }",
         ]

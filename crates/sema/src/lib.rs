@@ -6829,6 +6829,148 @@ mod tests {
     }
 
     #[test]
+    fn loads_make_a_relation_of_an_array() {
+        // Known when compiling, the relation is too: a tuple for each
+        // element, the value of the attribute `as` names, or the element
+        // itself, with its position if `numbered` names an attribute for
+        // it, and of them those `where` keeps, which sees both. Elements
+        // that make equal tuples make one.
+        let texts = r#"array ["name", "Ada", "", "Ada"]"#;
+        let pairs = "array [tuple { a: 1 }, tuple { a: 1 }]";
+        assert_eq!(
+            loaded(&format!(
+                "var lines: relation {{ line: text, n: integer }}; load lines from {texts} as line numbered n where n > 1 and line <> \"\"; var names: relation {{ name: text }}; load names from {texts} as name; var rows: relation {{ a: integer, at: integer }}; load rows from {pairs} numbered at; var nested: relation {{ t: tuple {{ a: integer }} }}; load nested from {pairs} as t;"
+            ))
+            .into_iter()
+            .skip(1)
+            .step_by(2)
+            .collect::<Vec<_>>(),
+            [
+                Some(
+                    r#"relation { line: text, n: integer } { { line: "Ada", n: 2 }, { line: "Ada", n: 4 } }"#
+                        .to_string()
+                ),
+                Some(
+                    r#"relation { name: text } { { name: "" }, { name: "Ada" }, { name: "name" } }"#
+                        .to_string()
+                ),
+                Some(
+                    "relation { a: integer, at: integer } { { a: 1, at: 1 }, { a: 1, at: 2 } }"
+                        .to_string()
+                ),
+                Some("relation { t: tuple { a: integer } } { { t: tuple { a: 1 } } }".to_string()),
+            ]
+        );
+        // Known only when running: the restriction of the relation of the
+        // array's elements.
+        let program = analyze_str(&format!(
+            "operator f{{a: array text}} [ var r: relation {{ x: text, n: integer }}; load r from a as x numbered n where n > 1; ];{MAIN}"
+        ))
+        .unwrap();
+        let f = program.operators.iter().find(|o| o.name == "f").unwrap();
+        let hir::OperatorKind::Update { body, .. } = &f.kind else {
+            panic!("f is an update operator");
+        };
+        let hir::Statement::Assign(assignments) = &body.statements[1] else {
+            panic!("{:?}", body.statements);
+        };
+        let hir::Expr::Restrict(relation, _) = &assignments[0].value else {
+            panic!("{:?}", assignments[0].value);
+        };
+        assert_eq!(
+            **relation,
+            hir::Expr::Unload(
+                Box::new(hir::Expr::Parameter("a".to_string())),
+                hir::Unloading {
+                    named: Some("x".to_string()),
+                    numbered: Some("n".to_string()),
+                },
+            )
+        );
+    }
+
+    #[test]
+    fn unload_errors() {
+        let declared = "var texts := array [\"Ada\", \"Alan\"]; var pairs := array [tuple { name: \"Ada\", n: 1 }]; var names: relation { name: text }; var lines: relation { name: text, n: integer }; var everyone: array tuple { name: text, born: integer };";
+        let source = |load: &str| assigning(PEOPLE, &format!("{declared} {load}"));
+        let fixed = |load: &str, fixed: &str| {
+            assert_eq!(fix(&source(load)), source(fixed), "{load}");
+        };
+        // An array of values names the attribute each element is the value
+        // of, and the one for its position, as the relation's heading has
+        // them.
+        fixed("load names from texts;", "load names from texts as name;");
+        fixed(
+            "load lines from texts;",
+            "load lines from texts as name numbered n;",
+        );
+        fixed(
+            "load lines from texts as line where n > 1;",
+            "load lines from texts as name numbered n where n > 1;",
+        );
+        // An array of tuples gives their own, unless `as` names one
+        // attribute for each, which no way of loading fits here.
+        let unfitting = source("load names from pairs as name;");
+        assert_eq!(codes(&unfitting), [Code::LoadMismatch]);
+        assert_eq!(fix(&unfitting), unfitting);
+        fixed(
+            "load lines from pairs numbered n;",
+            "load lines from pairs;",
+        );
+        assert_eq!(
+            codes(&source("load lines from pairs numbered n;")),
+            [Code::AttributeExists]
+        );
+        // `value` and an order are for a load into an array, and `as` and
+        // `numbered` for a load into a relation.
+        fixed(
+            "load names value from texts as name;",
+            "load names from texts as name;",
+        );
+        fixed(
+            "load names from texts as name order [asc name];",
+            "load names from texts as name;",
+        );
+        fixed(
+            "load everyone from people as p numbered n order [asc name];",
+            "load everyone from people order [asc name];",
+        );
+        // A relation is assigned, with the condition, if there is one.
+        fixed(
+            "load names from people{name} where name <> \"Ada\";",
+            "names := people{name} where name <> \"Ada\";",
+        );
+        // A name `where` doesn't know, in a load without `numbered`, may
+        // be meant as each element's position, unless it may be a
+        // misspelling: `n` isn't one of `a`, whose every letter differs.
+        let unnumbered = assigning(
+            PEOPLE,
+            &format!("{declared} var a := texts; load names from a as name where n > 1;"),
+        );
+        let errors = errors(&unnumbered);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, Code::UnknownName);
+        assert!(errors[0].suggestions.is_empty());
+        assert_eq!(
+            errors[0].help,
+            ["for each element's position, write `numbered n` before `where`"]
+        );
+        fixed(
+            "load names from texts as name where nme <> \"Ada\";",
+            "load names from texts as name where name <> \"Ada\";",
+        );
+        // An array is loaded with an order.
+        assert_eq!(
+            codes(&source("load everyone from people where born > 1900;")),
+            [Code::LoadOrder]
+        );
+        assert_eq!(
+            codes(&source("var n := 0; load n from texts;")),
+            [Code::LoadMismatch]
+        );
+    }
+
+    #[test]
     fn an_index_of_a_selector_takes_its_element() {
         // Unless another element can fail, which it must still be computed
         // to find out.

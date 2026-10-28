@@ -72,7 +72,7 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
     // The contextual keywords: `type`, in `builtin type name;`, `key`,
     // `value` and `from`, `any` and `type`, in `any type`, `types`, `per`,
     // a mode's `const` and `out`, `kind`, a load's `load`, `from`, `order`, `asc`,
-    // `desc` and `keep`, a `for` loop's `in`, and `heading`.
+    // `desc`, `keep` and `numbered`, a `for` loop's `in`, and `heading`.
     let keyword = match parent {
         Some(SyntaxKind::BuiltinType) => token.text() == "type",
         Some(SyntaxKind::AnyType) => matches!(token.text(), "any" | "type"),
@@ -85,6 +85,7 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
             | SyntaxKind::KindDecl
             | SyntaxKind::Load
             | SyntaxKind::Keeping
+            | SyntaxKind::Numbering
             | SyntaxKind::OrderItem
             | SyntaxKind::ForStmt
             | SyntaxKind::HeadingDecl,
@@ -117,9 +118,17 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
         (Some(SyntaxKind::Name), Some(SyntaxKind::VarDecl | SyntaxKind::ForStmt)) => {
             (Class::Variable, true)
         }
-        (Some(SyntaxKind::Name), Some(SyntaxKind::AttributeType | SyntaxKind::Gathering)) => {
-            (Class::Attribute, true)
-        }
+        // An attribute declared, gathered, or made of an array's elements
+        // or their positions, by a load's `as x` or `numbered n`.
+        (
+            Some(SyntaxKind::Name),
+            Some(
+                SyntaxKind::AttributeType
+                | SyntaxKind::Gathering
+                | SyntaxKind::ElementName
+                | SyntaxKind::Numbering,
+            ),
+        ) => (Class::Attribute, true),
         // A new attribute in an `extend`, or an existing one in a `replace`.
         (Some(SyntaxKind::Name), Some(SyntaxKind::Assign)) => {
             (Class::Attribute, !is_replaced(token))
@@ -678,6 +687,21 @@ mod tests {
                 ("name", Class::Attribute, false),
                 ("keep", Class::Keyword, false),
                 ("name", Class::Attribute, false),
+            ]
+        );
+        assert_eq!(
+            highlight(
+                "operator f{a: array text} [ var r: relation { x: text, n: integer }; load r from a as x numbered n; ];"
+            )[12..],
+            [
+                ("load", Class::Keyword, false),
+                ("r", Class::Variable, false),
+                ("from", Class::Keyword, false),
+                ("a", Class::Parameter, false),
+                ("as", Class::Keyword, false),
+                ("x", Class::Attribute, true),
+                ("numbered", Class::Keyword, false),
+                ("n", Class::Attribute, true),
             ]
         );
     }

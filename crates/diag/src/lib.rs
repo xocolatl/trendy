@@ -224,6 +224,53 @@ pub fn edit_distance(a: &str, b: &str) -> usize {
     row[b.len()]
 }
 
+/// How many edits `written` is from `meant`, if it may be a misspelling
+/// of it: at most two, comparing case-insensitively, and fewer than the
+/// longer has letters. A name none of whose letters can stay as they are
+/// is another name, as `a` is of `n`, and no misspelling of it.
+#[must_use]
+pub fn misspelling(written: &str, meant: &str) -> Option<usize> {
+    let distance = edit_distance(written, meant);
+    let letters = |s: &str| s.to_lowercase().chars().count();
+    (distance <= 2 && distance < letters(written).max(letters(meant))).then_some(distance)
+}
+
+/// The one of `candidates` that `written`, which names nothing, is most
+/// likely a misspelling of: the closest of those it may be one of, as
+/// [`misspelling`] says, and the first of equals.
+#[must_use]
+pub fn closest<'c>(
+    written: &str,
+    candidates: impl IntoIterator<Item = &'c str>,
+) -> Option<&'c str> {
+    nearest(candidates, |c| misspelling(written, c))
+}
+
+/// The one of `missing`, the names something lacks, that `written`, a
+/// name it has instead, is most likely meant as: the closest within two
+/// edits, comparing case-insensitively, and the first of equals. Unlike
+/// [`closest`], it may keep none of the letters, as `y` for `x`: only
+/// the names missing are candidates, not every name in scope.
+#[must_use]
+pub fn renamed<'c>(written: &str, missing: impl IntoIterator<Item = &'c str>) -> Option<&'c str> {
+    nearest(missing, |m| {
+        Some(edit_distance(written, m)).filter(|d| *d <= 2)
+    })
+}
+
+/// The one of `candidates` with the least `distance`, of those it gives
+/// one, and the first of equals.
+fn nearest<'c>(
+    candidates: impl IntoIterator<Item = &'c str>,
+    distance: impl Fn(&str) -> Option<usize>,
+) -> Option<&'c str> {
+    candidates
+        .into_iter()
+        .filter_map(|c| Some((distance(c)?, c)))
+        .min_by_key(|(distance, _)| *distance)
+        .map(|(_, c)| c)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,5 +283,25 @@ mod tests {
         assert_eq!(edit_distance("oprator", "operator"), 1);
         assert_eq!(edit_distance("operater", "operator"), 1);
         assert_eq!(edit_distance("main", "operator"), 7);
+    }
+
+    #[test]
+    fn misspellings() {
+        assert_eq!(misspelling("rivr", "river"), Some(1));
+        assert_eq!(misspelling("hedaer", "header"), Some(2));
+        assert_eq!(misspelling("N", "n"), Some(0));
+        assert_eq!(misspelling("n", "ns"), Some(1));
+        // Every letter changes: another name.
+        assert_eq!(misspelling("n", "a"), None);
+        assert_eq!(misspelling("ab", "cd"), None);
+        assert_eq!(misspelling("main", "operator"), None);
+        assert_eq!(
+            closest("quantty", ["quality", "quantity"]),
+            Some("quantity")
+        );
+        assert_eq!(closest("cout", ["out", "count"]), Some("out"));
+        assert_eq!(closest("n", ["a", "line"]), None);
+        assert_eq!(renamed("y", ["x"]), Some("x"));
+        assert_eq!(renamed("y", ["wxyz"]), None);
     }
 }

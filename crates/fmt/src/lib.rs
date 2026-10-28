@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 
 use trendy_syntax::ast::{
     Arguments, ArrayLiteral, AssignBlock, AssignList, AstNode, BinaryExpr, Body, Clause,
-    GatherList, Heading, IfExpr, NameList, NaryExpr, OrderList, RelationLiteral, RenameList,
+    GatherList, Heading, IfExpr, Load, NameList, NaryExpr, OrderList, RelationLiteral, RenameList,
     SourceFile, TupleLiteral,
 };
 use trendy_syntax::{Precedence, SyntaxKind, SyntaxNode, SyntaxToken};
@@ -58,7 +58,9 @@ enum Break {
     /// A chain of dyadic operators of one precedence, given by its
     /// outermost operator's expression: each operator starts a line, one
     /// level in from the line the chain starts on, as in `r` then
-    /// `where p`, or `a` then `and b` then `and c`.
+    /// `where p`, or `a` then `and b` then `and c`. A load's clauses after
+    /// its relation or array are a chain too, given by the load: `load a
+    /// from r` then `where p` then `order [asc x]`.
     Chain(SyntaxNode),
     /// The keys of a variable declaration, each on a line of its own.
     Keys(SyntaxNode),
@@ -314,18 +316,44 @@ fn precedence(node: &SyntaxNode) -> Option<Precedence> {
 }
 
 /// Whether `token` is the operator of the expression `node`, or its first
-/// word: the token a broken chain's line starts with.
+/// word, or the first word of a load's clause, `node`, or of its order,
+/// `node` being the load: the token a broken chain's line starts with.
 fn is_operator_of(token: &SyntaxToken, node: &SyntaxNode) -> bool {
+    if is_load_clause(node) {
+        return first_significant(node).as_ref() == Some(token);
+    }
+    if let Some(load) = Load::cast(node.clone()) {
+        return load.order_keyword().as_ref() == Some(token);
+    }
     BinaryExpr::cast(node.clone())
         .and_then(|b| b.operator())
         .as_ref()
         == Some(token)
 }
 
+/// Whether `node` is a clause of a load after its relation or array, which
+/// are a chain, as operators of one precedence are: `as x`, `numbered n`,
+/// `where c`, and `remove {x}` or `keep {x}` (its order is one too).
+fn is_load_clause(node: &SyntaxNode) -> bool {
+    matches!(
+        node.kind(),
+        SyntaxKind::ElementName
+            | SyntaxKind::Numbering
+            | SyntaxKind::LoadCondition
+            | SyntaxKind::Keeping
+    )
+}
+
 /// The outermost expression of the chain of operators of one precedence
 /// that the dyadic operator's expression `node` is in: in `a and b and c`,
-/// the second `and`'s, which the first's is the left operand of.
+/// the second `and`'s, which the first's is the left operand of. A load's
+/// clauses' chain is the load's.
 fn chain_top(node: &SyntaxNode) -> SyntaxNode {
+    if is_load_clause(node)
+        && let Some(load) = node.parent()
+    {
+        return load;
+    }
     let mut top = node.clone();
     while let Some(parent) = top
         .parent()
@@ -810,14 +838,18 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
             | SyntaxKind::HeadingDecl
             | SyntaxKind::Load
             | SyntaxKind::Keeping
+            | SyntaxKind::Numbering
             | SyntaxKind::OrderItem
             | SyntaxKind::ForStmt => true,
             _ => false,
         });
     let load_keyword = next.kind() == Ident
-        && next
-            .parent()
-            .is_some_and(|p| matches!(p.kind(), SyntaxKind::Load | SyntaxKind::Keeping));
+        && next.parent().is_some_and(|p| {
+            matches!(
+                p.kind(),
+                SyntaxKind::Load | SyntaxKind::Keeping | SyntaxKind::Numbering
+            )
+        });
     // A kind's requirements follow its name after a space.
     let requirements = next.kind() == LBrace
         && next
@@ -1179,13 +1211,27 @@ mod tests {
             fmt("operator f{} [ load   a   from r{x}where x>1   order[ asc   x ,desc y];];"),
             "operator f{} [\n    load a from r{x} where x > 1 order [asc x, desc y];\n];\n"
         );
-        // Too long for one line, the order's items each on a line of their
-        // own, as any list's.
+        assert_eq!(
+            fmt("operator f{} [ load   r   from a   as   x   numbered   n   where n>1;];"),
+            "operator f{} [\n    load r from a as x numbered n where n > 1;\n];\n"
+        );
+        assert_eq!(
+            fmt("operator f{} [ load r from f{a: a}numbered n; load s from a[1]as x;];"),
+            "operator f{} [\n    load r from f{a: a} numbered n;\n    load s from a[1] as x;\n];\n"
+        );
+        // Too long for one line, its clauses after the relation or array
+        // each start a line, one level in, as a chain's operators do.
         assert_eq!(
             fmt(
-                "operator f{} [ load everyone from people where born > 1900 and name <> \"Ada Lovelace\" order [desc born, asc name]; ];"
+                "operator f{} [ load everyone from people where born > 1900 and name <> \"Ada Lovelace\" order [desc born, asc name] keep {name}; ];"
             ),
-            "operator f{} [\n    load everyone from people where born > 1900 and name <> \"Ada Lovelace\" order [\n        desc born,\n        asc name,\n    ];\n];\n"
+            "operator f{} [\n    load everyone from people\n        where born > 1900 and name <> \"Ada Lovelace\"\n        order [desc born, asc name]\n        keep {name};\n];\n"
+        );
+        assert_eq!(
+            fmt(
+                "operator f{} [ load all_of_the_lines from the_lines_of_the_file as line_of_text numbered line_number where line_number > 1; ];"
+            ),
+            "operator f{} [\n    load all_of_the_lines from the_lines_of_the_file\n        as line_of_text\n        numbered line_number\n        where line_number > 1;\n];\n"
         );
     }
 

@@ -273,6 +273,10 @@ impl Names for BlockNames<'_> {
         self.outer.tuple_at_hand()
     }
 
+    fn unnumbered(&self) -> bool {
+        self.outer.unnumbered()
+    }
+
     fn type_parameters(&self) -> Option<&[hir::TypeParameter]> {
         self.outer.type_parameters()
     }

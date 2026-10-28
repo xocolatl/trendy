@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use trendy_diag::{Code, Diagnostic, Edit, Span, edit_distance};
+use trendy_diag::{Code, Diagnostic, Edit, Span, closest, edit_distance, misspelling};
 use trendy_hir as hir;
 use trendy_syntax::ast::{
     self, AstNode, AttributeValue, Expr, Key, Mode, NaryExpr, OrderList, ProjectExpr, SourceFile,
@@ -362,11 +362,7 @@ pub(crate) fn unknown_type(
                 .map(|t| t.name())
                 .chain(declared.iter().copied())
                 .collect();
-            types
-                .into_iter()
-                .filter(|t| edit_distance(t, name) <= 2)
-                .min_by_key(|t| edit_distance(t, name))
-                .map(written)
+            closest(name, types).map(written)
         });
     if let Some((meant, replacement)) = meant {
         if TYPE_ALIASES.iter().any(|(alias, _)| *alias == lowercase) {
@@ -1075,10 +1071,7 @@ pub(crate) fn unknown_kind(what: &SyntaxToken, namespaces: &Namespaces) -> Diagn
         .into_iter()
         .chain(kinds.iter().map(|k| k.name.as_str()))
         .collect();
-    let close = words
-        .into_iter()
-        .filter(|w| edit_distance(w, name) <= 2)
-        .min_by_key(|w| edit_distance(w, name));
+    let close = closest(name, words);
     match close {
         Some(close) => d.with_suggestion(
             format!("use `{close}`"),
@@ -1299,16 +1292,16 @@ pub(crate) fn per_relation(name: &str, relation: &SyntaxToken, problem: PerProbl
             d.with_help("name a parameter of type `any relation` after `per`")
         }
         PerProblem::NotAParameter(params) => {
-            let close = params
-                .iter()
-                .filter(|p| *p != name && edit_distance(p, target) <= 2)
-                .min_by_key(|p| edit_distance(p, target));
+            let close = closest(
+                target,
+                params.iter().map(String::as_str).filter(|p| *p != name),
+            );
             match close {
                 Some(close) => d.with_suggestion(
                     format!("use `{close}`"),
                     vec![Edit {
                         span,
-                        replacement: close.clone(),
+                        replacement: close.to_string(),
                     }],
                 ),
                 None => d.with_help("name a parameter of type `any relation` after `per`"),
@@ -1481,6 +1474,28 @@ pub(crate) fn unknown_name(name: &str, span: Span, kind: &str, candidates: &[&st
     )
 }
 
+/// A value `name`, at `span`, that refers to nothing, in the condition of
+/// a load into a relation without `numbered`: a misspelling of one of
+/// `candidates`, the names in scope, if it may be one, and otherwise each
+/// element's position, which only `numbered` names.
+pub(crate) fn unnumbered_position(name: &str, span: Span, candidates: &[&str]) -> Diagnostic {
+    if closest(name, candidates.iter().copied()).is_some() {
+        return unknown_name(name, span, "value", candidates);
+    }
+    Diagnostic::error(
+        Code::UnknownName,
+        format!("unknown value `{name}`"),
+        span,
+        "not defined",
+    )
+    .with_note(format!(
+        "a load's `where` sees the attributes of the tuples it makes, and an element's position only as the attribute `numbered {name}` would add, which the relation then has as well"
+    ))
+    .with_help(format!(
+        "for each element's position, write `numbered {name}` before `where`"
+    ))
+}
+
 /// The value `ARRAY`, or another spelling of `array`, at `span`, which
 /// refers to nothing, indexed: an array of one element, as SQL writes it,
 /// `ARRAY[1]`.
@@ -1629,16 +1644,12 @@ fn spelled_like(
     candidates: &[&str],
     otherwise: &str,
 ) -> Diagnostic {
-    let closest = candidates
-        .iter()
-        .filter(|c| edit_distance(c, name) <= 2)
-        .min_by_key(|c| edit_distance(c, name));
-    match closest {
+    match closest(name, candidates.iter().copied()) {
         Some(closest) => d.with_suggestion(
             format!("did you mean `{closest}`?"),
             vec![Edit {
                 span,
-                replacement: (*closest).to_string(),
+                replacement: closest.to_string(),
             }],
         ),
         None => d.with_help(otherwise),
@@ -2544,8 +2555,9 @@ pub(crate) fn image_unrelated(
     let close = heading
         .named()
         .flat_map(|(a, _)| at_hand.named().map(move |(b, _)| (a, b)))
-        .filter(|(a, b)| edit_distance(a, b) <= 2)
-        .min_by_key(|(a, b)| (edit_distance(a, b), *a, *b));
+        .filter_map(|(a, b)| Some((misspelling(a, b)?, a, b)))
+        .min()
+        .map(|(_, a, b)| (a, b));
     match close {
         Some((a, b)) => d.with_suggestion(
             format!("rename `{a}` to `{b}`, to match on it"),
@@ -3504,11 +3516,7 @@ pub(crate) fn replaced_unknown(
     let (hir::Type::Tuple(heading) | hir::Type::Relation(heading)) = ty else {
         unreachable!("only tuples and relations have attributes to replace");
     };
-    let rename = heading
-        .named()
-        .map(|(a, _)| a)
-        .filter(|a| edit_distance(a, name) <= 2)
-        .min_by_key(|a| edit_distance(a, name));
+    let rename = closest(name, heading.named().map(|(a, _)| a));
     let rule = if assigning == crate::ops::Assigning::Update {
         "`update` gives attributes the variable has new values of the same types; a variable's type never changes, so it adds none"
     } else {
@@ -4817,27 +4825,31 @@ pub(crate) fn key_violated(
 
 const LOAD: &str = "`load a from r` gives an array of tuples the tuples of a relation of their heading, and `load a value from r` an array the values of a relation's only attribute, of their type";
 
-/// A load into `name`, of type `ty`, written `target`, which isn't an
-/// array, of the relation `source`, of type `relation`, written as the
-/// clause at `clause`. A relation of `ty` is assigned instead.
-pub(crate) fn load_into_non_array(
+/// The rule for a load into a relation, for notes.
+const UNLOAD: &str = "`load r from a` gives a relation a tuple for each element of an array: the element, if it is a tuple, or, after `as x`, a tuple of one attribute, `x`, whose value it is; `numbered n` adds `n`, the element's position, counting from 1, and elements that make equal tuples make one";
+
+/// A load into `name`, of type `ty`, written `target`, which is neither an
+/// array nor a relation, of `source`, of type `value`, written as the
+/// clause at `clause`. A value of `ty` is assigned instead.
+pub(crate) fn load_into_other(
     name: &str,
     ty: &hir::Type,
     target: &Expr,
-    relation: &hir::Type,
+    value: &hir::Type,
     clause: Span,
     source: &Expr,
 ) -> Diagnostic {
     let d = Diagnostic::error(
         Code::LoadMismatch,
-        format!("`{name}` isn't an array, so a load can't fill it"),
+        format!("`{name}` is neither an array nor a relation, so a load can't fill it"),
         target.span(),
         format!("of type `{ty}`"),
     )
-    .with_note(LOAD);
-    if ty == relation {
+    .with_note(LOAD)
+    .with_note(UNLOAD);
+    if ty == value {
         d.with_suggestion(
-            format!("assign the relation to `{name}`"),
+            format!("assign the value to `{name}`"),
             vec![Edit {
                 span: clause,
                 replacement: format!("{name} := {}", source.syntax().text()),
@@ -4846,6 +4858,233 @@ pub(crate) fn load_into_non_array(
     } else {
         d
     }
+}
+
+/// `clause`, at `span`, of a load into `name`, which is an array if
+/// `array` says so, and a relation if not, though the clause is for a load
+/// into the other: the fix deletes `removal`.
+pub(crate) fn clause_of_other_load(
+    name: &str,
+    array: bool,
+    clause: &str,
+    span: Span,
+    removal: Span,
+) -> Diagnostic {
+    let (is, other, rule) = if array {
+        ("an array", "a relation", LOAD)
+    } else {
+        ("a relation", "an array", UNLOAD)
+    };
+    let d = Diagnostic::error(
+        Code::LoadMismatch,
+        format!("`{clause}` is for a load into {other}, but `{name}` is {is}"),
+        span,
+        format!("not for a load into {is}"),
+    )
+    .with_note(rule);
+    let d = if clause == "order" {
+        d.with_note("a relation's tuples have no order, so a load into one has none")
+    } else {
+        d
+    };
+    d.with_suggestion(
+        format!("remove `{clause}`"),
+        vec![Edit {
+            span: removal,
+            replacement: String::new(),
+        }],
+    )
+}
+
+/// A load into `name`, an array, with no order after its relation, which
+/// ends at `at`, with its `where`, if it has one.
+pub(crate) fn load_without_order(name: &str, at: usize) -> Diagnostic {
+    Diagnostic::error(
+        Code::LoadOrder,
+        format!("a load into an array needs an order, and `{name}` is one"),
+        Span::empty(at),
+        "no `order` after the relation",
+    )
+    .with_note("a relation's tuples have no order, so a load into an array says which to put them in")
+    .with_help("write the order after the relation: `order`, then, in brackets, the attributes to order by, each after its direction, `asc` or `desc`, as in `order [desc born, asc name]`")
+}
+
+/// A load into `name`, a relation of type `target`, of `source`, of type
+/// `ty`, which isn't an array. A relation of `target` is assigned instead,
+/// those `where` keeps, if the load has it.
+pub(crate) fn unload_of_non_array(
+    name: &str,
+    target: &hir::Type,
+    ty: &hir::Type,
+    source: &Expr,
+    load: &ast::Load,
+) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::LoadMismatch,
+        format!("a load fills `{name}`, a relation, from an array, but this is `{ty}`"),
+        source.span(),
+        "not an array",
+    )
+    .with_note(UNLOAD);
+    if ty != target {
+        return match ty {
+            hir::Type::Relation(_) => d.with_help(format!(
+                "a relation is assigned to `{name}` with `:=`, not loaded"
+            )),
+            _ => d,
+        };
+    }
+    let condition = load
+        .condition()
+        .and_then(|c| c.condition())
+        .map(|c| format!(" where {}", c.syntax().text()))
+        .unwrap_or_default();
+    d.with_suggestion(
+        format!("assign the relation to `{name}`"),
+        vec![Edit {
+            span: load.span(),
+            replacement: format!("{name} := {}{condition}", source.syntax().text()),
+        }],
+    )
+}
+
+/// The edit that makes `load`'s `as x` and `numbered n`, after its array,
+/// those of `way`.
+fn unloading_edit(load: &ast::Load, way: &hir::Unloading) -> Option<Edit> {
+    let start = load.source_end()?;
+    let end = [
+        load.element_name().map(|n| n.span().end),
+        load.numbering().map(|n| n.span().end),
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+    .unwrap_or(start);
+    let named = way.named.iter().map(|x| format!(" as {x}"));
+    let numbered = way.numbered.iter().map(|n| format!(" numbered {n}"));
+    Some(Edit {
+        span: Span::new(start, end),
+        replacement: named.chain(numbered).collect(),
+    })
+}
+
+/// Help that writes a load's `as x` and `numbered n` as `way` says, or
+/// `help` if there's no `way`.
+fn unloading_fix(
+    d: Diagnostic,
+    load: &ast::Load,
+    way: Option<&hir::Unloading>,
+    help: String,
+) -> Diagnostic {
+    let Some((way, edit)) = way.and_then(|w| Some((w, unloading_edit(load, w)?))) else {
+        return d.with_help(help);
+    };
+    let clauses: Vec<String> = [
+        way.named.as_ref().map(|x| format!("`as {x}`")),
+        way.numbered.as_ref().map(|n| format!("`numbered {n}`")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let text = if clauses.is_empty() {
+        "load the elements as they are".to_string()
+    } else {
+        format!("load them with {}", clauses.join(" and "))
+    };
+    d.with_suggestion(text, vec![edit])
+}
+
+/// A load into `name`, a relation, of an array of `element`s, which
+/// aren't tuples, without `as x`. `way` makes it fit `name`, if it can.
+pub(crate) fn unnamed_elements(
+    name: &str,
+    element: &hir::Type,
+    load: &ast::Load,
+    way: Option<&hir::Unloading>,
+) -> Diagnostic {
+    let at = load.source_end().unwrap_or_else(|| load.span().end);
+    let d = Diagnostic::error(
+        Code::LoadMismatch,
+        format!("the array's elements are `{element}`, not tuples, so the load names the attribute each becomes"),
+        Span::empty(at),
+        "`as` and the attribute's name go here",
+    )
+    .with_note(UNLOAD);
+    unloading_fix(
+        d,
+        load,
+        way,
+        format!(
+            "write `as` and the attribute's name after the array, as in `load {name} from lines as line`"
+        ),
+    )
+}
+
+/// `numbered`, after `numbering`'s `numbered`, in `load`, the name of an
+/// attribute each element's tuple already has. `way` makes it fit the
+/// relation loaded, if it can.
+pub(crate) fn numbered_attribute_exists(
+    numbered: &str,
+    numbering: &ast::Numbering,
+    load: &ast::Load,
+    way: Option<&hir::Unloading>,
+) -> Diagnostic {
+    let span = numbering
+        .name()
+        .map_or_else(|| numbering.span(), |n| n.span());
+    let d = Diagnostic::error(
+        Code::AttributeExists,
+        format!(
+            "each element's tuple already has `{numbered}`, so the positions need another name"
+        ),
+        span,
+        "an attribute of the elements' tuples",
+    )
+    .with_note(UNLOAD)
+    .with_note("a tuple's attributes are a set, so each name appears once");
+    unloading_fix(
+        d,
+        load,
+        way,
+        "name the positions' attribute one the tuples haven't".to_string(),
+    )
+}
+
+/// A load into `name`, a relation with `heading`, of `source`, an array
+/// whose elements make tuples of `made`. `way` makes them fit, if it can.
+pub(crate) fn unloaded_mismatch(
+    name: &str,
+    heading: &hir::Heading,
+    made: &hir::Heading,
+    source: &Expr,
+    load: &ast::Load,
+    way: Option<&hir::Unloading>,
+) -> Diagnostic {
+    let tuple = |h: &hir::Heading| {
+        hir::Type::Tuple(h.clone())
+            .to_string()
+            .trim_start_matches("tuple ")
+            .to_string()
+    };
+    let d = Diagnostic::error(
+        Code::LoadMismatch,
+        format!(
+            "the load gives `{name}` tuples of `{}`, but its tuples are `{}`",
+            tuple(made),
+            tuple(heading)
+        ),
+        source.span(),
+        format!("its elements make tuples of {}", listed(made)),
+    )
+    .with_note(UNLOAD);
+    unloading_fix(
+        d,
+        load,
+        way,
+        format!(
+            "name the attributes the elements make as `{name}`'s heading does, with `as` and `numbered`"
+        ),
+    )
 }
 
 /// A load of `source`, of type `ty`, into `name`, an array of `element`s,
@@ -5090,11 +5329,7 @@ pub(crate) fn unknown_order_attribute(
     heading: &hir::Heading,
 ) -> Diagnostic {
     let names: Vec<&str> = heading.attributes().map(|(a, _)| a).collect();
-    let rename = names
-        .iter()
-        .copied()
-        .filter(|a| edit_distance(a, name) <= 2)
-        .min_by_key(|a| edit_distance(a, name));
+    let rename = closest(name, names.iter().copied());
     let listed: Vec<String> = names.iter().map(|a| format!("`{a}`")).collect();
     let context = match listed.len() {
         0 => "the relation has no attributes".to_string(),

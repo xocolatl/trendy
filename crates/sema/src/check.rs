@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use trendy_diag::{CodeKind, Diagnostic, Span, edit_distance};
+use trendy_diag::{CodeKind, Diagnostic, Span, renamed};
 use trendy_hir as hir;
 use trendy_syntax::SyntaxToken;
 use trendy_syntax::ast::{self, AstNode, AttributeValue, Expr, Said};
@@ -122,6 +122,13 @@ pub(crate) trait Names {
     /// in the values of an `extend` or a `replace`.
     fn tuple_at_hand(&self) -> Option<&hir::Heading> {
         None
+    }
+
+    /// Whether the tuple at hand is one a load into a relation without
+    /// `numbered` makes of an array's element, whose position a name that
+    /// refers to nothing may be meant as.
+    fn unnumbered(&self) -> bool {
+        false
     }
 
     /// The type parameters of the operator whose body this is, which a
@@ -451,7 +458,11 @@ impl<'a> Checker<'a> {
             Lookup::Unknown => {
                 let candidates = self.names.candidates();
                 let candidates: Vec<&str> = candidates.iter().map(String::as_str).collect();
-                errors.push(errors::unknown_name(name, span, "value", &candidates));
+                errors.push(if self.names.unnumbered() {
+                    errors::unnumbered_position(name, span, &candidates)
+                } else {
+                    errors::unknown_name(name, span, "value", &candidates)
+                });
                 None
             }
         }
@@ -805,11 +816,7 @@ impl<'a> Checker<'a> {
             }
             let Some(param) = params.get(name) else {
                 ok = false;
-                let renamed = missing
-                    .iter()
-                    .copied()
-                    .filter(|m| edit_distance(m, name) <= 2)
-                    .min_by_key(|m| edit_distance(m, name));
+                let renamed = renamed(name, missing.iter().copied());
                 if let Some(target) = renamed {
                     missing.retain(|m| *m != target);
                 }
@@ -1050,10 +1057,7 @@ impl<'a> Checker<'a> {
                     errors.push(error);
                     return None;
                 }
-                let mut names = TupleNames {
-                    outer: &mut *self.names,
-                    heading: heading.clone(),
-                };
+                let mut names = TupleNames::new(&mut *self.names, heading.clone());
                 Checker::new(&mut names).expr(value, expected.as_ref(), errors)?
             }
             None => self.expr(value, expected.as_ref(), errors)?,
@@ -1228,10 +1232,7 @@ impl<'a> Checker<'a> {
             let (valid, expected) =
                 assigned_name(assigning, name, *span, &ty, operand_expr, other, errors);
             ok &= valid;
-            let mut names = TupleNames {
-                outer: &mut *self.names,
-                heading: heading.clone(),
-            };
+            let mut names = TupleNames::new(&mut *self.names, heading.clone());
             let mut checker = Checker::new(&mut names);
             match assign
                 .value()
@@ -1538,10 +1539,23 @@ impl<'a> Checker<'a> {
         expected: Option<&Expected>,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Expr> {
-        let operand_expr = binary.lhs()?;
-        let token = binary.operator()?;
-        let condition_expr = binary.rhs()?;
-        let written = unparenthesized(&operand_expr);
+        let (operand, token, condition) = (binary.lhs()?, binary.operator()?, binary.rhs()?);
+        self.restriction(&operand, token, &condition, expr, expected, errors)
+    }
+
+    /// The tuples of `operand_expr`, a relation, for which `condition_expr`,
+    /// after `token`, `where`, is true, as for [`Checker::restricted`]: a
+    /// `where`, written `expr`, or a load's.
+    pub(crate) fn restriction(
+        &mut self,
+        operand_expr: &Expr,
+        token: trendy_syntax::SyntaxToken,
+        condition_expr: &Expr,
+        expr: &Expr,
+        expected: Option<&Expected>,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let written = unparenthesized(operand_expr);
         let restricted = match ops::Joining::of(&written) {
             Some(joining) => {
                 let (operands, combined) = self.join_operands(&joining, None, errors)?;
@@ -1564,7 +1578,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            None => Restricted::Relation(self.expr(&operand_expr, None, errors)?),
+            None => Restricted::Relation(self.expr(operand_expr, None, errors)?),
         };
         let heading = match &restricted {
             Restricted::Joined { heading, .. } => heading.clone(),
@@ -1572,12 +1586,12 @@ impl<'a> Checker<'a> {
                 hir::Type::Relation(heading) => heading,
                 ty => {
                     let span = trendy_syntax::span(token.text_range());
-                    errors.push(errors::not_restrictable(span, &ty, &operand_expr));
+                    errors.push(errors::not_restrictable(span, &ty, operand_expr));
                     return None;
                 }
             },
         };
-        let condition = self.condition(heading, &condition_expr, token, errors)?;
+        let condition = self.condition(heading, condition_expr, token, errors)?;
         let result = match restricted {
             Restricted::Relation(operand) => ops::restrict(operand, condition, self.bindings()),
             Restricted::Joined { operands, .. } => {
@@ -1594,7 +1608,7 @@ impl<'a> Checker<'a> {
         match result {
             Ok(result) => self.matched(expected, result, expr, errors),
             Err(failure) => {
-                errors.push(errors::extension_failure(&failure, &condition_expr));
+                errors.push(errors::extension_failure(&failure, condition_expr));
                 None
             }
         }
@@ -1610,13 +1624,41 @@ impl<'a> Checker<'a> {
         token: trendy_syntax::SyntaxToken,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Expr> {
+        let names = TupleNames::new(&mut *self.names, heading);
+        Self::boolean(names, condition, token, errors)
+    }
+
+    /// `condition`, after `token`, the `where` of a load into a relation,
+    /// checked as [`Checker::condition`] checks one, of the tuples of
+    /// `heading` it makes of an array's elements, which `unnumbered` says
+    /// whether it leaves without their positions.
+    pub(crate) fn unloaded_condition(
+        &mut self,
+        heading: hir::Heading,
+        unnumbered: bool,
+        condition: &Expr,
+        token: trendy_syntax::SyntaxToken,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let names = TupleNames {
+            outer: &mut *self.names,
+            heading,
+            unnumbered,
+        };
+        Self::boolean(names, condition, token, errors)
+    }
+
+    /// `condition`, after `token`, checked as a boolean with the names of
+    /// `names`.
+    fn boolean(
+        mut names: TupleNames,
+        condition: &Expr,
+        token: trendy_syntax::SyntaxToken,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
         let boolean = Expected {
             ty: hir::Type::Scalar(hir::Scalar::Boolean),
             origin: types::Origin::Operator(token),
-        };
-        let mut names = TupleNames {
-            outer: &mut *self.names,
-            heading,
         };
         Checker::new(&mut names).expr(condition, Some(&boolean), errors)
     }
@@ -2316,6 +2358,21 @@ fn is_own_value(value: &hir::Expr, name: &str) -> bool {
 struct TupleNames<'a> {
     outer: &'a mut dyn Names,
     heading: hir::Heading,
+    /// Whether a load into a relation without `numbered` makes the tuple
+    /// at hand of an array's element.
+    unnumbered: bool,
+}
+
+impl<'a> TupleNames<'a> {
+    /// The names of a tuple with `heading`, which no load makes, in
+    /// `outer`.
+    fn new(outer: &'a mut dyn Names, heading: hir::Heading) -> Self {
+        TupleNames {
+            outer,
+            heading,
+            unnumbered: false,
+        }
+    }
 }
 
 impl Names for TupleNames<'_> {
@@ -2356,6 +2413,10 @@ impl Names for TupleNames<'_> {
 
     fn tuple_at_hand(&self) -> Option<&hir::Heading> {
         Some(&self.heading)
+    }
+
+    fn unnumbered(&self) -> bool {
+        self.unnumbered
     }
 
     fn type_parameters(&self) -> Option<&[hir::TypeParameter]> {

@@ -79,6 +79,26 @@ operator crops_by_year{r: relation { year: integer, crop: text }}: array text [
     crops
 ];
 
+/* An array's elements into a relation, by a load the other way. An array
+   of tuples gives their tuples, and `numbered` adds each one's position,
+   counting from 1: here, the cities' ranks by rain. */
+operator ranked_by_rain{
+    r: relation { city: text, rain: integer },
+}: relation { city: text, rain: integer, rank: integer } [
+    var ranks: relation { city: text, rain: integer, rank: integer };
+    load ranks from wettest_first{r: r} numbered rank;
+    ranks
+];
+
+/* An array of other values gives a tuple for each element, whose
+   attribute `as` names. Equal elements make one tuple, as a projection's
+   do, so teff is there once, and `where` keeps those it is true for. */
+operator grown{crops: array text}: relation { crop: text } [
+    var grown: relation { crop: text };
+    load grown from crops as crop where crop <> "sorghum";
+    grown
+];
+
 var harvests := relation {
     { year: 2021, crop: "teff" },
     { year: 2022, crop: "sorghum" },
@@ -88,6 +108,8 @@ var harvests := relation {
 var ranked := wettest_first{r: yearly};
 var names := alphabetical{r: yearly};
 var crops := crops_by_year{r: harvests};
+var ranks := ranked_by_rain{r: yearly};
+var grown_crops := grown{crops: crops};
 
 /* An element given a new value, `a[i] := x`, which is shorthand for
    assigning the whole array, so that a value it was copied to keeps its
@@ -147,6 +169,8 @@ operator computed{wet: integer, mid: integer, low: integer, two: integer, city: 
         { year: 2023, crop: "teff" },
     };
     call debug_value{v: crops_by_year{r: harvests}};
+    call debug_table{r: ranked_by_rain{r: yearly}};
+    call debug_table{r: grown{crops: crops_by_year{r: harvests}}};
     var revised := r;
     revised[3] := 250;
     var h := g;
@@ -173,6 +197,8 @@ operator main{} [
     call debug_value{v: ranked};
     call debug_value{v: names};
     call debug_value{v: crops};
+    call debug_table{r: ranks};
+    call debug_table{r: grown_crops};
     call debug_value{v: revised};
 
     call computed{wet: 1200, mid: 950, low: 220, two: 2, city: "Mumbai", at: 2};

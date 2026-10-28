@@ -2024,30 +2024,85 @@ impl<'a> Parser<'a> {
                 .push(errors::load_without_from(Span::empty(at), before));
         }
         if self.at_operand() && !self.at_order() {
-            // A whole expression, which ends before `order`: a load is a
-            // statement, so, unlike a `tuple from`'s relation, nothing
-            // after it could be outside it.
-            self.expression();
+            // An operand up to a `where`, which is the load's own, and ends
+            // before `order`: a load is a statement, so, unlike a `tuple
+            // from`'s relation, nothing after it could be outside it.
+            self.binary(Precedence::WHERE.tighter());
         } else {
             self.missing_with_help(
                 SyntaxKind::Ident,
-                "write the relation to load after `from`, as in `load a from r order [asc x]`",
+                "write the relation or array to load after `from`, as in `load a from r order [asc x]`",
             );
         }
+        self.load_clauses();
         self.load_order();
         self.form = outer_form;
     }
 
-    /// A load's order, after its relation: `order [asc x, desc y]`, then
-    /// `remove {x}` or `keep {x}` if the elements leave attributes out.
+    /// A load's clauses after its relation or array: for an array loaded
+    /// into a relation, `as x`, the attribute each element becomes, and
+    /// `numbered n`, the one its position becomes, then, for either, `where
+    /// c`, the tuples it keeps. Postgres's `WITH ORDINALITY AS n` is
+    /// reported, with a fix to `numbered n`.
+    fn load_clauses(&mut self) {
+        if self.at(SyntaxKind::AsKw)
+            && self
+                .found_after(1)
+                .is_some_and(|f| f.kind == SyntaxKind::Ident)
+        {
+            self.start_node(SyntaxKind::ElementName);
+            self.bump();
+            self.start_node(SyntaxKind::Name);
+            self.bump();
+            self.builder.finish_node();
+            self.builder.finish_node();
+        }
+        let word = |f: Option<Found>, word: &str| {
+            f.is_some_and(|f| f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case(word))
+        };
+        let ordinality = word(self.found(), "with")
+            && word(self.found_after(1), "ordinality")
+            && self
+                .found_after(2)
+                .is_some_and(|f| f.kind == SyntaxKind::AsKw)
+            && self
+                .found_after(3)
+                .is_some_and(|f| f.kind == SyntaxKind::Ident);
+        let numbered = self.at_word("numbered")
+            && self
+                .found_after(1)
+                .is_some_and(|f| f.kind == SyntaxKind::Ident);
+        if ordinality || numbered {
+            self.start_node(SyntaxKind::Numbering);
+            if ordinality {
+                let start = self.bump().start;
+                self.bump();
+                let end = self.bump().end;
+                self.errors.push(errors::ordinality(Span::new(start, end)));
+            } else {
+                self.contextual_keyword("numbered");
+            }
+            self.start_node(SyntaxKind::Name);
+            self.bump();
+            self.builder.finish_node();
+            self.builder.finish_node();
+        }
+        if self.at(SyntaxKind::WhereKw) {
+            self.start_node(SyntaxKind::LoadCondition);
+            self.bump();
+            self.expression();
+            self.builder.finish_node();
+        }
+    }
+
+    /// A load's order, after its relation, if it has one, which sema checks
+    /// a load into an array does: `order [asc x, desc y]`, then `remove
+    /// {x}` or `keep {x}` if the elements leave attributes out.
     /// SQL's `order by`, items without brackets, Tutorial D's `ORDER ( … )`,
     /// and items' habits (see [`Parser::order_item`]), are reported with
     /// fixes.
     fn load_order(&mut self) {
         let Some(order) = self.found_word("order") else {
-            let at = self.last_end.unwrap_or(0);
-            self.errors
-                .push(errors::load_without_order(Span::empty(at)));
             return;
         };
         self.contextual_keyword("order");
@@ -5639,7 +5694,18 @@ SourceFile
         };
         let (clause, plain) = load("load a from r where x > 1 order [asc x, desc y];");
         assert_eq!(clause.target().unwrap().syntax().text(), "a");
-        assert_eq!(clause.operand().unwrap().syntax().text(), "r where x > 1");
+        // The `where` is the load's, not the relation's.
+        assert_eq!(clause.operand().unwrap().syntax().text(), "r");
+        assert_eq!(
+            plain
+                .condition()
+                .unwrap()
+                .condition()
+                .unwrap()
+                .syntax()
+                .text(),
+            "x > 1"
+        );
         let items: Vec<_> = plain
             .order()
             .unwrap()
@@ -5683,6 +5749,31 @@ SourceFile
         let (clause, values) = load("load a value from r{x} order [asc x];");
         assert_eq!(clause.target().unwrap().syntax().text(), "a");
         assert_eq!(values.value().unwrap().text(), "value");
+        // An array into a relation: the attribute each element becomes,
+        // and the one its position does, then the tuples kept.
+        let (clause, unloading) = load("load r from a as line numbered n where n > 1;");
+        assert_eq!(clause.operand().unwrap().syntax().text(), "a");
+        assert_eq!(
+            unloading
+                .element_name()
+                .unwrap()
+                .name()
+                .unwrap()
+                .syntax()
+                .text(),
+            "line"
+        );
+        assert_eq!(
+            unloading
+                .numbering()
+                .unwrap()
+                .name()
+                .unwrap()
+                .syntax()
+                .text(),
+            "n"
+        );
+        assert!(unloading.order().is_none());
         // The words are contextual keywords: names elsewhere, even in a load,
         // as an attribute ordered by, or the array loaded.
         load("load desc from order order [asc desc];");
@@ -5766,7 +5857,13 @@ SourceFile
             fix(&body("a := r order [asc x];")),
             body("load a from r order [asc x];")
         );
-        assert_eq!(messages(&body("load a from r;")), ["a load needs an order"]);
+        // Without an order, it is a load into a relation, or one sema
+        // reports; Postgres's `WITH ORDINALITY` is `numbered`.
+        assert!(messages(&body("load a from r;")).is_empty());
+        assert_eq!(
+            fix(&body("load r from a with ordinality as n;")),
+            body("load r from a numbered n;")
+        );
     }
 
     #[test]

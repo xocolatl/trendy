@@ -1109,7 +1109,8 @@ operator main{} [
   feed, or the carriage return and line feed, that ends it. So the first
   line is element 1, and two equal lines are two elements: a file's lines
   have an order and can repeat, which a relation of them would have to
-  spell out with each one's position.
+  spell out with each one's position, as `load r from lines as line
+  numbered n` does (see [Loading an array](#loading-an-array)).
 - **The last line needs no ending,** so a file that ends with one has no
   empty line after it, and an empty file has no lines.
 - **The path is relative to the directory the program runs in,** not the
@@ -2021,6 +2022,79 @@ var yearly := relation { { city: "Mumbai", rain: 2200 } };
 operator main{} [
     var names: array text;
     load names from yearly order [asc city];
+];
+```
+
+### Loading an array
+
+`load r from a as x;` gives the relation variable `r` a tuple for each
+element of the array `a`, whose attribute `x` is the element. `numbered
+n` adds `n`, the element's position, counting from 1, and `where c`
+keeps the tuples for which `c` is true, with their attributes, the
+position's too, in scope. It is the converse of loading a relation, as
+Tutorial D's `LOAD r FROM a` is of its `LOAD a FROM r` (chapter 5), so
+`load lines from texts as line numbered n;` and `load texts value from
+lines order [asc n] remove {n};` give each other back.
+
+```trendy
+operator main{} [
+    var texts: array text;
+    call load_text_file{path: "rivers.txt", out lines: texts};
+    var lines: relation { line: text, n: integer };
+    load lines from texts as line numbered n where n > 1 and line <> "";
+    var rivers: relation { river: text };
+    load rivers from texts as river where river <> "";
+    var flows := array [tuple { river: "Nile", km: 6650 }, tuple { river: "Niger", km: 4180 }];
+    var longest: relation { river: text, km: integer, rank: integer };
+    load longest from flows numbered rank;
+    call debug_table{r: lines};
+    call debug_table{r: rivers};
+    call debug_table{r: longest};
+];
+```
+
+- **Each element makes a tuple:** an array of tuples' elements are
+  theirs, and any other element is the value of the attribute `as x`
+  names, which an array of tuples can name too, to make a relation of
+  one tuple-valued attribute. Without `as`, an array of other values is
+  reported (A0047), and so is a relation whose heading isn't the tuples'
+  (A0047), each with a fix that writes `as` and `numbered` as its heading
+  needs, when only one way fits it.
+- **Elements that make equal tuples make one,** as a projection's
+  do, since a relation's tuples are a set: `rivers` above has the Nile
+  once. Tutorial D requires an array with no duplicates instead. With
+  `numbered`, no two tuples are equal, as no two elements have one
+  position, so each element is there, as in `lines`. The position's
+  attribute is one the tuples haven't (A0024).
+- **`where` comes after `as` and `numbered`,** and sees what they name,
+  so `where n > 1` skips a header line. Without `numbered`, a name
+  `where` doesn't know is reported with help to write it (A0015), unless
+  it may be a misspelling of one it does. A load of a relation into an
+  array can have one too, before its order: `load a from r where c order
+  […]`.
+- **A load is an assignment** of the whole relation, written as a load
+  for the same reason as a load into an array: nothing converts an array
+  into a relation implicitly. A relation's tuples have no order, so a
+  load into one has none, nor `value`, which are for a load into an
+  array, as `as` and `numbered` are for a load into a relation (A0047);
+  each is fixed away. A relation loaded into a relation variable is fixed
+  to an assignment (A0047).
+- **`numbered` is a contextual keyword,** and Postgres's `WITH
+  ORDINALITY AS n` is fixed to `numbered n` (P0030).
+
+```trendy,error
+operator main{} [
+    var texts := array ["Nile", "Niger"];
+    var rivers: relation { river: text };
+    load rivers from texts;
+];
+```
+
+```trendy,error
+operator main{} [
+    var texts := array ["Nile", "Niger"];
+    var lines: relation { line: text, n: integer };
+    load lines from texts as line with ordinality as n;
 ];
 ```
 
@@ -3758,6 +3832,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `a[-1]`, the last element | `a[length{a: a}]` |
 | `len(a)`, `a.length()`, `CARDINALITY(a)`, `size(a)` | `length{a: a}` |
 | `ORDER BY x DESC`, `LOAD A FROM R ORDER (DESC X)`, `orderby x descending` | `load a from r order [desc x];` |
+| `unnest(a) WITH ORDINALITY AS t(x, n)`, `enumerate(a)`, `LOAD R FROM A` | `load r from a as x numbered n;` |
 | `a := r order [asc x];` | `load a from r order [asc x];` |
 | `NULLS FIRST`, `NULLS LAST` | nothing: there are no nulls |
 | `tuple { x = 1 }` | `tuple { x: 1 }` |

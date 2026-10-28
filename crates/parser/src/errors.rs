@@ -2052,18 +2052,6 @@ pub(crate) fn load_without_from(at: Span, relation: Option<usize>) -> Diagnostic
     }
 }
 
-/// A `load` with no order after its relation, which ends at `at`.
-pub(crate) fn load_without_order(at: Span) -> Diagnostic {
-    Diagnostic::error(
-        Code::LoadOrder,
-        "a load needs an order",
-        at,
-        "no `order` after the relation",
-    )
-    .with_note("a relation's tuples have no order, so a load says which to put them in")
-    .with_help(ORDER_ITEMS)
-}
-
 /// An assignment whose value, after `:=` at `assign`, is followed by an
 /// order, at `order`: a load, written as one. The assignment's variable
 /// starts at `target`.
@@ -2433,6 +2421,25 @@ pub(crate) fn updates_clause(
         replacement: "var ".to_string(),
     }));
     d.with_suggestion("write `var` before each parameter's name instead", edits)
+}
+
+/// Postgres's `WITH ORDINALITY AS`, at `span`, before the name of the
+/// attribute each element's position becomes, in a load into a relation.
+pub(crate) fn ordinality(span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::LoadOrder,
+        "an element's position is written `numbered n`, not `with ordinality as n`",
+        span,
+        "Postgres's spelling",
+    )
+    .with_note("`numbered n` after the array a load gives a relation adds the attribute `n`, each element's position in the array, counting from 1")
+    .with_suggestion(
+        "write `numbered`",
+        vec![Edit {
+            span,
+            replacement: "numbered".to_string(),
+        }],
+    )
 }
 
 /// The rule for a load's elements' attributes, for notes.

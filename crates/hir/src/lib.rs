@@ -939,6 +939,64 @@ pub enum Loaded {
     Values,
 }
 
+/// How a `load` makes a relation of an array (see [`Expr::Unload`]): each
+/// element a tuple, its own if it is one, with the attribute `named`, if
+/// there is one, whose value it is, and `numbered`, if there is one, whose
+/// value is its position, counting from 1.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Unloading {
+    pub named: Option<String>,
+    pub numbered: Option<String>,
+}
+
+impl Unloading {
+    /// The heading of the relation made of an array of `element`s.
+    ///
+    /// # Panics
+    ///
+    /// If an element without a name isn't a tuple, or the number's name is
+    /// one of its attributes', which sema rules out.
+    #[must_use]
+    pub fn heading(&self, element: &Type) -> Heading {
+        let mut attributes: BTreeMap<String, Type> = match (&self.named, element) {
+            (Some(name), _) => [(name.clone(), element.clone())].into(),
+            (None, Type::Tuple(heading)) => heading
+                .attributes()
+                .map(|(a, ty)| (a.to_string(), ty.clone()))
+                .collect(),
+            (None, other) => panic!("the tuples of an array of {other}"),
+        };
+        if let Some(numbered) = &self.numbered {
+            let clash = attributes.insert(numbered.clone(), Type::Scalar(Scalar::Integer));
+            assert!(
+                clash.is_none(),
+                "`{numbered}` numbers elements that have it"
+            );
+        }
+        Heading::new(attributes)
+    }
+
+    /// The tuple the element `value`, at `position`, counting from 1,
+    /// becomes.
+    ///
+    /// # Panics
+    ///
+    /// If an element without a name isn't a tuple, which sema rules out.
+    #[must_use]
+    pub fn tuple(&self, value: &Value, position: usize) -> TupleValue {
+        let mut tuple = match (&self.named, value) {
+            (Some(name), _) => TupleValue::new([(name.clone(), value.clone())].into()),
+            (None, Value::Tuple(tuple)) => tuple.clone(),
+            (None, other) => panic!("the tuple of {other:?}"),
+        };
+        if let Some(numbered) = &self.numbered {
+            let position = i64::try_from(position).expect("an array's positions fit");
+            tuple = tuple.with([(numbered.clone(), Value::Integer(position))]);
+        }
+        tuple
+    }
+}
+
 /// How a `load` makes an array of a relation (see [`Expr::Load`]).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Loading {
@@ -1087,6 +1145,9 @@ pub enum Expr {
     /// value of the only attribute left. Tuples equal on every item come in
     /// canonical order, which the language leaves undefined.
     Load(Box<Expr>, Loading),
+    /// The relation a `load` makes of an array: each element a tuple, as the
+    /// `Unloading` says, and those that turn out equal one.
+    Unload(Box<Expr>, Unloading),
     /// The only tuple of a relation (`tuple from`), which fails if it has
     /// none or several. `value from` is the extraction of its only
     /// attribute.
@@ -1122,6 +1183,10 @@ impl Expr {
             },
             Expr::WithElements(array, _) => array.type_with(leaf),
             Expr::If(_, then, _) => then.type_with(leaf),
+            Expr::Unload(array, unloading) => match array.type_with(leaf) {
+                Type::Array(element) => Type::Relation(unloading.heading(&element)),
+                other => panic!("unloading {other}"),
+            },
             Expr::Load(relation, loading) => match relation.type_with(leaf) {
                 Type::Relation(heading) => Type::Array(Box::new(loading.element(&heading))),
                 other => panic!("loading {other}"),
@@ -1206,6 +1271,7 @@ impl Expr {
             | Expr::Relation(..)
             | Expr::Array(..)
             | Expr::Load(..)
+            | Expr::Unload(..)
             | Expr::Index(..)
             | Expr::WithElements(..) => true,
             Expr::Unary(_, operand) => operand.can_fail(),
@@ -1371,6 +1437,7 @@ impl Expr {
                 Box::new(f(*otherwise, 0)),
             ),
             Expr::Load(relation, loading) => Expr::Load(Box::new(f(*relation, 0)), loading),
+            Expr::Unload(array, unloading) => Expr::Unload(Box::new(f(*array, 0)), unloading),
             Expr::Only(operand) => Expr::Only(Box::new(f(*operand, 0))),
             Expr::Call(call) => Expr::Call(Call {
                 args: call
@@ -1398,7 +1465,8 @@ impl Expr {
             | Expr::Rename(operand, _)
             | Expr::Ungroup(operand, _)
             | Expr::Only(operand)
-            | Expr::Load(operand, ..) => f(operand, 0),
+            | Expr::Load(operand, ..)
+            | Expr::Unload(operand, ..) => f(operand, 0),
             Expr::Let(_, lhs, rhs)
             | Expr::Binary(_, lhs, rhs)
             | Expr::And(lhs, rhs)
@@ -1499,6 +1567,7 @@ impl Expr {
             }
             // A load names only attributes, which no type parameter changes.
             Expr::Load(relation, loading) => Expr::Load(inst(relation), loading.clone()),
+            Expr::Unload(array, unloading) => Expr::Unload(inst(array), unloading.clone()),
             // A type parameter's comparisons and `not`s of them are kept in
             // normal form when it becomes a boolean, or a scalar.
             Expr::Unary(UnaryOp::Not, operand) => operand.instantiated(types).negated(),
@@ -2605,6 +2674,23 @@ pub struct ArrayValue {
     pub element: Type,
     /// In order, the first at position 1.
     pub elements: Vec<Value>,
+}
+
+impl ArrayValue {
+    /// The relation a `load` makes of the array, as `unloading` says: each
+    /// element a tuple, and those that turn out equal one.
+    #[must_use]
+    pub fn unloaded(&self, unloading: &Unloading) -> RelationValue {
+        RelationValue {
+            heading: unloading.heading(&self.element),
+            tuples: self
+                .elements
+                .iter()
+                .enumerate()
+                .map(|(i, element)| unloading.tuple(element, i + 1))
+                .collect(),
+        }
+    }
 }
 
 /// A relation value: a set of tuples, all with the relation's heading.

@@ -410,13 +410,9 @@ fn attribute_assigned(
     Some(errors::attribute_assigned(written.span(), attribute, fix))
 }
 
-/// `load`, the clause `clause`, of `target`: the array of the tuples of
-/// its relation, or, written `load a value from r`, of the values of the
-/// relation's only attribute, in the order of its items, each without the
-/// attributes its `remove`, after the order, names, or those its `keep`
-/// doesn't. The array's elements must be what it says: tuples of the
-/// relation's heading, less those, or values of the one attribute's type,
-/// which can be tuples too.
+/// `load`, the clause `clause`, of `target`: of a relation into an array
+/// (see [`into_array`]), or of an array into a relation (see
+/// [`into_relation`]), as the variable's type says.
 fn loaded(
     clause: &Clause,
     load: &ast::Load,
@@ -425,26 +421,58 @@ fn loaded(
     errors: &mut Vec<Diagnostic>,
 ) -> Option<Change> {
     let written = clause.operand()?;
-    let order = load.order()?;
-    let keeping = load.keepings().next();
+    match &target.assignee.ty {
+        hir::Type::Array(element) => into_array(load, target, element, &written, checker, errors),
+        hir::Type::Relation(heading) => {
+            into_relation(load, target, heading, &written, checker, errors)
+        }
+        ty => {
+            let value = checker.expr(&written, None, errors)?;
+            errors.push(errors::load_into_other(
+                &target.assignee.name,
+                ty,
+                target.written,
+                &checker.ty(&value),
+                clause.span(),
+                &written,
+            ));
+            None
+        }
+    }
+}
+
+/// `load`, of `written`, into `target`, an array of `element`s: the array
+/// of the tuples of the relation, those `where` keeps, or, written `load a
+/// value from r`, of the values of its only attribute, in the order of its
+/// items, each without the attributes its `remove`, after the order,
+/// names, or those its `keep` doesn't. The array's elements must be what
+/// it says: tuples of the relation's heading, less those, or values of the
+/// one attribute's type, which can be tuples too.
+fn into_array(
+    load: &ast::Load,
+    target: &Target,
+    element: &hir::Type,
+    written: &ast::Expr,
+    checker: &mut Checker,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<Change> {
     let name = &target.assignee.name;
-    let hir::Type::Array(element) = &target.assignee.ty else {
-        let relation = checker.expr(&written, None, errors)?;
-        errors.push(errors::load_into_non_array(
-            name,
-            &target.assignee.ty,
-            target.written,
-            &checker.ty(&relation),
-            clause.span(),
-            &written,
-        ));
+    if !without_other_clauses(load, name, true, errors) {
+        return None;
+    }
+    let Some(order) = load.order() else {
+        let at = load
+            .condition()
+            .map_or_else(|| load.source_end(), |c| Some(c.span().end))?;
+        errors.push(errors::load_without_order(name, at));
         return None;
     };
-    if let Some(error) = ordered_after_removal(&written, &order, keeping.is_some()) {
+    let keeping = load.keepings().next();
+    if let Some(error) = ordered_after_removal(written, &order, keeping.is_some()) {
         errors.push(error);
         return None;
     }
-    let (expected, loaded) = match (load.value(), &**element) {
+    let (expected, loaded) = match (load.value(), element) {
         // With nothing removed, the relation's heading is the elements',
         // which an empty relation can take from them.
         (None, hir::Type::Tuple(heading)) if keeping.is_none() => (
@@ -457,14 +485,14 @@ fn loaded(
         (None, hir::Type::Tuple(_)) => (None, hir::Loaded::Tuples),
         (None, _) => {
             // Values are taken only when the load says so.
-            let relation = checker.expr(&written, None, errors)?;
+            let relation = checker.expr(written, None, errors)?;
             let ty = checker.ty(&relation);
             let keep = values_kept(&ty, element, load);
             errors.push(errors::load_without_value(
                 name,
                 element,
                 &ty,
-                &written,
+                written,
                 load.from().as_ref(),
                 keep,
             ));
@@ -472,10 +500,24 @@ fn loaded(
         }
         (Some(_), _) => (None, hir::Loaded::Values),
     };
-    let relation = checker.expr(&written, expected.as_ref(), errors)?;
+    // The tuples `where` keeps, before they are ordered.
+    let relation = match load
+        .condition()
+        .and_then(|c| Some((c.keyword()?, c.condition()?)))
+    {
+        Some((token, condition)) => checker.restriction(
+            written,
+            token,
+            &condition,
+            written,
+            expected.as_ref(),
+            errors,
+        )?,
+        None => checker.expr(written, expected.as_ref(), errors)?,
+    };
     let ty = checker.ty(&relation);
     let hir::Type::Relation(heading) = &ty else {
-        errors.push(errors::load_mismatch(name, element, &ty, &written, None));
+        errors.push(errors::load_mismatch(name, element, &ty, written, None));
         return None;
     };
     let removed = match &keeping {
@@ -486,7 +528,7 @@ fn loaded(
         name,
         element,
         load,
-        written: &written,
+        written,
     };
     if !filling.fits(loaded, heading, &removed, errors) {
         return None;
@@ -497,7 +539,193 @@ fn loaded(
         removed,
         loaded,
     };
-    Some(Change::Value(ops::load(relation, loading), written))
+    Some(Change::Value(ops::load(relation, loading), written.clone()))
+}
+
+/// `load`, of `written`, into `target`, a relation with `heading`: the
+/// relation of the elements of the array, each a tuple, its own if it is
+/// one, with the attribute `as x` names, if it does, whose value it is,
+/// and `numbered n`, if it is there, whose value is its position, counting
+/// from 1, and those that turn out equal one, and of them those `where`
+/// keeps. The tuples must be of the relation's heading.
+fn into_relation(
+    load: &ast::Load,
+    target: &Target,
+    heading: &hir::Heading,
+    written: &ast::Expr,
+    checker: &mut Checker,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<Change> {
+    let name = &target.assignee.name;
+    let array = checker.expr(written, None, errors)?;
+    let ty = checker.ty(&array);
+    let hir::Type::Array(element) = &ty else {
+        errors.push(errors::unload_of_non_array(
+            name,
+            &target.assignee.ty,
+            &ty,
+            written,
+            load,
+        ));
+        return None;
+    };
+    if !without_other_clauses(load, name, false, errors) {
+        return None;
+    }
+    let unloading = hir::Unloading {
+        named: load
+            .element_name()
+            .and_then(|n| n.name()?.ident())
+            .map(|i| i.text().to_string()),
+        numbered: load
+            .numbering()
+            .and_then(|n| n.name()?.ident())
+            .map(|i| i.text().to_string()),
+    };
+    let fits = || fitting(element, heading, &unloading);
+    // An element that isn't a tuple is the value of an attribute it names.
+    if unloading.named.is_none() && !matches!(**element, hir::Type::Tuple(_)) {
+        errors.push(errors::unnamed_elements(
+            name,
+            element,
+            load,
+            fits().as_ref(),
+        ));
+        return None;
+    }
+    // The positions' attribute is one the elements don't make.
+    let elements = hir::Unloading {
+        numbered: None,
+        ..unloading.clone()
+    }
+    .heading(element);
+    if let (Some(numbered), Some(numbering)) = (&unloading.numbered, load.numbering())
+        && elements.get(numbered).is_some()
+    {
+        errors.push(errors::numbered_attribute_exists(
+            numbered,
+            &numbering,
+            load,
+            fits().as_ref(),
+        ));
+        return None;
+    }
+    let made = unloading.heading(element);
+    if made != *heading {
+        errors.push(errors::unloaded_mismatch(
+            name,
+            heading,
+            &made,
+            written,
+            load,
+            fits().as_ref(),
+        ));
+        return None;
+    }
+    let unnumbered = unloading.numbered.is_none();
+    let relation = ops::unload(array, unloading);
+    // The tuples `where` keeps, of those the elements make.
+    let Some((token, written_condition)) = load
+        .condition()
+        .and_then(|c| Some((c.keyword()?, c.condition()?)))
+    else {
+        return Some(Change::Value(relation, written.clone()));
+    };
+    let condition =
+        checker.unloaded_condition(made, unnumbered, &written_condition, token, errors)?;
+    match ops::restrict(relation, condition, checker.bindings()) {
+        Ok(relation) => Some(Change::Value(relation, written.clone())),
+        Err(failure) => {
+            errors.push(errors::extension_failure(&failure, &written_condition));
+            None
+        }
+    }
+}
+
+/// Whether `load`, into `name`, an array if `array` says so and a relation
+/// if not, has none of the clauses of a load into the other: `as x` and
+/// `numbered n` are for a load into a relation, and `value` and an order
+/// for a load into an array. Each it has is reported, with a fix that
+/// removes it.
+fn without_other_clauses(
+    load: &ast::Load,
+    name: &str,
+    array: bool,
+    errors: &mut Vec<Diagnostic>,
+) -> bool {
+    let mut other: Vec<(&str, Span, Span)> = Vec::new();
+    if array {
+        if let Some(named) = load.element_name() {
+            other.push(("as", named.span(), named.removal()));
+        }
+        if let Some(numbering) = load.numbering() {
+            other.push(("numbered", numbering.span(), numbering.removal()));
+        }
+    } else {
+        if let (Some(value), Some(from)) = (load.value(), load.from()) {
+            let span = trendy_syntax::span(value.text_range());
+            let removal = Span::new(span.start, trendy_syntax::span(from.text_range()).start);
+            other.push(("value", span, removal));
+        }
+        if let (Some(keyword), Some(order), Some(removal)) =
+            (load.order_keyword(), load.order(), load.order_removal())
+        {
+            let start = trendy_syntax::span(keyword.text_range()).start;
+            other.push(("order", Span::new(start, order.span().end), removal));
+        }
+    }
+    for &(clause, span, removal) in &other {
+        errors.push(errors::clause_of_other_load(
+            name, array, clause, span, removal,
+        ));
+    }
+    other.is_empty()
+}
+
+/// The clauses, `as x` and `numbered n`, that would make a load of an array
+/// of `element`s give tuples of `heading`, if one way does: the one that
+/// keeps a name `written` has, if there are several.
+fn fitting(
+    element: &hir::Type,
+    heading: &hir::Heading,
+    written: &hir::Unloading,
+) -> Option<hir::Unloading> {
+    let integer = hir::Type::Scalar(hir::Scalar::Integer);
+    // The heading less the positions' attribute, if it has one, which is
+    // the elements', or an attribute of the elements' type.
+    let numbers = std::iter::once(None).chain(
+        heading
+            .named()
+            .filter(|(_, ty)| **ty == integer)
+            .map(|(a, _)| Some(a.to_string())),
+    );
+    let ways: Vec<hir::Unloading> = numbers
+        .filter_map(|numbered| {
+            let rest = heading.without(&numbered.iter().cloned().collect());
+            let named = match element {
+                hir::Type::Tuple(elements) if *elements == rest => None,
+                _ => {
+                    let mut attributes = rest.named();
+                    let (named, ty) = attributes.next()?;
+                    if attributes.next().is_some() || ty != element {
+                        return None;
+                    }
+                    Some(named.to_string())
+                }
+            };
+            Some(hir::Unloading { named, numbered })
+        })
+        .collect();
+    let keeps = |way: &hir::Unloading| {
+        (written.named.is_some() && way.named == written.named)
+            || (written.numbered.is_some() && way.numbered == written.numbered)
+    };
+    if let [way] = ways.as_slice() {
+        return Some(way.clone());
+    }
+    let mut kept = ways.iter().filter(|w| keeps(w));
+    let way = kept.next()?;
+    kept.next().is_none().then(|| way.clone())
 }
 
 /// The attributes of `heading`, of the relation of type `ty` a load takes,

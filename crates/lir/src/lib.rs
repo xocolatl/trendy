@@ -337,6 +337,19 @@ pub enum RuntimeFn {
     /// the attributes removed, or the value of the only one left. Tuples
     /// equal on every item are in canonical order.
     Load,
+    /// `trendy_rt_unload(dst, src, source, result, parts, part_count,
+    /// numbers, number_count)`: store at `dst` the relation, of the type
+    /// the descriptor `result` describes, of the elements of the array
+    /// `src`, of the type the descriptor `source` describes, in memory the
+    /// statement owns. Each element makes a tuple of `part_count` (a
+    /// [`Field::Usize`]) parts, laid out as [`RuntimeFn::Load`]'s, each a
+    /// struct of an offset in the element, the offset in the tuple, and
+    /// the size: the element's attributes, or the element, as the value of
+    /// an attribute. At each of the `number_count` (a [`Field::Usize`])
+    /// offsets in a tuple at `numbers`, [`Field::Usize`]s, none or one, is
+    /// the element's position, counting from 1, an integer. Tuples that
+    /// turn out equal are one.
+    Unload,
     /// `trendy_rt_compare_text(dst, lhs, rhs)`: store -1, 0 or 1 at `dst`,
     /// an [`Layout::I64`], as `lhs` is before, equal to or after `rhs` in
     /// code point order.
@@ -387,6 +400,7 @@ impl RuntimeFn {
             RuntimeFn::Duplicate => "trendy_rt_duplicate",
             RuntimeFn::Sort => "trendy_rt_sort",
             RuntimeFn::Load => "trendy_rt_load",
+            RuntimeFn::Unload => "trendy_rt_unload",
             RuntimeFn::CompareText => "trendy_rt_compare_text",
             RuntimeFn::Equal => "trendy_rt_equal",
             RuntimeFn::Assign => "trendy_rt_assign",

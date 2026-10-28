@@ -252,6 +252,15 @@ pub enum SyntaxKind {
     /// tuples' attributes the elements leave out, or keep. `keep` is a
     /// contextual keyword, an identifier elsewhere.
     Keeping,
+    /// `as x`, after the array a `load` gives a relation: the attribute
+    /// each element becomes.
+    ElementName,
+    /// `numbered n`, after the array a `load` gives a relation: the
+    /// attribute each element's position becomes. `numbered` is a
+    /// contextual keyword, an identifier elsewhere.
+    Numbering,
+    /// `where c`, in a `load`: the tuples it keeps.
+    LoadCondition,
     /// `asc x` or `desc x`: an attribute a `load` orders by, and the
     /// direction, a contextual keyword.
     OrderItem,
@@ -367,7 +376,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 150] = [
+    pub const ALL: [SyntaxKind; 153] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -474,6 +483,9 @@ impl SyntaxKind {
         SyntaxKind::Load,
         SyntaxKind::OrderList,
         SyntaxKind::Keeping,
+        SyntaxKind::ElementName,
+        SyntaxKind::Numbering,
+        SyntaxKind::LoadCondition,
         SyntaxKind::OrderItem,
         SyntaxKind::Arguments,
         SyntaxKind::PositionalArg,
@@ -967,6 +979,9 @@ impl SyntaxKind {
             SyntaxKind::Load => "load",
             SyntaxKind::OrderList => "order",
             SyntaxKind::Keeping => "attributes kept",
+            SyntaxKind::ElementName => "element's attribute",
+            SyntaxKind::Numbering => "numbering",
+            SyntaxKind::LoadCondition => "condition",
             SyntaxKind::OrderItem => "order item",
             SyntaxKind::Arguments => "arguments",
             SyntaxKind::PositionalArg => "argument",

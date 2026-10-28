@@ -1545,6 +1545,72 @@ pub unsafe extern "C" fn trendy_rt_load(
     }
 }
 
+/// Store at `dst` the relation, which `result` describes, of the elements
+/// of the array `src`, which `source` describes, in memory the statement
+/// owns. Each element makes a tuple of the `*part_count` `parts` of it,
+/// each `size` bytes from offset `from` in the element to offset `to` in
+/// the tuple: its attributes, or itself, as the value of an attribute. At
+/// each of the `*number_count` offsets `numbers`, none or one, the tuple
+/// has the element's position, counting from 1, an integer. Tuples that
+/// turn out equal are one.
+///
+/// # Safety
+///
+/// `src` must point to a valid array of the type `source` describes,
+/// `result` to a valid relation descriptor, `parts` to `*part_count`
+/// parts, and `numbers` to `*number_count` offsets of integer attributes,
+/// which together make a valid tuple of the relation from an element.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_unload(
+    dst: *mut Text,
+    src: *const u8,
+    source: *const TypeDesc,
+    result: *const TypeDesc,
+    parts: *const Part,
+    part_count: *const usize,
+    numbers: *const usize,
+    number_count: *const usize,
+) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let (source, result) = (&*source, &*result);
+        let parts = array(parts, part_count.read_unaligned());
+        let numbers = array(numbers, number_count.read_unaligned());
+        let (elements, len) = read_slice(src);
+        let element = source.element().size;
+        let size = result.element().size;
+        let Some(bytes) = len.checked_mul(size) else {
+            trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+        };
+        // The tuples are made here first, zeroed, as everywhere, so that
+        // the padding in them is zero, and share the elements' buffers
+        // until `canonical` copies them, taking a reference to each.
+        let tuples = allocate::<u8>(bytes);
+        core::ptr::write_bytes(tuples, 0, bytes);
+        for i in 0..len {
+            let (from, to) = (elements.add(i * element), tuples.add(i * size));
+            for part in parts {
+                core::ptr::copy_nonoverlapping(from.add(part.from), to.add(part.to), part.size);
+            }
+            // An array of tuples of no attributes takes no memory, so only
+            // the integers limit its positions.
+            let Ok(position) = i64::try_from(i + 1) else {
+                trendy_rt_fail(FAIL_INTEGER_OVERFLOW)
+            };
+            for number in numbers {
+                to.add(*number).cast::<i64>().write_unaligned(position);
+            }
+        }
+        let (out, kept) = canonical(tuples, len, result);
+        free(tuples.cast());
+        dst.write_unaligned(Text {
+            bytes: out,
+            len: kept,
+        });
+    }
+}
+
 /// The order of two tuples by the `items` of a load.
 ///
 /// # Safety

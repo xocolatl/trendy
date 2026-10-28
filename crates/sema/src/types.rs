@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use trendy_diag::{Diagnostic, Span, edit_distance};
+use trendy_diag::{Diagnostic, Span, renamed};
 use trendy_hir as hir;
 use trendy_syntax::SyntaxToken;
 use trendy_syntax::ast::{
@@ -675,11 +675,7 @@ fn unknown_tuple_attribute(
     removal: Span,
     errors: &mut Vec<Diagnostic>,
 ) {
-    let renamed = missing
-        .iter()
-        .copied()
-        .filter(|m| edit_distance(m, name) <= 2)
-        .min_by_key(|m| edit_distance(m, name));
+    let renamed = renamed(name, missing.iter().copied());
     if let Some(target) = renamed {
         missing.retain(|m| *m != target);
     }

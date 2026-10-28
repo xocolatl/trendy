@@ -1298,6 +1298,23 @@ from its tuple, keeping elements that turn out equal. Tuples equal on
 every item are so in canonical order, when folding and when running
 alike, which the language leaves undefined.
 
+A load the other way, of an array into a relation variable, has no
+order; after its array, `as x` (`ElementName`) names the attribute each
+element is the value of, `numbered n` (`Numbering`, `numbered` a
+contextual keyword) the one its position is, and `where c`
+(`LoadCondition`), which a load of either kind can have, the tuples it
+keeps. The parser takes the clauses of both kinds in any load, as which
+it is depends on the variable's type: sema checks each as the type says
+(`into_array` and `into_relation`), and reports a clause of the other
+kind with a fix that removes it. A load into a relation is
+`hir::Expr::Unload`, with its `hir::Unloading`, restricted by its
+condition, if it has one, and folded when its array is a constant
+(`ArrayValue::unloaded`). Lowering calls `trendy_rt_unload`, with the
+offsets in an element and in a tuple of each part of an element a tuple
+takes, all its attributes or the element itself, and the offset of the
+position, if it is numbered; it makes each tuple, then the relation of
+them, canonically, without duplicates, as `trendy_rt_sort` does.
+
 Removing attributes (`hir::Expr::Remove`, which a projection becomes) and
 renaming them (`hir::Expr::Rename`) are both reshaping: each attribute of
 the result is one of the operand's. For a tuple, lowering copies each into

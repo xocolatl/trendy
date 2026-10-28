@@ -1289,6 +1289,7 @@ impl<'a> FunctionBuilder<'a> {
             hir::Expr::Index(array, position) => self.index(array, position, cx),
             hir::Expr::WithElements(array, changes) => self.with_elements(array, changes, cx),
             hir::Expr::Load(relation, loading) => self.load(expr, relation, loading, cx),
+            hir::Expr::Unload(array, unloading) => self.unload(expr, array, unloading, cx),
             hir::Expr::If(condition, then, otherwise) => {
                 self.conditional(expr, condition, [then, otherwise], cx)
             }
@@ -2292,6 +2293,89 @@ impl<'a> FunctionBuilder<'a> {
         ];
         self.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::Load,
+            args,
+        });
+        self.scoped = true;
+        dst
+    }
+
+    /// `expr`, the relation of the elements of `array`, each a tuple, with
+    /// its position, as `unloading` says, computed by the runtime into a
+    /// new stack slot. Lowering works out where each part of an element
+    /// goes in a tuple, so the runtime never finds attributes by name.
+    fn unload(
+        &mut self,
+        expr: &hir::Expr,
+        array: &hir::Expr,
+        unloading: &hir::Unloading,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let array_ty = self.type_of(array);
+        let hir::Type::Array(element) = &array_ty else {
+            unreachable!("sema unloads only arrays");
+        };
+        let relation_ty = self.type_of(expr);
+        let hir::Type::Relation(heading) = &relation_ty else {
+            unreachable!("an unload makes a relation");
+        };
+        let tuple = layout(&hir::Type::Tuple(heading.clone()));
+        // Where an attribute is in the tuple, by name order.
+        let position = |name: &str| {
+            heading
+                .attributes()
+                .position(|(a, _)| a == name)
+                .expect("sema makes the relation's attributes of the elements")
+        };
+        let part = |from: lir::Field, to: &str, size: lir::Field| {
+            lir::Field::Struct(vec![
+                from,
+                lir::Field::Offset(tuple.clone(), position(to)),
+                size,
+            ])
+        };
+        let parts: Vec<lir::Field> = match (&unloading.named, &**element) {
+            (Some(named), _) => vec![part(
+                lir::Field::Usize(0),
+                named,
+                lir::Field::Size(layout(element)),
+            )],
+            (None, hir::Type::Tuple(elements)) => {
+                let made = layout(element);
+                elements
+                    .attributes()
+                    .enumerate()
+                    .map(|(j, (name, ty))| {
+                        part(
+                            lir::Field::Offset(made.clone(), j),
+                            name,
+                            lir::Field::Size(layout(ty)),
+                        )
+                    })
+                    .collect()
+            }
+            (None, other) => unreachable!("sema names an element of {other}"),
+        };
+        let numbers: Vec<lir::Field> = unloading
+            .numbered
+            .iter()
+            .map(|n| lir::Field::Offset(tuple.clone(), position(n)))
+            .collect();
+        let part_count = usize_constant(len(parts.len()), cx);
+        let number_count = usize_constant(len(numbers.len()), cx);
+        let src = self.place(array, cx);
+        let dst = self.slot(layout(&relation_ty));
+        let args = vec![
+            dst.clone(),
+            src,
+            lir::Place::whole(lir::Base::Data(cx.descriptor(&array_ty))),
+            lir::Place::whole(lir::Base::Data(cx.descriptor(&relation_ty))),
+            lir::Place::whole(lir::Base::Data(cx.constant(parts))),
+            part_count,
+            lir::Place::whole(lir::Base::Data(cx.constant(numbers))),
+            number_count,
+        ];
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Unload,
             args,
         });
         self.scoped = true;
