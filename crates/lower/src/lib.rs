@@ -731,15 +731,15 @@ impl<'a> FunctionBuilder<'a> {
     fn call(&mut self, call: &hir::Call, cx: &mut Lowering) {
         let callee = self.program.operator(call.operator);
         match &callee.kind {
-            hir::OperatorKind::Builtin(hir::Builtin::DebugValue) => {
-                self.write(&call.args["v"], lir::RuntimeFn::DebugValue, cx);
-            }
-            hir::OperatorKind::Builtin(hir::Builtin::DebugTable) => {
-                self.write(&call.args["r"], lir::RuntimeFn::DebugTable, cx);
-            }
-            hir::OperatorKind::Builtin(hir::Builtin::LoadTextFile) => {
-                self.load_text_file(call, cx);
-            }
+            hir::OperatorKind::Builtin(hir::Builtin::Update(builtin)) => match builtin {
+                hir::UpdateBuiltin::DebugValue => {
+                    self.write(&call.args["v"], lir::RuntimeFn::DebugValue, cx);
+                }
+                hir::UpdateBuiltin::DebugTable => {
+                    self.write(&call.args["r"], lir::RuntimeFn::DebugTable, cx);
+                }
+                hir::UpdateBuiltin::LoadTextFile => self.load_text_file(call, cx),
+            },
             hir::OperatorKind::Update { .. } => {
                 let params = params_of(callee, &call.types);
                 let (function, _) = function(
@@ -778,18 +778,7 @@ impl<'a> FunctionBuilder<'a> {
                 }
             }
             hir::OperatorKind::ReadOnly { .. }
-            | hir::OperatorKind::Builtin(
-                hir::Builtin::Count
-                | hir::Builtin::Length
-                | hir::Builtin::Min
-                | hir::Builtin::Max
-                | hir::Builtin::Sum
-                | hir::Builtin::Product
-                | hir::Builtin::ToText
-                | hir::Builtin::ToApproximate
-                | hir::Builtin::ParseInteger
-                | hir::Builtin::ParseApproximate,
-            ) => {
+            | hir::OperatorKind::Builtin(hir::Builtin::ReadOnly(_)) => {
                 unreachable!("`call` invokes only update operators")
             }
         }
@@ -860,8 +849,14 @@ impl<'a> FunctionBuilder<'a> {
     /// stack slot. What the operator makes is the statement's.
     fn read_only_call(&mut self, call: &hir::Call, cx: &mut Lowering) -> lir::Place {
         let callee = self.program.operator(call.operator);
-        if let hir::OperatorKind::Builtin(builtin) = callee.kind {
-            return self.builtin_value(builtin, call, cx);
+        match callee.kind {
+            hir::OperatorKind::Builtin(hir::Builtin::ReadOnly(builtin)) => {
+                return self.builtin_value(builtin, call, cx);
+            }
+            hir::OperatorKind::Builtin(hir::Builtin::Update(_)) => {
+                unreachable!("only read-only operators are called in expressions")
+            }
+            hir::OperatorKind::ReadOnly { .. } | hir::OperatorKind::Update { .. } => {}
         }
         let (function, makes) = function(
             self.program,
@@ -885,14 +880,14 @@ impl<'a> FunctionBuilder<'a> {
     /// into a new stack slot.
     fn builtin_value(
         &mut self,
-        builtin: hir::Builtin,
+        builtin: hir::ReadOnlyBuiltin,
         call: &hir::Call,
         cx: &mut Lowering,
     ) -> lir::Place {
         match builtin {
             // The relation's or array's count, which it keeps after its
             // tuples or elements.
-            hir::Builtin::Count | hir::Builtin::Length => {
+            hir::ReadOnlyBuiltin::Count | hir::ReadOnlyBuiltin::Length => {
                 let operand = call.args.values().next().expect("one argument");
                 let mut count = self.place(operand, cx);
                 count.path.push(1);
@@ -904,17 +899,17 @@ impl<'a> FunctionBuilder<'a> {
                 });
                 dst
             }
-            hir::Builtin::Min => {
+            hir::ReadOnlyBuiltin::Min => {
                 let r = &call.args["r"];
                 self.extreme(r, hir::Comparison::Less, lir::Failure::NoMin, cx)
             }
-            hir::Builtin::Max => {
+            hir::ReadOnlyBuiltin::Max => {
                 let r = &call.args["r"];
                 self.extreme(r, hir::Comparison::Greater, lir::Failure::NoMax, cx)
             }
-            hir::Builtin::Sum => self.numbers(lir::RuntimeFn::Sum, call, cx),
-            hir::Builtin::Product => self.numbers(lir::RuntimeFn::Product, call, cx),
-            hir::Builtin::ToText => {
+            hir::ReadOnlyBuiltin::Sum => self.numbers(lir::RuntimeFn::Sum, call, cx),
+            hir::ReadOnlyBuiltin::Product => self.numbers(lir::RuntimeFn::Product, call, cx),
+            hir::ReadOnlyBuiltin::ToText => {
                 let from = &call.args["from"];
                 let ty = self.type_of(from);
                 let value = self.place(from, cx);
@@ -927,7 +922,7 @@ impl<'a> FunctionBuilder<'a> {
                 self.scoped = true;
                 dst
             }
-            hir::Builtin::ToApproximate => {
+            hir::ReadOnlyBuiltin::ToApproximate => {
                 let src = self.place(&call.args["from"], cx);
                 let dst = self.slot(lir::Layout::F64Bits);
                 self.insts.push(lir::Inst::Unary {
@@ -937,8 +932,8 @@ impl<'a> FunctionBuilder<'a> {
                 });
                 dst
             }
-            hir::Builtin::ParseInteger | hir::Builtin::ParseApproximate => {
-                let function = if builtin == hir::Builtin::ParseInteger {
+            hir::ReadOnlyBuiltin::ParseInteger | hir::ReadOnlyBuiltin::ParseApproximate => {
+                let function = if builtin == hir::ReadOnlyBuiltin::ParseInteger {
                     lir::RuntimeFn::ParseInteger
                 } else {
                     lir::RuntimeFn::ParseApproximate
@@ -951,15 +946,12 @@ impl<'a> FunctionBuilder<'a> {
                 });
                 dst
             }
-            hir::Builtin::DebugValue | hir::Builtin::DebugTable | hir::Builtin::LoadTextFile => {
-                unreachable!("`{}` is an update operator", builtin.name())
-            }
         }
     }
 
     /// The value of `call`, of `sum` or `product`, computed into a new
     /// stack slot by the runtime function `function`, which computes it as
-    /// `hir::Builtin::evaluate` does, from the relation, its descriptor and
+    /// `hir::ReadOnlyBuiltin::evaluate` does, from the relation, its descriptor and
     /// the position of `of` among its attributes.
     fn numbers(
         &mut self,
@@ -2867,9 +2859,9 @@ mod tests {
     fn debug_value() -> hir::Operator {
         hir::Operator {
             name: "debug_value".to_string(),
-            types: hir::Builtin::DebugValue.types(),
-            params: hir::Builtin::DebugValue.params(),
-            kind: hir::OperatorKind::Builtin(hir::Builtin::DebugValue),
+            types: hir::Builtin::Update(hir::UpdateBuiltin::DebugValue).types(),
+            params: hir::Builtin::Update(hir::UpdateBuiltin::DebugValue).params(),
+            kind: hir::OperatorKind::Builtin(hir::Builtin::Update(hir::UpdateBuiltin::DebugValue)),
         }
     }
 
@@ -3787,9 +3779,9 @@ mod tests {
         // `debug_value{v: count{r: r}}`, of a relation variable.
         let count = hir::Operator {
             name: "count".to_string(),
-            types: hir::Builtin::Count.types(),
-            params: hir::Builtin::Count.params(),
-            kind: hir::OperatorKind::Builtin(hir::Builtin::Count),
+            types: hir::Builtin::ReadOnly(hir::ReadOnlyBuiltin::Count).types(),
+            params: hir::Builtin::ReadOnly(hir::ReadOnlyBuiltin::Count).params(),
+            kind: hir::OperatorKind::Builtin(hir::Builtin::ReadOnly(hir::ReadOnlyBuiltin::Count)),
         };
         let tuple = |n| hir::TupleValue::new([("a".to_string(), hir::Value::Integer(n))].into());
         let r = hir::Value::Relation(hir::RelationValue {
@@ -3830,9 +3822,9 @@ mod tests {
         // tuples have `of` beside their own attributes, as sema makes it.
         let max = hir::Operator {
             name: "max".to_string(),
-            types: hir::Builtin::Max.types(),
-            params: hir::Builtin::Max.params(),
-            kind: hir::OperatorKind::Builtin(hir::Builtin::Max),
+            types: hir::Builtin::ReadOnly(hir::ReadOnlyBuiltin::Max).types(),
+            params: hir::Builtin::ReadOnly(hir::ReadOnlyBuiltin::Max).params(),
+            kind: hir::OperatorKind::Builtin(hir::Builtin::ReadOnly(hir::ReadOnlyBuiltin::Max)),
         };
         let own = hir::Heading::new(BTreeMap::new());
         let tuple = |n| {
@@ -4044,8 +4036,14 @@ mod tests {
     #[test]
     fn sum_and_product_are_runtime_calls() {
         for (builtin, function) in [
-            (hir::Builtin::Sum, lir::RuntimeFn::Sum),
-            (hir::Builtin::Product, lir::RuntimeFn::Product),
+            (
+                hir::Builtin::ReadOnly(hir::ReadOnlyBuiltin::Sum),
+                lir::RuntimeFn::Sum,
+            ),
+            (
+                hir::Builtin::ReadOnly(hir::ReadOnlyBuiltin::Product),
+                lir::RuntimeFn::Product,
+            ),
         ] {
             assert_eq!(
                 numbers_calls(builtin),
@@ -4135,8 +4133,8 @@ mod tests {
         let lowered = lower(&program(
             vec![
                 debug_value(),
-                builtin(hir::Builtin::ToText),
-                builtin(hir::Builtin::ToApproximate),
+                builtin(hir::Builtin::ReadOnly(hir::ReadOnlyBuiltin::ToText)),
+                builtin(hir::Builtin::ReadOnly(hir::ReadOnlyBuiltin::ToApproximate)),
                 show,
                 user("main", &[], main_body),
             ],

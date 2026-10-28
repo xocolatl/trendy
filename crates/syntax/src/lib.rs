@@ -992,6 +992,33 @@ impl SyntaxKind {
     }
 }
 
+/// Whether the braces of the list `node` have spaces inside them, in the
+/// canonical layout: a heading's, a tuple's, a relation's, and new
+/// attributes', as in `tuple { a: integer }` and `r extend { b := 1 }`, a
+/// key's, `key { a, b }`, and a built-in type's kinds. Parameters,
+/// arguments and attribute names are written without, as in
+/// `greet{name: text}` and `r{a}`.
+#[must_use]
+pub fn spaced_braces(node: &SyntaxNode) -> bool {
+    match node.kind() {
+        SyntaxKind::Heading => node.parent().is_none_or(|owner| {
+            !matches!(
+                owner.kind(),
+                SyntaxKind::Operator | SyntaxKind::BuiltinOperator
+            )
+        }),
+        SyntaxKind::TupleLiteral
+        | SyntaxKind::RelationLiteral
+        | SyntaxKind::AssignList
+        | SyntaxKind::GatherList
+        | SyntaxKind::RequirementList => true,
+        SyntaxKind::NameList => node
+            .parent()
+            .is_some_and(|k| matches!(k.kind(), SyntaxKind::Key | SyntaxKind::BuiltinType)),
+        _ => false,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Trendy {}
 

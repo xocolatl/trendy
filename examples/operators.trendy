@@ -9,7 +9,9 @@
    for each tuple of a relation, as the prelude's `min` and `max` take
    `of`. main prints each result. A heading the operators share is
    declared once, with a name, which stands for it after `relation` and
-   `tuple`. */
+   `tuple`. A read-only operator is a function of its arguments, so it
+   reads none of the program's variables: those it needs, such as `vat`
+   and `dishes`, are passed to it. */
 heading menu_item := { dish: text, country: text, price: integer };
 
 var vat := 16;
@@ -20,18 +22,18 @@ var dishes := relation menu_item {
 }
 key { dish };
 
-/* A price in cents with VAT, rounded down. It reads `vat`, as it is when
-   the operator is called. A read-only operator's local variables name
-   parts of its value, which its body ends with. */
-operator taxed{price: integer}: integer [
+/* A price in cents with VAT, at the rate `vat`, rounded down. A read-only
+   operator's local variables name parts of its value, which its body ends
+   with. */
+operator taxed{price: integer, vat: integer}: integer [
     var tax := price * vat div 100;
     price + tax
 ];
 
-/* A relation, of the dishes whose price with VAT is under `limit`: the
-   condition calls `taxed` for each. */
-operator under{limit: integer}: relation menu_item [
-    dishes where taxed{price: price} < limit
+/* A relation, of the dishes of `dishes` whose price with VAT is under
+   `limit`: the condition calls `taxed` for each. */
+operator under{limit: integer, dishes: relation menu_item, vat: integer}: relation menu_item [
+    dishes where taxed{price: price, vat: vat} < limit
 ];
 
 operator half{n: integer}: integer [
@@ -89,16 +91,20 @@ operator range{r: any relation, of: T per r}: tuple { low: T, high: T }
 
 /* How many dishes are under `limit` with VAT, and the cheapest's price:
    `under` is computed once, for both. */
-operator cheapest{limit: integer}: tuple { dishes: integer, lowest: integer } [
-    var under := dishes where taxed{price: price} < limit;
-    tuple { dishes: count{r: under}, lowest: min{r: under, of: taxed{price: price}} }
+operator cheapest{
+    limit: integer,
+    dishes: relation menu_item,
+    vat: integer,
+}: tuple { dishes: integer, lowest: integer } [
+    var under := dishes where taxed{price: price, vat: vat} < limit;
+    tuple { dishes: count{r: under}, lowest: min{r: under, of: taxed{price: price, vat: vat}} }
 ];
 
 /* The mean price of `r`'s dishes with VAT, rounded down. An `if`
    computes only the branch it takes, so the mean of none is 0, and no
    division by zero. */
-operator mean{r: relation menu_item}: integer [
-    if is_empty{r: r} then 0 else sum{r: r, of: taxed{price: price}} div count{r: r}
+operator mean{r: relation menu_item, vat: integer}: integer [
+    if is_empty{r: r} then 0 else sum{r: r, of: taxed{price: price, vat: vat}} div count{r: r}
 ];
 
 /* A word for how many dishes `r` has: an `else if` chains another
@@ -167,21 +173,21 @@ operator discount_twice{var price: integer, percent: integer} [
    only after, so the variable is a result. Two give `price_range` two
    results. */
 operator price_range{r: relation menu_item, out low: integer, out high: integer} [
-    low := min{r: r, of: taxed{price: price}};
-    high := max{r: r, of: taxed{price: price}};
+    low := min{r: r, of: taxed{price: price, vat: vat}};
+    high := max{r: r, of: taxed{price: price, vat: vat}};
     call show{label: "spread with VAT", value: high - low};
 ];
 
-var totals := dishes extend { total := taxed{price: price} } remove {price};
-var affordable := under{limit: 1000}{dish};
+var totals := dishes extend { total := taxed{price: price, vat: vat} } remove {price};
+var affordable := under{limit: 1000, dishes: dishes, vat: vat}{dish};
 var plural := if count{r: dishes} = 1 then "dish" else "dishes";
 
 /* A value block in place: the spread between the dearest dish and the
    cheapest, with VAT. Its local variables are its own, and it is
    evaluated when compiling, as `vat` and `dishes` are known then. */
 var spread := [
-    var dearest := max{r: dishes, of: taxed{price: price}};
-    var lowest := min{r: dishes, of: taxed{price: price}};
+    var dearest := max{r: dishes, of: taxed{price: price, vat: vat}};
+    var lowest := min{r: dishes, of: taxed{price: price, vat: vat}};
     dearest - lowest
 ];
 
@@ -191,44 +197,63 @@ operator main{} [
     call show{label: "half of 1200", value: half{n: 1200}};
     call rotate{next: "spicy " || special};
     call rotate{next: previous};
-    /* A call of an operator that reads a variable is made when the program
-       runs, and reads the variable as it is then. */
-    call debug_table{r: under{limit: 1100}{dish}};
+    /* A call with a variable as an argument is made when the program
+       runs, with the variable as it is then. */
+    call debug_table{r: under{limit: 1100, dishes: dishes, vat: vat}{dish}};
     vat := 25;
-    call debug_table{r: under{limit: 1100}{dish}};
-    call debug_table{r: dishes extend { total := taxed{price: price} } remove {price}};
+    call debug_table{r: under{limit: 1100, dishes: dishes, vat: vat}{dish}};
+    call debug_table{r: dishes extend { total := taxed{price: price, vat: vat} } remove {price}};
     /* A generic operator is compiled for each list of types it is called
        with when the program runs. */
     call show{label: "specials", value: both{a: special, b: previous}};
     call show{label: "affordable on the menu", value: within{r: affordable, of: dishes{dish}}};
     call show{label: "pairs", value: both{a: both{a: 1, b: 2}, b: both{a: 3, b: 4}}};
-    call show{label: "with VAT", value: values{r: dishes, of: taxed{price: price}}};
+    call show{label: "with VAT", value: values{r: dishes, of: taxed{price: price, vat: vat}}};
     call show{label: "where from", value: values{r: dishes, of: dish || ", " || country}};
     call show{
         label: "how many under 1000",
-        value: count{r: dishes where taxed{price: price} < 1000},
+        value: count{r: dishes where taxed{price: price, vat: vat} < 1000},
     };
     call show{label: "before p", value: below{r: dishes, of: dish, limit: "p"}};
     /* The prelude's `some` and `every`, written in trendy. */
-    call show{label: "some under 1000", value: some{r: dishes, of: taxed{price: price} < 1000}};
-    call show{label: "every under 1000", value: every{r: dishes, of: taxed{price: price} < 1000}};
-    call show{label: "prices with VAT", value: range{r: dishes, of: taxed{price: price}}};
+    call show{
+        label: "some under 1000",
+        value: some{r: dishes, of: taxed{price: price, vat: vat} < 1000},
+    };
+    call show{
+        label: "every under 1000",
+        value: every{r: dishes, of: taxed{price: price, vat: vat} < 1000},
+    };
+    call show{label: "prices with VAT", value: range{r: dishes, of: taxed{price: price, vat: vat}}};
     call show{label: "names", value: range{r: dishes, of: dish}};
     /* `cost`, of integers and of approximate numbers. */
     call show{
         label: "two of each, delivered",
-        value: values{r: dishes, of: cost{price: taxed{price: price}, quantity: 2, delivery: 300}},
+        value: values{
+            r: dishes,
+            of: cost{price: taxed{price: price, vat: vat}, quantity: 2, delivery: 300},
+        },
     };
     call show{
         label: "one and a half ramen, delivered",
-        value: cost{price: to_approximate{from: taxed{price: 900}}, quantity: 1.5e0, delivery: 3e2},
+        value: cost{
+            price: to_approximate{from: taxed{price: 900, vat: vat}},
+            quantity: 1.5e0,
+            delivery: 3e2,
+        },
     };
-    call show{label: "under 1200", value: cheapest{limit: 1200}};
-    call show{label: "mean under 1000", value: mean{r: dishes where taxed{price: price} < 1000}};
-    call show{label: "mean under 500", value: mean{r: dishes where taxed{price: price} < 500}};
+    call show{label: "under 1200", value: cheapest{limit: 1200, dishes: dishes, vat: vat}};
+    call show{
+        label: "mean under 1000",
+        value: mean{r: dishes where taxed{price: price, vat: vat} < 1000, vat: vat},
+    };
+    call show{
+        label: "mean under 500",
+        value: mean{r: dishes where taxed{price: price, vat: vat} < 500, vat: vat},
+    };
     call show{
         label: "how many under 1200",
-        value: how_many{r: dishes where taxed{price: price} < 1200},
+        value: how_many{r: dishes where taxed{price: price, vat: vat} < 1200},
     };
     /* Decided when compiling, as `dishes` is known then. */
     call show{label: "the menu's", value: plural};
@@ -237,12 +262,12 @@ operator main{} [
     call show{
         label: "spread now",
         value: [
-            var dearest := max{r: dishes, of: taxed{price: price}};
-            var lowest := min{r: dishes, of: taxed{price: price}};
+            var dearest := max{r: dishes, of: taxed{price: price, vat: vat}};
+            var lowest := min{r: dishes, of: taxed{price: price, vat: vat}};
             dearest - lowest
         ],
     };
-    call show{label: "pozole", value: band{price: taxed{price: 750}}};
+    call show{label: "pozole", value: band{price: taxed{price: 750, vat: vat}}};
     /* The variables passed as `var` are what change: a local one, and
        one of the program's, whose key is checked once the call ends. */
     var specials := dishes where country = "Japan";

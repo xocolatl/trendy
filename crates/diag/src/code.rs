@@ -130,6 +130,7 @@ codes! {
     LoadMismatch => "A0047",
     AttributeAssigned => "A0048",
     CyclicHeadings => "A0049",
+    VariableInReadOnly => "A0050",
     MisplacedMode => "A0051",
     ArgumentMode => "A0052",
     Aliased => "A0053",

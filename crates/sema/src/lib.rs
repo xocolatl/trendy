@@ -119,7 +119,7 @@ pub(crate) fn check(
             bodies.insert(signature.id, statements);
         }
     }
-    body::deferred_checks(&deferred, &bodies, &evaluated.values, &operators, errors);
+    body::deferred_checks(&deferred, &bodies, &operators, errors);
     Checked {
         namespaces,
         operators,
@@ -490,7 +490,7 @@ mod tests {
         assert_eq!(program.operator(program.entry).name, "main");
         assert!(matches!(
             program.operators[0].kind,
-            hir::OperatorKind::Builtin(hir::Builtin::DebugValue)
+            hir::OperatorKind::Builtin(hir::Builtin::Update(hir::UpdateBuiltin::DebugValue))
         ));
     }
 
@@ -585,12 +585,12 @@ mod tests {
     }
 
     /// Read-only operators for the tests below.
-    const READ_ONLY: &str = "var rate := 3;\nvar poets := relation { { name: \"Ada\", born: 1815 }, { name: \"Rumi\", born: 1207 } };\noperator double{x: integer}: integer [ x * 2 ];\noperator quadruple{x: integer}: integer [ double{x: double{x: x}} ];\noperator scaled{x: integer}: integer [ x * rate ];\noperator born_before{year: integer}: relation { name: text, born: integer } [ poets where born < year ];";
+    const READ_ONLY: &str = "var rate := 3;\nvar poets := relation { { name: \"Ada\", born: 1815 }, { name: \"Rumi\", born: 1207 } };\noperator double{x: integer}: integer [ x * 2 ];\noperator quadruple{x: integer}: integer [ double{x: double{x: x}} ];\noperator scaled{x: integer, rate: integer}: integer [ x * rate ];\noperator born_before{year: integer, poets: relation { name: text, born: integer }}: relation { name: text, born: integer } [ poets where born < year ];";
 
     #[test]
     fn read_only_operators_are_evaluated_when_compiling() {
         let program = analyze_str(&format!(
-            "{READ_ONLY}\nvar a := quadruple{{x: 2}};\nvar b := scaled{{x: 2}};\nvar c := born_before{{year: 1500}}{{name}};\nvar d := poets extend {{ twice := double{{x: born}} }};{MAIN}"
+            "{READ_ONLY}\nvar a := quadruple{{x: 2}};\nvar b := scaled{{x: 2, rate: rate}};\nvar c := born_before{{year: 1500, poets: poets}}{{name}};\nvar d := poets extend {{ twice := double{{x: born}} }};{MAIN}"
         ))
         .unwrap();
         let value = |name: &str| {
@@ -603,7 +603,7 @@ mod tests {
                 .clone()
         };
         assert_eq!(value("a"), hir::Value::Integer(8));
-        // A variable an operator reads has its initial value then.
+        // A variable passed to an operator has its initial value then.
         assert_eq!(value("b"), hir::Value::Integer(6));
         let hir::Value::Relation(c) = value("c") else {
             panic!("a relation");
@@ -719,9 +719,9 @@ mod tests {
         let source = program("call debug_value{v: double{n}};");
         assert_eq!(codes(&source), [Code::PositionalArgument]);
         assert!(fix(&source).contains("double{x: n}"));
-        // A call whose arguments, or a variable its operator reads, are
-        // known only when the program runs is made then.
-        for value in ["double{x: n}", "scaled{x: 1}"] {
+        // A call whose arguments are known only when the program runs, as a
+        // variable of the program's is, is made then.
+        for value in ["double{x: n}", "scaled{x: 1, rate: rate}"] {
             let body = main_body(&program(&format!("call debug_value{{v: {value}}};")));
             assert!(matches!(argument(&body[0]), hir::Expr::Call(..)), "{value}");
         }
@@ -731,6 +731,44 @@ mod tests {
         ));
         assert_eq!(errors[0].code, Code::Overflow);
         assert!(errors[0].notes.iter().any(|n| n.contains("`double`")));
+    }
+
+    #[test]
+    fn read_only_operators_read_no_variables() {
+        // A read-only operator's value depends on its arguments alone: a
+        // variable it reads is reported, once, and the fix passes it as a
+        // parameter, which each call gives the variable, in an initial
+        // value, a body or another read-only operator, whose read of it is
+        // then reported in turn.
+        let source = "var vat := 16;\nvar dishes := relation { { price: 1200 } };\n\
+             operator taxed{price: integer}: integer [ price + price * vat div 100 + vat ];\n\
+             operator dearest{}: integer [ max{r: dishes, of: taxed{price: price}} ];\n\
+             var folded := taxed{price: 100};\n\
+             operator main{} [ call debug_value{v: taxed{price: 100}}; ];";
+        let found = errors(source);
+        assert_eq!(
+            found.iter().map(|e| e.message.as_str()).collect::<Vec<_>>(),
+            [
+                "the read-only operator `taxed` can't read the variable `vat`",
+                "the read-only operator `dearest` can't read the variable `dishes`",
+            ]
+        );
+        let once = fix(source);
+        assert_eq!(
+            once,
+            "var vat := 16;\nvar dishes := relation { { price: 1200 } };\n\
+             operator taxed{price: integer, vat: integer}: integer [ price + price * vat div 100 + vat ];\n\
+             operator dearest{dishes: relation { price: integer }}: integer [ max{r: dishes, of: taxed{price: price, vat: vat}} ];\n\
+             var folded := taxed{price: 100, vat: vat};\n\
+             operator main{} [ call debug_value{v: taxed{price: 100, vat: vat}}; ];"
+        );
+        let twice = fix(&once);
+        assert!(
+            twice.contains("operator dearest{dishes: relation { price: integer }, vat: integer}"),
+            "{twice}"
+        );
+        let program = analyze_str(&twice).unwrap();
+        assert_eq!(program.variables[2].init, hir::Value::Integer(132));
     }
 
     #[test]
@@ -745,22 +783,14 @@ mod tests {
             messages("operator f{x: integer}: integer [ f{x: x} ];\noperator main{} [];"),
             ["`f` calls itself"]
         );
-        // A cycle through an operator's value is an initial values' cycle.
-        let cycle = errors(&format!(
-            "var a := f{{}};\noperator f{{}}: integer [ a + 1 ];{MAIN}"
-        ));
-        assert_eq!(cycle.len(), 1, "{cycle:#?}");
-        assert_eq!(cycle[0].code, Code::CyclicInitialValues);
+        // No cycle goes through an operator's value, which reads no
+        // variable of the program's.
         assert_eq!(
-            cycle[0].message,
-            "the initial value of `a` depends on itself"
+            codes(&format!(
+                "var a := f{{}};\noperator f{{}}: integer [ a + 1 ];{MAIN}"
+            )),
+            [Code::VariableInReadOnly]
         );
-        let labels: Vec<&str> = cycle[0]
-            .secondary
-            .iter()
-            .map(|l| l.message.as_str())
-            .collect();
-        assert_eq!(labels, ["`a` calls `f`", "`f` reads `a`"]);
     }
 
     #[test]
@@ -1299,7 +1329,7 @@ mod tests {
             fix(&format!(
                 "var p: tuple {{ x: integer }} := tuple {{}};{MAIN}"
             )),
-            format!("var p: tuple {{ x: integer }} := tuple {{ x: 0}};{MAIN}")
+            format!("var p: tuple {{ x: integer }} := tuple {{ x: 0 }};{MAIN}")
         );
     }
 
@@ -1758,7 +1788,7 @@ mod tests {
         assert_eq!(prelude.operators()[0].name, "debug_value");
         assert_eq!(
             prelude.operators()[0].params,
-            hir::Builtin::DebugValue.params()
+            hir::Builtin::Update(hir::UpdateBuiltin::DebugValue).params()
         );
     }
 
@@ -1866,7 +1896,7 @@ mod tests {
         );
         assert_eq!(
             fix(source),
-            "operator greet{name: text} [];\noperator main{} [\n    call greet{name: \"Ada\"};\n    call greet{ name: \"\"};\n    call greet{name: \"1\"};\n    call greet{name: \"Ada\"};\n];"
+            "operator greet{name: text} [];\noperator main{} [\n    call greet{name: \"Ada\"};\n    call greet{name: \"\"};\n    call greet{name: \"1\"};\n    call greet{name: \"Ada\"};\n];"
         );
         let errors = errors(source);
         assert_eq!(errors[1].message, "missing argument `name`");
@@ -4936,8 +4966,6 @@ mod tests {
              operator reads{var n: integer} [ n := count + 1; ];\n\
              operator assigns{var n: integer} [ count := 3; n := 1; ];\n\
              operator through{var n: integer} [ call reads{var n: n}; ];\n\
-             operator total{}: integer [ count + 1 ];\n\
-             operator calls{var n: integer} [ n := total{}; ];\n\
              operator plus{var a: integer, by: integer} [ a := a + by; ];\n";
         for (call, message) in [
             (
@@ -4959,10 +4987,6 @@ mod tests {
             (
                 "call through{var n: count};",
                 "`count` is passed to `var n` of `through`, which reads `count` itself",
-            ),
-            (
-                "call calls{var n: count};",
-                "`count` is passed to `var n` of `calls`, which reads `count` itself",
             ),
         ] {
             let source = format!("{OPERATORS}operator main{{}} [ {call} ];");
@@ -6157,7 +6181,7 @@ mod tests {
     #[test]
     fn a_read_only_operators_local_variables_are_lets() {
         let program = analyze_str(&format!(
-            "var vat := 16;\noperator taxed{{price: integer}}: integer [\n    var tax := price * vat div 100;\n    var total := price + tax;\n    total := total + 1;\n    total\n];\nvar folded := taxed{{price: 1000}};{MAIN}"
+            "var vat := 16;\noperator taxed{{price: integer, vat: integer}}: integer [\n    var tax := price * vat div 100;\n    var total := price + tax;\n    total := total + 1;\n    total\n];\nvar folded := taxed{{price: 1000, vat: vat}};{MAIN}"
         ))
         .unwrap();
         let op = program

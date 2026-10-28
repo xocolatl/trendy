@@ -5,7 +5,7 @@
 //! cycle: of initial values, through operators or not, or of read-only
 //! operators that call each other.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use trendy_diag::{Diagnostic, Span};
 use trendy_hir as hir;
@@ -39,9 +39,6 @@ pub(crate) struct Globals<'a> {
     ids: &'a HashMap<String, hir::VariableId>,
     /// Each variable, by id, once its evaluation has started.
     variables: Vec<Option<State<hir::Variable>>>,
-    /// Each evaluated variable's value, by id, which a call in an initial
-    /// value substitutes for it.
-    known: Vec<Option<hir::Value>>,
     /// Each read-only operator whose value's checking has started.
     operator_states: HashMap<hir::OperatorId, State<()>>,
     /// Each valid read-only operator's value.
@@ -50,6 +47,9 @@ pub(crate) struct Globals<'a> {
     locals: HashMap<hir::OperatorId, Vec<hir::Local>>,
     /// The globals being evaluated, innermost last.
     stack: Vec<Pending>,
+    /// Each read-only operator, and each variable of the program's it reads,
+    /// already reported.
+    read: HashSet<(hir::OperatorId, String)>,
     /// The local variables of value blocks in initial values, by id. Most
     /// have values known when compiling, which their names stand for; those
     /// computed for each tuple of a relation, as in an `extend`'s values,
@@ -106,7 +106,6 @@ impl<'a> Globals<'a> {
             decls,
             ids,
             variables: vec![None; ids.len()],
-            known: vec![None; ids.len()],
             operator_states: values
                 .keys()
                 .map(|&id| (id, State::Done(Some(()))))
@@ -114,6 +113,7 @@ impl<'a> Globals<'a> {
             values,
             locals: HashMap::new(),
             stack: Vec::new(),
+            read: HashSet::new(),
             block_locals: Vec::new(),
         }
     }
@@ -172,7 +172,6 @@ impl<'a> Globals<'a> {
         });
         let variable = variable(&decl, self, errors);
         self.stack.pop();
-        self.known[id.0] = variable.as_ref().map(|v| v.init.clone());
         self.variables[id.0] = Some(State::Done(variable.clone()));
         variable
     }
@@ -199,6 +198,32 @@ impl<'a> Globals<'a> {
             innermost.via = span;
         }
         self.variable(name, errors)
+    }
+
+    /// The type of the variable `name`, as its declaration writes it, or
+    /// the named heading of the selector its initial value is, as in
+    /// `relation home { … }`, or else as its value has it, if that is
+    /// known: its initial value isn't evaluated here, as that could lose
+    /// its errors.
+    fn written_type(&self, name: &str) -> Option<String> {
+        let decl = &self.decls[name];
+        if let Some(written) = decl.type_expr() {
+            return Some(written.syntax().text().to_string());
+        }
+        let named = match decl.initializer() {
+            Some(ast::Expr::Relation(r)) => r.heading().map(|h| ("relation", h)),
+            Some(ast::Expr::Tuple(t)) => t.heading().map(|h| ("tuple", h)),
+            _ => None,
+        };
+        if let Some((kind, ast::HeadingExpr::Named(heading))) = named
+            && let Some(ident) = heading.ident()
+        {
+            return Some(format!("{kind} {}", ident.text()));
+        }
+        match &self.variables[self.ids[name].0] {
+            Some(State::Done(Some(variable))) => Some(variable.ty.to_string()),
+            _ => None,
+        }
     }
 
     /// Whether the read-only operator `id`, called at `at`, has a valid
@@ -420,7 +445,6 @@ impl Names for Globals<'_> {
         ops::Bindings {
             operators: self.operators,
             values: &self.values,
-            variables: Some(&self.known),
         }
     }
 }
@@ -471,11 +495,20 @@ impl Names for ReadOnlyNames<'_, '_, '_> {
             Some(Local::Invalid) => return Lookup::Reported,
             None => {}
         }
-        if let Some(&id) = self.globals.ids.get(name) {
-            return match self.globals.reach(name, span, errors) {
-                Some(_) => Lookup::Found(hir::Expr::Variable(id)),
-                None => Lookup::Reported,
-            };
+        // A read-only operator's value depends on its arguments alone, so
+        // a variable of the program's is reported, once, with a fix that
+        // passes it as a parameter, of its type as written, if it is.
+        if self.globals.ids.contains_key(name) {
+            if self.globals.read.insert((self.within, name.to_string())) {
+                let ty = self.globals.written_type(name);
+                errors.push(errors::variable_in_read_only(
+                    name,
+                    span,
+                    self.signature(),
+                    ty,
+                ));
+            }
+            return Lookup::Reported;
         }
         if let Some(relation) = self.globals.operators.get(self.within).per_relation(name) {
             errors.push(errors::per_as_value(name, relation, span));
@@ -533,7 +566,6 @@ impl Names for ReadOnlyNames<'_, '_, '_> {
         ops::Bindings {
             operators: self.globals.operators,
             values: &self.globals.values,
-            variables: None,
         }
     }
 }

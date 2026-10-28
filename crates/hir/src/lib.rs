@@ -334,10 +334,19 @@ pub enum OperatorKind {
 /// [`Builtin::result`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Builtin {
-    /// Print a value to stderr as one line of trendy source.
-    DebugValue,
-    /// Print a relation to stderr as a table.
-    DebugTable,
+    ReadOnly(ReadOnlyBuiltin),
+    Update(UpdateBuiltin),
+}
+
+/// The read-only operators the compiler implements, each a function of its
+/// arguments: a call with the same arguments has the same value, whenever
+/// it is made (TTM, RM Prescription 3), so [`ReadOnlyBuiltin::evaluate`]
+/// computes any call whose arguments are known when compiling, as running
+/// it would. One that would read input, the clock or randomness, or change
+/// anything outside the program, is an [`UpdateBuiltin`] instead, which
+/// gives its result through an `out` parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ReadOnlyBuiltin {
     /// The number of tuples of a relation.
     Count,
     /// The number of elements of an array.
@@ -361,46 +370,47 @@ pub enum Builtin {
     ParseInteger,
     /// The approximate number nearest the decimal number a text writes.
     ParseApproximate,
-    /// The lines of a text file, in order, which the program reads when it
-    /// runs into its `out` parameter: an update operator, as reading the
-    /// same file twice can give different lines, which no read-only
-    /// operator's call can (TTM, RM Prescription 3).
+}
+
+/// The update operators the compiler implements, which `call` invokes:
+/// those that write output, or read input, which they give through an
+/// `out` parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UpdateBuiltin {
+    /// Print a value to stderr as one line of trendy source.
+    DebugValue,
+    /// Print a relation to stderr as a table.
+    DebugTable,
+    /// Read the lines of a text file, in order, into its `out` parameter,
+    /// when the program runs: reading the same file twice can give
+    /// different lines.
     LoadTextFile,
 }
 
 impl Builtin {
     pub const ALL: [Builtin; 13] = [
-        Builtin::DebugValue,
-        Builtin::DebugTable,
-        Builtin::Count,
-        Builtin::Length,
-        Builtin::Min,
-        Builtin::Max,
-        Builtin::Sum,
-        Builtin::Product,
-        Builtin::ToText,
-        Builtin::ToApproximate,
-        Builtin::ParseInteger,
-        Builtin::ParseApproximate,
-        Builtin::LoadTextFile,
+        Builtin::Update(UpdateBuiltin::DebugValue),
+        Builtin::Update(UpdateBuiltin::DebugTable),
+        Builtin::ReadOnly(ReadOnlyBuiltin::Count),
+        Builtin::ReadOnly(ReadOnlyBuiltin::Length),
+        Builtin::ReadOnly(ReadOnlyBuiltin::Min),
+        Builtin::ReadOnly(ReadOnlyBuiltin::Max),
+        Builtin::ReadOnly(ReadOnlyBuiltin::Sum),
+        Builtin::ReadOnly(ReadOnlyBuiltin::Product),
+        Builtin::ReadOnly(ReadOnlyBuiltin::ToText),
+        Builtin::ReadOnly(ReadOnlyBuiltin::ToApproximate),
+        Builtin::ReadOnly(ReadOnlyBuiltin::ParseInteger),
+        Builtin::ReadOnly(ReadOnlyBuiltin::ParseApproximate),
+        Builtin::Update(UpdateBuiltin::LoadTextFile),
     ];
 
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
-            Builtin::DebugValue => "debug_value",
-            Builtin::DebugTable => "debug_table",
-            Builtin::Count => "count",
-            Builtin::Length => "length",
-            Builtin::Min => "min",
-            Builtin::Max => "max",
-            Builtin::Sum => "sum",
-            Builtin::Product => "product",
-            Builtin::ToText => "to_text",
-            Builtin::ToApproximate => "to_approximate",
-            Builtin::ParseInteger => "parse_integer",
-            Builtin::ParseApproximate => "parse_approximate",
-            Builtin::LoadTextFile => "load_text_file",
+            Builtin::Update(UpdateBuiltin::DebugValue) => "debug_value",
+            Builtin::Update(UpdateBuiltin::DebugTable) => "debug_table",
+            Builtin::Update(UpdateBuiltin::LoadTextFile) => "load_text_file",
+            Builtin::ReadOnly(builtin) => builtin.name(),
         }
     }
 
@@ -434,15 +444,21 @@ impl Builtin {
             ]
         };
         match self {
-            Builtin::DebugValue | Builtin::ToText => vec![unnamed(0, Any::Type)],
-            Builtin::Count | Builtin::DebugTable => vec![unnamed(0, Any::Relation)],
-            Builtin::Length => vec![unnamed(0, Any::Array)],
-            Builtin::ToApproximate
-            | Builtin::ParseInteger
-            | Builtin::ParseApproximate
-            | Builtin::LoadTextFile => Vec::new(),
-            Builtin::Min | Builtin::Max => of_kind("ordered", &[Requirement::Order]),
-            Builtin::Sum | Builtin::Product => of_kind(
+            Builtin::Update(UpdateBuiltin::DebugValue)
+            | Builtin::ReadOnly(ReadOnlyBuiltin::ToText) => vec![unnamed(0, Any::Type)],
+            Builtin::Update(UpdateBuiltin::DebugTable)
+            | Builtin::ReadOnly(ReadOnlyBuiltin::Count) => vec![unnamed(0, Any::Relation)],
+            Builtin::ReadOnly(ReadOnlyBuiltin::Length) => vec![unnamed(0, Any::Array)],
+            Builtin::ReadOnly(
+                ReadOnlyBuiltin::ToApproximate
+                | ReadOnlyBuiltin::ParseInteger
+                | ReadOnlyBuiltin::ParseApproximate,
+            )
+            | Builtin::Update(UpdateBuiltin::LoadTextFile) => Vec::new(),
+            Builtin::ReadOnly(ReadOnlyBuiltin::Min | ReadOnlyBuiltin::Max) => {
+                of_kind("ordered", &[Requirement::Order])
+            }
+            Builtin::ReadOnly(ReadOnlyBuiltin::Sum | ReadOnlyBuiltin::Product) => of_kind(
                 "numeric",
                 &[Requirement::Addition, Requirement::Multiplication],
             ),
@@ -455,32 +471,36 @@ impl Builtin {
     pub fn params(self) -> BTreeMap<String, Parameter> {
         let types = self.types();
         let parameter = |index: usize| Type::Parameter(types[index].clone());
-        let declared: BTreeMap<String, Type> = match self {
-            Builtin::DebugValue => [("v".to_string(), parameter(0))].into(),
-            Builtin::Count | Builtin::DebugTable => [("r".to_string(), parameter(0))].into(),
-            Builtin::Length => [("a".to_string(), parameter(0))].into(),
-            Builtin::ToText => [("from".to_string(), parameter(0))].into(),
-            Builtin::ToApproximate => [("from".to_string(), Type::Scalar(Scalar::Integer))].into(),
-            Builtin::ParseInteger | Builtin::ParseApproximate => {
-                [("from".to_string(), Type::Scalar(Scalar::Text))].into()
+        let constant = |name: &str, ty: Type| (name.to_string(), Parameter::constant(ty));
+        match self {
+            Builtin::Update(UpdateBuiltin::DebugValue) => [constant("v", parameter(0))].into(),
+            Builtin::Update(UpdateBuiltin::DebugTable)
+            | Builtin::ReadOnly(ReadOnlyBuiltin::Count) => [constant("r", parameter(0))].into(),
+            Builtin::ReadOnly(ReadOnlyBuiltin::Length) => [constant("a", parameter(0))].into(),
+            Builtin::ReadOnly(ReadOnlyBuiltin::ToText) => [constant("from", parameter(0))].into(),
+            Builtin::ReadOnly(ReadOnlyBuiltin::ToApproximate) => {
+                [constant("from", Type::Scalar(Scalar::Integer))].into()
             }
-            Builtin::LoadTextFile => {
-                return [
-                    (
-                        "path".to_string(),
-                        Parameter::constant(Type::Scalar(Scalar::Text)),
-                    ),
-                    (
-                        "lines".to_string(),
-                        Parameter {
-                            ty: Type::Array(Box::new(Type::Scalar(Scalar::Text))),
-                            mode: Mode::Out,
-                        },
-                    ),
-                ]
-                .into();
-            }
-            Builtin::Min | Builtin::Max | Builtin::Sum | Builtin::Product => {
+            Builtin::ReadOnly(
+                ReadOnlyBuiltin::ParseInteger | ReadOnlyBuiltin::ParseApproximate,
+            ) => [constant("from", Type::Scalar(Scalar::Text))].into(),
+            Builtin::Update(UpdateBuiltin::LoadTextFile) => [
+                constant("path", Type::Scalar(Scalar::Text)),
+                (
+                    "lines".to_string(),
+                    Parameter {
+                        ty: Type::Array(Box::new(Type::Scalar(Scalar::Text))),
+                        mode: Mode::Out,
+                    },
+                ),
+            ]
+            .into(),
+            Builtin::ReadOnly(
+                ReadOnlyBuiltin::Min
+                | ReadOnlyBuiltin::Max
+                | ReadOnlyBuiltin::Sum
+                | ReadOnlyBuiltin::Product,
+            ) => {
                 let tuples = Heading::new(
                     [
                         ("of".to_string(), parameter(0)),
@@ -488,13 +508,18 @@ impl Builtin {
                     ]
                     .into(),
                 );
-                [("r".to_string(), Type::Relation(tuples))].into()
+                [constant("r", Type::Relation(tuples))].into()
             }
-        };
-        declared
-            .into_iter()
-            .map(|(name, ty)| (name, Parameter::constant(ty)))
-            .collect()
+        }
+    }
+
+    /// The built-in, if it is a read-only one.
+    #[must_use]
+    pub fn read_only(self) -> Option<ReadOnlyBuiltin> {
+        match self {
+            Builtin::ReadOnly(builtin) => Some(builtin),
+            Builtin::Update(_) => None,
+        }
     }
 
     /// The result type of the compiler's implementation, for a read-only
@@ -502,22 +527,53 @@ impl Builtin {
     #[must_use]
     pub fn result(self) -> Option<Type> {
         match self {
-            Builtin::DebugValue | Builtin::DebugTable | Builtin::LoadTextFile => None,
-            Builtin::Count | Builtin::Length | Builtin::ParseInteger => {
-                Some(Type::Scalar(Scalar::Integer))
+            Builtin::ReadOnly(builtin) => Some(builtin.result()),
+            Builtin::Update(_) => None,
+        }
+    }
+}
+
+impl ReadOnlyBuiltin {
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            ReadOnlyBuiltin::Count => "count",
+            ReadOnlyBuiltin::Length => "length",
+            ReadOnlyBuiltin::Min => "min",
+            ReadOnlyBuiltin::Max => "max",
+            ReadOnlyBuiltin::Sum => "sum",
+            ReadOnlyBuiltin::Product => "product",
+            ReadOnlyBuiltin::ToText => "to_text",
+            ReadOnlyBuiltin::ToApproximate => "to_approximate",
+            ReadOnlyBuiltin::ParseInteger => "parse_integer",
+            ReadOnlyBuiltin::ParseApproximate => "parse_approximate",
+        }
+    }
+
+    /// The type of the value of a call, which every read-only operator's
+    /// call is.
+    #[must_use]
+    pub fn result(self) -> Type {
+        match self {
+            ReadOnlyBuiltin::Count | ReadOnlyBuiltin::Length | ReadOnlyBuiltin::ParseInteger => {
+                Type::Scalar(Scalar::Integer)
             }
-            Builtin::Min | Builtin::Max | Builtin::Sum | Builtin::Product => {
-                Some(Type::Parameter(self.types()[0].clone()))
+            ReadOnlyBuiltin::Min
+            | ReadOnlyBuiltin::Max
+            | ReadOnlyBuiltin::Sum
+            | ReadOnlyBuiltin::Product => {
+                Type::Parameter(Builtin::ReadOnly(self).types()[0].clone())
             }
-            Builtin::ToText => Some(Type::Scalar(Scalar::Text)),
-            Builtin::ToApproximate | Builtin::ParseApproximate => {
-                Some(Type::Scalar(Scalar::Approximate))
+            ReadOnlyBuiltin::ToText => Type::Scalar(Scalar::Text),
+            ReadOnlyBuiltin::ToApproximate | ReadOnlyBuiltin::ParseApproximate => {
+                Type::Scalar(Scalar::Approximate)
             }
         }
     }
 
-    /// The value of a call of the read-only built-in with the arguments
-    /// `args`, known when compiling, by parameter name.
+    /// The value of a call with the arguments `args`, known when compiling,
+    /// by parameter name: what running the call gives, as it is a function
+    /// of its arguments.
     ///
     /// # Errors
     ///
@@ -528,9 +584,8 @@ impl Builtin {
     ///
     /// # Panics
     ///
-    /// If the built-in is an update operator, which has no value, or the
-    /// arguments aren't those of [`Builtin::params`], which sema rules
-    /// out.
+    /// If the arguments aren't those of [`Builtin::params`], which sema
+    /// rules out.
     pub fn evaluate(self, args: &BTreeMap<String, Value>) -> Result<Value, BuiltinFailure> {
         let relation = || match &args["r"] {
             Value::Relation(r) => r,
@@ -543,14 +598,11 @@ impl Builtin {
                 .map(|t| t.get("of").expect("`of` is an attribute"))
         };
         match self {
-            Builtin::DebugValue | Builtin::DebugTable | Builtin::LoadTextFile => {
-                panic!("`{}` is an update operator", self.name())
-            }
-            Builtin::Count => {
+            ReadOnlyBuiltin::Count => {
                 let count = i64::try_from(tuples().len()).expect("a relation's tuples fit");
                 Ok(Value::Integer(count))
             }
-            Builtin::Length => match &args["a"] {
+            ReadOnlyBuiltin::Length => match &args["a"] {
                 Value::Array(array) => {
                     let length =
                         i64::try_from(array.elements.len()).expect("an array's elements fit");
@@ -558,33 +610,33 @@ impl Builtin {
                 }
                 other => panic!("`length` of {other:?}"),
             },
-            Builtin::Min => values()
+            ReadOnlyBuiltin::Min => values()
                 .min_by(|a, b| compare(a, b))
                 .cloned()
                 .ok_or(BuiltinFailure::NoTuples),
-            Builtin::Max => values()
+            ReadOnlyBuiltin::Max => values()
                 .max_by(|a, b| compare(a, b))
                 .cloned()
                 .ok_or(BuiltinFailure::NoTuples),
-            Builtin::Sum | Builtin::Product => {
+            ReadOnlyBuiltin::Sum | ReadOnlyBuiltin::Product => {
                 let of = relation().heading.get("of").expect("`of` is an attribute");
-                let folded = if self == Builtin::Sum {
+                let folded = if self == ReadOnlyBuiltin::Sum {
                     sum(of, values())
                 } else {
                     product(of, values())
                 };
                 folded.map_err(BuiltinFailure::Failure)
             }
-            Builtin::ToText => Ok(Value::Text(args["from"].to_string())),
-            Builtin::ToApproximate => match args["from"] {
+            ReadOnlyBuiltin::ToText => Ok(Value::Text(args["from"].to_string())),
+            ReadOnlyBuiltin::ToApproximate => match args["from"] {
                 Value::Integer(n) => Ok(Value::Approximate(Approximate::nearest(n))),
                 ref other => panic!("`to_approximate` of {other:?}"),
             },
-            Builtin::ParseInteger | Builtin::ParseApproximate => {
+            ReadOnlyBuiltin::ParseInteger | ReadOnlyBuiltin::ParseApproximate => {
                 let Value::Text(text) = &args["from"] else {
                     panic!("`{}` of {:?}", self.name(), args["from"]);
                 };
-                let value = if self == Builtin::ParseInteger {
+                let value = if self == ReadOnlyBuiltin::ParseInteger {
                     trendy_numeric::parse_integer(text).map(Value::Integer)
                 } else {
                     trendy_numeric::parse_approximate(text)

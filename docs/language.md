@@ -247,8 +247,9 @@ A read-only operator has a result type after its parameters, written as a
 variable's type is, and its body ends with its value, an expression of
 that type, without `;` (TTM RM Prescription 3), which local variables can
 name parts of (see [Local variables](#local-variables)). It is Tutorial
-D's `WITH … : exp`: names introduced in turn, then the value. A call of it, `name{arguments}` in
-an expression, is that value, computed from the arguments.
+D's `WITH … : exp`: names introduced in turn, then the value. A call of
+it, `name{arguments}` in an expression, is that value, computed from the
+arguments alone: a read-only operator is a function of its arguments.
 
 ```trendy
 var rate := 3;
@@ -261,16 +262,19 @@ operator double{x: integer}: integer [
     x * 2
 ];
 
-operator scaled{x: integer}: integer [
+operator scaled{x: integer, rate: integer}: integer [
     double{x: x} * rate
 ];
 
-operator born_before{year: integer}: relation { name: text, born: integer } [
+operator born_before{
+    year: integer,
+    poets: relation { name: text, born: integer },
+}: relation { name: text, born: integer } [
     poets where born < year
 ];
 
-var twelve := scaled{x: 2};
-var medieval := born_before{year: 1500}{name};
+var twelve := scaled{x: 2, rate: rate};
+var medieval := born_before{year: 1500, poets: poets}{name};
 var doubled := poets extend { twice := double{x: born} };
 
 operator main{} [
@@ -278,13 +282,21 @@ operator main{} [
     call debug_value{v: double{x: 21}};
     call debug_table{r: doubled};
     rate := 4;
-    call debug_value{v: scaled{x: 2}};
+    call debug_value{v: scaled{x: 2, rate: rate}};
 ];
 ```
 
 - **It changes nothing but its own local variables.** It can't assign a
   variable of the program's or `call` an operator, not even `debug_value`
-  (A0034). It can read variables, and call read-only operators.
+  (A0034), but it can call read-only operators.
+- **It reads only its parameters and its own local variables,** not the
+  program's variables (A0050). Its calls with the same arguments have the
+  same value, whenever they are made (TTM, RM Prescription 3), so a
+  variable it needs is passed to it, as `rate` and `poets` are above, as
+  a `const` parameter, which the fix adds, with the variable in each
+  call. Whatever reads input, the clock or randomness is an update
+  operator, which gives its result through an `out` parameter, as
+  `load_text_file` does.
 - **Its body ends with its value** (A0035), which is its last item, and
   takes no `;` (P0031). An update operator, which has no result type, has
   no value. So `call` invokes only update
@@ -296,18 +308,16 @@ operator main{} [
   and `return x;` at its end is fixed to `x` (P0031).
 - **It doesn't call itself,** directly or through others (A0036): without
   a conditional, nothing could stop the calls.
-- **A call is evaluated when compiling where it can be.** An initial value
-  can call a read-only operator: the variables it reads have their initial
-  values, evaluated first, so a cycle through it is an initial values'
-  cycle (A0021). So can a body, with arguments known when compiling, if
-  the operator reads no variable, and an `extend`'s or a `where`'s values,
-  for each tuple of a constant operand. A call that fails, such as one
-  that overflows for its arguments, is an error at the call.
-- **Elsewhere it is made when the program runs:** where its arguments, or
-  a variable the operator reads, are known only then. The operator reads
-  each variable as it is at the call, so `scaled{x: 2}` above is 16 once
-  `rate` is 4, and a failure in it stops the program, as one anywhere
-  else does.
+- **A call is evaluated when compiling where its arguments are known
+  then:** in an initial value, where variables have their initial values,
+  and in a body, as `double{x: 21}` is, and in an `extend`'s or a
+  `where`'s values, for each tuple of a constant operand. A call that
+  fails, such as one that overflows for its arguments, is an error at the
+  call.
+- **Elsewhere it is made when the program runs:** where an argument is
+  known only then, as a variable's value is in a body, so
+  `scaled{x: 2, rate: rate}` above is 16 once `rate` is 4, and a failure
+  in it stops the program, as one anywhere else does.
 - **`f{}` calls a read-only operator without parameters,** and is its
   value, even where a variable or parameter is named `f` too: see
   [Names](#names-1).
@@ -318,6 +328,16 @@ var calls := 0;
 operator double{x: integer}: integer [
     calls := calls + 1;
     x * 2
+];
+
+operator main{} [];
+```
+
+```trendy,error
+var rate := 3;
+
+operator scaled{x: integer}: integer [
+    x * rate
 ];
 
 operator main{} [];
@@ -1233,7 +1253,10 @@ var dishes := relation {
 }
 key { dish };
 
-operator cheapest{limit: integer}: tuple { dishes: integer, lowest: integer } [
+operator cheapest{
+    limit: integer,
+    dishes: relation { dish: text, price: integer },
+}: tuple { dishes: integer, lowest: integer } [
     var under := dishes where price < limit;
     tuple { dishes: count{r: under}, lowest: min{r: under, of: price} }
 ];
@@ -1246,7 +1269,7 @@ operator discounted{price: integer, percent: integer}: integer [
 ];
 
 operator main{} [
-    call debug_value{v: cheapest{limit: 1100}};
+    call debug_value{v: cheapest{limit: 1100, dishes: dishes}};
     call debug_value{v: discounted{price: 1392, percent: 15}};
 ];
 ```

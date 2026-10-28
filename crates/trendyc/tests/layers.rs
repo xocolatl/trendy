@@ -141,3 +141,47 @@ fn dependencies_match_pipeline_doc() {
         errors.join("\n  ")
     );
 }
+
+/// The crates that compute values when compiling: sema, which evaluates
+/// calls, HIR, whose built-ins it evaluates, opt, and the crates they share
+/// with the runtime.
+const COMPILE_TIME: &[&str] = &["hir", "sema", "opt", "numeric", "text"];
+
+/// What reads the world outside the program, or what it can't know when
+/// compiling: files, the environment, the clock, the network, other
+/// processes, and standard input.
+const OUTSIDE: &[&str] = &[
+    "std::fs",
+    "std::env",
+    "std::time",
+    "std::net",
+    "std::process",
+    "stdin",
+];
+
+#[test]
+fn compiling_reads_nothing_outside() {
+    // A read-only operator is a function of its arguments, so evaluating
+    // one when compiling gives what running it would: none of the crates
+    // that evaluate them can reach anything outside the program (rule 6).
+    let mut errors = Vec::new();
+    for krate in COMPILE_TIME {
+        let src = workspace_root().join("crates").join(krate).join("src");
+        for entry in std::fs::read_dir(&src).unwrap() {
+            let path = entry.unwrap().path();
+            let text = std::fs::read_to_string(&path).unwrap();
+            for (i, line) in text.lines().enumerate() {
+                for outside in OUTSIDE {
+                    if line.contains(outside) {
+                        errors.push(format!("{}:{}: {outside}", path.display(), i + 1));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        errors.is_empty(),
+        "compile-time crates reaching outside the program (see docs/pipeline.md):\n  {}",
+        errors.join("\n  ")
+    );
+}

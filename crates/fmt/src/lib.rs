@@ -781,36 +781,15 @@ fn broken_line(
 /// The whitespace that goes between two adjacent tokens. `blank_line` says
 /// whether the source has a blank line between them.
 fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'static str {
-    use SyntaxKind::{
-        BuiltinType, Heading, Ident, LBrace, LBracket, Minus, Plus, RBrace, RelationLiteral,
-        Semicolon, TupleLiteral,
-    };
+    use SyntaxKind::{BuiltinType, Ident, LBrace, LBracket, Minus, Plus, RBrace, Semicolon};
     if prev.kind() == Semicolon {
         return between_definitions(prev, next, blank_line);
     }
-    // Braces with spaces inside: a heading, a tuple, a relation or new
-    // attributes, as in `tuple { a: integer }` and `r extend { b := 1 }`.
-    // Parameters and arguments are written without, as in
-    // `greet{name: text}`, and so is an operator's empty `{}`.
+    // Braces with spaces inside, but for an empty list's `{}`.
     let list_brace = |token: &SyntaxToken| {
-        token.parent().is_some_and(|p| match p.kind() {
-            Heading => p.parent().is_none_or(|owner| {
-                !matches!(
-                    owner.kind(),
-                    SyntaxKind::Operator | SyntaxKind::BuiltinOperator
-                )
-            }),
-            TupleLiteral
-            | RelationLiteral
-            | SyntaxKind::AssignList
-            | SyntaxKind::GatherList
-            | SyntaxKind::RequirementList => true,
-            // A key's attributes, as in `key { a, b }`, and a type's kinds.
-            SyntaxKind::NameList => p
-                .parent()
-                .is_some_and(|k| matches!(k.kind(), SyntaxKind::Key | BuiltinType)),
-            _ => false,
-        })
+        token
+            .parent()
+            .is_some_and(|p| trendy_syntax::spaced_braces(&p))
     };
     // The contextual keywords: `type`, in `builtin type name;`, `key`,
     // `value` and `from`, in `tuple from r` and `value from r`, `any`, in

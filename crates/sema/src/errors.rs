@@ -533,7 +533,7 @@ pub(crate) fn type_mismatch(
     // `n * x`, of an integer and an approximate number: the first operand
     // set the type, and as an approximate number it takes the rest.
     if let Origin::Value(first) = origin
-        && conversion(declared, found) == Some(hir::Builtin::ToApproximate)
+        && conversion(declared, found) == Some(hir::ReadOnlyBuiltin::ToApproximate)
     {
         let subject = format!("`{}`", first.syntax().text());
         d = match written_literal(first) {
@@ -544,7 +544,7 @@ pub(crate) fn type_mismatch(
                     replacement: format!("{written}e0"),
                 }],
             ),
-            None => with_conversion(d, &subject, hir::Builtin::ToApproximate, first),
+            None => with_conversion(d, &subject, hir::ReadOnlyBuiltin::ToApproximate, first),
         };
     }
     // Only a written type can be changed to fit the value, and only the
@@ -625,20 +625,20 @@ fn written_literal(expr: &Expr) -> Option<String> {
 /// `to`, if there is one: `to_text` writes a value of any type as text,
 /// `to_approximate` takes integers, and `parse_integer` and
 /// `parse_approximate` read numbers from text, failing for other text.
-fn conversion(from: &hir::Type, to: &hir::Type) -> Option<hir::Builtin> {
+fn conversion(from: &hir::Type, to: &hir::Type) -> Option<hir::ReadOnlyBuiltin> {
     use hir::{Scalar, Type};
     match (from, to) {
         (Type::Scalar(Scalar::Integer), Type::Scalar(Scalar::Approximate)) => {
-            Some(hir::Builtin::ToApproximate)
+            Some(hir::ReadOnlyBuiltin::ToApproximate)
         }
         (Type::Scalar(Scalar::Text), Type::Scalar(Scalar::Integer)) => {
-            Some(hir::Builtin::ParseInteger)
+            Some(hir::ReadOnlyBuiltin::ParseInteger)
         }
         (Type::Scalar(Scalar::Text), Type::Scalar(Scalar::Approximate)) => {
-            Some(hir::Builtin::ParseApproximate)
+            Some(hir::ReadOnlyBuiltin::ParseApproximate)
         }
         (Type::Scalar(_) | Type::Parameter(_), Type::Scalar(Scalar::Text)) => {
-            Some(hir::Builtin::ToText)
+            Some(hir::ReadOnlyBuiltin::ToText)
         }
         _ => None,
     }
@@ -646,16 +646,21 @@ fn conversion(from: &hir::Type, to: &hir::Type) -> Option<hir::Builtin> {
 
 /// Whether the conversion `builtin` reads a number from text, which fails
 /// for other text.
-fn parses(builtin: hir::Builtin) -> bool {
+fn parses(builtin: hir::ReadOnlyBuiltin) -> bool {
     matches!(
         builtin,
-        hir::Builtin::ParseInteger | hir::Builtin::ParseApproximate
+        hir::ReadOnlyBuiltin::ParseInteger | hir::ReadOnlyBuiltin::ParseApproximate
     )
 }
 
 /// `d`, with the fix converting `expr`, which the message calls `subject`,
 /// with the built-in `builtin`: a call of it around `expr`.
-fn with_conversion(d: Diagnostic, subject: &str, builtin: hir::Builtin, expr: &Expr) -> Diagnostic {
+fn with_conversion(
+    d: Diagnostic,
+    subject: &str,
+    builtin: hir::ReadOnlyBuiltin,
+    expr: &Expr,
+) -> Diagnostic {
     let name = builtin.name();
     let span = expr.span();
     let verb = if parses(builtin) { "parse" } else { "convert" };
@@ -1677,20 +1682,21 @@ pub(crate) fn elsewhere(name: &str) -> Option<(&'static str, Option<&'static str
 /// array's elements.
 pub(crate) fn counted_otherwise(
     d: Diagnostic,
-    builtin: Option<hir::Builtin>,
+    builtin: Option<hir::ReadOnlyBuiltin>,
     actual: &hir::Type,
     arg: &Expr,
 ) -> Diagnostic {
     let ours = match (builtin, actual) {
-        (Some(hir::Builtin::Count), hir::Type::Array(_)) => hir::Builtin::Length,
-        (Some(hir::Builtin::Length), hir::Type::Relation(_)) => hir::Builtin::Count,
+        (Some(hir::ReadOnlyBuiltin::Count), hir::Type::Array(_)) => hir::ReadOnlyBuiltin::Length,
+        (Some(hir::ReadOnlyBuiltin::Length), hir::Type::Relation(_)) => hir::ReadOnlyBuiltin::Count,
         _ => return d,
     };
     let call = arg
         .syntax()
         .parent()
         .and_then(|p| p.ancestors().find_map(trendy_syntax::ast::CallExpr::cast));
-    let (Some(call), Some(param)) = (call, ours.params().into_keys().next()) else {
+    let params = hir::Builtin::ReadOnly(ours).params();
+    let (Some(call), Some(param)) = (call, params.into_keys().next()) else {
         return d;
     };
     let name = ours.name();
@@ -1901,6 +1907,78 @@ fn indentation(node: &trendy_syntax::SyntaxNode) -> String {
     let text = before.text();
     text.rfind('\n')
         .map_or_else(String::new, |i| text[i + 1..].to_string())
+}
+
+/// The rule that a read-only operator is a function, for notes.
+const READ_ONLY_FUNCTION: &str = "a read-only operator is a function of its arguments: its calls with the same arguments have the same value, whenever they are made (TTM, RM Prescription 3), so it reads only its parameters and its own local variables, and a variable of the program's it needs is passed to it, as a `const` parameter";
+
+/// The variable of the program's `name`, of type `ty` if it is known, read
+/// at `span` in the read-only operator `operator`: the fix passes it as a
+/// parameter of that name, which each call of the operator in the file
+/// gives the variable.
+pub(crate) fn variable_in_read_only(
+    name: &str,
+    span: Span,
+    operator: &Signature,
+    ty: Option<String>,
+) -> Diagnostic {
+    let op = &operator.name;
+    let d = Diagnostic::error(
+        Code::VariableInReadOnly,
+        format!("the read-only operator `{op}` can't read the variable `{name}`"),
+        span,
+        "a variable of the program's",
+    )
+    .with_note(READ_ONLY_FUNCTION);
+    let help = format!(
+        "pass `{name}` to `{op}` as a parameter, `{name}: …`, and give it `{name}: {name}` in each call"
+    );
+    let (Some(decl), Some(ty)) = (&operator.decl, ty) else {
+        return d.with_help(help);
+    };
+    let Some(heading) = decl.params() else {
+        return d.with_help(help);
+    };
+    let (at, before, after) = heading.insertion();
+    let mut edits = vec![Edit {
+        span: Span::new(at, at),
+        replacement: format!("{before}{name}: {ty}{after}"),
+    }];
+    // Each call, `f{…}`, or `f{}`, which the parser takes for a projection.
+    let file = decl.syntax().ancestors().last().expect("a node has a root");
+    let calls_it = |name_ref: Option<trendy_syntax::ast::NameRef>| {
+        name_ref
+            .and_then(|n| n.ident())
+            .is_some_and(|i| i.text() == op)
+    };
+    for node in file.descendants() {
+        let insertion = if let Some(call) = trendy_syntax::ast::CallExpr::cast(node.clone()) {
+            calls_it(call.callee())
+                .then(|| call.arguments().map(|a| a.insertion()))
+                .flatten()
+        } else if let Some(projection) = ProjectExpr::cast(node) {
+            let empty = projection.names().filter(|l| l.names().next().is_none());
+            let callee = match projection.operand() {
+                Some(Expr::Name(name_ref)) => Some(name_ref),
+                _ => None,
+            };
+            calls_it(callee)
+                .then(|| empty.map(|l| l.insertion()))
+                .flatten()
+        } else {
+            None
+        };
+        if let Some((at, before, after)) = insertion {
+            edits.push(Edit {
+                span: Span::new(at, at),
+                replacement: format!("{before}{name}: {name}{after}"),
+            });
+        }
+    }
+    d.with_suggestion(
+        format!("pass `{name}` to `{op}`, as a `const` parameter, which each call gives `{name}`"),
+        edits,
+    )
 }
 
 /// The parameter `name`, at `span`, assigned. `hidden` says whether it
@@ -3719,9 +3797,14 @@ pub(crate) fn failed(failed: &crate::ops::Failed, expr: &Expr) -> Diagnostic {
 
 /// `expr`, which takes `builtin`, `parse_integer` or `parse_approximate`,
 /// of `text`, which isn't a number of its type, as `why` says.
-fn unparsable(builtin: hir::Builtin, text: &str, why: hir::Unparsable, expr: &Expr) -> Diagnostic {
+fn unparsable(
+    builtin: hir::ReadOnlyBuiltin,
+    text: &str,
+    why: hir::Unparsable,
+    expr: &Expr,
+) -> Diagnostic {
     let name = builtin.name();
-    let integer = builtin == hir::Builtin::ParseInteger;
+    let integer = builtin == hir::ReadOnlyBuiltin::ParseInteger;
     let a = if integer {
         "an integer"
     } else {
@@ -3740,7 +3823,7 @@ fn unparsable(builtin: hir::Builtin, text: &str, why: hir::Unparsable, expr: &Ex
                 return d.with_note("`parse_approximate` reads a decimal number: digits, then a `.` and more digits if it has a fraction, then an exponent if it has one, `e` or `E`, an optional sign and digits, all with a `-` before them if it is negative, and nothing else, not even spaces");
             }
             let d = d.with_note("`parse_integer` reads an integer as trendy writes one: decimal digits, with a `-` before them if it is negative, and nothing else, not even spaces");
-            if hir::Builtin::ParseApproximate
+            if hir::ReadOnlyBuiltin::ParseApproximate
                 .evaluate(&[("from".to_string(), quoted.clone())].into())
                 .is_ok()
             {
@@ -3791,10 +3874,10 @@ fn overlapping_elements(expr: &Expr) -> Diagnostic {
 
 /// `expr`, which takes `builtin`, `min` or `max`, of a relation without
 /// tuples.
-fn no_tuples(builtin: hir::Builtin, expr: &Expr) -> Diagnostic {
+fn no_tuples(builtin: hir::ReadOnlyBuiltin, expr: &Expr) -> Diagnostic {
     let name = builtin.name();
     let extreme = match builtin {
-        hir::Builtin::Min => "least",
+        hir::ReadOnlyBuiltin::Min => "least",
         _ => "greatest",
     };
     Diagnostic::error(
@@ -4004,23 +4087,12 @@ fn dropped(postfix: &trendy_syntax::ast::PostfixExpr, operand: &Expr) -> (Span, 
 }
 
 /// The globals in `cycle`, each referring to the next and the last to
-/// the first: an initial value's cycle, through operators or not, or, if
-/// it has no variable, read-only operators that call each other.
+/// the first: variables' initial values, or read-only operators that call
+/// each other. No cycle has both, as an operator reads no variable.
 pub(crate) fn cycle(cycle: &[Pending]) -> Diagnostic {
-    // Start at a variable, if there is one, whose initial value has no
-    // order to be evaluated in.
-    let start = cycle.iter().position(|p| !p.operator).unwrap_or(0);
-    let cycle: Vec<&Pending> = cycle[start..].iter().chain(&cycle[..start]).collect();
-    let first = cycle[0];
-    let names = |operators: bool| -> Vec<String> {
-        cycle
-            .iter()
-            .filter(|p| p.operator == operators)
-            .map(|p| format!("`{}`", p.name))
-            .collect()
-    };
+    let first = &cycle[0];
+    let names: Vec<String> = cycle.iter().map(|p| format!("`{}`", p.name)).collect();
     let d = if first.operator {
-        let names = names(true);
         let message = match names.as_slice() {
             [_] => format!("`{}` calls itself", first.name),
             _ => format!("{} call each other", trendy_diag::conjoin(&names)),
@@ -4031,7 +4103,6 @@ pub(crate) fn cycle(cycle: &[Pending]) -> Diagnostic {
             )
             .with_help("compute the value without calling the operator from its own body")
     } else {
-        let names = names(false);
         let message = match names.as_slice() {
             [_] => format!("the initial value of `{}` depends on itself", first.name),
             _ => format!(
@@ -4041,18 +4112,14 @@ pub(crate) fn cycle(cycle: &[Pending]) -> Diagnostic {
         };
         Diagnostic::error(Code::CyclicInitialValues, message, first.defined, "declared here")
             .with_note(
-                "initial values are evaluated when compiling, each after the ones it refers to, and the read-only operators it calls with the variables they read, so a cycle has no order to evaluate them in",
+                "initial values are evaluated when compiling, each after the ones it refers to, so a cycle has no order to evaluate them in",
             )
             .with_help("give one of these variables a value that doesn't refer to the others")
     };
+    let verb = if first.operator { "calls" } else { "refers to" };
     cycle.iter().enumerate().fold(d, |d, (i, pending)| {
-        let next = cycle[(i + 1) % cycle.len()];
-        let verb = match (pending.operator, next.operator) {
-            (_, true) => "calls",
-            (true, false) => "reads",
-            (false, false) => "refers to",
-        };
-        let label = if next.name == pending.name && next.operator == pending.operator {
+        let next = &cycle[(i + 1) % cycle.len()];
+        let label = if next.name == pending.name {
             format!("`{}` {verb} itself", pending.name)
         } else {
             format!("`{}` {verb} `{}`", pending.name, next.name)
@@ -4132,7 +4199,7 @@ const EARLY_EXIT: &str = "`return` leaves an operator before the end of its body
 const BODY_VALUE: &str = "a read-only operator's body declares and assigns its local variables, if it has any, then ends with its value, an expression of its result type, without `;`";
 
 /// What a read-only operator changes, for notes.
-const READ_ONLY: &str = "a read-only operator changes nothing but its own local variables (TTM RM Prescription 3): its value is computed from its parameters and the variables it reads";
+const READ_ONLY: &str = "a read-only operator changes nothing but its own local variables (TTM RM Prescription 3): its value is computed from its arguments alone";
 
 /// `stmt`, a `call` in the read-only operator `name`, which would change
 /// something.
@@ -4586,7 +4653,7 @@ pub(crate) fn wrong_operand_type(
             match first {
                 Some(first) => {
                     let subject = format!("`{}`", first.syntax().text());
-                    with_conversion(d, &subject, hir::Builtin::ToApproximate, first)
+                    with_conversion(d, &subject, hir::ReadOnlyBuiltin::ToApproximate, first)
                 }
                 None => d,
             }

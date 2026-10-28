@@ -683,7 +683,7 @@ impl<'a> Checker<'a> {
 
     /// A call of the operator `ident` names, with `written` arguments, as
     /// `expr`: a read-only operator's value, evaluated when compiling if
-    /// its arguments are known then, and the variables it reads. One whose
+    /// its arguments are known then. One whose
     /// arguments are known only for each tuple at hand is evaluated once
     /// it is, when a constant operand is folded.
     fn call(
@@ -1063,7 +1063,7 @@ impl<'a> Checker<'a> {
             let namespaces = self.names.namespaces();
             if let Err(error) = types.bind(name, ty, &actual, value, namespaces) {
                 let constant = Self::constant(&checked);
-                let builtin = types.signature.builtin;
+                let builtin = types.signature.builtin.and_then(hir::Builtin::read_only);
                 errors.push(error.diagnostic(&actual, constant, value, namespaces, builtin));
                 return None;
             }
@@ -2243,7 +2243,7 @@ impl Unbound<'_> {
         value: Option<&hir::Value>,
         arg: &Expr,
         namespaces: &Namespaces,
-        builtin: Option<hir::Builtin>,
+        builtin: Option<hir::ReadOnlyBuiltin>,
     ) -> Diagnostic {
         match self {
             Unbound::Given(expected) => {

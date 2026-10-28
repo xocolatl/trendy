@@ -17,10 +17,12 @@ program. Drivers parse it next to the program. Sema checks every
 declaration against what the compiler implements (`hir::Builtin`, and the
 scalar types), then checks the prelude's own operators, with only the
 built-ins in scope, once, as a program's are (`sema::Source::Prelude`), and
-gives every program them as checked HIR. A built-in with a result type is
-read-only, and its call is a value, which sema evaluates when compiling
-where its arguments are known (`hir::Builtin::evaluate`), and lowering
-computes inline otherwise: `count` and `length` are the count every
+gives every program them as checked HIR. A built-in is read-only or
+update (`hir::ReadOnlyBuiltin`, `hir::UpdateBuiltin`). A read-only one has
+a result type, and is a function of its arguments, so its call is a value,
+which sema evaluates when compiling where they are known
+(`hir::ReadOnlyBuiltin::evaluate`), getting what running it would, and
+which lowering computes inline otherwise: `count` and `length` are the count every
 relation keeps after its tuples, and every array after its elements, `min`
 and `max` a loop over them (`extreme`), which
 ends the block with `Terminator::Fail` for none (R0010), and
@@ -550,11 +552,12 @@ block's changes to one array's elements are one, whose paths must not
 overlap, one's being the other's or the start of it
 (`ElementChange::overlaps`).
 
-A read-only operator is its value, an expression of its parameters and the
-variables it reads (`OperatorKind::ReadOnly`). A call of one
-(`Expr::Call`) is the value, with the arguments for the parameters. Sema
-evaluates every call it can, so a call is left only where an argument, or
-a variable the operator reads, is known only when the program runs.
+A read-only operator is its value, an expression of its parameters
+(`OperatorKind::ReadOnly`), which reads no variable of the program's
+(A0050), so that its calls with the same arguments have the same value
+(TTM RM Prescription 3). A call of one (`Expr::Call`) is the value, with
+the arguments for the parameters. Sema evaluates every call it can, so a
+call is left only where an argument is known only when the program runs.
 
 Every type's equality must hold exactly when no operator can tell two values
 apart (TTM RM Prescription 8). IEEE 754 equality doesn't, because of NaN and
@@ -610,15 +613,14 @@ Manifesto* allows for initialization (RM Prescription 11).
 
 Initial values are evaluated when compiling, so a HIR variable holds a
 `Value`, never an expression. An initial value can refer to any variable,
-and call any read-only operator, which can read any variable: each global
-is evaluated, or checked, when first needed, after the ones it refers to
+and call any read-only operator, which reads no variable: each global is
+evaluated, or checked, when first needed, after the ones it refers to
 (`globals::Globals`). One referred to while it is itself being evaluated
 closes a cycle, reported once with a label at each reference in it: of
-initial values, through operators or not (A0021), or, among read-only
-operators alone, recursion (A0036), which nothing could stop without a
-conditional. A variable's id is its first declaration's place among them,
-known before any is evaluated, so that a read-only operator's value can
-refer to one.
+initial values (A0021), or, among read-only operators, recursion (A0036),
+which nothing could stop without a conditional. No cycle has both, as no
+operator reads a variable. A variable's id is its first declaration's
+place among them, known before any is evaluated.
 
 A read-only operator's body declares and assigns its local variables, and
 ends with its value, of its result type (A0035): assigning a
@@ -1482,6 +1484,14 @@ message, and offers each suggestion as a quick fix.
 5. **Tests may look upstream.** A crate's tests may use layers earlier in the
    pipeline to build their input, such as sema's tests lexing and parsing
    source text. Tests may never depend on a later layer.
+6. **Compiling reads nothing outside the program.** A read-only operator,
+   built in or the program's, is a function of its arguments (TTM RM
+   Prescription 3), so evaluating a call of it when compiling gives what
+   running it would. The crates that evaluate (`trendy_hir`, `trendy_sema`,
+   `trendy_opt`, `trendy_numeric` and `trendy_text`) use no file, clock,
+   environment, network, process or standard input, and whatever needs
+   one is an update operator, which gives a result through an `out`
+   parameter, as `load_text_file` does.
 
 ## Enforcement
 
@@ -1499,6 +1509,12 @@ declarations against the block below:
 - A crate's line may name only workspace crates listed above it.
 - Workspace crates in `[dev-dependencies]` must be listed above the crate
   (rule 5). External dev-dependencies are unrestricted.
+
+The same test checks rule 6: no source file of the crates that evaluate
+when compiling names `std::fs`, `std::env`, `std::time`, `std::net`,
+`std::process` or `stdin`. The type system checks the rest: a
+`hir::ReadOnlyBuiltin` has a result type and an `evaluate` arm, which an
+update built-in, a `hir::UpdateBuiltin`, has neither of.
 
 To add a layer, insert its line where it belongs in pipeline order, add a
 section above that describes it, and create the crate.

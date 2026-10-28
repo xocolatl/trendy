@@ -1354,6 +1354,12 @@ impl Heading {
         self.0.children().filter_map(AttributeType::cast)
     }
 
+    /// Where a new attribute goes, as for [`TupleLiteral::insertion`].
+    #[must_use]
+    pub fn insertion(&self) -> (usize, &'static str, &'static str) {
+        list_insertion(&self.0, self.attributes().last().map(|a| a.0))
+    }
+
     /// The span to delete to remove `attribute`, with its comma.
     #[must_use]
     pub fn removal(&self, attribute: &AttributeType) -> Span {
@@ -1617,7 +1623,14 @@ fn list_insertion(
                 || span(container.text_range()).end,
                 |t| span(t.text_range()).end,
             );
-        return (after_brace, " ", "");
+        // Laid out as the formatter lays it out: `tuple { a: 1 }`, but
+        // `f{a: 1}`.
+        let around = if crate::spaced_braces(container) {
+            " "
+        } else {
+            ""
+        };
+        return (after_brace, around, around);
     };
     match next_significant(&last_item) {
         Some(comma) if comma.kind() == SyntaxKind::Comma => {

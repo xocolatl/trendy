@@ -29,13 +29,12 @@ pub(crate) struct Context<'a> {
 }
 
 impl Context<'_> {
-    /// What evaluating a call in a body substitutes: no variable, since
-    /// they change when the program runs.
+    /// What evaluating a call in a body substitutes: the read-only
+    /// operators' values.
     pub(crate) fn bindings(&self) -> ops::Bindings<'_> {
         ops::Bindings {
             operators: self.operators,
             values: self.values,
-            variables: None,
         }
     }
 }
@@ -704,18 +703,17 @@ impl Statements<'_, '_> {
 /// assigns a variable of the program's that the loop's array is computed
 /// from, in the operator called or in those it calls, and each that passes
 /// one to a `var` parameter of an operator that reads or assigns it
-/// itself, there or in the update operators it calls, or in the read-only
-/// ones they call, whose `values` these are.
+/// itself, there or in the update operators it calls: the read-only ones
+/// read no variable of the program's.
 pub(crate) fn deferred_checks(
     deferred: &Deferred,
     bodies: &HashMap<hir::OperatorId, (Vec<hir::Local>, hir::Block)>,
-    values: &HashMap<hir::OperatorId, hir::Expr>,
     operators: &Operators,
     errors: &mut Vec<Diagnostic>,
 ) {
     for passed in &deferred.passed {
         let assigns = assigned_variables(passed.callee, bodies).contains(&passed.variable);
-        if assigns || read_variables(passed.callee, bodies, values).contains(&passed.variable) {
+        if assigns || read_variables(passed.callee, bodies).contains(&passed.variable) {
             errors.push(errors::passed_and_used(
                 &passed.name,
                 &passed.param,
@@ -820,42 +818,29 @@ fn each_statement(block: &hir::Block, f: &mut dyn FnMut(&hir::Statement)) {
 }
 
 /// The variables of the program that the update operator `id` reads, in
-/// its body or in those of the update operators it calls, in `bodies`, or
-/// in the values of the read-only operators they call, in `values`: each
-/// a variable's value, or one it passes to a `var` parameter.
+/// its body or in those of the update operators it calls, in `bodies`:
+/// each a variable's value, or one it passes to a `var` parameter. The
+/// read-only operators it calls read none.
 fn read_variables(
     id: hir::OperatorId,
     bodies: &HashMap<hir::OperatorId, (Vec<hir::Local>, hir::Block)>,
-    values: &HashMap<hir::OperatorId, hir::Expr>,
 ) -> Vec<hir::VariableId> {
-    // Each read-only operator's value is walked once.
-    fn walk(
-        expr: &hir::Expr,
-        values: &HashMap<hir::OperatorId, hir::Expr>,
-        seen: &mut Vec<hir::OperatorId>,
-        read: &mut Vec<hir::VariableId>,
-    ) {
-        match expr {
-            hir::Expr::Variable(id) if !read.contains(id) => read.push(*id),
-            hir::Expr::Call(call) if !seen.contains(&call.operator) => {
-                seen.push(call.operator);
-                if let Some(value) = values.get(&call.operator) {
-                    walk(value, values, seen, read);
-                }
-            }
-            _ => {}
+    fn walk(expr: &hir::Expr, read: &mut Vec<hir::VariableId>) {
+        if let hir::Expr::Variable(id) = expr
+            && !read.contains(id)
+        {
+            read.push(*id);
         }
-        expr.for_each_child(|child, _| walk(child, values, seen, read));
+        expr.for_each_child(|child, _| walk(child, read));
     }
     let mut read = Vec::new();
-    let mut seen = Vec::new();
     let mut next = vec![id];
     let mut called = vec![id];
     while let Some(id) = next.pop() {
         let Some((_, body)) = bodies.get(&id) else {
             continue;
         };
-        exprs_in(body, &mut |expr| walk(expr, values, &mut seen, &mut read));
+        exprs_in(body, &mut |expr| walk(expr, &mut read));
         let mut callees = Vec::new();
         calls_in(body, &mut callees);
         for callee in callees {

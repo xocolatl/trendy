@@ -1131,14 +1131,14 @@ pub(crate) enum Failed {
     /// A tuple breaks a disjoint union's or an included minus's condition.
     Broken(Box<hir::Broken>),
     /// This built-in, `min` or `max`, is of a relation without tuples.
-    NoTuples(hir::Builtin),
+    NoTuples(hir::ReadOnlyBuiltin),
     /// Two changes to an array overlap: they set one element, or one sets
     /// an element of the other's.
     Overlap,
     /// This built-in, `parse_integer` or `parse_approximate`, of `text`,
     /// which isn't a number of its type, as `why` says.
     Unparsable {
-        builtin: hir::Builtin,
+        builtin: hir::ReadOnlyBuiltin,
         text: String,
         why: hir::Unparsable,
     },
@@ -1959,13 +1959,10 @@ pub(crate) struct Bindings<'a> {
     /// compiler evaluates.
     pub(crate) operators: &'a Operators,
     /// The read-only operators' checked values. A call is checked after its
-    /// callee, so every operator a call's evaluation reaches is here.
+    /// callee, so every operator a call's evaluation reaches is here. None
+    /// reads a variable of the program's, so its value depends on its
+    /// arguments alone.
     pub(crate) values: &'a HashMap<hir::OperatorId, hir::Expr>,
-    /// Each variable's value, by id, in an initial value, where they are
-    /// known: every variable a read-only operator reads is evaluated when
-    /// the operator is checked. Elsewhere, they change when the program
-    /// runs, so none is known.
-    pub(crate) variables: Option<&'a [Option<hir::Value>]>,
 }
 
 /// What [`substitute`] replaces in an expression, which it then folds
@@ -2012,6 +2009,9 @@ pub(crate) fn call(call: hir::Call, bindings: Bindings) -> Result<hir::Expr, Fai
         return Ok(hir::Expr::Call(call));
     };
     if let Some(builtin) = bindings.operators.get(call.operator).builtin {
+        let hir::Builtin::ReadOnly(builtin) = builtin else {
+            unreachable!("only read-only operators' calls are values");
+        };
         // An argument whose type has a type parameter, such as the empty
         // `relation { v: T } {}`, is known only up to that type, which
         // `to_text` writes: it is evaluated for each list of types instead.
@@ -2048,7 +2048,7 @@ pub(crate) fn call(call: hir::Call, bindings: Bindings) -> Result<hir::Expr, Fai
     let evaluated = substitute(value, 0, &substitution)?;
     Ok(match evaluated {
         hir::Expr::Constant(_) => evaluated,
-        // A variable the operator reads is known only when running.
+        // Otherwise the call is made when the program runs.
         _ => hir::Expr::Call(call),
     })
 }
@@ -2141,9 +2141,9 @@ fn substituted_if(
 
 /// `expr` with what `substitution` says replaced, and simplified as when
 /// it was checked, so that what then depends only on constants is
-/// evaluated: the tuple at hand `depth` `Extend`s out, the parameters of a
-/// call's callee, and the variables, if their values are known. A call
-/// whose arguments are then all known is evaluated.
+/// evaluated: the tuple at hand `depth` `Extend`s out, and the parameters
+/// of a call's callee. A call whose arguments are then all known is
+/// evaluated.
 ///
 /// # Errors
 ///
@@ -2166,14 +2166,6 @@ fn substitute(
         hir::Expr::Parameter(name) if substitution.args.is_some() => {
             hir::Expr::Constant(substitution.args.expect("just checked")[&name].clone())
         }
-        hir::Expr::Variable(id) => match substitution
-            .bindings
-            .variables
-            .and_then(|values| values[id.0].clone())
-        {
-            Some(value) => hir::Expr::Constant(value),
-            None => expr,
-        },
         hir::Expr::Local(id) => match substitution.locals.iter().find(|(l, _)| *l == id) {
             Some((_, value)) => hir::Expr::Constant(value.clone()),
             // An update operator's local variable's value is known only
@@ -2193,7 +2185,12 @@ fn substitute(
             }
             value => hir::Expr::Let(id, Box::new(value), Box::new(sub(body)?)),
         },
-        hir::Expr::Current(..) | hir::Expr::Constant(_) | hir::Expr::Parameter(_) => expr,
+        // A variable of the program's is known only when running: a
+        // read-only operator's value reads none.
+        hir::Expr::Current(..)
+        | hir::Expr::Constant(_)
+        | hir::Expr::Parameter(_)
+        | hir::Expr::Variable(_) => expr,
         hir::Expr::Call(called) => {
             let args = called
                 .args

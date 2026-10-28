@@ -54,6 +54,14 @@ in the "Diagnostics" section of `docs/pipeline.md`.
   `crates/prelude/src/prelude.trendy`, listed in `hir::Builtin`, and usually
   implemented in `crates/runtime`. Sema checks the prelude against the
   compiler, so all three must change together.
+- A read-only operator, built in or a program's, is a function of its
+  arguments: calls with the same arguments have the same value, whenever
+  they are made (TTM RM Prescription 3). A built-in that reads input, the
+  clock or randomness, or changes anything outside the program, is an
+  update operator (`hir::UpdateBuiltin`) that gives its result through an
+  `out` parameter, never a read-only one (`hir::ReadOnlyBuiltin`), and a
+  program's read-only operator reads none of the program's variables
+  (A0050). See rule 6 in `docs/pipeline.md`.
 - Keep built-ins as few as possible. An operator that can be written in
   trendy is defined in the prelude, in trendy, rather than built in. When the
   language gains a feature, check whether it lets a built-in be replaced by
