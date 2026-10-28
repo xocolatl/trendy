@@ -5,11 +5,11 @@ use std::collections::BTreeSet;
 
 use trendy_diag::{Code, Diagnostic, Edit, Span, edit_distance};
 use trendy_hir as hir;
-use trendy_syntax::SyntaxToken;
 use trendy_syntax::ast::{
     self, AstNode, AttributeValue, Expr, Key, Mode, NaryExpr, OrderList, ProjectExpr, SourceFile,
     TypeExpr, VarDecl,
 };
+use trendy_syntax::{SyntaxKind, SyntaxToken};
 
 use crate::check::Written;
 use crate::globals::Pending;
@@ -1721,13 +1721,15 @@ pub(crate) fn operator_as_value(name: &str, span: Span) -> Diagnostic {
 /// `defined` unless it is built in, which has no value. `empty` says
 /// whether the call is `name{}`, without arguments, and `projectable`
 /// whether a value of the same name is in scope then, which `(name){}`
-/// would project.
+/// would project. `out` is what to write instead, if the call is a
+/// variable's value, which the operator's `out` parameter can give it.
 pub(crate) fn operator_call_without_value(
     name: &str,
     span: Span,
     defined: Option<Span>,
     empty: bool,
     projectable: bool,
+    out: Option<OutResult>,
 ) -> Diagnostic {
     let args = if empty { "" } else { "…" };
     let d = Diagnostic::error(
@@ -1747,9 +1749,22 @@ pub(crate) fn operator_call_without_value(
     let d = d.with_note(
         "a name right before `{}` is the operator when there is one, as it is after `call`; an update operator returns no value, so it is invoked only by a `call` statement, not in an expression",
     );
+    match out {
+        Some(OutResult::Fix(help, edit)) => {
+            return d
+                .with_note("an update operator gives a result through an `out` parameter, which a call names the variable for")
+                .with_suggestion(help, vec![edit]);
+        }
+        Some(OutResult::Help(help)) => {
+            return d
+                .with_note("an update operator gives a result through an `out` parameter, which a call names the variable for")
+                .with_help(help);
+        }
+        None => {}
+    }
     if !projectable {
         return d.with_help(format!(
-            "to invoke it, write a statement: `call {name}{{}};`"
+            "to invoke it, write a statement: `call {name}{{{args}}};`"
         ));
     }
     d.with_suggestion(
@@ -1765,6 +1780,127 @@ pub(crate) fn operator_call_without_value(
             },
         ],
     )
+}
+
+/// What to write for a call of an update operator with one `out`
+/// parameter that is a variable's value, as other languages return one.
+pub(crate) enum OutResult {
+    /// A `call` statement in the variable's statement's place, with the
+    /// variable its `out` argument: the help, which writes it out, and the
+    /// edit.
+    Fix(String, Edit),
+    /// The help, for an initial value, which is computed when compiling.
+    Help(String),
+}
+
+/// What to write for `expr`, a call, written with the arguments `written`,
+/// of the update operator `signature`, which has one `out` parameter, as
+/// the value of an assignment statement or a variable's declaration: in an
+/// update operator's body, a `call` statement, with the variable its `out`
+/// argument, after a declaration of it without a value; and for a variable
+/// of the program, which starts with its value when compiling, the same in
+/// an operator that runs, such as `main`.
+pub(crate) fn out_result(
+    signature: &Signature,
+    written: Written,
+    expr: &Expr,
+) -> Option<OutResult> {
+    let mut outs = signature
+        .written
+        .iter()
+        .filter_map(|(name, param)| match param {
+            crate::operators::Param::Variable(ty, hir::Mode::Out) => Some((name, ty)),
+            _ => None,
+        });
+    let (param, ty) = outs.next()?;
+    if outs.next().is_some() {
+        return None;
+    }
+    // The call with the variable as its `out` argument.
+    let call = |variable: &str| {
+        let (at, before, after) = match written {
+            Written::Arguments(args) => args.insertion(),
+            Written::Nothing(list) => list.insertion(),
+        };
+        let start = expr.span().start;
+        let mut text = expr.syntax().text().to_string();
+        text.insert_str(
+            at - start,
+            &format!("{before}out {param}: {variable}{after}"),
+        );
+        format!("call {text}")
+    };
+    let parent = expr.syntax().parent()?;
+    if let Some(trendy_syntax::ast::Clause::Assignment(assignment)) =
+        trendy_syntax::ast::Clause::cast(parent.clone())
+    {
+        // `x := f{…};`, alone in its statement, in an update operator.
+        let statement = trendy_syntax::ast::AssignStmt::cast(assignment.syntax().parent()?)?;
+        if statement.clauses().count() != 1 || statement.block().is_some() || !callable(&parent) {
+            return None;
+        }
+        let clause = trendy_syntax::ast::Clause::Assignment(assignment);
+        let variable = clause.target()?.syntax().text().to_string();
+        let replacement = call(&variable);
+        return Some(OutResult::Fix(
+            format!("call it, with `{variable}` as its `out` argument: `{replacement};`"),
+            Edit {
+                span: clause.span(),
+                replacement,
+            },
+        ));
+    }
+    // `var x := f{…};`, declared with its type and no value instead.
+    let declaration = VarDecl::cast(parent.parent()?)?;
+    let variable = declaration.name()?.ident()?.text().to_string();
+    let declared = match declaration.type_expr() {
+        Some(written) => written.syntax().text().to_string(),
+        None if ty.parameters().next().is_none() => ty.to_string(),
+        None => return None,
+    };
+    let declare = format!("var {variable}: {declared};");
+    let statement = format!("{};", call(&variable));
+    if declaration.syntax().parent().map(|p| p.kind()) == Some(SyntaxKind::SourceFile) {
+        return Some(OutResult::Help(format!(
+            "a variable's initial value is computed when compiling, which this call can't be: declare it without one, `{declare}`, and call `{}` in an operator that runs, such as `main`: `{statement}`",
+            signature.name
+        )));
+    }
+    if !callable(&parent) {
+        return None;
+    }
+    let indent = indentation(declaration.syntax());
+    Some(OutResult::Fix(
+        format!(
+            "declare `{variable}` without a value, then call it, with `{variable}` as its `out` argument: `{declare} {statement}`"
+        ),
+        Edit {
+            span: Span::new(declaration.span().start, expr.span().end),
+            replacement: format!("{declare}\n{indent}{}", call(&variable)),
+        },
+    ))
+}
+
+/// Whether a `call` statement can go where `node` is: in an update
+/// operator's body, not a value block's or a read-only operator's.
+fn callable(node: &trendy_syntax::SyntaxNode) -> bool {
+    node.ancestors()
+        .take_while(|a| a.kind() != SyntaxKind::ValueBlock)
+        .find_map(trendy_syntax::ast::Operator::cast)
+        .is_some_and(|op| op.result().is_none())
+}
+
+/// The spaces and tabs before `node` on its line.
+fn indentation(node: &trendy_syntax::SyntaxNode) -> String {
+    let Some(before) = node.first_token().and_then(|t| t.prev_token()) else {
+        return String::new();
+    };
+    if !before.kind().is_trivia() {
+        return String::new();
+    }
+    let text = before.text();
+    text.rfind('\n')
+        .map_or_else(String::new, |i| text[i + 1..].to_string())
 }
 
 /// The parameter `name`, at `span`, assigned. `hidden` says whether it
@@ -4096,29 +4232,6 @@ pub(crate) fn call_failure(
         Some(value) => d.with_secondary(value.span(), format!("`{}`'s value", signature.name)),
         None => d,
     }
-}
-
-/// A call, `expr`, of the operator `name` in an initial value, which is
-/// computed when compiling, though it reads input through the built-in
-/// `builtin`, which is known only when the program runs.
-pub(crate) fn input_in_initial_value(name: &str, builtin: hir::Builtin, expr: &Expr) -> Diagnostic {
-    let through = if name == builtin.name() {
-        String::new()
-    } else {
-        format!(", with `{}`,", builtin.name())
-    };
-    Diagnostic::error(
-        Code::InputInInitialValue,
-        "an initial value can't read input",
-        expr.span(),
-        format!("`{name}` reads input{through} when the program runs"),
-    )
-    .with_note(
-        "a variable's initial value is computed when compiling, so that the program starts with every variable holding its value, and input is known only when the program runs",
-    )
-    .with_help(
-        "read it in an operator that runs when the program does, such as `main`, into a local variable, or into this one declared with its type and no value",
-    )
 }
 
 /// A tuple at `span` that the relation already has, first at `first`.

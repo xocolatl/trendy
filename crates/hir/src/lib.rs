@@ -362,7 +362,9 @@ pub enum Builtin {
     /// The approximate number nearest the decimal number a text writes.
     ParseApproximate,
     /// The lines of a text file, in order, which the program reads when it
-    /// runs.
+    /// runs into its `out` parameter: an update operator, as reading the
+    /// same file twice can give different lines, which no read-only
+    /// operator's call can (TTM, RM Prescription 3).
     LoadTextFile,
 }
 
@@ -462,7 +464,22 @@ impl Builtin {
             Builtin::ParseInteger | Builtin::ParseApproximate => {
                 [("from".to_string(), Type::Scalar(Scalar::Text))].into()
             }
-            Builtin::LoadTextFile => [("path".to_string(), Type::Scalar(Scalar::Text))].into(),
+            Builtin::LoadTextFile => {
+                return [
+                    (
+                        "path".to_string(),
+                        Parameter::constant(Type::Scalar(Scalar::Text)),
+                    ),
+                    (
+                        "lines".to_string(),
+                        Parameter {
+                            ty: Type::Array(Box::new(Type::Scalar(Scalar::Text))),
+                            mode: Mode::Out,
+                        },
+                    ),
+                ]
+                .into();
+            }
             Builtin::Min | Builtin::Max | Builtin::Sum | Builtin::Product => {
                 let tuples = Heading::new(
                     [
@@ -485,7 +502,7 @@ impl Builtin {
     #[must_use]
     pub fn result(self) -> Option<Type> {
         match self {
-            Builtin::DebugValue | Builtin::DebugTable => None,
+            Builtin::DebugValue | Builtin::DebugTable | Builtin::LoadTextFile => None,
             Builtin::Count | Builtin::Length | Builtin::ParseInteger => {
                 Some(Type::Scalar(Scalar::Integer))
             }
@@ -496,18 +513,7 @@ impl Builtin {
             Builtin::ToApproximate | Builtin::ParseApproximate => {
                 Some(Type::Scalar(Scalar::Approximate))
             }
-            Builtin::LoadTextFile => Some(Type::Array(Box::new(Type::Scalar(Scalar::Text)))),
         }
-    }
-
-    /// Whether a call reads input, from outside the program, such as a
-    /// file: its value is known only when the program runs, and so is
-    /// never computed when compiling, as a variable's isn't. It updates no
-    /// variable, so the operator is still read-only (TTM, RM Prescription
-    /// 3).
-    #[must_use]
-    pub fn reads_input(self) -> bool {
-        self == Builtin::LoadTextFile
     }
 
     /// The value of a call of the read-only built-in with the arguments
@@ -522,9 +528,9 @@ impl Builtin {
     ///
     /// # Panics
     ///
-    /// If the built-in is an update operator, which has no value, or one
-    /// that reads input (see [`Builtin::reads_input`]), or the arguments
-    /// aren't those of [`Builtin::params`], which sema rules out.
+    /// If the built-in is an update operator, which has no value, or the
+    /// arguments aren't those of [`Builtin::params`], which sema rules
+    /// out.
     pub fn evaluate(self, args: &BTreeMap<String, Value>) -> Result<Value, BuiltinFailure> {
         let relation = || match &args["r"] {
             Value::Relation(r) => r,
@@ -537,7 +543,7 @@ impl Builtin {
                 .map(|t| t.get("of").expect("`of` is an attribute"))
         };
         match self {
-            Builtin::DebugValue | Builtin::DebugTable => {
+            Builtin::DebugValue | Builtin::DebugTable | Builtin::LoadTextFile => {
                 panic!("`{}` is an update operator", self.name())
             }
             Builtin::Count => {
@@ -585,9 +591,6 @@ impl Builtin {
                         .map(|x| Value::Approximate(Approximate::new(x)))
                 };
                 value.map_err(BuiltinFailure::Unparsable)
-            }
-            Builtin::LoadTextFile => {
-                panic!("`{}` reads input, known only when running", self.name())
             }
         }
     }

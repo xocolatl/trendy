@@ -742,15 +742,16 @@ builtin operator parse_integer{from: text}: integer;
    exponent. Other text fails (R0014), as does a number out of range. */
 builtin operator parse_approximate{from: text}: approximate;
 
-/* The lines of the text file at `path`, in the file's order, so that its
-   first line is the array's element 1. `path` is relative to the
-   directory the program runs in, unless it is absolute. A line ends at a
-   line feed, or a carriage return and a line feed, which aren't part of
-   it; the last needs neither. Each call reads the file as it is when the
-   program runs: the compiler never opens it, so it needn't exist until
-   then. A file that can't be read fails (R0012), as does one that isn't
-   UTF-8 text (R0013). */
-builtin operator load_text_file{path: text}: array text;
+/* Read the lines of the text file at `path` into `lines`, in the file's
+   order, so that its first line is the array's element 1. `path` is
+   relative to the directory the program runs in, unless it is absolute.
+   A line ends at a line feed, or a carriage return and a line feed,
+   which aren't part of it; the last needs neither. Each call reads the
+   file as it is when the program runs: the compiler never opens it, so
+   it needn't exist until then, and two calls can read different lines,
+   so it is an update operator, which `call` invokes. A file that can't
+   be read fails (R0012), as does one that isn't UTF-8 text (R0013). */
+builtin operator load_text_file{path: text, out lines: array text};
 ```
 
 **`debug_value{v: any type}`** writes `v` to stderr, on one line, as trendy
@@ -1058,9 +1059,32 @@ var people := parse_integer{from: "8.4e6"};
 operator main{} [];
 ```
 
-**`load_text_file{path: text}: array text`** reads input: the lines of a
-text file.
+**`load_text_file{path: text, out lines: array text}`** reads input: the
+lines of a text file, into the variable its call gives `lines`.
 
+```trendy
+operator main{} [
+    var lines: array text;
+    call load_text_file{path: "rivers.txt", out lines: lines};
+    call debug_value{v: length{a: lines}};
+    for line in lines loop [
+        if line <> "" then [
+            call debug_value{v: line};
+        ];
+    ];
+];
+```
+
+- **It is an update operator,** which `call` invokes, not a read-only
+  one: reading a file twice can give different lines, and a read-only
+  operator is a function, whose calls with the same arguments give the
+  same value (TTM, RM Prescription 3). So it is called in an update
+  operator's body, when the program runs, and never in an expression or
+  a variable's initial value, which is computed when compiling (A0016).
+  Its result is its `out` parameter's (see [`var` and `out`
+  parameters](#var-and-out-parameters)); written as a value, as other
+  languages return one, it is fixed to a call with the variable its `out`
+  argument.
 - **The lines are an array, in the file's order,** each without the line
   feed, or the carriage return and line feed, that ends it. So the first
   line is element 1, and two equal lines are two elements: a file's lines
@@ -1071,24 +1095,15 @@ text file.
 - **The path is relative to the directory the program runs in,** not the
   one its source is in, unless it is absolute.
 - **Each call reads the file as it is when the program runs.** The
-  compiler never opens it, even if its path is known then, so the file
-  needn't exist until the program runs, and it can change between two
-  runs, or between two calls. Reading updates nothing, so the operator
-  is read-only (TTM, RM Prescription 3). A variable's initial value is
-  computed when compiling, so it can't read a file (A0050).
+  compiler never opens it, so the file needn't exist until the program
+  runs, and it can change between two runs, or between two calls.
 - **A file that can't be read stops the program** (R0012), writing its
   path and the system's reason, as does one that isn't UTF-8 text
   (R0013), writing the first line that isn't.
 
-```trendy
+```trendy,error
 operator main{} [
     var lines := load_text_file{path: "rivers.txt"};
-    call debug_value{v: length{a: lines}};
-    for line in lines loop [
-        if line <> "" then [
-            call debug_value{v: line};
-        ];
-    ];
 ];
 ```
 
@@ -1131,7 +1146,8 @@ declared before or after it. Initial values are evaluated when compiling,
 each after the ones it refers to, so the program starts with every variable
 already holding its value: below, `ready` is simply `true`. So an initial
 value can't read input, such as a file, which is known only when the
-program runs (A0050).
+program runs: only an update operator reads input, which an expression
+can't call (A0016).
 
 ```trendy
 var ready := started or false;
@@ -3710,7 +3726,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `float(n)`, `n as f64`, `CAST(n AS DOUBLE PRECISION)`, `CAST_AS_RATIONAL (N)` | `to_approximate{from: n}` |
 | `int(s)`, `parseInt(s)`, `atoi(s)`, `CAST(s AS INTEGER)`, `CAST_AS_INTEGER (S)` | `parse_integer{from: s}` |
 | `float(s)`, `parseFloat(s)`, `atof(s)`, `CAST(s AS DOUBLE PRECISION)` | `parse_approximate{from: s}` |
-| `readLines(path)`, `File.readlines(path)`, `File.ReadAllLines(path)` | `load_text_file{path: path}`, an array of the lines |
+| `lines = readLines(path)`, `File.readlines(path)`, `File.ReadAllLines(path)` | `call load_text_file{path: path, out lines: lines};`, an array of the lines |
 | `{ x: 1 }`, `TUPLE { X 1 }` | `tuple { x: 1 }` |
 | `type Home = { … }`, `interface Home { … }`, `struct Home { … }` | `heading home := { … };`, whose types are `relation home` and `tuple home` |
 | `[1, 2]`, `ARRAY[1, 2]` | `array [1, 2]` |

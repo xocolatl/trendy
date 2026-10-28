@@ -655,7 +655,7 @@ fn load_text_file_reads_a_files_lines() {
     let literal = |path: &Path| format!("{:?}", path.to_str().unwrap());
     let lines = |path: &Path| {
         let source = format!(
-            "operator main{{}} [\n    call debug_value{{v: load_text_file{{path: {}}}}};\n];\n",
+            "operator main{{}} [\n    var lines: array text;\n    call load_text_file{{path: {}, out lines: lines}};\n    call debug_value{{v: lines}};\n];\n",
             literal(path)
         );
         let stem = path.file_stem().unwrap().to_str().unwrap();

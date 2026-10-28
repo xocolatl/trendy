@@ -7,11 +7,14 @@ operator greet{name: text, punctuation: text} [
     call debug_value{v: tuple { t: "constant " || "parts fold" }};
 ];
 
-/* A text file's lines, read when the program runs: an array, in the
-   file's order, the first line its element 1. A relative path is from
-   the directory the program runs in: here, the repository's. */
+/* A text file's lines, read when the program runs, into the variable
+   for `lines`: an array, in the file's order, the first line its element
+   1. A relative path is from the directory the program runs in: here,
+   the repository's. Reading is an update operator's work, as two reads
+   can differ. */
 operator list_rivers{} [
-    var rivers := load_text_file{path: "examples/rivers.txt"};
+    var rivers: array text;
+    call load_text_file{path: "examples/rivers.txt", out lines: rivers};
     call debug_value{v: rivers};
     call debug_value{v: length{a: rivers}};
     for river in rivers loop [

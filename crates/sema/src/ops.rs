@@ -2015,8 +2015,7 @@ pub(crate) fn call(call: hir::Call, bindings: Bindings) -> Result<hir::Expr, Fai
         // An argument whose type has a type parameter, such as the empty
         // `relation { v: T } {}`, is known only up to that type, which
         // `to_text` writes: it is evaluated for each list of types instead.
-        // Input is known only when running.
-        if call.types.iter().any(|t| t.parameters().next().is_some()) || builtin.reads_input() {
+        if call.types.iter().any(|t| t.parameters().next().is_some()) {
             return Ok(hir::Expr::Call(call));
         }
         let value = builtin.evaluate(&known).map_err(|failure| match failure {
@@ -2052,33 +2051,6 @@ pub(crate) fn call(call: hir::Call, bindings: Bindings) -> Result<hir::Expr, Fai
         // A variable the operator reads is known only when running.
         _ => hir::Expr::Call(call),
     })
-}
-
-/// The built-in through which `expr` reads input (see
-/// [`hir::Builtin::reads_input`]): one it calls, or one a read-only
-/// operator it calls does, through any number of others, if there is one.
-pub(crate) fn input(expr: &hir::Expr, bindings: Bindings) -> Option<hir::Builtin> {
-    if let hir::Expr::Call(call) = expr {
-        // An operator's value never calls the operator, which would be a
-        // cycle, reported instead.
-        let read = match bindings.operators.get(call.operator).builtin {
-            Some(builtin) => builtin.reads_input().then_some(builtin),
-            None => bindings
-                .values
-                .get(&call.operator)
-                .and_then(|value| input(value, bindings)),
-        };
-        if read.is_some() {
-            return read;
-        }
-    }
-    let mut read = None;
-    expr.for_each_child(|child, _| {
-        if read.is_none() {
-            read = input(child, bindings);
-        }
-    });
-    read
 }
 
 /// `array` with `changes` made, substituted as for [`substitute`].

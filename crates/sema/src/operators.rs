@@ -139,13 +139,20 @@ impl Operators {
     }
 
     /// Every operator's name, which a misspelled one, or another
-    /// language's, may be, with its parameters' names, as a call gives
-    /// their arguments.
+    /// language's, may be, with the names of its parameters that take
+    /// values, as a call gives their arguments: those a lone argument can
+    /// be for, not a `var` or `out` one's variable.
     pub(crate) fn names(&self) -> Vec<(&str, Vec<&str>)> {
         self.by_name
             .iter()
             .map(|(name, &id)| {
-                let params = self.get(id).written.keys().map(String::as_str).collect();
+                let params = self
+                    .get(id)
+                    .written
+                    .iter()
+                    .filter(|(_, param)| !matches!(param, Param::Variable(..)))
+                    .map(|(name, _)| name.as_str())
+                    .collect();
                 (name.as_str(), params)
             })
             .collect()

@@ -37,12 +37,13 @@ a runtime call, which writes the value as `debug_value` does; folded, it
 is `hir::Value`'s source text, which writes values the same way. Since
 that text has the value's type in it, as an empty relation's heading, a
 built-in isn't evaluated when compiling on an argument whose type has a
-type parameter, but for each list of types. Nor is one that reads input
-(`hir::Builtin::reads_input`), as `load_text_file` reads a file, whose
-contents are known only when the program runs: its call stays a call,
-which lowering makes a runtime call (`trendy_rt_load_text_file`), and an
-initial value, computed when compiling, can't make one, directly or
-through an operator whose value does (`ops::input`, A0050). A built-in can
+type parameter, but for each list of types. A built-in that reads input
+is an update operator, as `load_text_file` is, which reads a file's lines
+into its `out` parameter's variable, since two reads can differ and a
+read-only operator's calls can't (TTM RM Prescription 3): a `call`
+statement, which nothing evaluates when compiling, and which lowering
+makes a runtime call (`trendy_rt_load_text_file`) and an assignment of
+its result. A built-in can
 have type parameters, of a kind too, and `per` parameters, declared as an
 operator's are, and checked against the compiler's, written as the
 operator sees them. A wrong prelude is an internal

@@ -720,6 +720,7 @@ impl<'a> Checker<'a> {
                 signature.defined(),
                 matches!(written, Written::Nothing(_)),
                 projectable,
+                errors::out_result(&signature, written, expr),
             ));
             return None;
         }
@@ -739,14 +740,6 @@ impl<'a> Checker<'a> {
                 return None;
             }
         };
-        // Variables are known in an initial value, which is computed when
-        // compiling, where nothing can read input.
-        if bindings.variables.is_some()
-            && let Some(builtin) = ops::input(&result, bindings)
-        {
-            errors.push(errors::input_in_initial_value(name, builtin, expr));
-            return None;
-        }
         self.matched(expected, result, expr, errors)
     }
 

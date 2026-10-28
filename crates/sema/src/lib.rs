@@ -5855,12 +5855,27 @@ mod tests {
 
     #[test]
     fn other_languages_names_for_reading_are_fixed() {
-        // A file's lines: R's and Kotlin's, Python's and Ruby's, and .NET's.
+        // A file's lines: R's and Kotlin's, Python's and Ruby's, and .NET's,
+        // which they return, fixed to `load_text_file` with its argument
+        // named, then to a call with the variable its `out` argument.
+        for written in ["readLines", "readlines", "ReadAllLines"] {
+            let source =
+                format!("operator main{{}} [\n    var lines := {written}{{\"rivers.txt\"}};\n];\n");
+            let fixed = fix(&source);
+            assert_eq!(
+                fixed,
+                "operator main{} [\n    var lines := load_text_file{path: \"rivers.txt\"};\n];\n",
+                "{written}"
+            );
+            let fixed = fix(&fixed);
+            assert_eq!(
+                fixed,
+                "operator main{} [\n    var lines: array text;\n    call load_text_file{path: \"rivers.txt\", out lines: lines};\n];\n"
+            );
+            assert!(analyze_str(&fixed).is_ok(), "{fixed}");
+        }
         // Numbers: JavaScript's, C's and Go's, and Java's.
         for (written, arg, ours) in [
-            ("readLines", "\"rivers.txt\"", "load_text_file{path: "),
-            ("readlines", "\"rivers.txt\"", "load_text_file{path: "),
-            ("ReadAllLines", "\"rivers.txt\"", "load_text_file{path: "),
             ("parseInt", "\"42\"", "parse_integer{from: "),
             ("atoi", "\"42\"", "parse_integer{from: "),
             ("Atoi", "\"42\"", "parse_integer{from: "),
@@ -5881,49 +5896,47 @@ mod tests {
         }
     }
 
-    /// An operator that reads a file, through `load_text_file`.
-    const RIVERS: &str =
-        "operator rivers{}: array text [\n    load_text_file{path: \"rivers.txt\"}\n];\n";
-
     #[test]
-    fn an_initial_value_reads_no_input() {
-        for init in [
-            "load_text_file{path: \"rivers.txt\"}",
-            // Through an operator that reads it.
-            "length{a: rivers{}}",
-            // For each tuple, though its path isn't known until then.
-            "relation { { p: \"rivers.txt\" } } extend { n := length{a: load_text_file{path: p}} }",
+    fn a_file_is_read_into_an_out_variable() {
+        // A call, which reads the file when the program runs, into the
+        // variable for `lines`.
+        let source = "operator main{} [\n    var rivers: array text;\n    call load_text_file{path: \"rivers.txt\", out lines: rivers};\n];\n";
+        let body = main_body(source);
+        let hir::Statement::Call(call) = &body[1] else {
+            panic!("{body:#?}");
+        };
+        assert_eq!(call.updated["lines"], hir::Target::Local(hir::LocalId(0)));
+        // As a value, as other languages return one, it is fixed to a call
+        // with the variable its `out` argument.
+        for (written, fixed) in [
+            (
+                "var rivers := load_text_file{path: \"rivers.txt\"};",
+                "var rivers: array text;\n    call load_text_file{path: \"rivers.txt\", out lines: rivers};",
+            ),
+            (
+                "var rivers: array text;\n    rivers := load_text_file{path: \"rivers.txt\"};",
+                "var rivers: array text;\n    call load_text_file{path: \"rivers.txt\", out lines: rivers};",
+            ),
         ] {
-            let source = format!("{RIVERS}var lines := {init};{MAIN}");
-            let found = errors(&source);
+            let source = format!("operator main{{}} [\n    {written}\n];\n");
+            assert_eq!(codes(&source), [Code::OperatorAsValue], "{written}");
             assert_eq!(
-                found.iter().map(|e| e.code).collect::<Vec<_>>(),
-                [Code::InputInInitialValue],
-                "{init}"
-            );
-            assert!(
-                found[0].primary.message.contains("reads input"),
-                "{found:#?}"
+                fix(&source),
+                format!("operator main{{}} [\n    {fixed}\n];\n"),
+                "{written}"
             );
         }
-    }
-
-    #[test]
-    fn input_is_read_when_the_program_runs() {
-        // Though its path is known when compiling, and through an
-        // operator whose value would otherwise be.
-        let source = format!(
-            "{RIVERS}operator main{{}} [\n    call debug_value{{v: rivers{{}}}};\n    call debug_value{{v: length{{a: load_text_file{{path: \"rivers.txt\"}}}}}};\n];\n"
-        );
-        let body = main_body(&source);
-        assert!(
-            matches!(argument(&body[0]), hir::Expr::Call(_)),
-            "{body:#?}"
-        );
-        assert!(
-            matches!(argument(&body[1]), hir::Expr::Call(_)),
-            "{body:#?}"
-        );
+        // Not where no statement can call it: an initial value, which is
+        // computed when compiling, or a read-only operator's value.
+        for source in [
+            format!("var lines := load_text_file{{path: \"rivers.txt\"}};{MAIN}"),
+            format!(
+                "operator rivers{{}}: array text [ load_text_file{{path: \"rivers.txt\"}} ];{MAIN}"
+            ),
+        ] {
+            assert_eq!(codes(&source), [Code::OperatorAsValue], "{source}");
+            assert_eq!(fix(&source), source);
+        }
     }
 
     #[test]

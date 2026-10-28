@@ -737,6 +737,9 @@ impl<'a> FunctionBuilder<'a> {
             hir::OperatorKind::Builtin(hir::Builtin::DebugTable) => {
                 self.write(&call.args["r"], lir::RuntimeFn::DebugTable, cx);
             }
+            hir::OperatorKind::Builtin(hir::Builtin::LoadTextFile) => {
+                self.load_text_file(call, cx);
+            }
             hir::OperatorKind::Update { .. } => {
                 let params = params_of(callee, &call.types);
                 let (function, _) = function(
@@ -785,12 +788,28 @@ impl<'a> FunctionBuilder<'a> {
                 | hir::Builtin::ToText
                 | hir::Builtin::ToApproximate
                 | hir::Builtin::ParseInteger
-                | hir::Builtin::ParseApproximate
-                | hir::Builtin::LoadTextFile,
+                | hir::Builtin::ParseApproximate,
             ) => {
                 unreachable!("`call` invokes only update operators")
             }
         }
+    }
+
+    /// `call load_text_file{path: …, out lines: …};`: the file's lines,
+    /// which the runtime reads into an array the statement holds, assigned
+    /// to the variable for `lines`.
+    fn load_text_file(&mut self, call: &hir::Call, cx: &mut Lowering) {
+        let path = self.place(&call.args["path"], cx);
+        let target = &call.updated["lines"];
+        let ty = self.assigned(target).0.clone();
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+        let lines = self.slot(layout(&ty));
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::LoadTextFile,
+            args: vec![lines.clone(), path, descriptor],
+        });
+        self.scoped = true;
+        self.store(target, lines, cx);
     }
 
     /// A call of the runtime function `function`, which writes `value`,
@@ -932,19 +951,7 @@ impl<'a> FunctionBuilder<'a> {
                 });
                 dst
             }
-            hir::Builtin::LoadTextFile => {
-                let path = self.place(&call.args["path"], cx);
-                let ty = self.program.result(call);
-                let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
-                let dst = self.slot(layout(&ty));
-                self.insts.push(lir::Inst::CallRuntime {
-                    function: lir::RuntimeFn::LoadTextFile,
-                    args: vec![dst.clone(), path, descriptor],
-                });
-                self.scoped = true;
-                dst
-            }
-            hir::Builtin::DebugValue | hir::Builtin::DebugTable => {
+            hir::Builtin::DebugValue | hir::Builtin::DebugTable | hir::Builtin::LoadTextFile => {
                 unreachable!("`{}` is an update operator", builtin.name())
             }
         }
