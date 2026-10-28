@@ -2280,7 +2280,7 @@ pub(crate) fn value_before_statements(span: Span) -> Diagnostic {
 }
 
 /// The rule for modes, for notes.
-pub(crate) const MODE_RULE: &str = "a parameter is `const` unless written `var`, before its name: the operator only reads its argument's value; a `var` parameter takes a variable, which the operator can read and assign, and a call marks that argument `var` too, before its name: `call grow{var r: cities};`";
+pub(crate) const MODE_RULE: &str = "a parameter is `const` unless written `var` or `out`, before its name: the operator only reads its argument's value; a `var` parameter takes a variable, which the operator can read and assign, an `out` one a variable it assigns before reading it, and a call marks that argument the same way, before its name: `call grow{var r: cities};`";
 
 /// Whose spelling of a mode `text` is.
 fn mode_origin(text: &str) -> Option<&'static str> {

@@ -314,15 +314,15 @@ mean and fixed the same way. In a heading, `per r` can follow an
 attribute's type (`Per`), `per` a contextual keyword recognized there
 before a name; looking for it leaves the whitespace after the type to what
 follows. The parser accepts it in every heading, and sema in an operator's
-parameters only. So with a mode, `var` or `const`, before an attribute's
-name (`Mode`), `const` a contextual keyword recognized there before a name
-and its `:`, which can come before an argument's name too
-(`Parser::moded_attribute`). Other languages' modes are parsed as one and
-fixed (P0038): C#'s `ref`, Swift's `inout` and Ada's `in out` and `in`
-before the name, and, in parameters and arguments, one after the `:`,
-before a type, as Swift writes `inout`, or before a value, as C#, Swift and
-Rust write `ref x`, `&x` and `&mut x`, which the fix moves before the
-name. Tutorial D's `UPDATES { … }` after the parameters is consumed into an
+parameters only. So with a mode, `var`, `const` or `out`, before an
+attribute's name (`Mode`), `const` and `out` contextual keywords
+recognized there before a name and its `:`, which can come before an
+argument's name too (`Parser::moded_attribute`). Other languages' modes
+are parsed as one and fixed (P0038): C#'s `ref`, Swift's `inout` and
+Ada's `in out` and `in` before the name, and, in parameters and
+arguments, one after the `:`, before a type, as Swift writes `inout` and
+Ada `out`, or before a value, as C#, Swift and Rust write `ref x`, `out
+x`, `&x` and `&mut x`, which the fix moves before the name. Tutorial D's `UPDATES { … }` after the parameters is consumed into an
 error node, whose fix writes `var` before each parameter it lists.
 
 `heading name := { … };` (`HeadingDecl`) is a definition, `heading` a
@@ -478,11 +478,13 @@ type it failed in (`Failure::Overflow`), so that reporting it needs no
 type from elsewhere.
 
 Each parameter has a mode (`hir::Parameter`, `hir::Mode`): `Const`, whose
-argument is a value, or `Var`, which takes a variable, which an update
-operator can read and assign through it (TTM RM Prescription 3). A call
-gives a `var` parameter a variable (`Call::updated`), of the program or
-local, or a `var` parameter of the caller's, and an assignment can assign
-one (`Target::Parameter`), which assigns its variable.
+argument is a value, `Var`, which takes a variable, which an update
+operator can read and assign through it (TTM RM Prescription 3), or
+`Out`, which takes a variable it assigns before reading it, and is
+otherwise `Var`. A call gives a `var` or `out` parameter a variable
+(`Call::updated`), of the program or local, or such a parameter of the
+caller's, and an assignment can assign one (`Target::Parameter`), which
+assigns its variable.
 
 A `per` parameter is no parameter in HIR: an operator sees the relation it
 refers to with the `per` parameters' values as attributes of its tuples,
@@ -523,11 +525,20 @@ an update operator that assigns such a variable of the program's,
 directly or through the operators it calls, is reported once every body
 is checked (`body::Deferred`, `deferred_checks`), as a call that recurs
 with ever larger types is, and so is a call that passes such a variable to
-a `var` parameter of an operator that uses it by its own name too, which
-would make a copy and the variable itself differ (A0053). A call's `var`
-arguments are checked where the call is, each a variable the body can
-assign, as an assignment's target is (`body::Statements::updated`), and
-each a different one.
+a `var` or `out` parameter of an operator that uses it by its own name
+too, which would make a copy and the variable itself differ (A0053). A
+call's `var` and `out` arguments are checked where the call is, each a
+variable the body can assign, as an assignment's target is
+(`body::Statements::updated`), and each a different one. `Statements`
+also knows which `out` parameters are assigned on every path to the
+statement it checks (`body::Outs`): each statement's reads of them, which
+names collect as they resolve, and a change that reads its target, such
+as `insert`, are reported if they come before (A0054), and then what the
+statement assigns, an assignment's target or an `out` argument, counts
+as assigned; an `if` assigns what both its branches do, `while` and
+`for` loops nothing, since their blocks may not run, and a `loop …
+while` what its block does, before its condition. One not assigned when
+the body ends is reported too (A0054), unless its reads already are.
 `Combination::DisjointChanges` is the union of the tuples changes remove,
 which conflict (R0009) if two remove the same one. An element's
 assignment, `a[i] := x`, is a pseudovariable's, which TTM makes shorthand
@@ -1089,7 +1100,7 @@ blocks: each block is a list of instructions (`Copy`, `Call`,
 `CallRuntime`, the boolean and integer `Unary` and `Binary`, `Unary`'s
 conversions of a count to an integer and of an array's position less 1 to
 an index, `Element` and `Increment` for loops and indexes, and `Address`
-for a variable passed to a `var` parameter) ending in a
+for a variable passed to a `var` or `out` parameter) ending in a
 terminator: `Return`, `Jump`, `Branch` or `Fail`. Instructions refer to memory through places: a data object, a
 stack slot, the parameter struct, or what the address in a slot points to
 (`Base::Indirect`, such as the tuple a loop is at), plus a path through
@@ -1139,8 +1150,8 @@ parameters' types in full, wrapped attributes too, as
 `pair{a: integer, b: integer}`. An update operator's
 function is numbered before its body is lowered, so a call of itself finds
 it. A read-only operator's computes its value, then stores it where the
-caller says (`Base::Result`). An update operator's `var` parameter is the
-address of its variable in the parameter struct, which the function copies
+caller says (`Base::Result`). An update operator's `var` or `out`
+parameter is the address of its variable in the parameter struct, which the function copies
 to a slot on entry, and reads and assigns the variable through
 (`Base::Indirect`); once the call ends, the caller checks each variable
 it passed against its keys. Sema evaluates every other call, so an

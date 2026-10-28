@@ -4775,6 +4775,16 @@ mod tests {
                 "operator f{r: any relation, of: integer per r} [];",
             ),
             (
+                "operator halved{out n: integer}: integer [ 1 ];",
+                "a read-only operator's parameter `n` can't be `out`",
+                "operator halved{n: integer}: integer [ 1 ];",
+            ),
+            (
+                "operator f{r: any relation, out of: integer per r} [];",
+                "the `per` parameter `of` can't be `out`",
+                "operator f{r: any relation, of: integer per r} [];",
+            ),
+            (
                 "var t: tuple { var a: integer };",
                 "only an operator's parameters have a mode",
                 "var t: tuple { a: integer };",
@@ -4802,8 +4812,29 @@ mod tests {
     fn arguments_are_marked_as_their_parameters_are() {
         const OPERATORS: &str = "var count := 1;\n\
              operator double{var n: integer} [ n := n * 2; ];\n\
-             operator show{n: integer} [ call debug_value{v: n}; ];\n";
+             operator show{n: integer} [ call debug_value{v: n}; ];\n\
+             operator set{out n: integer} [ n := 1; ];\n";
         for (call, message, fixed) in [
+            (
+                "call set{n: count};",
+                "the argument for `out n` is marked `out`, as the variable the call assigns",
+                "call set{out n: count};",
+            ),
+            (
+                "call set{var n: count};",
+                "the argument for `out n` is marked `out`, not `var`",
+                "call set{out n: count};",
+            ),
+            (
+                "call double{out n: count};",
+                "the argument for `var n` is marked `var`, not `out`",
+                "call double{var n: count};",
+            ),
+            (
+                "call show{out n: count};",
+                "`n` isn't an `out` parameter, so its argument isn't marked `out`",
+                "call show{n: count};",
+            ),
             (
                 "call double{n: count};",
                 "the argument for `var n` is marked `var`, as the variable the call updates",
@@ -4901,6 +4932,7 @@ mod tests {
         const OPERATORS: &str = "var count := 1;\n\
              var other := 2;\n\
              operator add{var a: integer, var b: integer} [ a := a + b; ];\n\
+             operator both{var a: integer, out b: integer} [ b := a; ];\n\
              operator reads{var n: integer} [ n := count + 1; ];\n\
              operator assigns{var n: integer} [ count := 3; n := 1; ];\n\
              operator through{var n: integer} [ call reads{var n: n}; ];\n\
@@ -4911,6 +4943,10 @@ mod tests {
             (
                 "call add{var a: count, var b: count};",
                 "`count` is passed to both `var a` and `var b`",
+            ),
+            (
+                "call both{var a: count, out b: count};",
+                "`count` is passed to both `var a` and `out b`",
             ),
             (
                 "call reads{var n: count};",
@@ -4946,6 +4982,84 @@ mod tests {
             "{OPERATORS}operator main{{}} [ call add{{var a: count, var b: other}}; call reads{{var n: other}}; call plus{{var a: count, by: count}}; ];"
         );
         assert!(analyze_str(&fine).is_ok(), "{:?}", messages(&fine));
+    }
+
+    #[test]
+    fn out_parameters_are_assigned_before_they_are_read() {
+        let body = |body: &str| {
+            format!(
+                "var g := 0;\noperator f{{x: integer, out n: integer}} [ {body} ];\noperator bump{{var n: integer}} [ n := n + 1; ];\noperator set{{out n: integer}} [ n := 1; ];{MAIN}"
+            )
+        };
+        // Assigned first, then read; on every path, as `if`'s branches
+        // both assign it, or a `loop … while`'s block, which runs once.
+        for ok in [
+            "n := 42; var y := n; n := y + 1;",
+            "if x > 0 then [ n := 1; ] else [ n := 2; ]; call debug_value{v: n};",
+            "if x > 0 then [ n := 1; ] else if x < 0 then [ n := 2; ] else [ n := 3; ];",
+            "loop [ n := 1; ] while n < 0;",
+            "call set{out n: n}; call bump{var n: n};",
+            "n := 1; n := n + 1;",
+        ] {
+            assert!(
+                analyze_str(&body(ok)).is_ok(),
+                "{ok}: {:?}",
+                messages(&body(ok))
+            );
+        }
+        // Read before it is assigned, as the value of a variable, by a
+        // change that reads it, by a `var` argument, in a condition, or in
+        // an `assign` block, whose values are computed before any is
+        // assigned.
+        for (read, at) in [
+            ("var y := n; n := y;", "n;"),
+            ("n := n + 1;", "n + 1"),
+            ("call bump{var n: n};", "n}"),
+            ("if n > 0 then [ n := 1; ] else [ n := 2; ];", "n > 0"),
+            (
+                "while x > 0 loop [ n := 1; ]; call debug_value{v: n};",
+                "n}",
+            ),
+            ("assign { n := 1; g := n; };", "n; }"),
+        ] {
+            let source = body(read);
+            let errors = errors(&source);
+            assert_eq!(
+                errors
+                    .iter()
+                    .map(|e| (e.code, e.message.as_str()))
+                    .collect::<Vec<_>>(),
+                [(
+                    Code::UnassignedOut,
+                    "the `out` parameter `n` is read before it is assigned"
+                )],
+                "{read}"
+            );
+            let span = errors[0].span();
+            assert_eq!(
+                span.start,
+                source.find(read).unwrap() + read.find(at).unwrap(),
+                "{read}"
+            );
+            // The fix makes it `var`, whose argument's value can be read.
+            assert!(
+                fix(&source).contains("operator f{x: integer, var n: integer}"),
+                "{read}"
+            );
+        }
+        // Not assigned on every path.
+        for path in [
+            "if x > 0 then [ n := 1; ];",
+            "while x > 0 loop [ n := 1; ];",
+            "for i in array [1] loop [ n := i; ];",
+            "call debug_value{v: x};",
+        ] {
+            assert_eq!(
+                messages(&body(path)),
+                ["the `out` parameter `n` isn't assigned on every path through `f`"],
+                "{path}"
+            );
+        }
     }
 
     #[test]

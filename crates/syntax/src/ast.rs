@@ -1392,27 +1392,44 @@ impl AttributeType {
         self.0.children().find_map(Per::cast)
     }
 
-    /// `var` or `const`, before a parameter's name, or another language's
-    /// mode, before the name or the type, which the parser reports.
+    /// `var`, `const` or `out`, before a parameter's name, or another
+    /// language's mode, before the name or the type, which the parser
+    /// reports.
     #[must_use]
     pub fn mode(&self) -> Option<Mode> {
         self.0.children().find_map(Mode::cast)
     }
 }
 
+/// What a mode says of a parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Said {
+    /// `const`: the operator only reads its argument's value.
+    Const,
+    /// `var`: the operator can read and assign its variable.
+    Var,
+    /// `out`: the operator assigns its variable before it reads it.
+    Out,
+}
+
 impl Mode {
-    /// The word, `var` or `const`, or another language's, such as `ref`.
+    /// The word, `var`, `const` or `out`, or another language's, such as
+    /// `ref`.
     /// Ada's `in out` is two.
     pub fn words(&self) -> impl Iterator<Item = SyntaxToken> {
         significant_tokens(&self.0)
     }
 
-    /// Whether it says `var`, as written or as another language writes it,
-    /// as every mode but `const` and Ada's `in` does.
+    /// What it says, as written or as another language writes it: `const`,
+    /// as Ada's `in` does too, `out`, or else `var`.
     #[must_use]
-    pub fn is_var(&self) -> bool {
+    pub fn says(&self) -> Said {
         let words: Vec<String> = self.words().map(|w| w.text().to_lowercase()).collect();
-        !matches!(words.as_slice(), [word] if word == "const" || word == "in")
+        match words.as_slice() {
+            [word] if word == "const" || word == "in" => Said::Const,
+            [word] if word == "out" => Said::Out,
+            _ => Said::Var,
+        }
     }
 
     /// The span to delete to remove it, with the whitespace after it, up
@@ -1604,8 +1621,9 @@ impl AttributeValue {
         self.0.children().find_map(Name::cast)
     }
 
-    /// `var` or `const`, before an argument's name, or another language's
-    /// mode, before the name or the value, which the parser reports.
+    /// `var`, `const` or `out`, before an argument's name, or another
+    /// language's mode, before the name or the value, which the parser
+    /// reports.
     #[must_use]
     pub fn mode(&self) -> Option<Mode> {
         self.0.children().find_map(Mode::cast)

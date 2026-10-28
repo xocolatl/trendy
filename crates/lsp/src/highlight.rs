@@ -71,7 +71,7 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
     let (parent, grandparent) = (above(0), above(1));
     // The contextual keywords: `type`, in `builtin type name;`, `key`,
     // `value` and `from`, `any` and `type`, in `any type`, `types`, `per`,
-    // a mode's `const`, `kind`, a load's `load`, `from`, `order`, `asc` and
+    // a mode's `const` and `out`, `kind`, a load's `load`, `from`, `order`, `asc` and
     // `desc`, a `for` loop's `in`, and `heading`.
     let keyword = match parent {
         Some(SyntaxKind::BuiltinType) => token.text() == "type",
@@ -627,7 +627,7 @@ mod tests {
     fn modes() {
         assert_eq!(
             highlight(
-                "operator f{const n: integer, var r: integer} [ call f{const n: 1, var r: r}; ];"
+                "operator f{const n: integer, out r: integer} [ call f{const n: 1, out r: r}; ];"
             ),
             [
                 ("operator", Class::Keyword, false),
@@ -635,7 +635,7 @@ mod tests {
                 ("const", Class::Keyword, false),
                 ("n", Class::Parameter, true),
                 ("integer", Class::Type, false),
-                ("var", Class::Keyword, false),
+                ("out", Class::Keyword, false),
                 ("r", Class::Parameter, true),
                 ("integer", Class::Type, false),
                 ("call", Class::Keyword, false),
@@ -643,7 +643,7 @@ mod tests {
                 ("const", Class::Keyword, false),
                 ("n", Class::Attribute, false),
                 ("1", Class::Number, false),
-                ("var", Class::Keyword, false),
+                ("out", Class::Keyword, false),
                 ("r", Class::Attribute, false),
                 ("r", Class::Parameter, false),
             ]

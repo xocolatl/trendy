@@ -162,6 +162,16 @@ operator discount_twice{var price: integer, percent: integer} [
     call discount{var price: price, percent: percent};
 ];
 
+/* An `out` parameter takes a variable whose value the operator never
+   reads: it assigns the parameter first, on every path, and reads it
+   only after, so the variable is a result. Two give `price_range` two
+   results. */
+operator price_range{r: relation menu_item, out low: integer, out high: integer} [
+    low := min{r: r, of: taxed{price: price}};
+    high := max{r: r, of: taxed{price: price}};
+    call show{label: "spread with VAT", value: high - low};
+];
+
 var totals := dishes extend { total := taxed{price: price} } remove {price};
 var affordable := under{limit: 1000}{dish};
 var plural := if count{r: dishes} = 1 then "dish" else "dishes";
@@ -245,4 +255,8 @@ operator main{} [
     call show{label: "discounted", value: price};
     call discount_twice{var price: price, percent: 10};
     call show{label: "discounted twice more", value: price};
+    var low := 0;
+    var high := 0;
+    call price_range{r: dishes, out low: low, out high: high};
+    call show{label: "cheapest and dearest", value: tuple { low: low, high: high }};
 ];

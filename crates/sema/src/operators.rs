@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use trendy_diag::{Diagnostic, Span};
 use trendy_hir as hir;
-use trendy_syntax::ast::{self, AstNode, Item, SourceFile, TypeExpr};
+use trendy_syntax::ast::{self, AstNode, Item, Said, SourceFile, TypeExpr};
 
 use crate::check::Lookup;
 use crate::types::{self, Origin, TypeParameters};
@@ -57,11 +57,15 @@ impl Signature {
         }
     }
 
-    /// Whether `name` is a `var` parameter, which the operator can assign.
-    pub(crate) fn is_var(&self, name: &str) -> bool {
-        self.params
-            .get(name)
-            .is_some_and(|p| p.mode == hir::Mode::Var)
+    /// The mode of the parameter `name`, if it is one with a type.
+    pub(crate) fn mode(&self, name: &str) -> Option<hir::Mode> {
+        self.params.get(name).map(|p| p.mode)
+    }
+
+    /// Whether `name` is a `var` or `out` parameter, which the operator can
+    /// assign.
+    pub(crate) fn updates(&self, name: &str) -> bool {
+        self.mode(name).is_some_and(|mode| mode != hir::Mode::Const)
     }
 
     /// Whether `name` is one of the parameters, with a type or without.
@@ -239,9 +243,9 @@ pub(crate) fn signatures(
                             continue;
                         };
                         if let Some(param) = seen.get_mut(ident.text())
-                            && param.mode == hir::Mode::Var
+                            && param.mode != hir::Mode::Const
                         {
-                            errors.push(errors::var_in_read_only(ident.text(), &mode, &ident));
+                            errors.push(errors::updated_in_read_only(ident.text(), &mode, &ident));
                             param.mode = hir::Mode::Const;
                         }
                     }
@@ -283,9 +287,9 @@ pub(crate) fn signatures(
 pub(crate) enum Param {
     /// An argument of this type.
     Value(hir::Type),
-    /// A variable of this type, which the call updates: a `var`
-    /// parameter's argument.
-    Variable(hir::Type),
+    /// A variable of this type, which the call updates: a `var` or `out`
+    /// parameter's argument, as the mode says.
+    Variable(hir::Type, hir::Mode),
     /// A relation of any heading, which `per` parameters are evaluated for
     /// each tuple of. The operator sees its tuples with their values as
     /// attributes, beside the tuples' own attributes, wrapped in one more,
@@ -314,7 +318,7 @@ pub(crate) struct Params {
 /// `any relation`. Those that are invalid are reported, and their names
 /// kept, as a parameter's all the same. Each has the mode written before
 /// its name, or is `const`; a `per` one, and the relation it refers to,
-/// can only be `const`, as is one reported for being `var`.
+/// can only be `const`, as is one reported for being `var` or `out`.
 pub(crate) fn params(
     heading: &ast::Heading,
     types: &mut Vec<hir::TypeParameter>,
@@ -342,19 +346,21 @@ pub(crate) fn params(
         else {
             continue;
         };
-        if !mode.is_var() {
-            continue;
-        }
+        let said = match mode.says() {
+            Said::Const => continue,
+            Said::Var => hir::Mode::Var,
+            Said::Out => hir::Mode::Out,
+        };
         let name = ident.text();
         let relation = per
             .iter()
             .find(|(_, r)| *r == name)
             .map(|(p, _)| p.as_str());
         if per.contains_key(name) || relation.is_some() {
-            errors.push(errors::var_with_per(name, relation, &mode, &ident));
+            errors.push(errors::updated_with_per(name, relation, &mode, &ident));
             continue;
         }
-        modes.insert(name.to_string(), hir::Mode::Var);
+        modes.insert(name.to_string(), said);
     }
     let seen = seen
         .into_iter()
@@ -488,8 +494,8 @@ fn typed_params(
 pub(crate) fn written(seen: &BTreeMap<String, hir::Parameter>) -> BTreeMap<String, Param> {
     let mut written = BTreeMap::new();
     for (name, hir::Parameter { ty, mode }) in seen {
-        if *mode == hir::Mode::Var {
-            written.insert(name.clone(), Param::Variable(ty.clone()));
+        if *mode != hir::Mode::Const {
+            written.insert(name.clone(), Param::Variable(ty.clone(), *mode));
             continue;
         }
         let wrapped = match ty {
@@ -638,7 +644,7 @@ pub(crate) fn params_text(params: &BTreeMap<String, Param>) -> String {
         .iter()
         .map(|(name, param)| match param {
             Param::Value(ty) => format!("{name}: {ty}"),
-            Param::Variable(ty) => format!("var {name}: {ty}"),
+            Param::Variable(ty, mode) => format!("{} {name}: {ty}", mode.word()),
             Param::Relation(_) => format!("{name}: any relation"),
             Param::Per { relation, ty } => format!("{name}: {ty} per {relation}"),
         })

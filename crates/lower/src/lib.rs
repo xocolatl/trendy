@@ -311,8 +311,8 @@ struct FunctionBuilder<'a> {
     /// The parameters of the operator it is, with their types, which have
     /// no type parameters in them.
     params: BTreeMap<String, hir::Parameter>,
-    /// The slot with the address of each `var` parameter's variable, which
-    /// the parameter struct holds, copied there on entry.
+    /// The slot with the address of each `var` or `out` parameter's
+    /// variable, which the parameter struct holds, copied there on entry.
     pointers: BTreeMap<String, lir::SlotId>,
     variable_data: &'a [lir::DataId],
     /// The local variables of the operator it is, with their types, which
@@ -391,7 +391,7 @@ fn placeholder() -> lir::Block {
 
 impl<'a> FunctionBuilder<'a> {
     /// The function `name`, of an operator with the parameters `params`,
-    /// with an entry block that copies the address of each `var`
+    /// with an entry block that copies the address of each `var` or `out`
     /// parameter's variable to a slot of its own.
     fn new(
         program: &'a hir::Program,
@@ -419,7 +419,7 @@ impl<'a> FunctionBuilder<'a> {
             .params
             .iter()
             .enumerate()
-            .filter(|(_, (_, p))| p.mode == hir::Mode::Var)
+            .filter(|(_, (_, p))| p.mode != hir::Mode::Const)
             .map(|(i, (name, _))| (i, name.clone()))
             .collect();
         for (index, name) in variables {
@@ -807,7 +807,7 @@ impl<'a> FunctionBuilder<'a> {
 
     /// The arguments of `call`, for `params`: a tuple, built in a stack
     /// slot in parameter name order, whose address is passed, if there are
-    /// any. Each `const` parameter's is the argument's value, and each `var`
+    /// any. Each `const` parameter's is the argument's value, and each other
     /// one's the address of its variable.
     fn arguments(
         &mut self,
@@ -828,7 +828,7 @@ impl<'a> FunctionBuilder<'a> {
                         layout: layout(&param.ty),
                     });
                 }
-                hir::Mode::Var => {
+                hir::Mode::Var | hir::Mode::Out => {
                     let src = self.holder(&call.updated[name]);
                     self.insts.push(lir::Inst::Address { dst, src });
                 }
@@ -1108,7 +1108,7 @@ impl<'a> FunctionBuilder<'a> {
     }
 
     /// The type and keys of the variable `target`, of the program or local,
-    /// or of a `var` parameter, which has none: its variable's are checked
+    /// or of a `var` or `out` parameter, which has none: its variable's are checked
     /// where it is passed.
     fn assigned(&self, target: &hir::Target) -> (&hir::Type, &[hir::Key]) {
         match target {
@@ -1176,7 +1176,7 @@ impl<'a> FunctionBuilder<'a> {
     }
 
     /// Where the variable `target`'s value is, of the program or local, or
-    /// a `var` parameter's variable.
+    /// a `var` or `out` parameter's variable.
     fn holder(&self, target: &hir::Target) -> lir::Place {
         match target {
             hir::Target::Variable(id) => lir::Place {
@@ -1192,7 +1192,7 @@ impl<'a> FunctionBuilder<'a> {
         }
     }
 
-    /// The variable of the `var` parameter `name`, through its address.
+    /// The variable of the `var` or `out` parameter `name`, through its address.
     fn pointee(&self, name: &str) -> lir::Place {
         lir::Place::whole(lir::Base::Indirect {
             slot: self.pointers[name],
@@ -2781,11 +2781,11 @@ fn params_of(op: &hir::Operator, types: &[hir::Type]) -> BTreeMap<String, hir::P
 }
 
 /// The parameter struct of a user operator, if it has parameters: each
-/// `const` one's value, and the address of each `var` one's variable.
+/// `const` one's value, and the address of each other one's variable.
 fn params_layout(params: &BTreeMap<String, hir::Parameter>) -> Option<lir::Layout> {
     let field = |p: &hir::Parameter| match p.mode {
         hir::Mode::Const => layout(&p.ty),
-        hir::Mode::Var => lir::Layout::Address,
+        hir::Mode::Var | hir::Mode::Out => lir::Layout::Address,
     };
     (!params.is_empty()).then(|| lir::Layout::Struct(params.values().map(field).collect()))
 }

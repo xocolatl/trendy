@@ -433,7 +433,7 @@ pub enum Inst {
     /// iterations, and so never overflows.
     Increment { place: Place },
     /// Store at `dst`, a [`Layout::Address`], the address of `src`: a
-    /// variable passed to a `var` parameter.
+    /// variable passed to a `var` or `out` parameter.
     Address { dst: Place, src: Place },
 }
 

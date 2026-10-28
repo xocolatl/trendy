@@ -39,9 +39,9 @@ body in square brackets `[]`, and a closing `;`.
 
 - **Parameters are a heading:** `{name: type, …}`, with each name unique and
   in any order. `main` has none, since nothing passes it arguments. An
-  update operator's parameter can be `var`, written before its name: the
-  operator can then assign the variable it is passed (see [`var`
-  parameters](#var-parameters)).
+  update operator's parameter can be `var` or `out`, written before its
+  name: the operator can then assign the variable it is passed (see [`var`
+  and `out` parameters](#var-and-out-parameters)).
 - **A body is a list of statements,** each ending with `;`: calls,
   assignments (see [Assignment](#assignment)), local variables'
   declarations (see [Local variables](#local-variables)), and in an update
@@ -52,7 +52,8 @@ body in square brackets `[]`, and a closing `;`.
   isn't a statement, as its value would go unused (P0035).
 - **Arguments are a tuple of the parameters:** `call greet{name: "Ada",
   count: 2};`. Every argument is named, every parameter gets one, and the
-  order doesn't matter. One for a `var` parameter is marked `var` too.
+  order doesn't matter. One for a `var` or `out` parameter is marked so
+  too.
 
 Following *The Third Manifesto*, operators are either read-only operators,
 which return a value and are used in expressions, or update operators, which
@@ -100,7 +101,7 @@ operator main{} [
 A tuple or relation value's attributes can be any expression, names
 included, as in `tuple { n: n }`; see [Tuples](#tuples).
 
-### `var` parameters
+### `var` and `out` parameters
 
 ```trendy
 var visits := 0;
@@ -109,13 +110,21 @@ operator add{var total: integer, const amount: integer} [
     total := total + amount;
 ];
 
+operator split{n: integer, out tens: integer, out units: integer} [
+    tens := n div 10;
+    units := n mod 10;
+];
+
 operator main{} [
-    call add{var total: visits, amount: 2};
-    call debug_value{v: visits};
+    call add{var total: visits, amount: 42};
+    var tens := 0;
+    var units := 0;
+    call split{n: visits, out tens: tens, out units: units};
+    call debug_value{v: tuple { tens: tens, units: units }};
 ];
 ```
 
-A parameter takes its argument in one of two modes, written before its
+A parameter takes its argument in one of three modes, written before its
 name:
 
 - **`const`, whether written or not,** is how a parameter takes its
@@ -129,28 +138,45 @@ name:
   read-only operator changes nothing but its own local variables, and
   neither a `per` parameter nor the relation it is evaluated for each
   tuple of can be (A0051).
+- **`out` takes a variable whose value is never read:** the operator
+  assigns the parameter before it reads it, and on every path, so the
+  variable is a result of the operator, as `tens` and `units` are
+  `split`'s. Reading one before it is assigned on every path to the read
+  is an error, as is a change that reads it, such as `insert`, or passing
+  it to a `var` parameter (A0054): to read the value it is passed, it is
+  `var`, which the fix makes it. So `[ n := 42; var x := n; … ]` is right,
+  and `[ var x := n; … ]` isn't. An operator that may end without
+  assigning one is an error too (A0054): an `if` without `else`, a `while`
+  loop and a `for` loop may not run their statements, so what only they
+  assign isn't assigned on every path, while a `loop [ … ] while c;` runs
+  its block at least once. Otherwise an `out` parameter is a `var` one:
+  only an update operator's, and the variable is assigned the
+  parameter's value when the operator ends.
 - **A call marks each argument as its parameter is,** before its name:
-  `var` for a `var` parameter, so that the call shows what it changes, and
-  `const` or nothing for another (A0052).
-- **A `var` argument is a whole variable** (A0026): one of the program's,
-  a local variable, or a `var` parameter of the operator calling, passed
-  on. Not an expression, a `const` parameter, an array's element, or a
-  variable that a `for` loop goes through or computes its array from.
+  `var` for a `var` parameter and `out` for an `out` one, so that the call
+  shows what it changes, and `const` or nothing for another (A0052).
+- **A `var` or `out` argument is a whole variable** (A0026): one of the
+  program's, a local variable, or a `var` or `out` parameter of the
+  operator calling, passed on. Not an expression, a `const` parameter, an
+  array's element, or a variable that a `for` loop goes through or
+  computes its array from.
 - **A variable has one name in a call** (A0053). It can't be passed to two
-  `var` parameters, nor to one of an operator that uses it by its own name
-  too, reading or assigning it, in its body or in an operator it calls:
-  what that name gave would depend on whether the parameter is a copy of
-  the variable or the variable itself, so neither is the rule. Another
-  argument can read it, as its value is computed before the call.
+  `var` or `out` parameters, nor to one of an operator that uses it by its
+  own name too, reading or assigning it, in its body or in an operator it
+  calls: what that name gave would depend on whether the parameter is a
+  copy of the variable or the variable itself, so neither is the rule.
+  Another argument can read it, as its value is computed before the
+  call.
 - **A variable's keys are checked when the call ends,** as it is assigned
   the parameter's value then (R0008).
 - **Other languages' spellings are fixed** (P0038): C#'s `ref`, Swift's
   `inout` and Ada's `in out` before a parameter's name are `var`, and
   Ada's `in` is `const`; a mode before a parameter's type, as Swift writes
-  `inout`, or before an argument's value, as C#'s `ref x`, Swift's `&x`
-  and Rust's `&mut x` are, is moved before the name; and Tutorial D's
-  `UPDATES { p }` is `var` before each parameter it lists. An argument
-  left unmarked, as Delphi and Ada write a call, is marked (A0052).
+  `inout` and Ada `out`, or before an argument's value, as C#'s `ref x`
+  and `out x`, Swift's `&x` and Rust's `&mut x` are, is moved before the
+  name; and Tutorial D's `UPDATES { p }` is `var` before each parameter it
+  lists. An argument left unmarked, as Delphi and Ada write a call, is
+  marked (A0052).
 
 ```trendy,error
 var visits := 0;
@@ -191,6 +217,25 @@ operator main{} [
 ```trendy,error
 operator add{ref total: integer, amount: integer} [
     total := total + amount;
+];
+
+operator main{} [];
+```
+
+```trendy,error
+operator count_up{out n: integer} [
+    var start := n;
+    n := start + 1;
+];
+
+operator main{} [];
+```
+
+```trendy,error
+operator sign{x: integer, out s: text} [
+    if x < 0 then [
+        s := "negative";
+    ];
 ];
 
 operator main{} [];
@@ -1938,9 +1983,9 @@ operator main{} [
   (P0036).
 - **Only variables are assigned,** and an array variable's elements (see
   [Changing an element](#changing-an-element)), and an update operator's
-  `var` parameters, which assign the variables they are passed (see [`var`
-  parameters](#var-parameters)). Its other parameters are `const`, and an
-  operator is not a variable (A0026).
+  `var` and `out` parameters, which assign the variables they are passed
+  (see [`var` and `out` parameters](#var-and-out-parameters)). Its other
+  parameters are `const`, and an operator is not a variable (A0026).
 - **The shorthands are for relation variables,** but for `update`, which
   is also for tuple variables, and an element's assignment, for array
   variables. Each means an assignment:
@@ -3607,7 +3652,9 @@ line after a comment on its own line, such as a file's header, is kept.
 | `X := Y, Y := X`, a multiple assignment | `assign { x := y; y := x; };` |
 | `(params) { body }` | `{params} [body]` |
 | `ref int n`, `n: inout Int`, `n : in out Integer`, `UPDATES { N }` | `var n: integer`, before the name |
+| `out int n`, `n : out Integer` | `out n: integer`, before the name |
 | `f(ref x)`, `f(&x)`, `f(&mut x)`, `f(x)` for Delphi's `var` parameter | `call f{var n: x};` |
+| `f(out x)`, `f(x)` for Delphi's `out` parameter | `call f{out n: x};` |
 | `fn same<T>(a: T, b: T)`, `same<T>(a: T, b: T)` | `operator same{a: T, b: T} types { T: any type }` |
 | `any`, `anyelement` | `any type` |
 | `SUM (SP, QTY)`, an attribute for each tuple | `of: integer per r`, an expression of each tuple's attributes |

@@ -134,6 +134,7 @@ codes! {
     MisplacedMode => "A0051",
     ArgumentMode => "A0052",
     Aliased => "A0053",
+    UnassignedOut => "A0054",
     Overflow => "R0001",
     DivisionByZero => "R0002",
     OutOfMemory => "R0003",

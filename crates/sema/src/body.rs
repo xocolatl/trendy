@@ -1,7 +1,7 @@
 //! Update operators' bodies: their statements, their local variables, and
 //! the expressions in them.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use trendy_diag::{CodeKind, Diagnostic, Span};
 use trendy_hir as hir;
@@ -112,10 +112,50 @@ pub(crate) fn body(
         locals: Locals::default(),
         deferred,
         frozen: Vec::new(),
+        outs: Outs::default(),
     };
     let checked: Vec<ast::Statement> = body.statements().collect();
     let block = statements.block(&checked, errors)?;
-    Some((statements.locals.finish(), block))
+    // Every `out` parameter is assigned, whichever way the body goes.
+    let signature = cx.operators.get(within);
+    let mut ok = true;
+    for (name, param) in &signature.params {
+        if param.mode != hir::Mode::Out
+            || statements.outs.assigned.contains(name)
+            || statements.outs.reported.contains(name)
+        {
+            continue;
+        }
+        if let Some(ident) = signature
+            .param_decl(name)
+            .and_then(|d| d.name())
+            .and_then(|n| n.ident())
+        {
+            errors.push(errors::unassigned_out(name, &signature.name, &ident));
+            ok = false;
+        }
+    }
+    ok.then(|| (statements.locals.finish(), block))
+}
+
+/// What is known of an update operator's `out` parameters where the
+/// statement being checked is: which are assigned on every path to it, and
+/// where it reads and assigns them, which [`Statements::settle`] then
+/// reports and counts.
+#[derive(Default)]
+pub(crate) struct Outs {
+    /// Those assigned on every path to the statement.
+    assigned: BTreeSet<String>,
+    /// Each read of one in the statement, and where.
+    reads: Vec<(String, Span)>,
+    /// Each the statement assigns, and where it names it: an assignment's
+    /// target, which a change such as `insert` reads, or an `out`
+    /// argument.
+    targets: Vec<(String, Span)>,
+    /// Those read before they are assigned, already reported: making one
+    /// `var`, as the fix does, makes assigning it on every path needless
+    /// too.
+    reported: BTreeSet<String>,
 }
 
 /// Checks the statements of the update operator `within`, each block's
@@ -129,6 +169,9 @@ struct Statements<'a, 'b> {
     /// What each `for` loop the statement being checked is in keeps from
     /// changing, outermost first.
     frozen: Vec<Frozen>,
+    /// The `out` parameters assigned on every path to the statement being
+    /// checked, and its reads of them.
+    outs: Outs,
 }
 
 impl Statements<'_, '_> {
@@ -138,6 +181,66 @@ impl Statements<'_, '_> {
             within: self.within,
             locals: &mut self.locals,
             frozen: &self.frozen,
+            outs: &mut self.outs,
+        }
+    }
+
+    /// Report each read of an `out` parameter in the statement just
+    /// checked, `statement`, before it is assigned on every path to there,
+    /// then count each it assigns as assigned from then on: if it has
+    /// errors, each it names as assigned. A change to one that reads it,
+    /// such as `insert`, reads it where it names it.
+    fn settle(&mut self, statement: Option<&hir::Statement>, errors: &mut Vec<Diagnostic>) {
+        let targets = std::mem::take(&mut self.outs.targets);
+        let Some(statement) = statement else {
+            self.flush(errors);
+            self.outs
+                .assigned
+                .extend(targets.into_iter().map(|(name, _)| name));
+            return;
+        };
+        let assigned: Vec<&hir::Target> = match statement {
+            hir::Statement::Assign(assignments) => {
+                for assignment in assignments {
+                    let hir::Target::Parameter(name) = &assignment.target else {
+                        continue;
+                    };
+                    if ops::targets_read(&assignment.value).contains(&assignment.target)
+                        && !self.outs.reads.iter().any(|(n, _)| n == name)
+                        && let Some((_, span)) = targets.iter().find(|(n, _)| n == name)
+                    {
+                        self.outs.reads.push((name.clone(), *span));
+                    }
+                }
+                assignments.iter().map(|a| &a.target).collect()
+            }
+            hir::Statement::Call(call) => call.updated.values().collect(),
+            _ => Vec::new(),
+        };
+        self.flush(errors);
+        let signature = self.cx.operators.get(self.within);
+        for target in assigned {
+            if let hir::Target::Parameter(name) = target
+                && signature.mode(name) == Some(hir::Mode::Out)
+            {
+                self.outs.assigned.insert(name.clone());
+            }
+        }
+    }
+
+    /// Report each read of an `out` parameter checked since the last,
+    /// before it is assigned on every path to here.
+    fn flush(&mut self, errors: &mut Vec<Diagnostic>) {
+        let signature = self.cx.operators.get(self.within);
+        let mut reported: Vec<Span> = Vec::new();
+        for (name, span) in std::mem::take(&mut self.outs.reads) {
+            if self.outs.assigned.contains(&name) || reported.contains(&span) {
+                continue;
+            }
+            reported.push(span);
+            let decl = signature.param_decl(&name);
+            errors.push(errors::read_before_assigned(&name, span, decl.as_ref()));
+            self.outs.reported.insert(name);
         }
     }
 
@@ -170,7 +273,7 @@ impl Statements<'_, '_> {
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Statement> {
         let (cx, within) = (self.cx, self.within);
-        match stmt {
+        let checked = match stmt {
             ast::Statement::Call(stmt) => self.call(stmt, errors),
             ast::Statement::Assign(stmt) => {
                 let clauses: Vec<_> = stmt.clauses().collect();
@@ -183,25 +286,32 @@ impl Statements<'_, '_> {
                 None
             }
             ast::Statement::Var(decl) => self.declaration(decl, errors),
-            ast::Statement::If(stmt) => self.if_stmt(stmt, errors),
-            ast::Statement::While(stmt) => self.loop_stmt(
-                stmt.keyword(),
-                stmt.condition(),
-                stmt.body(),
-                hir::Check::Before,
-                stmt.span(),
-                errors,
-            ),
-            ast::Statement::Loop(stmt) => self.loop_stmt(
-                stmt.while_keyword(),
-                stmt.condition(),
-                stmt.body(),
-                hir::Check::After,
-                stmt.span(),
-                errors,
-            ),
-            ast::Statement::For(stmt) => self.for_stmt(stmt, errors),
-        }
+            // These settle their parts as they check them.
+            ast::Statement::If(stmt) => return self.if_stmt(stmt, errors),
+            ast::Statement::While(stmt) => {
+                return self.loop_stmt(
+                    stmt.keyword(),
+                    stmt.condition(),
+                    stmt.body(),
+                    hir::Check::Before,
+                    stmt.span(),
+                    errors,
+                );
+            }
+            ast::Statement::Loop(stmt) => {
+                return self.loop_stmt(
+                    stmt.while_keyword(),
+                    stmt.condition(),
+                    stmt.body(),
+                    hir::Check::After,
+                    stmt.span(),
+                    errors,
+                );
+            }
+            ast::Statement::For(stmt) => return self.for_stmt(stmt, errors),
+        };
+        self.settle(checked.as_ref(), errors);
+        checked
     }
 
     /// `for x in a loop [ … ];`: the block run for each element of the
@@ -220,13 +330,16 @@ impl Statements<'_, '_> {
         if statements.is_empty() {
             errors.push(errors::empty_for(stmt.span(), &body));
         }
-        let (array, ty) = {
+        let checked = {
             let mut names = self.names();
             let mut checker = Checker::new(&mut names);
-            let array = checker.expr(&written, None, errors)?;
-            let ty = checker.ty(&array);
-            (array, ty)
+            checker.expr(&written, None, errors).map(|array| {
+                let ty = checker.ty(&array);
+                (array, ty)
+            })
         };
+        self.flush(errors);
+        let (array, ty) = checked?;
         let hir::Type::Array(element) = ty else {
             errors.push(errors::not_iterable(&written, &ty));
             return None;
@@ -257,6 +370,8 @@ impl Statements<'_, '_> {
         let (id, mut ok) =
             self.locals
                 .enter_loop(&variable, local, statements.iter().cloned(), op, errors);
+        // The block may not run, so what it assigns isn't assigned after.
+        let before = self.outs.assigned.clone();
         let mut checked = Vec::new();
         for statement in &statements {
             match self.statement(statement, errors) {
@@ -264,6 +379,7 @@ impl Statements<'_, '_> {
                 None => ok = false,
             }
         }
+        self.outs.assigned = before;
         let locals = self.locals.exit();
         self.frozen.pop();
         let body = hir::Block {
@@ -332,11 +448,10 @@ impl Statements<'_, '_> {
         if !signature.valid {
             return None;
         }
-        let call = Checker::new(&mut self.names()).arguments(
-            Written::Arguments(&args),
-            signature,
-            errors,
-        )?;
+        let call =
+            Checker::new(&mut self.names()).arguments(Written::Arguments(&args), signature, errors);
+        self.outs_passed(&args, signature);
+        let call = call?;
         if !self.updated(&call, &args, signature.id, errors) {
             return None;
         }
@@ -375,11 +490,38 @@ impl Statements<'_, '_> {
         Some(hir::Statement::Call(call))
     }
 
+    /// Count each argument in `args` for an `out` parameter of `callee`
+    /// that is one of this operator's `out` parameters as assigned by the
+    /// call, not read.
+    fn outs_passed(&mut self, args: &ast::Arguments, callee: &Signature) {
+        for arg in args.named() {
+            let (Some(param), Some(value)) = (arg.name().and_then(|n| n.ident()), arg.value())
+            else {
+                continue;
+            };
+            if callee.mode(param.text()) != Some(hir::Mode::Out) {
+                continue;
+            }
+            let span = value.span();
+            let within = |s: &Span| span.start <= s.start && s.end <= span.end;
+            let passed: Vec<(String, Span)> = self
+                .outs
+                .reads
+                .iter()
+                .filter(|(_, s)| within(s))
+                .cloned()
+                .collect();
+            self.outs.reads.retain(|(_, s)| !within(s));
+            self.outs.targets.extend(passed);
+        }
+    }
+
     /// Whether the variables `call`, of the operator `callee`, with the
-    /// arguments `args`, updates, its `var` parameters' arguments, can be:
-    /// each one the body can assign, and a different one, after reporting
-    /// why not. Whether the operator called reads or assigns one that is
-    /// the program's itself is checked once every body is.
+    /// arguments `args`, updates, its `var` and `out` parameters'
+    /// arguments, can be: each one the body can assign, and a different
+    /// one, after reporting why not. Whether the operator called reads or
+    /// assigns one that is the program's itself is checked once every body
+    /// is.
     fn updated(
         &mut self,
         call: &hir::Call,
@@ -395,10 +537,11 @@ impl Statements<'_, '_> {
             else {
                 continue;
             };
-            let param = ident.text();
-            let Some(target) = call.updated.get(param) else {
+            let Some(target) = call.updated.get(ident.text()) else {
                 continue;
             };
+            let mode = self.cx.operators.get(callee).mode(ident.text());
+            let param = format!("{} {}", mode.map_or("var", hir::Mode::word), ident.text());
             let name = match target {
                 hir::Target::Variable(id) => self.cx.variables[id.0]
                     .as_ref()
@@ -412,17 +555,17 @@ impl Statements<'_, '_> {
                 continue;
             }
             if let Some((_, first, earlier)) = passed.iter().find(|(t, ..)| *t == target) {
-                errors.push(errors::passed_twice(&name, first, param, span, *earlier));
+                errors.push(errors::passed_twice(&name, first, &param, span, *earlier));
                 ok = false;
                 continue;
             }
-            passed.push((target, param.to_string(), span));
+            passed.push((target, param.clone(), span));
             if let hir::Target::Variable(variable) = target {
                 self.deferred.passed.push(Passed {
                     callee,
                     variable: *variable,
                     name,
-                    param: param.to_string(),
+                    param,
                     span,
                 });
             }
@@ -456,7 +599,25 @@ impl Statements<'_, '_> {
             errors.push(errors::endless_loop(&written));
         }
         let statements: Vec<ast::Statement> = body.statements().collect();
-        let block = self.block(&statements, errors);
+        let block = match check {
+            // The block may not run, so what it assigns isn't assigned
+            // after; the condition is computed before it.
+            hir::Check::Before => {
+                self.flush(errors);
+                let before = self.outs.assigned.clone();
+                let block = self.block(&statements, errors);
+                self.outs.assigned = before;
+                block
+            }
+            // The block runs at least once, before the condition.
+            hir::Check::After => {
+                let condition_reads = std::mem::take(&mut self.outs.reads);
+                let block = self.block(&statements, errors);
+                self.outs.reads = condition_reads;
+                self.flush(errors);
+                block
+            }
+        };
         Some(hir::Statement::Loop(condition?, block?, check))
     }
 
@@ -479,16 +640,27 @@ impl Statements<'_, '_> {
         };
         let condition =
             Checker::new(&mut self.names()).expr(&condition_expr, Some(&boolean), errors);
+        self.flush(errors);
         let taken = match &condition {
             Some(hir::Expr::Constant(hir::Value::Boolean(taken))) => Some(*taken),
             _ => None,
         };
+        // What the branch taken assigns is assigned after: what both do,
+        // unless the condition says which.
+        let before = self.outs.assigned.clone();
         let then = self.branch(
             Some(ast::ElseBranch::Block(then_block)),
             taken == Some(false),
             errors,
         );
+        let after_then = std::mem::replace(&mut self.outs.assigned, before);
         let otherwise = self.branch(stmt.else_branch(), taken == Some(true), errors);
+        let after_otherwise = std::mem::take(&mut self.outs.assigned);
+        self.outs.assigned = match taken {
+            Some(true) => after_then,
+            Some(false) => after_otherwise,
+            None => after_then.intersection(&after_otherwise).cloned().collect(),
+        };
         Some(hir::Statement::If(condition?, then?, otherwise?))
     }
 
@@ -777,6 +949,9 @@ pub(crate) struct BodyNames<'a, 'b> {
     /// What the `for` loops the statement being checked is in keep from
     /// changing.
     frozen: &'a [Frozen],
+    /// Where the statement being checked reads and assigns the operator's
+    /// `out` parameters.
+    outs: &'a mut Outs,
 }
 
 impl BodyNames<'_, '_> {
@@ -796,6 +971,9 @@ impl Names for BodyNames<'_, '_> {
 
     fn resolve(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {
         if let Some(lookup) = self.signature().parameter(name) {
+            if self.signature().mode(name) == Some(hir::Mode::Out) {
+                self.outs.reads.push((name.to_string(), span));
+            }
             return lookup;
         }
         match self.locals.find(name) {
@@ -917,9 +1095,13 @@ impl BodyNames<'_, '_> {
     ) -> Option<Assignee> {
         let cx = self.cx;
         let signature = self.signature();
-        if signature.is_var(name) {
+        if signature.updates(name) {
             let ty = signature.params[name].ty.clone();
-            return Some(Assignee::parameter(name, ty, signature.param_origin(name)));
+            let assignee = Assignee::parameter(name, ty, signature.param_origin(name));
+            if signature.mode(name) == Some(hir::Mode::Out) {
+                self.outs.targets.push((name.to_string(), span));
+            }
+            return Some(assignee);
         }
         if signature.is_parameter(name) {
             let hidden = cx.variable_ids.contains_key(name);

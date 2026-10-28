@@ -336,9 +336,10 @@ pub enum SyntaxKind {
     /// tuple of the argument for `r`. `per` is a contextual keyword, an
     /// identifier elsewhere.
     Per,
-    /// `var` or `const` before a parameter's name, saying how it takes its
-    /// argument, or before an argument's name, saying how it is given.
-    /// `const` is a contextual keyword, an identifier elsewhere.
+    /// `var`, `const` or `out` before a parameter's name, saying how it
+    /// takes its argument, or before an argument's name, saying how it is
+    /// given. `const` and `out` are contextual keywords, identifiers
+    /// elsewhere.
     Mode,
     /// `tuple { name: type, … }`
     TupleType,

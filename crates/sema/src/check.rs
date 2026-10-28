@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use trendy_diag::{CodeKind, Diagnostic, Span, edit_distance};
 use trendy_hir as hir;
 use trendy_syntax::SyntaxToken;
-use trendy_syntax::ast::{self, AstNode, AttributeValue, Expr};
+use trendy_syntax::ast::{self, AstNode, AttributeValue, Expr, Said};
 
 use crate::operators::{Operators, Param, Signature};
 use crate::ops::{self, Operator, Resolved};
@@ -840,10 +840,12 @@ impl<'a> Checker<'a> {
             }
         }
 
-        let variables: BTreeMap<&str, Expr> = pending
+        let variables: BTreeMap<&str, (Expr, hir::Mode)> = pending
             .iter()
-            .filter(|(_, _, p)| matches!(p, Param::Variable(_)))
-            .map(|(value, name, _)| (*name, value.clone()))
+            .filter_map(|(value, name, p)| match p {
+                Param::Variable(_, mode) => Some((*name, (value.clone(), *mode))),
+                _ => None,
+            })
             .collect();
         let checked = self.typed_arguments(pending, signature, errors);
         // A lone unnamed argument is reported, with a fix, as that parameter.
@@ -885,19 +887,19 @@ impl<'a> Checker<'a> {
         loop {
             let stage = |param: &Param| match param {
                 Param::Per { relation, .. } if !relations.contains_key(relation) => Stage::Waiting,
-                Param::Value(ty) | Param::Variable(ty) | Param::Per { ty, .. }
+                Param::Value(ty) | Param::Variable(ty, _) | Param::Per { ty, .. }
                     if types.know(ty) =>
                 {
                     Stage::Ready
                 }
                 Param::Value(hir::Type::Parameter(_))
-                | Param::Variable(hir::Type::Parameter(_))
+                | Param::Variable(hir::Type::Parameter(_), _)
                 | Param::Per {
                     ty: hir::Type::Parameter(_),
                     ..
                 }
                 | Param::Relation(_) => Stage::Bare,
-                Param::Value(_) | Param::Variable(_) | Param::Per { .. } => Stage::Structured,
+                Param::Value(_) | Param::Variable(..) | Param::Per { .. } => Stage::Structured,
             };
             // Those whose parameters' types are known are checked against
             // them. An unknown type parameter expects nothing of its
@@ -915,7 +917,7 @@ impl<'a> Checker<'a> {
             pending = rest;
             for (value, name, param) in checked_now {
                 let checked = match param {
-                    Param::Value(ty) | Param::Variable(ty) => {
+                    Param::Value(ty) | Param::Variable(ty, _) => {
                         self.typed_argument(&value, name, ty, None, &mut types, errors)
                     }
                     Param::Per { relation, ty } => {
@@ -1971,8 +1973,9 @@ pub(crate) struct Assigned<'a> {
 }
 
 /// Whether `arg`, the argument for the parameter `name`, `param`, of
-/// `signature`, is marked as the parameter is: `var` for a `var` one, and
-/// `const` or nothing for another; or `false`, after reporting it.
+/// `signature`, is marked as the parameter is: `var` for a `var` one,
+/// `out` for an `out` one, and `const` or nothing for another; or `false`,
+/// after reporting it.
 fn marked(
     arg: &AttributeValue,
     name: &str,
@@ -1981,11 +1984,16 @@ fn marked(
     errors: &mut Vec<Diagnostic>,
 ) -> bool {
     let mode = match param {
-        Param::Variable(_) => hir::Mode::Var,
+        Param::Variable(_, mode) => *mode,
         Param::Value(_) | Param::Relation(_) | Param::Per { .. } => hir::Mode::Const,
     };
     let written = arg.mode();
-    if written.as_ref().is_some_and(ast::Mode::is_var) == (mode == hir::Mode::Var) {
+    let said = match written.as_ref().map(ast::Mode::says) {
+        None | Some(Said::Const) => hir::Mode::Const,
+        Some(Said::Var) => hir::Mode::Var,
+        Some(Said::Out) => hir::Mode::Out,
+    };
+    if said == mode {
         return true;
     }
     errors.push(errors::argument_mode(
@@ -1999,16 +2007,17 @@ fn marked(
 }
 
 /// The variables a call updates: the arguments in `args`, checked, for its
-/// `var` parameters, written as `variables` has them, which are taken out
-/// of `args`. `None` after reporting each that isn't a variable.
+/// `var` and `out` parameters, written, with their modes, as `variables`
+/// has them, which are taken out of `args`. `None` after reporting each
+/// that isn't a variable.
 fn updated(
-    variables: &BTreeMap<&str, Expr>,
+    variables: &BTreeMap<&str, (Expr, hir::Mode)>,
     args: &mut BTreeMap<String, hir::Expr>,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<BTreeMap<String, hir::Target>> {
     let mut updated = BTreeMap::new();
     let mut ok = true;
-    for (name, written) in variables {
+    for (name, (written, mode)) in variables {
         let Some(arg) = args.remove(*name) else {
             continue;
         };
@@ -2017,7 +2026,7 @@ fn updated(
             hir::Expr::Local(id) => hir::Target::Local(id),
             hir::Expr::Parameter(parameter) => hir::Target::Parameter(parameter),
             _ => {
-                errors.push(errors::argument_not_a_variable(name, written));
+                errors.push(errors::argument_not_a_variable(name, *mode, written));
                 ok = false;
                 continue;
             }
@@ -2037,7 +2046,7 @@ fn missing_arguments(missing: &[&str], signature: &Signature, written: Written) 
             // Nor is there a variable to give a `var` parameter.
             let ty = match &signature.written[name] {
                 Param::Value(ty) | Param::Per { ty, .. } => Some(ty),
-                Param::Relation(_) | Param::Variable(_) => None,
+                Param::Relation(_) | Param::Variable(..) => None,
             };
             (name, ty.filter(|ty| ty.parameters().next().is_none()))
         })

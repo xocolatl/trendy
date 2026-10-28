@@ -4107,13 +4107,14 @@ impl<'a> Parser<'a> {
 
     /// The mode starting at the significant token `n` from the next one,
     /// if one does, before a parameter's or an argument's name and its
-    /// `:`: `var` or `const`, in any case, or another language's word for
-    /// one, C#'s `ref`, Swift's `inout`, or Ada's `in out` or `in`.
+    /// `:`: `var`, `const` or `out`, in any case, or another language's word
+    /// for one, C#'s `ref`, Swift's `inout`, or Ada's `in out` or `in`.
     fn mode_at(&mut self, n: usize) -> Option<ModeWords> {
         let word =
             |f: Found, word: &str| f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case(word);
         let first = self.nth_found(n)?;
-        let mode = if first.spells(SyntaxKind::VarKw) || word(first, "const") {
+        let mode = if first.spells(SyntaxKind::VarKw) || word(first, "const") || word(first, "out")
+        {
             ModeWords {
                 count: 1,
                 foreign: None,
@@ -4156,13 +4157,9 @@ impl<'a> Parser<'a> {
                 let text = &self.source[span.start..span.end];
                 self.errors.push(errors::mode_spelling(text, span, trendy));
             }
-            None if first.kind == SyntaxKind::Ident && first.text != "const" => {
-                let keyword = if first.spells(SyntaxKind::VarKw) {
-                    "var"
-                } else {
-                    "const"
-                };
-                self.errors.push(errors::miscased_keyword(first, keyword));
+            None if first.kind == SyntaxKind::Ident && first.text != first.text.to_lowercase() => {
+                let keyword = first.text.to_lowercase();
+                self.errors.push(errors::miscased_keyword(first, &keyword));
             }
             None => {}
         }
@@ -4170,15 +4167,19 @@ impl<'a> Parser<'a> {
     }
 
     /// Another language's mode, next, written where trendy writes none, in
-    /// `attribute`: before a parameter's type, as Swift's `inout T`, or
-    /// before an argument's value, as C#'s `ref x`, Swift's `&x` and Rust's
-    /// `&mut x`, and `var` or `const` there too.
+    /// `attribute`: before a parameter's type, as Swift's `inout T` and
+    /// Ada's `out T`, or before an argument's value, as C#'s `ref x` and
+    /// `out x`, Swift's `&x` and Rust's `&mut x`, and `var` or `const`
+    /// there too.
     fn misplaced_mode(&mut self, attribute: SyntaxKind) -> Option<ModeWords> {
         let word = |f: Option<Found>, word: &str| {
             f.is_some_and(|f| f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case(word))
         };
         let first = self.found()?;
-        let (count, foreign) = if first.spells(SyntaxKind::VarKw) || word(Some(first), "const") {
+        let (count, foreign) = if first.spells(SyntaxKind::VarKw)
+            || word(Some(first), "const")
+            || word(Some(first), "out")
+        {
             (1, None)
         } else if word(Some(first), "ref") || word(Some(first), "inout") {
             (1, Some("var"))
@@ -4675,7 +4676,7 @@ fn is_skipped(kind: SyntaxKind) -> bool {
 mod tests {
     use super::*;
     use trendy_diag::Code;
-    use trendy_syntax::ast::{AstNode, Clause, Expr, Statement, TypeExpr};
+    use trendy_syntax::ast::{AstNode, Clause, Expr, Said, Statement, TypeExpr};
     use trendy_syntax::outline;
 
     fn parse_str(source: &str) -> Parse {
@@ -6004,8 +6005,7 @@ SourceFile
 
     #[test]
     fn modes_are_before_names() {
-        let source =
-            "operator f{var r: integer, const n: integer} [ call f{var r: x, const n: 1}; ];";
+        let source = "operator f{var r: integer, const n: integer, out m: integer} [ call f{var r: x, const n: 1, out m: y}; ];";
         let parse = parse_str(source);
         assert!(parse.errors.is_empty(), "{:?}", parse.errors);
         let op = parse.tree.operators().next().unwrap();
@@ -6018,26 +6018,35 @@ SourceFile
                     .map_or_else(String::new, |m| m.syntax().text().to_string())
             })
             .collect();
-        assert_eq!(modes, ["var", "const"]);
+        assert_eq!(modes, ["var", "const", "out"]);
         let Some(Statement::Call(call)) = op.body().unwrap().statements().next() else {
             panic!("a call");
         };
-        let args: Vec<(String, bool)> = call
+        let args: Vec<(String, Said)> = call
             .arguments()
             .unwrap()
             .named()
             .map(|a| {
                 let mode = a.mode().unwrap();
-                (a.name().unwrap().syntax().text().to_string(), mode.is_var())
+                (a.name().unwrap().syntax().text().to_string(), mode.says())
             })
             .collect();
-        assert_eq!(args, [("r".to_string(), true), ("n".to_string(), false)]);
+        assert_eq!(
+            args,
+            [
+                ("r".to_string(), Said::Var),
+                ("n".to_string(), Said::Const),
+                ("m".to_string(), Said::Out),
+            ]
+        );
         // As an expression's, a call's arguments can have modes too.
         assert!(messages("var x := f{const n: 1};").is_empty());
-        // `const` and `var` are names elsewhere, and `const` before a
-        // name without its `:` is no mode.
-        assert!(messages("var x := tuple { const: 1 };").is_empty());
-        assert!(messages("operator f{const: integer} [];").is_empty());
+        // `const` and `out` are names elsewhere, and either before a name
+        // without its `:` is no mode.
+        assert!(messages("var x := tuple { const: 1, out: 2 };").is_empty());
+        assert!(
+            messages("operator f{const: integer, out: integer} [ call f{out: 1}; ];").is_empty()
+        );
     }
 
     #[test]
@@ -6067,6 +6076,21 @@ SourceFile
                 "operator f{VAR n: integer} [];",
                 "`VAR` is not a keyword; write `var`",
                 "operator f{var n: integer} [];",
+            ),
+            (
+                "operator f{OUT n: integer} [];",
+                "`OUT` is not a keyword; write `out`",
+                "operator f{out n: integer} [];",
+            ),
+            (
+                "operator f{n: out integer} [];",
+                "`out` goes before the parameter's name, not its type",
+                "operator f{out n: integer} [];",
+            ),
+            (
+                "operator main{} [ call f{n: out x}; ];",
+                "`out` goes before the argument's name, not its value",
+                "operator main{} [ call f{out n: x}; ];",
             ),
             (
                 "operator f{n: inout integer} [];",

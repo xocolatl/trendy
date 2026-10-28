@@ -167,12 +167,41 @@ fn variables() {
     );
 }
 
+/// What `examples/operators.trendy` writes last, of its operators with
+/// `var` and `out` parameters.
+const PARAMETERS: [&str; 16] = [
+    // `var` parameters: a local relation with a dish added, the
+    // program's with another, and a price discounted by 10%, then
+    // twice more.
+    "┌──────────────┬─────────┬───────┐",
+    "│ country      │ dish    │ price │",
+    "├──────────────┼─────────┼───────┤",
+    "│ Japan        │ ramen   │   900 │",
+    "│ South Africa │ bobotie │  1100 │",
+    "└──────────────┴─────────┴───────┘",
+    r#""dishes""#,
+    "4",
+    r#""discounted""#,
+    "900",
+    r#""discounted twice more""#,
+    "729",
+    // `out` parameters: the cheapest dish and the dearest, with VAT
+    // at 25, khachapuri's 1187 between them.
+    r#""spread with VAT""#,
+    "563",
+    r#""cheapest and dearest""#,
+    "tuple { high: 1500, low: 937 }",
+];
+
 #[test]
 fn operators() {
     let (code, stderr) = run_example("operators");
     assert_eq!(code, 0, "{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    let (others, parameters) = lines.split_at(lines.len() - PARAMETERS.len());
+    assert_eq!(parameters, PARAMETERS);
     assert_eq!(
-        stderr.lines().collect::<Vec<_>>(),
+        others,
         [
             // Each dish's price with VAT, by a call for each tuple.
             "┌─────────┬─────────────┬───────┐",
@@ -267,21 +296,6 @@ fn operators() {
             "563",
             r#""pozole""#,
             r#""under 1000 by 63""#,
-            // `var` parameters: a local relation with a dish added, the
-            // program's with another, and a price discounted by 10%, then
-            // twice more.
-            "┌──────────────┬─────────┬───────┐",
-            "│ country      │ dish    │ price │",
-            "├──────────────┼─────────┼───────┤",
-            "│ Japan        │ ramen   │   900 │",
-            "│ South Africa │ bobotie │  1100 │",
-            "└──────────────┴─────────┴───────┘",
-            r#""dishes""#,
-            "4",
-            r#""discounted""#,
-            "900",
-            r#""discounted twice more""#,
-            "729",
         ]
     );
 }

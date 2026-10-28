@@ -162,6 +162,10 @@ pub enum Mode {
     /// value is the parameter's when the operator ends: the parameter is
     /// subject to update.
     Var,
+    /// A variable, as for [`Mode::Var`], whose value before the call is
+    /// never read: the operator assigns the parameter on every path, and
+    /// reads it only once it has.
+    Out,
 }
 
 impl Mode {
@@ -171,6 +175,7 @@ impl Mode {
         match self {
             Mode::Const => "const",
             Mode::Var => "var",
+            Mode::Out => "out",
         }
     }
 }
@@ -680,8 +685,8 @@ pub struct Call {
     /// The arguments for the operator's `const` parameters, by name: their
     /// values.
     pub args: BTreeMap<String, Expr>,
-    /// The variables for its `var` parameters, by name, which the call
-    /// updates: each a different one. A read-only operator has none.
+    /// The variables for its `var` and `out` parameters, by name, which the
+    /// call updates: each a different one. A read-only operator has none.
     pub updated: BTreeMap<String, Target>,
 }
 

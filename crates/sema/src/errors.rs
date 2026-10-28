@@ -7,7 +7,7 @@ use trendy_diag::{Code, Diagnostic, Edit, Span, edit_distance};
 use trendy_hir as hir;
 use trendy_syntax::SyntaxToken;
 use trendy_syntax::ast::{
-    AstNode, AttributeValue, Expr, Key, Mode, NaryExpr, OrderList, ProjectExpr, SourceFile,
+    self, AstNode, AttributeValue, Expr, Key, Mode, NaryExpr, OrderList, ProjectExpr, SourceFile,
     TypeExpr, VarDecl,
 };
 
@@ -4963,13 +4963,21 @@ pub(crate) fn empty_for(span: Span, body: &trendy_syntax::ast::Body) -> Diagnost
 }
 
 /// The rule for parameters' modes, for notes.
-const MODE_RULE: &str = "a parameter is `const` unless written `var`: the operator only reads its argument's value; an update operator's `var` parameter takes a variable, which the operator can read and assign, and a call marks that argument `var` too: `call grow{var r: cities};`";
+const MODE_RULE: &str = "a parameter is `const` unless written `var` or `out`: the operator only reads its argument's value; an update operator's `var` parameter takes a variable, which the operator can read and assign, an `out` one a variable it assigns before reading it, and a call marks that argument the same way: `call grow{var r: cities};`";
+
+/// The rule for `out` parameters, for notes.
+const OUT_RULE: &str = "an `out` parameter's variable is never read: the operator assigns the parameter on every path, and reads it only once it has; a parameter whose argument's value the operator reads is `var`";
+
+/// The words of `mode`, as written.
+fn mode_words(mode: &Mode) -> String {
+    let words: Vec<String> = mode.words().map(|w| w.text().to_string()).collect();
+    words.join(" ")
+}
 
 /// The fix that removes `mode`.
 fn mode_removal(mode: &Mode) -> (String, Vec<Edit>) {
-    let words: Vec<String> = mode.words().map(|w| w.text().to_string()).collect();
     (
-        format!("remove `{}`", words.join(" ")),
+        format!("remove `{}`", mode_words(mode)),
         vec![Edit {
             span: mode.removal(),
             replacement: String::new(),
@@ -4977,13 +4985,16 @@ fn mode_removal(mode: &Mode) -> (String, Vec<Edit>) {
     )
 }
 
-/// `mode`, `var`, before the name `ident` of the parameter `name` of a
-/// read-only operator.
-pub(crate) fn var_in_read_only(name: &str, mode: &Mode, ident: &SyntaxToken) -> Diagnostic {
+/// `mode`, `var` or `out`, before the name `ident` of the parameter `name`
+/// of a read-only operator.
+pub(crate) fn updated_in_read_only(name: &str, mode: &Mode, ident: &SyntaxToken) -> Diagnostic {
     let (help, edits) = mode_removal(mode);
     Diagnostic::error(
         Code::MisplacedMode,
-        format!("a read-only operator's parameter `{name}` can't be `var`"),
+        format!(
+            "a read-only operator's parameter `{name}` can't be `{}`",
+            mode_words(mode)
+        ),
         mode.span(),
         "a read-only operator changes nothing but its own local variables",
     )
@@ -4993,23 +5004,24 @@ pub(crate) fn var_in_read_only(name: &str, mode: &Mode, ident: &SyntaxToken) -> 
     .with_suggestion(help, edits)
 }
 
-/// `mode`, `var`, before the name `ident` of the `per` parameter `name`,
-/// or, with `per`, of the relation that parameter is evaluated for each
-/// tuple of.
-pub(crate) fn var_with_per(
+/// `mode`, `var` or `out`, before the name `ident` of the `per` parameter
+/// `name`, or, with `per`, of the relation that parameter is evaluated for
+/// each tuple of.
+pub(crate) fn updated_with_per(
     name: &str,
     per: Option<&str>,
     mode: &Mode,
     ident: &SyntaxToken,
 ) -> Diagnostic {
     let (help, edits) = mode_removal(mode);
+    let words = mode_words(mode);
     let (message, label) = match per {
         Some(per) => (
-            format!("`{name}`, which `{per}` is evaluated for each tuple of, can't be `var`"),
+            format!("`{name}`, which `{per}` is evaluated for each tuple of, can't be `{words}`"),
             "its tuples carry the values of its `per` parameters",
         ),
         None => (
-            format!("the `per` parameter `{name}` can't be `var`"),
+            format!("the `per` parameter `{name}` can't be `{words}`"),
             "its argument is a value for each tuple of its relation",
         ),
     };
@@ -5043,42 +5055,55 @@ pub(crate) fn argument_mode(
     signature: &Signature,
 ) -> Diagnostic {
     let span = written.map_or_else(|| arg.span(), AstNode::span);
+    let word = mode.word();
+    let does = if mode == hir::Mode::Out {
+        "assigns"
+    } else {
+        "updates"
+    };
     let (message, label, help, edits) = match (mode, written) {
-        (hir::Mode::Var, None) => {
+        (hir::Mode::Const, written) => {
+            let written = written.expect("a `const` parameter's argument may be marked `const`");
+            let words = mode_words(written);
+            let (help, edits) = mode_removal(written);
+            let a = if words.starts_with(['a', 'e', 'i', 'o', 'u']) {
+                "an"
+            } else {
+                "a"
+            };
+            (
+                format!(
+                    "`{name}` isn't {a} `{words}` parameter, so its argument isn't marked `{words}`"
+                ),
+                "the operator only reads its value".to_string(),
+                help,
+                edits,
+            )
+        }
+        (_, None) => {
             let start = arg.span().start;
             (
                 format!(
-                    "the argument for `var {name}` is marked `var`, as the variable the call updates"
+                    "the argument for `{word} {name}` is marked `{word}`, as the variable the call {does}"
                 ),
-                "not marked `var`".to_string(),
-                "mark it `var`".to_string(),
+                format!("not marked `{word}`"),
+                format!("mark it `{word}`"),
                 vec![Edit {
                     span: Span::new(start, start),
-                    replacement: "var ".to_string(),
+                    replacement: format!("{word} "),
                 }],
             )
         }
-        (hir::Mode::Var, Some(written)) => {
-            let words: Vec<String> = written.words().map(|w| w.text().to_string()).collect();
-            let words = words.join(" ");
+        (_, Some(written)) => {
+            let words = mode_words(written);
             (
-                format!("the argument for `var {name}` is marked `var`, not `{words}`"),
+                format!("the argument for `{word} {name}` is marked `{word}`, not `{words}`"),
                 format!("marked `{words}`"),
-                "mark it `var`".to_string(),
+                format!("mark it `{word}`"),
                 vec![Edit {
                     span: written.span(),
-                    replacement: "var".to_string(),
+                    replacement: word.to_string(),
                 }],
-            )
-        }
-        (hir::Mode::Const, written) => {
-            let written = written.expect("a `const` parameter's argument may be marked `const`");
-            let (help, edits) = mode_removal(written);
-            (
-                format!("`{name}` isn't a `var` parameter, so its argument isn't marked `var`"),
-                "the operator doesn't change it".to_string(),
-                help,
-                edits,
             )
         }
     };
@@ -5092,12 +5117,18 @@ pub(crate) fn argument_mode(
     d.with_suggestion(help, edits)
 }
 
-/// The argument `written`, for the `var` parameter `name`, which isn't a
-/// variable.
-pub(crate) fn argument_not_a_variable(name: &str, written: &Expr) -> Diagnostic {
+/// The argument `written`, for the parameter `name`, whose mode is `mode`,
+/// `var` or `out`, which isn't a variable.
+pub(crate) fn argument_not_a_variable(name: &str, mode: hir::Mode, written: &Expr) -> Diagnostic {
+    let word = mode.word();
+    let does = if mode == hir::Mode::Out {
+        "assigns"
+    } else {
+        "updates"
+    };
     Diagnostic::error(
         Code::NotAssignable,
-        format!("the argument for `var {name}` is a variable, which the call updates"),
+        format!("the argument for `{word} {name}` is a variable, which the call {does}"),
         written.span(),
         "not a variable",
     )
@@ -5105,8 +5136,8 @@ pub(crate) fn argument_not_a_variable(name: &str, written: &Expr) -> Diagnostic 
     .with_help("declare a variable with this value, and pass the variable: `var v := …;`")
 }
 
-/// The variable `name`, at `span`, passed both to `var first` and to `var
-/// second`, of one call.
+/// The variable `name`, at `span`, passed both to `first` and to `second`,
+/// each a parameter written with its mode, as `var a`, of one call.
 pub(crate) fn passed_twice(
     name: &str,
     first: &str,
@@ -5116,18 +5147,19 @@ pub(crate) fn passed_twice(
 ) -> Diagnostic {
     Diagnostic::error(
         Code::Aliased,
-        format!("`{name}` is passed to both `var {first}` and `var {second}`"),
+        format!("`{name}` is passed to both `{first}` and `{second}`"),
         span,
         "passed again",
     )
     .with_secondary(earlier, "passed here first")
-    .with_note("each `var` parameter's value is its variable's when the operator ends, so one variable can't be two of them")
-    .with_help("pass a different variable to each `var` parameter")
+    .with_note("each `var` or `out` parameter's value is its variable's when the operator ends, so one variable can't be two of them")
+    .with_help("pass a different variable to each")
 }
 
-/// The variable `name`, at `span`, passed to `var param` of `callee`,
-/// which `reads` the variable itself, or assigns it, in its body or in
-/// those of the operators it calls.
+/// The variable `name`, at `span`, passed to `param`, a parameter written
+/// with its mode, as `var n`, of `callee`, which reads the variable
+/// itself, or, if `assigns`, assigns it, in its body or in those of the
+/// operators it calls.
 pub(crate) fn passed_and_used(
     name: &str,
     param: &str,
@@ -5136,13 +5168,56 @@ pub(crate) fn passed_and_used(
     span: Span,
 ) -> Diagnostic {
     let uses = if assigns { "assigns" } else { "reads" };
+    let parameter = param.split_once(' ').map_or(param, |(_, p)| p);
     Diagnostic::error(
         Code::Aliased,
-        format!("`{name}` is passed to `var {param}` of `{callee}`, which {uses} `{name}` itself"),
+        format!("`{name}` is passed to `{param}` of `{callee}`, which {uses} `{name}` itself"),
         span,
         "passed here",
     )
-    .with_note(format!("`{callee}` {uses} `{name}` in its body or in an operator it calls, where it would be a second name for what `{param}` is"))
+    .with_note(format!("`{callee}` {uses} `{name}` in its body or in an operator it calls, where it would be a second name for what `{parameter}` is"))
     .with_note(MODE_RULE)
-    .with_help(format!("pass `{callee}` another variable, or have it use `{param}` for `{name}`"))
+    .with_help(format!("pass `{callee}` another variable, or have it use `{parameter}` for `{name}`"))
+}
+
+/// The `out` parameter `name`, read at `span` before it is assigned on
+/// every path to there. `decl` is where it is declared, in the program's
+/// own operators, whose mode the fix makes `var`.
+pub(crate) fn read_before_assigned(
+    name: &str,
+    span: Span,
+    decl: Option<&ast::AttributeType>,
+) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::UnassignedOut,
+        format!("the `out` parameter `{name}` is read before it is assigned"),
+        span,
+        "read here",
+    )
+    .with_note(OUT_RULE);
+    let Some((decl, mode)) = decl.and_then(|d| Some((d, d.mode()?))) else {
+        return d;
+    };
+    d.with_secondary(decl.span(), "declared `out`")
+        .with_suggestion(
+            "make it `var`, to read the value it is passed",
+            vec![Edit {
+                span: mode.span(),
+                replacement: "var".to_string(),
+            }],
+        )
+}
+
+/// The `out` parameter `name` of `operator`, whose name `ident` is where it
+/// is declared, which isn't assigned on every path through the operator.
+pub(crate) fn unassigned_out(name: &str, operator: &str, ident: &SyntaxToken) -> Diagnostic {
+    Diagnostic::error(
+        Code::UnassignedOut,
+        format!("the `out` parameter `{name}` isn't assigned on every path through `{operator}`"),
+        trendy_syntax::span(ident.text_range()),
+        "not always assigned",
+    )
+    .with_note(OUT_RULE)
+    .with_note("an `if` without `else`, a `while` loop and a `for` loop may not run their statements, so what only they assign isn't assigned on every path")
+    .with_help(format!("assign `{name}` before `{operator}` ends, whichever way it goes, or make it `var` if `{operator}` may leave its variable as it is"))
 }
