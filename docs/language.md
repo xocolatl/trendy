@@ -38,7 +38,10 @@ An operator definition is the keyword `operator`, a name, its parameters, a
 body in square brackets `[]`, and a closing `;`.
 
 - **Parameters are a heading:** `{name: type, …}`, with each name unique and
-  in any order. `main` has none, since nothing passes it arguments.
+  in any order. `main` has none, since nothing passes it arguments. An
+  update operator's parameter can be `var`, written before its name: the
+  operator can then assign the variable it is passed (see [`var`
+  parameters](#var-parameters)).
 - **A body is a list of statements,** each ending with `;`: calls,
   assignments (see [Assignment](#assignment)), local variables'
   declarations (see [Local variables](#local-variables)), and in an update
@@ -49,7 +52,7 @@ body in square brackets `[]`, and a closing `;`.
   isn't a statement, as its value would go unused (P0035).
 - **Arguments are a tuple of the parameters:** `call greet{name: "Ada",
   count: 2};`. Every argument is named, every parameter gets one, and the
-  order doesn't matter.
+  order doesn't matter. One for a `var` parameter is marked `var` too.
 
 Following *The Third Manifesto*, operators are either read-only operators,
 which return a value and are used in expressions, or update operators, which
@@ -96,6 +99,102 @@ operator main{} [
 
 A tuple or relation value's attributes can be any expression, names
 included, as in `tuple { n: n }`; see [Tuples](#tuples).
+
+### `var` parameters
+
+```trendy
+var visits := 0;
+
+operator add{var total: integer, const amount: integer} [
+    total := total + amount;
+];
+
+operator main{} [
+    call add{var total: visits, amount: 2};
+    call debug_value{v: visits};
+];
+```
+
+A parameter takes its argument in one of two modes, written before its
+name:
+
+- **`const`, whether written or not,** is how a parameter takes its
+  argument unless it says otherwise: the operator only reads the
+  argument's value. It can't assign the parameter (A0026); to work on a
+  changed value, it declares a local variable for it.
+- **`var` takes a variable,** which the operator can read and assign
+  through the parameter: the parameter starts with the variable's value,
+  and the variable has the parameter's when the operator ends (TTM, RM
+  Prescription 3). Only an update operator's parameters can be `var`, as a
+  read-only operator changes nothing but its own local variables, and
+  neither a `per` parameter nor the relation it is evaluated for each
+  tuple of can be (A0051).
+- **A call marks each argument as its parameter is,** before its name:
+  `var` for a `var` parameter, so that the call shows what it changes, and
+  `const` or nothing for another (A0052).
+- **A `var` argument is a whole variable** (A0026): one of the program's,
+  a local variable, or a `var` parameter of the operator calling, passed
+  on. Not an expression, a `const` parameter, an array's element, or a
+  variable that a `for` loop goes through or computes its array from.
+- **A variable has one name in a call** (A0053). It can't be passed to two
+  `var` parameters, nor to one of an operator that uses it by its own name
+  too, reading or assigning it, in its body or in an operator it calls:
+  what that name gave would depend on whether the parameter is a copy of
+  the variable or the variable itself, so neither is the rule. Another
+  argument can read it, as its value is computed before the call.
+- **A variable's keys are checked when the call ends,** as it is assigned
+  the parameter's value then (R0008).
+- **Other languages' spellings are fixed** (P0038): C#'s `ref`, Swift's
+  `inout` and Ada's `in out` before a parameter's name are `var`, and
+  Ada's `in` is `const`; a mode before a parameter's type, as Swift writes
+  `inout`, or before an argument's value, as C#'s `ref x`, Swift's `&x`
+  and Rust's `&mut x` are, is moved before the name; and Tutorial D's
+  `UPDATES { p }` is `var` before each parameter it lists. An argument
+  left unmarked, as Delphi and Ada write a call, is marked (A0052).
+
+```trendy,error
+var visits := 0;
+
+operator add{var total: integer, amount: integer} [
+    total := total + amount;
+];
+
+operator main{} [
+    call add{total: visits, amount: 2};
+];
+```
+
+```trendy,error
+var visits := 0;
+
+operator add{var total: integer, amount: integer} [
+    total := total + amount;
+];
+
+operator main{} [
+    call add{var total: visits + 1, amount: 2};
+];
+```
+
+```trendy,error
+var visits := 0;
+
+operator add{var total: integer, amount: integer} [
+    total := visits + amount;
+];
+
+operator main{} [
+    call add{var total: visits, amount: 2};
+];
+```
+
+```trendy,error
+operator add{ref total: integer, amount: integer} [
+    total := total + amount;
+];
+
+operator main{} [];
+```
 
 ### Read-only operators
 
@@ -1838,8 +1937,10 @@ operator main{} [
   is no `+=`, `++` or `--`, which are fixed to the assignment they mean
   (P0036).
 - **Only variables are assigned,** and an array variable's elements (see
-  [Changing an element](#changing-an-element)). An operator's parameters
-  are read-only, and an operator is not a variable (A0026).
+  [Changing an element](#changing-an-element)), and an update operator's
+  `var` parameters, which assign the variables they are passed (see [`var`
+  parameters](#var-parameters)). Its other parameters are `const`, and an
+  operator is not a variable (A0026).
 - **The shorthands are for relation variables,** but for `update`, which
   is also for tuple variables, and an element's assignment, for array
   variables. Each means an assignment:
@@ -3505,6 +3606,8 @@ line after a comment on its own line, such as a file's header, is kept.
 | `UPDATE r SET a = x`, `… WHERE 1 = 1` | `update r { a := x };` |
 | `X := Y, Y := X`, a multiple assignment | `assign { x := y; y := x; };` |
 | `(params) { body }` | `{params} [body]` |
+| `ref int n`, `n: inout Int`, `n : in out Integer`, `UPDATES { N }` | `var n: integer`, before the name |
+| `f(ref x)`, `f(&x)`, `f(&mut x)`, `f(x)` for Delphi's `var` parameter | `call f{var n: x};` |
 | `fn same<T>(a: T, b: T)`, `same<T>(a: T, b: T)` | `operator same{a: T, b: T} types { T: any type }` |
 | `any`, `anyelement` | `any type` |
 | `SUM (SP, QTY)`, an attribute for each tuple | `of: integer per r`, an expression of each tuple's attributes |

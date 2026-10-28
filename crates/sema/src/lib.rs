@@ -119,7 +119,7 @@ pub(crate) fn check(
             bodies.insert(signature.id, statements);
         }
     }
-    body::deferred_checks(&deferred, &bodies, &operators, errors);
+    body::deferred_checks(&deferred, &bodies, &evaluated.values, &operators, errors);
     Checked {
         namespaces,
         operators,
@@ -432,6 +432,7 @@ fn variable_ids(file: &SourceFile, namespaces: &Namespaces) -> HashMap<String, h
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use trendy_diag::Code;
 
     fn parse(source: &str) -> SourceFile {
@@ -4360,7 +4361,7 @@ mod tests {
             };
             assignments
                 .iter()
-                .map(|a| (a.target, a.value.clone()))
+                .map(|a| (a.target.clone(), a.value.clone()))
                 .collect::<Vec<_>>()
         };
         let relation = |name: &str| {
@@ -4385,11 +4386,11 @@ mod tests {
                 },
             )))
         };
-        let target = hir::Target::Variable(hir::VariableId(0));
+        let target = || hir::Target::Variable(hir::VariableId(0));
         assert_eq!(
             assigned(r#"insert poets relation { { name: "Rumi", born: 1 } };"#),
             [(
-                target,
+                target(),
                 hir::Expr::Combine(hir::Combination::Union, poets(), relation("Rumi"))
             )]
         );
@@ -4399,7 +4400,7 @@ mod tests {
                 r#"assign { d_insert poets relation { { name: "Rumi", born: 1 } }; i_delete poets relation { { name: "Ada", born: 1 } }; };"#
             ),
             [(
-                target,
+                target(),
                 hir::Expr::Combine(
                     hir::Combination::DisjointUnion,
                     Box::new(hir::Expr::Combine(
@@ -4673,7 +4674,10 @@ mod tests {
                 Code::UnknownName
             ]
         );
-        assert_eq!(errors[0].message, "parameter `p` can't be assigned");
+        assert_eq!(
+            errors[0].message,
+            "the `const` parameter `p` can't be assigned"
+        );
         // The parameter `n` hides the variable.
         assert!(
             errors[1].help[0].contains("rename the parameter"),
@@ -4681,6 +4685,267 @@ mod tests {
             errors[1].help
         );
         assert_eq!(errors[2].message, "`main` is an operator, not a variable");
+    }
+
+    #[test]
+    fn var_parameters_update_their_arguments_variables() {
+        let program = analyze_str(
+            "var count := 1;\n\
+             operator double{var n: integer, const by: integer} [ n := n * by; ];\n\
+             operator twice{var n: integer} [ call double{var n: n, by: 2}; call double{var n: n, by: 2}; ];\n\
+             operator main{} [ var local := 2; call double{var n: count, const by: 3}; call twice{var n: local}; ];",
+        )
+        .unwrap();
+        let double = program
+            .operators
+            .iter()
+            .find(|o| o.name == "double")
+            .unwrap();
+        assert_eq!(double.params["n"].mode, hir::Mode::Var);
+        assert_eq!(double.params["by"].mode, hir::Mode::Const);
+        // The body assigns the parameter itself.
+        let hir::OperatorKind::Update { body, .. } = &double.kind else {
+            panic!("an update operator");
+        };
+        let [hir::Statement::Assign(assignments)] = &body.statements[..] else {
+            panic!("{body:?}");
+        };
+        assert_eq!(
+            assignments[0].target,
+            hir::Target::Parameter("n".to_string())
+        );
+        // A call gives each `var` parameter a variable, which it updates:
+        // the program's, a local one, or a `var` parameter passed on.
+        let hir::OperatorKind::Update { body, .. } = &program.operator(program.entry).kind else {
+            panic!("main is an update operator");
+        };
+        let updated: Vec<(BTreeMap<String, hir::Target>, Vec<String>)> = body
+            .statements
+            .iter()
+            .filter_map(|s| match s {
+                hir::Statement::Call(call) => {
+                    Some((call.updated.clone(), call.args.keys().cloned().collect()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            updated,
+            [
+                (
+                    [("n".to_string(), hir::Target::Variable(hir::VariableId(0)))].into(),
+                    vec!["by".to_string()]
+                ),
+                (
+                    [("n".to_string(), hir::Target::Local(hir::LocalId(0)))].into(),
+                    Vec::new()
+                ),
+            ]
+        );
+        let twice = program
+            .operators
+            .iter()
+            .find(|o| o.name == "twice")
+            .unwrap();
+        let hir::OperatorKind::Update { body, .. } = &twice.kind else {
+            panic!("an update operator");
+        };
+        let hir::Statement::Call(call) = &body.statements[0] else {
+            panic!("{body:?}");
+        };
+        assert_eq!(call.updated["n"], hir::Target::Parameter("n".to_string()));
+    }
+
+    #[test]
+    fn modes_only_where_a_parameter_can_have_one() {
+        for (source, message, fixed) in [
+            (
+                "operator doubled{var n: integer}: integer [ n * 2 ];",
+                "a read-only operator's parameter `n` can't be `var`",
+                "operator doubled{n: integer}: integer [ n * 2 ];",
+            ),
+            (
+                "operator f{var r: any relation, of: integer per r} [];",
+                "`r`, which `of` is evaluated for each tuple of, can't be `var`",
+                "operator f{r: any relation, of: integer per r} [];",
+            ),
+            (
+                "operator f{r: any relation, var of: integer per r} [];",
+                "the `per` parameter `of` can't be `var`",
+                "operator f{r: any relation, of: integer per r} [];",
+            ),
+            (
+                "var t: tuple { var a: integer };",
+                "only an operator's parameters have a mode",
+                "var t: tuple { a: integer };",
+            ),
+            (
+                "operator f{n: T} types { var T: any type } [];",
+                "only an operator's parameters have a mode",
+                "operator f{n: T} types { T: any type } [];",
+            ),
+        ] {
+            let source = format!("{source}{MAIN}");
+            assert_eq!(messages(&source), [message], "{source}");
+            assert_eq!(fix(&source), format!("{fixed}{MAIN}"), "{source}");
+        }
+        // `const` is a parameter's mode anyway, and can be written.
+        assert!(
+            analyze_str(&format!(
+                "operator half{{const n: integer}}: integer [ n div 2 ];{MAIN}"
+            ))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn arguments_are_marked_as_their_parameters_are() {
+        const OPERATORS: &str = "var count := 1;\n\
+             operator double{var n: integer} [ n := n * 2; ];\n\
+             operator show{n: integer} [ call debug_value{v: n}; ];\n";
+        for (call, message, fixed) in [
+            (
+                "call double{n: count};",
+                "the argument for `var n` is marked `var`, as the variable the call updates",
+                "call double{var n: count};",
+            ),
+            (
+                "call double{const n: count};",
+                "the argument for `var n` is marked `var`, not `const`",
+                "call double{var n: count};",
+            ),
+            (
+                "call show{var n: count};",
+                "`n` isn't a `var` parameter, so its argument isn't marked `var`",
+                "call show{n: count};",
+            ),
+        ] {
+            let source = format!("{OPERATORS}operator main{{}} [ {call} ];");
+            assert_eq!(messages(&source), [message], "{source}");
+            assert_eq!(
+                fix(&source),
+                format!("{OPERATORS}operator main{{}} [ {fixed} ];")
+            );
+        }
+        // So are a read-only operator's, whose parameters are `const`.
+        assert!(analyze_str(&format!("{OPERATORS}operator half{{n: integer}}: integer [ n div 2 ];\noperator main{{}} [ call show{{const n: half{{const n: 4}}}}; ];")).is_ok());
+        assert_eq!(
+            messages(&format!(
+                "{OPERATORS}operator half{{n: integer}}: integer [ n div 2 ];\nvar h := half{{var n: count}};{MAIN}"
+            )),
+            ["`n` isn't a `var` parameter, so its argument isn't marked `var`"]
+        );
+    }
+
+    #[test]
+    fn var_arguments_are_variables_the_body_can_assign() {
+        const OPERATORS: &str = "var count := 1;\n\
+             var numbers := array [1, 2];\n\
+             operator double{var n: integer} [ n := n * 2; ];\n";
+        for (body, code, message) in [
+            (
+                "call double{var n: count + 1};",
+                Code::NotAssignable,
+                "the argument for `var n` is a variable, which the call updates",
+            ),
+            (
+                "call double{var n: 2};",
+                Code::NotAssignable,
+                "the argument for `var n` is a variable, which the call updates",
+            ),
+            (
+                "call double{var n: numbers[1]};",
+                Code::NotAssignable,
+                "the argument for `var n` is a variable, which the call updates",
+            ),
+            (
+                "for x in numbers loop [ call double{var n: x}; ];",
+                Code::NotAssignable,
+                "`x`, a loop's variable, can't be assigned",
+            ),
+            (
+                "call double{var n: \"one\"};",
+                Code::TypeMismatch,
+                "mismatched types: expected `integer`, found `text`",
+            ),
+        ] {
+            let source = format!("{OPERATORS}operator main{{}} [ {body} ];");
+            let errors = errors(&source);
+            assert_eq!(
+                errors
+                    .iter()
+                    .map(|e| (e.code, e.message.as_str()))
+                    .collect::<Vec<_>>(),
+                [(code, message)],
+                "{source}"
+            );
+        }
+        // A `const` parameter is passed on as a value, not as a variable.
+        assert_eq!(
+            messages(&format!(
+                "{OPERATORS}operator f{{p: integer}} [ call double{{var n: p}}; ];{MAIN}"
+            )),
+            ["the `const` parameter `p` can't be assigned"]
+        );
+        // Nor is a variable that a `for` loop's array is computed from.
+        assert_eq!(
+            messages(&format!(
+                "{OPERATORS}operator g{{}} [ for x in numbers loop [ call double{{var n: count}}; call grow{{var a: numbers}}; ]; ];\noperator grow{{var a: array integer}} [];{MAIN}"
+            )),
+            ["`numbers` can't be assigned in a loop that goes through it"]
+        );
+    }
+
+    #[test]
+    fn a_var_argument_has_no_other_name_in_the_call() {
+        const OPERATORS: &str = "var count := 1;\n\
+             var other := 2;\n\
+             operator add{var a: integer, var b: integer} [ a := a + b; ];\n\
+             operator reads{var n: integer} [ n := count + 1; ];\n\
+             operator assigns{var n: integer} [ count := 3; n := 1; ];\n\
+             operator through{var n: integer} [ call reads{var n: n}; ];\n\
+             operator total{}: integer [ count + 1 ];\n\
+             operator calls{var n: integer} [ n := total{}; ];\n\
+             operator plus{var a: integer, by: integer} [ a := a + by; ];\n";
+        for (call, message) in [
+            (
+                "call add{var a: count, var b: count};",
+                "`count` is passed to both `var a` and `var b`",
+            ),
+            (
+                "call reads{var n: count};",
+                "`count` is passed to `var n` of `reads`, which reads `count` itself",
+            ),
+            (
+                "call assigns{var n: count};",
+                "`count` is passed to `var n` of `assigns`, which assigns `count` itself",
+            ),
+            (
+                "call through{var n: count};",
+                "`count` is passed to `var n` of `through`, which reads `count` itself",
+            ),
+            (
+                "call calls{var n: count};",
+                "`count` is passed to `var n` of `calls`, which reads `count` itself",
+            ),
+        ] {
+            let source = format!("{OPERATORS}operator main{{}} [ {call} ];");
+            let errors = errors(&source);
+            assert_eq!(
+                errors
+                    .iter()
+                    .map(|e| (e.code, e.message.as_str()))
+                    .collect::<Vec<_>>(),
+                [(Code::Aliased, message)],
+                "{source}"
+            );
+        }
+        // Other variables are fine, and so is reading the variable in
+        // another argument, whose value is computed before the call.
+        let fine = format!(
+            "{OPERATORS}operator main{{}} [ call add{{var a: count, var b: other}}; call reads{{var n: other}}; call plus{{var a: count, by: count}}; ];"
+        );
+        assert!(analyze_str(&fine).is_ok(), "{:?}", messages(&fine));
     }
 
     #[test]
@@ -5142,7 +5407,7 @@ mod tests {
             .find(|o| o.name == "values")
             .unwrap();
         assert_eq!(values.params.len(), 1);
-        assert_eq!(values.params["r"].to_string(), "relation { of: T, … }");
+        assert_eq!(values.params["r"].ty.to_string(), "relation { of: T, … }");
         // A relation passed on keeps its tuples, and its `per` attribute.
         let again = "operator again{r: any relation, of: T per r}: relation { v: T } types { T: any type } [ values{r: r, of: of} ];\n";
         let vars = variables(&format!(
@@ -5680,7 +5945,7 @@ mod tests {
         let targets: Vec<Vec<hir::Target>> = body
             .iter()
             .filter_map(|s| match s {
-                hir::Statement::Assign(a) => Some(a.iter().map(|a| a.target).collect()),
+                hir::Statement::Assign(a) => Some(a.iter().map(|a| a.target.clone()).collect()),
                 hir::Statement::Call(_)
                 | hir::Statement::If(..)
                 | hir::Statement::Loop(..)

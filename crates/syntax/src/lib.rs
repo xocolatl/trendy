@@ -336,6 +336,10 @@ pub enum SyntaxKind {
     /// tuple of the argument for `r`. `per` is a contextual keyword, an
     /// identifier elsewhere.
     Per,
+    /// `var` or `const` before a parameter's name, saying how it takes its
+    /// argument, or before an argument's name, saying how it is given.
+    /// `const` is a contextual keyword, an identifier elsewhere.
+    Mode,
     /// `tuple { name: type, … }`
     TupleType,
     /// `relation { name: type, … }`
@@ -358,7 +362,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 148] = [
+    pub const ALL: [SyntaxKind; 149] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -498,6 +502,7 @@ impl SyntaxKind {
         SyntaxKind::HeadingRef,
         SyntaxKind::AttributeType,
         SyntaxKind::Per,
+        SyntaxKind::Mode,
         SyntaxKind::TupleType,
         SyntaxKind::RelationType,
         SyntaxKind::ArrayType,
@@ -962,6 +967,7 @@ impl SyntaxKind {
             SyntaxKind::TypeRef | SyntaxKind::AnyType => "type",
             SyntaxKind::TypeParameters => "type parameters",
             SyntaxKind::Per => "`per`",
+            SyntaxKind::Mode => "mode",
             SyntaxKind::Initializer => "initial value",
             SyntaxKind::Key => "key",
             SyntaxKind::Heading | SyntaxKind::HeadingRef => "heading",

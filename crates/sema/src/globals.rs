@@ -499,7 +499,7 @@ impl Names for ReadOnlyNames<'_, '_, '_> {
 
     fn leaf_type(&self, leaf: &hir::Expr) -> hir::Type {
         match leaf {
-            hir::Expr::Parameter(name) => self.signature().params[name].clone(),
+            hir::Expr::Parameter(name) => self.signature().params[name].ty.clone(),
             hir::Expr::Local(id) => self.locals.get(*id).ty.clone(),
             hir::Expr::Variable(id) => match &self.globals.variables[id.0] {
                 Some(State::Done(Some(variable))) => variable.ty.clone(),

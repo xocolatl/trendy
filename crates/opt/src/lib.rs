@@ -68,7 +68,7 @@ fn optimized_operator(program: &hir::Program, operator: &hir::Operator) -> hir::
 /// local variables.
 struct Optimizer<'a> {
     program: &'a hir::Program,
-    params: &'a BTreeMap<String, hir::Type>,
+    params: &'a BTreeMap<String, hir::Parameter>,
     locals: &'a [hir::Local],
 }
 

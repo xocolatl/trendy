@@ -71,8 +71,8 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
     let (parent, grandparent) = (above(0), above(1));
     // The contextual keywords: `type`, in `builtin type name;`, `key`,
     // `value` and `from`, `any` and `type`, in `any type`, `types`, `per`,
-    // `kind`, a load's `load`, `from`, `order`, `asc` and `desc`, a `for`
-    // loop's `in`, and `heading`.
+    // a mode's `const`, `kind`, a load's `load`, `from`, `order`, `asc` and
+    // `desc`, a `for` loop's `in`, and `heading`.
     let keyword = match parent {
         Some(SyntaxKind::BuiltinType) => token.text() == "type",
         Some(SyntaxKind::AnyType) => matches!(token.text(), "any" | "type"),
@@ -81,6 +81,7 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
             | SyntaxKind::FromExpr
             | SyntaxKind::TypeParameters
             | SyntaxKind::Per
+            | SyntaxKind::Mode
             | SyntaxKind::KindDecl
             | SyntaxKind::Load
             | SyntaxKind::OrderItem
@@ -617,6 +618,33 @@ mod tests {
                 ("of", Class::Parameter, true),
                 ("integer", Class::Type, false),
                 ("per", Class::Keyword, false),
+                ("r", Class::Parameter, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn modes() {
+        assert_eq!(
+            highlight(
+                "operator f{const n: integer, var r: integer} [ call f{const n: 1, var r: r}; ];"
+            ),
+            [
+                ("operator", Class::Keyword, false),
+                ("f", Class::Operator, true),
+                ("const", Class::Keyword, false),
+                ("n", Class::Parameter, true),
+                ("integer", Class::Type, false),
+                ("var", Class::Keyword, false),
+                ("r", Class::Parameter, true),
+                ("integer", Class::Type, false),
+                ("call", Class::Keyword, false),
+                ("f", Class::Operator, false),
+                ("const", Class::Keyword, false),
+                ("n", Class::Attribute, false),
+                ("1", Class::Number, false),
+                ("var", Class::Keyword, false),
+                ("r", Class::Attribute, false),
                 ("r", Class::Parameter, false),
             ]
         );

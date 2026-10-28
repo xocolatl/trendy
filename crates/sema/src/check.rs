@@ -833,12 +833,18 @@ impl<'a> Checker<'a> {
                 ));
                 continue;
             };
+            ok &= marked(arg, name, param, signature, errors);
             match arg.value() {
                 Some(value) => pending.push((value, name, param)),
                 None => ok = false,
             }
         }
 
+        let variables: BTreeMap<&str, Expr> = pending
+            .iter()
+            .filter(|(_, _, p)| matches!(p, Param::Variable(_)))
+            .map(|(value, name, _)| (*name, value.clone()))
+            .collect();
         let checked = self.typed_arguments(pending, signature, errors);
         // A lone unnamed argument is reported, with a fix, as that parameter.
         if !missing.is_empty() && positional.is_empty() {
@@ -846,11 +852,13 @@ impl<'a> Checker<'a> {
             ok = false;
         }
         // Every type parameter has a type once every argument is given.
-        let (types, args) = checked.filter(|_| ok)?;
-        Some(hir::Call {
+        let (types, mut args) = checked?;
+        let updated = updated(&variables, &mut args, errors)?;
+        ok.then(|| hir::Call {
             operator: signature.id,
             types: types.finish(),
             args,
+            updated,
         })
     }
 
@@ -877,14 +885,19 @@ impl<'a> Checker<'a> {
         loop {
             let stage = |param: &Param| match param {
                 Param::Per { relation, .. } if !relations.contains_key(relation) => Stage::Waiting,
-                Param::Value(ty) | Param::Per { ty, .. } if types.know(ty) => Stage::Ready,
+                Param::Value(ty) | Param::Variable(ty) | Param::Per { ty, .. }
+                    if types.know(ty) =>
+                {
+                    Stage::Ready
+                }
                 Param::Value(hir::Type::Parameter(_))
+                | Param::Variable(hir::Type::Parameter(_))
                 | Param::Per {
                     ty: hir::Type::Parameter(_),
                     ..
                 }
                 | Param::Relation(_) => Stage::Bare,
-                Param::Value(_) | Param::Per { .. } => Stage::Structured,
+                Param::Value(_) | Param::Variable(_) | Param::Per { .. } => Stage::Structured,
             };
             // Those whose parameters' types are known are checked against
             // them. An unknown type parameter expects nothing of its
@@ -902,7 +915,7 @@ impl<'a> Checker<'a> {
             pending = rest;
             for (value, name, param) in checked_now {
                 let checked = match param {
-                    Param::Value(ty) => {
+                    Param::Value(ty) | Param::Variable(ty) => {
                         self.typed_argument(&value, name, ty, None, &mut types, errors)
                     }
                     Param::Per { relation, ty } => {
@@ -1957,6 +1970,63 @@ pub(crate) struct Assigned<'a> {
     pub(crate) operand: &'a Expr,
 }
 
+/// Whether `arg`, the argument for the parameter `name`, `param`, of
+/// `signature`, is marked as the parameter is: `var` for a `var` one, and
+/// `const` or nothing for another; or `false`, after reporting it.
+fn marked(
+    arg: &AttributeValue,
+    name: &str,
+    param: &Param,
+    signature: &Signature,
+    errors: &mut Vec<Diagnostic>,
+) -> bool {
+    let mode = match param {
+        Param::Variable(_) => hir::Mode::Var,
+        Param::Value(_) | Param::Relation(_) | Param::Per { .. } => hir::Mode::Const,
+    };
+    let written = arg.mode();
+    if written.as_ref().is_some_and(ast::Mode::is_var) == (mode == hir::Mode::Var) {
+        return true;
+    }
+    errors.push(errors::argument_mode(
+        arg,
+        name,
+        mode,
+        written.as_ref(),
+        signature,
+    ));
+    false
+}
+
+/// The variables a call updates: the arguments in `args`, checked, for its
+/// `var` parameters, written as `variables` has them, which are taken out
+/// of `args`. `None` after reporting each that isn't a variable.
+fn updated(
+    variables: &BTreeMap<&str, Expr>,
+    args: &mut BTreeMap<String, hir::Expr>,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<BTreeMap<String, hir::Target>> {
+    let mut updated = BTreeMap::new();
+    let mut ok = true;
+    for (name, written) in variables {
+        let Some(arg) = args.remove(*name) else {
+            continue;
+        };
+        let target = match arg {
+            hir::Expr::Variable(id) => hir::Target::Variable(id),
+            hir::Expr::Local(id) => hir::Target::Local(id),
+            hir::Expr::Parameter(parameter) => hir::Target::Parameter(parameter),
+            _ => {
+                errors.push(errors::argument_not_a_variable(name, written));
+                ok = false;
+                continue;
+            }
+        };
+        updated.insert((*name).to_string(), target);
+    }
+    ok.then_some(updated)
+}
+
 /// The error for a call, with `written` arguments, of `signature`, which
 /// has the parameters `missing` that aren't given one.
 fn missing_arguments(missing: &[&str], signature: &Signature, written: Written) -> Diagnostic {
@@ -1964,9 +2034,10 @@ fn missing_arguments(missing: &[&str], signature: &Signature, written: Written) 
     let missing: Vec<_> = missing
         .iter()
         .map(|&name| {
+            // Nor is there a variable to give a `var` parameter.
             let ty = match &signature.written[name] {
                 Param::Value(ty) | Param::Per { ty, .. } => Some(ty),
-                Param::Relation(_) => None,
+                Param::Relation(_) | Param::Variable(_) => None,
             };
             (name, ty.filter(|ty| ty.parameters().next().is_none()))
         })

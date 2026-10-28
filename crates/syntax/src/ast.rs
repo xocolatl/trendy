@@ -92,6 +92,7 @@ ast_node!(Heading);
 ast_node!(HeadingRef);
 ast_node!(AttributeType);
 ast_node!(Per);
+ast_node!(Mode);
 ast_node!(TupleType);
 ast_node!(RelationType);
 ast_node!(ArrayType);
@@ -1390,6 +1391,42 @@ impl AttributeType {
     pub fn per(&self) -> Option<Per> {
         self.0.children().find_map(Per::cast)
     }
+
+    /// `var` or `const`, before a parameter's name, or another language's
+    /// mode, before the name or the type, which the parser reports.
+    #[must_use]
+    pub fn mode(&self) -> Option<Mode> {
+        self.0.children().find_map(Mode::cast)
+    }
+}
+
+impl Mode {
+    /// The word, `var` or `const`, or another language's, such as `ref`.
+    /// Ada's `in out` is two.
+    pub fn words(&self) -> impl Iterator<Item = SyntaxToken> {
+        significant_tokens(&self.0)
+    }
+
+    /// Whether it says `var`, as written or as another language writes it,
+    /// as every mode but `const` and Ada's `in` does.
+    #[must_use]
+    pub fn is_var(&self) -> bool {
+        let words: Vec<String> = self.words().map(|w| w.text().to_lowercase()).collect();
+        !matches!(words.as_slice(), [word] if word == "const" || word == "in")
+    }
+
+    /// The span to delete to remove it, with the whitespace after it, up
+    /// to the name it is before.
+    #[must_use]
+    pub fn removal(&self) -> Span {
+        let end = std::iter::successors(
+            self.0.next_sibling_or_token(),
+            SyntaxElement::next_sibling_or_token,
+        )
+        .find(|e| !e.kind().is_trivia())
+        .map_or(self.span().end, |e| span(e.text_range()).start);
+        Span::new(self.span().start, end)
+    }
 }
 
 impl Per {
@@ -1565,6 +1602,13 @@ impl AttributeValue {
     #[must_use]
     pub fn name(&self) -> Option<Name> {
         self.0.children().find_map(Name::cast)
+    }
+
+    /// `var` or `const`, before an argument's name, or another language's
+    /// mode, before the name or the value, which the parser reports.
+    #[must_use]
+    pub fn mode(&self) -> Option<Mode> {
+        self.0.children().find_map(Mode::cast)
     }
 
     #[must_use]

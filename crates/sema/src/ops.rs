@@ -1829,12 +1829,14 @@ fn shifted(expr: hir::Expr, cutoff: usize) -> hir::Expr {
     }
 }
 
-/// The variables, of the program and local, that `expr` reads, each once.
+/// The variables, of the program and local, and the parameters, that
+/// `expr` reads, each once.
 pub(crate) fn targets_read(expr: &hir::Expr) -> Vec<hir::Target> {
     fn walk(expr: &hir::Expr, read: &mut Vec<hir::Target>) {
         let target = match expr {
             hir::Expr::Variable(id) => hir::Target::Variable(*id),
             hir::Expr::Local(id) => hir::Target::Local(*id),
+            hir::Expr::Parameter(name) => hir::Target::Parameter(name.clone()),
             _ => return expr.for_each_child(|child, _| walk(child, read)),
         };
         if !read.contains(&target) {

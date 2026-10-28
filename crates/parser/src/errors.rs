@@ -2279,6 +2279,162 @@ pub(crate) fn value_before_statements(span: Span) -> Diagnostic {
     .with_help("assign it to a local variable, as in `var x := …;`, or move it to the end")
 }
 
+/// The rule for modes, for notes.
+pub(crate) const MODE_RULE: &str = "a parameter is `const` unless written `var`, before its name: the operator only reads its argument's value; a `var` parameter takes a variable, which the operator can read and assign, and a call marks that argument `var` too, before its name: `call grow{var r: cities};`";
+
+/// Whose spelling of a mode `text` is.
+fn mode_origin(text: &str) -> Option<&'static str> {
+    let words: Vec<String> = text.split_whitespace().map(str::to_lowercase).collect();
+    match words
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        ["ref"] => Some("C#'s"),
+        ["inout" | "&"] => Some("Swift's"),
+        ["&", "mut"] | ["&mut"] => Some("Rust's"),
+        ["in", "out"] | ["in"] => Some("Ada's"),
+        _ => None,
+    }
+}
+
+/// A mode written `text`, at `span`, before a name, as another language
+/// writes one, where trendy writes `trendy`.
+pub(crate) fn mode_spelling(text: &str, span: Span, trendy: &str) -> Diagnostic {
+    let whose = mode_origin(text).map_or_else(String::new, |w| format!(" is {w}"));
+    let what = if trendy == "var" {
+        "a parameter the operator can assign is `var`"
+    } else {
+        "a parameter the operator only reads is `const`, as one is unless it says otherwise"
+    };
+    Diagnostic::error(
+        Code::ModeSpelling,
+        format!("`{text}`{whose}; {what}"),
+        span,
+        "another language's spelling",
+    )
+    .with_note(MODE_RULE)
+    .with_suggestion(
+        format!("write `{trendy}`"),
+        vec![Edit {
+            span,
+            replacement: trendy.to_string(),
+        }],
+    )
+}
+
+/// A mode written `text` after an attribute's `:`, before a parameter's
+/// type, if `parameter`, or before an argument's value, where other
+/// languages write one: `removal` deletes it, and the fix writes trendy's
+/// before the name, which starts at `name`, if it has none there yet.
+/// `foreign` is what trendy writes for another language's word.
+pub(crate) fn misplaced_mode(
+    text: &str,
+    foreign: Option<&str>,
+    parameter: bool,
+    removal: Span,
+    name: Option<usize>,
+) -> Diagnostic {
+    let trendy = foreign.unwrap_or(text);
+    let (whose, after) = if parameter {
+        ("parameter", "type")
+    } else {
+        ("argument", "value")
+    };
+    let (message, label) = match mode_origin(text) {
+        Some(origin) => (
+            format!(
+                "`{text}` before the {after} is {origin} spelling; trendy marks the {whose} `{trendy}`, before its name"
+            ),
+            "another language's spelling".to_string(),
+        ),
+        None => (
+            format!("`{text}` goes before the {whose}'s name, not its {after}"),
+            format!("before the {after}"),
+        ),
+    };
+    let mut edits = vec![Edit {
+        span: removal,
+        replacement: String::new(),
+    }];
+    let help = match name {
+        Some(start) => {
+            edits.push(Edit {
+                span: Span::new(start, start),
+                replacement: format!("{trendy} "),
+            });
+            if trendy == text {
+                format!("move `{text}` before the name")
+            } else {
+                format!("write `{trendy}` before the name instead")
+            }
+        }
+        None => format!("remove `{text}`"),
+    };
+    Diagnostic::error(
+        Code::ModeSpelling,
+        message,
+        removal_span(removal, text),
+        label,
+    )
+    .with_note(MODE_RULE)
+    .with_suggestion(help, edits)
+}
+
+/// The words of a mode at the start of `removal`, which runs on to what
+/// follows them.
+fn removal_span(removal: Span, text: &str) -> Span {
+    Span::new(removal.start, removal.start + text.len())
+}
+
+/// A parameter of an operator, as the parser saw it written: an `updates`
+/// clause after the parameters is fixed to mark each it lists `var`.
+pub(crate) struct Written {
+    pub(crate) name: String,
+    /// Where its name starts.
+    pub(crate) start: usize,
+    /// Whether it has a mode already.
+    pub(crate) moded: bool,
+}
+
+/// Tutorial D's `UPDATES { … }`, at `span`, after the parameters
+/// `written`: the fix deletes `removal`, the clause and the whitespace
+/// before it, and marks each parameter in `names`, if it lists only names
+/// of parameters, `var`.
+pub(crate) fn updates_clause(
+    span: Span,
+    removal: Span,
+    names: Option<&[String]>,
+    written: &[Written],
+) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::ModeSpelling,
+        "an operator's parameters that it updates are each written `var`, not listed in `updates`",
+        span,
+        "Tutorial D's spelling",
+    )
+    .with_note(MODE_RULE);
+    let marked: Option<Vec<&Written>> = names.and_then(|names| {
+        names
+            .iter()
+            .map(|name| written.iter().find(|w| &w.name == name))
+            .collect()
+    });
+    let Some(marked) = marked else {
+        return d.with_help("write `var` before the name of each parameter the operator updates, and remove `updates`");
+    };
+    let mut edits = vec![Edit {
+        span: removal,
+        replacement: String::new(),
+    }];
+    edits.extend(marked.iter().filter(|w| !w.moded).map(|w| Edit {
+        span: Span::new(w.start, w.start),
+        replacement: "var ".to_string(),
+    }));
+    d.with_suggestion("write `var` before each parameter's name instead", edits)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

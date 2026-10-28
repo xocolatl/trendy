@@ -267,6 +267,21 @@ fn operators() {
             "563",
             r#""pozole""#,
             r#""under 1000 by 63""#,
+            // `var` parameters: a local relation with a dish added, the
+            // program's with another, and a price discounted by 10%, then
+            // twice more.
+            "┌──────────────┬─────────┬───────┐",
+            "│ country      │ dish    │ price │",
+            "├──────────────┼─────────┼───────┤",
+            "│ Japan        │ ramen   │   900 │",
+            "│ South Africa │ bobotie │  1100 │",
+            "└──────────────┴─────────┴───────┘",
+            r#""dishes""#,
+            "4",
+            r#""discounted""#,
+            "900",
+            r#""discounted twice more""#,
+            "729",
         ]
     );
 }

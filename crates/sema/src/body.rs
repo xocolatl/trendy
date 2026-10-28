@@ -8,7 +8,7 @@ use trendy_hir as hir;
 use trendy_syntax::SyntaxToken;
 use trendy_syntax::ast::{self, AstNode, VarDecl};
 
-use crate::assign::{Assignee, Assigning};
+use crate::assign::{Assignee, Assigning, Declared};
 use crate::check::{Checker, Lookup, Names, Written};
 use crate::locals::{Declaration, Local, Locals};
 use crate::operators::{Operators, Signature};
@@ -62,6 +62,19 @@ pub(crate) struct Deferred {
     growing: Vec<Growing>,
     /// Each call in a `for` loop.
     in_loops: Vec<LoopCall>,
+    /// Each variable of the program's passed to a `var` parameter.
+    passed: Vec<Passed>,
+}
+
+/// A call, at `span`, that passes the variable of the program's
+/// `variable`, `name`, to the `var` parameter `param` of the update
+/// operator `callee`, which mustn't read or assign it by its own name.
+struct Passed {
+    callee: hir::OperatorId,
+    variable: hir::VariableId,
+    name: String,
+    param: String,
+    span: Span,
 }
 
 /// A call, at `span`, in one or more `for` loops, of the update operator
@@ -221,11 +234,12 @@ impl Statements<'_, '_> {
         let targets = ops::targets_read(&array)
             .into_iter()
             .map(|target| {
-                let name = match target {
+                let name = match &target {
                     hir::Target::Variable(id) => self.cx.variables[id.0]
                         .as_ref()
                         .map_or_else(String::new, |v| v.name.clone()),
-                    hir::Target::Local(id) => self.locals.get(id).name.clone(),
+                    hir::Target::Local(id) => self.locals.get(*id).name.clone(),
+                    hir::Target::Parameter(name) => name.clone(),
                 };
                 (target, name)
             })
@@ -323,6 +337,9 @@ impl Statements<'_, '_> {
             signature,
             errors,
         )?;
+        if !self.updated(&call, &args, signature.id, errors) {
+            return None;
+        }
         // A type parameter passed on as it is never grows.
         for (parameter, ty) in signature.types.iter().zip(&call.types) {
             if !matches!(ty, hir::Type::Parameter(_)) && ty.parameters().next().is_some() {
@@ -344,7 +361,7 @@ impl Statements<'_, '_> {
                     .iter()
                     .filter_map(|(target, name)| match target {
                         hir::Target::Variable(id) => Some((*id, name.clone(), frozen.array)),
-                        hir::Target::Local(_) => None,
+                        hir::Target::Local(_) | hir::Target::Parameter(_) => None,
                     })
             })
             .collect();
@@ -356,6 +373,61 @@ impl Statements<'_, '_> {
             });
         }
         Some(hir::Statement::Call(call))
+    }
+
+    /// Whether the variables `call`, of the operator `callee`, with the
+    /// arguments `args`, updates, its `var` parameters' arguments, can be:
+    /// each one the body can assign, and a different one, after reporting
+    /// why not. Whether the operator called reads or assigns one that is
+    /// the program's itself is checked once every body is.
+    fn updated(
+        &mut self,
+        call: &hir::Call,
+        args: &ast::Arguments,
+        callee: hir::OperatorId,
+        errors: &mut Vec<Diagnostic>,
+    ) -> bool {
+        let mut ok = true;
+        // Each variable passed so far, with its parameter and where.
+        let mut passed: Vec<(&hir::Target, String, Span)> = Vec::new();
+        for arg in args.named() {
+            let (Some(ident), Some(value)) = (arg.name().and_then(|n| n.ident()), arg.value())
+            else {
+                continue;
+            };
+            let param = ident.text();
+            let Some(target) = call.updated.get(param) else {
+                continue;
+            };
+            let name = match target {
+                hir::Target::Variable(id) => self.cx.variables[id.0]
+                    .as_ref()
+                    .map_or_else(String::new, |v| v.name.clone()),
+                hir::Target::Local(id) => self.locals.get(*id).name.clone(),
+                hir::Target::Parameter(name) => name.clone(),
+            };
+            let span = value.span();
+            if self.names().assigned(&name, span, errors).is_none() {
+                ok = false;
+                continue;
+            }
+            if let Some((_, first, earlier)) = passed.iter().find(|(t, ..)| *t == target) {
+                errors.push(errors::passed_twice(&name, first, param, span, *earlier));
+                ok = false;
+                continue;
+            }
+            passed.push((target, param.to_string(), span));
+            if let hir::Target::Variable(variable) = target {
+                self.deferred.passed.push(Passed {
+                    callee,
+                    variable: *variable,
+                    name,
+                    param: param.to_string(),
+                    span,
+                });
+            }
+        }
+        ok
     }
 
     /// A loop, written at `span`, whose condition, after `keyword`, is
@@ -456,15 +528,31 @@ impl Statements<'_, '_> {
 
 /// Report what can only be checked once every update operator's body is,
 /// in `bodies`: each call that leads back to its caller with ever larger
-/// types (see [`growing_recursion`]), and each call in a `for` loop that
+/// types (see [`growing_recursion`]), each call in a `for` loop that
 /// assigns a variable of the program's that the loop's array is computed
-/// from, in the operator called or in those it calls.
+/// from, in the operator called or in those it calls, and each that passes
+/// one to a `var` parameter of an operator that reads or assigns it
+/// itself, there or in the update operators it calls, or in the read-only
+/// ones they call, whose `values` these are.
 pub(crate) fn deferred_checks(
     deferred: &Deferred,
     bodies: &HashMap<hir::OperatorId, (Vec<hir::Local>, hir::Block)>,
+    values: &HashMap<hir::OperatorId, hir::Expr>,
     operators: &Operators,
     errors: &mut Vec<Diagnostic>,
 ) {
+    for passed in &deferred.passed {
+        let assigns = assigned_variables(passed.callee, bodies).contains(&passed.variable);
+        if assigns || read_variables(passed.callee, bodies, values).contains(&passed.variable) {
+            errors.push(errors::passed_and_used(
+                &passed.name,
+                &passed.param,
+                &operators.get(passed.callee).name,
+                assigns,
+                passed.span,
+            ));
+        }
+    }
     growing_recursion(&deferred.growing, bodies, operators, errors);
     for call in &deferred.in_loops {
         let assigned = assigned_variables(call.callee, bodies);
@@ -505,30 +593,128 @@ fn assigned_variables(
     assigned
 }
 
-/// Add each variable of the program that `block`'s statements assign, in
-/// blocks within it too, to `assigned`.
+/// Add each variable of the program that `block`'s statements assign, or
+/// pass to a `var` parameter, in blocks within it too, to `assigned`.
 fn assigned_in(block: &hir::Block, assigned: &mut Vec<hir::VariableId>) {
-    for statement in &block.statements {
-        match statement {
-            hir::Statement::Assign(assignments) => {
-                for assignment in assignments {
-                    if let hir::Target::Variable(id) = assignment.target
-                        && !assigned.contains(&id)
-                    {
-                        assigned.push(id);
-                    }
-                }
+    each_statement(block, &mut |statement| {
+        let targets: Vec<&hir::Target> = match statement {
+            hir::Statement::Assign(assignments) => assignments.iter().map(|a| &a.target).collect(),
+            hir::Statement::Call(call) => call.updated.values().collect(),
+            _ => Vec::new(),
+        };
+        for target in targets {
+            if let hir::Target::Variable(id) = target
+                && !assigned.contains(id)
+            {
+                assigned.push(*id);
             }
-            hir::Statement::Call(_) => {}
+        }
+    });
+}
+
+/// Add each variable of the program that `block`'s calls pass to a `var`
+/// parameter, in blocks within it too, to `passed`.
+fn passed_in(block: &hir::Block, passed: &mut Vec<hir::VariableId>) {
+    each_statement(block, &mut |statement| {
+        let hir::Statement::Call(call) = statement else {
+            return;
+        };
+        for target in call.updated.values() {
+            if let hir::Target::Variable(id) = target
+                && !passed.contains(id)
+            {
+                passed.push(*id);
+            }
+        }
+    });
+}
+
+/// Call `f` with each of `block`'s statements, and those in blocks within
+/// them, each before those within it.
+fn each_statement(block: &hir::Block, f: &mut dyn FnMut(&hir::Statement)) {
+    for statement in &block.statements {
+        f(statement);
+        match statement {
             hir::Statement::If(_, then, otherwise) => {
-                assigned_in(then, assigned);
-                assigned_in(otherwise, assigned);
+                each_statement(then, f);
+                each_statement(otherwise, f);
             }
             hir::Statement::Loop(_, body, _) | hir::Statement::For(_, _, body) => {
-                assigned_in(body, assigned);
+                each_statement(body, f);
+            }
+            hir::Statement::Call(_) | hir::Statement::Assign(_) => {}
+        }
+    }
+}
+
+/// The variables of the program that the update operator `id` reads, in
+/// its body or in those of the update operators it calls, in `bodies`, or
+/// in the values of the read-only operators they call, in `values`: each
+/// a variable's value, or one it passes to a `var` parameter.
+fn read_variables(
+    id: hir::OperatorId,
+    bodies: &HashMap<hir::OperatorId, (Vec<hir::Local>, hir::Block)>,
+    values: &HashMap<hir::OperatorId, hir::Expr>,
+) -> Vec<hir::VariableId> {
+    // Each read-only operator's value is walked once.
+    fn walk(
+        expr: &hir::Expr,
+        values: &HashMap<hir::OperatorId, hir::Expr>,
+        seen: &mut Vec<hir::OperatorId>,
+        read: &mut Vec<hir::VariableId>,
+    ) {
+        match expr {
+            hir::Expr::Variable(id) if !read.contains(id) => read.push(*id),
+            hir::Expr::Call(call) if !seen.contains(&call.operator) => {
+                seen.push(call.operator);
+                if let Some(value) = values.get(&call.operator) {
+                    walk(value, values, seen, read);
+                }
+            }
+            _ => {}
+        }
+        expr.for_each_child(|child, _| walk(child, values, seen, read));
+    }
+    let mut read = Vec::new();
+    let mut seen = Vec::new();
+    let mut next = vec![id];
+    let mut called = vec![id];
+    while let Some(id) = next.pop() {
+        let Some((_, body)) = bodies.get(&id) else {
+            continue;
+        };
+        exprs_in(body, &mut |expr| walk(expr, values, &mut seen, &mut read));
+        let mut callees = Vec::new();
+        calls_in(body, &mut callees);
+        for callee in callees {
+            if !called.contains(&callee) {
+                called.push(callee);
+                next.push(callee);
             }
         }
     }
+    // A `var` parameter's argument is read too.
+    for id in called {
+        if let Some((_, body)) = bodies.get(&id) {
+            passed_in(body, &mut read);
+        }
+    }
+    read
+}
+
+/// Call `f` with each expression `block`'s statements compute, in blocks
+/// within it too.
+fn exprs_in(block: &hir::Block, f: &mut dyn FnMut(&hir::Expr)) {
+    each_statement(block, &mut |statement| match statement {
+        hir::Statement::Call(call) => call.args.values().for_each(&mut *f),
+        hir::Statement::Assign(assignments) => {
+            for assignment in assignments {
+                f(&assignment.value);
+            }
+        }
+        hir::Statement::If(condition, ..) | hir::Statement::Loop(condition, ..) => f(condition),
+        hir::Statement::For(_, array, _) => f(array),
+    });
 }
 
 /// Report each call in `growing` that leads back to its caller through
@@ -575,19 +761,11 @@ fn growing_recursion(
 /// Add each operator `block`'s statements call, in blocks within it too, to
 /// `called`.
 fn calls_in(block: &hir::Block, called: &mut Vec<hir::OperatorId>) {
-    for statement in &block.statements {
-        match statement {
-            hir::Statement::Call(call) => called.push(call.operator),
-            hir::Statement::Assign(_) => {}
-            hir::Statement::If(_, then, otherwise) => {
-                calls_in(then, called);
-                calls_in(otherwise, called);
-            }
-            hir::Statement::Loop(_, body, _) | hir::Statement::For(_, _, body) => {
-                calls_in(body, called);
-            }
+    each_statement(block, &mut |statement| {
+        if let hir::Statement::Call(call) = statement {
+            called.push(call.operator);
         }
-    }
+    });
 }
 
 /// Names in the body of `within`: its parameters and its local variables,
@@ -672,7 +850,7 @@ impl Names for BodyNames<'_, '_> {
                 .expect("only valid variables are resolved")
                 .ty
                 .clone(),
-            hir::Expr::Parameter(name) => self.signature().params[name].clone(),
+            hir::Expr::Parameter(name) => self.signature().params[name].ty.clone(),
             hir::Expr::Local(id) => self.locals.get(*id).ty.clone(),
             _ => unreachable!("only variables, parameters and local variables are leaves"),
         }
@@ -738,7 +916,12 @@ impl BodyNames<'_, '_> {
         errors: &mut Vec<Diagnostic>,
     ) -> Option<Assignee> {
         let cx = self.cx;
-        if self.signature().is_parameter(name) {
+        let signature = self.signature();
+        if signature.is_var(name) {
+            let ty = signature.params[name].ty.clone();
+            return Some(Assignee::parameter(name, ty, signature.param_origin(name)));
+        }
+        if signature.is_parameter(name) {
             let hidden = cx.variable_ids.contains_key(name);
             errors.push(errors::assigned_parameter(name, span, hidden));
             return None;
@@ -781,7 +964,7 @@ impl BodyNames<'_, '_> {
                 name: variable.name.clone(),
                 ty: variable.ty.clone(),
                 keys: variable.keys.clone(),
-                declaration: cx.declarations[&variable.name].clone(),
+                declaration: Declared::Variable(cx.declarations[&variable.name].clone()),
             });
         }
         if let Some((kind, _)) = cx.namespaces.operator(name) {

@@ -7,7 +7,8 @@ use trendy_diag::{Code, Diagnostic, Edit, Span, edit_distance};
 use trendy_hir as hir;
 use trendy_syntax::SyntaxToken;
 use trendy_syntax::ast::{
-    AstNode, Expr, Key, NaryExpr, OrderList, ProjectExpr, SourceFile, TypeExpr, VarDecl,
+    AstNode, AttributeValue, Expr, Key, Mode, NaryExpr, OrderList, ProjectExpr, SourceFile,
+    TypeExpr, VarDecl,
 };
 
 use crate::check::Written;
@@ -1744,11 +1745,11 @@ pub(crate) fn operator_call_without_value(
 pub(crate) fn assigned_parameter(name: &str, span: Span, hidden: bool) -> Diagnostic {
     let d = Diagnostic::error(
         Code::NotAssignable,
-        format!("parameter `{name}` can't be assigned"),
+        format!("the `const` parameter `{name}` can't be assigned"),
         span,
-        "a parameter",
+        "a `const` parameter",
     )
-    .with_note("parameters are read-only: an operator can't change the arguments it is passed");
+    .with_note(MODE_RULE);
     if hidden {
         d.with_help(format!(
             "the parameter hides the variable `{name}`; to assign the variable, rename the parameter"
@@ -4959,4 +4960,189 @@ pub(crate) fn empty_for(span: Span, body: &trendy_syntax::ast::Body) -> Diagnost
             replacement: String::new(),
         }],
     )
+}
+
+/// The rule for parameters' modes, for notes.
+const MODE_RULE: &str = "a parameter is `const` unless written `var`: the operator only reads its argument's value; an update operator's `var` parameter takes a variable, which the operator can read and assign, and a call marks that argument `var` too: `call grow{var r: cities};`";
+
+/// The fix that removes `mode`.
+fn mode_removal(mode: &Mode) -> (String, Vec<Edit>) {
+    let words: Vec<String> = mode.words().map(|w| w.text().to_string()).collect();
+    (
+        format!("remove `{}`", words.join(" ")),
+        vec![Edit {
+            span: mode.removal(),
+            replacement: String::new(),
+        }],
+    )
+}
+
+/// `mode`, `var`, before the name `ident` of the parameter `name` of a
+/// read-only operator.
+pub(crate) fn var_in_read_only(name: &str, mode: &Mode, ident: &SyntaxToken) -> Diagnostic {
+    let (help, edits) = mode_removal(mode);
+    Diagnostic::error(
+        Code::MisplacedMode,
+        format!("a read-only operator's parameter `{name}` can't be `var`"),
+        mode.span(),
+        "a read-only operator changes nothing but its own local variables",
+    )
+    .with_secondary(trendy_syntax::span(ident.text_range()), "this parameter")
+    .with_note(MODE_RULE)
+    .with_note("an operator that changes a variable it is passed is an update operator, without a result type, which `call` invokes")
+    .with_suggestion(help, edits)
+}
+
+/// `mode`, `var`, before the name `ident` of the `per` parameter `name`,
+/// or, with `per`, of the relation that parameter is evaluated for each
+/// tuple of.
+pub(crate) fn var_with_per(
+    name: &str,
+    per: Option<&str>,
+    mode: &Mode,
+    ident: &SyntaxToken,
+) -> Diagnostic {
+    let (help, edits) = mode_removal(mode);
+    let (message, label) = match per {
+        Some(per) => (
+            format!("`{name}`, which `{per}` is evaluated for each tuple of, can't be `var`"),
+            "its tuples carry the values of its `per` parameters",
+        ),
+        None => (
+            format!("the `per` parameter `{name}` can't be `var`"),
+            "its argument is a value for each tuple of its relation",
+        ),
+    };
+    Diagnostic::error(Code::MisplacedMode, message, mode.span(), label)
+        .with_secondary(trendy_syntax::span(ident.text_range()), "this parameter")
+        .with_note(MODE_RULE)
+        .with_note(PER_RULE)
+        .with_suggestion(help, edits)
+}
+
+/// `mode`, in a heading that isn't an operator's parameters.
+pub(crate) fn mode_outside_parameters(mode: &Mode) -> Diagnostic {
+    let (help, edits) = mode_removal(mode);
+    Diagnostic::error(
+        Code::MisplacedMode,
+        "only an operator's parameters have a mode",
+        mode.span(),
+        "an attribute has none",
+    )
+    .with_note(MODE_RULE)
+    .with_suggestion(help, edits)
+}
+
+/// The argument `arg`, for the parameter `name` of `signature`, whose
+/// mode is `mode`, written with `written`, a different one, or none.
+pub(crate) fn argument_mode(
+    arg: &AttributeValue,
+    name: &str,
+    mode: hir::Mode,
+    written: Option<&Mode>,
+    signature: &Signature,
+) -> Diagnostic {
+    let span = written.map_or_else(|| arg.span(), AstNode::span);
+    let (message, label, help, edits) = match (mode, written) {
+        (hir::Mode::Var, None) => {
+            let start = arg.span().start;
+            (
+                format!(
+                    "the argument for `var {name}` is marked `var`, as the variable the call updates"
+                ),
+                "not marked `var`".to_string(),
+                "mark it `var`".to_string(),
+                vec![Edit {
+                    span: Span::new(start, start),
+                    replacement: "var ".to_string(),
+                }],
+            )
+        }
+        (hir::Mode::Var, Some(written)) => {
+            let words: Vec<String> = written.words().map(|w| w.text().to_string()).collect();
+            let words = words.join(" ");
+            (
+                format!("the argument for `var {name}` is marked `var`, not `{words}`"),
+                format!("marked `{words}`"),
+                "mark it `var`".to_string(),
+                vec![Edit {
+                    span: written.span(),
+                    replacement: "var".to_string(),
+                }],
+            )
+        }
+        (hir::Mode::Const, written) => {
+            let written = written.expect("a `const` parameter's argument may be marked `const`");
+            let (help, edits) = mode_removal(written);
+            (
+                format!("`{name}` isn't a `var` parameter, so its argument isn't marked `var`"),
+                "the operator doesn't change it".to_string(),
+                help,
+                edits,
+            )
+        }
+    };
+    let d = Diagnostic::error(Code::ArgumentMode, message, span, label)
+        .with_note(format!("the parameters are {}", signature.text()))
+        .with_note(MODE_RULE);
+    let d = match signature.param_decl(name) {
+        Some(decl) => d.with_secondary(decl.span(), "the parameter"),
+        None => d,
+    };
+    d.with_suggestion(help, edits)
+}
+
+/// The argument `written`, for the `var` parameter `name`, which isn't a
+/// variable.
+pub(crate) fn argument_not_a_variable(name: &str, written: &Expr) -> Diagnostic {
+    Diagnostic::error(
+        Code::NotAssignable,
+        format!("the argument for `var {name}` is a variable, which the call updates"),
+        written.span(),
+        "not a variable",
+    )
+    .with_note(MODE_RULE)
+    .with_help("declare a variable with this value, and pass the variable: `var v := …;`")
+}
+
+/// The variable `name`, at `span`, passed both to `var first` and to `var
+/// second`, of one call.
+pub(crate) fn passed_twice(
+    name: &str,
+    first: &str,
+    second: &str,
+    span: Span,
+    earlier: Span,
+) -> Diagnostic {
+    Diagnostic::error(
+        Code::Aliased,
+        format!("`{name}` is passed to both `var {first}` and `var {second}`"),
+        span,
+        "passed again",
+    )
+    .with_secondary(earlier, "passed here first")
+    .with_note("each `var` parameter's value is its variable's when the operator ends, so one variable can't be two of them")
+    .with_help("pass a different variable to each `var` parameter")
+}
+
+/// The variable `name`, at `span`, passed to `var param` of `callee`,
+/// which `reads` the variable itself, or assigns it, in its body or in
+/// those of the operators it calls.
+pub(crate) fn passed_and_used(
+    name: &str,
+    param: &str,
+    callee: &str,
+    assigns: bool,
+    span: Span,
+) -> Diagnostic {
+    let uses = if assigns { "assigns" } else { "reads" };
+    Diagnostic::error(
+        Code::Aliased,
+        format!("`{name}` is passed to `var {param}` of `{callee}`, which {uses} `{name}` itself"),
+        span,
+        "passed here",
+    )
+    .with_note(format!("`{callee}` {uses} `{name}` in its body or in an operator it calls, where it would be a second name for what `{param}` is"))
+    .with_note(MODE_RULE)
+    .with_help(format!("pass `{callee}` another variable, or have it use `{param}` for `{name}`"))
 }

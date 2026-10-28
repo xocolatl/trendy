@@ -254,26 +254,7 @@ impl Functions {
                     operand => operand_type(operand),
                 };
                 let value = self.load(ty, src, frame, b)?;
-                let result = match op {
-                    lir::UnaryOp::Not => b.ins().bxor_imm_u(value, 1),
-                    lir::UnaryOp::Negate(lir::Numeric::Integer) => {
-                        let zero = b.ins().iconst(types::I64, 0);
-                        let (result, overflow) = b.ins().ssub_overflow(zero, value);
-                        self.fail_if(overflow, lir::Failure::IntegerOverflow, b)?;
-                        result
-                    }
-                    // Exact: only the sign changes, and 0.0 stays 0.0.
-                    lir::UnaryOp::Negate(lir::Numeric::Approximate) => {
-                        let negated = b.ins().fneg(value);
-                        one_zero(negated, b)
-                    }
-                    lir::UnaryOp::Integer if ty == types::I64 => value,
-                    lir::UnaryOp::Integer => b.ins().uextend(types::I64, value),
-                    lir::UnaryOp::Usize if self.config.pointer_type() == types::I64 => value,
-                    lir::UnaryOp::Usize => b.ins().ireduce(self.config.pointer_type(), value),
-                    // Rounded to nearest, ties to even, as IEEE 754 rounds.
-                    lir::UnaryOp::Approximate => b.ins().fcvt_from_sint(types::F64, value),
-                };
+                let result = self.unary(*op, value, ty, b)?;
                 self.store(dst, result, frame, b)?;
             }
             lir::Inst::Element {
@@ -296,6 +277,10 @@ impl Functions {
                 let next = b.ins().iadd_imm_s(value, 1);
                 self.store(place, next, frame, b)?;
             }
+            lir::Inst::Address { dst, src } => {
+                let address = self.address(src, frame, b)?;
+                self.store(dst, address, frame, b)?;
+            }
             lir::Inst::Binary { dst, op, lhs, rhs } => {
                 let ty = match op {
                     lir::BinaryOp::Compare(_, lir::Operand::Usize) => self.config.pointer_type(),
@@ -308,6 +293,37 @@ impl Functions {
             }
         }
         Ok(())
+    }
+
+    /// `op value`, of `value`'s type `ty`, failing the program where an
+    /// arithmetic result doesn't exist.
+    fn unary(
+        &mut self,
+        op: lir::UnaryOp,
+        value: Value,
+        ty: types::Type,
+        b: &mut FunctionBuilder,
+    ) -> Result<Value, String> {
+        Ok(match op {
+            lir::UnaryOp::Not => b.ins().bxor_imm_u(value, 1),
+            lir::UnaryOp::Negate(lir::Numeric::Integer) => {
+                let zero = b.ins().iconst(types::I64, 0);
+                let (result, overflow) = b.ins().ssub_overflow(zero, value);
+                self.fail_if(overflow, lir::Failure::IntegerOverflow, b)?;
+                result
+            }
+            // Exact: only the sign changes, and 0.0 stays 0.0.
+            lir::UnaryOp::Negate(lir::Numeric::Approximate) => {
+                let negated = b.ins().fneg(value);
+                one_zero(negated, b)
+            }
+            lir::UnaryOp::Integer if ty == types::I64 => value,
+            lir::UnaryOp::Integer => b.ins().uextend(types::I64, value),
+            lir::UnaryOp::Usize if self.config.pointer_type() == types::I64 => value,
+            lir::UnaryOp::Usize => b.ins().ireduce(self.config.pointer_type(), value),
+            // Rounded to nearest, ties to even, as IEEE 754 rounds.
+            lir::UnaryOp::Approximate => b.ins().fcvt_from_sint(types::F64, value),
+        })
     }
 
     /// `lhs op rhs`, failing the program where an arithmetic result doesn't

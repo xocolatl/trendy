@@ -432,6 +432,9 @@ pub enum Inst {
     /// Add 1 to the [`Layout::Usize`] at `place`, which counts a loop's
     /// iterations, and so never overflows.
     Increment { place: Place },
+    /// Store at `dst`, a [`Layout::Address`], the address of `src`: a
+    /// variable passed to a `var` parameter.
+    Address { dst: Place, src: Place },
 }
 
 /// The type an arithmetic operator works on.

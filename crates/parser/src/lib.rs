@@ -86,6 +86,18 @@ struct Missing {
     help: Option<&'static str>,
 }
 
+/// A mode's words, where [`Parser::mode_at`] or
+/// [`Parser::misplaced_mode`] finds one.
+#[derive(Clone, Copy)]
+struct ModeWords {
+    /// How many tokens it is: Ada's `in out` and Rust's `&mut` are two.
+    count: usize,
+    /// What trendy writes for it, if it is another language's word: `var`
+    /// for C#'s `ref`, Swift's `inout` and `&`, Rust's `&mut` and Ada's
+    /// `in out`, and `const` for Ada's `in`.
+    foreign: Option<&'static str>,
+}
+
 /// How a key is spelled: trendy's `key`, or SQL's `primary key` or
 /// `unique`, which are reported with a fix.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -369,7 +381,8 @@ impl<'a> Parser<'a> {
             &[SyntaxKind::LBrace, SyntaxKind::LParen],
         );
         let angled = self.angled_type_parameters();
-        self.params();
+        let written = self.params();
+        self.updates_clause(&written);
         let valued = self.result_type();
         let declared = self.type_parameters();
         if let Some(angled) = angled {
@@ -503,8 +516,8 @@ impl<'a> Parser<'a> {
             (SyntaxKind::LBrace, SyntaxKind::RBrace),
             &[],
             |p| {
-                p.items(Self::at_attribute, |p| {
-                    p.attribute(SyntaxKind::AttributeType, Self::attribute_type);
+                p.items(Self::at_heading_attribute, |p| {
+                    p.moded_attribute(SyntaxKind::AttributeType, false, Self::attribute_type);
                 });
             },
         );
@@ -579,21 +592,95 @@ impl<'a> Parser<'a> {
     }
 
     /// An operator's parameters: a heading, which C-style `()` is accepted
-    /// for and reported.
-    fn params(&mut self) {
+    /// for and reported. Each one's name, where it starts, and whether it
+    /// has a mode, which an `updates` clause after them is fixed to.
+    fn params(&mut self) -> Vec<errors::Written> {
         let outer_form = std::mem::replace(&mut self.form, errors::HEADING_FORM);
+        let written = std::cell::RefCell::new(Vec::new());
         self.delimited(
             Some(SyntaxKind::Heading),
             "parameter list",
             (SyntaxKind::LBrace, SyntaxKind::RBrace),
             &[(SyntaxKind::LParen, SyntaxKind::RParen)],
             |p| {
-                p.items(Self::at_attribute, |p| {
-                    p.attribute(SyntaxKind::AttributeType, Self::attribute_type);
+                p.items(Self::at_heading_attribute, |p| {
+                    let moded = p.mode_at(0).is_some();
+                    let name = p.nth_found(usize::from(moded));
+                    if let Some(name) = name.filter(|n| n.kind == SyntaxKind::Ident) {
+                        written.borrow_mut().push(errors::Written {
+                            name: name.text.to_string(),
+                            start: name.span.start,
+                            moded,
+                        });
+                    }
+                    p.moded_attribute(SyntaxKind::AttributeType, true, Self::attribute_type);
                 });
             },
         );
         self.form = outer_form;
+        written.into_inner()
+    }
+
+    /// Tutorial D's `UPDATES { p, q }`, after an operator's parameters,
+    /// `written`, if it is there: kept in an error node, and reported with
+    /// a fix that marks each parameter it lists `var` instead.
+    fn updates_clause(&mut self, written: &[errors::Written]) {
+        let Some(keyword) = self
+            .found()
+            .filter(|f| f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case("updates"))
+        else {
+            return;
+        };
+        if self
+            .found_after(1)
+            .is_none_or(|f| f.kind != SyntaxKind::LBrace)
+        {
+            return;
+        }
+        let from = self.last_end.unwrap_or(keyword.span.start);
+        self.start_node(SyntaxKind::Error);
+        self.bump();
+        self.bump();
+        // The names it lists, or none for anything else, such as `ALL BUT`.
+        let mut names = Some(Vec::new());
+        while let Some(found) = self.found() {
+            if found.kind == SyntaxKind::RBrace {
+                break;
+            }
+            if matches!(
+                found.kind,
+                SyntaxKind::LBracket | SyntaxKind::Semicolon | SyntaxKind::OperatorKw
+            ) {
+                // The `}` is missing: what follows is the body.
+                names = None;
+                break;
+            }
+            match found.kind {
+                SyntaxKind::Ident => {
+                    if let Some(names) = &mut names {
+                        names.push(found.text.to_string());
+                    }
+                }
+                SyntaxKind::Comma => {}
+                _ => names = None,
+            }
+            if found.text.eq_ignore_ascii_case("all") || found.text.eq_ignore_ascii_case("but") {
+                names = None;
+            }
+            self.bump();
+        }
+        let end = if self.at(SyntaxKind::RBrace) {
+            self.bump().end
+        } else {
+            self.last_end.unwrap_or(keyword.span.end)
+        };
+        self.builder.finish_node();
+        self.errors.push(errors::updates_clause(
+            Span::new(keyword.span.start, end),
+            Span::new(from, end),
+            names.as_deref(),
+            written,
+        ));
     }
 
     /// Statements up to the end of a body.
@@ -2306,6 +2393,7 @@ impl<'a> Parser<'a> {
     fn at_argument(&mut self) -> bool {
         self.peek()
             .is_some_and(|k| k == SyntaxKind::Ident || starts_value(k))
+            || self.mode_at(0).is_some()
     }
 
     /// Whether a call expression starts here: a name followed by its
@@ -2321,6 +2409,7 @@ impl<'a> Parser<'a> {
         match self.found_after(1).map(|f| f.kind) {
             Some(SyntaxKind::LParen) => self.paren_calls,
             Some(SyntaxKind::LBrace) => match self.found_after(2) {
+                _ if self.mode_at(2).is_some() => true,
                 Some(f) if f.kind == SyntaxKind::Ident => self.found_after(3).is_some_and(|f| {
                     matches!(
                         f.kind,
@@ -2351,17 +2440,19 @@ impl<'a> Parser<'a> {
         self.builder.finish_node();
     }
 
-    /// `name: value`, or a value without a name, which sema reports.
+    /// `name: value`, with a mode before the name if it has one, or a
+    /// value without a name, which sema reports.
     fn argument(&mut self) {
-        let named = self.at(SyntaxKind::Ident)
-            && self.found_after(1).is_some_and(|f| {
-                matches!(
-                    f.kind,
-                    SyntaxKind::Colon | SyntaxKind::Eq | SyntaxKind::ColonEq
-                )
-            });
+        let named = self.mode_at(0).is_some()
+            || (self.at(SyntaxKind::Ident)
+                && self.found_after(1).is_some_and(|f| {
+                    matches!(
+                        f.kind,
+                        SyntaxKind::Colon | SyntaxKind::Eq | SyntaxKind::ColonEq
+                    )
+                }));
         if named {
-            self.attribute(SyntaxKind::AttributeValue, Self::expression);
+            self.moded_attribute(SyntaxKind::AttributeValue, true, Self::expression);
         } else {
             self.start_node(SyntaxKind::PositionalArg);
             self.expression();
@@ -3986,8 +4077,8 @@ impl<'a> Parser<'a> {
             (SyntaxKind::LBrace, SyntaxKind::RBrace),
             &[],
             |p| {
-                p.items(Self::at_attribute, |p| {
-                    p.attribute(SyntaxKind::AttributeType, Self::attribute_type);
+                p.items(Self::at_heading_attribute, |p| {
+                    p.moded_attribute(SyntaxKind::AttributeType, false, Self::attribute_type);
                 });
             },
         );
@@ -3996,6 +4087,199 @@ impl<'a> Parser<'a> {
 
     fn at_attribute(&mut self) -> bool {
         self.at(SyntaxKind::Ident)
+    }
+
+    /// Whether an attribute of a heading starts here: a name, or a mode
+    /// before one, which only an operator's parameters can have, as sema
+    /// checks.
+    fn at_heading_attribute(&mut self) -> bool {
+        self.at(SyntaxKind::Ident) || self.mode_at(0).is_some()
+    }
+
+    /// The significant token `n` after the next one, or the next one for 0.
+    fn nth_found(&mut self, n: usize) -> Option<Found<'a>> {
+        if n == 0 {
+            self.found()
+        } else {
+            self.found_after(n)
+        }
+    }
+
+    /// The mode starting at the significant token `n` from the next one,
+    /// if one does, before a parameter's or an argument's name and its
+    /// `:`: `var` or `const`, in any case, or another language's word for
+    /// one, C#'s `ref`, Swift's `inout`, or Ada's `in out` or `in`.
+    fn mode_at(&mut self, n: usize) -> Option<ModeWords> {
+        let word =
+            |f: Found, word: &str| f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case(word);
+        let first = self.nth_found(n)?;
+        let mode = if first.spells(SyntaxKind::VarKw) || word(first, "const") {
+            ModeWords {
+                count: 1,
+                foreign: None,
+            }
+        } else if word(first, "ref") || word(first, "inout") {
+            ModeWords {
+                count: 1,
+                foreign: Some("var"),
+            }
+        } else if word(first, "in") {
+            let out = self.found_after(n + 1).is_some_and(|f| word(f, "out"));
+            ModeWords {
+                count: 1 + usize::from(out),
+                foreign: Some(if out { "var" } else { "const" }),
+            }
+        } else {
+            return None;
+        };
+        let name = self.found_after(n + mode.count)?;
+        let separator = self.found_after(n + mode.count + 1)?;
+        (name.kind == SyntaxKind::Ident
+            && matches!(
+                separator.kind,
+                SyntaxKind::Colon | SyntaxKind::Eq | SyntaxKind::ColonEq
+            ))
+        .then_some(mode)
+    }
+
+    /// The mode `words`, next: one in another case, or another language's
+    /// word, is reported, with a fix.
+    fn mode(&mut self, words: ModeWords) {
+        self.start_node(SyntaxKind::Mode);
+        let first = self.found().expect("at a mode");
+        let mut span = self.bump();
+        for _ in 1..words.count {
+            span.end = self.bump().end;
+        }
+        match words.foreign {
+            Some(trendy) => {
+                let text = &self.source[span.start..span.end];
+                self.errors.push(errors::mode_spelling(text, span, trendy));
+            }
+            None if first.kind == SyntaxKind::Ident && first.text != "const" => {
+                let keyword = if first.spells(SyntaxKind::VarKw) {
+                    "var"
+                } else {
+                    "const"
+                };
+                self.errors.push(errors::miscased_keyword(first, keyword));
+            }
+            None => {}
+        }
+        self.builder.finish_node();
+    }
+
+    /// Another language's mode, next, written where trendy writes none, in
+    /// `attribute`: before a parameter's type, as Swift's `inout T`, or
+    /// before an argument's value, as C#'s `ref x`, Swift's `&x` and Rust's
+    /// `&mut x`, and `var` or `const` there too.
+    fn misplaced_mode(&mut self, attribute: SyntaxKind) -> Option<ModeWords> {
+        let word = |f: Option<Found>, word: &str| {
+            f.is_some_and(|f| f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case(word))
+        };
+        let first = self.found()?;
+        let (count, foreign) = if first.spells(SyntaxKind::VarKw) || word(Some(first), "const") {
+            (1, None)
+        } else if word(Some(first), "ref") || word(Some(first), "inout") {
+            (1, Some("var"))
+        } else if first.kind == SyntaxKind::ForeignOperator
+            && first.text == "&"
+            && attribute == SyntaxKind::AttributeValue
+        {
+            let rust = word(self.found_after(1), "mut");
+            (1 + usize::from(rust), Some("var"))
+        } else {
+            return None;
+        };
+        let next = self.found_after(count)?;
+        let follows = match attribute {
+            // A type: a name, or `tuple`, `relation` or `array`.
+            SyntaxKind::AttributeType => matches!(
+                next.kind,
+                SyntaxKind::Ident
+                    | SyntaxKind::TupleKw
+                    | SyntaxKind::RelationKw
+                    | SyntaxKind::ArrayKw
+            ),
+            // A variable's name, and nothing more.
+            _ => {
+                next.kind == SyntaxKind::Ident
+                    && self.found_after(count + 1).is_none_or(|f| {
+                        matches!(
+                            f.kind,
+                            SyntaxKind::Comma | SyntaxKind::RBrace | SyntaxKind::RParen
+                        )
+                    })
+            }
+        };
+        follows.then_some(ModeWords { count, foreign })
+    }
+
+    /// `name: x`, with `x` parsed by `item`.
+    fn attribute(&mut self, attribute: SyntaxKind, item: fn(&mut Self)) {
+        self.start_node(attribute);
+        self.start_node(SyntaxKind::Name);
+        self.bump();
+        self.builder.finish_node();
+        self.attribute_separator();
+        item(self);
+        self.builder.finish_node();
+    }
+
+    /// `name: x`, as [`Parser::attribute`], with a mode before the name, if
+    /// it has one, as a parameter or an argument can: `var name: x`. In
+    /// parameters and arguments, which are `called`, a mode after the `:`,
+    /// as other languages write one, is reported, with a fix moving it
+    /// before the name.
+    fn moded_attribute(&mut self, attribute: SyntaxKind, called: bool, item: fn(&mut Self)) {
+        self.start_node(attribute);
+        let moded = match self.mode_at(0) {
+            Some(words) => {
+                self.mode(words);
+                true
+            }
+            None => false,
+        };
+        self.start_node(SyntaxKind::Name);
+        let name = self.bump();
+        self.builder.finish_node();
+        self.attribute_separator();
+        if let Some(words) = self.misplaced_mode(attribute).filter(|_| called) {
+            self.start_node(SyntaxKind::Mode);
+            let mut span = self.bump();
+            for _ in 1..words.count {
+                span.end = self.bump().end;
+            }
+            self.builder.finish_node();
+            let end = self.found().map_or(span.end, |f| f.span.start);
+            let text = &self.source[span.start..span.end];
+            self.errors.push(errors::misplaced_mode(
+                text,
+                words.foreign,
+                attribute == SyntaxKind::AttributeType,
+                Span::new(span.start, end),
+                (!moded).then_some(name.start),
+            ));
+        }
+        item(self);
+        self.builder.finish_node();
+    }
+
+    /// The `:` after an attribute's name, or `=` or `:=` in its place,
+    /// which is reported, or none, which is missing.
+    fn attribute_separator(&mut self) {
+        match self.found() {
+            Some(found) if found.kind == SyntaxKind::Colon => {
+                self.bump();
+            }
+            Some(found) if matches!(found.kind, SyntaxKind::Eq | SyntaxKind::ColonEq) => {
+                let span = self.bump();
+                self.errors
+                    .push(errors::wrong_attribute_separator(found.kind, span));
+            }
+            // `TUPLE { A INTEGER }`, as in Tutorial D: the colon is missing.
+            _ => self.missing(SyntaxKind::Colon),
+        }
     }
 
     /// Comma-separated items, with an optional trailing comma. `starts_item`
@@ -4018,28 +4302,6 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-    }
-
-    /// `name: x`, with `x` parsed by `item`.
-    fn attribute(&mut self, attribute: SyntaxKind, item: fn(&mut Self)) {
-        self.start_node(attribute);
-        self.start_node(SyntaxKind::Name);
-        self.bump();
-        self.builder.finish_node();
-        match self.found() {
-            Some(found) if found.kind == SyntaxKind::Colon => {
-                self.bump();
-            }
-            Some(found) if matches!(found.kind, SyntaxKind::Eq | SyntaxKind::ColonEq) => {
-                let span = self.bump();
-                self.errors
-                    .push(errors::wrong_attribute_separator(found.kind, span));
-            }
-            // `TUPLE { A INTEGER }`, as in Tutorial D: the colon is missing.
-            _ => self.missing(SyntaxKind::Colon),
-        }
-        item(self);
-        self.builder.finish_node();
     }
 
     /// Whether `keyword` is next: the keyword itself, or a mis-cased spelling
@@ -5738,6 +6000,126 @@ SourceFile
             .unwrap();
         assert_eq!(named.declaration(), parse.tree.heading("home"));
         assert!(named.declaration().is_some());
+    }
+
+    #[test]
+    fn modes_are_before_names() {
+        let source =
+            "operator f{var r: integer, const n: integer} [ call f{var r: x, const n: 1}; ];";
+        let parse = parse_str(source);
+        assert!(parse.errors.is_empty(), "{:?}", parse.errors);
+        let op = parse.tree.operators().next().unwrap();
+        let modes: Vec<String> = op
+            .params()
+            .unwrap()
+            .attributes()
+            .map(|a| {
+                a.mode()
+                    .map_or_else(String::new, |m| m.syntax().text().to_string())
+            })
+            .collect();
+        assert_eq!(modes, ["var", "const"]);
+        let Some(Statement::Call(call)) = op.body().unwrap().statements().next() else {
+            panic!("a call");
+        };
+        let args: Vec<(String, bool)> = call
+            .arguments()
+            .unwrap()
+            .named()
+            .map(|a| {
+                let mode = a.mode().unwrap();
+                (a.name().unwrap().syntax().text().to_string(), mode.is_var())
+            })
+            .collect();
+        assert_eq!(args, [("r".to_string(), true), ("n".to_string(), false)]);
+        // As an expression's, a call's arguments can have modes too.
+        assert!(messages("var x := f{const n: 1};").is_empty());
+        // `const` and `var` are names elsewhere, and `const` before a
+        // name without its `:` is no mode.
+        assert!(messages("var x := tuple { const: 1 };").is_empty());
+        assert!(messages("operator f{const: integer} [];").is_empty());
+    }
+
+    #[test]
+    fn other_languages_modes_are_fixed() {
+        for (source, message, fixed) in [
+            (
+                "operator f{ref n: integer} [];",
+                "`ref` is C#'s; a parameter the operator can assign is `var`",
+                "operator f{var n: integer} [];",
+            ),
+            (
+                "operator f{inout n: integer} [];",
+                "`inout` is Swift's; a parameter the operator can assign is `var`",
+                "operator f{var n: integer} [];",
+            ),
+            (
+                "operator f{in out n: integer} [];",
+                "`in out` is Ada's; a parameter the operator can assign is `var`",
+                "operator f{var n: integer} [];",
+            ),
+            (
+                "operator f{in n: integer} [];",
+                "`in` is Ada's; a parameter the operator only reads is `const`, as one is unless it says otherwise",
+                "operator f{const n: integer} [];",
+            ),
+            (
+                "operator f{VAR n: integer} [];",
+                "`VAR` is not a keyword; write `var`",
+                "operator f{var n: integer} [];",
+            ),
+            (
+                "operator f{n: inout integer} [];",
+                "`inout` before the type is Swift's spelling; trendy marks the parameter `var`, before its name",
+                "operator f{var n: integer} [];",
+            ),
+            (
+                "operator f{n: const integer} [];",
+                "`const` goes before the parameter's name, not its type",
+                "operator f{const n: integer} [];",
+            ),
+            (
+                "operator main{} [ call f{n: &x}; ];",
+                "`&` before the value is Swift's spelling; trendy marks the argument `var`, before its name",
+                "operator main{} [ call f{var n: x}; ];",
+            ),
+            (
+                "operator main{} [ call f{n: &mut x, m: 1}; ];",
+                "`&mut` before the value is Rust's spelling; trendy marks the argument `var`, before its name",
+                "operator main{} [ call f{var n: x, m: 1}; ];",
+            ),
+            (
+                "operator main{} [ call f{n: ref x}; ];",
+                "`ref` before the value is C#'s spelling; trendy marks the argument `var`, before its name",
+                "operator main{} [ call f{var n: x}; ];",
+            ),
+            (
+                "operator main{} [ call f{n: var x}; ];",
+                "`var` goes before the argument's name, not its value",
+                "operator main{} [ call f{var n: x}; ];",
+            ),
+            (
+                "operator main{} [ call f{var n: var x}; ];",
+                "`var` goes before the argument's name, not its value",
+                "operator main{} [ call f{var n: x}; ];",
+            ),
+            (
+                "operator f{n: integer, m: integer} updates {n, m} [];",
+                "an operator's parameters that it updates are each written `var`, not listed in `updates`",
+                "operator f{var n: integer, var m: integer} [];",
+            ),
+            (
+                "operator f{n: integer, m: integer} UPDATES {ALL BUT m} [];",
+                "an operator's parameters that it updates are each written `var`, not listed in `updates`",
+                "operator f{n: integer, m: integer} UPDATES {ALL BUT m} [];",
+            ),
+        ] {
+            assert_eq!(messages(source), [message], "{source}");
+            assert_eq!(fix(source), fixed, "{source}");
+        }
+        // In a heading that isn't an operator's parameters, sema reports a
+        // mode before a name.
+        assert!(messages("var t: tuple { var a: integer };").is_empty());
     }
 
     #[test]

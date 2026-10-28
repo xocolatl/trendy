@@ -41,10 +41,15 @@ impl Program {
     /// variable that isn't in `locals`, or calls an update operator, which
     /// sema never produces.
     #[must_use]
-    pub fn type_of(&self, expr: &Expr, params: &BTreeMap<String, Type>, locals: &[Local]) -> Type {
+    pub fn type_of(
+        &self,
+        expr: &Expr,
+        params: &BTreeMap<String, Parameter>,
+        locals: &[Local],
+    ) -> Type {
         expr.type_with(&|leaf| match leaf {
             Expr::Variable(id) => self.variable(*id).ty.clone(),
-            Expr::Parameter(name) => params[name].clone(),
+            Expr::Parameter(name) => params[name].ty.clone(),
             Expr::Local(id) => locals[id.0].ty.clone(),
             Expr::Call(call) => self.result(call),
             _ => unreachable!("only variables, parameters, locals and calls are leaves"),
@@ -125,8 +130,49 @@ pub struct Operator {
     /// parameter's type, so a call's arguments determine it.
     pub types: Vec<TypeParameter>,
     /// The parameters, by name. A call's arguments are a tuple of them.
-    pub params: BTreeMap<String, Type>,
+    pub params: BTreeMap<String, Parameter>,
     pub kind: OperatorKind,
+}
+
+/// A parameter of an operator: its type, and how it takes its argument.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Parameter {
+    pub ty: Type,
+    pub mode: Mode,
+}
+
+impl Parameter {
+    /// A parameter of type `ty` that takes its argument's value.
+    #[must_use]
+    pub fn constant(ty: Type) -> Self {
+        Parameter {
+            ty,
+            mode: Mode::Const,
+        }
+    }
+}
+
+/// How a parameter takes its argument (TTM RM Prescription 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Mode {
+    /// The argument's value, which the operator only reads: a parameter's
+    /// mode unless it says otherwise.
+    Const,
+    /// A variable, which an update operator can read and assign, and whose
+    /// value is the parameter's when the operator ends: the parameter is
+    /// subject to update.
+    Var,
+}
+
+impl Mode {
+    /// The word for it, as written before a parameter's name.
+    #[must_use]
+    pub fn word(self) -> &'static str {
+        match self {
+            Mode::Const => "const",
+            Mode::Var => "var",
+        }
+    }
 }
 
 impl Operator {
@@ -157,7 +203,13 @@ impl Operator {
             params: self
                 .params
                 .iter()
-                .map(|(name, ty)| (name.clone(), ty.instantiated(types)))
+                .map(|(name, p)| {
+                    let parameter = Parameter {
+                        ty: p.ty.instantiated(types),
+                        mode: p.mode,
+                    };
+                    (name.clone(), parameter)
+                })
                 .collect(),
             kind,
         }
@@ -393,10 +445,10 @@ impl Builtin {
     /// The parameters the compiler's implementation takes, as it sees them:
     /// a `per` parameter is an attribute of its relation's tuples.
     #[must_use]
-    pub fn params(self) -> BTreeMap<String, Type> {
+    pub fn params(self) -> BTreeMap<String, Parameter> {
         let types = self.types();
         let parameter = |index: usize| Type::Parameter(types[index].clone());
-        match self {
+        let declared: BTreeMap<String, Type> = match self {
             Builtin::DebugValue => [("v".to_string(), parameter(0))].into(),
             Builtin::Count | Builtin::DebugTable => [("r".to_string(), parameter(0))].into(),
             Builtin::Length => [("a".to_string(), parameter(0))].into(),
@@ -416,7 +468,11 @@ impl Builtin {
                 );
                 [("r".to_string(), Type::Relation(tuples))].into()
             }
-        }
+        };
+        declared
+            .into_iter()
+            .map(|(name, ty)| (name, Parameter::constant(ty)))
+            .collect()
     }
 
     /// The result type of the compiler's implementation, for a read-only
@@ -621,8 +677,12 @@ pub struct Call {
     /// The type of each of the operator's type parameters, by index, which
     /// the arguments determine.
     pub types: Vec<Type>,
-    /// The arguments, for the operator's parameters, by name.
+    /// The arguments for the operator's `const` parameters, by name: their
+    /// values.
     pub args: BTreeMap<String, Expr>,
+    /// The variables for its `var` parameters, by name, which the call
+    /// updates: each a different one. A read-only operator has none.
+    pub updated: BTreeMap<String, Target>,
 }
 
 impl Call {
@@ -637,6 +697,7 @@ impl Call {
                 .iter()
                 .map(|(name, arg)| (name.clone(), arg.instantiated(types)))
                 .collect(),
+            updated: self.updated.clone(),
         }
     }
 }
@@ -688,7 +749,7 @@ impl Statement {
                 assignments
                     .iter()
                     .map(|a| Assignment {
-                        target: a.target,
+                        target: a.target.clone(),
                         value: a.value.instantiated(types),
                     })
                     .collect(),
@@ -745,12 +806,26 @@ pub struct Assignment {
     pub value: Expr,
 }
 
-/// What an assignment assigns: a variable of the program, or a local
-/// variable of the operator it is in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// What an assignment assigns: a variable of the program, a local
+/// variable of the operator it is in, or a `var` parameter of it, whose
+/// argument's variable it updates.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Target {
     Variable(VariableId),
     Local(LocalId),
+    Parameter(String),
+}
+
+impl Target {
+    /// The variable, as its name reads it.
+    #[must_use]
+    pub fn read(&self) -> Expr {
+        match self {
+            Target::Variable(id) => Expr::Variable(*id),
+            Target::Local(id) => Expr::Local(*id),
+            Target::Parameter(name) => Expr::Parameter(name.clone()),
+        }
+    }
 }
 
 /// A change to an element of an array, as in `a[i][j] := x`: the element

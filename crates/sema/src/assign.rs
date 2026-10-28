@@ -33,7 +33,7 @@ pub(crate) trait Assigning: Names {
 }
 
 /// A variable an assignment assigns, of the program or local to the
-/// operator, as it is declared.
+/// operator, or a `var` parameter, as it is declared.
 pub(crate) struct Assignee {
     pub(crate) target: hir::Target,
     /// Its value before the assignment: the variable itself, or, for a
@@ -43,7 +43,16 @@ pub(crate) struct Assignee {
     pub(crate) name: String,
     pub(crate) ty: hir::Type,
     pub(crate) keys: Vec<hir::Key>,
-    pub(crate) declaration: VarDecl,
+    pub(crate) declaration: Declared,
+}
+
+/// Where an assignee is declared.
+#[derive(Clone)]
+pub(crate) enum Declared {
+    /// A variable, of the program or local, by this declaration.
+    Variable(VarDecl),
+    /// A `var` parameter, whose type is set here.
+    Parameter(Origin),
 }
 
 impl Assignee {
@@ -55,15 +64,31 @@ impl Assignee {
             name: local.name.clone(),
             ty: local.ty.clone(),
             keys: local.keys.clone(),
-            declaration: declaration.clone(),
+            declaration: Declared::Variable(declaration.clone()),
         }
     }
 
-    /// The variable itself, as a name reads it.
-    fn itself(&self) -> hir::Expr {
-        match self.target {
-            hir::Target::Variable(id) => hir::Expr::Variable(id),
-            hir::Target::Local(id) => hir::Expr::Local(id),
+    /// The `var` parameter `name`, of type `ty`, which is set at `origin`.
+    pub(crate) fn parameter(name: &str, ty: hir::Type, origin: Origin) -> Self {
+        Assignee {
+            target: hir::Target::Parameter(name.to_string()),
+            current: hir::Expr::Parameter(name.to_string()),
+            name: name.to_string(),
+            ty,
+            keys: Vec::new(),
+            declaration: Declared::Parameter(origin),
+        }
+    }
+
+    /// Where its type is set: its declared type, or else its initial value,
+    /// or a parameter's type.
+    fn declared(&self) -> Option<Origin> {
+        match &self.declaration {
+            Declared::Variable(declaration) => declaration
+                .type_expr()
+                .map(Origin::Type)
+                .or_else(|| declaration.initializer().map(Origin::Value)),
+            Declared::Parameter(origin) => Some(origin.clone()),
         }
     }
 }
@@ -127,7 +152,7 @@ fn assignments(
             continue;
         };
         assignments.push(hir::Assignment {
-            target: assignee.target,
+            target: assignee.target.clone(),
             value,
         });
     }
@@ -194,11 +219,7 @@ fn change(
     let ident = name.ident()?;
     let span = trendy_syntax::span(ident.text_range());
     let assignee = names.assigned(ident.text(), span, errors)?;
-    let declared = assignee
-        .declaration
-        .type_expr()
-        .map(Origin::Type)
-        .or_else(|| assignee.declaration.initializer().map(Origin::Value))?;
+    let declared = assignee.declared()?;
     let target = Target {
         expected: Expected {
             ty: assignee.ty.clone(),
@@ -216,7 +237,7 @@ fn change(
         (Clause::Assignment(_), _) => {
             let written = clause.operand()?;
             let value = checker.expr(&written, Some(&target.expected), errors)?;
-            if value == target.assignee.itself() {
+            if value == target.assignee.target.read() {
                 let statement = clause.statement()?;
                 errors.push(errors::own_value(
                     &target.assignee.name,
@@ -275,7 +296,7 @@ fn element(
     // out of range now if its value is known, and as its name reads it,
     // which shows a value that is the element's own.
     let mut array = target.assignee.current.clone();
-    let mut itself = target.assignee.itself();
+    let mut itself = target.assignee.target.read();
     let mut ty = target.assignee.ty.clone();
     let mut origin = target.expected.origin.clone();
     let mut path = Vec::new();
@@ -554,7 +575,7 @@ fn update(
         // merged, then applied to its value (`attributes_merged`).
         (None, hir::Type::Tuple(_)) => {
             match checker.assign_attributes(
-                target.assignee.itself(),
+                target.assignee.target.read(),
                 &assigned,
                 unchanged,
                 errors,
@@ -700,8 +721,12 @@ fn merged(
     let (clause, first) = list.next()?;
     match first {
         Change::Value(value, written) => {
-            if let hir::Expr::Constant(hir::Value::Relation(relation)) = &value {
-                let keys = keys::written(&assignee.declaration, &assignee.keys);
+            if let (
+                hir::Expr::Constant(hir::Value::Relation(relation)),
+                Declared::Variable(declaration),
+            ) = (&value, &assignee.declaration)
+            {
+                let keys = keys::written(declaration, &assignee.keys);
                 if !keys::satisfied(name, &keys, relation, &written, names, errors) {
                     return None;
                 }

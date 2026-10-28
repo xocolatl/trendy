@@ -108,8 +108,11 @@ fn function(
 
 /// Parameters as written, `{name: text, times: integer}`, with their
 /// types in full, so that different types are written differently.
-fn params_text(params: &BTreeMap<String, hir::Type>) -> String {
-    format!("{{{}}}", attributes_text(params.iter()))
+fn params_text(params: &BTreeMap<String, hir::Parameter>) -> String {
+    format!(
+        "{{{}}}",
+        attributes_text(params.iter().map(|(name, p)| (name, &p.ty)))
+    )
 }
 
 /// Attributes, `name: type, …`, with their types in full: a wrapped
@@ -307,7 +310,10 @@ struct FunctionBuilder<'a> {
     name: String,
     /// The parameters of the operator it is, with their types, which have
     /// no type parameters in them.
-    params: BTreeMap<String, hir::Type>,
+    params: BTreeMap<String, hir::Parameter>,
+    /// The slot with the address of each `var` parameter's variable, which
+    /// the parameter struct holds, copied there on entry.
+    pointers: BTreeMap<String, lir::SlotId>,
     variable_data: &'a [lir::DataId],
     /// The local variables of the operator it is, with their types, which
     /// have no type parameters in them.
@@ -367,14 +373,6 @@ fn is_read(expr: &hir::Expr) -> bool {
     }
 }
 
-/// The variable `target`, as its name reads it.
-fn read(target: hir::Target) -> hir::Expr {
-    match target {
-        hir::Target::Variable(id) => hir::Expr::Variable(id),
-        hir::Target::Local(id) => hir::Expr::Local(id),
-    }
-}
-
 /// The type of the elements `depth` arrays into one of type `ty`.
 fn element_at(ty: &hir::Type, depth: usize) -> hir::Type {
     (0..depth).fold(ty.clone(), |ty, _| match ty {
@@ -393,17 +391,19 @@ fn placeholder() -> lir::Block {
 
 impl<'a> FunctionBuilder<'a> {
     /// The function `name`, of an operator with the parameters `params`,
-    /// with an empty entry block.
+    /// with an entry block that copies the address of each `var`
+    /// parameter's variable to a slot of its own.
     fn new(
         program: &'a hir::Program,
         name: String,
-        params: BTreeMap<String, hir::Type>,
+        params: BTreeMap<String, hir::Parameter>,
         variable_data: &'a [lir::DataId],
     ) -> Self {
-        FunctionBuilder {
+        let mut builder = FunctionBuilder {
             program,
             name,
             params,
+            pointers: BTreeMap::new(),
             variable_data,
             locals: Vec::new(),
             local_places: Vec::new(),
@@ -414,7 +414,30 @@ impl<'a> FunctionBuilder<'a> {
             scoped: false,
             scope: None,
             tuples: Vec::new(),
+        };
+        let variables: Vec<(usize, String)> = builder
+            .params
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, p))| p.mode == hir::Mode::Var)
+            .map(|(i, (name, _))| (i, name.clone()))
+            .collect();
+        for (index, name) in variables {
+            let slot = builder.slot(lir::Layout::Address);
+            builder.insts.push(lir::Inst::Copy {
+                dst: slot.clone(),
+                src: lir::Place {
+                    base: lir::Base::Params,
+                    path: vec![index],
+                },
+                layout: lir::Layout::Address,
+            });
+            let lir::Base::Slot(id) = slot.base else {
+                unreachable!("a slot's place is the whole slot");
+            };
+            builder.pointers.insert(name, id);
         }
+        builder
     }
 
     /// The type of `expr`, in the function.
@@ -723,12 +746,12 @@ impl<'a> FunctionBuilder<'a> {
                     &call.types,
                     cx,
                 );
-                let args = self.arguments(&params, &call.args, cx);
+                let args = self.arguments(&params, call, cx);
                 // An assignment the operator makes must not free what an
                 // argument points to, though it can replace the value of
                 // the only variable holding it.
-                for (i, ty) in params.values().enumerate() {
-                    if points(ty) {
+                for (i, hir::Parameter { ty, mode }) in params.values().enumerate() {
+                    if *mode == hir::Mode::Const && points(ty) {
                         let mut arg = args.clone().expect("a parameter has a slot");
                         arg.path.push(i);
                         let descriptor = cx.descriptor(ty);
@@ -744,6 +767,12 @@ impl<'a> FunctionBuilder<'a> {
                     args,
                     result: None,
                 });
+                // Each variable it updates is assigned its parameter's
+                // value as it ends, which its keys are checked against.
+                for target in call.updated.values() {
+                    let holder = self.holder(target);
+                    self.check_keys(target, &holder, cx);
+                }
             }
             hir::OperatorKind::ReadOnly { .. }
             | hir::OperatorKind::Builtin(
@@ -776,25 +805,34 @@ impl<'a> FunctionBuilder<'a> {
         });
     }
 
-    /// The arguments of a call, for `params`: a tuple, built in a stack
+    /// The arguments of `call`, for `params`: a tuple, built in a stack
     /// slot in parameter name order, whose address is passed, if there are
-    /// any.
+    /// any. Each `const` parameter's is the argument's value, and each `var`
+    /// one's the address of its variable.
     fn arguments(
         &mut self,
-        params: &BTreeMap<String, hir::Type>,
-        args: &BTreeMap<String, hir::Expr>,
+        params: &BTreeMap<String, hir::Parameter>,
+        call: &hir::Call,
         cx: &mut Lowering,
     ) -> Option<lir::Place> {
         let slot = self.slot(params_layout(params)?);
-        for (i, (name, ty)) in params.iter().enumerate() {
-            let src = self.place(&args[name], cx);
+        for (i, (name, param)) in params.iter().enumerate() {
             let mut dst = slot.clone();
             dst.path.push(i);
-            self.insts.push(lir::Inst::Copy {
-                dst,
-                src,
-                layout: layout(ty),
-            });
+            match param.mode {
+                hir::Mode::Const => {
+                    let src = self.place(&call.args[name], cx);
+                    self.insts.push(lir::Inst::Copy {
+                        dst,
+                        src,
+                        layout: layout(&param.ty),
+                    });
+                }
+                hir::Mode::Var => {
+                    let src = self.holder(&call.updated[name]);
+                    self.insts.push(lir::Inst::Address { dst, src });
+                }
+            }
         }
         Some(slot)
     }
@@ -814,7 +852,7 @@ impl<'a> FunctionBuilder<'a> {
             cx,
         );
         self.scoped |= makes;
-        let args = self.arguments(&params_of(callee, &call.types), &call.args, cx);
+        let args = self.arguments(&params_of(callee, &call.types), call, cx);
         let dst = self.slot(layout(&self.program.result(call)));
         self.insts.push(lir::Inst::Call {
             function,
@@ -1030,56 +1068,59 @@ impl<'a> FunctionBuilder<'a> {
         let mut changed: Vec<(hir::Target, Vec<Computed>)> = Vec::new();
         for assignment in assignments {
             if let hir::Expr::WithElements(array, changes) = &assignment.value
-                && **array == read(assignment.target)
+                && **array == assignment.target.read()
             {
                 let computed: Vec<Computed> =
                     changes.iter().map(|c| self.computed(c, cx)).collect();
                 self.check_overlaps(changes, &computed);
-                changed.push((assignment.target, computed));
+                changed.push((assignment.target.clone(), computed));
                 continue;
             }
             let value = self.place(&assignment.value, cx);
-            let ty = layout(self.assigned(assignment.target).0);
+            let ty = layout(self.assigned(&assignment.target).0);
             let slot = self.slot(ty.clone());
             self.insts.push(lir::Inst::Copy {
                 dst: slot.clone(),
                 src: value,
                 layout: ty,
             });
-            values.push((assignment.target, slot));
+            values.push((assignment.target.clone(), slot));
         }
         for (target, value) in &values {
-            self.check_keys(*target, value, cx);
+            self.check_keys(target, value, cx);
         }
         if changed.iter().map(|(_, c)| c.len()).sum::<usize>() > 1 {
             for (target, computed) in &changed {
-                let ty = self.assigned(*target).0.clone();
+                let ty = self.assigned(target).0.clone();
                 self.keep_values(&ty, computed, cx);
             }
         }
         for (target, value) in values {
-            self.store(target, value, cx);
+            self.store(&target, value, cx);
         }
         for (target, computed) in changed {
-            let ty = self.assigned(target).0.clone();
-            let holder = self.holder(target);
+            let ty = self.assigned(&target).0.clone();
+            let holder = self.holder(&target);
             for change in computed {
                 self.changed_at(holder.clone(), &ty, change, cx);
             }
         }
     }
 
-    /// The type and keys of the variable `target`, of the program or local.
-    fn assigned(&self, target: hir::Target) -> (&hir::Type, &[hir::Key]) {
+    /// The type and keys of the variable `target`, of the program or local,
+    /// or of a `var` parameter, which has none: its variable's are checked
+    /// where it is passed.
+    fn assigned(&self, target: &hir::Target) -> (&hir::Type, &[hir::Key]) {
         match target {
             hir::Target::Variable(id) => {
-                let variable = self.program.variable(id);
+                let variable = self.program.variable(*id);
                 (&variable.ty, &variable.keys)
             }
             hir::Target::Local(id) => {
                 let local = &self.locals[id.0];
                 (&local.ty, &local.keys)
             }
+            hir::Target::Parameter(name) => (&self.params[name].ty, &[]),
         }
     }
 
@@ -1087,7 +1128,7 @@ impl<'a> FunctionBuilder<'a> {
     /// the variable `target`, has two tuples with the same values for one
     /// of its keys: if its projection on the key has fewer tuples. A key of
     /// the whole heading always holds.
-    fn check_keys(&mut self, target: hir::Target, value: &lir::Place, cx: &mut Lowering) {
+    fn check_keys(&mut self, target: &hir::Target, value: &lir::Place, cx: &mut Lowering) {
         let (ty, keys) = self.assigned(target);
         let (ty, keys) = (ty.clone(), keys.to_vec());
         let ty = &ty;
@@ -1134,8 +1175,9 @@ impl<'a> FunctionBuilder<'a> {
         }
     }
 
-    /// Where the variable `target`'s value is, of the program or local.
-    fn holder(&self, target: hir::Target) -> lir::Place {
+    /// Where the variable `target`'s value is, of the program or local, or
+    /// a `var` parameter's variable.
+    fn holder(&self, target: &hir::Target) -> lir::Place {
         match target {
             hir::Target::Variable(id) => lir::Place {
                 base: lir::Base::Data(self.variable_data[id.0]),
@@ -1146,13 +1188,22 @@ impl<'a> FunctionBuilder<'a> {
                 .expect("an update operator's local variables are placed first")
                 .value
                 .clone(),
+            hir::Target::Parameter(name) => self.pointee(name),
         }
+    }
+
+    /// The variable of the `var` parameter `name`, through its address.
+    fn pointee(&self, name: &str) -> lir::Place {
+        lir::Place::whole(lir::Base::Indirect {
+            slot: self.pointers[name],
+            pointee: layout(&self.params[name].ty),
+        })
     }
 
     /// Assign the value at `value` to the variable `target`, of the
     /// program or local: copied, and, if it points to texts, relations or
     /// arrays, with a reference taken to each, which the variable holds.
-    fn store(&mut self, target: hir::Target, value: lir::Place, cx: &mut Lowering) {
+    fn store(&mut self, target: &hir::Target, value: lir::Place, cx: &mut Lowering) {
         let ty = self.assigned(target).0.clone();
         let dst = self.holder(target);
         if points(&ty) {
@@ -1195,13 +1246,14 @@ impl<'a> FunctionBuilder<'a> {
                 .clone(),
             hir::Expr::Let(id, value, body) => {
                 let value = self.place(value, cx);
-                self.check_keys(hir::Target::Local(*id), &value, cx);
+                self.check_keys(&hir::Target::Local(*id), &value, cx);
                 self.local_places[id.0] = Some(LocalPlace {
                     value,
                     holds: false,
                 });
                 self.place(body, cx)
             }
+            hir::Expr::Parameter(name) if self.pointers.contains_key(name) => self.pointee(name),
             hir::Expr::Parameter(name) => {
                 let index = self
                     .params
@@ -2715,16 +2767,27 @@ fn layout(ty: &hir::Type) -> lir::Layout {
 }
 
 /// The parameters of `op`, instantiated with `types`.
-fn params_of(op: &hir::Operator, types: &[hir::Type]) -> BTreeMap<String, hir::Type> {
+fn params_of(op: &hir::Operator, types: &[hir::Type]) -> BTreeMap<String, hir::Parameter> {
     op.params
         .iter()
-        .map(|(name, ty)| (name.clone(), ty.instantiated(types)))
+        .map(|(name, p)| {
+            let parameter = hir::Parameter {
+                ty: p.ty.instantiated(types),
+                mode: p.mode,
+            };
+            (name.clone(), parameter)
+        })
         .collect()
 }
 
-/// The parameter struct of a user operator, if it has parameters.
-fn params_layout(params: &BTreeMap<String, hir::Type>) -> Option<lir::Layout> {
-    (!params.is_empty()).then(|| lir::Layout::Struct(params.values().map(layout).collect()))
+/// The parameter struct of a user operator, if it has parameters: each
+/// `const` one's value, and the address of each `var` one's variable.
+fn params_layout(params: &BTreeMap<String, hir::Parameter>) -> Option<lir::Layout> {
+    let field = |p: &hir::Parameter| match p.mode {
+        hir::Mode::Const => layout(&p.ty),
+        hir::Mode::Var => lir::Layout::Address,
+    };
+    (!params.is_empty()).then(|| lir::Layout::Struct(params.values().map(field).collect()))
 }
 
 fn len(n: usize) -> u64 {
@@ -2745,7 +2808,7 @@ mod tests {
             types: Vec::new(),
             params: params
                 .iter()
-                .map(|p| ((*p).to_string(), integer()))
+                .map(|p| ((*p).to_string(), hir::Parameter::constant(integer())))
                 .collect(),
             kind: hir::OperatorKind::Update {
                 locals: Vec::new(),
@@ -2797,6 +2860,7 @@ mod tests {
             operator: hir::OperatorId(operator),
             types: Vec::new(),
             args: args.into_iter().map(|(n, e)| (n.to_string(), e)).collect(),
+            updated: BTreeMap::new(),
         })
     }
 
@@ -3036,6 +3100,87 @@ mod tests {
                 copy(data(0), slot(0)),
                 copy(data(1), slot(1)),
             ]
+        );
+    }
+
+    #[test]
+    fn a_var_parameter_is_its_variables_address() {
+        // `operator set{var n: integer} [ n := 7; ];`, called with the
+        // variable `a`: `call set{var n: a};`.
+        let mut set = user(
+            "set",
+            &[],
+            vec![hir::Statement::Assign(vec![hir::Assignment {
+                target: hir::Target::Parameter("n".to_string()),
+                value: hir::Expr::Constant(hir::Value::Integer(7)),
+            }])],
+        );
+        set.params = [(
+            "n".to_string(),
+            hir::Parameter {
+                ty: integer(),
+                mode: hir::Mode::Var,
+            },
+        )]
+        .into();
+        let call = hir::Statement::Call(hir::Call {
+            operator: hir::OperatorId(1),
+            types: Vec::new(),
+            args: BTreeMap::new(),
+            updated: [("n".to_string(), hir::Target::Variable(hir::VariableId(0)))].into(),
+        });
+        let lowered = lower(&program(
+            vec![user("main", &[], vec![call]), set],
+            vec![variable("a", hir::Value::Integer(1))],
+        ));
+        let slot = |i| lir::Place::whole(lir::Base::Slot(lir::SlotId(i)));
+        let field = |mut place: lir::Place, i| {
+            place.path.push(i);
+            place
+        };
+        // The caller passes the variable's address.
+        assert_eq!(
+            lowered.functions[0].blocks[0].insts,
+            [
+                lir::Inst::Address {
+                    dst: field(slot(0), 0),
+                    src: lir::Place {
+                        base: lir::Base::Data(lir::DataId(0)),
+                        path: vec![0],
+                    },
+                },
+                lir::Inst::Call {
+                    function: lir::FunctionId(1),
+                    args: Some(slot(0)),
+                    result: None,
+                },
+            ]
+        );
+        // The operator takes it from its parameters, and assigns the
+        // variable there.
+        let set = &lowered.functions[1];
+        assert_eq!(
+            set.params,
+            Some(lir::Layout::Struct(vec![lir::Layout::Address]))
+        );
+        let insts = &set.blocks[0].insts;
+        assert_eq!(
+            insts[0],
+            lir::Inst::Copy {
+                dst: slot(0),
+                src: field(lir::Place::whole(lir::Base::Params), 0),
+                layout: lir::Layout::Address,
+            }
+        );
+        let lir::Inst::Copy { dst, .. } = insts.last().expect("an assignment") else {
+            panic!("{insts:?}");
+        };
+        assert_eq!(
+            *dst,
+            lir::Place::whole(lir::Base::Indirect {
+                slot: lir::SlotId(0),
+                pointee: lir::Layout::I64,
+            })
         );
     }
 
@@ -3393,7 +3538,11 @@ mod tests {
         let f = hir::Operator {
             types: Vec::new(),
             name: "f".to_string(),
-            params: [("t".to_string(), hir::Type::Scalar(hir::Scalar::Text))].into(),
+            params: [(
+                "t".to_string(),
+                hir::Parameter::constant(hir::Type::Scalar(hir::Scalar::Text)),
+            )]
+            .into(),
             kind: hir::OperatorKind::Update {
                 locals: Vec::new(),
                 body: hir::Block::default(),
@@ -3440,7 +3589,7 @@ mod tests {
         let read_only = |name: &str, value| hir::Operator {
             name: name.to_string(),
             types: Vec::new(),
-            params: [("t".to_string(), text())].into(),
+            params: [("t".to_string(), hir::Parameter::constant(text()))].into(),
             kind: hir::OperatorKind::ReadOnly {
                 result: text(),
                 locals: Vec::new(),
@@ -3457,6 +3606,7 @@ mod tests {
             operator: hir::OperatorId(1),
             types: Vec::new(),
             args: [("t".to_string(), hir::Expr::Variable(hir::VariableId(0)))].into(),
+            updated: BTreeMap::new(),
         });
         let lowered = lower(&program(
             vec![
@@ -3532,7 +3682,11 @@ mod tests {
         let show = hir::Operator {
             name: "show".to_string(),
             types: vec![parameter.clone()],
-            params: [("v".to_string(), hir::Type::Parameter(parameter.clone()))].into(),
+            params: [(
+                "v".to_string(),
+                hir::Parameter::constant(hir::Type::Parameter(parameter.clone())),
+            )]
+            .into(),
             kind: hir::OperatorKind::Update {
                 locals: Vec::new(),
                 body: hir::Block {
@@ -3540,6 +3694,7 @@ mod tests {
                         operator: hir::OperatorId(0),
                         types: vec![hir::Type::Parameter(parameter)],
                         args: [("v".to_string(), hir::Expr::Parameter("v".to_string()))].into(),
+                        updated: BTreeMap::new(),
                     })],
                     locals: Vec::new(),
                 },
@@ -3551,6 +3706,7 @@ mod tests {
                 operator: hir::OperatorId(1),
                 types: vec![ty.clone()],
                 args: [("v".to_string(), hir::Expr::Constant(value))].into(),
+                updated: BTreeMap::new(),
             })
         };
         let main_body = vec![
@@ -3600,6 +3756,7 @@ mod tests {
             operator: hir::OperatorId(1),
             types: vec![r.ty()],
             args: [("r".to_string(), hir::Expr::Variable(hir::VariableId(0)))].into(),
+            updated: BTreeMap::new(),
         });
         let lowered = lower(&program(
             vec![
@@ -3660,6 +3817,7 @@ mod tests {
             operator: hir::OperatorId(1),
             types: vec![integer(), hir::Type::Tuple(own)],
             args: [("r".to_string(), hir::Expr::Variable(hir::VariableId(0)))].into(),
+            updated: BTreeMap::new(),
         });
         let lowered = lower(&program(
             vec![
@@ -3796,7 +3954,7 @@ mod tests {
         let f = hir::Operator {
             name: "f".to_string(),
             types: Vec::new(),
-            params: [("p".to_string(), integer())].into(),
+            params: [("p".to_string(), hir::Parameter::constant(integer()))].into(),
             kind: hir::OperatorKind::ReadOnly {
                 result: integer(),
                 locals: vec![hir::Local {
@@ -3811,6 +3969,7 @@ mod tests {
             operator: hir::OperatorId(1),
             types: Vec::new(),
             args: [("p".to_string(), hir::Expr::Variable(hir::VariableId(0)))].into(),
+            updated: BTreeMap::new(),
         });
         let lowered = lower(&program(
             vec![
@@ -3878,6 +4037,7 @@ mod tests {
             operator: hir::OperatorId(1),
             types: vec![integer(), hir::Type::Tuple(own)],
             args: [("r".to_string(), hir::Expr::Variable(hir::VariableId(0)))].into(),
+            updated: BTreeMap::new(),
         });
         let lowered = lower(&program(
             vec![
@@ -3913,6 +4073,7 @@ mod tests {
                 operator: hir::OperatorId(operator),
                 types,
                 args: [("from".to_string(), hir::Expr::Parameter("p".to_string()))].into(),
+                updated: BTreeMap::new(),
             })
         };
         let show = user(
@@ -4328,7 +4489,7 @@ mod tests {
         let f = hir::Operator {
             name: "f".to_string(),
             types: Vec::new(),
-            params: [("p".to_string(), integer())].into(),
+            params: [("p".to_string(), hir::Parameter::constant(integer()))].into(),
             kind: hir::OperatorKind::Update {
                 locals: vec![t],
                 body: hir::Block {

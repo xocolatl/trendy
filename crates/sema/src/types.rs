@@ -420,7 +420,7 @@ pub(crate) fn resolve_heading_expr(
 
 /// The heading `heading` denotes, as for [`resolve`], or `None` after
 /// reporting why it denotes none. Only an operator's parameters, which
-/// [`crate::operators::params`] resolves, can have `per`.
+/// [`crate::operators::params`] resolves, can have `per` or a mode.
 pub(crate) fn resolve_heading(
     heading: &ast::Heading,
     parameters: &mut TypeParameters,
@@ -430,6 +430,10 @@ pub(crate) fn resolve_heading(
     let mut ok = true;
     for per in heading.attributes().filter_map(|a| a.per()) {
         errors.push(errors::per_outside_parameters(&per));
+        ok = false;
+    }
+    for mode in heading.attributes().filter_map(|a| a.mode()) {
+        errors.push(errors::mode_outside_parameters(&mode));
         ok = false;
     }
     let resolved = resolve_attributes(heading, parameters, namespaces, errors)?;

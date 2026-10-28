@@ -141,6 +141,27 @@ operator rotate{next: text} [
     call debug_value{v: next};
 ];
 
+/* A `var` parameter takes a variable, which the operator can read and
+   assign, and whose value is the parameter's when the operator ends (TTM
+   RM Prescription 3); a call marks its argument `var` too, so that it
+   shows what the call changes. A parameter without a mode is `const`: the
+   operator only reads its argument's value. */
+operator add_dish{var menu: relation menu_item, dish: text, country: text, price: integer} [
+    insert menu relation menu_item { { dish: dish, country: country, price: price } };
+];
+
+/* `const` may be written, though it needn't be. */
+operator discount{var price: integer, const percent: integer} [
+    price := price - price * percent div 100;
+];
+
+/* A `var` parameter is passed on as a variable, which the operator
+   called updates. */
+operator discount_twice{var price: integer, percent: integer} [
+    call discount{var price: price, percent: percent};
+    call discount{var price: price, percent: percent};
+];
+
 var totals := dishes extend { total := taxed{price: price} } remove {price};
 var affordable := under{limit: 1000}{dish};
 var plural := if count{r: dishes} = 1 then "dish" else "dishes";
@@ -212,4 +233,16 @@ operator main{} [
         ],
     };
     call show{label: "pozole", value: band{price: taxed{price: 750}}};
+    /* The variables passed as `var` are what change: a local one, and
+       one of the program's, whose key is checked once the call ends. */
+    var specials := dishes where country = "Japan";
+    call add_dish{var menu: specials, dish: "bobotie", country: "South Africa", price: 1100};
+    call debug_table{r: specials};
+    call add_dish{var menu: dishes, dish: "khachapuri", country: "Georgia", price: 950};
+    call show{label: "dishes", value: count{r: dishes}};
+    var price := 1000;
+    call discount{var price: price, percent: 10};
+    call show{label: "discounted", value: price};
+    call discount_twice{var price: price, percent: 10};
+    call show{label: "discounted twice more", value: price};
 ];
