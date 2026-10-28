@@ -1990,13 +1990,20 @@ impl<'a> Parser<'a> {
     }
 
     /// `load a from r order [asc x, desc y]`, after its node starts: the
-    /// array `a` given the tuples of the relation `r`, or the values of its
-    /// only attribute, in order. `load`, `from` and `order` are contextual
-    /// keywords.
+    /// array `a` given the tuples of the relation `r`, or, with `value`
+    /// before `from`, the values of its only attribute, in order. `load`,
+    /// `value`, `from` and `order` are contextual keywords.
     fn load(&mut self) {
         let outer_form = std::mem::replace(&mut self.form, errors::LOAD_FORM);
         self.contextual_keyword("load");
         self.target();
+        if self.at_word("value")
+            && self
+                .found_after(1)
+                .is_some_and(|f| f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case("from"))
+        {
+            self.contextual_keyword("value");
+        }
         if self.at_word("from") {
             self.contextual_keyword("from");
         } else {
@@ -5573,9 +5580,20 @@ SourceFile
             })
             .collect();
         assert_eq!(items, [("x".to_string(), false), ("y".to_string(), true)]);
+        assert!(plain.value().is_none());
+        // `value` before `from`: the values of the only attribute.
+        let (clause, values) = load("load a value from r{x} order [asc x];");
+        assert_eq!(clause.target().unwrap().syntax().text(), "a");
+        assert_eq!(values.value().unwrap().text(), "value");
         // The words are contextual keywords: names elsewhere, even in a load,
-        // as an attribute ordered by.
+        // as an attribute ordered by, or the array loaded.
         load("load desc from order order [asc desc];");
+        let (clause, named) = load("load value from value order [asc value];");
+        assert_eq!(clause.target().unwrap().syntax().text(), "value");
+        assert!(named.value().is_none());
+        let (clause, both) = load("load value value from r order [asc x];");
+        assert_eq!(clause.target().unwrap().syntax().text(), "value");
+        assert!(both.value().is_some());
         let parse = parse_str("operator f{load: integer} [ load := load + 1; ];");
         assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
     }

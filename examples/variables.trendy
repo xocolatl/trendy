@@ -72,7 +72,7 @@ operator check_out{name: text} [
    names. */
 operator roll_call{} [
     var guests: array text;
-    load guests from rooms{guest} order [asc guest];
+    load guests value from rooms{guest} order [asc guest];
     var i := 1;
     while i <= length{a: guests} loop [
         var line := to_text{from: i} || ". " || guests[i];

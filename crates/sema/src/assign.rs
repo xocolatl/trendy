@@ -411,9 +411,10 @@ fn attribute_assigned(
 }
 
 /// `load`, the clause `clause`, of `target`: the array of the tuples of
-/// its relation, or of the values of the relation's only attribute, in the
-/// order of its items. Which is up to the array's elements: tuples, or
-/// other values.
+/// its relation, or, written `load a value from r`, of the values of the
+/// relation's only attribute, in the order of its items. The array's
+/// elements must be what it says: tuples of the relation's heading, or
+/// values of its attribute's type, which can be tuples too.
 fn loaded(
     clause: &Clause,
     load: &ast::Load,
@@ -436,24 +437,45 @@ fn loaded(
         ));
         return None;
     };
-    let (expected, loaded) = match &**element {
-        hir::Type::Tuple(heading) => (
+    let (expected, loaded) = match (load.value(), &**element) {
+        (None, hir::Type::Tuple(heading)) => (
             Some(Expected {
                 ty: hir::Type::Relation(heading.clone()),
                 origin: Origin::Loaded(name.clone(), Box::new(target.expected.origin.clone())),
             }),
             hir::Loaded::Tuples,
         ),
-        _ => (None, hir::Loaded::Values),
+        (None, _) => {
+            // Values are taken only when the load says so.
+            let relation = checker.expr(&written, None, errors)?;
+            let ty = checker.ty(&relation);
+            errors.push(errors::load_without_value(
+                name,
+                element,
+                &ty,
+                &written,
+                load.from().as_ref(),
+                projected(&ty, element, &order).as_deref(),
+            ));
+            return None;
+        }
+        (Some(_), _) => (None, hir::Loaded::Values),
     };
     let relation = checker.expr(&written, expected.as_ref(), errors)?;
     let ty = checker.ty(&relation);
-    let heading = match &ty {
-        hir::Type::Relation(heading)
+    let heading = match (&ty, &**element) {
+        (hir::Type::Relation(heading), _)
             if loaded == hir::Loaded::Tuples
                 || heading.attributes().map(|(_, ty)| ty).eq([&**element]) =>
         {
             heading
+        }
+        // Its tuples are the elements, as they are.
+        (hir::Type::Relation(heading), hir::Type::Tuple(elements)) if heading == elements => {
+            if let (Some(value), Some(from)) = (load.value(), load.from()) {
+                errors.push(errors::needless_value(name, &value, &from));
+            }
+            return None;
         }
         _ => {
             errors.push(errors::load_mismatch(

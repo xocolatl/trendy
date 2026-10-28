@@ -1271,12 +1271,14 @@ value holds. A `WithElements` as a value, as a value block computes one,
 is made in a copy that `trendy_rt_duplicate` makes, the same way.
 
 A load (`Load`) is a clause of an assignment statement, whose `load`,
-`from` and `order` are contextual keywords: `load` before a name starts
-one, and `order` is the keyword only before its items' `[`, or SQL's
-`by`, so a relation named `order` can be loaded. Sema checks it as an
-assignment of the array variable, whose new value is `hir::Expr::Load`:
-the relation, the order items, and whether the array takes the tuples or
-the values of a relation of one attribute, as its elements' type says.
+`value`, `from` and `order` are contextual keywords: `load` before a name
+starts one, `value` is the keyword only before `from`, and `order` only
+before its items' `[`, or SQL's `by`, so a relation named `order` can be
+loaded. Sema checks it as an assignment of the array variable, whose new
+value is `hir::Expr::Load`: the relation, the order items, and whether
+the array takes the tuples or, as `value` says, the values of a relation
+of one attribute; its elements' type must be what the load says it
+takes.
 It is an expression only in HIR, as no expression of the language orders
 a relation (TTM chapter 5), so that a load is an assignment like any
 other: in an `assign` block, of a read-only operator's local variable, and

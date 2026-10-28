@@ -6504,7 +6504,7 @@ mod tests {
         let people = r#"relation { { name: "Ada", born: 1815 }, { name: "Edgar", born: 1923 }, { name: "Alan", born: 1912 } }"#;
         assert_eq!(
             loaded(&format!(
-                "var names: array text; load names from {people}{{name}} order [desc name]; var by_birth: array tuple {{ name: text, born: integer }}; load by_birth from {people} where born > 1900 order [asc born];"
+                "var names: array text; load names value from {people}{{name}} order [desc name]; var by_birth: array tuple {{ name: text, born: integer }}; load by_birth from {people} where born > 1900 order [asc born];"
             )),
             [
                 Some("array text []".to_string()),
@@ -6528,7 +6528,7 @@ mod tests {
         );
         // Known only when running.
         let program = analyze_str(&format!(
-            "operator f{{r: relation {{ v: integer }}}} [ var a: array integer; load a from r order [desc v]; ];{MAIN}"
+            "operator f{{r: relation {{ v: integer }}}} [ var a: array integer; load a value from r order [desc v]; ];{MAIN}"
         ))
         .unwrap();
         let f = program.operators.iter().find(|o| o.name == "f").unwrap();
@@ -6556,12 +6556,12 @@ mod tests {
         // Of a read-only operator's local variable, and in an `assign`
         // block, which can't change the array otherwise as well.
         let source = format!(
-            "operator first{{r: relation {{ v: integer }}}}: integer [ var a: array integer; load a from r order [asc v]; a[1] ];\noperator f{{}} [ var a: array integer; var n := 0; assign {{ load a from relation {{ {{ v: 2 }}, {{ v: 1 }} }} order [asc v]; n := 1; }}; ];{MAIN}"
+            "operator first{{r: relation {{ v: integer }}}}: integer [ var a: array integer; load a value from r order [asc v]; a[1] ];\noperator f{{}} [ var a: array integer; var n := 0; assign {{ load a value from relation {{ {{ v: 2 }}, {{ v: 1 }} }} order [asc v]; n := 1; }}; ];{MAIN}"
         );
         assert!(analyze_str(&source).is_ok(), "{:#?}", errors(&source));
         let source = assigning(
             PEOPLE,
-            "var a: array text; assign { load a from people{name} order [asc name]; a := array [\"Ada\"]; };",
+            "var a: array text; assign { load a value from people{name} order [asc name]; a := array [\"Ada\"]; };",
         );
         assert_eq!(
             messages(&source),
@@ -6573,7 +6573,7 @@ mod tests {
     fn a_load_orders_by_attributes_with_an_order() {
         let source = |any: &str| {
             format!(
-                "operator f{{r: relation {{ v: T }}}} types {{ T: {any} }} [ var a: array T := array []; load a from r order [asc v]; ];{MAIN}"
+                "operator f{{r: relation {{ v: T }}}} types {{ T: {any} }} [ var a: array T := array []; load a value from r order [asc v]; ];{MAIN}"
             )
         };
         assert!(analyze_str(&source("any ordered")).is_ok());
@@ -6592,23 +6592,48 @@ mod tests {
         let fixed = |load: &str, fixed: &str| {
             assert_eq!(fix(&source(load)), source(fixed), "{load}");
         };
-        // Into an array of values, the relation of one attribute.
+        // Into an array of values, with `value`, the relation of one
+        // attribute.
         fixed(
-            "load names from people order [asc name];",
-            "load names from people{name} order [asc name];",
+            "load names value from people order [asc name];",
+            "load names value from people{name} order [asc name];",
         );
         fixed(
-            "load names from people where born > 1900 order [asc name];",
-            "load names from (people where born > 1900){name} order [asc name];",
+            "load names value from people where born > 1900 order [asc name];",
+            "load names value from (people where born > 1900){name} order [asc name];",
+        );
+        // Without `value`, the tuples, which don't fit: the fix writes it,
+        // and the projection if it is needed.
+        fixed(
+            "load names from people{name} order [asc name];",
+            "load names value from people{name} order [asc name];",
+        );
+        fixed(
+            "load names from people order [asc name];",
+            "load names value from people{name} order [asc name];",
+        );
+        // An array of tuples takes the relation's tuples as they are.
+        fixed(
+            "load everyone value from people order [asc name];",
+            "load everyone from people order [asc name];",
+        );
+        // With `value`, it takes the values of a relation of one
+        // tuple-valued attribute: they fit, but a tuple has no order, so
+        // only the order is wrong.
+        assert_eq!(
+            codes(&source(
+                "load everyone value from people wrap { p := {name, born} } order [asc p];"
+            )),
+            [Code::WrongOperandType]
         );
         // Ordered by another attribute, the tuples are needed.
         assert_eq!(
-            codes(&source("load names from people order [asc born];")),
+            codes(&source("load names value from people order [asc born];")),
             [Code::LoadMismatch]
         );
         assert_eq!(
-            fix(&source("load names from people order [asc born];")),
-            source("load names from people order [asc born];")
+            fix(&source("load names value from people order [asc born];")),
+            source("load names value from people order [asc born];")
         );
         assert_eq!(
             codes(&source("load n from people order [asc name];")),

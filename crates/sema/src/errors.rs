@@ -4608,7 +4608,7 @@ pub(crate) fn key_violated(
         .with_help("correct or remove one of these tuples, or declare the key that was meant")
 }
 
-const LOAD: &str = "a load gives an array of tuples the tuples of a relation of their heading, and an array of other values the values of a relation's only attribute, of their type";
+const LOAD: &str = "`load a from r` gives an array of tuples the tuples of a relation of their heading, and `load a value from r` an array the values of a relation's only attribute, of their type";
 
 /// A load into `name`, of type `ty`, written `target`, which isn't an
 /// array, of the relation `source`, of type `relation`, written as the
@@ -4642,9 +4642,9 @@ pub(crate) fn load_into_non_array(
 }
 
 /// A load of `source`, of type `ty`, into `name`, an array of `element`s,
-/// which aren't tuples, that it can't fill: it isn't a relation of one
-/// attribute of their type. The fix projects it onto `projected`, its
-/// attribute of that type, if it has one, which the order names alone.
+/// written `load a value from r`, that it can't fill: it isn't a relation
+/// of one attribute of their type. The fix projects it onto `projected`,
+/// its attribute of that type, if it has one, which the order names alone.
 pub(crate) fn load_mismatch(
     name: &str,
     element: &hir::Type,
@@ -4676,6 +4676,77 @@ pub(crate) fn load_mismatch(
         vec![Edit {
             span: source.span(),
             replacement: format!("{operand}{{{attribute}}}"),
+        }],
+    )
+}
+
+/// A load of `source`, of type `ty`, into `name`, an array of `element`s,
+/// which aren't tuples, without `value` before `from`, written `from`. The
+/// fix writes it, if the relation has one attribute, of their type, or
+/// projects it onto `projected` as well, its attribute of that type, which
+/// the order names alone.
+pub(crate) fn load_without_value(
+    name: &str,
+    element: &hir::Type,
+    ty: &hir::Type,
+    source: &Expr,
+    from: Option<&SyntaxToken>,
+    projected: Option<&str>,
+) -> Diagnostic {
+    let span = from.map_or_else(|| source.span(), |f| trendy_syntax::span(f.text_range()));
+    let d = Diagnostic::error(
+        Code::LoadMismatch,
+        format!("`{name}` is an `array {element}`, not of tuples, so the load takes values: `load {name} value from …`"),
+        span,
+        "`value` goes before `from`",
+    )
+    .with_note(LOAD)
+    .with_note("an array of tuples and an array of their values are different types, so the load says which it fills");
+    let Some(from) = from else {
+        return d;
+    };
+    let start = trendy_syntax::span(from.text_range()).start;
+    let mut edits = vec![Edit {
+        span: Span::new(start, start),
+        replacement: "value ".to_string(),
+    }];
+    let fits = matches!(ty, hir::Type::Relation(heading)
+        if heading.attributes().map(|(_, ty)| ty).eq([element]));
+    if !fits {
+        let Some(attribute) = projected else {
+            return d.with_help(format!(
+                "write `value` before `from`, and load a relation of one `{element}` attribute"
+            ));
+        };
+        let written = source.syntax().text().to_string();
+        let operand = match source {
+            Expr::Name(_) => written,
+            _ => format!("({written})"),
+        };
+        edits.push(Edit {
+            span: source.span(),
+            replacement: format!("{operand}{{{attribute}}}"),
+        });
+    }
+    d.with_suggestion("load the values, with `value`", edits)
+}
+
+/// `value`, before `from`, in a load into `name`, whose elements are the
+/// relation's tuples as they are.
+pub(crate) fn needless_value(name: &str, value: &SyntaxToken, from: &SyntaxToken) -> Diagnostic {
+    let span = trendy_syntax::span(value.text_range());
+    Diagnostic::error(
+        Code::LoadMismatch,
+        format!("`{name}`'s elements are the relation's tuples, so the load doesn't take values"),
+        span,
+        "not the values of one attribute",
+    )
+    .with_note(LOAD)
+    .with_suggestion(
+        "remove `value`",
+        vec![Edit {
+            span: Span::new(span.start, trendy_syntax::span(from.text_range()).start),
+            replacement: String::new(),
         }],
     )
 }

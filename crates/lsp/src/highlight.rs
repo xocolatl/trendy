@@ -654,7 +654,7 @@ mod tests {
     fn loads() {
         assert_eq!(
             highlight(
-                "operator f{r: relation { name: text }} [ var a: array text; load a from r order [desc name]; ];"
+                "operator f{r: relation { name: text }} [ var a: array text; load a value from r order [desc name]; ];"
             ),
             [
                 ("operator", Class::Keyword, false),
@@ -669,6 +669,7 @@ mod tests {
                 ("text", Class::Type, false),
                 ("load", Class::Keyword, false),
                 ("a", Class::Variable, false),
+                ("value", Class::Keyword, false),
                 ("from", Class::Keyword, false),
                 ("r", Class::Parameter, false),
                 ("order", Class::Keyword, false),

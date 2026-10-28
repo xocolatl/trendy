@@ -42,8 +42,8 @@ var wettest := first{a: rainfall};
 var named := first{a: array ["Amara", "Kofi"]};
 
 /* A relation's tuples into an array, in order, by a load (Tutorial D's
-   LOAD): an array of tuples takes the tuples, and an array of other values
-   the values of a relation of one attribute. Each item orders the tuples
+   LOAD): an array of tuples takes the tuples, and, with `value`, an array
+   of other values the values of a relation of one attribute. Each item orders the tuples
    equal on the items before it, and tuples equal on every item come in an
    undefined order, so an order whose items include a key is a total one. */
 var yearly := relation {
@@ -63,7 +63,7 @@ operator wettest_first{
 
 operator alphabetical{r: relation { city: text, rain: integer }}: array text [
     var names: array text;
-    load names from r{city} order [asc city];
+    load names value from r{city} order [asc city];
     names
 ];
 

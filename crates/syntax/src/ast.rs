@@ -695,6 +695,25 @@ impl Clause {
 }
 
 impl Load {
+    /// `value`, before `from`, if the array takes the values of the
+    /// relation's only attribute rather than its tuples.
+    #[must_use]
+    pub fn value(&self) -> Option<SyntaxToken> {
+        self.word("value")
+    }
+
+    /// `from`, before the relation.
+    #[must_use]
+    pub fn from(&self) -> Option<SyntaxToken> {
+        self.word("from")
+    }
+
+    /// Its contextual keyword `word`, in any case.
+    fn word(&self, word: &str) -> Option<SyntaxToken> {
+        significant_tokens(&self.0)
+            .find(|t| t.kind() == SyntaxKind::Ident && t.text().eq_ignore_ascii_case(word))
+    }
+
     /// The order items, in brackets.
     #[must_use]
     pub fn order(&self) -> Option<OrderList> {
