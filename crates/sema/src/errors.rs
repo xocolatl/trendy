@@ -522,7 +522,11 @@ pub(crate) fn type_mismatch(
                 replacement,
             }],
         );
-    } else if let Some(builtin) = conversion(found, declared) {
+    } else if let Some(builtin) = conversion(found, declared)
+        && (value.is_none() || !parses(builtin))
+    {
+        // A text known when compiling is a number's literal, rewritten
+        // above, or not a number, which parsing would fail for.
         d = with_conversion(d, "it", builtin, expr);
     }
     // `n * x`, of an integer and an approximate number: the first operand
@@ -589,14 +593,21 @@ fn written_literal(expr: &Expr) -> Option<String> {
     }
 }
 
-/// The prelude's operator that converts every value of type `from` to type
-/// `to`, if there is one: `to_text` writes a value of any type as text, and
-/// `to_approximate` takes integers.
+/// The prelude's operator that converts a value of type `from` to type
+/// `to`, if there is one: `to_text` writes a value of any type as text,
+/// `to_approximate` takes integers, and `parse_integer` and
+/// `parse_approximate` read numbers from text, failing for other text.
 fn conversion(from: &hir::Type, to: &hir::Type) -> Option<hir::Builtin> {
     use hir::{Scalar, Type};
     match (from, to) {
         (Type::Scalar(Scalar::Integer), Type::Scalar(Scalar::Approximate)) => {
             Some(hir::Builtin::ToApproximate)
+        }
+        (Type::Scalar(Scalar::Text), Type::Scalar(Scalar::Integer)) => {
+            Some(hir::Builtin::ParseInteger)
+        }
+        (Type::Scalar(Scalar::Text), Type::Scalar(Scalar::Approximate)) => {
+            Some(hir::Builtin::ParseApproximate)
         }
         (Type::Scalar(_) | Type::Parameter(_), Type::Scalar(Scalar::Text)) => {
             Some(hir::Builtin::ToText)
@@ -605,14 +616,24 @@ fn conversion(from: &hir::Type, to: &hir::Type) -> Option<hir::Builtin> {
     }
 }
 
+/// Whether the conversion `builtin` reads a number from text, which fails
+/// for other text.
+fn parses(builtin: hir::Builtin) -> bool {
+    matches!(
+        builtin,
+        hir::Builtin::ParseInteger | hir::Builtin::ParseApproximate
+    )
+}
+
 /// `d`, with the fix converting `expr`, which the message calls `subject`,
 /// with the built-in `builtin`: a call of it around `expr`.
 fn with_conversion(d: Diagnostic, subject: &str, builtin: hir::Builtin, expr: &Expr) -> Diagnostic {
     let name = builtin.name();
     let span = expr.span();
+    let verb = if parses(builtin) { "parse" } else { "convert" };
     d.with_suggestion(
         format!(
-            "convert {subject} with `{name}`: `{name}{{from: {}}}`",
+            "{verb} {subject} with `{name}`: `{name}{{from: {}}}`",
             expr.syntax().text()
         ),
         vec![
@@ -1594,8 +1615,10 @@ fn spelled_like(
 /// Other languages' names for operators of the prelude, lowercase, with
 /// the prelude's, of a relation if it takes one, and of an array if that is
 /// another: Python's `len` counts either, as SQL's `CARDINALITY` and Java's
-/// `size` do, and R's and Kotlin's `readLines` read a file's lines, as
-/// Python's and Ruby's `readlines` and .NET's `ReadAllLines` do.
+/// `size` do; R's and Kotlin's `readLines` read a file's lines, as
+/// Python's and Ruby's `readlines` and .NET's `ReadAllLines` do; and
+/// JavaScript's `parseInt` and `parseFloat`, Java's `parseDouble`, and C's
+/// `atoi` and `atof`, as Go's `Atoi`, read numbers.
 const ELSEWHERE: &[(&str, &str, Option<&str>)] = &[
     ("len", "count", Some("length")),
     ("size", "count", Some("length")),
@@ -1603,6 +1626,11 @@ const ELSEWHERE: &[(&str, &str, Option<&str>)] = &[
     ("prod", "product", None),
     ("readlines", "load_text_file", None),
     ("readalllines", "load_text_file", None),
+    ("parseint", "parse_integer", None),
+    ("atoi", "parse_integer", None),
+    ("parsefloat", "parse_approximate", None),
+    ("parsedouble", "parse_approximate", None),
+    ("atof", "parse_approximate", None),
 ];
 
 /// The prelude's operators that other languages call `name`, in any case:
@@ -3519,6 +3547,65 @@ pub(crate) fn failed(failed: &crate::ops::Failed, expr: &Expr) -> Diagnostic {
         crate::ops::Failed::Broken(broken) => broken_combination(broken, expr),
         crate::ops::Failed::NoTuples(builtin) => no_tuples(*builtin, expr),
         crate::ops::Failed::Overlap => overlapping_elements(expr),
+        crate::ops::Failed::Unparsable { builtin, text, why } => {
+            unparsable(*builtin, text, *why, expr)
+        }
+    }
+}
+
+/// `expr`, which takes `builtin`, `parse_integer` or `parse_approximate`,
+/// of `text`, which isn't a number of its type, as `why` says.
+fn unparsable(builtin: hir::Builtin, text: &str, why: hir::Unparsable, expr: &Expr) -> Diagnostic {
+    let name = builtin.name();
+    let integer = builtin == hir::Builtin::ParseInteger;
+    let a = if integer {
+        "an integer"
+    } else {
+        "an approximate number"
+    };
+    let quoted = hir::Value::Text(text.to_string());
+    match why {
+        hir::Unparsable::NotANumber => {
+            let d = Diagnostic::error(
+                Code::Unparsable,
+                format!("{quoted} isn't {a}"),
+                expr.span(),
+                format!("`{name}` of text that isn't {a}"),
+            );
+            if !integer {
+                return d.with_note("`parse_approximate` reads a decimal number: digits, then a `.` and more digits if it has a fraction, then an exponent if it has one, `e` or `E`, an optional sign and digits, all with a `-` before them if it is negative, and nothing else, not even spaces");
+            }
+            let d = d.with_note("`parse_integer` reads an integer as trendy writes one: decimal digits, with a `-` before them if it is negative, and nothing else, not even spaces");
+            if hir::Builtin::ParseApproximate
+                .evaluate(&[("from".to_string(), quoted.clone())].into())
+                .is_ok()
+            {
+                d.with_help("it is a decimal number with a fraction or an exponent, which `parse_approximate` reads as an approximate number")
+            } else {
+                d
+            }
+        }
+        hir::Unparsable::OutOfRange => {
+            let d = Diagnostic::error(
+                Code::Unparsable,
+                format!("{quoted} is out of {a}'s range"),
+                expr.span(),
+                format!("`{name}` of a number out of range"),
+            );
+            if integer {
+                d.with_note(format!(
+                    "integers are 64-bit signed, from {} to {}",
+                    i64::MIN,
+                    i64::MAX
+                ))
+                .with_help("`parse_approximate` reads it as the approximate number nearest it")
+            } else {
+                d.with_note(format!(
+                    "approximate numbers are finite, up to about {:e} in magnitude; a larger one is an error, not an infinity",
+                    f64::MAX
+                ))
+            }
+        }
     }
 }
 

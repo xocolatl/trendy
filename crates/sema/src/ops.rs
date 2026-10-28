@@ -1135,6 +1135,13 @@ pub(crate) enum Failed {
     /// Two changes to an array overlap: they set one element, or one sets
     /// an element of the other's.
     Overlap,
+    /// This built-in, `parse_integer` or `parse_approximate`, of `text`,
+    /// which isn't a number of its type, as `why` says.
+    Unparsable {
+        builtin: hir::Builtin,
+        text: String,
+        why: hir::Unparsable,
+    },
 }
 
 /// The tuples of `operand` for which `condition`, computed from the tuple at
@@ -2017,6 +2024,14 @@ pub(crate) fn call(call: hir::Call, bindings: Bindings) -> Result<hir::Expr, Fai
         let value = builtin.evaluate(&known).map_err(|failure| match failure {
             hir::BuiltinFailure::NoTuples => Failed::NoTuples(builtin),
             hir::BuiltinFailure::Failure(failure) => Failed::Scalar(failure),
+            hir::BuiltinFailure::Unparsable(why) => match &known["from"] {
+                hir::Value::Text(text) => Failed::Unparsable {
+                    builtin,
+                    text: text.clone(),
+                    why,
+                },
+                other => panic!("`{}` of {other:?}", builtin.name()),
+            },
         })?;
         return Ok(hir::Expr::Constant(value));
     }

@@ -4,6 +4,7 @@ var area := 3e0 * 2.5e0 * 2.5e0;
 var negated_zero := -0e0;
 var tiny := 1e-300 / 1e10;
 var rounded := to_approximate{from: 9007199254740993};
+var parsed := parse_approximate{from: "2.5"};
 
 operator arithmetic{a: approximate, b: approximate} [
     call debug_value{v: -a};
@@ -18,12 +19,19 @@ operator widen{n: integer} [
     call debug_value{v: to_approximate{from: n}};
 ];
 
+/* The approximate number nearest the decimal number `t` writes, with
+   or without a fraction or an exponent, read when the program runs. */
+operator parse{t: text} [
+    call debug_value{v: parse_approximate{from: t}};
+];
+
 operator main{} [
     call debug_value{v: half};
     call debug_value{v: area};
     call debug_value{v: negated_zero};
     call debug_value{v: tiny};
     call debug_value{v: rounded};
+    call debug_value{v: parsed};
     call arithmetic{a: 7e0, b: 2e0};
     call arithmetic{a: 0.1e0, b: 0.2e0};
     call arithmetic{a: 0e0, b: -1e0};
@@ -31,4 +39,7 @@ operator main{} [
     call widen{n: 3};
     call widen{n: 9007199254740993};
     call widen{n: -9223372036854775808};
+    call parse{t: "6650"};
+    call parse{t: "1.5E-3"};
+    call parse{t: "-0e0"};
 ];

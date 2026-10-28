@@ -27,7 +27,10 @@ ends the block with `Terminator::Fail` for none (R0010), and
 `to_approximate` an instruction (`UnaryOp::Approximate`). `sum` and
 `product` are runtime calls (`trendy_rt_sum`, `trendy_rt_product`), which
 walk the relation by its descriptor, and compute as sema folds them, with
-`trendy_numeric`. `debug_value` and `debug_table`, update operators, are runtime calls
+`trendy_numeric`, as are `parse_integer` and `parse_approximate`
+(`trendy_rt_parse_integer`, `trendy_rt_parse_approximate`), which read
+their text as sema does, also with `trendy_numeric`, and stop the program
+with the text for one that isn't a number (R0014). `debug_value` and `debug_table`, update operators, are runtime calls
 given their argument and its type's descriptor (`trendy_rt_debug_value`,
 `trendy_rt_debug_table`). `to_text` is
 a runtime call, which writes the value as `debug_value` does; folded, it
@@ -78,7 +81,10 @@ steps that dropped bits, which bounds the exact product above: if the
 bound rounds as the kept bits do, that is the product. Otherwise, within
 about 2^-74 of halfway between two approximate numbers, it is worked out
 in full (`Exact`), in memory the caller gives, which the runtime allocates
-and frees, and in time quadratic in the number of factors.
+and frees, and in time quadratic in the number of factors. It also holds
+the rules for reading numbers from text, which `parse_integer` and
+`parse_approximate` fold and run with (`parse_integer`,
+`parse_approximate`).
 
 ```mermaid
 flowchart TD

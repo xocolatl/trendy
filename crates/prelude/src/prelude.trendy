@@ -71,6 +71,19 @@ builtin operator to_text{from: any type}: text;
    magnitude, beyond which not every integer is one. */
 builtin operator to_approximate{from: integer}: approximate;
 
+/* The integer `from` writes, as trendy writes one: decimal digits, with
+   a `-` before them if it is negative, and nothing else, not even
+   spaces. Other text fails (R0014), as does an integer out of range. */
+builtin operator parse_integer{from: text}: integer;
+
+/* The approximate number nearest the decimal number `from` writes:
+   digits, then a `.` and more digits if it has a fraction, then an
+   exponent if it has one, `e` or `E`, an optional sign and digits, all
+   with a `-` before them if it is negative, and nothing else. So `2.5`
+   is `2.5e0`, as data files write it, though a literal needs its
+   exponent. Other text fails (R0014), as does a number out of range. */
+builtin operator parse_approximate{from: text}: approximate;
+
 /* The lines of the text file at `path`, which is relative to the
    directory the program runs in, unless it is absolute: each with its
    position in the file, `seq`, counting from 1. A line ends at a line

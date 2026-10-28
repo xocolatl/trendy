@@ -1,10 +1,11 @@
-//! Sums and products of numbers, exact before they are rounded, shared by
-//! the compiler (which evaluates `sum` and `product` when compiling) and the
-//! runtime (which evaluates them when running), so that the two can't
-//! disagree. A relation's tuples have no order, and neither has a sum or a
-//! product here: each is the exact result, rounded once, which no order of
-//! adding or multiplying can change. It has no dependencies and doesn't
-//! need `std`, so both can use it.
+//! Sums and products of numbers, exact before they are rounded, and numbers
+//! read from text, shared by the compiler (which evaluates `sum`, `product`,
+//! `parse_integer` and `parse_approximate` when compiling) and the runtime
+//! (which evaluates them when running), so that the two can't disagree. A
+//! relation's tuples have no order, and neither has a sum or a product
+//! here: each is the exact result, rounded once, which no order of adding
+//! or multiplying can change. It has no dependencies and doesn't need
+//! `std`, so both can use it.
 
 #![cfg_attr(not(test), no_std)]
 
@@ -435,9 +436,150 @@ fn nearest(magnitude: &[u64], exponent: i64, negative: bool) -> Option<f64> {
     Some(f64::from_bits(u64::from(negative) << 63 | bits))
 }
 
+/// Why a text isn't a number of a type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unparsable {
+    /// It isn't written as one.
+    NotANumber,
+    /// It is, but beyond the type's range.
+    OutOfRange,
+}
+
+/// The integer `text` writes as trendy writes one: decimal digits, with a
+/// `-` before them if it is negative, and nothing else, not even spaces.
+///
+/// # Errors
+///
+/// Returns why it isn't one: it is written otherwise, or out of a 64-bit
+/// integer's range.
+pub fn parse_integer(text: &str) -> Result<i64, Unparsable> {
+    let digits = text.strip_prefix('-').unwrap_or(text);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(Unparsable::NotANumber);
+    }
+    text.parse().map_err(|_| Unparsable::OutOfRange)
+}
+
+/// The approximate number nearest the decimal number `text` writes:
+/// digits, then a `.` and more digits if it has a fraction, then an
+/// exponent if it has one, `e` or `E`, an optional sign and digits, all
+/// with a `-` before them if it is negative, and nothing else. That is how
+/// trendy writes an approximate number, or an integer, or a decimal
+/// number, though a literal of an approximate number needs its exponent:
+/// a data file writes `2.5`, and here the type is known. One too small to
+/// tell from zero is zero, and there is one zero: `-0e0` is `0e0`.
+///
+/// # Errors
+///
+/// Returns why there is none: it is written otherwise, or beyond an
+/// approximate number's range, which has no infinity.
+pub fn parse_approximate(text: &str) -> Result<f64, Unparsable> {
+    fn digits(s: &str) -> usize {
+        s.bytes().take_while(u8::is_ascii_digit).count()
+    }
+    let unsigned = text.strip_prefix('-').unwrap_or(text);
+    let whole = digits(unsigned);
+    if whole == 0 {
+        return Err(Unparsable::NotANumber);
+    }
+    let mut rest = &unsigned[whole..];
+    if let Some(after) = rest.strip_prefix('.') {
+        let fraction = digits(after);
+        if fraction == 0 {
+            return Err(Unparsable::NotANumber);
+        }
+        rest = &after[fraction..];
+    }
+    if let Some(exponent) = rest.strip_prefix(['e', 'E']) {
+        let exponent = exponent.strip_prefix(['+', '-']).unwrap_or(exponent);
+        let length = digits(exponent);
+        if length == 0 {
+            return Err(Unparsable::NotANumber);
+        }
+        rest = &exponent[length..];
+    }
+    if !rest.is_empty() {
+        return Err(Unparsable::NotANumber);
+    }
+    // Rust reads every number written so, to the nearest `f64`.
+    let value: f64 = text.parse().map_err(|_| Unparsable::NotANumber)?;
+    if value.is_finite() {
+        // Adding `0.0` turns `-0.0` into `0.0` (IEEE 754, 6.3).
+        Ok(value + 0.0)
+    } else {
+        Err(Unparsable::OutOfRange)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn integers_are_read_as_trendy_writes_them() {
+        assert_eq!(parse_integer("42"), Ok(42));
+        assert_eq!(parse_integer("-42"), Ok(-42));
+        assert_eq!(parse_integer("007"), Ok(7));
+        assert_eq!(parse_integer("-0"), Ok(0));
+        assert_eq!(parse_integer("9223372036854775807"), Ok(i64::MAX));
+        assert_eq!(parse_integer("-9223372036854775808"), Ok(i64::MIN));
+        for other in [
+            "", "-", "+5", " 5", "5 ", "4.5", "1e3", "1_000", "0x1F", "--5", "５",
+        ] {
+            assert_eq!(
+                parse_integer(other),
+                Err(Unparsable::NotANumber),
+                "{other:?}"
+            );
+        }
+        for beyond in [
+            "9223372036854775808",
+            "-9223372036854775809",
+            "99999999999999999999",
+        ] {
+            assert_eq!(
+                parse_integer(beyond),
+                Err(Unparsable::OutOfRange),
+                "{beyond}"
+            );
+        }
+    }
+
+    #[test]
+    fn approximate_numbers_are_read_as_decimal_numbers() {
+        for (text, value) in [
+            ("5e-1", 0.5),
+            ("2.5", 2.5),
+            ("6650", 6650.0),
+            ("-1.5E+3", -1500.0),
+            ("1.75e1", 17.5),
+            ("007.50", 7.5),
+            ("1e-400", 0.0),
+            ("1.7976931348623157e308", f64::MAX),
+        ] {
+            assert_eq!(parse_approximate(text), Ok(value), "{text}");
+        }
+        // There is one zero.
+        assert_eq!(parse_approximate("-0e0").map(f64::to_bits), Ok(0));
+        assert_eq!(parse_approximate("-1e-400").map(f64::to_bits), Ok(0));
+        for other in [
+            "", "-", ".5", "5.", "1e", "1e+", "1.e3", "+1", " 1", "1 ", "1,5", "1_000.5", "inf",
+            "NaN", "infinity", "0x1p3", "1.2.3", "1e3e3",
+        ] {
+            assert_eq!(
+                parse_approximate(other),
+                Err(Unparsable::NotANumber),
+                "{other:?}"
+            );
+        }
+        for beyond in ["1e400", "-1e309", "1.8e308"] {
+            assert_eq!(
+                parse_approximate(beyond),
+                Err(Unparsable::OutOfRange),
+                "{beyond}"
+            );
+        }
+    }
 
     fn sum(values: &[f64]) -> Option<f64> {
         let mut sum = ApproximateSum::default();

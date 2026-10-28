@@ -755,6 +755,8 @@ impl<'a> FunctionBuilder<'a> {
                 | hir::Builtin::Product
                 | hir::Builtin::ToText
                 | hir::Builtin::ToApproximate
+                | hir::Builtin::ParseInteger
+                | hir::Builtin::ParseApproximate
                 | hir::Builtin::LoadTextFile,
             ) => {
                 unreachable!("`call` invokes only update operators")
@@ -875,6 +877,20 @@ impl<'a> FunctionBuilder<'a> {
                     dst: dst.clone(),
                     op: lir::UnaryOp::Approximate,
                     src,
+                });
+                dst
+            }
+            hir::Builtin::ParseInteger | hir::Builtin::ParseApproximate => {
+                let function = if builtin == hir::Builtin::ParseInteger {
+                    lir::RuntimeFn::ParseInteger
+                } else {
+                    lir::RuntimeFn::ParseApproximate
+                };
+                let text = self.place(&call.args["from"], cx);
+                let dst = self.slot(layout(&self.program.result(call)));
+                self.insts.push(lir::Inst::CallRuntime {
+                    function,
+                    args: vec![dst.clone(), text],
                 });
                 dst
             }

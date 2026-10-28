@@ -969,7 +969,7 @@ mod tests {
                 .map(|v| format!("    call debug_value{{v: {v}}};"))
                 .collect();
             format!(
-                "operator show{{n: integer, x: approximate, v: any type}} [\n{}\n];\noperator label{{n: integer}}: text [ n ];{MAIN}",
+                "operator show{{n: integer, x: approximate, t: text, v: any type}} [\n{}\n];\noperator label{{n: integer}}: text [ n ];{MAIN}",
                 calls.join("\n")
             )
         };
@@ -981,6 +981,8 @@ mod tests {
             "n * x",
             "1 * x",
             "n * 2 = x",
+            "n + t",
+            "x * t",
         ]);
         let fixed = show(&[
             "\"n = \" || to_text{from: n}",
@@ -990,6 +992,8 @@ mod tests {
             "to_approximate{from: n} * x",
             "1e0 * x",
             "to_approximate{from: n * 2} = x",
+            "n + parse_integer{from: t}",
+            "x * parse_approximate{from: t}",
         ])
         .replace("[ n ]", "[ to_text{from: n} ]");
         assert_eq!(fix(&source), fixed);
@@ -1078,6 +1082,58 @@ mod tests {
         );
         // Of the type the call gives `T`, not of `T`.
         assert_eq!(text(4), "relation { v: integer } {}");
+    }
+
+    #[test]
+    fn numbers_are_parsed_when_compiling() {
+        let vars = variables(
+            "var a := parse_integer{from: \"-42\"};\nvar b := parse_approximate{from: \"2.5\"};\nvar c := parse_approximate{from: \"-0e0\"};\noperator read{t: text}: integer [\n    parse_integer{from: t} + 1\n];\nvar d := read{t: \"007\"};",
+        );
+        assert_eq!(vars[0].init, hir::Value::Integer(-42));
+        assert_eq!(
+            vars[1].init,
+            hir::Value::Approximate(hir::Approximate::new(2.5))
+        );
+        let hir::Value::Approximate(zero) = vars[2].init else {
+            panic!("{:?}", vars[2].init);
+        };
+        assert_eq!(zero.to_bits(), 0, "there is one zero");
+        assert_eq!(vars[3].init, hir::Value::Integer(8));
+    }
+
+    #[test]
+    fn text_that_isnt_a_number_fails_when_compiling() {
+        let failure = |init: &str| {
+            let errors = errors(&format!(
+                "operator read{{t: text}}: integer [\n    parse_integer{{from: t}}\n];\nvar v := {init};{MAIN}"
+            ));
+            assert_eq!(errors.len(), 1, "{init}: {errors:#?}");
+            assert_eq!(errors[0].code, Code::Unparsable, "{init}");
+            (errors[0].message.clone(), errors[0].help.clone())
+        };
+        let (message, help) = failure("parse_integer{from: \"4.5\"}");
+        assert_eq!(message, "\"4.5\" isn't an integer");
+        assert!(help[0].contains("`parse_approximate`"), "{help:?}");
+        // Nothing reads it as another number.
+        let (message, help) = failure("parse_integer{from: \"4,5\"}");
+        assert_eq!(message, "\"4,5\" isn't an integer");
+        assert!(help.is_empty(), "{help:?}");
+        let (message, _) = failure("parse_integer{from: \"9223372036854775808\"}");
+        assert_eq!(
+            message,
+            "\"9223372036854775808\" is out of an integer's range"
+        );
+        let (message, _) = failure("parse_approximate{from: \" 2.5\"}");
+        assert_eq!(message, "\" 2.5\" isn't an approximate number");
+        let (message, _) = failure("parse_approximate{from: \"1e400\"}");
+        assert_eq!(message, "\"1e400\" is out of an approximate number's range");
+        // Through an operator, and for a tuple.
+        let (message, _) = failure("read{t: \"x\"}");
+        assert_eq!(message, "\"x\" isn't an integer");
+        let (message, _) = failure(
+            "relation { { t: \"1\" }, { t: \"one\" } } extend { n := parse_integer{from: t} }",
+        );
+        assert_eq!(message, "\"one\" isn't an integer");
     }
 
     #[test]
@@ -5419,16 +5475,27 @@ mod tests {
     }
 
     #[test]
-    fn other_languages_names_for_reading_lines_are_fixed() {
-        // R's and Kotlin's, Python's and Ruby's, and .NET's.
-        for written in ["readLines", "readlines", "ReadAllLines"] {
+    fn other_languages_names_for_reading_are_fixed() {
+        // A file's lines: R's and Kotlin's, Python's and Ruby's, and .NET's.
+        // Numbers: JavaScript's, C's and Go's, and Java's.
+        for (written, arg, ours) in [
+            ("readLines", "\"rivers.txt\"", "load_text_file{path: "),
+            ("readlines", "\"rivers.txt\"", "load_text_file{path: "),
+            ("ReadAllLines", "\"rivers.txt\"", "load_text_file{path: "),
+            ("parseInt", "\"42\"", "parse_integer{from: "),
+            ("atoi", "\"42\"", "parse_integer{from: "),
+            ("Atoi", "\"42\"", "parse_integer{from: "),
+            ("parseFloat", "\"2.5\"", "parse_approximate{from: "),
+            ("atof", "\"2.5\"", "parse_approximate{from: "),
+            ("parseDouble", "\"2.5\"", "parse_approximate{from: "),
+        ] {
             let source = format!(
-                "operator main{{}} [\n    var lines := {written}{{\"rivers.txt\"}};\n    call debug_table{{r: lines}};\n];\n"
+                "operator main{{}} [\n    call debug_value{{v: {written}{{{arg}}}}};\n];\n"
             );
             let fixed = fix(&source);
             assert_eq!(
                 fixed,
-                source.replace(&format!("{written}{{"), "load_text_file{path: "),
+                source.replace(&format!("{written}{{"), ours),
                 "{written}"
             );
             assert!(analyze_str(&fixed).is_ok(), "{fixed}");

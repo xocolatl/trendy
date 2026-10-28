@@ -2,6 +2,7 @@ var seven := 1 + 2 * 3;
 var nine := (1 + 2) * 3;
 var smallest := -9223372036854775808;
 var largest := -(smallest + 1);
+var parsed := parse_integer{from: "-42"};
 
 operator arithmetic{a: integer, b: integer} [
     call debug_value{v: -a};
@@ -12,13 +13,22 @@ operator arithmetic{a: integer, b: integer} [
     call debug_value{v: a mod b};
 ];
 
+/* The integer `t` writes: digits, with a `-` before them if it is
+   negative, read when the program runs. */
+operator parse{t: text} [
+    call debug_value{v: parse_integer{from: t}};
+];
+
 operator main{} [
     call debug_value{v: seven};
     call debug_value{v: nine};
     call debug_value{v: smallest};
     call debug_value{v: largest};
+    call debug_value{v: parsed};
     call arithmetic{a: 7, b: 2};
     call arithmetic{a: -7, b: 2};
     call arithmetic{a: 7, b: -2};
     call arithmetic{a: smallest + 1, b: -1};
+    call parse{t: "007"};
+    call parse{t: "-9223372036854775808"};
 ];

@@ -427,11 +427,17 @@ fn integers() {
     let lines: Vec<&str> = stderr.lines().collect();
     // Evaluated when compiling.
     assert_eq!(
-        lines[..4],
-        ["7", "9", "-9223372036854775808", "9223372036854775807"]
+        lines[..5],
+        [
+            "7",
+            "9",
+            "-9223372036854775808",
+            "9223372036854775807",
+            "-42"
+        ]
     );
     // Each row: `-a`, `a + b`, `a - b`, `a * b`, `a div b`, `a mod b`.
-    let rows: Vec<_> = lines[4..].chunks(6).collect();
+    let rows: Vec<_> = lines[5..29].chunks(6).collect();
     assert_eq!(
         rows,
         [
@@ -448,6 +454,8 @@ fn integers() {
             ],
         ]
     );
+    // Parsed when running.
+    assert_eq!(lines[29..], ["7", "-9223372036854775808"]);
 }
 
 #[test]
@@ -457,12 +465,19 @@ fn approximate_numbers() {
     let lines: Vec<&str> = stderr.lines().collect();
     // Evaluated when compiling.
     assert_eq!(
-        lines[..5],
-        ["5e-1", "1.875e1", "0e0", "1e-310", "9.007199254740992e15"]
+        lines[..6],
+        [
+            "5e-1",
+            "1.875e1",
+            "0e0",
+            "1e-310",
+            "9.007199254740992e15",
+            "2.5e0"
+        ]
     );
     // Each row: `-a`, `a + b`, `a - b`, `a * b`, `a / b`, rounded as IEEE
     // 754 rounds them, except that there is one zero.
-    let rows: Vec<_> = lines[5..25].chunks(5).collect();
+    let rows: Vec<_> = lines[6..26].chunks(5).collect();
     assert_eq!(
         rows,
         [
@@ -480,9 +495,11 @@ fn approximate_numbers() {
     );
     // Integers widened when running: beyond 2^53, to the nearest.
     assert_eq!(
-        lines[25..],
+        lines[26..29],
         ["3e0", "9.007199254740992e15", "-9.223372036854776e18"]
     );
+    // Parsed when running, with one zero.
+    assert_eq!(lines[29..], ["6.65e3", "1.5e-3", "0e0"]);
 }
 
 #[test]
@@ -512,6 +529,52 @@ fn approximate_failures_stop_the_program() {
     for (name, expr, expected) in cases {
         let (code, stderr) = run_source(&format!("approximate_{name}"), &program(expr));
         assert_eq!((code, &stderr), (1, expected), "{expr}");
+    }
+}
+
+#[test]
+fn text_that_isnt_a_number_stops_the_program() {
+    use trendy_diag::Code;
+    // `t` is known only when the program runs, so each fails then, after
+    // writing 1.
+    let program = |operator: &str, text: &str| {
+        format!(
+            "operator f{{t: text}} [\n    call debug_value{{v: 1}};\n    call debug_value{{v: {operator}{{from: t}}}};\n];\n\noperator main{{}} [\n    call f{{t: {text:?}}};\n];\n"
+        )
+    };
+    let cases = [
+        (
+            "integer_fraction",
+            "parse_integer",
+            "4.5",
+            "isn't an integer",
+        ),
+        ("integer_space", "parse_integer", " 42", "isn't an integer"),
+        ("integer_tab", "parse_integer", "4\t2", "isn't an integer"),
+        (
+            "integer_range",
+            "parse_integer",
+            "9223372036854775808",
+            "is out of an integer's range",
+        ),
+        (
+            "approximate_infinity",
+            "parse_approximate",
+            "inf",
+            "isn't an approximate number",
+        ),
+        (
+            "approximate_range",
+            "parse_approximate",
+            "1e400",
+            "is out of an approximate number's range",
+        ),
+    ];
+    for (name, operator, text, why) in cases {
+        let (code, stderr) = run_source(&format!("parse_{name}"), &program(operator, text));
+        // Rust's `Debug` writes a text's escapes as trendy does.
+        let expected = format!("1\nerror[{}]: {text:?} {why}\n", Code::Unparsable.id());
+        assert_eq!((code, stderr), (1, expected), "{text:?}");
     }
 }
 

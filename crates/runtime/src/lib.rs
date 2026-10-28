@@ -1926,6 +1926,62 @@ pub unsafe extern "C" fn trendy_rt_to_text(
     }
 }
 
+/// Store at `dst` the integer the text `from` writes, as `parse_integer`
+/// reads one, and the compiler with it. Stops the program if the text
+/// writes none (R0014).
+///
+/// # Safety
+///
+/// `from` must point to a valid text value, and `dst` to memory for an
+/// integer.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_parse_integer(dst: *mut i64, from: *const Text) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let text = read_text(from.cast());
+        match trendy_numeric::parse_integer(text) {
+            Ok(n) => dst.write_unaligned(n),
+            Err(why) => unparsable(text, "an integer", why),
+        }
+    }
+}
+
+/// Store at `dst` the approximate number nearest the decimal number the
+/// text `from` writes, as `parse_approximate` reads one, and the compiler
+/// with it. Stops the program if the text writes none (R0014).
+///
+/// # Safety
+///
+/// `from` must point to a valid text value, and `dst` to memory for an
+/// approximate number.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_parse_approximate(dst: *mut f64, from: *const Text) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let text = read_text(from.cast());
+        match trendy_numeric::parse_approximate(text) {
+            Ok(x) => dst.write_unaligned(x),
+            Err(why) => unparsable(text, "an approximate number", why),
+        }
+    }
+}
+
+/// Stop the program because `text` isn't `a`, a number of its type, as
+/// `why` says.
+#[cfg(not(test))]
+fn unparsable(text: &str, a: &str, why: trendy_numeric::Unparsable) -> ! {
+    fail_with(|out| {
+        out.write_str("error[R0014]: \"")?;
+        trendy_text::escape(text, out)?;
+        match why {
+            trendy_numeric::Unparsable::NotANumber => writeln!(out, "\" isn't {a}"),
+            trendy_numeric::Unparsable::OutOfRange => writeln!(out, "\" is out of {a}'s range"),
+        }
+    })
+}
+
 /// Store at `dst` the relation of the lines of the text file at `path`, of
 /// the type `desc` describes, `relation { line: text, seq: integer }`, in
 /// memory the statement owns: each line, without the line feed, or the

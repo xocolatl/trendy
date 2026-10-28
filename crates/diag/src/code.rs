@@ -143,6 +143,7 @@ codes! {
     IndexOutOfRange => "R0011",
     UnreadableFile => "R0012",
     NotUtf8 => "R0013",
+    Unparsable => "R0014",
     Internal => "X0000",
 }
 

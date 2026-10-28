@@ -585,6 +585,19 @@ builtin operator to_text{from: any type}: text;
    magnitude, beyond which not every integer is one. */
 builtin operator to_approximate{from: integer}: approximate;
 
+/* The integer `from` writes, as trendy writes one: decimal digits, with
+   a `-` before them if it is negative, and nothing else, not even
+   spaces. Other text fails (R0014), as does an integer out of range. */
+builtin operator parse_integer{from: text}: integer;
+
+/* The approximate number nearest the decimal number `from` writes:
+   digits, then a `.` and more digits if it has a fraction, then an
+   exponent if it has one, `e` or `E`, an optional sign and digits, all
+   with a `-` before them if it is negative, and nothing else. So `2.5`
+   is `2.5e0`, as data files write it, though a literal needs its
+   exponent. Other text fails (R0014), as does a number out of range. */
+builtin operator parse_approximate{from: text}: approximate;
+
 /* The lines of the text file at `path`, which is relative to the
    directory the program runs in, unless it is absolute: each with its
    position in the file, `seq`, counting from 1. A line ends at a line
@@ -826,8 +839,10 @@ operator main{} [
 ];
 ```
 
-**`to_text{from: any type}: text`** and
-**`to_approximate{from: integer}: approximate`** convert values, which
+**`to_text{from: any type}: text`**,
+**`to_approximate{from: integer}: approximate`**,
+**`parse_integer{from: text}: integer`** and
+**`parse_approximate{from: text}: approximate`** convert values, which
 never convert implicitly: *The Third Manifesto* allows no coercion, only
 explicit conversions such as Tutorial D's `CAST_AS_CHAR` (chapter 3).
 
@@ -841,9 +856,25 @@ explicit conversions such as Tutorial D's `CAST_AS_CHAR` (chapter 3).
   is one, so `9007199254740993` becomes `9.007199254740992e15`. There is
   no conversion back yet: an approximate number has to be rounded to be
   an integer, and how is the program's choice.
+- **`parse_integer` reads an integer as trendy writes one:** decimal
+  digits, with a `-` before them if it is negative, and nothing else, so
+  not `+5`, `1_000` or `4.5`, and not ` 42`, with a space.
+- **`parse_approximate` reads a decimal number,** with or without a
+  fraction or an exponent: `2.5`, `6650` and `1.5e-3`, but not `.5`, `5.`,
+  `inf` or `NaN`. So it reads every number `to_text` writes, and the
+  decimals data files write, though a literal needs its exponent: in the
+  source, only the literal's form says its type, which is known here. A
+  number too small to tell from zero is zero, and there is one zero.
+- **Text that isn't a number of the type fails** (R0014), as does a number
+  out of its range: when compiling, if the text is known then, and
+  otherwise when the program runs, which writes the text, as in
+  `error[R0014]: "4.5" isn't an integer`.
 - **The errors fix it:** a value of the wrong type where text or an
   approximate number is expected, as in `"n = " || n` or `x * n`, has a fix
-  that converts it.
+  that converts it, and so does text where a number is expected, which
+  is parsed, unless it is known when compiling: a literal of a number,
+  as in `"42"`, is rewritten as one instead. `parseInt`, `parseFloat`,
+  `atoi` and `atof` are fixed to `parse_integer` and `parse_approximate`.
 
 ```trendy
 var cities := relation {
@@ -856,9 +887,16 @@ operator describe{city: text, people: integer} [
     call debug_value{v: city || " has " || to_text{from: people} || " people"};
 ];
 
+/* A city's people and area, from text, read when the program runs. */
+operator read{people: text, km2: text} [
+    call debug_value{v: parse_integer{from: people}};
+    call debug_value{v: parse_approximate{from: km2}};
+];
+
 operator main{} [
     call debug_table{r: densities{city, density}};
     call describe{city: "Lima", people: 10883000};
+    call read{people: "8435700", km2: "3358.6"};
 ];
 ```
 
@@ -866,6 +904,12 @@ operator main{} [
 operator describe{city: text, people: integer} [
     call debug_value{v: city || " has " || people || " people"};
 ];
+
+operator main{} [];
+```
+
+```trendy,error
+var people := parse_integer{from: "8.4e6"};
 
 operator main{} [];
 ```
@@ -1265,8 +1309,9 @@ and they are ordered numerically.
 
 Values never convert to another type implicitly, as *The Third Manifesto*
 requires. An integer literal can't initialize an `approximate`: write `1e0`,
-not `1`. Other values convert explicitly, with `to_approximate` and
-`to_text` (see [The prelude](#the-prelude)).
+not `1`. Other values convert explicitly, with `to_approximate`,
+`to_text`, `parse_integer` and `parse_approximate` (see
+[The prelude](#the-prelude)).
 
 ```trendy,error
 var ratio: approximate := 1;
@@ -3478,6 +3523,8 @@ line after a comment on its own line, such as a file's header, is kept.
 | `string`, `str`, `varchar` | `text` |
 | `str(x)`, `x.to_string()`, `CAST(x AS VARCHAR)`, `CAST_AS_CHAR (X)` | `to_text{from: x}` |
 | `float(n)`, `n as f64`, `CAST(n AS DOUBLE PRECISION)`, `CAST_AS_RATIONAL (N)` | `to_approximate{from: n}` |
+| `int(s)`, `parseInt(s)`, `atoi(s)`, `CAST(s AS INTEGER)`, `CAST_AS_INTEGER (S)` | `parse_integer{from: s}` |
+| `float(s)`, `parseFloat(s)`, `atof(s)`, `CAST(s AS DOUBLE PRECISION)` | `parse_approximate{from: s}` |
 | `readLines(path)`, `File.readlines(path)`, `File.ReadAllLines(path)` | `load_text_file{path: path}`, with each line's `seq` |
 | `{ x: 1 }`, `TUPLE { X 1 }` | `tuple { x: 1 }` |
 | `type Home = { … }`, `interface Home { … }`, `struct Home { … }` | `heading home := { … };`, whose types are `relation home` and `tuple home` |

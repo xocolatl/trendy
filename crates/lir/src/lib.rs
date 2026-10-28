@@ -180,6 +180,15 @@ pub enum RuntimeFn {
     /// [`RuntimeFn::Begin`]). It stops the program if the memory can't be
     /// allocated.
     ToText,
+    /// `trendy_rt_parse_integer(dst, text)`: store at `dst` the integer the
+    /// text writes, as `parse_integer` reads one. It stops the program if
+    /// the text writes none.
+    ParseInteger,
+    /// `trendy_rt_parse_approximate(dst, text)`: store at `dst` the
+    /// approximate number nearest the decimal number the text writes, as
+    /// `parse_approximate` reads one. It stops the program if the text
+    /// writes none.
+    ParseApproximate,
     /// `trendy_rt_load_text_file(dst, path, descriptor)`: store at `dst` the
     /// relation of the lines of the text file at `path`, a text, of the
     /// type the descriptor describes, `relation { line: text, seq: integer
@@ -351,6 +360,8 @@ impl RuntimeFn {
             RuntimeFn::DebugValue => "trendy_rt_debug_value",
             RuntimeFn::DebugTable => "trendy_rt_debug_table",
             RuntimeFn::ToText => "trendy_rt_to_text",
+            RuntimeFn::ParseInteger => "trendy_rt_parse_integer",
+            RuntimeFn::ParseApproximate => "trendy_rt_parse_approximate",
             RuntimeFn::LoadTextFile => "trendy_rt_load_text_file",
             RuntimeFn::Sum => "trendy_rt_sum",
             RuntimeFn::Product => "trendy_rt_product",

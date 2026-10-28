@@ -8,6 +8,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+pub use trendy_numeric::Unparsable;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program {
     /// The prelude's built-in operators, then the program's own.
@@ -298,13 +300,17 @@ pub enum Builtin {
     ToText,
     /// The approximate number nearest an integer.
     ToApproximate,
+    /// The integer a text writes.
+    ParseInteger,
+    /// The approximate number nearest the decimal number a text writes.
+    ParseApproximate,
     /// The lines of a text file, numbered from 1, which the program reads
     /// when it runs.
     LoadTextFile,
 }
 
 impl Builtin {
-    pub const ALL: [Builtin; 11] = [
+    pub const ALL: [Builtin; 13] = [
         Builtin::DebugValue,
         Builtin::DebugTable,
         Builtin::Count,
@@ -315,6 +321,8 @@ impl Builtin {
         Builtin::Product,
         Builtin::ToText,
         Builtin::ToApproximate,
+        Builtin::ParseInteger,
+        Builtin::ParseApproximate,
         Builtin::LoadTextFile,
     ];
 
@@ -331,6 +339,8 @@ impl Builtin {
             Builtin::Product => "product",
             Builtin::ToText => "to_text",
             Builtin::ToApproximate => "to_approximate",
+            Builtin::ParseInteger => "parse_integer",
+            Builtin::ParseApproximate => "parse_approximate",
             Builtin::LoadTextFile => "load_text_file",
         }
     }
@@ -368,7 +378,10 @@ impl Builtin {
             Builtin::DebugValue | Builtin::ToText => vec![unnamed(0, Any::Type)],
             Builtin::Count | Builtin::DebugTable => vec![unnamed(0, Any::Relation)],
             Builtin::Length => vec![unnamed(0, Any::Array)],
-            Builtin::ToApproximate | Builtin::LoadTextFile => Vec::new(),
+            Builtin::ToApproximate
+            | Builtin::ParseInteger
+            | Builtin::ParseApproximate
+            | Builtin::LoadTextFile => Vec::new(),
             Builtin::Min | Builtin::Max => of_kind("ordered", &[Requirement::Order]),
             Builtin::Sum | Builtin::Product => of_kind(
                 "numeric",
@@ -389,6 +402,9 @@ impl Builtin {
             Builtin::Length => [("a".to_string(), parameter(0))].into(),
             Builtin::ToText => [("from".to_string(), parameter(0))].into(),
             Builtin::ToApproximate => [("from".to_string(), Type::Scalar(Scalar::Integer))].into(),
+            Builtin::ParseInteger | Builtin::ParseApproximate => {
+                [("from".to_string(), Type::Scalar(Scalar::Text))].into()
+            }
             Builtin::LoadTextFile => [("path".to_string(), Type::Scalar(Scalar::Text))].into(),
             Builtin::Min | Builtin::Max | Builtin::Sum | Builtin::Product => {
                 let tuples = Heading::new(
@@ -409,12 +425,16 @@ impl Builtin {
     pub fn result(self) -> Option<Type> {
         match self {
             Builtin::DebugValue | Builtin::DebugTable => None,
-            Builtin::Count | Builtin::Length => Some(Type::Scalar(Scalar::Integer)),
+            Builtin::Count | Builtin::Length | Builtin::ParseInteger => {
+                Some(Type::Scalar(Scalar::Integer))
+            }
             Builtin::Min | Builtin::Max | Builtin::Sum | Builtin::Product => {
                 Some(Type::Parameter(self.types()[0].clone()))
             }
             Builtin::ToText => Some(Type::Scalar(Scalar::Text)),
-            Builtin::ToApproximate => Some(Type::Scalar(Scalar::Approximate)),
+            Builtin::ToApproximate | Builtin::ParseApproximate => {
+                Some(Type::Scalar(Scalar::Approximate))
+            }
             Builtin::LoadTextFile => Some(Type::Relation(Heading::new(
                 [
                     ("line".to_string(), Type::Scalar(Scalar::Text)),
@@ -441,8 +461,9 @@ impl Builtin {
     /// # Errors
     ///
     /// Returns why there is no value: `min` or `max` of a relation without
-    /// tuples, which has neither, or a `sum` or `product` out of its type's
-    /// range.
+    /// tuples, which has neither, a `sum` or `product` out of its type's
+    /// range, or `parse_integer` or `parse_approximate` of text that isn't
+    /// a number of its type.
     ///
     /// # Panics
     ///
@@ -498,6 +519,18 @@ impl Builtin {
                 Value::Integer(n) => Ok(Value::Approximate(Approximate::nearest(n))),
                 ref other => panic!("`to_approximate` of {other:?}"),
             },
+            Builtin::ParseInteger | Builtin::ParseApproximate => {
+                let Value::Text(text) = &args["from"] else {
+                    panic!("`{}` of {:?}", self.name(), args["from"]);
+                };
+                let value = if self == Builtin::ParseInteger {
+                    trendy_numeric::parse_integer(text).map(Value::Integer)
+                } else {
+                    trendy_numeric::parse_approximate(text)
+                        .map(|x| Value::Approximate(Approximate::new(x)))
+                };
+                value.map_err(BuiltinFailure::Unparsable)
+            }
             Builtin::LoadTextFile => {
                 panic!("`{}` reads input, known only when running", self.name())
             }
@@ -512,6 +545,9 @@ pub enum BuiltinFailure {
     NoTuples,
     /// An operator's failure, such as a `sum` out of its type's range.
     Failure(Failure),
+    /// `parse_integer` or `parse_approximate` of text that isn't a number
+    /// of its type.
+    Unparsable(Unparsable),
 }
 
 /// The exact sum of `values`, of the numeric type `ty`, rounded once.
