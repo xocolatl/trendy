@@ -777,6 +777,23 @@ builtin operator parse_boolean{from: text}: boolean;
    so it is an update operator, which `call` invokes. A file that can't
    be read fails (R0012), as does one that isn't UTF-8 text (R0013). */
 builtin operator load_text_file{path: text, out lines: array text};
+
+/* Read the records of the CSV file at `path` into `rows`, in the file's
+   order, each a tuple whose attributes are the fields in the columns of
+   their names, which the file's first record, its header, gives. Each
+   attribute is text, an integer, an approximate number or a boolean,
+   read from its field as `parse_integer`, `parse_approximate` and
+   `parse_boolean` read them, and text as it is; columns the tuples
+   don't name are skipped. The file is CSV as RFC 4180 has it: fields
+   separated by commas, records by line ends, as for `load_text_file`,
+   and a field with a comma, a quote or a line end in quotes, each quote
+   in it doubled. Empty lines are skipped. A file that can't be read
+   fails (R0012), as does one that isn't UTF-8 text (R0013), or isn't
+   CSV (R0015), or whose header doesn't name each attribute once
+   (R0016), or that has a field its attribute's type can't read
+   (R0014). */
+builtin operator load_csv{path: text, out rows: array T}
+    types { T: any tuple };
 ```
 
 **`debug_value{v: any type}`** writes `v` to stderr, on one line, as trendy
@@ -1148,6 +1165,63 @@ operator main{} [
 var lines := load_text_file{path: "rivers.txt"};
 
 operator main{} [];
+```
+
+**`load_csv{path: text, out rows: array T}`**, where `T` is any tuple,
+reads the records of a CSV file into the variable its call gives `rows`,
+each a tuple of the columns its attributes name.
+
+```trendy
+heading city := { city: text, people: integer, km2: approximate, capital: boolean };
+
+operator main{} [
+    var rows: array tuple city;
+    call load_csv{path: "cities.csv", out rows: rows};
+    var cities: relation city;
+    load cities from rows;
+    call debug_table{r: cities where capital};
+];
+```
+
+- **The array's type says what to read.** The file's first record, its
+  header, names its columns, and each attribute of the tuples is the
+  field in the column of its name, so the columns can be in any order,
+  and those the tuples don't name are skipped. A header that doesn't
+  name each attribute once stops the program (R0016). So the type is
+  the program's, as Tutorial D's `LOAD` takes its shape from its target
+  (*The Third Manifesto*, chapter 5): a reader whose result's heading
+  came from the file would have a type known only when running.
+- **Each field is read as its attribute's type:** text as it is, and an
+  integer, an approximate number or a boolean as `parse_integer`,
+  `parse_approximate` and `parse_boolean` read them, so `2672.3` is an
+  approximate number, and `yes` and `N` are booleans. A field that isn't
+  one stops the program (R0014), writing it, its column and its line.
+  An attribute of another type, which no field writes, is an error when
+  compiling (A0055), as is an array whose tuples' type is a type
+  parameter, whose attributes, the columns to read, aren't known then.
+- **The file is CSV as RFC 4180 has it:** fields separated by commas,
+  and records by line ends, as for `load_text_file`; a field with a
+  comma, a quote or a line end is in quotes, each quote in it doubled,
+  as in `"Hanoi, ""Hà Nội"""`. A field's spaces are part of it, so
+  ` 42` isn't an integer. Empty lines are skipped, and so is a byte order
+  mark at the start. A file that isn't CSV, or has a record with another
+  number of fields than the header, stops the program (R0015), writing
+  the line.
+- **The rows are an array, in the file's order,** which can repeat, as
+  `load_text_file`'s lines can; `load r from rows` makes a relation of
+  them, in which equal ones are one (see [Loading an
+  array](#loading-an-array)).
+- **It is an update operator,** as `load_text_file` is, and reads the
+  file when the program runs, relative to the directory it runs in,
+  stopping it if the file can't be read (R0012), or isn't UTF-8 text
+  (R0013). pandas' and R's `read_csv` are fixed to it, then to a call
+  with the variable its `out` argument.
+
+```trendy,error
+operator main{} [
+    var rows: array tuple { city: text, districts: relation { district: text } };
+    call load_csv{path: "cities.csv", out rows: rows};
+];
 ```
 
 ## Variables
@@ -3841,6 +3915,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `float(s)`, `parseFloat(s)`, `atof(s)`, `CAST(s AS DOUBLE PRECISION)` | `parse_approximate{from: s}` |
 | `Boolean.parseBoolean(s)`, `strconv.ParseBool(s)`, `CAST(s AS BOOLEAN)` | `parse_boolean{from: s}` |
 | `lines = readLines(path)`, `File.readlines(path)`, `File.ReadAllLines(path)` | `call load_text_file{path: path, out lines: lines};`, an array of the lines |
+| `rows = pd.read_csv(path)`, `read_csv(path)` | `call load_csv{path: path, out rows: rows};`, an array of tuples whose attributes name the columns |
 | `{ x: 1 }`, `TUPLE { X 1 }` | `tuple { x: 1 }` |
 | `type Home = { … }`, `interface Home { … }`, `struct Home { … }` | `heading home := { … };`, whose types are `relation home` and `tuple home` |
 | `[1, 2]`, `ARRAY[1, 2]` | `array [1, 2]` |

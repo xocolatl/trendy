@@ -684,17 +684,10 @@ fn with_conversion(
     )
 }
 
-/// An argument written `arg`, of type `actual`, for a parameter of type
-/// `parameter`, `any tuple`, `any relation` or `any array`, written as
-/// `origin` says, which it isn't.
-pub(crate) fn not_of_kind(
-    parameter: &hir::TypeParameter,
-    origin: &Origin,
-    actual: &hir::Type,
-    arg: &Expr,
-    namespaces: &Namespaces,
-) -> Diagnostic {
-    let (expected, note) = match &parameter.any {
+/// What a type of `parameter`, `any tuple`, `any relation`, `any array`
+/// or of a kind, is, as in "a tuple", and the rule that says so.
+fn what_any_is(parameter: &hir::TypeParameter, namespaces: &Namespaces) -> (String, String) {
+    match &parameter.any {
         hir::Any::Tuple => (
             "a tuple".to_string(),
             format!("a parameter of type `{parameter}` takes a tuple of any heading"),
@@ -723,7 +716,35 @@ pub(crate) fn not_of_kind(
             )
         }
         hir::Any::Type => unreachable!("every type is `any type`"),
-    };
+    }
+}
+
+/// The note for a type parameter `parameter` in a parameter's type, such
+/// as the `T` of `array T`, that an argument's type has `actual` in place
+/// of, which it can't be.
+pub(crate) fn unadmitted(
+    parameter: &hir::TypeParameter,
+    actual: &hir::Type,
+    namespaces: &Namespaces,
+) -> String {
+    let (what, _) = what_any_is(parameter, namespaces);
+    format!(
+        "`{parameter}` is `{}`, so it is {what}, which `{actual}` isn't",
+        parameter.any
+    )
+}
+
+/// An argument written `arg`, of type `actual`, for a parameter of type
+/// `parameter`, `any tuple`, `any relation` or `any array`, written as
+/// `origin` says, which it isn't.
+pub(crate) fn not_of_kind(
+    parameter: &hir::TypeParameter,
+    origin: &Origin,
+    actual: &hir::Type,
+    arg: &Expr,
+    namespaces: &Namespaces,
+) -> Diagnostic {
+    let (expected, note) = what_any_is(parameter, namespaces);
     let mut d = Diagnostic::error(
         Code::TypeMismatch,
         format!("mismatched types: expected {expected}, found `{actual}`"),
@@ -1667,7 +1688,9 @@ fn spelled_like(
 /// the prelude's, of a relation if it takes one, and of an array if that is
 /// another: Python's `len` counts either, as SQL's `CARDINALITY` and Java's
 /// `size` do; R's and Kotlin's `readLines` read a file's lines, as
-/// Python's and Ruby's `readlines` and .NET's `ReadAllLines` do; and
+/// Python's and Ruby's `readlines` and .NET's `ReadAllLines` do, and
+/// pandas' and R's `read_csv` and Julia's `readcsv` a CSV file's records;
+/// and
 /// JavaScript's `parseInt` and `parseFloat`, Java's `parseDouble`, and C's
 /// `atoi` and `atof`, as Go's `Atoi`, read numbers, and Java's
 /// `parseBoolean` and Go's `ParseBool` booleans.
@@ -1678,6 +1701,8 @@ const ELSEWHERE: &[(&str, &str, Option<&str>)] = &[
     ("prod", "product", None),
     ("readlines", "load_text_file", None),
     ("readalllines", "load_text_file", None),
+    ("read_csv", "load_csv", None),
+    ("readcsv", "load_csv", None),
     ("parseint", "parse_integer", None),
     ("atoi", "parse_integer", None),
     ("parsefloat", "parse_approximate", None),
@@ -5858,4 +5883,43 @@ pub(crate) fn unassigned_out(name: &str, operator: &str, ident: &SyntaxToken) ->
     .with_note(OUT_RULE)
     .with_note("an `if` without `else`, a `while` loop and a `for` loop may not run their statements, so what only they assign isn't assigned on every path")
     .with_help(format!("assign `{name}` before `{operator}` ends, whichever way it goes, or make it `var` if `{operator}` may leave its variable as it is"))
+}
+
+/// The rule for what `load_csv` reads.
+const CSV_FIELDS: &str = "`load_csv` reads each attribute of its array's tuples from the field in the column of its name, which the file's header gives: text as it is, and an integer, an approximate number or a boolean as `parse_integer`, `parse_approximate` and `parse_boolean` read them";
+
+/// The array written `rows`, which `load_csv` loads, whose tuples have
+/// the attributes `unreadable`, by name and type, which it can't read
+/// from a field.
+pub(crate) fn unreadable_attributes(unreadable: &[(&str, &hir::Type)], rows: &Expr) -> Diagnostic {
+    let named: Vec<String> = unreadable
+        .iter()
+        .map(|(name, ty)| format!("`{name}`, of type `{ty}`"))
+        .collect();
+    Diagnostic::error(
+        Code::UnreadableAttribute,
+        format!("`load_csv` can't read {}, from a field", trendy_diag::conjoin(&named)),
+        rows.span(),
+        "loaded with `load_csv`",
+    )
+    .with_note(CSV_FIELDS)
+    .with_help("load the fields of the columns as text, integers, approximate numbers or booleans, and compute the other attributes from them")
+}
+
+/// The array written `rows`, which `load_csv` loads, whose tuples' type is
+/// `parameter`, a type parameter of the operator the call is in, so their
+/// attributes, which name the columns to read, aren't known here.
+pub(crate) fn unknown_columns(parameter: &hir::TypeParameter, rows: &Expr) -> Diagnostic {
+    Diagnostic::error(
+        Code::UnreadableAttribute,
+        format!("`load_csv` can't read tuples of `{parameter}`, whose attributes aren't known here"),
+        rows.span(),
+        "loaded with `load_csv`",
+    )
+    .with_note(CSV_FIELDS)
+    .with_note(format!(
+        "`{parameter}` is `{}`, whose attributes each call gives it, but `load_csv` needs them when compiling, to know the columns to read and the types to read them as",
+        parameter.any
+    ))
+    .with_help("call `load_csv` where the array's type is written, and pass the array to this operator")
 }

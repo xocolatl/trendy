@@ -387,10 +387,14 @@ pub enum UpdateBuiltin {
     /// when the program runs: reading the same file twice can give
     /// different lines.
     LoadTextFile,
+    /// The records of a CSV file, as tuples whose attributes are its
+    /// columns of their names, read when the program runs, as
+    /// [`UpdateBuiltin::LoadTextFile`] reads a file's lines.
+    LoadCsv,
 }
 
 impl Builtin {
-    pub const ALL: [Builtin; 14] = [
+    pub const ALL: [Builtin; 15] = [
         Builtin::Update(UpdateBuiltin::DebugValue),
         Builtin::Update(UpdateBuiltin::DebugTable),
         Builtin::ReadOnly(ReadOnlyBuiltin::Count),
@@ -405,6 +409,7 @@ impl Builtin {
         Builtin::ReadOnly(ReadOnlyBuiltin::ParseApproximate),
         Builtin::ReadOnly(ReadOnlyBuiltin::ParseBoolean),
         Builtin::Update(UpdateBuiltin::LoadTextFile),
+        Builtin::Update(UpdateBuiltin::LoadCsv),
     ];
 
     #[must_use]
@@ -413,6 +418,7 @@ impl Builtin {
             Builtin::Update(UpdateBuiltin::DebugValue) => "debug_value",
             Builtin::Update(UpdateBuiltin::DebugTable) => "debug_table",
             Builtin::Update(UpdateBuiltin::LoadTextFile) => "load_text_file",
+            Builtin::Update(UpdateBuiltin::LoadCsv) => "load_csv",
             Builtin::ReadOnly(builtin) => builtin.name(),
         }
     }
@@ -452,6 +458,11 @@ impl Builtin {
             Builtin::Update(UpdateBuiltin::DebugTable)
             | Builtin::ReadOnly(ReadOnlyBuiltin::Count) => vec![unnamed(0, Any::Relation)],
             Builtin::ReadOnly(ReadOnlyBuiltin::Length) => vec![unnamed(0, Any::Array)],
+            Builtin::Update(UpdateBuiltin::LoadCsv) => vec![TypeParameter {
+                index: 0,
+                name: Some("T".to_string()),
+                any: Any::Tuple,
+            }],
             Builtin::ReadOnly(
                 ReadOnlyBuiltin::ToApproximate
                 | ReadOnlyBuiltin::ParseInteger
@@ -496,6 +507,17 @@ impl Builtin {
                     "lines".to_string(),
                     Parameter {
                         ty: Type::Array(Box::new(Type::Scalar(Scalar::Text))),
+                        mode: Mode::Out,
+                    },
+                ),
+            ]
+            .into(),
+            Builtin::Update(UpdateBuiltin::LoadCsv) => [
+                constant("path", Type::Scalar(Scalar::Text)),
+                (
+                    "rows".to_string(),
+                    Parameter {
+                        ty: Type::Array(Box::new(parameter(0))),
                         mode: Mode::Out,
                     },
                 ),

@@ -642,7 +642,129 @@ fn text() {
             r#""Paraná""#,
             r#""Mekong""#,
             r#""Volga""#,
+            // The CSV file's first record, then its records as a relation.
+            r#"tuple { basin_km2: 3.254555e6, km: 6650, reaches_ocean: true, river: "Nile" }"#,
+            "┌────────────┬──────┬───────────────┬─────────┐",
+            "│ basin_km2  │ km   │ reaches_ocean │ river   │",
+            "├────────────┼──────┼───────────────┼─────────┤",
+            "│     7.95e5 │ 4909 │ true          │ Mekong  │",
+            "│     1.36e6 │ 3531 │ false         │ Volga   │",
+            "│   1.8085e6 │ 6300 │ true          │ Yangtze │",
+            "│ 2.582672e6 │ 4880 │ true          │ Paraná  │",
+            "│ 3.254555e6 │ 6650 │ true          │ Nile    │",
+            "│     7.05e6 │ 6400 │ true          │ Amazon  │",
+            "└────────────┴──────┴───────────────┴─────────┘",
         ]
+    );
+}
+
+#[test]
+fn csv_files_are_loaded_when_running() {
+    use trendy_diag::Code;
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("csv");
+    std::fs::create_dir_all(&dir).unwrap();
+    // What loading `contents` as a CSV file writes, and the program's exit
+    // status: its rows, in the file's order, and how many there are.
+    let loaded = |name: &str, contents: &str| {
+        let path = dir.join(format!("{name}.csv"));
+        std::fs::write(&path, contents).unwrap();
+        let source = format!(
+            "operator main{{}} [
+    var rows: array tuple {{ city: text, people: integer, km2: approximate, capital: boolean }};
+    call load_csv{{path: {:?}, out rows: rows}};
+    call debug_value{{v: rows}};
+    call debug_value{{v: length{{a: rows}}}};
+];
+",
+            path.to_str().unwrap()
+        );
+        let (code, stderr) = run_source(&format!("csv_{name}"), &source);
+        let path = path.to_str().unwrap().to_string();
+        (code, stderr.replace(&path, "PATH"))
+    };
+    let ok = |rows: &str, count: usize| (0, format!("{rows}\n{count}\n"));
+    // Columns in any order, those the tuples don't name skipped, quoted
+    // fields, line ends of either kind, and empty lines.
+    assert_eq!(
+        loaded(
+            "cities",
+            "\u{FEFF}country,capital,city,km2,people\r\nPeru,yes,Lima,2672.3,10883000\r\n\nVietnam,N,\"Hanoi, \"\"Hà Nội\"\"\",3358.6,8435700\n"
+        ),
+        ok(
+            r#"array [tuple { capital: true, city: "Lima", km2: 2.6723e3, people: 10883000 }, tuple { capital: false, city: "Hanoi, \"Hà Nội\"", km2: 3.3586e3, people: 8435700 }]"#,
+            2
+        )
+    );
+    // A header alone gives none.
+    assert_eq!(
+        loaded("header", "city,people,km2,capital"),
+        ok(
+            "array tuple { capital: boolean, city: text, km2: approximate, people: integer } []",
+            0
+        )
+    );
+    let failed = |code: Code, message: &str| (1, format!("error[{}]: {message}\n", code.id()));
+    // The header names each attribute once.
+    assert_eq!(
+        loaded("missing", "city,people,area,capital\n"),
+        failed(
+            Code::CsvColumns,
+            r#""PATH" has no column "km2", for the attribute of that name; its header names "city", "people", "area", "capital""#
+        )
+    );
+    assert_eq!(
+        loaded("twice", "city,people,km2,capital,city\n"),
+        failed(Code::CsvColumns, r#""PATH" has two columns "city""#)
+    );
+    assert_eq!(
+        loaded("empty", "\n"),
+        failed(
+            Code::CsvColumns,
+            r#""PATH" has no header, to name its columns"#
+        )
+    );
+    // Each record has the header's fields, and the file is CSV.
+    assert_eq!(
+        loaded("short", "city,people,km2,capital\nLima,10883000,2672.3\n"),
+        failed(
+            Code::MalformedCsv,
+            r#"line 2 of "PATH" has 3 fields, but the header has 4"#
+        )
+    );
+    assert_eq!(
+        loaded("stray", "city,people,km2,capital\nLima \"Peru\",1,1,y\n"),
+        failed(
+            Code::MalformedCsv,
+            r#"line 2 of "PATH" has a quote in a field that isn't quoted"#
+        )
+    );
+    assert_eq!(
+        loaded("unclosed", "city,people,km2,capital\n\n\"Lima,1,1,y\n"),
+        failed(
+            Code::MalformedCsv,
+            r#"line 3 of "PATH" starts a quoted field that isn't closed"#
+        )
+    );
+    // Each field is a value of its attribute's type, without spaces.
+    assert_eq!(
+        loaded(
+            "spaced",
+            "city,people,km2,capital\nLima, 10883000,2672.3,yes\n"
+        ),
+        failed(
+            Code::Unparsable,
+            r#"" 10883000", in column "people" on line 2 of "PATH", isn't an integer"#
+        )
+    );
+    assert_eq!(
+        loaded(
+            "word",
+            "city,people,km2,capital\nLima,10883000,2672.3,capital\n"
+        ),
+        failed(
+            Code::Unparsable,
+            r#""capital", in column "capital" on line 2 of "PATH", isn't a boolean"#
+        )
     );
 }
 

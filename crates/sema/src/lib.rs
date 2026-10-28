@@ -5495,8 +5495,11 @@ mod tests {
             fix(source),
             "operator f{r: any relation, n: integer} [];\noperator main{} [];"
         );
-        // Twice, or in the result or the body, it does.
+        // Twice, or in the result or the body, it does, and so does one
+        // inside a parameter's type, where `any …` can't be written.
         analyze_str("operator f{a: T}: T types { T: any type } [ a ];\noperator main{} [];")
+            .unwrap();
+        analyze_str("operator f{a: array T} types { T: any tuple } [];\noperator main{} [];")
             .unwrap();
         analyze_str(
             "operator f{a: T} types { T: any type } [ call debug_table{r: relation { a: T } {}}; ];\noperator main{} [];",
@@ -5928,6 +5931,19 @@ mod tests {
             );
             assert!(analyze_str(&fixed).is_ok(), "{fixed}");
         }
+        // A CSV file's records: pandas' and R's, and Julia's.
+        for written in ["read_csv", "readcsv"] {
+            let source = format!(
+                "operator main{{}} [\n    var rows: array tuple {{ city: text }};\n    rows := {written}{{\"cities.csv\"}};\n];\n"
+            );
+            let fixed = fix(&fix(&source));
+            assert_eq!(
+                fixed,
+                "operator main{} [\n    var rows: array tuple { city: text };\n    call load_csv{path: \"cities.csv\", out rows: rows};\n];\n",
+                "{written}"
+            );
+            assert!(analyze_str(&fixed).is_ok(), "{fixed}");
+        }
         // Numbers: JavaScript's, C's and Go's, and Java's; and booleans:
         // Java's and Go's.
         for (written, arg, ours) in [
@@ -5994,6 +6010,49 @@ mod tests {
             assert_eq!(codes(&source), [Code::OperatorAsValue], "{source}");
             assert_eq!(fix(&source), source);
         }
+    }
+
+    #[test]
+    fn a_csv_file_is_read_into_tuples_of_types_it_can_read() {
+        let call = |declared: &str| {
+            format!(
+                "operator main{{}} [\n    var rows: {declared};\n    call load_csv{{path: \"cities.csv\", out rows: rows}};\n];\n"
+            )
+        };
+        // Of text, integers, approximate numbers and booleans, read when
+        // the program runs, into the variable for `rows`, of the tuples'
+        // type.
+        let source =
+            call("array tuple { city: text, people: integer, km2: approximate, capital: boolean }");
+        let body = main_body(&source);
+        let hir::Statement::Call(call_of) = &body[1] else {
+            panic!("{body:#?}");
+        };
+        assert_eq!(call_of.updated["rows"], hir::Target::Local(hir::LocalId(0)));
+        // Not of other types, which no field writes.
+        let unreadable = errors(&call(
+            "array tuple { city: text, districts: relation { district: text }, centre: tuple { x: integer } }",
+        ));
+        assert_eq!(unreadable.len(), 1, "{unreadable:#?}");
+        assert_eq!(unreadable[0].code, Code::UnreadableAttribute);
+        assert_eq!(
+            unreadable[0].message,
+            "`load_csv` can't read `centre`, of type `tuple { x: integer }` and `districts`, of type `relation { district: text }`, from a field"
+        );
+        // Nor of a type parameter, whose attributes, the columns, aren't
+        // known here.
+        let generic = "operator read{out rows: array T} types { T: any tuple } [\n    call load_csv{path: \"cities.csv\", out rows: rows};\n];\noperator main{} [];";
+        assert_eq!(codes(generic), [Code::UnreadableAttribute]);
+        // Tuples, which an array of other values hasn't.
+        let texts = errors(&call("array text"));
+        assert_eq!(texts[0].code, Code::TypeMismatch);
+        assert!(
+            texts[0]
+                .notes
+                .contains(&"`T` is `any tuple`, so it is a tuple, which `text` isn't".to_string()),
+            "{:?}",
+            texts[0].notes
+        );
     }
 
     #[test]

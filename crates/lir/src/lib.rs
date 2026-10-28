@@ -199,6 +199,15 @@ pub enum RuntimeFn {
     /// statement owns. It stops the program if the file can't be read, or
     /// isn't UTF-8 text, or if the memory can't be allocated.
     LoadTextFile,
+    /// `trendy_rt_load_csv(dst, path, descriptor)`: store at `dst` the
+    /// array of the records of the CSV file at `path`, a text, in order, of
+    /// the type the descriptor describes, an array of tuples whose
+    /// attributes are the columns of their names, in memory the statement
+    /// owns. It stops the program if the file can't be read, isn't UTF-8
+    /// text or CSV, its header doesn't name each attribute once, a field
+    /// isn't a value of its attribute's type, or the memory can't be
+    /// allocated.
+    LoadCsv,
     /// `trendy_rt_sum(dst, src, descriptor, index)`: store at `dst` the
     /// sum of the attribute `index` (a [`Field::Usize`], its position by
     /// name) of the tuples of the relation `src`, of the type the
@@ -384,6 +393,7 @@ impl RuntimeFn {
             RuntimeFn::ParseApproximate => "trendy_rt_parse_approximate",
             RuntimeFn::ParseBoolean => "trendy_rt_parse_boolean",
             RuntimeFn::LoadTextFile => "trendy_rt_load_text_file",
+            RuntimeFn::LoadCsv => "trendy_rt_load_csv",
             RuntimeFn::Sum => "trendy_rt_sum",
             RuntimeFn::Product => "trendy_rt_product",
             RuntimeFn::Fail => "trendy_rt_fail",

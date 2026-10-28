@@ -1,4 +1,5 @@
 var greeting := "hello" || ", " || "world";
+
 var nothing := "" || "";
 
 operator greet{name: text, punctuation: text} [
@@ -24,6 +25,22 @@ operator list_rivers{} [
     ];
 ];
 
+heading river := { river: text, km: integer, basin_km2: approximate, reaches_ocean: boolean };
+
+/* A CSV file's records, read when the program runs, into the variable
+   for `rows`: an array of tuples, in the file's order, each attribute the
+   field in the column of its name, which the header gives, read as its
+   type. Columns the tuples don't name, here `native_name` and `mouth`,
+   are skipped. */
+operator river_table{} [
+    var rivers: array tuple river;
+    call load_csv{path: "examples/rivers.csv", out rows: rivers};
+    call debug_value{v: rivers[1]};
+    var table: relation river;
+    load table from rivers;
+    call debug_table{r: table};
+];
+
 operator main{} [
     call debug_value{v: greeting};
     call debug_value{v: nothing};
@@ -31,4 +48,5 @@ operator main{} [
     call greet{name: "é\u{1F600}\"", punctuation: "\n"};
     call greet{name: "", punctuation: ""};
     call list_rivers{};
+    call river_table{};
 ];

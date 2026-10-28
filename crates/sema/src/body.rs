@@ -451,6 +451,11 @@ impl Statements<'_, '_> {
             Checker::new(&mut self.names()).arguments(Written::Arguments(&args), signature, errors);
         self.outs_passed(&args, signature);
         let call = call?;
+        if signature.builtin == Some(hir::Builtin::Update(hir::UpdateBuiltin::LoadCsv))
+            && !csv_readable(&call, &args, errors)
+        {
+            return None;
+        }
         if !self.updated(&call, &args, signature.id, errors) {
             return None;
         }
@@ -1146,4 +1151,51 @@ impl BodyNames<'_, '_> {
         }
         None
     }
+}
+
+/// Whether `call`, of `load_csv`, with the arguments `args`, loads an
+/// array whose elements' attributes it can read from fields: each of a
+/// type known here, text, an integer, an approximate number or a boolean.
+/// If not, it is reported.
+fn csv_readable(call: &hir::Call, args: &ast::Arguments, errors: &mut Vec<Diagnostic>) -> bool {
+    let Some(rows) = args
+        .named()
+        .find(|a| {
+            a.name()
+                .and_then(|n| n.ident())
+                .is_some_and(|n| n.text() == "rows")
+        })
+        .and_then(|a| a.value())
+    else {
+        return false;
+    };
+    match &call.types[0] {
+        hir::Type::Tuple(heading) => {
+            let unreadable: Vec<(&str, &hir::Type)> = heading
+                .named()
+                .filter(|(_, ty)| {
+                    !matches!(
+                        ty,
+                        hir::Type::Scalar(
+                            hir::Scalar::Text
+                                | hir::Scalar::Integer
+                                | hir::Scalar::Approximate
+                                | hir::Scalar::Boolean
+                        )
+                    )
+                })
+                .collect();
+            if unreadable.is_empty() {
+                return true;
+            }
+            errors.push(errors::unreadable_attributes(&unreadable, &rows));
+        }
+        // A type parameter of the operator the call is in, whose tuples'
+        // attributes each of its calls gives.
+        hir::Type::Parameter(parameter) => {
+            errors.push(errors::unknown_columns(parameter, &rows));
+        }
+        other => unreachable!("`load_csv` loads tuples, not `{other}`"),
+    }
+    false
 }

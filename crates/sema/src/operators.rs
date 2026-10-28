@@ -586,8 +586,10 @@ pub(crate) fn declared_types(
 /// Whether each of the type parameters `declared` lists, `list`, is in a
 /// parameter's type, written `op`'s parameters `params`, so that a call's
 /// arguments determine it; otherwise it is reported. One written only
-/// once, as a parameter's type, is reported too: it is `any` without a
-/// name, which the fix writes.
+/// once, as a parameter's whole type, is reported too: it is `any`
+/// without a name, which the fix writes. One written once inside a
+/// parameter's type, as in `array T`, needs its name, as `any` is only a
+/// whole type.
 fn determined(
     op: &ast::Operator,
     declared: &ast::TypeParameters,
@@ -607,6 +609,14 @@ fn determined(
         let named = |t: &ast::TypeRef| t.ident().is_some_and(|i| i.text() == name);
         let in_params: Vec<ast::TypeRef> = params.type_refs().filter(named).collect();
         let uses = op.type_refs().filter(named).count();
+        // A parameter's whole type, the one place `any …` can be written,
+        // as `array any tuple` can't be.
+        let whole = |t: &ast::TypeRef| {
+            t.syntax()
+                .parent()
+                .and_then(|attribute| attribute.parent())
+                .is_some_and(|list| list == *params.syntax())
+        };
         // Removing it removes the list, if it is the only one.
         let removal = if attributes.len() == 1 {
             declared.removal()
@@ -623,7 +633,7 @@ fn determined(
                 ));
                 ok = false;
             }
-            [only] if uses == 1 => {
+            [only] if uses == 1 && whole(only) => {
                 errors.push(errors::type_parameter_named_once(
                     name,
                     &parameter.any,

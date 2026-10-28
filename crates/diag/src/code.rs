@@ -135,6 +135,7 @@ codes! {
     ArgumentMode => "A0052",
     Aliased => "A0053",
     UnassignedOut => "A0054",
+    UnreadableAttribute => "A0055",
     Overflow => "R0001",
     DivisionByZero => "R0002",
     OutOfMemory => "R0003",
@@ -149,6 +150,8 @@ codes! {
     UnreadableFile => "R0012",
     NotUtf8 => "R0013",
     Unparsable => "R0014",
+    MalformedCsv => "R0015",
+    CsvColumns => "R0016",
     Internal => "X0000",
 }
 
@@ -193,7 +196,12 @@ impl Code {
     pub fn reported_when_compiling(self) -> bool {
         !matches!(
             self,
-            Code::OutOfMemory | Code::UnreadableFile | Code::NotUtf8 | Code::Internal
+            Code::OutOfMemory
+                | Code::UnreadableFile
+                | Code::NotUtf8
+                | Code::MalformedCsv
+                | Code::CsvColumns
+                | Code::Internal
         )
     }
 }

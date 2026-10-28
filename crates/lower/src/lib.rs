@@ -738,7 +738,12 @@ impl<'a> FunctionBuilder<'a> {
                 hir::UpdateBuiltin::DebugTable => {
                     self.write(&call.args["r"], lir::RuntimeFn::DebugTable, cx);
                 }
-                hir::UpdateBuiltin::LoadTextFile => self.load_text_file(call, cx),
+                hir::UpdateBuiltin::LoadTextFile => {
+                    self.loaded(lir::RuntimeFn::LoadTextFile, call, "lines", cx);
+                }
+                hir::UpdateBuiltin::LoadCsv => {
+                    self.loaded(lir::RuntimeFn::LoadCsv, call, "rows", cx);
+                }
             },
             hir::OperatorKind::Update { .. } => {
                 let params = params_of(callee, &call.types);
@@ -784,21 +789,22 @@ impl<'a> FunctionBuilder<'a> {
         }
     }
 
-    /// `call load_text_file{path: …, out lines: …};`: the file's lines,
-    /// which the runtime reads into an array the statement holds, assigned
-    /// to the variable for `lines`.
-    fn load_text_file(&mut self, call: &hir::Call, cx: &mut Lowering) {
+    /// `call`, of `load_text_file` or `load_csv`, whose `out` parameter is
+    /// `out`: what the runtime function `function` reads from the file at
+    /// the path, into an array the statement holds, given its type's
+    /// descriptor, assigned to the variable for `out`.
+    fn loaded(&mut self, function: lir::RuntimeFn, call: &hir::Call, out: &str, cx: &mut Lowering) {
         let path = self.place(&call.args["path"], cx);
-        let target = &call.updated["lines"];
+        let target = &call.updated[out];
         let ty = self.assigned(target).0.clone();
         let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
-        let lines = self.slot(layout(&ty));
+        let array = self.slot(layout(&ty));
         self.insts.push(lir::Inst::CallRuntime {
-            function: lir::RuntimeFn::LoadTextFile,
-            args: vec![lines.clone(), path, descriptor],
+            function,
+            args: vec![array.clone(), path, descriptor],
         });
         self.scoped = true;
-        self.store(target, lines, cx);
+        self.store(target, array, cx);
     }
 
     /// A call of the runtime function `function`, which writes `value`,

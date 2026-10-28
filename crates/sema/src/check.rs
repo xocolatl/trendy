@@ -2203,13 +2203,16 @@ impl<'s> TypeArguments<'s> {
         }
         Err(match pattern {
             hir::Type::Parameter(p) => match &self.types[p.index] {
-                Some(_) => Unbound::Given(Box::new(self.expected(name, pattern))),
+                Some(_) => Unbound::Given(Box::new(self.expected(name, pattern)), None),
                 None => Unbound::Kind(p, self.signature.param_origin(name)),
             },
-            _ => Unbound::Given(Box::new(Expected {
-                ty: self.instantiate(pattern),
-                origin: self.signature.param_origin(name),
-            })),
+            _ => Unbound::Given(
+                Box::new(Expected {
+                    ty: self.instantiate(pattern),
+                    origin: self.signature.param_origin(name),
+                }),
+                unadmitted(&self.types, pattern, actual, namespaces),
+            ),
         })
     }
 
@@ -2265,11 +2268,37 @@ fn bind(
     }
 }
 
+/// The type parameter in `pattern`, without a type in `types` yet, that
+/// the part of `actual` in its place can't be, as `text` can't be the `T`
+/// of `array T` if `T` is `any tuple`, and that part, if there is one.
+fn unadmitted<'a>(
+    types: &[Option<(hir::Type, Expr)>],
+    pattern: &'a hir::Type,
+    actual: &hir::Type,
+    namespaces: &Namespaces,
+) -> Option<(&'a hir::TypeParameter, hir::Type)> {
+    match (pattern, actual) {
+        (hir::Type::Parameter(p), _) => (types[p.index].is_none()
+            && !namespaces.admits(&p.any, actual))
+        .then(|| (p, actual.clone())),
+        (hir::Type::Tuple(pattern), hir::Type::Tuple(actual))
+        | (hir::Type::Relation(pattern), hir::Type::Relation(actual)) => pattern
+            .attributes()
+            .find_map(|(name, ty)| unadmitted(types, ty, actual.get(name)?, namespaces)),
+        (hir::Type::Array(pattern), hir::Type::Array(actual)) => {
+            unadmitted(types, pattern, actual, namespaces)
+        }
+        _ => None,
+    }
+}
+
 /// Why an argument's type gives its parameter's type parameters none.
 enum Unbound<'a> {
     /// They have types already, or the type has more than type parameters
-    /// in it, so the argument was expected to have this one.
-    Given(Box<Expected>),
+    /// in it, so the argument was expected to have this one; and the type
+    /// parameter in it that the argument's type has a type in place of
+    /// that it can't be, if that is why.
+    Given(Box<Expected>, Option<(&'a hir::TypeParameter, hir::Type)>),
     /// The parameter's type is the type parameter, which can't be the
     /// argument's type: `any tuple` or `any relation` of another type.
     Kind(&'a hir::TypeParameter, types::Origin),
@@ -2288,8 +2317,14 @@ impl Unbound<'_> {
         builtin: Option<hir::ReadOnlyBuiltin>,
     ) -> Diagnostic {
         match self {
-            Unbound::Given(expected) => {
-                errors::type_mismatch(&expected.ty, &expected.origin, actual, value, arg)
+            Unbound::Given(expected, unadmitted) => {
+                let d = errors::type_mismatch(&expected.ty, &expected.origin, actual, value, arg);
+                match unadmitted {
+                    Some((parameter, ty)) => {
+                        d.with_note(errors::unadmitted(parameter, ty, namespaces))
+                    }
+                    None => d,
+                }
             }
             Unbound::Kind(parameter, origin) => {
                 let d = errors::not_of_kind(parameter, origin, actual, arg, namespaces);

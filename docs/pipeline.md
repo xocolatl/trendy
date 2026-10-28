@@ -46,7 +46,12 @@ into its `out` parameter's variable, since two reads can differ and a
 read-only operator's calls can't (TTM RM Prescription 3): a `call`
 statement, which nothing evaluates when compiling, and which lowering
 makes a runtime call (`trendy_rt_load_text_file`) and an assignment of
-its result. A built-in can
+its result. `load_csv` is one too (`trendy_rt_load_csv`), given its
+array's descriptor, whose tuples' attributes name the columns to read,
+and whose types say how; sema checks that each is a type a field can
+be read as, known when compiling (A0055), and the runtime reads the file
+as CSV (its `csv` module) and each field as `parse_*` reads one. A
+built-in can
 have type parameters, of a kind too, and `per` parameters, declared as an
 operator's are, and checked against the compiler's, written as the
 operator sees them. A wrong prelude is an internal

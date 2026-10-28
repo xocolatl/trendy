@@ -29,6 +29,8 @@
 
 use core::fmt::{self, Write};
 
+mod csv;
+
 use unicode_width::UnicodeWidthStr;
 
 pub const KIND_BOOLEAN: u8 = 0;
@@ -2040,7 +2042,7 @@ pub unsafe extern "C" fn trendy_rt_parse_integer(dst: *mut i64, from: *const Tex
         let text = read_text(from.cast());
         match trendy_numeric::parse_integer(text) {
             Ok(n) => dst.write_unaligned(n),
-            Err(why) => unparsable(text, "an integer", why),
+            Err(why) => unparsable(text, "an integer", why, None),
         }
     }
 }
@@ -2061,7 +2063,7 @@ pub unsafe extern "C" fn trendy_rt_parse_approximate(dst: *mut f64, from: *const
         let text = read_text(from.cast());
         match trendy_numeric::parse_approximate(text) {
             Ok(x) => dst.write_unaligned(x),
-            Err(why) => unparsable(text, "an approximate number", why),
+            Err(why) => unparsable(text, "an approximate number", why, None),
         }
     }
 }
@@ -2082,21 +2084,39 @@ pub unsafe extern "C" fn trendy_rt_parse_boolean(dst: *mut u8, from: *const Text
         let text = read_text(from.cast());
         match trendy_text::parse_boolean(text) {
             Ok(b) => dst.write(u8::from(b)),
-            Err(why) => unparsable(text, "a boolean", why),
+            Err(why) => unparsable(text, "a boolean", why, None),
         }
     }
 }
 
-/// Stop the program because `text` isn't `a`, a value of its type, as
-/// `why` says.
+/// Where a field of a CSV file is: in the column of a name, on a line, of
+/// the file at a path.
 #[cfg(not(test))]
-fn unparsable(text: &str, a: &str, why: trendy_text::Unparsable) -> ! {
+#[derive(Clone, Copy)]
+struct Place<'a> {
+    column: &'a str,
+    line: usize,
+    path: &'a str,
+}
+
+/// Stop the program because `text`, at `place` if it is a CSV file's
+/// field, isn't `a`, a value of its type, as `why` says.
+#[cfg(not(test))]
+fn unparsable(text: &str, a: &str, why: trendy_text::Unparsable, place: Option<Place>) -> ! {
     fail_with(|out| {
         out.write_str("error[R0014]: \"")?;
         trendy_text::escape(text, out)?;
+        out.write_char('"')?;
+        if let Some(Place { column, line, path }) = place {
+            out.write_str(", in column \"")?;
+            trendy_text::escape(column, out)?;
+            write!(out, "\" on line {line} of \"")?;
+            trendy_text::escape(path, out)?;
+            out.write_str("\",")?;
+        }
         match why {
-            trendy_text::Unparsable::Malformed => writeln!(out, "\" isn't {a}"),
-            trendy_text::Unparsable::OutOfRange => writeln!(out, "\" is out of {a}'s range"),
+            trendy_text::Unparsable::Malformed => writeln!(out, " isn't {a}"),
+            trendy_text::Unparsable::OutOfRange => writeln!(out, " is out of {a}'s range"),
         }
     })
 }
@@ -2124,19 +2144,7 @@ pub unsafe extern "C" fn trendy_rt_load_text_file(
     unsafe {
         let path = read_text(path.cast());
         let (contents, len) = read_file(path);
-        let bytes = array(contents, len);
-        let text = match core::str::from_utf8(bytes) {
-            Ok(text) => text,
-            Err(error) => {
-                let before = &bytes[..error.valid_up_to()];
-                let line = before.split(|&b| b == b'\n').count();
-                fail_with(|out| {
-                    write!(out, "error[R0013]: line {line} of \"")?;
-                    trendy_text::escape(path, out)?;
-                    out.write_str("\" isn't UTF-8 text\n")
-                })
-            }
-        };
+        let text = file_text(path, array(contents, len));
         let desc = &*desc;
         let element = desc.element();
         let count = text.lines().count();
@@ -2163,6 +2171,275 @@ pub unsafe extern "C" fn trendy_rt_load_text_file(
             bytes: lines,
             len: count,
         });
+    }
+}
+
+/// `bytes`, the contents of the file at `path`, as text. Stops the program
+/// if they aren't UTF-8 (R0013).
+#[cfg(not(test))]
+fn file_text<'a>(path: &str, bytes: &'a [u8]) -> &'a str {
+    match core::str::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(error) => {
+            let before = &bytes[..error.valid_up_to()];
+            let line = before.split(|&b| b == b'\n').count();
+            fail_with(|out| {
+                write!(out, "error[R0013]: line {line} of \"")?;
+                trendy_text::escape(path, out)?;
+                out.write_str("\" isn't UTF-8 text\n")
+            })
+        }
+    }
+}
+
+/// Store at `dst` the array of the records of the CSV file at `path`, in
+/// the file's order, of the type `desc` describes, an array of tuples, in
+/// memory the statement owns. The file's first record is its header,
+/// which names its columns, and each attribute of the tuples is the field
+/// in the column of its name: text as it is, and an integer, an
+/// approximate number or a boolean as `parse_integer`,
+/// `parse_approximate` and `parse_boolean` read one. Columns the tuples
+/// don't name are skipped. Stops the program if the file can't be read
+/// (R0012), isn't UTF-8 text (R0013) or CSV (R0015), its header doesn't
+/// name each attribute once (R0016), a field isn't a value of its
+/// attribute's type (R0014), or the memory can't be allocated.
+///
+/// # Safety
+///
+/// `path` must point to a valid text value, `desc` to a valid descriptor
+/// of an array of tuples whose attributes are text, integers, approximate
+/// numbers or booleans, and `dst` to memory for an array. The statement
+/// must have begun a scope.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_load_csv(
+    dst: *mut Text,
+    path: *const Text,
+    desc: *const TypeDesc,
+) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let path = read_text(path.cast());
+        let (contents, len) = read_file(path);
+        let text = file_text(path, array(contents, len));
+        let desc = &*desc;
+        let element = desc.element();
+        let attrs = attributes(element);
+        let count = csv_records(text, path);
+        // Each attribute's column, by the header.
+        let columns = allocate::<usize>(attrs.len());
+        for (i, attr) in attrs.iter().enumerate() {
+            columns.add(i).write(column(text, path, name(attr)));
+        }
+        let Some(size) = count.checked_mul(element.size) else {
+            trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+        };
+        let rows = allocate_buffer(size, desc);
+        // Each record's tuple, made here, then copied into the array.
+        let tuple = allocate::<u8>(element.size);
+        // Every field after the header's, as `csv_records` found the file
+        // CSV.
+        let mut fields = csv::Fields::new(text).flatten();
+        fields.by_ref().find(|f| f.last);
+        let (mut i, mut j) = (0, 0);
+        for field in fields {
+            if let Some(a) = array(columns, attrs.len()).iter().position(|&c| c == j) {
+                let attr = &attrs[a];
+                let place = Place {
+                    column: name(attr),
+                    line: field.line,
+                    path,
+                };
+                read_field(field, tuple.add(attr.offset), &*attr.desc, place);
+            }
+            j += 1;
+            if field.last {
+                copy_element(rows, rows.add(i * element.size), tuple, element);
+                i += 1;
+                j = 0;
+            }
+        }
+        free(tuple.cast());
+        free(columns.cast());
+        free(contents.cast());
+        dst.write_unaligned(Text {
+            bytes: rows,
+            len: count,
+        });
+    }
+}
+
+/// The column of the CSV text `text`, of the file at `path`, that its
+/// header names `name`, counting from 0. Stops the program if it has no
+/// header, or no such column, or two (R0016).
+#[cfg(not(test))]
+fn column(text: &str, path: &str, name: &str) -> usize {
+    let mut found = None;
+    for (j, field) in csv::header(text).enumerate() {
+        if field.as_written() != Some(name) {
+            continue;
+        }
+        if found.is_some() {
+            columns_fail(path, |out| {
+                out.write_str(" has two columns \"")?;
+                trendy_text::escape(name, out)?;
+                out.write_char('"')
+            });
+        }
+        found = Some(j);
+    }
+    if csv::header(text).next().is_none() {
+        columns_fail(path, |out| {
+            out.write_str(" has no header, to name its columns")
+        });
+    }
+    found.unwrap_or_else(|| {
+        columns_fail(path, |out| {
+            out.write_str(" has no column \"")?;
+            trendy_text::escape(name, out)?;
+            out.write_str("\", for the attribute of that name; its header names ")?;
+            for (j, field) in csv::header(text).enumerate() {
+                if j > 0 {
+                    out.write_str(", ")?;
+                }
+                out.write_char('"')?;
+                // SAFETY: the statement has begun a scope, as
+                // `trendy_rt_load_csv`'s caller guarantees.
+                trendy_text::escape(unsafe { field_value(field) }, out)?;
+                out.write_char('"')?;
+            }
+            Ok(())
+        })
+    })
+}
+
+/// Stop the program because the header of the CSV file at `path` doesn't
+/// name each attribute once, as `write` says (R0016).
+#[cfg(not(test))]
+fn columns_fail(path: &str, write: impl FnOnce(&mut Stderr) -> fmt::Result) -> ! {
+    fail_with(|out| {
+        out.write_str("error[R0016]: \"")?;
+        trendy_text::escape(path, out)?;
+        out.write_char('"')?;
+        write(out)?;
+        out.write_char('\n')
+    })
+}
+
+/// The number of records of the CSV text `text`, of the file at `path`,
+/// after its header. Stops the program if it isn't CSV, or a record has
+/// another number of fields than the header (R0015).
+#[cfg(not(test))]
+fn csv_records(text: &str, path: &str) -> usize {
+    let (mut records, mut fields, mut header, mut line) = (0, 0, None, 0);
+    for field in csv::Fields::new(text) {
+        let field = field.unwrap_or_else(|csv::NotCsv { why, line }| {
+            malformed(path, line, |out| {
+                out.write_str(match why {
+                    csv::Malformed::StrayQuote => "has a quote in a field that isn't quoted",
+                    csv::Malformed::AfterQuote => {
+                        "has more after a quoted field's closing quote than a comma or a line end"
+                    }
+                    csv::Malformed::Unclosed => "starts a quoted field that isn't closed",
+                })
+            })
+        });
+        if fields == 0 {
+            line = field.line;
+        }
+        fields += 1;
+        if !field.last {
+            continue;
+        }
+        match header {
+            None => header = Some(fields),
+            Some(expected) if expected == fields => records += 1,
+            Some(expected) => malformed(path, line, |out| {
+                let plural = if fields == 1 { "" } else { "s" };
+                write!(
+                    out,
+                    "has {fields} field{plural}, but the header has {expected}"
+                )
+            }),
+        }
+        fields = 0;
+    }
+    records
+}
+
+/// Stop the program because the CSV file at `path` isn't CSV on line
+/// `line`, as `write` says (R0015).
+#[cfg(not(test))]
+fn malformed(path: &str, line: usize, write: impl FnOnce(&mut Stderr) -> fmt::Result) -> ! {
+    fail_with(|out| {
+        write!(out, "error[R0015]: line {line} of \"")?;
+        trendy_text::escape(path, out)?;
+        out.write_str("\" ")?;
+        write(out)?;
+        out.write_char('\n')
+    })
+}
+
+/// The value of the CSV field `field`: its text as written, or, with its
+/// doubled quotes made one, a copy in memory the statement's scope holds.
+///
+/// # Safety
+///
+/// The statement must have begun a scope, which holds the copy until it
+/// ends, as long as the value is used.
+#[cfg(not(test))]
+unsafe fn field_value(field: csv::Field<'_>) -> &str {
+    if let Some(written) = field.as_written() {
+        return written;
+    }
+    let len = field.len();
+    let bytes = allocate_buffer(len, core::ptr::null());
+    // SAFETY: the buffer has room for the value's bytes, and they are the
+    // field's UTF-8, with some quotes left out.
+    unsafe {
+        let value = core::slice::from_raw_parts_mut(bytes, len);
+        field.copy_to(value);
+        core::str::from_utf8_unchecked(value)
+    }
+}
+
+/// Write at `dst` the value of the CSV field `field`, at `place`, of the
+/// type `desc` describes: text, an integer, an approximate number or a
+/// boolean. Stops the program if it isn't one of that type (R0014).
+///
+/// # Safety
+///
+/// `dst` must point to memory for a value of that type. The statement must
+/// have begun a scope, which holds a text's bytes.
+#[cfg(not(test))]
+unsafe fn read_field(field: csv::Field, dst: *mut u8, desc: &TypeDesc, place: Place) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let value = field_value(field);
+        let failed = |a, why| unparsable(value, a, why, Some(place));
+        match desc.kind {
+            KIND_TEXT => {
+                let bytes = allocate_buffer(value.len(), core::ptr::null());
+                core::ptr::copy_nonoverlapping(value.as_ptr(), bytes, value.len());
+                dst.cast::<Text>().write_unaligned(Text {
+                    bytes,
+                    len: value.len(),
+                });
+            }
+            KIND_INTEGER => match trendy_numeric::parse_integer(value) {
+                Ok(n) => dst.cast::<i64>().write_unaligned(n),
+                Err(why) => failed("an integer", why),
+            },
+            KIND_APPROXIMATE => match trendy_numeric::parse_approximate(value) {
+                Ok(x) => dst.cast::<f64>().write_unaligned(x),
+                Err(why) => failed("an approximate number", why),
+            },
+            KIND_BOOLEAN => match trendy_text::parse_boolean(value) {
+                Ok(b) => dst.write(u8::from(b)),
+                Err(why) => failed("a boolean", why),
+            },
+            kind => unreachable!("`load_csv` reads no values of kind {kind}"),
+        }
     }
 }
 
