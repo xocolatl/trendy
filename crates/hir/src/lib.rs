@@ -874,30 +874,45 @@ pub struct OrderItem {
     pub descending: bool,
 }
 
-/// What an array loaded from a relation holds.
+/// What an array loaded from a relation holds: each of its tuples, less
+/// the attributes removed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Loaded {
-    /// The relation's tuples.
+    /// The tuples.
     Tuples,
-    /// The values of the relation's only attribute.
+    /// The values of the tuples' only attribute.
     Values,
 }
 
-impl Loaded {
+/// How a `load` makes an array of a relation (see [`Expr::Load`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Loading {
+    /// The items the tuples are ordered by: at least one, each a different
+    /// attribute of the relation, of an ordered type, by the first, then,
+    /// among tuples equal on it, by the next, and so on.
+    pub order: Vec<OrderItem>,
+    /// The attributes left out of each element, once the tuples are
+    /// ordered: equal elements are each still there.
+    pub removed: BTreeSet<String>,
+    pub loaded: Loaded,
+}
+
+impl Loading {
     /// The type of the elements of an array loaded from a relation with
     /// `heading`.
     ///
     /// # Panics
     ///
-    /// For [`Loaded::Values`], if the heading hasn't exactly one attribute,
-    /// which sema rules out.
+    /// For [`Loaded::Values`], if the heading hasn't exactly one attribute
+    /// besides those removed, which sema rules out.
     #[must_use]
-    pub fn element(self, heading: &Heading) -> Type {
-        match self {
-            Loaded::Tuples => Type::Tuple(heading.clone()),
-            Loaded::Values => match heading.attributes().collect::<Vec<_>>()[..] {
+    pub fn element(&self, heading: &Heading) -> Type {
+        let kept = heading.without(&self.removed);
+        match self.loaded {
+            Loaded::Tuples => Type::Tuple(kept),
+            Loaded::Values => match kept.attributes().collect::<Vec<_>>()[..] {
                 [(_, ty)] => ty.clone(),
-                _ => panic!("the values of {heading:?}, which hasn't one attribute"),
+                _ => panic!("the values of {kept:?}, which hasn't one attribute"),
             },
         }
     }
@@ -1012,13 +1027,11 @@ pub enum Expr {
     /// else the third's: only that one is computed, so the other's failure
     /// never happens.
     If(Box<Expr>, Box<Expr>, Box<Expr>),
-    /// The array a `load` makes of a relation: its tuples, or the values
-    /// of its only attribute, as `Loaded` says, in the order of the items,
-    /// by the first, then, among tuples equal on it, by the next, and so
-    /// on. Tuples equal on every item come in canonical order, which the
-    /// language leaves undefined. The items are at least one, each a
-    /// different attribute of the relation, of an ordered type.
-    Load(Box<Expr>, Vec<OrderItem>, Loaded),
+    /// The array a `load` makes of a relation: its tuples, in the order the
+    /// `Loading` says, each without the attributes it removes, or the
+    /// value of the only attribute left. Tuples equal on every item come in
+    /// canonical order, which the language leaves undefined.
+    Load(Box<Expr>, Loading),
     /// The only tuple of a relation (`tuple from`), which fails if it has
     /// none or several. `value from` is the extraction of its only
     /// attribute.
@@ -1054,8 +1067,8 @@ impl Expr {
             },
             Expr::WithElements(array, _) => array.type_with(leaf),
             Expr::If(_, then, _) => then.type_with(leaf),
-            Expr::Load(relation, _, loaded) => match relation.type_with(leaf) {
-                Type::Relation(heading) => Type::Array(Box::new(loaded.element(&heading))),
+            Expr::Load(relation, loading) => match relation.type_with(leaf) {
+                Type::Relation(heading) => Type::Array(Box::new(loading.element(&heading))),
                 other => panic!("loading {other}"),
             },
             // Arithmetic on a type parameter's values has their type.
@@ -1302,9 +1315,7 @@ impl Expr {
                 Box::new(f(*then, 0)),
                 Box::new(f(*otherwise, 0)),
             ),
-            Expr::Load(relation, items, loaded) => {
-                Expr::Load(Box::new(f(*relation, 0)), items, loaded)
-            }
+            Expr::Load(relation, loading) => Expr::Load(Box::new(f(*relation, 0)), loading),
             Expr::Only(operand) => Expr::Only(Box::new(f(*operand, 0))),
             Expr::Call(call) => Expr::Call(Call {
                 args: call
@@ -1431,9 +1442,8 @@ impl Expr {
             Expr::If(condition, then, otherwise) => {
                 Expr::If(inst(condition), inst(then), inst(otherwise))
             }
-            Expr::Load(relation, items, loaded) => {
-                Expr::Load(inst(relation), items.clone(), *loaded)
-            }
+            // A load names only attributes, which no type parameter changes.
+            Expr::Load(relation, loading) => Expr::Load(inst(relation), loading.clone()),
             // A type parameter's comparisons and `not`s of them are kept in
             // normal form when it becomes a boolean, or a scalar.
             Expr::Unary(UnaryOp::Not, operand) => operand.instantiated(types).negated(),
@@ -2555,22 +2565,23 @@ pub struct RelationValue {
 }
 
 impl RelationValue {
-    /// The array a `load` makes of the relation, as [`Expr::Load`] says:
-    /// its tuples, or their values, ordered by `items`, which are
-    /// attributes of scalar types.
+    /// The array a `load` makes of the relation, as `loading` says: its
+    /// tuples, ordered by its items, which are attributes of scalar types,
+    /// each without the attributes it removes, or the value of the only one
+    /// left.
     ///
     /// # Panics
     ///
     /// If an item isn't an attribute of a scalar type, or the values are
-    /// loaded of a relation of more attributes than one, which sema rules
-    /// out.
+    /// loaded of tuples of more attributes than one, which sema rules out.
     #[must_use]
-    pub fn loaded(&self, items: &[OrderItem], loaded: Loaded) -> ArrayValue {
+    pub fn loaded(&self, loading: &Loading) -> ArrayValue {
         fn key<'t>(tuple: &'t TupleValue, item: &OrderItem) -> &'t Value {
             tuple
                 .get(&item.attribute)
                 .expect("sema orders only by the relation's attributes")
         }
+        let items = &loading.order;
         let mut tuples: Vec<&TupleValue> = self.tuples.iter().collect();
         // A stable sort of the tuples in canonical order, which so breaks
         // ties, as the runtime does.
@@ -2590,17 +2601,20 @@ impl RelationValue {
         });
         let elements = tuples
             .into_iter()
-            .map(|tuple| match loaded {
-                Loaded::Tuples => Value::Tuple(tuple.clone()),
-                Loaded::Values => tuple
-                    .attributes()
-                    .next()
-                    .map(|(_, value)| value.clone())
-                    .expect("sema loads the values only of one attribute"),
+            .map(|tuple| {
+                let kept = tuple.without(&loading.removed);
+                match loading.loaded {
+                    Loaded::Tuples => Value::Tuple(kept),
+                    Loaded::Values => kept
+                        .attributes()
+                        .next()
+                        .map(|(_, value)| value.clone())
+                        .expect("sema loads the values only of one attribute"),
+                }
             })
             .collect();
         ArrayValue {
-            element: loaded.element(&self.heading),
+            element: loading.element(&self.heading),
             elements,
         }
     }
@@ -3529,8 +3543,14 @@ mod tests {
             attribute: attribute.to_string(),
             descending,
         };
-        let loaded =
-            |items: &[OrderItem]| Value::Array(relation.loaded(items, Loaded::Tuples)).to_string();
+        let loaded = |items: &[OrderItem]| {
+            let loading = Loading {
+                order: items.to_vec(),
+                removed: BTreeSet::new(),
+                loaded: Loaded::Tuples,
+            };
+            Value::Array(relation.loaded(&loading)).to_string()
+        };
         assert_eq!(
             loaded(&[item("a", true), item("b", true)]),
             r#"array [tuple { a: 2, b: "y" }, tuple { a: 1, b: "z" }, tuple { a: 1, b: "x" }]"#
@@ -3547,9 +3567,33 @@ mod tests {
                 .map(|b| TupleValue::new([("b".to_string(), Value::Text(b.to_string()))].into()))
                 .into(),
         };
+        let values = Loading {
+            order: vec![item("b", true)],
+            removed: BTreeSet::new(),
+            loaded: Loaded::Values,
+        };
         assert_eq!(
-            Value::Array(names.loaded(&[item("b", true)], Loaded::Values)).to_string(),
+            Value::Array(names.loaded(&values)).to_string(),
             r#"array ["z", "y", "x"]"#
+        );
+        // Ordered by an attribute that the elements then leave out, which
+        // keeps those that turn out equal.
+        let without_b = Loading {
+            order: vec![item("b", false)],
+            removed: ["b".to_string()].into(),
+            loaded: Loaded::Values,
+        };
+        assert_eq!(
+            Value::Array(relation.loaded(&without_b)).to_string(),
+            "array [1, 2, 1]"
+        );
+        let tuples = Loading {
+            loaded: Loaded::Tuples,
+            ..without_b
+        };
+        assert_eq!(
+            Value::Array(relation.loaded(&tuples)).to_string(),
+            "array [tuple { a: 1 }, tuple { a: 2 }, tuple { a: 1 }]"
         );
     }
 

@@ -322,16 +322,20 @@ pub enum RuntimeFn {
     /// tuples in the canonical order, without duplicates, in memory the
     /// statement owns.
     Sort,
-    /// `trendy_rt_load(dst, src, descriptor, items, count)`: store at `dst`
-    /// the array of the tuples of the relation `src`, of the type the
-    /// descriptor describes, in the order of `items`, in memory the
-    /// statement owns. `items` is an array of `count` (a [`Field::Usize`])
-    /// structs, one per order item: its attribute's [`Field::Offset`] in a
-    /// tuple, the [`Field::Address`] of the attribute's type's descriptor,
-    /// and a [`Field::Usize`], 1 if descending and 0 if ascending. Tuples
-    /// equal on every item are in canonical order. A tuple of one attribute
-    /// is laid out as that attribute is (see [`Layout`]), so the array is
-    /// one of its values as well.
+    /// `trendy_rt_load(dst, src, source, result, items, count, parts,
+    /// part_count)`: store at `dst` the array, of the type the descriptor
+    /// `result` describes, of the tuples of the relation `src`, of the type
+    /// the descriptor `source` describes, in the order of `items`, in
+    /// memory the statement owns. `items` is an array of `count` (a
+    /// [`Field::Usize`]) structs, one per order item: its attribute's
+    /// [`Field::Offset`] in a tuple, the [`Field::Address`] of the
+    /// attribute's type's descriptor, and a [`Field::Usize`], 1 if
+    /// descending and 0 if ascending. Each element is made of `part_count`
+    /// (a [`Field::Usize`]) parts of its tuple, each a struct of the offset
+    /// in the tuple of an attribute it keeps, its offset in the element,
+    /// and its size, each a [`Field::Usize`]-sized field: the tuple without
+    /// the attributes removed, or the value of the only one left. Tuples
+    /// equal on every item are in canonical order.
     Load,
     /// `trendy_rt_compare_text(dst, lhs, rhs)`: store -1, 0 or 1 at `dst`,
     /// an [`Layout::I64`], as `lhs` is before, equal to or after `rhs` in

@@ -35,7 +35,7 @@ pub(crate) const UPDATE_FORM: &str = "`update` takes attributes the variable has
 pub(crate) const TYPES_FORM: &str = "an operator's type parameters follow its parameters and result type, each `name: any type`, `any tuple`, `any relation`, `any array` or `any` and a kind: `operator pair{a: T, b: T}: relation { v: T } types { T: any type } [ … ];`";
 pub(crate) const IF_FORM: &str = "an `if` has the form `if condition then value else value`, and `else if` chains another: `if n = 1 then \"one\" else if n = 2 then \"two\" else \"many\"`";
 pub(crate) const IF_STMT_FORM: &str = "an `if` statement has the form `if condition then [ … ] else [ … ];`, each branch a block in brackets, and `else if` chains another condition";
-pub(crate) const LOAD_FORM: &str = "a load has the form `load a from r order [asc x, desc y];`: the array `a` given the tuples of the relation `r`, or the values of its only attribute, in the order of the attributes listed";
+pub(crate) const LOAD_FORM: &str = "a load has the form `load a from r order [asc x, desc y];`: the array `a` given the tuples of the relation `r`, in the order of the attributes listed, or, as `load a value from r …`, the values of its only attribute; `remove {x}` after the order leaves attributes out of the elements";
 pub(crate) const VALUE_BLOCK_FORM: &str = "a value block has the form `[ var x := …; value ]`: local variables declared and assigned, then the value they compute";
 pub(crate) const STATEMENT_FORM: &str = "statements are calls, such as `call debug_value{v: 1};`, assignments, such as `n := n + 1;`, local variables, such as `var n := 0;`, and, in an update operator, `if` statements and loops, such as `if n > 0 then [ n := n - 1; ];`; a read-only operator's body ends with its value, an expression without `;`";
 pub(crate) const VARIABLE_FORM: &str = "a variable declaration has the form `var name: type := value;`, where either the type or the value may be left out";
@@ -2433,6 +2433,66 @@ pub(crate) fn updates_clause(
         replacement: "var ".to_string(),
     }));
     d.with_suggestion("write `var` before each parameter's name instead", edits)
+}
+
+/// The rule for a load's elements' attributes, for notes.
+const KEEPING_RULE: &str = "after a load's order, `remove {x}` leaves attributes out of the elements, and `keep {x}` leaves out all the others, once the tuples are ordered; each element is still there, though some turn out equal";
+
+/// `word`, before a load's attributes after its order, as another
+/// language writes it, where trendy writes `spelled`: SQL's `select`, the
+/// algebra's `project`, and `drop`, as SAS, Stata and pandas write it.
+pub(crate) fn keeping_spelling(word: Found, spelled: &str) -> Diagnostic {
+    Diagnostic::error(
+        Code::LoadOrder,
+        format!(
+            "a load's elements' attributes are written `{spelled} {{…}}`, not `{} {{…}}`",
+            word.text
+        ),
+        word.span,
+        "another language's spelling",
+    )
+    .with_note(KEEPING_RULE)
+    .with_suggestion(
+        format!("write `{spelled}`"),
+        vec![Edit {
+            span: word.span,
+            replacement: spelled.to_string(),
+        }],
+    )
+}
+
+/// Attribute names in braces after a load's order, at `at`, as a
+/// projection is written, without `keep`.
+pub(crate) fn bare_keeping(at: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::LoadOrder,
+        "the attributes a load's elements keep are written `keep {…}`",
+        at,
+        "`keep` goes here",
+    )
+    .with_note(KEEPING_RULE)
+    .with_note("a projection, `r{x}`, would merge the tuples that turn out equal, which `keep` after the order doesn't")
+    .with_suggestion(
+        "write `keep`",
+        vec![Edit {
+            span: at,
+            replacement: "keep ".to_string(),
+        }],
+    )
+}
+
+/// A second list of a load's elements' attributes, at `span`, after the
+/// first, at `first`.
+pub(crate) fn second_keeping(span: Span, first: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::LoadOrder,
+        "a load's elements keep the attributes of one list",
+        span,
+        "a second list",
+    )
+    .with_secondary(first, "the first")
+    .with_note(KEEPING_RULE)
+    .with_help("write one list: the attributes to remove, or those to keep")
 }
 
 #[cfg(test)]

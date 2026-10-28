@@ -7,9 +7,9 @@
 //! to one variable are merged, if they don't conflict, into its one new
 //! value. So the order of a block's assignments never matters.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use trendy_diag::{Diagnostic, Span};
+use trendy_diag::{Diagnostic, Edit, Span};
 use trendy_hir as hir;
 use trendy_syntax::ast::{self, AstNode, Clause, VarDecl};
 use trendy_syntax::{SyntaxKind, SyntaxToken};
@@ -412,9 +412,11 @@ fn attribute_assigned(
 
 /// `load`, the clause `clause`, of `target`: the array of the tuples of
 /// its relation, or, written `load a value from r`, of the values of the
-/// relation's only attribute, in the order of its items. The array's
-/// elements must be what it says: tuples of the relation's heading, or
-/// values of its attribute's type, which can be tuples too.
+/// relation's only attribute, in the order of its items, each without the
+/// attributes its `remove`, after the order, names, or those its `keep`
+/// doesn't. The array's elements must be what it says: tuples of the
+/// relation's heading, less those, or values of the one attribute's type,
+/// which can be tuples too.
 fn loaded(
     clause: &Clause,
     load: &ast::Load,
@@ -424,6 +426,7 @@ fn loaded(
 ) -> Option<Change> {
     let written = clause.operand()?;
     let order = load.order()?;
+    let keeping = load.keepings().next();
     let name = &target.assignee.name;
     let hir::Type::Array(element) = &target.assignee.ty else {
         let relation = checker.expr(&written, None, errors)?;
@@ -437,25 +440,33 @@ fn loaded(
         ));
         return None;
     };
+    if let Some(error) = ordered_after_removal(&written, &order, keeping.is_some()) {
+        errors.push(error);
+        return None;
+    }
     let (expected, loaded) = match (load.value(), &**element) {
-        (None, hir::Type::Tuple(heading)) => (
+        // With nothing removed, the relation's heading is the elements',
+        // which an empty relation can take from them.
+        (None, hir::Type::Tuple(heading)) if keeping.is_none() => (
             Some(Expected {
                 ty: hir::Type::Relation(heading.clone()),
                 origin: Origin::Loaded(name.clone(), Box::new(target.expected.origin.clone())),
             }),
             hir::Loaded::Tuples,
         ),
+        (None, hir::Type::Tuple(_)) => (None, hir::Loaded::Tuples),
         (None, _) => {
             // Values are taken only when the load says so.
             let relation = checker.expr(&written, None, errors)?;
             let ty = checker.ty(&relation);
+            let keep = values_kept(&ty, element, load);
             errors.push(errors::load_without_value(
                 name,
                 element,
                 &ty,
                 &written,
                 load.from().as_ref(),
-                projected(&ty, element, &order).as_deref(),
+                keep,
             ));
             return None;
         }
@@ -463,51 +474,179 @@ fn loaded(
     };
     let relation = checker.expr(&written, expected.as_ref(), errors)?;
     let ty = checker.ty(&relation);
-    let heading = match (&ty, &**element) {
-        (hir::Type::Relation(heading), _)
-            if loaded == hir::Loaded::Tuples
-                || heading.attributes().map(|(_, ty)| ty).eq([&**element]) =>
-        {
-            heading
-        }
-        // Its tuples are the elements, as they are.
-        (hir::Type::Relation(heading), hir::Type::Tuple(elements)) if heading == elements => {
-            if let (Some(value), Some(from)) = (load.value(), load.from()) {
-                errors.push(errors::needless_value(name, &value, &from));
-            }
-            return None;
-        }
-        _ => {
-            errors.push(errors::load_mismatch(
-                name,
-                element,
-                &ty,
-                &written,
-                projected(&ty, element, &order).as_deref(),
-            ));
-            return None;
-        }
+    let hir::Type::Relation(heading) = &ty else {
+        errors.push(errors::load_mismatch(name, element, &ty, &written, None));
+        return None;
     };
-    let items = order_items(&order, heading, errors)?;
-    Some(Change::Value(ops::load(relation, items, loaded), written))
+    let removed = match &keeping {
+        Some(keeping) => removed(keeping, heading, &ty, errors)?,
+        None => BTreeSet::new(),
+    };
+    let filling = Filling {
+        name,
+        element,
+        load,
+        written: &written,
+    };
+    if !filling.fits(loaded, heading, &removed, errors) {
+        return None;
+    }
+    let order = order_items(&order, heading, errors)?;
+    let loading = hir::Loading {
+        order,
+        removed,
+        loaded,
+    };
+    Some(Change::Value(ops::load(relation, loading), written))
 }
 
-/// The attribute of `ty`, a relation, of type `element`, that every item of
-/// `order` names, if it is the only one of that type: what to project the
-/// relation onto to load its values.
-fn projected(ty: &hir::Type, element: &hir::Type, order: &ast::OrderList) -> Option<String> {
+/// The attributes of `heading`, of the relation of type `ty` a load takes,
+/// that its elements leave out, as `keeping` says: those it names after
+/// `remove`, or the others than those it names after `keep`. `None` after
+/// reporting one that isn't the relation's, or is named twice.
+fn removed(
+    keeping: &ast::Keeping,
+    heading: &hir::Heading,
+    ty: &hir::Type,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<BTreeSet<String>> {
+    let context = errors::attributes_note("relation", ty);
+    let named = ops::listed(
+        &keeping.names()?,
+        heading,
+        errors::Noun::Projected,
+        &context,
+        errors,
+    )?;
+    if !keeping.keeps() {
+        return Some(named);
+    }
+    Some(
+        heading
+            .attributes()
+            .map(|(a, _)| a.to_string())
+            .filter(|a| !named.contains(a))
+            .collect(),
+    )
+}
+
+/// The array variable `name` that `load` fills, of `element`s, from the
+/// relation `written`.
+struct Filling<'a> {
+    name: &'a str,
+    element: &'a hir::Type,
+    load: &'a ast::Load,
+    written: &'a ast::Expr,
+}
+
+impl Filling<'_> {
+    /// Whether the elements are what the load gives them of the tuples of
+    /// a relation with `heading`, `loaded`, without the attributes
+    /// `removed`, after reporting why not, with a fix that keeps the
+    /// attributes they need, if the tuples have them.
+    fn fits(
+        &self,
+        loaded: hir::Loaded,
+        heading: &hir::Heading,
+        removed: &BTreeSet<String>,
+        errors: &mut Vec<Diagnostic>,
+    ) -> bool {
+        let (name, element, load) = (self.name, self.element, self.load);
+        let kept = heading.without(removed);
+        match (loaded, element) {
+            (hir::Loaded::Tuples, hir::Type::Tuple(elements)) if kept != *elements => {
+                let has_them = elements
+                    .attributes()
+                    .all(|(a, ty)| heading.get(a) == Some(ty));
+                let wanted: Vec<&str> = elements.attributes().map(|(a, _)| a).collect();
+                let keep = has_them
+                    .then(|| errors::keeping_edit(heading, &wanted, load))
+                    .flatten();
+                errors.push(errors::loaded_tuples_mismatch(
+                    name,
+                    elements,
+                    &kept,
+                    self.written,
+                    keep,
+                ));
+                false
+            }
+            (hir::Loaded::Values, element)
+                if !kept.attributes().map(|(_, ty)| ty).eq([element]) =>
+            {
+                // Its tuples are the elements, as they are.
+                if let (hir::Type::Tuple(elements), Some(value), Some(from)) =
+                    (element, load.value(), load.from())
+                    && kept == *elements
+                {
+                    errors.push(errors::needless_value(name, &value, &from));
+                    return false;
+                }
+                let ty = hir::Type::Relation(heading.clone());
+                let keep = values_kept(&ty, element, load);
+                let given = hir::Type::Relation(kept);
+                errors.push(errors::load_mismatch(
+                    name,
+                    element,
+                    &given,
+                    self.written,
+                    keep,
+                ));
+                false
+            }
+            _ => true,
+        }
+    }
+}
+
+/// The edit that makes `load`, of a relation of type `ty`, keep only its
+/// attribute of type `element`, as a load of values from it needs, if it
+/// has one, and only one.
+fn values_kept(ty: &hir::Type, element: &hir::Type, load: &ast::Load) -> Option<(String, Edit)> {
     let hir::Type::Relation(heading) = ty else {
         return None;
     };
     let mut of_type = heading.attributes().filter(|(_, ty)| *ty == element);
     let (name, _) = of_type.next()?;
-    let only = of_type.next().is_none();
-    let named = order.items().all(|item| {
-        item.attribute()
-            .and_then(|a| a.ident())
-            .is_some_and(|i| i.text() == name)
-    });
-    (only && named).then(|| name.to_string())
+    if of_type.next().is_some() {
+        return None;
+    }
+    errors::keeping_edit(heading, &[name], load)
+}
+
+/// The error for a load of `written`, a relation `r remove {…}`, whose
+/// `order` names an attribute that the `remove` leaves out, which the
+/// order then can't see; `remove` after the order, unless the load has a
+/// list of its elements' attributes there already, `keeping`, leaves it
+/// out of the elements after ordering by it.
+fn ordered_after_removal(
+    written: &ast::Expr,
+    order: &ast::OrderList,
+    keeping: bool,
+) -> Option<Diagnostic> {
+    let ast::Expr::Postfix(postfix) = written else {
+        return None;
+    };
+    if postfix.operator()?.kind() != SyntaxKind::RemoveKw {
+        return None;
+    }
+    let list = postfix.names()?;
+    let removed: Vec<String> = list
+        .names()
+        .filter_map(|n| Some(n.ident()?.text().to_string()))
+        .collect();
+    let (attribute, span) = order.items().find_map(|item| {
+        let ident = item.attribute()?.ident()?;
+        removed.iter().any(|r| r == ident.text()).then(|| {
+            (
+                ident.text().to_string(),
+                trendy_syntax::span(ident.text_range()),
+            )
+        })
+    })?;
+    Some(errors::ordered_after_removal(
+        &attribute, span, postfix, &list, order, keeping,
+    ))
 }
 
 /// The items of a load's `order`, each a different attribute of `heading`,

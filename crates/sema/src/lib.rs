@@ -6542,11 +6542,142 @@ mod tests {
             assignments[0].value,
             hir::Expr::Load(
                 Box::new(hir::Expr::Parameter("r".to_string())),
-                vec![hir::OrderItem {
-                    attribute: "v".to_string(),
-                    descending: true,
-                }],
-                hir::Loaded::Values,
+                hir::Loading {
+                    order: vec![hir::OrderItem {
+                        attribute: "v".to_string(),
+                        descending: true,
+                    }],
+                    removed: BTreeSet::new(),
+                    loaded: hir::Loaded::Values,
+                },
+            )
+        );
+    }
+
+    #[test]
+    fn loads_remove_attributes_after_ordering() {
+        // Ordered by `born`, then without it: equal elements are each
+        // there, while a projection would merge them.
+        let twins = "var twins := relation { { name: \"Ada\", born: 1815 }, { name: \"Ada\", born: 1912 }, { name: \"Alan\", born: 1900 } };";
+        let loaded = |body: &str| {
+            main_body(&assigning(twins, body))
+                .iter()
+                .flat_map(|statement| match statement {
+                    hir::Statement::Assign(assignments) => assignments.clone(),
+                    other => panic!("{other:?}"),
+                })
+                .filter_map(|a| match a.value {
+                    hir::Expr::Constant(value @ hir::Value::Array(_)) => Some(value.to_string()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        // Known when compiling, the relation is written out.
+        let people = r#"relation { { name: "Ada", born: 1815 }, { name: "Ada", born: 1912 }, { name: "Alan", born: 1900 } }"#;
+        assert_eq!(
+            loaded(&format!(
+                "var names: array text; load names value from {people} order [asc born] remove {{born}}; var named: array tuple {{ name: text }}; load named from {people} order [desc born] remove {{born}}; var merged: array text; load merged value from {people}{{name}} order [asc name];"
+            )),
+            [
+                "array text []",
+                r#"array ["Ada", "Alan", "Ada"]"#,
+                "array tuple { name: text } []",
+                r#"array [tuple { name: "Ada" }, tuple { name: "Alan" }, tuple { name: "Ada" }]"#,
+                "array text []",
+                r#"array ["Ada", "Alan"]"#,
+            ]
+        );
+        let source = |load: &str| {
+            assigning(
+                twins,
+                &format!("var names: array text; var named: array tuple {{ name: text }}; {load}"),
+            )
+        };
+        // Ordered by an attribute the relation's `remove` left out: the fix
+        // removes it after the order instead.
+        let removed_first = source("load names value from twins remove {born} order [asc born];");
+        assert_eq!(codes(&removed_first), [Code::UnknownAttribute]);
+        assert_eq!(
+            fix(&removed_first),
+            source("load names value from twins order [asc born] remove {born};")
+        );
+        // Tuples with more attributes than the elements: the fix removes
+        // the others after the order.
+        let more = source("load named from twins order [asc born];");
+        assert_eq!(codes(&more), [Code::TypeMismatch]);
+        assert_eq!(
+            fix(&more),
+            source("load named from twins order [asc born] remove {born};")
+        );
+        // Removing the wrong ones, or one the relation hasn't.
+        assert_eq!(
+            codes(&source(
+                "load named from twins order [asc born] remove {name};"
+            )),
+            [Code::LoadMismatch]
+        );
+        assert_eq!(
+            codes(&source(
+                "load names value from twins order [asc born] remove {bron};"
+            )),
+            [Code::UnknownAttribute]
+        );
+        assert_eq!(
+            codes(&source(
+                "load names value from twins order [asc born] remove {born, born};"
+            )),
+            [Code::DuplicateAttribute]
+        );
+        // The values of the one attribute left.
+        assert_eq!(
+            codes(&source("load names value from twins order [asc born];")),
+            [Code::LoadMismatch]
+        );
+    }
+
+    #[test]
+    fn loads_keep_attributes_after_ordering() {
+        // `keep` names those kept, and leaves out the others; a fix writes
+        // whichever of the two lists is shorter.
+        let cities = "var cities := relation { { city: \"Lagos\", country: \"Nigeria\", people: 15 }, { city: \"Abuja\", country: \"Nigeria\", people: 4 } };";
+        let source = |load: &str| {
+            assigning(
+                cities,
+                &format!(
+                    "var names: array text; var placed: array tuple {{ city: text, country: text }}; {load}"
+                ),
+            )
+        };
+        assert!(
+            analyze_str(&source(
+                "load names value from cities order [desc people] keep {city}; load placed from cities order [asc people] keep {city, country};"
+            ))
+            .is_ok()
+        );
+        let fixed = |load: &str, fixed: &str| {
+            assert_eq!(fix(&source(load)), source(fixed), "{load}");
+        };
+        fixed(
+            "load placed from cities order [asc people];",
+            "load placed from cities order [asc people] remove {people};",
+        );
+        fixed(
+            "load placed from cities order [asc people] keep {city};",
+            "load placed from cities order [asc people] remove {people};",
+        );
+        assert_eq!(
+            codes(&source("load names value from cities order [asc people];")),
+            [Code::LoadMismatch]
+        );
+        let narrowed = assigning(
+            cities,
+            "var named: array tuple { city: text }; load named from cities order [asc people];",
+        );
+        assert_eq!(
+            fix(&narrowed),
+            assigning(
+                cities,
+                "var named: array tuple { city: text }; load named from cities order [asc people] keep {city};"
             )
         );
     }
@@ -6592,25 +6723,31 @@ mod tests {
         let fixed = |load: &str, fixed: &str| {
             assert_eq!(fix(&source(load)), source(fixed), "{load}");
         };
-        // Into an array of values, with `value`, the relation of one
-        // attribute.
+        // Into an array of values, with `value`, of the one attribute left:
+        // the fix leaves the others out, after the order, which keeps
+        // equal values each, as a projection wouldn't.
         fixed(
             "load names value from people order [asc name];",
-            "load names value from people{name} order [asc name];",
+            "load names value from people order [asc name] remove {born};",
         );
         fixed(
             "load names value from people where born > 1900 order [asc name];",
-            "load names value from (people where born > 1900){name} order [asc name];",
+            "load names value from people where born > 1900 order [asc name] remove {born};",
+        );
+        // Ordered by another attribute, which is then left out.
+        fixed(
+            "load names value from people order [asc born];",
+            "load names value from people order [asc born] remove {born};",
         );
         // Without `value`, the tuples, which don't fit: the fix writes it,
-        // and the projection if it is needed.
+        // and leaves the others out if there are any.
         fixed(
             "load names from people{name} order [asc name];",
             "load names value from people{name} order [asc name];",
         );
         fixed(
             "load names from people order [asc name];",
-            "load names value from people{name} order [asc name];",
+            "load names value from people order [asc name] remove {born};",
         );
         // An array of tuples takes the relation's tuples as they are.
         fixed(
@@ -6625,15 +6762,6 @@ mod tests {
                 "load everyone value from people wrap { p := {name, born} } order [asc p];"
             )),
             [Code::WrongOperandType]
-        );
-        // Ordered by another attribute, the tuples are needed.
-        assert_eq!(
-            codes(&source("load names value from people order [asc born];")),
-            [Code::LoadMismatch]
-        );
-        assert_eq!(
-            fix(&source("load names value from people order [asc born];")),
-            source("load names value from people order [asc born];")
         );
         assert_eq!(
             codes(&source("load n from people order [asc name];")),

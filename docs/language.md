@@ -1889,7 +1889,9 @@ tuples with equal values of `x`, by `y`, descending. It is Tutorial D's
 `LOAD a FROM r ORDER (ASC x, DESC y)` (chapter 5). `load a value from r
 order [asc x];` gives `a` the values of a relation of one attribute
 instead, such as a projection's, as `value from r` is the value of a
-relation's only tuple's only attribute.
+relation's only tuple's only attribute. `remove {x}` after the order
+leaves attributes out of the elements, once the tuples are ordered, and
+`keep {x}` leaves out all the others.
 
 ```trendy
 var yearly := relation {
@@ -1904,8 +1906,14 @@ operator main{} [
     load ranked from yearly order [desc rain, asc city];
     var names: array text;
     load names value from yearly{city} order [asc city];
+    var rains: array integer;
+    load rains value from yearly order [asc city] remove {city};
+    var wettest: array text;
+    load wettest value from yearly order [desc rain] keep {city};
     call debug_value{v: ranked[1].city};
     call debug_value{v: names};
+    call debug_value{v: rains};
+    call debug_value{v: wettest};
 ];
 ```
 
@@ -1933,9 +1941,26 @@ operator main{} [
   unless the load says so; one into an array of other values without
   `value` gets it from the fix, as does a relation of several attributes
   the order names one of, its projection on that one.
-- **`load`, `value`, `from`, `order`, `asc` and `desc` are contextual
-  keywords:** they are names elsewhere, so an attribute can be called
-  `order` or `desc`.
+- **`remove` after the order leaves attributes out of the elements,**
+  once the tuples are ordered by them, as `rains` leaves out `city`, and
+  `keep` leaves out all those it doesn't name, as `wettest` keeps only
+  `city`: whichever is shorter to write. A load has one of the two at
+  most (P0030). Each element is still there, though some turn out equal:
+  they are an array's elements, not a relation's tuples. Removing
+  attributes from the relation instead, `load a from r remove {x} order
+  […]`, leaves them out before the order, which then can't name them, and
+  merges tuples that turn out equal; ordering by one is reported, with a
+  fix that removes it after the order (A0010). Each attribute named is
+  one of the relation's, named once (A0010, A0008). An array with fewer
+  attributes than the relation, or of the values of one, is fixed to
+  leave the others out, with whichever of `remove` and `keep` names fewer
+  (A0004, A0047). `keep` is a contextual keyword, and other languages'
+  words are fixed (P0030): `drop` to `remove`, and SQL's `select`, the
+  algebra's `project`, and braces alone, as a projection is written, to
+  `keep`.
+- **`load`, `value`, `from`, `order`, `asc`, `desc` and `keep` are
+  contextual keywords:** they are names elsewhere, so an attribute can be
+  called `order` or `desc`.
 - **Other languages' habits are fixed** (P0030): SQL's `ORDER BY x DESC`
   to `order [desc x]`, its `NULLS FIRST` and `NULLS LAST` deleted, an item
   without a direction given `asc`, LINQ's `descending` written `desc`,

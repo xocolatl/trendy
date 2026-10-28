@@ -71,8 +71,8 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
     let (parent, grandparent) = (above(0), above(1));
     // The contextual keywords: `type`, in `builtin type name;`, `key`,
     // `value` and `from`, `any` and `type`, in `any type`, `types`, `per`,
-    // a mode's `const` and `out`, `kind`, a load's `load`, `from`, `order`, `asc` and
-    // `desc`, a `for` loop's `in`, and `heading`.
+    // a mode's `const` and `out`, `kind`, a load's `load`, `from`, `order`, `asc`,
+    // `desc` and `keep`, a `for` loop's `in`, and `heading`.
     let keyword = match parent {
         Some(SyntaxKind::BuiltinType) => token.text() == "type",
         Some(SyntaxKind::AnyType) => matches!(token.text(), "any" | "type"),
@@ -84,6 +84,7 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
             | SyntaxKind::Mode
             | SyntaxKind::KindDecl
             | SyntaxKind::Load
+            | SyntaxKind::Keeping
             | SyntaxKind::OrderItem
             | SyntaxKind::ForStmt
             | SyntaxKind::HeadingDecl,
@@ -654,7 +655,7 @@ mod tests {
     fn loads() {
         assert_eq!(
             highlight(
-                "operator f{r: relation { name: text }} [ var a: array text; load a value from r order [desc name]; ];"
+                "operator f{r: relation { name: text }} [ var a: array text; load a value from r order [desc name] keep {name}; ];"
             ),
             [
                 ("operator", Class::Keyword, false),
@@ -674,6 +675,8 @@ mod tests {
                 ("r", Class::Parameter, false),
                 ("order", Class::Keyword, false),
                 ("desc", Class::Keyword, false),
+                ("name", Class::Attribute, false),
+                ("keep", Class::Keyword, false),
                 ("name", Class::Attribute, false),
             ]
         );

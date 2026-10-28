@@ -815,9 +815,10 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
     // The contextual keywords: `type`, in `builtin type name;`, `key`,
     // `value` and `from`, in `tuple from r` and `value from r`, `any`, in
     // `any type`, `types`, before an operator's type parameters, `per`,
-    // which a space also comes before, `load`, `from` and `order`, which
-    // one comes before too, an order item's `asc` and `desc`, a `for`
-    // loop's `in`, and `heading`, before a heading's name.
+    // which a space also comes before, `load`, `value`, `from` and `order`,
+    // and a load's `keep`, which one comes before too, an order item's
+    // `asc` and `desc`, a `for` loop's `in`, and `heading`, before a
+    // heading's name.
     let contextual_keyword = prev.kind() == Ident
         && prev.parent().is_some_and(|p| match p.kind() {
             BuiltinType => prev.text() == "type",
@@ -829,12 +830,15 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
             | SyntaxKind::KindDecl
             | SyntaxKind::HeadingDecl
             | SyntaxKind::Load
+            | SyntaxKind::Keeping
             | SyntaxKind::OrderItem
             | SyntaxKind::ForStmt => true,
             _ => false,
         });
-    let load_keyword =
-        next.kind() == Ident && next.parent().is_some_and(|p| p.kind() == SyntaxKind::Load);
+    let load_keyword = next.kind() == Ident
+        && next
+            .parent()
+            .is_some_and(|p| matches!(p.kind(), SyntaxKind::Load | SyntaxKind::Keeping));
     // A kind's requirements follow its name after a space.
     let requirements = next.kind() == LBrace
         && next

@@ -1274,7 +1274,10 @@ A load (`Load`) is a clause of an assignment statement, whose `load`,
 `value`, `from` and `order` are contextual keywords: `load` before a name
 starts one, `value` is the keyword only before `from`, and `order` only
 before its items' `[`, or SQL's `by`, so a relation named `order` can be
-loaded. Sema checks it as an assignment of the array variable, whose new
+loaded; `remove { … }` or `keep { … }` after the items (`Keeping`, `keep`
+a contextual keyword) lists the attributes the elements leave out, or
+keep, and sema makes `keep`'s the others left out, so HIR has only the
+attributes removed. Sema checks it as an assignment of the array variable, whose new
 value is `hir::Expr::Load`: the relation, the order items, and whether
 the array takes the tuples or, as `value` says, the values of a relation
 of one attribute; its elements' type must be what the load says it
@@ -1284,12 +1287,13 @@ a relation (TTM chapter 5), so that a load is an assignment like any
 other: in an `assign` block, of a read-only operator's local variable, and
 folded when its relation is a constant (`RelationValue::loaded`).
 Lowering calls `trendy_rt_load`, with each item's offset, type and
-direction; it sorts pointers to the tuples on the items, then
-canonically, and copies the tuples into an array. Tuples equal on every
-item are so in canonical order, when folding and when running alike,
-which the language leaves undefined. A tuple of one attribute is laid out
-as its attribute is, so the values of a relation of one attribute are its
-tuples.
+direction, and each attribute an element keeps (`hir::Loading::removed`
+leaves the others out), with its offset in a tuple and in the element,
+which is the value itself when the array takes values; it sorts pointers
+to the tuples on the items, then canonically, and makes each element
+from its tuple, keeping elements that turn out equal. Tuples equal on
+every item are so in canonical order, when folding and when running
+alike, which the language leaves undefined.
 
 Removing attributes (`hir::Expr::Remove`, which a projection becomes) and
 renaming them (`hir::Expr::Rename`) are both reshaping: each attribute of

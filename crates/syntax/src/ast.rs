@@ -60,6 +60,7 @@ ast_node!(Update);
 ast_node!(Load);
 ast_node!(ValueBlock);
 ast_node!(OrderList);
+ast_node!(Keeping);
 ast_node!(OrderItem);
 ast_node!(Arguments);
 ast_node!(PositionalArg);
@@ -718,6 +719,45 @@ impl Load {
     #[must_use]
     pub fn order(&self) -> Option<OrderList> {
         self.0.children().find_map(OrderList::cast)
+    }
+
+    /// `remove {x}` or `keep {x}`, after the order: the attributes the
+    /// elements leave out, or keep. A load has one at most, which the
+    /// parser checks.
+    pub fn keepings(&self) -> impl Iterator<Item = Keeping> + use<> {
+        self.0.children().filter_map(Keeping::cast)
+    }
+}
+
+impl Keeping {
+    /// The word: `remove` or `keep`, or another language's, such as `drop`,
+    /// or none, for a projection's braces alone.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    /// Whether it names the attributes kept, rather than those left out:
+    /// `keep`, and another language's word for it, or none.
+    #[must_use]
+    pub fn keeps(&self) -> bool {
+        self.keyword()
+            .is_none_or(|k| k.kind() != SyntaxKind::RemoveKw)
+            && self
+                .keyword()
+                .is_none_or(|k| !k.text().eq_ignore_ascii_case("drop"))
+    }
+
+    /// The attributes, `{x, y}`.
+    #[must_use]
+    pub fn names(&self) -> Option<NameList> {
+        self.0.children().find_map(NameList::cast)
+    }
+
+    /// The span to delete to remove it, with the whitespace before.
+    #[must_use]
+    pub fn removal(&self) -> Span {
+        Span::new(preceded_from(&self.0.clone().into()), self.span().end)
     }
 }
 

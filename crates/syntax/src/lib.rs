@@ -248,6 +248,10 @@ pub enum SyntaxKind {
     Load,
     /// `[asc x, desc y]`: the order items of a `load`.
     OrderList,
+    /// `remove {x}` or `keep {x}`, after a `load`'s order: which of its
+    /// tuples' attributes the elements leave out, or keep. `keep` is a
+    /// contextual keyword, an identifier elsewhere.
+    Keeping,
     /// `asc x` or `desc x`: an attribute a `load` orders by, and the
     /// direction, a contextual keyword.
     OrderItem,
@@ -363,7 +367,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 149] = [
+    pub const ALL: [SyntaxKind; 150] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -469,6 +473,7 @@ impl SyntaxKind {
         SyntaxKind::Update,
         SyntaxKind::Load,
         SyntaxKind::OrderList,
+        SyntaxKind::Keeping,
         SyntaxKind::OrderItem,
         SyntaxKind::Arguments,
         SyntaxKind::PositionalArg,
@@ -961,6 +966,7 @@ impl SyntaxKind {
             SyntaxKind::Update => "update",
             SyntaxKind::Load => "load",
             SyntaxKind::OrderList => "order",
+            SyntaxKind::Keeping => "attributes kept",
             SyntaxKind::OrderItem => "order item",
             SyntaxKind::Arguments => "arguments",
             SyntaxKind::PositionalArg => "argument",

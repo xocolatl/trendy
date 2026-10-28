@@ -1289,7 +1289,7 @@ impl<'a> FunctionBuilder<'a> {
             hir::Expr::Array(element, elements) => self.array(element, elements, cx),
             hir::Expr::Index(array, position) => self.index(array, position, cx),
             hir::Expr::WithElements(array, changes) => self.with_elements(array, changes, cx),
-            hir::Expr::Load(relation, items, _) => self.load(expr, relation, items, cx),
+            hir::Expr::Load(relation, loading) => self.load(expr, relation, loading, cx),
             hir::Expr::If(condition, then, otherwise) => {
                 self.conditional(expr, condition, [then, otherwise], cx)
             }
@@ -2212,16 +2212,17 @@ impl<'a> FunctionBuilder<'a> {
         dst
     }
 
-    /// `expr`, the array of the tuples of `relation`, or of their values,
-    /// in the order of `items`, computed by the runtime into a new stack
-    /// slot. Lowering works out each item's offset and type, so the runtime
-    /// never finds attributes by name. The values of a relation of one
-    /// attribute are its tuples, laid out the same.
+    /// `expr`, the array of the tuples of `relation`, in the order of the
+    /// `loading`'s items, each without the attributes it removes, or the
+    /// value of the only one left, computed by the runtime into a new stack
+    /// slot. Lowering works out each item's offset and type, and where each
+    /// attribute kept goes in an element, so the runtime never finds
+    /// attributes by name.
     fn load(
         &mut self,
         expr: &hir::Expr,
         relation: &hir::Expr,
-        items: &[hir::OrderItem],
+        loading: &hir::Loading,
         cx: &mut Lowering,
     ) -> lir::Place {
         let relation_ty = self.type_of(relation);
@@ -2229,14 +2230,20 @@ impl<'a> FunctionBuilder<'a> {
             unreachable!("sema loads only relations");
         };
         let tuple = layout(&hir::Type::Tuple(heading.clone()));
-        let items: Vec<lir::Field> = items
+        // Where an attribute is in the tuple, by name order, and its type.
+        let attribute = |name: &str| {
+            heading
+                .attributes()
+                .enumerate()
+                .find(|(_, (a, _))| *a == name)
+                .map(|(i, (_, ty))| (i, ty))
+                .expect("sema names only the relation's attributes")
+        };
+        let items: Vec<lir::Field> = loading
+            .order
             .iter()
             .map(|item| {
-                let (i, (_, ty)) = heading
-                    .attributes()
-                    .enumerate()
-                    .find(|(_, (name, _))| *name == item.attribute)
-                    .expect("sema orders only by the relation's attributes");
+                let (i, ty) = attribute(&item.attribute);
                 lir::Field::Struct(vec![
                     lir::Field::Offset(tuple.clone(), i),
                     lir::Field::Address(cx.descriptor(ty)),
@@ -2244,15 +2251,45 @@ impl<'a> FunctionBuilder<'a> {
                 ])
             })
             .collect();
+        // Each attribute an element keeps: where it is in the tuple, and in
+        // the element, which is the value itself if it is one.
+        let array_ty = self.type_of(expr);
+        let hir::Type::Array(element) = &array_ty else {
+            unreachable!("a load makes an array");
+        };
+        let element = layout(element);
+        let kept: Vec<(&str, &hir::Type)> = heading
+            .attributes()
+            .filter(|(a, _)| !loading.removed.contains(*a))
+            .collect();
+        let parts: Vec<lir::Field> = kept
+            .iter()
+            .enumerate()
+            .map(|(j, (name, ty))| {
+                let to = match loading.loaded {
+                    hir::Loaded::Tuples => lir::Field::Offset(element.clone(), j),
+                    hir::Loaded::Values => lir::Field::Usize(0),
+                };
+                lir::Field::Struct(vec![
+                    lir::Field::Offset(tuple.clone(), attribute(name).0),
+                    to,
+                    lir::Field::Size(layout(ty)),
+                ])
+            })
+            .collect();
         let count = usize_constant(len(items.len()), cx);
+        let part_count = usize_constant(len(parts.len()), cx);
         let src = self.place(relation, cx);
-        let dst = self.slot(layout(&self.type_of(expr)));
+        let dst = self.slot(layout(&array_ty));
         let args = vec![
             dst.clone(),
             src,
             lir::Place::whole(lir::Base::Data(cx.descriptor(&relation_ty))),
+            lir::Place::whole(lir::Base::Data(cx.descriptor(&array_ty))),
             lir::Place::whole(lir::Base::Data(cx.constant(items))),
             count,
+            lir::Place::whole(lir::Base::Data(cx.constant(parts))),
+            part_count,
         ];
         self.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::Load,

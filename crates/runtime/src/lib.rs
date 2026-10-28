@@ -1469,32 +1469,52 @@ pub struct OrderItem {
     pub descending: usize,
 }
 
-/// Store at `dst` the array of the tuples of the relation `src`, which
-/// `desc` describes, in the order of the `*count` `items`: by the first,
-/// then, among tuples equal on it, by the next, and so on, in memory the
-/// statement owns. Tuples equal on every item are in canonical order, which
-/// the language leaves undefined.
+/// Part of an element of an array [`trendy_rt_load`] makes: `size` bytes
+/// from offset `from` in a tuple of the relation, to offset `to` in the
+/// element. The compiler emits an array of these, laid out like this
+/// struct, one for each attribute an element keeps.
+#[repr(C)]
+pub struct Part {
+    pub from: usize,
+    pub to: usize,
+    pub size: usize,
+}
+
+/// Store at `dst` the array, which `result` describes, of the tuples of the
+/// relation `src`, which `source` describes, in the order of the `*count`
+/// `items`: by the first, then, among tuples equal on it, by the next, and
+/// so on, in memory the statement owns. Each element is made of the
+/// `*part_count` `parts` of its tuple: the tuple without the attributes
+/// removed, or the value of the only one left, and elements that turn out
+/// equal are each there. Tuples equal on every item are in canonical
+/// order, which the language leaves undefined.
 ///
 /// # Safety
 ///
-/// `src` must point to a valid relation of the type `desc` describes, and
-/// `items` to `*count` items, each with the offset and type of one of its
-/// attributes.
+/// `src` must point to a valid relation of the type `source` describes,
+/// `result` to a valid array descriptor, `items` to `*count` items, each
+/// with the offset and type of one of the relation's attributes, and
+/// `parts` to `*part_count` parts, which together make a valid element of
+/// the array from a tuple.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn trendy_rt_load(
     dst: *mut Text,
     src: *const u8,
-    desc: *const TypeDesc,
+    source: *const TypeDesc,
+    result: *const TypeDesc,
     items: *const OrderItem,
     count: *const usize,
+    parts: *const Part,
+    part_count: *const usize,
 ) {
     // SAFETY: guaranteed by the caller.
     unsafe {
-        let desc = &*desc;
+        let (source, result) = (&*source, &*result);
         let items = array(items, count.read_unaligned());
+        let parts = array(parts, part_count.read_unaligned());
         let (tuples, len) = read_slice(src);
-        let size = desc.element().size;
+        let size = source.element().size;
         let order = core::slice::from_raw_parts_mut(allocate::<*const u8>(len), len);
         for (i, tuple) in order.iter_mut().enumerate() {
             *tuple = tuples.add(i * size);
@@ -1502,12 +1522,24 @@ pub unsafe extern "C" fn trendy_rt_load(
         // A relation's tuples are distinct, so no two are equal in
         // canonical order, and the sort has one result.
         order.sort_unstable_by(|a, b| {
-            on_items(items, *a, *b).then_with(|| compare_tuples(*a, *b, desc))
+            on_items(items, *a, *b).then_with(|| compare_tuples(*a, *b, source))
         });
-        let out = allocate_buffer(len * size, desc);
+        let element = result.element();
+        let Some(bytes) = len.checked_mul(element.size) else {
+            trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+        };
+        let out = allocate_buffer(bytes, result);
+        // Each element is made here first, zeroed, as everywhere, so that
+        // the padding in it is zero.
+        let made = allocate::<u8>(element.size);
+        core::ptr::write_bytes(made, 0, element.size);
         for (i, tuple) in order.iter().enumerate() {
-            copy_element(out, out.add(i * size), *tuple, desc.element());
+            for part in parts {
+                core::ptr::copy_nonoverlapping(tuple.add(part.from), made.add(part.to), part.size);
+            }
+            copy_element(out, out.add(i * element.size), made, element);
         }
+        free(made.cast());
         free(order.as_mut_ptr().cast());
         dst.write_unaligned(Text { bytes: out, len });
     }

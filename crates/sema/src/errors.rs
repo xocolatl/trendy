@@ -554,6 +554,9 @@ pub(crate) fn type_mismatch(
         Origin::Operand(_, within) => (true, &**within),
         origin => (false, origin),
     };
+    if let (Origin::Loaded(..), Some(fix)) = (origin, removal_fix(declared, found, expr)) {
+        return d.with_suggestion(fix.0, fix.1);
+    }
     match origin {
         Origin::Type(type_expr) if !operand => d.with_suggestion(
             format!("change the type to `{found}`"),
@@ -580,6 +583,30 @@ pub(crate) fn type_mismatch(
         | Origin::Operator(_)
         | Origin::Operand(..) => d,
     }
+}
+
+/// The fix for a load of `expr`, a relation of type `found`, into an array
+/// of tuples whose relation would be `declared`: if its tuples have the
+/// elements' attributes and others, the load keeps only those, after the
+/// order.
+fn removal_fix(
+    declared: &hir::Type,
+    found: &hir::Type,
+    expr: &Expr,
+) -> Option<(String, Vec<Edit>)> {
+    let (hir::Type::Relation(want), hir::Type::Relation(have)) = (declared, found) else {
+        return None;
+    };
+    if !want.attributes().all(|(a, ty)| have.get(a) == Some(ty)) {
+        return None;
+    }
+    let load = expr
+        .syntax()
+        .ancestors()
+        .find_map(trendy_syntax::ast::Load::cast)?;
+    let wanted: Vec<&str> = want.attributes().map(|(a, _)| a).collect();
+    let (help, edit) = keeping_edit(have, &wanted, &load)?;
+    Some((help, vec![edit]))
 }
 
 /// The literal `expr` is, as written, if it is one, or a negative one such
@@ -4643,14 +4670,14 @@ pub(crate) fn load_into_non_array(
 
 /// A load of `source`, of type `ty`, into `name`, an array of `element`s,
 /// written `load a value from r`, that it can't fill: it isn't a relation
-/// of one attribute of their type. The fix projects it onto `projected`,
-/// its attribute of that type, if it has one, which the order names alone.
+/// of one attribute of their type. `keep` keeps only the attribute of
+/// their type, if the relation has one.
 pub(crate) fn load_mismatch(
     name: &str,
     element: &hir::Type,
     ty: &hir::Type,
     source: &Expr,
-    projected: Option<&str>,
+    keep: Option<(String, Edit)>,
 ) -> Diagnostic {
     let label = match ty {
         hir::Type::Relation(_) => format!("not a relation of one `{element}` attribute"),
@@ -4663,35 +4690,23 @@ pub(crate) fn load_mismatch(
         label,
     )
     .with_note(LOAD);
-    let Some(attribute) = projected else {
-        return d;
-    };
-    let written = source.syntax().text().to_string();
-    let operand = match source {
-        Expr::Name(_) => written,
-        _ => format!("({written})"),
-    };
-    d.with_suggestion(
-        format!("load the values of `{attribute}`"),
-        vec![Edit {
-            span: source.span(),
-            replacement: format!("{operand}{{{attribute}}}"),
-        }],
-    )
+    match keep {
+        Some((help, edit)) => d.with_suggestion(help, vec![edit]),
+        None => d,
+    }
 }
 
 /// A load of `source`, of type `ty`, into `name`, an array of `element`s,
 /// which aren't tuples, without `value` before `from`, written `from`. The
 /// fix writes it, if the relation has one attribute, of their type, or
-/// projects it onto `projected` as well, its attribute of that type, which
-/// the order names alone.
+/// makes the load `keep` only that one as well, if it has others.
 pub(crate) fn load_without_value(
     name: &str,
     element: &hir::Type,
     ty: &hir::Type,
     source: &Expr,
     from: Option<&SyntaxToken>,
-    projected: Option<&str>,
+    keep: Option<(String, Edit)>,
 ) -> Diagnostic {
     let span = from.map_or_else(|| source.span(), |f| trendy_syntax::span(f.text_range()));
     let d = Diagnostic::error(
@@ -4713,20 +4728,12 @@ pub(crate) fn load_without_value(
     let fits = matches!(ty, hir::Type::Relation(heading)
         if heading.attributes().map(|(_, ty)| ty).eq([element]));
     if !fits {
-        let Some(attribute) = projected else {
+        let Some((_, keep)) = keep else {
             return d.with_help(format!(
                 "write `value` before `from`, and load a relation of one `{element}` attribute"
             ));
         };
-        let written = source.syntax().text().to_string();
-        let operand = match source {
-            Expr::Name(_) => written,
-            _ => format!("({written})"),
-        };
-        edits.push(Edit {
-            span: source.span(),
-            replacement: format!("{operand}{{{attribute}}}"),
-        });
+        edits.push(keep);
     }
     d.with_suggestion("load the values, with `value`", edits)
 }
@@ -4749,6 +4756,132 @@ pub(crate) fn needless_value(name: &str, value: &SyntaxToken, from: &SyntaxToken
             replacement: String::new(),
         }],
     )
+}
+
+/// The rule for leaving attributes out of a load's elements, for notes.
+const LOAD_REMOVE: &str = "`remove {x}` after a load's order leaves attributes out of the elements, and `keep {x}` all the others, once the tuples are ordered by them, keeping each element, though some turn out equal; `remove` on the relation leaves them out before, so the order can't name them, and merges tuples that turn out equal";
+
+/// `attribute`, at `span`, which a load's `order` names, though the
+/// relation it loads is `postfix`, which removes it, in `list`: the fix
+/// moves the `remove` after the order, unless the load has a list of its
+/// elements' attributes there already, `keeping`.
+pub(crate) fn ordered_after_removal(
+    attribute: &str,
+    span: Span,
+    postfix: &trendy_syntax::ast::PostfixExpr,
+    list: &trendy_syntax::ast::NameList,
+    order: &OrderList,
+    keeping: bool,
+) -> Diagnostic {
+    let removal = postfix.operand().map_or_else(
+        || postfix.span(),
+        |o| Span::new(o.span().end, postfix.span().end),
+    );
+    let d = Diagnostic::error(
+        Code::UnknownAttribute,
+        format!("`{attribute}` is removed from the relation before the load orders its tuples"),
+        span,
+        "not an attribute of the relation loaded",
+    )
+    .with_secondary(removal, "removed here")
+    .with_note(LOAD_REMOVE);
+    if keeping {
+        return d.with_help(format!(
+            "leave `{attribute}` out after the order, not from the relation"
+        ));
+    }
+    let end = order.span().end;
+    d.with_suggestion(
+        "remove it after the order instead",
+        vec![
+            Edit {
+                span: removal,
+                replacement: String::new(),
+            },
+            Edit {
+                span: Span::new(end, end),
+                replacement: format!(" remove {}", list.syntax().text()),
+            },
+        ],
+    )
+}
+
+/// A load of `source` into `name`, an array of tuples of `elements`, which
+/// gives them `kept` instead, the tuples' attributes less those it leaves
+/// out. `keep` makes it keep the elements' attributes, if the tuples have
+/// them.
+pub(crate) fn loaded_tuples_mismatch(
+    name: &str,
+    elements: &hir::Heading,
+    kept: &hir::Heading,
+    source: &Expr,
+    keep: Option<(String, Edit)>,
+) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::LoadMismatch,
+        format!(
+            "the load gives `{name}` elements of `tuple {}`, but they are `tuple {}`",
+            hir::Type::Tuple(kept.clone())
+                .to_string()
+                .trim_start_matches("tuple "),
+            hir::Type::Tuple(elements.clone())
+                .to_string()
+                .trim_start_matches("tuple ")
+        ),
+        source.span(),
+        format!("its tuples, less those removed, have {}", listed(kept)),
+    )
+    .with_note(LOAD)
+    .with_note(LOAD_REMOVE);
+    match keep {
+        Some((help, edit)) => d.with_suggestion(help, vec![edit]),
+        None => d,
+    }
+}
+
+/// The edit that makes `load`, of a relation with `heading`, keep only the
+/// attributes `wanted`: `remove` or `keep` after the order, whichever names
+/// fewer attributes, `remove` if they are as many, in place of the one it
+/// has, if any, or none if it keeps every attribute. Its help, and it, if
+/// there is an order to put it after.
+pub(crate) fn keeping_edit(
+    heading: &hir::Heading,
+    wanted: &[&str],
+    load: &trendy_syntax::ast::Load,
+) -> Option<(String, Edit)> {
+    let removed: Vec<&str> = heading
+        .named()
+        .map(|(a, _)| a)
+        .filter(|a| !wanted.contains(a))
+        .collect();
+    let (help, text) = if removed.is_empty() {
+        ("keep every attribute".to_string(), String::new())
+    } else if removed.len() <= wanted.len() {
+        let names = removed.join(", ");
+        (
+            format!("leave out `{names}`, after the order"),
+            format!(" remove {{{names}}}"),
+        )
+    } else {
+        let names = wanted.join(", ");
+        (
+            format!("keep only `{names}`, after the order"),
+            format!(" keep {{{names}}}"),
+        )
+    };
+    let span = if let Some(keeping) = load.keepings().next() {
+        keeping.removal()
+    } else {
+        let end = load.order()?.span().end;
+        Span::new(end, end)
+    };
+    Some((
+        help,
+        Edit {
+            span,
+            replacement: text,
+        },
+    ))
 }
 
 /// A load's order, `order`, with no items, of a relation with `heading`.

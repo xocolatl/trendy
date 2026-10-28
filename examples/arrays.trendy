@@ -43,9 +43,10 @@ var named := first{a: array ["Amara", "Kofi"]};
 
 /* A relation's tuples into an array, in order, by a load (Tutorial D's
    LOAD): an array of tuples takes the tuples, and, with `value`, an array
-   of other values the values of a relation of one attribute. Each item orders the tuples
-   equal on the items before it, and tuples equal on every item come in an
-   undefined order, so an order whose items include a key is a total one. */
+   of other values the values of a relation of one attribute. Each item
+   orders the tuples equal on the items before it, and tuples equal on
+   every item come in an undefined order, so an order whose items include
+   a key is a total one. */
 var yearly := relation {
     { city: "Mumbai", rain: 2200 },
     { city: "Cairo", rain: 25 },
@@ -67,8 +68,26 @@ operator alphabetical{r: relation { city: text, rain: integer }}: array text [
     names
 ];
 
+/* The crops in the order of the years they were grown in, without the
+   years: `remove` after the order leaves `year` out of the elements once
+   the tuples are ordered by it, and keeps each, so teff is there twice.
+   Removing it from the relation instead would merge the two, and leave
+   the order no years to go by. */
+operator crops_by_year{r: relation { year: integer, crop: text }}: array text [
+    var crops: array text;
+    load crops value from r order [asc year] remove {year};
+    crops
+];
+
+var harvests := relation {
+    { year: 2021, crop: "teff" },
+    { year: 2022, crop: "sorghum" },
+    { year: 2023, crop: "teff" },
+};
+
 var ranked := wettest_first{r: yearly};
 var names := alphabetical{r: yearly};
+var crops := crops_by_year{r: harvests};
 
 /* An element given a new value, `a[i] := x`, which is shorthand for
    assigning the whole array, so that a value it was copied to keeps its
@@ -122,6 +141,12 @@ operator computed{wet: integer, mid: integer, low: integer, two: integer, city: 
     load ranked from yearly order [desc rain, asc city];
     call debug_value{v: ranked};
     call debug_value{v: alphabetical{r: yearly}};
+    var harvests := relation {
+        { year: 2019 + at, crop: "teff" },
+        { year: 2022, crop: "sorghum" },
+        { year: 2023, crop: "teff" },
+    };
+    call debug_value{v: crops_by_year{r: harvests}};
     var revised := r;
     revised[3] := 250;
     var h := g;
@@ -147,6 +172,7 @@ operator main{} [
     call debug_value{v: named};
     call debug_value{v: ranked};
     call debug_value{v: names};
+    call debug_value{v: crops};
     call debug_value{v: revised};
 
     call computed{wet: 1200, mid: 950, low: 220, two: 2, city: "Mumbai", at: 2};

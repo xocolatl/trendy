@@ -1427,18 +1427,14 @@ pub(crate) fn array(element: hir::Type, elements: Vec<hir::Expr>) -> hir::Expr {
     }
 }
 
-/// The array a `load` makes of `relation`, in the order of `items`:
-/// evaluated if the relation is a constant.
-pub(crate) fn load(
-    relation: hir::Expr,
-    items: Vec<hir::OrderItem>,
-    loaded: hir::Loaded,
-) -> hir::Expr {
+/// The array a `load` makes of `relation`, as `loading` says: evaluated
+/// if the relation is a constant.
+pub(crate) fn load(relation: hir::Expr, loading: hir::Loading) -> hir::Expr {
     match relation {
         hir::Expr::Constant(hir::Value::Relation(relation)) => {
-            hir::Expr::Constant(hir::Value::Array(relation.loaded(&items, loaded)))
+            hir::Expr::Constant(hir::Value::Array(relation.loaded(&loading)))
         }
-        relation => hir::Expr::Load(Box::new(relation), items, loaded),
+        relation => hir::Expr::Load(Box::new(relation), loading),
     }
 }
 
@@ -2255,7 +2251,7 @@ fn substitute(
         hir::Expr::WithElements(array, changes) => {
             substituted_elements(*array, changes, depth, substitution)?
         }
-        hir::Expr::Load(relation, items, loaded) => load(sub(relation)?, items, loaded),
+        hir::Expr::Load(relation, loading) => load(sub(relation)?, loading),
         hir::Expr::If(condition, then, otherwise) => {
             substituted_if(*condition, *then, *otherwise, depth, substitution)?
         }

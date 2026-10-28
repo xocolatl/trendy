@@ -86,6 +86,16 @@ struct Missing {
     help: Option<&'static str>,
 }
 
+/// How a load's elements' attributes start, after its order, where
+/// [`Parser::at_keeping`] finds them.
+#[derive(Clone, Copy)]
+enum KeepingStart<'a> {
+    /// `remove`, `keep`, or another language's word for one.
+    Word(Found<'a>),
+    /// The braces alone, as a projection is written.
+    Braces,
+}
+
 /// A mode's words, where [`Parser::mode_at`] or
 /// [`Parser::misplaced_mode`] finds one.
 #[derive(Clone, Copy)]
@@ -2028,9 +2038,11 @@ impl<'a> Parser<'a> {
         self.form = outer_form;
     }
 
-    /// A load's order, after its relation: `order [asc x, desc y]`. SQL's
-    /// `order by`, items without brackets, Tutorial D's `ORDER ( … )`, and
-    /// items' habits (see [`Parser::order_item`]), are reported with fixes.
+    /// A load's order, after its relation: `order [asc x, desc y]`, then
+    /// `remove {x}` or `keep {x}` if the elements leave attributes out.
+    /// SQL's `order by`, items without brackets, Tutorial D's `ORDER ( … )`,
+    /// and items' habits (see [`Parser::order_item`]), are reported with
+    /// fixes.
     fn load_order(&mut self) {
         let Some(order) = self.found_word("order") else {
             let at = self.last_end.unwrap_or(0);
@@ -2082,6 +2094,64 @@ impl<'a> Parser<'a> {
                 "list the attributes to order by in brackets, each after `asc` or `desc`, as in `order [asc name]`",
             );
         }
+        // The attributes the elements leave out, or keep, once the tuples
+        // are ordered: one list, which a second is reported after.
+        let mut first: Option<Span> = None;
+        while let Some(start) = self.at_keeping() {
+            let span = self.keeping(start);
+            if let Some(first) = first {
+                self.errors.push(errors::second_keeping(span, first));
+            }
+            first.get_or_insert(span);
+        }
+    }
+
+    /// Whether `remove {x}` or `keep {x}` is next, after a load's order, or
+    /// another language's spelling of it: `drop`, `select` or `project`
+    /// before the braces, or the braces alone, as a projection is written.
+    fn at_keeping(&mut self) -> Option<KeepingStart<'a>> {
+        let found = self.found()?;
+        if found.kind == SyntaxKind::LBrace {
+            return Some(KeepingStart::Braces);
+        }
+        let word = found.kind == SyntaxKind::RemoveKw
+            || (found.kind == SyntaxKind::Ident
+                && ["keep", "drop", "select", "project"]
+                    .iter()
+                    .any(|w| found.text.eq_ignore_ascii_case(w)));
+        (word
+            && self
+                .found_after(1)
+                .is_some_and(|f| f.kind == SyntaxKind::LBrace))
+        .then_some(KeepingStart::Word(found))
+    }
+
+    /// The `remove {x}` or `keep {x}` [`Parser::at_keeping`] found, as it
+    /// starts: another language's spelling, or a keyword in another case,
+    /// is reported, with a fix. Where it is.
+    fn keeping(&mut self, start: KeepingStart<'a>) -> Span {
+        self.start_node(SyntaxKind::Keeping);
+        let at = self.found().map_or(0, |f| f.span.start);
+        if let KeepingStart::Word(word) = start {
+            self.bump();
+            let spelled = match word.text.to_lowercase().as_str() {
+                "drop" => Some("remove"),
+                "select" | "project" => Some("keep"),
+                "keep" if word.text != "keep" => {
+                    self.errors.push(errors::miscased_keyword(word, "keep"));
+                    None
+                }
+                _ => None,
+            };
+            if let Some(spelled) = spelled {
+                self.errors.push(errors::keeping_spelling(word, spelled));
+            }
+        } else {
+            self.errors.push(errors::bare_keeping(Span::empty(at)));
+        }
+        self.names(errors::LOAD_FORM);
+        self.builder.finish_node();
+        Span::new(at, self.last_end.unwrap_or(at))
     }
 
     /// An item of a load's order: `asc x` or `desc x`. A direction after
@@ -4683,7 +4753,7 @@ fn is_skipped(kind: SyntaxKind) -> bool {
 mod tests {
     use super::*;
     use trendy_diag::Code;
-    use trendy_syntax::ast::{AstNode, Clause, Expr, Said, Statement, TypeExpr};
+    use trendy_syntax::ast::{AstNode, Clause, Expr, Load, Said, Statement, TypeExpr};
     use trendy_syntax::outline;
 
     fn parse_str(source: &str) -> Parse {
@@ -5581,6 +5651,34 @@ SourceFile
             .collect();
         assert_eq!(items, [("x".to_string(), false), ("y".to_string(), true)]);
         assert!(plain.value().is_none());
+        assert_eq!(plain.keepings().count(), 0);
+        // `remove` or `keep` after the order says which attributes the
+        // elements keep; `remove` before it is the relation's.
+        let kept = |load: &Load| -> Vec<(bool, Vec<String>)> {
+            load.keepings()
+                .map(|k| {
+                    let names = k
+                        .names()
+                        .unwrap()
+                        .names()
+                        .map(|n| n.syntax().text().to_string())
+                        .collect();
+                    (k.keeps(), names)
+                })
+                .collect()
+        };
+        let (_, removing) = load("load a from r order [asc o] remove {o, p};");
+        assert_eq!(
+            kept(&removing),
+            [(false, vec!["o".to_string(), "p".to_string()])]
+        );
+        let (_, keeping) = load("load a value from r order [asc o] keep {x};");
+        assert_eq!(kept(&keeping), [(true, vec!["x".to_string()])]);
+        let (clause, removed) = load("load a from r remove {o} order [asc x];");
+        assert_eq!(clause.operand().unwrap().syntax().text(), "r remove {o}");
+        assert_eq!(removed.keepings().count(), 0);
+        // `keep` is a name elsewhere.
+        load("load keep from keep order [asc keep] keep {keep};");
         // `value` before `from`: the values of the only attribute.
         let (clause, values) = load("load a value from r{x} order [asc x];");
         assert_eq!(clause.target().unwrap().syntax().text(), "a");
@@ -5596,6 +5694,45 @@ SourceFile
         assert!(both.value().is_some());
         let parse = parse_str("operator f{load: integer} [ load := load + 1; ];");
         assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+    }
+
+    #[test]
+    fn load_keeping_habits() {
+        let body = |statement: &str| format!("operator f{{}} [ {statement} ];");
+        for (written, message, fixed) in [
+            (
+                "load a from r order [asc o] drop {o};",
+                "a load's elements' attributes are written `remove {…}`, not `drop {…}`",
+                "load a from r order [asc o] remove {o};",
+            ),
+            (
+                "load a from r order [asc o] select {x};",
+                "a load's elements' attributes are written `keep {…}`, not `select {…}`",
+                "load a from r order [asc o] keep {x};",
+            ),
+            (
+                "load a from r order [asc o] project {x};",
+                "a load's elements' attributes are written `keep {…}`, not `project {…}`",
+                "load a from r order [asc o] keep {x};",
+            ),
+            (
+                "load a from r order [asc o] {x};",
+                "the attributes a load's elements keep are written `keep {…}`",
+                "load a from r order [asc o] keep {x};",
+            ),
+            (
+                "load a from r order [asc o] KEEP {x};",
+                "`KEEP` is not a keyword; write `keep`",
+                "load a from r order [asc o] keep {x};",
+            ),
+        ] {
+            assert_eq!(messages(&body(written)), [message], "{written}");
+            assert_eq!(fix(&body(written)), body(fixed), "{written}");
+        }
+        assert_eq!(
+            messages(&body("load a from r order [asc o] remove {o} keep {x};")),
+            ["a load's elements keep the attributes of one list"]
+        );
     }
 
     #[test]
