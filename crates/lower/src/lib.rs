@@ -932,21 +932,35 @@ impl<'a> FunctionBuilder<'a> {
                 });
                 dst
             }
-            hir::ReadOnlyBuiltin::ParseInteger | hir::ReadOnlyBuiltin::ParseApproximate => {
-                let function = if builtin == hir::ReadOnlyBuiltin::ParseInteger {
-                    lir::RuntimeFn::ParseInteger
-                } else {
-                    lir::RuntimeFn::ParseApproximate
-                };
-                let text = self.place(&call.args["from"], cx);
-                let dst = self.slot(layout(&self.program.result(call)));
-                self.insts.push(lir::Inst::CallRuntime {
-                    function,
-                    args: vec![dst.clone(), text],
-                });
-                dst
+            hir::ReadOnlyBuiltin::ParseInteger => {
+                self.parsed(lir::RuntimeFn::ParseInteger, call, cx)
+            }
+            hir::ReadOnlyBuiltin::ParseApproximate => {
+                self.parsed(lir::RuntimeFn::ParseApproximate, call, cx)
+            }
+            hir::ReadOnlyBuiltin::ParseBoolean => {
+                self.parsed(lir::RuntimeFn::ParseBoolean, call, cx)
             }
         }
+    }
+
+    /// The value of `call`, of `parse_integer`, `parse_approximate` or
+    /// `parse_boolean`, computed into a new stack slot by the runtime
+    /// function `function`, which reads its text as
+    /// `hir::ReadOnlyBuiltin::evaluate` does.
+    fn parsed(
+        &mut self,
+        function: lir::RuntimeFn,
+        call: &hir::Call,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let text = self.place(&call.args["from"], cx);
+        let dst = self.slot(layout(&self.program.result(call)));
+        self.insts.push(lir::Inst::CallRuntime {
+            function,
+            args: vec![dst.clone(), text],
+        });
+        dst
     }
 
     /// The value of `call`, of `sum` or `product`, computed into a new

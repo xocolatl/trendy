@@ -189,6 +189,10 @@ pub enum RuntimeFn {
     /// `parse_approximate` reads one. It stops the program if the text
     /// writes none.
     ParseApproximate,
+    /// `trendy_rt_parse_boolean(dst, text)`: store at `dst` the boolean the
+    /// text writes, as `parse_boolean` reads one. It stops the program if
+    /// the text writes none.
+    ParseBoolean,
     /// `trendy_rt_load_text_file(dst, path, descriptor)`: store at `dst` the
     /// array of the lines of the text file at `path`, a text, in order, of
     /// the type the descriptor describes, `array text`, in memory the
@@ -378,6 +382,7 @@ impl RuntimeFn {
             RuntimeFn::ToText => "trendy_rt_to_text",
             RuntimeFn::ParseInteger => "trendy_rt_parse_integer",
             RuntimeFn::ParseApproximate => "trendy_rt_parse_approximate",
+            RuntimeFn::ParseBoolean => "trendy_rt_parse_boolean",
             RuntimeFn::LoadTextFile => "trendy_rt_load_text_file",
             RuntimeFn::Sum => "trendy_rt_sum",
             RuntimeFn::Product => "trendy_rt_product",

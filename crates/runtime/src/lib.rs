@@ -2066,16 +2066,37 @@ pub unsafe extern "C" fn trendy_rt_parse_approximate(dst: *mut f64, from: *const
     }
 }
 
-/// Stop the program because `text` isn't `a`, a number of its type, as
+/// Store at `dst` the boolean the text `from` writes, as `parse_boolean`
+/// reads one, and the compiler with it. Stops the program if the text
+/// writes none (R0014).
+///
+/// # Safety
+///
+/// `from` must point to a valid text value, and `dst` to memory for a
+/// boolean.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_parse_boolean(dst: *mut u8, from: *const Text) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let text = read_text(from.cast());
+        match trendy_text::parse_boolean(text) {
+            Ok(b) => dst.write(u8::from(b)),
+            Err(why) => unparsable(text, "a boolean", why),
+        }
+    }
+}
+
+/// Stop the program because `text` isn't `a`, a value of its type, as
 /// `why` says.
 #[cfg(not(test))]
-fn unparsable(text: &str, a: &str, why: trendy_numeric::Unparsable) -> ! {
+fn unparsable(text: &str, a: &str, why: trendy_text::Unparsable) -> ! {
     fail_with(|out| {
         out.write_str("error[R0014]: \"")?;
         trendy_text::escape(text, out)?;
         match why {
-            trendy_numeric::Unparsable::NotANumber => writeln!(out, "\" isn't {a}"),
-            trendy_numeric::Unparsable::OutOfRange => writeln!(out, "\" is out of {a}'s range"),
+            trendy_text::Unparsable::Malformed => writeln!(out, "\" isn't {a}"),
+            trendy_text::Unparsable::OutOfRange => writeln!(out, "\" is out of {a}'s range"),
         }
     })
 }

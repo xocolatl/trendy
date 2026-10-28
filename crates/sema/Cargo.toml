@@ -10,6 +10,7 @@ workspace = true
 trendy_diag.workspace = true
 trendy_syntax.workspace = true
 trendy_hir.workspace = true
+trendy_text.workspace = true
 
 [dev-dependencies]
 trendy_prelude.workspace = true

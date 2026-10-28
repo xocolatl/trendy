@@ -84,6 +84,11 @@ builtin operator parse_integer{from: text}: integer;
    exponent. Other text fails (R0014), as does a number out of range. */
 builtin operator parse_approximate{from: text}: approximate;
 
+/* The boolean `from` writes: true for `true`, `t`, `yes`, `y` or `1`,
+   and false for `false`, `f`, `no`, `n` or `0`, in any case, and nothing
+   else, not even spaces. Other text fails (R0014). */
+builtin operator parse_boolean{from: text}: boolean;
+
 /* Read the lines of the text file at `path` into `lines`, in the file's
    order, so that its first line is the array's element 1. `path` is
    relative to the directory the program runs in, unless it is absolute.

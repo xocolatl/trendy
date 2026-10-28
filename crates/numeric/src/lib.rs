@@ -4,10 +4,12 @@
 //! (which evaluates them when running), so that the two can't disagree. A
 //! relation's tuples have no order, and neither has a sum or a product
 //! here: each is the exact result, rounded once, which no order of adding
-//! or multiplying can change. It has no dependencies and doesn't need
-//! `std`, so both can use it.
+//! or multiplying can change. It depends only on `trendy_text`, for why a
+//! text is no number, and doesn't need `std`, so both can use it.
 
 #![cfg_attr(not(test), no_std)]
+
+use trendy_text::Unparsable;
 
 /// The exact sum of integers. Each is below 2^63 in magnitude, and a
 /// relation has fewer than 2^64 tuples, so the sum is below 2^127 in
@@ -436,15 +438,6 @@ fn nearest(magnitude: &[u64], exponent: i64, negative: bool) -> Option<f64> {
     Some(f64::from_bits(u64::from(negative) << 63 | bits))
 }
 
-/// Why a text isn't a number of a type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Unparsable {
-    /// It isn't written as one.
-    NotANumber,
-    /// It is, but beyond the type's range.
-    OutOfRange,
-}
-
 /// The integer `text` writes as trendy writes one: decimal digits, with a
 /// `-` before them if it is negative, and nothing else, not even spaces.
 ///
@@ -455,7 +448,7 @@ pub enum Unparsable {
 pub fn parse_integer(text: &str) -> Result<i64, Unparsable> {
     let digits = text.strip_prefix('-').unwrap_or(text);
     if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(Unparsable::NotANumber);
+        return Err(Unparsable::Malformed);
     }
     text.parse().map_err(|_| Unparsable::OutOfRange)
 }
@@ -480,13 +473,13 @@ pub fn parse_approximate(text: &str) -> Result<f64, Unparsable> {
     let unsigned = text.strip_prefix('-').unwrap_or(text);
     let whole = digits(unsigned);
     if whole == 0 {
-        return Err(Unparsable::NotANumber);
+        return Err(Unparsable::Malformed);
     }
     let mut rest = &unsigned[whole..];
     if let Some(after) = rest.strip_prefix('.') {
         let fraction = digits(after);
         if fraction == 0 {
-            return Err(Unparsable::NotANumber);
+            return Err(Unparsable::Malformed);
         }
         rest = &after[fraction..];
     }
@@ -494,15 +487,15 @@ pub fn parse_approximate(text: &str) -> Result<f64, Unparsable> {
         let exponent = exponent.strip_prefix(['+', '-']).unwrap_or(exponent);
         let length = digits(exponent);
         if length == 0 {
-            return Err(Unparsable::NotANumber);
+            return Err(Unparsable::Malformed);
         }
         rest = &exponent[length..];
     }
     if !rest.is_empty() {
-        return Err(Unparsable::NotANumber);
+        return Err(Unparsable::Malformed);
     }
     // Rust reads every number written so, to the nearest `f64`.
-    let value: f64 = text.parse().map_err(|_| Unparsable::NotANumber)?;
+    let value: f64 = text.parse().map_err(|_| Unparsable::Malformed)?;
     if value.is_finite() {
         // Adding `0.0` turns `-0.0` into `0.0` (IEEE 754, 6.3).
         Ok(value + 0.0)
@@ -528,7 +521,7 @@ mod tests {
         ] {
             assert_eq!(
                 parse_integer(other),
-                Err(Unparsable::NotANumber),
+                Err(Unparsable::Malformed),
                 "{other:?}"
             );
         }
@@ -568,7 +561,7 @@ mod tests {
         ] {
             assert_eq!(
                 parse_approximate(other),
-                Err(Unparsable::NotANumber),
+                Err(Unparsable::Malformed),
                 "{other:?}"
             );
         }

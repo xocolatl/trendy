@@ -522,8 +522,8 @@ pub(crate) fn type_mismatch(
     } else if let Some(builtin) = conversion(found, declared)
         && (value.is_none() || !parses(builtin))
     {
-        // A text known when compiling is a number's literal, rewritten
-        // above, or not a number, which parsing would fail for.
+        // A text known when compiling is one parsing reads, rewritten
+        // above as the value's literal, or one it would fail for.
         d = with_conversion(d, "it", builtin, expr);
     }
     // `n * x`, of an integer and an approximate number: the first operand
@@ -619,8 +619,9 @@ fn written_literal(expr: &Expr) -> Option<String> {
 
 /// The prelude's operator that converts a value of type `from` to type
 /// `to`, if there is one: `to_text` writes a value of any type as text,
-/// `to_approximate` takes integers, and `parse_integer` and
-/// `parse_approximate` read numbers from text, failing for other text.
+/// `to_approximate` takes integers, and `parse_integer`,
+/// `parse_approximate` and `parse_boolean` read values from text, failing
+/// for other text.
 fn conversion(from: &hir::Type, to: &hir::Type) -> Option<hir::ReadOnlyBuiltin> {
     use hir::{Scalar, Type};
     match (from, to) {
@@ -633,6 +634,9 @@ fn conversion(from: &hir::Type, to: &hir::Type) -> Option<hir::ReadOnlyBuiltin> 
         (Type::Scalar(Scalar::Text), Type::Scalar(Scalar::Approximate)) => {
             Some(hir::ReadOnlyBuiltin::ParseApproximate)
         }
+        (Type::Scalar(Scalar::Text), Type::Scalar(Scalar::Boolean)) => {
+            Some(hir::ReadOnlyBuiltin::ParseBoolean)
+        }
         (Type::Scalar(_) | Type::Parameter(_), Type::Scalar(Scalar::Text)) => {
             Some(hir::ReadOnlyBuiltin::ToText)
         }
@@ -640,12 +644,14 @@ fn conversion(from: &hir::Type, to: &hir::Type) -> Option<hir::ReadOnlyBuiltin> 
     }
 }
 
-/// Whether the conversion `builtin` reads a number from text, which fails
+/// Whether the conversion `builtin` reads a value from text, which fails
 /// for other text.
 fn parses(builtin: hir::ReadOnlyBuiltin) -> bool {
     matches!(
         builtin,
-        hir::ReadOnlyBuiltin::ParseInteger | hir::ReadOnlyBuiltin::ParseApproximate
+        hir::ReadOnlyBuiltin::ParseInteger
+            | hir::ReadOnlyBuiltin::ParseApproximate
+            | hir::ReadOnlyBuiltin::ParseBoolean
     )
 }
 
@@ -815,9 +821,10 @@ fn rewrite_literal(ty: hir::Scalar, value: &hir::Value, written: &str) -> Option
         ) => Some(format!("\"{written}\"")),
         // `0` and `1` are the usual spellings of false and true elsewhere.
         (hir::Scalar::Boolean, hir::Value::Integer(n @ (0 | 1))) => Some((*n == 1).to_string()),
-        (hir::Scalar::Boolean, hir::Value::Text(text)) => ["true", "false"]
-            .contains(&text.as_str())
-            .then(|| text.clone()),
+        // `"yes"` or `"0"`, as `parse_boolean` reads them.
+        (hir::Scalar::Boolean, hir::Value::Text(text)) => {
+            trendy_text::parse_boolean(text).ok().map(|b| b.to_string())
+        }
         (hir::Scalar::Approximate, hir::Value::Integer(_)) => Some(format!("{written}e0")),
         (hir::Scalar::Integer, hir::Value::Approximate(r)) => {
             // Only exact integers within range; `{:.0}` prints them in full.
@@ -1662,7 +1669,8 @@ fn spelled_like(
 /// `size` do; R's and Kotlin's `readLines` read a file's lines, as
 /// Python's and Ruby's `readlines` and .NET's `ReadAllLines` do; and
 /// JavaScript's `parseInt` and `parseFloat`, Java's `parseDouble`, and C's
-/// `atoi` and `atof`, as Go's `Atoi`, read numbers.
+/// `atoi` and `atof`, as Go's `Atoi`, read numbers, and Java's
+/// `parseBoolean` and Go's `ParseBool` booleans.
 const ELSEWHERE: &[(&str, &str, Option<&str>)] = &[
     ("len", "count", Some("length")),
     ("size", "count", Some("length")),
@@ -1675,6 +1683,8 @@ const ELSEWHERE: &[(&str, &str, Option<&str>)] = &[
     ("parsefloat", "parse_approximate", None),
     ("parsedouble", "parse_approximate", None),
     ("atof", "parse_approximate", None),
+    ("parseboolean", "parse_boolean", None),
+    ("parsebool", "parse_boolean", None),
 ];
 
 /// The prelude's operators that other languages call `name`, in any case:
@@ -3803,8 +3813,9 @@ pub(crate) fn failed(failed: &crate::ops::Failed, expr: &Expr) -> Diagnostic {
     }
 }
 
-/// `expr`, which takes `builtin`, `parse_integer` or `parse_approximate`,
-/// of `text`, which isn't a number of its type, as `why` says.
+/// `expr`, which takes `builtin`, `parse_integer`, `parse_approximate` or
+/// `parse_boolean`, of `text`, which isn't a value of its type, as `why`
+/// says.
 fn unparsable(
     builtin: hir::ReadOnlyBuiltin,
     text: &str,
@@ -3812,28 +3823,36 @@ fn unparsable(
     expr: &Expr,
 ) -> Diagnostic {
     let name = builtin.name();
-    let integer = builtin == hir::ReadOnlyBuiltin::ParseInteger;
-    let a = if integer {
-        "an integer"
-    } else {
-        "an approximate number"
-    };
     let quoted = hir::Value::Text(text.to_string());
+    let (a, rule) = match builtin {
+        hir::ReadOnlyBuiltin::ParseInteger => ("an integer", "`parse_integer` reads an integer as trendy writes one: decimal digits, with a `-` before them if it is negative, and nothing else, not even spaces".to_string()),
+        hir::ReadOnlyBuiltin::ParseApproximate => ("an approximate number", "`parse_approximate` reads a decimal number: digits, then a `.` and more digits if it has a fraction, then an exponent if it has one, `e` or `E`, an optional sign and digits, all with a `-` before them if it is negative, and nothing else, not even spaces".to_string()),
+        hir::ReadOnlyBuiltin::ParseBoolean => {
+            let words = |words: &[&str]| {
+                let words: Vec<String> = words.iter().map(|w| format!("`{w}`")).collect();
+                trendy_diag::disjoin(&words)
+            };
+            ("a boolean", format!(
+                "`parse_boolean` reads {} as true, and {} as false, in any case, and nothing else, not even spaces",
+                words(&trendy_text::TRUE_WORDS),
+                words(&trendy_text::FALSE_WORDS),
+            ))
+        }
+        other => unreachable!("`{}` reads no text", other.name()),
+    };
     match why {
-        hir::Unparsable::NotANumber => {
+        hir::Unparsable::Malformed => {
             let d = Diagnostic::error(
                 Code::Unparsable,
                 format!("{quoted} isn't {a}"),
                 expr.span(),
                 format!("`{name}` of text that isn't {a}"),
-            );
-            if !integer {
-                return d.with_note("`parse_approximate` reads a decimal number: digits, then a `.` and more digits if it has a fraction, then an exponent if it has one, `e` or `E`, an optional sign and digits, all with a `-` before them if it is negative, and nothing else, not even spaces");
-            }
-            let d = d.with_note("`parse_integer` reads an integer as trendy writes one: decimal digits, with a `-` before them if it is negative, and nothing else, not even spaces");
-            if hir::ReadOnlyBuiltin::ParseApproximate
-                .evaluate(&[("from".to_string(), quoted.clone())].into())
-                .is_ok()
+            )
+            .with_note(rule);
+            if builtin == hir::ReadOnlyBuiltin::ParseInteger
+                && hir::ReadOnlyBuiltin::ParseApproximate
+                    .evaluate(&[("from".to_string(), quoted.clone())].into())
+                    .is_ok()
             {
                 d.with_help("it is a decimal number with a fraction or an exponent, which `parse_approximate` reads as an approximate number")
             } else {
@@ -3847,7 +3866,7 @@ fn unparsable(
                 expr.span(),
                 format!("`{name}` of a number out of range"),
             );
-            if integer {
+            if builtin == hir::ReadOnlyBuiltin::ParseInteger {
                 d.with_note(format!(
                     "integers are 64-bit signed, from {} to {}",
                     i64::MIN,

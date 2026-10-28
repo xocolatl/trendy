@@ -445,6 +445,10 @@ fn booleans() {
             "false",
             "true",
             "false",
+            // `parsed` when compiling, then `N` and `TRUE` when running.
+            "true",
+            "false",
+            "true",
         ]
     );
 }
@@ -562,7 +566,7 @@ fn approximate_failures_stop_the_program() {
 }
 
 #[test]
-fn text_that_isnt_a_number_stops_the_program() {
+fn text_that_isnt_a_value_of_the_type_stops_the_program() {
     use trendy_diag::Code;
     // `t` is known only when the program runs, so each fails then, after
     // writing 1.
@@ -598,6 +602,8 @@ fn text_that_isnt_a_number_stops_the_program() {
             "1e400",
             "is out of an approximate number's range",
         ),
+        ("boolean_space", "parse_boolean", "yes ", "isn't a boolean"),
+        ("boolean_word", "parse_boolean", "on", "isn't a boolean"),
     ];
     for (name, operator, text, why) in cases {
         let (code, stderr) = run_source(&format!("parse_{name}"), &program(operator, text));

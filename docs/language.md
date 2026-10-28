@@ -762,6 +762,11 @@ builtin operator parse_integer{from: text}: integer;
    exponent. Other text fails (R0014), as does a number out of range. */
 builtin operator parse_approximate{from: text}: approximate;
 
+/* The boolean `from` writes: true for `true`, `t`, `yes`, `y` or `1`,
+   and false for `false`, `f`, `no`, `n` or `0`, in any case, and nothing
+   else, not even spaces. Other text fails (R0014). */
+builtin operator parse_boolean{from: text}: boolean;
+
 /* Read the lines of the text file at `path` into `lines`, in the file's
    order, so that its first line is the array's element 1. `path` is
    relative to the directory the program runs in, unless it is absolute.
@@ -1006,8 +1011,9 @@ operator main{} [
 
 **`to_text{from: any type}: text`**,
 **`to_approximate{from: integer}: approximate`**,
-**`parse_integer{from: text}: integer`** and
-**`parse_approximate{from: text}: approximate`** convert values, which
+**`parse_integer{from: text}: integer`**,
+**`parse_approximate{from: text}: approximate`** and
+**`parse_boolean{from: text}: boolean`** convert values, which
 never convert implicitly: *The Third Manifesto* allows no coercion, only
 explicit conversions such as Tutorial D's `CAST_AS_CHAR` (chapter 3).
 
@@ -1030,16 +1036,24 @@ explicit conversions such as Tutorial D's `CAST_AS_CHAR` (chapter 3).
   decimals data files write, though a literal needs its exponent: in the
   source, only the literal's form says its type, which is known here. A
   number too small to tell from zero is zero, and there is one zero.
-- **Text that isn't a number of the type fails** (R0014), as does a number
+- **`parse_boolean` reads the words data writes booleans with:** `true`,
+  `t`, `yes`, `y` and `1` for true, and `false`, `f`, `no`, `n` and `0`
+  for false, in any case, so `TRUE`, `Yes` and `N` too, but not ` yes`,
+  with a space, nor `on`. It reads what `to_text` writes, `true` and
+  `false`. Text that writes a boolean otherwise is compared with the
+  text for true instead: `answer = "on"`.
+- **Text that isn't a value of the type fails** (R0014), as does a number
   out of its range: when compiling, if the text is known then, and
   otherwise when the program runs, which writes the text, as in
   `error[R0014]: "4.5" isn't an integer`.
 - **The errors fix it:** a value of the wrong type where text or an
   approximate number is expected, as in `"n = " || n` or `x * n`, has a fix
-  that converts it, and so does text where a number is expected, which
-  is parsed, unless it is known when compiling: a literal of a number,
-  as in `"42"`, is rewritten as one instead. `parseInt`, `parseFloat`,
-  `atoi` and `atof` are fixed to `parse_integer` and `parse_approximate`.
+  that converts it, and so does text where a number or a boolean is
+  expected, which is parsed, unless it is known when compiling: text
+  that parses, as in `"42"` or `"yes"`, is rewritten as the literal of
+  its value instead. `parseInt`, `parseFloat`, `atoi`, `atof`,
+  `parseBoolean` and `ParseBool` are fixed to `parse_integer`,
+  `parse_approximate` and `parse_boolean`.
 
 ```trendy
 var cities := relation {
@@ -1052,16 +1066,18 @@ operator describe{city: text, people: integer} [
     call debug_value{v: city || " has " || to_text{from: people} || " people"};
 ];
 
-/* A city's people and area, from text, read when the program runs. */
-operator read{people: text, km2: text} [
+/* A city's people, area and whether it is a capital, from text, read
+   when the program runs. */
+operator read{people: text, km2: text, capital: text} [
     call debug_value{v: parse_integer{from: people}};
     call debug_value{v: parse_approximate{from: km2}};
+    call debug_value{v: parse_boolean{from: capital}};
 ];
 
 operator main{} [
     call debug_table{r: densities{city, density}};
     call describe{city: "Lima", people: 10883000};
-    call read{people: "8435700", km2: "3358.6"};
+    call read{people: "8435700", km2: "3358.6", capital: "Y"};
 ];
 ```
 
@@ -1498,7 +1514,7 @@ and they are ordered numerically.
 Values never convert to another type implicitly, as *The Third Manifesto*
 requires. An integer literal can't initialize an `approximate`: write `1e0`,
 not `1`. Other values convert explicitly, with `to_approximate`,
-`to_text`, `parse_integer` and `parse_approximate` (see
+`to_text`, `parse_integer`, `parse_approximate` and `parse_boolean` (see
 [The prelude](#the-prelude)).
 
 ```trendy,error
@@ -3823,6 +3839,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `float(n)`, `n as f64`, `CAST(n AS DOUBLE PRECISION)`, `CAST_AS_RATIONAL (N)` | `to_approximate{from: n}` |
 | `int(s)`, `parseInt(s)`, `atoi(s)`, `CAST(s AS INTEGER)`, `CAST_AS_INTEGER (S)` | `parse_integer{from: s}` |
 | `float(s)`, `parseFloat(s)`, `atof(s)`, `CAST(s AS DOUBLE PRECISION)` | `parse_approximate{from: s}` |
+| `Boolean.parseBoolean(s)`, `strconv.ParseBool(s)`, `CAST(s AS BOOLEAN)` | `parse_boolean{from: s}` |
 | `lines = readLines(path)`, `File.readlines(path)`, `File.ReadAllLines(path)` | `call load_text_file{path: path, out lines: lines};`, an array of the lines |
 | `{ x: 1 }`, `TUPLE { X 1 }` | `tuple { x: 1 }` |
 | `type Home = { … }`, `interface Home { … }`, `struct Home { … }` | `heading home := { … };`, whose types are `relation home` and `tuple home` |

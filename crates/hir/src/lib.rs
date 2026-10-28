@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-pub use trendy_numeric::Unparsable;
+pub use trendy_text::Unparsable;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program {
@@ -370,6 +370,8 @@ pub enum ReadOnlyBuiltin {
     ParseInteger,
     /// The approximate number nearest the decimal number a text writes.
     ParseApproximate,
+    /// The boolean a text writes.
+    ParseBoolean,
 }
 
 /// The update operators the compiler implements, which `call` invokes:
@@ -388,7 +390,7 @@ pub enum UpdateBuiltin {
 }
 
 impl Builtin {
-    pub const ALL: [Builtin; 13] = [
+    pub const ALL: [Builtin; 14] = [
         Builtin::Update(UpdateBuiltin::DebugValue),
         Builtin::Update(UpdateBuiltin::DebugTable),
         Builtin::ReadOnly(ReadOnlyBuiltin::Count),
@@ -401,6 +403,7 @@ impl Builtin {
         Builtin::ReadOnly(ReadOnlyBuiltin::ToApproximate),
         Builtin::ReadOnly(ReadOnlyBuiltin::ParseInteger),
         Builtin::ReadOnly(ReadOnlyBuiltin::ParseApproximate),
+        Builtin::ReadOnly(ReadOnlyBuiltin::ParseBoolean),
         Builtin::Update(UpdateBuiltin::LoadTextFile),
     ];
 
@@ -452,7 +455,8 @@ impl Builtin {
             Builtin::ReadOnly(
                 ReadOnlyBuiltin::ToApproximate
                 | ReadOnlyBuiltin::ParseInteger
-                | ReadOnlyBuiltin::ParseApproximate,
+                | ReadOnlyBuiltin::ParseApproximate
+                | ReadOnlyBuiltin::ParseBoolean,
             )
             | Builtin::Update(UpdateBuiltin::LoadTextFile) => Vec::new(),
             Builtin::ReadOnly(ReadOnlyBuiltin::Min | ReadOnlyBuiltin::Max) => {
@@ -482,7 +486,9 @@ impl Builtin {
                 [constant("from", Type::Scalar(Scalar::Integer))].into()
             }
             Builtin::ReadOnly(
-                ReadOnlyBuiltin::ParseInteger | ReadOnlyBuiltin::ParseApproximate,
+                ReadOnlyBuiltin::ParseInteger
+                | ReadOnlyBuiltin::ParseApproximate
+                | ReadOnlyBuiltin::ParseBoolean,
             ) => [constant("from", Type::Scalar(Scalar::Text))].into(),
             Builtin::Update(UpdateBuiltin::LoadTextFile) => [
                 constant("path", Type::Scalar(Scalar::Text)),
@@ -547,6 +553,7 @@ impl ReadOnlyBuiltin {
             ReadOnlyBuiltin::ToApproximate => "to_approximate",
             ReadOnlyBuiltin::ParseInteger => "parse_integer",
             ReadOnlyBuiltin::ParseApproximate => "parse_approximate",
+            ReadOnlyBuiltin::ParseBoolean => "parse_boolean",
         }
     }
 
@@ -568,6 +575,7 @@ impl ReadOnlyBuiltin {
             ReadOnlyBuiltin::ToApproximate | ReadOnlyBuiltin::ParseApproximate => {
                 Type::Scalar(Scalar::Approximate)
             }
+            ReadOnlyBuiltin::ParseBoolean => Type::Scalar(Scalar::Boolean),
         }
     }
 
@@ -579,8 +587,8 @@ impl ReadOnlyBuiltin {
     ///
     /// Returns why there is no value: `min` or `max` of a relation without
     /// tuples, which has neither, a `sum` or `product` out of its type's
-    /// range, or `parse_integer` or `parse_approximate` of text that isn't
-    /// a number of its type.
+    /// range, or `parse_integer`, `parse_approximate` or `parse_boolean` of
+    /// text that isn't a value of its type.
     ///
     /// # Panics
     ///
@@ -632,19 +640,30 @@ impl ReadOnlyBuiltin {
                 Value::Integer(n) => Ok(Value::Approximate(Approximate::nearest(n))),
                 ref other => panic!("`to_approximate` of {other:?}"),
             },
-            ReadOnlyBuiltin::ParseInteger | ReadOnlyBuiltin::ParseApproximate => {
-                let Value::Text(text) = &args["from"] else {
-                    panic!("`{}` of {:?}", self.name(), args["from"]);
-                };
-                let value = if self == ReadOnlyBuiltin::ParseInteger {
-                    trendy_numeric::parse_integer(text).map(Value::Integer)
-                } else {
-                    trendy_numeric::parse_approximate(text)
-                        .map(|x| Value::Approximate(Approximate::new(x)))
-                };
-                value.map_err(BuiltinFailure::Unparsable)
-            }
+            ReadOnlyBuiltin::ParseInteger => self.parsed(args, |text| {
+                trendy_numeric::parse_integer(text).map(Value::Integer)
+            }),
+            ReadOnlyBuiltin::ParseApproximate => self.parsed(args, |text| {
+                trendy_numeric::parse_approximate(text)
+                    .map(|x| Value::Approximate(Approximate::new(x)))
+            }),
+            ReadOnlyBuiltin::ParseBoolean => self.parsed(args, |text| {
+                trendy_text::parse_boolean(text).map(Value::Boolean)
+            }),
         }
+    }
+
+    /// The value of a call of this built-in, which reads a value from the
+    /// text `args` give `from` with `read`.
+    fn parsed(
+        self,
+        args: &BTreeMap<String, Value>,
+        read: impl Fn(&str) -> Result<Value, Unparsable>,
+    ) -> Result<Value, BuiltinFailure> {
+        let Value::Text(text) = &args["from"] else {
+            panic!("`{}` of {:?}", self.name(), args["from"]);
+        };
+        read(text).map_err(BuiltinFailure::Unparsable)
     }
 }
 
@@ -655,8 +674,8 @@ pub enum BuiltinFailure {
     NoTuples,
     /// An operator's failure, such as a `sum` out of its type's range.
     Failure(Failure),
-    /// `parse_integer` or `parse_approximate` of text that isn't a number
-    /// of its type.
+    /// `parse_integer`, `parse_approximate` or `parse_boolean` of text
+    /// that isn't a value of its type.
     Unparsable(Unparsable),
 }
 

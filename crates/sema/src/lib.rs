@@ -1014,6 +1014,7 @@ mod tests {
             "n * 2 = x",
             "n + t",
             "x * t",
+            "t and true",
         ]);
         let fixed = show(&[
             "\"n = \" || to_text{from: n}",
@@ -1025,6 +1026,7 @@ mod tests {
             "to_approximate{from: n * 2} = x",
             "n + parse_integer{from: t}",
             "x * parse_approximate{from: t}",
+            "parse_boolean{from: t} and true",
         ])
         .replace("[ n ]", "[ to_text{from: n} ]");
         assert_eq!(fix(&source), fixed);
@@ -1133,6 +1135,22 @@ mod tests {
     }
 
     #[test]
+    fn booleans_are_parsed_when_compiling() {
+        let vars = variables(
+            "var a := parse_boolean{from: \"Yes\"};\nvar b := parse_boolean{from: \"0\"};\nvar c := parse_boolean{from: to_text{from: true}};",
+        );
+        let values: Vec<&hir::Value> = vars.iter().map(|v| &v.init).collect();
+        assert_eq!(
+            values,
+            [
+                &hir::Value::Boolean(true),
+                &hir::Value::Boolean(false),
+                &hir::Value::Boolean(true)
+            ]
+        );
+    }
+
+    #[test]
     fn text_that_isnt_a_number_fails_when_compiling() {
         let failure = |init: &str| {
             let errors = errors(&format!(
@@ -1158,6 +1176,16 @@ mod tests {
         assert_eq!(message, "\" 2.5\" isn't an approximate number");
         let (message, _) = failure("parse_approximate{from: \"1e400\"}");
         assert_eq!(message, "\"1e400\" is out of an approximate number's range");
+        // A boolean's words, and nothing around them.
+        let errors = errors(&format!("var v := parse_boolean{{from: \"yes \"}};{MAIN}"));
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].message, "\"yes \" isn't a boolean");
+        assert_eq!(
+            errors[0].notes,
+            [
+                "`parse_boolean` reads `true`, `t`, `yes`, `y` or `1` as true, and `false`, `f`, `no`, `n` or `0` as false, in any case, and nothing else, not even spaces"
+            ]
+        );
         // Through an operator, and for a tuple.
         let (message, _) = failure("read{t: \"x\"}");
         assert_eq!(message, "\"x\" isn't an integer");
@@ -1216,12 +1244,14 @@ mod tests {
     #[test]
     fn boolean_mismatch_fixes() {
         let source = format!(
-            "var a: boolean := 1;\nvar b: boolean := \"false\";\nvar c: text := true;\nvar d: bool;\nvar e: boolean := 2;{MAIN}"
+            "var a: boolean := 1;\nvar b: boolean := \"false\";\nvar c: text := true;\nvar d: bool;\nvar e: boolean := 2;\nvar f: boolean := \"Yes\";\nvar g: boolean := \"n\";\nvar h: boolean := \"on\";{MAIN}"
         );
+        // Text that `parse_boolean` reads is its literal, and other text
+        // is still text.
         assert_eq!(
             fix(&source),
             format!(
-                "var a: boolean := true;\nvar b: boolean := false;\nvar c: text := \"true\";\nvar d: boolean;\nvar e: integer := 2;{MAIN}"
+                "var a: boolean := true;\nvar b: boolean := false;\nvar c: text := \"true\";\nvar d: boolean;\nvar e: integer := 2;\nvar f: boolean := true;\nvar g: boolean := false;\nvar h: text := \"on\";{MAIN}"
             )
         );
     }
@@ -5898,7 +5928,8 @@ mod tests {
             );
             assert!(analyze_str(&fixed).is_ok(), "{fixed}");
         }
-        // Numbers: JavaScript's, C's and Go's, and Java's.
+        // Numbers: JavaScript's, C's and Go's, and Java's; and booleans:
+        // Java's and Go's.
         for (written, arg, ours) in [
             ("parseInt", "\"42\"", "parse_integer{from: "),
             ("atoi", "\"42\"", "parse_integer{from: "),
@@ -5906,6 +5937,8 @@ mod tests {
             ("parseFloat", "\"2.5\"", "parse_approximate{from: "),
             ("atof", "\"2.5\"", "parse_approximate{from: "),
             ("parseDouble", "\"2.5\"", "parse_approximate{from: "),
+            ("parseBoolean", "\"yes\"", "parse_boolean{from: "),
+            ("ParseBool", "\"yes\"", "parse_boolean{from: "),
         ] {
             let source = format!(
                 "operator main{{}} [\n    call debug_value{{v: {written}{{{arg}}}}};\n];\n"

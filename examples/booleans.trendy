@@ -6,6 +6,9 @@ var chain := f implies f implies f;
    matter: whether every one is true, and whether an odd number are. */
 var every_one := and{t, u, not f};
 var odd := xor{t, u, f};
+/* A boolean written in text: `true`, `t`, `yes`, `y` or `1`, or
+   `false`, `f`, `no`, `n` or `0`, in any case. */
+var parsed := parse_boolean{from: "Yes"};
 /* Guards: of the operands of `and`, `or` and `implies`, those that can't
    fail are computed first, wherever they are written, and those that can
    only if they don't decide the result, in a list as in a chain. So
@@ -30,6 +33,11 @@ operator guards{r: relation { x: integer, y: integer }, zero: integer} [
     call debug_value{v: and{5 div zero > 1, zero <> 0}};
 ];
 
+/* The boolean `t` writes, read when the program runs. */
+operator parse{t: text} [
+    call debug_value{v: parse_boolean{from: t}};
+];
+
 operator table{a: boolean, b: boolean} [
     call debug_value{v: not a};
     call debug_value{v: a and b};
@@ -51,4 +59,7 @@ operator main{} [
     call debug_value{v: not (t and f) xor t};
     call debug_table{r: steep};
     call guards{r: points, zero: 0};
+    call debug_value{v: parsed};
+    call parse{t: "N"};
+    call parse{t: "TRUE"};
 ];

@@ -600,6 +600,9 @@ dependencies = [
 [[package]]
 name = "trendy_numeric"
 version = "0.1.0"
+dependencies = [
+ "trendy_text",
+]
 
 [[package]]
 name = "trendy_opt"
@@ -644,6 +647,7 @@ dependencies = [
  "trendy_parser",
  "trendy_prelude",
  "trendy_syntax",
+ "trendy_text",
 ]
 
 [[package]]

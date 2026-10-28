@@ -1137,8 +1137,9 @@ pub(crate) enum Failed {
     /// Two changes to an array overlap: they set one element, or one sets
     /// an element of the other's.
     Overlap,
-    /// This built-in, `parse_integer` or `parse_approximate`, of `text`,
-    /// which isn't a number of its type, as `why` says.
+    /// This built-in, `parse_integer`, `parse_approximate` or
+    /// `parse_boolean`, of `text`, which isn't a value of its type, as
+    /// `why` says.
     Unparsable {
         builtin: hir::ReadOnlyBuiltin,
         text: String,
