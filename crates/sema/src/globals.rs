@@ -16,7 +16,7 @@ use crate::check::{Checker, Lookup, Names};
 use crate::locals::{self, Declaration, Local, Locals};
 use crate::operators::{Operators, Signature};
 use crate::types::{self, Expected, Origin};
-use crate::{Namespaces, Prelude, errors, keys, ops};
+use crate::{Namespaces, Prelude, Sites, errors, keys, ops};
 
 /// What the globals evaluate to.
 pub(crate) struct Evaluated {
@@ -31,6 +31,8 @@ pub(crate) struct Evaluated {
 
 /// Evaluates the globals, each when first needed.
 pub(crate) struct Globals<'a> {
+    /// Where each place in the file is.
+    sites: &'a Sites<'a>,
     namespaces: &'a Namespaces,
     operators: &'a Operators,
     /// The first declaration of each variable, by name.
@@ -88,6 +90,7 @@ impl<'a> Globals<'a> {
         operators: &'a Operators,
         decls: &'a HashMap<String, VarDecl>,
         ids: &'a HashMap<String, hir::VariableId>,
+        sites: &'a Sites<'a>,
     ) -> Self {
         let values: HashMap<hir::OperatorId, hir::Expr> = prelude
             .operators()
@@ -101,6 +104,7 @@ impl<'a> Globals<'a> {
             })
             .collect();
         Globals {
+            sites,
             namespaces,
             operators,
             decls,
@@ -301,6 +305,10 @@ impl<'a> Globals<'a> {
         let statements: Vec<ast::Statement> = body.statements().collect();
         let written_value = body.value();
         for (i, statement) in statements.iter().enumerate() {
+            // Where each value it gives a local variable is computed.
+            let site = self
+                .sites
+                .at(trendy_syntax::span(statement.syntax().text_range()));
             let mut names = ReadOnlyNames {
                 globals: self,
                 within: signature.id,
@@ -321,18 +329,18 @@ impl<'a> Globals<'a> {
                     let checked = locals::local(decl, &signature.types, &mut names, errors);
                     let (local, value) = checked.unzip();
                     match (locals.declare(decl, local), value) {
-                        (Some(id), Some(value)) => lets.push((id, value)),
+                        (Some(id), Some(value)) => lets.push((id, hir::Expr::at(site, value))),
                         _ => valid = false,
                     }
                 }
                 ast::Statement::Assign(stmt) => {
                     let clauses: Vec<_> = stmt.clauses().collect();
                     let assigned = assign::statement(&clauses, &mut names, errors);
-                    valid &= reassigned(assigned, &mut locals, &mut lets);
+                    valid &= reassigned(assigned, site, &mut locals, &mut lets);
                 }
                 ast::Statement::Block(block) => {
                     let assigned = assign::block(block, &mut names, errors);
-                    valid &= reassigned(assigned, &mut locals, &mut lets);
+                    valid &= reassigned(assigned, site, &mut locals, &mut lets);
                 }
                 ast::Statement::Call(stmt) => {
                     errors.push(errors::call_in_read_only(&signature.name, stmt));
@@ -361,7 +369,11 @@ impl<'a> Globals<'a> {
             ty,
             origin: Origin::Type(written.clone()),
         });
-        let value = Checker::new(&mut names).expr(&written_value, expected.as_ref(), errors)?;
+        let site = names.site(written_value.span());
+        let value = hir::Expr::at(
+            site,
+            Checker::new(&mut names).expr(&written_value, expected.as_ref(), errors)?,
+        );
         valid.then(|| {
             let value = lets.into_iter().rev().fold(value, |body, (id, value)| {
                 hir::Expr::Let(id, Box::new(value), Box::new(body))
@@ -373,11 +385,13 @@ impl<'a> Globals<'a> {
 
 /// Whether `assigned`, an assignment statement in a read-only operator, of
 /// its local variables, is valid, each local variable it assigns then given
-/// a new one, which has the value from there on, in `lets`. The values are
-/// computed from the local variables before any is assigned, so the
-/// statement's assignments are still made at once.
+/// a new one, which has the value from there on, in `lets`, computed at
+/// `site`, the statement's. The values are computed from the local
+/// variables before any is assigned, so the statement's assignments are
+/// still made at once.
 fn reassigned(
     assigned: Option<hir::Statement>,
+    site: hir::Site,
     locals: &mut Locals,
     lets: &mut Vec<(hir::LocalId, hir::Expr)>,
 ) -> bool {
@@ -388,7 +402,7 @@ fn reassigned(
         let hir::Target::Local(id) = assignment.target else {
             unreachable!("a read-only operator assigns only its local variables");
         };
-        lets.push((locals.reassigned(id), assignment.value));
+        lets.push((locals.reassigned(id), hir::Expr::at(site, assignment.value)));
     }
     true
 }
@@ -396,6 +410,10 @@ fn reassigned(
 impl Names for Globals<'_> {
     fn namespaces(&self) -> &Namespaces {
         self.namespaces
+    }
+
+    fn site(&self, at: Span) -> hir::Site {
+        self.sites.at(at)
     }
 
     fn operators(&self) -> &Operators {
@@ -467,6 +485,10 @@ impl ReadOnlyNames<'_, '_, '_> {
 impl Names for ReadOnlyNames<'_, '_, '_> {
     fn namespaces(&self) -> &Namespaces {
         self.globals.namespaces
+    }
+
+    fn site(&self, at: Span) -> hir::Site {
+        self.globals.sites.at(at)
     }
 
     fn operators(&self) -> &Operators {

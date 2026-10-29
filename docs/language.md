@@ -21,6 +21,20 @@ var greeting: text := "hello";
 operator main{} [];
 ```
 
+A program that fails while it runs, as when an integer overflows (R0001),
+stops, writing the error to stderr as the compiler writes one, then where
+the program was, and exits with status 1. Where it was is the statement
+running, or, in a value block, such as a read-only operator's body, the
+statement that gives a local variable the value being computed, or the
+value the block ends with. Here, a recipe in `projects/shopping` that
+serves no one, by its file's line, divides by zero where `shopping_list`
+scales each ingredient to the people a meal is cooked for:
+
+```text
+error[R0002]: division by zero
+ --> projects/shopping/shopping.trendy:90:5
+```
+
 ## Operators
 
 ```trendy
@@ -2603,7 +2617,8 @@ or NaN, so every approximate number is finite and can be written as a
 literal. When the operands are known while compiling,
 this is a compile error (R0001 for overflow, R0002 for division by zero).
 Otherwise the program stops at that operator, writing the error to stderr,
-such as `error[R0001]: integer overflow`, and exits with status 1.
+such as `error[R0001]: integer overflow`, and where it was (see
+[Programs](#programs)), and exits with status 1.
 
 ```trendy,error
 var big := 9223372036854775807 + 1;

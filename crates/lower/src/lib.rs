@@ -9,8 +9,8 @@ use trendy_lir as lir;
 
 /// Translate HIR to LIR. Infallible: sema has already rejected bad programs.
 #[must_use]
-pub fn lower(program: &hir::Program) -> lir::Program {
-    let mut cx = Lowering::new();
+pub fn lower(program: &hir::Program, path: &str) -> lir::Program {
+    let mut cx = Lowering::new(path);
 
     let mut variable_data = Vec::new();
     for variable in &program.variables {
@@ -156,17 +156,58 @@ struct Lowering {
     /// The function of each operator and list of types lowered code calls
     /// it with, and whether a call of it makes a text, relation or array.
     functions_of: HashMap<(hir::OperatorId, Vec<hir::Type>), (lir::FunctionId, bool)>,
+    /// The program's source's path, as a failure writes it.
+    path: String,
+    /// Each site's data object, made once.
+    sites: HashMap<hir::Site, lir::DataId>,
+    /// Each file's path, as a text, made once.
+    paths: HashMap<hir::File, lir::Field>,
 }
 
 impl Lowering {
-    fn new() -> Self {
+    /// For the program whose source is at `path`.
+    fn new(path: &str) -> Self {
         Lowering {
             data: Vec::new(),
             descriptors: HashMap::new(),
             empty: None,
             functions: BTreeMap::new(),
             functions_of: HashMap::new(),
+            path: path.to_string(),
+            sites: HashMap::new(),
+            paths: HashMap::new(),
         }
+    }
+
+    /// The data object of `site`, laid out as `trendy_runtime::Site`: the
+    /// path of its file, the program's or `<prelude>`, as a text, then its
+    /// line and column.
+    fn site(&mut self, site: hir::Site) -> lir::DataId {
+        if let Some(&id) = self.sites.get(&site) {
+            return id;
+        }
+        let path = self.path_of(site.file);
+        let id = self.constant(vec![
+            path,
+            lir::Field::Usize(len(site.line)),
+            lir::Field::Usize(len(site.column)),
+        ]);
+        self.sites.insert(site, id);
+        id
+    }
+
+    /// The path of `file`, the program's or `<prelude>`, as a text.
+    fn path_of(&mut self, file: hir::File) -> lir::Field {
+        if let Some(path) = self.paths.get(&file) {
+            return path.clone();
+        }
+        let text = match file {
+            hir::File::Program => self.path.clone(),
+            hir::File::Prelude => "<prelude>".to_string(),
+        };
+        let path = self.value_field(&hir::Value::Text(text));
+        self.paths.insert(file, path.clone());
+        path
     }
 
     fn push(&mut self, data: lir::Data) -> lir::DataId {
@@ -340,6 +381,9 @@ struct FunctionBuilder<'a> {
     /// Where each tuple at hand is, innermost last: what `Current` refers
     /// to, inside an `Extend`'s values.
     tuples: Vec<lir::Place>,
+    /// The site the code built so far leaves the program at: the
+    /// statement's being lowered, or a value's in it, if any.
+    site: Option<hir::Site>,
 }
 
 /// Where a local variable is: its value's place, and whether the variable
@@ -416,6 +460,7 @@ impl<'a> FunctionBuilder<'a> {
             scoped: false,
             scope: None,
             tuples: Vec::new(),
+            site: None,
         };
         let variables: Vec<(usize, String)> = builder
             .params
@@ -483,7 +528,8 @@ impl<'a> FunctionBuilder<'a> {
     /// pointers null, so that one assigned again, when the block runs
     /// again, has none to give up.
     fn block(&mut self, block: &hir::Block, cx: &mut Lowering) {
-        for statement in &block.statements {
+        for (site, statement) in &block.statements {
+            self.at(Some(*site), cx);
             self.statement(statement, cx);
         }
         for id in &block.locals {
@@ -501,6 +547,27 @@ impl<'a> FunctionBuilder<'a> {
                 });
             }
         }
+    }
+
+    /// Set the site the program is at to `site`, if there is one, so that
+    /// a failure from here on writes it.
+    fn at(&mut self, site: Option<hir::Site>, cx: &mut Lowering) {
+        self.site = site;
+        if let Some(site) = site {
+            self.insts.push(lir::Inst::Site(cx.site(site)));
+        }
+    }
+
+    /// Where `expr`, computed at `site`, is: the site set while it is
+    /// computed, then the one before, if there is one, again.
+    fn place_at(&mut self, site: hir::Site, expr: &hir::Expr, cx: &mut Lowering) -> lir::Place {
+        let outer = self.site;
+        self.at(Some(site), cx);
+        let place = self.place(expr, cx);
+        if outer.is_some() {
+            self.at(outer, cx);
+        }
+        place
     }
 
     /// The function, its last block ended with a return, with a result
@@ -648,6 +715,9 @@ impl<'a> FunctionBuilder<'a> {
             hir::Check::After => run,
         };
         self.end_block(lir::Terminator::Jump(first), test);
+        // The condition is the loop's, though its body's statements ran
+        // before it.
+        self.at(self.site, cx);
         // Copied, so that nothing its scope owns is read once it ends.
         let decided = self.slot(lir::Layout::U8);
         self.scoped(|this| {
@@ -790,6 +860,8 @@ impl<'a> FunctionBuilder<'a> {
                     args,
                     result: None,
                 });
+                // The callee leaves the program at its own site.
+                self.at(self.site, cx);
                 // Each variable it updates is assigned its parameter's
                 // value as it ends, which its keys are checked against.
                 for target in call.updated.values() {
@@ -904,6 +976,8 @@ impl<'a> FunctionBuilder<'a> {
             args,
             result: Some(dst.clone()),
         });
+        // The callee leaves the program at its own site.
+        self.at(self.site, cx);
         dst
     }
 
@@ -1278,6 +1352,7 @@ impl<'a> FunctionBuilder<'a> {
                 .expect("a local variable is placed before it is used")
                 .value
                 .clone(),
+            hir::Expr::At(site, expr) => self.place_at(*site, expr, cx),
             hir::Expr::Let(id, value, body) => {
                 let value = self.place(value, cx);
                 self.check_keys(&hir::Target::Local(*id), &value, cx);
@@ -2953,6 +3028,33 @@ fn len(n: usize) -> u64 {
 mod tests {
     use super::*;
 
+    /// `statements`, each at a site of its own, on its own line.
+    fn sited(statements: Vec<hir::Statement>) -> Vec<(hir::Site, hir::Statement)> {
+        statements
+            .into_iter()
+            .enumerate()
+            .map(|(i, statement)| {
+                let site = hir::Site {
+                    file: hir::File::Program,
+                    line: i + 1,
+                    column: 5,
+                };
+                (site, statement)
+            })
+            .collect()
+    }
+
+    /// The program lowered, as if its source were `test.trendy`, without
+    /// the sites it sets, which only
+    /// [`statements_and_values_set_their_sites`] is about.
+    fn lower_program(program: &hir::Program) -> lir::Program {
+        let mut lowered = lower(program, "test.trendy");
+        for block in lowered.functions.iter_mut().flat_map(|f| &mut f.blocks) {
+            block.insts.retain(|i| !matches!(i, lir::Inst::Site(_)));
+        }
+        lowered
+    }
+
     fn integer() -> hir::Type {
         hir::Type::Scalar(hir::Scalar::Integer)
     }
@@ -2968,7 +3070,7 @@ mod tests {
             kind: hir::OperatorKind::Update {
                 locals: Vec::new(),
                 body: hir::Block {
-                    statements: body,
+                    statements: sited(body),
                     locals: Vec::new(),
                 },
             },
@@ -3020,8 +3122,79 @@ mod tests {
     }
 
     #[test]
+    fn statements_and_values_set_their_sites() {
+        // `main` calls `f`, then loops while `x < 1`, writing `x`; each
+        // statement on a line of its own.
+        let x = || hir::Expr::Variable(hir::VariableId(0));
+        let less = hir::Expr::Binary(
+            hir::BinaryOp::Compare(
+                hir::Comparison::Less,
+                hir::Compared::Scalar(hir::Scalar::Integer),
+            ),
+            Box::new(x()),
+            Box::new(hir::Expr::Constant(hir::Value::Integer(1))),
+        );
+        let body = hir::Block {
+            statements: sited(vec![call(0, vec![("v", x())])]),
+            locals: Vec::new(),
+        };
+        let lowered = lower(
+            &program(
+                vec![
+                    debug_value(),
+                    user("f", &[], vec![call(0, vec![("v", x())])]),
+                    user(
+                        "main",
+                        &[],
+                        vec![
+                            call(1, vec![]),
+                            hir::Statement::Loop(less, body, hir::Check::Before),
+                        ],
+                    ),
+                ],
+                vec![variable("x", hir::Value::Integer(0))],
+            ),
+            "test.trendy",
+        );
+        // Each site's line, its column 5 and its path the program's.
+        let line = |inst: &lir::Inst| {
+            let lir::Inst::Site(id) = inst else {
+                return None;
+            };
+            let fields = &lowered.data[id.0].fields;
+            let lir::Field::Struct(path) = &fields[0] else {
+                panic!("a site's path is a text: {fields:?}");
+            };
+            assert_eq!(path[1], lir::Field::Usize(len("test.trendy".len())));
+            assert_eq!(fields[2], lir::Field::Usize(5));
+            match fields[1] {
+                lir::Field::Usize(line) => Some(line),
+                _ => panic!("a site's line is a number: {fields:?}"),
+            }
+        };
+        let main = &lowered.functions[0];
+        let lines = |block: &lir::Block| block.insts.iter().filter_map(line).collect::<Vec<_>>();
+        // The call's statement, again once `f` returns, which sets its
+        // own, then the loop's.
+        assert_eq!(lines(&main.blocks[0]), [1, 1, 2]);
+        assert!(matches!(main.blocks[0].insts[1], lir::Inst::Call { .. }));
+        // The loop's condition is the loop's, though its body ran before.
+        let test = main
+            .blocks
+            .iter()
+            .find(|b| {
+                b.insts
+                    .iter()
+                    .any(|i| matches!(i, lir::Inst::Binary { .. }))
+            })
+            .expect("the loop's condition is computed");
+        assert!(line(&test.insts[0]) == Some(2), "{:?}", test.insts);
+        assert_eq!(lines(&lowered.functions[1].blocks[0]), [1]);
+    }
+
+    #[test]
     fn built_ins_dont_become_functions() {
-        let lowered = lower(&program(
+        let lowered = lower_program(&program(
             vec![debug_value(), user("main", &[], vec![])],
             vec![],
         ));
@@ -3032,7 +3205,7 @@ mod tests {
 
     #[test]
     fn values_point_to_constant_buffers_after_a_header() {
-        let lowered = lower(&program(
+        let lowered = lower_program(&program(
             vec![user("main", &[], vec![])],
             vec![
                 variable("i", hir::Value::Integer(-7)),
@@ -3063,7 +3236,7 @@ mod tests {
     fn relations_point_to_an_array_of_tuples() {
         let tuple = |n| hir::TupleValue::new([("a".to_string(), hir::Value::Integer(n))].into());
         let heading = hir::Heading::new([("a".to_string(), integer())].into());
-        let lowered = lower(&program(
+        let lowered = lower_program(&program(
             vec![user("main", &[], vec![])],
             vec![variable(
                 "r",
@@ -3103,7 +3276,7 @@ mod tests {
                 vec![*a(), *b()],
             )),
         );
-        let lowered = lower(&program(
+        let lowered = lower_program(&program(
             vec![
                 debug_value(),
                 user("main", &[], vec![call(0, vec![("v", expr)])]),
@@ -3149,7 +3322,7 @@ mod tests {
             hir::UnaryOp::Negate(hir::Numeric::Integer),
             Box::new(hir::Expr::Binary(hir::BinaryOp::Mod, n(), n())),
         );
-        let lowered = lower(&program(
+        let lowered = lower_program(&program(
             vec![
                 debug_value(),
                 user("main", &[], vec![call(0, vec![("v", expr)])]),
@@ -3178,7 +3351,7 @@ mod tests {
         let t = || Box::new(hir::Expr::Variable(hir::VariableId(0)));
         let inner = hir::Expr::Binary(hir::BinaryOp::Concatenate, t(), t());
         let expr = hir::Expr::Binary(hir::BinaryOp::Concatenate, Box::new(inner), t());
-        let lowered = lower(&program(
+        let lowered = lower_program(&program(
             vec![
                 debug_value(),
                 user("main", &[], vec![call(0, vec![("v", expr)])]),
@@ -3226,7 +3399,7 @@ mod tests {
     fn assignments_read_every_value_before_assigning_any() {
         // `a := b, b := a;` swaps them.
         let var = |i| hir::Expr::Variable(hir::VariableId(i));
-        let lowered = lower(&program(
+        let lowered = lower_program(&program(
             vec![user(
                 "main",
                 &[],
@@ -3284,7 +3457,7 @@ mod tests {
             args: BTreeMap::new(),
             updated: [("n".to_string(), hir::Target::Variable(hir::VariableId(0)))].into(),
         });
-        let lowered = lower(&program(
+        let lowered = lower_program(&program(
             vec![user("main", &[], vec![call]), set],
             vec![variable("a", hir::Value::Integer(1))],
         ));
@@ -3355,7 +3528,7 @@ mod tests {
         }];
         let a = hir::Expr::Variable(hir::VariableId(0));
         let new_value = hir::Expr::WithElements(Box::new(a), changes.clone());
-        let lowered = lower(&program(
+        let lowered = lower_program(&program(
             vec![user("main", &[], vec![assign(vec![(0, new_value)])])],
             vec![variable("a", integers(&[1, 2, 3]))],
         ));
@@ -3400,7 +3573,7 @@ mod tests {
         // a copy, which the statement holds.
         let value =
             hir::Expr::WithElements(Box::new(hir::Expr::Constant(integers(&[1, 2, 3]))), changes);
-        let lowered = lower(&program(
+        let lowered = lower_program(&program(
             vec![
                 debug_value(),
                 user("main", &[], vec![call(0, vec![("v", value)])]),
@@ -3446,7 +3619,7 @@ mod tests {
             element: integer(),
             elements: vec![hir::Value::Integer(0); 3],
         });
-        let lowered = lower(&program(
+        let lowered = lower_program(&program(
             vec![user("main", &["i", "j"], vec![assign(vec![(0, changed)])])],
             vec![variable("a", array)],
         ));
@@ -3463,7 +3636,7 @@ mod tests {
     #[test]
     fn assigned_texts_take_a_reference_to_their_bytes() {
         let t = hir::Expr::Variable(hir::VariableId(0));
-        let lowered = lower(&program(
+        let lowered = lower_program(&program(
             vec![user("main", &[], vec![assign(vec![(0, t)])])],
             vec![variable("t", hir::Value::Text("a".to_string()))],
         ));
@@ -3502,7 +3675,7 @@ mod tests {
             })
         };
         let var = |i| Box::new(hir::Expr::Variable(hir::VariableId(i)));
-        let lowered = lower(&program(
+        let lowered = lower_program(&program(
             vec![
                 debug_value(),
                 user(
@@ -3556,7 +3729,7 @@ mod tests {
             added,
             [("m".to_string(), n)].into(),
         );
-        let lowered = lower(&program(
+        let lowered = lower_program(&program(
             vec![
                 debug_value(),
                 user("main", &[], vec![call(0, vec![("v", extend)])]),
@@ -3622,7 +3795,7 @@ mod tests {
 
     #[test]
     fn calls_build_the_argument_tuple_in_a_slot() {
-        let lowered = lower(&program(
+        let lowered = lower_program(&program(
             vec![
                 user("f", &["a", "b"], vec![]),
                 user(
@@ -3663,13 +3836,19 @@ mod tests {
             base: lir::Base::Data(lir::DataId(id)),
             path: vec![0],
         };
+        // The constant `5`, among the other data, such as the sites'.
+        let five = lowered
+            .data
+            .iter()
+            .position(|d| d.fields == [lir::Field::I64(5)])
+            .expect("`5` is a constant");
         assert_eq!(
             main.blocks[0].insts,
             [
                 // `a`, then `b`: parameter name order.
                 lir::Inst::Copy {
                     dst: slot(0),
-                    src: data(1),
+                    src: data(five),
                     layout: lir::Layout::I64,
                 },
                 lir::Inst::Copy {
@@ -3703,7 +3882,7 @@ mod tests {
                 body: hir::Block::default(),
             },
         };
-        let lowered = lower(&program(
+        let lowered = lower_program(&program(
             vec![
                 f,
                 user(
@@ -3763,7 +3942,7 @@ mod tests {
             args: [("t".to_string(), hir::Expr::Variable(hir::VariableId(0)))].into(),
             updated: BTreeMap::new(),
         });
-        let lowered = lower(&program(
+        let lowered = lower_program(&program(
             vec![
                 debug_value(),
                 shout,
@@ -3845,12 +4024,12 @@ mod tests {
             kind: hir::OperatorKind::Update {
                 locals: Vec::new(),
                 body: hir::Block {
-                    statements: vec![hir::Statement::Call(hir::Call {
+                    statements: sited(vec![hir::Statement::Call(hir::Call {
                         operator: hir::OperatorId(0),
                         types: vec![hir::Type::Parameter(parameter)],
                         args: [("v".to_string(), hir::Expr::Parameter("v".to_string()))].into(),
                         updated: BTreeMap::new(),
-                    })],
+                    })]),
                     locals: Vec::new(),
                 },
             },
@@ -3869,7 +4048,7 @@ mod tests {
             call(&integer(), hir::Value::Integer(2)),
             call(&text, hir::Value::Text("Lagos".to_string())),
         ];
-        let lowered = lower(&program(
+        let lowered = lower_program(&program(
             vec![debug_value(), show, user("main", &[], main_body)],
             vec![],
         ));
@@ -3913,7 +4092,7 @@ mod tests {
             args: [("r".to_string(), hir::Expr::Variable(hir::VariableId(0)))].into(),
             updated: BTreeMap::new(),
         });
-        let lowered = lower(&program(
+        let lowered = lower_program(&program(
             vec![
                 debug_value(),
                 count,
@@ -3974,7 +4153,7 @@ mod tests {
             args: [("r".to_string(), hir::Expr::Variable(hir::VariableId(0)))].into(),
             updated: BTreeMap::new(),
         });
-        let lowered = lower(&program(
+        let lowered = lower_program(&program(
             vec![
                 debug_value(),
                 max,
@@ -4038,16 +4217,16 @@ mod tests {
             kind: hir::OperatorKind::Update {
                 locals: vec![r, n],
                 body: hir::Block {
-                    statements: vec![
+                    statements: sited(vec![
                         declared(0, empty),
                         declared(1, hir::Value::Integer(1)),
                         call(0, vec![("v", hir::Expr::Local(hir::LocalId(0)))]),
-                    ],
+                    ]),
                     locals: vec![hir::LocalId(0), hir::LocalId(1)],
                 },
             },
         };
-        let lowered = lower(&program(
+        let lowered = lower_program(&program(
             vec![debug_value(), f, user("main", &[], vec![call(1, vec![])])],
             Vec::new(),
         ));
@@ -4126,7 +4305,7 @@ mod tests {
             args: [("p".to_string(), hir::Expr::Variable(hir::VariableId(0)))].into(),
             updated: BTreeMap::new(),
         });
-        let lowered = lower(&program(
+        let lowered = lower_program(&program(
             vec![
                 debug_value(),
                 f,
@@ -4200,7 +4379,7 @@ mod tests {
             args: [("r".to_string(), hir::Expr::Variable(hir::VariableId(0)))].into(),
             updated: BTreeMap::new(),
         });
-        let lowered = lower(&program(
+        let lowered = lower_program(&program(
             vec![
                 debug_value(),
                 operator,
@@ -4249,7 +4428,7 @@ mod tests {
             3,
             vec![("p", hir::Expr::Constant(hir::Value::Integer(3)))],
         )];
-        let lowered = lower(&program(
+        let lowered = lower_program(&program(
             vec![
                 debug_value(),
                 builtin(hir::Builtin::ReadOnly(hir::ReadOnlyBuiltin::ToText)),
@@ -4299,7 +4478,7 @@ mod tests {
             call(1, vec![("p", hir::Expr::Constant(hir::Value::Integer(3)))]),
             call(0, vec![("v", hir::Expr::Constant(hir::Value::Integer(4)))]),
         ];
-        let lowered = lower(&program(
+        let lowered = lower_program(&program(
             vec![
                 debug_value(),
                 user("show", &["p"], show_param),
@@ -4346,7 +4525,7 @@ mod tests {
             ]
             .into(),
         );
-        let mut cx = Lowering::new();
+        let mut cx = Lowering::new("test.trendy");
         let id = cx.descriptor(&hir::Type::Tuple(heading));
         let lir::Field::Address(attributes) = cx.data[id.0].fields[2] else {
             panic!("attributes are an address");
@@ -4360,7 +4539,7 @@ mod tests {
 
     #[test]
     fn descriptors_point_to_their_elements_type() {
-        let mut cx = Lowering::new();
+        let mut cx = Lowering::new("test.trendy");
         let element = |cx: &Lowering, id: lir::DataId| {
             let lir::Field::Address(element) = cx.data[id.0].fields[4] else {
                 panic!("the element's descriptor is an address");
@@ -4389,7 +4568,7 @@ mod tests {
                 hir::Expr::Constant(hir::Value::Integer(2)),
             ],
         );
-        let lowered = lower(&program(
+        let lowered = lower_program(&program(
             vec![
                 debug_value(),
                 user("show", &["p"], vec![call(0, vec![("v", selector)])]),
@@ -4439,7 +4618,7 @@ mod tests {
             Box::new(hir::Expr::Variable(hir::VariableId(0))),
             Box::new(hir::Expr::Parameter("i".to_string())),
         );
-        let lowered = lower(&program(
+        let lowered = lower_program(&program(
             vec![
                 debug_value(),
                 user("show", &["i"], vec![call(0, vec![("v", indexed)])]),
@@ -4510,7 +4689,7 @@ mod tests {
                 p(),
             )),
         );
-        let lowered = lower(&program(
+        let lowered = lower_program(&program(
             vec![
                 debug_value(),
                 user("show", &["p"], vec![call(0, vec![("v", chosen)])]),
@@ -4579,7 +4758,7 @@ mod tests {
                 compare(hir::Comparison::Greater, 1),
             ],
         );
-        let lowered = lower(&program(
+        let lowered = lower_program(&program(
             vec![
                 debug_value(),
                 user("show", &["p"], vec![call(0, vec![("v", either)])]),
@@ -4634,17 +4813,20 @@ mod tests {
             Box::new(hir::Expr::Constant(hir::Value::Integer(0))),
         );
         let then = hir::Block {
-            statements: vec![
+            statements: sited(vec![
                 hir::Statement::Assign(vec![hir::Assignment {
                     target: hir::Target::Local(hir::LocalId(0)),
                     value: hir::Expr::Constant(hir::Value::Text("zero".to_string())),
                 }]),
                 call(0, vec![("v", hir::Expr::Local(hir::LocalId(0)))]),
-            ],
+            ]),
             locals: vec![hir::LocalId(0)],
         };
         let otherwise = hir::Block {
-            statements: vec![call(0, vec![("v", hir::Expr::Parameter("p".to_string()))])],
+            statements: sited(vec![call(
+                0,
+                vec![("v", hir::Expr::Parameter("p".to_string()))],
+            )]),
             locals: Vec::new(),
         };
         let f = hir::Operator {
@@ -4654,12 +4836,12 @@ mod tests {
             kind: hir::OperatorKind::Update {
                 locals: vec![t],
                 body: hir::Block {
-                    statements: vec![hir::Statement::If(condition, then, otherwise)],
+                    statements: sited(vec![hir::Statement::If(condition, then, otherwise)]),
                     locals: Vec::new(),
                 },
             },
         };
-        let lowered = lower(&program(
+        let lowered = lower_program(&program(
             vec![
                 debug_value(),
                 f,

@@ -17,7 +17,7 @@ use std::collections::{BTreeSet, HashMap};
 use trendy_diag::{Diagnostic, Span};
 use trendy_hir as hir;
 use trendy_syntax::SyntaxToken;
-use trendy_syntax::ast::{Item, SourceFile, VarDecl};
+use trendy_syntax::ast::{AstNode, Item, SourceFile, VarDecl};
 
 pub use prelude::Prelude;
 
@@ -61,6 +61,36 @@ pub(crate) enum Source {
     Prelude,
 }
 
+/// Where each place in a file is: the sites of what runs there.
+pub(crate) struct Sites<'a> {
+    file: hir::File,
+    map: trendy_diag::SourceMap<'a>,
+}
+
+impl<'a> Sites<'a> {
+    /// The sites in `text`, the file `source` says.
+    pub(crate) fn new(source: Source, text: &'a str) -> Self {
+        let file = match source {
+            Source::Program => hir::File::Program,
+            Source::Prelude => hir::File::Prelude,
+        };
+        Sites {
+            file,
+            map: trendy_diag::SourceMap::new(text),
+        }
+    }
+
+    /// The site of what starts at `span`.
+    pub(crate) fn at(&self, span: Span) -> hir::Site {
+        let position = self.map.line_col(span.start);
+        hir::Site {
+            file: self.file,
+            line: position.line,
+            column: position.col,
+        }
+    }
+}
+
 /// A file, checked, with every error reported.
 pub(crate) struct Checked {
     namespaces: Namespaces,
@@ -78,6 +108,8 @@ pub(crate) fn check(
     errors: &mut Vec<Diagnostic>,
 ) -> Checked {
     let mut namespaces = collect_names(prelude, file, errors);
+    let text = file.syntax().text().to_string();
+    let sites = Sites::new(source, &text);
 
     // The headings' attributes first, which any type can name.
     headings::resolve(file, &mut namespaces, errors);
@@ -97,11 +129,13 @@ pub(crate) fn check(
         &operators,
         &declarations,
         &variable_ids,
+        &sites,
     )
     .evaluate(file, errors);
 
     // Then the update operators' bodies, which refer to both.
     let context = body::Context {
+        sites: &sites,
         namespaces: &namespaces,
         operators: &operators,
         values: &evaluated.values,
@@ -786,7 +820,7 @@ mod tests {
             panic!("a read-only operator");
         };
         assert_eq!(result, &hir::Type::Scalar(hir::Scalar::Integer));
-        assert!(matches!(value, hir::Expr::Call(..)));
+        assert!(matches!(unsited(value.clone()), hir::Expr::Call(..)));
     }
 
     #[test]
@@ -2036,7 +2070,7 @@ mod tests {
             panic!("main is a user operator");
         };
         assert_eq!(*argument(&body[0]), hir::Expr::Variable(hir::VariableId(0)));
-        let hir::Statement::Call(call) = &body[1] else {
+        let (_, hir::Statement::Call(call)) = &body[1] else {
             panic!("a call");
         };
         assert_eq!(
@@ -2106,6 +2140,48 @@ mod tests {
             ]
         );
         assert!(fix(source).contains("call debug_value{v: tally};\n    call debug_value{v: 1};"));
+    }
+
+    #[test]
+    fn what_runs_says_where_it_is() {
+        let program = analyze_str(
+            "operator half{n: integer, by: integer}: integer [\n    var d := n div by;\n    d + 1\n];\n\noperator main{} [\n    call debug_value{v: half{n: 4, by: 2}};\n];\n",
+        )
+        .unwrap();
+        let site = |line, column| hir::Site {
+            file: hir::File::Program,
+            line,
+            column,
+        };
+        // Each statement, where it starts.
+        let (_, main) = update_body(&program, "main");
+        assert_eq!(main[0].0, site(7, 5));
+        // A value block's values that can fail, each where its statement
+        // starts, or the value, where it does.
+        let half = program.operators.iter().find(|o| o.name == "half").unwrap();
+        let hir::OperatorKind::ReadOnly { value, .. } = &half.kind else {
+            panic!("`half` is read-only");
+        };
+        let hir::Expr::Let(_, d, rest) = value else {
+            panic!("{value:?}");
+        };
+        assert!(
+            matches!(**d, hir::Expr::At(at, _) if at == site(2, 5)),
+            "{d:?}"
+        );
+        assert!(
+            matches!(**rest, hir::Expr::At(at, _) if at == site(3, 5)),
+            "{rest:?}"
+        );
+        // The prelude's are the prelude's.
+        let some = program.operators.iter().find(|o| o.name == "some").unwrap();
+        let hir::OperatorKind::ReadOnly { value, .. } = &some.kind else {
+            panic!("`some` is read-only");
+        };
+        let hir::Expr::At(at, _) = value else {
+            panic!("{value:?}");
+        };
+        assert_eq!(at.file, hir::File::Prelude);
     }
 
     #[test]
@@ -2356,7 +2432,16 @@ mod tests {
         );
     }
 
-    fn main_body(source: &str) -> Vec<hir::Statement> {
+    /// `expr` without the sites in it, which only
+    /// [`what_runs_says_where_it_is`] is about.
+    fn unsited(expr: hir::Expr) -> hir::Expr {
+        match expr {
+            hir::Expr::At(_, expr) => unsited(*expr),
+            expr => expr.map_children(|e, _| unsited(e)),
+        }
+    }
+
+    fn main_body(source: &str) -> Vec<(hir::Site, hir::Statement)> {
         let program = analyze_str(source).unwrap();
         let hir::OperatorKind::Update {
             body: hir::Block {
@@ -2372,8 +2457,8 @@ mod tests {
 
     /// The only argument of a call, such as `debug_value`'s or
     /// `debug_table`'s.
-    fn argument(statement: &hir::Statement) -> &hir::Expr {
-        let hir::Statement::Call(call) = statement else {
+    fn argument(statement: &(hir::Site, hir::Statement)) -> &hir::Expr {
+        let (_, hir::Statement::Call(call)) = statement else {
             panic!("a call");
         };
         let [argument] = call.args.values().collect::<Vec<_>>()[..] else {
@@ -4139,7 +4224,8 @@ mod tests {
         let hir::OperatorKind::ReadOnly { value, .. } = &f.kind else {
             panic!("a read-only operator");
         };
-        let hir::Expr::Connective(connective, operands) = value else {
+        let value = unsited(value.clone());
+        let hir::Expr::Connective(connective, operands) = &value else {
             panic!("{value:?}");
         };
         assert!(matches!(
@@ -4160,7 +4246,7 @@ mod tests {
             let hir::OperatorKind::ReadOnly { value, .. } = &f.kind else {
                 panic!("a read-only operator");
             };
-            value.clone()
+            unsited(value.clone())
         };
         for (written, normal) in [
             // A chain is one connective, however grouped,
@@ -4598,7 +4684,7 @@ mod tests {
         let poets = || Box::new(hir::Expr::Variable(hir::VariableId(0)));
         let assigned = |body: &str| {
             let body = main_body(&assigning(POETS, body));
-            let [hir::Statement::Assign(assignments)] = &body[..] else {
+            let [(_, hir::Statement::Assign(assignments))] = &body[..] else {
                 panic!("{body:?}");
             };
             assignments
@@ -4693,7 +4779,7 @@ mod tests {
         };
         // `a[i] := x` assigns `a` the array with the element changed.
         let body = main_body(&source("a[i] := 5;"));
-        let [_, hir::Statement::Assign(assignments)] = &body[..] else {
+        let [_, (_, hir::Statement::Assign(assignments))] = &body[..] else {
             panic!("{body:?}");
         };
         let [
@@ -4712,7 +4798,7 @@ mod tests {
         assert_eq!(change.value, hir::Expr::Constant(hir::Value::Integer(5)));
         // Changes to an array's elements, at any depth, are one.
         let body = main_body(&source("assign { g[i][1] := 3; g[2] := array [4]; };"));
-        let [_, hir::Statement::Assign(assignments)] = &body[..] else {
+        let [_, (_, hir::Statement::Assign(assignments))] = &body[..] else {
             panic!("{body:?}");
         };
         let [
@@ -4803,7 +4889,7 @@ mod tests {
         let body = main(
             "assign { update poets { born := 1 } where name = \"Ada\"; update poets { born := 2 } where born > 1900; };",
         );
-        let [hir::Statement::Assign(assignments)] = &body[..] else {
+        let [(_, hir::Statement::Assign(assignments))] = &body[..] else {
             panic!("{body:?}");
         };
         let [hir::Assignment { value, .. }] = &assignments[..] else {
@@ -4826,13 +4912,13 @@ mod tests {
         ));
         // A tuple's updates of different attributes are one.
         let body = main("assign { update address { city := \"Cusco\" }; n := n + 1; };");
-        let [hir::Statement::Assign(assignments)] = &body[..] else {
+        let [(_, hir::Statement::Assign(assignments))] = &body[..] else {
             panic!("{body:?}");
         };
         assert_eq!(assignments.len(), 2);
         let source = "var t := tuple { a: 1, b: 2 };\noperator main{} [ assign { update t { a := b }; update t { b := a }; }; ];";
         let body = main_body(source);
-        let [hir::Statement::Assign(assignments)] = &body[..] else {
+        let [(_, hir::Statement::Assign(assignments))] = &body[..] else {
             panic!("{body:?}");
         };
         let [
@@ -4852,7 +4938,7 @@ mod tests {
             "assign { d_insert poets relation { { name: \"Rumi\", born: n } }; update poets { born := 1 }; };",
         ] {
             let body = main(block);
-            let [hir::Statement::Assign(assignments)] = &body[..] else {
+            let [(_, hir::Statement::Assign(assignments))] = &body[..] else {
                 panic!("{body:?}");
             };
             let [hir::Assignment { value, .. }] = &assignments[..] else {
@@ -4949,7 +5035,7 @@ mod tests {
         let hir::OperatorKind::Update { body, .. } = &double.kind else {
             panic!("an update operator");
         };
-        let [hir::Statement::Assign(assignments)] = &body.statements[..] else {
+        let [(_, hir::Statement::Assign(assignments))] = &body.statements[..] else {
             panic!("{body:?}");
         };
         assert_eq!(
@@ -4964,7 +5050,7 @@ mod tests {
         let updated: Vec<(BTreeMap<String, hir::Target>, Vec<String>)> = body
             .statements
             .iter()
-            .filter_map(|s| match s {
+            .filter_map(|(_, s)| match s {
                 hir::Statement::Call(call) => {
                     Some((call.updated.clone(), call.args.keys().cloned().collect()))
                 }
@@ -4992,7 +5078,7 @@ mod tests {
         let hir::OperatorKind::Update { body, .. } = &twice.kind else {
             panic!("an update operator");
         };
-        let hir::Statement::Call(call) = &body.statements[0] else {
+        let (_, hir::Statement::Call(call)) = &body.statements[0] else {
             panic!("{body:?}");
         };
         assert_eq!(call.updated["n"], hir::Target::Parameter("n".to_string()));
@@ -5564,7 +5650,7 @@ mod tests {
         };
         assert_eq!(call.types, [hir::Type::Scalar(hir::Scalar::Integer)]);
         // So does a call of `debug_value`, whose `any type` has no name.
-        let hir::Statement::Call(call) = &body[0] else {
+        let (_, hir::Statement::Call(call)) = &body[0] else {
             panic!("a call");
         };
         assert_eq!(call.types, [hir::Type::Scalar(hir::Scalar::Boolean)]);
@@ -6162,7 +6248,7 @@ mod tests {
         // variable for `lines`.
         let source = "operator main{} [\n    var rivers: array text;\n    call load_text_file{path: \"rivers.txt\", out lines: rivers};\n];\n";
         let body = main_body(source);
-        let hir::Statement::Call(call) = &body[1] else {
+        let (_, hir::Statement::Call(call)) = &body[1] else {
             panic!("{body:#?}");
         };
         assert_eq!(call.updated["lines"], hir::Target::Local(hir::LocalId(0)));
@@ -6211,7 +6297,7 @@ mod tests {
         // type.
         let source = call("array tuple { city: text }");
         let body = main_body(&source);
-        let hir::Statement::Call(call_of) = &body[1] else {
+        let (_, hir::Statement::Call(call_of)) = &body[1] else {
             panic!("{body:#?}");
         };
         assert_eq!(call_of.updated["rows"], hir::Target::Local(hir::LocalId(0)));
@@ -6395,7 +6481,7 @@ mod tests {
     fn update_body<'p>(
         program: &'p hir::Program,
         name: &str,
-    ) -> (&'p [hir::Local], &'p [hir::Statement]) {
+    ) -> (&'p [hir::Local], &'p [(hir::Site, hir::Statement)]) {
         let op = program.operators.iter().find(|o| o.name == name).unwrap();
         let hir::OperatorKind::Update { locals, body } = &op.kind else {
             panic!("{name} is an update operator");
@@ -6425,7 +6511,7 @@ mod tests {
         // A declaration assigns the initial value, or the type's default.
         let targets: Vec<Vec<hir::Target>> = body
             .iter()
-            .filter_map(|s| match s {
+            .filter_map(|(_, s)| match s {
                 hir::Statement::Assign(a) => Some(a.iter().map(|a| a.target.clone()).collect()),
                 hir::Statement::Call(_)
                 | hir::Statement::If(..)
@@ -6435,7 +6521,7 @@ mod tests {
             .collect();
         let local = |i| vec![hir::Target::Local(hir::LocalId(i))];
         assert_eq!(targets, [local(0), local(1), local(1)]);
-        let hir::Statement::Assign(declared) = &body[1] else {
+        let (_, hir::Statement::Assign(declared)) = &body[1] else {
             panic!("a declaration");
         };
         assert_eq!(
@@ -6448,12 +6534,12 @@ mod tests {
             }))
         );
         // `x` is the local variable in `f`, hiding the program's.
-        let hir::Statement::Call(call) = &body[3] else {
+        let (_, hir::Statement::Call(call)) = &body[3] else {
             panic!("a call");
         };
         assert_eq!(call.args["r"], hir::Expr::Local(hir::LocalId(1)));
         let (_, main) = update_body(&program, "main");
-        let hir::Statement::Call(call) = &main[0] else {
+        let (_, hir::Statement::Call(call)) = &main[0] else {
             panic!("a call");
         };
         assert_eq!(call.args["n"], hir::Expr::Variable(hir::VariableId(0)));
@@ -6584,8 +6670,9 @@ mod tests {
         let hir::OperatorKind::ReadOnly { value, locals, .. } = &f.kind else {
             panic!("f is read-only");
         };
+        let value = unsited(value.clone());
         assert!(
-            matches!(value, hir::Expr::Let(_, _, body) if matches!(**body, hir::Expr::Let(..)))
+            matches!(&value, hir::Expr::Let(_, _, body) if matches!(**body, hir::Expr::Let(..)))
         );
         assert_eq!(locals.len(), 2);
         // In an `if`'s branches, and in an `extend`'s values, with the
@@ -6650,8 +6737,8 @@ mod tests {
         );
         let [
             _,
-            hir::Statement::Loop(_, before, hir::Check::Before),
-            hir::Statement::Loop(_, after, hir::Check::After),
+            (_, hir::Statement::Loop(_, before, hir::Check::Before)),
+            (_, hir::Statement::Loop(_, after, hir::Check::After)),
         ] = &body[..]
         else {
             panic!("{body:?}");
@@ -6718,7 +6805,7 @@ mod tests {
         let body = main_body(
             "operator main{} [ var total := 0; for n in array [3, 1, 2] loop [ var doubled := n * 2; total := total + doubled; ]; ];",
         );
-        let [_, hir::Statement::For(variable, array, block)] = &body[..] else {
+        let [_, (_, hir::Statement::For(variable, array, block))] = &body[..] else {
             panic!("{body:?}");
         };
         assert!(matches!(array, hir::Expr::Constant(hir::Value::Array(_))));
@@ -6852,7 +6939,7 @@ mod tests {
     fn loaded(body: &str) -> Vec<Option<String>> {
         main_body(&assigning(PEOPLE, body))
             .iter()
-            .flat_map(|statement| match statement {
+            .flat_map(|(_, statement)| match statement {
                 hir::Statement::Assign(assignments) => assignments.clone(),
                 other => panic!("{other:?}"),
             })
@@ -6901,7 +6988,7 @@ mod tests {
         let hir::OperatorKind::Update { body, .. } = &f.kind else {
             panic!("f is an update operator");
         };
-        let hir::Statement::Assign(assignments) = &body.statements[1] else {
+        let (_, hir::Statement::Assign(assignments)) = &body.statements[1] else {
             panic!("{:?}", body.statements);
         };
         assert_eq!(
@@ -6928,7 +7015,7 @@ mod tests {
         let loaded = |body: &str| {
             main_body(&assigning(twins, body))
                 .iter()
-                .flat_map(|statement| match statement {
+                .flat_map(|(_, statement)| match statement {
                     hir::Statement::Assign(assignments) => assignments.clone(),
                     other => panic!("{other:?}"),
                 })
@@ -7200,7 +7287,7 @@ mod tests {
         let hir::OperatorKind::Update { body, .. } = &f.kind else {
             panic!("f is an update operator");
         };
-        let hir::Statement::Assign(assignments) = &body.statements[1] else {
+        let (_, hir::Statement::Assign(assignments)) = &body.statements[1] else {
             panic!("{:?}", body.statements);
         };
         let hir::Expr::Restrict(relation, _) = &assignments[0].value else {
@@ -7312,7 +7399,7 @@ mod tests {
             let hir::OperatorKind::ReadOnly { value, .. } = &op.kind else {
                 panic!("{name} is read-only");
             };
-            value.clone()
+            unsited(value.clone())
         };
         assert_eq!(value("kept"), hir::Expr::Constant(hir::Value::Integer(2)));
         assert!(matches!(value("failing"), hir::Expr::Index(..)));
@@ -7567,7 +7654,7 @@ mod tests {
         .unwrap();
         let (locals, body) = update_body(&program, "f");
         assert_eq!(locals.len(), 2);
-        let hir::Statement::If(_, then, otherwise) = &body[0] else {
+        let (_, hir::Statement::If(_, then, otherwise)) = &body[0] else {
             panic!("an `if`");
         };
         assert_eq!(then.locals, [hir::LocalId(0)]);

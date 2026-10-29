@@ -92,6 +92,9 @@ pub(crate) trait Names {
     /// The program's top-level names.
     fn namespaces(&self) -> &Namespaces;
 
+    /// The site of what starts at `at`, in the file being checked.
+    fn site(&self, at: Span) -> hir::Site;
+
     /// What `name`, written at `span`, refers to.
     fn resolve(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup;
 
@@ -2448,6 +2451,10 @@ impl<'a> TupleNames<'a> {
 impl Names for TupleNames<'_> {
     fn namespaces(&self) -> &Namespaces {
         self.outer.namespaces()
+    }
+
+    fn site(&self, at: Span) -> hir::Site {
+        self.outer.site(at)
     }
 
     fn resolve(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {

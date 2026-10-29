@@ -78,7 +78,7 @@ impl Optimizer<'_> {
             statements: block
                 .statements
                 .into_iter()
-                .map(|s| self.statement(s))
+                .map(|(site, s)| (site, self.statement(s)))
                 .collect(),
             ..block
         }
@@ -372,7 +372,7 @@ mod tests {
         let hir::OperatorKind::Update { locals, body } = &operator.kind else {
             panic!("`f` is an update operator");
         };
-        let [hir::Statement::Call(call)] = &body.statements[..] else {
+        let [(_, hir::Statement::Call(call))] = &body.statements[..] else {
             panic!("`f` makes one call");
         };
         let optimizer = Optimizer {

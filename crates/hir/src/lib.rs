@@ -873,12 +873,34 @@ impl Statement {
     }
 }
 
+/// Where the program is in its source while it runs: a statement's place,
+/// or a value's, which a failure there says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Site {
+    pub file: File,
+    /// Counting from 1.
+    pub line: usize,
+    /// Counting from 1, in characters, as diagnostics count them.
+    pub column: usize,
+}
+
+/// The source a [`Site`] is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum File {
+    /// The program's own.
+    Program,
+    /// The prelude's, whose operators written in trendy are in every
+    /// program.
+    Prelude,
+}
+
 /// Statements run in order, an update operator's body or a branch of an
 /// `if` statement, with the local variables declared among them, which are
 /// in scope from their declaration to its end.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Block {
-    pub statements: Vec<Statement>,
+    /// Each statement, with where it is.
+    pub statements: Vec<(Site, Statement)>,
     /// The local variables declared in it, not in a block within it: their
     /// memory is released at its end.
     pub locals: Vec<LocalId>,
@@ -892,7 +914,7 @@ impl Block {
             statements: self
                 .statements
                 .iter()
-                .map(|s| s.instantiated(types))
+                .map(|(site, s)| (*site, s.instantiated(types)))
                 .collect(),
             locals: self.locals.clone(),
         }
@@ -1092,6 +1114,10 @@ pub enum Expr {
     /// the first, computed once, in it: a read-only operator's local
     /// variable, from its declaration or an assignment on.
     Let(LocalId, Box<Expr>, Box<Expr>),
+    /// The expression, computed at the site: a value block's local
+    /// variable's value, or the value it ends with, which a failure in it
+    /// says it is at (see [`Expr::at`]).
+    At(Site, Box<Expr>),
     /// A monadic operator: `not x` or `-x`.
     Unary(UnaryOp, Box<Expr>),
     /// A dyadic operator, such as `x + y` or `x < y`.
@@ -1210,6 +1236,17 @@ pub enum Expr {
 }
 
 impl Expr {
+    /// `expr`, computed at `site`, so that a failure in it says so; one
+    /// that can't fail needs no site.
+    #[must_use]
+    pub fn at(site: Site, expr: Expr) -> Expr {
+        if expr.can_fail() {
+            Expr::At(site, Box::new(expr))
+        } else {
+            expr
+        }
+    }
+
     /// The expression's type, where `leaf` gives the type of each variable,
     /// parameter and call in it.
     ///
@@ -1221,7 +1258,7 @@ impl Expr {
         match self {
             Expr::Constant(value) => value.ty(),
             Expr::Variable(_) | Expr::Parameter(_) | Expr::Local(_) | Expr::Call(_) => leaf(self),
-            Expr::Let(_, _, body) => body.type_with(leaf),
+            Expr::Let(_, _, body) | Expr::At(_, body) => body.type_with(leaf),
             Expr::Array(element, _) => Type::Array(Box::new(element.clone())),
             Expr::Index(array, _) => match array.type_with(leaf) {
                 Type::Array(element) => *element,
@@ -1320,7 +1357,7 @@ impl Expr {
             | Expr::Unload(..)
             | Expr::Index(..)
             | Expr::WithElements(..) => true,
-            Expr::Unary(_, operand) => operand.can_fail(),
+            Expr::Unary(_, operand) | Expr::At(_, operand) => operand.can_fail(),
             Expr::Tuple(attributes) => attributes.values().any(Expr::can_fail),
             Expr::Connective(_, operands) => operands.iter().any(Expr::can_fail),
             Expr::Extract(tuple, _) => tuple.can_fail(),
@@ -1428,6 +1465,7 @@ impl Expr {
             Expr::Let(local, value, body) => {
                 Expr::Let(local, Box::new(f(*value, 0)), Box::new(f(*body, 0)))
             }
+            Expr::At(site, expr) => Expr::At(site, Box::new(f(*expr, 0))),
             Expr::Unary(op, operand) => Expr::Unary(op, Box::new(f(*operand, 0))),
             Expr::Binary(op, lhs, rhs) => {
                 Expr::Binary(op, Box::new(f(*lhs, 0)), Box::new(f(*rhs, 0)))
@@ -1506,6 +1544,7 @@ impl Expr {
             | Expr::Local(_)
             | Expr::Current(..) => {}
             Expr::Unary(_, operand)
+            | Expr::At(_, operand)
             | Expr::Extract(operand, _)
             | Expr::Remove(operand, _)
             | Expr::Rename(operand, _)
@@ -1599,6 +1638,7 @@ impl Expr {
             Expr::Constant(value) => Expr::Constant(value.instantiated(types)),
             Expr::Variable(_) | Expr::Parameter(_) | Expr::Local(_) => self.clone(),
             Expr::Let(local, value, body) => Expr::Let(*local, inst(value), inst(body)),
+            Expr::At(site, expr) => Expr::At(*site, inst(expr)),
             Expr::Array(element, elements) => Expr::Array(
                 element.instantiated(types),
                 elements.iter().map(|e| e.instantiated(types)).collect(),

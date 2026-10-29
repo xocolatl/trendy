@@ -1515,6 +1515,20 @@ diagnostic, with offsets, lines, columns, labels and edits. The language
 server sends the code, related locations, and all notes and help in the
 message, and offers each suggestion as a quick fix.
 
+A failure while the program runs writes its code and message, then where
+the program is, ` --> path:line:column`, as a compiler's error does. Sema
+gives each statement its site (`hir::Site`, its file and where it starts),
+and each value of a value block's that can fail, a local variable's or
+the one it ends with, the site of the statement or value (`Expr::At`,
+which `Expr::at` leaves out for one that can't). Lowering emits
+`Inst::Site` before each, again after each call, whose callee sets its
+own, and before a loop's condition, which follows its body's statements;
+each site is a constant of the path, `<prelude>` for the prelude's, the
+line and the column. Codegen stores its address in the runtime's
+`trendy_rt_site`, which the runtime writes for every failure, its own
+functions' too, out of memory included. The site is a statement's or a
+value's, not the operator's in it that failed, which the message says.
+
 ## Rules
 
 1. **Dependencies point down.** A layer may depend only on layers above it in

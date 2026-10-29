@@ -57,7 +57,7 @@ fn build(input: &Path, output: &Path, format: Format) -> Result<(), String> {
 
     // Past sema, every failure is a compiler bug, not a user error.
     let hir = trendy_opt::optimized(hir);
-    let lir = trendy_lower::lower(&hir);
+    let lir = trendy_lower::lower(&hir, &path);
     let object = trendy_codegen::compile(&lir)
         .map_err(|e| format!("error[X0000]: internal compiler error: {e}"))?;
     link(&object, output)

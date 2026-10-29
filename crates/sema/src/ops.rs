@@ -2199,6 +2199,8 @@ fn substitute(
             }
             value => hir::Expr::Let(id, Box::new(value), Box::new(sub(body)?)),
         },
+        // Known, it needs no site.
+        hir::Expr::At(site, expr) => hir::Expr::at(site, sub(expr)?),
         // A variable of the program's is known only when running: a
         // read-only operator's value reads none.
         hir::Expr::Current(..)

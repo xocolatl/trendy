@@ -53,7 +53,8 @@
 //!
 //! An arithmetic instruction whose result doesn't exist stops the program by
 //! calling [`RuntimeFn::Fail`], which writes the error to stderr and exits
-//! with status 1.
+//! with status 1. Every failure, a runtime function's too, also writes the
+//! site the program is at, which [`Inst::Site`] sets.
 //!
 //! # Type descriptors
 //!
@@ -448,6 +449,11 @@ pub enum Inst {
         args: Option<Place>,
         result: Option<Place>,
     },
+    /// The program is at the site the data object describes, laid out as
+    /// `trendy_runtime::Site`, until the next: a failure from here on
+    /// writes it. Codegen stores its address in the runtime's
+    /// `trendy_rt_site`.
+    Site(DataId),
     /// Call a runtime function, passing the address of each place.
     CallRuntime {
         function: RuntimeFn,

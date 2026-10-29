@@ -72,6 +72,7 @@ pub fn compile(program: &lir::Program) -> Result<Vec<u8>, String> {
         data_layouts,
         function_ids,
         runtime: HashMap::new(),
+        site: None,
     };
     let mut ctx = functions.module.make_context();
     let mut fctx = FunctionBuilderContext::new();
@@ -130,6 +131,8 @@ struct Functions {
     function_ids: Vec<FuncId>,
     /// Runtime functions, imported when first called.
     runtime: HashMap<&'static str, FuncId>,
+    /// The runtime's `trendy_rt_site`, imported when first set.
+    site: Option<DataId>,
 }
 
 impl Functions {
@@ -237,6 +240,13 @@ impl Functions {
                     .map(|place| self.address(place, frame, b))
                     .collect::<Result<Vec<_>, _>>()?;
                 b.ins().call(callee, &addresses);
+            }
+            lir::Inst::Site(site) => {
+                let address = self.address(&lir::Place::whole(lir::Base::Data(*site)), frame, b)?;
+                let global = self.site_global()?;
+                let global = self.module.declare_data_in_func(global, b.func);
+                let at = b.ins().symbol_value(self.config.pointer_type(), global);
+                b.ins().store(MemFlagsData::trusted(), address, at, 0);
             }
             lir::Inst::CallRuntime { function, args } => {
                 let pointers = vec![self.config.pointer_type(); args.len()];
@@ -476,6 +486,20 @@ impl Functions {
     }
 
     /// Import a runtime function, which takes parameters of types `params`.
+    /// The runtime's `trendy_rt_site`, which [`lir::Inst::Site`] sets,
+    /// imported when first set.
+    fn site_global(&mut self) -> Result<DataId, String> {
+        if let Some(id) = self.site {
+            return Ok(id);
+        }
+        let id = self
+            .module
+            .declare_data("trendy_rt_site", Linkage::Import, true, false)
+            .map_err(|e| e.to_string())?;
+        self.site = Some(id);
+        Ok(id)
+    }
+
     fn runtime_function(
         &mut self,
         function: lir::RuntimeFn,

@@ -32,19 +32,21 @@ pub(crate) fn value(
         .unwrap_or_default();
     let mut lets = Vec::new();
     for statement in &statements {
+        // Where each value it gives a local variable is computed.
+        let site = names.site(trendy_syntax::span(statement.syntax().text_range()));
         match statement {
             ast::Statement::Var(decl) => {
                 let checked = locals::local(decl, &types, &mut names, errors);
-                ok &= names.declare(decl, checked, &mut lets);
+                ok &= names.declare(decl, checked, site, &mut lets);
             }
             ast::Statement::Assign(stmt) => {
                 let clauses: Vec<_> = stmt.clauses().collect();
                 let assigned = assign::statement(&clauses, &mut names, errors);
-                ok &= names.reassigned(assigned, &mut lets);
+                ok &= names.reassigned(assigned, site, &mut lets);
             }
             ast::Statement::Block(block) => {
                 let assigned = assign::block(block, &mut names, errors);
-                ok &= names.reassigned(assigned, &mut lets);
+                ok &= names.reassigned(assigned, site, &mut lets);
             }
             ast::Statement::Call(stmt) => {
                 errors.push(errors::call_in_block(stmt));
@@ -64,7 +66,12 @@ pub(crate) fn value(
             }
         }
     }
-    let value = Checker::new(&mut names).expr(&block.value()?, expected, errors)?;
+    let written = block.value()?;
+    let site = names.site(written.span());
+    let value = hir::Expr::at(
+        site,
+        Checker::new(&mut names).expr(&written, expected, errors)?,
+    );
     ok.then(|| {
         lets.into_iter().rev().fold(value, |body, (id, value)| {
             hir::Expr::Let(id, Box::new(value), Box::new(body))
@@ -141,11 +148,12 @@ impl<'a> BlockNames<'a> {
 
     /// Record the local variable `decl` declares, `checked` with its value,
     /// or `None` after its errors were reported: a value known only when
-    /// running is added to `lets`. Whether it is valid.
+    /// running is added to `lets`, computed at `site`. Whether it is valid.
     fn declare(
         &mut self,
         decl: &VarDecl,
         checked: Option<(hir::Local, hir::Expr)>,
+        site: hir::Site,
         lets: &mut Vec<(hir::LocalId, hir::Expr)>,
     ) -> bool {
         // A declaration that isn't in the scope declares a name again, or
@@ -165,7 +173,7 @@ impl<'a> BlockNames<'a> {
         let known = match value {
             hir::Expr::Constant(value) => Some(value),
             value => {
-                lets.push((id, value));
+                lets.push((id, hir::Expr::at(site, value)));
                 None
             }
         };
@@ -174,11 +182,13 @@ impl<'a> BlockNames<'a> {
     }
 
     /// Give each local variable that `assigned`, an assignment statement in
-    /// the block, assigns its new value: one known only when running is
-    /// added to `lets`, under a new id. Whether the statement is valid.
+    /// the block, at `site`, assigns its new value: one known only when
+    /// running is added to `lets`, under a new id, computed there. Whether
+    /// the statement is valid.
     fn reassigned(
         &mut self,
         assigned: Option<hir::Statement>,
+        site: hir::Site,
         lets: &mut Vec<(hir::LocalId, hir::Expr)>,
     ) -> bool {
         let Some(hir::Statement::Assign(assignments)) = assigned else {
@@ -198,7 +208,7 @@ impl<'a> BlockNames<'a> {
                 hir::Expr::Constant(value) => (id, local, Some(value)),
                 value => {
                     let new = self.outer.fresh_local(local.clone());
-                    lets.push((new, value));
+                    lets.push((new, hir::Expr::at(site, value)));
                     (new, local, None)
                 }
             });
@@ -227,6 +237,10 @@ impl<'a> BlockNames<'a> {
 impl Names for BlockNames<'_> {
     fn namespaces(&self) -> &Namespaces {
         self.outer.namespaces()
+    }
+
+    fn site(&self, at: Span) -> hir::Site {
+        self.outer.site(at)
     }
 
     fn resolve(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {

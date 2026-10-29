@@ -1822,13 +1822,52 @@ pub unsafe extern "C" fn trendy_rt_check_key(
     }
 }
 
+/// Where the program is in its source, a statement's place or a value's,
+/// laid out as the compiler emits it.
+#[repr(C)]
+pub struct Site {
+    /// The source file's path, as the compiler was given it, or
+    /// `<prelude>`.
+    pub path: Text,
+    /// Counting from 1.
+    pub line: usize,
+    /// Counting from 1, in characters.
+    pub column: usize,
+}
+
+/// The site the program is at, which compiled code sets before each
+/// statement runs, and each value of a value block's is computed, and
+/// again after each call, as the callee sets its own; null before the
+/// first. A failure writes it.
+#[unsafe(export_name = "trendy_rt_site")]
+pub static SITE: core::sync::atomic::AtomicPtr<Site> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
 /// Stop the program, writing the message `write` writes to stderr, a line
-/// that starts with the compiler's error code, and exiting with status 1.
+/// that starts with the compiler's error code, then where the program is,
+/// as a compiler's error says, ` --> path:line:column`, and exiting with
+/// status 1.
 #[cfg(not(test))]
 fn fail_with(write: impl FnOnce(&mut Stderr) -> fmt::Result) -> ! {
     let mut out = Stderr::default();
     // There is nowhere to report a failure to write to stderr.
     let _ = write(&mut out);
+    // SAFETY: compiled code sets the site to one it emits, read-only data
+    // whose path is UTF-8.
+    let site = unsafe {
+        SITE.load(core::sync::atomic::Ordering::Relaxed)
+            .as_ref()
+            .map(|site| {
+                (
+                    read_text((&raw const site.path).cast()),
+                    site.line,
+                    site.column,
+                )
+            })
+    };
+    if let Some((path, line, column)) = site {
+        let _ = writeln!(out, " --> {path}:{line}:{column}");
+    }
     out.flush();
     // SAFETY: `exit` has no preconditions.
     unsafe { exit(1) }

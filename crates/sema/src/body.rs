@@ -13,10 +13,12 @@ use crate::check::{Checker, Lookup, Names, Written, argument_names};
 use crate::locals::{Declaration, Local, Locals};
 use crate::operators::{Chosen, Operators, Signature};
 use crate::types::{Expected, Origin};
-use crate::{Namespaces, assign, errors, locals, ops};
+use crate::{Namespaces, Sites, assign, errors, locals, ops};
 
 /// Everything a body can refer to.
 pub(crate) struct Context<'a> {
+    /// Where each place in the file is.
+    pub(crate) sites: &'a Sites<'a>,
     pub(crate) namespaces: &'a Namespaces,
     pub(crate) operators: &'a Operators,
     /// Each valid read-only operator's value.
@@ -254,7 +256,7 @@ impl Statements<'_, '_> {
         let mut ok = self.locals.enter(statements.iter().cloned(), op, errors);
         let mut checked = Vec::new();
         for stmt in statements {
-            match self.statement(stmt, errors) {
+            match self.sited(stmt, errors) {
                 Some(statement) => checked.push(statement),
                 None => ok = false,
             }
@@ -264,6 +266,20 @@ impl Statements<'_, '_> {
             statements: checked,
             locals,
         })
+    }
+
+    /// `stmt`, with its site, where it starts, or `None` after reporting
+    /// its errors.
+    fn sited(
+        &mut self,
+        stmt: &ast::Statement,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<(hir::Site, hir::Statement)> {
+        let site = self
+            .cx
+            .sites
+            .at(trendy_syntax::span(stmt.syntax().text_range()));
+        Some((site, self.statement(stmt, errors)?))
     }
 
     fn statement(
@@ -373,7 +389,7 @@ impl Statements<'_, '_> {
         let before = self.outs.assigned.clone();
         let mut checked = Vec::new();
         for statement in &statements {
-            match self.statement(statement, errors) {
+            match self.sited(statement, errors) {
                 Some(statement) => checked.push(statement),
                 None => ok = false,
             }
@@ -763,9 +779,13 @@ impl Statements<'_, '_> {
                 self.block(&statements, reported_to)
             }
             Some(ast::ElseBranch::If(stmt)) => {
+                let site = self
+                    .cx
+                    .sites
+                    .at(trendy_syntax::span(stmt.syntax().text_range()));
                 self.if_stmt(&stmt, reported_to)
                     .map(|statement| hir::Block {
-                        statements: vec![statement],
+                        statements: vec![(site, statement)],
                         locals: Vec::new(),
                     })
             }
@@ -884,7 +904,7 @@ fn passed_in(block: &hir::Block, passed: &mut Vec<hir::VariableId>) {
 /// Call `f` with each of `block`'s statements, and those in blocks within
 /// them, each before those within it.
 fn each_statement(block: &hir::Block, f: &mut dyn FnMut(&hir::Statement)) {
-    for statement in &block.statements {
+    for (_, statement) in &block.statements {
         f(statement);
         match statement {
             hir::Statement::If(_, then, otherwise) => {
@@ -1030,6 +1050,10 @@ impl BodyNames<'_, '_> {
 impl Names for BodyNames<'_, '_> {
     fn namespaces(&self) -> &Namespaces {
         self.cx.namespaces
+    }
+
+    fn site(&self, at: Span) -> hir::Site {
+        self.cx.sites.at(at)
     }
 
     fn operators(&self) -> &Operators {

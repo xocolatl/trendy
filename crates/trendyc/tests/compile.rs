@@ -45,8 +45,16 @@ fn run_file(name: &str, path: &Path, dir: &Path) -> (i32, String) {
     build_and_run(&root.join(path), &output, &root.join(dir))
 }
 
+/// The line a failure writes after its message: where the program is, at
+/// the statement on `line` of the source `name` of a test's, indented
+/// once.
+fn site(name: &str, line: usize) -> String {
+    format!(" --> {name}.trendy:{line}:5\n")
+}
+
 /// Compile `input` into the executable `output`, run it in `dir`, and
-/// return its exit code and what it wrote to stderr. The C library
+/// return its exit code and what it wrote to stderr, where a failure's
+/// site names the source by its file's name alone. The C library
 /// scribbles over memory as it is freed (`MallocScribble` on macOS,
 /// `MALLOC_PERTURB_` with glibc), so that a program that reads a value
 /// whose buffer was freed writes garbage, rather than, by luck, what it
@@ -71,7 +79,9 @@ fn build_and_run(input: &Path, output: &Path, dir: &Path) -> (i32, String) {
         .env("MALLOC_PERTURB_", "85")
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&run.stderr).into_owned();
+    let path = input.to_str().unwrap();
+    let file = input.file_name().unwrap().to_str().unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr).replace(path, file);
     let code = run
         .status
         .code()
@@ -566,8 +576,10 @@ fn approximate_failures_stop_the_program() {
         ("divide_negative_zero", "a / -b", &division),
     ];
     for (name, expr, expected) in cases {
-        let (code, stderr) = run_source(&format!("approximate_{name}"), &program(expr));
-        assert_eq!((code, &stderr), (1, expected), "{expr}");
+        let name = format!("approximate_{name}");
+        let (code, stderr) = run_source(&name, &program(expr));
+        let expected = format!("{expected}{}", site(&name, 3));
+        assert_eq!((code, stderr), (1, expected), "{expr}");
     }
 }
 
@@ -612,9 +624,14 @@ fn text_that_isnt_a_value_of_the_type_stops_the_program() {
         ("boolean_word", "parse_boolean", "on", "isn't a boolean"),
     ];
     for (name, operator, text, why) in cases {
-        let (code, stderr) = run_source(&format!("parse_{name}"), &program(operator, text));
+        let name = format!("parse_{name}");
+        let (code, stderr) = run_source(&name, &program(operator, text));
         // Rust's `Debug` writes a text's escapes as trendy does.
-        let expected = format!("1\nerror[{}]: {text:?} {why}\n", Code::Unparsable.id());
+        let expected = format!(
+            "1\nerror[{}]: {text:?} {why}\n{}",
+            Code::Unparsable.id(),
+            site(&name, 3)
+        );
         assert_eq!((code, stderr), (1, expected), "{text:?}");
     }
 }
@@ -731,16 +748,17 @@ fn csv_files_are_loaded_when_running() {
     assert_eq!(loaded_csv("nothing", "", true, CSV_COLUMNS), ok(none, 0));
 }
 
-/// What a program that stops with the error `code`, writing `message`,
-/// writes, and its exit status.
-fn failed_with(code: trendy_diag::Code, message: &str) -> (i32, String) {
-    (1, format!("error[{}]: {message}\n", code.id()))
+/// What loading the CSV file named for `name` writes, and the program's
+/// exit status, if it stops with the error `code`, writing `message`, at
+/// the call of `load_csv`.
+fn csv_failed(name: &str, code: trendy_diag::Code, message: &str) -> (i32, String) {
+    let at = site(&format!("csv_{name}"), 4);
+    (1, format!("error[{}]: {message}\n{at}", code.id()))
 }
 
 #[test]
 fn csv_columns_that_arent_the_files_stop_the_program() {
     use trendy_diag::Code;
-    let failed = failed_with;
     // Each attribute has a column of the file's, of its own, counting
     // from 1.
     assert_eq!(
@@ -750,7 +768,8 @@ fn csv_columns_that_arent_the_files_stop_the_program() {
             true,
             "city: 3, people: 6, km2: 4, capital: 2"
         ),
-        failed(
+        csv_failed(
+            "beyond",
             Code::CsvColumns,
             r#"`people` is read from column 6, but "PATH" has 5 columns"#
         )
@@ -762,7 +781,8 @@ fn csv_columns_that_arent_the_files_stop_the_program() {
             true,
             "city: 0, people: 5, km2: 4, capital: 2"
         ),
-        failed(
+        csv_failed(
+            "zero",
             Code::CsvColumns,
             "`city` is read from column 0, but columns count from 1"
         )
@@ -774,7 +794,8 @@ fn csv_columns_that_arent_the_files_stop_the_program() {
             true,
             "city: 3, people: 5, km2: 4, capital: 3"
         ),
-        failed(
+        csv_failed(
+            "shared",
             Code::CsvColumns,
             "`capital` and `city` are both read from column 3"
         )
@@ -784,7 +805,6 @@ fn csv_columns_that_arent_the_files_stop_the_program() {
 #[test]
 fn csv_files_that_cant_be_read_stop_the_program() {
     use trendy_diag::Code;
-    let failed = failed_with;
     // Each record has the first's fields, and the file is CSV.
     assert_eq!(
         loaded_csv(
@@ -793,7 +813,8 @@ fn csv_files_that_cant_be_read_stop_the_program() {
             true,
             CSV_COLUMNS
         ),
-        failed(
+        csv_failed(
+            "short",
             Code::MalformedCsv,
             r#"line 2 of "PATH" has 4 fields, but the header has 5"#
         )
@@ -805,14 +826,16 @@ fn csv_files_that_cant_be_read_stop_the_program() {
             false,
             CSV_COLUMNS
         ),
-        failed(
+        csv_failed(
+            "long",
             Code::MalformedCsv,
             r#"line 3 of "PATH" has 6 fields, but line 1 has 5"#
         )
     );
     assert_eq!(
         loaded_csv("stray", "Peru,yes,Lima \"Peru\",1,1\n", false, CSV_COLUMNS),
-        failed(
+        csv_failed(
+            "stray",
             Code::MalformedCsv,
             r#"line 1 of "PATH" has a quote in a field that isn't quoted"#
         )
@@ -824,7 +847,8 @@ fn csv_files_that_cant_be_read_stop_the_program() {
             true,
             CSV_COLUMNS
         ),
-        failed(
+        csv_failed(
+            "unclosed",
             Code::MalformedCsv,
             r#"line 3 of "PATH" starts a quoted field that isn't closed"#
         )
@@ -838,7 +862,8 @@ fn csv_files_that_cant_be_read_stop_the_program() {
             true,
             CSV_COLUMNS
         ),
-        failed(
+        csv_failed(
+            "spaced",
             Code::Unparsable,
             r#"" 10883000", in column 5 ("population") on line 2 of "PATH", isn't an integer, the type of `people`"#
         )
@@ -850,7 +875,8 @@ fn csv_files_that_cant_be_read_stop_the_program() {
             false,
             CSV_COLUMNS
         ),
-        failed(
+        csv_failed(
+            "word",
             Code::Unparsable,
             r#""capital", in column 2 on line 1 of "PATH", isn't a boolean, the type of `capital`; if line 1 is a header, `header: true` skips it"#
         )
@@ -900,9 +926,10 @@ fn load_text_file_reads_a_files_lines() {
         (
             1,
             format!(
-                "error[{}]: can't read {}: No such file or directory\n",
+                "error[{}]: can't read {}: No such file or directory\n{}",
                 Code::UnreadableFile.id(),
-                literal(&missing)
+                literal(&missing),
+                site("load_text_file_missing", 3)
             )
         )
     );
@@ -912,9 +939,10 @@ fn load_text_file_reads_a_files_lines() {
         (
             1,
             format!(
-                "error[{}]: line 2 of {} isn't UTF-8 text\n",
+                "error[{}]: line 2 of {} isn't UTF-8 text\n{}",
                 Code::NotUtf8.id(),
-                literal(&not_utf8)
+                literal(&not_utf8),
+                site("load_text_file_latin1", 3)
             )
         )
     );
@@ -1067,12 +1095,21 @@ fn run_time_failures_stop_the_program() {
         ("where", "relation { { n: a } } where n + 1 > 0", &overflow),
     ];
     for (name, expr, expected) in cases {
-        let (code, stderr) = run_source(&format!("fail_{name}"), &program(expr));
-        assert_eq!((code, &stderr), (1, expected), "{expr}");
+        let name = format!("fail_{name}");
+        let (code, stderr) = run_source(&name, &program(expr));
+        let expected = format!("{expected}{}", site(&name, 3));
+        assert_eq!((code, stderr), (1, expected), "{expr}");
     }
     // The smallest integer `mod -1` has a result.
     let (code, stderr) = run_source("mod_min", &program("(-a - 1) mod -1"));
     assert_eq!((code, &stderr[..]), (0, "1\n0\n2\n"));
+}
+
+/// Taking a relation's only tuple, combining relations, indexing an array
+/// and joining tuples that fail stop the program.
+#[test]
+fn values_that_arent_there_stop_the_program() {
+    use trendy_diag::Code;
     // A relation with no tuples, or several, has no only tuple.
     for (name, expr, what) in [
         (
@@ -1092,8 +1129,9 @@ fn run_time_failures_stop_the_program() {
             (
                 1,
                 &*format!(
-                    "1\nerror[{}]: the relation has {what}, but exactly one was taken\n",
-                    Code::NotOneTuple.id()
+                    "1\nerror[{}]: the relation has {what}, but exactly one was taken\n{}",
+                    Code::NotOneTuple.id(),
+                    site(name, 3)
                 )
             ),
             "{expr}"
@@ -1120,7 +1158,8 @@ fn run_time_failures_stop_the_program() {
         ),
     ] {
         let (code, stderr) = run_source(name, &program(expr));
-        assert_eq!((code, stderr), (1, format!("1\n{failure}\n")), "{expr}");
+        let expected = format!("1\n{failure}\n{}", site(name, 3));
+        assert_eq!((code, stderr), (1, expected), "{expr}");
     }
     // An array has no element at position 0, nor beyond its length.
     for (name, expr) in [
@@ -1133,8 +1172,9 @@ fn run_time_failures_stop_the_program() {
             (
                 1,
                 &*format!(
-                    "1\nerror[{}]: an array has no element at that position\n",
-                    Code::IndexOutOfRange.id()
+                    "1\nerror[{}]: an array has no element at that position\n{}",
+                    Code::IndexOutOfRange.id(),
+                    site(name, 3)
                 )
             ),
             "{expr}"
@@ -1150,8 +1190,9 @@ fn run_time_failures_stop_the_program() {
         (
             1,
             &*format!(
-                "1\nerror[{}]: tuples disagree on a common attribute\n",
-                Code::TupleMismatch.id()
+                "1\nerror[{}]: tuples disagree on a common attribute\n{}",
+                Code::TupleMismatch.id(),
+                site("fail_tuple_join", 3)
             )
         )
     );
@@ -1160,8 +1201,9 @@ fn run_time_failures_stop_the_program() {
 #[test]
 fn an_if_fails_only_if_the_branch_it_takes_does() {
     let overflow = format!(
-        "1\nerror[{}]: integer overflow\n",
-        trendy_diag::Code::Overflow.id()
+        "1\nerror[{}]: integer overflow\n{}",
+        trendy_diag::Code::Overflow.id(),
+        site("fail_if", 3)
     );
     let (code, stderr) = run_source("if_safe", &program("if b = 0 then 0 else a div b"));
     assert_eq!((code, &stderr[..]), (0, "1\n0\n2\n"));
@@ -1190,8 +1232,9 @@ fn min_and_max_of_no_tuples_stop_the_program() {
             (
                 1,
                 format!(
-                    "1\nerror[{}]: the relation has no tuples, so it has no {which}\n",
-                    Code::NoMinOrMax.id()
+                    "1\nerror[{}]: the relation has no tuples, so it has no {which}\n{}",
+                    Code::NoMinOrMax.id(),
+                    site(name, 3)
                 )
             ),
             "{expr}"
@@ -1348,7 +1391,7 @@ fn assignments_that_break_a_rule_stop_the_program() {
         let (code, stderr) = run_source(name, &assigning(statement));
         assert_eq!(
             (code, stderr),
-            (1, format!("1\n{failure}\n")),
+            (1, format!("1\n{failure}\n{}", site(name, 6))),
             "{statement}"
         );
     }
