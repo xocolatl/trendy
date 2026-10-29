@@ -52,9 +52,12 @@
 //! # Failures
 //!
 //! An arithmetic instruction whose result doesn't exist stops the program by
-//! calling [`RuntimeFn::Fail`], which writes the error to stderr and exits
-//! with status 1. Every failure, a runtime function's too, also writes the
-//! site the program is at, which [`Inst::Site`] sets.
+//! calling [`RuntimeFn::IntegerFailed`] or [`RuntimeFn::ApproximateFailed`]
+//! with the operation, and a check that fails ends its block with
+//! [`Terminator::Fail`], whose runtime function takes the values involved.
+//! Each writes the error, with those values, to stderr and exits with
+//! status 1. Every failure, a runtime function's too, also writes the site
+//! the program is at, which [`Inst::Site`] sets.
 //!
 //! # Type descriptors
 //!
@@ -221,9 +224,42 @@ pub enum RuntimeFn {
     /// `trendy_rt_product(dst, src, descriptor, index)`: as
     /// [`RuntimeFn::Sum`], of the product.
     Product,
-    /// `trendy_rt_fail(failure)`, which doesn't return. It takes a
-    /// [`Failure::code`] by value, not a place, so only codegen calls it.
-    Fail,
+    /// `trendy_rt_integer_failed(op, lhs, rhs)`, which doesn't return:
+    /// stop the program because `lhs op rhs`, of integers, has no result,
+    /// writing the operation: a division by zero, or an overflow. `op` is
+    /// an [`Arithmetic::code`]; a negation's `lhs` is 0. It takes them by
+    /// value, not by place, so only codegen calls it.
+    IntegerFailed,
+    /// `trendy_rt_approximate_failed(op, lhs, rhs)`: as
+    /// [`RuntimeFn::IntegerFailed`], of approximate numbers.
+    ApproximateFailed,
+    /// `trendy_rt_tuple_mismatch(attribute, lhs, rhs, descriptor)`, which
+    /// doesn't return: stop the program because tuples being joined
+    /// disagree on the common attribute named `attribute`, a text, which is
+    /// `lhs` in one and `rhs` in the other, of the type the descriptor
+    /// describes, writing them.
+    TupleMismatch,
+    /// `trendy_rt_not_one_tuple(count)`, which doesn't return: stop the
+    /// program because a relation has `count` (a [`Layout::Usize`]) tuples,
+    /// not one, where its only one is taken, writing the count.
+    NotOneTuple,
+    /// `trendy_rt_no_min()`, which doesn't return: stop the program
+    /// because a relation has no tuples, where the least value of an
+    /// attribute is taken.
+    NoMin,
+    /// `trendy_rt_no_max()`: as [`RuntimeFn::NoMin`], of the greatest.
+    NoMax,
+    /// `trendy_rt_index_out_of_range(position, length)`, which doesn't
+    /// return: stop the program because an array of `length` elements has
+    /// none at `position`, both [`Layout::I64`], writing them.
+    IndexOutOfRange,
+    /// `trendy_rt_element_conflict(positions, count, nested)`, which
+    /// doesn't return: stop the program because two changes to an array
+    /// in an `assign` block set the element at `positions`, a struct of
+    /// `count` (a [`Layout::Usize`]) [`Layout::I64`]s, from the outermost
+    /// array in, or, if `nested` (a [`Layout::U8`]) is 1, one sets it and
+    /// the other an element in it, writing the positions.
+    ElementConflict,
     /// `trendy_rt_check_key(src, descriptor, key, variable)`: stop the
     /// program if the relation `src`, of the type the descriptor
     /// describes, has two tuples with the same values for the attributes
@@ -406,7 +442,14 @@ impl RuntimeFn {
             RuntimeFn::LoadCsv => "trendy_rt_load_csv",
             RuntimeFn::Sum => "trendy_rt_sum",
             RuntimeFn::Product => "trendy_rt_product",
-            RuntimeFn::Fail => "trendy_rt_fail",
+            RuntimeFn::IntegerFailed => "trendy_rt_integer_failed",
+            RuntimeFn::ApproximateFailed => "trendy_rt_approximate_failed",
+            RuntimeFn::TupleMismatch => "trendy_rt_tuple_mismatch",
+            RuntimeFn::NotOneTuple => "trendy_rt_not_one_tuple",
+            RuntimeFn::NoMin => "trendy_rt_no_min",
+            RuntimeFn::NoMax => "trendy_rt_no_max",
+            RuntimeFn::IndexOutOfRange => "trendy_rt_index_out_of_range",
+            RuntimeFn::ElementConflict => "trendy_rt_element_conflict",
             RuntimeFn::CheckKey => "trendy_rt_check_key",
             RuntimeFn::Concat => "trendy_rt_concat",
             RuntimeFn::Release => "trendy_rt_release",
@@ -511,8 +554,8 @@ pub enum Operand {
 pub enum UnaryOp {
     /// Of a boolean.
     Not,
-    /// Fails with [`Failure::IntegerOverflow`] for the smallest integer;
-    /// never fails for an approximate number.
+    /// Overflows for the smallest integer; never fails for an approximate
+    /// number.
     Negate(Numeric),
     /// The integer a [`Layout::Usize`] is, such as a relation's count,
     /// which is never more than the largest integer.
@@ -538,10 +581,10 @@ impl UnaryOp {
 }
 
 /// A dyadic operator. Arithmetic is checked: a result that doesn't exist
-/// stops the program with a [`Failure`], as if the instruction were
-/// followed by a branch to a call to [`RuntimeFn::Fail`]. Codegen emits
-/// that branch. Approximate results are rounded as IEEE 754 binary64 rounds
-/// them, and must be finite.
+/// stops the program, as if the instruction were followed by a branch to a
+/// call to [`RuntimeFn::IntegerFailed`] or [`RuntimeFn::ApproximateFailed`].
+/// Codegen emits that branch. Approximate results are rounded as IEEE 754
+/// binary64 rounds them, and must be finite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
     And,
@@ -550,8 +593,7 @@ pub enum BinaryOp {
     Add(Numeric),
     Subtract(Numeric),
     Multiply(Numeric),
-    /// Of approximate numbers. Fails with [`Failure::DivisionByZero`] for
-    /// either zero.
+    /// Of approximate numbers. Fails for either zero.
     Divide,
     /// Of integers, truncating toward zero.
     Div,
@@ -590,46 +632,97 @@ impl BinaryOp {
     }
 }
 
-/// Why a program stops: the argument of [`RuntimeFn::Fail`].
+/// An arithmetic operator whose result may not exist, as
+/// [`RuntimeFn::IntegerFailed`] and [`RuntimeFn::ApproximateFailed`] take
+/// it, to write the operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Arithmetic {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Div,
+    Mod,
+    Negate,
+}
+
+impl Arithmetic {
+    /// The `trendy_runtime::ARITHMETIC_` constant for this operator.
+    #[must_use]
+    pub fn code(self) -> u32 {
+        match self {
+            Arithmetic::Add => 0,
+            Arithmetic::Subtract => 1,
+            Arithmetic::Multiply => 2,
+            Arithmetic::Divide => 3,
+            Arithmetic::Div => 4,
+            Arithmetic::Mod => 5,
+            Arithmetic::Negate => 6,
+        }
+    }
+}
+
+/// Why a program stops, at a [`Terminator::Fail`], with the values its
+/// message writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Failure {
-    IntegerOverflow,
-    DivisionByZero,
-    ApproximateOverflow,
-    /// Tuples being joined disagree on a common attribute.
-    TupleMismatch,
-    /// A relation has no tuples, where its only one is taken.
-    NoTuple,
-    /// A relation has several tuples, where its only one is taken.
-    SeveralTuples,
+    /// Tuples being joined disagree on the common attribute named
+    /// `attribute`, a text, which is `lhs` in one and `rhs` in the other,
+    /// of the type `descriptor` describes.
+    TupleMismatch {
+        attribute: Place,
+        lhs: Place,
+        rhs: Place,
+        descriptor: Place,
+    },
+    /// A relation has `count` (a [`Layout::Usize`]) tuples, not one, where
+    /// its only one is taken.
+    NotOneTuple { count: Place },
     /// A relation has no tuples, where the least value of an attribute is
     /// taken.
     NoMin,
     /// A relation has no tuples, where the greatest value of an attribute
     /// is taken.
     NoMax,
-    /// An array has no element at the position it is indexed at.
-    IndexOutOfRange,
-    /// Two changes to an array in an `assign` block set the same element,
-    /// or one sets an element in the other's.
-    ElementConflict,
+    /// An array of `length` elements has none at `position`, both
+    /// [`Layout::I64`].
+    IndexOutOfRange { position: Place, length: Place },
+    /// Two changes to an array in an `assign` block set the element at
+    /// `positions`, as [`RuntimeFn::ElementConflict`] takes them, or one
+    /// sets it and the other an element in it.
+    ElementConflict {
+        positions: Place,
+        count: Place,
+        nested: Place,
+    },
 }
 
 impl Failure {
-    /// The `trendy_runtime::FAIL_` constant for this failure.
+    /// The runtime function that stops the program because of this
+    /// failure, and its arguments, each passed by address.
     #[must_use]
-    pub fn code(self) -> u32 {
+    pub fn call(&self) -> (RuntimeFn, Vec<&Place>) {
         match self {
-            Failure::IntegerOverflow => 0,
-            Failure::DivisionByZero => 1,
-            Failure::ApproximateOverflow => 2,
-            Failure::TupleMismatch => 4,
-            Failure::NoTuple => 5,
-            Failure::SeveralTuples => 6,
-            Failure::NoMin => 11,
-            Failure::NoMax => 12,
-            Failure::IndexOutOfRange => 13,
-            Failure::ElementConflict => 14,
+            Failure::TupleMismatch {
+                attribute,
+                lhs,
+                rhs,
+                descriptor,
+            } => (
+                RuntimeFn::TupleMismatch,
+                vec![attribute, lhs, rhs, descriptor],
+            ),
+            Failure::NotOneTuple { count } => (RuntimeFn::NotOneTuple, vec![count]),
+            Failure::NoMin => (RuntimeFn::NoMin, Vec::new()),
+            Failure::NoMax => (RuntimeFn::NoMax, Vec::new()),
+            Failure::IndexOutOfRange { position, length } => {
+                (RuntimeFn::IndexOutOfRange, vec![position, length])
+            }
+            Failure::ElementConflict {
+                positions,
+                count,
+                nested,
+            } => (RuntimeFn::ElementConflict, vec![positions, count, nested]),
         }
     }
 }
@@ -687,8 +780,8 @@ pub enum Terminator {
         then: BlockId,
         otherwise: BlockId,
     },
-    /// Stop the program because of this failure, by calling
-    /// [`RuntimeFn::Fail`].
+    /// Stop the program because of this failure, by calling its runtime
+    /// function, which writes it, with its values.
     Fail(Failure),
 }
 

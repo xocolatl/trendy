@@ -41,69 +41,21 @@ pub const KIND_TUPLE: u8 = 4;
 pub const KIND_RELATION: u8 = 5;
 pub const KIND_ARRAY: u8 = 6;
 
-/// An integer result out of range.
-pub const FAIL_INTEGER_OVERFLOW: u32 = 0;
-/// `/`, `div` or `mod` by zero.
-pub const FAIL_DIVISION_BY_ZERO: u32 = 1;
-/// An approximate result beyond the largest finite magnitude.
-pub const FAIL_APPROXIMATE_OVERFLOW: u32 = 2;
-/// Memory for a result couldn't be allocated.
-pub const FAIL_OUT_OF_MEMORY: u32 = 3;
-/// Tuples being joined disagree on a common attribute.
-pub const FAIL_TUPLE_MISMATCH: u32 = 4;
-/// The operands of a disjoint union have a tuple in common.
-pub const FAIL_SHARED_TUPLE: u32 = 7;
-/// The right operand of an included minus has a tuple the left lacks.
-pub const FAIL_MISSING_TUPLE: u32 = 8;
-/// A relation has no tuples, where its only one is taken.
-pub const FAIL_NO_TUPLE: u32 = 5;
-/// A relation has several tuples, where its only one is taken.
-pub const FAIL_SEVERAL_TUPLES: u32 = 6;
-/// Two changes to a variable in an `assign` block remove the same tuple.
-pub const FAIL_CONFLICT: u32 = 10;
-/// A relation has no tuples, where the least value of an attribute is
-/// taken.
-pub const FAIL_NO_MIN: u32 = 11;
-/// A relation has no tuples, where the greatest value of an attribute is
-/// taken.
-pub const FAIL_NO_MAX: u32 = 12;
-/// An array has no element at the position it is indexed at.
-pub const FAIL_INDEX_OUT_OF_RANGE: u32 = 13;
-/// Two changes to an array in an `assign` block set the same element, or
-/// one sets an element in the other's.
-pub const FAIL_ELEMENT_CONFLICT: u32 = 14;
-
-/// The line written to stderr for each `FAIL_` constant, with the
-/// compiler's error code, which `trendyc --explain` describes.
-#[must_use]
-pub fn failure_message(failure: u32) -> &'static str {
-    match failure {
-        FAIL_INTEGER_OVERFLOW => "error[R0001]: integer overflow\n",
-        FAIL_DIVISION_BY_ZERO => "error[R0002]: division by zero\n",
-        FAIL_APPROXIMATE_OVERFLOW => "error[R0001]: approximate overflow\n",
-        FAIL_OUT_OF_MEMORY => "error[R0003]: out of memory\n",
-        FAIL_TUPLE_MISMATCH => "error[R0004]: tuples disagree on a common attribute\n",
-        FAIL_SHARED_TUPLE => {
-            "error[R0006]: d_union or d_insert adds a tuple that is already there\n"
-        }
-        FAIL_MISSING_TUPLE => {
-            "error[R0007]: i_minus or i_delete removes a tuple that isn't there\n"
-        }
-        FAIL_CONFLICT => "error[R0009]: two changes in an assign block remove the same tuple\n",
-        FAIL_NO_TUPLE => "error[R0005]: the relation has no tuples, but exactly one was taken\n",
-        FAIL_SEVERAL_TUPLES => {
-            "error[R0005]: the relation has several tuples, but exactly one was taken\n"
-        }
-        FAIL_NO_MIN => "error[R0010]: the relation has no tuples, so it has no min\n",
-        FAIL_NO_MAX => "error[R0010]: the relation has no tuples, so it has no max\n",
-        FAIL_INDEX_OUT_OF_RANGE => "error[R0011]: an array has no element at that position\n",
-        FAIL_ELEMENT_CONFLICT => {
-            "error[R0009]: two changes in an assign block set the same element\n"
-        }
-        // The compiler and the runtime disagree: a bug.
-        _ => "error[X0000]: internal error: unknown run-time failure\n",
-    }
-}
+/// [`trendy_rt_integer_failed`]'s and [`trendy_rt_approximate_failed`]'s
+/// operators: `+`.
+pub const ARITHMETIC_ADD: u32 = 0;
+/// `-`, of two operands.
+pub const ARITHMETIC_SUBTRACT: u32 = 1;
+/// `*`.
+pub const ARITHMETIC_MULTIPLY: u32 = 2;
+/// `/`, of approximate numbers.
+pub const ARITHMETIC_DIVIDE: u32 = 3;
+/// `div`, of integers.
+pub const ARITHMETIC_DIV: u32 = 4;
+/// `mod`, of integers.
+pub const ARITHMETIC_MOD: u32 = 5;
+/// `-`, of one operand.
+pub const ARITHMETIC_NEGATE: u32 = 6;
 
 /// A `text` value: the address of its UTF-8 bytes, and their number. The
 /// compiler lays text out as this pair.
@@ -128,7 +80,7 @@ pub unsafe extern "C" fn trendy_rt_concat(dst: *mut Text, lhs: *const Text, rhs:
     unsafe {
         let (lhs, rhs) = (lhs.read_unaligned(), rhs.read_unaligned());
         let Some(len) = lhs.len.checked_add(rhs.len) else {
-            trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+            fail(Failure::OutOfMemory)
         };
         let bytes = allocate_buffer(len, core::ptr::null());
         core::ptr::copy_nonoverlapping(lhs.bytes, bytes, lhs.len);
@@ -364,11 +316,11 @@ unsafe fn hold(buffer: *mut u8) {
         if scope.len == scope.capacity {
             let capacity = (scope.capacity * 2).max(8);
             let Some(bytes) = capacity.checked_mul(size_of::<*mut u8>()) else {
-                trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+                fail(Failure::OutOfMemory)
             };
             let grown = realloc(scope.buffers.cast(), bytes);
             if grown.is_null() {
-                trendy_rt_fail(FAIL_OUT_OF_MEMORY);
+                fail(Failure::OutOfMemory);
             }
             scope.buffers = grown.cast();
             scope.capacity = capacity;
@@ -418,7 +370,7 @@ fn allocate_buffer(bytes: usize, desc: *const TypeDesc) -> *mut u8 {
 #[cfg(not(test))]
 fn new_buffer(bytes: usize, desc: *const TypeDesc) -> *mut u8 {
     let Some(total) = bytes.checked_add(HEADER) else {
-        trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+        fail(Failure::OutOfMemory)
     };
     // SAFETY: the block has room for the header and the bytes.
     unsafe {
@@ -740,7 +692,7 @@ unsafe fn copied(buffer: *const u8, len: usize, desc: &TypeDesc) -> *mut u8 {
     unsafe {
         let element = desc.element();
         let Some(bytes) = len.checked_mul(element.size) else {
-            trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+            fail(Failure::OutOfMemory)
         };
         let copy = new_buffer(bytes, desc);
         for i in 0..len {
@@ -757,12 +709,12 @@ unsafe fn copied(buffer: *const u8, len: usize, desc: &TypeDesc) -> *mut u8 {
 #[cfg(not(test))]
 fn allocate<T>(count: usize) -> *mut T {
     let Some(size) = count.checked_mul(size_of::<T>()) else {
-        trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+        fail(Failure::OutOfMemory)
     };
     // SAFETY: `malloc` has no preconditions.
     let memory = unsafe { malloc(size.max(1)) };
     if memory.is_null() {
-        trendy_rt_fail(FAIL_OUT_OF_MEMORY);
+        fail(Failure::OutOfMemory);
     }
     memory.cast()
 }
@@ -796,7 +748,7 @@ pub unsafe extern "C" fn trendy_rt_reshape(
         let (tuples, count) = read_slice(src);
         let size = result.element().size;
         let Some(bytes) = count.checked_mul(size) else {
-            trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+            fail(Failure::OutOfMemory)
         };
         let attributes = attributes(result);
         let offsets = core::slice::from_raw_parts(offsets, attributes.len());
@@ -924,7 +876,7 @@ pub unsafe extern "C" fn trendy_rt_and(
 
         let size = result.element().size;
         let Some(bytes) = total.checked_mul(size) else {
-            trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+            fail(Failure::OutOfMemory)
         };
         let joined = allocate::<u8>(bytes);
         core::ptr::write_bytes(joined, 0, bytes);
@@ -1015,7 +967,7 @@ pub unsafe extern "C" fn trendy_rt_ungroup(
         let size = result.element().size;
         let Some((total, bytes)) = total.and_then(|total| Some((total, total.checked_mul(size)?)))
         else {
-            trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+            fail(Failure::OutOfMemory)
         };
         let made = allocate::<u8>(bytes);
         core::ptr::write_bytes(made, 0, bytes);
@@ -1119,6 +1071,11 @@ pub unsafe extern "C" fn trendy_rt_subset(
     }
 }
 
+/// The start of the error [`trendy_rt_combine`] writes, before the tuple,
+/// when an included minus's right operand has a tuple the left lacks.
+#[cfg(not(test))]
+const MISSING_TUPLE: &str = "error[R0007]: i_minus or i_delete removes a tuple that isn't there: ";
+
 /// [`trendy_rt_combine`]'s union.
 pub const COMBINE_UNION: usize = 0;
 /// [`trendy_rt_combine`]'s union of operands with no tuple in common.
@@ -1167,10 +1124,10 @@ pub unsafe extern "C" fn trendy_rt_combine(
         let minus = matches!(combination, COMBINE_MINUS | COMBINE_INCLUDED_MINUS);
         let size = desc.element().size;
         let Some(room) = lhs_count.checked_add(rhs_count) else {
-            trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+            fail(Failure::OutOfMemory)
         };
         let Some(bytes) = room.checked_mul(size) else {
-            trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+            fail(Failure::OutOfMemory)
         };
         let out = allocate_buffer(bytes, desc);
         let tuple_desc = desc.element();
@@ -1194,8 +1151,16 @@ pub unsafe extern "C" fn trendy_rt_combine(
                 }
                 Ordering::Equal => {
                     match combination {
-                        COMBINE_DISJOINT_UNION => trendy_rt_fail(FAIL_SHARED_TUPLE),
-                        COMBINE_DISJOINT_CHANGES => trendy_rt_fail(FAIL_CONFLICT),
+                        COMBINE_DISJOINT_UNION => tuple_failed(
+                            "error[R0006]: d_union or d_insert adds a tuple that is already there: ",
+                            l,
+                            tuple_desc,
+                        ),
+                        COMBINE_DISJOINT_CHANGES => tuple_failed(
+                            "error[R0009]: two changes in an assign block remove the same tuple: ",
+                            l,
+                            tuple_desc,
+                        ),
                         _ => {}
                     }
                     // A tuple of both is in an exclusive union's result
@@ -1208,7 +1173,7 @@ pub unsafe extern "C" fn trendy_rt_combine(
                 }
                 Ordering::Greater => {
                     if combination == COMBINE_INCLUDED_MINUS {
-                        trendy_rt_fail(FAIL_MISSING_TUPLE);
+                        tuple_failed(MISSING_TUPLE, rhs.add(j * size), tuple_desc);
                     }
                     if !minus {
                         keep(rhs.add(j * size));
@@ -1219,7 +1184,7 @@ pub unsafe extern "C" fn trendy_rt_combine(
         }
         // What is left of `rhs` is in no tuple of `lhs`.
         if combination == COMBINE_INCLUDED_MINUS && j < rhs_count {
-            trendy_rt_fail(FAIL_MISSING_TUPLE);
+            tuple_failed(MISSING_TUPLE, rhs.add(j * size), tuple_desc);
         }
         if !minus {
             for k in j..rhs_count {
@@ -1386,7 +1351,7 @@ unsafe fn matching_runs<'a>(
                         .checked_mul(rhs_end - j)
                         .and_then(|n| n.checked_add(total))
                     else {
-                        trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+                        fail(Failure::OutOfMemory)
                     };
                     total = sum;
                     groups.add(count).write(Group {
@@ -1425,7 +1390,7 @@ pub unsafe extern "C" fn trendy_rt_allocate(
     unsafe {
         let count = count.read_unaligned();
         let Some(bytes) = count.checked_mul((*desc).element().size) else {
-            trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+            fail(Failure::OutOfMemory)
         };
         let tuples = allocate_buffer(bytes, desc);
         core::ptr::write_bytes(tuples, 0, bytes);
@@ -1522,7 +1487,7 @@ pub unsafe extern "C" fn trendy_rt_load(
         });
         let element = result.element();
         let Some(bytes) = len.checked_mul(element.size) else {
-            trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+            fail(Failure::OutOfMemory)
         };
         let out = allocate_buffer(bytes, result);
         // Each element is made here first, zeroed, as everywhere, so that
@@ -1577,7 +1542,7 @@ pub unsafe extern "C" fn trendy_rt_unload(
         let element = source.element().size;
         let size = result.element().size;
         let Some(bytes) = len.checked_mul(size) else {
-            trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+            fail(Failure::OutOfMemory)
         };
         // The tuples are made here first, zeroed, as everywhere, so that
         // the padding in them is zero, and share the elements' buffers
@@ -1592,7 +1557,7 @@ pub unsafe extern "C" fn trendy_rt_unload(
             // An array of tuples of no attributes takes no memory, so only
             // the integers limit its positions.
             let Ok(position) = i64::try_from(i + 1) else {
-                trendy_rt_fail(FAIL_INTEGER_OVERFLOW)
+                fail(Failure::IntegerOverflow)
             };
             for number in numbers {
                 to.add(*number).cast::<i64>().write_unaligned(position);
@@ -1724,12 +1689,288 @@ unsafe fn compare_tuples(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> cor
     }
 }
 
-/// Stop the program because of `failure`, one of the `FAIL_` constants:
-/// write its message to stderr and exit with status 1.
+/// Why the runtime stops the program where it has no values to write.
+#[cfg(not(test))]
+#[derive(Debug, Clone, Copy)]
+enum Failure {
+    /// An integer result out of range: a sum, a product, or a position.
+    IntegerOverflow,
+    /// An approximate result beyond the largest finite magnitude: a sum or
+    /// a product.
+    ApproximateOverflow,
+    /// Memory for a result couldn't be allocated.
+    OutOfMemory,
+}
+
+/// Stop the program because of `failure`.
+#[cfg(not(test))]
+fn fail(failure: Failure) -> ! {
+    fail_with(|out| {
+        out.write_str(match failure {
+            Failure::IntegerOverflow => "error[R0001]: integer overflow\n",
+            Failure::ApproximateOverflow => "error[R0001]: approximate overflow\n",
+            Failure::OutOfMemory => "error[R0003]: out of memory\n",
+        })
+    })
+}
+
+/// Stop the program because `lhs op rhs`, of integers, has no result, `op`
+/// being an `ARITHMETIC_` constant, writing the operation: a division by
+/// zero (R0002), or else an overflow (R0001). A negation's `lhs` is 0.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub extern "C" fn trendy_rt_fail(failure: u32) -> ! {
-    fail_with(|out| out.write_str(failure_message(failure)))
+pub extern "C" fn trendy_rt_integer_failed(op: u32, lhs: i64, rhs: i64) -> ! {
+    arithmetic_failed(op, Number::Integer(lhs), Number::Integer(rhs))
+}
+
+/// As [`trendy_rt_integer_failed`], of approximate numbers.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn trendy_rt_approximate_failed(op: u32, lhs: f64, rhs: f64) -> ! {
+    arithmetic_failed(op, Number::Approximate(lhs), Number::Approximate(rhs))
+}
+
+/// An operand of an arithmetic operation that has no result.
+#[cfg(not(test))]
+#[derive(Debug, Clone, Copy)]
+enum Number {
+    Integer(i64),
+    Approximate(f64),
+}
+
+#[cfg(not(test))]
+impl Number {
+    fn is_zero(self) -> bool {
+        match self {
+            Number::Integer(n) => n == 0,
+            // Equal to 0.0 for both zeros.
+            Number::Approximate(x) => x == 0.0,
+        }
+    }
+
+    fn is_negative(self) -> bool {
+        match self {
+            Number::Integer(n) => n < 0,
+            Number::Approximate(x) => x < 0.0,
+        }
+    }
+}
+
+#[cfg(not(test))]
+impl fmt::Display for Number {
+    /// As trendy source writes it, as [`write_value`] does.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Number::Integer(n) => write!(f, "{n}"),
+            Number::Approximate(x) => write!(f, "{x:e}"),
+        }
+    }
+}
+
+/// Stop the program because `lhs op rhs` has no result, as
+/// [`trendy_rt_integer_failed`] says, writing the operation as trendy
+/// source writes it, with a negative right operand in parentheses.
+#[cfg(not(test))]
+fn arithmetic_failed(op: u32, lhs: Number, rhs: Number) -> ! {
+    let symbol = match op {
+        ARITHMETIC_ADD => "+",
+        ARITHMETIC_SUBTRACT | ARITHMETIC_NEGATE => "-",
+        ARITHMETIC_MULTIPLY => "*",
+        ARITHMETIC_DIVIDE => "/",
+        ARITHMETIC_DIV => "div",
+        ARITHMETIC_MOD => "mod",
+        // The compiler and the runtime disagree: a bug.
+        _ => fail_with(|out| {
+            out.write_str("error[X0000]: internal error: unknown arithmetic operator\n")
+        }),
+    };
+    let divides = matches!(op, ARITHMETIC_DIVIDE | ARITHMETIC_DIV | ARITHMETIC_MOD);
+    let (error, outcome) = match rhs {
+        _ if divides && rhs.is_zero() => ("R0002]: division by zero", "has no result"),
+        Number::Integer(_) => (
+            "R0001]: integer overflow",
+            "doesn't fit in a 64-bit integer",
+        ),
+        Number::Approximate(_) => (
+            "R0001]: approximate overflow",
+            "is too large for an approximate number",
+        ),
+    };
+    fail_with(|out| {
+        write!(out, "error[{error}: ")?;
+        if op == ARITHMETIC_NEGATE {
+            out.write_str(symbol)?;
+        } else {
+            write!(out, "{lhs} {symbol} ")?;
+        }
+        if rhs.is_negative() {
+            write!(out, "({rhs})")?;
+        } else {
+            write!(out, "{rhs}")?;
+        }
+        writeln!(out, " {outcome}")
+    })
+}
+
+/// Stop the program because tuples being joined disagree on the common
+/// attribute named `attribute`, a text, which is `lhs` in one and `rhs` in
+/// the other, of the type `desc` describes, writing them (R0004).
+///
+/// # Safety
+///
+/// `attribute` must point to a valid text value, and `lhs` and `rhs` to
+/// valid values of the type `desc` describes.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_tuple_mismatch(
+    attribute: *const u8,
+    lhs: *const u8,
+    rhs: *const u8,
+    desc: *const TypeDesc,
+) -> ! {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let (attribute, desc) = (read_text(attribute), &*desc);
+        fail_with(|out| {
+            write!(
+                out,
+                "error[R0004]: the tuples disagree on `{attribute}`, so they have no join: `{attribute}` is "
+            )?;
+            write_value(out, lhs, desc)?;
+            out.write_str(" in one and ")?;
+            write_value(out, rhs, desc)?;
+            out.write_str(" in the other\n")
+        })
+    }
+}
+
+/// Stop the program because a relation has `*count` tuples, not one,
+/// where its only one is taken, writing the count (R0005).
+///
+/// # Safety
+///
+/// `count` must point to a `usize`.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_not_one_tuple(count: *const usize) -> ! {
+    // SAFETY: guaranteed by the caller.
+    let count = unsafe { count.read_unaligned() };
+    fail_with(|out| {
+        out.write_str("error[R0005]: the relation has ")?;
+        match count {
+            0 => out.write_str("no tuples")?,
+            _ => write!(out, "{count} tuples")?,
+        }
+        out.write_str(", but exactly one is taken\n")
+    })
+}
+
+/// Stop the program because a relation has no tuples, where the least
+/// value of an attribute is taken (R0010).
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn trendy_rt_no_min() -> ! {
+    fail_with(|out| out.write_str("error[R0010]: the relation has no tuples, so it has no min\n"))
+}
+
+/// Stop the program because a relation has no tuples, where the greatest
+/// value of an attribute is taken (R0010).
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn trendy_rt_no_max() -> ! {
+    fail_with(|out| out.write_str("error[R0010]: the relation has no tuples, so it has no max\n"))
+}
+
+/// Stop the program because an array of `*length` elements has none at
+/// `*position`, writing them (R0011).
+///
+/// # Safety
+///
+/// `position` and `length` must point to integers.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_index_out_of_range(
+    position: *const i64,
+    length: *const i64,
+) -> ! {
+    // SAFETY: guaranteed by the caller.
+    let (position, length) = unsafe { (position.read_unaligned(), length.read_unaligned()) };
+    fail_with(|out| {
+        out.write_str("error[R0011]: ")?;
+        match length {
+            _ if position < 1 => write!(
+                out,
+                "an array has no element at position {position}: positions count from 1"
+            )?,
+            0 => write!(
+                out,
+                "the array is empty, so it has no element at position {position}"
+            )?,
+            1 => write!(
+                out,
+                "the array has 1 element, so none at position {position}"
+            )?,
+            _ => write!(
+                out,
+                "the array has {length} elements, so none at position {position}"
+            )?,
+        }
+        out.write_char('\n')
+    })
+}
+
+/// Stop the program because two changes to an array in an `assign` block
+/// set the element at the `*count` `positions`, from the outermost array
+/// in, or, if `*nested` is 1, one sets it and the other an element in it,
+/// writing the positions (R0009).
+///
+/// # Safety
+///
+/// `positions` must point to `*count` integers, `count` to a `usize`, and
+/// `nested` to a byte.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_element_conflict(
+    positions: *const i64,
+    count: *const usize,
+    nested: *const u8,
+) -> ! {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let (count, nested) = (count.read_unaligned(), nested.read() == 1);
+        fail_with(|out| {
+            if nested {
+                out.write_str("error[R0009]: one change in an assign block sets the element at ")?;
+            } else {
+                out.write_str(
+                    "error[R0009]: two changes in an assign block set the same element, at ",
+                )?;
+            }
+            for i in 0..count {
+                write!(out, "[{}]", positions.add(i).read_unaligned())?;
+            }
+            if nested {
+                out.write_str(", and another an element in it")?;
+            }
+            out.write_char('\n')
+        })
+    }
+}
+
+/// Stop the program, writing `message`, then the tuple at `tuple`, of the
+/// type `desc` describes.
+///
+/// # Safety
+///
+/// `tuple` must point to a valid tuple of the type `desc` describes.
+#[cfg(not(test))]
+unsafe fn tuple_failed(message: &str, tuple: *const u8, desc: &TypeDesc) -> ! {
+    fail_with(|out| {
+        out.write_str(message)?;
+        // SAFETY: guaranteed by the caller.
+        unsafe { write_value(out, tuple, desc)? };
+        out.write_char('\n')
+    })
 }
 
 /// Stop the program if the relation `value`, of the type `desc` describes,
@@ -2101,7 +2342,7 @@ impl Column {
 #[cfg(not(test))]
 unsafe fn store_integer(dst: *mut u8, total: Option<i64>) {
     let Some(total) = total else {
-        trendy_rt_fail(FAIL_INTEGER_OVERFLOW)
+        fail(Failure::IntegerOverflow)
     };
     // SAFETY: guaranteed by the caller.
     unsafe { dst.cast::<i64>().write_unaligned(total) }
@@ -2116,7 +2357,7 @@ unsafe fn store_integer(dst: *mut u8, total: Option<i64>) {
 #[cfg(not(test))]
 unsafe fn store_approximate(dst: *mut u8, total: Option<f64>) {
     let Some(total) = total else {
-        trendy_rt_fail(FAIL_APPROXIMATE_OVERFLOW)
+        fail(Failure::ApproximateOverflow)
     };
     // SAFETY: guaranteed by the caller.
     unsafe { dst.cast::<f64>().write_unaligned(total) }
@@ -2143,7 +2384,7 @@ pub unsafe extern "C" fn trendy_rt_to_text(
         let Ok(text) = text_of(value, &*desc, |bytes| {
             allocate_buffer(bytes, core::ptr::null())
         }) else {
-            trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+            fail(Failure::OutOfMemory)
         };
         dst.write_unaligned(text);
     }
@@ -2299,7 +2540,7 @@ pub unsafe extern "C" fn trendy_rt_load_text_file(
         let element = desc.element();
         let count = text.lines().count();
         let Some(size) = count.checked_mul(element.size) else {
-            trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+            fail(Failure::OutOfMemory)
         };
         let lines = allocate_buffer(size, desc);
         for (i, line) in text.lines().enumerate() {
@@ -2423,7 +2664,7 @@ pub unsafe extern "C" fn trendy_rt_load_csv(
             });
         }
         let Some(size) = count.checked_mul(element.size) else {
-            trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+            fail(Failure::OutOfMemory)
         };
         let rows = allocate_buffer(size, desc);
         // Each record's tuple, made here, then copied into the array.
@@ -2625,7 +2866,7 @@ fn read_file(path: &str) -> (*mut u8, usize) {
         cant_read(path, "a path can't contain the character U+0000");
     }
     let Some(terminated) = path.len().checked_add(1) else {
-        trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+        fail(Failure::OutOfMemory)
     };
     // SAFETY: the memory is for the path's bytes and a NUL, read by `open`
     // and then freed; the descriptor is read, then closed, and `read`
@@ -2645,11 +2886,11 @@ fn read_file(path: &str) -> (*mut u8, usize) {
         loop {
             if len == capacity {
                 let Some(grown) = capacity.checked_mul(2) else {
-                    trendy_rt_fail(FAIL_OUT_OF_MEMORY)
+                    fail(Failure::OutOfMemory)
                 };
                 contents = realloc(contents.cast(), grown).cast();
                 if contents.is_null() {
-                    trendy_rt_fail(FAIL_OUT_OF_MEMORY);
+                    fail(Failure::OutOfMemory);
                 }
                 capacity = grown;
             }

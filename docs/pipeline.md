@@ -983,7 +983,7 @@ Both become `Only`, the only tuple of a relation, folded
 when it is a constant, where no tuple or several is an error (R0005);
 `value from` is the extraction of the only attribute from it. Lowering
 compares the count with one, ending the block with `Terminator::Fail`
-for none or several, then copies the tuple.
+for none or several, which writes the count, then copies the tuple.
 
 `matching` and `not matching` are parsed as the joins are, `not matching`
 as one operator of two words (`Words::NotMatching`), and checked as `join`
@@ -1274,7 +1274,7 @@ An array built at run time is made by `trendy_rt_allocate`, as an
 extension's relation is, with each element computed into its place, in
 order. An index, `a[i]`, compares the position with 1 and the array's
 count, and outside them ends the block with `Terminator::Fail`, so the
-program stops with R0011; inside them it is the element's own place,
+program stops with R0011, writing the position and the count; inside them it is the element's own place,
 `Element` at the position less 1, so it costs no copy. Sema folds an index
 of a constant array, or of a selector whose other elements can't fail, and
 reports a position out of range when compiling where it can: one below 1
@@ -1361,7 +1361,8 @@ the runtime never matches attributes by name.
 
 `And` of tuples is the tuple join: lowering compares each common
 attribute and ends the block with `Terminator::Fail` if they differ, so
-the program stops with R0004, then copies each attribute from the operand
+the program stops with R0004, writing the attribute and its values, then
+copies each attribute from the operand
 that has it. Sema folds it for constants (`TupleValue::join`), reporting a
 mismatch when compiling; `ops::Failed` carries why constants have no
 value, an operator's failure or a mismatch, so that an `extend`'s values
@@ -1404,13 +1405,18 @@ produced with Cranelift.
   object occupies at least one byte;
 - calling conventions, and the C-ABI `main` entry shim;
 - the checks of arithmetic instructions, each branching to a cold block that
-  calls `trendy_rt_fail`, which writes the error, such as
-  `error[R0001]: integer overflow`, to stderr and exits with status 1.
-  Integer overflow is detected with Cranelift's `sadd_overflow` and its kin,
-  and division by zero, or of the smallest integer by -1, with explicit
-  comparisons. Approximate operands are always finite, so an approximate
-  result overflowed exactly when it is infinite, and there is never a NaN; a
-  division is checked for a zero divisor first.
+  calls `trendy_rt_integer_failed` or `trendy_rt_approximate_failed` with
+  the operator and its operands, by value, which writes the error, with
+  the operation, such as `error[R0001]: integer overflow:
+  9223372036854775807 + 1 doesn't fit in a 64-bit integer`, to stderr and
+  exits with status 1. Integer overflow is detected with Cranelift's
+  `sadd_overflow` and its kin, and division by zero, or of the smallest
+  integer by -1, with explicit comparisons. Approximate operands are always
+  finite, so an approximate result overflowed exactly when it is infinite,
+  and there is never a NaN; a division is checked for a zero divisor first;
+- each `Terminator::Fail`, a call to its failure's runtime function, with
+  the addresses of the values it writes, and a trap, since it doesn't
+  return.
 
 The calling convention: a function with parameters takes one pointer, to a
 struct of its parameters in name order, because a call's arguments are a
@@ -1515,8 +1521,13 @@ diagnostic, with offsets, lines, columns, labels and edits. The language
 server sends the code, related locations, and all notes and help in the
 message, and offers each suggestion as a quick fix.
 
-A failure while the program runs writes its code and message, then where
-the program is, ` --> path:line:column`, as a compiler's error does. Sema
+A failure while the program runs writes its code and message, with the
+values involved, as the error when compiling names them: an arithmetic
+operation and its operands, a tuple a combination or a change finds, a
+join's attribute and its values, a relation's count, or an array's
+position and length. Each failure is a runtime function of its own, which
+takes its values (`lir::Failure::call`), so the runtime needs no table of
+failures shared with the compiler. Then it writes where the program is, ` --> path:line:column`, as a compiler's error does. Sema
 gives each statement its site (`hir::Site`, its file and where it starts),
 and each value of a value block's that can fail, a local variable's or
 the one it ends with, the site of the statement or value (`Expr::At`,

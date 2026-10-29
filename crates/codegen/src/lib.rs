@@ -195,7 +195,7 @@ impl Functions {
                     b.ins()
                         .brif(condition, blocks[then.0], &[], blocks[otherwise.0], &[]);
                 }
-                lir::Terminator::Fail(failure) => self.fail(*failure, &mut b)?,
+                lir::Terminator::Fail(failure) => self.fail(failure, &frame, &mut b)?,
             }
         }
         b.seal_all_blocks();
@@ -249,14 +249,8 @@ impl Functions {
                 b.ins().store(MemFlagsData::trusted(), address, at, 0);
             }
             lir::Inst::CallRuntime { function, args } => {
-                let pointers = vec![self.config.pointer_type(); args.len()];
-                let id = self.runtime_function(*function, &pointers)?;
-                let callee = self.module.declare_func_in_func(id, b.func);
-                let args = args
-                    .iter()
-                    .map(|place| self.address(place, frame, b))
-                    .collect::<Result<Vec<_>, _>>()?;
-                b.ins().call(callee, &args);
+                let args: Vec<&lir::Place> = args.iter().collect();
+                self.call_runtime(*function, &args, frame, b)?;
             }
             lir::Inst::Unary { dst, op, src } => {
                 let ty = match op.operand() {
@@ -319,7 +313,8 @@ impl Functions {
             lir::UnaryOp::Negate(lir::Numeric::Integer) => {
                 let zero = b.ins().iconst(types::I64, 0);
                 let (result, overflow) = b.ins().ssub_overflow(zero, value);
-                self.fail_if(overflow, lir::Failure::IntegerOverflow, b)?;
+                let negation = Operation::integer(lir::Arithmetic::Negate, zero, value);
+                self.fail_if(overflow, negation, b)?;
                 result
             }
             // Exact: only the sign changes, and 0.0 stays 0.0.
@@ -346,18 +341,22 @@ impl Functions {
         b: &mut FunctionBuilder,
     ) -> Result<Value, String> {
         use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
+        use lir::Arithmetic as A;
         use lir::Numeric::{Approximate, Integer};
-        let checked = |this: &mut Self, (result, overflow), b: &mut FunctionBuilder| {
-            this.fail_if(overflow, lir::Failure::IntegerOverflow, b)
-                .map(|()| result)
+        let (integer, approximate) = (
+            |op| Operation::integer(op, lhs, rhs),
+            |op| Operation::approximate(op, lhs, rhs),
+        );
+        let checked = |this: &mut Self, op, (result, overflow), b: &mut FunctionBuilder| {
+            this.fail_if(overflow, integer(op), b).map(|()| result)
         };
         // The operands are finite, so an infinite result is an overflow, and
         // there is never a NaN.
-        let finite = |this: &mut Self, result: Value, b: &mut FunctionBuilder| {
+        let finite = |this: &mut Self, op, result: Value, b: &mut FunctionBuilder| {
             let magnitude = b.ins().fabs(result);
             let infinity = b.ins().f64const(f64::INFINITY);
             let overflow = b.ins().fcmp(FloatCC::Equal, magnitude, infinity);
-            this.fail_if(overflow, lir::Failure::ApproximateOverflow, b)
+            this.fail_if(overflow, approximate(op), b)
                 .map(|()| one_zero(result, b))
         };
         Ok(match op {
@@ -379,62 +378,64 @@ impl Functions {
             lir::BinaryOp::Xor => b.ins().bxor(lhs, rhs),
             lir::BinaryOp::Add(Integer) => {
                 let sum = b.ins().sadd_overflow(lhs, rhs);
-                checked(self, sum, b)?
+                checked(self, A::Add, sum, b)?
             }
             lir::BinaryOp::Subtract(Integer) => {
                 let difference = b.ins().ssub_overflow(lhs, rhs);
-                checked(self, difference, b)?
+                checked(self, A::Subtract, difference, b)?
             }
             lir::BinaryOp::Multiply(Integer) => {
                 let product = b.ins().smul_overflow(lhs, rhs);
-                checked(self, product, b)?
+                checked(self, A::Multiply, product, b)?
             }
             lir::BinaryOp::Add(Approximate) => {
                 let sum = b.ins().fadd(lhs, rhs);
-                finite(self, sum, b)?
+                finite(self, A::Add, sum, b)?
             }
             lir::BinaryOp::Subtract(Approximate) => {
                 let difference = b.ins().fsub(lhs, rhs);
-                finite(self, difference, b)?
+                finite(self, A::Subtract, difference, b)?
             }
             lir::BinaryOp::Multiply(Approximate) => {
                 let product = b.ins().fmul(lhs, rhs);
-                finite(self, product, b)?
+                finite(self, A::Multiply, product, b)?
             }
             lir::BinaryOp::Divide => {
                 // Equal to 0.0 for both zeros.
                 let zero = b.ins().f64const(0.0);
                 let by_zero = b.ins().fcmp(FloatCC::Equal, rhs, zero);
-                self.fail_if(by_zero, lir::Failure::DivisionByZero, b)?;
+                self.fail_if(by_zero, approximate(A::Divide), b)?;
                 let quotient = b.ins().fdiv(lhs, rhs);
-                finite(self, quotient, b)?
+                finite(self, A::Divide, quotient, b)?
             }
-            lir::BinaryOp::Div | lir::BinaryOp::Mod => {
+            lir::BinaryOp::Div => {
                 let zero = b.ins().icmp_imm_s(IntCC::Equal, rhs, 0);
-                self.fail_if(zero, lir::Failure::DivisionByZero, b)?;
-                if op == lir::BinaryOp::Mod {
-                    // Cranelift defines `srem` of the smallest integer by -1
-                    // as 0, which is the result.
-                    b.ins().srem(lhs, rhs)
-                } else {
-                    // The one quotient out of range: the smallest integer
-                    // divided by -1.
-                    let min = b.ins().icmp_imm_s(IntCC::Equal, lhs, i64::MIN);
-                    let minus_one = b.ins().icmp_imm_s(IntCC::Equal, rhs, -1);
-                    let overflow = b.ins().band(min, minus_one);
-                    self.fail_if(overflow, lir::Failure::IntegerOverflow, b)?;
-                    b.ins().sdiv(lhs, rhs)
-                }
+                self.fail_if(zero, integer(A::Div), b)?;
+                // The one quotient out of range: the smallest integer
+                // divided by -1.
+                let min = b.ins().icmp_imm_s(IntCC::Equal, lhs, i64::MIN);
+                let minus_one = b.ins().icmp_imm_s(IntCC::Equal, rhs, -1);
+                let overflow = b.ins().band(min, minus_one);
+                self.fail_if(overflow, integer(A::Div), b)?;
+                b.ins().sdiv(lhs, rhs)
+            }
+            lir::BinaryOp::Mod => {
+                let zero = b.ins().icmp_imm_s(IntCC::Equal, rhs, 0);
+                self.fail_if(zero, integer(A::Mod), b)?;
+                // Cranelift defines `srem` of the smallest integer by -1 as
+                // 0, which is the result.
+                b.ins().srem(lhs, rhs)
             }
         })
     }
 
-    /// Stop the program with `failure` when `condition` is nonzero, in a
-    /// cold block, and carry on in a new block otherwise.
+    /// Stop the program when `condition` is nonzero, because `operation`
+    /// has no result, in a cold block, and carry on in a new block
+    /// otherwise.
     fn fail_if(
         &mut self,
         condition: Value,
-        failure: lir::Failure,
+        operation: Operation,
         b: &mut FunctionBuilder,
     ) -> Result<(), String> {
         let fail = b.create_block();
@@ -443,21 +444,51 @@ impl Functions {
         b.ins().brif(condition, fail, &[], carry_on, &[]);
 
         b.switch_to_block(fail);
-        self.fail(failure, b)?;
+        let (function, ty) = match operation.numeric {
+            lir::Numeric::Integer => (lir::RuntimeFn::IntegerFailed, types::I64),
+            lir::Numeric::Approximate => (lir::RuntimeFn::ApproximateFailed, types::F64),
+        };
+        let id = self.runtime_function(function, &[types::I32, ty, ty])?;
+        let callee = self.module.declare_func_in_func(id, b.func);
+        let op = b.ins().iconst(types::I32, i64::from(operation.op.code()));
+        b.ins().call(callee, &[op, operation.lhs, operation.rhs]);
+        stopped(b);
 
         b.switch_to_block(carry_on);
         Ok(())
     }
 
-    /// End the current block by stopping the program because of `failure`.
-    fn fail(&mut self, failure: lir::Failure, b: &mut FunctionBuilder) -> Result<(), String> {
-        let id = self.runtime_function(lir::RuntimeFn::Fail, &[types::I32])?;
+    /// End the current block by stopping the program because of `failure`,
+    /// whose runtime function writes it.
+    fn fail(
+        &mut self,
+        failure: &lir::Failure,
+        frame: &Frame,
+        b: &mut FunctionBuilder,
+    ) -> Result<(), String> {
+        let (function, args) = failure.call();
+        self.call_runtime(function, &args, frame, b)?;
+        stopped(b);
+        Ok(())
+    }
+
+    /// Call the runtime function `function`, passing the address of each
+    /// of `args`.
+    fn call_runtime(
+        &mut self,
+        function: lir::RuntimeFn,
+        args: &[&lir::Place],
+        frame: &Frame,
+        b: &mut FunctionBuilder,
+    ) -> Result<(), String> {
+        let pointers = vec![self.config.pointer_type(); args.len()];
+        let id = self.runtime_function(function, &pointers)?;
         let callee = self.module.declare_func_in_func(id, b.func);
-        let code = b.ins().iconst(types::I32, i64::from(failure.code()));
-        b.ins().call(callee, &[code]);
-        // `trendy_rt_fail` doesn't return.
-        b.ins()
-            .trap(cranelift_codegen::ir::TrapCode::unwrap_user(1));
+        let args = args
+            .iter()
+            .map(|place| self.address(place, frame, b))
+            .collect::<Result<Vec<_>, _>>()?;
+        b.ins().call(callee, &args);
         Ok(())
     }
 
@@ -606,6 +637,43 @@ fn float_condition(comparison: lir::Comparison) -> cranelift_codegen::ir::condco
         lir::Comparison::Greater => FloatCC::GreaterThan,
         lir::Comparison::GreaterOrEqual => FloatCC::GreaterThanOrEqual,
     }
+}
+
+/// An arithmetic operation that may have no result, for the message of the
+/// failure if it hasn't: the operator, and its operands, of `numeric`.
+#[derive(Clone, Copy)]
+struct Operation {
+    numeric: lir::Numeric,
+    op: lir::Arithmetic,
+    lhs: Value,
+    rhs: Value,
+}
+
+impl Operation {
+    fn integer(op: lir::Arithmetic, lhs: Value, rhs: Value) -> Self {
+        Operation {
+            numeric: lir::Numeric::Integer,
+            op,
+            lhs,
+            rhs,
+        }
+    }
+
+    fn approximate(op: lir::Arithmetic, lhs: Value, rhs: Value) -> Self {
+        Operation {
+            numeric: lir::Numeric::Approximate,
+            op,
+            lhs,
+            rhs,
+        }
+    }
+}
+
+/// End the current block after a call to a runtime function that stops the
+/// program, and so doesn't return.
+fn stopped(b: &mut FunctionBuilder) {
+    b.ins()
+        .trap(cranelift_codegen::ir::TrapCode::unwrap_user(1));
 }
 
 /// The approximate number `value`, with IEEE 754's `-0.0` made `0.0`, since

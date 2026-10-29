@@ -1190,7 +1190,7 @@ impl<'a> FunctionBuilder<'a> {
             {
                 let computed: Vec<Computed> =
                     changes.iter().map(|c| self.computed(c, cx)).collect();
-                self.check_overlaps(changes, &computed);
+                self.check_overlaps(changes, &computed, cx);
                 changed.push((assignment.target.clone(), computed));
                 continue;
             }
@@ -1700,7 +1700,7 @@ impl<'a> FunctionBuilder<'a> {
             dst: beyond.clone(),
             op: lir::BinaryOp::Compare(lir::Comparison::Greater, integers),
             lhs: at.clone(),
-            rhs: length,
+            rhs: length.clone(),
         });
         let outside = self.slot(lir::Layout::U8);
         self.insts.push(lir::Inst::Binary {
@@ -1718,7 +1718,11 @@ impl<'a> FunctionBuilder<'a> {
             },
             fail,
         );
-        self.end_block(lir::Terminator::Fail(lir::Failure::IndexOutOfRange), inside);
+        let failure = lir::Failure::IndexOutOfRange {
+            position: at.clone(),
+            length,
+        };
+        self.end_block(lir::Terminator::Fail(failure), inside);
         // From 1 up to the count, so from 0 less 1, which can't overflow.
         let from_zero = self.slot(lir::Layout::I64);
         self.insts.push(lir::Inst::Binary {
@@ -1747,7 +1751,7 @@ impl<'a> FunctionBuilder<'a> {
         let ty = self.type_of(array);
         let src = self.place(array, cx);
         let computed: Vec<Computed> = changes.iter().map(|c| self.computed(c, cx)).collect();
-        self.check_overlaps(changes, &computed);
+        self.check_overlaps(changes, &computed, cx);
         if computed.len() > 1 {
             self.keep_values(&ty, &computed, cx);
         }
@@ -1787,8 +1791,14 @@ impl<'a> FunctionBuilder<'a> {
     /// Stop the program if two of `changes`, to one array, computed as
     /// `computed`, overlap, unless their paths show they don't: if they
     /// have the same position at each level both have, so that they set
-    /// one element, or one sets an element in the other's.
-    fn check_overlaps(&mut self, changes: &[hir::ElementChange], computed: &[Computed]) {
+    /// one element, or one sets an element in the other's, writing those
+    /// positions.
+    fn check_overlaps(
+        &mut self,
+        changes: &[hir::ElementChange],
+        computed: &[Computed],
+        cx: &mut Lowering,
+    ) {
         let integers = lir::Operand::Numeric(lir::Numeric::Integer);
         for j in 0..changes.len() {
             for i in 0..j {
@@ -1828,7 +1838,25 @@ impl<'a> FunctionBuilder<'a> {
                     },
                     fail,
                 );
-                self.end_block(lir::Terminator::Fail(lir::Failure::ElementConflict), apart);
+                // The positions both have, which are the same.
+                let lengths = [i, j].map(|k| computed[k].positions.len());
+                let shared = lengths[0].min(lengths[1]);
+                let positions = self.slot(lir::Layout::Struct(vec![lir::Layout::I64; shared]));
+                for (k, position) in computed[i].positions[..shared].iter().enumerate() {
+                    let mut dst = positions.clone();
+                    dst.path.push(k);
+                    self.insts.push(lir::Inst::Copy {
+                        dst,
+                        src: position.clone(),
+                        layout: lir::Layout::I64,
+                    });
+                }
+                let failure = lir::Failure::ElementConflict {
+                    positions,
+                    count: usize_constant(len(shared), cx),
+                    nested: u8_constant(u8::from(lengths[0] != lengths[1]), cx),
+                };
+                self.end_block(lir::Terminator::Fail(failure), apart);
             }
         }
     }
@@ -2145,7 +2173,8 @@ impl<'a> FunctionBuilder<'a> {
     }
 
     /// The only tuple of the relation `operand`, copied into a new stack
-    /// slot. The program stops if the relation has none, or several.
+    /// slot. The program stops if the relation has none, or several,
+    /// writing how many.
     fn only(&mut self, operand: &hir::Expr, cx: &mut Lowering) -> lir::Place {
         let ty = self.type_of(operand);
         let hir::Type::Relation(heading) = &ty else {
@@ -2154,18 +2183,13 @@ impl<'a> FunctionBuilder<'a> {
         let src = self.place(operand, cx);
         let mut count = src.clone();
         count.path.push(1);
-        let (one, zero) = (usize_constant(1, cx), usize_constant(0, cx));
-        let compare = |this: &mut Self, rhs: &lir::Place| {
-            let equal = this.slot(lir::Layout::U8);
-            this.insts.push(lir::Inst::Binary {
-                dst: equal.clone(),
-                op: lir::BinaryOp::Compare(lir::Comparison::Equal, lir::Operand::Usize),
-                lhs: count.clone(),
-                rhs: rhs.clone(),
-            });
-            equal
-        };
-        let is_one = compare(self, &one);
+        let is_one = self.slot(lir::Layout::U8);
+        self.insts.push(lir::Inst::Binary {
+            dst: is_one.clone(),
+            op: lir::BinaryOp::Compare(lir::Comparison::Equal, lir::Operand::Usize),
+            lhs: count.clone(),
+            rhs: usize_constant(1, cx),
+        });
         let (single, other) = (self.new_block(), self.new_block());
         self.end_block(
             lir::Terminator::Branch {
@@ -2175,18 +2199,9 @@ impl<'a> FunctionBuilder<'a> {
             },
             other,
         );
-        let is_zero = compare(self, &zero);
-        let (none, several) = (self.new_block(), self.new_block());
-        self.end_block(
-            lir::Terminator::Branch {
-                condition: is_zero,
-                then: none,
-                otherwise: several,
-            },
-            none,
-        );
-        self.end_block(lir::Terminator::Fail(lir::Failure::NoTuple), several);
-        self.end_block(lir::Terminator::Fail(lir::Failure::SeveralTuples), single);
+        let failure = lir::Failure::NotOneTuple { count };
+        self.end_block(lir::Terminator::Fail(failure), single);
+        let zero = usize_constant(0, cx);
         let tuple = layout(&hir::Type::Tuple(heading.clone()));
         let only = self.element(&src, &zero, tuple.clone());
         let dst = self.slot(tuple.clone());
@@ -2670,8 +2685,8 @@ impl<'a> FunctionBuilder<'a> {
     /// The join of the tuples at `lhs` and `rhs`, of types `lhs_ty` and
     /// `rhs_ty`, computed into a new stack slot: each common attribute is
     /// compared first, and the program stops if they differ, since no
-    /// tuple would do; then each attribute is copied from the operand that
-    /// has it.
+    /// tuple would do, writing it and its values; then each attribute is
+    /// copied from the operand that has it.
     fn tuple_join(
         &mut self,
         lhs_ty: &hir::Type,
@@ -2707,7 +2722,14 @@ impl<'a> FunctionBuilder<'a> {
                 },
                 mismatch,
             );
-            self.end_block(lir::Terminator::Fail(lir::Failure::TupleMismatch), agree);
+            let attribute = hir::Expr::Constant(hir::Value::Text(name.to_string()));
+            let failure = lir::Failure::TupleMismatch {
+                attribute: self.place(&attribute, cx),
+                lhs: field(lhs, i),
+                rhs: field(rhs, j),
+                descriptor: lir::Place::whole(lir::Base::Data(cx.descriptor(ty))),
+            };
+            self.end_block(lir::Terminator::Fail(failure), agree);
         }
         let result_ty = lhs_ty.and(rhs_ty);
         let hir::Type::Tuple(result) = &result_ty else {
@@ -2934,6 +2956,14 @@ fn zero_constant(layout: &lir::Layout, cx: &mut Lowering) -> lir::Place {
 fn usize_constant(n: u64, cx: &mut Lowering) -> lir::Place {
     lir::Place {
         base: lir::Base::Data(cx.constant(vec![lir::Field::Usize(n)])),
+        path: vec![0],
+    }
+}
+
+/// A byte constant `n`, as a place.
+fn u8_constant(n: u8, cx: &mut Lowering) -> lir::Place {
+    lir::Place {
+        base: lir::Base::Data(cx.constant(vec![lir::Field::U8(n)])),
         path: vec![0],
     }
 }
@@ -3562,13 +3592,10 @@ mod tests {
                 path: vec![0],
             }
         );
-        let fails = |function: &lir::Function, failure| {
-            function
-                .blocks
-                .iter()
-                .any(|b| b.terminator == lir::Terminator::Fail(failure))
-        };
-        assert!(fails(&lowered.functions[0], lir::Failure::IndexOutOfRange));
+        assert!(lowered.functions[0].blocks.iter().any(|b| matches!(
+            b.terminator,
+            lir::Terminator::Fail(lir::Failure::IndexOutOfRange { .. })
+        )));
         // As a value, as a value block computes one, the change is made in
         // a copy, which the statement holds.
         let value =
@@ -3626,7 +3653,12 @@ mod tests {
         let conflicts = lowered.functions[0]
             .blocks
             .iter()
-            .filter(|b| b.terminator == lir::Terminator::Fail(lir::Failure::ElementConflict))
+            .filter(|b| {
+                matches!(
+                    b.terminator,
+                    lir::Terminator::Fail(lir::Failure::ElementConflict { .. })
+                )
+            })
             .count();
         // `i` with `j`, and each with 3, as their values are known only
         // when running; 3 with itself never.
@@ -4635,9 +4667,10 @@ mod tests {
         ));
         let blocks = &lowered.functions[1].blocks;
         assert!(
-            blocks
-                .iter()
-                .any(|b| b.terminator == lir::Terminator::Fail(lir::Failure::IndexOutOfRange)),
+            blocks.iter().any(|b| matches!(
+                b.terminator,
+                lir::Terminator::Fail(lir::Failure::IndexOutOfRange { .. })
+            )),
             "{blocks:#?}"
         );
         let insts: Vec<&lir::Inst> = blocks.iter().flat_map(|b| &b.insts).collect();

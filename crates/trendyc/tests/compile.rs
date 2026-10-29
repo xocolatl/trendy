@@ -559,26 +559,32 @@ fn approximate_failures_stop_the_program() {
             "operator f{{a: approximate, b: approximate}} [\n    call debug_value{{v: 1e0}};\n    call debug_value{{v: {call}}};\n];\n\noperator main{{}} [\n    call f{{a: 1e308, b: 0e0}};\n];\n"
         )
     };
-    let overflow = format!(
-        "1e0\nerror[{}]: approximate overflow\n",
-        Code::Overflow.id()
-    );
-    let division = format!(
-        "1e0\nerror[{}]: division by zero\n",
-        Code::DivisionByZero.id()
-    );
+    // The error writes the operation, with its operands' values.
+    let overflow = |operation: &str| {
+        format!(
+            "error[{}]: approximate overflow: {operation} is too large for an approximate number",
+            Code::Overflow.id()
+        )
+    };
+    let division = |operation: &str| {
+        format!(
+            "error[{}]: division by zero: {operation} has no result",
+            Code::DivisionByZero.id()
+        )
+    };
     let cases = [
-        ("add", "a + a", &overflow),
-        ("subtract", "-a - a", &overflow),
-        ("multiply", "a * 10e0", &overflow),
-        ("divide", "a / 0.1e0", &overflow),
-        ("divide_zero", "a / b", &division),
-        ("divide_negative_zero", "a / -b", &division),
+        ("add", "a + a", overflow("1e308 + 1e308")),
+        ("subtract", "-a - a", overflow("-1e308 - 1e308")),
+        ("multiply", "a * 10e0", overflow("1e308 * 1e1")),
+        ("divide", "a / 0.1e0", overflow("1e308 / 1e-1")),
+        ("divide_zero", "a / b", division("1e308 / 0e0")),
+        // There is one zero.
+        ("divide_negative_zero", "a / -b", division("1e308 / 0e0")),
     ];
-    for (name, expr, expected) in cases {
+    for (name, expr, failure) in cases {
         let name = format!("approximate_{name}");
         let (code, stderr) = run_source(&name, &program(expr));
-        let expected = format!("{expected}{}", site(&name, 3));
+        let expected = format!("1e0\n{failure}\n{}", site(&name, 3));
         assert_eq!((code, stderr), (1, expected), "{expr}");
     }
 }
@@ -1067,6 +1073,22 @@ fn run_source(name: &str, source: &str) -> (i32, String) {
     build_and_run(&input, &dir.join(name), &workspace_root())
 }
 
+/// The error an integer overflow writes, of `operation`.
+fn overflow(operation: &str) -> String {
+    format!(
+        "error[{}]: integer overflow: {operation} doesn't fit in a 64-bit integer",
+        trendy_diag::Code::Overflow.id()
+    )
+}
+
+/// The error a division by zero writes, of `operation`.
+fn division(operation: &str) -> String {
+    format!(
+        "error[{}]: division by zero: {operation} has no result",
+        trendy_diag::Code::DivisionByZero.id()
+    )
+}
+
 /// A program that writes 1, then `call`, computed from `a`, the largest
 /// integer, and `b`, 0, when it runs, then 2.
 fn program(call: &str) -> String {
@@ -1077,27 +1099,42 @@ fn program(call: &str) -> String {
 
 #[test]
 fn run_time_failures_stop_the_program() {
-    use trendy_diag::Code;
-    let overflow = format!("1\nerror[{}]: integer overflow\n", Code::Overflow.id());
-    let division = format!(
-        "1\nerror[{}]: division by zero\n",
-        Code::DivisionByZero.id()
-    );
+    // The error writes the operation, with its operands' values, and a
+    // negative right operand in parentheses.
     let cases = [
-        ("add", "a + 1", &overflow),
-        ("subtract", "-a - 2", &overflow),
-        ("multiply", "a * 2", &overflow),
-        ("negate", "-(-a - 1)", &overflow),
-        ("divide_min", "(-a - 1) div -1", &overflow),
-        ("divide_zero", "a div b", &division),
-        ("mod_zero", "a mod b", &division),
+        ("add", "a + 1", overflow("9223372036854775807 + 1")),
+        ("subtract", "-a - 2", overflow("-9223372036854775807 - 2")),
+        ("multiply", "a * 2", overflow("9223372036854775807 * 2")),
+        ("negate", "-(-a - 1)", overflow("-(-9223372036854775808)")),
+        // `x div -1` is computed as `-x`, which fails for the same `x`,
+        // and the error writes the operation computed.
+        (
+            "divide_min",
+            "(-a - 1) div -1",
+            overflow("-(-9223372036854775808)"),
+        ),
+        (
+            "divide_min_by",
+            "(-a - 1) div (b - 1)",
+            overflow("-9223372036854775808 div (-1)"),
+        ),
+        (
+            "divide_zero",
+            "a div b",
+            division("9223372036854775807 div 0"),
+        ),
+        ("mod_zero", "a mod b", division("9223372036854775807 mod 0")),
         // In a condition, computed for each tuple.
-        ("where", "relation { { n: a } } where n + 1 > 0", &overflow),
+        (
+            "where",
+            "relation { { n: a } } where n + 1 > 0",
+            overflow("9223372036854775807 + 1"),
+        ),
     ];
-    for (name, expr, expected) in cases {
+    for (name, expr, failure) in cases {
         let name = format!("fail_{name}");
         let (code, stderr) = run_source(&name, &program(expr));
-        let expected = format!("{expected}{}", site(&name, 3));
+        let expected = format!("1\n{failure}\n{}", site(&name, 3));
         assert_eq!((code, stderr), (1, expected), "{expr}");
     }
     // The smallest integer `mod -1` has a result.
@@ -1106,103 +1143,78 @@ fn run_time_failures_stop_the_program() {
 }
 
 /// Taking a relation's only tuple, combining relations, indexing an array
-/// and joining tuples that fail stop the program.
+/// and joining tuples that fail stop the program, writing the values
+/// involved.
 #[test]
 fn values_that_arent_there_stop_the_program() {
     use trendy_diag::Code;
-    // A relation with no tuples, or several, has no only tuple.
-    for (name, expr, what) in [
+    let cases = [
+        // A relation with no tuples, or several, has no only tuple.
         (
             "fail_no_tuple",
             "tuple from (relation { { n: a } } join relation { { n: b } })",
-            "no tuples",
+            Code::NotOneTuple,
+            "the relation has no tuples, but exactly one is taken",
         ),
         (
             "fail_several_tuples",
             "value from relation { { n: a }, { n: b } }",
-            "several tuples",
+            Code::NotOneTuple,
+            "the relation has 2 tuples, but exactly one is taken",
         ),
-    ] {
-        let (code, stderr) = run_source(name, &program(expr));
-        assert_eq!(
-            (code, &stderr[..]),
-            (
-                1,
-                &*format!(
-                    "1\nerror[{}]: the relation has {what}, but exactly one was taken\n{}",
-                    Code::NotOneTuple.id(),
-                    site(name, 3)
-                )
-            ),
-            "{expr}"
-        );
-    }
-    // A disjoint union whose operands share a tuple, and an included minus
-    // that removes one that isn't there.
-    for (name, expr, failure) in [
+        // A disjoint union whose operands share a tuple, and an included
+        // minus that removes one that isn't there.
         (
             "fail_d_union",
             "relation { { n: a } } d_union relation { { n: a } }",
-            format!(
-                "error[{}]: d_union or d_insert adds a tuple that is already there",
-                Code::SharedTuple.id()
-            ),
+            Code::SharedTuple,
+            "d_union or d_insert adds a tuple that is already there: tuple { n: 9223372036854775807 }",
         ),
         (
             "fail_i_minus",
             "relation { { n: a } } i_minus relation { { n: b } }",
-            format!(
-                "error[{}]: i_minus or i_delete removes a tuple that isn't there",
-                Code::MissingTuple.id()
-            ),
+            Code::MissingTuple,
+            "i_minus or i_delete removes a tuple that isn't there: tuple { n: 0 }",
         ),
-    ] {
-        let (code, stderr) = run_source(name, &program(expr));
-        let expected = format!("1\n{failure}\n{}", site(name, 3));
-        assert_eq!((code, stderr), (1, expected), "{expr}");
-    }
-    // An array has no element at position 0, nor beyond its length.
-    for (name, expr) in [
-        ("fail_index_zero", "array [a][b]"),
-        ("fail_index_beyond", "array [a][b + 2]"),
-    ] {
-        let (code, stderr) = run_source(name, &program(expr));
-        assert_eq!(
-            (code, &stderr[..]),
-            (
-                1,
-                &*format!(
-                    "1\nerror[{}]: an array has no element at that position\n{}",
-                    Code::IndexOutOfRange.id(),
-                    site(name, 3)
-                )
-            ),
-            "{expr}"
-        );
-    }
-    // Tuples that disagree on a common attribute have no join.
-    let (code, stderr) = run_source(
-        "fail_tuple_join",
-        &program("tuple { n: a, m: 1 } join tuple { n: b }"),
-    );
-    assert_eq!(
-        (code, &stderr[..]),
+        // An array has no element at position 0, nor beyond its length.
         (
-            1,
-            &*format!(
-                "1\nerror[{}]: tuples disagree on a common attribute\n{}",
-                Code::TupleMismatch.id(),
-                site("fail_tuple_join", 3)
-            )
-        )
-    );
+            "fail_index_zero",
+            "array [a][b]",
+            Code::IndexOutOfRange,
+            "an array has no element at position 0: positions count from 1",
+        ),
+        (
+            "fail_index_beyond",
+            "array [a][b + 2]",
+            Code::IndexOutOfRange,
+            "the array has 1 element, so none at position 2",
+        ),
+        (
+            "fail_index_empty",
+            "(array integer [])[b + 1]",
+            Code::IndexOutOfRange,
+            "the array is empty, so it has no element at position 1",
+        ),
+        // Tuples that disagree on a common attribute have no join.
+        (
+            "fail_tuple_join",
+            "tuple { n: a, m: 1 } join tuple { n: b }",
+            Code::TupleMismatch,
+            "the tuples disagree on `n`, so they have no join: `n` is 9223372036854775807 in one and 0 in the other",
+        ),
+    ];
+    for (name, expr, code, message) in cases {
+        let (status, stderr) = run_source(name, &program(expr));
+        let expected = format!("1\nerror[{}]: {message}\n{}", code.id(), site(name, 3));
+        assert_eq!((status, stderr), (1, expected), "{expr}");
+    }
 }
 
 #[test]
 fn an_if_fails_only_if_the_branch_it_takes_does() {
     let overflow = format!(
-        "1\nerror[{}]: integer overflow\n{}",
-        trendy_diag::Code::Overflow.id(),
+        "1\n{}\n{}",
+        overflow("9223372036854775807 + 1"),
         site("fail_if", 3)
     );
     let (code, stderr) = run_source("if_safe", &program("if b = 0 then 0 else a div b"));
@@ -1341,16 +1353,18 @@ operator main{} [
     );
 }
 
-/// Assignments that break a rule stop the program: two changes that
-/// remove the same tuple, a disjoint insert of a tuple already there, an
-/// included delete of one that isn't, and two tuples with the same key,
-/// which the error writes, with the variable and the key.
+/// Assignments that break a rule stop the program, writing the tuple or
+/// the positions: two changes that remove the same tuple, a disjoint
+/// insert of a tuple already there, an included delete of one that isn't,
+/// two changes to one element of an array, or to an element and one in
+/// it, and two tuples with the same key, which the error writes, with the
+/// variable and the key.
 #[test]
 fn assignments_that_break_a_rule_stop_the_program() {
     use trendy_diag::Code;
     let assigning = |statement: &str| {
         format!(
-            "var poets := relation {{ {{ name: \"Ada\", born: 1815 }} }}\nkey {{ name }};\n\noperator f{{a: integer}} [\n    call debug_value{{v: 1}};\n    {statement};\n    call debug_value{{v: 2}};\n];\n\noperator main{{}} [\n    call f{{a: 1815}};\n];\n"
+            "var poets := relation {{ {{ name: \"Ada\", born: 1815 }} }}\nkey {{ name }};\nvar grid := array [array [1, 2], array [3, 4]];\noperator f{{a: integer}} [\n    call debug_value{{v: 1}};\n    {statement};\n    call debug_value{{v: 2}};\n];\n\noperator main{{}} [\n    call f{{a: 1815}};\n];\n"
         )
     };
     for (name, statement, failure) in [
@@ -1359,7 +1373,7 @@ fn assignments_that_break_a_rule_stop_the_program() {
             "fail_conflict",
             r#"assign { update poets { born := a } where name = "Ada"; delete poets where born < 1900; }"#,
             format!(
-                "error[{}]: two changes in an assign block remove the same tuple",
+                r#"error[{}]: two changes in an assign block remove the same tuple: tuple {{ born: 1815, name: "Ada" }}"#,
                 Code::ConflictingChanges.id()
             ),
         ),
@@ -1367,7 +1381,7 @@ fn assignments_that_break_a_rule_stop_the_program() {
             "fail_d_insert",
             r#"d_insert poets relation { { name: "Ada", born: a } }"#,
             format!(
-                "error[{}]: d_union or d_insert adds a tuple that is already there",
+                r#"error[{}]: d_union or d_insert adds a tuple that is already there: tuple {{ born: 1815, name: "Ada" }}"#,
                 Code::SharedTuple.id()
             ),
         ),
@@ -1375,8 +1389,25 @@ fn assignments_that_break_a_rule_stop_the_program() {
             "fail_i_delete",
             r#"i_delete poets relation { { name: "Ada", born: a + 1 } }"#,
             format!(
-                "error[{}]: i_minus or i_delete removes a tuple that isn't there",
+                r#"error[{}]: i_minus or i_delete removes a tuple that isn't there: tuple {{ born: 1816, name: "Ada" }}"#,
                 Code::MissingTuple.id()
+            ),
+        ),
+        // `a - 1814` is 1, which is known only when running.
+        (
+            "fail_same_element",
+            "assign { grid[a - 1814][1] := 0; grid[1][1] := 5; }",
+            format!(
+                "error[{}]: two changes in an assign block set the same element, at [1][1]",
+                Code::ConflictingChanges.id()
+            ),
+        ),
+        (
+            "fail_element_in_element",
+            "assign { grid[a - 1814] := array [0, 0]; grid[1][2] := 5; }",
+            format!(
+                "error[{}]: one change in an assign block sets the element at [1], and another an element in it",
+                Code::ConflictingChanges.id()
             ),
         ),
         (
