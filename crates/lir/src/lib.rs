@@ -199,14 +199,16 @@ pub enum RuntimeFn {
     /// statement owns. It stops the program if the file can't be read, or
     /// isn't UTF-8 text, or if the memory can't be allocated.
     LoadTextFile,
-    /// `trendy_rt_load_csv(dst, path, descriptor)`: store at `dst` the
-    /// array of the records of the CSV file at `path`, a text, in order, of
-    /// the type the descriptor describes, an array of tuples whose
-    /// attributes are the columns of their names, in memory the statement
-    /// owns. It stops the program if the file can't be read, isn't UTF-8
-    /// text or CSV, its header doesn't name each attribute once, a field
-    /// isn't a value of its attribute's type, or the memory can't be
-    /// allocated.
+    /// `trendy_rt_load_csv(dst, path, header, columns, columns_descriptor,
+    /// descriptor)`: store at `dst` the array of the records of the CSV
+    /// file at `path`, a text, in order, after its first if `header`, a
+    /// boolean, is true, of the type the descriptor describes, an array of
+    /// tuples whose attributes are the fields in the columns `columns`
+    /// gives them, a tuple of integers its descriptor describes, in memory
+    /// the statement owns. It stops the program if a column isn't one of
+    /// the file's, or two attributes have one, the file can't be read,
+    /// isn't UTF-8 text or CSV, a field isn't a value of its attribute's
+    /// type, or the memory can't be allocated.
     LoadCsv,
     /// `trendy_rt_sum(dst, src, descriptor, index)`: store at `dst` the
     /// sum of the attribute `index` (a [`Field::Usize`], its position by

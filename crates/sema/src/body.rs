@@ -1,7 +1,7 @@
 //! Update operators' bodies: their statements, their local variables, and
 //! the expressions in them.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use trendy_diag::{CodeKind, Diagnostic, Span};
 use trendy_hir as hir;
@@ -405,6 +405,65 @@ impl Statements<'_, '_> {
         }]))
     }
 
+    /// Whether `call`, of `load_csv`, whose signature is `signature`, with
+    /// the arguments `args`, can load its array: whether it can read its
+    /// tuples' attributes from fields (see [`csv_readable`]), and
+    /// `columns` gives each its own column. If not, it is reported.
+    fn csv_loadable(
+        &mut self,
+        call: &hir::Call,
+        signature: &Signature,
+        args: &ast::Arguments,
+        errors: &mut Vec<Diagnostic>,
+    ) -> bool {
+        // The types the call gives the tuples, `T`, and the columns, `C`.
+        let given = |name: &str| {
+            let index = signature
+                .types
+                .iter()
+                .position(|t| t.name.as_deref() == Some(name))
+                .expect("`load_csv` has its type parameters");
+            &call.types[index]
+        };
+        let (tuples, given_columns) = (given("T"), given("C"));
+        let written = |name: &str| {
+            args.named()
+                .find(|a| a.is_named(name))
+                .and_then(|a| a.value())
+        };
+        let (Some(rows), Some(columns)) = (written("rows"), written("columns")) else {
+            return false;
+        };
+        if !csv_readable(tuples, &rows, errors) {
+            return false;
+        }
+        let hir::Type::Tuple(heading) = tuples else {
+            unreachable!("`csv_readable` found the tuples' attributes");
+        };
+        // A column's position for each attribute.
+        let positions = hir::Type::Tuple(hir::Heading::new(
+            heading
+                .named()
+                .map(|(name, _)| (name.to_string(), hir::Type::Scalar(hir::Scalar::Integer)))
+                .collect(),
+        ));
+        // Checked again, against the type it must have, which reports how
+        // it differs.
+        if *given_columns != positions {
+            let expected = Expected {
+                ty: positions,
+                origin: Origin::Columns(rows),
+            };
+            if Checker::new(&mut self.names())
+                .expr(&columns, Some(&expected), errors)
+                .is_none()
+            {
+                return false;
+            }
+        }
+        distinct_columns(&call.args["columns"], &columns, errors)
+    }
+
     /// `call name{arguments};`, of an update operator. One in a `for` loop
     /// is checked once every body is, for what it assigns.
     fn call(
@@ -470,7 +529,7 @@ impl Statements<'_, '_> {
         self.outs_passed(&args, signature);
         let call = call?;
         if signature.builtin == Some(hir::Builtin::Update(hir::UpdateBuiltin::LoadCsv))
-            && !csv_readable(&call, &args, errors)
+            && !self.csv_loadable(&call, signature, &args, errors)
         {
             return None;
         }
@@ -1171,23 +1230,12 @@ impl BodyNames<'_, '_> {
     }
 }
 
-/// Whether `call`, of `load_csv`, with the arguments `args`, loads an
-/// array whose elements' attributes it can read from fields: each of a
-/// type known here, text, an integer, an approximate number or a boolean.
-/// If not, it is reported.
-fn csv_readable(call: &hir::Call, args: &ast::Arguments, errors: &mut Vec<Diagnostic>) -> bool {
-    let Some(rows) = args
-        .named()
-        .find(|a| {
-            a.name()
-                .and_then(|n| n.ident())
-                .is_some_and(|n| n.text() == "rows")
-        })
-        .and_then(|a| a.value())
-    else {
-        return false;
-    };
-    match &call.types[0] {
+/// Whether `load_csv` loads an array, written `rows`, of `tuples`, whose
+/// attributes it can read from fields: each of a type known here, text,
+/// an integer, an approximate number or a boolean. If not, it is
+/// reported.
+fn csv_readable(tuples: &hir::Type, rows: &ast::Expr, errors: &mut Vec<Diagnostic>) -> bool {
+    match tuples {
         hir::Type::Tuple(heading) => {
             let unreadable: Vec<(&str, &hir::Type)> = heading
                 .named()
@@ -1206,14 +1254,59 @@ fn csv_readable(call: &hir::Call, args: &ast::Arguments, errors: &mut Vec<Diagno
             if unreadable.is_empty() {
                 return true;
             }
-            errors.push(errors::unreadable_attributes(&unreadable, &rows));
+            errors.push(errors::unreadable_attributes(&unreadable, rows));
         }
         // A type parameter of the operator the call is in, whose tuples'
         // attributes each of its calls gives.
         hir::Type::Parameter(parameter) => {
-            errors.push(errors::unknown_columns(parameter, &rows));
+            errors.push(errors::unknown_columns(parameter, rows));
         }
         other => unreachable!("`load_csv` loads tuples, not `{other}`"),
     }
     false
+}
+
+/// Whether `columns`, the argument written `written` for `load_csv`'s
+/// `columns`, gives each attribute a column of its own, counting from 1,
+/// if it is known here. If not, it is reported (R0016), as it would be
+/// when the program runs.
+fn distinct_columns(
+    columns: &hir::Expr,
+    written: &ast::Expr,
+    errors: &mut Vec<Diagnostic>,
+) -> bool {
+    let hir::Expr::Constant(hir::Value::Tuple(positions)) = columns else {
+        return true;
+    };
+    // Where an attribute's position is written: in a tuple selector, its
+    // value, and otherwise the whole argument.
+    let at = |name: &str| match written {
+        ast::Expr::Tuple(tuple) => tuple
+            .attributes()
+            .find(|a| a.is_named(name))
+            .and_then(|a| a.value())
+            .map_or_else(|| written.span(), |v| v.span()),
+        _ => written.span(),
+    };
+    let mut ok = true;
+    let mut read: BTreeMap<i64, &str> = BTreeMap::new();
+    for (name, position) in positions.attributes() {
+        let &hir::Value::Integer(position) = position else {
+            unreachable!("a column's position is an integer, not `{position}`");
+        };
+        if position < 1 {
+            errors.push(errors::not_a_column(name, position, at(name)));
+            ok = false;
+        } else if let Some(first) = read.insert(position, name) {
+            errors.push(errors::shared_column(
+                first,
+                name,
+                position,
+                at(first),
+                at(name),
+            ));
+            ok = false;
+        }
+    }
+    ok
 }

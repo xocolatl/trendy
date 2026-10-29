@@ -453,11 +453,17 @@ impl Builtin {
             Builtin::Update(UpdateBuiltin::DebugTable)
             | Builtin::ReadOnly(ReadOnlyBuiltin::Count) => vec![unnamed(0, Any::Relation)],
             Builtin::ReadOnly(ReadOnlyBuiltin::Length) => vec![unnamed(0, Any::Array)],
-            Builtin::Update(UpdateBuiltin::LoadCsv) => vec![TypeParameter {
-                index: 0,
-                name: Some("T".to_string()),
-                any: Any::Tuple,
-            }],
+            // `C`, the columns of the tuples' attributes, and `T`, the
+            // tuples, as the prelude declares them.
+            Builtin::Update(UpdateBuiltin::LoadCsv) => ["C", "T"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, name)| TypeParameter {
+                    index,
+                    name: Some(name.to_string()),
+                    any: Any::Tuple,
+                })
+                .collect(),
             Builtin::ReadOnly(
                 ReadOnlyBuiltin::ToApproximate
                 | ReadOnlyBuiltin::ParseInteger
@@ -509,10 +515,12 @@ impl Builtin {
             .into(),
             Builtin::Update(UpdateBuiltin::LoadCsv) => [
                 constant("path", Type::Scalar(Scalar::Text)),
+                constant("header", Type::Scalar(Scalar::Boolean)),
+                constant("columns", parameter(0)),
                 (
                     "rows".to_string(),
                     Parameter {
-                        ty: Type::Array(Box::new(parameter(0))),
+                        ty: Type::Array(Box::new(parameter(1))),
                         mode: Mode::Out,
                     },
                 ),

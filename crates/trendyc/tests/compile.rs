@@ -645,128 +645,211 @@ fn text() {
             r#""Paraná""#,
             r#""Mekong""#,
             r#""Volga""#,
-            // The CSV file's first record, then its records as a relation.
-            r#"tuple { basin_km2: 3.254555e6, km: 6650, reaches_ocean: true, river: "Nile" }"#,
-            "┌────────────┬──────┬───────────────┬─────────┐",
-            "│ basin_km2  │ km   │ reaches_ocean │ river   │",
-            "├────────────┼──────┼───────────────┼─────────┤",
-            "│     7.95e5 │ 4909 │ true          │ Mekong  │",
-            "│     1.36e6 │ 3531 │ false         │ Volga   │",
-            "│   1.8085e6 │ 6300 │ true          │ Yangtze │",
-            "│ 2.582672e6 │ 4880 │ true          │ Paraná  │",
-            "│ 3.254555e6 │ 6650 │ true          │ Nile    │",
-            "│     7.05e6 │ 6400 │ true          │ Amazon  │",
-            "└────────────┴──────┴───────────────┴─────────┘",
+            // The CSV file's first record after its header, then its
+            // records as a relation.
+            r#"tuple { basin_km2: 3.254555e6, length_km: 6650, name: "Nile", reaches_ocean: true }"#,
+            "┌────────────┬───────────┬─────────┬───────────────┐",
+            "│ basin_km2  │ length_km │ name    │ reaches_ocean │",
+            "├────────────┼───────────┼─────────┼───────────────┤",
+            "│     7.95e5 │      4909 │ Mekong  │ true          │",
+            "│     1.36e6 │      3531 │ Volga   │ false         │",
+            "│   1.8085e6 │      6300 │ Yangtze │ true          │",
+            "│ 2.582672e6 │      4880 │ Paraná  │ true          │",
+            "│ 3.254555e6 │      6650 │ Nile    │ true          │",
+            "│     7.05e6 │      6400 │ Amazon  │ true          │",
+            "└────────────┴───────────┴─────────┴───────────────┘",
         ]
     );
 }
 
-#[test]
-fn csv_files_are_loaded_when_running() {
-    use trendy_diag::Code;
+/// The columns of the CSV files the tests load, in another order than
+/// their attributes', with others between them.
+const CSV_COLUMNS: &str = "city: 3, people: 5, km2: 4, capital: 2";
+
+/// A CSV file the tests load, of cities, after a header, which names the
+/// columns otherwise than the attributes: quoted fields, line ends of
+/// either kind, an empty line, and a byte order mark.
+const CITIES_CSV: &str = "\u{FEFF}country,capital,city,area,population\r\nPeru,yes,Lima,2672.3,10883000\r\n\nVietnam,N,\"Hanoi, \"\"Hà Nội\"\"\",3358.6,8435700\n";
+
+/// What loading `contents` as a CSV file, named for `name`, writes, with
+/// or without a header, reading the columns `columns` gives, and the
+/// program's exit status: its rows, in the file's order, and how many
+/// there are. The columns are a variable's, known only when the program
+/// runs.
+fn loaded_csv(name: &str, contents: &str, header: bool, columns: &str) -> (i32, String) {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("csv");
     std::fs::create_dir_all(&dir).unwrap();
-    // What loading `contents` as a CSV file writes, and the program's exit
-    // status: its rows, in the file's order, and how many there are.
-    let loaded = |name: &str, contents: &str| {
-        let path = dir.join(format!("{name}.csv"));
-        std::fs::write(&path, contents).unwrap();
-        let source = format!(
-            "operator main{{}} [
+    let path = dir.join(format!("{name}.csv"));
+    std::fs::write(&path, contents).unwrap();
+    let source = format!(
+        "operator main{{}} [
     var rows: array tuple {{ city: text, people: integer, km2: approximate, capital: boolean }};
-    call load_csv{{path: {:?}, out rows: rows}};
+    var columns := tuple {{ {columns} }};
+    call load_csv{{path: {:?}, header: {header}, columns: columns, out rows: rows}};
     call debug_value{{v: rows}};
     call debug_value{{v: length{{a: rows}}}};
 ];
 ",
-            path.to_str().unwrap()
-        );
-        let (code, stderr) = run_source(&format!("csv_{name}"), &source);
-        let path = path.to_str().unwrap().to_string();
-        (code, stderr.replace(&path, "PATH"))
-    };
+        path.to_str().unwrap()
+    );
+    let (code, stderr) = run_source(&format!("csv_{name}"), &source);
+    let path = path.to_str().unwrap().to_string();
+    (code, stderr.replace(&path, "PATH"))
+}
+
+#[test]
+fn csv_files_are_loaded_when_running() {
     let ok = |rows: &str, count: usize| (0, format!("{rows}\n{count}\n"));
-    // Columns in any order, those the tuples don't name skipped, quoted
-    // fields, line ends of either kind, and empty lines.
+    // Columns in any order, those `columns` doesn't name skipped, the
+    // header too, whatever it calls them, quoted fields, line ends of
+    // either kind, and empty lines.
+    let both = r#"array [tuple { capital: true, city: "Lima", km2: 2.6723e3, people: 10883000 }, tuple { capital: false, city: "Hanoi, \"Hà Nội\"", km2: 3.3586e3, people: 8435700 }]"#;
     assert_eq!(
-        loaded(
-            "cities",
-            "\u{FEFF}country,capital,city,km2,people\r\nPeru,yes,Lima,2672.3,10883000\r\n\nVietnam,N,\"Hanoi, \"\"Hà Nội\"\"\",3358.6,8435700\n"
+        loaded_csv("cities", CITIES_CSV, true, CSV_COLUMNS),
+        ok(both, 2)
+    );
+    // Without a header, every record is one.
+    let headless = CITIES_CSV.split_once('\n').unwrap().1;
+    assert_eq!(
+        loaded_csv("headless", headless, false, CSV_COLUMNS),
+        ok(both, 2)
+    );
+    // A header alone gives none, as does nothing at all.
+    let none = "array tuple { capital: boolean, city: text, km2: approximate, people: integer } []";
+    assert_eq!(
+        loaded_csv(
+            "header",
+            "country,capital,city,area,population",
+            true,
+            CSV_COLUMNS
         ),
-        ok(
-            r#"array [tuple { capital: true, city: "Lima", km2: 2.6723e3, people: 10883000 }, tuple { capital: false, city: "Hanoi, \"Hà Nội\"", km2: 3.3586e3, people: 8435700 }]"#,
-            2
-        )
+        ok(none, 0)
     );
-    // A header alone gives none.
+    assert_eq!(loaded_csv("nothing", "", true, CSV_COLUMNS), ok(none, 0));
+}
+
+/// What a program that stops with the error `code`, writing `message`,
+/// writes, and its exit status.
+fn failed_with(code: trendy_diag::Code, message: &str) -> (i32, String) {
+    (1, format!("error[{}]: {message}\n", code.id()))
+}
+
+#[test]
+fn csv_columns_that_arent_the_files_stop_the_program() {
+    use trendy_diag::Code;
+    let failed = failed_with;
+    // Each attribute has a column of the file's, of its own, counting
+    // from 1.
     assert_eq!(
-        loaded("header", "city,people,km2,capital"),
-        ok(
-            "array tuple { capital: boolean, city: text, km2: approximate, people: integer } []",
-            0
-        )
-    );
-    let failed = |code: Code, message: &str| (1, format!("error[{}]: {message}\n", code.id()));
-    // The header names each attribute once.
-    assert_eq!(
-        loaded("missing", "city,people,area,capital\n"),
+        loaded_csv(
+            "beyond",
+            CITIES_CSV,
+            true,
+            "city: 3, people: 6, km2: 4, capital: 2"
+        ),
         failed(
             Code::CsvColumns,
-            r#""PATH" has no column "km2", for the attribute of that name; its header names "city", "people", "area", "capital""#
+            r#"`people` is read from column 6, but "PATH" has 5 columns"#
         )
     );
     assert_eq!(
-        loaded("twice", "city,people,km2,capital,city\n"),
-        failed(Code::CsvColumns, r#""PATH" has two columns "city""#)
-    );
-    assert_eq!(
-        loaded("empty", "\n"),
+        loaded_csv(
+            "zero",
+            CITIES_CSV,
+            true,
+            "city: 0, people: 5, km2: 4, capital: 2"
+        ),
         failed(
             Code::CsvColumns,
-            r#""PATH" has no header, to name its columns"#
+            "`city` is read from column 0, but columns count from 1"
         )
     );
-    // Each record has the header's fields, and the file is CSV.
     assert_eq!(
-        loaded("short", "city,people,km2,capital\nLima,10883000,2672.3\n"),
+        loaded_csv(
+            "shared",
+            CITIES_CSV,
+            true,
+            "city: 3, people: 5, km2: 4, capital: 3"
+        ),
+        failed(
+            Code::CsvColumns,
+            "`capital` and `city` are both read from column 3"
+        )
+    );
+}
+
+#[test]
+fn csv_files_that_cant_be_read_stop_the_program() {
+    use trendy_diag::Code;
+    let failed = failed_with;
+    // Each record has the first's fields, and the file is CSV.
+    assert_eq!(
+        loaded_csv(
+            "short",
+            "a,b,c,d,e\nPeru,yes,Lima,2672.3\n",
+            true,
+            CSV_COLUMNS
+        ),
         failed(
             Code::MalformedCsv,
-            r#"line 2 of "PATH" has 3 fields, but the header has 4"#
+            r#"line 2 of "PATH" has 4 fields, but the header has 5"#
         )
     );
     assert_eq!(
-        loaded("stray", "city,people,km2,capital\nLima \"Peru\",1,1,y\n"),
+        loaded_csv(
+            "long",
+            "Peru,yes,Lima,2672.3,1\n\nPeru,yes,Lima,2672.3,1,1\n",
+            false,
+            CSV_COLUMNS
+        ),
         failed(
             Code::MalformedCsv,
-            r#"line 2 of "PATH" has a quote in a field that isn't quoted"#
+            r#"line 3 of "PATH" has 6 fields, but line 1 has 5"#
         )
     );
     assert_eq!(
-        loaded("unclosed", "city,people,km2,capital\n\n\"Lima,1,1,y\n"),
+        loaded_csv("stray", "Peru,yes,Lima \"Peru\",1,1\n", false, CSV_COLUMNS),
+        failed(
+            Code::MalformedCsv,
+            r#"line 1 of "PATH" has a quote in a field that isn't quoted"#
+        )
+    );
+    assert_eq!(
+        loaded_csv(
+            "unclosed",
+            "a,b,c,d,e\n\n\"Peru,yes,Lima,1,1\n",
+            true,
+            CSV_COLUMNS
+        ),
         failed(
             Code::MalformedCsv,
             r#"line 3 of "PATH" starts a quoted field that isn't closed"#
         )
     );
-    // Each field is a value of its attribute's type, without spaces.
+    // Each field is a value of its attribute's type, without spaces, in a
+    // column the header names, if there is one.
     assert_eq!(
-        loaded(
+        loaded_csv(
             "spaced",
-            "city,people,km2,capital\nLima, 10883000,2672.3,yes\n"
+            "a,b,c,d,population\nPeru,yes,Lima,2672.3, 10883000\n",
+            true,
+            CSV_COLUMNS
         ),
         failed(
             Code::Unparsable,
-            r#"" 10883000", in column "people" on line 2 of "PATH", isn't an integer"#
+            r#"" 10883000", in column 5 ("population") on line 2 of "PATH", isn't an integer, the type of `people`"#
         )
     );
     assert_eq!(
-        loaded(
+        loaded_csv(
             "word",
-            "city,people,km2,capital\nLima,10883000,2672.3,capital\n"
+            "Peru,capital,Lima,2672.3,10883000\n",
+            false,
+            CSV_COLUMNS
         ),
         failed(
             Code::Unparsable,
-            r#""capital", in column "capital" on line 2 of "PATH", isn't a boolean"#
+            r#""capital", in column 2 on line 1 of "PATH", isn't a boolean, the type of `capital`; if line 1 is a header, `header: true` skips it"#
         )
     );
 }

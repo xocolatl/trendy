@@ -201,7 +201,6 @@ impl Code {
                 | Code::UnreadableFile
                 | Code::NotUtf8
                 | Code::MalformedCsv
-                | Code::CsvColumns
                 | Code::Internal
         )
     }

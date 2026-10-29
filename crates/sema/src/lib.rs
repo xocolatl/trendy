@@ -6064,7 +6064,9 @@ mod tests {
             );
             assert!(analyze_str(&fixed).is_ok(), "{fixed}");
         }
-        // A CSV file's records: pandas' and R's, and Julia's.
+        // A CSV file's records: pandas' and R's, and Julia's, whose
+        // arguments the program then names, with the columns and whether
+        // there is a header.
         for written in ["read_csv", "readcsv"] {
             let source = format!(
                 "operator main{{}} [\n    var rows: array tuple {{ city: text }};\n    rows := {written}{{\"cities.csv\"}};\n];\n"
@@ -6072,10 +6074,10 @@ mod tests {
             let fixed = fix(&fix(&source));
             assert_eq!(
                 fixed,
-                "operator main{} [\n    var rows: array tuple { city: text };\n    call load_csv{path: \"cities.csv\", out rows: rows};\n];\n",
+                "operator main{} [\n    var rows: array tuple { city: text };\n    call load_csv{\"cities.csv\", out rows: rows};\n];\n",
                 "{written}"
             );
-            assert!(analyze_str(&fixed).is_ok(), "{fixed}");
+            assert_eq!(codes(&fixed), [Code::PositionalArgument]);
         }
         // Numbers: JavaScript's, C's and Go's, and Java's; and booleans:
         // Java's and Go's.
@@ -6149,14 +6151,13 @@ mod tests {
     fn a_csv_file_is_read_into_tuples_of_types_it_can_read() {
         let call = |declared: &str| {
             format!(
-                "operator main{{}} [\n    var rows: {declared};\n    call load_csv{{path: \"cities.csv\", out rows: rows}};\n];\n"
+                "operator main{{}} [\n    var rows: {declared};\n    call load_csv{{path: \"cities.csv\", header: true, columns: tuple {{ city: 1 }}, out rows: rows}};\n];\n"
             )
         };
         // Of text, integers, approximate numbers and booleans, read when
         // the program runs, into the variable for `rows`, of the tuples'
         // type.
-        let source =
-            call("array tuple { city: text, people: integer, km2: approximate, capital: boolean }");
+        let source = call("array tuple { city: text }");
         let body = main_body(&source);
         let hir::Statement::Call(call_of) = &body[1] else {
             panic!("{body:#?}");
@@ -6166,6 +6167,7 @@ mod tests {
         let unreadable = errors(&call(
             "array tuple { city: text, districts: relation { district: text }, centre: tuple { x: integer } }",
         ));
+        // Reported once, not with `columns` too.
         assert_eq!(unreadable.len(), 1, "{unreadable:#?}");
         assert_eq!(unreadable[0].code, Code::UnreadableAttribute);
         assert_eq!(
@@ -6174,7 +6176,7 @@ mod tests {
         );
         // Nor of a type parameter, whose attributes, the columns, aren't
         // known here.
-        let generic = "operator read{out rows: array T} types { T: any tuple } [\n    call load_csv{path: \"cities.csv\", out rows: rows};\n];\noperator main{} [];";
+        let generic = "operator read{out rows: array T} types { T: any tuple } [\n    call load_csv{path: \"cities.csv\", header: true, columns: tuple { city: 1 }, out rows: rows};\n];\noperator main{} [];";
         assert_eq!(codes(generic), [Code::UnreadableAttribute]);
         // Tuples, which an array of other values hasn't.
         let texts = errors(&call("array text"));
@@ -6185,6 +6187,56 @@ mod tests {
                 .contains(&"`T` is `any tuple`, so it is a tuple, which `text` isn't".to_string()),
             "{:?}",
             texts[0].notes
+        );
+    }
+
+    #[test]
+    fn a_csv_files_columns_are_given_each_attribute() {
+        let call = |columns: &str| {
+            format!(
+                "operator main{{}} [\n    var rows: array tuple {{ city: text, people: integer }};\n    call load_csv{{path: \"cities.csv\", header: false, columns: {columns}, out rows: rows}};\n];\n"
+            )
+        };
+        analyze_str(&call("tuple { people: 3, city: 1 }")).unwrap();
+        // A position for each attribute, and no other, which the array
+        // that sets them is pointed at for.
+        let missing = errors(&call("tuple { city: 1 }"));
+        assert_eq!(missing[0].code, Code::MissingAttribute);
+        assert_eq!(
+            missing[0].secondary[0].message,
+            "`columns` gives a column for each attribute of these tuples"
+        );
+        assert_eq!(
+            fix(&call("tuple { city: 1, peopel: 2 }")),
+            call("tuple { city: 1, people: 2 }")
+        );
+        assert_eq!(
+            fix(&call("tuple { city: 1, people: 2, country: 3 }")),
+            call("tuple { city: 1, people: 2 }")
+        );
+        assert_eq!(
+            codes(&call("tuple { city: 1, people: 2e0 }")),
+            [Code::TypeMismatch]
+        );
+        // Each a column, counting from 1, of its own, if known when
+        // compiling, as it would be when running.
+        let zero = errors(&call("tuple { city: 0, people: 2 }"));
+        assert_eq!(zero[0].code, Code::CsvColumns);
+        assert_eq!(
+            zero[0].message,
+            "`city` is read from column 0, but columns count from 1"
+        );
+        let shared = errors(&call("tuple { city: 2, people: 2 }"));
+        assert_eq!(shared[0].code, Code::CsvColumns);
+        assert_eq!(
+            shared[0].message,
+            "`city` and `people` are both read from column 2"
+        );
+        // Other languages' names for the parameters.
+        let source = "operator main{} [\n    var rows: array tuple { city: text };\n    call load_csv{path: \"cities.csv\", has_header: true, usecols: tuple { city: 1 }, out rows: rows};\n];\n";
+        assert_eq!(
+            fix(source),
+            "operator main{} [\n    var rows: array tuple { city: text };\n    call load_csv{path: \"cities.csv\", header: true, columns: tuple { city: 1 }, out rows: rows};\n];\n"
         );
     }
 

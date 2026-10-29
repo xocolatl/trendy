@@ -25,16 +25,23 @@ operator list_rivers{} [
     ];
 ];
 
-heading river := { river: text, km: integer, basin_km2: approximate, reaches_ocean: boolean };
+heading river := { name: text, length_km: integer, basin_km2: approximate, reaches_ocean: boolean };
 
-/* A CSV file's records, read when the program runs, into the variable
-   for `rows`: an array of tuples, in the file's order, each attribute the
-   field in the column of its name, which the header gives, read as its
-   type. Columns the tuples don't name, here `native_name` and `mouth`,
-   are skipped. */
+/* A CSV file's records, after its header, read when the program runs,
+   into the variable for `rows`: an array of tuples, in the file's order,
+   each attribute the field in the column `columns` gives it, counting
+   from 1, read as its type. The file's columns have an order and no
+   names, so the call names them, whatever the header calls them: its
+   `km` is `length_km` here. Columns `columns` doesn't name, here
+   `native_name` and `mouth`, are skipped. */
 operator river_table{} [
     var rivers: array tuple river;
-    call load_csv{path: "examples/rivers.csv", out rows: rivers};
+    call load_csv{
+        path: "examples/rivers.csv",
+        header: true,
+        columns: tuple { name: 1, length_km: 3, basin_km2: 4, reaches_ocean: 6 },
+        out rows: rivers,
+    };
     call debug_value{v: rivers[1]};
     var table: relation river;
     load table from rivers;

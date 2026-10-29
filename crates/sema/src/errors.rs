@@ -503,16 +503,15 @@ pub(crate) fn type_mismatch(
     value: Option<&hir::Value>,
     expr: &Expr,
 ) -> Diagnostic {
-    let mut d = Diagnostic::error(
-        Code::TypeMismatch,
-        format!("mismatched types: expected `{declared}`, found `{found}`"),
-        expr.span(),
-        format!("this is `{found}`"),
-    )
-    .with_note("values never convert to another type implicitly");
-    for (span, label) in origin.labels() {
-        d = d.with_secondary(span, label);
-    }
+    let mut d = origin.explain(
+        Diagnostic::error(
+            Code::TypeMismatch,
+            format!("mismatched types: expected `{declared}`, found `{found}`"),
+            expr.span(),
+            format!("this is `{found}`"),
+        )
+        .with_note("values never convert to another type implicitly"),
+    );
     let unnamed = |ty: &hir::Type| ty.parameters().any(|p| p.name.is_none());
     if unnamed(declared) || unnamed(found) {
         d = d.with_note("each `any type`, `any tuple` or `any relation` written as a parameter's type is a type of its own; to make parameters' types the same, declare one type parameter after the signature, `types { T: any type }`, and write `T` in each");
@@ -605,6 +604,7 @@ pub(crate) fn type_mismatch(
         | Origin::Heading(_)
         | Origin::Value(_)
         | Origin::Builtin
+        | Origin::Columns(_)
         | Origin::Operator(_)
         | Origin::Operand(..) => d,
     }
@@ -774,16 +774,15 @@ pub(crate) fn not_of_kind(
     namespaces: &Namespaces,
 ) -> Diagnostic {
     let (expected, note) = what_any_is(parameter, namespaces);
-    let mut d = Diagnostic::error(
-        Code::TypeMismatch,
-        format!("mismatched types: expected {expected}, found `{actual}`"),
-        arg.span(),
-        format!("this is `{actual}`"),
-    )
-    .with_note(note);
-    for (span, label) in origin.labels() {
-        d = d.with_secondary(span, label);
-    }
+    let mut d = origin.explain(
+        Diagnostic::error(
+            Code::TypeMismatch,
+            format!("mismatched types: expected {expected}, found `{actual}`"),
+            arg.span(),
+            format!("this is `{actual}`"),
+        )
+        .with_note(note),
+    );
     // A type parameter of the operator the call is in, which can be types
     // that aren't of the kind: it can be declared as the kind instead.
     if let (hir::Type::Parameter(p), hir::Any::Kind(kind)) = (actual, &parameter.any) {
@@ -1376,14 +1375,12 @@ pub(crate) fn per_relation_argument(
     } else {
         format!("mismatched types: expected a relation, found `{actual}`")
     };
-    let mut d = Diagnostic::error(Code::TypeMismatch, message, arg.span(), format!("this is `{actual}`"))
-        .with_note(format!(
-            "`{name}` takes a relation of any heading, whose tuples the `per` arguments are evaluated for"
-        ));
-    for (span, label) in origin.labels() {
-        d = d.with_secondary(span, label);
-    }
-    d
+    origin.explain(
+        Diagnostic::error(Code::TypeMismatch, message, arg.span(), format!("this is `{actual}`"))
+            .with_note(format!(
+                "`{name}` takes a relation of any heading, whose tuples the `per` arguments are evaluated for"
+            )),
+    )
 }
 
 /// The note on a `per` argument that is the same for every tuple: the
@@ -1735,6 +1732,28 @@ pub(crate) fn elsewhere(name: &str) -> Option<(&'static str, Option<&'static str
         .iter()
         .find(|(other, ..)| *other == lowercase)
         .map(|&(_, relation, array)| (relation, array))
+}
+
+/// Other languages' names for parameters of the prelude's operators, with
+/// the operator and the prelude's name: pandas' `read_csv` chooses the
+/// columns to read with `usecols`, or names a file's columns with
+/// `names`, as `load_csv`'s `columns` does both, and Python's
+/// `has_header` says what its `header` does.
+const PARAMETERS_ELSEWHERE: &[(hir::Builtin, &str, &str)] = &[
+    (LOAD_CSV, "usecols", "columns"),
+    (LOAD_CSV, "names", "columns"),
+    (LOAD_CSV, "has_header", "header"),
+];
+
+const LOAD_CSV: hir::Builtin = hir::Builtin::Update(hir::UpdateBuiltin::LoadCsv);
+
+/// The parameter of the built-in `builtin` that other languages call
+/// `name`, if there is one.
+pub(crate) fn parameter_elsewhere(builtin: hir::Builtin, name: &str) -> Option<&'static str> {
+    PARAMETERS_ELSEWHERE
+        .iter()
+        .find(|&&(b, other, _)| b == builtin && other == name)
+        .map(|&(.., ours)| ours)
 }
 
 /// `d`, about the argument written `arg`, of type `actual`, of a call of
@@ -5908,7 +5927,10 @@ pub(crate) fn unassigned_out(name: &str, operator: &str, ident: &SyntaxToken) ->
 }
 
 /// The rule for what `load_csv` reads.
-const CSV_FIELDS: &str = "`load_csv` reads each attribute of its array's tuples from the field in the column of its name, which the file's header gives: text as it is, and an integer, an approximate number or a boolean as `parse_integer`, `parse_approximate` and `parse_boolean` read them";
+const CSV_FIELDS: &str = "`load_csv` reads each attribute of its array's tuples from the field in the column `columns` gives it: text as it is, and an integer, an approximate number or a boolean as `parse_integer`, `parse_approximate` and `parse_boolean` read them";
+
+/// The rule for `load_csv`'s columns.
+const CSV_COLUMNS: &str = "`columns` gives each attribute of the tuples the position of the column it is read from, counting from 1, and each a column of its own";
 
 /// The array written `rows`, which `load_csv` loads, whose tuples have
 /// the attributes `unreadable`, by name and type, which it can't read
@@ -5940,10 +5962,45 @@ pub(crate) fn unknown_columns(parameter: &hir::TypeParameter, rows: &Expr) -> Di
     )
     .with_note(CSV_FIELDS)
     .with_note(format!(
-        "`{parameter}` is `{}`, whose attributes each call gives it, but `load_csv` needs them when compiling, to know the columns to read and the types to read them as",
+        "`{parameter}` is `{}`, whose attributes each call gives it, but `load_csv` needs them when compiling, to know the types to read their columns as",
         parameter.any
     ))
     .with_help("call `load_csv` where the array's type is written, and pass the array to this operator")
+}
+
+/// `attribute`, whose column `load_csv` is given at `at` as `position`,
+/// which no column has, as they count from 1.
+pub(crate) fn not_a_column(attribute: &str, position: i64, at: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::CsvColumns,
+        format!("`{attribute}` is read from column {position}, but columns count from 1"),
+        at,
+        "no column has this position",
+    )
+    .with_note(CSV_COLUMNS)
+}
+
+/// `second`, whose column `load_csv` is given at `at` as `position`, which
+/// `first`'s is too, at `first_at`.
+pub(crate) fn shared_column(
+    first: &str,
+    second: &str,
+    position: i64,
+    first_at: Span,
+    at: Span,
+) -> Diagnostic {
+    Diagnostic::error(
+        Code::CsvColumns,
+        format!("`{first}` and `{second}` are both read from column {position}"),
+        at,
+        format!("`{first}`'s column too"),
+    )
+    .with_secondary(
+        first_at,
+        format!("`{first}` is read from column {position}"),
+    )
+    .with_note(CSV_COLUMNS)
+    .with_help("give each attribute the column it is in")
 }
 
 /// The rule for operators of one name.

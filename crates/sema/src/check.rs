@@ -836,7 +836,12 @@ impl<'a> Checker<'a> {
             }
             let Some(param) = params.get(name) else {
                 ok = false;
-                let renamed = renamed(name, missing.iter().copied());
+                // Another language's name for one, or a misspelling.
+                let renamed = signature
+                    .builtin
+                    .and_then(|builtin| errors::parameter_elsewhere(builtin, name))
+                    .filter(|ours| missing.contains(ours))
+                    .or_else(|| renamed(name, missing.iter().copied()));
                 if let Some(target) = renamed {
                     missing.retain(|m| *m != target);
                 }
@@ -2141,11 +2146,7 @@ fn missing_arguments(
     };
     let projection = args
         .named()
-        .find(|a| {
-            a.name()
-                .and_then(|n| n.ident())
-                .is_some_and(|i| i.text() == relation)
-        })
+        .find(|a| a.is_named(relation))
         .and_then(|a| a.value());
     match projection {
         Some(Expr::Project(projection)) => {

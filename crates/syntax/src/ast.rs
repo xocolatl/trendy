@@ -928,11 +928,17 @@ impl Arguments {
     }
 
     /// Where a new argument goes, as an offset and the text to put around
-    /// `name: value`: after the last argument, keeping any trailing comma
-    /// trailing.
+    /// `name: value`: after the last argument, named or not, keeping any
+    /// trailing comma trailing.
     #[must_use]
     pub fn insertion(&self) -> (usize, &'static str, &'static str) {
-        list_insertion(&self.0, self.named().last().map(|a| a.0))
+        let last = self.0.children().filter(|c| {
+            matches!(
+                c.kind(),
+                SyntaxKind::AttributeValue | SyntaxKind::PositionalArg
+            )
+        });
+        list_insertion(&self.0, last.last())
     }
 
     /// The span to delete to remove `argument`, with its comma.
@@ -1542,6 +1548,14 @@ impl AttributeType {
         self.0.children().find_map(Name::cast)
     }
 
+    /// Whether its name is `name`.
+    #[must_use]
+    pub fn is_named(&self, name: &str) -> bool {
+        self.name()
+            .and_then(|n| n.ident())
+            .is_some_and(|i| i.text() == name)
+    }
+
     #[must_use]
     pub fn type_expr(&self) -> Option<TypeExpr> {
         self.0.children().find_map(TypeExpr::cast)
@@ -1779,6 +1793,14 @@ impl AttributeValue {
     #[must_use]
     pub fn name(&self) -> Option<Name> {
         self.0.children().find_map(Name::cast)
+    }
+
+    /// Whether its name is `name`.
+    #[must_use]
+    pub fn is_named(&self, name: &str) -> bool {
+        self.name()
+            .and_then(|n| n.ident())
+            .is_some_and(|i| i.text() == name)
     }
 
     /// `var`, `const` or `out`, before an argument's name, or another

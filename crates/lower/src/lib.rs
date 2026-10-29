@@ -741,10 +741,23 @@ impl<'a> FunctionBuilder<'a> {
                     self.write(&call.args["r"], lir::RuntimeFn::DebugTable, cx);
                 }
                 hir::UpdateBuiltin::LoadTextFile => {
-                    self.loaded(lir::RuntimeFn::LoadTextFile, call, "lines", cx);
+                    self.loaded(lir::RuntimeFn::LoadTextFile, call, "lines", Vec::new(), cx);
                 }
                 hir::UpdateBuiltin::LoadCsv => {
-                    self.loaded(lir::RuntimeFn::LoadCsv, call, "rows", cx);
+                    // Whether the file has a header, and each attribute's
+                    // column, given their tuple's type's descriptor.
+                    let header = self.place(&call.args["header"], cx);
+                    let columns = &call.args["columns"];
+                    let ty = self.type_of(columns);
+                    let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+                    let columns = self.place(columns, cx);
+                    self.loaded(
+                        lir::RuntimeFn::LoadCsv,
+                        call,
+                        "rows",
+                        vec![header, columns, descriptor],
+                        cx,
+                    );
                 }
             },
             hir::OperatorKind::Update { .. } => {
@@ -793,18 +806,28 @@ impl<'a> FunctionBuilder<'a> {
 
     /// `call`, of `load_text_file` or `load_csv`, whose `out` parameter is
     /// `out`: what the runtime function `function` reads from the file at
-    /// the path, into an array the statement holds, given its type's
-    /// descriptor, assigned to the variable for `out`.
-    fn loaded(&mut self, function: lir::RuntimeFn, call: &hir::Call, out: &str, cx: &mut Lowering) {
+    /// the path, as the arguments `given` after it say, into an array the
+    /// statement holds, given its type's descriptor, assigned to the
+    /// variable for `out`.
+    fn loaded(
+        &mut self,
+        function: lir::RuntimeFn,
+        call: &hir::Call,
+        out: &str,
+        given: Vec<lir::Place>,
+        cx: &mut Lowering,
+    ) {
         let path = self.place(&call.args["path"], cx);
         let target = &call.updated[out];
         let ty = self.assigned(target).0.clone();
         let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
         let array = self.slot(layout(&ty));
-        self.insts.push(lir::Inst::CallRuntime {
-            function,
-            args: vec![array.clone(), path, descriptor],
-        });
+        let args = [array.clone(), path]
+            .into_iter()
+            .chain(given)
+            .chain([descriptor])
+            .collect();
+        self.insts.push(lir::Inst::CallRuntime { function, args });
         self.scoped = true;
         self.store(target, array, cx);
     }

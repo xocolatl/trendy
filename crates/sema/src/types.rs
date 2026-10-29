@@ -59,6 +59,9 @@ pub(crate) enum Origin {
     /// The type parameter named, of an operator called, given its type by
     /// the argument written here.
     TypeParameter(String, Expr),
+    /// The array written here, whose tuples `load_csv` reads, which
+    /// `columns` gives each attribute of a column for.
+    Columns(Expr),
 }
 
 impl Origin {
@@ -80,6 +83,13 @@ impl Origin {
         labels
     }
 
+    /// `d`, with secondary labels at where the expectation comes from.
+    pub(crate) fn explain(&self, d: Diagnostic) -> Diagnostic {
+        self.labels()
+            .into_iter()
+            .fold(d, |d, (span, label)| d.with_secondary(span, label))
+    }
+
     /// The expectation of the result of the operator written `token`, as
     /// the expectation of each of its operands.
     pub(crate) fn operand(&self, token: &SyntaxToken) -> Origin {
@@ -96,9 +106,10 @@ impl Origin {
         match self {
             Origin::Type(t) => Some(t.span()),
             Origin::Heading(h) => Some(h.span()),
-            Origin::Value(v) | Origin::Replaced(v, _) | Origin::TypeParameter(_, v) => {
-                Some(v.span())
-            }
+            Origin::Value(v)
+            | Origin::Replaced(v, _)
+            | Origin::TypeParameter(_, v)
+            | Origin::Columns(v) => Some(v.span()),
             Origin::Builtin => None,
             Origin::Operator(token) => Some(trendy_syntax::span(token.text_range())),
             Origin::Variable(_, within)
@@ -123,6 +134,9 @@ impl Origin {
             Origin::Value(_) => "expected because of this value".to_string(),
             Origin::TypeParameter(name, _) => {
                 format!("`{name}` is given this argument's type")
+            }
+            Origin::Columns(_) => {
+                "`columns` gives a column for each attribute of these tuples".to_string()
             }
             Origin::Replaced(_, name) => format!("`{name}` has the expected type here"),
             Origin::Variable(name, declared) => match **declared {
@@ -202,20 +216,12 @@ impl Origin {
             Origin::Heading(h) => h
                 .attributes_written()?
                 .attributes()
-                .find(|a| {
-                    a.name()
-                        .and_then(|n| n.ident())
-                        .is_some_and(|i| i.text() == name)
-                })?
+                .find(|a| a.is_named(name))?
                 .type_expr()
                 .map(Origin::Type),
             Origin::Value(Expr::Tuple(t)) => t
                 .attributes()
-                .find(|a| {
-                    a.name()
-                        .and_then(|n| n.ident())
-                        .is_some_and(|i| i.text() == name)
-                })?
+                .find(|a| a.is_named(name))?
                 .value()
                 .map(Origin::Value),
             _ => None,
@@ -638,12 +644,12 @@ pub(crate) fn tuple_selector(
         }
     }
     if let (Some(here), false) = (here, missing.is_empty()) {
-        errors.push(errors::missing_attributes(
+        errors.push(here.origin.explain(errors::missing_attributes(
             errors::Noun::Attribute,
             &missing,
             &format!("the expected type is `{}`", here.ty),
             tuple.span(),
-        ));
+        )));
         ok = false;
     }
     if !ok {
@@ -674,14 +680,14 @@ fn unknown_tuple_attribute(
     if let Some(target) = renamed {
         missing.retain(|m| *m != target);
     }
-    errors.push(errors::unknown_attribute(
+    errors.push(here.origin.explain(errors::unknown_attribute(
         errors::Noun::Attribute,
         name,
         span,
         &format!("the expected type is `{}`", here.ty),
         renamed,
         Some(removal),
-    ));
+    )));
 }
 
 /// A relation selector, checked against `expected` if given. Tuples known

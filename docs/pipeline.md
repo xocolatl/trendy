@@ -47,11 +47,15 @@ read-only operator's calls can't (TTM RM Prescription 3): a `call`
 statement, which nothing evaluates when compiling, and which lowering
 makes a runtime call (`trendy_rt_load_text_file`) and an assignment of
 its result. `load_csv` is one too (`trendy_rt_load_csv`), given its
-array's descriptor, whose tuples' attributes name the columns to read,
-and whose types say how; sema checks that each is a type a field can
-be read as, known when compiling (A0055), and the runtime reads the file
-as CSV (its `csv` module) and each field as `parse_*` reads one. A
-built-in can
+array's descriptor, whose tuples' attributes' types say how to read
+their columns, and `columns`, a tuple of those attributes, each its
+column's position, and its descriptor; sema checks that each attribute
+is a type a field can be read as, known when compiling (A0055), and
+`columns` against the type it must have, the tuples' heading with every
+attribute an integer, which the signature can't say (`body::csv_loadable`,
+reporting at `types::Origin::Columns`), and its positions if they are
+known (R0016). The runtime reads the file as CSV (its `csv` module) and
+each field as `parse_*` reads one. A built-in can
 have type parameters, of a kind too, and `per` parameters, declared as an
 operator's are, and checked against the compiler's, written as the
 operator sees them. A wrong prelude is an internal

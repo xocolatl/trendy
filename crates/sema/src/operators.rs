@@ -89,11 +89,11 @@ impl Signature {
 
     /// Where parameter `name` is written, for the program's own.
     pub(crate) fn param_decl(&self, name: &str) -> Option<ast::AttributeType> {
-        self.decl.as_ref()?.params()?.attributes().find(|a| {
-            a.name()
-                .and_then(|n| n.ident())
-                .is_some_and(|i| i.text() == name)
-        })
+        self.decl
+            .as_ref()?
+            .params()?
+            .attributes()
+            .find(|a| a.is_named(name))
     }
 
     /// The relation whose tuples the `per` parameter `name` is an attribute
@@ -519,11 +519,7 @@ fn typed_params(
         let Some(relation) = clause.relation().and_then(|r| r.ident()) else {
             continue;
         };
-        let target = heading.attributes().find(|a| {
-            a.name()
-                .and_then(|n| n.ident())
-                .is_some_and(|i| i.text() == relation.text())
-        });
+        let target = heading.attributes().find(|a| a.is_named(relation.text()));
         let problem = match &target {
             _ if relation.text() == name.text() => Some(errors::PerProblem::Itself),
             None => Some(errors::PerProblem::NotAParameter(

@@ -2089,14 +2089,21 @@ pub unsafe extern "C" fn trendy_rt_parse_boolean(dst: *mut u8, from: *const Text
     }
 }
 
-/// Where a field of a CSV file is: in the column of a name, on a line, of
-/// the file at a path.
+/// Where a field of a CSV file is, for an attribute: in a column, counting
+/// from 0, on a line, of the file at a path.
 #[cfg(not(test))]
 #[derive(Clone, Copy)]
 struct Place<'a> {
-    column: &'a str,
+    attribute: &'a str,
+    column: usize,
     line: usize,
     path: &'a str,
+    /// The file's CSV text, if its first record is a header, which names
+    /// the column.
+    header: Option<&'a str>,
+    /// Whether the field is in the file's first record, which isn't a
+    /// header.
+    first: bool,
 }
 
 /// Stop the program because `text`, at `place` if it is a CSV file's
@@ -2107,17 +2114,37 @@ fn unparsable(text: &str, a: &str, why: trendy_text::Unparsable, place: Option<P
         out.write_str("error[R0014]: \"")?;
         trendy_text::escape(text, out)?;
         out.write_char('"')?;
-        if let Some(Place { column, line, path }) = place {
-            out.write_str(", in column \"")?;
-            trendy_text::escape(column, out)?;
-            write!(out, "\" on line {line} of \"")?;
-            trendy_text::escape(path, out)?;
+        if let Some(place) = place {
+            write!(out, ", in column {}", place.column + 1)?;
+            if let Some(field) = place
+                .header
+                .and_then(|text| csv::header(text).nth(place.column))
+            {
+                out.write_str(" (\"")?;
+                // SAFETY: the statement has begun a scope, as
+                // `trendy_rt_load_csv`'s caller guarantees.
+                trendy_text::escape(unsafe { field_value(field) }, out)?;
+                out.write_str("\")")?;
+            }
+            write!(out, " on line {} of \"", place.line)?;
+            trendy_text::escape(place.path, out)?;
             out.write_str("\",")?;
         }
         match why {
-            trendy_text::Unparsable::Malformed => writeln!(out, " isn't {a}"),
-            trendy_text::Unparsable::OutOfRange => writeln!(out, " is out of {a}'s range"),
+            trendy_text::Unparsable::Malformed => write!(out, " isn't {a}")?,
+            trendy_text::Unparsable::OutOfRange => write!(out, " is out of {a}'s range")?,
         }
+        if let Some(place) = place {
+            write!(out, ", the type of `{}`", place.attribute)?;
+            if place.first {
+                write!(
+                    out,
+                    "; if line {} is a header, `header: true` skips it",
+                    place.line
+                )?;
+            }
+        }
+        out.write_char('\n')
     })
 }
 
@@ -2193,43 +2220,84 @@ fn file_text<'a>(path: &str, bytes: &'a [u8]) -> &'a str {
 }
 
 /// Store at `dst` the array of the records of the CSV file at `path`, in
-/// the file's order, of the type `desc` describes, an array of tuples, in
-/// memory the statement owns. The file's first record is its header,
-/// which names its columns, and each attribute of the tuples is the field
-/// in the column of its name: text as it is, and an integer, an
-/// approximate number or a boolean as `parse_integer`,
-/// `parse_approximate` and `parse_boolean` read one. Columns the tuples
-/// don't name are skipped. Stops the program if the file can't be read
-/// (R0012), isn't UTF-8 text (R0013) or CSV (R0015), its header doesn't
-/// name each attribute once (R0016), a field isn't a value of its
-/// attribute's type (R0014), or the memory can't be allocated.
+/// the file's order, after the first if `header` is true, a header, of the
+/// type `desc` describes, an array of tuples, in memory the statement
+/// owns. Each attribute of the tuples is the field in the column that
+/// `columns`, a tuple of integers `columns_desc` describes, gives it,
+/// counting from 1: text as it is, and an integer, an approximate number
+/// or a boolean as `parse_integer`, `parse_approximate` and
+/// `parse_boolean` read one. Columns it doesn't give are skipped. Stops
+/// the program if a column isn't one of the file's, or two attributes
+/// have one (R0016), the file can't be read (R0012), isn't UTF-8 text
+/// (R0013) or CSV (R0015), a field isn't a value of its attribute's type
+/// (R0014), or the memory can't be allocated.
 ///
 /// # Safety
 ///
-/// `path` must point to a valid text value, `desc` to a valid descriptor
-/// of an array of tuples whose attributes are text, integers, approximate
-/// numbers or booleans, and `dst` to memory for an array. The statement
-/// must have begun a scope.
+/// `path` must point to a valid text value, `header` to a valid boolean,
+/// `columns` to a valid tuple and `columns_desc` to its type's descriptor,
+/// of the attributes of the tuples `desc` describes, each an integer, and
+/// `desc` to a valid descriptor of an array of tuples whose attributes are
+/// text, integers, approximate numbers or booleans, and `dst` to memory
+/// for an array. The statement must have begun a scope.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn trendy_rt_load_csv(
     dst: *mut Text,
     path: *const Text,
+    header: *const u8,
+    columns: *const u8,
+    columns_desc: *const TypeDesc,
     desc: *const TypeDesc,
 ) {
     // SAFETY: guaranteed by the caller.
     unsafe {
         let path = read_text(path.cast());
-        let (contents, len) = read_file(path);
-        let text = file_text(path, array(contents, len));
+        let header = *header != 0;
         let desc = &*desc;
         let element = desc.element();
         let attrs = attributes(element);
-        let count = csv_records(text, path);
-        // Each attribute's column, by the header.
-        let columns = allocate::<usize>(attrs.len());
-        for (i, attr) in attrs.iter().enumerate() {
-            columns.add(i).write(column(text, path, name(attr)));
+        // Each attribute's column, counting from 0, as `columns` gives it,
+        // whose attributes are the tuples', in the same order.
+        let slots = allocate::<usize>(attrs.len());
+        for (i, position) in attributes(&*columns_desc).iter().enumerate() {
+            let n = columns.add(position.offset).cast::<i64>().read_unaligned();
+            let attr = name(&attrs[i]);
+            if n < 1 {
+                columns_fail(|out| {
+                    write!(
+                        out,
+                        "`{attr}` is read from column {n}, but columns count from 1"
+                    )
+                });
+            }
+            let index = usize::try_from(n - 1).unwrap_or(usize::MAX);
+            if let Some(first) = array(slots, i).iter().position(|&j| j == index) {
+                let first = name(&attrs[first]);
+                columns_fail(|out| {
+                    write!(out, "`{first}` and `{attr}` are both read from column {n}")
+                });
+            }
+            slots.add(i).write(index);
+        }
+        let indexes = array(slots, attrs.len());
+        let (contents, len) = read_file(path);
+        let text = file_text(path, array(contents, len));
+        let Records { count, fields } = csv_records(text, path, header);
+        if let Some(i) = indexes.iter().position(|&j| j >= fields)
+            && fields > 0
+        {
+            let attr = name(&attrs[i]);
+            columns_fail(|out| {
+                write!(
+                    out,
+                    "`{attr}` is read from column {}, but \"",
+                    indexes[i].saturating_add(1)
+                )?;
+                trendy_text::escape(path, out)?;
+                let plural = if fields == 1 { "" } else { "s" };
+                write!(out, "\" has {fields} column{plural}")
+            });
         }
         let Some(size) = count.checked_mul(element.size) else {
             trendy_rt_fail(FAIL_OUT_OF_MEMORY)
@@ -2237,18 +2305,23 @@ pub unsafe extern "C" fn trendy_rt_load_csv(
         let rows = allocate_buffer(size, desc);
         // Each record's tuple, made here, then copied into the array.
         let tuple = allocate::<u8>(element.size);
-        // Every field after the header's, as `csv_records` found the file
-        // CSV.
-        let mut fields = csv::Fields::new(text).flatten();
-        fields.by_ref().find(|f| f.last);
-        let (mut i, mut j) = (0, 0);
-        for field in fields {
-            if let Some(a) = array(columns, attrs.len()).iter().position(|&c| c == j) {
+        // Every field after the header's, if there is one, as
+        // `csv_records` found the file CSV.
+        let mut all = csv::Fields::new(text).flatten();
+        if header {
+            all.by_ref().find(|f| f.last);
+        }
+        let (mut i, mut j, mut first) = (0, 0, !header);
+        for field in all {
+            if let Some(a) = indexes.iter().position(|&c| c == j) {
                 let attr = &attrs[a];
                 let place = Place {
-                    column: name(attr),
+                    attribute: name(attr),
+                    column: j,
                     line: field.line,
                     path,
+                    header: header.then_some(text),
+                    first,
                 };
                 read_field(field, tuple.add(attr.offset), &*attr.desc, place);
             }
@@ -2257,10 +2330,11 @@ pub unsafe extern "C" fn trendy_rt_load_csv(
                 copy_element(rows, rows.add(i * element.size), tuple, element);
                 i += 1;
                 j = 0;
+                first = false;
             }
         }
         free(tuple.cast());
-        free(columns.cast());
+        free(slots.cast());
         free(contents.cast());
         dst.write_unaligned(Text {
             bytes: rows,
@@ -2269,69 +2343,34 @@ pub unsafe extern "C" fn trendy_rt_load_csv(
     }
 }
 
-/// The column of the CSV text `text`, of the file at `path`, that its
-/// header names `name`, counting from 0. Stops the program if it has no
-/// header, or no such column, or two (R0016).
+/// Stop the program because `columns` doesn't give each attribute a
+/// column of the file, of its own, as `write` says (R0016).
 #[cfg(not(test))]
-fn column(text: &str, path: &str, name: &str) -> usize {
-    let mut found = None;
-    for (j, field) in csv::header(text).enumerate() {
-        if field.as_written() != Some(name) {
-            continue;
-        }
-        if found.is_some() {
-            columns_fail(path, |out| {
-                out.write_str(" has two columns \"")?;
-                trendy_text::escape(name, out)?;
-                out.write_char('"')
-            });
-        }
-        found = Some(j);
-    }
-    if csv::header(text).next().is_none() {
-        columns_fail(path, |out| {
-            out.write_str(" has no header, to name its columns")
-        });
-    }
-    found.unwrap_or_else(|| {
-        columns_fail(path, |out| {
-            out.write_str(" has no column \"")?;
-            trendy_text::escape(name, out)?;
-            out.write_str("\", for the attribute of that name; its header names ")?;
-            for (j, field) in csv::header(text).enumerate() {
-                if j > 0 {
-                    out.write_str(", ")?;
-                }
-                out.write_char('"')?;
-                // SAFETY: the statement has begun a scope, as
-                // `trendy_rt_load_csv`'s caller guarantees.
-                trendy_text::escape(unsafe { field_value(field) }, out)?;
-                out.write_char('"')?;
-            }
-            Ok(())
-        })
-    })
-}
-
-/// Stop the program because the header of the CSV file at `path` doesn't
-/// name each attribute once, as `write` says (R0016).
-#[cfg(not(test))]
-fn columns_fail(path: &str, write: impl FnOnce(&mut Stderr) -> fmt::Result) -> ! {
+fn columns_fail(write: impl FnOnce(&mut Stderr) -> fmt::Result) -> ! {
     fail_with(|out| {
-        out.write_str("error[R0016]: \"")?;
-        trendy_text::escape(path, out)?;
-        out.write_char('"')?;
+        out.write_str("error[R0016]: ")?;
         write(out)?;
         out.write_char('\n')
     })
 }
 
-/// The number of records of the CSV text `text`, of the file at `path`,
-/// after its header. Stops the program if it isn't CSV, or a record has
-/// another number of fields than the header (R0015).
+/// A CSV file's records to load, and how many fields each has.
 #[cfg(not(test))]
-fn csv_records(text: &str, path: &str) -> usize {
-    let (mut records, mut fields, mut header, mut line) = (0, 0, None, 0);
+struct Records {
+    count: usize,
+    /// The fields of each record, the first's, or 0 if there are none.
+    fields: usize,
+}
+
+/// The records of the CSV text `text`, of the file at `path`, after its
+/// first, a header, if `header` is true. Stops the program if it isn't
+/// CSV, or a record has another number of fields than the first
+/// (R0015).
+#[cfg(not(test))]
+fn csv_records(text: &str, path: &str, header: bool) -> Records {
+    let (mut records, mut fields, mut line) = (0_usize, 0, 0);
+    // The first record's fields and line.
+    let mut first: Option<(usize, usize)> = None;
     for field in csv::Fields::new(text) {
         let field = field.unwrap_or_else(|csv::NotCsv { why, line }| {
             malformed(path, line, |out| {
@@ -2351,20 +2390,30 @@ fn csv_records(text: &str, path: &str) -> usize {
         if !field.last {
             continue;
         }
-        match header {
-            None => header = Some(fields),
-            Some(expected) if expected == fields => records += 1,
-            Some(expected) => malformed(path, line, |out| {
+        match first {
+            None => first = Some((fields, line)),
+            Some((expected, _)) if expected == fields => {}
+            Some((expected, first_line)) => malformed(path, line, |out| {
                 let plural = if fields == 1 { "" } else { "s" };
-                write!(
-                    out,
-                    "has {fields} field{plural}, but the header has {expected}"
-                )
+                write!(out, "has {fields} field{plural}, but ")?;
+                if header {
+                    write!(out, "the header has {expected}")
+                } else {
+                    write!(out, "line {first_line} has {expected}")
+                }
             }),
         }
+        records += 1;
         fields = 0;
     }
-    records
+    Records {
+        count: if header {
+            records.saturating_sub(1)
+        } else {
+            records
+        },
+        fields: first.map_or(0, |(fields, _)| fields),
+    }
 }
 
 /// Stop the program because the CSV file at `path` isn't CSV on line
