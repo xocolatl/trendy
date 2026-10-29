@@ -13,7 +13,7 @@ use trendy_syntax::{SyntaxKind, SyntaxToken};
 
 use crate::check::Written;
 use crate::globals::Pending;
-use crate::operators::Signature;
+use crate::operators::{Chosen, Operators, Signature};
 use crate::types::{Origin, TypeParameters};
 use crate::{Kind, Namespaces};
 
@@ -64,19 +64,48 @@ pub(crate) fn duplicate_name(
             first.0.describe()
         )),
     };
-    let note = match this.0 {
-        Kind::Variable => {
-            "variables have a namespace of their own, so no two can have the same name, though a variable can have an operator's"
-        }
-        Kind::Heading | Kind::Type => {
-            "headings share a namespace with the types, so no two can have the same name, nor a heading a built-in type's, though a heading can have a variable's or an operator's"
-        }
-        _ => {
-            "operators have a namespace of their own, so no two can have the same name, though an operator can have a variable's"
-        }
+    let note = if this.0 == Kind::Variable {
+        "variables have a namespace of their own, so no two can have the same name, though a variable can have an operator's"
+    } else {
+        "headings share a namespace with the types, so no two can have the same name, nor a heading a built-in type's, though a heading can have a variable's or an operator's"
     };
     d.with_note(note)
         .with_help("delete the duplicate definition, or rename one of them")
+}
+
+/// The operator `name`, defined at `span` with parameters named `params`,
+/// which `first`, of that name, already has: built in, the prelude's, or
+/// the program's, there.
+pub(crate) fn duplicate_operator(
+    name: &str,
+    span: Span,
+    first: (Kind, Option<Span>),
+    params: &BTreeSet<String>,
+) -> Diagnostic {
+    let listed: Vec<String> = params.iter().map(|p| format!("`{p}`")).collect();
+    let same = if listed.is_empty() {
+        "no parameters".to_string()
+    } else {
+        format!("parameters named {}", trendy_diag::conjoin(&listed))
+    };
+    let d = Diagnostic::error(
+        Code::DuplicateName,
+        format!("`{name}` is defined more than once with {same}"),
+        span,
+        "redefined here as an operator",
+    );
+    let d = match first.1 {
+        Some(at) => d.with_secondary(
+            at,
+            format!("`{name}` is first defined here as {}", first.0.describe()),
+        ),
+        None => d.with_note(format!(
+            "`{name}` is {}, declared in the prelude",
+            first.0.describe()
+        )),
+    };
+    d.with_note("operators have a namespace of their own, in which operators of one name are told apart by their parameters' names, which each call names its arguments with; so no two have the same name and the same parameters' names, though an operator can have a variable's name")
+        .with_help("delete the duplicate definition, or rename it or one of its parameters")
 }
 
 /// What a local variable's name must be.
@@ -1945,13 +1974,15 @@ fn indentation(node: &trendy_syntax::SyntaxNode) -> String {
 const READ_ONLY_FUNCTION: &str = "a read-only operator is a function of its arguments: its calls with the same arguments have the same value, whenever they are made (TTM, RM Prescription 3), so it reads only its parameters and its own local variables, and a variable of the program's it needs is passed to it, as a `const` parameter";
 
 /// The variable of the program's `name`, of type `ty` if it is known, read
-/// at `span` in the read-only operator `operator`: the fix passes it as a
-/// parameter of that name, which each call of the operator in the file
-/// gives the variable.
+/// at `span` in the read-only operator `operator`, one of `operators`: the
+/// fix passes it as a parameter of that name, which each call of the
+/// operator in the file gives the variable, but not a call of another of
+/// its name.
 pub(crate) fn variable_in_read_only(
     name: &str,
     span: Span,
     operator: &Signature,
+    operators: &Operators,
     ty: Option<String>,
 ) -> Diagnostic {
     let op = &operator.name;
@@ -1976,27 +2007,32 @@ pub(crate) fn variable_in_read_only(
         span: Span::new(at, at),
         replacement: format!("{before}{name}: {ty}{after}"),
     }];
-    // Each call, `f{…}`, or `f{}`, which the parser takes for a projection.
+    // Each call, `f{…}`, or `f{}`, which the parser takes for a projection,
+    // whose arguments' names choose this operator.
     let file = decl.syntax().ancestors().last().expect("a node has a root");
-    let calls_it = |name_ref: Option<trendy_syntax::ast::NameRef>| {
-        name_ref
-            .and_then(|n| n.ident())
-            .is_some_and(|i| i.text() == op)
+    let calls_it = |name_ref: Option<trendy_syntax::ast::NameRef>, written: Written| {
+        name_ref.and_then(|n| n.ident()).is_some_and(|i| {
+            i.text() == op
+                && matches!(
+                    operators.chosen(op, &crate::check::argument_names(written)),
+                    Some(Chosen::One(chosen)) if chosen.id == operator.id
+                )
+        })
     };
     for node in file.descendants() {
         let insertion = if let Some(call) = trendy_syntax::ast::CallExpr::cast(node.clone()) {
-            calls_it(call.callee())
-                .then(|| call.arguments().map(|a| a.insertion()))
-                .flatten()
+            call.arguments()
+                .filter(|args| calls_it(call.callee(), Written::Arguments(args)))
+                .map(|args| args.insertion())
         } else if let Some(projection) = ProjectExpr::cast(node) {
             let empty = projection.names().filter(|l| l.names().next().is_none());
             let callee = match projection.operand() {
                 Some(Expr::Name(name_ref)) => Some(name_ref),
                 _ => None,
             };
-            calls_it(callee)
-                .then(|| empty.map(|l| l.insertion()))
-                .flatten()
+            empty
+                .filter(|list| calls_it(callee, Written::Nothing(list)))
+                .map(|list| list.insertion())
         } else {
             None
         };
@@ -5908,4 +5944,28 @@ pub(crate) fn unknown_columns(parameter: &hir::TypeParameter, rows: &Expr) -> Di
         parameter.any
     ))
     .with_help("call `load_csv` where the array's type is written, and pass the array to this operator")
+}
+
+/// The rule for operators of one name.
+const OVERLOADS: &str = "operators of one name are told apart by their parameters' names, which a call names its arguments with, so it calls the one whose parameters they name";
+
+/// A call of `name`, with the arguments `written`, whose names name the
+/// parameters of none of its operators, and of `tied` equally nearly.
+pub(crate) fn unchosen_operator(name: &str, tied: &[&Signature], written: Written) -> Diagnostic {
+    let span = match written {
+        Written::Arguments(args) => args.span(),
+        Written::Nothing(list) => list.span(),
+    };
+    let texts: Vec<String> = tied.iter().map(|s| s.text()).collect();
+    Diagnostic::error(
+        Code::UnchosenOperator,
+        format!("these arguments' names choose no operator `{name}`"),
+        span,
+        format!("not the parameters of any `{name}`"),
+    )
+    .with_note(OVERLOADS)
+    .with_help(format!(
+        "name the arguments as one of these has its parameters: {}",
+        trendy_diag::disjoin(&texts)
+    ))
 }

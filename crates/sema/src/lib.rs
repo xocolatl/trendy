@@ -177,17 +177,20 @@ impl Checked {
 }
 
 /// The operator named `main`, which must be the program's own, an update
-/// operator taking no parameters.
+/// operator taking no parameters: the one without parameters, if there are
+/// several.
 fn entry(
     file: &SourceFile,
     namespaces: &Namespaces,
     operators: &Operators,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::OperatorId> {
-    let Some((signature, decl)) = operators
-        .named("main")
-        .and_then(|s| Some((s, s.decl.as_ref()?)))
-    else {
+    let mains: Vec<&operators::Signature> = operators.overloads("main").collect();
+    let main = mains
+        .iter()
+        .find(|s| s.written.is_empty())
+        .or_else(|| mains.first());
+    let Some((signature, decl)) = main.and_then(|s| Some((s, s.decl.as_ref()?))) else {
         errors.push(errors::missing_main(file, namespaces));
         return None;
     };
@@ -231,11 +234,14 @@ impl Kind {
 /// The program's top-level names, each in its namespace: its first
 /// definition, and where it is (built-ins are in the prelude, so they have
 /// no span). Operators and variables have a namespace each, so a variable
-/// can have an operator's name; types and headings have a third.
+/// can have an operator's name; types and headings have a third. Operators
+/// of one name are told apart by their parameters' names, which every
+/// call writes, so a name has an operator for each set of them.
 #[derive(Default)]
 pub(crate) struct Namespaces {
-    /// User and built-in operators.
-    operators: HashMap<String, (Kind, Option<Span>)>,
+    /// User and built-in operators: each name's, with their parameters'
+    /// names, in the order they are defined.
+    operators: HashMap<String, Vec<OperatorName>>,
     variables: HashMap<String, Span>,
     /// Where each heading is declared.
     headings: HashMap<String, Span>,
@@ -245,6 +251,15 @@ pub(crate) struct Namespaces {
     /// The kinds, which only the prelude declares, by name, each with the
     /// built-in types of it.
     kinds: HashMap<String, (hir::Kind, BTreeSet<hir::Scalar>)>,
+}
+
+/// An operator's definition, as its name's namespace has it.
+struct OperatorName {
+    kind: Kind,
+    /// Where it is defined, unless the prelude defines it.
+    span: Option<Span>,
+    /// Its parameters' names, as a call gives their arguments.
+    params: BTreeSet<String>,
 }
 
 impl Namespaces {
@@ -296,10 +311,11 @@ impl Namespaces {
         }
     }
 
-    /// The operator named `name`: whether it is built in, and where it is
-    /// defined.
+    /// The first operator named `name`: whether it is built in, and where
+    /// it is defined.
     pub(crate) fn operator(&self, name: &str) -> Option<(Kind, Option<Span>)> {
-        self.operators.get(name).copied()
+        let first = self.operators.get(name)?.first()?;
+        Some((first.kind, first.span))
     }
 
     /// Where the variable named `name` is declared.
@@ -328,14 +344,16 @@ impl Namespaces {
     pub(crate) fn operators(&self) -> impl Iterator<Item = (&str, Kind, Option<Span>)> {
         self.operators
             .iter()
-            .map(|(name, &(kind, span))| (name.as_str(), kind, span))
+            .flat_map(|(name, defined)| defined.iter().map(|d| (name.as_str(), d.kind, d.span)))
     }
 
-    /// Whether `ident` is its operator name's first definition, not a
-    /// duplicate.
+    /// Whether `ident` names the first definition of an operator of its
+    /// name and parameters' names, not a duplicate.
     pub(crate) fn is_first_operator(&self, ident: &SyntaxToken) -> bool {
-        self.operator(ident.text())
-            .is_some_and(|(_, span)| span == Some(trendy_syntax::span(ident.text_range())))
+        let span = Some(trendy_syntax::span(ident.text_range()));
+        self.operators
+            .get(ident.text())
+            .is_some_and(|defined| defined.iter().any(|d| d.span == span))
     }
 
     /// Whether `ident` is its variable name's first declaration, not a
@@ -350,24 +368,29 @@ impl Namespaces {
 fn collect_names(prelude: &Prelude, file: &SourceFile, errors: &mut Vec<Diagnostic>) -> Namespaces {
     let mut namespaces = Namespaces {
         kinds: Namespaces::with_kinds(prelude.kinds()).kinds,
-        operators: prelude
-            .operators()
-            .iter()
-            .map(|op| {
-                let kind = match op.kind {
-                    hir::OperatorKind::Builtin(_) => Kind::Builtin,
-                    _ => Kind::Prelude,
-                };
-                (op.name.clone(), (kind, None))
-            })
-            .collect(),
         ..Namespaces::default()
     };
+    for op in prelude.operators() {
+        let kind = match op.kind {
+            hir::OperatorKind::Builtin(_) => Kind::Builtin,
+            _ => Kind::Prelude,
+        };
+        let params = operators::written(&op.params).into_keys().collect();
+        namespaces
+            .operators
+            .entry(op.name.clone())
+            .or_default()
+            .push(OperatorName {
+                kind,
+                span: None,
+                params,
+            });
+    }
     for item in file.items() {
         let (kind, name) = match item {
-            Item::Operator(op) => (Kind::Operator, op.name()),
-            Item::Variable(decl) => (Kind::Variable, decl.name()),
-            Item::Heading(decl) => (Kind::Heading, decl.name()),
+            Item::Operator(ref op) => (Kind::Operator, op.name()),
+            Item::Variable(ref decl) => (Kind::Variable, decl.name()),
+            Item::Heading(ref decl) => (Kind::Heading, decl.name()),
             // Reported as being outside the prelude, or the prelude's own,
             // already in it.
             Item::Builtin(_) | Item::BuiltinType(_) | Item::Kind(_) => continue,
@@ -376,26 +399,46 @@ fn collect_names(prelude: &Prelude, file: &SourceFile, errors: &mut Vec<Diagnost
             continue;
         };
         let (name, span) = (ident.text(), trendy_syntax::span(ident.text_range()));
+        if let Item::Operator(op) = item {
+            let params: BTreeSet<String> = op
+                .params()
+                .map(|heading| {
+                    heading
+                        .attributes()
+                        .filter_map(|a| Some(a.name()?.ident()?.text().to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let defined = namespaces.operators.entry(name.to_string()).or_default();
+            match defined.iter().find(|d| d.params == params) {
+                Some(first) => errors.push(errors::duplicate_operator(
+                    name,
+                    span,
+                    (first.kind, first.span),
+                    &params,
+                )),
+                None => defined.push(OperatorName {
+                    kind,
+                    span: Some(span),
+                    params,
+                }),
+            }
+            continue;
+        }
         let first = match kind {
             Kind::Variable => namespaces.variable(name).map(|s| (kind, Some(s))),
-            Kind::Heading => namespaces
+            _ => namespaces
                 .heading(name)
                 .map(|(s, _)| (kind, Some(s)))
                 .or_else(|| hir::Scalar::from_name(name).map(|_| (Kind::Type, None))),
-            _ => namespaces.operator(name),
         };
         match (first, kind) {
             (Some(first), _) => errors.push(errors::duplicate_name(name, (kind, span), first)),
             (None, Kind::Variable) => {
                 namespaces.variables.insert(name.to_string(), span);
             }
-            (None, Kind::Heading) => {
-                namespaces.headings.insert(name.to_string(), span);
-            }
             (None, _) => {
-                namespaces
-                    .operators
-                    .insert(name.to_string(), (kind, Some(span)));
+                namespaces.headings.insert(name.to_string(), span);
             }
         }
     }
@@ -556,9 +599,99 @@ mod tests {
         let errors = errors("operator main{}[]; operator main{}[];");
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].code, Code::DuplicateName);
-        assert_eq!(errors[0].message, "`main` is defined more than once");
+        assert_eq!(
+            errors[0].message,
+            "`main` is defined more than once with no parameters"
+        );
         assert_eq!(errors[0].span(), Span::new(28, 32));
         assert_eq!(errors[0].secondary[0].span, Span::new(9, 13));
+    }
+
+    /// Operators of one name, which their parameters' names tell apart.
+    const AREAS: &str = "operator area{width: integer, height: integer}: integer [ width * height ];\noperator area{side: integer}: integer [ side * side ];\noperator greeting{name: text, title: text}: text [ title || \" \" || name ];\noperator greeting{name: text, nickname: text}: text [ nickname ];\n";
+
+    #[test]
+    fn a_calls_arguments_names_choose_the_operator_of_its_name() {
+        let vars = variables(&format!(
+            "{AREAS}var a := area{{width: 3, height: 4}};\nvar b := area{{side: 3}};\nvar c := greeting{{name: \"Ada\", nickname: \"Countess\"}};"
+        ));
+        let values: Vec<&hir::Value> = vars.iter().map(|v| &v.init).collect();
+        assert_eq!(
+            values,
+            [
+                &hir::Value::Integer(12),
+                &hir::Value::Integer(9),
+                &hir::Value::Text("Countess".to_string())
+            ]
+        );
+        // Update operators too, and a name of the prelude's, as `count` of
+        // an array beside `count` of a relation.
+        analyze_str(
+            "operator show{v: integer} [ call debug_value{v: v}; ];\noperator show{v: integer, label: text} [ call debug_value{v: label}; ];\noperator count{a: any array}: integer [ length{a: a} ];\noperator main{} [ call show{v: 1}; call show{v: count{a: array [1]}, label: \"one\"}; call debug_value{v: count{r: relation { { x: 1 } }}}; ];",
+        )
+        .unwrap();
+        // Not two of one name with the same parameters' names, in any
+        // order, nor the prelude's.
+        for (source, message) in [
+            (
+                "operator a{x: integer, y: integer} [];\noperator a{y: text, x: text} [];",
+                "`a` is defined more than once with parameters named `x` and `y`",
+            ),
+            (
+                "operator count{r: any relation}: integer [ 0 ];",
+                "`count` is defined more than once with parameters named `r`",
+            ),
+        ] {
+            let errors = errors(&format!("{source}{MAIN}"));
+            assert_eq!(errors.len(), 1, "{source}: {errors:#?}");
+            assert_eq!(errors[0].code, Code::DuplicateName, "{source}");
+            assert_eq!(errors[0].message, message);
+        }
+        // `main` is the one without parameters.
+        analyze_str("operator main{x: integer} [];\noperator main{} [];").unwrap();
+    }
+
+    #[test]
+    fn arguments_naming_no_operator_are_checked_against_the_nearest() {
+        let call = |call: &str| {
+            format!("{AREAS}operator main{{}} [\n    call debug_value{{v: {call}}};\n];")
+        };
+        // The one whose parameters they name most nearly, whose missing and
+        // unknown arguments are reported, and whose error names the others.
+        let missing = errors(&call("area{width: 3}"));
+        assert_eq!(missing[0].code, Code::MissingAttribute);
+        assert!(
+            missing[0].notes[0].ends_with("or those of another `area`, `area{side: integer}`"),
+            "{:?}",
+            missing[0].notes
+        );
+        assert_eq!(fix(&call("area{sid: 3}")), call("area{side: 3}"));
+        assert_eq!(fix(&call("area{3}")), call("area{side: 3}"));
+        // Equally near ones leave the choice to the program.
+        let tied = errors(&call("greeting{name: \"Ada\"}"));
+        assert_eq!(tied.len(), 1, "{tied:#?}");
+        assert_eq!(tied[0].code, Code::UnchosenOperator);
+        assert!(tied[0].suggestions.is_empty());
+        assert_eq!(
+            tied[0].help,
+            [
+                "name the arguments as one of these has its parameters: `greeting{name: text, title: text}` or `greeting{name: text, nickname: text}`"
+            ]
+        );
+        // So does a statement's.
+        let source = "operator show{v: integer, label: text} [];\noperator show{v: integer, unit: text} [];\noperator main{} [ call show{v: 1}; ];";
+        assert_eq!(codes(source), [Code::UnchosenOperator]);
+    }
+
+    #[test]
+    fn a_variable_is_passed_only_to_its_reader() {
+        // A read-only operator reading a variable gets it as a parameter,
+        // which only the calls choosing it give it.
+        let source = "var rate := 2;\noperator scaled{n: integer}: integer [ n * rate ];\noperator scaled{n: integer, by: integer}: integer [ n * by ];\noperator main{} [\n    call debug_value{v: scaled{n: 1}};\n    call debug_value{v: scaled{n: 1, by: 3}};\n];";
+        assert_eq!(
+            fix(source),
+            "var rate := 2;\noperator scaled{n: integer, rate: integer}: integer [ n * rate ];\noperator scaled{n: integer, by: integer}: integer [ n * by ];\noperator main{} [\n    call debug_value{v: scaled{n: 1, rate: rate}};\n    call debug_value{v: scaled{n: 1, by: 3}};\n];"
+        );
     }
 
     #[test]
@@ -582,6 +715,10 @@ mod tests {
         assert!(variables[0].notes[0].starts_with("variables have a namespace of their own"));
         let operators = errors("operator a{} [];\noperator a{} [];\noperator main{} [];");
         assert!(operators[0].notes[0].starts_with("operators have a namespace of their own"));
+        assert_eq!(
+            operators[0].message,
+            "`a` is defined more than once with no parameters"
+        );
     }
 
     /// Read-only operators for the tests below.
@@ -1966,9 +2103,12 @@ mod tests {
             "var any := 1;\nvar types := any;\noperator main{} [ call debug_value{v: types}; ];",
         )
         .unwrap();
-        let errors = errors("operator debug_value{} [];\noperator main{} [];");
+        // A built-in's name and parameters' names are taken, though not
+        // its name with others.
+        let errors = errors("operator debug_value{v: integer} [];\noperator main{} [];");
         assert_eq!(errors[0].code, Code::DuplicateName);
         assert!(errors[0].notes[0].contains("declared in the prelude"));
+        analyze_str("operator debug_value{} [];\noperator main{} [];").unwrap();
     }
 
     #[test]
@@ -5659,8 +5799,11 @@ mod tests {
         assert_eq!(errors.len(), 1, "{errors:#?}");
         assert_eq!(errors[0].code, Code::TypeMismatch);
         assert!(errors[0].secondary.is_empty());
-        // Their names are taken, as the built-ins' are.
-        let taken = self::errors("operator some{} [];\noperator main{} [];");
+        // Their names with their parameters' names are taken, as the
+        // built-ins' are.
+        let taken = self::errors(
+            "operator some{r: any relation, of: boolean per r}: boolean [ false ];\noperator main{} [];",
+        );
         assert_eq!(taken[0].code, Code::DuplicateName);
         assert!(taken[0].notes[0].contains("declared in the prelude"));
     }

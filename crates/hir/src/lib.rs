@@ -423,11 +423,6 @@ impl Builtin {
         }
     }
 
-    #[must_use]
-    pub fn from_name(name: &str) -> Option<Builtin> {
-        Builtin::ALL.into_iter().find(|b| b.name() == name)
-    }
-
     /// The type parameters the compiler's implementation takes: for `min`
     /// and `max`, `T`, of the kind `ordered`, and for `sum` and `product`,
     /// of `numeric`, and the tuples of `r`, whose `per` parameter `of` is.

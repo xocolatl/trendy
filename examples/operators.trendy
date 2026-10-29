@@ -11,7 +11,9 @@
    declared once, with a name, which stands for it after `relation` and
    `tuple`. A read-only operator is a function of its arguments, so it
    reads none of the program's variables: those it needs, such as `vat`
-   and `dishes`, are passed to it. */
+   and `dishes`, are passed to it. Operators of one name are told apart by
+   their parameters' names, which each call names its arguments with, as
+   `half` is. */
 heading menu_item := { dish: text, country: text, price: integer };
 
 var vat := 16;
@@ -38,6 +40,12 @@ operator under{limit: integer, dishes: relation menu_item, vat: integer}: relati
 
 operator half{n: integer}: integer [
     n div 2
+];
+
+/* Another `half`, of an approximate number, `x`, which a call of `half`
+   chooses by naming its argument `x`. */
+operator half{x: approximate}: approximate [
+    x / 2e0
 ];
 
 /* An update operator, invoked by `call`. `value` can be of any type. */
@@ -268,6 +276,10 @@ operator main{} [
         ],
     };
     call show{label: "pozole", value: band{price: taxed{price: 750, vat: vat}}};
+    call show{
+        label: "half the VAT",
+        value: tuple { n: half{n: vat}, x: half{x: to_approximate{from: vat}} },
+    };
     /* The variables passed as `var` are what change: a local one, and
        one of the program's, whose key is checked once the call ends. */
     var specials := dishes where country = "Japan";

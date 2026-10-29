@@ -9,9 +9,9 @@ use trendy_syntax::SyntaxToken;
 use trendy_syntax::ast::{self, AstNode, VarDecl};
 
 use crate::assign::{Assignee, Assigning, Declared};
-use crate::check::{Checker, Lookup, Names, Written};
+use crate::check::{Checker, Lookup, Names, Written, argument_names};
 use crate::locals::{Declaration, Local, Locals};
-use crate::operators::{Operators, Signature};
+use crate::operators::{Chosen, Operators, Signature};
 use crate::types::{Expected, Origin};
 use crate::{Namespaces, assign, errors, locals, ops};
 
@@ -416,34 +416,52 @@ impl Statements<'_, '_> {
         let ident = stmt.callee()?.ident()?;
         let name = ident.text();
         let span = trendy_syntax::span(ident.text_range());
-        let Some(signature) = cx.operators.named(name) else {
-            let what = if cx.operators.get(within).is_parameter(name) {
-                Some("a parameter")
-            } else if self.locals.find(name).is_some() {
-                Some("a local variable")
-            } else {
-                cx.namespaces.variable(name).map(|_| "a variable")
-            };
-            if let Some(what) = what {
-                errors.push(errors::not_an_operator(name, span, what));
-            } else {
-                let operators = cx.operators.names();
-                let args = stmt.arguments();
-                errors.push(errors::unknown_operator(
-                    name,
-                    span,
-                    &operators,
-                    args.as_ref().map(Written::Arguments),
-                    false,
-                ));
+        let args = stmt.arguments();
+        let names = args
+            .as_ref()
+            .map(|args| argument_names(Written::Arguments(args)))
+            .unwrap_or_default();
+        let signature = match cx.operators.chosen(name, &names) {
+            Some(Chosen::One(signature)) => signature,
+            Some(Chosen::Tied(tied)) => {
+                // Without arguments, a syntax error, which is reported.
+                if let Some(args) = &args {
+                    errors.push(errors::unchosen_operator(
+                        name,
+                        &tied,
+                        Written::Arguments(args),
+                    ));
+                }
+                return None;
             }
-            return None;
+            None => {
+                let what = if cx.operators.get(within).is_parameter(name) {
+                    Some("a parameter")
+                } else if self.locals.find(name).is_some() {
+                    Some("a local variable")
+                } else {
+                    cx.namespaces.variable(name).map(|_| "a variable")
+                };
+                if let Some(what) = what {
+                    errors.push(errors::not_an_operator(name, span, what));
+                } else {
+                    let operators = cx.operators.names();
+                    errors.push(errors::unknown_operator(
+                        name,
+                        span,
+                        &operators,
+                        args.as_ref().map(Written::Arguments),
+                        false,
+                    ));
+                }
+                return None;
+            }
         };
         if signature.read_only {
             errors.push(errors::call_of_read_only(name, span, signature.defined()));
             return None;
         }
-        let args = stmt.arguments()?;
+        let args = args?;
         if !signature.valid {
             return None;
         }

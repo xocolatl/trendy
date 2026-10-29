@@ -71,8 +71,10 @@ fn function(
     } else {
         op.instantiated(types)
     };
-    // Instances of one operator are told apart by their parameters' types.
-    let name = if types.is_empty() {
+    // Instances of one operator are told apart by their parameters' types,
+    // and operators of one name by their parameters' names.
+    let overloaded = program.operators.iter().filter(|o| o.name == name).count() > 1;
+    let name = if types.is_empty() && !overloaded {
         name
     } else {
         format!("{name}{}", params_text(&params))

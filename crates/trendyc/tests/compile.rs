@@ -296,6 +296,9 @@ fn operators() {
             "563",
             r#""pozole""#,
             r#""under 1000 by 63""#,
+            // Each `half`, of `vat` at 25, as the arguments' names choose.
+            r#""half the VAT""#,
+            "tuple { n: 12, x: 1.25e1 }",
         ]
     );
 }

@@ -44,33 +44,52 @@ fn declared_text(types: &[hir::TypeParameter]) -> String {
     }
 }
 
+/// The built-in named `name` whose parameters are named `params`, as a
+/// call names their arguments, or else the first named `name`, whose
+/// parameters the declaration's then differ from.
+fn implemented(name: &str, params: &BTreeSet<String>) -> Option<hir::Builtin> {
+    let named = || hir::Builtin::ALL.into_iter().filter(|b| b.name() == name);
+    named()
+        .find(|b| operators::written(&b.params()).keys().eq(params.iter()))
+        .or_else(|| named().next())
+}
+
 /// The built-in operator `decl` declares, with the parameters the
-/// compiler implements, or `None` after reporting why it isn't one. Its
-/// name is added to those `declared`, unless it already is.
+/// compiler implements, or `None` after reporting why it isn't one. It is
+/// added to those `declared`, unless it already is.
 fn builtin_operator(
     decl: &BuiltinOperator,
     namespaces: &Namespaces,
-    declared: &mut Vec<String>,
+    declared: &mut Vec<hir::Builtin>,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Operator> {
     // A missing name is a syntax error, already reported.
     let ident = decl.name()?.ident()?;
     let name = ident.text();
-    let Some(builtin) = hir::Builtin::from_name(name) else {
+    let written: BTreeSet<String> = decl
+        .params()
+        .map(|heading| {
+            heading
+                .attributes()
+                .filter_map(|a| Some(a.name()?.ident()?.text().to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let Some(builtin) = implemented(name, &written) else {
         errors.push(internal(
             format!("`{name}` is not a built-in the compiler implements"),
             &ident,
         ));
         return None;
     };
-    if declared.iter().any(|d| d == name) {
+    if declared.contains(&builtin) {
         errors.push(internal(
             format!("`{name}` is declared more than once"),
             &ident,
         ));
         return None;
     }
-    declared.push(name.to_string());
+    declared.push(builtin);
     let (mut types, declared_valid) = decl.type_parameters().map_or_else(
         || (Vec::new(), true),
         |d| operators::declared_types(&d, namespaces, errors),
@@ -299,7 +318,7 @@ impl Prelude {
         let mut operators: Vec<hir::Operator> = Vec::new();
         // The built-ins declared, rightly or not, so that a wrong
         // declaration isn't missing too.
-        let mut declared: Vec<String> = Vec::new();
+        let mut declared: Vec<hir::Builtin> = Vec::new();
         for item in file.items() {
             match item {
                 Item::Builtin(decl) => {
@@ -326,9 +345,11 @@ impl Prelude {
         let end = Span::empty(file.span().end);
         let missing_operators = hir::Builtin::ALL
             .into_iter()
-            .map(hir::Builtin::name)
-            .filter(|b| !declared.iter().any(|d| d == b))
-            .map(|b| format!("the prelude doesn't declare `{b}`"));
+            .filter(|b| !declared.contains(b))
+            .map(|b| {
+                let params = operators::params_text(&operators::written(&b.params()));
+                format!("the prelude doesn't declare `{}{params}`", b.name())
+            });
         let missing_types = builtin_types()
             .filter(|t| !types.iter().any(|d| d == t))
             .map(|t| format!("the prelude doesn't declare the type `{t}`"));

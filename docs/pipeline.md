@@ -595,6 +595,13 @@ before `{}` could be either, a projection on no attributes or a call
 without arguments: it is the operator if there is one, so it is a call,
 and a value of the same name is projected as `(x){}`. An update operator
 has no value, so calling one in an expression is an error (A0016).
+Operators of one name are told apart by their parameters' names: the
+namespace keeps each name's, with their parameters' names, and
+`Operators::chosen` finds the one a call's arguments' names choose, or
+the one they name most nearly, which its errors are checked against
+(A0056 when two are equally near). Lowering names a function after its
+operator's parameters too when another has its name, as it does an
+instance of a generic operator, so that their symbols differ.
 
 Sema collects every name before checking anything, so errors can refer to
 definitions anywhere in the file. Then it resolves the headings'

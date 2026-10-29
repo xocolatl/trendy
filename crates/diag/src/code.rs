@@ -136,6 +136,7 @@ codes! {
     Aliased => "A0053",
     UnassignedOut => "A0054",
     UnreadableAttribute => "A0055",
+    UnchosenOperator => "A0056",
     Overflow => "R0001",
     DivisionByZero => "R0002",
     OutOfMemory => "R0003",

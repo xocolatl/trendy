@@ -15,7 +15,7 @@ use trendy_hir as hir;
 use trendy_syntax::SyntaxToken;
 use trendy_syntax::ast::{self, AstNode, AttributeValue, Expr, Said};
 
-use crate::operators::{Operators, Param, Signature};
+use crate::operators::{Chosen, Operators, Param, Signature};
 use crate::ops::{self, Operator, Resolved};
 use crate::types::{self, Expected};
 use crate::{Namespaces, errors};
@@ -522,7 +522,13 @@ impl<'a> Checker<'a> {
         {
             return None;
         }
-        let signature = self.names.operators().named(name)?;
+        // The operator of the name that takes one argument, `x`'s, if one
+        // does.
+        let operators = self.names.operators();
+        let signature = operators
+            .overloads(name)
+            .find(|s| s.written.len() == 1)
+            .or_else(|| operators.overloads(name).next())?;
         // `x.f{}`: the empty braces that follow are the call's arguments.
         let braces = extract
             .syntax()
@@ -542,7 +548,7 @@ impl<'a> Checker<'a> {
             operand,
             whole,
             only.map(String::as_str),
-            &signature.text(),
+            &operators.described(signature),
         ))
     }
 
@@ -593,7 +599,7 @@ impl<'a> Checker<'a> {
         let ident = name_ref.ident()?;
         let list = project.names()?;
         let name = ident.text();
-        let operator = self.names.operators().named(name).is_some();
+        let operator = self.names.operators().has(name);
         let call = if operator {
             list.names().next().is_none() || !self.names.has_value(name)
         } else {
@@ -627,7 +633,7 @@ impl<'a> Checker<'a> {
         expected: Option<&Expected>,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Expr> {
-        let known = self.names.operators().named(ident.text()).is_some();
+        let known = self.names.operators().has(ident.text());
         if known && list.names().next().is_some() {
             self.positional_names(ident, list, errors);
             return None;
@@ -644,20 +650,23 @@ impl<'a> Checker<'a> {
         list: &ast::NameList,
         errors: &mut Vec<Diagnostic>,
     ) {
-        let signature = self
-            .names
-            .operators()
-            .named(ident.text())
-            .expect("a projected call is of an operator");
+        let operators = self.names.operators();
+        // The one a call without named arguments chooses, if one is
+        // nearest.
+        let (signature, chosen) = match operators.chosen(ident.text(), &BTreeSet::new()) {
+            Some(Chosen::One(signature)) => (signature, true),
+            Some(Chosen::Tied(tied)) => (tied[0], false),
+            None => unreachable!("a projected call is of an operator"),
+        };
         let names: Vec<ast::Name> = list.names().collect();
-        let only_param = (signature.written.len() == 1 && names.len() == 1)
+        let only_param = (chosen && signature.written.len() == 1 && names.len() == 1)
             .then(|| signature.written.keys().next())
             .flatten();
         for name in &names {
             errors.push(errors::positional_argument(
                 name.span(),
                 only_param.map(String::as_str),
-                &signature.text(),
+                &operators.described(signature),
             ));
         }
     }
@@ -707,21 +716,20 @@ impl<'a> Checker<'a> {
     ) -> Option<hir::Expr> {
         let name = ident.text();
         let span = trendy_syntax::span(ident.text_range());
-        let Some(signature) = self.names.operators().named(name).cloned() else {
-            if self.names.has_value(name) {
-                errors.push(errors::not_an_operator(name, span, "a value"));
-            } else {
-                let of_array = self.of_array(written);
-                let operators = self.names.operators().names();
-                errors.push(errors::unknown_operator(
-                    name,
-                    span,
-                    &operators,
-                    Some(written),
-                    of_array,
-                ));
+        let signature = match self
+            .names
+            .operators()
+            .chosen(name, &argument_names(written))
+        {
+            Some(Chosen::One(signature)) => signature.clone(),
+            Some(Chosen::Tied(tied)) => {
+                errors.push(errors::unchosen_operator(name, &tied, written));
+                return None;
             }
-            return None;
+            None => {
+                self.unknown_operator(name, span, written, errors);
+                return None;
+            }
         };
         if !signature.read_only {
             let projectable = matches!(written, Written::Nothing(_)) && self.names.has_value(name);
@@ -754,6 +762,31 @@ impl<'a> Checker<'a> {
         self.matched(expected, result, expr, errors)
     }
 
+    /// The error for a call of `name`, at `span`, with `written` arguments,
+    /// which no operator is named: a value's name, or an operator's
+    /// misspelled, or another language's.
+    fn unknown_operator(
+        &mut self,
+        name: &str,
+        span: Span,
+        written: Written,
+        errors: &mut Vec<Diagnostic>,
+    ) {
+        if self.names.has_value(name) {
+            errors.push(errors::not_an_operator(name, span, "a value"));
+        } else {
+            let of_array = self.of_array(written);
+            let operators = self.names.operators().names();
+            errors.push(errors::unknown_operator(
+                name,
+                span,
+                &operators,
+                Some(written),
+                of_array,
+            ));
+        }
+    }
+
     /// A call of the operator `signature`, with `written` arguments for its
     /// parameters: each named, each parameter given one, and each of its
     /// parameter's type, once each type parameter in that type is given
@@ -766,7 +799,7 @@ impl<'a> Checker<'a> {
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Call> {
         let params = &signature.written;
-        let signature_text = signature.text();
+        let signature_text = self.names.operators().described(signature);
         let mut ok = true;
 
         let (named, positional): (Vec<AttributeValue>, Vec<ast::PositionalArg>) = match written {
@@ -850,7 +883,12 @@ impl<'a> Checker<'a> {
         let checked = self.typed_arguments(pending, signature, errors);
         // A lone unnamed argument is reported, with a fix, as that parameter.
         if !missing.is_empty() && positional.is_empty() {
-            errors.push(missing_arguments(&missing, signature, written));
+            errors.push(missing_arguments(
+                &missing,
+                signature,
+                &signature_text,
+                written,
+            ));
             ok = false;
         }
         // Every type parameter has a type once every argument is given.
@@ -2072,8 +2110,15 @@ fn updated(
 }
 
 /// The error for a call, with `written` arguments, of `signature`, which
-/// has the parameters `missing` that aren't given one.
-fn missing_arguments(missing: &[&str], signature: &Signature, written: Written) -> Diagnostic {
+/// has the parameters `missing` that aren't given one, and whose
+/// parameters, with those of the other operators of its name, are
+/// `described`.
+fn missing_arguments(
+    missing: &[&str],
+    signature: &Signature,
+    described: &str,
+    written: Written,
+) -> Diagnostic {
     let span = match written {
         Written::Arguments(args) => args.span(),
         Written::Nothing(list) => list.span(),
@@ -2081,7 +2126,7 @@ fn missing_arguments(missing: &[&str], signature: &Signature, written: Written) 
     let d = errors::missing_attributes(
         errors::Noun::Argument,
         missing,
-        &format!("the parameters are {}", signature.text()),
+        &format!("the parameters are {described}"),
         span,
     );
     // `sum{r: plots{harvest}}`: the attribute was meant as the argument of
@@ -2455,5 +2500,17 @@ impl Names for TupleNames<'_> {
 
     fn bindings(&self) -> ops::Bindings<'_> {
         self.outer.bindings()
+    }
+}
+
+/// The names of the arguments `written`, which choose which operator of
+/// its name a call calls.
+pub(crate) fn argument_names(written: Written) -> BTreeSet<String> {
+    match written {
+        Written::Arguments(args) => args
+            .named()
+            .filter_map(|a| Some(a.name()?.ident()?.text().to_string()))
+            .collect(),
+        Written::Nothing(_) => BTreeSet::new(),
     }
 }

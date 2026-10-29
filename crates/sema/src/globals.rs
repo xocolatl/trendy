@@ -505,6 +505,7 @@ impl Names for ReadOnlyNames<'_, '_, '_> {
                     name,
                     span,
                     self.signature(),
+                    self.globals.operators,
                     ty,
                 ));
             }

@@ -122,7 +122,18 @@ impl Signature {
 /// Every operator, by id: the prelude's, then the program's.
 pub(crate) struct Operators {
     list: Vec<Signature>,
-    by_name: HashMap<String, hir::OperatorId>,
+    /// Each name's operators, which their parameters' names tell apart.
+    by_name: HashMap<String, Vec<hir::OperatorId>>,
+}
+
+/// Which operator of a name a call's arguments' names choose.
+pub(crate) enum Chosen<'a> {
+    /// The one whose parameters they name, or, if none, the one whose
+    /// parameters they name most nearly.
+    One(&'a Signature),
+    /// Those whose parameters they name equally nearly, of which none is
+    /// nearer.
+    Tied(Vec<&'a Signature>),
 }
 
 impl Operators {
@@ -130,8 +141,81 @@ impl Operators {
         &self.list[id.0]
     }
 
-    pub(crate) fn named(&self, name: &str) -> Option<&Signature> {
-        self.by_name.get(name).map(|&id| self.get(id))
+    /// The operators named `name`, in the order they are defined.
+    pub(crate) fn overloads(&self, name: &str) -> impl Iterator<Item = &Signature> {
+        self.by_name
+            .get(name)
+            .into_iter()
+            .flatten()
+            .map(|&id| self.get(id))
+    }
+
+    /// Whether an operator is named `name`.
+    pub(crate) fn has(&self, name: &str) -> bool {
+        self.by_name.contains_key(name)
+    }
+
+    /// The operator named `name` that a call whose arguments are named
+    /// `args` calls, if one is named so: the only one, or the one whose
+    /// parameters `args` names. Otherwise it is the one they name most
+    /// nearly, each argument it has no parameter for, and each parameter
+    /// they don't name, counting two, but an argument whose name is a
+    /// misspelling of a parameter's they don't name one, for both.
+    pub(crate) fn chosen(&self, name: &str, args: &BTreeSet<String>) -> Option<Chosen<'_>> {
+        let overloads: Vec<&Signature> = self.overloads(name).collect();
+        if let [only] = overloads.as_slice() {
+            return Some(Chosen::One(only));
+        }
+        let distance = |signature: &Signature| {
+            let mut missing: Vec<&str> = signature
+                .written
+                .keys()
+                .map(String::as_str)
+                .filter(|p| !args.contains(*p))
+                .collect();
+            let mut distance = 0;
+            for arg in args.iter().filter(|a| !signature.written.contains_key(*a)) {
+                match trendy_diag::renamed(arg, missing.iter().copied()) {
+                    Some(meant) => {
+                        missing.retain(|m| *m != meant);
+                        distance += 1;
+                    }
+                    None => distance += 2,
+                }
+            }
+            distance + 2 * missing.len()
+        };
+        let nearest = overloads.iter().map(|s| distance(s)).min()?;
+        let mut tied: Vec<&Signature> = overloads
+            .into_iter()
+            .filter(|s| distance(s) == nearest)
+            .collect();
+        Some(if tied.len() == 1 {
+            Chosen::One(tied.remove(0))
+        } else {
+            Chosen::Tied(tied)
+        })
+    }
+
+    /// `signature`'s parameters, as a call's error says what they are:
+    /// `` `greet{name: text}` ``, and those of the other operators of its
+    /// name, which a call's arguments' names choose among.
+    pub(crate) fn described(&self, signature: &Signature) -> String {
+        let others: Vec<String> = self
+            .overloads(&signature.name)
+            .filter(|s| s.id != signature.id)
+            .map(Signature::text)
+            .collect();
+        if others.is_empty() {
+            signature.text()
+        } else {
+            format!(
+                "{}, or those of another `{}`, {}",
+                signature.text(),
+                signature.name,
+                trendy_diag::disjoin(&others)
+            )
+        }
     }
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = &Signature> {
@@ -141,19 +225,19 @@ impl Operators {
     /// Every operator's name, which a misspelled one, or another
     /// language's, may be, with the names of its parameters that take
     /// values, as a call gives their arguments: those a lone argument can
-    /// be for, not a `var` or `out` one's variable.
+    /// be for, not a `var` or `out` one's variable. A name with several
+    /// operators is there for each, in the order they are defined.
     pub(crate) fn names(&self) -> Vec<(&str, Vec<&str>)> {
-        self.by_name
+        self.list
             .iter()
-            .map(|(name, &id)| {
-                let params = self
-                    .get(id)
+            .map(|signature| {
+                let params = signature
                     .written
                     .iter()
                     .filter(|(_, param)| !matches!(param, Param::Variable(..)))
                     .map(|(name, _)| name.as_str())
                     .collect();
-                (name.as_str(), params)
+                (signature.name.as_str(), params)
             })
             .collect()
     }
@@ -285,7 +369,13 @@ pub(crate) fn signatures(
             Item::Variable(_) | Item::Heading(_) => {}
         }
     }
-    let by_name = list.iter().map(|s| (s.name.clone(), s.id)).collect();
+    let mut by_name: HashMap<String, Vec<hir::OperatorId>> = HashMap::new();
+    for signature in &list {
+        by_name
+            .entry(signature.name.clone())
+            .or_default()
+            .push(signature.id);
+    }
     Operators { list, by_name }
 }
 

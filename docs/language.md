@@ -101,6 +101,60 @@ operator main{} [
 A tuple or relation value's attributes can be any expression, names
 included, as in `tuple { n: n }`; see [Tuples](#tuples).
 
+### Operators of one name
+
+Operators of one name are told apart by their parameters' names, which
+every call names its arguments with: a call calls the operator whose
+parameters its arguments name. So a name can have an operator for each
+set of parameters' names, as *The Third Manifesto* permits an operator
+name for operators with different parameters (chapter 6, RM Prescription
+3), and the prelude's names can have the program's operators too.
+
+```trendy
+operator area{width: integer, height: integer}: integer [
+    width * height
+];
+
+operator area{side: integer}: integer [
+    side * side
+];
+
+operator count{a: any array}: integer [
+    length{a: a}
+];
+
+operator main{} [
+    call debug_value{v: area{width: 3, height: 4}};
+    call debug_value{v: area{side: 3}};
+    call debug_value{v: count{a: array [1, 2]}};
+    call debug_value{v: count{r: relation { { x: 1 } }}};
+];
+```
+
+- **Names, not types, tell them apart.** Two operators of one name with
+  the same parameters' names, in any order, are one defined twice
+  (A0001), whatever their types, so the arguments' names alone say which
+  a call calls, before any argument is checked. An operation that works
+  on several types, each its own way, is a generic operator of a kind
+  instead (see [Kinds](#kinds)).
+- **A call that names no operator's parameters** is checked against the
+  one whose parameters it names most nearly, each argument it has no
+  parameter for and each parameter it doesn't name counting two, and a
+  misspelling of one it doesn't name one for both: its missing and
+  unknown arguments are reported (A0009, A0010), and its error names
+  the other operators. When two are equally near, nothing says which
+  was meant, and the call is reported (A0056).
+- **`main` is the one without parameters.**
+
+```trendy,error
+operator greeting{name: text, title: text}: text [ title || " " || name ];
+operator greeting{name: text, nickname: text}: text [ nickname ];
+
+operator main{} [
+    call debug_value{v: greeting{name: "Ada"}};
+];
+```
+
 ### `var` and `out` parameters
 
 ```trendy
