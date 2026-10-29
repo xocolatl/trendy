@@ -1,6 +1,7 @@
 /* A shopping list: the ingredients for the week's planned meals, each
    recipe scaled to the number of people it's cooked for, and summed across
-   recipes.
+   recipes. The recipes, their ingredients and the week's plan are CSV
+   files beside it, which it reads when it runs.
 
    The first project written in trendy, to find out what the language needs
    by using it. What it can't say yet is written below as it should read,
@@ -8,78 +9,98 @@
 
 /* Each recipe, its name in its own script, and how many people it serves
    as written. */
-var recipes := relation {
-    { recipe: "shakshuka", native_name: "شكشوكة", serves: 4 },
-    { recipe: "dal tadka", native_name: "दाल तड़का", serves: 4 },
-    { recipe: "mapo doufu", native_name: "麻婆豆腐", serves: 3 },
-    { recipe: "borshch", native_name: "борщ", serves: 6 },
-}
-key { recipe }
-key { native_name };
+heading recipe := { recipe: text, native_name: text, serves: integer };
 
-/* What each recipe needs, for the people it serves. An ingredient always
-   comes in one unit, so quantities of it can be added up. That is a
-   constraint too, but not a key, since it holds across recipes. */
-var ingredients := relation {
-    { recipe: "shakshuka", ingredient: "egg", quantity: 6e0, unit: "piece" },
-    { recipe: "shakshuka", ingredient: "tomato", quantity: 800e0, unit: "g" },
-    { recipe: "shakshuka", ingredient: "onion", quantity: 1e0, unit: "piece" },
-    { recipe: "shakshuka", ingredient: "garlic", quantity: 3e0, unit: "clove" },
-    { recipe: "shakshuka", ingredient: "cumin", quantity: 5e0, unit: "g" },
-    { recipe: "shakshuka", ingredient: "olive oil", quantity: 30e0, unit: "ml" },
-    { recipe: "dal tadka", ingredient: "red lentils", quantity: 250e0, unit: "g" },
-    { recipe: "dal tadka", ingredient: "tomato", quantity: 200e0, unit: "g" },
-    { recipe: "dal tadka", ingredient: "onion", quantity: 1e0, unit: "piece" },
-    { recipe: "dal tadka", ingredient: "garlic", quantity: 4e0, unit: "clove" },
-    { recipe: "dal tadka", ingredient: "ginger", quantity: 10e0, unit: "g" },
-    { recipe: "dal tadka", ingredient: "cumin", quantity: 5e0, unit: "g" },
-    { recipe: "dal tadka", ingredient: "ghee", quantity: 30e0, unit: "g" },
-    { recipe: "mapo doufu", ingredient: "tofu", quantity: 400e0, unit: "g" },
-    { recipe: "mapo doufu", ingredient: "minced pork", quantity: 150e0, unit: "g" },
-    { recipe: "mapo doufu", ingredient: "garlic", quantity: 3e0, unit: "clove" },
-    { recipe: "mapo doufu", ingredient: "ginger", quantity: 15e0, unit: "g" },
-    { recipe: "mapo doufu", ingredient: "doubanjiang", quantity: 30e0, unit: "g" },
-    { recipe: "mapo doufu", ingredient: "Sichuan pepper", quantity: 3e0, unit: "g" },
-    { recipe: "borshch", ingredient: "beetroot", quantity: 500e0, unit: "g" },
-    { recipe: "borshch", ingredient: "cabbage", quantity: 300e0, unit: "g" },
-    { recipe: "borshch", ingredient: "potato", quantity: 300e0, unit: "g" },
-    { recipe: "borshch", ingredient: "carrot", quantity: 1e0, unit: "piece" },
-    { recipe: "borshch", ingredient: "onion", quantity: 1e0, unit: "piece" },
-    { recipe: "borshch", ingredient: "garlic", quantity: 2e0, unit: "clove" },
-}
-key { recipe, ingredient };
+/* An ingredient a recipe needs, how much of it, and in which unit, for
+   the people the recipe serves. */
+heading need := { recipe: text, ingredient: text, quantity: approximate, unit: text };
 
-/* This week's meals, and how many people each is cooked for. No borshch
-   this week, so none of its ingredients belong on the list. */
-var plan := relation {
-    { recipe: "shakshuka", people: 4 },
-    { recipe: "dal tadka", people: 4 },
-    { recipe: "mapo doufu", people: 6 },
-}
-key { recipe };
+/* A meal of the week's, and how many people it's cooked for. */
+heading meal := { recipe: text, people: integer };
 
-/* Each planned meal with its recipe and ingredients. Joining with the
-   plan also leaves out the recipes not planned. */
-var planned := join{plan, recipes, ingredients};
+/* The recipes, which `recipes.csv` lists. */
+var recipes: relation recipe key { recipe } key { native_name };
 
-/* Each planned meal's ingredients, scaled from the people its recipe
-   serves to the people it's cooked for. Values never convert implicitly,
-   so the counts of people, integers, are converted to approximate
-   numbers. */
-var scaled := planned extend {
-    amount := quantity * to_approximate{from: people} / to_approximate{from: serves},
+/* What each recipe needs, which `ingredients.csv` lists. An ingredient
+   always comes in one unit, so quantities of it can be added up. That is
+   a constraint too, but not a key, since it holds across recipes. */
+var ingredients: relation need key { recipe, ingredient };
+
+/* This week's meals, which `plan.csv` lists. No borshch this week, so
+   none of its ingredients belong on the list. */
+var plan: relation meal key { recipe };
+
+/* Read the recipes, their ingredients and the plan from their CSV files,
+   from the directory the program runs in, the project's. Each file has a
+   header, and the call names the columns: a file's columns have an order
+   and no names. Each file's records are an array, and loading a variable
+   from it makes a relation, in which equal lines are one, and which the
+   variable's keys hold of: two lines that give one recipe different
+   values stop the program. */
+operator load_week{} [
+    var recipe_rows: array tuple recipe;
+    call load_csv{
+        path: "recipes.csv",
+        header: true,
+        columns: tuple { recipe: 1, native_name: 2, serves: 3 },
+        out rows: recipe_rows,
+    };
+    load recipes from recipe_rows;
+    var need_rows: array tuple need;
+    call load_csv{
+        path: "ingredients.csv",
+        header: true,
+        columns: tuple { recipe: 1, ingredient: 2, quantity: 3, unit: 4 },
+        out rows: need_rows,
+    };
+    load ingredients from need_rows;
+    var meal_rows: array tuple meal;
+    call load_csv{
+        path: "plan.csv",
+        header: true,
+        columns: tuple { recipe: 1, people: 2 },
+        out rows: meal_rows,
+    };
+    load plan from meal_rows;
+];
+
+/* An ingredient to buy, in its unit, how much of it, and the recipes that
+   need it. */
+heading item := {
+    ingredient: text,
+    unit: text,
+    total: approximate,
+    recipes: relation { recipe: text },
 };
 
-/* What to buy: each ingredient and its unit, with the sum of its amounts
-   in its image relation in `scaled`, the tuples for that ingredient, and
-   the recipes that need it. The sum is of those tuples, not of their
-   distinct amounts: cumin is 5 g in both shakshuka and dal tadka, and the
-   list needs 10 g. The image relation keeps `recipe`, so both are
-   there. */
-var list := scaled{ingredient, unit} extend {
-    total := sum{r: !!scaled, of: amount},
-    recipes := (!!scaled){recipe},
-};
+/* What to buy for the meals of `plan`, cooked from `recipes` with
+   `ingredients`: a function of them, so a read-only operator. */
+operator shopping_list{
+    plan: relation meal,
+    recipes: relation recipe,
+    ingredients: relation need,
+}: relation item [
+    /* Each planned meal with its recipe and ingredients. Joining with the
+       plan also leaves out the recipes not planned. */
+    var planned := join{plan, recipes, ingredients};
+    /* Each planned meal's ingredients, scaled from the people its recipe
+       serves to the people it's cooked for. Values never convert
+       implicitly, so the counts of people, integers, are converted to
+       approximate numbers. */
+    var scaled := planned extend {
+        amount := quantity * to_approximate{from: people} / to_approximate{from: serves},
+    };
+    /* Each ingredient and its unit, with the sum of its amounts in its
+       image relation in `scaled`, the tuples for that ingredient, and the
+       recipes that need it. The sum is of those tuples, not of their
+       distinct amounts: cumin is 5 g in both shakshuka and dal tadka, and
+       the list needs 10 g. The image relation keeps `recipe`, so both are
+       there. */
+    scaled{ingredient, unit} extend {
+        total := sum{r: !!scaled, of: amount},
+        recipes := (!!scaled){recipe},
+    }
+];
 
 /* What it can't say yet, as it should read once the language has what it
    needs:
@@ -144,6 +165,8 @@ var list := scaled{ingredient, unit} extend {
    sum is 0.
 
      operator main{} [
+         call load_week{};
+         var list := shopping_list{plan: plan, recipes: recipes, ingredients: ingredients};
          transaction [
              var to_buy := list
                  extend { buy := total - sum{r: !!(kitchen.pantry), of: quantity} }
@@ -155,6 +178,7 @@ var list := scaled{ingredient, unit} extend {
    Later: output for people rather than `debug_table`. */
 
 operator main{} [
+    call load_week{};
     call debug_table{r: plan};
-    call debug_table{r: list};
+    call debug_table{r: shopping_list{plan: plan, recipes: recipes, ingredients: ingredients}};
 ];

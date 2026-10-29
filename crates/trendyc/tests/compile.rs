@@ -15,40 +15,43 @@ fn compile_and_run(name: &str) -> i32 {
     run_example(name).0
 }
 
-/// Compile `examples/<name>.trendy`, run the executable, and return its exit
-/// code and what it wrote to stderr.
-fn run_example(name: &str) -> (i32, String) {
-    run_file(name, &Path::new("examples").join(format!("{name}.trendy")))
-}
-
-/// Compile `projects/<name>/<name>.trendy`, run the executable, and return
+/// Compile `examples/<name>.trendy`, run the executable in the workspace
+/// root, from which the examples' paths to files are relative, and return
 /// its exit code and what it wrote to stderr.
-fn run_project(name: &str) -> (i32, String) {
+fn run_example(name: &str) -> (i32, String) {
     run_file(
         name,
-        &Path::new("projects")
-            .join(name)
-            .join(format!("{name}.trendy")),
+        &Path::new("examples").join(format!("{name}.trendy")),
+        Path::new(""),
     )
 }
 
-/// Compile `path`, relative to the workspace root, run the executable, and
+/// Compile `projects/<name>/<name>.trendy`, run the executable in the
+/// project's directory, from which its paths to files are relative, and
 /// return its exit code and what it wrote to stderr.
-fn run_file(name: &str, path: &Path) -> (i32, String) {
-    let input = workspace_root().join(path);
+fn run_project(name: &str) -> (i32, String) {
+    let dir = Path::new("projects").join(name);
+    run_file(name, &dir.join(format!("{name}.trendy")), &dir)
+}
+
+/// Compile `path`, relative to the workspace root, run the executable in
+/// `dir`, relative to it too, and return its exit code and what it wrote
+/// to stderr.
+fn run_file(name: &str, path: &Path, dir: &Path) -> (i32, String) {
+    let root = workspace_root();
     // Each run gets its own executable, since tests run in parallel.
     let run = RUNS.fetch_add(1, Ordering::Relaxed);
     let output = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}-{run}"));
-    build_and_run(&input, &output)
+    build_and_run(&root.join(path), &output, &root.join(dir))
 }
 
-/// Compile `input` into the executable `output`, run it in the workspace
-/// root, from which the examples' paths to files are relative, and return
-/// its exit code and what it wrote to stderr. The C library scribbles over
-/// memory as it is freed (`MallocScribble` on macOS, `MALLOC_PERTURB_`
-/// with glibc), so that a program that reads a value whose buffer was
-/// freed writes garbage, rather than, by luck, what it should.
-fn build_and_run(input: &Path, output: &Path) -> (i32, String) {
+/// Compile `input` into the executable `output`, run it in `dir`, and
+/// return its exit code and what it wrote to stderr. The C library
+/// scribbles over memory as it is freed (`MallocScribble` on macOS,
+/// `MALLOC_PERTURB_` with glibc), so that a program that reads a value
+/// whose buffer was freed writes garbage, rather than, by luck, what it
+/// should.
+fn build_and_run(input: &Path, output: &Path, dir: &Path) -> (i32, String) {
     let compile = Command::new(env!("CARGO_BIN_EXE_trendyc"))
         .arg(input)
         .arg("-o")
@@ -62,7 +65,7 @@ fn build_and_run(input: &Path, output: &Path) -> (i32, String) {
     );
 
     let run = Command::new(output)
-        .current_dir(workspace_root())
+        .current_dir(dir)
         .env("MallocScribble", "1")
         .env("MallocPreScribble", "1")
         .env("MALLOC_PERTURB_", "85")
@@ -1027,12 +1030,13 @@ fn comparisons() {
     );
 }
 
-/// Compile `source`, run it, and return its exit code and stderr.
+/// Compile `source`, run it in the workspace root, and return its exit
+/// code and stderr.
 fn run_source(name: &str, source: &str) -> (i32, String) {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
     let input = dir.join(format!("{name}.trendy"));
     std::fs::write(&input, source).unwrap();
-    build_and_run(&input, &dir.join(name))
+    build_and_run(&input, &dir.join(name), &workspace_root())
 }
 
 /// A program that writes 1, then `call`, computed from `a`, the largest
