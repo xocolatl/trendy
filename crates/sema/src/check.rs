@@ -2074,32 +2074,19 @@ fn updated(
 /// The error for a call, with `written` arguments, of `signature`, which
 /// has the parameters `missing` that aren't given one.
 fn missing_arguments(missing: &[&str], signature: &Signature, written: Written) -> Diagnostic {
-    // A type with a type parameter in it has no default value.
-    let missing: Vec<_> = missing
-        .iter()
-        .map(|&name| {
-            // Nor is there a variable to give a `var` parameter.
-            let ty = match &signature.written[name] {
-                Param::Value(ty) | Param::Per { ty, .. } => Some(ty),
-                Param::Relation(_) | Param::Variable(..) => None,
-            };
-            (name, ty.filter(|ty| ty.parameters().next().is_none()))
-        })
-        .collect();
-    let (span, insertion) = match written {
-        Written::Arguments(args) => (args.span(), args.insertion()),
-        Written::Nothing(list) => (list.span(), list.insertion()),
+    let span = match written {
+        Written::Arguments(args) => args.span(),
+        Written::Nothing(list) => list.span(),
     };
     let d = errors::missing_attributes(
         errors::Noun::Argument,
-        &missing,
+        missing,
         &format!("the parameters are {}", signature.text()),
         span,
-        insertion,
     );
     // `sum{r: plots{harvest}}`: the attribute was meant as the argument of
     // the `per` parameter, for each tuple, not as a projection.
-    let ([(name, _)], Written::Arguments(args)) = (missing.as_slice(), written) else {
+    let ([name], Written::Arguments(args)) = (missing, written) else {
         return d;
     };
     let Param::Per { relation, .. } = &signature.written[*name] else {
@@ -2115,7 +2102,7 @@ fn missing_arguments(missing: &[&str], signature: &Signature, written: Written) 
         .and_then(|a| a.value());
     match projection {
         Some(Expr::Project(projection)) => {
-            errors::projected_relation(d, name, relation, &projection, insertion)
+            errors::projected_relation(d, name, relation, &projection, args.insertion())
         }
         _ => d,
     }

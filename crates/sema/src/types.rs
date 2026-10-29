@@ -637,17 +637,12 @@ pub(crate) fn tuple_selector(
             None => ok = false,
         }
     }
-    if let (Some(here), Some(heading), false) = (here, heading, missing.is_empty()) {
-        let missing: Vec<_> = missing
-            .into_iter()
-            .filter_map(|name| Some((name, Some(heading.get(name)?))))
-            .collect();
+    if let (Some(here), false) = (here, missing.is_empty()) {
         errors.push(errors::missing_attributes(
             errors::Noun::Attribute,
             &missing,
             &format!("the expected type is `{}`", here.ty),
             tuple.span(),
-            tuple.insertion(),
         ));
         ok = false;
     }

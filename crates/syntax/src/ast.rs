@@ -927,7 +927,9 @@ impl Arguments {
         self.0.children().filter_map(PositionalArg::cast)
     }
 
-    /// Where a new argument goes, as for [`TupleLiteral::insertion`].
+    /// Where a new argument goes, as an offset and the text to put around
+    /// `name: value`: after the last argument, keeping any trailing comma
+    /// trailing.
     #[must_use]
     pub fn insertion(&self) -> (usize, &'static str, &'static str) {
         list_insertion(&self.0, self.named().last().map(|a| a.0))
@@ -1241,7 +1243,7 @@ impl NameList {
         self.0.children().filter_map(Name::cast)
     }
 
-    /// Where a new item goes, as for [`TupleLiteral::insertion`].
+    /// Where a new item goes, as for [`Arguments::insertion`].
     #[must_use]
     pub fn insertion(&self) -> (usize, &'static str, &'static str) {
         list_insertion(&self.0, self.names().last().map(|n| n.0))
@@ -1448,7 +1450,7 @@ impl Heading {
         self.0.children().filter_map(AttributeType::cast)
     }
 
-    /// Where a new attribute goes, as for [`TupleLiteral::insertion`].
+    /// Where a new attribute goes, as for [`Arguments::insertion`].
     #[must_use]
     pub fn insertion(&self) -> (usize, &'static str, &'static str) {
         list_insertion(&self.0, self.attributes().last().map(|a| a.0))
@@ -1636,14 +1638,6 @@ impl TupleLiteral {
 
     pub fn attributes(&self) -> impl Iterator<Item = AttributeValue> {
         self.0.children().filter_map(AttributeValue::cast)
-    }
-
-    /// Where a new attribute goes, as an offset and the text to put around
-    /// `name: value`: after the last attribute, keeping any trailing comma
-    /// trailing.
-    #[must_use]
-    pub fn insertion(&self) -> (usize, &'static str, &'static str) {
-        list_insertion(&self.0, self.attributes().last().map(|a| a.0))
     }
 
     /// The span to delete to remove `attribute`, including the comma that

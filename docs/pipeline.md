@@ -1484,7 +1484,9 @@ guesswork.
   of exact edits. Applying them must resolve that diagnostic, and the
   explanations test checks this for every failing example. When the fix needs
   a decision, such as which of two duplicate definitions to rename, use help
-  text instead of guessing.
+  text instead of guessing. A fix never makes up a value: a missing argument
+  or attribute gets help (A0009), not a default, which would compile and
+  compute with a value the program never gave.
 - **One mistake gives one diagnostic.** Consecutive missing tokens merge into
   a single error with a single insertion. Recovery never reports tokens that
   were only skipped because of an earlier error.

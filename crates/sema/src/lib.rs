@@ -1343,23 +1343,11 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].code, Code::MissingAttribute);
         assert_eq!(errors[0].message, "missing attributes `y` and `z`");
+        // No value the compiler could choose is the one the program means.
+        assert!(errors[0].suggestions.is_empty());
         assert_eq!(
-            fix(&source),
-            format!(
-                "var p: tuple {{ x: approximate, y: approximate, z: text }} := tuple {{ x: 1e0, y: 0e0, z: \"\" }};{MAIN}"
-            )
-        );
-        assert_eq!(
-            fix(&format!(
-                "var p: tuple {{ x: integer, y: integer }} := tuple {{ x: 1, }};{MAIN}"
-            )),
-            format!("var p: tuple {{ x: integer, y: integer }} := tuple {{ x: 1, y: 0, }};{MAIN}")
-        );
-        assert_eq!(
-            fix(&format!(
-                "var p: tuple {{ x: integer }} := tuple {{}};{MAIN}"
-            )),
-            format!("var p: tuple {{ x: integer }} := tuple {{ x: 0 }};{MAIN}")
+            errors[0].help,
+            ["add `y` and `z` with the values they should have"]
         );
     }
 
@@ -1580,12 +1568,9 @@ mod tests {
         let source = format!(
             "var r: relation {{ a: integer, b: text }} := relation {{ {{ a: 1 }} }};{MAIN}"
         );
-        assert_eq!(
-            fix(&source),
-            format!(
-                "var r: relation {{ a: integer, b: text }} := relation {{ {{ a: 1, b: \"\" }} }};{MAIN}"
-            )
-        );
+        let errors = errors(&source);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].message, "missing attribute `b`");
     }
 
     #[test]
@@ -1658,19 +1643,6 @@ mod tests {
             "relation { members: relation { name: text } }"
         );
         assert_eq!(relation_value(&vars[0]).tuples.len(), 2);
-    }
-
-    #[test]
-    fn missing_relation_attribute_gets_an_empty_relation() {
-        let source = format!(
-            "var t: tuple {{ a: integer, r: relation {{ x: integer }} }} := tuple {{ a: 1 }};{MAIN}"
-        );
-        assert_eq!(
-            fix(&source),
-            format!(
-                "var t: tuple {{ a: integer, r: relation {{ x: integer }} }} := tuple {{ a: 1, r: relation {{ x: integer }} {{}} }};{MAIN}"
-            )
-        );
     }
 
     fn codes(source: &str) -> Vec<Code> {
@@ -1926,10 +1898,11 @@ mod tests {
         );
         assert_eq!(
             fix(source),
-            "operator greet{name: text} [];\noperator main{} [\n    call greet{name: \"Ada\"};\n    call greet{name: \"\"};\n    call greet{name: \"1\"};\n    call greet{name: \"Ada\"};\n];"
+            "operator greet{name: text} [];\noperator main{} [\n    call greet{name: \"Ada\"};\n    call greet{};\n    call greet{name: \"1\"};\n    call greet{name: \"Ada\"};\n];"
         );
         let errors = errors(source);
         assert_eq!(errors[1].message, "missing argument `name`");
+        assert_eq!(errors[1].help, ["add `name` with the value it should have"]);
         let origin = errors[2].secondary[0].span;
         assert_eq!(
             &source[origin.start..origin.end],
@@ -1946,7 +1919,6 @@ mod tests {
         .unwrap();
         let errors = errors("operator main{} [ call debug_value{}; ];");
         assert_eq!(errors[0].code, Code::MissingAttribute);
-        assert!(errors[0].suggestions.is_empty(), "`any` has no default");
     }
 
     #[test]

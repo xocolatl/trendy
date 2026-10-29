@@ -924,25 +924,24 @@ pub(crate) fn duplicate_attribute(noun: Noun, name: &str, span: Span, first: Spa
 }
 
 /// A tuple value or argument list, at `at`, without the `missing`
-/// attributes or arguments, each with its type (`None` for `any`). `context`
-/// is a note on what was expected; `insertion` is where new items go.
+/// attributes or arguments. `context` is a note on what was expected.
+///
+/// There is no fix: only the program knows what values they should have,
+/// and any the compiler chose would make a program that compiles and
+/// computes with a value nobody gave.
 pub(crate) fn missing_attributes(
     noun: Noun,
-    missing: &[(&str, Option<&hir::Type>)],
+    missing: &[&str],
     context: &str,
     at: Span,
-    insertion: (usize, &str, &str),
 ) -> Diagnostic {
-    let names: Vec<_> = missing
-        .iter()
-        .map(|(name, _)| format!("`{name}`"))
-        .collect();
-    let what = if missing.len() == 1 {
-        noun.one()
+    let names: Vec<_> = missing.iter().map(|name| format!("`{name}`")).collect();
+    let (what, values) = if missing.len() == 1 {
+        (noun.one(), "the value it should have")
     } else {
-        noun.many()
+        (noun.many(), "the values they should have")
     };
-    let d = Diagnostic::error(
+    Diagnostic::error(
         Code::MissingAttribute,
         format!("missing {what} {}", trendy_diag::conjoin(&names)),
         at,
@@ -954,24 +953,11 @@ pub(crate) fn missing_attributes(
             "a tuple value must have every attribute of its type"
         }
         Noun::Argument => "every parameter needs an argument",
-    });
-
-    // Defaults make the fix; an `any` parameter has none.
-    let items = missing
-        .iter()
-        .map(|(name, ty)| Some(format!("{name}: {}", (*ty)?.default_value())))
-        .collect::<Option<Vec<_>>>();
-    let Some(items) = items else {
-        return d.with_help(format!("give {}", trendy_diag::conjoin(&names)));
-    };
-    let (offset, before, after) = insertion;
-    d.with_suggestion(
-        format!("add {} with default values", trendy_diag::conjoin(&names)),
-        vec![Edit {
-            span: Span::empty(offset),
-            replacement: format!("{before}{}{after}", items.join(", ")),
-        }],
-    )
+    })
+    .with_help(format!(
+        "add {} with {values}",
+        trendy_diag::conjoin(&names)
+    ))
 }
 
 /// `d`, the error for a call without an argument for the `per` parameter
