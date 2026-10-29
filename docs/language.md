@@ -140,10 +140,11 @@ operator main{} [
 - **A call that names no operator's parameters** is checked against the
   one whose parameters it names most nearly, each argument it has no
   parameter for and each parameter it doesn't name counting two, and a
-  misspelling of one it doesn't name one for both: its missing and
-  unknown arguments are reported (A0009, A0010), and its error names
-  the other operators. When two are equally near, nothing says which
-  was meant, and the call is reported (A0056).
+  misspelling of one it doesn't name, or an argument without a name,
+  one for both: its missing, unknown and unnamed arguments are reported
+  (A0009, A0010, A0018), and its error names the other operators. When
+  two are equally near, nothing says which was meant, and the call is
+  reported (A0056).
 - **`main` is the one without parameters.**
 
 ```trendy,error

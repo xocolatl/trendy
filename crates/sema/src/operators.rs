@@ -126,6 +126,15 @@ pub(crate) struct Operators {
     by_name: HashMap<String, Vec<hir::OperatorId>>,
 }
 
+/// A call's arguments, as they choose which operator of its name it
+/// calls: the names of those written `name: value`, and how many have no
+/// name.
+#[derive(Default)]
+pub(crate) struct ArgumentNames {
+    pub(crate) named: BTreeSet<String>,
+    pub(crate) unnamed: usize,
+}
+
 /// Which operator of a name a call's arguments' names choose.
 pub(crate) enum Chosen<'a> {
     /// The one whose parameters they name, or, if none, the one whose
@@ -160,8 +169,9 @@ impl Operators {
     /// parameters `args` names. Otherwise it is the one they name most
     /// nearly, each argument it has no parameter for, and each parameter
     /// they don't name, counting two, but an argument whose name is a
-    /// misspelling of a parameter's they don't name one, for both.
-    pub(crate) fn chosen(&self, name: &str, args: &BTreeSet<String>) -> Option<Chosen<'_>> {
+    /// misspelling of a parameter's they don't name, or that has no name,
+    /// one, for both.
+    pub(crate) fn chosen(&self, name: &str, args: &ArgumentNames) -> Option<Chosen<'_>> {
         let overloads: Vec<&Signature> = self.overloads(name).collect();
         if let [only] = overloads.as_slice() {
             return Some(Chosen::One(only));
@@ -171,10 +181,14 @@ impl Operators {
                 .written
                 .keys()
                 .map(String::as_str)
-                .filter(|p| !args.contains(*p))
+                .filter(|p| !args.named.contains(*p))
                 .collect();
             let mut distance = 0;
-            for arg in args.iter().filter(|a| !signature.written.contains_key(*a)) {
+            for arg in args
+                .named
+                .iter()
+                .filter(|a| !signature.written.contains_key(*a))
+            {
                 match trendy_diag::renamed(arg, missing.iter().copied()) {
                     Some(meant) => {
                         missing.retain(|m| *m != meant);
@@ -183,7 +197,9 @@ impl Operators {
                     None => distance += 2,
                 }
             }
-            distance + 2 * missing.len()
+            // Naming one without a name, as one of those, fixes both.
+            let paired = args.unnamed.min(missing.len());
+            distance + paired + 2 * (args.unnamed - paired) + 2 * (missing.len() - paired)
         };
         let nearest = overloads.iter().map(|s| distance(s)).min()?;
         let mut tied: Vec<&Signature> = overloads

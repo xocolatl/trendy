@@ -15,7 +15,7 @@ use trendy_hir as hir;
 use trendy_syntax::SyntaxToken;
 use trendy_syntax::ast::{self, AstNode, AttributeValue, Expr, Said};
 
-use crate::operators::{Chosen, Operators, Param, Signature};
+use crate::operators::{ArgumentNames, Chosen, Operators, Param, Signature};
 use crate::ops::{self, Operator, Resolved};
 use crate::types::{self, Expected};
 use crate::{Namespaces, errors};
@@ -651,13 +651,13 @@ impl<'a> Checker<'a> {
         errors: &mut Vec<Diagnostic>,
     ) {
         let operators = self.names.operators();
-        // The one a call without named arguments chooses, if one is
-        // nearest.
-        let (signature, chosen) = match operators.chosen(ident.text(), &BTreeSet::new()) {
-            Some(Chosen::One(signature)) => (signature, true),
-            Some(Chosen::Tied(tied)) => (tied[0], false),
-            None => unreachable!("a projected call is of an operator"),
-        };
+        // The one these arguments choose, if one is nearest.
+        let (signature, chosen) =
+            match operators.chosen(ident.text(), &argument_names(Written::Nothing(list))) {
+                Some(Chosen::One(signature)) => (signature, true),
+                Some(Chosen::Tied(tied)) => (tied[0], false),
+                None => unreachable!("a projected call is of an operator"),
+            };
         let names: Vec<ast::Name> = list.names().collect();
         let only_param = (chosen && signature.written.len() == 1 && names.len() == 1)
             .then(|| signature.written.keys().next())
@@ -814,19 +814,6 @@ impl<'a> Checker<'a> {
                 Some((a, ident.text().to_string(), span))
             })
             .collect();
-        // With one parameter, a lone unnamed argument can only be that one.
-        let only_param = (params.len() == 1 && named.is_empty() && positional.len() == 1)
-            .then(|| params.keys().next())
-            .flatten();
-        for arg in &positional {
-            ok = false;
-            errors.push(errors::positional_argument(
-                arg.span(),
-                only_param.map(String::as_str),
-                &signature_text,
-            ));
-        }
-
         let mut missing: Vec<&str> = params
             .keys()
             .map(String::as_str)
@@ -881,7 +868,22 @@ impl<'a> Checker<'a> {
             })
             .collect();
         let checked = self.typed_arguments(pending, signature, errors);
-        // A lone unnamed argument is reported, with a fix, as that parameter.
+        // A lone unnamed argument can only be for the one parameter no
+        // other argument names.
+        let only_param = match (positional.as_slice(), missing.as_slice()) {
+            ([_], [param]) => Some(*param),
+            _ => None,
+        };
+        for arg in &positional {
+            ok = false;
+            errors.push(errors::positional_argument(
+                arg.span(),
+                only_param,
+                &signature_text,
+            ));
+        }
+        // Unnamed arguments are for parameters without them, so those
+        // aren't missing.
         if !missing.is_empty() && positional.is_empty() {
             errors.push(missing_arguments(
                 &missing,
@@ -2505,12 +2507,20 @@ impl Names for TupleNames<'_> {
 
 /// The names of the arguments `written`, which choose which operator of
 /// its name a call calls.
-pub(crate) fn argument_names(written: Written) -> BTreeSet<String> {
+pub(crate) fn argument_names(written: Written) -> ArgumentNames {
     match written {
-        Written::Arguments(args) => args
-            .named()
-            .filter_map(|a| Some(a.name()?.ident()?.text().to_string()))
-            .collect(),
-        Written::Nothing(_) => BTreeSet::new(),
+        Written::Arguments(args) => ArgumentNames {
+            named: args
+                .named()
+                .filter_map(|a| Some(a.name()?.ident()?.text().to_string()))
+                .collect(),
+            unnamed: args.positional().count(),
+        },
+        // Names written as a projection's attributes, as in `double{n}`,
+        // are arguments without names.
+        Written::Nothing(list) => ArgumentNames {
+            named: BTreeSet::new(),
+            unnamed: list.names().count(),
+        },
     }
 }

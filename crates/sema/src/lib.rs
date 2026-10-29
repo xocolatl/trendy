@@ -666,7 +666,19 @@ mod tests {
             missing[0].notes
         );
         assert_eq!(fix(&call("area{sid: 3}")), call("area{side: 3}"));
+        // An argument without a name is for a parameter without one.
         assert_eq!(fix(&call("area{3}")), call("area{side: 3}"));
+        assert_eq!(
+            fix(&call("area{width: 3, 4}")),
+            call("area{width: 3, height: 4}")
+        );
+        let two = errors(&call("area{3, 4}"));
+        assert_eq!(codes(&call("area{3, 4}")), [Code::PositionalArgument; 2]);
+        assert!(
+            two[0].notes[0].ends_with("the parameters are `area{height: integer, width: integer}`, or those of another `area`, `area{side: integer}`"),
+            "{:?}",
+            two[0].notes
+        );
         // Equally near ones leave the choice to the program.
         let tied = errors(&call("greeting{name: \"Ada\"}"));
         assert_eq!(tied.len(), 1, "{tied:#?}");
@@ -2045,6 +2057,12 @@ mod tests {
             &source[origin.start..origin.end],
             "text",
             "the parameter's type"
+        );
+        // A lone unnamed argument is for the one parameter no other names.
+        let source = "operator greet{name: text, title: text} [];\noperator main{} [ call greet{name: \"Ada\", \"Countess\"}; ];";
+        assert_eq!(
+            fix(source),
+            "operator greet{name: text, title: text} [];\noperator main{} [ call greet{name: \"Ada\", title: \"Countess\"}; ];"
         );
     }
 
