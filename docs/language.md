@@ -1914,7 +1914,9 @@ operator main{} [];
   for a key are an error (R0008). An initial value is checked when
   compiling, and the error is reported at the two tuples; an assigned
   value is checked when the assignment is made, or, in an `assign` block,
-  once all of the block's are (see [Assignment](#assignment)).
+  once all of the block's are (see [Assignment](#assignment)), and a value
+  known only when the program runs stops it, writing the variable, the
+  key and the two tuples.
 - `key` is a keyword only there, so it can still be a name: an attribute or
   a variable can be called `key`.
 

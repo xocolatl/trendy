@@ -59,9 +59,6 @@ pub const FAIL_MISSING_TUPLE: u32 = 8;
 pub const FAIL_NO_TUPLE: u32 = 5;
 /// A relation has several tuples, where its only one is taken.
 pub const FAIL_SEVERAL_TUPLES: u32 = 6;
-/// Two tuples of a relation assigned to a variable have the same values
-/// for one of its keys.
-pub const FAIL_KEY_VIOLATED: u32 = 9;
 /// Two changes to a variable in an `assign` block remove the same tuple.
 pub const FAIL_CONFLICT: u32 = 10;
 /// A relation has no tuples, where the least value of an attribute is
@@ -91,9 +88,6 @@ pub fn failure_message(failure: u32) -> &'static str {
         }
         FAIL_MISSING_TUPLE => {
             "error[R0007]: i_minus or i_delete removes a tuple that isn't there\n"
-        }
-        FAIL_KEY_VIOLATED => {
-            "error[R0008]: two tuples of a variable have the same values for one of its keys\n"
         }
         FAIL_CONFLICT => "error[R0009]: two changes in an assign block remove the same tuple\n",
         FAIL_NO_TUPLE => "error[R0005]: the relation has no tuples, but exactly one was taken\n",
@@ -1736,6 +1730,96 @@ unsafe fn compare_tuples(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> cor
 #[unsafe(no_mangle)]
 pub extern "C" fn trendy_rt_fail(failure: u32) -> ! {
     fail_with(|out| out.write_str(failure_message(failure)))
+}
+
+/// Stop the program if the relation `value`, of the type `desc` describes,
+/// about to be assigned to the variable named `variable`, a text, has two
+/// tuples with the same values for the attributes of `key`, the
+/// descriptor of its projection on one of its keys, writing the variable,
+/// the key and the two tuples (R0008).
+///
+/// # Safety
+///
+/// `value` must point to a valid relation of the type `desc` describes,
+/// `key` to the descriptor of a relation of some of its attributes, and
+/// `variable` to a valid text value.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_check_key(
+    value: *const u8,
+    desc: *const TypeDesc,
+    key: *const TypeDesc,
+    variable: *const u8,
+) {
+    // SAFETY: guaranteed by the caller; `allocate` gives memory for the
+    // key's attributes and the tuples' positions, which nothing else
+    // holds, freed once they are compared.
+    unsafe {
+        let (tuples, count) = read_slice(value);
+        if count < 2 {
+            return;
+        }
+        let (desc, key) = (&*desc, attributes(&*key));
+        let element = desc.element();
+        // The tuples' own attributes in the key, by name.
+        let found = allocate::<*const Attr>(key.len());
+        let mut len = 0;
+        for attr in attributes(element) {
+            if key.iter().any(|k| name(k) == name(attr)) {
+                found.add(len).write(attr);
+                len += 1;
+            }
+        }
+        let compared = array(found, len);
+        let on_key = |i: usize, j: usize| {
+            let (a, b) = (tuples.add(i * element.size), tuples.add(j * element.size));
+            compared
+                .iter()
+                .map(|&attr| order(a.add((*attr).offset), b.add((*attr).offset), &*(*attr).desc))
+                .find(|o| o.is_ne())
+                .unwrap_or(core::cmp::Ordering::Equal)
+        };
+        // The tuples' positions, in their keys' order, which puts tuples
+        // with the same values for it next to each other.
+        let slots = allocate::<usize>(count);
+        for i in 0..count {
+            slots.add(i).write(i);
+        }
+        let positions = core::slice::from_raw_parts_mut(slots, count);
+        positions.sort_unstable_by(|&i, &j| on_key(i, j).then(i.cmp(&j)));
+        let shared = positions
+            .windows(2)
+            .find(|pair| on_key(pair[0], pair[1]).is_eq());
+        if let Some(&[first, second]) = shared {
+            let variable = read_text(variable);
+            fail_with(|out| {
+                if key.is_empty() {
+                    write!(
+                        out,
+                        "error[R0008]: `{variable}` has two tuples, but its key {{}} allows at most one: "
+                    )?;
+                } else {
+                    write!(
+                        out,
+                        "error[R0008]: two tuples of `{variable}` have the same values for its key {{ "
+                    )?;
+                    for (i, attr) in key.iter().enumerate() {
+                        if i > 0 {
+                            out.write_str(", ")?;
+                        }
+                        out.write_str(name(attr))?;
+                    }
+                    out.write_str(" }: ")?;
+                }
+                write_value(out, tuples.add(first * element.size), element)?;
+                out.write_str(" and ")?;
+                write_value(out, tuples.add(second * element.size), element)?;
+                out.write_char('\n')
+            });
+        }
+        free(slots.cast());
+        free(found.cast());
+    }
 }
 
 /// Stop the program, writing the message `write` writes to stderr, a line

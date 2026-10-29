@@ -1300,7 +1300,8 @@ operator main{} [
 
 /// Assignments that break a rule stop the program: two changes that
 /// remove the same tuple, a disjoint insert of a tuple already there, an
-/// included delete of one that isn't, and two tuples with the same key.
+/// included delete of one that isn't, and two tuples with the same key,
+/// which the error writes, with the variable and the key.
 #[test]
 fn assignments_that_break_a_rule_stop_the_program() {
     use trendy_diag::Code;
@@ -1339,7 +1340,7 @@ fn assignments_that_break_a_rule_stop_the_program() {
             "fail_key",
             r#"insert poets relation { { name: "Ada", born: a + 1 } }"#,
             format!(
-                "error[{}]: two tuples of a variable have the same values for one of its keys",
+                r#"error[{}]: two tuples of `poets` have the same values for its key {{ name }}: tuple {{ born: 1815, name: "Ada" }} and tuple {{ born: 1816, name: "Ada" }}"#,
                 Code::KeyViolated.id()
             ),
         ),

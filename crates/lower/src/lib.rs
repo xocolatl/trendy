@@ -1170,16 +1170,16 @@ impl<'a> FunctionBuilder<'a> {
 
     /// Stop the program if the relation at `value`, about to be assigned to
     /// the variable `target`, has two tuples with the same values for one
-    /// of its keys: if its projection on the key has fewer tuples. A key of
+    /// of its keys, writing the variable, the key and the tuples. A key of
     /// the whole heading always holds.
     fn check_keys(&mut self, target: &hir::Target, value: &lir::Place, cx: &mut Lowering) {
         let (ty, keys) = self.assigned(target);
         let (ty, keys) = (ty.clone(), keys.to_vec());
-        let ty = &ty;
         if !matches!(ty, hir::Type::Relation(_)) {
             return;
         }
-        let names: Vec<&str> = attribute_names(ty).collect();
+        let names: Vec<&str> = attribute_names(&ty).collect();
+        let variable = hir::Expr::Constant(hir::Value::Text(self.target_name(target).to_string()));
         for key in &keys {
             if key.len() == names.len() {
                 continue;
@@ -1189,33 +1189,23 @@ impl<'a> FunctionBuilder<'a> {
                 .filter(|name| !key.contains(**name))
                 .map(|name| (*name).to_string())
                 .collect();
-            let sources: Vec<usize> = names
-                .iter()
-                .enumerate()
-                .filter(|(_, name)| key.contains(**name))
-                .map(|(i, _)| i)
-                .collect();
-            let projected = self.reshape(ty, &ty.without(&others), &sources, value.clone(), cx);
-            let (mut count, mut keys) = (value.clone(), projected);
-            count.path.push(1);
-            keys.path.push(1);
-            let violated = self.slot(lir::Layout::U8);
-            self.insts.push(lir::Inst::Binary {
-                dst: violated.clone(),
-                op: lir::BinaryOp::Compare(lir::Comparison::NotEqual, lir::Operand::Usize),
-                lhs: count,
-                rhs: keys,
+            let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+            let projected = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty.without(&others))));
+            let variable = self.place(&variable, cx);
+            self.insts.push(lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::CheckKey,
+                args: vec![value.clone(), descriptor, projected, variable],
             });
-            let (fail, holds) = (self.new_block(), self.new_block());
-            self.end_block(
-                lir::Terminator::Branch {
-                    condition: violated,
-                    then: fail,
-                    otherwise: holds,
-                },
-                fail,
-            );
-            self.end_block(lir::Terminator::Fail(lir::Failure::KeyViolated), holds);
+        }
+    }
+
+    /// The name of the variable `target`, of the program or local, or of a
+    /// `var` or `out` parameter.
+    fn target_name<'t>(&'t self, target: &'t hir::Target) -> &'t str {
+        match target {
+            hir::Target::Variable(id) => &self.program.variable(*id).name,
+            hir::Target::Local(id) => &self.locals[id.0].name,
+            hir::Target::Parameter(name) => name,
         }
     }
 

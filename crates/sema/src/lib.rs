@@ -1901,6 +1901,11 @@ mod tests {
                 ("{ a: 1, b: 3 }", vec!["{ a: 1, b: 2 }", "key { a }"]),
             ]
         );
+        // Naming the key, as the program would when running.
+        assert_eq!(
+            errors[0].message,
+            "two tuples of `r` have the same values for its key { b }"
+        );
     }
 
     #[test]
@@ -1925,11 +1930,13 @@ mod tests {
             ))
             .is_ok()
         );
+        let two = errors(&format!(
+            "var r := relation {{ {{ a: 1 }}, {{ a: 2 }} }} key {{}};{MAIN}"
+        ));
+        assert_eq!(two[0].code, Code::KeyViolated);
         assert_eq!(
-            codes(&format!(
-                "var r := relation {{ {{ a: 1 }}, {{ a: 2 }} }} key {{}};{MAIN}"
-            )),
-            [Code::KeyViolated]
+            two[0].message,
+            "`r` has two tuples, but its key {} allows at most one"
         );
     }
 

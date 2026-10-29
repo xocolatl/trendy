@@ -223,6 +223,13 @@ pub enum RuntimeFn {
     /// `trendy_rt_fail(failure)`, which doesn't return. It takes a
     /// [`Failure::code`] by value, not a place, so only codegen calls it.
     Fail,
+    /// `trendy_rt_check_key(src, descriptor, key, variable)`: stop the
+    /// program if the relation `src`, of the type the descriptor
+    /// describes, has two tuples with the same values for the attributes
+    /// of `key`, the descriptor of its projection on one of the keys of
+    /// the variable named `variable`, a text, which it is about to be
+    /// assigned to, writing the variable, the key and the two tuples.
+    CheckKey,
     /// `trendy_rt_concat(dst, lhs, rhs)`: store the concatenation of two
     /// texts at `dst`, in memory the statement owns (see
     /// [`RuntimeFn::Begin`]). It stops the program if the memory can't be
@@ -399,6 +406,7 @@ impl RuntimeFn {
             RuntimeFn::Sum => "trendy_rt_sum",
             RuntimeFn::Product => "trendy_rt_product",
             RuntimeFn::Fail => "trendy_rt_fail",
+            RuntimeFn::CheckKey => "trendy_rt_check_key",
             RuntimeFn::Concat => "trendy_rt_concat",
             RuntimeFn::Release => "trendy_rt_release",
             RuntimeFn::Begin => "trendy_rt_begin",
@@ -588,9 +596,6 @@ pub enum Failure {
     NoTuple,
     /// A relation has several tuples, where its only one is taken.
     SeveralTuples,
-    /// Two tuples of a relation assigned to a variable have the same
-    /// values for one of its keys.
-    KeyViolated,
     /// A relation has no tuples, where the least value of an attribute is
     /// taken.
     NoMin,
@@ -615,7 +620,6 @@ impl Failure {
             Failure::TupleMismatch => 4,
             Failure::NoTuple => 5,
             Failure::SeveralTuples => 6,
-            Failure::KeyViolated => 9,
             Failure::NoMin => 11,
             Failure::NoMax => 12,
             Failure::IndexOutOfRange => 13,

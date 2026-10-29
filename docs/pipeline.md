@@ -1253,9 +1253,11 @@ don't call themselves, so that ends.
 An assignment statement computes each value into a slot of its own: a
 copy, since a value can be a variable's own place, which assigning another
 variable of the statement would change. Then each variable's keys are
-checked against its value, a projection on each key the variable
-declares, whose count must equal the value's, or the program stops
-(R0008). Only then are the variables assigned.
+checked against its value (`trendy_rt_check_key`): the runtime sorts the
+tuples' positions by each key the variable declares, and if two next to
+each other have the same values for it, stops the program (R0008),
+writing the variable, the key and the two tuples. Only then are the
+variables assigned.
 
 An `if` computes its condition, then branches to a block for each branch,
 which computes only its own value into one slot, and jumps to the block

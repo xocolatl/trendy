@@ -4890,12 +4890,17 @@ pub(crate) fn key_violated(
         ),
         (false, false) => (format!("has two tuples with {shared}"), String::new()),
     };
-    let mut d = Diagnostic::error(
-        Code::KeyViolated,
-        format!("two tuples of `{name}` have the same value for one of its keys"),
-        at,
-        label,
-    );
+    // As the program would say when running.
+    let message = if empty {
+        format!("`{name}` has two tuples, but its key {{}} allows at most one")
+    } else {
+        let names: Vec<&str> = value.attributes().map(|(a, _)| a).collect();
+        format!(
+            "two tuples of `{name}` have the same values for its key {{ {} }}",
+            names.join(", ")
+        )
+    };
+    let mut d = Diagnostic::error(Code::KeyViolated, message, at, label);
     if let Some(first) = first {
         d = d.with_secondary(first, first_label);
     }
