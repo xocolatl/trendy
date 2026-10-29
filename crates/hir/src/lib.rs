@@ -124,7 +124,8 @@ impl Local {
 /// called with, instantiated with them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Operator {
-    /// Unique among operators.
+    /// Its name, which other operators can have, with parameters of other
+    /// names.
     pub name: String,
     /// The type parameters, the `i`th with index `i`. Each is in some
     /// parameter's type, so a call's arguments determine it.
@@ -454,7 +455,8 @@ impl Builtin {
             | Builtin::ReadOnly(ReadOnlyBuiltin::Count) => vec![unnamed(0, Any::Relation)],
             Builtin::ReadOnly(ReadOnlyBuiltin::Length) => vec![unnamed(0, Any::Array)],
             // `C`, the columns of the tuples' attributes, and `T`, the
-            // tuples, as the prelude declares them.
+            // tuples, numbered in their names' order, as sema numbers
+            // declared type parameters.
             Builtin::Update(UpdateBuiltin::LoadCsv) => ["C", "T"]
                 .into_iter()
                 .enumerate()

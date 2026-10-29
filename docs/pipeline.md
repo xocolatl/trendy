@@ -477,8 +477,11 @@ An operator can have type parameters (`Operator::types`), each `any type`,
 `any tuple` or `any relation` (`hir::Any`), named or not, which its
 parameters' types, its result type and its body refer to as
 `Type::Parameter`: a type of its own inside the operator, equal only to
-itself. Each call (`hir::Call`, a statement's or an expression's) gives
-each one a type, by index, which the arguments determined, and the
+itself. They are numbered, as the written order of braces means nothing,
+those `types { … }` declares in their names' order, then each `any`
+written as a parameter's type in its parameter's name's order. Each call
+(`hir::Call`, a statement's or an expression's) gives each one a type,
+by that number, which the arguments determined, and the
 callee's types mean those: `Operator::instantiated` replaces each type
 parameter with its type throughout, an operator of its own with none.
 Comparing values of a type parameter is `Compared::Parameter`, and adding

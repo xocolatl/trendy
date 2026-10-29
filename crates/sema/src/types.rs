@@ -472,7 +472,9 @@ pub(crate) struct Attributes {
 }
 
 /// The attributes of `heading`, each with its type, or among those
-/// reported as invalid.
+/// reported as invalid. They are in braces, so their order means nothing:
+/// they are resolved in their names' order, which numbers the type
+/// parameter each `any` in an operator's parameters adds.
 pub(crate) fn attributes(
     heading: &ast::Heading,
     parameters: &mut TypeParameters,
@@ -482,10 +484,16 @@ pub(crate) fn attributes(
     let mut resolved = BTreeMap::new();
     let mut unresolved = BTreeSet::new();
     let mut first_spans = HashMap::new();
-    for attribute in heading.attributes() {
-        let Some(ident) = attribute.name().and_then(|n| n.ident()) else {
-            continue;
-        };
+    let mut named: Vec<(ast::AttributeType, SyntaxToken)> = heading
+        .attributes()
+        .filter_map(|a| {
+            let ident = a.name()?.ident()?;
+            Some((a, ident))
+        })
+        .collect();
+    // Stable, so that of two of one name, the first written is first.
+    named.sort_by(|(_, a), (_, b)| a.text().cmp(b.text()));
+    for (attribute, ident) in named {
         let name = ident.text().to_string();
         let span = trendy_syntax::span(ident.text_range());
         if let Some(&first) = first_spans.get(&name) {

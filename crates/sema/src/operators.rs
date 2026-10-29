@@ -631,7 +631,9 @@ pub(crate) fn written(seen: &BTreeMap<String, hir::Parameter>) -> BTreeMap<Strin
 /// The type parameters `declared` lists, each `any type`, `any tuple` or
 /// `any relation` under a name of its own, and whether they are valid,
 /// after reporting why not. One declared as a specific type is listed as
-/// `any type`, so that its uses aren't reported too.
+/// `any type`, so that its uses aren't reported too. They are in braces,
+/// so their order means nothing: they are numbered in their names'
+/// order.
 pub(crate) fn declared_types(
     declared: &ast::TypeParameters,
     namespaces: &Namespaces,
@@ -677,10 +679,14 @@ pub(crate) fn declared_types(
         };
         ok &= any.is_some();
         list.push(hir::TypeParameter {
-            index: list.len(),
+            index: 0,
             name: Some(name.to_string()),
             any: any.unwrap_or(hir::Any::Type),
         });
+    }
+    list.sort_by(|a, b| a.name.cmp(&b.name));
+    for (index, parameter) in list.iter_mut().enumerate() {
+        parameter.index = index;
     }
     (list, ok)
 }

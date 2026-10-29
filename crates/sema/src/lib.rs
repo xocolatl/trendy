@@ -1944,6 +1944,16 @@ mod tests {
     }
 
     #[test]
+    fn the_prelude_declares_type_parameters_in_any_order() {
+        // In braces, as a program's are, so the built-ins' are the same.
+        let declared = "types { C: any tuple, T: any tuple }";
+        assert!(trendy_prelude::SOURCE.contains(declared));
+        let source =
+            trendy_prelude::SOURCE.replacen(declared, "types { T: any tuple, C: any tuple }", 1);
+        Prelude::load(&parse(&source)).unwrap();
+    }
+
+    #[test]
     fn the_prelude_declares_built_ins_as_the_compiler_implements_them() {
         let wrong = |from: &str, to: &str| {
             assert!(trendy_prelude::SOURCE.contains(from), "{from}");
@@ -2089,6 +2099,41 @@ mod tests {
             ]
         );
         assert!(fix(source).contains("call debug_value{v: tally};\n    call debug_value{v: 1};"));
+    }
+
+    #[test]
+    fn braces_order_neither_type_parameters_nor_parameters() {
+        // However they are written, the operator is the same, its type
+        // parameters numbered in their names' order, those its parameters
+        // declare first, then each `any`, in its parameter's name's order.
+        let pair = |written: &str| {
+            let program = analyze_str(&format!("{written}{MAIN}")).unwrap();
+            let pair = program.operators.iter().find(|o| o.name == "pair").unwrap();
+            (pair.types.clone(), pair.params.clone())
+        };
+        let ours = pair(
+            "operator pair{a: T, b: U, c: array T, d: array U, e: any type, f: any tuple} types { T: any type, U: any type } [];",
+        );
+        assert_eq!(
+            pair(
+                "operator pair{f: any tuple, e: any type, d: array U, c: array T, b: U, a: T} types { U: any type, T: any type } [];"
+            ),
+            ours
+        );
+        let names: Vec<_> = ours
+            .0
+            .iter()
+            .map(|t| (t.index, t.name.clone(), t.any.clone()))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                (0, Some("T".to_string()), hir::Any::Type),
+                (1, Some("U".to_string()), hir::Any::Type),
+                (2, None, hir::Any::Type),
+                (3, None, hir::Any::Tuple),
+            ]
+        );
     }
 
     #[test]

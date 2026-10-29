@@ -469,7 +469,9 @@ though the Manifesto leaves how to further study.
 - **`types { … }` declares the type parameters,** after the parameters
   and the result type: each a name, capitalized by convention, and what
   it can be, `any type`, `any tuple`, `any relation` or `any array`
-  (A0040). Inside the
+  (A0040). They are in braces, so their order means nothing, as the
+  parameters' doesn't: `types { T: any type, U: any type }` and
+  `types { U: any type, T: any type }` declare the same. Inside the
   operator, a type parameter is a type, which the parameters' types, the
   result type and the body can use, in other types too, as in
   `relation { v: T }`. Each `any …` written as a parameter's type is a type
