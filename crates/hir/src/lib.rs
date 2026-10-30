@@ -989,9 +989,10 @@ impl ElementChange {
     }
 }
 
-/// An attribute a `load` orders a relation's tuples by, and in which
+/// An attribute a `load` orders a relation's tuples by, or a component a
+/// type of the program's own orders its values by, and in which
 /// direction: `asc a` or `desc a`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OrderItem {
     pub attribute: String,
     pub descending: bool,
@@ -2095,7 +2096,7 @@ pub enum Compared {
     /// Tuples of one tuple type, equal when every attribute is.
     Tuple,
     /// Values of one of the program's own types, equal when their
-    /// components are: only `=` and `<>`, as such a type has no order.
+    /// components are, and ordered by the type's order, if it has one.
     Defined,
     /// Relations of one relation type, equal when they have the same tuples,
     /// and one less than or equal to another when it is a subset of it.
@@ -2176,13 +2177,15 @@ impl Comparison {
     }
 }
 
-/// The order of two values of the same scalar type: `false` before `true`,
-/// integers and approximate numbers numerically, and text by code point,
-/// which is the order of its UTF-8 bytes.
+/// The order of two values of the same ordered type: `false` before
+/// `true`, integers and approximate numbers numerically, text by code
+/// point, which is the order of its UTF-8 bytes, and values of a type of
+/// the program's own by its order, their components compared in turn until
+/// one differs, a descending one the other way.
 ///
 /// # Panics
 ///
-/// If the values aren't of one scalar type, which sema rules out.
+/// If the values aren't of one ordered type, which sema rules out.
 #[must_use]
 pub fn compare(lhs: &Value, rhs: &Value) -> std::cmp::Ordering {
     match (lhs, rhs) {
@@ -2190,6 +2193,30 @@ pub fn compare(lhs: &Value, rhs: &Value) -> std::cmp::Ordering {
         (Value::Integer(a), Value::Integer(b)) => a.cmp(b),
         (Value::Approximate(a), Value::Approximate(b)) => a.cmp(b),
         (Value::Text(a), Value::Text(b)) => a.as_bytes().cmp(b.as_bytes()),
+        (Value::Defined(a), Value::Defined(b)) => {
+            let order =
+                a.ty.order
+                    .as_ref()
+                    .expect("only ordered values are compared");
+            order
+                .iter()
+                .map(|item| {
+                    let component = |v: &DefinedValue| {
+                        v.components
+                            .get(&item.attribute)
+                            .expect("an order names the type's components")
+                            .clone()
+                    };
+                    let ordering = compare(&component(a), &component(b));
+                    if item.descending {
+                        ordering.reverse()
+                    } else {
+                        ordering
+                    }
+                })
+                .find(|ordering| ordering.is_ne())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }
         _ => panic!("comparing {lhs:?} with {rhs:?}"),
     }
 }
@@ -2265,6 +2292,10 @@ impl BinaryOp {
             BinaryOp::Compare(Comparison::NotEqual, _) => return Ok(Value::Boolean(lhs != rhs)),
             BinaryOp::Compare(comparison, Compared::Relation) => {
                 return Ok(Value::Boolean(contains(comparison, lhs, rhs)));
+            }
+            // By the type's order.
+            BinaryOp::Compare(comparison, Compared::Defined) => {
+                return Ok(Value::Boolean(comparison.holds(compare(lhs, rhs))));
             }
             // Values of a type parameter's type, as the values are: of
             // `any relation`, ordered by inclusion, or of a kind that
@@ -2447,13 +2478,18 @@ pub struct Constraint {
 
 /// A scalar type of the program's own: its name, the components of its
 /// possible representation, as values of it are stored and selected (TTM
-/// RM Prescription 4), and its constraints, in order, which every value's
-/// components satisfy (RM Prescription 23).
+/// RM Prescription 4), its constraints, in order, which every value's
+/// components satisfy (RM Prescription 23), and its order, if it has one:
+/// its values compared by their components, each of an ordered type, in
+/// turn, every one of them, so that it is a total order consistent with
+/// `=`, which makes the type ordered (*Type Inheritance and Relational
+/// Theory*, chapter 2).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Defined {
     pub name: String,
     pub components: Heading,
     pub constraints: Vec<Constraint>,
+    pub order: Option<Vec<OrderItem>>,
 }
 
 /// Source text for the heading: `{ a: integer, b: text }` or `{}`. A
@@ -3300,6 +3336,7 @@ impl Type {
         match self {
             Type::Scalar(scalar) => scalar.has(requirement),
             Type::Parameter(parameter) => parameter.any.requires(requirement),
+            Type::Defined(defined) => requirement == Requirement::Order && defined.order.is_some(),
             _ => false,
         }
     }
@@ -3453,6 +3490,7 @@ mod tests {
             name: "celsius".to_string(),
             components,
             constraints: Vec::new(),
+            order: None,
         };
         let ty = Type::Defined(celsius.clone());
         assert_eq!(ty.to_string(), "celsius");

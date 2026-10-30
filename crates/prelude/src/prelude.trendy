@@ -1,5 +1,6 @@
 /* The types with a total order, `<`: a type parameter of `any ordered`
-   can be compared with `<`, `<=`, `>` and `>=`. */
+   can be compared with `<`, `<=`, `>` and `>=`. A type of the program's
+   own is of it when its braces give it an order, `order [asc …]`. */
 kind ordered { < };
 
 /* The types with addition and multiplication, `+` and `*`: values of a

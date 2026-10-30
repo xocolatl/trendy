@@ -599,7 +599,9 @@ operator main{} [
   requires, which the prelude's loading checks. `boolean`, `integer`,
   `approximate` and `text` are ordered; relations aren't, as their `<` is
   subset, which isn't a total order. `integer` and `approximate` are
-  numeric.
+  numeric. A type of the program's own is ordered when its braces give
+  it an order (see [A program's own types](#a-programs-own-types)), and
+  can't be numeric yet.
 - **A kind says what its types must have, not what they happen to have,**
   so a body can use exactly what its type parameters' kinds require, and
   nothing else. Declaring a kind also says what no compiler can check, as
@@ -612,8 +614,8 @@ operator main{} [
   that values of the type come from the arguments.
 - **An argument must be of the kind** (A0004), and a kind named wrong is
   reported with the closest as the fix (A0003). A program can't declare
-  a kind (A0013): its types are those that declare it, and a program can't
-  declare a type.
+  a kind (A0013): a kind's requirements are operators only the compiler
+  gives, so only the prelude declares one.
 
 ```trendy
 operator cost{price: T, quantity: T, delivery: T}: T
@@ -749,7 +751,8 @@ language can express more, built-ins become ordinary operators.
 
 ```
 /* The types with a total order, `<`: a type parameter of `any ordered`
-   can be compared with `<`, `<=`, `>` and `>=`. */
+   can be compared with `<`, `<=`, `>` and `>=`. A type of the program's
+   own is of it when its braces give it an order, `order [asc …]`. */
 kind ordered { < };
 
 /* The types with addition and multiplication, `+` and `*`: values of a
@@ -1738,7 +1741,9 @@ operator main{} [
 - **The components go in braces of their own,** inside the type's:
   `type celsius { { degrees: approximate } };`, even for one. The outer
   braces hold what the declaration says of the type: its possible
-  representation, and its constraints (see below). Components written
+  representation, its constraints and its order (see below). Their order
+  doesn't matter to the compiler, but reads best that way: what the values
+  are made of, which of those values the type has, and how they compare. Components written
   straight inside the type's braces, as a heading's attributes are, or
   after Tutorial D's `POSSREP`, are fixed to that (P0039).
 - **The selector is named after the type,** and takes the components as
@@ -1767,10 +1772,10 @@ operator main{} [
   a field, is fixed to the `update`, with a `replace` for a value inside
   the variable's, as in `update stop { at := at replace { latitude := x } };`
   (A0048).
-- **A value has no order:** values of a type of the program's own are
-  equal when their components are, and compared only with `=` and `<>`;
-  `<` is an error (A0022). A parameter of `any type` takes them, and one
-  of a kind doesn't.
+- **Values are equal when their components are,** and compared with `=`
+  and `<>`; only a type with an order has `<` (see below), which is
+  otherwise an error (A0022). A parameter of `any type` takes them, and
+  one of `any ordered` those of a type with an order.
 - **There is no default,** since no value of a type is any more a start
   than another: a variable of one, or of a tuple with one, needs an
   initial value (A0006).
@@ -1831,6 +1836,47 @@ operator main{} [
   `constraint` (P0040), and a constraint inside the components' braces,
   where Tutorial D writes a possible representation's `CONSTRAINT`, is
   moved out of them (P0041).
+
+A type's order says how its values compare: `order [asc year, …]`, in
+its braces, compares them by the components it names, in turn, until one
+differs, as a load's order compares tuples by their attributes, a `desc`
+one the other way:
+
+```trendy
+type calendar_day {
+    { year: integer, month: integer, day: integer },
+    constraint month >= 1 and month <= 12,
+    constraint day >= 1 and day <= 31,
+    order [asc year, asc month, asc day],
+};
+
+var festivals := relation {
+    { name: "Nowruz", on: calendar_day{year: 2026, month: 3, day: 20} },
+    { name: "Diwali", on: calendar_day{year: 2026, month: 11, day: 8} },
+    { name: "Lunar New Year", on: calendar_day{year: 2026, month: 2, day: 17} },
+};
+
+operator main{} [
+    call debug_value{v: min{r: festivals, of: on}};
+    call debug_table{r: festivals where on < calendar_day{year: 2026, month: 6, day: 1}};
+];
+```
+
+- **A type with an order is ordered:** its values have `<`, `<=`, `>`
+  and `>=`, and it is of the kind `ordered`, so `min`, `max`, a load's
+  order and a type parameter of `any ordered` take them, as they take
+  integers. Without one, `<` is an error, and so is a type where an
+  ordered one is expected (A0022, A0004), each with help to give it an
+  order.
+- **The order names every component, once,** each of an ordered type
+  (A0009, A0008, A0022), so that it is a total order consistent with
+  `=`: values that differ are never equal in it. The compiler compares
+  by it, so it can't be wrong, as a `<` the program wrote could be.
+  Tutorial D's `ORDERED` and `ORDINAL`, which have the program write
+  `<` (*Type Inheritance and Relational Theory*, chapter 2), are
+  reported (P0042).
+- **A type has one order** (A0008). It goes in the type's braces, not
+  the components', as a constraint does (P0041).
 
 ## Tuples
 

@@ -184,33 +184,50 @@ pub(crate) fn bare_representation(
         .with_suggestion("put the components in braces of their own", edits)
 }
 
-/// Why a type's constraints go in its braces, for notes.
-const CONSTRAINT_RULE: &str = "a type's constraints, each `constraint` and a condition on the components, go in the type's braces with its possible representation, as in `type celsius { { degrees: approximate }, constraint degrees >= -273.15e0 };`: they are the type's, and say which values it has";
+/// Why a type's constraints and order go in its braces, for notes.
+const CONSTRAINT_RULE: &str = "what a type says of its values beside their components goes in the type's braces with its possible representation: its constraints, each `constraint` and a condition on the components, which say which values it has, as in `type celsius { { degrees: approximate }, constraint degrees >= -273.15e0 };`, and its order, `order [asc degrees]`";
 
-/// Constraints written inside a possible representation's braces, after
-/// its components, as Tutorial D writes them in a possrep's.
+/// Tutorial D's `ORDERED` or `ORDINAL`, `found`, saying a type has an
+/// order: a type's order is written with the components it compares.
+pub(crate) fn ordered_word(found: Found) -> Diagnostic {
+    Diagnostic::error(
+        Code::OrderedWord,
+        format!(
+            "a type's order is written `order [asc …]`, not `{}`",
+            found.text
+        ),
+        found.span,
+        "Tutorial D's keyword",
+    )
+    .with_note("a type's order compares its values by their components, in turn, each after `asc` or `desc`, as in `type day { { year: integer, month: integer, day: integer }, order [asc year, asc month, asc day] };`, so that values that differ are never equal in it")
+    .with_help("list the components in the order they compare, in the type's braces")
+}
+
+/// An order or constraints written inside a possible representation's
+/// braces, after its components, as Tutorial D writes a possrep's
+/// constraint.
 pub(crate) struct Inside {
     /// Where the components end, before any comma after them.
     pub(crate) components: usize,
-    /// Whether a comma separates the constraints from them.
+    /// Whether a comma separates the items from them.
     pub(crate) comma: bool,
-    /// Each constraint's span, in order.
-    pub(crate) constraints: Vec<Span>,
+    /// Each item's span, in order, and what it is, as in `a constraint`.
+    pub(crate) items: Vec<(Span, &'static str)>,
 }
 
-/// The constraints `inside`, in `source`, a possible representation's
-/// braces. The fix moves them after the braces, which end at `close`, into
-/// the type's.
+/// The order or constraints `inside`, in `source`, a possible
+/// representation's braces. The fix moves them after the braces, which end
+/// at `close`, into the type's.
 pub(crate) fn constraint_in_components(
     source: &str,
     inside: &Inside,
     close: Option<usize>,
 ) -> Diagnostic {
-    let constraints = &inside.constraints;
-    let first = constraints[0];
+    let items = &inside.items;
+    let (first, what) = items[0];
     let d = Diagnostic::error(
         Code::ConstraintInRepresentation,
-        "a constraint goes in the type's braces, not the components'",
+        format!("{what} goes in the type's braces, not the components'"),
         first,
         "inside the components' braces",
     )
@@ -218,11 +235,8 @@ pub(crate) fn constraint_in_components(
     let Some(close) = close else {
         return d;
     };
-    let last = constraints[constraints.len() - 1];
-    let moved: Vec<&str> = constraints
-        .iter()
-        .map(|s| &source[s.start..s.end])
-        .collect();
+    let (last, _) = items[items.len() - 1];
+    let moved: Vec<&str> = items.iter().map(|(s, _)| &source[s.start..s.end]).collect();
     d.with_suggestion(
         "move it after the components' braces",
         vec![

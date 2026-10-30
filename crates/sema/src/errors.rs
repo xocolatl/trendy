@@ -799,6 +799,12 @@ fn with_conversion(
     )
 }
 
+/// Whether `kind` requires only an order, which a type of the program's own
+/// has when it declares one, so that it is of the kind.
+fn orders_only(kind: &hir::Kind) -> bool {
+    kind.requires.iter().all(|&r| r == hir::Requirement::Order)
+}
+
 /// What a type of `parameter`, `any tuple`, `any relation`, `any array`
 /// or of a kind, is, as in "a tuple", and the rule that says so.
 fn what_any_is(parameter: &hir::TypeParameter, namespaces: &Namespaces) -> (String, String) {
@@ -816,11 +822,14 @@ fn what_any_is(parameter: &hir::TypeParameter, namespaces: &Namespaces) -> (Stri
             format!("a parameter of type `{parameter}` takes an array of any elements"),
         ),
         hir::Any::Kind(kind) => {
-            let members: Vec<String> = namespaces
+            let mut members: Vec<String> = namespaces
                 .members(kind)
                 .iter()
                 .map(|m| format!("`{}`", m.name()))
                 .collect();
+            if orders_only(kind) {
+                members.push("types of the program's own with an order".to_string());
+            }
             (
                 format!("a type of kind `{}`", kind.name),
                 format!(
@@ -869,6 +878,15 @@ pub(crate) fn not_of_kind(
         )
         .with_note(note),
     );
+    // A type of the program's own, which an order makes ordered.
+    if let (hir::Type::Defined(defined), hir::Any::Kind(kind)) = (actual, &parameter.any)
+        && orders_only(kind)
+    {
+        d = d.with_help(format!(
+            "give `{}` an order, `order [asc …]` in its braces, its components in the order they compare",
+            defined.name
+        ));
+    }
     // A type parameter of the operator the call is in, which can be types
     // that aren't of the kind: it can be declared as the kind instead.
     if let (hir::Type::Parameter(p), hir::Any::Kind(kind)) = (actual, &parameter.any) {
@@ -1196,7 +1214,7 @@ pub(crate) fn kind_outside_prelude(decl: &trendy_syntax::ast::KindDecl) -> Diagn
         span,
         "not allowed in a program",
     )
-    .with_note("a kind's types are those that declare it, as the prelude's built-in types do, and a program can't declare a type, so a kind of its own would have none")
+    .with_note("a kind says what its types must have, `<`, or `+` and `*`, operators only the compiler gives, so only the prelude declares one")
     .with_help("name one of the prelude's kinds after `any`, as in `any ordered`")
 }
 
@@ -5029,10 +5047,15 @@ pub(crate) fn wrong_operand_type(
             (Operator::Compare(_), hir::Type::Array(_)) => d.with_note(
                 "arrays can only be compared with `=` and `<>`: they are equal if they have equal elements at each position",
             ),
-            (Operator::Compare(_), hir::Type::Defined(defined)) => d.with_note(format!(
-                "a type of the program's own has no order: values of `{}` can only be compared with `=` and `<>`, equal when their components are",
-                defined.name
-            )),
+            (Operator::Compare(_), hir::Type::Defined(defined)) => d
+                .with_note(format!(
+                    "`{}` has no order, so its values can only be compared with `=` and `<>`, equal when their components are",
+                    defined.name
+                ))
+                .with_help(format!(
+                    "give `{}` an order, `order [asc …]` in its braces, its components in the order they compare",
+                    defined.name
+                )),
             (Operator::Compare(_), _) => d.with_note(
                 "tuples have no order: they can only be compared with `=` and `<>`; relations can also be compared as sets, with `<=` and `<` for subset and proper subset",
             ),
@@ -5714,62 +5737,124 @@ pub(crate) fn keeping_edit(
 }
 
 /// A load's order, `order`, with no items, of a relation with `heading`.
-pub(crate) fn empty_order(order: &OrderList, heading: &hir::Heading) -> Diagnostic {
+/// What an order orders: a load's relation's tuples, by attributes, or
+/// the values of the type of the program's own named so, by components.
+#[derive(Clone, Copy)]
+pub(crate) enum Orders<'a> {
+    Load,
+    Type(&'a str),
+}
+
+impl Orders<'_> {
+    fn noun(self) -> Noun {
+        match self {
+            Orders::Load => Noun::Ordered,
+            Orders::Type(_) => Noun::Component,
+        }
+    }
+}
+
+/// The rule for a type's order, for notes.
+const TYPE_ORDER: &str = "a type's order compares its values by their components, each of a type with `<`, in turn, until one differs, so it names every component, once, and values that differ are never equal in it";
+
+/// `order`, an order of what `orders` says, with no items, of a relation
+/// or type with `heading`.
+pub(crate) fn empty_order(order: &OrderList, heading: &hir::Heading, orders: Orders) -> Diagnostic {
     let example = heading
         .attributes()
         .next()
         .map_or_else(|| "name".to_string(), |(name, _)| name.to_string());
-    Diagnostic::error(
-        Code::EmptyList,
-        "a load's order needs at least one attribute",
-        order.span(),
-        "no attributes to order by",
-    )
-    .with_note("a relation's tuples have no order, so a load says which to put them in")
-    .with_help(format!(
-        "list the attributes to order by, each after `asc` or `desc`, as in `[asc {example}]`"
+    let many = orders.noun().many();
+    let d = match orders {
+        Orders::Load => Diagnostic::error(
+            Code::EmptyList,
+            "a load's order needs at least one attribute",
+            order.span(),
+            "no attributes to order by",
+        )
+        .with_note("a relation's tuples have no order, so a load says which to put them in"),
+        Orders::Type(t) => Diagnostic::error(
+            Code::EmptyList,
+            format!("the order of `{t}` needs its components"),
+            order.span(),
+            "no components to order by",
+        )
+        .with_note(TYPE_ORDER),
+    };
+    d.with_help(format!(
+        "list the {many} to order by, each after `asc` or `desc`, as in `[asc {example}]`"
     ))
 }
 
-/// An attribute, `name`, at `span`, that a load orders by, which its
-/// relation, with `heading`, hasn't.
+/// An attribute or a component, as `orders` says, `name`, at `span`, that
+/// an order orders by, which the relation or type, with `heading`, hasn't.
 pub(crate) fn unknown_order_attribute(
     name: &str,
     span: Span,
     heading: &hir::Heading,
+    orders: Orders,
 ) -> Diagnostic {
     let names: Vec<&str> = heading.attributes().map(|(a, _)| a).collect();
     let rename = closest(name, names.iter().copied());
     let listed: Vec<String> = names.iter().map(|a| format!("`{a}`")).collect();
-    let context = match listed.len() {
-        0 => "the relation has no attributes".to_string(),
-        _ => format!("the relation's attributes are {}", listed.join(", ")),
+    let context = match (orders, listed.len()) {
+        (Orders::Load, 0) => "the relation has no attributes".to_string(),
+        (Orders::Load, _) => format!("the relation's attributes are {}", listed.join(", ")),
+        (Orders::Type(t), 0) => format!("`{t}` has no components"),
+        (Orders::Type(t), _) => format!("`{t}`'s components are {}", listed.join(", ")),
     };
-    unknown_attribute(Noun::Ordered, name, span, &context, rename, None)
+    unknown_attribute(orders.noun(), name, span, &context, rename, None)
 }
 
-/// An attribute, `name`, at `span`, of type `ty`, which has no order, that
-/// a load orders by.
-pub(crate) fn unordered_attribute(name: &str, span: Span, ty: &hir::Type) -> Diagnostic {
-    Diagnostic::error(
+/// An attribute or a component, as `orders` says, `name`, at `span`, of
+/// type `ty`, which has no order, that an order orders by.
+pub(crate) fn unordered_attribute(
+    name: &str,
+    span: Span,
+    ty: &hir::Type,
+    orders: Orders,
+) -> Diagnostic {
+    let (message, note) = match orders {
+        Orders::Load => (
+            format!("a load can't order by `{name}`, of type `{ty}`"),
+            "a load orders by attributes of types with `<`: booleans, integers, approximate numbers and text, and types of the program's own with an order; tuples and arrays have no order, and relations are ordered only as sets, by inclusion",
+        ),
+        Orders::Type(t) => (
+            format!("the order of `{t}` can't compare `{name}`, of type `{ty}`"),
+            TYPE_ORDER,
+        ),
+    };
+    let d = Diagnostic::error(
         Code::WrongOperandType,
-        format!("a load can't order by `{name}`, of type `{ty}`"),
+        message,
         span,
         format!("{} have no total order", plural(ty)),
     )
     .with_parameter_note(ty)
-    .with_note("a load orders by attributes of types with `<`: booleans, integers, approximate numbers and text; tuples and arrays have no order, and relations are ordered only as sets, by inclusion")
+    .with_note(note);
+    match ty {
+        hir::Type::Defined(defined) => d.with_help(format!(
+            "give `{}` an order of its own, `order [asc …]` in its braces",
+            defined.name
+        )),
+        _ => d,
+    }
 }
 
-/// An attribute, `name`, at `span`, that a load orders by again, first at
-/// `first`: the repeat, deleted with `removal`, orders nothing, since the
-/// tuples it would are equal on it.
+/// An attribute or a component, as `orders` says, `name`, at `span`, that
+/// an order orders by again, first at `first`: the repeat, deleted with
+/// `removal`, orders nothing, since what it would are equal on it.
 pub(crate) fn repeated_order_item(
     name: &str,
     span: Span,
     first: Span,
     removal: Span,
+    orders: Orders,
 ) -> Diagnostic {
+    let what = match orders {
+        Orders::Load => "tuples",
+        Orders::Type(_) => "values",
+    };
     Diagnostic::error(
         Code::DuplicateAttribute,
         format!("the order names `{name}` more than once"),
@@ -5777,13 +5862,63 @@ pub(crate) fn repeated_order_item(
         "named again here",
     )
     .with_secondary(first, format!("`{name}` is first named here"))
-    .with_note(
-        "an item orders only the tuples equal on the items before it, so a repeat orders nothing",
-    )
+    .with_note(format!(
+        "an item orders only the {what} equal on the items before it, so a repeat orders nothing"
+    ))
     .with_suggestion(
         "remove the repeat",
         vec![Edit {
             span: removal,
+            replacement: String::new(),
+        }],
+    )
+}
+
+/// `order`, the order of a type, as `orders` says, which leaves out its
+/// components `missing`. There is no fix: where each compares isn't
+/// known.
+pub(crate) fn unordered_components(
+    missing: &[&str],
+    order: &OrderList,
+    orders: Orders,
+) -> Diagnostic {
+    let Orders::Type(t) = orders else {
+        unreachable!("only a type's order names every component");
+    };
+    let quoted: Vec<String> = missing.iter().map(|name| format!("`{name}`")).collect();
+    let named = trendy_diag::conjoin(&quoted);
+    let example = missing[0];
+    Diagnostic::error(
+        Code::MissingAttribute,
+        format!("the order of `{t}` leaves out {named}"),
+        order.span(),
+        format!("no {named}"),
+    )
+    .with_note(TYPE_ORDER)
+    .with_help(format!(
+        "add `asc {example}` or `desc {example}` where it compares, among the others"
+    ))
+}
+
+/// `again`, a type's second order, after `first`: a type has one order,
+/// so it is deleted.
+pub(crate) fn second_order(
+    t: &str,
+    again: &trendy_syntax::ast::TypeOrder,
+    first: &trendy_syntax::ast::TypeOrder,
+) -> Diagnostic {
+    Diagnostic::error(
+        Code::DuplicateAttribute,
+        format!("the order of `{t}` is given more than once"),
+        again.span(),
+        "given again here",
+    )
+    .with_secondary(first.span(), "first given here")
+    .with_note("a type has one order, which compares its values")
+    .with_suggestion(
+        "delete the second order",
+        vec![Edit {
+            span: again.removal(),
             replacement: String::new(),
         }],
     )

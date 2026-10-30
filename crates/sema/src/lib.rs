@@ -343,7 +343,9 @@ impl Namespaces {
     }
 
     /// Whether a type parameter of `any` can be `ty`: a type of a call's
-    /// arguments, which can be a type parameter of the caller's.
+    /// arguments, which can be a type parameter of the caller's. A built-in
+    /// type is of the kinds it declares, and a type of the program's own of
+    /// those whose requirements it has, as an order.
     pub(crate) fn admits(&self, any: &hir::Any, ty: &hir::Type) -> bool {
         match (any, ty) {
             (hir::Any::Type, _)
@@ -354,6 +356,9 @@ impl Namespaces {
                 .kinds
                 .get(&kind.name)
                 .is_some_and(|(_, members)| members.contains(scalar)),
+            (hir::Any::Kind(kind), hir::Type::Defined(_)) => {
+                kind.requires.iter().all(|&requirement| ty.has(requirement))
+            }
             (_, hir::Type::Parameter(p)) => p.any == *any,
             _ => false,
         }
@@ -6468,6 +6473,95 @@ mod tests {
     }
 
     #[test]
+    fn a_programs_own_types_are_ordered_by_their_order() {
+        let declared =
+            "type day { { year: integer, month: integer }, order [asc year, desc month] };
+type entry { { on: day, title: text }, order [asc on, asc title] };
+";
+        let var = |value: &str| format!("{declared}var v := {value};");
+        let value = |source: &str| variables(source)[0].init.to_string();
+        // Compared by the order, its components in turn, a descending one
+        // the other way, and a value inside by its own type's.
+        assert_eq!(
+            value(&var(
+                "day{year: 2026, month: 3} < day{year: 2026, month: 2}"
+            )),
+            "true"
+        );
+        assert_eq!(
+            value(&var(
+                "day{year: 2025, month: 1} >= day{year: 2026, month: 12}"
+            )),
+            "false"
+        );
+        assert_eq!(
+            value(&var(
+                "max{r: relation { { e: entry{on: day{year: 2026, month: 1}, title: \"b\"} }, { e: entry{on: day{year: 2026, month: 2}, title: \"a\"} } }, of: e}"
+            )),
+            "entry{on: day{month: 1, year: 2026}, title: \"b\"}"
+        );
+        // Of `any ordered`, so a generic operator's `<` takes its values.
+        assert_eq!(
+            value(&format!(
+                "{declared}operator least{{a: T, b: T}}: T types {{ T: any ordered }} [ if a < b then a else b ];\nvar v := least{{a: day{{year: 2026, month: 1}}, b: day{{year: 2026, month: 5}}}};"
+            )),
+            "day{month: 5, year: 2026}"
+        );
+        // Without an order, none of that, with help to give it one.
+        let unordered = "type spot { { x: integer } };\nvar s := spot{x: 1};\n";
+        for (source, code) in [
+            (
+                format!("{unordered}var v := s < s;{MAIN}"),
+                Code::WrongOperandType,
+            ),
+            (
+                format!("{unordered}var v := min{{r: relation {{ {{ s: s }} }}, of: s}};{MAIN}"),
+                Code::TypeMismatch,
+            ),
+        ] {
+            let errors = errors(&source);
+            assert_eq!(errors[0].code, code, "{source}");
+            assert!(
+                errors[0]
+                    .help
+                    .contains(&"give `spot` an order, `order [asc …]` in its braces, its components in the order they compare".to_string()),
+                "{errors:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_programs_own_types_order_errors() {
+        let declare = |order: &str| {
+            format!("type day {{ {{ year: integer, month: integer }}, {order} }};{MAIN}")
+        };
+        // Every component, once, each of an ordered type, and one order.
+        assert_eq!(
+            messages(&declare("order [asc year]")),
+            ["the order of `day` leaves out `month`"]
+        );
+        let source = declare("order [asc yaer, asc month]");
+        assert_eq!(messages(&source), ["unknown component `yaer`"]);
+        assert_eq!(fix(&source), declare("order [asc year, asc month]"));
+        let source = declare("order [asc year, asc month, desc year]");
+        assert_eq!(codes(&source), [Code::DuplicateAttribute]);
+        assert_eq!(fix(&source), declare("order [asc year, asc month]"));
+        let source = declare("order [asc year, asc month], order [desc year, desc month]");
+        assert_eq!(
+            messages(&source),
+            ["the order of `day` is given more than once"]
+        );
+        assert_eq!(fix(&source), declare("order [asc year, asc month]"));
+        assert_eq!(codes(&declare("order []")), [Code::EmptyList]);
+        assert_eq!(
+            messages(&format!(
+                "type spot {{ {{ x: integer }} }};\ntype day {{ {{ at: spot }}, order [asc at] }};{MAIN}"
+            )),
+            ["the order of `day` can't compare `at`, of type `spot`"]
+        );
+    }
+
+    #[test]
     fn a_csv_file_is_read_into_values_of_a_programs_own_types() {
         let call = |declared: &str, columns: &str| {
             format!(
@@ -7942,6 +8036,7 @@ type position { { latitude: approximate, longitude: approximate } };
                 .into(),
             ),
             constraints: Vec::new(),
+            order: None,
         };
         let place = hir::Defined {
             name: "place".to_string(),
@@ -7953,6 +8048,7 @@ type position { { latitude: approximate, longitude: approximate } };
                 .into(),
             ),
             constraints: Vec::new(),
+            order: None,
         };
         let vars = variables(source);
         assert_eq!(vars[0].ty, hir::Type::Defined(place));

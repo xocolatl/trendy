@@ -1,10 +1,10 @@
 /* Types of the program's own: each is a scalar type with a possible
    representation, the components its values are written with, in braces
    of their own inside the type's (The Third Manifesto, RM Prescription
-   4). Their values are compared with `=` and `<>` only, as in
-   comparisons.trendy, and a variable's components are changed with
-   `update`, as in variables.trendy, which is shorthand for the `replace`
-   below. Each result below is printed twice, folded when compiling and
+   4). Their values are compared with `=` and `<>`, as in
+   comparisons.trendy, and with `<` too if the type has an order, as
+   below, and a variable's components are changed with `update`, as in
+   variables.trendy, which is shorthand for the `replace` below. Each result below is printed twice, folded when compiling and
    computed when running. */
 
 /* A place on Earth, by its latitude and longitude, in degrees. Its
@@ -97,6 +97,38 @@ operator to_equator{r: relation { name: text, at: position }} [
     call debug_table{r: r replace { at := at replace { latitude := 0e0 } }};
 ];
 
+/* A day of the calendar. Its order compares days by their years, then
+   their months, then their days: with one, a type has `<`, `<=`, `>` and
+   `>=`, and `min`, `max` and a load's order take its values. */
+type calendar_day {
+    { year: integer, month: integer, day: integer },
+    constraint month >= 1 and month <= 12,
+    constraint day >= 1 and day <= 31,
+    order [asc year, asc month, asc day],
+};
+
+var festivals := relation {
+    { name: "Nowruz", on: calendar_day{year: 2026, month: 3, day: 20} },
+    { name: "Inti Raymi", on: calendar_day{year: 2026, month: 6, day: 24} },
+    { name: "Lunar New Year", on: calendar_day{year: 2026, month: 2, day: 17} },
+    { name: "Diwali", on: calendar_day{year: 2026, month: 11, day: 8} },
+};
+var first_festival := min{r: festivals, of: on};
+var before_june := festivals where on < calendar_day{year: 2026, month: 6, day: 1};
+var festival_calendar := [
+    var names: array text;
+    load names value from festivals order [asc on] remove {on};
+    names
+];
+
+operator in_order{f: relation { name: text, on: calendar_day }, june: calendar_day} [
+    call debug_value{v: min{r: f, of: on}};
+    call debug_table{r: f where on < june};
+    var names: array text;
+    load names value from f order [asc on] remove {on};
+    call debug_value{v: names};
+];
+
 /* A journey's stops, as a relation. */
 operator stops{j: journey}: relation { stop: text, at: position } [
     relation {
@@ -120,6 +152,9 @@ operator main{} [
     call debug_value{v: flight_back};
     call debug_table{r: southern};
     call debug_table{r: on_equator};
+    call debug_value{v: first_festival};
+    call debug_table{r: before_june};
+    call debug_value{v: festival_calendar};
     call debug_table{r: flight_stops};
 
     call select_position{
@@ -137,6 +172,8 @@ operator main{} [
     call south_of{r: landmarks, latitude: 0e0};
 
     call to_equator{r: landmarks};
+
+    call in_order{f: festivals, june: calendar_day{year: 2026, month: 6, day: 1}};
 
     call list_stops{j: flight};
 ];

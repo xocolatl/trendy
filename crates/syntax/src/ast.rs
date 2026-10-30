@@ -46,6 +46,7 @@ ast_node!(TypeDecl);
 ast_node!(TypeBody);
 ast_node!(Representation);
 ast_node!(Constraint);
+ast_node!(TypeOrder);
 ast_node!(RequirementList);
 ast_node!(Requirement);
 ast_node!(Body);
@@ -325,6 +326,12 @@ impl TypeDecl {
     pub fn constraints(&self) -> impl Iterator<Item = Constraint> {
         self.0.descendants().filter_map(Constraint::cast)
     }
+
+    /// Its orders, of which it may have one: in its body, or, where the
+    /// parser reports them out of place, among the components.
+    pub fn orders(&self) -> impl Iterator<Item = TypeOrder> {
+        self.0.descendants().filter_map(TypeOrder::cast)
+    }
 }
 
 impl Representation {
@@ -332,6 +339,27 @@ impl Representation {
     #[must_use]
     pub fn components(&self) -> Option<Heading> {
         self.0.children().find_map(Heading::cast)
+    }
+}
+
+impl TypeOrder {
+    /// The word `order`.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    /// The components, in the order they compare values.
+    #[must_use]
+    pub fn list(&self) -> Option<OrderList> {
+        self.0.children().find_map(OrderList::cast)
+    }
+
+    /// The span to delete to remove it from its type's braces, with the
+    /// comma that separates it from the rest.
+    #[must_use]
+    pub fn removal(&self) -> Span {
+        list_removal(&self.0)
     }
 }
 

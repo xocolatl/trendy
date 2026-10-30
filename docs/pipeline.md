@@ -659,6 +659,15 @@ selection checks each, which folds when the components are constants
 operator when running. Checking a selector's call, or another selection,
 checks the type's constraints first (`Globals::checked`), so a
 constraint that selects a value of its own type closes a cycle (A0036).
+A type's order, `order [asc …]`, is checked as a load's is
+(`assign::order_items`), with every component named, and makes the type
+ordered (`hir::Defined::order`, `Type::has`), so of `any ordered`
+(`Namespaces::admits`). `hir::compare` orders its values by it, which
+folding uses for comparisons, `min`, `max` and loads; lowering compares
+two values component by component until one differs
+(`FunctionBuilder::ordering`), and a load's order on one becomes its
+components' items (`order_leaves`), so the runtime sorts by scalars, as
+before.
 Then it checks, in order, every operator's signature, its parameters and result type (`signatures`), so
 that anything can refer to an operator defined after it; the globals,
 which are the variables, whose initial values it evaluates, and the

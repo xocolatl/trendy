@@ -288,26 +288,30 @@ impl<'a> Parser<'a> {
     }
 
     /// Whether a type declaration starts here: `type`, a contextual keyword,
-    /// in any case, before a name and `{`, or Tutorial D's `POSSREP`.
-    /// TypeScript's `type Home = {…}` declares a heading instead.
+    /// in any case, before a name and `{`, or Tutorial D's `POSSREP`, or
+    /// its `ORDERED` or `ORDINAL` before either. TypeScript's
+    /// `type Home = {…}` declares a heading instead.
     fn at_type_decl(&mut self) -> bool {
         self.found()
             .is_some_and(|f| f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case("type"))
             && self
                 .found_after(1)
                 .is_some_and(|f| f.kind == SyntaxKind::Ident)
-            && self.found_after(2).is_some_and(|f| {
-                f.kind == SyntaxKind::LBrace
-                    || (f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case("possrep"))
-            })
+            && (self.ordered_at(2)
+                || self.found_after(2).is_some_and(|f| {
+                    f.kind == SyntaxKind::LBrace
+                        || (f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case("possrep"))
+                }))
     }
 
-    /// `type name { { name: type, … }, constraint … };`: a scalar type of
-    /// the program's own, its possible representation, whose components
-    /// are in braces of their own, and its constraints, in any order.
-    /// Components written without braces of their own, as a heading's are,
-    /// or after Tutorial D's `POSSREP`, are reported, with a fix, and so
-    /// are constraints inside the components' braces.
+    /// `type name { { name: type, … }, constraint …, order [asc …] };`: a
+    /// scalar type of the program's own, its possible representation,
+    /// whose components are in braces of their own, its constraints, and
+    /// its order, if it has one, in any order. Components written without
+    /// braces of their own, as a heading's are, or after Tutorial D's
+    /// `POSSREP`, are reported, with a fix, and so are an order or
+    /// constraints inside the components' braces, and Tutorial D's
+    /// `ORDERED` or `ORDINAL`.
     fn type_decl(&mut self) {
         let outer_form = std::mem::replace(&mut self.form, errors::TYPE_DECL_FORM);
         self.start_node(SyntaxKind::TypeDecl);
@@ -320,6 +324,10 @@ impl<'a> Parser<'a> {
             "add the type's name after `type`, as in `type celsius { { degrees: approximate } };`",
             &[SyntaxKind::LBrace],
         );
+        // Tutorial D's `ORDERED` or `ORDINAL`, after the name.
+        if self.ordered_at(0) {
+            self.ordered_word();
+        }
         // Tutorial D's `POSSREP`, and the representation's name after it.
         let possrep = self
             .found()
@@ -337,7 +345,7 @@ impl<'a> Parser<'a> {
             && (self
                 .found_after(1)
                 .is_some_and(|f| matches!(f.kind, SyntaxKind::LBrace | SyntaxKind::RBrace))
-                || self.constraint_at(1));
+                || self.type_item_at(1));
         if braced {
             self.delimited(
                 Some(SyntaxKind::TypeBody),
@@ -347,10 +355,12 @@ impl<'a> Parser<'a> {
                 |p| {
                     let before = p.last_end;
                     p.items(
-                        |p| p.at(SyntaxKind::LBrace) || p.constraint_at(0),
+                        |p| p.at(SyntaxKind::LBrace) || p.type_item_at(0) || p.ordered_at(0),
                         |p| {
-                            if !p.at(SyntaxKind::LBrace) {
-                                p.constraint();
+                            if p.ordered_at(0) {
+                                p.ordered_word();
+                            } else if p.type_item_at(0) {
+                                p.type_item();
                             } else if let Some(inside) = p.representation() {
                                 let close = p.closed_at();
                                 let error =
@@ -388,9 +398,9 @@ impl<'a> Parser<'a> {
         self.form = outer_form;
     }
 
-    /// `{ name: type, … }`: a possible representation's components.
-    /// Constraints after them, inside their braces, as Tutorial D writes
-    /// them in a possrep's, are parsed there, and returned.
+    /// `{ name: type, … }`: a possible representation's components. An
+    /// order or constraints after them, inside their braces, as Tutorial D
+    /// writes a possrep's constraint, are parsed there, and returned.
     fn representation(&mut self) -> Option<errors::Inside> {
         self.start_node(SyntaxKind::Representation);
         let outer_form = std::mem::replace(&mut self.form, errors::HEADING_FORM);
@@ -402,7 +412,7 @@ impl<'a> Parser<'a> {
             &[],
             |p| {
                 p.items(
-                    |p| p.at_heading_attribute() && !p.constraint_at(0),
+                    |p| p.at_heading_attribute() && !p.type_item_at(0),
                     |p| p.moded_attribute(SyntaxKind::AttributeType, false, Self::attribute_type),
                 );
                 // Where the components end, before the comma after them.
@@ -412,22 +422,22 @@ impl<'a> Parser<'a> {
                     }
                     end => (end, false),
                 };
-                let mut constraints = Vec::new();
-                while let Some(start) = p.found().filter(|_| p.constraint_at(0)) {
-                    p.constraint();
-                    constraints.push(Span::new(
-                        start.span.start,
-                        p.last_end.unwrap_or(start.span.end),
+                let mut items = Vec::new();
+                while let Some(start) = p.found().filter(|_| p.type_item_at(0)) {
+                    let what = p.type_item();
+                    items.push((
+                        Span::new(start.span.start, p.last_end.unwrap_or(start.span.end)),
+                        what,
                     ));
                     if p.at(SyntaxKind::Comma) {
                         p.bump();
                     }
                 }
-                if let (Some(components), false) = (components, constraints.is_empty()) {
+                if let (Some(components), false) = (components, items.is_empty()) {
                     inside = Some(errors::Inside {
                         components,
                         comma,
-                        constraints,
+                        items,
                     });
                 }
             },
@@ -441,6 +451,65 @@ impl<'a> Parser<'a> {
     fn closed_at(&self) -> Option<usize> {
         self.last_end
             .filter(|&end| self.source[..end].ends_with('}'))
+    }
+
+    /// Whether what a type says of itself, beside its components, starts at
+    /// the significant token `n` from the next one: an order or a
+    /// constraint.
+    fn type_item_at(&mut self, n: usize) -> bool {
+        self.constraint_at(n) || self.order_at(n)
+    }
+
+    /// What a type says of itself, beside its components, which
+    /// [`Parser::type_item_at`] found: its order or a constraint. What it
+    /// is, as an error says.
+    fn type_item(&mut self) -> &'static str {
+        if self.order_at(0) {
+            self.start_node(SyntaxKind::TypeOrder);
+            self.order_list(|p| p.at_attribute() && !p.type_item_at(0));
+            self.builder.finish_node();
+            "an order"
+        } else {
+            self.constraint();
+            "a constraint"
+        }
+    }
+
+    /// Whether a type's order starts at the significant token `n` from the
+    /// next one: `order`, in any case, unless it is a component's name,
+    /// before a `:`.
+    fn order_at(&mut self, n: usize) -> bool {
+        self.nth_found(n)
+            .is_some_and(|f| f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case("order"))
+            && self
+                .nth_found(n + 1)
+                .is_none_or(|f| f.kind != SyntaxKind::Colon)
+    }
+
+    /// Whether Tutorial D's `ORDERED` or `ORDINAL`, in any case, is the
+    /// significant token `n` from the next one, alone, not a component's
+    /// name or a type's.
+    fn ordered_at(&mut self, n: usize) -> bool {
+        self.nth_found(n).is_some_and(|f| {
+            f.kind == SyntaxKind::Ident
+                && (f.text.eq_ignore_ascii_case("ordered")
+                    || f.text.eq_ignore_ascii_case("ordinal"))
+        }) && self.nth_found(n + 1).is_some_and(|f| {
+            matches!(
+                f.kind,
+                SyntaxKind::Comma | SyntaxKind::RBrace | SyntaxKind::LBrace
+            ) || f.text.eq_ignore_ascii_case("possrep")
+        })
+    }
+
+    /// Tutorial D's `ORDERED` or `ORDINAL`, which [`Parser::ordered_at`]
+    /// found, reported: a type's order is written with its components.
+    fn ordered_word(&mut self) {
+        let found = self.found().expect("at the word");
+        self.start_node(SyntaxKind::Error);
+        self.bump();
+        self.builder.finish_node();
+        self.errors.push(errors::ordered_word(found));
     }
 
     /// Whether a type's constraint starts at the significant token `n` from
@@ -2294,15 +2363,32 @@ impl<'a> Parser<'a> {
     }
 
     /// A load's order, after its relation, if it has one, which sema checks
-    /// a load into an array does: `order [asc x, desc y]`, then `remove
-    /// {x}` or `keep {x}` if the elements leave attributes out.
-    /// SQL's `order by`, items without brackets, Tutorial D's `ORDER ( … )`,
-    /// and items' habits (see [`Parser::order_item`]), are reported with
-    /// fixes.
+    /// a load into an array does: `order [asc x, desc y]` (see
+    /// [`Parser::order_list`]), then `remove {x}` or `keep {x}` if the
+    /// elements leave attributes out.
     fn load_order(&mut self) {
-        let Some(order) = self.found_word("order") else {
+        if !self.at_word("order") {
             return;
-        };
+        }
+        self.order_list(Self::at_attribute);
+        // The attributes the elements leave out, or keep, once the tuples
+        // are ordered: one list, which a second is reported after.
+        let mut first: Option<Span> = None;
+        while let Some(start) = self.at_keeping() {
+            let span = self.keeping(start);
+            if let Some(first) = first {
+                self.errors.push(errors::second_keeping(span, first));
+            }
+            first.get_or_insert(span);
+        }
+    }
+
+    /// `order [asc x, desc y]`, a load's or a type's order, at the word
+    /// `order`. SQL's `order by`, items without brackets, each starting
+    /// where `starts_item` says, Tutorial D's `ORDER ( … )`, and items'
+    /// habits (see [`Parser::order_item`]), are reported with fixes.
+    fn order_list(&mut self, starts_item: fn(&mut Self) -> bool) {
+        let order = self.found().expect("at `order`");
         self.contextual_keyword("order");
         let by = self.found_word("by");
         if by.is_some() {
@@ -2330,11 +2416,11 @@ impl<'a> Parser<'a> {
                 ],
                 |p| p.items(Self::at_attribute, Self::order_item),
             );
-        } else if self.at(SyntaxKind::Ident) {
+        } else if starts_item(self) {
             // `order by name desc`, as SQL writes it: the items without
             // brackets.
             self.start_node(SyntaxKind::OrderList);
-            self.items(Self::at_attribute, Self::order_item);
+            self.items(starts_item, Self::order_item);
             self.builder.finish_node();
             let close = self.last_end.unwrap_or(first);
             self.errors.push(match by {
@@ -2344,18 +2430,8 @@ impl<'a> Parser<'a> {
         } else {
             self.missing_with_help(
                 SyntaxKind::LBracket,
-                "list the attributes to order by in brackets, each after `asc` or `desc`, as in `order [asc name]`",
+                "list what to order by in brackets, each after `asc` or `desc`, as in `order [asc name]`",
             );
-        }
-        // The attributes the elements leave out, or keep, once the tuples
-        // are ordered: one list, which a second is reported after.
-        let mut first: Option<Span> = None;
-        while let Some(start) = self.at_keeping() {
-            let span = self.keeping(start);
-            if let Some(first) = first {
-                self.errors.push(errors::second_keeping(span, first));
-            }
-            first.get_or_insert(span);
         }
     }
 
@@ -6731,6 +6807,67 @@ operator main{} [
         );
         let errors = parse_str("operator main{} [ type celsius { { d: approximate } }; ];").errors;
         assert_eq!(errors[0].code, Code::NestedDefinition);
+    }
+
+    #[test]
+    fn type_orders() {
+        // An order goes in the type's braces, in any place, as a load's is
+        // written; a component may be named `order`.
+        let parse = parse_str(
+            "type day { { year: integer, month: integer }, order [asc year, desc month], constraint month >= 1 };
+type rank { order [asc n], { n: integer } };
+type rule { { order: integer } };",
+        );
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let orders: Vec<Vec<String>> = parse
+            .tree
+            .types()
+            .map(|t| {
+                t.orders()
+                    .filter_map(|o| o.list())
+                    .flat_map(|list| list.items().collect::<Vec<_>>())
+                    .map(|item| item.syntax().text().to_string())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            orders,
+            [
+                vec!["asc year", "desc month"],
+                vec!["asc n"],
+                Vec::<&str>::new()
+            ]
+        );
+        // Inside the components' braces, moved out of them; a load's
+        // habits, such as SQL's `order by`, fixed as there.
+        let fixed = "type day { { year: integer }, order [asc year] };";
+        for (source, code) in [
+            (
+                "type day { { year: integer, order [asc year] } };",
+                Code::ConstraintInRepresentation,
+            ),
+            (
+                "type day { { year: integer }, order by [asc year] };",
+                Code::LoadOrder,
+            ),
+        ] {
+            let parse = parse_str(source);
+            let codes: Vec<Code> = parse.errors.iter().map(|e| e.code).collect();
+            assert_eq!(codes, [code], "{source}");
+            assert_eq!(fix(source), fixed, "{source}");
+        }
+        // Tutorial D's `ORDERED` or `ORDINAL`, in the braces or after the
+        // name, with no fix: which components come first isn't known.
+        for source in [
+            "type day { { year: integer }, ordered };",
+            "type day ORDINAL { { year: integer } };",
+            "type day ORDERED POSSREP { year: integer };",
+        ] {
+            let parse = parse_str(source);
+            assert_eq!(parse.errors[0].code, Code::OrderedWord, "{source}");
+            assert_eq!(parse.tree.types().count(), 1, "{source}");
+            assert!(parse.errors[0].suggestions.is_empty(), "{source}");
+        }
     }
 
     #[test]

@@ -882,8 +882,8 @@ impl Target {
                 let size = u64::try_from(self.size(layout)).map_err(|e| e.to_string())?;
                 self.usize(size, out)?;
             }
-            lir::Field::Offset(layout, index) => {
-                let offset = self.path_offset(layout, &[*index])?;
+            lir::Field::Offset(layout, path) => {
+                let offset = self.path_offset(layout, path)?;
                 self.usize(u64::try_from(offset).map_err(|e| e.to_string())?, out)?;
             }
             lir::Field::Address(target) => {
@@ -1130,7 +1130,7 @@ mod tests {
         let laid_out = layout
             .lay_out(&[
                 lir::Field::Size(tuple.clone()),
-                lir::Field::Offset(tuple, 1),
+                lir::Field::Offset(tuple, vec![1]),
             ])
             .unwrap();
         assert_eq!(laid_out.bytes[..8], 16_u64.to_le_bytes());

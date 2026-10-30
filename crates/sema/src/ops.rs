@@ -184,7 +184,9 @@ impl Operator {
             Operator::Compare(hir::Comparison::Equal | hir::Comparison::NotEqual) => {
                 "two values of the same type"
             }
-            Operator::Compare(_) => "booleans, integers, approximate numbers or text",
+            Operator::Compare(_) => {
+                "booleans, integers, approximate numbers, text, or values of a type with an order"
+            }
         }
     }
 
@@ -205,6 +207,15 @@ impl Operator {
                 | (Operator::Compare(comparison), hir::Type::Relation(_)) => Some(
                     Resolved::Binary(B::Compare(comparison, hir::Compared::of(ty))),
                 ),
+                // A type of the program's own with an order.
+                (Operator::Compare(comparison), hir::Type::Defined(defined))
+                    if defined.order.is_some() =>
+                {
+                    Some(Resolved::Binary(B::Compare(
+                        comparison,
+                        hir::Compared::Defined,
+                    )))
+                }
                 (Operator::Compare(comparison), hir::Type::Parameter(p))
                     if p.any == hir::Any::Relation =>
                 {

@@ -123,15 +123,34 @@ pub(crate) fn resolve(
                     });
                     next += 1;
                 }
+                let order = type_order(decl, name, &resolved, errors);
                 let defined = hir::Defined {
                     name: name.clone(),
                     components: resolved,
                     constraints,
+                    order,
                 };
                 namespaces.defined.insert(name.clone(), defined);
             }
         }
     }
+}
+
+/// The order `decl` gives its type, named `name`, with `components`, if it
+/// gives it one, or `None` after reporting its errors: a type has one.
+fn type_order(
+    decl: &TypeDecl,
+    name: &str,
+    components: &hir::Heading,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<Vec<hir::OrderItem>> {
+    let mut orders = decl.orders();
+    let first = orders.next()?;
+    for again in orders {
+        errors.push(errors::second_order(name, &again, &first));
+    }
+    let list = first.list()?;
+    crate::assign::order_items(&list, components, errors::Orders::Type(name), errors)
 }
 
 /// The declared headings, after `relation` or `tuple`, and types that

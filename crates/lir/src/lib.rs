@@ -880,9 +880,10 @@ pub enum Field {
     Struct(Vec<Field>),
     /// The size of a value with this layout, as a pointer-sized integer.
     Size(Layout),
-    /// The offset of field `index` in a [`Layout::Struct`], as a
-    /// pointer-sized integer.
-    Offset(Layout, usize),
+    /// The offset of the field at a path in a [`Layout::Struct`], a field's
+    /// index in each struct from the outermost in, as a pointer-sized
+    /// integer.
+    Offset(Layout, Vec<usize>),
 }
 
 impl Field {

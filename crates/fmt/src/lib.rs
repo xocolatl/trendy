@@ -836,7 +836,8 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
     // which a space also comes before, `load`, `value`, `from` and `order`,
     // and a load's `keep`, which one comes before too, an order item's
     // `asc` and `desc`, a `for` loop's `in`, `heading`, before a heading's
-    // name, `type`, before a type's, and `constraint`, before a condition.
+    // name, `type`, before a type's, `constraint`, before a condition, and
+    // a type's `order`.
     let contextual_keyword = prev.kind() == Ident
         && prev.parent().is_some_and(|p| match p.kind() {
             BuiltinType => prev.text() == "type",
@@ -849,6 +850,7 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
             | SyntaxKind::HeadingDecl
             | SyntaxKind::TypeDecl
             | SyntaxKind::Constraint
+            | SyntaxKind::TypeOrder
             | SyntaxKind::Load
             | SyntaxKind::Keeping
             | SyntaxKind::Numbering

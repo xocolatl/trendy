@@ -84,6 +84,7 @@ codes! {
     BareRepresentation => "P0039",
     ConstraintSpelling => "P0040",
     ConstraintInRepresentation => "P0041",
+    OrderedWord => "P0042",
     DuplicateName => "A0001",
     MissingMain => "A0002",
     UnknownType => "A0003",

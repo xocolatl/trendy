@@ -339,7 +339,7 @@ impl Lowering {
                 lir::Field::Struct(vec![
                     lir::Field::Address(name_bytes),
                     lir::Field::Usize(len(name.len())),
-                    lir::Field::Offset(tuple.clone(), i),
+                    lir::Field::Offset(tuple.clone(), vec![i]),
                     lir::Field::Address(desc),
                 ])
             })
@@ -2416,7 +2416,7 @@ impl<'a> FunctionBuilder<'a> {
         let offsets = cx.constant(
             sources
                 .iter()
-                .map(|&i| lir::Field::Offset(tuple_layout.clone(), i))
+                .map(|&i| lir::Field::Offset(tuple_layout.clone(), vec![i]))
                 .collect(),
         );
         let result_desc = lir::Place::whole(lir::Base::Data(cx.descriptor(result_ty)));
@@ -2464,9 +2464,9 @@ impl<'a> FunctionBuilder<'a> {
                     || {
                         let i = position(rhs_heading, name)
                             .expect("each attribute of the result is an operand's");
-                        (1, lir::Field::Offset(rhs_tuple.clone(), i))
+                        (1, lir::Field::Offset(rhs_tuple.clone(), vec![i]))
                     },
-                    |i| (0, lir::Field::Offset(lhs_tuple.clone(), i)),
+                    |i| (0, lir::Field::Offset(lhs_tuple.clone(), vec![i])),
                 );
                 lir::Field::Struct(vec![lir::Field::Usize(from_rhs), offset])
             })
@@ -2525,15 +2525,21 @@ impl<'a> FunctionBuilder<'a> {
                 .map(|(i, (_, ty))| (i, ty))
                 .expect("sema names only the relation's attributes")
         };
-        let items: Vec<lir::Field> = loading
-            .order
-            .iter()
-            .map(|item| {
-                let (i, ty) = attribute(&item.attribute);
+        // Each scalar the tuples are ordered by: an attribute's, or, of a
+        // value of a type of the program's own, its components', by its
+        // order.
+        let mut ordered = Vec::new();
+        for item in &loading.order {
+            let (i, ty) = attribute(&item.attribute);
+            order_leaves(ty, vec![i], item.descending, &mut ordered);
+        }
+        let items: Vec<lir::Field> = ordered
+            .into_iter()
+            .map(|(path, ty, descending)| {
                 lir::Field::Struct(vec![
-                    lir::Field::Offset(tuple.clone(), i),
+                    lir::Field::Offset(tuple.clone(), path),
                     lir::Field::Address(cx.descriptor(ty)),
-                    lir::Field::Usize(u64::from(item.descending)),
+                    lir::Field::Usize(u64::from(descending)),
                 ])
             })
             .collect();
@@ -2553,11 +2559,11 @@ impl<'a> FunctionBuilder<'a> {
             .enumerate()
             .map(|(j, (name, ty))| {
                 let to = match loading.loaded {
-                    hir::Loaded::Tuples => lir::Field::Offset(element.clone(), j),
+                    hir::Loaded::Tuples => lir::Field::Offset(element.clone(), vec![j]),
                     hir::Loaded::Values => lir::Field::Usize(0),
                 };
                 lir::Field::Struct(vec![
-                    lir::Field::Offset(tuple.clone(), attribute(name).0),
+                    lir::Field::Offset(tuple.clone(), vec![attribute(name).0]),
                     to,
                     lir::Field::Size(layout(ty)),
                 ])
@@ -2615,7 +2621,7 @@ impl<'a> FunctionBuilder<'a> {
         let part = |from: lir::Field, to: &str, size: lir::Field| {
             lir::Field::Struct(vec![
                 from,
-                lir::Field::Offset(tuple.clone(), position(to)),
+                lir::Field::Offset(tuple.clone(), vec![position(to)]),
                 size,
             ])
         };
@@ -2632,7 +2638,7 @@ impl<'a> FunctionBuilder<'a> {
                     .enumerate()
                     .map(|(j, (name, ty))| {
                         part(
-                            lir::Field::Offset(made.clone(), j),
+                            lir::Field::Offset(made.clone(), vec![j]),
                             name,
                             lir::Field::Size(layout(ty)),
                         )
@@ -2644,7 +2650,7 @@ impl<'a> FunctionBuilder<'a> {
         let numbers: Vec<lir::Field> = unloading
             .numbered
             .iter()
-            .map(|n| lir::Field::Offset(tuple.clone(), position(n)))
+            .map(|n| lir::Field::Offset(tuple.clone(), vec![position(n)]))
             .collect();
         let part_count = usize_constant(len(parts.len()), cx);
         let number_count = usize_constant(len(numbers.len()), cx);
@@ -2781,7 +2787,9 @@ impl<'a> FunctionBuilder<'a> {
                         0,
                         lir::Field::Offset(
                             outer.clone(),
-                            position(heading, name).expect("a kept attribute is the operand's"),
+                            vec![
+                                position(heading, name).expect("a kept attribute is the operand's"),
+                            ],
                         ),
                     ),
                     None => inner
@@ -2789,7 +2797,7 @@ impl<'a> FunctionBuilder<'a> {
                         .enumerate()
                         .find_map(|(k, (_, inner, tuple))| {
                             let i = position(inner, name)?;
-                            Some((len(k + 1), lir::Field::Offset(tuple.clone(), i)))
+                            Some((len(k + 1), lir::Field::Offset(tuple.clone(), vec![i])))
                         })
                         .expect("each attribute of the result is kept or ungrouped"),
                 };
@@ -2800,7 +2808,7 @@ impl<'a> FunctionBuilder<'a> {
             .iter()
             .map(|(at, _, tuple)| {
                 lir::Field::Struct(vec![
-                    lir::Field::Offset(outer.clone(), *at),
+                    lir::Field::Offset(outer.clone(), vec![*at]),
                     lir::Field::Size(tuple.clone()),
                 ])
             })
@@ -2964,6 +2972,23 @@ impl<'a> FunctionBuilder<'a> {
                 });
                 return dst;
             }
+            // Values of a type of the program's own by its order, which is
+            // then compared with 0.
+            hir::BinaryOp::Compare(
+                comparison @ (hir::Comparison::Less
+                | hir::Comparison::LessOrEqual
+                | hir::Comparison::Greater
+                | hir::Comparison::GreaterOrEqual),
+                hir::Compared::Defined,
+            ) => {
+                let ordering = self.ordering(operand_ty, lhs, rhs, cx);
+                let zero = self.place(&hir::Expr::Constant(hir::Value::Integer(0)), cx);
+                let op = lir::BinaryOp::Compare(
+                    lower_comparison(comparison),
+                    lir::Operand::Numeric(lir::Numeric::Integer),
+                );
+                (op, ordering, zero)
+            }
             hir::BinaryOp::Compare(
                 comparison,
                 hir::Compared::Defined
@@ -3025,6 +3050,120 @@ impl<'a> FunctionBuilder<'a> {
             rhs,
         });
         dst
+    }
+
+    /// The order of the values at `lhs` and `rhs`, of the ordered type
+    /// `ty`, as [`hir::compare`] has it, as an integer in a new slot: -1 if
+    /// the first comes first, 1 if it comes last, and else 0. Text's is the
+    /// runtime's, and other scalars' by `<` and `>`. A value of a type of
+    /// the program's own's is its components', in its order, the first that
+    /// isn't 0, a descending one's the other way.
+    fn ordering(
+        &mut self,
+        ty: &hir::Type,
+        lhs: lir::Place,
+        rhs: lir::Place,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let result = self.slot(lir::Layout::I64);
+        let set = |this: &mut Self, n: i64, cx: &mut Lowering| {
+            let src = this.place(&hir::Expr::Constant(hir::Value::Integer(n)), cx);
+            this.insts.push(lir::Inst::Copy {
+                dst: result.clone(),
+                src,
+                layout: lir::Layout::I64,
+            });
+        };
+        match ty {
+            hir::Type::Scalar(hir::Scalar::Text) => {
+                self.insts.push(lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::CompareText,
+                    args: vec![result.clone(), lhs, rhs],
+                });
+            }
+            hir::Type::Scalar(scalar) => {
+                let compared = hir::Compared::Scalar(*scalar);
+                let less = hir::BinaryOp::Compare(hir::Comparison::Less, compared);
+                let is_less = self.binary(less, ty, lhs.clone(), rhs.clone(), cx);
+                let (first, after, done) = (self.new_block(), self.new_block(), self.new_block());
+                self.end_block(
+                    lir::Terminator::Branch {
+                        condition: is_less,
+                        then: first,
+                        otherwise: after,
+                    },
+                    first,
+                );
+                set(self, -1, cx);
+                self.end_block(lir::Terminator::Jump(done), after);
+                let greater = hir::BinaryOp::Compare(hir::Comparison::Greater, compared);
+                let is_greater = self.binary(greater, ty, lhs, rhs, cx);
+                let (last, same) = (self.new_block(), self.new_block());
+                self.end_block(
+                    lir::Terminator::Branch {
+                        condition: is_greater,
+                        then: last,
+                        otherwise: same,
+                    },
+                    last,
+                );
+                set(self, 1, cx);
+                self.end_block(lir::Terminator::Jump(done), same);
+                set(self, 0, cx);
+                self.end_block(lir::Terminator::Jump(done), done);
+            }
+            hir::Type::Defined(defined) => {
+                set(self, 0, cx);
+                let done = self.new_block();
+                let order = defined
+                    .order
+                    .as_ref()
+                    .expect("sema compares only ordered values");
+                for item in order {
+                    let (j, (_, component)) = defined
+                        .components
+                        .attributes()
+                        .enumerate()
+                        .find(|(_, (name, _))| *name == item.attribute)
+                        .expect("an order names the type's components");
+                    let (mut first, mut second) = (lhs.clone(), rhs.clone());
+                    first.path.push(j);
+                    second.path.push(j);
+                    if item.descending {
+                        std::mem::swap(&mut first, &mut second);
+                    }
+                    let ordering = self.ordering(component, first, second, cx);
+                    self.insts.push(lir::Inst::Copy {
+                        dst: result.clone(),
+                        src: ordering.clone(),
+                        layout: lir::Layout::I64,
+                    });
+                    let zero = self.place(&hir::Expr::Constant(hir::Value::Integer(0)), cx);
+                    let differs = self.slot(lir::Layout::U8);
+                    self.insts.push(lir::Inst::Binary {
+                        dst: differs.clone(),
+                        op: lir::BinaryOp::Compare(
+                            lir::Comparison::NotEqual,
+                            lir::Operand::Numeric(lir::Numeric::Integer),
+                        ),
+                        lhs: ordering,
+                        rhs: zero,
+                    });
+                    let next = self.new_block();
+                    self.end_block(
+                        lir::Terminator::Branch {
+                            condition: differs,
+                            then: done,
+                            otherwise: next,
+                        },
+                        next,
+                    );
+                }
+                self.end_block(lir::Terminator::Jump(done), done);
+            }
+            other => unreachable!("only ordered values are compared, not values of `{other}`"),
+        }
+        result
     }
 
     /// A new stack slot holding a value with `layout`.
@@ -3090,8 +3229,8 @@ fn common_attributes(lhs: &hir::Heading, rhs: &hir::Heading, cx: &mut Lowering) 
         .filter_map(|(i, (name, ty))| {
             let j = rhs.attributes().position(|(a, _)| a == name)?;
             Some(lir::Field::Struct(vec![
-                lir::Field::Offset(lhs_tuple.clone(), i),
-                lir::Field::Offset(rhs_tuple.clone(), j),
+                lir::Field::Offset(lhs_tuple.clone(), vec![i]),
+                lir::Field::Offset(rhs_tuple.clone(), vec![j]),
                 lir::Field::Address(cx.descriptor(ty)),
             ]))
         })
@@ -3162,6 +3301,37 @@ fn lower_numeric(numeric: hir::Numeric) -> lir::Numeric {
 
 fn scalar_layout(scalar: hir::Scalar) -> lir::Layout {
     layout(&hir::Type::Scalar(scalar))
+}
+
+/// The scalars a value of type `ty`, at `path` in a tuple, orders by, as
+/// [`hir::compare`] does, `descending` or not, into `leaves`: each one's
+/// path, type, and whether it is descending. A value of a type of the
+/// program's own orders by its components, in its order, a descending one
+/// the other way.
+fn order_leaves<'t>(
+    ty: &'t hir::Type,
+    path: Vec<usize>,
+    descending: bool,
+    leaves: &mut Vec<(Vec<usize>, &'t hir::Type, bool)>,
+) {
+    let hir::Type::Defined(defined) = ty else {
+        leaves.push((path, ty, descending));
+        return;
+    };
+    let order = defined
+        .order
+        .as_ref()
+        .expect("sema orders only by ordered types");
+    for item in order {
+        let (j, (_, component)) = defined
+            .components
+            .attributes()
+            .enumerate()
+            .find(|(_, (name, _))| *name == item.attribute)
+            .expect("an order names the type's components");
+        let at = path.iter().copied().chain([j]).collect();
+        order_leaves(component, at, descending != item.descending, leaves);
+    }
 }
 
 /// The values of types of the program's own with constraints in a tuple
@@ -4762,7 +4932,7 @@ mod tests {
         let lir::Field::Struct(b) = &cx.data[attributes.0].fields[1] else {
             panic!("an attribute is a struct");
         };
-        assert_eq!(b[2], lir::Field::Offset(tuple, 1));
+        assert_eq!(b[2], lir::Field::Offset(tuple, vec![1]));
     }
 
     #[test]

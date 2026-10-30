@@ -555,7 +555,7 @@ fn into_array(
     if !filling.fits(loaded, heading, &removed, errors) {
         return None;
     }
-    let order = order_items(&order, heading, errors)?;
+    let order = order_items(&order, heading, errors::Orders::Load, errors)?;
     let loading = hir::Loading {
         order,
         removed,
@@ -899,17 +899,20 @@ fn ordered_after_removal(
     ))
 }
 
-/// The items of a load's `order`, each a different attribute of `heading`,
-/// of a type with an order, at least one, or `None` after reporting why
-/// they aren't.
-fn order_items(
+/// The items of `order`, a load's or a type's, as `orders` says, each a
+/// different attribute or component of `heading`, of a type with an
+/// order, at least one, and, of a type, every component, so that values
+/// that differ are never equal in it, or `None` after reporting why they
+/// aren't.
+pub(crate) fn order_items(
     order: &ast::OrderList,
     heading: &hir::Heading,
+    orders: errors::Orders,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<Vec<hir::OrderItem>> {
     let items: Vec<ast::OrderItem> = order.items().collect();
     if items.is_empty() {
-        errors.push(errors::empty_order(order, heading));
+        errors.push(errors::empty_order(order, heading, orders));
         return None;
     }
     let mut ok = true;
@@ -922,12 +925,12 @@ fn order_items(
         let name = ident.text();
         let span = trendy_syntax::span(ident.text_range());
         let Some(ty) = heading.get(name) else {
-            errors.push(errors::unknown_order_attribute(name, span, heading));
+            errors.push(errors::unknown_order_attribute(name, span, heading, orders));
             ok = false;
             continue;
         };
         if !ty.has(hir::Requirement::Order) {
-            errors.push(errors::unordered_attribute(name, span, ty));
+            errors.push(errors::unordered_attribute(name, span, ty, orders));
             ok = false;
             continue;
         }
@@ -937,6 +940,7 @@ fn order_items(
                 span,
                 *first,
                 order.removal(item),
+                orders,
             ));
             ok = false;
             continue;
@@ -946,6 +950,17 @@ fn order_items(
             descending: item.descending(),
         };
         ordered.push((item, span));
+    }
+    if let errors::Orders::Type(_) = orders {
+        let missing: Vec<&str> = heading
+            .named()
+            .map(|(name, _)| name)
+            .filter(|name| !ordered.iter().any(|(o, _)| o.attribute == *name))
+            .collect();
+        if ok && !missing.is_empty() {
+            errors.push(errors::unordered_components(&missing, order, orders));
+            ok = false;
+        }
     }
     ok.then(|| ordered.into_iter().map(|(item, _)| item).collect())
 }

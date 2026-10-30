@@ -1378,6 +1378,47 @@ fn values_that_break_their_types_constraints_stop_the_program() {
     assert_eq!((status, &stderr[..]), (0, "percentage{value: 100}\n"));
 }
 
+/// Values of a type of the program's own with an order compare by it when
+/// the program runs, as when compiling: its components in turn, a
+/// descending one the other way, and a value inside by its own type's.
+#[test]
+fn ordered_values_compare_by_their_types_order_when_running() {
+    let source = "type score { { points: integer, name: text }, order [desc points, asc name] };
+type entry { { at: score, round: integer }, order [asc round, asc at] };
+
+operator compare{a: integer, b: integer} [
+    var high := score{points: a, name: \"Ama\"};
+    var low := score{points: b, name: \"Zhu\"};
+    call debug_value{v: high < low};
+    var entries := relation {
+        { e: entry{at: high, round: 2} },
+        { e: entry{at: low, round: 1} },
+        { e: entry{at: score{points: a, name: \"Bo\"}, round: 2} },
+    };
+    call debug_value{v: min{r: entries, of: e}};
+    var ordered: array entry;
+    load ordered value from entries order [desc e];
+    call debug_value{v: ordered};
+];
+
+operator main{} [
+    call compare{a: 9, b: 3};
+];
+";
+    let (status, stderr) = run_source("ordered_values", source);
+    assert_eq!(
+        (status, stderr.lines().collect::<Vec<_>>()),
+        (
+            0,
+            vec![
+                "true",
+                r#"entry{at: score{name: "Zhu", points: 3}, round: 1}"#,
+                r#"array [entry{at: score{name: "Bo", points: 9}, round: 2}, entry{at: score{name: "Ama", points: 9}, round: 2}, entry{at: score{name: "Zhu", points: 3}, round: 1}]"#,
+            ]
+        )
+    );
+}
+
 #[test]
 fn an_if_fails_only_if_the_branch_it_takes_does() {
     let overflow = format!(
@@ -1639,6 +1680,16 @@ fn types() {
             "│ position{latitude: 0e0, longitude: 3.544e1}  │ Petra          │",
             "│ position{latitude: 0e0, longitude: 1.3573e2} │ Kinkaku-ji     │",
             "└──────────────────────────────────────────────┴────────────────┘",
+            // The first festival, those before June, and all of them, in
+            // order, by the calendar day's order.
+            "calendar_day{day: 17, month: 2, year: 2026}",
+            "┌────────────────┬─────────────────────────────────────────────┐",
+            "│ name           │ on                                          │",
+            "├────────────────┼─────────────────────────────────────────────┤",
+            "│ Lunar New Year │ calendar_day{day: 17, month: 2, year: 2026} │",
+            "│ Nowruz         │ calendar_day{day: 20, month: 3, year: 2026} │",
+            "└────────────────┴─────────────────────────────────────────────┘",
+            r#"array ["Lunar New Year", "Nowruz", "Inti Raymi", "Diwali"]"#,
             "┌───────────────────────────────────────────────────┬─────────────┐",
             "│ at                                                │ stop        │",
             "├───────────────────────────────────────────────────┼─────────────┤",

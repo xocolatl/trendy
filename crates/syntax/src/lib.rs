@@ -211,6 +211,10 @@ pub enum SyntaxKind {
     /// `constraint condition`: a condition every value of a type satisfies.
     /// `constraint` is a contextual keyword, an identifier elsewhere.
     Constraint,
+    /// `order [asc c, …]`: the order of a type's values, by their
+    /// components, in turn. `order` is a contextual keyword, an identifier
+    /// elsewhere.
+    TypeOrder,
     /// `{ <, … }`: what a kind's types must have.
     RequirementList,
     /// One thing a kind's types must have: an operator, such as `<`.
@@ -389,7 +393,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 157] = [
+    pub const ALL: [SyntaxKind; 158] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -480,6 +484,7 @@ impl SyntaxKind {
         SyntaxKind::TypeBody,
         SyntaxKind::Representation,
         SyntaxKind::Constraint,
+        SyntaxKind::TypeOrder,
         SyntaxKind::RequirementList,
         SyntaxKind::Requirement,
         SyntaxKind::VarDecl,
@@ -962,6 +967,7 @@ impl SyntaxKind {
             SyntaxKind::TypeBody => "type's representation",
             SyntaxKind::Representation => "possible representation",
             SyntaxKind::Constraint => "type constraint",
+            SyntaxKind::TypeOrder => "type's order",
             SyntaxKind::RequirementList => "requirements",
             SyntaxKind::Requirement => "requirement",
             SyntaxKind::VarDecl => "variable declaration",
