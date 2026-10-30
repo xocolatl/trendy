@@ -4,9 +4,9 @@ mod body;
 mod check;
 mod errors;
 mod globals;
-mod headings;
 mod keys;
 mod locals;
+mod named_types;
 mod operators;
 mod ops;
 mod prelude;
@@ -111,8 +111,9 @@ pub(crate) fn check(
     let text = file.syntax().text().to_string();
     let sites = Sites::new(source, &text);
 
-    // The headings' attributes first, which any type can name.
-    headings::resolve(file, &mut namespaces, errors);
+    // The headings' attributes and the types' components first, which any
+    // type can name.
+    named_types::resolve(file, &mut namespaces, errors);
 
     // Every operator's signature first, so that anything can refer to an
     // operator defined after it.
@@ -251,6 +252,10 @@ pub(crate) enum Kind {
     Heading,
     /// A built-in type.
     Type,
+    /// A type of the program's own.
+    Defined,
+    /// A type's selector, an operator with the type's name.
+    Selector,
 }
 
 impl Kind {
@@ -261,6 +266,8 @@ impl Kind {
             Kind::Variable => "a variable",
             Kind::Heading => "a heading",
             Kind::Type => "a built-in type",
+            Kind::Defined => "a type",
+            Kind::Selector => "a type's selector",
         }
     }
 }
@@ -280,8 +287,13 @@ pub(crate) struct Namespaces {
     /// Where each heading is declared.
     headings: HashMap<String, Span>,
     /// Each heading's attributes, unless they have errors, which are
-    /// reported: [`headings::resolve`] fills it in.
+    /// reported: [`named_types::resolve`] fills it in.
     attributes: HashMap<String, hir::Heading>,
+    /// Where each of the program's own types is declared.
+    types: HashMap<String, Span>,
+    /// Each of the program's types, with its components, unless they have
+    /// errors, which are reported: [`named_types::resolve`] fills it in.
+    defined: HashMap<String, hir::Defined>,
     /// The kinds, which only the prelude declares, by name, each with the
     /// built-in types of it.
     kinds: HashMap<String, (hir::Kind, BTreeSet<hir::Scalar>)>,
@@ -375,6 +387,24 @@ impl Namespaces {
         self.headings.get(ident.text()) == Some(&trendy_syntax::span(ident.text_range()))
     }
 
+    /// The program's own type named `name`: where it is declared, and the
+    /// type, unless its components have errors.
+    pub(crate) fn defined(&self, name: &str) -> Option<(Span, Option<&hir::Defined>)> {
+        let span = *self.types.get(name)?;
+        Some((span, self.defined.get(name)))
+    }
+
+    /// The program's own types' names.
+    pub(crate) fn defined_types(&self) -> impl Iterator<Item = &str> {
+        self.types.keys().map(String::as_str)
+    }
+
+    /// Whether `ident` is its type name's first declaration, not a
+    /// duplicate.
+    pub(crate) fn is_first_type(&self, ident: &SyntaxToken) -> bool {
+        self.types.get(ident.text()) == Some(&trendy_syntax::span(ident.text_range()))
+    }
+
     pub(crate) fn operators(&self) -> impl Iterator<Item = (&str, Kind, Option<Span>)> {
         self.operators
             .iter()
@@ -425,6 +455,7 @@ fn collect_names(prelude: &Prelude, file: &SourceFile, errors: &mut Vec<Diagnost
             Item::Operator(ref op) => (Kind::Operator, op.name()),
             Item::Variable(ref decl) => (Kind::Variable, decl.name()),
             Item::Heading(ref decl) => (Kind::Heading, decl.name()),
+            Item::Type(ref decl) => (Kind::Defined, decl.name()),
             // Reported as being outside the prelude, or the prelude's own,
             // already in it.
             Item::Builtin(_) | Item::BuiltinType(_) | Item::Kind(_) => continue,
@@ -463,7 +494,12 @@ fn collect_names(prelude: &Prelude, file: &SourceFile, errors: &mut Vec<Diagnost
             Kind::Variable => namespaces.variable(name).map(|s| (kind, Some(s))),
             _ => namespaces
                 .heading(name)
-                .map(|(s, _)| (kind, Some(s)))
+                .map(|(s, _)| (Kind::Heading, Some(s)))
+                .or_else(|| {
+                    namespaces
+                        .defined(name)
+                        .map(|(s, _)| (Kind::Defined, Some(s)))
+                })
                 .or_else(|| hir::Scalar::from_name(name).map(|_| (Kind::Type, None))),
         };
         match (first, kind) {
@@ -471,12 +507,63 @@ fn collect_names(prelude: &Prelude, file: &SourceFile, errors: &mut Vec<Diagnost
             (None, Kind::Variable) => {
                 namespaces.variables.insert(name.to_string(), span);
             }
+            (None, Kind::Defined) => {
+                namespaces.types.insert(name.to_string(), span);
+            }
             (None, _) => {
                 namespaces.headings.insert(name.to_string(), span);
             }
         }
     }
+    selectors(file, &mut namespaces, errors);
     namespaces
+}
+
+/// Record each type's selector, an operator named after it, with its
+/// components as its parameters, in `namespaces`: no other operator can
+/// have a type's name, so one that does is reported. The program's own
+/// give way to the selector, as a duplicate does to the first definition,
+/// and a type with a prelude operator's name, reported at the type, has
+/// no selector.
+fn selectors(file: &SourceFile, namespaces: &mut Namespaces, errors: &mut Vec<Diagnostic>) {
+    for decl in file.types() {
+        let Some(ident) = decl.name().and_then(|n| n.ident()) else {
+            continue;
+        };
+        if !namespaces.is_first_type(&ident) {
+            continue;
+        }
+        let (name, span) = (ident.text(), trendy_syntax::span(ident.text_range()));
+        if let Some(others) = namespaces.operators.get(name) {
+            if let Some(other) = others.iter().find(|other| other.span.is_none()) {
+                errors.push(errors::selector_name(name, span, other.kind, None));
+                continue;
+            }
+            for other in others {
+                errors.push(errors::selector_name(name, span, other.kind, other.span));
+            }
+            namespaces.operators.remove(name);
+        }
+        let params = decl
+            .representation()
+            .and_then(|r| r.components())
+            .map(|components| {
+                components
+                    .attributes()
+                    .filter_map(|a| Some(a.name()?.ident()?.text().to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        namespaces
+            .operators
+            .entry(name.to_string())
+            .or_default()
+            .push(OperatorName {
+                kind: Kind::Selector,
+                span: Some(span),
+                params,
+            });
+    }
 }
 
 /// The first declaration of each variable, by name.
@@ -1461,8 +1548,8 @@ mod tests {
             tuple_type(&[("a", b), ("c", scalar(hir::Scalar::Text))])
         );
         assert_eq!(
-            vars[0].ty.default_value(),
-            vars[0].init,
+            vars[0].ty.default_value().as_ref(),
+            Some(&vars[0].init),
             "starts at its type's default"
         );
         assert_eq!(
@@ -7784,6 +7871,153 @@ heading home := { city: text, rooms: integer };
                 "heading home := {{ city: text }};\nvar r: relation {{ city: text }} := relation home {{}};{MAIN}"
             ))
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_programs_own_types() {
+        // Declared in any order, nested, and in a heading; selected by the
+        // type's name, a component read with a dot, and compared, all
+        // folded.
+        let source = "var here := place{name: \"Lima\", at: position{latitude: -12.05e0, longitude: -77.04e0}};
+var latitude := here.at.latitude;
+var same := here.at = position{latitude: -12.05e0, longitude: -77.04e0};
+var cities: relation city := relation { { name: \"Lima\", at: here.at } };
+heading city := { name: text, at: position };
+type place { { name: text, at: position } };
+type position { { latitude: approximate, longitude: approximate } };
+";
+        let approximate = || hir::Type::Scalar(hir::Scalar::Approximate);
+        let position = hir::Defined {
+            name: "position".to_string(),
+            components: hir::Heading::new(
+                [
+                    ("latitude".to_string(), approximate()),
+                    ("longitude".to_string(), approximate()),
+                ]
+                .into(),
+            ),
+        };
+        let place = hir::Defined {
+            name: "place".to_string(),
+            components: hir::Heading::new(
+                [
+                    ("at".to_string(), hir::Type::Defined(position.clone())),
+                    ("name".to_string(), hir::Type::Scalar(hir::Scalar::Text)),
+                ]
+                .into(),
+            ),
+        };
+        let vars = variables(source);
+        assert_eq!(vars[0].ty, hir::Type::Defined(place));
+        assert_eq!(
+            vars[0].init.to_string(),
+            "place{at: position{latitude: -1.205e1, longitude: -7.704e1}, name: \"Lima\"}"
+        );
+        assert_eq!(vars[1].init.to_string(), "-1.205e1");
+        assert_eq!(vars[2].init, hir::Value::Boolean(true));
+        assert_eq!(
+            vars[3].ty,
+            hir::Type::Relation(hir::Heading::new(
+                [
+                    ("at".to_string(), hir::Type::Defined(position.clone())),
+                    ("name".to_string(), hir::Type::Scalar(hir::Scalar::Text)),
+                ]
+                .into()
+            ))
+        );
+        // The selector is a read-only operator named after the type, which
+        // a call with values known only when running calls.
+        let program = analyze_str(&format!(
+            "{source}operator north{{p: position}}: position [ position{{latitude: p.latitude + 1e0, longitude: p.longitude}} ];{MAIN}"
+        ))
+        .unwrap();
+        let selector = program
+            .operators
+            .iter()
+            .find(|op| op.name == "position")
+            .unwrap();
+        let hir::OperatorKind::ReadOnly { result, value, .. } = &selector.kind else {
+            panic!("a read-only operator");
+        };
+        assert_eq!(*result, hir::Type::Defined(position.clone()));
+        assert!(matches!(value, hir::Expr::Select(defined, _) if *defined == position));
+        assert_eq!(
+            selector.params.keys().collect::<Vec<_>>(),
+            ["latitude", "longitude"]
+        );
+    }
+
+    #[test]
+    fn a_programs_own_types_errors() {
+        let celsius = "type celsius { { degrees: approximate } };\n";
+        // A component that isn't one, fixed to the closest.
+        let source =
+            format!("{celsius}var t := celsius{{degrees: 1e0}};\nvar d := t.degres;{MAIN}");
+        assert_eq!(messages(&source), ["unknown component `degres`"]);
+        assert_eq!(
+            fix(&source),
+            format!("{celsius}var t := celsius{{degrees: 1e0}};\nvar d := t.degrees;{MAIN}")
+        );
+        // A missing component is a missing argument, a lone one without a
+        // name named, and no default.
+        assert_eq!(
+            codes(&format!("{celsius}var t := celsius{{}};{MAIN}")),
+            [Code::MissingAttribute]
+        );
+        assert_eq!(
+            fix(&format!("{celsius}var t := celsius{{1e0}};{MAIN}")),
+            format!("{celsius}var t := celsius{{degrees: 1e0}};{MAIN}")
+        );
+        assert_eq!(
+            codes(&format!("{celsius}var t: celsius;{MAIN}")),
+            [Code::UntypedVariable]
+        );
+        assert_eq!(
+            codes(&format!("{celsius}var t: tuple {{ c: celsius }};{MAIN}")),
+            [Code::UntypedVariable]
+        );
+        // No order, and no join.
+        assert_eq!(
+            codes(&format!(
+                "{celsius}operator f{{a: celsius, b: celsius}}: boolean [ a < b ];{MAIN}"
+            )),
+            [Code::WrongOperandType]
+        );
+        // A tuple of its name, fixed to its selector.
+        let source = format!("{celsius}var t := tuple celsius {{ degrees: 1e0 }};{MAIN}");
+        assert_eq!(messages(&source), ["`celsius` is a type, not a heading"]);
+        assert_eq!(
+            fix(&source),
+            format!("{celsius}var t := celsius{{degrees: 1e0}};{MAIN}")
+        );
+        // Its name is its selector's: another operator can't have it, which
+        // then gives way, nor can a type have a prelude operator's.
+        let source = format!(
+            "{celsius}operator celsius{{f: approximate}}: celsius [ celsius{{degrees: f}} ];{MAIN}"
+        );
+        assert_eq!(codes(&source), [Code::SelectorName]);
+        assert_eq!(
+            codes(&format!("type count {{ {{ n: integer }} }};{MAIN}")),
+            [Code::SelectorName]
+        );
+        // Defined once, and not as a heading.
+        assert_eq!(
+            codes(&format!(
+                "{celsius}{celsius}heading celsius := {{ a: integer }};{MAIN}"
+            )),
+            [Code::DuplicateName, Code::DuplicateName]
+        );
+        // Not containing itself, directly or through a heading.
+        assert_eq!(
+            messages(&format!("type route {{ {{ rest: route }} }};{MAIN}")),
+            ["the type `route` contains itself"]
+        );
+        assert_eq!(
+            messages(&format!(
+                "heading leg := {{ to: route }};\ntype route {{ {{ legs: relation leg }} }};{MAIN}"
+            )),
+            ["`leg` and `route` contain each other"]
         );
     }
 

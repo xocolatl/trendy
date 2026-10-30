@@ -240,8 +240,13 @@ impl Lowering {
                 let bytes = self.buffer(lir::Field::Bytes(text.as_bytes().to_vec()));
                 lir::Field::Struct(vec![bytes, lir::Field::Usize(len(text.len()))])
             }
-            // Attributes come in name order, the heading's order.
-            hir::Value::Tuple(tuple) => lir::Field::Struct(
+            // Attributes come in name order, the heading's order, and a
+            // value of a type of the program's own is laid out as its
+            // components.
+            hir::Value::Tuple(tuple)
+            | hir::Value::Defined(hir::DefinedValue {
+                components: tuple, ..
+            }) => lir::Field::Struct(
                 tuple
                     .attributes()
                     .map(|(_, value)| self.value_field(value))
@@ -266,13 +271,15 @@ impl Lowering {
     }
 
     /// The descriptor of `ty`, laid out as `trendy_runtime::TypeDesc`:
-    /// `{ kind: u8, size, attributes: *Attr, count, element: *TypeDesc }`.
+    /// `{ kind: u8, size, attributes: *Attr, count, element: *TypeDesc,
+    /// name: *u8, name_len }`.
     fn descriptor(&mut self, ty: &hir::Type) -> lir::DataId {
         if let Some(&id) = self.descriptors.get(ty) {
             return id;
         }
         let (kind, heading, element) = match ty {
             hir::Type::Scalar(hir::Scalar::Boolean) => (KIND_BOOLEAN, None, None),
+            hir::Type::Defined(defined) => (KIND_DEFINED, Some(&defined.components), None),
             hir::Type::Scalar(hir::Scalar::Integer) => (KIND_INTEGER, None, None),
             hir::Type::Scalar(hir::Scalar::Approximate) => (KIND_APPROXIMATE, None, None),
             hir::Type::Scalar(hir::Scalar::Text) => (KIND_TEXT, None, None),
@@ -293,12 +300,25 @@ impl Lowering {
         let element = element.map_or(lir::Field::Usize(0), |element| {
             lir::Field::Address(self.descriptor(&element))
         });
+        // A type of the program's own's name, which values are written
+        // with, or none.
+        let name = match ty {
+            hir::Type::Defined(defined) => defined.name.as_str(),
+            _ => "",
+        };
+        let name_bytes = if name.is_empty() {
+            self.empty()
+        } else {
+            self.constant(vec![lir::Field::Bytes(name.as_bytes().to_vec())])
+        };
         let id = self.constant(vec![
             lir::Field::U8(kind),
             lir::Field::Size(layout(ty)),
             lir::Field::Address(attributes),
             lir::Field::Usize(len(count)),
             element,
+            lir::Field::Address(name_bytes),
+            lir::Field::Usize(len(name.len())),
         ]);
         self.descriptors.insert(ty.clone(), id);
         id
@@ -345,6 +365,7 @@ const KIND_TEXT: u8 = 3;
 const KIND_TUPLE: u8 = 4;
 const KIND_RELATION: u8 = 5;
 const KIND_ARRAY: u8 = 6;
+const KIND_DEFINED: u8 = 7;
 
 /// The part of lowering for one function.
 struct FunctionBuilder<'a> {
@@ -1408,6 +1429,11 @@ impl<'a> FunctionBuilder<'a> {
             hir::Expr::And(lhs, rhs) => self.joined(lhs, rhs, cx),
             hir::Expr::Ungroup(operand, names) => self.ungroup(operand, names, cx),
             hir::Expr::Only(operand) => self.only(operand, cx),
+            // A value of a type of the program's own is laid out as the tuple
+            // of its components.
+            hir::Expr::Select(_, operand) | hir::Expr::Components(operand) => {
+                self.place(operand, cx)
+            }
             hir::Expr::Semijoin(lhs, rhs) => self.matching(lhs, rhs, false, cx),
             hir::Expr::Combine(combination, lhs, rhs) => self.combine(*combination, lhs, rhs, cx),
             hir::Expr::Antijoin(lhs, rhs) => self.matching(lhs, rhs, true, cx),
@@ -2805,7 +2831,10 @@ impl<'a> FunctionBuilder<'a> {
             }
             hir::BinaryOp::Compare(
                 comparison,
-                hir::Compared::Tuple | hir::Compared::Relation | hir::Compared::Array,
+                hir::Compared::Defined
+                | hir::Compared::Tuple
+                | hir::Compared::Relation
+                | hir::Compared::Array,
             ) => {
                 let equal = self.slot(lir::Layout::U8);
                 let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(operand_ty)));
@@ -2891,6 +2920,7 @@ fn lower_binary_op(op: hir::BinaryOp) -> lir::BinaryOp {
                     lir::Operand::Numeric(lir::Numeric::Approximate)
                 }
                 hir::Compared::Scalar(hir::Scalar::Text)
+                | hir::Compared::Defined
                 | hir::Compared::Tuple
                 | hir::Compared::Relation
                 | hir::Compared::Array => unreachable!("compared by a runtime call"),
@@ -3005,12 +3035,17 @@ fn points(ty: &hir::Type) -> bool {
     match ty {
         hir::Type::Scalar(scalar) => *scalar == hir::Scalar::Text,
         hir::Type::Relation(_) | hir::Type::Array(_) => true,
-        hir::Type::Tuple(heading) => heading.attributes().any(|(_, ty)| points(ty)),
+        hir::Type::Tuple(heading)
+        | hir::Type::Defined(hir::Defined {
+            components: heading,
+            ..
+        }) => heading.attributes().any(|(_, ty)| points(ty)),
         hir::Type::Parameter(_) => unreachable!("functions are of instantiated operators"),
     }
 }
 
-/// The layout of a value of type `ty`.
+/// The layout of a value of type `ty`: a value of a type of the program's
+/// own is laid out as the tuple of its components.
 fn layout(ty: &hir::Type) -> lir::Layout {
     match ty {
         hir::Type::Scalar(hir::Scalar::Boolean) => lir::Layout::U8,
@@ -3019,9 +3054,11 @@ fn layout(ty: &hir::Type) -> lir::Layout {
         hir::Type::Scalar(hir::Scalar::Text) | hir::Type::Relation(_) | hir::Type::Array(_) => {
             lir::Layout::Struct(vec![lir::Layout::Address, lir::Layout::Usize])
         }
-        hir::Type::Tuple(heading) => {
-            lir::Layout::Struct(heading.attributes().map(|(_, ty)| layout(ty)).collect())
-        }
+        hir::Type::Tuple(heading)
+        | hir::Type::Defined(hir::Defined {
+            components: heading,
+            ..
+        }) => lir::Layout::Struct(heading.attributes().map(|(_, ty)| layout(ty)).collect()),
         hir::Type::Parameter(_) => unreachable!("functions are of instantiated operators"),
     }
 }

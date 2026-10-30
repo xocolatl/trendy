@@ -88,7 +88,8 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
             | SyntaxKind::Numbering
             | SyntaxKind::OrderItem
             | SyntaxKind::ForStmt
-            | SyntaxKind::HeadingDecl,
+            | SyntaxKind::HeadingDecl
+            | SyntaxKind::TypeDecl,
         ) => true,
         _ => false,
     };
@@ -160,10 +161,16 @@ fn type_name(
         // A type or a heading, named, or a kind, after `any`, as in
         // `any ordered`.
         (SyntaxKind::TypeRef | SyntaxKind::HeadingRef | SyntaxKind::AnyType, _) => false,
-        // A built-in type, a kind, or a heading, declared.
+        // A built-in type, a type of the program's own, a kind, or a heading,
+        // declared.
         (
             SyntaxKind::Name,
-            Some(SyntaxKind::BuiltinType | SyntaxKind::KindDecl | SyntaxKind::HeadingDecl),
+            Some(
+                SyntaxKind::BuiltinType
+                | SyntaxKind::TypeDecl
+                | SyntaxKind::KindDecl
+                | SyntaxKind::HeadingDecl,
+            ),
         ) => true,
         // A kind, among a built-in type's.
         (SyntaxKind::Name, Some(SyntaxKind::NameList))

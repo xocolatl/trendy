@@ -1,3 +1,5 @@
+type position { { latitude: approximate, longitude: approximate } };
+
 var flag := true;
 var count := 42;
 var ratio := 1.5e-3;
@@ -13,8 +15,10 @@ var people := relation {
 var teams := relation { { team: "core", members: relation { { name: "Ada" } } } };
 var rainfall := array [1200, 950, 220];
 var dry: array text;
+var nairobi := position{latitude: -1.29e0, longitude: 36.82e0};
 var written := tuple {
     greeting: to_text{from: greeting},
+    nairobi: to_text{from: nairobi},
     point: to_text{from: point},
     rainfall: to_text{from: rainfall},
     teams: to_text{from: teams},
@@ -44,10 +48,12 @@ operator main{} [
     call debug_value{v: teams};
     call debug_value{v: rainfall};
     call debug_value{v: dry};
+    call debug_value{v: nairobi};
     call debug_value{v: written};
     call debug_value{v: 7};
     call show{value: count, label: "count"};
     call as_text{v: greeting};
+    call as_text{v: nairobi};
     call as_text{v: point};
     call as_text{v: rainfall};
     call as_text{v: teams};

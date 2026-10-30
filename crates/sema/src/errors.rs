@@ -73,6 +73,40 @@ pub(crate) fn duplicate_name(
         .with_help("delete the duplicate definition, or rename one of them")
 }
 
+/// The type `name`, declared at `declared`, whose name is that of an
+/// operator of kind `kind`, the program's defined at `operator`, or the
+/// prelude's: a type's name is its selector's, which no other operator can
+/// have.
+pub(crate) fn selector_name(
+    name: &str,
+    declared: Span,
+    kind: Kind,
+    operator: Option<Span>,
+) -> Diagnostic {
+    let d = match operator {
+        Some(operator) => Diagnostic::error(
+            Code::SelectorName,
+            format!("operator `{name}` has the name of a type"),
+            operator,
+            "the type's selector has this name",
+        )
+        .with_secondary(declared, format!("the type `{name}` is declared here")),
+        None => Diagnostic::error(
+            Code::SelectorName,
+            format!(
+                "type `{name}` has the name of {} in the prelude",
+                kind.describe()
+            ),
+            declared,
+            "its selector would have the prelude operator's name",
+        ),
+    };
+    d.with_note(format!(
+        "a type's selector has its name: `{name}{{…}}` selects a value of the type from its components, so no other operator can have the name"
+    ))
+    .with_help("rename the operator or the type")
+}
+
 /// The operator `name`, defined at `span` with parameters named `params`,
 /// which `first`, of that name, already has: built in, the prelude's, or
 /// the program's, there.
@@ -240,16 +274,24 @@ pub(crate) fn local_out_of_scope(
     ))
 }
 
-/// A variable `name`, of type `ty`, written `type_expr`, which has a type
-/// parameter in it, without an initial value.
+/// A variable `name`, of type `ty`, written `type_expr`, which has no
+/// default, without an initial value: a type with a type parameter in it,
+/// or with a type of the program's own.
 pub(crate) fn no_default_value(name: &str, ty: &hir::Type, type_expr: &TypeExpr) -> Diagnostic {
+    let why = if ty.parameters().next().is_some() {
+        "each call gives a type parameter its type, so a type with one in it has no default"
+    } else {
+        "no value of a type of the program's own is any more a start than another, so it has no default, nor has a tuple with one"
+    };
     Diagnostic::error(
         Code::UntypedVariable,
         format!("variable `{name}`, of type `{ty}`, has no initial value"),
         type_expr.span(),
         "a type without a default",
     )
-    .with_note("without a value, a variable starts at its type's default, but each call gives a type parameter its type, so a type with one in it has no default")
+    .with_note(format!(
+        "without a value, a variable starts at its type's default, but {why}"
+    ))
     .with_help(format!("give it a value: `var {name}: {ty} := …;`"))
 }
 
@@ -389,6 +431,7 @@ pub(crate) fn unknown_type(
             let types: Vec<&str> = hir::Scalar::ALL
                 .iter()
                 .map(|t| t.name())
+                .chain(namespaces.defined_types())
                 .chain(declared.iter().copied())
                 .collect();
             closest(name, types).map(written)
@@ -430,6 +473,39 @@ pub(crate) fn heading_as_type(ident: &SyntaxToken, declared: Span) -> Diagnostic
     .with_suggestion(format!("a tuple: `tuple {name}`"), vec![fix("tuple")])
 }
 
+/// `literal`, a tuple selector written with `ident`, the name of a type of
+/// the program's own declared at `declared`, as its heading: a value of the
+/// type was meant, which its selector, named after it, selects from its
+/// components, which the tuple's attributes give.
+pub(crate) fn tuple_of_type(
+    ident: &SyntaxToken,
+    literal: &trendy_syntax::ast::TupleLiteral,
+    declared: Span,
+) -> Diagnostic {
+    let name = ident.text();
+    let components: Vec<String> = literal
+        .attributes()
+        .map(|a| a.syntax().text().to_string())
+        .collect();
+    Diagnostic::error(
+        Code::UnknownType,
+        format!("`{name}` is a type, not a heading"),
+        trendy_syntax::span(ident.text_range()),
+        "a type of the program's own",
+    )
+    .with_secondary(declared, format!("`{name}` is declared here"))
+    .with_note(format!(
+        "a value of a type of the program's own is selected by its selector, named after it, from its components, as in `{name}{{…}}`; `tuple h {{ … }}` is a tuple of the heading `h`"
+    ))
+    .with_suggestion(
+        format!("select a value of `{name}`"),
+        vec![Edit {
+            span: literal.span(),
+            replacement: format!("{name}{{{}}}", components.join(", ")),
+        }],
+    )
+}
+
 /// The heading named `ident`, after `relation` or `tuple`, which isn't one.
 pub(crate) fn unknown_heading(ident: &SyntaxToken, namespaces: &Namespaces) -> Diagnostic {
     let name = ident.text();
@@ -445,12 +521,19 @@ pub(crate) fn unknown_heading(ident: &SyntaxToken, namespaces: &Namespaces) -> D
     );
     let kind = hir::Scalar::from_name(name)
         .map(|_| Kind::Type)
+        .or_else(|| namespaces.defined(name).map(|_| Kind::Defined))
         .or_else(|| namespaces.variable(name).map(|_| Kind::Variable))
         .or_else(|| namespaces.operator(name).map(|(kind, _)| kind));
     if let Some(kind) = kind {
-        return d
-            .with_note(format!("`{name}` is {}, not a heading", kind.describe()))
-            .with_help("write the attributes in braces, or declare a heading and write its name");
+        let d = d.with_note(format!("`{name}` is {}, not a heading", kind.describe()));
+        return match kind {
+            Kind::Type | Kind::Defined => d.with_help(format!(
+                "a tuple or a relation of `{name}` values names an attribute for them, as in `relation {{ value: {name} }}`"
+            )),
+            _ => d.with_help(
+                "write the attributes in braces, or declare a heading and write its name",
+            ),
+        };
     }
     let mut headings: Vec<&str> = namespaces.headings().collect();
     headings.sort_unstable();
@@ -465,19 +548,21 @@ pub(crate) fn unknown_heading(ident: &SyntaxToken, namespaces: &Namespaces) -> D
 
 /// The headings in `cycle`, each naming the next in its attributes' types,
 /// and the last the first.
-pub(crate) fn cyclic_headings(cycle: &[crate::headings::Cycled]) -> Diagnostic {
+pub(crate) fn cyclic_types(cycle: &[crate::named_types::Cycled]) -> Diagnostic {
     let first = &cycle[0];
     let names: Vec<String> = cycle.iter().map(|c| format!("`{}`", c.name)).collect();
     let message = match names.as_slice() {
-        [_] => format!("the heading `{}` contains itself", first.name),
-        _ => format!(
-            "the headings {} contain each other",
+        [_] => format!("the {} `{}` contains itself", first.what, first.name),
+        _ if cycle.iter().all(|c| c.what == first.what) => format!(
+            "the {}s {} contain each other",
+            first.what,
             trendy_diag::conjoin(&names)
         ),
+        _ => format!("{} contain each other", trendy_diag::conjoin(&names)),
     };
-    let d = Diagnostic::error(Code::CyclicHeadings, message, first.declared, "declared here")
+    let d = Diagnostic::error(Code::CyclicTypes, message, first.declared, "declared here")
         .with_note(
-            "a heading's attributes can be of other headings' types, but not of its own, directly or through others: its type would contain itself (TTM, chapter 6, RM Prescription 6)",
+            "a heading's attributes and a type's components can be of other headings' and types' types, but not of their own, directly or through others: the type would contain itself (TTM, chapter 6, RM Prescription 6)",
         )
         .with_help(
             "keep a hierarchy as a relation of pairs instead, each with one it contains, as in `heading assembly := { major: text, minor: text };`",
@@ -914,6 +999,9 @@ pub(crate) enum Noun {
     Key,
     /// An attribute a load orders by, which must be one of the relation's.
     Ordered,
+    /// A component of a value of a type of the program's own, which must
+    /// be one of its possible representation's.
+    Component,
 }
 
 impl Noun {
@@ -921,6 +1009,7 @@ impl Noun {
         match self {
             Noun::Attribute | Noun::Projected | Noun::Key | Noun::Ordered => "attribute",
             Noun::Argument => "argument",
+            Noun::Component => "component",
         }
     }
 
@@ -928,6 +1017,7 @@ impl Noun {
         match self {
             Noun::Attribute | Noun::Projected | Noun::Key | Noun::Ordered => "attributes",
             Noun::Argument => "arguments",
+            Noun::Component => "components",
         }
     }
 }
@@ -939,6 +1029,9 @@ pub(crate) fn duplicate_attribute(noun: Noun, name: &str, span: Span, first: Spa
         Noun::Attribute => "a tuple's attributes are a set, so each name can appear only once",
         Noun::Projected | Noun::Key | Noun::Ordered => "each attribute is named once",
         Noun::Argument => "arguments are a tuple of the parameters, so each one is given once",
+        Noun::Component => {
+            "a possible representation's components are a set, so each name can appear only once"
+        }
     };
     Diagnostic::error(
         Code::DuplicateAttribute,
@@ -981,6 +1074,9 @@ pub(crate) fn missing_attributes(
             "a tuple value must have every attribute of its type"
         }
         Noun::Argument => "every parameter needs an argument",
+        Noun::Component => {
+            "a value is selected with every component of its possible representation"
+        }
     })
     .with_help(format!(
         "add {} with {values}",
@@ -1045,6 +1141,7 @@ pub(crate) fn unknown_attribute(
         Noun::Projected => "not an attribute of the operand",
         Noun::Key | Noun::Ordered => "not an attribute of the relation",
         Noun::Argument => "not a parameter of this operator",
+        Noun::Component => "not a component of the value's type",
     };
     let mut d = Diagnostic::error(
         Code::UnknownAttribute,
@@ -3075,7 +3172,7 @@ pub(crate) fn not_extractable(name: &str, at: Span, ty: &hir::Type, operand: &Ex
         Code::WrongOperandType,
         format!("`.{name}` can't be applied to {}", plural(ty)),
         at,
-        "only a tuple has an attribute's value",
+        "only a tuple has an attribute's value, and a type's value a component's",
     )
     .with_parameter_note(ty)
     .with_secondary(operand.span(), format!("this is `{ty}`"));
@@ -3085,7 +3182,7 @@ pub(crate) fn not_extractable(name: &str, at: Span, ty: &hir::Type, operand: &Ex
             .with_help(format!(
                 "to keep only the attribute, project on it: `r{{{name}}}`"
             )),
-        _ => d.with_note("`t.name` is the value of the attribute `name` of the tuple `t`"),
+        _ => d.with_note("`t.name` is the value of the attribute `name` of the tuple `t`, or of the component `name` of `t`, a value of a type of the program's own"),
     }
 }
 
@@ -3681,6 +3778,21 @@ pub(crate) fn attributes_note(whose: &str, ty: &hir::Type) -> String {
         format!(
             "the {whose}'s attributes are {}",
             trendy_diag::conjoin(&attributes)
+        )
+    }
+}
+
+/// What the components of the type of the program's own `defined` are, for
+/// a note.
+pub(crate) fn components_note(defined: &hir::Defined) -> String {
+    let components = named_attributes(&defined.components);
+    if components.is_empty() {
+        format!("`{}` has no components", defined.name)
+    } else {
+        format!(
+            "`{}`'s components are {}",
+            defined.name,
+            trendy_diag::conjoin(&components)
         )
     }
 }
@@ -4672,6 +4784,7 @@ fn plural(ty: &hir::Type) -> String {
         hir::Type::Scalar(hir::Scalar::Integer) => "integers".to_string(),
         hir::Type::Scalar(hir::Scalar::Approximate) => "approximate numbers".to_string(),
         hir::Type::Scalar(hir::Scalar::Text) => "text".to_string(),
+        hir::Type::Defined(defined) => format!("values of `{}`", defined.name),
         hir::Type::Tuple(_) => "tuples".to_string(),
         hir::Type::Relation(_) => "relations".to_string(),
         hir::Type::Array(_) => "arrays".to_string(),
@@ -4713,6 +4826,10 @@ pub(crate) fn wrong_operand_type(
             (Operator::Compare(_), hir::Type::Array(_)) => d.with_note(
                 "arrays can only be compared with `=` and `<>`: they are equal if they have equal elements at each position",
             ),
+            (Operator::Compare(_), hir::Type::Defined(defined)) => d.with_note(format!(
+                "a type of the program's own has no order: values of `{}` can only be compared with `=` and `<>`, equal when their components are",
+                defined.name
+            )),
             (Operator::Compare(_), _) => d.with_note(
                 "tuples have no order: they can only be compared with `=` and `<>`; relations can also be compared as sets, with `<=` and `<` for subset and proper subset",
             ),

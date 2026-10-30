@@ -960,7 +960,10 @@ impl Joining {
                 hir::Type::Tuple(_) => {
                     errors.push(errors::tuple_among_relations(self.kind.keyword(), operand));
                 }
-                hir::Type::Scalar(_) | hir::Type::Array(_) | hir::Type::Parameter(_) => {
+                hir::Type::Scalar(_)
+                | hir::Type::Defined(_)
+                | hir::Type::Array(_)
+                | hir::Type::Parameter(_) => {
                     errors.push(errors::not_joinable(
                         self.kind,
                         self.operator(),
@@ -2254,6 +2257,8 @@ fn substitute(
         hir::Expr::And(lhs, rhs) => and(vec![sub(lhs)?, sub(rhs)?])?,
         hir::Expr::Ungroup(operand, names) => ungroup(sub(operand)?, names),
         hir::Expr::Only(operand) => only(sub(operand)?)?,
+        hir::Expr::Select(defined, components) => select(defined, sub(components)?),
+        hir::Expr::Components(value) => components(sub(value)?),
         hir::Expr::Semijoin(lhs, rhs) => matching(sub(lhs)?, sub(rhs)?, false),
         hir::Expr::Combine(combination, lhs, rhs) => combined(sub(lhs)?, sub(rhs)?, combination)?,
         hir::Expr::Antijoin(lhs, rhs) => matching(sub(lhs)?, sub(rhs)?, true),
@@ -2300,24 +2305,55 @@ pub(crate) fn extracted(
     let ident = extract.attribute()?.ident()?;
     let name = ident.text().to_string();
     let span = trendy_syntax::span(ident.text_range());
-    let hir::Type::Tuple(heading) = ty else {
-        errors.push(errors::not_extractable(&name, span, ty, operand));
-        return None;
+    let (heading, noun, context) = match ty {
+        hir::Type::Tuple(heading) => (
+            heading,
+            errors::Noun::Projected,
+            errors::attributes_note("tuple", ty),
+        ),
+        hir::Type::Defined(defined) => (
+            &defined.components,
+            errors::Noun::Component,
+            errors::components_note(defined),
+        ),
+        _ => {
+            errors.push(errors::not_extractable(&name, span, ty, operand));
+            return None;
+        }
     };
     if heading.get(&name).is_none() {
         let rename = closest(&name, heading.named().map(|(a, _)| a));
-        let context = errors::attributes_note("tuple", ty);
         errors.push(errors::unknown_attribute(
-            errors::Noun::Projected,
-            &name,
-            span,
-            &context,
-            rename,
-            None,
+            noun, &name, span, &context, rename, None,
         ));
         return None;
     }
     Some(name)
+}
+
+/// The value of the program's own type `defined` whose components are the
+/// tuple `components`: evaluated if they are a constant.
+pub(crate) fn select(defined: hir::Defined, components: hir::Expr) -> hir::Expr {
+    match components {
+        hir::Expr::Constant(hir::Value::Tuple(tuple)) => {
+            hir::Expr::Constant(hir::Value::Defined(hir::DefinedValue {
+                name: defined.name,
+                components: tuple,
+            }))
+        }
+        components => hir::Expr::Select(defined, Box::new(components)),
+    }
+}
+
+/// The components of `value`, a value of a type of the program's own, as a
+/// tuple: evaluated if it is a constant.
+pub(crate) fn components(value: hir::Expr) -> hir::Expr {
+    match value {
+        hir::Expr::Constant(hir::Value::Defined(value)) => {
+            hir::Expr::Constant(hir::Value::Tuple(value.components))
+        }
+        value => hir::Expr::Components(Box::new(value)),
+    }
 }
 
 /// The value of `operand`'s attribute `name`: evaluated if the operand is a

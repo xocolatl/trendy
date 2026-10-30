@@ -198,6 +198,16 @@ pub enum SyntaxKind {
     /// stands for it after `relation` and `tuple`. `heading` is a
     /// contextual keyword, an identifier elsewhere.
     HeadingDecl,
+    /// `type name { { name: type, … } };`: a scalar type of the program's
+    /// own, with its possible representation. `type` is a contextual
+    /// keyword, an identifier elsewhere.
+    TypeDecl,
+    /// `{ { name: type, … } }`: what a type declaration says of its type,
+    /// its possible representation.
+    TypeBody,
+    /// `{ name: type, … }`: a possible representation of a type, its
+    /// components.
+    Representation,
     /// `{ <, … }`: what a kind's types must have.
     RequirementList,
     /// One thing a kind's types must have: an operator, such as `<`.
@@ -376,7 +386,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 153] = [
+    pub const ALL: [SyntaxKind; 156] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -463,6 +473,9 @@ impl SyntaxKind {
         SyntaxKind::BuiltinType,
         SyntaxKind::KindDecl,
         SyntaxKind::HeadingDecl,
+        SyntaxKind::TypeDecl,
+        SyntaxKind::TypeBody,
+        SyntaxKind::Representation,
         SyntaxKind::RequirementList,
         SyntaxKind::Requirement,
         SyntaxKind::VarDecl,
@@ -941,6 +954,9 @@ impl SyntaxKind {
             SyntaxKind::BuiltinType => "built-in type declaration",
             SyntaxKind::KindDecl => "kind declaration",
             SyntaxKind::HeadingDecl => "heading declaration",
+            SyntaxKind::TypeDecl => "type declaration",
+            SyntaxKind::TypeBody => "type's representation",
+            SyntaxKind::Representation => "possible representation",
             SyntaxKind::RequirementList => "requirements",
             SyntaxKind::Requirement => "requirement",
             SyntaxKind::VarDecl => "variable declaration",
@@ -1010,7 +1026,8 @@ impl SyntaxKind {
 /// Whether the braces of the list `node` have spaces inside them, in the
 /// canonical layout: a heading's, a tuple's, a relation's, and new
 /// attributes', as in `tuple { a: integer }` and `r extend { b := 1 }`, a
-/// key's, `key { a, b }`, and a built-in type's kinds. Parameters,
+/// key's, `key { a, b }`, a built-in type's kinds, and a type's
+/// representation, `type t { { a: integer } }`. Parameters,
 /// arguments and attribute names are written without, as in
 /// `greet{name: text}` and `r{a}`.
 #[must_use]
@@ -1026,7 +1043,8 @@ pub fn spaced_braces(node: &SyntaxNode) -> bool {
         | SyntaxKind::RelationLiteral
         | SyntaxKind::AssignList
         | SyntaxKind::GatherList
-        | SyntaxKind::RequirementList => true,
+        | SyntaxKind::RequirementList
+        | SyntaxKind::TypeBody => true,
         SyntaxKind::NameList => node
             .parent()
             .is_some_and(|k| matches!(k.kind(), SyntaxKind::Key | SyntaxKind::BuiltinType)),

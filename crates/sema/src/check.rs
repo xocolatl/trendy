@@ -312,6 +312,11 @@ impl<'a> Checker<'a> {
                     return None;
                 }
                 let name = ops::extracted(extract, &operand_expr, &ty, errors)?;
+                // A component is extracted from the value's components.
+                let operand = match ty {
+                    hir::Type::Defined(_) => ops::components(operand),
+                    _ => operand,
+                };
                 self.matched(expected, ops::extract(operand, name), expr, errors)
             }
             Expr::Postfix(postfix) if let Some(gathering) = ops::Gathering::of(postfix) => {
@@ -1469,7 +1474,10 @@ impl<'a> Checker<'a> {
                 ));
                 return None;
             }
-            hir::Type::Scalar(_) | hir::Type::Array(_) | hir::Type::Parameter(_) => {
+            hir::Type::Scalar(_)
+            | hir::Type::Defined(_)
+            | hir::Type::Array(_)
+            | hir::Type::Parameter(_) => {
                 errors.push(errors::not_relational(operator, span, &ty, &operand_expr));
                 return None;
             }

@@ -351,6 +351,14 @@ declarations of a type of records, TypeScript's `type Home = {…}` and
 `interface Home {…}` and C's and Rust's `struct Home {…}`, are parsed as
 a heading's, reported once with a fix that makes them one (P0004).
 
+`type name { { … } };` (`TypeDecl`) is a definition too, `type` a
+contextual keyword at a definition's start before a name and `{`. Its
+braces (`TypeBody`) hold its possible representation (`Representation`),
+whose components are a `Heading`. Components written straight in the
+type's braces, or after Tutorial D's `POSSREP`, are parsed as the
+representation in its place and fixed to braces of their own (P0039);
+TypeScript's `type Home = {…}`, with its `=`, stays a heading's.
+
 `!!r` (`ImageExpr`), Tutorial D's image relation, takes a single operand:
 a name, a literal or a parenthesized expression. The lexer makes `!!` one
 token only when the two `!`s are together; a lone `!` is C's `not`, fixed
@@ -612,12 +620,20 @@ instance of a generic operator, so that their symbols differ.
 
 Sema collects every name before checking anything, so errors can refer to
 definitions anywhere in the file. Then it resolves the headings'
-attributes (`headings::resolve`), each after those of the headings it
-names, so that any type can name one, and reports each cycle among them
-(A0049). A heading's name is only a shorter way to write its attributes:
+attributes and the types' components (`named_types::resolve`), each
+after those of the headings and types it names, so that any type can
+name one, and reports each cycle among them (A0049). A heading's name is only a shorter way to write its attributes:
 `relation home` resolves to the `hir::Type` its attributes written out
 would, so HIR has no headings' names, and an expectation's origin follows
-the name to the declaration, where the attributes' types are written.
+the name to the declaration, where the attributes' types are written. A
+type of the program's own is scalar, so its name is its identity:
+`hir::Type::Defined` carries it, with its components, so that lowering
+lays a value out as the tuple of them. Its selector is a read-only
+operator named after it (`Signature::selects`), whose value is
+`Expr::Select` of the tuple of its parameters, so a call of it is checked,
+overloaded and folded as any call; no other operator can have the name
+(A0057), and one that has gives way to the selector. `v.c` is
+`Extract(Components(v), c)`.
 Then it checks, in order, every operator's signature, its parameters and result type (`signatures`), so
 that anything can refer to an operator defined after it; the globals,
 which are the variables, whose initial values it evaluates, and the

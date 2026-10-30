@@ -92,7 +92,7 @@ impl<'a> Globals<'a> {
         ids: &'a HashMap<String, hir::VariableId>,
         sites: &'a Sites<'a>,
     ) -> Self {
-        let values: HashMap<hir::OperatorId, hir::Expr> = prelude
+        let prelude_values = prelude
             .operators()
             .iter()
             .enumerate()
@@ -101,8 +101,15 @@ impl<'a> Globals<'a> {
                     Some((hir::OperatorId(i), value.clone()))
                 }
                 _ => None,
-            })
+            });
+        // A selector's value is the value its arguments are the components
+        // of, with no body to check.
+        let selectors: Vec<(hir::OperatorId, hir::Expr)> = operators
+            .iter()
+            .filter_map(|s| Some((s.id, Signature::selection(&s.selects.as_ref()?.0))))
             .collect();
+        let locals = selectors.iter().map(|&(id, _)| (id, Vec::new())).collect();
+        let values: HashMap<hir::OperatorId, hir::Expr> = prelude_values.chain(selectors).collect();
         Globals {
             sites,
             namespaces,
@@ -115,7 +122,7 @@ impl<'a> Globals<'a> {
                 .map(|&id| (id, State::Done(Some(()))))
                 .collect(),
             values,
-            locals: HashMap::new(),
+            locals,
             stack: Vec::new(),
             read: HashSet::new(),
             block_locals: Vec::new(),
@@ -671,9 +678,12 @@ fn variable(
             ));
             return None;
         }
-        (Some((ty, _)), None) => {
+        (Some((ty, type_expr)), None) => {
             let ty = ty?;
-            let init = ty.default_value();
+            let Some(init) = ty.default_value() else {
+                errors.push(errors::no_default_value(ident.text(), &ty, &type_expr));
+                return None;
+            };
             (ty, init)
         }
         (None, Some(expr)) => {

@@ -1,0 +1,106 @@
+/* Types of the program's own: each is a scalar type with a possible
+   representation, the components its values are written with, in braces
+   of their own inside the type's (The Third Manifesto, RM Prescription
+   4). Their values are compared with `=` and `<>` only, as in
+   comparisons.trendy. Each result below is printed twice, folded when
+   compiling and computed when running. */
+
+/* A place on Earth, by its latitude and longitude, in degrees. */
+type position { { latitude: approximate, longitude: approximate } };
+
+/* A journey between two positions: a component can be of another of the
+   program's types, declared before or after it. */
+type journey { { origin: position, destination: position } };
+
+/* Selectors: the value of a type with the components given, by the
+   operator named after the type, called like any other (RM Prescription
+   4). */
+var nairobi := position{latitude: -1.29e0, longitude: 36.82e0};
+var flight := journey{
+    origin: nairobi,
+    destination: position{latitude: -12.05e0, longitude: -77.04e0},
+};
+
+operator select_position{latitude: approximate, longitude: approximate, destination: position} [
+    var here := position{latitude: latitude, longitude: longitude};
+    call debug_value{v: here};
+    call debug_value{v: journey{origin: here, destination: destination}};
+];
+
+/* Components: `p.latitude` is the value of one, with the dot of a tuple's
+   attribute, reaching into components of the program's types too (RM
+   Prescription 5). Tutorial D: THE_LATITUDE ( P ). */
+var south := nairobi.latitude < 0e0;
+var west := flight.destination.longitude;
+
+operator read_components{p: position, j: journey} [
+    call debug_value{v: p.latitude < 0e0};
+    call debug_value{v: j.destination.longitude};
+];
+
+/* The program's operators take and give its types' values as they do any
+   others: here, the position on the other side of the Earth. */
+operator antipode{p: position}: position [
+    position{
+        latitude: -p.latitude,
+        longitude: if p.longitude > 0e0 then p.longitude - 180e0 else p.longitude + 180e0,
+    }
+];
+
+var far := antipode{p: nairobi};
+
+operator far_side{p: position} [
+    call debug_value{v: antipode{p: p}};
+];
+
+/* Values in relations: an attribute can be of one of the program's types,
+   and a condition can read its components. */
+var landmarks := relation {
+    { name: "Machu Picchu", at: position{latitude: -13.16e0, longitude: -72.55e0} },
+    { name: "Kinkaku-ji", at: position{latitude: 35.04e0, longitude: 135.73e0} },
+    { name: "Petra", at: position{latitude: 30.33e0, longitude: 35.44e0} },
+    { name: "Great Zimbabwe", at: position{latitude: -20.27e0, longitude: 30.93e0} },
+};
+var southern := landmarks where at.latitude < 0e0;
+
+operator south_of{r: relation { name: text, at: position }, latitude: approximate} [
+    call debug_table{r: r where at.latitude < latitude};
+];
+
+/* A journey's stops, as a relation. */
+operator stops{j: journey}: relation { stop: text, at: position } [
+    relation {
+        { stop: "origin", at: j.origin },
+        { stop: "destination", at: j.destination },
+    }
+];
+
+var flight_stops := stops{j: flight};
+
+operator list_stops{j: journey} [
+    call debug_table{r: stops{j: j}};
+];
+
+operator main{} [
+    call debug_value{v: nairobi};
+    call debug_value{v: flight};
+    call debug_value{v: south};
+    call debug_value{v: west};
+    call debug_value{v: far};
+    call debug_table{r: southern};
+    call debug_table{r: flight_stops};
+
+    call select_position{
+        latitude: -1.29e0,
+        longitude: 36.82e0,
+        destination: position{latitude: -12.05e0, longitude: -77.04e0},
+    };
+
+    call read_components{p: nairobi, j: flight};
+
+    call far_side{p: nairobi};
+
+    call south_of{r: landmarks, latitude: 0e0};
+
+    call list_stops{j: flight};
+];

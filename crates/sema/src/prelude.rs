@@ -339,6 +339,12 @@ impl Prelude {
                     decl.span(),
                     "a heading",
                 )),
+                Item::Type(decl) => errors.push(Diagnostic::error(
+                    Code::Internal,
+                    "the prelude declares no types but built-in ones",
+                    decl.span(),
+                    "a type",
+                )),
             }
         }
         // What is missing goes at the end.

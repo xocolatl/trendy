@@ -27,6 +27,7 @@ pub(crate) const RENAME_FORM: &str =
     "`rename` takes renamings, each `old as new`: `r rename {postal_code as code}`";
 pub(crate) const TUPLE_VALUE_FORM: &str = "a tuple value has the form `tuple { name: value, … }`";
 pub(crate) const BUILTIN_FORM: &str = "built-ins are declared as `builtin type name;`, or `builtin type name: { kind, … };` with the kinds it is of, `builtin operator name{params};`, or `builtin operator name{params}: type;` with a result type, then `types { T: any type }` for type parameters, only in the prelude";
+pub(crate) const TYPE_DECL_FORM: &str = "a type is declared as `type name { { component: type, … } };`, with the components of its possible representation in braces of their own";
 pub(crate) const KIND_FORM: &str = "a kind is declared as `kind name { requirement, … };`, with what each of its types must have, such as `<`";
 pub(crate) const ASSIGNMENT_FORM: &str = "an assignment statement is `name := value;`, or a shorthand for one: `insert r s;`, `d_insert r s;`, `delete r where p;`, `i_delete r s;` or `update r { a := x } where p;`";
 pub(crate) const ASSIGN_BLOCK_FORM: &str =
@@ -146,10 +147,48 @@ pub(crate) fn foreign_heading(foreign: &ForeignHeading) -> Diagnostic {
     .with_suggestion("declare a heading", edits)
 }
 
-/// A heading's declaration in a body, whose `heading` is `keyword`, written
-/// `text`, where `span` deletes it with the whitespace before: it goes
-/// after the top-level definition that ends at `previous`, or first.
-pub(crate) fn nested_heading(
+/// A type's possible representation whose components were written, from
+/// `open` to `close`, without braces of their own, as a heading's are, or
+/// after Tutorial D's `POSSREP`, and its name if it has one, at `possrep`,
+/// which runs to the components: the components go in braces inside the
+/// type's.
+pub(crate) fn bare_representation(
+    open: Span,
+    close: Option<Span>,
+    possrep: Option<Span>,
+) -> Diagnostic {
+    let (message, span, label) = match possrep {
+        Some(span) => (
+            "a type's possible representation is written in braces, not after `POSSREP`",
+            span,
+            "Tutorial D's word for a possible representation",
+        ),
+        None => (
+            "a type's components go in braces of their own",
+            open,
+            "the type's braces, around the components",
+        ),
+    };
+    // `POSSREP`, and its name, give way to the type's brace.
+    let mut edits = vec![Edit {
+        span: possrep.unwrap_or(Span::empty(open.start)),
+        replacement: "{ ".to_string(),
+    }];
+    edits.extend(close.map(|close| Edit {
+        span: Span::empty(close.end),
+        replacement: " }".to_string(),
+    }));
+    Diagnostic::error(Code::BareRepresentation, message, span, label)
+        .with_note("a type's declaration holds its possible representation in braces of its own, its components and their types, as in `type celsius { { degrees: approximate } };`, so that its braces can hold more about the type")
+        .with_suggestion("put the components in braces of their own", edits)
+}
+
+/// A declaration of `what`, a heading or a type, in a body, whose keyword is
+/// `keyword`, written `text`, where `span` deletes it with the whitespace
+/// before: it goes after the top-level definition that ends at
+/// `previous`, or first.
+pub(crate) fn nested_definition(
+    what: &str,
     keyword: Span,
     text: &str,
     span: Span,
@@ -167,12 +206,12 @@ pub(crate) fn nested_heading(
     };
     Diagnostic::error(
         Code::NestedDefinition,
-        "a heading is declared at the top level, not in an operator",
+        format!("a {what} is declared at the top level, not in an operator"),
         keyword,
         "inside an operator's body",
     )
     .with_note(
-        "headings, as operators and the program's variables, are definitions of the program, which any operator can use; an operator's body declares only local variables",
+        "headings and types, as operators and the program's variables, are definitions of the program, which any operator can use; an operator's body declares only local variables",
     )
     .with_suggestion(
         "move it before the operator",

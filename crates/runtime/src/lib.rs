@@ -40,6 +40,8 @@ pub const KIND_TEXT: u8 = 3;
 pub const KIND_TUPLE: u8 = 4;
 pub const KIND_RELATION: u8 = 5;
 pub const KIND_ARRAY: u8 = 6;
+/// A type of the program's own, laid out as the tuple of its components.
+pub const KIND_DEFINED: u8 = 7;
 
 /// [`trendy_rt_integer_failed`]'s and [`trendy_rt_approximate_failed`]'s
 /// operators: `+`.
@@ -133,7 +135,7 @@ pub unsafe fn equal(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> bool {
                     && core::slice::from_raw_parts(a.0, a.1)
                         == core::slice::from_raw_parts(b.0, b.1)
             }
-            KIND_TUPLE => tuples_equal(lhs, rhs, desc),
+            KIND_TUPLE | KIND_DEFINED => tuples_equal(lhs, rhs, desc),
             KIND_RELATION | KIND_ARRAY => {
                 let ((a, count), (b, other)) = (read_slice(lhs), read_slice(rhs));
                 let element = desc.element();
@@ -407,7 +409,7 @@ unsafe fn each_buffer(value: *const u8, desc: &TypeDesc, f: &mut impl FnMut(*mut
                     f(buffer.cast_mut());
                 }
             }
-            KIND_TUPLE => {
+            KIND_TUPLE | KIND_DEFINED => {
                 for attr in attributes(desc) {
                     each_buffer(value.add(attr.offset), &*attr.desc, f);
                 }
@@ -428,7 +430,7 @@ unsafe fn points(desc: &TypeDesc) -> bool {
     unsafe {
         match desc.kind {
             KIND_TEXT | KIND_RELATION | KIND_ARRAY => true,
-            KIND_TUPLE => attributes(desc).iter().any(|attr| points(&*attr.desc)),
+            KIND_TUPLE | KIND_DEFINED => attributes(desc).iter().any(|attr| points(&*attr.desc)),
             _ => false,
         }
     }
@@ -1653,7 +1655,7 @@ pub unsafe fn order(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> core::cm
                 let (a, b) = (read_slice(lhs), read_slice(rhs));
                 core::slice::from_raw_parts(a.0, a.1).cmp(core::slice::from_raw_parts(b.0, b.1))
             }
-            KIND_TUPLE => compare_tuples(lhs, rhs, desc),
+            KIND_TUPLE | KIND_DEFINED => compare_tuples(lhs, rhs, desc),
             KIND_RELATION | KIND_ARRAY => {
                 let ((a, count), (b, other)) = (read_slice(lhs), read_slice(rhs));
                 let element = desc.element();
@@ -2121,13 +2123,18 @@ pub struct TypeDesc {
     pub kind: u8,
     /// The size of a value of this type, in bytes.
     pub size: usize,
-    /// For a tuple or relation, its heading's attributes, sorted by name.
-    /// For other kinds, `count` is 0 and this is not read.
+    /// For a tuple or relation, its heading's attributes, and for a type of
+    /// the program's own, its components, sorted by name. For other kinds,
+    /// `count` is 0 and this is not read.
     pub attributes: *const Attr,
     pub count: usize,
     /// For a relation, its tuples' type, and for an array, its elements':
     /// what each element of its memory is. For other kinds, null.
     pub element: *const TypeDesc,
+    /// For a type of the program's own, the UTF-8 bytes of its name, whose
+    /// components are its attributes. For other kinds, `name_len` is 0.
+    pub name: *const u8,
+    pub name_len: usize,
 }
 
 impl TypeDesc {
@@ -3023,6 +3030,19 @@ pub unsafe fn write_value(out: &mut impl Write, value: *const u8, desc: &TypeDes
                 out.write_str("tuple ")?;
                 write_tuple(out, value, desc)
             }
+            // Its selector's invocation, as a call is written.
+            KIND_DEFINED => {
+                out.write_str(type_name(desc))?;
+                out.write_char('{')?;
+                for (i, attr) in attributes(desc).iter().enumerate() {
+                    if i > 0 {
+                        out.write_str(", ")?;
+                    }
+                    write!(out, "{}: ", name(attr))?;
+                    write_value(out, value.add(attr.offset), &*attr.desc)?;
+                }
+                out.write_char('}')
+            }
             KIND_RELATION => {
                 out.write_str("relation ")?;
                 write_heading(out, desc)?;
@@ -3249,6 +3269,8 @@ unsafe fn write_type(out: &mut impl Write, desc: &TypeDesc) -> fmt::Result {
         KIND_INTEGER => out.write_str("integer"),
         KIND_APPROXIMATE => out.write_str("approximate"),
         KIND_TEXT => out.write_str("text"),
+        // SAFETY: guaranteed by the caller.
+        KIND_DEFINED => out.write_str(unsafe { type_name(desc) }),
         KIND_TUPLE => {
             out.write_str("tuple ")?;
             // SAFETY: guaranteed by the caller.
@@ -3359,6 +3381,16 @@ unsafe fn array<'a, T>(values: *const T, len: usize) -> &'a [T] {
     }
     // SAFETY: guaranteed by the caller.
     unsafe { core::slice::from_raw_parts(values, len) }
+}
+
+/// The name of the type of the program's own that `desc` describes.
+///
+/// # Safety
+///
+/// `desc` must be a valid descriptor of such a type.
+unsafe fn type_name(desc: &TypeDesc) -> &str {
+    // SAFETY: the compiler emits names as valid UTF-8.
+    unsafe { core::str::from_utf8_unchecked(core::slice::from_raw_parts(desc.name, desc.name_len)) }
 }
 
 /// # Safety
@@ -3500,6 +3532,8 @@ mod tests {
             attributes: core::ptr::null(),
             count: 0,
             element: core::ptr::null(),
+            name: core::ptr::null(),
+            name_len: 0,
         }
     }
 
@@ -3511,6 +3545,22 @@ mod tests {
             attributes: attributes.as_ptr(),
             count: attributes.len(),
             element: core::ptr::null(),
+            name: core::ptr::null(),
+            name_len: 0,
+        }
+    }
+
+    /// A type of the program's own named `name`, with the components
+    /// `attributes`, of `size` bytes.
+    fn defined_of(name: &'static str, attributes: &[Attr], size: usize) -> TypeDesc {
+        TypeDesc {
+            kind: KIND_DEFINED,
+            size,
+            attributes: attributes.as_ptr(),
+            count: attributes.len(),
+            element: core::ptr::null(),
+            name: name.as_ptr(),
+            name_len: name.len(),
         }
     }
 
@@ -3522,6 +3572,8 @@ mod tests {
             attributes: tuple.attributes,
             count: tuple.count,
             element: tuple,
+            name: core::ptr::null(),
+            name_len: 0,
         }
     }
 
@@ -3533,6 +3585,8 @@ mod tests {
             attributes: core::ptr::null(),
             count: 0,
             element,
+            name: core::ptr::null(),
+            name_len: 0,
         }
     }
 
@@ -3709,6 +3763,44 @@ mod tests {
             print(empty.as_ptr().cast(), &relation),
             "relation { a: boolean, b: integer } {}"
         );
+    }
+
+    #[test]
+    fn a_programs_own_types_values_are_written_as_their_selectors_invocations() {
+        let approximate = scalar(KIND_APPROXIMATE, 8);
+        // type position { { latitude: approximate, longitude: approximate } }
+        let components = [
+            attr("latitude", 0, &approximate),
+            attr("longitude", 8, &approximate),
+        ];
+        let position = defined_of("position", &components, 16);
+        let nairobi: [f64; 2] = [-1.29, 36.82];
+        assert_eq!(
+            print(nairobi.as_ptr().cast(), &position),
+            "position{latitude: -1.29e0, longitude: 3.682e1}"
+        );
+        // Of no components, and inside a tuple, whose type it names.
+        let unit = defined_of("unit", &[], 0);
+        assert_eq!(print([0_u8; 0].as_ptr(), &unit), "unit{}");
+        let heading = [attr("at", 0, &position)];
+        let tuple = tuple_of(&heading, 16);
+        assert_eq!(
+            print(nairobi.as_ptr().cast(), &tuple),
+            "tuple { at: position{latitude: -1.29e0, longitude: 3.682e1} }"
+        );
+        let empty: [usize; 2] = [8, 0];
+        assert_eq!(
+            print(empty.as_ptr().cast(), &array_of(&position)),
+            "array position []"
+        );
+        // Equal when their components are.
+        let lima: [f64; 2] = [-12.05, -77.04];
+        // SAFETY: both are values of the type.
+        let same = |a: &[f64; 2], b: &[f64; 2]| unsafe {
+            equal(a.as_ptr().cast(), b.as_ptr().cast(), &position)
+        };
+        assert!(same(&nairobi, &[-1.29, 36.82]));
+        assert!(!same(&nairobi, &lima));
     }
 
     #[test]

@@ -127,6 +127,8 @@ enum StatementStart {
     For,
     /// A heading's declaration, which goes at the top level.
     Heading,
+    /// A type's declaration, which goes at the top level.
+    Type,
     /// `break;` or `LEAVE name;`, which trendy has none of.
     Exit,
     Call,
@@ -242,6 +244,7 @@ impl<'a> Parser<'a> {
                 SyntaxKind::BuiltinKw => self.builtin(),
                 SyntaxKind::VarKw => self.var_decl(),
                 SyntaxKind::Ident if self.at_kind() => self.kind_decl(),
+                SyntaxKind::Ident if self.at_type_decl() => self.type_decl(),
                 SyntaxKind::Ident if self.at_heading_decl() => self.heading_decl(),
                 _ => self.junk(found),
             }
@@ -281,6 +284,97 @@ impl<'a> Parser<'a> {
             },
         );
         self.expect(SyntaxKind::Semicolon);
+        self.builder.finish_node();
+    }
+
+    /// Whether a type declaration starts here: `type`, a contextual keyword,
+    /// in any case, before a name and `{`, or Tutorial D's `POSSREP`.
+    /// TypeScript's `type Home = {…}` declares a heading instead.
+    fn at_type_decl(&mut self) -> bool {
+        self.found()
+            .is_some_and(|f| f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case("type"))
+            && self
+                .found_after(1)
+                .is_some_and(|f| f.kind == SyntaxKind::Ident)
+            && self.found_after(2).is_some_and(|f| {
+                f.kind == SyntaxKind::LBrace
+                    || (f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case("possrep"))
+            })
+    }
+
+    /// `type name { { name: type, … } };`: a scalar type of the program's
+    /// own, and its possible representation, whose components are in
+    /// braces of their own. Components written without them, as a
+    /// heading's are, or after Tutorial D's `POSSREP`, are reported, with
+    /// a fix.
+    fn type_decl(&mut self) {
+        let outer_form = std::mem::replace(&mut self.form, errors::TYPE_DECL_FORM);
+        self.start_node(SyntaxKind::TypeDecl);
+        let keyword = self.found().expect("at a type declaration");
+        self.bump();
+        if keyword.text != "type" {
+            self.errors.push(errors::miscased_keyword(keyword, "type"));
+        }
+        self.name(
+            "add the type's name after `type`, as in `type celsius { { degrees: approximate } };`",
+            &[SyntaxKind::LBrace],
+        );
+        // Tutorial D's `POSSREP`, and the representation's name after it.
+        let possrep = self
+            .found()
+            .filter(|f| f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case("possrep"))
+            .map(|f| {
+                self.bump();
+                if self.at(SyntaxKind::Ident) {
+                    self.bump();
+                }
+                let end = self.found().map_or(f.span.end, |next| next.span.start);
+                Span::new(f.span.start, end)
+            });
+        let braced = possrep.is_none()
+            && self.at(SyntaxKind::LBrace)
+            && self
+                .found_after(1)
+                .is_some_and(|f| matches!(f.kind, SyntaxKind::LBrace | SyntaxKind::RBrace));
+        if braced {
+            self.delimited(
+                Some(SyntaxKind::TypeBody),
+                "type's representation",
+                (SyntaxKind::LBrace, SyntaxKind::RBrace),
+                &[],
+                |p| {
+                    if p.at(SyntaxKind::LBrace) {
+                        p.representation();
+                        if p.at(SyntaxKind::Comma) {
+                            p.bump();
+                        }
+                    } else {
+                        p.missing(SyntaxKind::LBrace);
+                    }
+                },
+            );
+        } else if let Some(open) = self.found().filter(|f| f.kind == SyntaxKind::LBrace) {
+            // `type celsius { degrees: approximate };`, written as a heading.
+            self.representation();
+            // The components' `}`, if they end with one.
+            let close = self
+                .last_end
+                .filter(|&end| end > open.span.end && self.source[..end].ends_with('}'))
+                .map(|end| Span::new(end - 1, end));
+            self.errors
+                .push(errors::bare_representation(open.span, close, possrep));
+        } else {
+            self.missing(SyntaxKind::LBrace);
+        }
+        self.expect(SyntaxKind::Semicolon);
+        self.builder.finish_node();
+        self.form = outer_form;
+    }
+
+    /// `{ name: type, … }`: a possible representation's components.
+    fn representation(&mut self) {
+        self.start_node(SyntaxKind::Representation);
+        self.heading();
         self.builder.finish_node();
     }
 
@@ -971,6 +1065,8 @@ impl<'a> Parser<'a> {
             StatementStart::For
         } else if found.text == "heading" && self.at_heading_decl() {
             StatementStart::Heading
+        } else if found.text == "type" && self.at_type_decl() {
+            StatementStart::Type
         } else if exit {
             StatementStart::Exit
         } else if self.at_call_keyword() {
@@ -1008,13 +1104,20 @@ impl<'a> Parser<'a> {
             Some(StatementStart::While) => self.while_stmt(),
             Some(StatementStart::Loop) => self.loop_stmt(),
             Some(StatementStart::For) => self.for_stmt(),
-            Some(StatementStart::Heading) => {
-                // A heading declared in a body, as a local type: parsed as
-                // one, and moved before the definition it is in.
+            // A heading or a type declared in a body, as a local type: parsed
+            // as one, and moved before the definition it is in.
+            Some(start @ (StatementStart::Heading | StatementStart::Type)) => {
                 let before = self.last_end.unwrap_or(found.span.start);
-                self.heading_decl();
+                let what = if start == StatementStart::Heading {
+                    self.heading_decl();
+                    "heading"
+                } else {
+                    self.type_decl();
+                    "type"
+                };
                 let end = self.last_end.unwrap_or(found.span.end);
-                self.errors.push(errors::nested_heading(
+                self.errors.push(errors::nested_definition(
+                    what,
                     found.span,
                     &self.source[found.span.start..end],
                     Span::new(before, end),
@@ -4623,6 +4726,7 @@ impl<'a> Parser<'a> {
                 SyntaxKind::OperatorKw | SyntaxKind::VarKw | SyntaxKind::BuiltinKw
             )
         }) && !self.at_heading_decl()
+            && !self.at_type_decl()
         {
             self.bump();
         }
@@ -6449,6 +6553,89 @@ SourceFile
         );
         // A heading's name as a relation value: the empty relation.
         assert_eq!(fix("var r := relation home;"), "var r := relation home {};");
+    }
+
+    #[test]
+    fn type_declarations() {
+        let parse = parse_str(
+            "type position { { latitude: approximate, longitude: approximate } };
+type unit { {} };",
+        );
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let types: Vec<_> = parse.tree.types().collect();
+        let names: Vec<String> = types
+            .iter()
+            .map(|t| t.name().and_then(|n| n.ident()).unwrap().text().to_string())
+            .collect();
+        assert_eq!(names, ["position", "unit"]);
+        let components = |t: &trendy_syntax::ast::TypeDecl| {
+            t.representation()
+                .and_then(|r| r.components())
+                .map(|h| h.attributes().count())
+        };
+        assert_eq!(components(&types[0]), Some(2));
+        assert_eq!(components(&types[1]), Some(0));
+        // A trailing comma, and `type` as a name elsewhere.
+        assert!(
+            parse_str(
+                "type celsius { { degrees: approximate }, };
+var type := 1;"
+            )
+            .errors
+            .is_empty()
+        );
+        // Components without braces of their own, as a heading's are, or
+        // after Tutorial D's `POSSREP`, fixed in one edit; and the keyword
+        // in another case.
+        let fixed = "type celsius { { degrees: approximate } };";
+        for (source, code) in [
+            (
+                "type celsius { degrees: approximate };",
+                Code::BareRepresentation,
+            ),
+            (
+                "type celsius POSSREP { degrees: approximate };",
+                Code::BareRepresentation,
+            ),
+            (
+                "type celsius possrep c { degrees: approximate };",
+                Code::BareRepresentation,
+            ),
+            (
+                "Type celsius { { degrees: approximate } };",
+                Code::MiscasedKeyword,
+            ),
+        ] {
+            let parse = parse_str(source);
+            let codes: Vec<Code> = parse.errors.iter().map(|e| e.code).collect();
+            assert_eq!(codes, [code], "{source}");
+            assert_eq!(fix(source), fixed, "{source}");
+            assert_eq!(parse.tree.types().count(), 1, "{source}");
+        }
+        // TypeScript's `type Home = {…}` still declares a heading.
+        assert_eq!(
+            parse_str("type Home = { city: text };")
+                .tree
+                .headings()
+                .count(),
+            1
+        );
+        // Junk stops before a type's declaration, and one in a body moves
+        // before its operator.
+        let parse = parse_str("junk type celsius { { degrees: approximate } };");
+        assert_eq!(parse.errors.len(), 1);
+        assert_eq!(parse.tree.types().count(), 1);
+        assert_eq!(
+            fix("operator main{} [
+    type celsius { { degrees: approximate } };
+];"),
+            "type celsius { { degrees: approximate } };
+
+operator main{} [
+];"
+        );
+        let errors = parse_str("operator main{} [ type celsius { { d: approximate } }; ];").errors;
+        assert_eq!(errors[0].code, Code::NestedDefinition);
     }
 
     #[test]

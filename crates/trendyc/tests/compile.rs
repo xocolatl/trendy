@@ -334,11 +334,13 @@ relation { born: integer, name: text } { { born: 1815, name: "Ada" }, { born: 19
 relation { members: relation { name: text }, team: text } { { members: relation { name: text } { { name: "Ada" } }, team: "core" } }
 array [1200, 950, 220]
 array text []
-tuple { greeting: "\"say \\\"hi\\\"\\n\\ttab \\\\ é\"", point: "tuple { x: 1e0, y: tuple { z: false } }", rainfall: "array [1200, 950, 220]", teams: "relation { members: relation { name: text }, team: text } { { members: relation { name: text } { { name: \"Ada\" } }, team: \"core\" } }" }
+position{latitude: -1.29e0, longitude: 3.682e1}
+tuple { greeting: "\"say \\\"hi\\\"\\n\\ttab \\\\ é\"", nairobi: "position{latitude: -1.29e0, longitude: 3.682e1}", point: "tuple { x: 1e0, y: tuple { z: false } }", rainfall: "array [1200, 950, 220]", teams: "relation { members: relation { name: text }, team: text } { { members: relation { name: text } { { name: \"Ada\" } }, team: \"core\" } }" }
 7
 "count"
 42
 "\"say \\\"hi\\\"\\n\\ttab \\\\ é\""
+"position{latitude: -1.29e0, longitude: 3.682e1}"
 "tuple { x: 1e0, y: tuple { z: false } }"
 "array [1200, 950, 220]"
 "relation { members: relation { name: text }, team: text } { { members: relation { name: text } { { name: \"Ada\" } }, team: \"core\" } }"
@@ -370,21 +372,20 @@ tuple { greeting: "\"say \\\"hi\\\"\\n\\ttab \\\\ é\"", point: "tuple { x: 1e0,
 
 #[test]
 fn to_text_is_what_debug_value_writes() {
+    let source = std::fs::read_to_string(workspace_root().join("examples/debug.trendy")).unwrap();
     let (_, stderr) = run_example("debug");
     let lines: Vec<&str> = stderr.lines().collect();
-    let text = |line: &str| {
-        let program = analyze(&format!("var x := {line};\noperator main{{}} [];"));
-        program.variables[0].init.clone()
-    };
+    let text = |line: &str| read_back(&source, line);
     let written = |written: &str| trendy_hir::Value::Text(written.to_string());
-    // `greeting`, `point`, `rainfall` and `teams`, in name order: folded
-    // when compiling into `written`, and made when running by `as_text`.
-    let debug = [lines[4], lines[5], lines[10], lines[9]];
-    let trendy_hir::Value::Tuple(folded) = text(lines[12]) else {
-        panic!("{}", lines[12]);
+    // `greeting`, `nairobi`, `point`, `rainfall` and `teams`, in name
+    // order: folded when compiling into `written`, and made when running by
+    // `as_text`.
+    let debug = [lines[4], lines[12], lines[5], lines[10], lines[9]];
+    let trendy_hir::Value::Tuple(folded) = text(lines[13]) else {
+        panic!("{}", lines[13]);
     };
     let folded: Vec<_> = folded.attributes().map(|(_, v)| v.clone()).collect();
-    let run: Vec<_> = lines[16..20].iter().map(|line| text(line)).collect();
+    let run: Vec<_> = lines[17..22].iter().map(|line| text(line)).collect();
     let expected: Vec<_> = debug.iter().map(|line| written(line)).collect();
     assert_eq!(folded, expected);
     assert_eq!(run, expected);
@@ -401,6 +402,14 @@ fn analyze(source: &str) -> trendy_hir::Program {
     trendy_sema::analyze(&prelude, &parse(source)).unwrap()
 }
 
+/// `written`, a value the program `source` wrote, read back as an
+/// expression in that program, which declares the types it can be of.
+fn read_back(source: &str, written: &str) -> trendy_hir::Value {
+    let program = analyze(&format!("{source}\nvar read_back := {written};\n"));
+    let mut variables = program.variables.into_iter();
+    variables.find(|v| v.name == "read_back").unwrap().init
+}
+
 #[test]
 fn debug_output_reads_back_as_the_same_value() {
     // `debug.trendy` prints its variables first, in declaration order.
@@ -408,9 +417,9 @@ fn debug_output_reads_back_as_the_same_value() {
     let program = analyze(&source);
     let (_, stderr) = run_example("debug");
     for (variable, line) in program.variables.iter().zip(stderr.lines()) {
-        let printed = analyze(&format!("var x := {line};\noperator main{{}} [];"));
         assert_eq!(
-            printed.variables[0].init, variable.init,
+            read_back(&source, line),
+            variable.init,
             "`{}` printed as {line}",
             variable.name
         );
@@ -1022,9 +1031,9 @@ fn comparisons() {
         .map(|b| if b == "true" { '1' } else { '0' })
         .collect();
     // Evaluated when compiling.
-    assert_eq!(bits[..3], ['1', '1', '1']);
+    assert_eq!(bits[..4], ['1', '1', '1', '1']);
     // Each scalar call: `=`, `<>`, `<`, `<=`, `>`, `>=`.
-    let scalars: Vec<String> = bits[3..63]
+    let scalars: Vec<String> = bits[4..64]
         .chunks(6)
         .map(|row| row.iter().collect())
         .collect();
@@ -1043,8 +1052,8 @@ fn comparisons() {
             "100101", // "", ""
         ]
     );
-    // Each tuple and relation call: `=`, `<>`.
-    let values: Vec<String> = bits[63..]
+    // Each tuple, relation and position call: `=`, `<>`.
+    let values: Vec<String> = bits[64..]
         .chunks(2)
         .map(|row| row.iter().collect())
         .collect();
@@ -1060,6 +1069,8 @@ fn comparisons() {
             "10", // two empty relations
             "10", // `0e0` and `-0e0` are one value, even nested
             "10", // nested relations compare as sets
+            "10", // components compare as their types' values do
+            "01", // components compare by name
         ]
     );
 }
@@ -1440,6 +1451,34 @@ fn folded_and_run(name: &str) -> Vec<String> {
         "folded when compiling, and computed when running"
     );
     folded.to_vec()
+}
+
+#[test]
+fn types() {
+    assert_eq!(
+        folded_and_run("types"),
+        [
+            "position{latitude: -1.29e0, longitude: 3.682e1}",
+            "journey{destination: position{latitude: -1.205e1, longitude: -7.704e1}, origin: position{latitude: -1.29e0, longitude: 3.682e1}}",
+            "true",
+            "-7.704e1",
+            // The antipode.
+            "position{latitude: 1.29e0, longitude: -1.4318e2}",
+            // South of the equator.
+            "┌───────────────────────────────────────────────────┬────────────────┐",
+            "│ at                                                │ name           │",
+            "├───────────────────────────────────────────────────┼────────────────┤",
+            "│ position{latitude: -2.027e1, longitude: 3.093e1}  │ Great Zimbabwe │",
+            "│ position{latitude: -1.316e1, longitude: -7.255e1} │ Machu Picchu   │",
+            "└───────────────────────────────────────────────────┴────────────────┘",
+            "┌───────────────────────────────────────────────────┬─────────────┐",
+            "│ at                                                │ stop        │",
+            "├───────────────────────────────────────────────────┼─────────────┤",
+            "│ position{latitude: -1.205e1, longitude: -7.704e1} │ destination │",
+            "│ position{latitude: -1.29e0, longitude: 3.682e1}   │ origin      │",
+            "└───────────────────────────────────────────────────┴─────────────┘",
+        ]
+    );
 }
 
 #[test]

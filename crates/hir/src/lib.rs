@@ -1224,6 +1224,16 @@ pub enum Expr {
     /// none or several. `value from` is the extraction of its only
     /// attribute.
     Only(Box<Expr>),
+    /// The value of the program's own type `Defined` whose components, in
+    /// its possible representation, are the tuple: what its selector
+    /// computes, as the privileged operator Date has a selector written
+    /// with sets a value's physical representation (*Type Inheritance and
+    /// Relational Theory*, chapter 2).
+    Select(Defined, Box<Expr>),
+    /// The components of a value of one of the program's own types, in its
+    /// possible representation, as a tuple: what its `THE_` operators
+    /// extract from, as `v.c` is `Extract(Components(v), c)`.
+    Components(Box<Expr>),
     /// The tuple at hand, with this heading: the one an `Extend` is computing
     /// attributes for, or a `Restrict` a condition, `depth` of them out from
     /// here, counting the innermost as 0. Its attributes are in scope by
@@ -1314,6 +1324,11 @@ impl Expr {
                 Type::Relation(heading) => Type::Tuple(heading),
                 other => panic!("the only tuple of {other}"),
             },
+            Expr::Select(defined, _) => Type::Defined(defined.clone()),
+            Expr::Components(value) => match value.type_with(leaf) {
+                Type::Defined(defined) => Type::Tuple(defined.components),
+                other => panic!("the components of {other}"),
+            },
         }
     }
 }
@@ -1357,7 +1372,10 @@ impl Expr {
             | Expr::Unload(..)
             | Expr::Index(..)
             | Expr::WithElements(..) => true,
-            Expr::Unary(_, operand) | Expr::At(_, operand) => operand.can_fail(),
+            Expr::Unary(_, operand)
+            | Expr::At(_, operand)
+            | Expr::Select(_, operand)
+            | Expr::Components(operand) => operand.can_fail(),
             Expr::Tuple(attributes) => attributes.values().any(Expr::can_fail),
             Expr::Connective(_, operands) => operands.iter().any(Expr::can_fail),
             Expr::Extract(tuple, _) => tuple.can_fail(),
@@ -1523,6 +1541,8 @@ impl Expr {
             Expr::Load(relation, loading) => Expr::Load(Box::new(f(*relation, 0)), loading),
             Expr::Unload(array, unloading) => Expr::Unload(Box::new(f(*array, 0)), unloading),
             Expr::Only(operand) => Expr::Only(Box::new(f(*operand, 0))),
+            Expr::Select(defined, components) => Expr::Select(defined, Box::new(f(*components, 0))),
+            Expr::Components(value) => Expr::Components(Box::new(f(*value, 0))),
             Expr::Call(call) => Expr::Call(Call {
                 args: call
                     .args
@@ -1550,6 +1570,8 @@ impl Expr {
             | Expr::Rename(operand, _)
             | Expr::Ungroup(operand, _)
             | Expr::Only(operand)
+            | Expr::Select(_, operand)
+            | Expr::Components(operand)
             | Expr::Load(operand, ..)
             | Expr::Unload(operand, ..) => f(operand, 0),
             Expr::Let(_, lhs, rhs)
@@ -1690,6 +1712,9 @@ impl Expr {
             Expr::Ungroup(operand, names) => Expr::Ungroup(inst(operand), names.clone()),
             Expr::Restrict(operand, condition) => Expr::Restrict(inst(operand), inst(condition)),
             Expr::Only(operand) => Expr::Only(inst(operand)),
+            // A type of the program's own has no type parameters in it.
+            Expr::Select(defined, components) => Expr::Select(defined.clone(), inst(components)),
+            Expr::Components(value) => Expr::Components(inst(value)),
             Expr::Current(depth, heading) => Expr::Current(*depth, heading.instantiated(types)),
             Expr::Call(call) => Expr::Call(call.instantiated(types)),
         }
@@ -2065,6 +2090,9 @@ pub enum Compared {
     Scalar(Scalar),
     /// Tuples of one tuple type, equal when every attribute is.
     Tuple,
+    /// Values of one of the program's own types, equal when their
+    /// components are: only `=` and `<>`, as such a type has no order.
+    Defined,
     /// Relations of one relation type, equal when they have the same tuples,
     /// and one less than or equal to another when it is a subset of it.
     Relation,
@@ -2083,6 +2111,7 @@ impl Compared {
     pub fn of(ty: &Type) -> Compared {
         match ty {
             Type::Scalar(scalar) => Compared::Scalar(*scalar),
+            Type::Defined(_) => Compared::Defined,
             Type::Tuple(_) => Compared::Tuple,
             Type::Relation(_) => Compared::Relation,
             Type::Array(_) => Compared::Array,
@@ -2162,8 +2191,8 @@ pub fn compare(lhs: &Value, rhs: &Value) -> std::cmp::Ordering {
 }
 
 impl BinaryOp {
-    /// The scalar type of both operands: `None` for tuples, relations,
-    /// arrays and a type parameter's values.
+    /// The scalar type of both operands: `None` for the program's own
+    /// types, tuples, relations, arrays and a type parameter's values.
     #[must_use]
     pub fn operand(self) -> Option<Scalar> {
         match self {
@@ -2176,7 +2205,11 @@ impl BinaryOp {
             BinaryOp::Compare(_, Compared::Scalar(scalar)) => Some(scalar),
             BinaryOp::Compare(
                 _,
-                Compared::Tuple | Compared::Relation | Compared::Array | Compared::Parameter(_),
+                Compared::Defined
+                | Compared::Tuple
+                | Compared::Relation
+                | Compared::Array
+                | Compared::Parameter(_),
             ) => None,
         }
     }
@@ -2301,17 +2334,20 @@ pub struct Variable {
 /// A key: a set of a relation's attributes, by name.
 pub type Key = BTreeSet<String>;
 
-/// A type: a built-in scalar type, a tuple type, a relation type, an array
-/// type, or a type parameter of the operator it is written in.
+/// A type: a built-in scalar type, one of the program's own, a tuple type, a
+/// relation type, an array type, or a type parameter of the operator it is
+/// written in.
 ///
 /// Types are structural: two tuple types, or two relation types, are the
 /// same type exactly when their headings are equal, wherever they are
-/// written. A type parameter is a type of its own inside its operator, the
+/// written. A program's own types are scalar, so their names tell them
+/// apart. A type parameter is a type of its own inside its operator, the
 /// same type only as itself, and outside it means nothing: a call gives it
 /// a type, which [`Type::instantiated`] puts in its place.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Type {
     Scalar(Scalar),
+    Defined(Defined),
     Tuple(Heading),
     Relation(Heading),
     /// Arrays of elements of this type (TTM's ARRAY type generator, chapter
@@ -2326,7 +2362,7 @@ impl Type {
     #[must_use]
     pub fn instantiated(&self, types: &[Type]) -> Type {
         match self {
-            Type::Scalar(_) => self.clone(),
+            Type::Scalar(_) | Type::Defined(_) => self.clone(),
             Type::Tuple(heading) => Type::Tuple(heading.instantiated(types)),
             Type::Relation(heading) => Type::Relation(heading.instantiated(types)),
             Type::Array(element) => Type::Array(Box::new(element.instantiated(types))),
@@ -2337,7 +2373,7 @@ impl Type {
     /// The type parameters in the type.
     pub fn parameters(&self) -> Box<dyn Iterator<Item = &TypeParameter> + '_> {
         match self {
-            Type::Scalar(_) => Box::new(std::iter::empty()),
+            Type::Scalar(_) | Type::Defined(_) => Box::new(std::iter::empty()),
             Type::Tuple(heading) | Type::Relation(heading) => {
                 Box::new(heading.0.values().flat_map(Type::parameters))
             }
@@ -2347,21 +2383,24 @@ impl Type {
     }
 
     /// The value a variable of this type starts with when none is given:
-    /// for a tuple, each attribute's default.
+    /// for a tuple, each attribute's default. A type of the program's own
+    /// has none, nor a tuple with one, since no value of it is any more a
+    /// start than another.
     ///
     /// # Panics
     ///
     /// If the type has a type parameter in it, which only operators'
     /// parameters, and not variables, have.
     #[must_use]
-    pub fn default_value(&self) -> Value {
-        match self {
+    pub fn default_value(&self) -> Option<Value> {
+        Some(match self {
             Type::Scalar(scalar) => scalar.default_value(),
+            Type::Defined(_) => return None,
             Type::Tuple(heading) => Value::Tuple(TupleValue(
                 heading
                     .attributes()
-                    .map(|(name, ty)| (name.to_string(), ty.default_value()))
-                    .collect(),
+                    .map(|(name, ty)| Some((name.to_string(), ty.default_value()?)))
+                    .collect::<Option<_>>()?,
             )),
             // TTM's default for a relation variable: the empty relation.
             Type::Relation(heading) => Value::Relation(RelationValue {
@@ -2373,7 +2412,7 @@ impl Type {
                 elements: Vec::new(),
             }),
             Type::Parameter(p) => panic!("no variable has the type parameter {p}"),
-        }
+        })
     }
 }
 
@@ -2383,12 +2422,22 @@ impl std::fmt::Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Type::Scalar(scalar) => f.write_str(scalar.name()),
+            Type::Defined(defined) => f.write_str(&defined.name),
             Type::Tuple(heading) => write!(f, "tuple {heading}"),
             Type::Relation(heading) => write!(f, "relation {heading}"),
             Type::Array(element) => write!(f, "array {element}"),
             Type::Parameter(p) => write!(f, "{p}"),
         }
     }
+}
+
+/// A scalar type of the program's own: its name, and the components of its
+/// possible representation, as values of it are stored and selected (TTM
+/// RM Prescription 4).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Defined {
+    pub name: String,
+    pub components: Heading,
 }
 
 /// Source text for the heading: `{ a: integer, b: text }` or `{}`. A
@@ -2624,6 +2673,7 @@ pub enum Value {
     Tuple(TupleValue),
     Relation(RelationValue),
     Array(ArrayValue),
+    Defined(DefinedValue),
 }
 
 impl Value {
@@ -2643,6 +2693,15 @@ impl Value {
             )),
             Value::Relation(relation) => Type::Relation(relation.heading.clone()),
             Value::Array(array) => Type::Array(Box::new(array.element.clone())),
+            Value::Defined(value) => {
+                let Type::Tuple(components) = Value::Tuple(value.components.clone()).ty() else {
+                    unreachable!("a tuple's type is a tuple type");
+                };
+                Type::Defined(Defined {
+                    name: value.name.clone(),
+                    components,
+                })
+            }
         }
     }
 
@@ -2693,6 +2752,15 @@ impl std::fmt::Display for Value {
                 f.write_char('"')
             }
             Value::Tuple(tuple) => write!(f, "tuple {tuple}"),
+            // Its selector's invocation, as a call is written.
+            Value::Defined(value) => {
+                let components: Vec<String> = value
+                    .components
+                    .attributes()
+                    .map(|(name, value)| format!("{name}: {value}"))
+                    .collect();
+                write!(f, "{}{{{}}}", value.name, components.join(", "))
+            }
             Value::Relation(relation) => {
                 write!(f, "relation {} ", relation.heading)?;
                 if relation.tuples.is_empty() {
@@ -2713,6 +2781,15 @@ impl std::fmt::Display for Value {
             }
         }
     }
+}
+
+/// A value of one of the program's own types, of the type named `name`: its
+/// components, in its possible representation. Two are equal when their
+/// components are (TTM RM Prescription 8).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DefinedValue {
+    pub name: String,
+    pub components: TupleValue,
 }
 
 /// A tuple value: a value for each attribute of its heading. Two tuples are
@@ -3355,8 +3432,53 @@ mod tests {
             ]
             .into(),
         ));
-        assert_eq!(ty.default_value(), expected);
+        assert_eq!(ty.default_value(), Some(expected.clone()));
         assert_eq!(expected.ty(), ty);
+    }
+
+    #[test]
+    fn a_programs_own_types_are_named_and_have_no_default() {
+        let components =
+            Heading::new([("degrees".to_string(), Type::Scalar(Scalar::Approximate))].into());
+        let ty = Type::Defined(Defined {
+            name: "celsius".to_string(),
+            components,
+        });
+        assert_eq!(ty.to_string(), "celsius");
+        assert_eq!(ty.default_value(), None);
+        // Nor has a tuple with one.
+        let tuple = Type::Tuple(Heading::new([("t".to_string(), ty.clone())].into()));
+        assert_eq!(tuple.default_value(), None);
+        // A value is written as its selector's invocation.
+        let value = Value::Defined(DefinedValue {
+            name: "celsius".to_string(),
+            components: TupleValue::new(
+                [(
+                    "degrees".to_string(),
+                    Value::Approximate(Approximate::new(21.5)),
+                )]
+                .into(),
+            ),
+        });
+        assert_eq!(value.to_string(), "celsius{degrees: 2.15e1}");
+        assert_eq!(value.ty(), ty);
+        // Its components, and the value they select.
+        let select = Expr::Select(
+            Defined {
+                name: "celsius".to_string(),
+                components: Heading::new(
+                    [("degrees".to_string(), Type::Scalar(Scalar::Approximate))].into(),
+                ),
+            },
+            Box::new(Expr::Parameter("t".to_string())),
+        );
+        assert_eq!(select.type_with(&|_| unreachable!()), ty);
+        assert_eq!(
+            Expr::Components(Box::new(select)).type_with(&|_| unreachable!()),
+            Type::Tuple(Heading::new(
+                [("degrees".to_string(), Type::Scalar(Scalar::Approximate))].into()
+            ))
+        );
     }
 
     #[test]
@@ -3394,7 +3516,9 @@ mod tests {
         // An empty relation of it, and how its values are compared.
         let compared = Expr::Binary(
             BinaryOp::Compare(Comparison::Equal, Compared::of(&Type::Parameter(t))),
-            Box::new(Expr::Constant(generic.default_value())),
+            Box::new(Expr::Constant(
+                generic.default_value().expect("a relation has a default"),
+            )),
             Box::new(Expr::Parameter("a".to_string())),
         );
         let Expr::Binary(op, lhs, _) = compared.instantiated(&types) else {
@@ -3415,7 +3539,7 @@ mod tests {
         let heading = Heading::new([("a".to_string(), Type::Scalar(Scalar::Integer))].into());
         let ty = Type::Relation(heading.clone());
         assert_eq!(ty.to_string(), "relation { a: integer }");
-        let Value::Relation(empty) = ty.default_value() else {
+        let Some(Value::Relation(empty)) = ty.default_value() else {
             panic!("a relation's default is a relation");
         };
         assert!(empty.tuples.is_empty());

@@ -1696,6 +1696,64 @@ var ratio: approximate := 1;
 operator main{} [];
 ```
 
+### A program's own types
+
+A program can declare scalar types of its own, each with a possible
+representation: the components a value of it can be written with (*The
+Third Manifesto*, RM Prescription 4). A position on Earth is its latitude
+and its longitude:
+
+```trendy
+/* A place on Earth, by its latitude and longitude, in degrees. */
+type position { { latitude: approximate, longitude: approximate } };
+
+heading city := { name: text, at: position };
+
+var cities := relation city {
+    { name: "Nairobi", at: position{latitude: -1.29e0, longitude: 36.82e0} },
+    { name: "Lima", at: position{latitude: -12.05e0, longitude: -77.04e0} },
+};
+
+operator main{} [
+    var nairobi := value from (cities where name = "Nairobi"){at};
+    call debug_value{v: nairobi};
+    call debug_value{v: nairobi.latitude};
+    call debug_table{r: cities where at.latitude < -5e0};
+];
+```
+
+- **The components go in braces of their own,** inside the type's:
+  `type celsius { { degrees: approximate } };`, even for one. The outer
+  braces hold what the declaration says of the type, of which the
+  possible representation is the first thing. Components written straight
+  inside the type's braces, as a heading's attributes are, or after
+  Tutorial D's `POSSREP`, are fixed to that (P0039).
+- **The selector is named after the type,** and takes the components as
+  its arguments: `position{latitude: -1.29e0, longitude: 36.82e0}` is the
+  value of `position` with those components. It is an operator, as TTM's
+  selectors are, and a call like any other, so a missing or misspelled
+  component is reported as an argument is. No other operator can have a
+  type's name, nor a type a prelude operator's (A0057).
+- **`p.latitude` is a component's value,** with the dot of a tuple's
+  attribute: TTM's `THE_LATITUDE(P)` (RM Prescription 5).
+- **A value has no order:** values of a type of the program's own are
+  equal when their components are, and compared only with `=` and `<>`;
+  `<` is an error (A0022). A parameter of `any type` takes them, and one
+  of a kind doesn't.
+- **There is no default,** since no value of a type is any more a start
+  than another: a variable of one, or of a tuple with one, needs an
+  initial value (A0006).
+- **A value is written as its selector's invocation,** by `debug_value`,
+  `debug_table` and `to_text`: `position{latitude: -1.29e0, longitude:
+  3.682e1}`, which reads back as the same value.
+- **A type is scalar,** not a tuple: its components are its
+  representation, not attributes, so nothing joins on them or projects
+  them. `tuple position { … }` is an error, fixed to the selector.
+- **Types share a namespace with the headings,** and can be declared in
+  any order. A component can be of any type, another of the program's
+  own, a tuple or a relation, but not of its own type, directly or
+  through others (A0049).
+
 ## Tuples
 
 A tuple type is written `tuple { name: type, … }`, and a tuple value
@@ -1859,7 +1917,7 @@ operator main{} [
 - **Its attributes have specific types,** as a variable's do: not
   `any type`, nor an operator's type parameter (A0014, A0003).
 - **Headings share a namespace with the types,** so no two have the same
-  name, nor a heading a built-in type's (A0001), but a heading can have a
+  name, nor a heading a type's (A0001), but a heading can have a
   variable's, an operator's or an attribute's name. `heading` is a keyword
   only before a heading's name, so an attribute can be called `heading`,
   as a ship's is.
@@ -3829,8 +3887,8 @@ are case-sensitive. The keywords are `operator`, `var`, `call`, `builtin`,
 `as`, `insert`, `d_insert`, `delete`, `i_delete`, `update`, `assign`,
 `return`, `if`, `then`, `else`, `while`, `loop` and `for`, all lowercase,
 and a keyword can't be a name (P0017).
-`type` is a keyword only after `builtin`, `key` only where a variable's
-keys go, `value` and `from` only in `tuple from` and `value from`, and
+`type` is a keyword only after `builtin` and before a type's name, `key`
+only where a variable's keys go, `value` and `from` only in `tuple from` and `value from`, and
 `load`, `from`, `order`, `asc` and `desc` only in a load, `in` only
 in a `for` loop, and `heading` only before a heading's name.
 
@@ -3840,7 +3898,8 @@ variable of its name. So a variable can have an operator's name, or a
 type's, and which one a name is depends on where it is: in
 `call greet{…};` it is an operator, and as a value it is a variable or a
 parameter. No two operators can have the same name, nor two variables,
-nor two headings, nor a heading and a built-in type (A0001).
+nor two headings, nor a heading and a type (A0001), and a type's name is
+its selector's, which no other operator can have (A0057).
 
 ```trendy
 var greet := "Hello";

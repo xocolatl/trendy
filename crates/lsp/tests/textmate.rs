@@ -219,6 +219,21 @@ fn builtin_type_rule(identifier: &str) -> Value {
     })
 }
 
+/// `type name {`: `type` is a keyword before a type's name, which two names
+/// in a row never are elsewhere.
+fn type_rule(identifier: &str) -> Value {
+    json!({
+        "match": format!(
+            "\\b(type)\\s+({identifier})\\s*(?={})",
+            regex_escape(SyntaxKind::LBrace.fixed_text().unwrap())
+        ),
+        "captures": {
+            "1": { "name": "keyword.other.trendy" },
+            "2": { "name": "entity.name.type.trendy" },
+        },
+    })
+}
+
 /// `heading name :=`: `heading` is a keyword only before a heading's name
 /// and `:=`, which an attribute so named never has.
 fn heading_rule(identifier: &str) -> Value {
@@ -338,6 +353,7 @@ fn generate(probed: &Probed) -> Value {
             { "include": "#comment" },
             { "include": "#operator-definition" },
             { "include": "#builtin-type" },
+            { "include": "#type" },
             { "include": "#heading" },
             { "include": "#call" },
             { "include": "#variable-declaration" },
@@ -377,6 +393,7 @@ fn generate(probed: &Probed) -> Value {
                 },
             },
             "builtin-type": builtin_type_rule(identifier),
+            "type": type_rule(identifier),
             "heading": heading_rule(identifier),
             "key": key_rule(),
             "load": load_rule(identifier),

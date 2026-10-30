@@ -344,12 +344,19 @@ pub(crate) fn local(
         }
         (Some((ty, type_expr)), None) => {
             let ty = ty?;
-            if ty.parameters().next().is_some() {
+            // A type parameter has no default, nor has a type of the
+            // program's own.
+            let default = ty
+                .parameters()
+                .next()
+                .is_none()
+                .then(|| ty.default_value())
+                .flatten();
+            let Some(default) = default else {
                 errors.push(errors::no_default_value(name, &ty, &type_expr));
                 return None;
-            }
-            let value = hir::Expr::Constant(ty.default_value());
-            (ty, value)
+            };
+            (ty, hir::Expr::Constant(default))
         }
         (None, Some(written)) => {
             let value = checker.expr(&written, None, errors)?;

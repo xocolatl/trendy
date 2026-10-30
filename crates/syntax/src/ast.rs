@@ -42,6 +42,9 @@ ast_node!(BuiltinOperator);
 ast_node!(BuiltinType);
 ast_node!(KindDecl);
 ast_node!(HeadingDecl);
+ast_node!(TypeDecl);
+ast_node!(TypeBody);
+ast_node!(Representation);
 ast_node!(RequirementList);
 ast_node!(Requirement);
 ast_node!(Body);
@@ -115,6 +118,7 @@ pub enum Item {
     BuiltinType(BuiltinType),
     Kind(KindDecl),
     Heading(HeadingDecl),
+    Type(TypeDecl),
     Variable(VarDecl),
 }
 
@@ -128,6 +132,7 @@ impl SourceFile {
                 .or_else(|| BuiltinType::cast(node.clone()).map(Item::BuiltinType))
                 .or_else(|| KindDecl::cast(node.clone()).map(Item::Kind))
                 .or_else(|| HeadingDecl::cast(node.clone()).map(Item::Heading))
+                .or_else(|| TypeDecl::cast(node.clone()).map(Item::Type))
                 .or_else(|| VarDecl::cast(node).map(Item::Variable))
         })
     }
@@ -145,6 +150,10 @@ impl SourceFile {
                 .and_then(|n| n.ident())
                 .is_some_and(|i| i.text() == name)
         })
+    }
+
+    pub fn types(&self) -> impl Iterator<Item = TypeDecl> {
+        self.0.children().filter_map(TypeDecl::cast)
     }
 
     pub fn operators(&self) -> impl Iterator<Item = Operator> {
@@ -283,6 +292,38 @@ impl HeadingDecl {
     /// The attributes it names.
     #[must_use]
     pub fn heading(&self) -> Option<Heading> {
+        self.0.children().find_map(Heading::cast)
+    }
+}
+
+impl TypeDecl {
+    /// The word `type`, which the parser reports in another case.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    #[must_use]
+    pub fn name(&self) -> Option<Name> {
+        self.0.children().find_map(Name::cast)
+    }
+
+    /// Its possible representation: in its body, or, where the components
+    /// were written without braces of their own, which the parser reports,
+    /// in its place.
+    #[must_use]
+    pub fn representation(&self) -> Option<Representation> {
+        self.0.children().find_map(TypeBody::cast).map_or_else(
+            || self.0.children().find_map(Representation::cast),
+            |body| body.0.children().find_map(Representation::cast),
+        )
+    }
+}
+
+impl Representation {
+    /// Its components, each with its type.
+    #[must_use]
+    pub fn components(&self) -> Option<Heading> {
         self.0.children().find_map(Heading::cast)
     }
 }

@@ -367,11 +367,12 @@ fn chain_top(node: &SyntaxNode) -> SyntaxNode {
 /// Whether `node` is a list that can be broken across lines, one item per
 /// line: parameters, arguments, headings, tuple and relation values, lists
 /// of names, new attributes, the operands of `join{…}`, `and{…}` and the
-/// like, and a load's order.
+/// like, a load's order, and what a type's declaration says of it.
 fn is_list(node: &SyntaxNode) -> bool {
     matches!(
         node.kind(),
         SyntaxKind::Heading
+            | SyntaxKind::TypeBody
             | SyntaxKind::Arguments
             | SyntaxKind::RequirementList
             | SyntaxKind::TupleLiteral
@@ -716,7 +717,10 @@ fn items(node: &SyntaxNode) -> usize {
         heading.attributes().count()
     } else if let Some(names) = NameList::cast(node.clone()) {
         names.names().count()
-    } else if node.kind() == SyntaxKind::RequirementList {
+    } else if matches!(
+        node.kind(),
+        SyntaxKind::RequirementList | SyntaxKind::TypeBody
+    ) {
         node.children().count()
     } else if let Some(renamings) = RenameList::cast(node.clone()) {
         renamings.renamings().count()
@@ -824,8 +828,8 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
     // `any type`, `types`, before an operator's type parameters, `per`,
     // which a space also comes before, `load`, `value`, `from` and `order`,
     // and a load's `keep`, which one comes before too, an order item's
-    // `asc` and `desc`, a `for` loop's `in`, and `heading`, before a
-    // heading's name.
+    // `asc` and `desc`, a `for` loop's `in`, `heading`, before a heading's
+    // name, and `type`, before a type's.
     let contextual_keyword = prev.kind() == Ident
         && prev.parent().is_some_and(|p| match p.kind() {
             BuiltinType => prev.text() == "type",
@@ -836,6 +840,7 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
             | SyntaxKind::Per
             | SyntaxKind::KindDecl
             | SyntaxKind::HeadingDecl
+            | SyntaxKind::TypeDecl
             | SyntaxKind::Load
             | SyntaxKind::Keeping
             | SyntaxKind::Numbering
@@ -850,11 +855,12 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
                 SyntaxKind::Load | SyntaxKind::Keeping | SyntaxKind::Numbering
             )
         });
-    // A kind's requirements follow its name after a space.
+    // A kind's requirements, and a type's representation, follow its name
+    // after a space.
     let requirements = next.kind() == LBrace
-        && next
-            .parent()
-            .is_some_and(|p| p.kind() == SyntaxKind::RequirementList);
+        && next.parent().is_some_and(|p| {
+            matches!(p.kind(), SyntaxKind::RequirementList | SyntaxKind::TypeBody)
+        });
     let per = next
         .parent()
         .is_some_and(|p| p.kind() == SyntaxKind::Per && p.first_token().as_ref() == Some(next));
@@ -920,7 +926,7 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
 }
 
 /// The whitespace between definitions, after `prev`, a `;`: declarations
-/// of one kind in a row, variables', headings', built-in types' or
+/// of one kind in a row, variables', headings', types', built-in types' or
 /// kinds', go on adjacent lines unless the source groups them with a blank
 /// line, as `blank_line` says, and everything else is separated by a blank
 /// line.
@@ -929,6 +935,7 @@ fn between_definitions(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool)
     let in_a_row = [
         SyntaxKind::VarDecl,
         SyntaxKind::HeadingDecl,
+        SyntaxKind::TypeDecl,
         SyntaxKind::BuiltinType,
         SyntaxKind::KindDecl,
     ]
@@ -1339,6 +1346,25 @@ mod tests {
                 "heading home := { house: integer, color: text, nation: text, drink: text, dish: text, pet: text, garden: boolean };"
             ),
             "heading home := {\n    house: integer,\n    color: text,\n    nation: text,\n    drink: text,\n    dish: text,\n    pet: text,\n    garden: boolean,\n};\n"
+        );
+    }
+
+    #[test]
+    fn types() {
+        // Spaced braces around the representation, in a row, and a call of
+        // the selector, as any call.
+        assert_eq!(
+            fmt(
+                "type  celsius{{degrees:approximate}};type unit{{},};var t:=celsius{ degrees:1e0 };"
+            ),
+            "type celsius { { degrees: approximate } };\ntype unit { {} };\n\nvar t := celsius{degrees: 1e0};\n"
+        );
+        // A long one breaks its own braces first.
+        assert_eq!(
+            fmt(
+                "type place { { name: text, at: position, description: text, population: integer, founded: integer } };"
+            ),
+            "type place {\n    { name: text, at: position, description: text, population: integer, founded: integer },\n};\n"
         );
     }
 

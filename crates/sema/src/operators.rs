@@ -10,7 +10,7 @@ use trendy_syntax::ast::{self, AstNode, Item, Said, SourceFile, TypeExpr};
 
 use crate::check::Lookup;
 use crate::types::{self, Origin, TypeParameters};
-use crate::{Namespaces, Prelude, Source, errors};
+use crate::{Kind, Namespaces, Prelude, Source, errors};
 
 /// What a call needs to know about the operator it calls.
 #[derive(Clone)]
@@ -38,6 +38,10 @@ pub(crate) struct Signature {
     pub(crate) decl: Option<ast::Operator>,
     /// The built-in it is, for the prelude's.
     pub(crate) builtin: Option<hir::Builtin>,
+    /// The type of the program's own it is the selector of, named after
+    /// it, and where the type's name is declared: its value is the value
+    /// of the type its arguments are the components of.
+    pub(crate) selects: Option<(hir::Defined, Span)>,
     /// Whether the parameters and the result type are valid. Calls of an
     /// operator with errors in them aren't checked, because those errors
     /// are already reported.
@@ -108,8 +112,22 @@ impl Signature {
     /// Where the operator's name is written in its definition, for the
     /// program's own.
     pub(crate) fn defined(&self) -> Option<Span> {
+        if let Some((_, declared)) = &self.selects {
+            return Some(*declared);
+        }
         let ident = self.decl.as_ref()?.name()?.ident()?;
         Some(trendy_syntax::span(ident.text_range()))
+    }
+
+    /// The value of a selector, of the type `defined`: the value whose
+    /// components are its parameters.
+    pub(crate) fn selection(defined: &hir::Defined) -> hir::Expr {
+        let components = defined
+            .components
+            .attributes()
+            .map(|(name, _)| (name.to_string(), hir::Expr::Parameter(name.to_string())))
+            .collect();
+        hir::Expr::Select(defined.clone(), Box::new(hir::Expr::Tuple(components)))
     }
 
     /// The parameters, as a call's error says what they are:
@@ -280,6 +298,7 @@ impl Signature {
             result,
             decl: None,
             builtin,
+            selects: None,
             valid: true,
         }
     }
@@ -369,6 +388,7 @@ pub(crate) fn signatures(
                     result,
                     decl: Some(op),
                     builtin: None,
+                    selects: None,
                 });
             }
             Item::Builtin(_) | Item::BuiltinType(_) | Item::Kind(_)
@@ -382,6 +402,10 @@ pub(crate) fn signatures(
                 builtin.keyword(),
                 builtin.syntax(),
             )),
+            Item::Type(decl) => {
+                let id = hir::OperatorId(list.len());
+                list.extend(selector(id, &decl, namespaces));
+            }
             Item::Variable(_) | Item::Heading(_) => {}
         }
     }
@@ -393,6 +417,46 @@ pub(crate) fn signatures(
             .push(signature.id);
     }
     Operators { list, by_name }
+}
+
+/// The signature of the selector of the type `decl` declares, whose id is
+/// `id`: an operator named after it, whose parameters are its components,
+/// unless its name is another operator's, which is reported, or its
+/// components have errors.
+fn selector(
+    id: hir::OperatorId,
+    decl: &ast::TypeDecl,
+    namespaces: &Namespaces,
+) -> Option<Signature> {
+    let ident = decl.name()?.ident()?;
+    let name = ident.text();
+    let (Some((declared, Some(defined))), Some((Kind::Selector, _))) =
+        (namespaces.defined(name), namespaces.operator(name))
+    else {
+        return None;
+    };
+    if !namespaces.is_first_type(&ident) {
+        return None;
+    }
+    let params: BTreeMap<String, hir::Parameter> = defined
+        .components
+        .attributes()
+        .map(|(name, ty)| (name.to_string(), hir::Parameter::constant(ty.clone())))
+        .collect();
+    Some(Signature {
+        id,
+        name: name.to_string(),
+        types: Vec::new(),
+        written: written(&params),
+        params,
+        unresolved: BTreeSet::new(),
+        read_only: true,
+        result: Some(hir::Type::Defined(defined.clone())),
+        decl: None,
+        builtin: None,
+        selects: Some((defined.clone(), declared)),
+        valid: true,
+    })
 }
 
 /// A parameter, as a call gives its argument.

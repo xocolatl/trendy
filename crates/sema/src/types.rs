@@ -357,14 +357,19 @@ pub(crate) fn resolve(
             if let Some(parameter) = parameters.named(ident.text()) {
                 return Some(hir::Type::Parameter(parameter.clone()));
             }
-            let scalar = hir::Scalar::from_name(ident.text());
-            if scalar.is_none() {
-                errors.push(match namespaces.heading(ident.text()) {
-                    Some((declared, _)) => errors::heading_as_type(&ident, declared),
-                    None => errors::unknown_type(&ident, namespaces, parameters),
-                });
+            if let Some(scalar) = hir::Scalar::from_name(ident.text()) {
+                return Some(hir::Type::Scalar(scalar));
             }
-            scalar.map(hir::Type::Scalar)
+            // A type whose components have errors is reported where it is
+            // declared.
+            if let Some((_, defined)) = namespaces.defined(ident.text()) {
+                return defined.cloned().map(hir::Type::Defined);
+            }
+            errors.push(match namespaces.heading(ident.text()) {
+                Some((declared, _)) => errors::heading_as_type(&ident, declared),
+                None => errors::unknown_type(&ident, namespaces, parameters),
+            });
+            None
         }
         TypeExpr::Tuple(tuple) => {
             resolve_heading_expr(&tuple.heading()?, parameters, namespaces, errors)
@@ -590,6 +595,14 @@ pub(crate) fn tuple_selector(
     checker: &mut Checker,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::Expr> {
+    // `tuple celsius { degrees: 1e0 }`, for the type's selector.
+    if let Some(ast::HeadingExpr::Named(named)) = tuple.heading()
+        && let Some(ident) = named.ident()
+        && let Some((declared, _)) = checker.namespaces().defined(ident.text())
+    {
+        errors.push(errors::tuple_of_type(&ident, tuple, declared));
+        return None;
+    }
     let own = own_heading(tuple.heading(), hir::Type::Tuple, checker, errors).ok()?;
     let here = own.as_ref().or(expected);
     let heading = match here {
