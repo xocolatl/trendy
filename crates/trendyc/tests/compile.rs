@@ -1310,6 +1310,86 @@ fn comparisons() {
     );
 }
 
+#[test]
+fn orders_in_another_representation_compare_when_running() {
+    // Points by their distance from the origin, in kilometres, descending,
+    // then their angle, descending: each comparison converts the points,
+    // and their distances, to the representations their orders compare.
+    // `compare` computes when running what `main` folds.
+    let source = "type distance {
+    { m: approximate },
+    { km: approximate } to { m := km * 1e3 } from { km := m / 1e3 },
+    order [desc km],
+};
+type point {
+    { x: approximate, y: approximate },
+    { r: distance, theta: approximate }
+        to { x := r.m * cos{of: theta}, y := r.m * sin{of: theta} }
+        from { r := distance{m: sqrt{of: x * x + y * y}}, theta := atan2{y: y, x: x} },
+    order [asc r, desc theta],
+};
+type site { { name: text, at: point }, order [asc at, asc name] };
+
+var points := relation {
+    { name: \"far\", at: point{x: 3e0, y: 4e0} },
+    { name: \"west\", at: point{x: -1e0, y: 0e0} },
+    { name: \"north\", at: point{x: 0e0, y: 1e0} },
+};
+var sites := relation {
+    { s: site{name: \"b\", at: point{x: 0e0, y: 1e0}} },
+    { s: site{name: \"a\", at: point{x: 0e0, y: 1e0}} },
+    { s: site{name: \"c\", at: point{x: -1e0, y: 0e0}} },
+};
+
+operator outward{r: relation { name: text, at: point }}: array text [
+    var names: array text;
+    load names value from r order [asc at] remove {at};
+    names
+];
+
+operator ranked{r: relation { s: site }}: array site [
+    var all: array site;
+    load all value from r order [desc s];
+    all
+];
+
+operator compare{r: relation { name: text, at: point }, s: relation { s: site }} [
+    call debug_value{v: min{r: r, of: at}};
+    call debug_value{v: max{r: r, of: at}};
+    call debug_value{v: r where at < point{x: 0e0, y: 1e0}};
+    call debug_value{v: outward{r: r}};
+    call debug_value{v: ranked{r: s}};
+];
+
+operator main{} [
+    call debug_value{v: min{r: points, of: at}};
+    call debug_value{v: max{r: points, of: at}};
+    call debug_value{v: points where at < point{x: 0e0, y: 1e0}};
+    call debug_value{v: outward{r: points}};
+    call debug_value{v: ranked{r: sites}};
+    call compare{r: points, s: sites};
+];
+";
+    let (code, stderr) = run_source("orders_in_another_representation", source);
+    assert_eq!(code, 0, "{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    let (folded, run) = lines.split_at(lines.len() / 2);
+    assert_eq!(
+        folded, run,
+        "folded when compiling, and computed when running"
+    );
+    assert_eq!(
+        folded,
+        [
+            "point{x: 3e0, y: 4e0}",
+            "point{x: 0e0, y: 1e0}",
+            r#"relation { at: point, name: text } { { at: point{x: -1e0, y: 0e0}, name: "west" }, { at: point{x: 3e0, y: 4e0}, name: "far" } }"#,
+            r#"array ["far", "west", "north"]"#,
+            r#"array [site{at: point{x: 0e0, y: 1e0}, name: "b"}, site{at: point{x: 0e0, y: 1e0}, name: "a"}, site{at: point{x: -1e0, y: 0e0}, name: "c"}]"#,
+        ]
+    );
+}
+
 /// Compile `source`, run it in the workspace root, and return its exit
 /// code and stderr.
 fn run_source(name: &str, source: &str) -> (i32, String) {
@@ -1891,7 +1971,9 @@ fn inheritance() {
             // points selected by their polar coordinates, the origin's at
             // any angle, the point twice as far from the origin, by its
             // polar `r`, then moved, a segment's begin moved, an ellipse's
-            // semiaxes changed together, and a polygon's corners.
+            // semiaxes changed together, a polygon's corners, its vertex
+            // nearest the origin, by the points' polar order, and its
+            // vertices' numbers in that order.
             "point{x: -5e0, y: -2.5e0}",
             "tuple { r: distance{m: 5.5901699437494745e0}, theta: angle{rho: 3.6052402625905993e0} }",
             "distance{m: 1.1180339887498949e1}",
@@ -1902,6 +1984,8 @@ fn inheritance() {
             "lineseg{begin: point{x: 6.5e0, y: 2.5e0}, end: point{x: -5e0, y: -2.5e0}}",
             "ellipse{a: distance{m: 3e0}, b: distance{m: 2e0}, ctr: point{x: 5e0, y: 2.5e0}}",
             "3",
+            "point{x: 0e0, y: 0e0}",
+            "array [1, 3, 2]",
         ]
     );
 }

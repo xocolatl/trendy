@@ -666,8 +666,8 @@ can name it. The type carries its constraints (`hir::Defined`'s
 TTM has a type's constraint be part of its definition, and so does each
 of its values (`hir::DefinedValue`'s type), as TTM has every scalar
 value carry its type (RM Prescription 2). The constraints' operators,
-and each possible representation's conversion to the stored one, come
-right after the prelude's, numbered as the types resolve
+and each possible representation's conversions to the stored one and
+from it, come right after the prelude's, numbered as the types resolve
 (`named_types::resolve`), since a type is resolved, and its `Defined`
 copied into the types that name it, before any signature is made. A
 selection checks each, which folds when the components are constants
@@ -677,13 +677,13 @@ checks the type's constraints first (`Globals::checked`), so a
 constraint that selects a value of its own type closes a cycle (A0036).
 A type's possible representations but the stored one, the one without
 conversions, are in its `Defined` too (`hir::Representation`): each with
-its components and its conversion to the stored one, whose value is the
-tuple of the stored components its `to` computes, unchecked. Sema keeps
-their declarations (`Namespaces::converted`). Each has a selector, whose
-value is the value its conversion to the stored one computes, selected,
-and a conversion from the stored representation (`operators::Made`),
-whose value is the tuple of its components its `from` computes; a
-component of one, `v.c`, is the conversion's, called in an `Extend` of
+its components and its conversions, to the stored one, whose value is the
+tuple of the stored components its `to` computes, and from it, whose
+value is the tuple of its own components its `from` computes, unchecked.
+Sema keeps their declarations (`Namespaces::converted`). Each has a
+selector, whose value is the value its conversion to the stored one
+computes, selected (`operators::Made`); a component of one, `v.c`, is
+the conversion from the stored one's, called in an `Extend` of
 `v`'s stored components, so that `v` is computed once
 (`Checker::converted_component`), and a constraint names one as the
 conversion's call on its parameters. A `replace` or an `update` gives the
@@ -691,15 +691,23 @@ components of one representation new values (`check::representation`),
 with every representation's in scope (`ComponentNames`), and, of another
 than the stored one, selects the value in it, computed from the stored
 components at hand (`Replacement::Selected`, `Checker::selected_from`).
-A type's order, `order [asc …]`, is checked as a load's is
-(`assign::order_items`), with every component named, and makes the type
-ordered (`hir::Defined::order`, `Type::has`), so of `any ordered`
-(`Namespaces::admits`). `hir::compare` orders its values by it, which
-folding uses for comparisons, `min`, `max` and loads; lowering compares
-two values component by component until one differs
+A type's order, `order [asc …]`, names the components of one possible
+representation (`named_types::type_order`, `check::representation`), is
+checked as a load's is (`assign::order_items`), with every one of them
+named, and makes the type ordered (`hir::Order`, `Type::has`), so of
+`any ordered` (`Namespaces::admits`). `hir::compare` orders its values by
+it, which folding uses for comparisons, `min`, `max` and loads. Of an
+order in another representation than the stored one, it compares the
+components the conversion from the stored one computes, which only sema
+can call: folding converts the values compared first (`ops::converted`,
+into a `hir::Converted`), after checking each conversion it needs
+(`Checker::orders_checked`), and leaves the comparison to the program if
+one isn't known. Lowering compares two values component by component
+until one differs, calling the conversion on both first
 (`FunctionBuilder::ordering`), and a load's order on one becomes its
-components' items (`order_leaves`), so the runtime sorts by scalars, as
-before.
+components' items, so the runtime sorts by scalars, as before, each of
+those another representation's an attribute of each tuple, which an
+`Extend` of the relation computes (`sorted`).
 Then it checks, in order, every operator's signature, its parameters and result type (`signatures`), so
 that anything can refer to an operator defined after it; the globals,
 which are the variables, whose initial values it evaluates, and the

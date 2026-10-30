@@ -1895,9 +1895,10 @@ operator main{} [
   integers. Without one, `<` is an error, and so is a type where an
   ordered one is expected (A0022, A0004), each with help to give it an
   order.
-- **The order names every component, once,** each of an ordered type
-  (A0009, A0008, A0022), so that it is a total order consistent with
-  `=`: values that differ are never equal in it. The compiler compares
+- **The order names every component of one possible representation,
+  once,** each of an ordered type (A0009, A0008, A0022), so that it is a
+  total order consistent with `=`: values that differ are never equal in
+  it. The compiler compares
   by it, so it can't be wrong, as a `<` the program wrote could be.
   Tutorial D's `ORDERED` and `ORDINAL`, which have the program write
   `<` (*Type Inheritance and Relational Theory*, chapter 2), are
@@ -1941,8 +1942,14 @@ operator main{} [
   `to` computes. A value is written in its stored representation.
 - **A component of any representation is read with the dot:**
   `body.celsius` is computed by its `from`, and a constraint can name
-  one, as `constraint celsius < 100e0` would. Equality and order are the
-  stored components'.
+  one, as `constraint celsius < 100e0` would.
+- **An order compares the components of any one representation,**
+  converted to it by its `from` where values are compared:
+  `order [desc fahrenheit]` would put the hottest first. The Third
+  Manifesto's point, in `examples/inheritance.trendy`, is ordered by
+  its polar coordinates, `order [asc r, asc theta]`, though stored by
+  its cartesian ones. Components of two representations in one order
+  are an error (A0059).
 - **Each component is in one representation** (A0008), since its name
   says which, and each conversion computes each component it should,
   once, of its type (A0009, A0008, A0004), and reads no variable

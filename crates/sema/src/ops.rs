@@ -1448,14 +1448,88 @@ pub(crate) fn array(element: hir::Type, elements: Vec<hir::Expr>) -> hir::Expr {
 }
 
 /// The array a `load` makes of `relation`, as `loading` says: evaluated
-/// if the relation is a constant.
-pub(crate) fn load(relation: hir::Expr, loading: hir::Loading) -> hir::Expr {
-    match relation {
-        hir::Expr::Constant(hir::Value::Relation(relation)) => {
-            hir::Expr::Constant(hir::Value::Array(relation.loaded(&loading)))
+/// if the relation is a constant, and each value its order compares in
+/// another possible representation than its type's stored one is known in
+/// it.
+///
+/// # Errors
+///
+/// Returns why converting a value to the representation its type's order
+/// compares fails.
+pub(crate) fn load(
+    relation: hir::Expr,
+    loading: hir::Loading,
+    bindings: Bindings,
+) -> Result<hir::Expr, Failed> {
+    if let hir::Expr::Constant(hir::Value::Relation(constant)) = &relation {
+        let compared = constant.tuples.iter().flat_map(|tuple| {
+            loading
+                .order
+                .iter()
+                .filter_map(|item| tuple.get(&item.attribute))
+        });
+        if let Some(converted) = converted(compared, bindings)? {
+            let loaded = constant.loaded(&loading, &converted);
+            return Ok(hir::Expr::Constant(hir::Value::Array(loaded)));
         }
-        relation => hir::Expr::Load(Box::new(relation), loading),
     }
+    Ok(hir::Expr::Load(Box::new(relation), loading))
+}
+
+/// The values of types of the program's own among `values`, and among the
+/// components their orders compare, whose order compares the components
+/// of another possible representation than the stored one, each with those
+/// components, which [`hir::compare`] compares it by: `None` if a
+/// conversion isn't known when compiling.
+///
+/// # Errors
+///
+/// Returns why a conversion fails.
+fn converted<'v>(
+    values: impl IntoIterator<Item = &'v hir::Value>,
+    bindings: Bindings,
+) -> Result<Option<hir::Converted>, Failed> {
+    let mut converted = hir::Converted::default();
+    let mut pending: Vec<hir::Value> = values.into_iter().cloned().collect();
+    while let Some(value) = pending.pop() {
+        let hir::Value::Defined(value) = value else {
+            continue;
+        };
+        let Some(order) = &value.ty.order else {
+            continue;
+        };
+        let compared = match order.from {
+            None => value.components.clone(),
+            Some(_) if converted.contains(&value) => continue,
+            Some(from) => {
+                let args = value
+                    .components
+                    .attributes()
+                    .map(|(c, v)| (c.to_string(), hir::Expr::Constant(v.clone())))
+                    .collect();
+                let conversion = hir::Call {
+                    operator: from,
+                    types: Vec::new(),
+                    args,
+                    updated: BTreeMap::new(),
+                };
+                let hir::Expr::Constant(hir::Value::Tuple(components)) =
+                    call(conversion, bindings)?
+                else {
+                    return Ok(None);
+                };
+                converted.insert(value.clone(), components.clone());
+                components
+            }
+        };
+        pending.extend(
+            order
+                .items
+                .iter()
+                .filter_map(|item| compared.get(&item.attribute).cloned()),
+        );
+    }
+    Ok(Some(converted))
 }
 
 /// The relation a `load` makes of `array`, as `unloading` says: evaluated
@@ -2049,18 +2123,31 @@ pub(crate) fn call(call: hir::Call, bindings: Bindings) -> Result<hir::Expr, Fai
         if call.types.iter().any(|t| t.parameters().next().is_some()) {
             return Ok(hir::Expr::Call(call));
         }
-        let value = builtin.evaluate(&known).map_err(|failure| match failure {
-            hir::BuiltinFailure::NoTuples => Failed::NoTuples(builtin),
-            hir::BuiltinFailure::Failure(failure) => Failed::Scalar(failure),
-            hir::BuiltinFailure::Unparsable(why) => match &known["from"] {
-                hir::Value::Text(text) => Failed::Unparsable {
-                    builtin,
-                    text: text.clone(),
-                    why,
-                },
+        // `min` and `max` compare the values of `of`.
+        let compared = match builtin {
+            hir::ReadOnlyBuiltin::Min | hir::ReadOnlyBuiltin::Max => match &known["r"] {
+                hir::Value::Relation(r) => r.tuples.iter().filter_map(|t| t.get("of")).collect(),
                 other => panic!("`{}` of {other:?}", builtin.name()),
             },
-        })?;
+            _ => Vec::new(),
+        };
+        let Some(converted) = converted(compared, bindings)? else {
+            return Ok(hir::Expr::Call(call));
+        };
+        let value = builtin
+            .evaluate(&known, &converted)
+            .map_err(|failure| match failure {
+                hir::BuiltinFailure::NoTuples => Failed::NoTuples(builtin),
+                hir::BuiltinFailure::Failure(failure) => Failed::Scalar(failure),
+                hir::BuiltinFailure::Unparsable(why) => match &known["from"] {
+                    hir::Value::Text(text) => Failed::Unparsable {
+                        builtin,
+                        text: text.clone(),
+                        why,
+                    },
+                    other => panic!("`{}` of {other:?}", builtin.name()),
+                },
+            })?;
         return Ok(hir::Expr::Constant(value));
     }
     // The callee's value for the types its type parameters are given.
@@ -2221,9 +2308,7 @@ fn substitute(
             call(hir::Call { args, ..called }, substitution.bindings)?
         }
         hir::Expr::Unary(op, operand) => unary(op, sub(operand)?).map_err(Failed::Scalar)?,
-        hir::Expr::Binary(op, lhs, rhs) => {
-            binary(op, sub(lhs)?, sub(rhs)?).map_err(Failed::Scalar)?
-        }
+        hir::Expr::Binary(op, lhs, rhs) => binary(op, sub(lhs)?, sub(rhs)?, substitution.bindings)?,
         hir::Expr::Connective(connective, operands) => {
             substituted_connective(connective, operands, depth, substitution)?
         }
@@ -2241,7 +2326,7 @@ fn substitute(
         hir::Expr::WithElements(array, changes) => {
             substituted_elements(*array, changes, depth, substitution)?
         }
-        hir::Expr::Load(relation, loading) => load(sub(relation)?, loading),
+        hir::Expr::Load(relation, loading) => load(sub(relation)?, loading, substitution.bindings)?,
         hir::Expr::Unload(array, unloading) => unload(sub(array)?, unloading),
         hir::Expr::If(condition, then, otherwise) => {
             substituted_if(*condition, *then, *otherwise, depth, substitution)?
@@ -2635,26 +2720,57 @@ enum Side {
     Rhs,
 }
 
-/// `lhs op rhs`, evaluated if both are constants, and otherwise simplified
-/// where a constant operand decides the result or leaves the other operand
-/// as it is. Expressions have no side effects, so this never changes what a
-/// program does. Approximate numbers are finite, with one zero, so these
-/// hold for them as for integers: `x * 0.0` is `0.0`, whatever `x` is.
+/// `lhs op rhs`, evaluated if both are constants, and each value an
+/// order compares in another possible representation than its type's
+/// stored one is known in it, and otherwise simplified where a constant
+/// operand decides the result or leaves the other operand as it is.
+/// Expressions have no side effects, so this never changes what a program
+/// does. Approximate numbers are finite, with one zero, so these hold for
+/// them as for integers: `x * 0.0` is `0.0`, whatever `x` is.
 ///
 /// # Errors
 ///
 /// Returns why the result can't exist, including a division by a constant
-/// zero, which fails whatever the dividend is.
+/// zero, which fails whatever the dividend is, or why converting a value
+/// to the representation its type's order compares fails.
 pub(crate) fn binary(
+    op: hir::BinaryOp,
+    lhs: hir::Expr,
+    rhs: hir::Expr,
+    bindings: Bindings,
+) -> Result<hir::Expr, Failed> {
+    if let (hir::Expr::Constant(a), hir::Expr::Constant(b)) = (&lhs, &rhs) {
+        let compared = match op {
+            hir::BinaryOp::Compare(hir::Comparison::Equal | hir::Comparison::NotEqual, _) => {
+                Vec::new()
+            }
+            hir::BinaryOp::Compare(..) => vec![a, b],
+            _ => Vec::new(),
+        };
+        if let Some(converted) = converted(compared, bindings)? {
+            return op
+                .apply(a, b, &converted)
+                .map(hir::Expr::Constant)
+                .map_err(Failed::Scalar);
+        }
+        return Ok(hir::Expr::Binary(op, Box::new(lhs), Box::new(rhs)));
+    }
+    simplified(op, lhs, rhs).map_err(Failed::Scalar)
+}
+
+/// `lhs op rhs`, of which one at most is a constant, simplified as
+/// [`binary`] says.
+///
+/// # Errors
+///
+/// Returns why the result can't exist: a division by a constant zero.
+fn simplified(
     op: hir::BinaryOp,
     lhs: hir::Expr,
     rhs: hir::Expr,
 ) -> Result<hir::Expr, hir::Failure> {
     use Known::{Empty, MinusOne, One, Zero};
     use hir::BinaryOp::{Add, Compare, Concatenate, Div, Divide, Mod, Multiply, Subtract};
-    if let (hir::Expr::Constant(a), hir::Expr::Constant(b)) = (&lhs, &rhs) {
-        return op.apply(a, b).map(hir::Expr::Constant);
-    }
     let negate = |e| {
         let numeric = op
             .operand()

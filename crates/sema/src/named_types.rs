@@ -8,6 +8,7 @@ use trendy_diag::{Diagnostic, Span};
 use trendy_hir as hir;
 use trendy_syntax::ast::{self, AstNode, HeadingDecl, HeadingRef, SourceFile, TypeDecl, TypeRef};
 
+use crate::check::{self, Representation};
 use crate::errors;
 use crate::types::{self, TypeParameters};
 use crate::{Converted, Namespaces};
@@ -282,8 +283,8 @@ struct Resolved<'r> {
 /// The type `decl` declares, `resolved`, into `namespaces`: its
 /// representations but the stored one, with the types their components
 /// name resolved by now, its constraints and its order. Each constraint,
-/// then each representation's conversion to the stored one, is an operator
-/// numbered from `next` on.
+/// then each representation's conversions to the stored one and from it,
+/// is an operator numbered from `next` on.
 fn defined(
     decl: &TypeDecl,
     resolved: Resolved,
@@ -330,35 +331,56 @@ fn defined(
         .map(|c| hir::Representation {
             components: c.components.clone(),
             to: numbered(),
+            from: numbered(),
         })
         .collect();
-    let order = type_order(decl, name, &components, errors);
-    let defined = hir::Defined {
+    let mut defined = hir::Defined {
         name: name.to_string(),
         components,
         representations,
         constraints,
-        order,
+        order: None,
     };
+    defined.order = type_order(decl, &defined, errors);
     namespaces.defined.insert(name.to_string(), defined);
     namespaces.converted.insert(name.to_string(), converted);
 }
 
-/// The order `decl` gives its type, named `name`, with `components`, if it
-/// gives it one, or `None` after reporting its errors: a type has one.
+/// The order `decl` gives its type, `defined`, if it gives it one, or
+/// `None` after reporting its errors: a type has one, which compares the
+/// components of the possible representation those it names are of.
 fn type_order(
     decl: &TypeDecl,
-    name: &str,
-    components: &hir::Heading,
+    defined: &hir::Defined,
     errors: &mut Vec<Diagnostic>,
-) -> Option<Vec<hir::OrderItem>> {
+) -> Option<hir::Order> {
     let mut orders = decl.orders();
     let first = orders.next()?;
     for again in orders {
-        errors.push(errors::second_order(name, &again, &first));
+        errors.push(errors::second_order(&defined.name, &again, &first));
     }
     let list = first.list()?;
-    crate::assign::order_items(&list, components, errors::Orders::Type(name), errors)
+    let idents: Vec<_> = list
+        .items()
+        .filter_map(|item| item.attribute()?.ident())
+        .collect();
+    let named: Vec<(&str, Span)> = idents
+        .iter()
+        .map(|ident| (ident.text(), trendy_syntax::span(ident.text_range())))
+        .collect();
+    let rule = errors::OneRepresentation::Ordered;
+    let (components, from) = match check::representation(defined, &named, rule, errors)? {
+        Representation::Stored { .. } => (&defined.components, None),
+        Representation::Other(component) => {
+            let (components, other) = defined
+                .representation(component)
+                .expect("a component names its representation");
+            (components, other.map(|r| r.from))
+        }
+    };
+    let orders = errors::Orders::Type(defined);
+    let items = crate::assign::order_items(&list, components, orders, errors)?;
+    Some(hir::Order { from, items })
 }
 
 /// The declared headings, after `relation` or `tuple`, and types that

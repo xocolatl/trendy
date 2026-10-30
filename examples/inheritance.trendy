@@ -28,8 +28,12 @@ type angle {
    Prescription 23 has it: TTM writes `SQRT ( X ** 2 + Y ** 2 ) <= 100.0`
    of the cartesian ones and `R <= LENGTH ( 100.0 )` of the polar ones,
    which is the same constraint, since a point's distance from the origin
-   is that square root. A constraint can name either's components. A point
-   has no order.
+   is that square root. A constraint can name either's components.
+
+   TTM's points have no order. These are ordered by their polar
+   coordinates, nearer the origin first, then from the positive x axis
+   anticlockwise: an order, like a constraint, can name the components of
+   any one representation.
 
    Its values are stored by their cartesian coordinates, from which the
    origin's angle is 0, so that it has one polar representation, as RM
@@ -42,6 +46,7 @@ type point {
         to { x := r.m * cos{of: theta.rho}, y := r.m * sin{of: theta.rho} }
         from { r := distance{m: sqrt{of: x * x + y * y}}, theta := direction{y: y, x: x} },
     constraint r <= distance{m: 100e0},
+    order [asc r, asc theta],
 };
 
 /* The angle from the positive x axis to the point (x, y): `atan2` gives
@@ -136,6 +141,16 @@ var triangle := polygon{vertices: relation {
 }};
 var corners := count{r: triangle.vertices};
 
+/* The vertex nearest the origin, and the vertices' numbers in the points'
+   order: the one at the origin, then the one 3 from it, on the y axis,
+   then the one 4 from it, on the x axis. */
+var nearest := min{r: triangle.vertices, of: vertex};
+var outward := [
+    var numbers: array integer;
+    load numbers value from triangle.vertices order [asc vertex] remove {vertex};
+    numbers
+];
+
 operator geometry{p: point, shape: polygon} [
     var opposite := reflect{p: p};
     call debug_value{v: opposite};
@@ -156,6 +171,10 @@ operator geometry{p: point, shape: polygon} [
     update e { a := distance{m: 3e0}, b := distance{m: 2e0} };
     call debug_value{v: e};
     call debug_value{v: count{r: shape.vertices}};
+    call debug_value{v: min{r: shape.vertices, of: vertex}};
+    var numbers: array integer;
+    load numbers value from shape.vertices order [asc vertex] remove {vertex};
+    call debug_value{v: numbers};
 ];
 
 operator main{} [
@@ -169,6 +188,8 @@ operator main{} [
     call debug_value{v: segment};
     call debug_value{v: squashed};
     call debug_value{v: corners};
+    call debug_value{v: nearest};
+    call debug_value{v: outward};
 
     call geometry{p: pt, shape: triangle};
 ];

@@ -641,7 +641,8 @@ impl ReadOnlyBuiltin {
 
     /// The value of a call with the arguments `args`, known when compiling,
     /// by parameter name: what running the call gives, as it is a function
-    /// of its arguments.
+    /// of its arguments. `min` and `max` compare values of types of the
+    /// program's own with the components in `converted` (see [`compare`]).
     ///
     /// # Errors
     ///
@@ -654,7 +655,11 @@ impl ReadOnlyBuiltin {
     ///
     /// If the arguments aren't those of [`Builtin::params`], which sema
     /// rules out.
-    pub fn evaluate(self, args: &BTreeMap<String, Value>) -> Result<Value, BuiltinFailure> {
+    pub fn evaluate(
+        self,
+        args: &BTreeMap<String, Value>,
+        converted: &Converted,
+    ) -> Result<Value, BuiltinFailure> {
         let relation = || match &args["r"] {
             Value::Relation(r) => r,
             other => panic!("{} of {other:?}", self.name()),
@@ -684,11 +689,11 @@ impl ReadOnlyBuiltin {
                 other => panic!("`length` of {other:?}"),
             },
             ReadOnlyBuiltin::Min => values()
-                .min_by(|a, b| compare(a, b))
+                .min_by(|a, b| compare(a, b, converted))
                 .cloned()
                 .ok_or(BuiltinFailure::NoTuples),
             ReadOnlyBuiltin::Max => values()
-                .max_by(|a, b| compare(a, b))
+                .max_by(|a, b| compare(a, b, converted))
                 .cloned()
                 .ok_or(BuiltinFailure::NoTuples),
             ReadOnlyBuiltin::Sum | ReadOnlyBuiltin::Product => {
@@ -2230,17 +2235,51 @@ impl Comparison {
     }
 }
 
+/// Values of types of the program's own whose order compares the
+/// components of another possible representation than the stored one, each
+/// with those components, which its conversion computes. Only sema can
+/// call a conversion, so it converts the values a comparison it folds
+/// compares, and [`compare`] looks them up here.
+#[derive(Debug, Clone, Default)]
+pub struct Converted(BTreeMap<DefinedValue, TupleValue>);
+
+impl Converted {
+    /// Whether `value` is converted already.
+    #[must_use]
+    pub fn contains(&self, value: &DefinedValue) -> bool {
+        self.0.contains_key(value)
+    }
+
+    /// `value`, with its `components` in the representation its type's
+    /// order compares.
+    pub fn insert(&mut self, value: DefinedValue, components: TupleValue) {
+        self.0.insert(value, components);
+    }
+
+    /// The components of `value` its type's order compares.
+    fn compared<'v>(&'v self, value: &'v DefinedValue, order: &Order) -> &'v TupleValue {
+        match order.from {
+            None => &value.components,
+            Some(_) => self
+                .0
+                .get(value)
+                .expect("sema converts each value an order compares in another representation"),
+        }
+    }
+}
+
 /// The order of two values of the same ordered type: `false` before
 /// `true`, integers and approximate numbers numerically, text by code
 /// point, which is the order of its UTF-8 bytes, and values of a type of
-/// the program's own by its order, their components compared in turn until
-/// one differs, a descending one the other way.
+/// the program's own by its order, the components of its representation,
+/// in `converted` if it isn't the stored one, compared in turn until one
+/// differs, a descending one the other way.
 ///
 /// # Panics
 ///
 /// If the values aren't of one ordered type, which sema rules out.
 #[must_use]
-pub fn compare(lhs: &Value, rhs: &Value) -> std::cmp::Ordering {
+pub fn compare(lhs: &Value, rhs: &Value, converted: &Converted) -> std::cmp::Ordering {
     match (lhs, rhs) {
         (Value::Boolean(a), Value::Boolean(b)) => a.cmp(b),
         (Value::Integer(a), Value::Integer(b)) => a.cmp(b),
@@ -2251,16 +2290,18 @@ pub fn compare(lhs: &Value, rhs: &Value) -> std::cmp::Ordering {
                 a.ty.order
                     .as_ref()
                     .expect("only ordered values are compared");
+            let (a, b) = (converted.compared(a, order), converted.compared(b, order));
             order
+                .items
                 .iter()
                 .map(|item| {
-                    let component = |v: &DefinedValue| {
-                        v.components
+                    let component = |components: &TupleValue| {
+                        components
                             .get(&item.attribute)
-                            .expect("an order names the type's components")
+                            .expect("an order names its representation's components")
                             .clone()
                     };
-                    let ordering = compare(&component(a), &component(b));
+                    let ordering = compare(&component(a), &component(b), converted);
                     if item.descending {
                         ordering.reverse()
                     } else {
@@ -2322,9 +2363,10 @@ impl BinaryOp {
         }
     }
 
-    /// The result for `lhs` and `rhs`, which have the operand type.
-    /// Approximate results are rounded as IEEE 754 binary64 arithmetic rounds
-    /// them, to nearest, ties to even.
+    /// The result for `lhs` and `rhs`, which have the operand type, values
+    /// of types of the program's own compared with the components in
+    /// `converted` (see [`compare`]). Approximate results are rounded as
+    /// IEEE 754 binary64 arithmetic rounds them, to nearest, ties to even.
     ///
     /// # Errors
     ///
@@ -2334,10 +2376,11 @@ impl BinaryOp {
     /// # Panics
     ///
     /// If an operand isn't of the operand type, which sema rules out.
-    pub fn apply(self, lhs: &Value, rhs: &Value) -> Result<Value, Failure> {
+    pub fn apply(self, lhs: &Value, rhs: &Value, converted: &Converted) -> Result<Value, Failure> {
+        let ordered = || compare(lhs, rhs, converted);
         match self {
             BinaryOp::Compare(comparison, Compared::Scalar(_)) => {
-                return Ok(Value::Boolean(comparison.holds(compare(lhs, rhs))));
+                return Ok(Value::Boolean(comparison.holds(ordered())));
             }
             // Value equality is the language's: attribute-wise for tuples,
             // set equality for relations.
@@ -2348,7 +2391,7 @@ impl BinaryOp {
             }
             // By the type's order.
             BinaryOp::Compare(comparison, Compared::Defined) => {
-                return Ok(Value::Boolean(comparison.holds(compare(lhs, rhs))));
+                return Ok(Value::Boolean(comparison.holds(ordered())));
             }
             // Values of a type parameter's type, as the values are: of
             // `any relation`, ordered by inclusion, or of a kind that
@@ -2356,7 +2399,7 @@ impl BinaryOp {
             BinaryOp::Compare(comparison, Compared::Parameter(_)) => {
                 let holds = match lhs {
                     Value::Relation(_) => contains(comparison, lhs, rhs),
-                    _ => comparison.holds(compare(lhs, rhs)),
+                    _ => comparison.holds(ordered()),
                 };
                 return Ok(Value::Boolean(holds));
             }
@@ -2545,20 +2588,53 @@ pub struct Constraint {
 /// possible representation its values are stored as (TTM RM Prescription
 /// 4), its other possible representations, its constraints, in order,
 /// which every value's components satisfy (RM Prescription 23), and its
-/// order, if it has one: its values compared by their components, each of
-/// an ordered type, in turn, every one of them, so that it is a total
-/// order consistent with `=`, which makes the type ordered (*Type
-/// Inheritance and Relational Theory*, chapter 2).
+/// order, if it has one, which makes the type ordered.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Defined {
     pub name: String,
     pub components: Heading,
     pub representations: Vec<Representation>,
     pub constraints: Vec<Constraint>,
-    pub order: Option<Vec<OrderItem>>,
+    pub order: Option<Order>,
+}
+
+/// The order of a type of the program's own (*Type Inheritance and
+/// Relational Theory*, chapter 2): its values compared by the components
+/// of one of its possible representations, each of an ordered type, in
+/// turn, every one of them, so that it is a total order consistent with
+/// `=`. They are the stored components, or, if `from` is the conversion
+/// from those to another representation, that one's.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Order {
+    pub from: Option<OperatorId>,
+    pub items: Vec<OrderItem>,
 }
 
 impl Defined {
+    /// Its order, if it has one, and the components of the possible
+    /// representation it compares.
+    ///
+    /// # Panics
+    ///
+    /// If the order's conversion isn't one of its representations', which
+    /// sema rules out.
+    #[must_use]
+    pub fn ordered_by(&self) -> Option<(&Order, &Heading)> {
+        let order = self.order.as_ref()?;
+        let components = match order.from {
+            None => &self.components,
+            Some(from) => {
+                &self
+                    .representations
+                    .iter()
+                    .find(|r| r.from == from)
+                    .expect("an order's conversion is one of the type's")
+                    .components
+            }
+        };
+        Some((order, components))
+    }
+
     /// The components of each of its possible representations, the stored
     /// one's first.
     pub fn possible_representations(&self) -> impl Iterator<Item = &Heading> {
@@ -2566,17 +2642,17 @@ impl Defined {
     }
 
     /// The components of the possible representation with a component
-    /// named `name`, the stored one's or another's, and its conversion to
-    /// the stored one, if it isn't that.
+    /// named `name`, the stored one's or another's, and, if it isn't the
+    /// stored one, the representation, with its conversions.
     #[must_use]
-    pub fn representation(&self, name: &str) -> Option<(&Heading, Option<OperatorId>)> {
+    pub fn representation(&self, name: &str) -> Option<(&Heading, Option<&Representation>)> {
         if self.components.get(name).is_some() {
             return Some((&self.components, None));
         }
         self.representations
             .iter()
             .find(|r| r.components.get(name).is_some())
-            .map(|r| (&r.components, Some(r.to)))
+            .map(|r| (&r.components, Some(r)))
     }
 }
 
@@ -2624,13 +2700,16 @@ pub fn read_as(ty: &Type, columns: &Type) -> Type {
 }
 
 /// A possible representation of a type of the program's own other than
-/// the one its values are stored as: its components, and its conversion to
-/// the stored one, the read-only operator whose value is the tuple of the
-/// stored components its `to` computes from them, its parameters.
+/// the one its values are stored as: its components, and its conversions,
+/// each a read-only operator: `to` the stored one, whose value is the tuple
+/// of the stored components its `to` computes from its components, its
+/// parameters, and `from` it, whose value is the tuple of its components
+/// its `from` computes from the stored ones, its parameters.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Representation {
     pub components: Heading,
     pub to: OperatorId,
+    pub from: OperatorId,
 }
 
 /// Source text for the heading: `{ a: integer, b: text }` or `{}`. A
@@ -3057,15 +3136,16 @@ pub struct RelationValue {
 impl RelationValue {
     /// The array a `load` makes of the relation, as `loading` says: its
     /// tuples, ordered by its items, which are attributes of scalar types,
-    /// each without the attributes it removes, or the value of the only one
-    /// left.
+    /// values of types of the program's own compared with the components in
+    /// `converted` (see [`compare`]), each without the attributes it
+    /// removes, or the value of the only one left.
     ///
     /// # Panics
     ///
     /// If an item isn't an attribute of a scalar type, or the values are
     /// loaded of tuples of more attributes than one, which sema rules out.
     #[must_use]
-    pub fn loaded(&self, loading: &Loading) -> ArrayValue {
+    pub fn loaded(&self, loading: &Loading, converted: &Converted) -> ArrayValue {
         fn key<'t>(tuple: &'t TupleValue, item: &OrderItem) -> &'t Value {
             tuple
                 .get(&item.attribute)
@@ -3079,7 +3159,7 @@ impl RelationValue {
             items
                 .iter()
                 .map(|item| {
-                    let ordering = compare(key(a, item), key(b, item));
+                    let ordering = compare(key(a, item), key(b, item), converted);
                     if item.descending {
                         ordering.reverse()
                     } else {
@@ -3820,7 +3900,7 @@ mod tests {
     #[test]
     fn approximate_operators() {
         let r = |x| Value::Approximate(Approximate::new(x));
-        let apply = |op: BinaryOp, a, b| op.apply(&r(a), &r(b));
+        let apply = |op: BinaryOp, a, b| op.apply(&r(a), &r(b), &Converted::default());
         assert_eq!(
             apply(BinaryOp::Add(Numeric::Approximate), 0.5, 0.25),
             Ok(r(0.75))
@@ -3857,7 +3937,8 @@ mod tests {
             let Type::Scalar(scalar) = a.ty() else {
                 panic!("not a scalar");
             };
-            BinaryOp::Compare(c, Compared::Scalar(scalar)).apply(&a, &b) == Ok(Value::Boolean(true))
+            BinaryOp::Compare(c, Compared::Scalar(scalar)).apply(&a, &b, &Converted::default())
+                == Ok(Value::Boolean(true))
         };
         let r = |x| Value::Approximate(Approximate::new(x));
         let t = |s: &str| Value::Text(s.to_string());
@@ -3904,11 +3985,11 @@ mod tests {
         };
         let equal = BinaryOp::Compare(Comparison::Equal, Compared::Tuple);
         assert_eq!(
-            equal.apply(&tuple(1, "x"), &tuple(1, "x")),
+            equal.apply(&tuple(1, "x"), &tuple(1, "x"), &Converted::default()),
             Ok(Value::Boolean(true))
         );
         assert_eq!(
-            equal.apply(&tuple(1, "x"), &tuple(1, "y")),
+            equal.apply(&tuple(1, "x"), &tuple(1, "y"), &Converted::default()),
             Ok(Value::Boolean(false))
         );
         let relation = |tuples: &[Value]| {
@@ -3930,9 +4011,13 @@ mod tests {
         let not_equal = BinaryOp::Compare(Comparison::NotEqual, Compared::Relation);
         let ab = relation(&[tuple(1, "x"), tuple(2, "y")]);
         let ba = relation(&[tuple(2, "y"), tuple(1, "x")]);
-        assert_eq!(not_equal.apply(&ab, &ba), Ok(Value::Boolean(false)), "sets");
         assert_eq!(
-            not_equal.apply(&ab, &relation(&[tuple(1, "x")])),
+            not_equal.apply(&ab, &ba, &Converted::default()),
+            Ok(Value::Boolean(false)),
+            "sets"
+        );
+        assert_eq!(
+            not_equal.apply(&ab, &relation(&[tuple(1, "x")]), &Converted::default()),
             Ok(Value::Boolean(true))
         );
     }
@@ -4009,13 +4094,25 @@ mod tests {
     #[test]
     fn concatenation() {
         let t = |s: &str| Value::Text(s.to_string());
-        assert_eq!(BinaryOp::Concatenate.apply(&t("ab"), &t("é")), Ok(t("abé")));
-        assert_eq!(BinaryOp::Concatenate.apply(&t(""), &t("")), Ok(t("")));
+        assert_eq!(
+            BinaryOp::Concatenate.apply(&t("ab"), &t("é"), &Converted::default()),
+            Ok(t("abé"))
+        );
+        assert_eq!(
+            BinaryOp::Concatenate.apply(&t(""), &t(""), &Converted::default()),
+            Ok(t(""))
+        );
     }
 
     #[test]
     fn integer_operators() {
-        let apply = |op: BinaryOp, a, b| op.apply(&Value::Integer(a), &Value::Integer(b));
+        let apply = |op: BinaryOp, a, b| {
+            op.apply(
+                &Value::Integer(a),
+                &Value::Integer(b),
+                &Converted::default(),
+            )
+        };
         let ok = |n| Ok(Value::Integer(n));
         assert_eq!(apply(BinaryOp::Add(Numeric::Integer), 2, 3), ok(5));
         assert_eq!(apply(BinaryOp::Subtract(Numeric::Integer), 2, 3), ok(-1));
@@ -4086,7 +4183,7 @@ mod tests {
                 removed: BTreeSet::new(),
                 loaded: Loaded::Tuples,
             };
-            Value::Array(relation.loaded(&loading)).to_string()
+            Value::Array(relation.loaded(&loading, &Converted::default())).to_string()
         };
         assert_eq!(
             loaded(&[item("a", true), item("b", true)]),
@@ -4110,7 +4207,7 @@ mod tests {
             loaded: Loaded::Values,
         };
         assert_eq!(
-            Value::Array(names.loaded(&values)).to_string(),
+            Value::Array(names.loaded(&values, &Converted::default())).to_string(),
             r#"array ["z", "y", "x"]"#
         );
         // Ordered by an attribute that the elements then leave out, which
@@ -4121,7 +4218,7 @@ mod tests {
             loaded: Loaded::Values,
         };
         assert_eq!(
-            Value::Array(relation.loaded(&without_b)).to_string(),
+            Value::Array(relation.loaded(&without_b, &Converted::default())).to_string(),
             "array [1, 2, 1]"
         );
         let tuples = Loading {
@@ -4129,7 +4226,7 @@ mod tests {
             ..without_b
         };
         assert_eq!(
-            Value::Array(relation.loaded(&tuples)).to_string(),
+            Value::Array(relation.loaded(&tuples, &Converted::default())).to_string(),
             "array [tuple { a: 1 }, tuple { a: 2 }, tuple { a: 1 }]"
         );
     }

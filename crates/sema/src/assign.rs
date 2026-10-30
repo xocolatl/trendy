@@ -566,13 +566,29 @@ fn into_array(
     if !filling.fits(loaded, heading, &removed, errors) {
         return None;
     }
-    let order = order_items(&order, heading, errors::Orders::Load, errors)?;
+    let list = order;
+    let order = order_items(&list, heading, errors::Orders::Load, errors)?;
+    let ordered = order.iter().all(|item| {
+        let ty = heading
+            .get(&item.attribute)
+            .expect("a load orders by the relation's attributes");
+        checker.orders_checked(ty, list.span(), errors)
+    });
+    if !ordered {
+        return None;
+    }
     let loading = hir::Loading {
         order,
         removed,
         loaded,
     };
-    Some(Change::Value(ops::load(relation, loading), written.clone()))
+    match ops::load(relation, loading, checker.bindings()) {
+        Ok(loaded) => Some(Change::Value(loaded, written.clone())),
+        Err(failed) => {
+            errors.push(errors::failed(&failed, written));
+            None
+        }
+    }
 }
 
 /// `load`, of `written`, into `target`, a relation with `heading`: the
@@ -912,9 +928,9 @@ fn ordered_after_removal(
 
 /// The items of `order`, a load's or a type's, as `orders` says, each a
 /// different attribute or component of `heading`, of a type with an
-/// order, at least one, and, of a type, every component, so that values
-/// that differ are never equal in it, or `None` after reporting why they
-/// aren't.
+/// order, at least one, and, of a type, every component of the possible
+/// representation `heading` is, so that values that differ are never equal
+/// in it, or `None` after reporting why they aren't.
 pub(crate) fn order_items(
     order: &ast::OrderList,
     heading: &hir::Heading,
@@ -936,7 +952,13 @@ pub(crate) fn order_items(
         let name = ident.text();
         let span = trendy_syntax::span(ident.text_range());
         let Some(ty) = heading.get(name) else {
-            errors.push(errors::unknown_order_attribute(name, span, heading, orders));
+            let known = items
+                .iter()
+                .filter_map(|item| item.attribute()?.ident())
+                .any(|ident| heading.get(ident.text()).is_some());
+            errors.push(errors::unknown_order_attribute(
+                name, span, heading, known, orders,
+            ));
             ok = false;
             continue;
         };

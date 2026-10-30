@@ -1065,29 +1065,13 @@ impl<'a> FunctionBuilder<'a> {
         let first = fields.named().next().map(|(c, _)| c);
         match first.and_then(|c| defined.representation(c)) {
             Some((own, None)) => self.attributes_read(value, own, fields, cx),
-            Some((own, Some(to))) => {
+            Some((own, Some(other))) => {
                 let components = Reading {
                     dst: self.slot(layout(&hir::Type::Tuple(own.clone()))),
                     ..value.clone()
                 };
                 self.attributes_read(&components, own, fields, cx);
-                let at_hand = hir::Expr::Current(0, own.clone());
-                let args = own
-                    .attributes()
-                    .map(|(c, _)| {
-                        let arg = hir::Expr::Extract(Box::new(at_hand.clone()), c.to_string());
-                        (c.to_string(), arg)
-                    })
-                    .collect();
-                let stored = hir::Expr::Call(hir::Call {
-                    operator: to,
-                    types: Vec::new(),
-                    args,
-                    updated: BTreeMap::new(),
-                });
-                self.tuples.push(components.dst);
-                let stored = self.place(&stored, cx);
-                self.tuples.pop();
+                let stored = self.converted(other.to, own, components.dst, cx);
                 self.insts.push(lir::Inst::Copy {
                     dst: value.dst.clone(),
                     src: stored,
@@ -1097,6 +1081,36 @@ impl<'a> FunctionBuilder<'a> {
             None => unreachable!("a type's value is read in one of its representations"),
         }
         self.constraints_checked(defined, &value.dst, &value.name, value.at, cx);
+    }
+
+    /// The tuple the conversion `operator`, of a type of the program's own,
+    /// computes from the components `heading` of a value at `value`, its
+    /// arguments, by name, in a new place.
+    fn converted(
+        &mut self,
+        operator: hir::OperatorId,
+        heading: &hir::Heading,
+        value: lir::Place,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let at_hand = hir::Expr::Current(0, heading.clone());
+        let args = heading
+            .attributes()
+            .map(|(c, _)| {
+                let arg = hir::Expr::Extract(Box::new(at_hand.clone()), c.to_string());
+                (c.to_string(), arg)
+            })
+            .collect();
+        let conversion = hir::Expr::Call(hir::Call {
+            operator,
+            types: Vec::new(),
+            args,
+            updated: BTreeMap::new(),
+        });
+        self.tuples.push(value);
+        let converted = self.place(&conversion, cx);
+        self.tuples.pop();
+        converted
     }
 
     /// Each attribute of a tuple of `heading`, or component of a value of a
@@ -2723,7 +2737,9 @@ impl<'a> FunctionBuilder<'a> {
     /// value of the only one left, computed by the runtime into a new stack
     /// slot. Lowering works out each item's offset and type, and where each
     /// attribute kept goes in an element, so the runtime never finds
-    /// attributes by name.
+    /// attributes by name, and converts the values an order compares in
+    /// another possible representation than the stored one (see
+    /// [`sorted`]).
     fn load(
         &mut self,
         expr: &hir::Expr,
@@ -2731,35 +2747,30 @@ impl<'a> FunctionBuilder<'a> {
         loading: &hir::Loading,
         cx: &mut Lowering,
     ) -> lir::Place {
-        let relation_ty = self.type_of(relation);
-        let hir::Type::Relation(heading) = &relation_ty else {
+        let hir::Type::Relation(written) = self.type_of(relation) else {
             unreachable!("sema loads only relations");
         };
+        let Sorted {
+            relation,
+            heading,
+            leaves,
+        } = sorted(relation, &written, &loading.order);
+        let relation_ty = hir::Type::Relation(heading.clone());
         let tuple = layout(&hir::Type::Tuple(heading.clone()));
-        // Where an attribute is in the tuple, by name order, and its type.
+        // Where an attribute is in the tuple, by name order.
         let attribute = |name: &str| {
             heading
                 .attributes()
-                .enumerate()
-                .find(|(_, (a, _))| *a == name)
-                .map(|(i, (_, ty))| (i, ty))
+                .position(|(a, _)| a == name)
                 .expect("sema names only the relation's attributes")
         };
-        // Each scalar the tuples are ordered by: an attribute's, or, of a
-        // value of a type of the program's own, its components', by its
-        // order.
-        let mut ordered = Vec::new();
-        for item in &loading.order {
-            let (i, ty) = attribute(&item.attribute);
-            order_leaves(ty, vec![i], item.descending, &mut ordered);
-        }
-        let items: Vec<lir::Field> = ordered
+        let items: Vec<lir::Field> = leaves
             .into_iter()
-            .map(|(path, ty, descending)| {
+            .map(|leaf| {
                 lir::Field::Struct(vec![
-                    lir::Field::Offset(tuple.clone(), path),
-                    lir::Field::Address(cx.descriptor(ty)),
-                    lir::Field::Usize(u64::from(descending)),
+                    lir::Field::Offset(tuple.clone(), leaf.path),
+                    lir::Field::Address(cx.descriptor(&leaf.ty)),
+                    lir::Field::Usize(u64::from(leaf.descending)),
                 ])
             })
             .collect();
@@ -2770,7 +2781,7 @@ impl<'a> FunctionBuilder<'a> {
             unreachable!("a load makes an array");
         };
         let element = layout(element);
-        let kept: Vec<(&str, &hir::Type)> = heading
+        let kept: Vec<(&str, &hir::Type)> = written
             .attributes()
             .filter(|(a, _)| !loading.removed.contains(*a))
             .collect();
@@ -2783,7 +2794,7 @@ impl<'a> FunctionBuilder<'a> {
                     hir::Loaded::Values => lir::Field::Usize(0),
                 };
                 lir::Field::Struct(vec![
-                    lir::Field::Offset(tuple.clone(), vec![attribute(name).0]),
+                    lir::Field::Offset(tuple.clone(), vec![attribute(name)]),
                     to,
                     lir::Field::Size(layout(ty)),
                 ])
@@ -2791,7 +2802,7 @@ impl<'a> FunctionBuilder<'a> {
             .collect();
         let count = usize_constant(len(items.len()), cx);
         let part_count = usize_constant(len(parts.len()), cx);
-        let src = self.place(relation, cx);
+        let src = self.place(&relation, cx);
         let dst = self.slot(layout(&array_ty));
         let args = vec![
             dst.clone(),
@@ -3276,8 +3287,9 @@ impl<'a> FunctionBuilder<'a> {
     /// `ty`, as [`hir::compare`] has it, as an integer in a new slot: -1 if
     /// the first comes first, 1 if it comes last, and else 0. Text's is the
     /// runtime's, and other scalars' by `<` and `>`. A value of a type of
-    /// the program's own's is its components', in its order, the first that
-    /// isn't 0, a descending one's the other way.
+    /// the program's own's is its components', in the representation and
+    /// order its order gives, converted to it if it isn't the stored one,
+    /// the first that isn't 0, a descending one's the other way.
     fn ordering(
         &mut self,
         ty: &hir::Type,
@@ -3286,14 +3298,6 @@ impl<'a> FunctionBuilder<'a> {
         cx: &mut Lowering,
     ) -> lir::Place {
         let result = self.slot(lir::Layout::I64);
-        let set = |this: &mut Self, n: i64, cx: &mut Lowering| {
-            let src = this.place(&hir::Expr::Constant(hir::Value::Integer(n)), cx);
-            this.insts.push(lir::Inst::Copy {
-                dst: result.clone(),
-                src,
-                layout: lir::Layout::I64,
-            });
-        };
         match ty {
             hir::Type::Scalar(hir::Scalar::Text) => {
                 self.insts.push(lir::Inst::CallRuntime {
@@ -3314,7 +3318,7 @@ impl<'a> FunctionBuilder<'a> {
                     },
                     first,
                 );
-                set(self, -1, cx);
+                self.set_integer(&result, -1, cx);
                 self.end_block(lir::Terminator::Jump(done), after);
                 let greater = hir::BinaryOp::Compare(hir::Comparison::Greater, compared);
                 let is_greater = self.binary(greater, ty, lhs, rhs, cx);
@@ -3327,63 +3331,96 @@ impl<'a> FunctionBuilder<'a> {
                     },
                     last,
                 );
-                set(self, 1, cx);
+                self.set_integer(&result, 1, cx);
                 self.end_block(lir::Terminator::Jump(done), same);
-                set(self, 0, cx);
+                self.set_integer(&result, 0, cx);
                 self.end_block(lir::Terminator::Jump(done), done);
             }
             hir::Type::Defined(defined) => {
-                set(self, 0, cx);
-                let done = self.new_block();
-                let order = defined
-                    .order
-                    .as_ref()
-                    .expect("sema compares only ordered values");
-                for item in order {
-                    let (j, (_, component)) = defined
-                        .components
-                        .attributes()
-                        .enumerate()
-                        .find(|(_, (name, _))| *name == item.attribute)
-                        .expect("an order names the type's components");
-                    let (mut first, mut second) = (lhs.clone(), rhs.clone());
-                    first.path.push(j);
-                    second.path.push(j);
-                    if item.descending {
-                        std::mem::swap(&mut first, &mut second);
-                    }
-                    let ordering = self.ordering(component, first, second, cx);
-                    self.insts.push(lir::Inst::Copy {
-                        dst: result.clone(),
-                        src: ordering.clone(),
-                        layout: lir::Layout::I64,
-                    });
-                    let zero = self.place(&hir::Expr::Constant(hir::Value::Integer(0)), cx);
-                    let differs = self.slot(lir::Layout::U8);
-                    self.insts.push(lir::Inst::Binary {
-                        dst: differs.clone(),
-                        op: lir::BinaryOp::Compare(
-                            lir::Comparison::NotEqual,
-                            lir::Operand::Numeric(lir::Numeric::Integer),
-                        ),
-                        lhs: ordering,
-                        rhs: zero,
-                    });
-                    let next = self.new_block();
-                    self.end_block(
-                        lir::Terminator::Branch {
-                            condition: differs,
-                            then: done,
-                            otherwise: next,
-                        },
-                        next,
-                    );
-                }
-                self.end_block(lir::Terminator::Jump(done), done);
+                self.components_ordering(defined, lhs, rhs, &result, cx);
             }
             other => unreachable!("only ordered values are compared, not values of `{other}`"),
         }
         result
+    }
+
+    /// The order of the values at `lhs` and `rhs`, of the type of the
+    /// program's own `defined`, into `result`, as [`FunctionBuilder::ordering`]
+    /// has it: their components', in the representation and order its
+    /// order gives, converted to it if it isn't the stored one, the first
+    /// that isn't 0, a descending one's the other way.
+    fn components_ordering(
+        &mut self,
+        defined: &hir::Defined,
+        lhs: lir::Place,
+        rhs: lir::Place,
+        result: &lir::Place,
+        cx: &mut Lowering,
+    ) {
+        let (order, components) = defined
+            .ordered_by()
+            .expect("sema compares only ordered values");
+        // In another representation than the stored one, the components its
+        // conversion computes.
+        let (lhs, rhs) = match order.from {
+            None => (lhs, rhs),
+            Some(from) => (
+                self.converted(from, &defined.components, lhs, cx),
+                self.converted(from, &defined.components, rhs, cx),
+            ),
+        };
+        self.set_integer(result, 0, cx);
+        let done = self.new_block();
+        for item in &order.items {
+            let (j, (_, component)) = components
+                .attributes()
+                .enumerate()
+                .find(|(_, (name, _))| *name == item.attribute)
+                .expect("an order names its representation's components");
+            let (mut first, mut second) = (lhs.clone(), rhs.clone());
+            first.path.push(j);
+            second.path.push(j);
+            if item.descending {
+                std::mem::swap(&mut first, &mut second);
+            }
+            let ordering = self.ordering(component, first, second, cx);
+            self.insts.push(lir::Inst::Copy {
+                dst: result.clone(),
+                src: ordering.clone(),
+                layout: lir::Layout::I64,
+            });
+            let zero = self.place(&hir::Expr::Constant(hir::Value::Integer(0)), cx);
+            let differs = self.slot(lir::Layout::U8);
+            self.insts.push(lir::Inst::Binary {
+                dst: differs.clone(),
+                op: lir::BinaryOp::Compare(
+                    lir::Comparison::NotEqual,
+                    lir::Operand::Numeric(lir::Numeric::Integer),
+                ),
+                lhs: ordering,
+                rhs: zero,
+            });
+            let next = self.new_block();
+            self.end_block(
+                lir::Terminator::Branch {
+                    condition: differs,
+                    then: done,
+                    otherwise: next,
+                },
+                next,
+            );
+        }
+        self.end_block(lir::Terminator::Jump(done), done);
+    }
+
+    /// Sets the integer at `dst` to `n`.
+    fn set_integer(&mut self, dst: &lir::Place, n: i64, cx: &mut Lowering) {
+        let src = self.place(&hir::Expr::Constant(hir::Value::Integer(n)), cx);
+        self.insts.push(lir::Inst::Copy {
+            dst: dst.clone(),
+            src,
+            layout: lir::Layout::I64,
+        });
     }
 
     /// A new stack slot holding a value with `layout`.
@@ -3523,34 +3560,220 @@ fn scalar_layout(scalar: hir::Scalar) -> lir::Layout {
     layout(&hir::Type::Scalar(scalar))
 }
 
-/// The scalars a value of type `ty`, at `path` in a tuple, orders by, as
-/// [`hir::compare`] does, `descending` or not, into `leaves`: each one's
-/// path, type, and whether it is descending. A value of a type of the
-/// program's own orders by its components, in its order, a descending one
-/// the other way.
-fn order_leaves<'t>(
-    ty: &'t hir::Type,
-    path: Vec<usize>,
-    descending: bool,
-    leaves: &mut Vec<(Vec<usize>, &'t hir::Type, bool)>,
-) {
-    let hir::Type::Defined(defined) = ty else {
-        leaves.push((path, ty, descending));
-        return;
-    };
-    let order = defined
-        .order
-        .as_ref()
-        .expect("sema orders only by ordered types");
+/// The relation a load of `relation`, of `heading`, ordered by `order`,
+/// sorts, and each scalar it is ordered by, as [`hir::compare`] orders
+/// values. A value of a type of the program's own orders
+/// by the components its order compares, in turn, a descending one the
+/// other way. Of an order in another possible representation than the
+/// stored one, the runtime can't call the conversion to it, so the
+/// components it computes are an attribute of each tuple, which no source
+/// can name, computed by an `Extend` of the relation, one more for each
+/// conversion of another's components, and the runtime orders by those.
+fn sorted(relation: &hir::Expr, heading: &hir::Heading, order: &[hir::OrderItem]) -> Sorted {
+    let mut keys = Keys::default();
     for item in order {
-        let (j, (_, component)) = defined
-            .components
+        let ty = heading
+            .get(&item.attribute)
+            .expect("sema orders by the relation's attributes");
+        let key = Key {
+            attribute: item.attribute.clone(),
+            path: Vec::new(),
+            ty: ty.clone(),
+            descending: item.descending,
+        };
+        keys.ordered_by(key);
+    }
+    let levels = keys.converted.iter().map(|c| c.level).max().unwrap_or(0);
+    let (mut relation, mut heading) = (relation.clone(), heading.clone());
+    for level in 1..=levels {
+        let computed: Vec<&Conversion> =
+            keys.converted.iter().filter(|c| c.level == level).collect();
+        let types = computed
+            .iter()
+            .map(|c| (c.name.clone(), hir::Type::Tuple(c.components.clone())))
+            .collect();
+        let values = computed
+            .iter()
+            .map(|c| (c.name.clone(), c.computed(&heading)))
+            .collect();
+        let added = hir::Heading::new(types);
+        heading = hir::Heading::new(
+            heading
+                .attributes()
+                .chain(added.attributes())
+                .map(|(a, ty)| (a.to_string(), ty.clone()))
+                .collect(),
+        );
+        relation = hir::Expr::Extend(Box::new(relation), added, values);
+    }
+    let leaves = keys
+        .leaves
+        .into_iter()
+        .map(|key| {
+            let mut path = vec![
+                heading
+                    .attributes()
+                    .position(|(a, _)| a == key.attribute)
+                    .expect("a key is an attribute of the tuples"),
+            ];
+            let mut ty = heading.get(&key.attribute).expect("a key is an attribute");
+            for step in &key.path {
+                let fields = ty.fields().expect("a key's path is through components");
+                path.push(
+                    fields
+                        .attributes()
+                        .position(|(c, _)| c == step)
+                        .expect("a key's path names components"),
+                );
+                ty = fields.get(step).expect("a key's path names components");
+            }
+            Leaf {
+                path,
+                ty: key.ty,
+                descending: key.descending,
+            }
+        })
+        .collect();
+    Sorted {
+        relation,
+        heading,
+        leaves,
+    }
+}
+
+/// The relation a load sorts, with `heading`, and each scalar it orders
+/// its tuples by (see [`sorted`]).
+struct Sorted {
+    relation: hir::Expr,
+    heading: hir::Heading,
+    leaves: Vec<Leaf>,
+}
+
+/// A scalar a load orders its tuples by: where it is in a tuple, its type,
+/// and whether it is descending.
+struct Leaf {
+    path: Vec<usize>,
+    ty: hir::Type,
+    descending: bool,
+}
+
+/// What a load's tuples are ordered by, as [`sorted`] works it out.
+#[derive(Default)]
+struct Keys {
+    /// Each scalar, in order.
+    leaves: Vec<Key>,
+    /// The values converted to another possible representation of their
+    /// type, for the scalars among its components.
+    converted: Vec<Conversion>,
+}
+
+impl Keys {
+    /// The scalars a value, `key`, is ordered by: itself, or, of a type of
+    /// the program's own, the components its order compares, each in turn,
+    /// converted, if they aren't the stored ones.
+    fn ordered_by(&mut self, key: Key) {
+        let hir::Type::Defined(defined) = &key.ty else {
+            self.leaves.push(key);
+            return;
+        };
+        let (order, components) = defined
+            .ordered_by()
+            .expect("sema orders only by ordered types");
+        let (attribute, path) = match order.from {
+            None => (key.attribute.clone(), key.path.clone()),
+            Some(from) => {
+                let level = 1 + self
+                    .converted
+                    .iter()
+                    .find(|c| c.name == key.attribute)
+                    .map_or(0, |c| c.level);
+                let name = hir::wrapped(&format!("key {}", self.converted.len() + 1));
+                self.converted.push(Conversion {
+                    name: name.clone(),
+                    level,
+                    of: key.clone(),
+                    stored: defined.components.clone(),
+                    from,
+                    components: components.clone(),
+                });
+                (name, Vec::new())
+            }
+        };
+        for item in &order.items {
+            let ty = components
+                .get(&item.attribute)
+                .expect("an order names its representation's components");
+            let mut path = path.clone();
+            path.push(item.attribute.clone());
+            self.ordered_by(Key {
+                attribute: attribute.clone(),
+                path,
+                ty: ty.clone(),
+                descending: key.descending != item.descending,
+            });
+        }
+    }
+}
+
+/// A value a load's tuples are ordered by, of type `ty`, `descending` or
+/// not: the attribute `attribute`, or a value inside it, `path` its
+/// components, or attributes, one inside another.
+#[derive(Clone)]
+struct Key {
+    attribute: String,
+    path: Vec<String>,
+    ty: hir::Type,
+    descending: bool,
+}
+
+/// The components `components` that the conversion `from` computes from
+/// the `stored` ones of the value `of`, as the attribute `name` of each
+/// tuple, which the `Extend` numbered `level`, counting from 1, computes,
+/// after those of lower levels, whose attributes its own are of.
+struct Conversion {
+    name: String,
+    level: usize,
+    of: Key,
+    stored: hir::Heading,
+    from: hir::OperatorId,
+    components: hir::Heading,
+}
+
+impl Conversion {
+    /// The tuple of the components, computed from the tuple at hand, of
+    /// `heading`.
+    fn computed(&self, heading: &hir::Heading) -> hir::Expr {
+        let at_hand = hir::Expr::Current(0, heading.clone());
+        let mut value = hir::Expr::Extract(Box::new(at_hand), self.of.attribute.clone());
+        let mut ty = heading
+            .get(&self.of.attribute)
+            .expect("a conversion's value is an attribute of the tuples");
+        for step in &self.of.path {
+            let fields = match ty {
+                hir::Type::Defined(_) => hir::Expr::Components(Box::new(value)),
+                _ => value,
+            };
+            value = hir::Expr::Extract(Box::new(fields), step.clone());
+            ty = ty
+                .fields()
+                .and_then(|fields| fields.get(step))
+                .expect("a key's path names components");
+        }
+        let components = hir::Expr::Components(Box::new(value));
+        let args = self
+            .stored
             .attributes()
-            .enumerate()
-            .find(|(_, (name, _))| *name == item.attribute)
-            .expect("an order names the type's components");
-        let at = path.iter().copied().chain([j]).collect();
-        order_leaves(component, at, descending != item.descending, leaves);
+            .map(|(k, _)| {
+                let arg = hir::Expr::Extract(Box::new(components.clone()), k.to_string());
+                (k.to_string(), arg)
+            })
+            .collect();
+        hir::Expr::Call(hir::Call {
+            operator: self.from,
+            types: Vec::new(),
+            args,
+            updated: BTreeMap::new(),
+        })
     }
 }
 

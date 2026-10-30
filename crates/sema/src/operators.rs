@@ -281,23 +281,6 @@ impl Operators {
         &self.list[id.0]
     }
 
-    /// The conversion of the type of the program's own `defined` from its
-    /// stored representation to the one with the component `component`,
-    /// and that representation's components, if another has it.
-    pub(crate) fn conversion(
-        &self,
-        defined: &hir::Defined,
-        component: &str,
-    ) -> Option<(hir::OperatorId, &hir::Heading)> {
-        self.list.iter().find_map(|signature| {
-            let (ty, _) = signature.converts()?;
-            let Some(hir::Type::Tuple(own)) = &signature.result else {
-                return None;
-            };
-            (ty.name == defined.name && own.get(component).is_some()).then_some((signature.id, own))
-        })
-    }
-
     /// The selector of the type of the program's own `defined` in the
     /// possible representation with the component `component`, if the
     /// type has selectors.
@@ -584,13 +567,14 @@ fn operator(
 }
 
 /// The signatures of the constraints of the types `file` declares, and of
-/// their possible representations' conversions to the stored ones, in the
-/// order of the ids [`crate::named_types::resolve`] gave them: read-only
-/// operators, each named for its type and its place among them, or the
-/// representation, a name no source can write or call. A constraint's
-/// parameters are the stored components, and its value a boolean; a
-/// conversion's parameters are its representation's components, and its
-/// value the tuple of the stored ones.
+/// their possible representations' conversions to the stored ones and
+/// from them, in the order of the ids [`crate::named_types::resolve`] gave
+/// them: read-only operators, each named for its type and its place among
+/// them, or the representation, a name no source can write or call. A
+/// constraint's parameters are the stored components, and its value a
+/// boolean; a conversion's parameters are the components of the
+/// representation it converts from, and its value the tuple of those of
+/// the one it converts to.
 fn numbered(file: &SourceFile, namespaces: &Namespaces) -> Vec<Signature> {
     let mut signatures = Vec::new();
     for decl in file.types() {
@@ -634,20 +618,35 @@ fn numbered(file: &SourceFile, namespaces: &Namespaces) -> Vec<Signature> {
         for (representation, converted) in defined.representations.iter().zip(converted) {
             let own = component_parameters(&converted.components);
             let names: Vec<&str> = converted.components.named().map(|(c, _)| c).collect();
-            signatures.push(Signature {
-                id: representation.to,
-                name: format!("{} from {{{}}}", defined.name, names.join(", ")),
-                types: Vec::new(),
-                written: self::written(&own),
-                params: own,
-                unresolved: BTreeSet::new(),
-                read_only: true,
-                result: Some(hir::Type::Tuple(defined.components.clone())),
-                decl: None,
-                builtin: None,
-                from_type: Some(from_type(Made::To(converted.decl.clone()))),
-                valid: converted.convertible,
-            });
+            let conversion =
+                |id, name, params: BTreeMap<String, hir::Parameter>, result, made| Signature {
+                    id,
+                    name,
+                    types: Vec::new(),
+                    written: self::written(&params),
+                    params,
+                    unresolved: BTreeSet::new(),
+                    read_only: true,
+                    result: Some(hir::Type::Tuple(result)),
+                    decl: None,
+                    builtin: None,
+                    from_type: Some(from_type(made)),
+                    valid: converted.convertible,
+                };
+            signatures.push(conversion(
+                representation.to,
+                format!("{} from {{{}}}", defined.name, names.join(", ")),
+                own,
+                defined.components.clone(),
+                Made::To(converted.decl.clone()),
+            ));
+            signatures.push(conversion(
+                representation.from,
+                format!("{} as {{{}}}", defined.name, names.join(", ")),
+                params.clone(),
+                converted.components.clone(),
+                Made::From(converted.decl.clone()),
+            ));
         }
     }
     signatures.sort_by_key(|signature| signature.id);
@@ -663,13 +662,10 @@ fn component_parameters(components: &hir::Heading) -> BTreeMap<String, hir::Para
         .collect()
 }
 
-/// The signatures made from the type `decl` declares, but its constraints,
-/// numbered after the prelude's, each with no id yet: a selector for each
-/// possible representation, named after the type, whose parameters are its
-/// components, unless its name is another operator's, which is reported,
-/// and, of each but the stored one, its conversion from the stored one,
-/// named for the representation it converts to, a name no source can
-/// write or call. None for a type whose stored components have errors, and
+/// The selectors of the type `decl` declares, each with no id yet: one for
+/// each possible representation, named after the type, whose parameters
+/// are its components, unless its name is another operator's, which is
+/// reported. None for a type whose stored components have errors, and
 /// those of a representation with errors in its conversions, which are
 /// reported, are invalid.
 fn from_type(decl: &ast::TypeDecl, namespaces: &Namespaces) -> Vec<Signature> {
@@ -723,17 +719,6 @@ fn from_type(decl: &ast::TypeDecl, namespaces: &Namespaces) -> Vec<Signature> {
             );
             signatures.push(selector);
         }
-        let names: Vec<&str> = converted.components.named().map(|(c, _)| c).collect();
-        let conversion = Signature {
-            name: format!("{name} as {{{}}}", names.join(", ")),
-            ..made(
-                Made::From(converted.decl.clone()),
-                component_parameters(&defined.components),
-                hir::Type::Tuple(converted.components.clone()),
-                converted.convertible,
-            )
-        };
-        signatures.push(conversion);
     }
     signatures
 }

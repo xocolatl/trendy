@@ -204,6 +204,38 @@ impl<'a> Checker<'a> {
         self.names.bindings()
     }
 
+    /// Whether each conversion that comparing values of type `ty` calls,
+    /// for an order of a type of the program's own that compares the
+    /// components of another possible representation than the stored one,
+    /// its own or a component's, is checked, so that comparisons of its
+    /// values fold, after checking it, at `at`, if it isn't yet: `false`
+    /// after reporting that it has errors, or that it compares values of
+    /// its own type, which needs it again.
+    pub(crate) fn orders_checked(
+        &mut self,
+        ty: &hir::Type,
+        at: Span,
+        errors: &mut Vec<Diagnostic>,
+    ) -> bool {
+        let hir::Type::Defined(defined) = ty else {
+            return true;
+        };
+        let Some((order, components)) = defined.ordered_by() else {
+            return true;
+        };
+        if let Some(from) = order.from
+            && !self.names.checked(from, at, errors)
+        {
+            return false;
+        }
+        order.items.iter().all(|item| {
+            let component = components
+                .get(&item.attribute)
+                .expect("an order names its representation's components");
+            self.orders_checked(component, at, errors)
+        })
+    }
+
     /// The value `expr` is, if it is known when compiling.
     pub(crate) fn constant(expr: &hir::Expr) -> Option<&hir::Value> {
         match expr {
@@ -296,12 +328,26 @@ impl<'a> Checker<'a> {
                 let Resolved::Binary(op) = resolved else {
                     unreachable!("a connective, which `Checker::connective` checks");
                 };
-                types::evaluated(
-                    ops::binary(op, lhs, rhs),
-                    expr,
-                    binary.rhs().as_ref(),
-                    errors,
-                )
+                if let hir::BinaryOp::Compare(..) = op
+                    && !self.orders_checked(
+                        &self.ty(&lhs),
+                        trendy_syntax::span(token.text_range()),
+                        errors,
+                    )
+                {
+                    return None;
+                }
+                match ops::binary(op, lhs, rhs, self.bindings()) {
+                    Ok(result) => Some(result),
+                    Err(ops::Failed::Scalar(failure)) => {
+                        errors.push(errors::failure(failure, expr, binary.rhs().as_ref()));
+                        None
+                    }
+                    Err(failed) => {
+                        errors.push(errors::failed(&failed, expr));
+                        None
+                    }
+                }
             }
             Expr::Extract(extract) => self.extracted(extract, expr, expected, errors),
             Expr::Postfix(postfix) if let Some(gathering) = ops::Gathering::of(postfix) => {
@@ -776,6 +822,14 @@ impl<'a> Checker<'a> {
         let call = self.arguments(written, &signature, errors)?;
         // A built-in's implementation is the compiler's, never checked.
         if signature.builtin.is_none() && !self.names.checked(signature.id, span, errors) {
+            return None;
+        }
+        // Its value may compare the values of a type it is given.
+        if !call
+            .types
+            .iter()
+            .all(|ty| self.orders_checked(ty, span, errors))
+        {
             return None;
         }
         let bindings = self.names.bindings();
@@ -1328,8 +1382,8 @@ impl<'a> Checker<'a> {
         expr: &Expr,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<(hir::Expr, hir::Heading)> {
-        let (conversion, own) = self.names.operators().conversion(defined, component)?;
-        let own = own.clone();
+        let (own, other) = defined.representation(component)?;
+        let (conversion, own) = (other?.from, own.clone());
         let result = hir::Type::Tuple(own.clone());
         let converted = self.applied(
             conversion,
@@ -3040,8 +3094,11 @@ impl Names for ComponentNames<'_> {
             let tuple = hir::Expr::Current(0, stored.clone());
             return Lookup::Found(hir::Expr::Extract(Box::new(tuple), name.to_string()));
         }
-        let conversion = self.outer.operators().conversion(&self.defined, name);
-        if let Some((conversion, _)) = conversion {
+        let conversion = self
+            .defined
+            .representation(name)
+            .and_then(|(_, other)| other);
+        if let Some(conversion) = conversion.map(|r| r.from) {
             if !self.outer.checked(conversion, span, errors) {
                 return Lookup::Reported;
             }

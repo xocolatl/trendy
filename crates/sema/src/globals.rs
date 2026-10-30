@@ -497,8 +497,10 @@ impl<'a> Globals<'a> {
         errors: &mut Vec<Diagnostic>,
     ) -> Option<(Vec<hir::Local>, hir::Expr)> {
         let component = signature.params.keys().next()?;
-        let (_, to) = defined.representation(component)?;
-        let to = to.expect("only another representation's selector converts");
+        let (_, other) = defined.representation(component)?;
+        let to = other
+            .expect("only another representation's selector converts")
+            .to;
         let at = signature.defined()?;
         let converts = self.checked(to, at, errors);
         let constrained = defined
@@ -793,8 +795,8 @@ impl Names for ReadOnlyNames<'_, '_, '_> {
         // than the stored one, which its conversion computes from the
         // stored components, the parameters.
         let conversion = self.signature().constrains().and_then(|(defined, _)| {
-            let (id, _) = self.globals.operators.conversion(defined, name)?;
-            Some((id, defined.components.clone()))
+            let (_, other) = defined.representation(name)?;
+            Some((other?.from, defined.components.clone()))
         });
         if let Some((conversion, stored)) = conversion {
             if !self.globals.checked(conversion, span, errors) {

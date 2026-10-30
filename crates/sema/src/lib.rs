@@ -6685,6 +6685,96 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
         );
     }
 
+    /// A pair of integers, stored as they are, and ordered by their total,
+    /// then the first, which the stored order wouldn't give.
+    const PAIR: &str = "type pair {
+    { a: integer, b: integer },
+    { total: integer, first: integer }
+        to { a := first, b := total - first }
+        from { total := a + b, first := a },
+    order [asc total, asc first],
+};
+";
+
+    #[test]
+    fn a_programs_own_types_are_ordered_in_any_representation() {
+        let value = |value: &str| {
+            let source = format!("{PAIR}var v := {value};");
+            variables(&source)[0].init.to_string()
+        };
+        // Compared by the components the order names, of the representation
+        // it names, which the conversion computes.
+        assert_eq!(value("pair{a: 1, b: 9} > pair{a: 5, b: 0}"), "true");
+        assert_eq!(value("pair{a: 1, b: 3} < pair{a: 2, b: 2}"), "true");
+        let pairs = "relation { { p: pair{a: 5, b: 0} }, { p: pair{a: 1, b: 9} }, { p: pair{a: 0, b: 4} } }";
+        assert_eq!(
+            value(&format!("min{{r: {pairs}, of: p}}")),
+            "pair{a: 0, b: 4}"
+        );
+        assert_eq!(
+            value(&format!("max{{r: {pairs}, of: p}}")),
+            "pair{a: 1, b: 9}"
+        );
+        assert_eq!(
+            value(&format!(
+                "[ var ps: array pair; load ps value from {pairs} order [desc p]; ps ]"
+            )),
+            "array [pair{a: 1, b: 9}, pair{a: 5, b: 0}, pair{a: 0, b: 4}]"
+        );
+        // Of `any ordered`, and inside a value of another type, by it.
+        let source = format!(
+            "{PAIR}type entry {{ {{ at: pair }}, order [desc at] }};\noperator least{{a: T, b: T}}: T types {{ T: any ordered }} [ if a < b then a else b ];\nvar v := least{{a: entry{{at: pair{{a: 1, b: 9}}}}, b: entry{{at: pair{{a: 5, b: 0}}}}}};"
+        );
+        assert_eq!(
+            variables(&source)[0].init.to_string(),
+            "entry{at: pair{a: 1, b: 9}}"
+        );
+        // A conversion that fails when compiling fails the comparison.
+        assert_eq!(
+            codes(&format!(
+                "{PAIR}var v := pair{{a: 9223372036854775807, b: 1}} < pair{{a: 0, b: 0}};{MAIN}"
+            )),
+            [Code::Overflow]
+        );
+    }
+
+    #[test]
+    fn a_programs_own_types_are_ordered_in_one_representation() {
+        let declare = |order: &str| {
+            format!(
+                "type pair {{
+    {{ a: integer, b: integer }},
+    {{ total: integer, first: integer }}
+        to {{ a := first, b := total - first }}
+        from {{ total := a + b, first := a }},
+    {order},
+}};{MAIN}"
+            )
+        };
+        assert_eq!(
+            messages(&declare("order [asc total, asc a]")),
+            ["`total` and `a` are components of different possible representations of `pair`"]
+        );
+        assert_eq!(
+            messages(&declare("order [asc total]")),
+            ["the order of `pair` leaves out `first`"]
+        );
+        // A misspelling is of the representation the others are of, or of
+        // any.
+        let source = declare("order [asc totl, asc first]");
+        assert_eq!(messages(&source), ["unknown component `totl`"]);
+        assert_eq!(fix(&source), declare("order [asc total, asc first]"));
+        let source = declare("order [asc totl]");
+        assert_eq!(fix(&source), declare("order [asc total]"));
+        assert!(
+            errors(&source)[0].notes.iter().any(|note| note.contains(
+                "an order compares the components of one possible representation of `pair`, as its selectors write them: `pair{a: …, b: …}` or `pair{first: …, total: …}`"
+            )),
+            "{:#?}",
+            errors(&source)
+        );
+    }
+
     const TEMPERATURE: &str = "type temperature {
     { kelvin: approximate },
     { celsius: approximate }

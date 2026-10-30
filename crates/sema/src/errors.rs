@@ -4016,6 +4016,10 @@ pub(crate) fn mixed_representations(
             "`load_csv` reads the components of one representation, each from its column, and selects the value in it",
             "give the columns of one representation's components",
         ),
+        OneRepresentation::Ordered => (
+            "a type's order compares the components of one representation, each of a value converted to it",
+            "order by one representation's components",
+        ),
     };
     Diagnostic::error(
         Code::Conversions,
@@ -4034,12 +4038,14 @@ pub(crate) fn mixed_representations(
 }
 
 /// What names the components of one of a type's possible representations:
-/// a change, `replace` or `update`, whose values they are given, or
-/// `load_csv`'s `columns`, which they are read from.
+/// a change, `replace` or `update`, whose values they are given,
+/// `load_csv`'s `columns`, which they are read from, or the type's order,
+/// which compares them.
 #[derive(Clone, Copy)]
 pub(crate) enum OneRepresentation {
     Changed,
     Read,
+    Ordered,
 }
 
 /// `where`, at `span`, applied to `operand`, of type `ty`, which isn't a
@@ -4388,7 +4394,10 @@ fn unparsable(
             .with_note(rule);
             if builtin == hir::ReadOnlyBuiltin::ParseInteger
                 && hir::ReadOnlyBuiltin::ParseApproximate
-                    .evaluate(&[("from".to_string(), quoted.clone())].into())
+                    .evaluate(
+                        &[("from".to_string(), quoted.clone())].into(),
+                        &hir::Converted::default(),
+                    )
                     .is_ok()
             {
                 d.with_help("it is a decimal number with a fraction or an exponent, which `parse_approximate` reads as an approximate number")
@@ -6111,13 +6120,12 @@ pub(crate) fn keeping_edit(
     ))
 }
 
-/// A load's order, `order`, with no items, of a relation with `heading`.
 /// What an order orders: a load's relation's tuples, by attributes, or
-/// the values of the type of the program's own named so, by components.
+/// the values of the type of the program's own, by components.
 #[derive(Clone, Copy)]
 pub(crate) enum Orders<'a> {
     Load,
-    Type(&'a str),
+    Type(&'a hir::Defined),
 }
 
 impl Orders<'_> {
@@ -6130,7 +6138,7 @@ impl Orders<'_> {
 }
 
 /// The rule for a type's order, for notes.
-const TYPE_ORDER: &str = "a type's order compares its values by their components, each of a type with `<`, in turn, until one differs, so it names every component, once, and values that differ are never equal in it";
+const TYPE_ORDER: &str = "a type's order compares its values by the components of one of its possible representations, each of a type with `<`, in turn, until one differs, so it names every component of that one, once, and values that differ are never equal in it";
 
 /// `order`, an order of what `orders` says, with no items, of a relation
 /// or type with `heading`.
@@ -6148,9 +6156,9 @@ pub(crate) fn empty_order(order: &OrderList, heading: &hir::Heading, orders: Ord
             "no attributes to order by",
         )
         .with_note("a relation's tuples have no order, so a load says which to put them in"),
-        Orders::Type(t) => Diagnostic::error(
+        Orders::Type(defined) => Diagnostic::error(
             Code::EmptyList,
-            format!("the order of `{t}` needs its components"),
+            format!("the order of `{}` needs its components", defined.name),
             order.span(),
             "no components to order by",
         )
@@ -6162,21 +6170,43 @@ pub(crate) fn empty_order(order: &OrderList, heading: &hir::Heading, orders: Ord
 }
 
 /// An attribute or a component, as `orders` says, `name`, at `span`, that
-/// an order orders by, which the relation or type, with `heading`, hasn't.
+/// an order orders by, which the relation, with `heading`, hasn't, or the
+/// type, in the possible representation with `heading`, if `known`, the
+/// one the other components the order names are of, or else in any.
 pub(crate) fn unknown_order_attribute(
     name: &str,
     span: Span,
     heading: &hir::Heading,
+    known: bool,
     orders: Orders,
 ) -> Diagnostic {
-    let names: Vec<&str> = heading.attributes().map(|(a, _)| a).collect();
+    let names: Vec<&str> = match orders {
+        Orders::Type(defined) if !known => defined
+            .possible_representations()
+            .flat_map(|h| h.named().map(|(c, _)| c))
+            .collect(),
+        _ => heading.attributes().map(|(a, _)| a).collect(),
+    };
     let rename = closest(name, names.iter().copied());
     let listed: Vec<String> = names.iter().map(|a| format!("`{a}`")).collect();
     let context = match (orders, listed.len()) {
         (Orders::Load, 0) => "the relation has no attributes".to_string(),
         (Orders::Load, _) => format!("the relation's attributes are {}", listed.join(", ")),
-        (Orders::Type(t), 0) => format!("`{t}` has no components"),
-        (Orders::Type(t), _) => format!("`{t}`'s components are {}", listed.join(", ")),
+        (Orders::Type(defined), 0) => format!("`{}` has no components", defined.name),
+        (Orders::Type(defined), _) if defined.representations.is_empty() => {
+            format!("`{}`'s components are {}", defined.name, listed.join(", "))
+        }
+        (Orders::Type(defined), _) => {
+            let selectors: Vec<String> = defined
+                .possible_representations()
+                .map(|components| selector_text(&defined.name, components))
+                .collect();
+            format!(
+                "an order compares the components of one possible representation of `{}`, as its selectors write them: {}",
+                defined.name,
+                trendy_diag::disjoin(&selectors)
+            )
+        }
     };
     unknown_attribute(orders.noun(), name, span, &context, rename, None)
 }
@@ -6194,8 +6224,11 @@ pub(crate) fn unordered_attribute(
             format!("a load can't order by `{name}`, of type `{ty}`"),
             "a load orders by attributes of types with `<`: booleans, integers, approximate numbers and text, and types of the program's own with an order; tuples and arrays have no order, and relations are ordered only as sets, by inclusion",
         ),
-        Orders::Type(t) => (
-            format!("the order of `{t}` can't compare `{name}`, of type `{ty}`"),
+        Orders::Type(defined) => (
+            format!(
+                "the order of `{}` can't compare `{name}`, of type `{ty}`",
+                defined.name
+            ),
             TYPE_ORDER,
         ),
     };
@@ -6257,9 +6290,10 @@ pub(crate) fn unordered_components(
     order: &OrderList,
     orders: Orders,
 ) -> Diagnostic {
-    let Orders::Type(t) = orders else {
+    let Orders::Type(defined) = orders else {
         unreachable!("only a type's order names every component");
     };
+    let t = &defined.name;
     let quoted: Vec<String> = missing.iter().map(|name| format!("`{name}`")).collect();
     let named = trendy_diag::conjoin(&quoted);
     let example = missing[0];
