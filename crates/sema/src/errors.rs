@@ -3909,60 +3909,92 @@ pub(crate) fn replaced_unknown(
     }
 }
 
-/// The component `name`, at `span`, which a `replace` or an `update`, as
+/// A component, `name`, at `span`, that a value of a type of the program's
+/// own hasn't in the possible representation a change gives new values,
+/// with the components it may be a misspelling of, `candidates`, and those
+/// of each of the type's representations.
+pub(crate) struct Unknown<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) span: Span,
+    pub(crate) candidates: &'a [String],
+    pub(crate) representations: &'a [hir::Heading],
+}
+
+/// The component `unknown`, which a `replace` or an `update`, as
 /// `assigning` says, of `operand`, a value of the type of the program's own
-/// `defined`, gives a new value, but which the type hasn't.
+/// `defined`, gives a new value, but which the type hasn't, or not in the
+/// possible representation the others are of.
 pub(crate) fn replaced_unknown_component(
     assigning: crate::ops::Assigning,
-    name: &str,
-    span: Span,
+    unknown: &Unknown,
     defined: &hir::Defined,
     operand: &Expr,
 ) -> Diagnostic {
-    let rename = closest(name, defined.components.named().map(|(c, _)| c));
+    let &Unknown {
+        name,
+        span,
+        candidates,
+        representations,
+    } = unknown;
+    let rename = closest(name, candidates.iter().map(String::as_str));
     let has = if assigning == crate::ops::Assigning::Update {
         "the variable's value has"
     } else {
         "the operand has"
     };
+    let components = match representations {
+        [_, _, ..] => {
+            let selectors: Vec<String> = representations
+                .iter()
+                .map(|components| selector_text(&defined.name, components))
+                .collect();
+            format!(
+                "`{}`'s components are those of one of its possible representations, as its selectors write them: {}",
+                defined.name,
+                trendy_diag::disjoin(&selectors)
+            )
+        }
+        _ => components_note(defined),
+    };
     let context = format!(
-        "`{}` gives components {has} new values of the same types, and {}",
+        "`{}` gives components {has} new values of the same types, and {components}",
         assigning.keyword(),
-        components_note(defined)
     );
     unknown_attribute(Noun::Component, name, span, &context, rename, None)
         .with_secondary(operand.span(), format!("this is `{}`", defined.name))
 }
 
-/// The component `name`, at `span`, which a `replace` or an `update`, as
-/// `assigning` says, of a value of the type of the program's own
-/// `defined`, gives a value, but which is a component of another of its
-/// possible representations, with the components `own`, than the stored
-/// one.
-pub(crate) fn other_representations_component(
-    assigning: crate::ops::Assigning,
-    name: &str,
-    span: Span,
+/// The selector of the type `t` in the possible representation with the
+/// components `components`, quoted, with `…` for each argument.
+fn selector_text(t: &str, components: &hir::Heading) -> String {
+    let written: Vec<String> = components.named().map(|(c, _)| format!("{c}: …")).collect();
+    format!("`{t}{{{}}}`", written.join(", "))
+}
+
+/// Components of two possible representations of the type of the program's
+/// own `defined`, each with where it is written and its representation's
+/// components, that a `replace` or an `update` gives new values together.
+pub(crate) fn mixed_representations(
     defined: &hir::Defined,
-    own: &hir::Heading,
+    first: (&str, Span, &hir::Heading),
+    second: (&str, Span, &hir::Heading),
 ) -> Diagnostic {
     let t = &defined.name;
-    let components: Vec<String> = own.named().map(|(c, _)| format!("{c}: …")).collect();
+    let (one, one_span, ones) = first;
+    let (other, other_span, others) = second;
+    let listed = |components: &hir::Heading| selector_text(t, components);
     Diagnostic::error(
         Code::Conversions,
-        format!("`{name}` is a component of another possible representation of `{t}`"),
-        span,
-        "not of the representation its values are stored as",
+        format!("`{one}` and `{other}` are components of different possible representations of `{t}`"),
+        other_span,
+        format!("not a component of the representation `{one}` is of"),
     )
+    .with_secondary(one_span, format!("a component of {}", listed(ones)))
     .with_note(format!(
-        "`{}` gives the components of the representation a value is stored as new values, and {}",
-        assigning.keyword(),
-        components_note(defined)
+        "a `replace` or an `update` gives the components of one representation new values, keeps the others it has, and selects the value in it; `{other}` is a component of {}",
+        listed(others)
     ))
-    .with_help(format!(
-        "select the value in that representation instead: `{t}{{{}}}`",
-        components.join(", ")
-    ))
+    .with_help("give one representation's components new values at a time, as in `v replace { … } replace { … }`")
 }
 
 /// `where`, at `span`, applied to `operand`, of type `ty`, which isn't a

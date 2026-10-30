@@ -289,6 +289,24 @@ impl Operators {
         })
     }
 
+    /// The selector of the type of the program's own `defined` in the
+    /// possible representation with the component `component`, if the
+    /// type has selectors.
+    pub(crate) fn selector(
+        &self,
+        defined: &hir::Defined,
+        component: &str,
+    ) -> Option<hir::OperatorId> {
+        self.overloads(&defined.name)
+            .find(|signature| {
+                signature
+                    .selects()
+                    .is_some_and(|ty| ty.name == defined.name)
+                    && signature.params.contains_key(component)
+            })
+            .map(|signature| signature.id)
+    }
+
     /// The operators named `name`, in the order they are defined.
     pub(crate) fn overloads(&self, name: &str) -> impl Iterator<Item = &Signature> {
         self.by_name

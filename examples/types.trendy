@@ -132,7 +132,9 @@ operator in_order{f: relation { name: text, on: calendar_day }, june: calendar_d
 /* A temperature, stored in kelvins, and written in degrees Celsius or
    Fahrenheit too: each possible representation but the stored one
    converts to it, with `to`, and from it, with `from`. A value is
-   selected in any of them, and a component of any read with the dot. */
+   selected in any of them, a component of any read with the dot, and the
+   components of any changed by `replace` and `update`, the value
+   selected in that representation. */
 type temperature {
     { kelvin: approximate },
     { celsius: approximate }
@@ -149,6 +151,12 @@ var reykjavik := temperature{celsius: -2e0};
 var phoenix := temperature{fahrenheit: 104e0};
 var phoenix_celsius := phoenix.celsius;
 var warmer := phoenix > reykjavik;
+var thawed := reykjavik replace { celsius := celsius + 10e0 };
+var cooled := [
+    var t := phoenix;
+    update t { fahrenheit := fahrenheit - 18e0 };
+    t
+];
 
 operator temperatures{celsius: approximate, fahrenheit: approximate} [
     var cold := temperature{celsius: celsius};
@@ -156,6 +164,9 @@ operator temperatures{celsius: approximate, fahrenheit: approximate} [
     call debug_value{v: cold};
     call debug_value{v: hot.celsius};
     call debug_value{v: hot > cold};
+    call debug_value{v: cold replace { celsius := celsius + 10e0 }};
+    update hot { fahrenheit := fahrenheit - 18e0 };
+    call debug_value{v: hot};
 ];
 
 /* A journey's stops, as a relation. */
@@ -187,6 +198,8 @@ operator main{} [
     call debug_value{v: reykjavik};
     call debug_value{v: phoenix_celsius};
     call debug_value{v: warmer};
+    call debug_value{v: thawed};
+    call debug_value{v: cooled};
     call debug_table{r: flight_stops};
 
     call select_position{

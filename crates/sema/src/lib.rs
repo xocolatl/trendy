@@ -425,6 +425,17 @@ impl Namespaces {
         self.converted.get(name).map_or(&[], Vec::as_slice)
     }
 
+    /// The components of each possible representation of the program's own
+    /// type `defined` whose components have no errors: the stored one's
+    /// first.
+    pub(crate) fn representations<'d>(
+        &'d self,
+        defined: &'d hir::Defined,
+    ) -> impl Iterator<Item = &'d hir::Heading> {
+        std::iter::once(&defined.components)
+            .chain(self.converted(&defined.name).iter().map(|c| &c.components))
+    }
+
     /// The program's own types' names.
     pub(crate) fn defined_types(&self) -> impl Iterator<Item = &str> {
         self.types.keys().map(String::as_str)
@@ -6742,17 +6753,100 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
             matches!(&**inner, hir::Expr::Extract(extended, _) if matches!(**extended, hir::Expr::Extend(..))),
             "{inner:?}"
         );
-        // `replace` changes the stored components, with help to select the
-        // value in another representation.
-        let source = format!(
-            "{TEMPERATURE}var v := temperature{{kelvin: 1e0}} replace {{ celsius := 2e0 }};{MAIN}"
-        );
-        let error = &errors(&source)[0];
-        assert_eq!(error.code, Code::Conversions);
+    }
+
+    #[test]
+    fn a_programs_own_types_change_in_any_representation() {
+        let var = |value: &str| {
+            let source =
+                format!("{TEMPERATURE}var t := temperature{{celsius: 20e0}};\nvar v := {value};");
+            variables(&source)[1].init.to_string()
+        };
+        // In another representation, selected in it from its components,
+        // the others as they were in it.
         assert_eq!(
-            error.help,
-            ["select the value in that representation instead: `temperature{celsius: …}`"]
+            var("t replace { celsius := celsius + 5e0 }"),
+            "temperature{kelvin: 2.9815e2}"
         );
+        // Each representation's components are in scope, the others
+        // computed by their conversions.
+        assert_eq!(
+            var("t replace { kelvin := celsius }"),
+            "temperature{kelvin: 2e1}"
+        );
+        assert_eq!(
+            var("t replace { celsius := kelvin - 293.15e0 + 1e0 }"),
+            "temperature{kelvin: 2.7415e2}"
+        );
+        // So `update` does, a whole new value.
+        assert_eq!(
+            var("[ var u := t; update u { celsius := 0e0 }; u ]"),
+            "temperature{kelvin: 2.7315e2}"
+        );
+        // An outer tuple's attributes are in scope too.
+        assert_eq!(
+            var(
+                "tuple from (relation { { at: t, by: 2e0 } } replace { at := at replace { celsius := celsius * by } })"
+            ),
+            "tuple { at: temperature{kelvin: 3.1315e2}, by: 2e0 }"
+        );
+        // Selected, the value satisfies the type's constraints, of any
+        // representation's components.
+        let source = format!(
+            "{TEMPERATURE}var t := temperature{{celsius: 20e0}};\nvar v := t replace {{ celsius := 1000e0 }};{MAIN}"
+        );
+        let errors = errors(&source);
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].code, Code::BrokenConstraint);
+        assert_eq!(
+            &source[errors[0].span().start..errors[0].span().end],
+            "t replace { celsius := 1000e0 }"
+        );
+    }
+
+    #[test]
+    fn a_programs_own_types_change_one_representation_at_a_time() {
+        let program = |change: &str| {
+            format!(
+                "{TEMPERATURE}operator main{{}} [\n    var t := temperature{{celsius: 20e0}};\n    {change}\n    call debug_value{{v: t}};\n];\n"
+            )
+        };
+        // Components of two representations, which no selector takes
+        // together.
+        let source = program("t := t replace { celsius := 1e0, kelvin := 2e0 };");
+        let mixed = errors(&source);
+        assert_eq!(mixed.len(), 1, "{mixed:#?}");
+        assert_eq!(mixed[0].code, Code::Conversions);
+        assert_eq!(
+            mixed[0].message,
+            "`celsius` and `kelvin` are components of different possible representations of `temperature`"
+        );
+        assert_eq!(
+            &source[mixed[0].span().start..mixed[0].span().end],
+            "kelvin"
+        );
+        assert!(mixed[0].suggestions.is_empty(), "{mixed:#?}");
+        // A misspelling is one of a representation's components, of the
+        // one the others are of, if they name one.
+        let source = program("update t { celsus := 1e0 };");
+        assert_eq!(fix(&source), program("update t { celsius := 1e0 };"));
+        let source = program("update t { celsius := 1e0, kelvn := 2e0 };");
+        let unknown = errors(&source);
+        assert_eq!(unknown[0].code, Code::UnknownAttribute);
+        assert!(unknown[0].suggestions.is_empty(), "{unknown:#?}");
+        assert!(
+            unknown[0].notes[0].contains("`temperature{kelvin: …}` or `temperature{celsius: …}`"),
+            "{unknown:#?}"
+        );
+        // Another representation's update gives every stored component a
+        // new value, so another change to the variable conflicts with it.
+        let source =
+            program("assign { update t { celsius := 1e0 }; update t { kelvin := 300e0 }; };");
+        assert_eq!(codes(&source), [Code::ConflictingChanges]);
+        // As other languages assign an object's field, fixed to `update`.
+        let source = program("t.celsius := 25e0;");
+        assert_eq!(fix(&source), program("update t { celsius := 25e0 };"));
+        assert!(analyze_str(&fix(&source)).is_ok());
     }
 
     #[test]

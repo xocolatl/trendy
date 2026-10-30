@@ -86,27 +86,36 @@ operator reflect{p: point}: point [
     point{x: -p.x, y: -p.y}
 ];
 
-var p := point{x: 5e0, y: 2.5e0};
-var reflected := reflect{p: p};
+var pt := point{x: 5e0, y: 2.5e0};
+var reflected := reflect{p: pt};
 
 /* A point's polar coordinates, the reflected point's half a turn from
    the point's, and a point selected by them: π/2 is no approximate
    number, so its cosine isn't 0, and the point is only nearly on the y
    axis. */
 var polar := tuple { r: reflected.r, theta: reflected.theta };
-var apart := dist{p1: p, p2: reflected};
+var apart := dist{p1: pt, p2: reflected};
 var north := point{r: distance{m: 3e0}, theta: angle{rho: pi{} / 2e0}};
 var origin := point{r: distance{m: 0e0}, theta: angle{rho: 1e0}};
+
+/* `THE_R ( P ) := …`: a component of the polar representation changed,
+   the point selected in it, at the same angle, twice as far from the
+   origin. */
+var farther := [
+    var q := pt;
+    update q { r := distance{m: 2e0 * r.m} };
+    q
+];
 
 /* `THE_X ( P ) := 2.0`: a component changed with `update`, and one of a
    value inside another, `THE_X ( THE_BEGIN ( LS ) ) := 6.5`. */
 var moved := [
-    var q := p;
+    var q := pt;
     update q { x := 2e0 };
     q
 ];
 var segment := [
-    var ls := lineseg{begin: p, end: reflected};
+    var ls := lineseg{begin: pt, end: reflected};
     update ls { begin := begin replace { x := 6.5e0 } };
     ls
 ];
@@ -115,7 +124,7 @@ var segment := [
    recommends: one at a time, a major semiaxis of 3 would be shorter than
    the minor one of 4 in between, which no ellipse has. */
 var squashed := [
-    var e := ellipse{a: distance{m: 5e0}, b: distance{m: 4e0}, ctr: p};
+    var e := ellipse{a: distance{m: 5e0}, b: distance{m: 4e0}, ctr: pt};
     update e { a := distance{m: 3e0}, b := distance{m: 2e0} };
     e
 ];
@@ -128,16 +137,19 @@ var triangle := polygon{vertices: relation {
 var corners := count{r: triangle.vertices};
 
 operator geometry{p: point, shape: polygon} [
-    var reflected := reflect{p: p};
-    call debug_value{v: reflected};
-    call debug_value{v: tuple { r: reflected.r, theta: reflected.theta }};
-    call debug_value{v: dist{p1: p, p2: reflected}};
+    var opposite := reflect{p: p};
+    call debug_value{v: opposite};
+    call debug_value{v: tuple { r: opposite.r, theta: opposite.theta }};
+    call debug_value{v: dist{p1: p, p2: opposite}};
     call debug_value{v: point{r: distance{m: 3e0}, theta: angle{rho: pi{} / 2e0}}};
     call debug_value{v: point{r: distance{m: 0e0}, theta: angle{rho: 1e0}}};
+    var doubled := p;
+    update doubled { r := distance{m: 2e0 * r.m} };
+    call debug_value{v: doubled};
     var q := p;
     update q { x := 2e0 };
     call debug_value{v: q};
-    var ls := lineseg{begin: p, end: reflected};
+    var ls := lineseg{begin: p, end: opposite};
     update ls { begin := begin replace { x := 6.5e0 } };
     call debug_value{v: ls};
     var e := ellipse{a: distance{m: 5e0}, b: distance{m: 4e0}, ctr: p};
@@ -152,10 +164,11 @@ operator main{} [
     call debug_value{v: apart};
     call debug_value{v: north};
     call debug_value{v: origin};
+    call debug_value{v: farther};
     call debug_value{v: moved};
     call debug_value{v: segment};
     call debug_value{v: squashed};
     call debug_value{v: corners};
 
-    call geometry{p: p, shape: triangle};
+    call geometry{p: pt, shape: triangle};
 ];

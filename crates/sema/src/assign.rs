@@ -14,7 +14,7 @@ use trendy_hir as hir;
 use trendy_syntax::ast::{self, AstNode, Clause, VarDecl};
 use trendy_syntax::{SyntaxKind, SyntaxToken};
 
-use crate::check::{Assigned, Checker, Names, Unchanged};
+use crate::check::{Assigned, Checker, Names, Replacement, Unchanged};
 use crate::types::{self, Expected, Origin};
 use crate::{errors, keys, ops};
 
@@ -166,8 +166,13 @@ enum Change {
     /// `a[i] := x`, of an array: its element at a path given a new value.
     Element(ElementAt),
     /// An `update` of a tuple, or of a value of a type of the program's
-    /// own: its attributes, or its components, given new values.
+    /// own: its attributes, or its stored components, given new values.
     Attributes(hir::Heading, BTreeMap<String, hir::Expr>),
+    /// An `update` of a value of a type of the program's own in another
+    /// possible representation than the stored one, which gives every
+    /// stored component a new value: the value selected in it, computed
+    /// from the stored components at hand (see [`Replacement::Selected`]).
+    Selected(hir::Expr),
     /// A change to a relation's tuples.
     Tuples(TupleChange),
 }
@@ -385,8 +390,15 @@ fn attribute_assigned(
                     of = None;
                     heading
                 }
+                // The components of the representation the component is
+                // of, which the fix's `update` or `replace` brings into
+                // scope.
                 hir::Type::Defined(defined) => {
-                    let components = defined.components.clone();
+                    let components = names
+                        .namespaces()
+                        .representations(&defined)
+                        .find(|components| components.get(attribute).is_some())?
+                        .clone();
                     of = Some(defined);
                     components
                 }
@@ -975,8 +987,9 @@ struct Target<'w> {
 
 /// `clause`, an `update` after `keyword`, of `target`: of a tuple, its
 /// attributes given new values, and of a value of a type of the program's
-/// own, its components; of a relation, the tuples for which the condition
-/// is true, if there is one, replaced.
+/// own, its components, those of one of its possible representations; of
+/// a relation, the tuples for which the condition is true, if there is
+/// one, replaced.
 fn update(
     clause: &Clause,
     keyword: &SyntaxToken,
@@ -1009,10 +1022,16 @@ fn update(
                 errors,
             )?;
             match updated {
-                hir::Expr::Extend(_, computed, values) => {
+                Replacement::Attributes(hir::Expr::Extend(_, computed, values)) => {
                     Some(Change::Attributes(computed, values))
                 }
-                _ => unreachable!("a variable's value is known only when running"),
+                // Of another representation than the stored one, every
+                // stored component changes: the variable is given the value
+                // selected in it.
+                Replacement::Selected(selected) => Some(Change::Selected(selected)),
+                Replacement::Attributes(_) => {
+                    unreachable!("a variable's value is known only when running")
+                }
             }
         }
         (Some(token), hir::Type::Tuple(_) | hir::Type::Defined(_)) => {
@@ -1046,7 +1065,11 @@ fn update(
                 condition.clone(),
                 checker.bindings(),
             );
-            let replaced = checker.assign_attributes(selected, &assigned, unchanged, errors)?;
+            let Replacement::Attributes(replaced) =
+                checker.assign_attributes(selected, &assigned, unchanged, errors)?
+            else {
+                unreachable!("a relation's tuples have attributes");
+            };
             Some(Change::Tuples(TupleChange {
                 removed: Some(Removal::Where(condition)),
                 added: Some(Addition {
@@ -1129,13 +1152,16 @@ fn merged(
     // A whole new value conflicts with any other change.
     let whole = list
         .iter()
-        .position(|(_, c)| matches!(c, Change::Value(..)));
+        .position(|(_, c)| matches!(c, Change::Value(..) | Change::Selected(_)));
     if let (Some(i), true) = (whole, list.len() > 1) {
         // The first other change.
         let other = usize::from(i == 0);
         let (first, second) = (i.min(other), i.max(other));
         let written = match list[i].0 {
             Clause::Load(_) => format!("`load {name} from …`"),
+            Clause::Update(_) => format!(
+                "`update {name} {{…}}`, of components of another representation than the stored one,"
+            ),
             _ => format!("`{name} := …`"),
         };
         errors.push(errors::conflicting_changes(
@@ -1161,6 +1187,14 @@ fn merged(
                 }
             }
             Some(value)
+        }
+        Change::Selected(selected) => {
+            let hir::Type::Defined(defined) = &assignee.ty else {
+                unreachable!("only a type's value is selected in another representation");
+            };
+            let target = clause.target()?;
+            let current = assignee.current.clone();
+            Checker::new(names).selected_from(defined, current, selected, &target, errors)
         }
         Change::Attributes(computed, values) => {
             let mut changes = vec![(clause, computed, values)];

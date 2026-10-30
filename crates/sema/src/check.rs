@@ -1223,8 +1223,8 @@ impl<'a> Checker<'a> {
             list: &list,
             operand: &operand_expr,
         };
-        let result = self.assign_attributes(
-            operand,
+        let replaced = self.assign_attributes(
+            operand.clone(),
             &assigned,
             |why| match why {
                 Unchanged::Empty => errors::empty_assign(assigning, noun, postfix, &operand_expr),
@@ -1232,10 +1232,19 @@ impl<'a> Checker<'a> {
             },
             errors,
         )?;
-        // A type's value is selected from its components, replaced.
-        let result = match &ty {
-            hir::Type::Defined(defined) => self.selected(defined, result, expr, errors)?,
-            _ => result,
+        // A type's value is selected from its stored components, replaced,
+        // or in another representation, from the operand's.
+        let result = match (replaced, &ty) {
+            (Replacement::Attributes(components), hir::Type::Defined(defined)) => {
+                self.selected(defined, components, expr, errors)?
+            }
+            (Replacement::Selected(selected), hir::Type::Defined(defined)) => {
+                self.selected_from(defined, operand, selected, expr, errors)?
+            }
+            (Replacement::Attributes(result), _) => result,
+            (Replacement::Selected(_), _) => {
+                unreachable!("only a type's value is selected in another representation")
+            }
         };
         self.matched(expected, result, expr, errors)
     }
@@ -1288,8 +1297,7 @@ impl<'a> Checker<'a> {
 
     /// The component `name` of `value`, written `expr`, of the type of the
     /// program's own `defined`, of a possible representation other than the
-    /// stored one: computed by its conversion from the stored components,
-    /// at hand in an `Extend` of them, so that `value` is computed once.
+    /// stored one: computed by its conversion from the stored components.
     /// `None` after reporting that the conversion fails, or if it has
     /// errors, already reported.
     pub(crate) fn converted_component(
@@ -1300,34 +1308,95 @@ impl<'a> Checker<'a> {
         expr: &Expr,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Expr> {
-        let (conversion, own) = self.names.operators().conversion(defined, name)?;
+        let components = ops::components(value);
+        let (converted, _) = self.converted(defined, components, name, expr, errors)?;
+        Some(ops::extract(converted, name.to_string()))
+    }
+
+    /// The components, in the possible representation of the type of the
+    /// program's own `defined` with the component `component`, other than
+    /// the stored one, of the value whose stored components are
+    /// `components`, written `expr`: a tuple of them, computed by its
+    /// conversion from the stored ones, and its heading. `None` after
+    /// reporting that the conversion fails, or if it has errors, already
+    /// reported.
+    fn converted(
+        &mut self,
+        defined: &hir::Defined,
+        components: hir::Expr,
+        component: &str,
+        expr: &Expr,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<(hir::Expr, hir::Heading)> {
+        let (conversion, own) = self.names.operators().conversion(defined, component)?;
         let own = own.clone();
-        if !self.names.checked(conversion, expr.span(), errors) {
+        let result = hir::Type::Tuple(own.clone());
+        let converted = self.applied(
+            conversion,
+            result,
+            components,
+            &defined.components,
+            expr,
+            errors,
+        )?;
+        Some((converted, own))
+    }
+
+    /// The value of the type of the program's own `defined` that
+    /// `selected`, of a `replace` or an `update` in another possible
+    /// representation than the stored one, computes from the stored
+    /// components of `value` at hand. `None` after reporting that it fails,
+    /// written `expr`, as a selection breaking a constraint does.
+    pub(crate) fn selected_from(
+        &self,
+        defined: &hir::Defined,
+        value: hir::Expr,
+        selected: hir::Expr,
+        expr: &Expr,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let ty = hir::Type::Defined(defined.clone());
+        self.computed_from(ops::components(value), ty, selected, expr, errors)
+    }
+
+    /// The value, of type `result`, of a call of `operator` with each
+    /// attribute of `tuple`, of `heading`, as the argument of the parameter
+    /// of its name: computed in an `Extend` of `tuple`, so that `tuple` is
+    /// computed once. `None` after reporting that the call, written `expr`,
+    /// fails, or if the operator has errors, already reported.
+    fn applied(
+        &mut self,
+        operator: hir::OperatorId,
+        result: hir::Type,
+        tuple: hir::Expr,
+        heading: &hir::Heading,
+        expr: &Expr,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        if !self.names.checked(operator, expr.span(), errors) {
             return None;
         }
-        let at_hand = hir::Expr::Current(0, defined.components.clone());
-        let args = defined
-            .components
-            .attributes()
-            .map(|(k, _)| {
-                let arg = hir::Expr::Extract(Box::new(at_hand.clone()), k.to_string());
-                (k.to_string(), arg)
-            })
-            .collect();
-        let call = hir::Expr::Call(hir::Call {
-            operator: conversion,
-            types: Vec::new(),
-            args,
-            updated: BTreeMap::new(),
-        });
-        let computed = hir::wrapped("as");
-        let heading = hir::Heading::new([(computed.clone(), hir::Type::Tuple(own))].into());
-        let values = [(computed.clone(), call)].into();
-        match ops::extend(ops::components(value), heading, values, self.bindings()) {
-            Ok(extended) => Some(ops::extract(
-                ops::extract(extended, computed),
-                name.to_string(),
-            )),
+        let call = called_with(operator, heading);
+        self.computed_from(tuple, result, call, expr, errors)
+    }
+
+    /// The value, of type `result`, that `computed` computes from `tuple`
+    /// at hand, its `Current(0)`: in an `Extend` of `tuple`, so that `tuple`
+    /// is computed once. `None` after reporting that it fails, written
+    /// `expr`.
+    fn computed_from(
+        &self,
+        tuple: hir::Expr,
+        result: hir::Type,
+        computed: hir::Expr,
+        expr: &Expr,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let wrapped = hir::wrapped("as");
+        let extension = hir::Heading::new([(wrapped.clone(), result)].into());
+        let values = [(wrapped.clone(), computed)].into();
+        match ops::extend(tuple, extension, values, self.bindings()) {
+            Ok(extended) => Some(ops::extract(extended, wrapped)),
             Err(failure) => {
                 errors.push(errors::failed(&failure.failed, expr));
                 None
@@ -1370,18 +1439,21 @@ impl<'a> Checker<'a> {
     /// tuple at hand in scope. A `replace`'s values have the types of the
     /// attributes they replace, and are computed from the old values, all
     /// at once. A `replace` or an `update` of a value of a type of the
-    /// program's own gives its components new values in the same way: the
-    /// result is then the tuple of them, which the value is selected from
-    /// (TTM chapter 5's scalar update). An attribute given its own value is
-    /// an error, and `unchanged` is the error for a list that leaves the
-    /// operand as it is.
+    /// program's own gives its components new values in the same way, those
+    /// of one of its possible representations (TTM chapter 5's scalar
+    /// update): of the stored one, the result is the tuple of them, which
+    /// the value is selected from, and of another, the value selected in
+    /// it, computed from the stored components at hand, which
+    /// [`Checker::selected_from`] computes from the operand's. An attribute
+    /// given its own value is an error, and `unchanged` is the error for a
+    /// list that leaves the operand as it is.
     pub(crate) fn assign_attributes(
         &mut self,
         operand: hir::Expr,
         assigned: &Assigned,
         unchanged: impl FnOnce(Unchanged) -> Diagnostic,
         errors: &mut Vec<Diagnostic>,
-    ) -> Option<hir::Expr> {
+    ) -> Option<Replacement> {
         let Assigned {
             assigning,
             keyword,
@@ -1389,25 +1461,6 @@ impl<'a> Checker<'a> {
             operand: operand_expr,
         } = *assigned;
         let ty = self.ty(&operand);
-        let (heading, operand, defined) = match (&ty, assigning) {
-            (hir::Type::Tuple(heading) | hir::Type::Relation(heading), _) => {
-                (heading, operand, None)
-            }
-            (hir::Type::Defined(defined), ops::Assigning::Replace | ops::Assigning::Update) => {
-                (&defined.components, ops::components(operand), Some(defined))
-            }
-            _ => {
-                let at = trendy_syntax::span(keyword.text_range());
-                errors.push(errors::not_projectable(
-                    Some(assigning.keyword()),
-                    at,
-                    &ty,
-                    operand_expr,
-                ));
-                return None;
-            }
-        };
-        let noun = errors::Noun::assigned(&ty);
         let assignments: Vec<(ast::Assign, String, Span)> = list
             .assignments()
             .filter_map(|assign| {
@@ -1416,6 +1469,9 @@ impl<'a> Checker<'a> {
                 Some((assign, ident.text().to_string(), span))
             })
             .collect();
+        let (heading, operand, changed) =
+            self.changed(&ty, operand, &assignments, assigned, errors)?;
+        let noun = errors::Noun::assigned(&ty);
         if list.assignments().next().is_none() {
             errors.push(unchanged(Unchanged::Empty));
             return None;
@@ -1424,15 +1480,15 @@ impl<'a> Checker<'a> {
         // tuple or relation, the other one is likely what was meant.
         let keyword = trendy_syntax::span(keyword.text_range());
         let other = (assigning != ops::Assigning::Update
-            && defined.is_none()
+            && matches!(changed, Changed::Attributes)
             && assignments.iter().all(|(_, name, _)| {
                 heading.get(name).is_some() == (assigning == ops::Assigning::Extend)
             }))
         .then_some(keyword);
+        let (representations, candidates) = self.components_known(&changed, &heading);
         let mut ok = true;
         let mut values = BTreeMap::new();
         let mut types = BTreeMap::new();
-        let others = self.other_components(&ty);
         for (assign, name, span) in &assignments {
             if let Some(&(_, _, first)) = assignments.iter().find(|(_, n, _)| n == name)
                 && first != *span
@@ -1445,18 +1501,16 @@ impl<'a> Checker<'a> {
                 assigning,
                 name,
                 span: *span,
-                others: &others,
+                candidates: &candidates,
+                representations: &representations,
             };
-            let (valid, expected) = assigned_name(&assigned, &ty, operand_expr, other, errors);
+            let (valid, expected) =
+                assigned_name(&assigned, &ty, &heading, operand_expr, other, errors);
             ok &= valid;
-            let mut names = TupleNames::new(&mut *self.names, heading.clone());
-            let mut checker = Checker::new(&mut names);
-            match assign
-                .value()
-                .and_then(|v| checker.expr(&v, expected.as_ref(), errors))
-            {
-                Some(value) => {
-                    types.insert(name.clone(), checker.ty(&value));
+            let written = assign.value();
+            match self.assigned_value(&changed, &heading, written, expected.as_ref(), errors) {
+                Some((value, ty)) => {
+                    types.insert(name.clone(), ty);
                     values.insert(name.clone(), value);
                 }
                 None => ok = false,
@@ -1465,17 +1519,175 @@ impl<'a> Checker<'a> {
         if !ok || !changes_something(&assignments, &values, list, unchanged, errors) {
             return None;
         }
-        match ops::extend(operand, hir::Heading::new(types), values, self.bindings()) {
-            Ok(result) => Some(result),
+        let replaced = match ops::extend(operand, hir::Heading::new(types), values, self.bindings())
+        {
+            Ok(result) => result,
             Err(failure) => {
                 let value = assignments
                     .iter()
                     .find(|(_, name, _)| Some(name) == failure.attribute.as_ref())
                     .and_then(|(assign, _, _)| assign.value())?;
                 errors.push(errors::extension_failure(&failure, &value));
+                return None;
+            }
+        };
+        match changed {
+            Changed::Attributes | Changed::Stored(..) => Some(Replacement::Attributes(replaced)),
+            // Selected in the representation, from its components.
+            Changed::Other(defined, selector) => {
+                let ty = hir::Type::Defined(defined.clone());
+                let selected =
+                    self.applied(selector, ty, replaced, &heading, operand_expr, errors)?;
+                Some(Replacement::Selected(selected))
+            }
+        }
+    }
+
+    /// What `assignments`, of `assigned`, give new values in `operand`, of
+    /// type `ty`: its attributes, or the components of one of its possible
+    /// representations, if it is a value of a type of the program's own,
+    /// with their heading and the tuple of them. Those of another than the
+    /// stored one are computed from the stored components at hand, which
+    /// the caller gives (`selected_from`). `None` after reporting why there
+    /// are none to give values.
+    fn changed<'t>(
+        &mut self,
+        ty: &'t hir::Type,
+        operand: hir::Expr,
+        assignments: &[(ast::Assign, String, Span)],
+        assigned: &Assigned,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<(hir::Heading, hir::Expr, Changed<'t>)> {
+        let assigning = assigned.assigning;
+        match (ty, assigning) {
+            (hir::Type::Tuple(heading) | hir::Type::Relation(heading), _) => {
+                Some((heading.clone(), operand, Changed::Attributes))
+            }
+            (hir::Type::Defined(defined), ops::Assigning::Replace | ops::Assigning::Update) => {
+                match self.representation(defined, assignments, errors)? {
+                    Representation::Stored { known } => Some((
+                        defined.components.clone(),
+                        ops::components(operand),
+                        Changed::Stored(defined, known),
+                    )),
+                    Representation::Other(component) => {
+                        let selector = self.names.operators().selector(defined, component)?;
+                        let at_hand = hir::Expr::Current(0, defined.components.clone());
+                        let (converted, own) =
+                            self.converted(defined, at_hand, component, assigned.operand, errors)?;
+                        Some((own, converted, Changed::Other(defined, selector)))
+                    }
+                }
+            }
+            _ => {
+                let at = trendy_syntax::span(assigned.keyword.text_range());
+                errors.push(errors::not_projectable(
+                    Some(assigning.keyword()),
+                    at,
+                    ty,
+                    assigned.operand,
+                ));
                 None
             }
         }
+    }
+
+    /// The components of each possible representation of a type's value
+    /// that `changed` says a list gives new values, for errors, and the
+    /// names a component's misspelling may be one of: the representation's
+    /// it gives new values, `heading`, if the list names one, or else any.
+    fn components_known(
+        &self,
+        changed: &Changed,
+        heading: &hir::Heading,
+    ) -> (Vec<hir::Heading>, Vec<String>) {
+        let representations: Vec<hir::Heading> = match changed {
+            Changed::Attributes => Vec::new(),
+            Changed::Stored(defined, _) | Changed::Other(defined, _) => self
+                .names
+                .namespaces()
+                .representations(defined)
+                .cloned()
+                .collect(),
+        };
+        let candidates = match changed {
+            Changed::Stored(_, false) => representations
+                .iter()
+                .flat_map(|h| h.named().map(|(c, _)| c.to_string()))
+                .collect(),
+            _ => heading.named().map(|(c, _)| c.to_string()).collect(),
+        };
+        (representations, candidates)
+    }
+
+    /// The value `written`, of an assignment in a list that gives new
+    /// values to what `changed` says, of `heading`, checked as `expected`
+    /// says, and its type. In scope: a tuple's attributes, or a type's
+    /// value's components, of any representation, and first those of the
+    /// one the list gives new values, if it isn't the stored one.
+    fn assigned_value(
+        &mut self,
+        changed: &Changed,
+        heading: &hir::Heading,
+        written: Option<Expr>,
+        expected: Option<&Expected>,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<(hir::Expr, hir::Type)> {
+        match changed {
+            Changed::Attributes => {
+                let mut names = TupleNames::new(&mut *self.names, heading.clone());
+                checked_value(&mut names, written, expected, errors)
+            }
+            Changed::Stored(defined, _) => {
+                let mut names = ComponentNames::new(&mut *self.names, (*defined).clone());
+                checked_value(&mut names, written, expected, errors)
+            }
+            Changed::Other(defined, _) => {
+                let mut components = ComponentNames::new(&mut *self.names, (*defined).clone());
+                let mut names = TupleNames::new(&mut components, heading.clone());
+                checked_value(&mut names, written, expected, errors)
+            }
+        }
+    }
+
+    /// The possible representation of the type `defined` whose components
+    /// `assignments` give new values: the one the components they name are
+    /// of, or the stored one if they name none. `None` after reporting
+    /// components of two representations.
+    fn representation<'n>(
+        &self,
+        defined: &hir::Defined,
+        assignments: &'n [(ast::Assign, String, Span)],
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<Representation<'n>> {
+        let representations: Vec<&hir::Heading> =
+            self.names.namespaces().representations(defined).collect();
+        // The first component named, with its representation's position,
+        // the stored one's 0.
+        let mut first: Option<(usize, &str, Span)> = None;
+        for (_, name, span) in assignments {
+            let Some(at) = representations.iter().position(|h| h.get(name).is_some()) else {
+                continue;
+            };
+            match first {
+                None => first = Some((at, name, *span)),
+                Some((earlier, other, other_span)) if earlier != at => {
+                    errors.push(errors::mixed_representations(
+                        defined,
+                        (other, other_span, representations[earlier]),
+                        (name, *span, representations[at]),
+                    ));
+                    return None;
+                }
+                Some(_) => {}
+            }
+        }
+        Some(match first {
+            Some((at, name, _)) if at > 0 => Representation::Other(name),
+            known => Representation::Stored {
+                known: known.is_some(),
+            },
+        })
     }
 
     /// `postfix`, a `group` or a `wrap`, as `gathering` says, written
@@ -2041,25 +2253,28 @@ fn changes_something(
 }
 
 /// An attribute or a component, `name`, at `span`, that a list of
-/// `assigning` gives a value, and the components of the other possible
-/// representations of its value's type, if it is a type of the program's
-/// own.
+/// `assigning` gives a value, and, if it is a component, the names it may
+/// be a misspelling of, and the components of each possible
+/// representation of its value's type.
 struct Named<'a> {
     assigning: ops::Assigning,
     name: &'a str,
     span: Span,
-    others: &'a [hir::Heading],
+    candidates: &'a [String],
+    representations: &'a [hir::Heading],
 }
 
 /// Whether `name`, at `span`, is right for `assigning` in an operand of type
 /// `ty`, written `operand`, after reporting why not: new for an `extend`,
 /// existing for a `replace` or an `update`, and, of a value of a type of
-/// the program's own, one of its components. `other` is the keyword's
-/// span, if every name is wrong for it. Also the type a `replace`'s or an
-/// `update`'s value must have.
+/// the program's own, a component of `heading`, the representation the
+/// list gives new values. `other` is the keyword's span, if every name is
+/// wrong for it. Also the type a `replace`'s or an `update`'s value must
+/// have.
 fn assigned_name(
     named: &Named,
     ty: &hir::Type,
+    heading: &hir::Heading,
     operand: &Expr,
     other: Option<Span>,
     errors: &mut Vec<Diagnostic>,
@@ -2068,35 +2283,30 @@ fn assigned_name(
         assigning,
         name,
         span,
-        others,
+        candidates,
+        representations,
     } = named;
-    let heading = match ty {
-        hir::Type::Tuple(heading) | hir::Type::Relation(heading) => heading,
-        hir::Type::Defined(defined) => {
-            let Some(component) = defined.components.get(name) else {
-                let error = match others.iter().find(|h| h.get(name).is_some()) {
-                    Some(own) => {
-                        errors::other_representations_component(assigning, name, span, defined, own)
-                    }
-                    None => {
-                        errors::replaced_unknown_component(assigning, name, span, defined, operand)
-                    }
-                };
-                errors.push(error);
-                return (false, None);
+    if let hir::Type::Defined(defined) = ty {
+        let Some(component) = heading.get(name) else {
+            let unknown = errors::Unknown {
+                name,
+                span,
+                candidates,
+                representations,
             };
-            return (
-                true,
-                Some(Expected {
-                    ty: component.clone(),
-                    origin: types::Origin::Component(operand.clone(), name.to_string()),
-                }),
-            );
-        }
-        _ => unreachable!(
-            "only tuples, relations and types of the program's own have names to assign"
-        ),
-    };
+            errors.push(errors::replaced_unknown_component(
+                assigning, &unknown, defined, operand,
+            ));
+            return (false, None);
+        };
+        return (
+            true,
+            Some(Expected {
+                ty: component.clone(),
+                origin: types::Origin::Component(operand.clone(), name.to_string()),
+            }),
+        );
+    }
     match (assigning, heading.get(name)) {
         (ops::Assigning::Extend, None) => (true, None),
         (ops::Assigning::Extend, Some(_)) => {
@@ -2117,6 +2327,38 @@ fn assigned_name(
             (false, None)
         }
     }
+}
+
+/// What a list of assignments gives new values: a tuple's or a relation's
+/// attributes, or the components of a type's value, `defined`, in its
+/// stored possible representation, whether the list names one of them or
+/// none, or in another, whose selector is `selector`.
+enum Changed<'t> {
+    Attributes,
+    Stored(&'t hir::Defined, bool),
+    Other(&'t hir::Defined, hir::OperatorId),
+}
+
+/// The possible representation of a type whose components a `replace` or
+/// an `update` gives new values: the stored one, and whether a component
+/// of it is named, or another, named by its component.
+enum Representation<'n> {
+    Stored { known: bool },
+    Other(&'n str),
+}
+
+/// What a `replace`, an `update` or an `extend` makes of its operand.
+pub(crate) enum Replacement {
+    /// Its attributes, or the stored components of a value of a type of
+    /// the program's own, which the value is selected from, with those the
+    /// list assigns added or replaced.
+    Attributes(hir::Expr),
+    /// A value of a type of the program's own, selected in another possible
+    /// representation than the stored one, from its components there with
+    /// those the list assigns replaced: computed from the stored components
+    /// at hand, `Current(0)`, which [`Checker::selected_from`] computes from
+    /// the operand's.
+    Selected(hir::Expr),
 }
 
 /// The gatherings of a `group` or a `wrap`, as `gathering` says, in
@@ -2717,6 +2959,134 @@ impl Names for TupleNames<'_> {
 
     fn unnumbered(&self) -> bool {
         self.unnumbered
+    }
+
+    fn type_parameters(&self) -> Option<&[hir::TypeParameter]> {
+        self.outer.type_parameters()
+    }
+
+    fn operators(&self) -> &Operators {
+        self.outer.operators()
+    }
+
+    fn checked(&mut self, id: hir::OperatorId, at: Span, errors: &mut Vec<Diagnostic>) -> bool {
+        self.outer.checked(id, at, errors)
+    }
+
+    fn bindings(&self) -> ops::Bindings<'_> {
+        self.outer.bindings()
+    }
+}
+
+/// The value `written`, if there is one, checked with `names` in scope, as
+/// `expected` says, and its type.
+fn checked_value(
+    names: &mut dyn Names,
+    written: Option<Expr>,
+    expected: Option<&Expected>,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<(hir::Expr, hir::Type)> {
+    let mut checker = Checker::new(names);
+    let value = checker.expr(&written?, expected, errors)?;
+    let ty = checker.ty(&value);
+    Some((value, ty))
+}
+
+/// A call of `operator` with each attribute of the tuple at hand, of
+/// `heading`, as the argument of the parameter of its name.
+fn called_with(operator: hir::OperatorId, heading: &hir::Heading) -> hir::Expr {
+    let at_hand = hir::Expr::Current(0, heading.clone());
+    let args = heading
+        .attributes()
+        .map(|(k, _)| {
+            let arg = hir::Expr::Extract(Box::new(at_hand.clone()), k.to_string());
+            (k.to_string(), arg)
+        })
+        .collect();
+    hir::Expr::Call(hir::Call {
+        operator,
+        types: Vec::new(),
+        args,
+        updated: BTreeMap::new(),
+    })
+}
+
+/// The names of the components of a value of the program's own type
+/// `defined` at hand, `Current(0, …)` its stored components, in `outer`:
+/// the components of each of its possible representations, as in a
+/// constraint, those of another than the stored one computed by its
+/// conversion from the stored ones where each is named.
+struct ComponentNames<'a> {
+    outer: &'a mut dyn Names,
+    defined: hir::Defined,
+}
+
+impl<'a> ComponentNames<'a> {
+    fn new(outer: &'a mut dyn Names, defined: hir::Defined) -> Self {
+        ComponentNames { outer, defined }
+    }
+}
+
+impl Names for ComponentNames<'_> {
+    fn namespaces(&self) -> &Namespaces {
+        self.outer.namespaces()
+    }
+
+    fn site(&self, at: Span) -> hir::Site {
+        self.outer.site(at)
+    }
+
+    fn resolve(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {
+        let stored = &self.defined.components;
+        if stored.get(name).is_some() {
+            let tuple = hir::Expr::Current(0, stored.clone());
+            return Lookup::Found(hir::Expr::Extract(Box::new(tuple), name.to_string()));
+        }
+        let conversion = self.outer.operators().conversion(&self.defined, name);
+        if let Some((conversion, _)) = conversion {
+            if !self.outer.checked(conversion, span, errors) {
+                return Lookup::Reported;
+            }
+            let converted = called_with(conversion, &self.defined.components);
+            return Lookup::Found(hir::Expr::Extract(Box::new(converted), name.to_string()));
+        }
+        match self.outer.resolve(name, span, errors) {
+            Lookup::Found(expr) => Lookup::Found(ops::deeper(expr)),
+            other => other,
+        }
+    }
+
+    fn candidates(&self) -> Vec<String> {
+        let components: Vec<String> = self
+            .outer
+            .namespaces()
+            .representations(&self.defined)
+            .flat_map(|h| h.named().map(|(c, _)| c.to_string()))
+            .collect();
+        components
+            .into_iter()
+            .chain(self.outer.candidates())
+            .collect()
+    }
+
+    fn leaf_type(&self, leaf: &hir::Expr) -> hir::Type {
+        self.outer.leaf_type(leaf)
+    }
+
+    fn fresh_local(&mut self, local: hir::Local) -> hir::LocalId {
+        self.outer.fresh_local(local)
+    }
+
+    fn hides(&self, name: &str) -> bool {
+        self.outer
+            .namespaces()
+            .representations(&self.defined)
+            .any(|h| h.get(name).is_some())
+            || self.outer.hides(name)
+    }
+
+    fn tuple_at_hand(&self) -> Option<&hir::Heading> {
+        Some(&self.defined.components)
     }
 
     fn type_parameters(&self) -> Option<&[hir::TypeParameter]> {

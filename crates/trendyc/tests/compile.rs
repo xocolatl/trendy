@@ -1776,10 +1776,14 @@ fn types() {
             "└────────────────┴─────────────────────────────────────────────┘",
             r#"array ["Lunar New Year", "Nowruz", "Inti Raymi", "Diwali"]"#,
             // A temperature selected in degrees Celsius, stored in kelvins,
-            // one in degrees Fahrenheit read in Celsius, and compared.
+            // one in degrees Fahrenheit read in Celsius, and compared, and
+            // each changed in its own representation: 10 degrees Celsius
+            // warmer, and 18 degrees Fahrenheit cooler.
             "temperature{kelvin: 2.7115e2}",
             "4e1",
             "true",
+            "temperature{kelvin: 2.8115e2}",
+            "temperature{kelvin: 3.0315e2}",
             "┌───────────────────────────────────────────────────┬─────────────┐",
             "│ at                                                │ stop        │",
             "├───────────────────────────────────────────────────┼─────────────┤",
@@ -1798,14 +1802,15 @@ fn inheritance() {
             // The Third Manifesto's point reflected, its polar coordinates,
             // half a turn from the point's, the distance between the two,
             // points selected by their polar coordinates, the origin's at
-            // any angle, then the point moved, a segment's begin moved, an
-            // ellipse's semiaxes changed together, and a polygon's
-            // corners.
+            // any angle, the point twice as far from the origin, by its
+            // polar `r`, then moved, a segment's begin moved, an ellipse's
+            // semiaxes changed together, and a polygon's corners.
             "point{x: -5e0, y: -2.5e0}",
             "tuple { r: distance{m: 5.5901699437494745e0}, theta: angle{rho: 3.6052402625905993e0} }",
             "distance{m: 1.1180339887498949e1}",
             "point{x: 1.8369701987210297e-16, y: 3e0}",
             "point{x: 0e0, y: 0e0}",
+            "point{x: 1e1, y: 5e0}",
             "point{x: 2e0, y: 2.5e0}",
             "lineseg{begin: point{x: 6.5e0, y: 2.5e0}, end: point{x: -5e0, y: -2.5e0}}",
             "ellipse{a: distance{m: 3e0}, b: distance{m: 2e0}, ctr: point{x: 5e0, y: 2.5e0}}",

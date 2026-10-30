@@ -1924,6 +1924,9 @@ operator main{} [
     call debug_value{v: body};
     call debug_value{v: body.celsius};
     call debug_value{v: body > temperature{celsius: 30e0}};
+    call debug_value{v: body replace { celsius := celsius + 1.5e0 }};
+    update body { fahrenheit := 100.4e0 };
+    call debug_value{v: body};
 ];
 ```
 
@@ -1942,9 +1945,20 @@ operator main{} [
 - **Exactly one representation is stored,** and each other has `to` and
   `from`, once each (A0059, A0008). `to` and `from` the wrong way round
   are swapped by the fix.
-- **`replace` and `update` change the stored representation's
-  components;** another's is an error (A0059), whose help selects the
-  value in that representation instead.
+- **`replace` and `update` change one representation's components:**
+  the value is selected in the representation the components they name
+  are of, from those, with the others it has there as they were, as TTM's
+  `THE_X ( P ) := 2.0` is shorthand for `P := CARTESIAN ( 2.0, THE_Y ( P
+  ) )` (chapter 3). So `body replace { celsius := celsius + 1.5e0 }` is
+  `temperature{celsius: body.celsius + 1.5e0}`. Components of two
+  representations in one change are an error (A0059), since no selector
+  takes them together.
+- **Every representation's components are in scope** in the values of a
+  `replace` or an `update`, as in a constraint, each but the stored ones
+  computed by its `from`: `body replace { kelvin := celsius }` is fine.
+- **An `update` in another representation than the stored one gives
+  every stored component a new value,** so in an `assign` block it
+  conflicts with any other change to the variable (R0009).
 
 ## Tuples
 
