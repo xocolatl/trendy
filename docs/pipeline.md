@@ -636,7 +636,17 @@ overloaded and folded as any call; no other operator can have the name
 `Extract(Components(v), c)`, and `v replace { c := x }` is
 `Select(t, Extend(Components(v), …))`, a `replace` of its components,
 which `update v { c := x }` assigns `v` and merges with others in an
-`assign` block as a tuple's does.
+`assign` block as a tuple's does. Each of a type's constraints is a
+read-only operator of its own (`Signature::from_type`), whose parameters
+are the components and whose value is the condition, checked as a
+read-only operator's value is, so it reads no variable (A0050); no call
+can name it. `Expr::Select` carries the type's constraints
+(`hir::Constraint`, the operator and the condition as written), and a
+selection checks each, which folds when the components are constants
+(`ops::select`, R0017 when compiling) and is otherwise a call of each
+operator when running. Checking a selector's call, or another selection,
+checks the type's constraints first (`Globals::checked`), so a
+constraint that selects a value of its own type closes a cycle (A0036).
 Then it checks, in order, every operator's signature, its parameters and result type (`signatures`), so
 that anything can refer to an operator defined after it; the globals,
 which are the variables, whose initial values it evaluates, and the
@@ -1543,8 +1553,9 @@ message, and offers each suggestion as a quick fix.
 A failure while the program runs writes its code and message, with the
 values involved, as the error when compiling names them: an arithmetic
 operation and its operands, a tuple a combination or a change finds, a
-join's attribute and its values, a relation's count, or an array's
-position and length. Each failure is a runtime function of its own, which
+join's attribute and its values, a relation's count, an array's
+position and length, or a value and the constraint of its type it
+breaks. Each failure is a runtime function of its own, which
 takes its values (`lir::Failure::call`), so the runtime needs no table of
 failures shared with the compiler. Then it writes where the program is, ` --> path:line:column`, as a compiler's error does. Sema
 gives each statement its site (`hir::Site`, its file and where it starts),

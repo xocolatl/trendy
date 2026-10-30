@@ -1431,9 +1431,10 @@ impl<'a> FunctionBuilder<'a> {
             hir::Expr::Only(operand) => self.only(operand, cx),
             // A value of a type of the program's own is laid out as the tuple
             // of its components.
-            hir::Expr::Select(_, operand) | hir::Expr::Components(operand) => {
-                self.place(operand, cx)
+            hir::Expr::Select(defined, constraints, operand) => {
+                self.selected(defined, constraints, operand, cx)
             }
+            hir::Expr::Components(operand) => self.place(operand, cx),
             hir::Expr::Semijoin(lhs, rhs) => self.matching(lhs, rhs, false, cx),
             hir::Expr::Combine(combination, lhs, rhs) => self.combine(*combination, lhs, rhs, cx),
             hir::Expr::Antijoin(lhs, rhs) => self.matching(lhs, rhs, true, cx),
@@ -2201,6 +2202,59 @@ impl<'a> FunctionBuilder<'a> {
     /// The only tuple of the relation `operand`, copied into a new stack
     /// slot. The program stops if the relation has none, or several,
     /// writing how many.
+    /// The value of the type of the program's own `defined` selected from
+    /// `components`, laid out as the tuple of them, once each of
+    /// `constraints` is true of them: each is a call of its operator with
+    /// the components as its arguments, and the program stops at the first
+    /// that is false.
+    fn selected(
+        &mut self,
+        defined: &hir::Defined,
+        constraints: &[hir::Constraint],
+        components: &hir::Expr,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let value = self.place(components, cx);
+        let at_hand = hir::Expr::Current(0, defined.components.clone());
+        let args: BTreeMap<String, hir::Expr> = defined
+            .components
+            .attributes()
+            .map(|(name, _)| {
+                let arg = hir::Expr::Extract(Box::new(at_hand.clone()), name.to_string());
+                (name.to_string(), arg)
+            })
+            .collect();
+        for constraint in constraints {
+            let call = hir::Expr::Call(hir::Call {
+                operator: constraint.operator,
+                types: Vec::new(),
+                args: args.clone(),
+                updated: BTreeMap::new(),
+            });
+            self.tuples.push(value.clone());
+            let holds = self.place(&call, cx);
+            self.tuples.pop();
+            let (kept, broken) = (self.new_block(), self.new_block());
+            self.end_block(
+                lir::Terminator::Branch {
+                    condition: holds,
+                    then: kept,
+                    otherwise: broken,
+                },
+                broken,
+            );
+            let text = hir::Expr::Constant(hir::Value::Text(constraint.text.clone()));
+            let ty = hir::Type::Defined(defined.clone());
+            let failure = lir::Failure::BrokenConstraint {
+                value: value.clone(),
+                descriptor: lir::Place::whole(lir::Base::Data(cx.descriptor(&ty))),
+                constraint: self.place(&text, cx),
+            };
+            self.end_block(lir::Terminator::Fail(failure), kept);
+        }
+        value
+    }
+
     fn only(&mut self, operand: &hir::Expr, cx: &mut Lowering) -> lir::Place {
         let ty = self.type_of(operand);
         let hir::Type::Relation(heading) = &ty else {

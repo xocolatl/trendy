@@ -12,7 +12,7 @@ use trendy_syntax::ast::{
 use trendy_syntax::{SyntaxKind, SyntaxToken};
 
 use crate::check::Written;
-use crate::globals::Pending;
+use crate::globals::{Global, Pending};
 use crate::operators::{Chosen, Operators, Signature};
 use crate::types::{Origin, TypeParameters};
 use crate::{Kind, Namespaces};
@@ -2112,6 +2112,21 @@ pub(crate) fn variable_in_read_only(
     operators: &Operators,
     ty: Option<String>,
 ) -> Diagnostic {
+    if let Some((defined, _)) = operator.constrains() {
+        return Diagnostic::error(
+            Code::VariableInReadOnly,
+            format!(
+                "`{}`'s constraint can't read the variable `{name}`",
+                defined.name
+            ),
+            span,
+            "a variable of the program's",
+        )
+        .with_note(CONSTRAINT_OF_COMPONENTS)
+        .with_help(format!(
+            "write the condition with the components and constants, without `{name}`"
+        ));
+    }
     let op = &operator.name;
     let d = Diagnostic::error(
         Code::VariableInReadOnly,
@@ -4066,7 +4081,35 @@ pub(crate) fn failed(failed: &crate::ops::Failed, expr: &Expr) -> Diagnostic {
         crate::ops::Failed::Unparsable { builtin, text, why } => {
             unparsable(*builtin, text, *why, expr)
         }
+        crate::ops::Failed::Constraint(broken) => broken_constraint(broken, expr),
     }
+}
+
+/// What a type's constraints are, for notes.
+const CONSTRAINT_RULE: &str = "a type is the values its constraints are true of, so selecting a value, by its selector, `replace` or `update`, fails when its components break one (TTM RM Prescription 23)";
+
+/// `expr`, which selects `broken.value`, whose components break a
+/// constraint of its type.
+fn broken_constraint(broken: &crate::ops::BrokenConstraint, expr: &Expr) -> Diagnostic {
+    let t = &broken.value.name;
+    let value = hir::Value::Defined(broken.value.clone());
+    let message = format!("`{value}` isn't a value of `{t}`");
+    let d = match broken.at {
+        Some(at) => Diagnostic::error(
+            Code::BrokenConstraint,
+            message,
+            expr.span(),
+            format!("its components break a constraint of `{t}`"),
+        )
+        .with_secondary(at, "false of them"),
+        None => Diagnostic::error(
+            Code::BrokenConstraint,
+            message,
+            expr.span(),
+            format!("its components break `{t}`'s constraint `{}`", broken.text),
+        ),
+    };
+    d.with_note(CONSTRAINT_RULE)
 }
 
 /// `expr`, which takes `builtin`, `parse_integer`, `parse_approximate` or
@@ -4374,41 +4417,122 @@ fn dropped(postfix: &trendy_syntax::ast::PostfixExpr, operand: &Expr) -> (Span, 
 /// each other. No cycle has both, as an operator reads no variable.
 pub(crate) fn cycle(cycle: &[Pending]) -> Diagnostic {
     let first = &cycle[0];
-    let names: Vec<String> = cycle.iter().map(|p| format!("`{}`", p.name)).collect();
-    let d = if first.operator {
-        let message = match names.as_slice() {
-            [_] => format!("`{}` calls itself", first.name),
-            _ => format!("{} call each other", trendy_diag::conjoin(&names)),
-        };
-        Diagnostic::error(Code::Recursion, message, first.defined, "defined here")
-            .with_note(
-                "a read-only operator can't call itself, directly or through others: without a condition to stop on, its call would never end",
-            )
-            .with_help("compute the value without calling the operator from its own body")
-    } else {
-        let message = match names.as_slice() {
-            [_] => format!("the initial value of `{}` depends on itself", first.name),
-            _ => format!(
-                "the initial values of {} depend on each other",
-                trendy_diag::conjoin(&names)
-            ),
-        };
-        Diagnostic::error(Code::CyclicInitialValues, message, first.defined, "declared here")
+    // How each is written, and what the one before it does to it.
+    let shown = |p: &Pending| match p.global {
+        Global::Constraint(_) => format!("`{}`'s constraint", p.name),
+        Global::Variable(_) | Global::Operator(_) => format!("`{}`", p.name),
+    };
+    let names: Vec<String> = cycle.iter().map(shown).collect();
+    let d = match first.global {
+        Global::Constraint(_) => {
+            let ty = &first.name;
+            let message = match names.as_slice() {
+                [_] => format!("`{ty}`'s constraint selects a value of `{ty}`"),
+                [_, rest @ ..] => format!(
+                    "`{ty}`'s constraint selects a value of `{ty}` through {}",
+                    trendy_diag::conjoin(rest)
+                ),
+                [] => unreachable!("a cycle has a global in it"),
+            };
+            Diagnostic::error(Code::Recursion, message, first.defined, "this constraint")
+                .with_note(
+                    "a type's constraints are checked whenever a value of it is selected, by its selector, `replace` or `update`, so a constraint that selects one, directly or through operators, would check itself without end",
+                )
+                .with_help("compute the condition from the components without selecting a value of the type")
+        }
+        Global::Operator(_) => {
+            let message = match names.as_slice() {
+                [_] => format!("`{}` calls itself", first.name),
+                _ => format!("{} call each other", trendy_diag::conjoin(&names)),
+            };
+            Diagnostic::error(Code::Recursion, message, first.defined, "defined here")
+                .with_note(
+                    "a read-only operator can't call itself, directly or through others: without a condition to stop on, its call would never end",
+                )
+                .with_help("compute the value without calling the operator from its own body")
+        }
+        Global::Variable(_) => {
+            let message = match names.as_slice() {
+                [_] => format!("the initial value of `{}` depends on itself", first.name),
+                _ => format!(
+                    "the initial values of {} depend on each other",
+                    trendy_diag::conjoin(&names)
+                ),
+            };
+            Diagnostic::error(Code::CyclicInitialValues, message, first.defined, "declared here")
             .with_note(
                 "initial values are evaluated when compiling, each after the ones it refers to, so a cycle has no order to evaluate them in",
             )
             .with_help("give one of these variables a value that doesn't refer to the others")
+        }
     };
-    let verb = if first.operator { "calls" } else { "refers to" };
     cycle.iter().enumerate().fold(d, |d, (i, pending)| {
         let next = &cycle[(i + 1) % cycle.len()];
-        let label = if next.name == pending.name {
-            format!("`{}` {verb} itself", pending.name)
-        } else {
-            format!("`{}` {verb} `{}`", pending.name, next.name)
+        let (this, that) = (shown(pending), shown(next));
+        let label = match (pending.global, next.global) {
+            (_, Global::Constraint(_)) if next.global == pending.global => {
+                format!(
+                    "{this} selects a value of `{}`, which checks it again",
+                    next.name
+                )
+            }
+            (_, Global::Constraint(_)) => {
+                format!(
+                    "{this} selects a value of `{}`, which checks {that}",
+                    next.name
+                )
+            }
+            (Global::Variable(_), _) if next.global == pending.global => {
+                format!("{this} refers to itself")
+            }
+            (Global::Variable(_), _) => format!("{this} refers to {that}"),
+            _ if next.global == pending.global => format!("{this} calls itself"),
+            _ => format!("{this} calls {that}"),
         };
         d.with_secondary(pending.via, label)
     })
+}
+
+/// Why a type's constraint depends on the components alone, for notes.
+const CONSTRAINT_OF_COMPONENTS: &str = "a type's constraint says which values the type has, so it is a condition on a value's components alone: one that read a variable, whose value changes, would make a value of the type one at one time and not at another";
+
+/// `constraint`, of the type `defined`, whose condition is known when
+/// compiling to be `holds` whatever the components: true, which says
+/// nothing, and is deleted, or false, which no value satisfies.
+pub(crate) fn constant_constraint(
+    holds: bool,
+    constraint: &trendy_syntax::ast::Constraint,
+    defined: &hir::Defined,
+) -> Diagnostic {
+    let span = constraint
+        .condition()
+        .map_or_else(|| constraint.span(), |c| c.span());
+    let t = &defined.name;
+    if holds {
+        Diagnostic::error(
+            Code::ConstantConstraint,
+            format!("this constraint is true of every value of `{t}`"),
+            span,
+            "true whatever the components",
+        )
+        .with_note("a type's constraints say which of the values its components could make are its own, so one true of them all says nothing")
+        .with_suggestion(
+            "delete the constraint",
+            vec![Edit {
+                span: constraint.removal(),
+                replacement: String::new(),
+            }],
+        )
+    } else {
+        Diagnostic::error(
+            Code::ConstantConstraint,
+            format!("no value of `{t}` satisfies this constraint"),
+            span,
+            "false whatever the components",
+        )
+        .with_note(format!("a type's constraints say which of the values its components could make are its own, so with this one `{t}` would have none, and every selection of one would fail"))
+        .with_help("write the condition on the components, which some of their values satisfy")
+    }
 }
 
 /// A `call` of the read-only operator `name`, at `span`, defined at
@@ -4560,8 +4684,9 @@ pub(crate) fn call_failure(
     expr: &Expr,
     signature: &Signature,
 ) -> Diagnostic {
-    // A built-in's value is the compiler's, with nothing to point at.
-    if signature.builtin.is_some() {
+    // A built-in's value is the compiler's, with nothing to point at, and
+    // a selector's is the selection that fails.
+    if signature.builtin.is_some() || signature.selects().is_some() {
         return self::failed(failed, expr);
     }
     let d = self::failed(failed, expr).with_note(format!(

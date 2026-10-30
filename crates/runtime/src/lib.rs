@@ -1846,6 +1846,36 @@ pub unsafe extern "C" fn trendy_rt_tuple_mismatch(
     }
 }
 
+/// Stop the program because `value`, of the type of the program's own
+/// `desc` describes, breaks its constraint written `constraint`, a text,
+/// writing them (R0017).
+///
+/// # Safety
+///
+/// `value` must point to a valid value of the type `desc` describes, a
+/// type of the program's own, and `constraint` to a valid text value.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_broken_constraint(
+    value: *const u8,
+    desc: *const TypeDesc,
+    constraint: *const u8,
+) -> ! {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let (desc, constraint) = (&*desc, read_text(constraint));
+        fail_with(|out| {
+            out.write_str("error[R0017]: ")?;
+            write_value(out, value, desc)?;
+            writeln!(
+                out,
+                " isn't a value of `{}`: it breaks the constraint `{constraint}`",
+                type_name(desc)
+            )
+        })
+    }
+}
+
 /// Stop the program because a relation has `*count` tuples, not one,
 /// where its only one is taken, writing the count (R0005).
 ///

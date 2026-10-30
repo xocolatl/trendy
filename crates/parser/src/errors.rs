@@ -148,13 +148,14 @@ pub(crate) fn foreign_heading(foreign: &ForeignHeading) -> Diagnostic {
 }
 
 /// A type's possible representation whose components were written, from
-/// `open` to `close`, without braces of their own, as a heading's are, or
-/// after Tutorial D's `POSSREP`, and its name if it has one, at `possrep`,
-/// which runs to the components: the components go in braces inside the
-/// type's.
+/// `open`, without braces of their own, as a heading's are, or after
+/// Tutorial D's `POSSREP`, and its name if it has one, at `possrep`, which
+/// runs to the components: the components go in braces inside the type's,
+/// which close where `close` says, with the text after the brace, a comma
+/// where constraints follow without one.
 pub(crate) fn bare_representation(
     open: Span,
-    close: Option<Span>,
+    close: Option<(usize, &str)>,
     possrep: Option<Span>,
 ) -> Diagnostic {
     let (message, span, label) = match possrep {
@@ -174,13 +175,89 @@ pub(crate) fn bare_representation(
         span: possrep.unwrap_or(Span::empty(open.start)),
         replacement: "{ ".to_string(),
     }];
-    edits.extend(close.map(|close| Edit {
-        span: Span::empty(close.end),
-        replacement: " }".to_string(),
+    edits.extend(close.map(|(close, after)| Edit {
+        span: Span::empty(close),
+        replacement: format!(" }}{after}"),
     }));
     Diagnostic::error(Code::BareRepresentation, message, span, label)
         .with_note("a type's declaration holds its possible representation in braces of its own, its components and their types, as in `type celsius { { degrees: approximate } };`, so that its braces can hold more about the type")
         .with_suggestion("put the components in braces of their own", edits)
+}
+
+/// Why a type's constraints go in its braces, for notes.
+const CONSTRAINT_RULE: &str = "a type's constraints, each `constraint` and a condition on the components, go in the type's braces with its possible representation, as in `type celsius { { degrees: approximate }, constraint degrees >= -273.15e0 };`: they are the type's, and say which values it has";
+
+/// Constraints written inside a possible representation's braces, after
+/// its components, as Tutorial D writes them in a possrep's.
+pub(crate) struct Inside {
+    /// Where the components end, before any comma after them.
+    pub(crate) components: usize,
+    /// Whether a comma separates the constraints from them.
+    pub(crate) comma: bool,
+    /// Each constraint's span, in order.
+    pub(crate) constraints: Vec<Span>,
+}
+
+/// The constraints `inside`, in `source`, a possible representation's
+/// braces. The fix moves them after the braces, which end at `close`, into
+/// the type's.
+pub(crate) fn constraint_in_components(
+    source: &str,
+    inside: &Inside,
+    close: Option<usize>,
+) -> Diagnostic {
+    let constraints = &inside.constraints;
+    let first = constraints[0];
+    let d = Diagnostic::error(
+        Code::ConstraintInRepresentation,
+        "a constraint goes in the type's braces, not the components'",
+        first,
+        "inside the components' braces",
+    )
+    .with_note(CONSTRAINT_RULE);
+    let Some(close) = close else {
+        return d;
+    };
+    let last = constraints[constraints.len() - 1];
+    let moved: Vec<&str> = constraints
+        .iter()
+        .map(|s| &source[s.start..s.end])
+        .collect();
+    d.with_suggestion(
+        "move it after the components' braces",
+        vec![
+            Edit {
+                span: Span::new(inside.components, last.end),
+                replacement: String::new(),
+            },
+            Edit {
+                span: Span::empty(close),
+                replacement: format!(", {}", moved.join(", ")),
+            },
+        ],
+    )
+}
+
+/// SQL's `check`, `found`, starting a type's constraint, as a domain's or
+/// a table's does.
+pub(crate) fn sql_check(found: Found) -> Diagnostic {
+    Diagnostic::error(
+        Code::ConstraintSpelling,
+        format!(
+            "a type's constraint is written `constraint`, not `{}`",
+            found.text
+        ),
+        found.span,
+        "SQL's spelling",
+    )
+    .with_note(CONSTRAINT_RULE)
+    .with_suggestion(
+        "write `constraint`",
+        vec![Edit {
+            span: found.span,
+            replacement: "constraint".to_string(),
+        }],
+    )
 }
 
 /// A declaration of `what`, a heading or a type, in a body, whose keyword is

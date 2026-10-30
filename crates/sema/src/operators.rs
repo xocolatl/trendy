@@ -38,15 +38,35 @@ pub(crate) struct Signature {
     pub(crate) decl: Option<ast::Operator>,
     /// The built-in it is, for the prelude's.
     pub(crate) builtin: Option<hir::Builtin>,
-    /// The type of the program's own it is the selector of, named after
-    /// it, and the type's declaration, where its parameters, the
-    /// components, are written: its value is the value of the type its
-    /// arguments are the components of.
-    pub(crate) selects: Option<(hir::Defined, ast::TypeDecl)>,
+    /// The type of the program's own it is made from, if it is its selector
+    /// or one of its constraints.
+    pub(crate) from_type: Option<FromType>,
     /// Whether the parameters and the result type are valid. Calls of an
     /// operator with errors in them aren't checked, because those errors
     /// are already reported.
     pub(crate) valid: bool,
+}
+
+/// An operator made from the declaration of a type of the program's own:
+/// its selector, named after it, whose value is the value of the type its
+/// arguments are the components of, or one of its constraints, true of the
+/// components that are its arguments if they are those of a value of the
+/// type. Either's parameters are the components.
+#[derive(Clone)]
+pub(crate) struct FromType {
+    pub(crate) defined: hir::Defined,
+    /// The type's declaration, where the components are written.
+    pub(crate) decl: ast::TypeDecl,
+    /// The constraint the operator computes, if it is one, and else it is
+    /// the selector.
+    pub(crate) constraint: Option<ast::Constraint>,
+}
+
+impl FromType {
+    /// The type, if the operator is its selector.
+    pub(crate) fn selects(&self) -> Option<&hir::Defined> {
+        self.constraint.is_none().then_some(&self.defined)
+    }
 }
 
 impl Signature {
@@ -93,13 +113,25 @@ impl Signature {
     }
 
     /// Where parameter `name` is written, for the program's own: a
-    /// selector's are its type's components.
+    /// selector's and a constraint's are its type's components.
     pub(crate) fn param_decl(&self, name: &str) -> Option<ast::AttributeType> {
-        let params = match &self.selects {
-            Some((_, decl)) => decl.representation()?.components()?,
+        let params = match &self.from_type {
+            Some(from) => from.decl.representation()?.components()?,
             None => self.decl.as_ref()?.params()?,
         };
         params.attributes().find(|a| a.is_named(name))
+    }
+
+    /// The type of the program's own it is the selector of.
+    pub(crate) fn selects(&self) -> Option<&hir::Defined> {
+        self.from_type.as_ref()?.selects()
+    }
+
+    /// The type of the program's own it is a constraint of, and the
+    /// constraint.
+    pub(crate) fn constrains(&self) -> Option<(&hir::Defined, &ast::Constraint)> {
+        let from = self.from_type.as_ref()?;
+        Some((&from.defined, from.constraint.as_ref()?))
     }
 
     /// The relation whose tuples the `per` parameter `name` is an attribute
@@ -112,24 +144,36 @@ impl Signature {
     }
 
     /// Where the operator's name is written in its definition, for the
-    /// program's own.
+    /// program's own: a constraint's `constraint`.
     pub(crate) fn defined(&self) -> Option<Span> {
-        let ident = match &self.selects {
-            Some((_, decl)) => decl.name()?.ident()?,
+        let ident = match &self.from_type {
+            Some(FromType {
+                constraint: Some(constraint),
+                ..
+            }) => constraint.keyword()?,
+            Some(from) => from.decl.name()?.ident()?,
             None => self.decl.as_ref()?.name()?.ident()?,
         };
         Some(trendy_syntax::span(ident.text_range()))
     }
 
-    /// The value of a selector, of the type `defined`: the value whose
-    /// components are its parameters.
-    pub(crate) fn selection(defined: &hir::Defined) -> hir::Expr {
+    /// The value of a selector, of the type `defined`, with the
+    /// `constraints`: the value whose components are its parameters, if
+    /// they satisfy them.
+    pub(crate) fn selection(
+        defined: &hir::Defined,
+        constraints: Vec<hir::Constraint>,
+    ) -> hir::Expr {
         let components = defined
             .components
             .attributes()
             .map(|(name, _)| (name.to_string(), hir::Expr::Parameter(name.to_string())))
             .collect();
-        hir::Expr::Select(defined.clone(), Box::new(hir::Expr::Tuple(components)))
+        hir::Expr::Select(
+            defined.clone(),
+            constraints,
+            Box::new(hir::Expr::Tuple(components)),
+        )
     }
 
     /// The parameters, as a call's error says what they are:
@@ -144,6 +188,8 @@ pub(crate) struct Operators {
     list: Vec<Signature>,
     /// Each name's operators, which their parameters' names tell apart.
     by_name: HashMap<String, Vec<hir::OperatorId>>,
+    /// Each type of the program's own's constraints, by its name, in order.
+    constraints: HashMap<String, Vec<hir::Constraint>>,
 }
 
 /// A call's arguments, as they choose which operator of its name it
@@ -166,8 +212,48 @@ pub(crate) enum Chosen<'a> {
 }
 
 impl Operators {
+    /// The operators of `list`, by id, each named in the order they are
+    /// defined, but constraints, which no call can name, each of its type.
+    fn new(list: Vec<Signature>) -> Self {
+        let mut by_name: HashMap<String, Vec<hir::OperatorId>> = HashMap::new();
+        let mut constraints: HashMap<String, Vec<hir::Constraint>> = HashMap::new();
+        for signature in &list {
+            match signature.constrains() {
+                Some((defined, constraint)) => {
+                    let text = constraint
+                        .condition()
+                        .map_or_else(String::new, |c| c.syntax().text().to_string());
+                    constraints
+                        .entry(defined.name.clone())
+                        .or_default()
+                        .push(hir::Constraint {
+                            operator: signature.id,
+                            text,
+                        });
+                }
+                None => by_name
+                    .entry(signature.name.clone())
+                    .or_default()
+                    .push(signature.id),
+            }
+        }
+        Operators {
+            list,
+            by_name,
+            constraints,
+        }
+    }
+
     pub(crate) fn get(&self, id: hir::OperatorId) -> &Signature {
         &self.list[id.0]
+    }
+
+    /// The constraints of the type of the program's own `defined`, in
+    /// order: none, if it has none.
+    pub(crate) fn constraints(&self, defined: &hir::Defined) -> &[hir::Constraint] {
+        self.constraints
+            .get(&defined.name)
+            .map_or(&[], Vec::as_slice)
     }
 
     /// The operators named `name`, in the order they are defined.
@@ -300,7 +386,7 @@ impl Signature {
             result,
             decl: None,
             builtin,
-            selects: None,
+            from_type: None,
             valid: true,
         }
     }
@@ -390,7 +476,7 @@ pub(crate) fn signatures(
                     result,
                     decl: Some(op),
                     builtin: None,
-                    selects: None,
+                    from_type: None,
                 });
             }
             Item::Builtin(_) | Item::BuiltinType(_) | Item::Kind(_)
@@ -406,19 +492,40 @@ pub(crate) fn signatures(
             )),
             Item::Type(decl) => {
                 let id = hir::OperatorId(list.len());
-                list.extend(selector(id, &decl, namespaces));
+                let Some(selector) = selector(id, &decl, namespaces) else {
+                    continue;
+                };
+                let constraints = constraints(&selector, &decl, list.len() + 1);
+                list.push(selector);
+                list.extend(constraints);
             }
             Item::Variable(_) | Item::Heading(_) => {}
         }
     }
-    let mut by_name: HashMap<String, Vec<hir::OperatorId>> = HashMap::new();
-    for signature in &list {
-        by_name
-            .entry(signature.name.clone())
-            .or_default()
-            .push(signature.id);
-    }
-    Operators { list, by_name }
+    Operators::new(list)
+}
+
+/// The signatures of the constraints of the type `decl` declares, whose
+/// selector is `selector`, numbered from `first`: read-only operators of
+/// its components, of a boolean, each named for its type and its place
+/// among them, a name no source can write or call.
+fn constraints(selector: &Signature, decl: &ast::TypeDecl, first: usize) -> Vec<Signature> {
+    let Some(from) = &selector.from_type else {
+        unreachable!("a selector is made from its type");
+    };
+    decl.constraints()
+        .enumerate()
+        .map(|(i, constraint)| Signature {
+            id: hir::OperatorId(first + i),
+            name: format!("{} constraint {}", from.defined.name, i + 1),
+            result: Some(hir::Type::Scalar(hir::Scalar::Boolean)),
+            from_type: Some(FromType {
+                constraint: Some(constraint),
+                ..from.clone()
+            }),
+            ..selector.clone()
+        })
+        .collect()
 }
 
 /// The signature of the selector of the type `decl` declares, whose id is
@@ -456,7 +563,11 @@ fn selector(
         result: Some(hir::Type::Defined(defined.clone())),
         decl: None,
         builtin: None,
-        selects: Some((defined.clone(), decl.clone())),
+        from_type: Some(FromType {
+            defined: defined.clone(),
+            decl: decl.clone(),
+            constraint: None,
+        }),
         valid: true,
     })
 }

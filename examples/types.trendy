@@ -7,12 +7,23 @@
    below. Each result below is printed twice, folded when compiling and
    computed when running. */
 
-/* A place on Earth, by its latitude and longitude, in degrees. */
-type position { { latitude: approximate, longitude: approximate } };
+/* A place on Earth, by its latitude and longitude, in degrees. Its
+   constraints say which values it has: every value selected, by its
+   selector, `replace` or `update`, satisfies them, or the program stops
+   there (RM Prescription 23). */
+type position {
+    { latitude: approximate, longitude: approximate },
+    constraint latitude >= -90e0 and latitude <= 90e0,
+    constraint longitude > -180e0 and longitude <= 180e0,
+};
 
 /* A journey between two positions: a component can be of another of the
-   program's types, declared before or after it. */
-type journey { { origin: position, destination: position } };
+   program's types, declared before or after it, and a constraint can
+   compare them. */
+type journey {
+    { origin: position, destination: position },
+    constraint origin <> destination,
+};
 
 /* Selectors: the value of a type with the components given, by the
    operator named after the type, called like any other (RM Prescription

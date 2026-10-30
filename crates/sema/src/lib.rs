@@ -7941,7 +7941,7 @@ type position { { latitude: approximate, longitude: approximate } };
             panic!("a read-only operator");
         };
         assert_eq!(*result, hir::Type::Defined(position.clone()));
-        assert!(matches!(value, hir::Expr::Select(defined, _) if *defined == position));
+        assert!(matches!(value, hir::Expr::Select(defined, _, _) if *defined == position));
         assert_eq!(
             selector.params.keys().collect::<Vec<_>>(),
             ["latitude", "longitude"]
@@ -8069,7 +8069,7 @@ var swapped := [
         };
         assert!(matches!(
             &assignments[0].value,
-            hir::Expr::Select(_, components) if matches!(**components, hir::Expr::Extend(..))
+            hir::Expr::Select(_, _, components) if matches!(**components, hir::Expr::Extend(..))
         ));
     }
 
@@ -8189,7 +8189,7 @@ var landmarks := relation { { name: \"Petra\", at: here } } replace { at := at r
         };
         assert!(matches!(
             &**value,
-            hir::Expr::Select(_, components) if matches!(**components, hir::Expr::Extend(..))
+            hir::Expr::Select(_, _, components) if matches!(**components, hir::Expr::Extend(..))
         ));
     }
 
@@ -8235,6 +8235,111 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
         assert_eq!(
             messages(&var("1 replace { a := 2 }")),
             ["`replace` can't be applied to integers"]
+        );
+    }
+
+    #[test]
+    fn a_programs_own_types_constraints() {
+        let declared = "type percentage { { value: integer }, constraint value >= 0, constraint value <= 100 };\n";
+        let var = |value: &str| format!("{declared}var v := {value};{MAIN}");
+        // A value whose components satisfy them is selected when compiling,
+        // by the selector or `replace`.
+        assert_eq!(
+            variables(&format!(
+                "{declared}var v := percentage{{value: 20}} replace {{ value := value * 2 }};"
+            ))[0]
+                .init
+                .to_string(),
+            "percentage{value: 40}"
+        );
+        // One that breaks one is reported where it is selected, by the
+        // selector, `replace` or `update`, with the first it breaks.
+        let source = var("percentage{value: 120}");
+        assert_eq!(
+            messages(&source),
+            ["`percentage{value: 120}` isn't a value of `percentage`"]
+        );
+        let broken = errors(&source);
+        assert_eq!(
+            broken[0].primary.message,
+            "its components break a constraint of `percentage`"
+        );
+        assert_eq!(broken[0].secondary[0].message, "false of them");
+        for value in [
+            "percentage{value: 20} replace { value := -1 }",
+            "[\n    var p := percentage{value: 1};\n    update p { value := 101 };\n    p\n]",
+        ] {
+            assert_eq!(codes(&var(value)), [Code::BrokenConstraint], "{value}");
+        }
+        // Known only when running, the selector's value checks each, in
+        // order, by an operator of the components for each.
+        let program = analyze_str(&format!(
+            "{declared}operator half{{p: percentage}}: percentage [ p replace {{ value := value div 2 }} ];{MAIN}"
+        ))
+        .unwrap();
+        let selector = program
+            .operators
+            .iter()
+            .find(|op| op.name == "percentage")
+            .unwrap();
+        let hir::OperatorKind::ReadOnly { value, .. } = &selector.kind else {
+            panic!("a read-only operator");
+        };
+        let hir::Expr::Select(_, constraints, _) = value else {
+            panic!("a selection: {value:?}");
+        };
+        let texts: Vec<&str> = constraints.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, ["value >= 0", "value <= 100"]);
+        let checks = &program.operators[constraints[0].operator.0];
+        assert!(matches!(
+            &checks.kind,
+            hir::OperatorKind::ReadOnly {
+                result: hir::Type::Scalar(hir::Scalar::Boolean),
+                ..
+            }
+        ));
+        assert_eq!(checks.params.keys().collect::<Vec<_>>(), ["value"]);
+    }
+
+    #[test]
+    fn a_programs_own_types_constraint_errors() {
+        let declare = |constraint: &str| {
+            format!("type percentage {{ {{ value: integer }}, constraint {constraint} }};{MAIN}")
+        };
+        // A boolean condition on the components alone.
+        assert_eq!(codes(&declare("value + 1")), [Code::TypeMismatch]);
+        assert_eq!(
+            messages(&format!("var limit := 100;\n{}", declare("value <= limit"))),
+            ["`percentage`'s constraint can't read the variable `limit`"]
+        );
+        // One known when compiling: true, deleted, or false.
+        let source = format!(
+            "type percentage {{ {{ value: integer }}, constraint value >= 0, constraint 1 = 1 }};{MAIN}"
+        );
+        assert_eq!(
+            messages(&source),
+            ["this constraint is true of every value of `percentage`"]
+        );
+        assert_eq!(
+            fix(&source),
+            format!("type percentage {{ {{ value: integer }}, constraint value >= 0 }};{MAIN}")
+        );
+        assert_eq!(
+            messages(&declare("1 > 2")),
+            ["no value of `percentage` satisfies this constraint"]
+        );
+        // One that selects a value of its type, directly or through an
+        // operator, closes a cycle, reported once.
+        assert_eq!(
+            messages(&declare("percentage{value: value} <> percentage{value: 0}")),
+            ["`percentage`'s constraint selects a value of `percentage`"]
+        );
+        assert_eq!(
+            messages(&format!(
+                "operator positive{{n: integer}}: boolean [ percentage{{value: n}} <> percentage{{value: 0}} ];\n{}",
+                declare("positive{n: value}")
+            )),
+            ["`percentage`'s constraint selects a value of `percentage` through `positive`"]
         );
     }
 

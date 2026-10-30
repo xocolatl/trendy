@@ -137,7 +137,8 @@ impl Layout {
     }
 
     /// Whether a node is laid out one item per line, indented: a body with
-    /// statements, a relation value with more than one tuple, a list broken
+    /// statements, a relation value with more than one tuple, a type's
+    /// braces with more than one thing in them, a list broken
     /// because it was too long, a list with several items, one of them
     /// laid out across lines, and a list with a broken chain in it outside
     /// any block. So a value broken across lines is never followed by more
@@ -179,7 +180,7 @@ impl Layout {
             SyntaxKind::AssignBlock => {
                 AssignBlock::cast(node.clone()).is_some_and(|b| b.statements().next().is_some())
             }
-            _ => is_multi_tuple_relation(node) || self.broken.contains(node),
+            _ => always_vertical(node) || self.broken.contains(node),
         }
     }
 
@@ -699,8 +700,14 @@ fn key_start(token: &SyntaxToken) -> Option<SyntaxNode> {
         .filter(|p| p.kind() == SyntaxKind::Key && p.first_token().as_ref() == Some(token))
 }
 
-fn is_multi_tuple_relation(node: &SyntaxNode) -> bool {
-    RelationLiteral::cast(node.clone()).is_some_and(|r| r.elements().nth(1).is_some())
+/// Whether `node` is laid out one item per line whatever its width: a
+/// relation value with more than one tuple, or a type's braces with more
+/// than one thing in them, possible representations or constraints.
+fn always_vertical(node: &SyntaxNode) -> bool {
+    match node.kind() {
+        SyntaxKind::TypeBody => items(node) > 1,
+        _ => RelationLiteral::cast(node.clone()).is_some_and(|r| r.elements().nth(1).is_some()),
+    }
 }
 
 /// How many items a list has.
@@ -829,7 +836,7 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
     // which a space also comes before, `load`, `value`, `from` and `order`,
     // and a load's `keep`, which one comes before too, an order item's
     // `asc` and `desc`, a `for` loop's `in`, `heading`, before a heading's
-    // name, and `type`, before a type's.
+    // name, `type`, before a type's, and `constraint`, before a condition.
     let contextual_keyword = prev.kind() == Ident
         && prev.parent().is_some_and(|p| match p.kind() {
             BuiltinType => prev.text() == "type",
@@ -841,6 +848,7 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
             | SyntaxKind::KindDecl
             | SyntaxKind::HeadingDecl
             | SyntaxKind::TypeDecl
+            | SyntaxKind::Constraint
             | SyntaxKind::Load
             | SyntaxKind::Keeping
             | SyntaxKind::Numbering
@@ -1365,6 +1373,14 @@ mod tests {
                 "type place { { name: text, at: position, description: text, population: integer, founded: integer } };"
             ),
             "type place {\n    { name: text, at: position, description: text, population: integer, founded: integer },\n};\n"
+        );
+        // A representation and constraints go one to a line, however short,
+        // each `constraint` with a space before its condition.
+        assert_eq!(
+            fmt(
+                "type percentage{{value:integer},constraint(value>=0),constraint value<=100};type angle{{radians:approximate}};"
+            ),
+            "type percentage {\n    { value: integer },\n    constraint (value >= 0),\n    constraint value <= 100,\n};\ntype angle { { radians: approximate } };\n"
         );
     }
 

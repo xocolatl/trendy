@@ -52,11 +52,26 @@ pub(crate) struct Globals<'a> {
     /// Each read-only operator, and each variable of the program's it reads,
     /// already reported.
     read: HashSet<(hir::OperatorId, String)>,
+    /// Each cycle already reported, by the globals in it, from the first
+    /// reached.
+    cycles: HashSet<Vec<Global>>,
     /// The local variables of value blocks in initial values, by id. Most
     /// have values known when compiling, which their names stand for; those
     /// computed for each tuple of a relation, as in an `extend`'s values,
     /// are substituted when each tuple is.
     block_locals: Vec<hir::Local>,
+}
+
+/// What a global being evaluated is.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Global {
+    /// A variable, whose initial value refers to another.
+    Variable(hir::VariableId),
+    /// A read-only operator, which a call checks.
+    Operator(hir::OperatorId),
+    /// A constraint of a type of the program's own, which selecting one of
+    /// its values checks.
+    Constraint(hir::OperatorId),
 }
 
 /// Where a global's evaluation is.
@@ -72,9 +87,9 @@ enum State<T> {
 /// to the innermost.
 #[derive(Clone)]
 pub(crate) struct Pending {
+    pub(crate) global: Global,
+    /// Its name, as errors write it: a constraint's type's.
     pub(crate) name: String,
-    /// Whether it is a read-only operator, rather than a variable.
-    pub(crate) operator: bool,
     /// Where its name is defined.
     pub(crate) defined: Span,
     /// Where it refers to the next one, once it does.
@@ -102,14 +117,7 @@ impl<'a> Globals<'a> {
                 }
                 _ => None,
             });
-        // A selector's value is the value its arguments are the components
-        // of, with no body to check.
-        let selectors: Vec<(hir::OperatorId, hir::Expr)> = operators
-            .iter()
-            .filter_map(|s| Some((s.id, Signature::selection(&s.selects.as_ref()?.0))))
-            .collect();
-        let locals = selectors.iter().map(|&(id, _)| (id, Vec::new())).collect();
-        let values: HashMap<hir::OperatorId, hir::Expr> = prelude_values.chain(selectors).collect();
+        let values: HashMap<hir::OperatorId, hir::Expr> = prelude_values.collect();
         Globals {
             sites,
             namespaces,
@@ -122,9 +130,10 @@ impl<'a> Globals<'a> {
                 .map(|&id| (id, State::Done(Some(()))))
                 .collect(),
             values,
-            locals,
+            locals: HashMap::new(),
             stack: Vec::new(),
             read: HashSet::new(),
+            cycles: HashSet::new(),
             block_locals: Vec::new(),
         }
     }
@@ -176,8 +185,8 @@ impl<'a> Globals<'a> {
         let declared = trendy_syntax::span(decl.name()?.ident()?.text_range());
         self.variables[id.0] = Some(State::Evaluating);
         self.stack.push(Pending {
+            global: Global::Variable(id),
             name: name.to_string(),
-            operator: false,
             defined: declared,
             via: declared,
         });
@@ -201,7 +210,7 @@ impl<'a> Globals<'a> {
             let start = self
                 .stack
                 .iter()
-                .position(|p| !p.operator && p.name == name)?;
+                .position(|p| p.global == Global::Variable(id))?;
             self.cycle(start, span, errors);
             return None;
         }
@@ -244,14 +253,29 @@ impl<'a> Globals<'a> {
     fn checked(&mut self, id: hir::OperatorId, at: Span, errors: &mut Vec<Diagnostic>) -> bool {
         let operators = self.operators;
         let signature = operators.get(id);
+        // A selector's value is the value its arguments are the components
+        // of, with no body to check, but its type's constraints, which it
+        // checks: a call of it is one of each of them, so a constraint
+        // whose condition selects a value of its type closes a cycle.
+        if let Some(defined) = signature.selects() {
+            let constraints = operators.constraints(defined);
+            let valid = constraints
+                .iter()
+                .all(|c| self.checked(c.operator, at, errors));
+            if valid {
+                self.values
+                    .entry(id)
+                    .or_insert_with(|| Signature::selection(defined, constraints.to_vec()));
+                self.locals.entry(id).or_default();
+            }
+            return valid;
+        }
         match self.operator_states.get(&id) {
             Some(State::Done(done)) => return done.is_some(),
             Some(State::Evaluating) => {
-                if let Some(start) = self
-                    .stack
-                    .iter()
-                    .position(|p| p.operator && p.name == signature.name)
-                {
+                if let Some(start) = self.stack.iter().position(
+                    |p| matches!(p.global, Global::Operator(o) | Global::Constraint(o) if o == id),
+                ) {
                     self.cycle(start, at, errors);
                 }
                 return false;
@@ -263,9 +287,13 @@ impl<'a> Globals<'a> {
         }
         let defined = signature.defined().unwrap_or(at);
         self.operator_states.insert(id, State::Evaluating);
+        let (global, name) = match signature.constrains() {
+            Some((ty, _)) => (Global::Constraint(id), ty.name.clone()),
+            None => (Global::Operator(id), signature.name.clone()),
+        };
         self.stack.push(Pending {
-            name: signature.name.clone(),
-            operator: true,
+            global,
+            name,
             defined,
             via: defined,
         });
@@ -282,13 +310,23 @@ impl<'a> Globals<'a> {
     }
 
     /// Report the cycle closed by a reference at `at` back to the global
-    /// at `start` in the stack.
-    fn cycle(&self, start: usize, at: Span, errors: &mut Vec<Diagnostic>) {
+    /// at `start` in the stack, unless another reference closed it already,
+    /// as a second call of an operator in it does. A cycle through a type's
+    /// constraint is reported from the constraint, wherever it was entered.
+    fn cycle(&mut self, start: usize, at: Span, errors: &mut Vec<Diagnostic>) {
         let mut cycle = self.stack[start..].to_vec();
         if let Some(last) = cycle.last_mut() {
             last.via = at;
         }
-        errors.push(errors::cycle(&cycle));
+        if let Some(constraint) = cycle
+            .iter()
+            .position(|p| matches!(p.global, Global::Constraint(_)))
+        {
+            cycle.rotate_left(constraint);
+        }
+        if self.cycles.insert(cycle.iter().map(|p| p.global).collect()) {
+            errors.push(errors::cycle(&cycle));
+        }
     }
 
     /// The value of the read-only operator `signature`, and its local
@@ -303,6 +341,9 @@ impl<'a> Globals<'a> {
         signature: &Signature,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<(Vec<hir::Local>, hir::Expr)> {
+        if let Some((defined, constraint)) = signature.constrains() {
+            return self.constraint(signature, defined, constraint, errors);
+        }
         let decl = signature.decl.as_ref()?;
         let written = decl.result()?;
         let body = decl.body()?;
@@ -387,6 +428,39 @@ impl<'a> Globals<'a> {
             });
             (locals.finish(), value)
         })
+    }
+
+    /// The value of `signature`, an operator that computes `constraint`, of
+    /// the type `defined`: its condition, a boolean of the components, its
+    /// parameters, checked as a read-only operator's value is, so that it
+    /// depends on them alone. `None` after reporting why it has none, or
+    /// that it is known when compiling, true or false whatever the
+    /// components.
+    fn constraint(
+        &mut self,
+        signature: &Signature,
+        defined: &hir::Defined,
+        constraint: &ast::Constraint,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<(Vec<hir::Local>, hir::Expr)> {
+        let condition = constraint.condition()?;
+        let boolean = Expected {
+            ty: hir::Type::Scalar(hir::Scalar::Boolean),
+            origin: Origin::Operator(constraint.keyword()?),
+        };
+        let mut locals = Locals::default();
+        let mut names = ReadOnlyNames {
+            globals: self,
+            within: signature.id,
+            locals: &mut locals,
+        };
+        let site = names.site(condition.span());
+        let value = Checker::new(&mut names).expr(&condition, Some(&boolean), errors)?;
+        if let hir::Expr::Constant(hir::Value::Boolean(holds)) = value {
+            errors.push(errors::constant_constraint(holds, constraint, defined));
+            return None;
+        }
+        Some((locals.finish(), hir::Expr::at(site, value)))
     }
 }
 

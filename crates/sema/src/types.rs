@@ -173,6 +173,13 @@ impl Origin {
             {
                 "`while` takes a boolean condition".to_string()
             }
+            Origin::Operator(token)
+                if token
+                    .parent()
+                    .is_some_and(|p| p.kind() == trendy_syntax::SyntaxKind::Constraint) =>
+            {
+                "a type's constraint is a boolean condition".to_string()
+            }
             // An `if`'s keyword, or another language's `elif` for one.
             Origin::Operator(token)
                 if token.parent().is_some_and(|p| {

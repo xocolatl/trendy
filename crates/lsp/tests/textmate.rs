@@ -234,6 +234,40 @@ fn type_rule(identifier: &str) -> Value {
     })
 }
 
+/// `keyword name`, where `keyword` is `operator` or `call`, before an
+/// operator's name.
+fn operator_name_rule(keyword: SyntaxKind, identifier: &str) -> Value {
+    json!({
+        "match": format!(
+            "\\b({})\\s+({identifier})",
+            regex_escape(keyword.fixed_text().unwrap())
+        ),
+        "captures": {
+            "1": { "name": "keyword.other.trendy" },
+            "2": { "name": "entity.name.function.trendy" },
+        },
+    })
+}
+
+/// `var name: type`: the type name is only captured when it isn't one of
+/// `keywords`, such as the `tuple` of a tuple type.
+fn variable_declaration_rule(identifier: &str, keywords: &[String]) -> Value {
+    json!({
+        "match": format!(
+            "\\b({})\\s+({identifier})(?:\\s*({})\\s*(?!(?:{})\\b)({identifier}))?",
+            regex_escape(SyntaxKind::VarKw.fixed_text().unwrap()),
+            regex_escape(SyntaxKind::Colon.fixed_text().unwrap()),
+            keywords.join("|"),
+        ),
+        "captures": {
+            "1": { "name": "keyword.other.trendy" },
+            "2": { "name": "variable.other.definition.trendy" },
+            "3": { "name": punctuation_scope(SyntaxKind::Colon) },
+            "4": { "name": "entity.name.type.trendy" },
+        },
+    })
+}
+
 /// `heading name :=`: `heading` is a keyword only before a heading's name
 /// and `:=`, which an attribute so named never has.
 fn heading_rule(identifier: &str) -> Value {
@@ -255,6 +289,17 @@ fn heading_rule(identifier: &str) -> Value {
 fn key_rule() -> Value {
     json!({
         "match": "\\b(key)\\s*(?=\\{)",
+        "captures": { "1": { "name": "keyword.other.trendy" } },
+    })
+}
+
+/// `, constraint condition`: `constraint` is a keyword only after a comma
+/// or a brace in a type's braces, before a condition, which a grammar
+/// can't tell from a value so named followed by an operator; semantic
+/// highlighting can. A component so named is followed by `:`.
+fn constraint_rule() -> Value {
+    json!({
+        "match": "(?<=[,{])\\s*\\b(constraint)\\b(?!\\s*:)",
         "captures": { "1": { "name": "keyword.other.trendy" } },
     })
 }
@@ -358,6 +403,7 @@ fn generate(probed: &Probed) -> Value {
             { "include": "#call" },
             { "include": "#variable-declaration" },
             { "include": "#key" },
+            { "include": "#constraint" },
             { "include": "#load" },
             { "include": "#order" },
             { "include": "#for" },
@@ -369,43 +415,17 @@ fn generate(probed: &Probed) -> Value {
             { "include": "#punctuation" },
         ],
         "repository": {
-            "operator-definition": {
-                "match": format!("\\b({})\\s+({identifier})", keyword(SyntaxKind::OperatorKw)),
-                "captures": {
-                    "1": { "name": "keyword.other.trendy" },
-                    "2": { "name": "entity.name.function.trendy" },
-                },
-            },
-            // The type name is only captured when it isn't a keyword, such as
-            // the `tuple` of a tuple type.
-            "variable-declaration": {
-                "match": format!(
-                    "\\b({})\\s+({identifier})(?:\\s*({})\\s*(?!(?:{})\\b)({identifier}))?",
-                    keyword(SyntaxKind::VarKw),
-                    regex_escape(SyntaxKind::Colon.fixed_text().unwrap()),
-                    all_keywords.join("|"),
-                ),
-                "captures": {
-                    "1": { "name": "keyword.other.trendy" },
-                    "2": { "name": "variable.other.definition.trendy" },
-                    "3": { "name": punctuation_scope(SyntaxKind::Colon) },
-                    "4": { "name": "entity.name.type.trendy" },
-                },
-            },
+            "operator-definition": operator_name_rule(SyntaxKind::OperatorKw, identifier),
+            "variable-declaration": variable_declaration_rule(identifier, &all_keywords),
             "builtin-type": builtin_type_rule(identifier),
             "type": type_rule(identifier),
             "heading": heading_rule(identifier),
             "key": key_rule(),
+            "constraint": constraint_rule(),
             "load": load_rule(identifier),
             "order": order_rule(),
             "for": for_rule(identifier),
-            "call": {
-                "match": format!("\\b({})\\s+({identifier})", keyword(SyntaxKind::CallKw)),
-                "captures": {
-                    "1": { "name": "keyword.other.trendy" },
-                    "2": { "name": "entity.name.function.trendy" },
-                },
-            },
+            "call": operator_name_rule(SyntaxKind::CallKw, identifier),
             "comment": comment_rule(),
             "keywords": {
                 "match": format!("\\b(?:{})\\b", keywords.join("|")),

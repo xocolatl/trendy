@@ -1223,6 +1223,52 @@ fn values_that_arent_there_stop_the_program() {
     }
 }
 
+/// A value whose components break a constraint of its type stops the
+/// program where it is selected, by its selector, `replace` or `update`,
+/// writing the value and the first constraint it breaks.
+#[test]
+fn values_that_break_their_types_constraints_stop_the_program() {
+    let program = |body: &str| {
+        format!(
+            "type percentage {{ {{ value: integer }}, constraint value >= 0, constraint value <= 100 }};\n\noperator f{{b: integer}} [\n    var p := percentage{{value: b}};\n    {body}\n    call debug_value{{v: p}};\n];\n\noperator main{{}} [\n    call f{{b: 0}};\n];\n"
+        )
+    };
+    let broken = |value: i64, constraint: &str| {
+        format!(
+            "error[{}]: percentage{{value: {value}}} isn't a value of `percentage`: it breaks the constraint `{constraint}`",
+            trendy_diag::Code::BrokenConstraint.id()
+        )
+    };
+    let cases = [
+        (
+            "constraint_selector",
+            "p := percentage{value: b - 1};",
+            broken(-1, "value >= 0"),
+        ),
+        (
+            "constraint_replace",
+            "p := p replace { value := value + 101 };",
+            broken(101, "value <= 100"),
+        ),
+        (
+            "constraint_update",
+            "update p { value := value - 1 };",
+            broken(-1, "value >= 0"),
+        ),
+    ];
+    for (name, body, message) in cases {
+        let (status, stderr) = run_source(name, &program(body));
+        let expected = format!("{message}\n{}", site(name, 5));
+        assert_eq!((status, stderr), (1, expected), "{body}");
+    }
+    // Components that satisfy them select the value.
+    let (status, stderr) = run_source(
+        "constraint_kept",
+        &program("update p { value := value + 100 };"),
+    );
+    assert_eq!((status, &stderr[..]), (0, "percentage{value: 100}\n"));
+}
+
 #[test]
 fn an_if_fails_only_if_the_branch_it_takes_does() {
     let overflow = format!(

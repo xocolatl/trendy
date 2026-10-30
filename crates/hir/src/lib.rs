@@ -1228,8 +1228,10 @@ pub enum Expr {
     /// its possible representation, are the tuple: what its selector
     /// computes, as the privileged operator Date has a selector written
     /// with sets a value's physical representation (*Type Inheritance and
-    /// Relational Theory*, chapter 2).
-    Select(Defined, Box<Expr>),
+    /// Relational Theory*, chapter 2). It fails unless each of the type's
+    /// constraints, in order, is true of the components, since a type is
+    /// the values its constraints are true of (TTM RM Prescription 23).
+    Select(Defined, Vec<Constraint>, Box<Expr>),
     /// The components of a value of one of the program's own types, in its
     /// possible representation, as a tuple: what its `THE_` operators
     /// extract from, as `v.c` is `Extract(Components(v), c)`.
@@ -1324,7 +1326,7 @@ impl Expr {
                 Type::Relation(heading) => Type::Tuple(heading),
                 other => panic!("the only tuple of {other}"),
             },
-            Expr::Select(defined, _) => Type::Defined(defined.clone()),
+            Expr::Select(defined, ..) => Type::Defined(defined.clone()),
             Expr::Components(value) => match value.type_with(leaf) {
                 Type::Defined(defined) => Type::Tuple(defined.components),
                 other => panic!("the components of {other}"),
@@ -1372,10 +1374,12 @@ impl Expr {
             | Expr::Unload(..)
             | Expr::Index(..)
             | Expr::WithElements(..) => true,
-            Expr::Unary(_, operand)
-            | Expr::At(_, operand)
-            | Expr::Select(_, operand)
-            | Expr::Components(operand) => operand.can_fail(),
+            // A value breaks a constraint, or a constraint's operator
+            // fails.
+            Expr::Select(_, constraints, operand) => !constraints.is_empty() || operand.can_fail(),
+            Expr::Unary(_, operand) | Expr::At(_, operand) | Expr::Components(operand) => {
+                operand.can_fail()
+            }
             Expr::Tuple(attributes) => attributes.values().any(Expr::can_fail),
             Expr::Connective(_, operands) => operands.iter().any(Expr::can_fail),
             Expr::Extract(tuple, _) => tuple.can_fail(),
@@ -1541,7 +1545,9 @@ impl Expr {
             Expr::Load(relation, loading) => Expr::Load(Box::new(f(*relation, 0)), loading),
             Expr::Unload(array, unloading) => Expr::Unload(Box::new(f(*array, 0)), unloading),
             Expr::Only(operand) => Expr::Only(Box::new(f(*operand, 0))),
-            Expr::Select(defined, components) => Expr::Select(defined, Box::new(f(*components, 0))),
+            Expr::Select(defined, constraints, components) => {
+                Expr::Select(defined, constraints, Box::new(f(*components, 0)))
+            }
             Expr::Components(value) => Expr::Components(Box::new(f(*value, 0))),
             Expr::Call(call) => Expr::Call(Call {
                 args: call
@@ -1570,7 +1576,7 @@ impl Expr {
             | Expr::Rename(operand, _)
             | Expr::Ungroup(operand, _)
             | Expr::Only(operand)
-            | Expr::Select(_, operand)
+            | Expr::Select(_, _, operand)
             | Expr::Components(operand)
             | Expr::Load(operand, ..)
             | Expr::Unload(operand, ..) => f(operand, 0),
@@ -1713,7 +1719,9 @@ impl Expr {
             Expr::Restrict(operand, condition) => Expr::Restrict(inst(operand), inst(condition)),
             Expr::Only(operand) => Expr::Only(inst(operand)),
             // A type of the program's own has no type parameters in it.
-            Expr::Select(defined, components) => Expr::Select(defined.clone(), inst(components)),
+            Expr::Select(defined, constraints, components) => {
+                Expr::Select(defined.clone(), constraints.clone(), inst(components))
+            }
             Expr::Components(value) => Expr::Components(inst(value)),
             Expr::Current(depth, heading) => Expr::Current(*depth, heading.instantiated(types)),
             Expr::Call(call) => Expr::Call(call.instantiated(types)),
@@ -2429,6 +2437,16 @@ impl std::fmt::Display for Type {
             Type::Parameter(p) => write!(f, "{p}"),
         }
     }
+}
+
+/// A constraint of a type of the program's own (TTM RM Prescription 23):
+/// the read-only operator that computes it, a boolean, from a value's
+/// components, its parameters, and the condition as it is written, which a
+/// value that breaks it is reported with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Constraint {
+    pub operator: OperatorId,
+    pub text: String,
 }
 
 /// A scalar type of the program's own: its name, and the components of its
@@ -3470,6 +3488,7 @@ mod tests {
                     [("degrees".to_string(), Type::Scalar(Scalar::Approximate))].into(),
                 ),
             },
+            Vec::new(),
             Box::new(Expr::Parameter("t".to_string())),
         );
         assert_eq!(select.type_with(&|_| unreachable!()), ty);

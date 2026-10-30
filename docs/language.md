@@ -1725,10 +1725,10 @@ operator main{} [
 
 - **The components go in braces of their own,** inside the type's:
   `type celsius { { degrees: approximate } };`, even for one. The outer
-  braces hold what the declaration says of the type, of which the
-  possible representation is the first thing. Components written straight
-  inside the type's braces, as a heading's attributes are, or after
-  Tutorial D's `POSSREP`, are fixed to that (P0039).
+  braces hold what the declaration says of the type: its possible
+  representation, and its constraints (see below). Components written
+  straight inside the type's braces, as a heading's attributes are, or
+  after Tutorial D's `POSSREP`, are fixed to that (P0039).
 - **The selector is named after the type,** and takes the components as
   its arguments: `position{latitude: -1.29e0, longitude: 36.82e0}` is the
   value of `position` with those components. It is an operator, as TTM's
@@ -1774,6 +1774,50 @@ operator main{} [
   any order. A component can be of any type, another of the program's
   own, a tuple or a relation, but not of its own type, directly or
   through others (A0049).
+
+A type's constraints say which values it has: each is `constraint` and a
+condition on the components, in the type's braces with its possible
+representation, and a value of the type is one whose components satisfy
+them all (*The Third Manifesto*, RM Prescription 23):
+
+```trendy
+type position {
+    { latitude: approximate, longitude: approximate },
+    constraint latitude >= -90e0 and latitude <= 90e0,
+    constraint longitude > -180e0 and longitude <= 180e0,
+};
+
+operator north{p: position, by: approximate}: position [
+    p replace { latitude := latitude + by }
+];
+
+operator main{} [
+    var nairobi := position{latitude: -1.29e0, longitude: 36.82e0};
+    call debug_value{v: north{p: nairobi, by: 10e0}};
+];
+```
+
+- **A value is checked where it is selected,** by the selector,
+  `replace` or `update`, the only ways a value of the type comes to be,
+  as TTM has a selector check its type's constraint. Components that
+  break a constraint fail there, so no variable ever holds a value
+  outside its type. The failure names the value and the constraint it
+  breaks: when compiling, if the components are known then, and else
+  when running, as `north{p: nairobi, by: 100e0}` would (R0017).
+- **Several constraints are one,** all of them true of every value, as
+  TTM has one type constraint per type. Each is checked in order, so a
+  failure says which one a value breaks.
+- **A constraint is a condition on the components alone,** in scope by
+  name. It reads no variable of the program's, whose value changes
+  (A0050), and selects no value of its own type, directly or through
+  operators, which would check it again without end (A0036). One known
+  when compiling, true or false whatever the components, is an error
+  (A0058).
+- **The braces are a set,** so the constraints and the possible
+  representation can come in any order. SQL's `check` is fixed to
+  `constraint` (P0040), and a constraint inside the components' braces,
+  where Tutorial D writes a possible representation's `CONSTRAINT`, is
+  moved out of them (P0041).
 
 ## Tuples
 

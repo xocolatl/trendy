@@ -1194,7 +1194,8 @@ impl<'a> Checker<'a> {
     ) -> Option<hir::Expr> {
         let operand_expr = postfix.operand()?;
         let operand = self.expr(&operand_expr, None, errors)?;
-        let noun = errors::Noun::assigned(&self.ty(&operand));
+        let ty = self.ty(&operand);
+        let noun = errors::Noun::assigned(&ty);
         let list = postfix.assignments()?;
         let keyword = postfix.operator()?;
         let assigned = Assigned {
@@ -1212,7 +1213,41 @@ impl<'a> Checker<'a> {
             },
             errors,
         )?;
+        // A type's value is selected from its components, replaced.
+        let result = match &ty {
+            hir::Type::Defined(defined) => self.selected(defined, result, expr, errors)?,
+            _ => result,
+        };
         self.matched(expected, result, expr, errors)
+    }
+
+    /// The value of the type of the program's own `defined` whose
+    /// components are `components`, selected by `expr`, which fails unless
+    /// each of the type's constraints, each checked first if it isn't yet,
+    /// is true of them: evaluated if they are known when compiling. `None`
+    /// after reporting a constraint they break, or one with errors.
+    pub(crate) fn selected(
+        &mut self,
+        defined: &hir::Defined,
+        components: hir::Expr,
+        expr: &Expr,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let constraints = self.names.operators().constraints(defined).to_vec();
+        let at = expr.span();
+        if !constraints
+            .iter()
+            .all(|c| self.names.checked(c.operator, at, errors))
+        {
+            return None;
+        }
+        match ops::select(defined.clone(), constraints, components, self.bindings()) {
+            Ok(value) => Some(value),
+            Err(failed) => {
+                errors.push(errors::failed(&failed, expr));
+                None
+            }
+        }
     }
 
     /// `operand`, written `assigned.operand`, with the attributes in
@@ -1221,10 +1256,10 @@ impl<'a> Checker<'a> {
     /// tuple at hand in scope. A `replace`'s values have the types of the
     /// attributes they replace, and are computed from the old values, all
     /// at once. A `replace` or an `update` of a value of a type of the
-    /// program's own gives its components new values in the same way: it is
-    /// the value selected from its components, a `replace` of them (TTM
-    /// chapter 5's scalar update). An attribute given its own value is an
-    /// error, and `unchanged` is the error for a list that leaves the
+    /// program's own gives its components new values in the same way: the
+    /// result is then the tuple of them, which the value is selected from
+    /// (TTM chapter 5's scalar update). An attribute given its own value is
+    /// an error, and `unchanged` is the error for a list that leaves the
     /// operand as it is.
     pub(crate) fn assign_attributes(
         &mut self,
@@ -1311,10 +1346,7 @@ impl<'a> Checker<'a> {
             return None;
         }
         match ops::extend(operand, hir::Heading::new(types), values, self.bindings()) {
-            Ok(result) => Some(match defined {
-                Some(defined) => ops::select(defined.clone(), result),
-                None => result,
-            }),
+            Ok(result) => Some(result),
             Err(failure) => {
                 let value = assignments
                     .iter()

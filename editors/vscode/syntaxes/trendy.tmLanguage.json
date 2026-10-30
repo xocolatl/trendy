@@ -28,6 +28,9 @@
       "include": "#key"
     },
     {
+      "include": "#constraint"
+    },
+    {
       "include": "#load"
     },
     {
@@ -94,6 +97,14 @@
           "include": "#comment"
         }
       ]
+    },
+    "constraint": {
+      "captures": {
+        "1": {
+          "name": "keyword.other.trendy"
+        }
+      },
+      "match": "(?<=[,{])\\s*\\b(constraint)\\b(?!\\s*:)"
     },
     "for": {
       "captures": {

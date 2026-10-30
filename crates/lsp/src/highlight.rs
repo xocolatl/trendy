@@ -72,7 +72,8 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
     // The contextual keywords: `type`, in `builtin type name;`, `key`,
     // `value` and `from`, `any` and `type`, in `any type`, `types`, `per`,
     // a mode's `const` and `out`, `kind`, a load's `load`, `from`, `order`, `asc`,
-    // `desc`, `keep` and `numbered`, a `for` loop's `in`, and `heading`.
+    // `desc`, `keep` and `numbered`, a `for` loop's `in`, `heading`, `type`,
+    // and a type's `constraint`.
     let keyword = match parent {
         Some(SyntaxKind::BuiltinType) => token.text() == "type",
         Some(SyntaxKind::AnyType) => matches!(token.text(), "any" | "type"),
@@ -89,7 +90,8 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
             | SyntaxKind::OrderItem
             | SyntaxKind::ForStmt
             | SyntaxKind::HeadingDecl
-            | SyntaxKind::TypeDecl,
+            | SyntaxKind::TypeDecl
+            | SyntaxKind::Constraint,
         ) => true,
         _ => false,
     };

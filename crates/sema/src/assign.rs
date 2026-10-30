@@ -993,11 +993,6 @@ fn update(
                 unchanged,
                 errors,
             )?;
-            // A type's value is selected from its components, updated.
-            let updated = match updated {
-                hir::Expr::Select(_, components) => *components,
-                updated => updated,
-            };
             match updated {
                 hir::Expr::Extend(_, computed, values) => {
                     Some(Change::Attributes(computed, values))
@@ -1171,10 +1166,13 @@ fn merged(
                 None => assignee.current.clone(),
             };
             let merged = attributes_merged(current, name, changes, names.bindings(), errors)?;
-            Some(match defined {
-                Some(defined) => ops::select(defined.clone(), merged),
-                None => merged,
-            })
+            match defined {
+                Some(defined) => {
+                    let target = clause.target()?;
+                    Checker::new(names).selected(defined, merged, &target, errors)
+                }
+                None => Some(merged),
+            }
         }
         Change::Tuples(change) => {
             let mut changes = vec![(clause, change)];

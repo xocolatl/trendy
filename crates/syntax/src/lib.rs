@@ -202,12 +202,15 @@ pub enum SyntaxKind {
     /// own, with its possible representation. `type` is a contextual
     /// keyword, an identifier elsewhere.
     TypeDecl,
-    /// `{ { name: type, … } }`: what a type declaration says of its type,
-    /// its possible representation.
+    /// `{ { name: type, … }, constraint … }`: what a type declaration says
+    /// of its type, its possible representation and its constraints.
     TypeBody,
     /// `{ name: type, … }`: a possible representation of a type, its
     /// components.
     Representation,
+    /// `constraint condition`: a condition every value of a type satisfies.
+    /// `constraint` is a contextual keyword, an identifier elsewhere.
+    Constraint,
     /// `{ <, … }`: what a kind's types must have.
     RequirementList,
     /// One thing a kind's types must have: an operator, such as `<`.
@@ -386,7 +389,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 156] = [
+    pub const ALL: [SyntaxKind; 157] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -476,6 +479,7 @@ impl SyntaxKind {
         SyntaxKind::TypeDecl,
         SyntaxKind::TypeBody,
         SyntaxKind::Representation,
+        SyntaxKind::Constraint,
         SyntaxKind::RequirementList,
         SyntaxKind::Requirement,
         SyntaxKind::VarDecl,
@@ -957,6 +961,7 @@ impl SyntaxKind {
             SyntaxKind::TypeDecl => "type declaration",
             SyntaxKind::TypeBody => "type's representation",
             SyntaxKind::Representation => "possible representation",
+            SyntaxKind::Constraint => "type constraint",
             SyntaxKind::RequirementList => "requirements",
             SyntaxKind::Requirement => "requirement",
             SyntaxKind::VarDecl => "variable declaration",

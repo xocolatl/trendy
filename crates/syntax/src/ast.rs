@@ -45,6 +45,7 @@ ast_node!(HeadingDecl);
 ast_node!(TypeDecl);
 ast_node!(TypeBody);
 ast_node!(Representation);
+ast_node!(Constraint);
 ast_node!(RequirementList);
 ast_node!(Requirement);
 ast_node!(Body);
@@ -318,6 +319,12 @@ impl TypeDecl {
             |body| body.0.children().find_map(Representation::cast),
         )
     }
+
+    /// Its constraints, in order: in its body, or, where the parser
+    /// reports them out of place, among the components.
+    pub fn constraints(&self) -> impl Iterator<Item = Constraint> {
+        self.0.descendants().filter_map(Constraint::cast)
+    }
 }
 
 impl Representation {
@@ -325,6 +332,28 @@ impl Representation {
     #[must_use]
     pub fn components(&self) -> Option<Heading> {
         self.0.children().find_map(Heading::cast)
+    }
+}
+
+impl Constraint {
+    /// The word `constraint`, which the parser reports in another case or
+    /// spelling.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    /// The condition every value of the type satisfies.
+    #[must_use]
+    pub fn condition(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+
+    /// The span to delete to remove it from its type's braces, with the
+    /// comma that separates it from the rest.
+    #[must_use]
+    pub fn removal(&self) -> Span {
+        list_removal(&self.0)
     }
 }
 

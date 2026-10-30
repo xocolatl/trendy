@@ -1148,6 +1148,9 @@ pub(crate) enum Failed {
         text: String,
         why: hir::Unparsable,
     },
+    /// Components that break a constraint of the type of the program's own
+    /// a value is selected of.
+    Constraint(Box<BrokenConstraint>),
 }
 
 /// The tuples of `operand` for which `condition`, computed from the tuple at
@@ -2189,19 +2192,7 @@ fn substitute(
             // when running.
             None => expr,
         },
-        hir::Expr::Let(id, value, body) => match sub(value)? {
-            // Known, it is substituted in the rest.
-            hir::Expr::Constant(value) => {
-                let mut locals = substitution.locals.to_vec();
-                locals.push((id, value));
-                let inner = Substitution {
-                    locals: &locals,
-                    ..*substitution
-                };
-                substitute(*body, depth, &inner)?
-            }
-            value => hir::Expr::Let(id, Box::new(value), Box::new(sub(body)?)),
-        },
+        hir::Expr::Let(id, value, body) => substituted_let(id, *value, *body, depth, substitution)?,
         // Known, it needs no site.
         hir::Expr::At(site, expr) => hir::Expr::at(site, sub(expr)?),
         // A variable of the program's is known only when running: a
@@ -2257,7 +2248,12 @@ fn substitute(
         hir::Expr::And(lhs, rhs) => and(vec![sub(lhs)?, sub(rhs)?])?,
         hir::Expr::Ungroup(operand, names) => ungroup(sub(operand)?, names),
         hir::Expr::Only(operand) => only(sub(operand)?)?,
-        hir::Expr::Select(defined, components) => select(defined, sub(components)?),
+        hir::Expr::Select(defined, constraints, components) => select(
+            defined,
+            constraints,
+            sub(components)?,
+            substitution.bindings,
+        )?,
         hir::Expr::Components(value) => components(sub(value)?),
         hir::Expr::Semijoin(lhs, rhs) => matching(sub(lhs)?, sub(rhs)?, false),
         hir::Expr::Combine(combination, lhs, rhs) => combined(sub(lhs)?, sub(rhs)?, combination)?,
@@ -2276,6 +2272,38 @@ fn substitute(
             extend(sub(operand)?, computed, attributes, substitution.bindings)
                 .map_err(|f| f.failed)?
         }
+    })
+}
+
+/// `body` with the local variable `id` given `value` in it, substituted as
+/// for [`substitute`]: a value that is then known is substituted in the
+/// body.
+///
+/// # Errors
+///
+/// Returns why the value or the body fails.
+fn substituted_let(
+    id: hir::LocalId,
+    value: hir::Expr,
+    body: hir::Expr,
+    depth: usize,
+    substitution: &Substitution,
+) -> Result<hir::Expr, Failed> {
+    Ok(match substitute(value, depth, substitution)? {
+        hir::Expr::Constant(value) => {
+            let mut locals = substitution.locals.to_vec();
+            locals.push((id, value));
+            let inner = Substitution {
+                locals: &locals,
+                ..*substitution
+            };
+            substitute(body, depth, &inner)?
+        }
+        value => hir::Expr::Let(
+            id,
+            Box::new(value),
+            Box::new(substitute(body, depth, substitution)?),
+        ),
     })
 }
 
@@ -2333,16 +2361,69 @@ pub(crate) fn extracted(
 
 /// The value of the program's own type `defined` whose components are the
 /// tuple `components`: evaluated if they are a constant.
-pub(crate) fn select(defined: hir::Defined, components: hir::Expr) -> hir::Expr {
-    match components {
-        hir::Expr::Constant(hir::Value::Tuple(tuple)) => {
-            hir::Expr::Constant(hir::Value::Defined(hir::DefinedValue {
-                name: defined.name,
-                components: tuple,
-            }))
+pub(crate) fn select(
+    defined: hir::Defined,
+    constraints: Vec<hir::Constraint>,
+    components: hir::Expr,
+    bindings: Bindings,
+) -> Result<hir::Expr, Failed> {
+    let hir::Expr::Constant(hir::Value::Tuple(tuple)) = components else {
+        return Ok(hir::Expr::Select(
+            defined,
+            constraints,
+            Box::new(components),
+        ));
+    };
+    let value = hir::DefinedValue {
+        name: defined.name.clone(),
+        components: tuple,
+    };
+    for constraint in &constraints {
+        let args = value
+            .components
+            .attributes()
+            .map(|(name, v)| (name.to_string(), hir::Expr::Constant(v.clone())))
+            .collect();
+        let checked = call(
+            hir::Call {
+                operator: constraint.operator,
+                types: Vec::new(),
+                args,
+                updated: BTreeMap::new(),
+            },
+            bindings,
+        )?;
+        match checked {
+            hir::Expr::Constant(hir::Value::Boolean(true)) => {}
+            hir::Expr::Constant(hir::Value::Boolean(false)) => {
+                let written = bindings.operators.get(constraint.operator).constrains();
+                return Err(Failed::Constraint(Box::new(BrokenConstraint {
+                    value,
+                    text: constraint.text.clone(),
+                    at: written.map(|(_, c)| c.span()),
+                })));
+            }
+            // Its value is known only when running, and so is whether the
+            // components satisfy it.
+            _ => {
+                return Ok(hir::Expr::Select(
+                    defined,
+                    constraints,
+                    Box::new(hir::Expr::Constant(hir::Value::Tuple(value.components))),
+                ));
+            }
         }
-        components => hir::Expr::Select(defined, Box::new(components)),
     }
+    Ok(hir::Expr::Constant(hir::Value::Defined(value)))
+}
+
+/// A value of a type of the program's own whose components break one of
+/// its constraints: the condition, as it is written, at `at`.
+#[derive(Debug, Clone)]
+pub(crate) struct BrokenConstraint {
+    pub(crate) value: hir::DefinedValue,
+    pub(crate) text: String,
+    pub(crate) at: Option<Span>,
 }
 
 /// The components of `value`, a value of a type of the program's own, as a

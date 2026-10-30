@@ -82,6 +82,8 @@ codes! {
     NamedOperand => "P0037",
     ModeSpelling => "P0038",
     BareRepresentation => "P0039",
+    ConstraintSpelling => "P0040",
+    ConstraintInRepresentation => "P0041",
     DuplicateName => "A0001",
     MissingMain => "A0002",
     UnknownType => "A0003",
@@ -139,6 +141,7 @@ codes! {
     UnreadableAttribute => "A0055",
     UnchosenOperator => "A0056",
     SelectorName => "A0057",
+    ConstantConstraint => "A0058",
     Overflow => "R0001",
     DivisionByZero => "R0002",
     OutOfMemory => "R0003",
@@ -155,6 +158,7 @@ codes! {
     Unparsable => "R0014",
     MalformedCsv => "R0015",
     CsvColumns => "R0016",
+    BrokenConstraint => "R0017",
     Internal => "X0000",
 }
 

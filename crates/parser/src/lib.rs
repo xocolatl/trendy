@@ -302,11 +302,12 @@ impl<'a> Parser<'a> {
             })
     }
 
-    /// `type name { { name: type, … } };`: a scalar type of the program's
-    /// own, and its possible representation, whose components are in
-    /// braces of their own. Components written without them, as a
-    /// heading's are, or after Tutorial D's `POSSREP`, are reported, with
-    /// a fix.
+    /// `type name { { name: type, … }, constraint … };`: a scalar type of
+    /// the program's own, its possible representation, whose components
+    /// are in braces of their own, and its constraints, in any order.
+    /// Components written without braces of their own, as a heading's are,
+    /// or after Tutorial D's `POSSREP`, are reported, with a fix, and so
+    /// are constraints inside the components' braces.
     fn type_decl(&mut self) {
         let outer_form = std::mem::replace(&mut self.form, errors::TYPE_DECL_FORM);
         self.start_node(SyntaxKind::TypeDecl);
@@ -333,9 +334,10 @@ impl<'a> Parser<'a> {
             });
         let braced = possrep.is_none()
             && self.at(SyntaxKind::LBrace)
-            && self
+            && (self
                 .found_after(1)
-                .is_some_and(|f| matches!(f.kind, SyntaxKind::LBrace | SyntaxKind::RBrace));
+                .is_some_and(|f| matches!(f.kind, SyntaxKind::LBrace | SyntaxKind::RBrace))
+                || self.constraint_at(1));
         if braced {
             self.delimited(
                 Some(SyntaxKind::TypeBody),
@@ -343,24 +345,39 @@ impl<'a> Parser<'a> {
                 (SyntaxKind::LBrace, SyntaxKind::RBrace),
                 &[],
                 |p| {
-                    if p.at(SyntaxKind::LBrace) {
-                        p.representation();
-                        if p.at(SyntaxKind::Comma) {
-                            p.bump();
-                        }
-                    } else {
+                    let before = p.last_end;
+                    p.items(
+                        |p| p.at(SyntaxKind::LBrace) || p.constraint_at(0),
+                        |p| {
+                            if !p.at(SyntaxKind::LBrace) {
+                                p.constraint();
+                            } else if let Some(inside) = p.representation() {
+                                let close = p.closed_at();
+                                let error =
+                                    errors::constraint_in_components(p.source, &inside, close);
+                                p.errors.push(error);
+                            }
+                        },
+                    );
+                    if p.last_end == before {
                         p.missing(SyntaxKind::LBrace);
                     }
                 },
             );
         } else if let Some(open) = self.found().filter(|f| f.kind == SyntaxKind::LBrace) {
-            // `type celsius { degrees: approximate };`, written as a heading.
-            self.representation();
-            // The components' `}`, if they end with one.
-            let close = self
-                .last_end
-                .filter(|&end| end > open.span.end && self.source[..end].ends_with('}'))
-                .map(|end| Span::new(end - 1, end));
+            // `type celsius { degrees: approximate };`, written as a heading:
+            // the braces go around the components, before any constraints
+            // after them, which are then in the type's, after a comma.
+            let close = match self.representation() {
+                Some(inside) => {
+                    let comma = if inside.comma { "" } else { "," };
+                    Some((inside.components, comma))
+                }
+                None => self
+                    .closed_at()
+                    .filter(|&end| end > open.span.end)
+                    .map(|end| (end, "")),
+            };
             self.errors
                 .push(errors::bare_representation(open.span, close, possrep));
         } else {
@@ -372,9 +389,87 @@ impl<'a> Parser<'a> {
     }
 
     /// `{ name: type, … }`: a possible representation's components.
-    fn representation(&mut self) {
+    /// Constraints after them, inside their braces, as Tutorial D writes
+    /// them in a possrep's, are parsed there, and returned.
+    fn representation(&mut self) -> Option<errors::Inside> {
         self.start_node(SyntaxKind::Representation);
-        self.heading();
+        let outer_form = std::mem::replace(&mut self.form, errors::HEADING_FORM);
+        let mut inside = None;
+        self.delimited(
+            Some(SyntaxKind::Heading),
+            "heading",
+            (SyntaxKind::LBrace, SyntaxKind::RBrace),
+            &[],
+            |p| {
+                p.items(
+                    |p| p.at_heading_attribute() && !p.constraint_at(0),
+                    |p| p.moded_attribute(SyntaxKind::AttributeType, false, Self::attribute_type),
+                );
+                // Where the components end, before the comma after them.
+                let (components, comma) = match p.last_end {
+                    Some(end) if p.source[..end].ends_with(',') => {
+                        (Some(p.source[..end - 1].trim_end().len()), true)
+                    }
+                    end => (end, false),
+                };
+                let mut constraints = Vec::new();
+                while let Some(start) = p.found().filter(|_| p.constraint_at(0)) {
+                    p.constraint();
+                    constraints.push(Span::new(
+                        start.span.start,
+                        p.last_end.unwrap_or(start.span.end),
+                    ));
+                    if p.at(SyntaxKind::Comma) {
+                        p.bump();
+                    }
+                }
+                if let (Some(components), false) = (components, constraints.is_empty()) {
+                    inside = Some(errors::Inside {
+                        components,
+                        comma,
+                        constraints,
+                    });
+                }
+            },
+        );
+        self.form = outer_form;
+        self.builder.finish_node();
+        inside
+    }
+
+    /// Where the `}` just consumed ends, if the last token was one.
+    fn closed_at(&self) -> Option<usize> {
+        self.last_end
+            .filter(|&end| self.source[..end].ends_with('}'))
+    }
+
+    /// Whether a type's constraint starts at the significant token `n` from
+    /// the next one: `constraint`, in any case, or SQL's `check`, unless it
+    /// is a component's name, before a `:`.
+    fn constraint_at(&mut self, n: usize) -> bool {
+        self.nth_found(n).is_some_and(|f| {
+            f.kind == SyntaxKind::Ident
+                && (f.text.eq_ignore_ascii_case("constraint")
+                    || f.text.eq_ignore_ascii_case("check"))
+        }) && self
+            .nth_found(n + 1)
+            .is_none_or(|f| f.kind != SyntaxKind::Colon)
+    }
+
+    /// `constraint condition`: a condition every value of a type satisfies.
+    /// `constraint` in another case, and SQL's `check`, are reported, with
+    /// fixes.
+    fn constraint(&mut self) {
+        self.start_node(SyntaxKind::Constraint);
+        let keyword = self.found().expect("at a constraint");
+        self.bump();
+        if keyword.text.eq_ignore_ascii_case("check") {
+            self.errors.push(errors::sql_check(keyword));
+        } else if keyword.text != "constraint" {
+            self.errors
+                .push(errors::miscased_keyword(keyword, "constraint"));
+        }
+        self.expression();
         self.builder.finish_node();
     }
 
@@ -6636,6 +6731,70 @@ operator main{} [
         );
         let errors = parse_str("operator main{} [ type celsius { { d: approximate } }; ];").errors;
         assert_eq!(errors[0].code, Code::NestedDefinition);
+    }
+
+    #[test]
+    fn type_constraints() {
+        // Constraints go in the type's braces, in any order with the
+        // representation; a component may be named `constraint`.
+        let parse = parse_str(
+            "type percentage { { value: integer }, constraint value >= 0, constraint value <= 100 };
+type angle { constraint radians >= 0e0, { radians: approximate } };
+type rule { { constraint: text } };",
+        );
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let counts: Vec<(usize, Option<usize>)> = parse
+            .tree
+            .types()
+            .map(|t| {
+                let components = t
+                    .representation()
+                    .and_then(|r| r.components())
+                    .map(|h| h.attributes().count());
+                (t.constraints().count(), components)
+            })
+            .collect();
+        assert_eq!(counts, [(2, Some(1)), (1, Some(1)), (0, Some(1))]);
+        // SQL's `check`, the keyword in another case, and Tutorial D's
+        // constraint inside the components' braces, after a comma or
+        // not, each fixed in one edit; in components without braces of
+        // their own, the braces close before the constraint.
+        let fixed = "type angle { { radians: approximate }, constraint radians >= 0e0 };";
+        for (source, code) in [
+            (
+                "type angle { { radians: approximate }, check radians >= 0e0 };",
+                Code::ConstraintSpelling,
+            ),
+            (
+                "type angle { { radians: approximate }, CONSTRAINT radians >= 0e0 };",
+                Code::MiscasedKeyword,
+            ),
+            (
+                "type angle { { radians: approximate, constraint radians >= 0e0 } };",
+                Code::ConstraintInRepresentation,
+            ),
+            (
+                "type angle { { radians: approximate constraint radians >= 0e0 } };",
+                Code::ConstraintInRepresentation,
+            ),
+            (
+                "type angle { radians: approximate, constraint radians >= 0e0 };",
+                Code::BareRepresentation,
+            ),
+            (
+                "type angle POSSREP { radians: approximate constraint radians >= 0e0 };",
+                Code::BareRepresentation,
+            ),
+        ] {
+            let parse = parse_str(source);
+            let codes: Vec<Code> = parse.errors.iter().map(|e| e.code).collect();
+            assert_eq!(codes, [code], "{source}");
+            assert_eq!(fix(source), fixed, "{source}");
+            assert_eq!(parse.tree.types().next().unwrap().constraints().count(), 1);
+        }
+        // A constraint needs a condition.
+        let errors = parse_str("type angle { { radians: approximate }, constraint };").errors;
+        assert_eq!(errors[0].code, Code::MissingToken);
     }
 
     #[test]

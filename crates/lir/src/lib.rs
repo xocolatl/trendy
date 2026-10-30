@@ -260,6 +260,11 @@ pub enum RuntimeFn {
     /// array in, or, if `nested` (a [`Layout::U8`]) is 1, one sets it and
     /// the other an element in it, writing the positions.
     ElementConflict,
+    /// `trendy_rt_broken_constraint(value, descriptor, constraint)`, which
+    /// doesn't return: stop the program because `value`, of the type of
+    /// the program's own the descriptor describes, breaks its constraint
+    /// written `constraint`, a text, writing them.
+    BrokenConstraint,
     /// `trendy_rt_check_key(src, descriptor, key, variable)`: stop the
     /// program if the relation `src`, of the type the descriptor
     /// describes, has two tuples with the same values for the attributes
@@ -450,6 +455,7 @@ impl RuntimeFn {
             RuntimeFn::NoMax => "trendy_rt_no_max",
             RuntimeFn::IndexOutOfRange => "trendy_rt_index_out_of_range",
             RuntimeFn::ElementConflict => "trendy_rt_element_conflict",
+            RuntimeFn::BrokenConstraint => "trendy_rt_broken_constraint",
             RuntimeFn::CheckKey => "trendy_rt_check_key",
             RuntimeFn::Concat => "trendy_rt_concat",
             RuntimeFn::Release => "trendy_rt_release",
@@ -695,6 +701,13 @@ pub enum Failure {
         count: Place,
         nested: Place,
     },
+    /// `value`, of the type of the program's own `descriptor` describes,
+    /// breaks its constraint written `constraint`, a text.
+    BrokenConstraint {
+        value: Place,
+        descriptor: Place,
+        constraint: Place,
+    },
 }
 
 impl Failure {
@@ -723,6 +736,14 @@ impl Failure {
                 count,
                 nested,
             } => (RuntimeFn::ElementConflict, vec![positions, count, nested]),
+            Failure::BrokenConstraint {
+                value,
+                descriptor,
+                constraint,
+            } => (
+                RuntimeFn::BrokenConstraint,
+                vec![value, descriptor, constraint],
+            ),
         }
     }
 }
