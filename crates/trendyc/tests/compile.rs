@@ -1466,6 +1466,8 @@ fn types() {
             "-7.704e1",
             // The antipode.
             "position{latitude: 1.29e0, longitude: -1.4318e2}",
+            // The flight back: the components swapped.
+            "journey{destination: position{latitude: -1.29e0, longitude: 3.682e1}, origin: position{latitude: -1.205e1, longitude: -7.704e1}}",
             // South of the equator.
             "┌───────────────────────────────────────────────────┬────────────────┐",
             "│ at                                                │ name           │",
@@ -1473,6 +1475,15 @@ fn types() {
             "│ position{latitude: -2.027e1, longitude: 3.093e1}  │ Great Zimbabwe │",
             "│ position{latitude: -1.316e1, longitude: -7.255e1} │ Machu Picchu   │",
             "└───────────────────────────────────────────────────┴────────────────┘",
+            // On the equator.
+            "┌──────────────────────────────────────────────┬────────────────┐",
+            "│ at                                           │ name           │",
+            "├──────────────────────────────────────────────┼────────────────┤",
+            "│ position{latitude: 0e0, longitude: -7.255e1} │ Machu Picchu   │",
+            "│ position{latitude: 0e0, longitude: 3.093e1}  │ Great Zimbabwe │",
+            "│ position{latitude: 0e0, longitude: 3.544e1}  │ Petra          │",
+            "│ position{latitude: 0e0, longitude: 1.3573e2} │ Kinkaku-ji     │",
+            "└──────────────────────────────────────────────┴────────────────┘",
             "┌───────────────────────────────────────────────────┬─────────────┐",
             "│ at                                                │ stop        │",
             "├───────────────────────────────────────────────────┼─────────────┤",

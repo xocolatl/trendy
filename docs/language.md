@@ -1718,6 +1718,7 @@ operator main{} [
     var nairobi := value from (cities where name = "Nairobi"){at};
     call debug_value{v: nairobi};
     call debug_value{v: nairobi.latitude};
+    call debug_value{v: nairobi replace { latitude := 0e0 }};
     call debug_table{r: cities where at.latitude < -5e0};
 ];
 ```
@@ -1736,16 +1737,23 @@ operator main{} [
   type's name, nor a type a prelude operator's (A0057).
 - **`p.latitude` is a component's value,** with the dot of a tuple's
   attribute: TTM's `THE_LATITUDE(P)` (RM Prescription 5).
+- **`p replace { latitude := x }` is the value with a component
+  changed,** and the others as they were: shorthand for
+  `position{latitude: x, longitude: p.longitude}`. Inside the braces, the
+  components are in scope by name, and are computed from the old value,
+  all at once, each keeping its type, as in a tuple's
+  [`replace`](#substitution). Tutorial D has this expression for tuples
+  and relations, and changes a scalar's components only in a variable,
+  but TTM's case for those changes, that they don't depend on how the
+  selector is written (chapter 3), holds for values too: `replace` names
+  only the components that change.
 - **`update p { latitude := x };` changes a component** of a variable's
-  value, and keeps the others: it is shorthand for
-  `p := position{latitude: x, longitude: p.longitude};`, as Tutorial D's
-  `UPDATE` of a scalar variable is (TTM chapter 5). Inside the braces, the
-  components are in scope by name, as a tuple's attributes are in its
-  `update`, and each keeps its type. In an `assign` block, `update`s of
-  different components merge, and two of the same one conflict (R0009).
-  `p.latitude := x;`, as other languages assign a field, is fixed to the
-  `update`, with the type's selector for a value inside the variable's,
-  as in `update stop { at := position{latitude: x, longitude: at.longitude} };`
+  value: it is shorthand for `p := p replace { latitude := x };`, as
+  Tutorial D's `UPDATE` of a scalar variable is (TTM chapter 5). In an
+  `assign` block, `update`s of different components merge, and two of the
+  same one conflict (R0009). `p.latitude := x;`, as other languages assign
+  a field, is fixed to the `update`, with a `replace` for a value inside
+  the variable's, as in `update stop { at := at replace { latitude := x } };`
   (A0048).
 - **A value has no order:** values of a type of the program's own are
   equal when their components are, and compared only with `=` and `<>`;
@@ -1758,8 +1766,10 @@ operator main{} [
   `debug_table` and `to_text`: `position{latitude: -1.29e0, longitude:
   3.682e1}`, which reads back as the same value.
 - **A type is scalar,** not a tuple: its components are its
-  representation, not attributes, so nothing joins on them or projects
-  them. `tuple position { … }` is an error, fixed to the selector.
+  representation, not attributes, so nothing joins on them, and a value
+  has the components its type declares, so none is projected away, added,
+  removed or renamed (A0022). `tuple position { … }` is an error, fixed
+  to the selector.
 - **Types share a namespace with the headings,** and can be declared in
   any order. A component can be of any type, another of the program's
   own, a tuple or a relation, but not of its own type, directly or
@@ -2404,8 +2414,7 @@ operator main{} [
 | `d_insert r s;` | `r := r d_union s;`, which fails if a tuple of `s` is already in `r` (R0006) |
 | `delete r where p;` | `r := r where not (p);` |
 | `i_delete r s;` | `r := r i_minus s;`, which fails if a tuple of `s` isn't in `r` (R0007) |
-| `update r { a := x };` | `r := r replace { a := x };`, of a relation or a tuple |
-| `update p { c := x };` | `p := t{c: x, d: p.d};`, of a value of a type of the program's own, `t`, with components `c` and `d` (see [A program's own types](#a-programs-own-types)) |
+| `update r { a := x };` | `r := r replace { a := x };`, of a relation, a tuple or a value of a type of the program's own (see [A program's own types](#a-programs-own-types)) |
 | `update r { a := x } where p;` | `r := (r where not (p)) union ((r where p) replace { a := x });` |
 | `load a from r order [asc x];` | `a :=` the array of the tuples of `r`, in order (see [Loading a relation](#loading-a-relation)) |
 | `a[i] := x;` | `a :=` the array `a` with its element at position `i` changed to `x` (see [Changing an element](#changing-an-element)) |
@@ -3157,7 +3166,9 @@ operator main{} [];
 
 `r replace { price := price * 2 }` is the tuple, or each tuple of the
 relation, `r` with attributes it has given new values, each written
-`name := value`. The values are computed from the tuple's own attributes,
+`name := value`, and of a value of a type of the program's own, the value
+with components given new values (see
+[A program's own types](#a-programs-own-types)). The values are computed from the tuple's own attributes,
 in scope by name as in `extend`. It is Tutorial D's read-only `UPDATE`
 (*The Third Manifesto*, chapter 5), which is shorthand for `extend` under
 new names, `remove` of the old ones, and `rename` of the new.

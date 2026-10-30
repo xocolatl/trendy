@@ -1194,6 +1194,7 @@ impl<'a> Checker<'a> {
     ) -> Option<hir::Expr> {
         let operand_expr = postfix.operand()?;
         let operand = self.expr(&operand_expr, None, errors)?;
+        let noun = errors::Noun::assigned(&self.ty(&operand));
         let list = postfix.assignments()?;
         let keyword = postfix.operator()?;
         let assigned = Assigned {
@@ -1206,8 +1207,8 @@ impl<'a> Checker<'a> {
             operand,
             &assigned,
             |why| match why {
-                Unchanged::Empty => errors::empty_assign(assigning, postfix, &operand_expr),
-                Unchanged::OwnValues => errors::own_values_replaced(postfix, &operand_expr),
+                Unchanged::Empty => errors::empty_assign(assigning, noun, postfix, &operand_expr),
+                Unchanged::OwnValues => errors::own_values_replaced(noun, postfix, &operand_expr),
             },
             errors,
         )?;
@@ -1219,12 +1220,12 @@ impl<'a> Checker<'a> {
     /// says: each attribute's value is checked with the attributes of the
     /// tuple at hand in scope. A `replace`'s values have the types of the
     /// attributes they replace, and are computed from the old values, all
-    /// at once. An `update` of a value of a type of the program's own gives
-    /// its components new values in the same way: it is the value selected
-    /// from its components, a `replace` of them (TTM chapter 5's scalar
-    /// update). An attribute given its own value is an error, and
-    /// `unchanged` is the error for a list that leaves the operand as it
-    /// is.
+    /// at once. A `replace` or an `update` of a value of a type of the
+    /// program's own gives its components new values in the same way: it is
+    /// the value selected from its components, a `replace` of them (TTM
+    /// chapter 5's scalar update). An attribute given its own value is an
+    /// error, and `unchanged` is the error for a list that leaves the
+    /// operand as it is.
     pub(crate) fn assign_attributes(
         &mut self,
         operand: hir::Expr,
@@ -1243,7 +1244,7 @@ impl<'a> Checker<'a> {
             (hir::Type::Tuple(heading) | hir::Type::Relation(heading), _) => {
                 (heading, operand, None)
             }
-            (hir::Type::Defined(defined), ops::Assigning::Update) => {
+            (hir::Type::Defined(defined), ops::Assigning::Replace | ops::Assigning::Update) => {
                 (&defined.components, ops::components(operand), Some(defined))
             }
             _ => {
@@ -1257,11 +1258,7 @@ impl<'a> Checker<'a> {
                 return None;
             }
         };
-        let noun = if defined.is_some() {
-            errors::Noun::Component
-        } else {
-            errors::Noun::Attribute
-        };
+        let noun = errors::Noun::assigned(&ty);
         let assignments: Vec<(ast::Assign, String, Span)> = list
             .assignments()
             .filter_map(|assign| {
@@ -1274,10 +1271,11 @@ impl<'a> Checker<'a> {
             errors.push(unchanged(Unchanged::Empty));
             return None;
         }
-        // When every name is wrong for an `extend` or a `replace`, the
-        // other one is likely what was meant.
+        // When every name is wrong for an `extend` or a `replace` of a
+        // tuple or relation, the other one is likely what was meant.
         let keyword = trendy_syntax::span(keyword.text_range());
         let other = (assigning != ops::Assigning::Update
+            && defined.is_none()
             && assignments.iter().all(|(_, name, _)| {
                 heading.get(name).is_some() == (assigning == ops::Assigning::Extend)
             }))
@@ -1892,10 +1890,10 @@ fn changes_something(
 
 /// Whether `name`, at `span`, is right for `assigning` in an operand of type
 /// `ty`, written `operand`, after reporting why not: new for an `extend`,
-/// existing for a `replace` or an `update`, and one of the components of
-/// an `update`'s value of a type of the program's own. `other` is the
-/// keyword's span, if every name is wrong for it. Also the type a
-/// `replace`'s or an `update`'s value must have.
+/// existing for a `replace` or an `update`, and, of a value of a type of
+/// the program's own, one of its components. `other` is the keyword's
+/// span, if every name is wrong for it. Also the type a `replace`'s or an
+/// `update`'s value must have.
 fn assigned_name(
     assigning: ops::Assigning,
     name: &str,
@@ -1909,8 +1907,8 @@ fn assigned_name(
         hir::Type::Tuple(heading) | hir::Type::Relation(heading) => heading,
         hir::Type::Defined(defined) => {
             let Some(component) = defined.components.get(name) else {
-                errors.push(errors::updated_unknown_component(
-                    name, span, defined, operand,
+                errors.push(errors::replaced_unknown_component(
+                    assigning, name, span, defined, operand,
                 ));
                 return (false, None);
             };

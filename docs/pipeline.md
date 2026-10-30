@@ -633,10 +633,10 @@ operator named after it (`Signature::selects`), whose value is
 `Expr::Select` of the tuple of its parameters, so a call of it is checked,
 overloaded and folded as any call; no other operator can have the name
 (A0057), and one that has gives way to the selector. `v.c` is
-`Extract(Components(v), c)`, and `update v { c := x }` is
-`v := Select(t, Extend(Components(v), …))`, a `replace` of its
-components, which merges with others in an `assign` block as a tuple's
-does.
+`Extract(Components(v), c)`, and `v replace { c := x }` is
+`Select(t, Extend(Components(v), …))`, a `replace` of its components,
+which `update v { c := x }` assigns `v` and merges with others in an
+`assign` block as a tuple's does.
 Then it checks, in order, every operator's signature, its parameters and result type (`signatures`), so
 that anything can refer to an operator defined after it; the globals,
 which are the variables, whose initial values it evaluates, and the

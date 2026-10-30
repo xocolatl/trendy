@@ -1006,6 +1006,16 @@ pub(crate) enum Noun {
 }
 
 impl Noun {
+    /// What a `replace` or an `update` of a value of type `ty` gives new
+    /// values: the components of a type of the program's own, or else
+    /// attributes.
+    pub(crate) fn assigned(ty: &hir::Type) -> Noun {
+        match ty {
+            hir::Type::Defined(_) => Noun::Component,
+            _ => Noun::Attribute,
+        }
+    }
+
     fn one(self) -> &'static str {
         match self {
             Noun::Attribute | Noun::Projected | Noun::Key | Noun::Ordered => "attribute",
@@ -2350,13 +2360,12 @@ pub(crate) fn attribute_assigned(
                 target,
                 format!("a component of a `{t}`"),
             )
-            .with_note(format!("the components of a variable's value are changed by `update v {{ c := x }}`, shorthand for `v := {t}{{…}}` of `x` and the other components as they were; a component is no variable to assign"))
+                .with_note("the components of a variable's value are changed by `update v { c := x }`, shorthand for `v := v replace { c := x }`; a component is no variable to assign")
         }
     };
-    let noun = if of.is_some() {
-        "component"
-    } else {
-        "attribute"
+    let (noun, holder) = match of {
+        Some(_) => ("component", "variable"),
+        None => ("attribute", "tuple"),
     };
     match fix {
         Some((span, replacement, true)) => d.with_suggestion(
@@ -2367,12 +2376,9 @@ pub(crate) fn attribute_assigned(
             format!("assign the element with the {noun} changed"),
             vec![Edit { span, replacement }],
         ),
-        None if of.is_some() => {
-            d.with_help("give the variable a new value with the component changed, by `update`")
-        }
-        None => d.with_help(
-            "give the tuple a new value with the attribute replaced, by `update` or `replace`",
-        ),
+        None => d.with_help(format!(
+            "give the {holder} a new value with the {noun} replaced, by `update` or `replace`"
+        )),
     }
 }
 
@@ -2446,16 +2452,17 @@ pub(crate) fn own_values_updated(
     deleted(d, statement)
 }
 
-/// `postfix`, a `replace` of `operand`, that gives each attribute its own
-/// value.
+/// `postfix`, a `replace` of `operand`, that gives each attribute, or
+/// component, as `noun` says, its own value.
 pub(crate) fn own_values_replaced(
+    noun: Noun,
     postfix: &trendy_syntax::ast::PostfixExpr,
     operand: &Expr,
 ) -> Diagnostic {
     let (span, edit) = dropped(postfix, operand);
     Diagnostic::error(
         Code::NoChange,
-        "this `replace` gives each attribute its own value",
+        format!("this `replace` gives each {} its own value", noun.one()),
         span,
         "leaves the operand as it is",
     )
@@ -2651,7 +2658,8 @@ pub(crate) fn main_with_params(params: &trendy_syntax::ast::Heading) -> Diagnost
 }
 
 /// A projection, or the `operator` such as `remove`, written at `at`,
-/// applied to a value of type `ty`, which isn't a tuple or relation.
+/// applied to a value of type `ty`, which has no attributes, or, for a
+/// `replace` or an `update`, no components either.
 pub(crate) fn not_projectable(
     operator: Option<&str>,
     at: Span,
@@ -2659,6 +2667,10 @@ pub(crate) fn not_projectable(
     operand: &Expr,
 ) -> Diagnostic {
     let (message, label) = match operator {
+        Some(operator @ ("replace" | "update")) => (
+            format!("`{operator}` can't be applied to {}", plural(ty)),
+            format!("`{operator}` takes a tuple, a relation or a value with components"),
+        ),
         Some(operator) => (
             format!("`{operator}` can't be applied to {}", plural(ty)),
             format!("`{operator}` takes a tuple or relation"),
@@ -2668,12 +2680,19 @@ pub(crate) fn not_projectable(
             "a projection takes a tuple or relation".to_string(),
         ),
     };
-    Diagnostic::error(Code::WrongOperandType, message, at, label)
+    let d = Diagnostic::error(Code::WrongOperandType, message, at, label)
         .with_parameter_note(ty)
         .with_secondary(operand.span(), format!("this is `{ty}`"))
         .with_note(
-            "a projection, `r{a, b}`, `r remove {c}`, `r rename {a as b}`, `r extend { d := … }`, `r replace { a := … }`, `r wrap { w := {a} }` and `r unwrap {w}` work on the attributes of a tuple or relation",
-        )
+            "a projection, `r{a, b}`, `r remove {c}`, `r rename {a as b}`, `r extend { d := … }`, `r replace { a := … }`, `r wrap { w := {a} }` and `r unwrap {w}` work on the attributes of a tuple or relation, and `v replace { c := … }` on the components of a value of a type of the program's own",
+        );
+    match ty {
+        hir::Type::Defined(defined) => d.with_note(format!(
+            "`{}` is a scalar type, whose values have the components it declares: `v.c` reads one and `replace` gives them new values, but none can be added, removed or renamed",
+            defined.name
+        )),
+        _ => d,
+    }
 }
 
 /// What every join does with the operands' common attributes, for notes.
@@ -3645,12 +3664,15 @@ pub(crate) fn attribute_exists(
 }
 
 /// `extend {}` or `replace {}`, as `assigning` says, written `postfix`
-/// after `operand`, which changes nothing.
+/// after `operand`, which changes nothing. A `replace` is of attributes or
+/// components, as `noun` says.
 pub(crate) fn empty_assign(
     assigning: crate::ops::Assigning,
+    noun: Noun,
     postfix: &trendy_syntax::ast::PostfixExpr,
     operand: &Expr,
 ) -> Diagnostic {
+    let many = noun.many();
     match assigning {
         crate::ops::Assigning::Extend => empty_list(
             postfix,
@@ -3661,8 +3683,10 @@ pub(crate) fn empty_assign(
         crate::ops::Assigning::Replace => empty_list(
             postfix,
             operand,
-            ("replaces nothing", "no attributes"),
-            "`replace` takes attributes the operand has, each `name := value`; with none it would change nothing",
+            ("replaces nothing", &format!("no {many}")),
+            &format!(
+                "`replace` takes {many} the operand has, each `name := value`; with none it would change nothing"
+            ),
         ),
         crate::ops::Assigning::Update => unreachable!("an `update` is a statement"),
     }
@@ -3740,18 +3764,25 @@ pub(crate) fn replaced_unknown(
     }
 }
 
-/// The component `name`, at `span`, which an `update` of `operand`, a value
-/// of the type of the program's own `defined`, gives a new value, but
-/// which the type hasn't.
-pub(crate) fn updated_unknown_component(
+/// The component `name`, at `span`, which a `replace` or an `update`, as
+/// `assigning` says, of `operand`, a value of the type of the program's own
+/// `defined`, gives a new value, but which the type hasn't.
+pub(crate) fn replaced_unknown_component(
+    assigning: crate::ops::Assigning,
     name: &str,
     span: Span,
     defined: &hir::Defined,
     operand: &Expr,
 ) -> Diagnostic {
     let rename = closest(name, defined.components.named().map(|(c, _)| c));
+    let has = if assigning == crate::ops::Assigning::Update {
+        "the variable's value has"
+    } else {
+        "the operand has"
+    };
     let context = format!(
-        "`update` gives components the variable's value has new values of the same types, and {}",
+        "`{}` gives components {has} new values of the same types, and {}",
+        assigning.keyword(),
         components_note(defined)
     );
     unknown_attribute(Noun::Component, name, span, &context, rename, None)

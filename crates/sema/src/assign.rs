@@ -346,8 +346,7 @@ fn element(
 /// target, after a variable or an element of one, and the value names
 /// none of the attributes or components that the fix brings into scope:
 /// an `update` of the variable, or an assignment of the element, with a
-/// `replace` for each tuple inside, and a selector for each value of a
-/// type of the program's own.
+/// `replace` for each tuple or value inside.
 fn attribute_assigned(
     clause: &Clause,
     written: &ast::Expr,
@@ -364,7 +363,9 @@ fn attribute_assigned(
     }
     attributes.reverse();
     // Whether the names start at a variable, rather than at an element of
-    // one, and the type each is in, outermost first.
+    // one; the attributes or components each is one of, outermost first;
+    // and the type of the program's own the last is a component of, if it
+    // is one.
     let path = (|| {
         let (name, positions) = target_path(&base)?;
         let ident = name.ident()?;
@@ -376,100 +377,59 @@ fn attribute_assigned(
             };
             ty = *element;
         }
-        let mut holders = Vec::new();
+        let mut levels = Vec::new();
+        let mut of = None;
         for attribute in &attributes {
-            let inner = match &ty {
-                hir::Type::Tuple(heading) => heading.get(attribute)?.clone(),
-                hir::Type::Defined(defined) => defined.components.get(attribute)?.clone(),
+            let level = match ty {
+                hir::Type::Tuple(heading) => {
+                    of = None;
+                    heading
+                }
+                hir::Type::Defined(defined) => {
+                    let components = defined.components.clone();
+                    of = Some(defined);
+                    components
+                }
                 _ => return None,
             };
-            holders.push(std::mem::replace(&mut ty, inner));
+            ty = level.get(attribute)?.clone();
+            levels.push(level);
         }
-        Some((positions.is_empty(), holders))
+        Some((positions.is_empty(), levels, of))
     })();
     let fix = (|| {
-        let (variable, holders) = path.as_ref()?;
-        // What each level's change brings into scope, where the fix gives
-        // the last name its value: the variable's `update`, and each
-        // tuple's `replace`, but not a selector.
-        let opened: Vec<Option<&hir::Heading>> = holders
-            .iter()
-            .enumerate()
-            .map(|(i, holder)| match holder {
-                hir::Type::Tuple(heading) => Some(heading),
-                hir::Type::Defined(defined) if i == 0 && *variable => Some(&defined.components),
-                _ => None,
-            })
-            .collect();
+        let (variable, levels, _) = path.as_ref()?;
+        // The variable's `update`, or the element's `replace`, and the
+        // `replace` of each level inside, bring the level's names into
+        // scope where the fix gives the last name its value.
         let value = clause.operand()?;
         let captured = value
             .syntax()
             .descendants()
             .filter_map(ast::NameRef::cast)
             .filter_map(|name| name.ident())
-            .any(|ident| {
-                opened
-                    .iter()
-                    .flatten()
-                    .any(|h| h.get(ident.text()).is_some())
-            });
+            .any(|ident| levels.iter().any(|h| h.get(ident.text()).is_some()));
         if captured {
             return None;
         }
-        // Each level's value, as it is written where its change goes: in
-        // scope, if the level outside brings it there, or else read from
-        // that level's.
-        let base = base.syntax().text().to_string();
-        let mut levels = vec![base.clone()];
-        for (i, attribute) in attributes.iter().enumerate().take(attributes.len() - 1) {
-            levels.push(match opened[i] {
-                Some(_) => attribute.clone(),
-                None => format!("{}.{attribute}", levels[i]),
-            });
-        }
-        // `a := a replace { b := x }`, inside out.
+        // `a := a replace { b := b replace { c := x } }`, inside out, each
+        // level inside in scope where its change goes.
         let mut nested = value.syntax().text().to_string();
-        for i in (1..attributes.len()).rev() {
-            nested = changed(&holders[i], &levels[i], &attributes[i], &nested);
+        for (outer, inner) in attributes.iter().zip(&attributes[1..]).rev() {
+            nested = format!("{outer} replace {{ {inner} := {nested} }}");
         }
         let first = &attributes[0];
+        let base = base.syntax().text().to_string();
         let replacement = if *variable {
             format!("update {base} {{ {first} := {nested} }}")
         } else {
-            format!("{base} := {}", changed(&holders[0], &base, first, &nested))
+            format!("{base} := {base} replace {{ {first} := {nested} }}")
         };
         Some((clause.span(), replacement, *variable))
     })();
-    let of = match path.as_ref().and_then(|(_, holders)| holders.last()) {
-        Some(hir::Type::Defined(defined)) => Some(defined),
-        _ => None,
-    };
+    let of = path.as_ref().and_then(|(_, _, of)| of.as_ref());
     let name = attributes.last()?;
     Some(errors::attribute_assigned(written.span(), name, of, fix))
-}
-
-/// The value written `written`, of type `ty`, a tuple or a type of the
-/// program's own, with its attribute or component `name` given the value
-/// written `new`, as a fix writes it: a `replace` of a tuple, or the type's
-/// selector, of `new` and the value's other components.
-fn changed(ty: &hir::Type, written: &str, name: &str, new: &str) -> String {
-    match ty {
-        hir::Type::Defined(defined) => {
-            let components: Vec<String> = defined
-                .components
-                .named()
-                .map(|(component, _)| {
-                    if component == name {
-                        format!("{component}: {new}")
-                    } else {
-                        format!("{component}: {written}.{component}")
-                    }
-                })
-                .collect();
-            format!("{}{{{}}}", defined.name, components.join(", "))
-        }
-        _ => format!("{written} replace {{ {name} := {new} }}"),
-    }
 }
 
 /// `load`, the clause `clause`, of `target`: of a relation into an array
@@ -1017,10 +977,7 @@ fn update(
         list: &list,
         operand: target.written,
     };
-    let noun = match target.assignee.ty {
-        hir::Type::Defined(_) => errors::Noun::Component,
-        _ => errors::Noun::Attribute,
-    };
+    let noun = errors::Noun::assigned(&target.assignee.ty);
     let unchanged = |why| match why {
         Unchanged::Empty => errors::empty_update(noun, &list, &statement),
         Unchanged::OwnValues => errors::own_values_updated(noun, clause.span(), &statement),

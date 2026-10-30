@@ -3,8 +3,9 @@
    of their own inside the type's (The Third Manifesto, RM Prescription
    4). Their values are compared with `=` and `<>` only, as in
    comparisons.trendy, and a variable's components are changed with
-   `update`, as in variables.trendy. Each result below is printed twice,
-   folded when compiling and computed when running. */
+   `update`, as in variables.trendy, which is shorthand for the `replace`
+   below. Each result below is printed twice, folded when compiling and
+   computed when running. */
 
 /* A place on Earth, by its latitude and longitude, in degrees. */
 type position { { latitude: approximate, longitude: approximate } };
@@ -39,6 +40,15 @@ operator read_components{p: position, j: journey} [
     call debug_value{v: j.destination.longitude};
 ];
 
+/* `replace`: the value with components given new values, and the others
+   as they were. The components are in scope by name, and the new values
+   are computed from the old ones, all at once: here, the flight back. */
+var flight_back := flight replace { origin := destination, destination := origin };
+
+operator turn_back{j: journey} [
+    call debug_value{v: j replace { origin := destination, destination := origin }};
+];
+
 /* The program's operators take and give its types' values as they do any
    others: here, the position on the other side of the Earth. */
 operator antipode{p: position}: position [
@@ -68,6 +78,14 @@ operator south_of{r: relation { name: text, at: position }, latitude: approximat
     call debug_table{r: r where at.latitude < latitude};
 ];
 
+/* The places on the equator due north or south of the landmarks: each
+   tuple's position, with its latitude replaced. */
+var on_equator := landmarks replace { at := at replace { latitude := 0e0 } };
+
+operator to_equator{r: relation { name: text, at: position }} [
+    call debug_table{r: r replace { at := at replace { latitude := 0e0 } }};
+];
+
 /* A journey's stops, as a relation. */
 operator stops{j: journey}: relation { stop: text, at: position } [
     relation {
@@ -88,7 +106,9 @@ operator main{} [
     call debug_value{v: south};
     call debug_value{v: west};
     call debug_value{v: far};
+    call debug_value{v: flight_back};
     call debug_table{r: southern};
+    call debug_table{r: on_equator};
     call debug_table{r: flight_stops};
 
     call select_position{
@@ -101,7 +121,11 @@ operator main{} [
 
     call far_side{p: nairobi};
 
+    call turn_back{j: flight};
+
     call south_of{r: landmarks, latitude: 0e0};
+
+    call to_equator{r: landmarks};
 
     call list_stops{j: flight};
 ];

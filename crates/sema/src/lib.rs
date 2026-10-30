@@ -8115,7 +8115,7 @@ var stops := array [here];
         );
         // A component assigned on its own, as other languages assign a
         // field, fixed to an `update` of the variable, or an assignment of
-        // the element, with a selector for a value inside.
+        // the element, with a `replace` for a value inside.
         let source = main("here.latitude := 0e0;");
         assert_eq!(
             messages(&source),
@@ -8124,16 +8124,118 @@ var stops := array [here];
         assert_eq!(fix(&source), main("update here { latitude := 0e0 };"));
         assert_eq!(
             fix(&main("stop.at.latitude := 0e0;")),
-            main("update stop { at := position{latitude: 0e0, longitude: at.longitude} };")
+            main("update stop { at := at replace { latitude := 0e0 } };")
         );
         assert_eq!(
             fix(&main("stops[1].latitude := 0e0;")),
-            main("stops[1] := position{latitude: 0e0, longitude: stops[1].longitude};")
+            main("stops[1] := stops[1] replace { latitude := 0e0 };")
         );
-        // None when the value names a component, which `update` brings
-        // into scope.
+        // None when the value names a component, which `update` or
+        // `replace` brings into scope.
         let source = main("here.latitude := longitude;");
         assert_eq!(fix(&source), source);
+        let source = main("stop.at.latitude := longitude;");
+        assert_eq!(fix(&source), source);
+    }
+
+    #[test]
+    fn a_programs_own_types_components_are_replaced() {
+        // `replace` is the value with components given new values, each
+        // computed with the components in scope, all at once, and the
+        // others kept: of a value nested in another, or in a relation's
+        // tuples, too.
+        let source = "type position { { latitude: approximate, longitude: approximate } };
+type journey { { origin: position, destination: position } };
+var here := position{latitude: 1e0, longitude: 2e0};
+var flight := journey{origin: here, destination: position{latitude: 3e0, longitude: 4e0}};
+var equator := here replace { latitude := 0e0 };
+var back := flight replace { origin := destination, destination := origin };
+var east := flight replace { destination := destination replace { longitude := longitude + 1e0 } };
+var landmarks := relation { { name: \"Petra\", at: here } } replace { at := at replace { latitude := -latitude } };
+";
+        let vars = variables(source);
+        assert_eq!(
+            vars[2].init.to_string(),
+            "position{latitude: 0e0, longitude: 2e0}"
+        );
+        assert_eq!(
+            vars[3].init.to_string(),
+            "journey{destination: position{latitude: 1e0, longitude: 2e0}, origin: position{latitude: 3e0, longitude: 4e0}}"
+        );
+        assert_eq!(
+            vars[4].init.to_string(),
+            "journey{destination: position{latitude: 3e0, longitude: 5e0}, origin: position{latitude: 1e0, longitude: 2e0}}"
+        );
+        assert_eq!(
+            vars[5].init.to_string(),
+            "relation { at: position, name: text } { { at: position{latitude: -1e0, longitude: 2e0}, name: \"Petra\" } }"
+        );
+        // A value known only when running is selected from its components,
+        // replaced.
+        let program = analyze_str(&format!(
+            "{source}operator north{{p: position}}: position [ p replace {{ latitude := latitude + 1e0 }} ];{MAIN}"
+        ))
+        .unwrap();
+        let north = program
+            .operators
+            .iter()
+            .find(|op| op.name == "north")
+            .unwrap();
+        let hir::OperatorKind::ReadOnly { value, .. } = &north.kind else {
+            panic!("a read-only operator");
+        };
+        let hir::Expr::At(_, value) = value else {
+            panic!("the body's value, where it is: {value:?}");
+        };
+        assert!(matches!(
+            &**value,
+            hir::Expr::Select(_, components) if matches!(**components, hir::Expr::Extend(..))
+        ));
+    }
+
+    #[test]
+    fn a_programs_own_types_replace_errors() {
+        let declared = "type position { { latitude: approximate, longitude: approximate } };
+var here := position{latitude: -1.29e0, longitude: 36.82e0};
+";
+        let var = |value: &str| format!("{declared}var v := {value};{MAIN}");
+        // A component that isn't one, fixed to the closest, with no `extend`
+        // to suggest.
+        let source = var("here replace { lattitude := 0e0 }");
+        assert_eq!(messages(&source), ["unknown component `lattitude`"]);
+        assert_eq!(fix(&source), var("here replace { latitude := 0e0 }"));
+        // A component keeps its type, and is given once.
+        assert_eq!(
+            codes(&var("here replace { latitude := \"south\" }")),
+            [Code::TypeMismatch]
+        );
+        assert_eq!(
+            codes(&var("here replace { latitude := 0e0, latitude := 1e0 }")),
+            [Code::DuplicateAttribute]
+        );
+        // One that changes nothing, fixed by dropping it.
+        let source = var("here replace { latitude := latitude }");
+        assert_eq!(
+            messages(&source),
+            ["this `replace` gives each component its own value"]
+        );
+        assert_eq!(fix(&source), var("here"));
+        assert_eq!(fix(&var("here replace {}")), var("here"));
+        // The type's components are the ones it declares: none are added,
+        // removed or renamed.
+        for changed in [
+            "here extend { altitude := 0e0 }",
+            "here remove {latitude}",
+            "here rename {latitude as lat}",
+            "here{latitude}",
+        ] {
+            assert_eq!(codes(&var(changed)), [Code::WrongOperandType]);
+        }
+        // A value without components has none to replace.
+        assert_eq!(
+            messages(&var("1 replace { a := 2 }")),
+            ["`replace` can't be applied to integers"]
+        );
     }
 
     #[test]
