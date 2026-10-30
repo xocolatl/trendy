@@ -2754,6 +2754,104 @@ mod tests {
     }
 
     #[test]
+    fn square_roots_and_trigonometry_when_compiling() {
+        let r = |x| hir::Value::Approximate(hir::Approximate::new(x));
+        assert_eq!(init("var a := pi{};", "a"), r(std::f64::consts::PI));
+        assert_eq!(
+            init("var a := sqrt{of: 3e0 * 3e0 + 4e0 * 4e0};", "a"),
+            r(5.0)
+        );
+        assert_eq!(init("var a := sqrt{of: -0e0};", "a"), r(0.0));
+        assert_eq!(init("var a := cos{of: pi{}};", "a"), r(-1.0));
+        assert_eq!(init("var a := sin{of: pi{} / 2e0};", "a"), r(1.0));
+        assert_eq!(
+            init("var a := atan2{y: 1e0, x: -1e0};", "a"),
+            r(3.0 * std::f64::consts::FRAC_PI_4)
+        );
+        // The origin's angle is 0, as the positive x axis's is.
+        assert_eq!(init("var a := atan2{y: 0e0, x: 0e0};", "a"), r(0.0));
+        // A negative number has no square root.
+        let source = format!("var a := sqrt{{of: 1e0 - 5e0}};{MAIN}");
+        let errors = errors(&source);
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].code, Code::NoResult);
+        assert_eq!(errors[0].message, "-4e0 has no square root");
+        assert_eq!(
+            &source[errors[0].span().start..errors[0].span().end],
+            "sqrt{of: 1e0 - 5e0}"
+        );
+    }
+
+    #[test]
+    fn constants_are_called() {
+        // As a value, with the braces of its call, and as other languages
+        // write it: in another case, as C does, and with its library.
+        for written in ["pi", "PI", "Pi", "M_PI", "math.pi", "Math.PI", "math.Pi"] {
+            let source = format!("var a := 2e0 * {written};{MAIN}");
+            let errors = errors(&source);
+            assert_eq!(errors.len(), 1, "{errors:#?}");
+            let fixed = fix(&source);
+            assert_eq!(fixed, format!("var a := 2e0 * pi{{}};{MAIN}"), "{written}");
+            assert!(analyze_str(&fixed).is_ok(), "{fixed}");
+        }
+        // Not an operator with parameters, whose arguments the fix can't
+        // know, nor a library's other members.
+        for written in ["sqrt", "SQRT", "math.sqrt", "math.e"] {
+            let source = format!("var a := {written};{MAIN}");
+            let errors = errors(&source);
+            assert!(errors[0].suggestions.is_empty(), "{written}: {errors:#?}");
+        }
+        let source = format!("var a := sqrt;{MAIN}");
+        assert_eq!(
+            errors(&source)[0].help,
+            ["call it with its arguments: the parameters are `sqrt{of: approximate}`"]
+        );
+        // An update operator is called by a statement.
+        let source = format!("var a := main;{MAIN}");
+        assert_eq!(
+            errors(&source)[0].help,
+            ["to invoke it, write a statement: `call main{…};`"]
+        );
+    }
+
+    #[test]
+    fn other_languages_mathematics() {
+        // Names of the prelude's operators.
+        for (written, ours) in [("sine", "sin"), ("cosine", "cos"), ("arctan2", "atan2")] {
+            let args = if ours == "atan2" {
+                "y: 1e0, x: 1e0"
+            } else {
+                "of: 1e0"
+            };
+            let source = format!("var a := {written}{{{args}}};{MAIN}");
+            let fixed = fix(&source);
+            assert_eq!(
+                fixed,
+                format!("var a := {ours}{{{args}}};{MAIN}"),
+                "{written}"
+            );
+            assert!(analyze_str(&fixed).is_ok(), "{fixed}");
+        }
+        // Operators the prelude hasn't, which are no misspellings of those
+        // it has, as `log` is close to `cos`, `asin` to `sin` and `atan` to
+        // `atan2`, and Pascal's `sqr` squares where BASIC's is a root.
+        for (written, help) in [
+            ("tan", "sin{of: x} / cos{of: x}"),
+            ("atan", "atan2{y: x, x: 1e0}"),
+            ("abs", "if x < 0e0 then -x else x"),
+            ("sqr", "`x * x` is the square"),
+            ("log", "an operator of the program's own"),
+            ("asin", "an operator of the program's own"),
+        ] {
+            let source = format!("var a := {written}{{of: 1e0}};{MAIN}");
+            let errors = errors(&source);
+            assert_eq!(errors[0].code, Code::UnknownName, "{written}");
+            assert!(errors[0].suggestions.is_empty(), "{written}: {errors:#?}");
+            assert!(errors[0].help[0].contains(help), "{written}: {errors:#?}");
+        }
+    }
+
+    #[test]
     fn division_operators_by_type() {
         let source = format!(
             "var a := 7 / 2;\nvar b := 7e0 div 2e0;\nvar c := 7e0 mod 2e0;\nvar d: integer := 1/2;{MAIN}"

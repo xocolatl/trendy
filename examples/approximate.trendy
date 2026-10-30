@@ -6,12 +6,29 @@ var tiny := 1e-300 / 1e10;
 var rounded := to_approximate{from: 9007199254740993};
 var parsed := parse_approximate{from: "2.5"};
 
+/* π, the approximate number nearest it, and square roots and
+   trigonometry, of angles in radians: computed the same way on every
+   machine, so folded as they run. */
+var circumference := 2e0 * pi{} * 1.5e0;
+var hypotenuse := sqrt{of: 3e0 * 3e0 + 4e0 * 4e0};
+var half_turn := cos{of: pi{}};
+var upward := atan2{y: 1e0, x: 0e0};
+
 operator arithmetic{a: approximate, b: approximate} [
     call debug_value{v: -a};
     call debug_value{v: a + b};
     call debug_value{v: a - b};
     call debug_value{v: a * b};
     call debug_value{v: a / b};
+];
+
+/* The square root of a² + b², the sine and cosine of `a`, and the
+   angle of the point (a, b), from -π, exclusive, to π. */
+operator trigonometry{a: approximate, b: approximate} [
+    call debug_value{v: sqrt{of: a * a + b * b}};
+    call debug_value{v: sin{of: a}};
+    call debug_value{v: cos{of: a}};
+    call debug_value{v: atan2{y: b, x: a}};
 ];
 
 /* The approximate number nearest `n`, which is `n` up to 2^53. */
@@ -32,6 +49,10 @@ operator main{} [
     call debug_value{v: tiny};
     call debug_value{v: rounded};
     call debug_value{v: parsed};
+    call debug_value{v: circumference};
+    call debug_value{v: hypotenuse};
+    call debug_value{v: half_turn};
+    call debug_value{v: upward};
     call arithmetic{a: 7e0, b: 2e0};
     call arithmetic{a: 0.1e0, b: 0.2e0};
     call arithmetic{a: 0e0, b: -1e0};
@@ -42,4 +63,7 @@ operator main{} [
     call parse{t: "6650"};
     call parse{t: "1.5E-3"};
     call parse{t: "-0e0"};
+    call trigonometry{a: 3e0, b: 4e0};
+    call trigonometry{a: pi{} / 6e0, b: -1e0};
+    call trigonometry{a: -1e0, b: 0e0};
 ];

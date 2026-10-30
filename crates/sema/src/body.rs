@@ -1091,7 +1091,7 @@ impl Names for BodyNames<'_, '_> {
             return Lookup::Reported;
         }
         if self.cx.namespaces.operator(name).is_some() {
-            errors.push(errors::operator_as_value(name, span));
+            errors.push(errors::operator_as_value(name, span, self.cx.operators));
             return Lookup::Reported;
         }
         Lookup::Unknown

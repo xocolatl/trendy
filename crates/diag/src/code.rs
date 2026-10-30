@@ -161,6 +161,7 @@ codes! {
     MalformedCsv => "R0015",
     CsvColumns => "R0016",
     BrokenConstraint => "R0017",
+    NoResult => "R0018",
     Internal => "X0000",
 }
 

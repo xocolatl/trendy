@@ -10,8 +10,8 @@
 
 /* Lengths and angles. A length, here a `distance`, since the prelude's
    `length` of an array has the name, is never negative, and an angle is in
-   radians, from 0 up to a full turn; both are ordinal in Tutorial D, and
-   ordered here. */
+   radians, from 0 up to a full turn, which TTM writes `2 * 3.14159`; both
+   are ordinal in Tutorial D, and ordered here. */
 type distance {
     { m: approximate },
     constraint m >= 0e0,
@@ -19,39 +19,47 @@ type distance {
 };
 type angle {
     { rho: approximate },
-    constraint rho >= 0e0 and rho < 2e0 * 3.14159e0,
+    constraint rho >= 0e0 and rho < 2e0 * pi{},
     order [asc rho],
 };
 
-/* A point in two-dimensional space, by its cartesian coordinates, within
-   the circle of radius 100 around the origin, as RM Prescription 23 has
-   it: TTM writes `SQRT ( X ** 2 + Y ** 2 ) <= 100.0`. A point has no
-   order.
+/* A point in two-dimensional space, by its cartesian coordinates or its
+   polar ones, within the circle of radius 100 around the origin, as RM
+   Prescription 23 has it: TTM writes `SQRT ( X ** 2 + Y ** 2 ) <= 100.0`
+   of the cartesian ones and `R <= LENGTH ( 100.0 )` of the polar ones,
+   which is the same constraint, since a point's distance from the origin
+   is that square root. A constraint can name either's components. A point
+   has no order.
 
-   TTM's polar representation, `POSSREP POLAR { R LENGTH, THETA ANGLE }`,
-   needs square roots and trigonometry, which trendy hasn't yet. It will
-   read, beside the cartesian one, with the origin's angle 0, as RM
-   Prescription 8 needs, so that every point has one polar
-   representation:
-
-     { r: distance, theta: angle }
-         to { x := r.m * cos{of: theta.rho}, y := r.m * sin{of: theta.rho} }
-         from {
-             r := distance{m: sqrt{of: x * x + y * y}},
-             theta := angle{rho: turn{of: atan2{y: y, x: x}}},
-         },
-     constraint r <> distance{m: 0e0} or theta = angle{rho: 0e0},
-
-   And DIST, the distance between two points:
-
-     operator dist{p1: point, p2: point}: distance [
-         distance{m: sqrt{of: (p1.x - p2.x) * (p1.x - p2.x) + (p1.y - p2.y) * (p1.y - p2.y)}}
-     ];
-*/
+   Its values are stored by their cartesian coordinates, from which the
+   origin's angle is 0, so that it has one polar representation, as RM
+   Prescription 8 needs, and TTM's constraint on its polar one, `IF R =
+   LENGTH ( 0.0 ) THEN THETA = ANGLE ( 0.0 ) END IF`, always holds. A polar
+   selection of the origin at another angle gives the origin. */
 type point {
     { x: approximate, y: approximate },
-    constraint x * x + y * y <= 100e0 * 100e0,
+    { r: distance, theta: angle }
+        to { x := r.m * cos{of: theta.rho}, y := r.m * sin{of: theta.rho} }
+        from { r := distance{m: sqrt{of: x * x + y * y}}, theta := direction{y: y, x: x} },
+    constraint r <= distance{m: 100e0},
 };
+
+/* The angle from the positive x axis to the point (x, y): `atan2` gives
+   one from -π, exclusive, to π, and a negative one is that much short of
+   a full turn, unless so little short that the nearest approximate number
+   is the full turn itself, which is the angle 0. */
+operator direction{y: approximate, x: approximate}: angle [
+    var rho := atan2{y: y, x: x};
+    var turned := if rho < 0e0 then rho + 2e0 * pi{} else rho;
+    angle{rho: if turned < 2e0 * pi{} then turned else 0e0}
+];
+
+/* The distance between two points (TTM's DIST). */
+operator dist{p1: point, p2: point}: distance [
+    var dx := p1.x - p2.x;
+    var dy := p1.y - p2.y;
+    distance{m: sqrt{of: dx * dx + dy * dy}}
+];
 
 /* A line segment, from one point to another (TTM's LINESEG). */
 type lineseg { { begin: point, end: point } };
@@ -80,6 +88,15 @@ operator reflect{p: point}: point [
 
 var p := point{x: 5e0, y: 2.5e0};
 var reflected := reflect{p: p};
+
+/* A point's polar coordinates, the reflected point's half a turn from
+   the point's, and a point selected by them: π/2 is no approximate
+   number, so its cosine isn't 0, and the point is only nearly on the y
+   axis. */
+var polar := tuple { r: reflected.r, theta: reflected.theta };
+var apart := dist{p1: p, p2: reflected};
+var north := point{r: distance{m: 3e0}, theta: angle{rho: pi{} / 2e0}};
+var origin := point{r: distance{m: 0e0}, theta: angle{rho: 1e0}};
 
 /* `THE_X ( P ) := 2.0`: a component changed with `update`, and one of a
    value inside another, `THE_X ( THE_BEGIN ( LS ) ) := 6.5`. */
@@ -111,11 +128,16 @@ var triangle := polygon{vertices: relation {
 var corners := count{r: triangle.vertices};
 
 operator geometry{p: point, shape: polygon} [
-    call debug_value{v: reflect{p: p}};
+    var reflected := reflect{p: p};
+    call debug_value{v: reflected};
+    call debug_value{v: tuple { r: reflected.r, theta: reflected.theta }};
+    call debug_value{v: dist{p1: p, p2: reflected}};
+    call debug_value{v: point{r: distance{m: 3e0}, theta: angle{rho: pi{} / 2e0}}};
+    call debug_value{v: point{r: distance{m: 0e0}, theta: angle{rho: 1e0}}};
     var q := p;
     update q { x := 2e0 };
     call debug_value{v: q};
-    var ls := lineseg{begin: p, end: reflect{p: p}};
+    var ls := lineseg{begin: p, end: reflected};
     update ls { begin := begin replace { x := 6.5e0 } };
     call debug_value{v: ls};
     var e := ellipse{a: distance{m: 5e0}, b: distance{m: 4e0}, ctr: p};
@@ -126,6 +148,10 @@ operator geometry{p: point, shape: polygon} [
 
 operator main{} [
     call debug_value{v: reflected};
+    call debug_value{v: polar};
+    call debug_value{v: apart};
+    call debug_value{v: north};
+    call debug_value{v: origin};
     call debug_value{v: moved};
     call debug_value{v: segment};
     call debug_value{v: squashed};

@@ -601,6 +601,7 @@ dependencies = [
 name = "trendy_numeric"
 version = "0.1.0"
 dependencies = [
+ "libm",
  "trendy_text",
 ]
 

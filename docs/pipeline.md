@@ -33,7 +33,11 @@ walk the relation by its descriptor, and compute as sema folds them, with
 (`trendy_rt_parse_integer`, `trendy_rt_parse_approximate`), which read
 their text as sema does, also with `trendy_numeric`, and `parse_boolean`
 (`trendy_rt_parse_boolean`), with `trendy_text`; each stops the program
-with the text for one that isn't a value of its type (R0014). `debug_value` and `debug_table`, update operators, are runtime calls
+with the text for one that isn't a value of its type (R0014). `sqrt`,
+`sin`, `cos` and `atan2` are runtime calls too (`trendy_rt_sqrt`,
+`trendy_rt_sin`, `trendy_rt_cos`, `trendy_rt_atan2`), with
+`trendy_numeric`, and `sqrt` stops the program for a negative number
+(R0018). `debug_value` and `debug_table`, update operators, are runtime calls
 given their argument and its type's descriptor (`trendy_rt_debug_value`,
 `trendy_rt_debug_table`). `to_text` is
 a runtime call, which writes the value as `debug_value` does; folded, it
@@ -89,8 +93,8 @@ rules for text literals, so the compiler, which reads them and writes them
 in messages and in `to_text`'s folded values, and the runtime, which writes
 them, can't disagree, and so the words `parse_boolean` reads
 (`parse_boolean`), and why a text is no value of a type (`Unparsable`).
-**`trendy_numeric`**, `no_std` too, and depending only on `trendy_text`,
-holds the exact sums
+**`trendy_numeric`**, `no_std` too, and depending only on `trendy_text`
+and `libm`, holds the exact sums
 and products that `sum` and `product` fold and run with, each rounded once
 at the end (`nearest`), so that neither depends on the order of a
 relation's tuples, which has no meaning. A sum of integers is an `i128`,
@@ -106,7 +110,10 @@ in full (`Exact`), in memory the caller gives, which the runtime allocates
 and frees, and in time quadratic in the number of factors. It also holds
 the rules for reading numbers from text, which `parse_integer` and
 `parse_approximate` fold and run with (`parse_integer`,
-`parse_approximate`).
+`parse_approximate`), and the square roots and trigonometry `sqrt`,
+`sin`, `cos` and `atan2` fold and run with, which are `libm`'s, written in
+Rust rather than the platform's C library, so that a result is the same
+folded as run, on every machine.
 
 ```mermaid
 flowchart TD
@@ -1654,7 +1661,7 @@ section above that describes it, and create the crate.
 ```layers
 # crate          dependencies
 trendy_text    :
-trendy_numeric : trendy_text
+trendy_numeric : trendy_text libm
 trendy_prelude :
 trendy_diag    : serde_json
 trendy_syntax  : trendy_diag trendy_text rowan

@@ -90,6 +90,28 @@ builtin operator parse_approximate{from: text}: approximate;
    else, not even spaces. Other text fails (R0014). */
 builtin operator parse_boolean{from: text}: boolean;
 
+/* π, the ratio of a circle's circumference to its diameter: the
+   approximate number nearest it. */
+operator pi{}: approximate [
+    3.141592653589793e0
+];
+
+/* The square root of `of`: the approximate number nearest it, correctly
+   rounded, as IEEE 754 has it. A negative number has none, and the program
+   fails (R0018). */
+builtin operator sqrt{of: approximate}: approximate;
+
+/* The sine of `of`, an angle in radians. */
+builtin operator sin{of: approximate}: approximate;
+
+/* The cosine of `of`, an angle in radians. */
+builtin operator cos{of: approximate}: approximate;
+
+/* The angle, in radians, from the positive x axis to the point (x, y), from
+   -π, exclusive, to π: 0 for the origin, as for any point on the positive x
+   axis. */
+builtin operator atan2{y: approximate, x: approximate}: approximate;
+
 /* Read the lines of the text file at `path` into `lines`, in the file's
    order, so that its first line is the array's element 1. `path` is
    relative to the directory the program runs in, unless it is absolute.

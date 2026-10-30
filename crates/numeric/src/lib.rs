@@ -1,11 +1,14 @@
-//! Sums and products of numbers, exact before they are rounded, and numbers
-//! read from text, shared by the compiler (which evaluates `sum`, `product`,
-//! `parse_integer` and `parse_approximate` when compiling) and the runtime
-//! (which evaluates them when running), so that the two can't disagree. A
-//! relation's tuples have no order, and neither has a sum or a product
-//! here: each is the exact result, rounded once, which no order of adding
-//! or multiplying can change. It depends only on `trendy_text`, for why a
-//! text is no number, and doesn't need `std`, so both can use it.
+//! Sums and products of numbers, exact before they are rounded, numbers
+//! read from text, and square roots and trigonometry, shared by the
+//! compiler (which evaluates `sum`, `product`, `parse_integer`,
+//! `parse_approximate`, `sqrt`, `sin`, `cos` and `atan2` when compiling)
+//! and the runtime (which evaluates them when running), so that the two
+//! can't disagree. A relation's tuples have no order, and neither has a sum
+//! or a product here: each is the exact result, rounded once, which no
+//! order of adding or multiplying can change. It depends only on
+//! `trendy_text`, for why a text is no number, and `libm`, Rust's port of
+//! musl's mathematical functions, which give the same result on every
+//! platform, and doesn't need `std`, so both can use it.
 
 #![cfg_attr(not(test), no_std)]
 
@@ -504,9 +507,65 @@ pub fn parse_approximate(text: &str) -> Result<f64, Unparsable> {
     }
 }
 
+/// The square root of `x`, correctly rounded (IEEE 754, 5.4.1), if it has
+/// one: a negative number has none, as approximate numbers have no NaN.
+#[must_use]
+pub fn sqrt(x: f64) -> Option<f64> {
+    (x >= 0.0).then(|| one_zero(libm::sqrt(x)))
+}
+
+/// The sine of `x`, in radians.
+#[must_use]
+pub fn sin(x: f64) -> f64 {
+    one_zero(libm::sin(x))
+}
+
+/// The cosine of `x`, in radians.
+#[must_use]
+pub fn cos(x: f64) -> f64 {
+    one_zero(libm::cos(x))
+}
+
+/// The angle, in radians, from the positive x axis to the point `(x, y)`,
+/// from -π, exclusive, to π: 0 for the origin, as for any point on the
+/// positive x axis.
+#[must_use]
+pub fn atan2(y: f64, x: f64) -> f64 {
+    one_zero(libm::atan2(y, x))
+}
+
+/// `x`, but `0.0` for `-0.0`: approximate numbers have one zero.
+fn one_zero(x: f64) -> f64 {
+    // Adding `0.0` turns `-0.0` into `0.0` (IEEE 754, 6.3).
+    x + 0.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn square_roots_and_trigonometry() {
+        // A square root is correctly rounded, of zero or more only.
+        assert_eq!(sqrt(16.0), Some(4.0));
+        assert_eq!(sqrt(2.0), Some(core::f64::consts::SQRT_2));
+        assert_eq!(sqrt(0.0).map(f64::to_bits), Some(0));
+        assert_eq!(sqrt(-4.0), None);
+        // Angles in radians, with one zero, exactly these numbers on every
+        // machine.
+        let bits = |a: f64| a.to_bits();
+        assert_eq!(bits(sin(0.0)), 0);
+        assert_eq!(bits(cos(0.0)), bits(1.0));
+        assert_eq!(bits(cos(core::f64::consts::PI)), bits(-1.0));
+        assert_eq!(
+            bits(sin(core::f64::consts::PI)),
+            bits(1.224_646_799_147_353_2e-16)
+        );
+        assert_eq!(bits(atan2(1.0, 1.0)), bits(core::f64::consts::FRAC_PI_4));
+        assert_eq!(bits(atan2(0.0, -1.0)), bits(core::f64::consts::PI));
+        assert_eq!(bits(atan2(-1.0, 0.0)), bits(-core::f64::consts::FRAC_PI_2));
+        assert_eq!(bits(atan2(0.0, 0.0)), 0);
+    }
 
     #[test]
     fn integers_are_read_as_trendy_writes_them() {

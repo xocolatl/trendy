@@ -449,6 +449,10 @@ impl<'a> Checker<'a> {
                 None
             }
             Lookup::Unknown => {
+                if let Some((operator, written)) = self.constant_elsewhere(name_ref, name, span) {
+                    errors.push(errors::constant_as_value(name, written, &operator));
+                    return None;
+                }
                 let candidates = self.names.candidates();
                 let candidates: Vec<&str> = candidates.iter().map(String::as_str).collect();
                 errors.push(if self.names.unnumbered() {
@@ -459,6 +463,36 @@ impl<'a> Checker<'a> {
                 None
             }
         }
+    }
+
+    /// The read-only operator without parameters that `name_ref`, which
+    /// names no value, is written for as another language writes a
+    /// constant, as `pi`'s value is written `PI`, in another case, C's
+    /// `M_PI`, or `math.pi` and `Math.PI`, with the library it is in, and
+    /// the span of what is written.
+    fn constant_elsewhere(
+        &self,
+        name_ref: &ast::NameRef,
+        name: &str,
+        span: Span,
+    ) -> Option<(String, Span)> {
+        let member = name_ref
+            .syntax()
+            .parent()
+            .and_then(ast::ExtractExpr::cast)
+            .filter(|_| matches!(name, "math" | "Math"))
+            .and_then(|extract| Some((extract.attribute()?.ident()?, extract.span())));
+        let (constant, written) = match &member {
+            Some((attribute, whole)) => (attribute.text(), *whole),
+            None => (name.strip_prefix("M_").unwrap_or(name), span),
+        };
+        let operator = constant.to_ascii_lowercase();
+        let constant = self
+            .names
+            .operators()
+            .overloads(&operator)
+            .any(|signature| signature.read_only && signature.written.is_empty());
+        constant.then_some((operator, written))
     }
 
     /// `index`, `a[i]`, written `expr`: the element of the array `a` at the

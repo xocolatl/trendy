@@ -2509,6 +2509,68 @@ pub unsafe extern "C" fn trendy_rt_parse_approximate(dst: *mut f64, from: *const
     }
 }
 
+/// Store at `dst` the square root of `*x`, as `sqrt` computes it, and the
+/// compiler with it. Stops the program if `*x` is negative, which has none
+/// (R0018).
+///
+/// # Safety
+///
+/// `x` must point to an approximate number, and `dst` to memory for one.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_sqrt(dst: *mut f64, x: *const f64) {
+    // SAFETY: guaranteed by the caller.
+    let x = unsafe { x.read_unaligned() };
+    match trendy_numeric::sqrt(x) {
+        // SAFETY: guaranteed by the caller.
+        Some(root) => unsafe { dst.write_unaligned(root) },
+        None => fail_with(|out| writeln!(out, "error[R0018]: {x:e} has no square root")),
+    }
+}
+
+/// Store at `dst` the sine of `*x`, in radians, as `sin` computes it, and
+/// the compiler with it.
+///
+/// # Safety
+///
+/// `x` must point to an approximate number, and `dst` to memory for one.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_sin(dst: *mut f64, x: *const f64) {
+    // SAFETY: guaranteed by the caller.
+    unsafe { dst.write_unaligned(trendy_numeric::sin(x.read_unaligned())) };
+}
+
+/// Store at `dst` the cosine of `*x`, in radians, as `cos` computes it,
+/// and the compiler with it.
+///
+/// # Safety
+///
+/// `x` must point to an approximate number, and `dst` to memory for one.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_cos(dst: *mut f64, x: *const f64) {
+    // SAFETY: guaranteed by the caller.
+    unsafe { dst.write_unaligned(trendy_numeric::cos(x.read_unaligned())) };
+}
+
+/// Store at `dst` the angle, in radians, from the positive x axis to the
+/// point (`*x`, `*y`), as `atan2` computes it, and the compiler with it.
+///
+/// # Safety
+///
+/// `y` and `x` must point to approximate numbers, and `dst` to memory for
+/// one.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_atan2(dst: *mut f64, y: *const f64, x: *const f64) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let angle = trendy_numeric::atan2(y.read_unaligned(), x.read_unaligned());
+        dst.write_unaligned(angle);
+    }
+}
+
 /// Store at `dst` the boolean the text `from` writes, as `parse_boolean`
 /// reads one, and the compiler with it. Stops the program if the text
 /// writes none (R0014).

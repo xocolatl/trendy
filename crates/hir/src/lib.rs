@@ -373,6 +373,16 @@ pub enum ReadOnlyBuiltin {
     ParseApproximate,
     /// The boolean a text writes.
     ParseBoolean,
+    /// The square root of an approximate number, correctly rounded, which
+    /// a negative one hasn't.
+    Sqrt,
+    /// The sine of an angle in radians.
+    Sin,
+    /// The cosine of an angle in radians.
+    Cos,
+    /// The angle, in radians, from the positive x axis to a point, from
+    /// -π, exclusive, to π.
+    Atan2,
 }
 
 /// The update operators the compiler implements, which `call` invokes:
@@ -395,7 +405,7 @@ pub enum UpdateBuiltin {
 }
 
 impl Builtin {
-    pub const ALL: [Builtin; 15] = [
+    pub const ALL: [Builtin; 19] = [
         Builtin::Update(UpdateBuiltin::DebugValue),
         Builtin::Update(UpdateBuiltin::DebugTable),
         Builtin::ReadOnly(ReadOnlyBuiltin::Count),
@@ -409,6 +419,10 @@ impl Builtin {
         Builtin::ReadOnly(ReadOnlyBuiltin::ParseInteger),
         Builtin::ReadOnly(ReadOnlyBuiltin::ParseApproximate),
         Builtin::ReadOnly(ReadOnlyBuiltin::ParseBoolean),
+        Builtin::ReadOnly(ReadOnlyBuiltin::Sqrt),
+        Builtin::ReadOnly(ReadOnlyBuiltin::Sin),
+        Builtin::ReadOnly(ReadOnlyBuiltin::Cos),
+        Builtin::ReadOnly(ReadOnlyBuiltin::Atan2),
         Builtin::Update(UpdateBuiltin::LoadTextFile),
         Builtin::Update(UpdateBuiltin::LoadCsv),
     ];
@@ -470,7 +484,11 @@ impl Builtin {
                 ReadOnlyBuiltin::ToApproximate
                 | ReadOnlyBuiltin::ParseInteger
                 | ReadOnlyBuiltin::ParseApproximate
-                | ReadOnlyBuiltin::ParseBoolean,
+                | ReadOnlyBuiltin::ParseBoolean
+                | ReadOnlyBuiltin::Sqrt
+                | ReadOnlyBuiltin::Sin
+                | ReadOnlyBuiltin::Cos
+                | ReadOnlyBuiltin::Atan2,
             )
             | Builtin::Update(UpdateBuiltin::LoadTextFile) => Vec::new(),
             Builtin::ReadOnly(ReadOnlyBuiltin::Min | ReadOnlyBuiltin::Max) => {
@@ -504,6 +522,14 @@ impl Builtin {
                 | ReadOnlyBuiltin::ParseApproximate
                 | ReadOnlyBuiltin::ParseBoolean,
             ) => [constant("from", Type::Scalar(Scalar::Text))].into(),
+            Builtin::ReadOnly(
+                ReadOnlyBuiltin::Sqrt | ReadOnlyBuiltin::Sin | ReadOnlyBuiltin::Cos,
+            ) => [constant("of", Type::Scalar(Scalar::Approximate))].into(),
+            Builtin::ReadOnly(ReadOnlyBuiltin::Atan2) => [
+                constant("y", Type::Scalar(Scalar::Approximate)),
+                constant("x", Type::Scalar(Scalar::Approximate)),
+            ]
+            .into(),
             Builtin::Update(UpdateBuiltin::LoadTextFile) => [
                 constant("path", Type::Scalar(Scalar::Text)),
                 (
@@ -581,6 +607,10 @@ impl ReadOnlyBuiltin {
             ReadOnlyBuiltin::ParseInteger => "parse_integer",
             ReadOnlyBuiltin::ParseApproximate => "parse_approximate",
             ReadOnlyBuiltin::ParseBoolean => "parse_boolean",
+            ReadOnlyBuiltin::Sqrt => "sqrt",
+            ReadOnlyBuiltin::Sin => "sin",
+            ReadOnlyBuiltin::Cos => "cos",
+            ReadOnlyBuiltin::Atan2 => "atan2",
         }
     }
 
@@ -599,9 +629,12 @@ impl ReadOnlyBuiltin {
                 Type::Parameter(Builtin::ReadOnly(self).types()[0].clone())
             }
             ReadOnlyBuiltin::ToText => Type::Scalar(Scalar::Text),
-            ReadOnlyBuiltin::ToApproximate | ReadOnlyBuiltin::ParseApproximate => {
-                Type::Scalar(Scalar::Approximate)
-            }
+            ReadOnlyBuiltin::ToApproximate
+            | ReadOnlyBuiltin::ParseApproximate
+            | ReadOnlyBuiltin::Sqrt
+            | ReadOnlyBuiltin::Sin
+            | ReadOnlyBuiltin::Cos
+            | ReadOnlyBuiltin::Atan2 => Type::Scalar(Scalar::Approximate),
             ReadOnlyBuiltin::ParseBoolean => Type::Scalar(Scalar::Boolean),
         }
     }
@@ -614,8 +647,8 @@ impl ReadOnlyBuiltin {
     ///
     /// Returns why there is no value: `min` or `max` of a relation without
     /// tuples, which has neither, a `sum` or `product` out of its type's
-    /// range, or `parse_integer`, `parse_approximate` or `parse_boolean` of
-    /// text that isn't a value of its type.
+    /// range, `parse_integer`, `parse_approximate` or `parse_boolean` of
+    /// text that isn't a value of its type, or `sqrt` of a negative number.
     ///
     /// # Panics
     ///
@@ -626,6 +659,11 @@ impl ReadOnlyBuiltin {
             Value::Relation(r) => r,
             other => panic!("{} of {other:?}", self.name()),
         };
+        let approximate = |name: &str| match args[name] {
+            Value::Approximate(x) => x,
+            ref other => panic!("{} of {other:?}", self.name()),
+        };
+        let computed = |x: f64| Value::Approximate(Approximate::new(x));
         let tuples = || &relation().tuples;
         let values = || {
             tuples()
@@ -677,6 +715,18 @@ impl ReadOnlyBuiltin {
             ReadOnlyBuiltin::ParseBoolean => self.parsed(args, |text| {
                 trendy_text::parse_boolean(text).map(Value::Boolean)
             }),
+            ReadOnlyBuiltin::Sqrt => {
+                let x = approximate("of");
+                trendy_numeric::sqrt(x.get())
+                    .map(|root| Value::Approximate(Approximate::new(root)))
+                    .ok_or(BuiltinFailure::Failure(Failure::NegativeRoot(x)))
+            }
+            ReadOnlyBuiltin::Sin => Ok(computed(trendy_numeric::sin(approximate("of").get()))),
+            ReadOnlyBuiltin::Cos => Ok(computed(trendy_numeric::cos(approximate("of").get()))),
+            ReadOnlyBuiltin::Atan2 => Ok(computed(trendy_numeric::atan2(
+                approximate("y").get(),
+                approximate("x").get(),
+            ))),
         }
     }
 
@@ -1746,6 +1796,9 @@ pub enum Failure {
     /// The result is out of the range of this type.
     Overflow(Scalar),
     DivisionByZero,
+    /// The square root of this negative number, which has none, as
+    /// approximate numbers have no NaN.
+    NegativeRoot(Approximate),
     /// An array has no element at the position `index`, which, counting
     /// from 1, is below 1 or beyond its `length`, if that is known.
     OutOfRange {

@@ -842,6 +842,28 @@ builtin operator parse_approximate{from: text}: approximate;
    else, not even spaces. Other text fails (R0014). */
 builtin operator parse_boolean{from: text}: boolean;
 
+/* π, the ratio of a circle's circumference to its diameter: the
+   approximate number nearest it. */
+operator pi{}: approximate [
+    3.141592653589793e0
+];
+
+/* The square root of `of`: the approximate number nearest it, correctly
+   rounded, as IEEE 754 has it. A negative number has none, and the program
+   fails (R0018). */
+builtin operator sqrt{of: approximate}: approximate;
+
+/* The sine of `of`, an angle in radians. */
+builtin operator sin{of: approximate}: approximate;
+
+/* The cosine of `of`, an angle in radians. */
+builtin operator cos{of: approximate}: approximate;
+
+/* The angle, in radians, from the positive x axis to the point (x, y), from
+   -π, exclusive, to π: 0 for the origin, as for any point on the positive x
+   axis. */
+builtin operator atan2{y: approximate, x: approximate}: approximate;
+
 /* Read the lines of the text file at `path` into `lines`, in the file's
    order, so that its first line is the array's element 1. `path` is
    relative to the directory the program runs in, unless it is absolute.
@@ -2869,6 +2891,38 @@ operator main{} [];
 A `-` written directly before a number literal makes a negative literal, so
 the smallest integer, `-9223372036854775808`, can be written.
 
+The prelude's `sqrt`, `sin` and `cos` give an approximate number's square
+root, and the sine and cosine of an angle in radians, and `atan2` the angle
+from the positive x axis to the point `(x, y)`, from -π, exclusive, to π.
+`pi{}` is the approximate number nearest π: a constant is a read-only
+operator without parameters, called as any other. `sqrt` is correctly
+rounded, as IEEE 754 requires; the others are computed the same way on
+every machine, so a result is the same whether the compiler computes it or
+the program does. A negative number has no square root (R0018), which is
+a compile error when it is known while compiling, and otherwise stops the
+program as an overflow does.
+
+```trendy
+var circumference := 2e0 * pi{} * 1.5e0;
+var hypotenuse := sqrt{of: 3e0 * 3e0 + 4e0 * 4e0};
+
+operator polar{x: approximate, y: approximate} [
+    call debug_value{v: sqrt{of: x * x + y * y}};
+    call debug_value{v: atan2{y: y, x: x}};
+    call debug_value{v: cos{of: pi{} / 3e0}};
+];
+
+operator main{} [
+    call polar{x: 1e0, y: 1e0};
+];
+```
+
+```trendy,error
+var root := sqrt{of: -4e0};
+
+operator main{} [];
+```
+
 ### Text
 
 `a || b` is the text `a` followed by the text `b`. Both operands must be
@@ -4310,6 +4364,9 @@ line after a comment on its own line, such as a file's header, is kept.
 | `a / b` for integers | `a div b` |
 | `a % b` | `a mod b` |
 | `1 / 2` meaning one half | `1e0 / 2e0` |
+| `PI`, `M_PI`, `math.pi`, `Math.PI` | `pi{}`, a call of an operator without parameters |
+| `sine(x)`, `cosine(x)`, `arctan2(y, x)` | `sin{of: x}`, `cos{of: x}`, `atan2{y: y, x: x}` |
+| `tan(x)`, `atan(x)`, `hypot(x, y)`, `abs(x)` | `sin{of: x} / cos{of: x}`, `atan2{y: x, x: 1e0}`, `sqrt{of: x * x + y * y}`, `if x < 0e0 then -x else x` |
 | `inf`, `NaN`, `1e0 / 0e0` | an error: approximate numbers are finite |
 
 The compiler recognizes each of these habits and suggests the fix.

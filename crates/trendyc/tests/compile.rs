@@ -523,21 +523,26 @@ fn approximate_numbers() {
     let (code, stderr) = run_example("approximate");
     assert_eq!(code, 0, "{stderr}");
     let lines: Vec<&str> = stderr.lines().collect();
-    // Evaluated when compiling.
+    // Evaluated when compiling, with π, a square root, a cosine and an
+    // angle.
     assert_eq!(
-        lines[..6],
+        lines[..10],
         [
             "5e-1",
             "1.875e1",
             "0e0",
             "1e-310",
             "9.007199254740992e15",
-            "2.5e0"
+            "2.5e0",
+            "9.42477796076938e0",
+            "5e0",
+            "-1e0",
+            "1.5707963267948966e0"
         ]
     );
     // Each row: `-a`, `a + b`, `a - b`, `a * b`, `a / b`, rounded as IEEE
     // 754 rounds them, except that there is one zero.
-    let rows: Vec<_> = lines[6..26].chunks(5).collect();
+    let rows: Vec<_> = lines[10..30].chunks(5).collect();
     assert_eq!(
         rows,
         [
@@ -555,11 +560,38 @@ fn approximate_numbers() {
     );
     // Integers widened when running: beyond 2^53, to the nearest.
     assert_eq!(
-        lines[26..29],
+        lines[30..33],
         ["3e0", "9.007199254740992e15", "-9.223372036854776e18"]
     );
     // Parsed when running, with one zero.
-    assert_eq!(lines[29..], ["6.65e3", "1.5e-3", "0e0"]);
+    assert_eq!(lines[33..36], ["6.65e3", "1.5e-3", "0e0"]);
+    // Each row: the square root of a² + b², the sine and cosine of `a`,
+    // and the angle of (a, b), the same on every machine, rounded: π/6 is
+    // no approximate number, so its sine isn't one half.
+    let rows: Vec<_> = lines[36..].chunks(4).collect();
+    assert_eq!(
+        rows,
+        [
+            [
+                "5e0",
+                "1.411200080598672e-1",
+                "-9.899924966004454e-1",
+                "9.272952180016122e-1"
+            ],
+            [
+                "1.1287850449966272e0",
+                "4.9999999999999994e-1",
+                "8.660254037844387e-1",
+                "-1.0884484196938717e0"
+            ],
+            [
+                "1e0",
+                "-8.414709848078965e-1",
+                "5.403023058681398e-1",
+                "3.141592653589793e0"
+            ],
+        ]
+    );
 }
 
 #[test]
@@ -591,6 +623,11 @@ fn approximate_failures_stop_the_program() {
         ("divide_zero", "a / b", division("1e308 / 0e0")),
         // There is one zero.
         ("divide_negative_zero", "a / -b", division("1e308 / 0e0")),
+        (
+            "square_root",
+            "sqrt{of: -a}",
+            format!("error[{}]: -1e308 has no square root", Code::NoResult.id()),
+        ),
     ];
     for (name, expr, failure) in cases {
         let name = format!("approximate_{name}");
@@ -1758,10 +1795,17 @@ fn inheritance() {
     assert_eq!(
         folded_and_run("inheritance"),
         [
-            // The Third Manifesto's point reflected, moved, a segment's
-            // begin moved, an ellipse's semiaxes changed together, and a
-            // polygon's corners.
+            // The Third Manifesto's point reflected, its polar coordinates,
+            // half a turn from the point's, the distance between the two,
+            // points selected by their polar coordinates, the origin's at
+            // any angle, then the point moved, a segment's begin moved, an
+            // ellipse's semiaxes changed together, and a polygon's
+            // corners.
             "point{x: -5e0, y: -2.5e0}",
+            "tuple { r: distance{m: 5.5901699437494745e0}, theta: angle{rho: 3.6052402625905993e0} }",
+            "distance{m: 1.1180339887498949e1}",
+            "point{x: 1.8369701987210297e-16, y: 3e0}",
+            "point{x: 0e0, y: 0e0}",
             "point{x: 2e0, y: 2.5e0}",
             "lineseg{begin: point{x: 6.5e0, y: 2.5e0}, end: point{x: -5e0, y: -2.5e0}}",
             "ellipse{a: distance{m: 3e0}, b: distance{m: 2e0}, ctr: point{x: 5e0, y: 2.5e0}}",

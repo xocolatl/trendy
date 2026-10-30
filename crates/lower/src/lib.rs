@@ -1155,7 +1155,35 @@ impl<'a> FunctionBuilder<'a> {
             hir::ReadOnlyBuiltin::ParseBoolean => {
                 self.parsed(lir::RuntimeFn::ParseBoolean, call, cx)
             }
+            hir::ReadOnlyBuiltin::Sqrt => {
+                self.mathematical(lir::RuntimeFn::Sqrt, call, &["of"], cx)
+            }
+            hir::ReadOnlyBuiltin::Sin => self.mathematical(lir::RuntimeFn::Sin, call, &["of"], cx),
+            hir::ReadOnlyBuiltin::Cos => self.mathematical(lir::RuntimeFn::Cos, call, &["of"], cx),
+            hir::ReadOnlyBuiltin::Atan2 => {
+                self.mathematical(lir::RuntimeFn::Atan2, call, &["y", "x"], cx)
+            }
         }
+    }
+
+    /// The value of `call`, of `sqrt`, `sin`, `cos` or `atan2`, an
+    /// approximate number computed into a new stack slot by the runtime
+    /// function `function` from the arguments for `operands`, in order, as
+    /// `hir::ReadOnlyBuiltin::evaluate` computes it.
+    fn mathematical(
+        &mut self,
+        function: lir::RuntimeFn,
+        call: &hir::Call,
+        operands: &[&str],
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let dst = self.slot(lir::Layout::F64Bits);
+        let mut args = vec![dst.clone()];
+        for operand in operands {
+            args.push(self.place(&call.args[*operand], cx));
+        }
+        self.insts.push(lir::Inst::CallRuntime { function, args });
+        dst
     }
 
     /// The value of `call`, of `parse_integer`, `parse_approximate` or

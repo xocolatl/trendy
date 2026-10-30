@@ -1662,6 +1662,27 @@ pub(crate) fn unnumbered_position(name: &str, span: Span, candidates: &[&str]) -
     ))
 }
 
+/// The value `name`, which refers to nothing, written at `span` as another
+/// language writes a constant, such as `PI` or `Math.PI`: the read-only
+/// operator `operator`, which has no parameters, and whose call is the
+/// value.
+pub(crate) fn constant_as_value(name: &str, span: Span, operator: &str) -> Diagnostic {
+    let replacement = format!("{operator}{{}}");
+    Diagnostic::error(
+        Code::UnknownName,
+        format!("unknown value `{name}`"),
+        span,
+        "a constant, as another language writes it",
+    )
+    .with_note(format!(
+        "a constant is a read-only operator without parameters, whose value is its call's, written with braces after its name, as `{replacement}`, and names are case-sensitive"
+    ))
+    .with_suggestion(
+        format!("call `{operator}`"),
+        vec![Edit { span, replacement }],
+    )
+}
+
 /// The value `ARRAY`, or another spelling of `array`, at `span`, which
 /// refers to nothing, indexed: an array of one element, as SQL writes it,
 /// `ARRAY[1]`.
@@ -1720,12 +1741,14 @@ pub(crate) fn unknown_operator(
         span,
         "not defined",
     );
-    // `avg{…}`, as SQL writes a mean, which is no misspelling of `min`.
+    // An operator the prelude hasn't, as SQL's `avg`, which is no
+    // misspelling of `min`, nor `log` of `cos`.
     let lowercase = name.to_lowercase();
-    if ["avg", "average", "mean"].contains(&&*lowercase) {
-        return d
-            .with_note("a mean is the sum divided by the count, which the prelude's `sum` and `count` give; it has no mean of its own yet, as the mean of integers isn't an integer")
-            .with_help("write `sum{r: r, of: x} / to_approximate{from: count{r: r}}`, and for integers, `to_approximate{from: sum{r: r, of: x}}` as the dividend");
+    if let Some(&(_, note, help)) = ABSENT
+        .iter()
+        .find(|(names, ..)| names.contains(&&*lowercase))
+    {
+        return d.with_note(note).with_help(help);
     }
     // Other languages' names for the prelude's operators, such as Python's
     // `prod` and `len`, which no closeness of spelling finds, or finds
@@ -1765,6 +1788,54 @@ pub(crate) fn unknown_operator(
     };
     d.with_suggestion(format!("use `{ours}`, as trendy calls it{named}"), edits)
 }
+
+/// Operators other languages have and the prelude hasn't yet, by their
+/// names there, lowercase, which closeness of spelling would find wrong,
+/// as it finds `min` for `avg` and `cos` for `log`: each with what the
+/// prelude has instead, and how to write the value with it.
+const ABSENT: &[(&[&str], &str, &str)] = &[
+    (
+        &["avg", "average", "mean"],
+        "a mean is the sum divided by the count, which the prelude's `sum` and `count` give; it has no mean of its own yet, as the mean of integers isn't an integer",
+        "write `sum{r: r, of: x} / to_approximate{from: count{r: r}}`, and for integers, `to_approximate{from: sum{r: r, of: x}}` as the dividend",
+    ),
+    (
+        &["tan"],
+        MATHEMATICAL,
+        "the tangent of `x` is `sin{of: x} / cos{of: x}`",
+    ),
+    (
+        &["atan", "arctan"],
+        MATHEMATICAL,
+        "the arctangent of `x` is `atan2{y: x, x: 1e0}`",
+    ),
+    (
+        &["hypot"],
+        MATHEMATICAL,
+        "the hypotenuse of `x` and `y` is `sqrt{of: x * x + y * y}`",
+    ),
+    (
+        &["abs", "fabs"],
+        MATHEMATICAL,
+        "the absolute value of `x` is `if x < 0e0 then -x else x`, with `0` for an integer",
+    ),
+    (
+        &["pow", "power", "sqr"],
+        MATHEMATICAL,
+        "a power with a whole exponent is a product, as `x * x` is the square of `x`, and `sqrt{of: x}` is its square root",
+    ),
+    (
+        &[
+            "asin", "acos", "arcsin", "arccos", "sinh", "cosh", "tanh", "exp", "log", "ln", "log2",
+            "log10", "cbrt", "floor", "ceil", "ceiling", "round", "trunc",
+        ],
+        MATHEMATICAL,
+        "write it as an operator of the program's own, with those",
+    ),
+];
+
+/// What the prelude has of mathematics.
+const MATHEMATICAL: &str = "the prelude's mathematical operators are `+`, `-`, `*`, `/`, `div`, `mod`, `sqrt`, `sin`, `cos`, `atan2` and `pi`, and it has no others yet";
 
 /// The edit naming the one argument of a call, written `written`, `param`,
 /// the one parameter of the operator meant, if it has another name or
@@ -1831,7 +1902,8 @@ fn spelled_like(
 /// and
 /// JavaScript's `parseInt` and `parseFloat`, Java's `parseDouble`, and C's
 /// `atoi` and `atof`, as Go's `Atoi`, read numbers, and Java's
-/// `parseBoolean` and Go's `ParseBool` booleans.
+/// `parseBoolean` and Go's `ParseBool` booleans; and `sine`, `cosine` and
+/// NumPy's `arctan2` are `sin`, `cos` and `atan2`.
 const ELSEWHERE: &[(&str, &str, Option<&str>)] = &[
     ("len", "count", Some("length")),
     ("size", "count", Some("length")),
@@ -1848,6 +1920,9 @@ const ELSEWHERE: &[(&str, &str, Option<&str>)] = &[
     ("atof", "parse_approximate", None),
     ("parseboolean", "parse_boolean", None),
     ("parsebool", "parse_boolean", None),
+    ("sine", "sin", None),
+    ("cosine", "cos", None),
+    ("arctan2", "atan2", None),
 ];
 
 /// The prelude's operators that other languages call `name`, in any case:
@@ -1916,16 +1991,37 @@ pub(crate) fn counted_otherwise(
     )
 }
 
-/// The operator `name`, at `span`, used as a value.
-pub(crate) fn operator_as_value(name: &str, span: Span) -> Diagnostic {
-    Diagnostic::error(
+/// The operator `name`, at `span`, used as a value, of `operators`. A
+/// read-only operator's call is a value, as `pi{}` is, so it is called,
+/// and an update operator is invoked by a `call` statement.
+pub(crate) fn operator_as_value(name: &str, span: Span, operators: &Operators) -> Diagnostic {
+    let d = Diagnostic::error(
         Code::OperatorAsValue,
         format!("`{name}` is an operator, not a value"),
         span,
         "operators can't be used as values",
-    )
-    .with_help(format!(
-        "to invoke it, write a statement: `call {name}{{…}};`"
+    );
+    let mut read_only = operators
+        .overloads(name)
+        .filter(|signature| signature.read_only);
+    let Some(first) = read_only.next() else {
+        return d.with_help(format!(
+            "to invoke it, write a statement: `call {name}{{…}};`"
+        ));
+    };
+    let d = d.with_note(
+        "a read-only operator's value is its call's, written with its arguments in braces after its name, even when it has none",
+    );
+    if first.written.is_empty() || read_only.any(|signature| signature.written.is_empty()) {
+        let replacement = format!("{name}{{}}");
+        return d.with_suggestion(
+            format!("call it: `{replacement}`"),
+            vec![Edit { span, replacement }],
+        );
+    }
+    d.with_help(format!(
+        "call it with its arguments: the parameters are {}",
+        first.text()
     ))
 }
 
@@ -5031,6 +5127,13 @@ pub(crate) fn failure(failure: hir::Failure, expr: &Expr, at: Option<&Expr>) -> 
         )
         .with_note("`/`, `div` and `mod` have no result when the divisor is zero"),
         hir::Failure::OutOfRange { index, length } => out_of_range(index, length, expr, at),
+        hir::Failure::NegativeRoot(x) => Diagnostic::error(
+            Code::NoResult,
+            format!("{x} has no square root"),
+            expr.span(),
+            "the square root of a negative number",
+        )
+        .with_note("no approximate number's square is negative, so a negative one has no square root; approximate numbers have no NaN for it, nor imaginary numbers"),
     }
 }
 

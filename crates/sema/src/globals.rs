@@ -666,7 +666,7 @@ impl Names for Globals<'_> {
             };
         }
         if self.namespaces.operator(name).is_some() {
-            errors.push(errors::operator_as_value(name, span));
+            errors.push(errors::operator_as_value(name, span, self.operators));
             return Lookup::Reported;
         }
         Lookup::Unknown
@@ -799,7 +799,11 @@ impl Names for ReadOnlyNames<'_, '_, '_> {
             return Lookup::Reported;
         }
         if self.globals.namespaces.operator(name).is_some() {
-            errors.push(errors::operator_as_value(name, span));
+            errors.push(errors::operator_as_value(
+                name,
+                span,
+                self.globals.operators,
+            ));
             return Lookup::Reported;
         }
         Lookup::Unknown

@@ -197,6 +197,20 @@ pub enum RuntimeFn {
     /// text writes, as `parse_boolean` reads one. It stops the program if
     /// the text writes none.
     ParseBoolean,
+    /// `trendy_rt_sqrt(dst, x)`: store at `dst` the square root of the
+    /// approximate number `x`, as `sqrt` computes it. It stops the program
+    /// if `x` is negative, which has none.
+    Sqrt,
+    /// `trendy_rt_sin(dst, x)`: store at `dst` the sine of the angle `x`,
+    /// in radians, as `sin` computes it.
+    Sin,
+    /// `trendy_rt_cos(dst, x)`: store at `dst` the cosine of the angle
+    /// `x`, in radians, as `cos` computes it.
+    Cos,
+    /// `trendy_rt_atan2(dst, y, x)`: store at `dst` the angle, in radians,
+    /// from the positive x axis to the point (`x`, `y`), as `atan2`
+    /// computes it.
+    Atan2,
     /// `trendy_rt_load_text_file(dst, path, descriptor)`: store at `dst` the
     /// array of the lines of the text file at `path`, a text, in order, of
     /// the type the descriptor describes, `array text`, in memory the
@@ -450,6 +464,10 @@ impl RuntimeFn {
             RuntimeFn::ParseInteger => "trendy_rt_parse_integer",
             RuntimeFn::ParseApproximate => "trendy_rt_parse_approximate",
             RuntimeFn::ParseBoolean => "trendy_rt_parse_boolean",
+            RuntimeFn::Sqrt => "trendy_rt_sqrt",
+            RuntimeFn::Sin => "trendy_rt_sin",
+            RuntimeFn::Cos => "trendy_rt_cos",
+            RuntimeFn::Atan2 => "trendy_rt_atan2",
             RuntimeFn::LoadTextFile => "trendy_rt_load_text_file",
             RuntimeFn::LoadCsv => "trendy_rt_load_csv",
             RuntimeFn::Sum => "trendy_rt_sum",
