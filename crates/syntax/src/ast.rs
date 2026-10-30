@@ -45,6 +45,7 @@ ast_node!(HeadingDecl);
 ast_node!(TypeDecl);
 ast_node!(TypeBody);
 ast_node!(Representation);
+ast_node!(Conversion);
 ast_node!(Constraint);
 ast_node!(TypeOrder);
 ast_node!(RequirementList);
@@ -310,15 +311,20 @@ impl TypeDecl {
         self.0.children().find_map(Name::cast)
     }
 
-    /// Its possible representation: in its body, or, where the components
-    /// were written without braces of their own, which the parser reports,
-    /// in its place.
+    /// Its first possible representation (see
+    /// [`TypeDecl::representations`]).
     #[must_use]
     pub fn representation(&self) -> Option<Representation> {
-        self.0.children().find_map(TypeBody::cast).map_or_else(
-            || self.0.children().find_map(Representation::cast),
-            |body| body.0.children().find_map(Representation::cast),
-        )
+        self.representations().next()
+    }
+
+    /// Its possible representations, in order: in its body, or, where the
+    /// components were written without braces of their own, which the
+    /// parser reports, in its place.
+    pub fn representations(&self) -> impl Iterator<Item = Representation> + use<> {
+        let body = self.0.children().find_map(TypeBody::cast);
+        let within = body.map_or_else(|| self.0.clone(), |body| body.0);
+        within.children().filter_map(Representation::cast)
     }
 
     /// Its constraints, in order: in its body, or, where the parser
@@ -339,6 +345,54 @@ impl Representation {
     #[must_use]
     pub fn components(&self) -> Option<Heading> {
         self.0.children().find_map(Heading::cast)
+    }
+
+    /// Its conversions, `to` and `from`, in the order written: none for
+    /// the representation values are stored as.
+    pub fn conversions(&self) -> impl Iterator<Item = Conversion> + use<> {
+        self.0.children().filter_map(Conversion::cast)
+    }
+}
+
+/// Which way a conversion goes: `to` the stored representation, or `from`
+/// it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    To,
+    From,
+}
+
+impl Conversion {
+    /// The word `to` or `from`.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    /// Which way it goes, as its keyword says, in any case.
+    #[must_use]
+    pub fn direction(&self) -> Option<Direction> {
+        let keyword = self.keyword()?;
+        if keyword.text().eq_ignore_ascii_case("to") {
+            Some(Direction::To)
+        } else if keyword.text().eq_ignore_ascii_case("from") {
+            Some(Direction::From)
+        } else {
+            None
+        }
+    }
+
+    /// The components it computes, each `name := value`.
+    #[must_use]
+    pub fn assignments(&self) -> Option<AssignList> {
+        self.0.children().find_map(AssignList::cast)
+    }
+
+    /// The span to delete to remove it, with the whitespace directly
+    /// before it.
+    #[must_use]
+    pub fn removal(&self) -> Span {
+        statement_removal(&self.0)
     }
 }
 

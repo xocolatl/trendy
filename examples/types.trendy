@@ -129,6 +129,35 @@ operator in_order{f: relation { name: text, on: calendar_day }, june: calendar_d
     call debug_value{v: names};
 ];
 
+/* A temperature, stored in kelvins, and written in degrees Celsius or
+   Fahrenheit too: each possible representation but the stored one
+   converts to it, with `to`, and from it, with `from`. A value is
+   selected in any of them, and a component of any read with the dot. */
+type temperature {
+    { kelvin: approximate },
+    { celsius: approximate }
+        to { kelvin := celsius + 273.15e0 }
+        from { celsius := kelvin - 273.15e0 },
+    { fahrenheit: approximate }
+        to { kelvin := (fahrenheit - 32e0) * 5e0 / 9e0 + 273.15e0 }
+        from { fahrenheit := (kelvin - 273.15e0) * 9e0 / 5e0 + 32e0 },
+    constraint kelvin >= 0e0,
+    order [asc kelvin],
+};
+
+var reykjavik := temperature{celsius: -2e0};
+var phoenix := temperature{fahrenheit: 104e0};
+var phoenix_celsius := phoenix.celsius;
+var warmer := phoenix > reykjavik;
+
+operator temperatures{celsius: approximate, fahrenheit: approximate} [
+    var cold := temperature{celsius: celsius};
+    var hot := temperature{fahrenheit: fahrenheit};
+    call debug_value{v: cold};
+    call debug_value{v: hot.celsius};
+    call debug_value{v: hot > cold};
+];
+
 /* A journey's stops, as a relation. */
 operator stops{j: journey}: relation { stop: text, at: position } [
     relation {
@@ -155,6 +184,9 @@ operator main{} [
     call debug_value{v: first_festival};
     call debug_table{r: before_june};
     call debug_value{v: festival_calendar};
+    call debug_value{v: reykjavik};
+    call debug_value{v: phoenix_celsius};
+    call debug_value{v: warmer};
     call debug_table{r: flight_stops};
 
     call select_position{
@@ -174,6 +206,8 @@ operator main{} [
     call to_equator{r: landmarks};
 
     call in_order{f: festivals, june: calendar_day{year: 2026, month: 6, day: 1}};
+
+    call temperatures{celsius: -2e0, fahrenheit: 104e0};
 
     call list_stops{j: flight};
 ];

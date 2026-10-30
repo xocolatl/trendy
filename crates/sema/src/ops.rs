@@ -2330,12 +2330,15 @@ fn tuple_of(
 }
 
 /// The attribute `extract`, written after `operand`, which is of type `ty`,
-/// takes the value of. `None` after reporting why there is none: the
-/// operand isn't a tuple, or hasn't the attribute.
+/// takes the value of, or the component, of a value of a type of the
+/// program's own, of its stored representation or one of `others`. `None`
+/// after reporting why there is none: the operand isn't a tuple, or hasn't
+/// the attribute or component.
 pub(crate) fn extracted(
     extract: &ast::ExtractExpr,
     operand: &Expr,
     ty: &hir::Type,
+    others: &[&hir::Heading],
     errors: &mut Vec<Diagnostic>,
 ) -> Option<String> {
     let ident = extract.attribute()?.ident()?;
@@ -2357,8 +2360,14 @@ pub(crate) fn extracted(
             return None;
         }
     };
-    if heading.get(&name).is_none() {
-        let rename = closest(&name, heading.named().map(|(a, _)| a));
+    let all = || {
+        std::iter::once(heading)
+            .chain(others.iter().copied())
+            .flat_map(hir::Heading::named)
+            .map(|(a, _)| a)
+    };
+    if !all().any(|a| a == name) {
+        let rename = closest(&name, all());
         errors.push(errors::unknown_attribute(
             noun, &name, span, &context, rename, None,
         ));

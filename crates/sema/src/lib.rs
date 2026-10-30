@@ -17,7 +17,7 @@ use std::collections::{BTreeSet, HashMap};
 use trendy_diag::{Diagnostic, Span};
 use trendy_hir as hir;
 use trendy_syntax::SyntaxToken;
-use trendy_syntax::ast::{AstNode, Item, SourceFile, VarDecl};
+use trendy_syntax::ast::{self, AstNode, Item, SourceFile, VarDecl};
 
 pub use prelude::Prelude;
 
@@ -296,6 +296,10 @@ pub(crate) struct Namespaces {
     /// Each of the program's types, with its components, unless they have
     /// errors, which are reported: [`named_types::resolve`] fills it in.
     defined: HashMap<String, hir::Defined>,
+    /// Each of the program's types' possible representations but the one
+    /// its values are stored as, in order, whose components have no
+    /// errors: [`named_types::resolve`] fills it in too.
+    converted: HashMap<String, Vec<Converted>>,
     /// The kinds, which only the prelude declares, by name, each with the
     /// built-in types of it.
     kinds: HashMap<String, (hir::Kind, BTreeSet<hir::Scalar>)>,
@@ -308,6 +312,20 @@ struct OperatorName {
     span: Option<Span>,
     /// Its parameters' names, as a call gives their arguments.
     params: BTreeSet<String>,
+}
+
+/// A possible representation of a type of the program's own other than
+/// the one its values are stored as, which they are converted to and from.
+#[derive(Clone)]
+pub(crate) struct Converted {
+    /// Its declaration, with its conversions.
+    pub(crate) decl: ast::Representation,
+    /// Its components.
+    pub(crate) components: hir::Heading,
+    /// Whether it has each conversion once, the right way round, so that
+    /// its selector and its conversion from the stored representation are
+    /// checked: otherwise that is reported already.
+    pub(crate) convertible: bool,
 }
 
 impl Namespaces {
@@ -399,6 +417,12 @@ impl Namespaces {
     pub(crate) fn defined(&self, name: &str) -> Option<(Span, Option<&hir::Defined>)> {
         let span = *self.types.get(name)?;
         Some((span, self.defined.get(name)))
+    }
+
+    /// The possible representations of the program's own type `name` but
+    /// the one its values are stored as, whose components have no errors.
+    pub(crate) fn converted(&self, name: &str) -> &[Converted] {
+        self.converted.get(name).map_or(&[], Vec::as_slice)
     }
 
     /// The program's own types' names.
@@ -551,25 +575,27 @@ fn selectors(file: &SourceFile, namespaces: &mut Namespaces, errors: &mut Vec<Di
             }
             namespaces.operators.remove(name);
         }
-        let params = decl
-            .representation()
-            .and_then(|r| r.components())
-            .map(|components| {
-                components
-                    .attributes()
-                    .filter_map(|a| Some(a.name()?.ident()?.text().to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        namespaces
-            .operators
-            .entry(name.to_string())
-            .or_default()
-            .push(OperatorName {
-                kind: Kind::Selector,
-                span: Some(span),
-                params,
-            });
+        // A selector for each possible representation.
+        for representation in decl.representations() {
+            let params = representation
+                .components()
+                .map(|components| {
+                    components
+                        .attributes()
+                        .filter_map(|a| Some(a.name()?.ident()?.text().to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            namespaces
+                .operators
+                .entry(name.to_string())
+                .or_default()
+                .push(OperatorName {
+                    kind: Kind::Selector,
+                    span: Some(span),
+                    params,
+                });
+        }
     }
 }
 
@@ -6558,6 +6584,150 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
                 "type spot {{ {{ x: integer }} }};\ntype day {{ {{ at: spot }}, order [asc at] }};{MAIN}"
             )),
             ["the order of `day` can't compare `at`, of type `spot`"]
+        );
+    }
+
+    const TEMPERATURE: &str = "type temperature {
+    { kelvin: approximate },
+    { celsius: approximate }
+        to { kelvin := celsius + 273.15e0 }
+        from { celsius := kelvin - 273.15e0 },
+    constraint kelvin >= 0e0,
+    constraint celsius < 1000e0,
+};
+";
+
+    #[test]
+    fn a_programs_own_types_have_possible_representations() {
+        let var = |value: &str| {
+            let source = format!("{TEMPERATURE}var v := {value};");
+            variables(&source)[0].init.to_string()
+        };
+        // Selected in any representation, stored in one, and read in any.
+        assert_eq!(
+            var("temperature{celsius: 100e0}"),
+            "temperature{kelvin: 3.7315e2}"
+        );
+        assert_eq!(var("temperature{kelvin: 373.15e0}.celsius"), "1e2");
+        assert_eq!(
+            var("temperature{celsius: 0e0} = temperature{kelvin: 273.15e0}"),
+            "true"
+        );
+        // A constraint names any component, through the conversion.
+        let broken = errors(&format!(
+            "{TEMPERATURE}var v := temperature{{celsius: 2000e0}};{MAIN}"
+        ));
+        assert_eq!(broken[0].code, Code::BrokenConstraint);
+        assert_eq!(
+            broken[0].primary.message,
+            "its components break a constraint of `temperature`"
+        );
+        // Known only when running, a component of another representation
+        // is its conversion's, of the value's stored components, computed
+        // once.
+        let program = analyze_str(&format!(
+            "{TEMPERATURE}operator c{{t: temperature}}: approximate [ t.celsius ];{MAIN}"
+        ))
+        .unwrap();
+        let c = program.operators.iter().find(|op| op.name == "c").unwrap();
+        let hir::OperatorKind::ReadOnly { value, .. } = &c.kind else {
+            panic!("a read-only operator");
+        };
+        let hir::Expr::At(_, value) = value else {
+            panic!("the body's value, where it is: {value:?}");
+        };
+        let hir::Expr::Extract(inner, name) = &**value else {
+            panic!("a component: {value:?}");
+        };
+        assert_eq!(name, "celsius");
+        assert!(
+            matches!(&**inner, hir::Expr::Extract(extended, _) if matches!(**extended, hir::Expr::Extend(..))),
+            "{inner:?}"
+        );
+        // `replace` changes the stored components, with help to select the
+        // value in another representation.
+        let source = format!(
+            "{TEMPERATURE}var v := temperature{{kelvin: 1e0}} replace {{ celsius := 2e0 }};{MAIN}"
+        );
+        let error = &errors(&source)[0];
+        assert_eq!(error.code, Code::Conversions);
+        assert_eq!(
+            error.help,
+            ["select the value in that representation instead: `temperature{celsius: …}`"]
+        );
+    }
+
+    #[test]
+    fn a_programs_own_types_representation_errors() {
+        let declare = |others: &str| {
+            format!("type temperature {{\n    {{ kelvin: approximate }},\n    {others},\n}};{MAIN}")
+        };
+        // One stored, the others converting both ways, once each.
+        assert_eq!(
+            messages(&declare("{ celsius: approximate }")),
+            ["`temperature` has more than one possible representation without conversions"]
+        );
+        assert_eq!(
+            messages(&declare(
+                "{ celsius: approximate } to { kelvin := celsius + 273.15e0 }"
+            )),
+            ["this possible representation has no conversion `from`"]
+        );
+        assert_eq!(
+            messages(&format!(
+                "type t {{ {{ a: integer }} to {{ a := 1 }} from {{ a := 1 }} }};{MAIN}"
+            )),
+            ["no possible representation of `t` is stored"]
+        );
+        let source = declare(
+            "{ celsius: approximate } to { kelvin := celsius } to { kelvin := 1e0 } from { celsius := kelvin }",
+        );
+        assert_eq!(codes(&source), [Code::DuplicateAttribute]);
+        assert_eq!(
+            fix(&source),
+            declare("{ celsius: approximate } to { kelvin := celsius } from { celsius := kelvin }")
+        );
+        // The wrong way round, swapped.
+        let source =
+            declare("{ celsius: approximate } to { celsius := kelvin } from { kelvin := celsius }");
+        assert_eq!(
+            messages(&source),
+            ["`to` and `from` are the wrong way round"]
+        );
+        assert_eq!(
+            fix(&source),
+            declare("{ celsius: approximate } from { celsius := kelvin } to { kelvin := celsius }")
+        );
+        // A component in one representation.
+        assert_eq!(
+            codes(&declare(
+                "{ kelvin: integer } to { kelvin := 1e0 } from { kelvin := 1 }"
+            )),
+            [Code::DuplicateAttribute]
+        );
+        // Each conversion computes its components, once each, of their
+        // types, from the others alone.
+        let source =
+            declare("{ celsius: approximate } to { kelvn := celsius } from { celsius := kelvin }");
+        assert_eq!(messages(&source), ["unknown component `kelvn`"]);
+        assert_eq!(
+            fix(&source),
+            declare("{ celsius: approximate } to { kelvin := celsius } from { celsius := kelvin }")
+        );
+        assert_eq!(
+            codes(&declare(
+                "{ celsius: approximate } to { kelvin := 1 } from { celsius := kelvin }"
+            )),
+            [Code::TypeMismatch]
+        );
+        assert_eq!(
+            messages(&format!(
+                "var limit := 1e0;\n{}",
+                declare(
+                    "{ celsius: approximate } to { kelvin := celsius } from { celsius := limit }"
+                )
+            )),
+            ["a conversion of `temperature` can't read the variable `limit`"]
         );
     }
 

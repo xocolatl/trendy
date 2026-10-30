@@ -405,6 +405,9 @@ struct FunctionBuilder<'a> {
     /// The site the code built so far leaves the program at: the
     /// statement's being lowered, or a value's in it, if any.
     site: Option<hir::Site>,
+    /// Where the site the function is entered at is saved, once a call
+    /// changes it while the function has none of its own.
+    entered: Option<lir::Place>,
 }
 
 /// Where a local variable is: its value's place, and whether the variable
@@ -482,6 +485,7 @@ impl<'a> FunctionBuilder<'a> {
             scope: None,
             tuples: Vec::new(),
             site: None,
+            entered: None,
         };
         let variables: Vec<(usize, String)> = builder
             .params
@@ -579,6 +583,24 @@ impl<'a> FunctionBuilder<'a> {
         }
     }
 
+    /// The site the code is at again after a call, whose callee leaves the
+    /// program at its own: the function's own, if it has set one, or else
+    /// the one it was entered at, saved as it starts.
+    fn after_call(&mut self, cx: &mut Lowering) {
+        if self.site.is_some() {
+            self.at(self.site, cx);
+            return;
+        }
+        let entered = if let Some(entered) = &self.entered {
+            entered.clone()
+        } else {
+            let slot = self.slot(lir::Layout::Address);
+            self.entered = Some(slot.clone());
+            slot
+        };
+        self.insts.push(lir::Inst::RestoreSite { src: entered });
+    }
+
     /// Where `expr`, computed at `site`, is: the site set while it is
     /// computed, then the one before, if there is one, again.
     fn place_at(&mut self, site: hir::Site, expr: &hir::Expr, cx: &mut Lowering) -> lir::Place {
@@ -595,6 +617,10 @@ impl<'a> FunctionBuilder<'a> {
     /// laid out as `result`, if it has one.
     fn finish(mut self, result: Option<lir::Layout>) -> lir::Function {
         self.end_block(lir::Terminator::Return, lir::BlockId(0));
+        if let Some(entered) = self.entered.take() {
+            let save = lir::Inst::SaveSite { dst: entered };
+            self.blocks[0].insts.insert(0, save);
+        }
         lir::Function {
             name: self.name,
             params: params_layout(&self.params),
@@ -895,7 +921,7 @@ impl<'a> FunctionBuilder<'a> {
                     result: None,
                 });
                 // The callee leaves the program at its own site.
-                self.at(self.site, cx);
+                self.after_call(cx);
                 // Each variable it updates is assigned its parameter's
                 // value as it ends, which its keys are checked against.
                 for target in call.updated.values() {
@@ -1060,7 +1086,7 @@ impl<'a> FunctionBuilder<'a> {
             result: Some(dst.clone()),
         });
         // The callee leaves the program at its own site.
-        self.at(self.site, cx);
+        self.after_call(cx);
         dst
     }
 

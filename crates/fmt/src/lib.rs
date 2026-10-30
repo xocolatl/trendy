@@ -775,6 +775,14 @@ fn broken_line(
     if let Some(types) = type_parameters_start(next) {
         return Some(starts.level(&types.parent()?)? + 1);
     }
+    // A possible representation's conversions, each on a line of its own,
+    // one level in from the representation's.
+    if let Some(conversion) = next
+        .parent()
+        .filter(|p| p.kind() == SyntaxKind::Conversion && p.first_token().as_ref() == Some(next))
+    {
+        return Some(starts.level(&conversion.parent()?)? + 1);
+    }
     // A broken `if`'s `then` and `else`, each starting a line one level
     // in from the `if`, or from the one it is chained to.
     if matches!(next.kind(), SyntaxKind::ThenKw | SyntaxKind::ElseKw)
@@ -836,8 +844,8 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
     // which a space also comes before, `load`, `value`, `from` and `order`,
     // and a load's `keep`, which one comes before too, an order item's
     // `asc` and `desc`, a `for` loop's `in`, `heading`, before a heading's
-    // name, `type`, before a type's, `constraint`, before a condition, and
-    // a type's `order`.
+    // name, `type`, before a type's, `constraint`, before a condition, a
+    // type's `order`, and a conversion's `to` and `from`.
     let contextual_keyword = prev.kind() == Ident
         && prev.parent().is_some_and(|p| match p.kind() {
             BuiltinType => prev.text() == "type",
@@ -851,6 +859,7 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
             | SyntaxKind::TypeDecl
             | SyntaxKind::Constraint
             | SyntaxKind::TypeOrder
+            | SyntaxKind::Conversion
             | SyntaxKind::Load
             | SyntaxKind::Keeping
             | SyntaxKind::Numbering
@@ -1383,6 +1392,14 @@ mod tests {
                 "type percentage{{value:integer},constraint(value>=0),constraint value<=100};type angle{{radians:approximate}};"
             ),
             "type percentage {\n    { value: integer },\n    constraint (value >= 0),\n    constraint value <= 100,\n};\ntype angle { { radians: approximate } };\n"
+        );
+        // A representation's conversions each on a line of their own, one
+        // level in from it.
+        assert_eq!(
+            fmt(
+                "type t{{kelvin:approximate},{celsius:approximate}to{kelvin:=celsius+273.15e0}from{celsius:=kelvin-273.15e0}};"
+            ),
+            "type t {\n    { kelvin: approximate },\n    { celsius: approximate }\n        to { kelvin := celsius + 273.15e0 }\n        from { celsius := kelvin - 273.15e0 },\n};\n"
         );
     }
 

@@ -73,7 +73,8 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
     // `value` and `from`, `any` and `type`, in `any type`, `types`, `per`,
     // a mode's `const` and `out`, `kind`, a load's `load`, `from`, `order`, `asc`,
     // `desc`, `keep` and `numbered`, a `for` loop's `in`, `heading`, `type`,
-    // and a type's `constraint` and `order`.
+    // a type's `constraint` and `order`, and a conversion's `to` and
+    // `from`.
     let keyword = match parent {
         Some(SyntaxKind::BuiltinType) => token.text() == "type",
         Some(SyntaxKind::AnyType) => matches!(token.text(), "any" | "type"),
@@ -92,7 +93,8 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
             | SyntaxKind::HeadingDecl
             | SyntaxKind::TypeDecl
             | SyntaxKind::Constraint
-            | SyntaxKind::TypeOrder,
+            | SyntaxKind::TypeOrder
+            | SyntaxKind::Conversion,
         ) => true,
         _ => false,
     };

@@ -1378,6 +1378,54 @@ fn values_that_break_their_types_constraints_stop_the_program() {
     assert_eq!((status, &stderr[..]), (0, "percentage{value: 100}\n"));
 }
 
+/// A value selected in a possible representation other than the stored
+/// one is stored as its conversion computes, and read in any when the
+/// program runs; one that breaks a constraint naming another's component
+/// stops the program at the statement that selects it, not in the
+/// constraint, whose conversion sets a site of its own.
+#[test]
+fn values_are_converted_between_representations_when_running() {
+    let source = |celsius: &str| {
+        format!(
+            "type temperature {{
+    {{ kelvin: approximate }},
+    {{ celsius: approximate }}
+        to {{ kelvin := celsius + 273.15e0 }}
+        from {{ celsius := kelvin - 273.15e0 }},
+    constraint celsius < 1000e0,
+}};
+
+operator show{{celsius: approximate}} [
+    var t := temperature{{celsius: celsius}};
+    call debug_value{{v: t}};
+    call debug_value{{v: t.celsius}};
+];
+
+operator main{{}} [
+    call show{{celsius: {celsius}}};
+];
+"
+        )
+    };
+    let (status, stderr) = run_source("converted", &source("100e0"));
+    assert_eq!(
+        (status, &stderr[..]),
+        (0, "temperature{kelvin: 3.7315e2}\n1e2\n")
+    );
+    let (status, stderr) = run_source("converted_broken", &source("2000e0"));
+    assert_eq!(
+        (status, stderr),
+        (
+            1,
+            format!(
+                "error[{}]: temperature{{kelvin: 2.27315e3}} isn't a value of `temperature`: it breaks the constraint `celsius < 1000e0`\n{}",
+                trendy_diag::Code::BrokenConstraint.id(),
+                site("converted_broken", 10)
+            )
+        )
+    );
+}
+
 /// Values of a type of the program's own with an order compare by it when
 /// the program runs, as when compiling: its components in turn, a
 /// descending one the other way, and a value inside by its own type's.
@@ -1690,12 +1738,34 @@ fn types() {
             "│ Nowruz         │ calendar_day{day: 20, month: 3, year: 2026} │",
             "└────────────────┴─────────────────────────────────────────────┘",
             r#"array ["Lunar New Year", "Nowruz", "Inti Raymi", "Diwali"]"#,
+            // A temperature selected in degrees Celsius, stored in kelvins,
+            // one in degrees Fahrenheit read in Celsius, and compared.
+            "temperature{kelvin: 2.7115e2}",
+            "4e1",
+            "true",
             "┌───────────────────────────────────────────────────┬─────────────┐",
             "│ at                                                │ stop        │",
             "├───────────────────────────────────────────────────┼─────────────┤",
             "│ position{latitude: -1.205e1, longitude: -7.704e1} │ destination │",
             "│ position{latitude: -1.29e0, longitude: 3.682e1}   │ origin      │",
             "└───────────────────────────────────────────────────┴─────────────┘",
+        ]
+    );
+}
+
+#[test]
+fn inheritance() {
+    assert_eq!(
+        folded_and_run("inheritance"),
+        [
+            // The Third Manifesto's point reflected, moved, a segment's
+            // begin moved, an ellipse's semiaxes changed together, and a
+            // polygon's corners.
+            "point{x: -5e0, y: -2.5e0}",
+            "point{x: 2e0, y: 2.5e0}",
+            "lineseg{begin: point{x: 6.5e0, y: 2.5e0}, end: point{x: -5e0, y: -2.5e0}}",
+            "ellipse{a: distance{m: 3e0}, b: distance{m: 2e0}, ctr: point{x: 5e0, y: 2.5e0}}",
+            "3",
         ]
     );
 }

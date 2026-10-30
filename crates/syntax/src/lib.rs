@@ -206,8 +206,13 @@ pub enum SyntaxKind {
     /// of its type, its possible representation and its constraints.
     TypeBody,
     /// `{ name: type, … }`: a possible representation of a type, its
-    /// components.
+    /// components, and, but for the one its values are stored as, its
+    /// conversions to and from that one.
     Representation,
+    /// `to { stored := … }` or `from { this := … }`: how a possible
+    /// representation converts to the stored one, or from it. `to` and
+    /// `from` are contextual keywords, identifiers elsewhere.
+    Conversion,
     /// `constraint condition`: a condition every value of a type satisfies.
     /// `constraint` is a contextual keyword, an identifier elsewhere.
     Constraint,
@@ -393,7 +398,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 158] = [
+    pub const ALL: [SyntaxKind; 159] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -483,6 +488,7 @@ impl SyntaxKind {
         SyntaxKind::TypeDecl,
         SyntaxKind::TypeBody,
         SyntaxKind::Representation,
+        SyntaxKind::Conversion,
         SyntaxKind::Constraint,
         SyntaxKind::TypeOrder,
         SyntaxKind::RequirementList,
@@ -966,6 +972,7 @@ impl SyntaxKind {
             SyntaxKind::TypeDecl => "type declaration",
             SyntaxKind::TypeBody => "type's representation",
             SyntaxKind::Representation => "possible representation",
+            SyntaxKind::Conversion => "conversion",
             SyntaxKind::Constraint => "type constraint",
             SyntaxKind::TypeOrder => "type's order",
             SyntaxKind::RequirementList => "requirements",

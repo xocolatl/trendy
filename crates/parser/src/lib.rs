@@ -442,9 +442,28 @@ impl<'a> Parser<'a> {
                 }
             },
         );
+        // Its conversions, after the components' braces.
+        while self.conversion_at() {
+            self.start_node(SyntaxKind::Conversion);
+            let word = self.found().expect("at the word").text.to_lowercase();
+            self.contextual_keyword(&word);
+            self.assign_list(errors::Assigning::Conversion);
+            self.builder.finish_node();
+        }
         self.form = outer_form;
         self.builder.finish_node();
         inside
+    }
+
+    /// Whether a possible representation's conversion is next: `to` or
+    /// `from`, in any case, before `{`.
+    fn conversion_at(&mut self) -> bool {
+        self.found().is_some_and(|f| {
+            f.kind == SyntaxKind::Ident
+                && (f.text.eq_ignore_ascii_case("to") || f.text.eq_ignore_ascii_case("from"))
+        }) && self
+            .found_after(1)
+            .is_some_and(|f| f.kind == SyntaxKind::LBrace)
     }
 
     /// Where the `}` just consumed ends, if the last token was one.
@@ -2216,7 +2235,7 @@ impl<'a> Parser<'a> {
                 if self.at_sql_set() {
                     self.sql_set();
                 } else if values_first {
-                    self.assign_list(keyword);
+                    self.assign_list(errors::Assigning::of(keyword));
                 }
                 if self.at(SyntaxKind::WhereKw) {
                     let where_span = self.bump();
@@ -3708,7 +3727,9 @@ impl<'a> Parser<'a> {
                 self.operator_token(found, keyword);
                 match keyword {
                     SyntaxKind::RenameKw => self.rename_list(),
-                    SyntaxKind::ExtendKw | SyntaxKind::ReplaceKw => self.assign_list(keyword),
+                    SyntaxKind::ExtendKw | SyntaxKind::ReplaceKw => {
+                        self.assign_list(errors::Assigning::of(keyword));
+                    }
                     SyntaxKind::GroupKw | SyntaxKind::WrapKw => self.gather_list(keyword),
                     SyntaxKind::UngroupKw | SyntaxKind::UnwrapKw => self.unpacked(keyword),
                     _ => self.names(errors::PROJECTION_FORM),
@@ -3817,14 +3838,17 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// `{ a := x, b := y }`: attributes and their values, after `keyword`,
-    /// `extend` or `replace`.
-    fn assign_list(&mut self, keyword: SyntaxKind) {
-        let assigning = errors::Assigning::of(keyword);
+    /// `{ a := x, b := y }`: attributes and their values, of an `extend` or
+    /// a `replace`, or components and theirs, of a conversion, as
+    /// `assigning` says.
+    fn assign_list(&mut self, assigning: errors::Assigning) {
         let outer_form = std::mem::replace(&mut self.form, assigning.form());
-        // An `update` isn't an operator that could be chained, so brackets
-        // are only a wrong delimiter there.
-        let (delimiters, mistakes): (_, &[_]) = if assigning == errors::Assigning::Update {
+        // An `update` isn't an operator that could be chained, nor is a
+        // conversion, so brackets are only a wrong delimiter there.
+        let (delimiters, mistakes): (_, &[_]) = if matches!(
+            assigning,
+            errors::Assigning::Update | errors::Assigning::Conversion
+        ) {
             (
                 (SyntaxKind::LBrace, SyntaxKind::RBrace),
                 &[
@@ -6807,6 +6831,41 @@ operator main{} [
         );
         let errors = parse_str("operator main{} [ type celsius { { d: approximate } }; ];").errors;
         assert_eq!(errors[0].code, Code::NestedDefinition);
+    }
+
+    #[test]
+    fn type_representations() {
+        // Each possible representation but the stored one converts, `to`
+        // and `from`, after its braces.
+        let parse = parse_str(
+            "type temperature {
+    { kelvin: approximate },
+    { celsius: approximate }
+        to { kelvin := celsius + 273.15e0 }
+        from { celsius := kelvin - 273.15e0 },
+};",
+        );
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let decl = parse.tree.types().next().unwrap();
+        let conversions: Vec<Vec<trendy_syntax::ast::Direction>> = decl
+            .representations()
+            .map(|r| r.conversions().filter_map(|c| c.direction()).collect())
+            .collect();
+        assert_eq!(
+            conversions,
+            [
+                vec![],
+                vec![
+                    trendy_syntax::ast::Direction::To,
+                    trendy_syntax::ast::Direction::From
+                ]
+            ]
+        );
+        // A conversion's assignments have an `extend`'s habits.
+        assert_eq!(
+            fix("type t { { a: integer }, { b: integer } to { a: b } from { b := a } };"),
+            "type t { { a: integer }, { b: integer } to { a := b } from { b := a } };"
+        );
     }
 
     #[test]

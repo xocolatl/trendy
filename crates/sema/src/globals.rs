@@ -5,16 +5,16 @@
 //! cycle: of initial values, through operators or not, or of read-only
 //! operators that call each other.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use trendy_diag::{Diagnostic, Span};
 use trendy_hir as hir;
-use trendy_syntax::ast::{self, SourceFile, VarDecl};
+use trendy_syntax::ast::{self, AstNode, SourceFile, VarDecl};
 
 use crate::assign::{self, Assignee, Assigning};
 use crate::check::{Checker, Lookup, Names};
 use crate::locals::{self, Declaration, Local, Locals};
-use crate::operators::{Operators, Signature};
+use crate::operators::{FromType, Made, Operators, Signature};
 use crate::types::{self, Expected, Origin};
 use crate::{Namespaces, Prelude, Sites, errors, keys, ops};
 
@@ -253,11 +253,17 @@ impl<'a> Globals<'a> {
     fn checked(&mut self, id: hir::OperatorId, at: Span, errors: &mut Vec<Diagnostic>) -> bool {
         let operators = self.operators;
         let signature = operators.get(id);
-        // A selector's value is the value its arguments are the components
-        // of, with no body to check, but its type's constraints, which it
-        // checks: a call of it is one of each of them, so a constraint
-        // whose condition selects a value of its type closes a cycle.
-        if let Some(defined) = signature.selects() {
+        // The stored representation's selector's value is the value its
+        // arguments are the components of, with no body to check, but its
+        // type's constraints, which it checks: a call of it is one of each
+        // of them, so a constraint whose condition selects a value of its
+        // type closes a cycle.
+        if let Some(defined) = signature.selects().filter(|_| {
+            signature
+                .from_type
+                .as_ref()
+                .is_some_and(FromType::selects_stored)
+        }) {
             let valid = defined
                 .constraints
                 .iter()
@@ -344,6 +350,9 @@ impl<'a> Globals<'a> {
         if let Some((defined, constraint)) = signature.constrains() {
             return self.constraint(signature, defined, constraint, errors);
         }
+        if let Some(from) = &signature.from_type {
+            return self.converted(signature, from, errors);
+        }
         let decl = signature.decl.as_ref()?;
         let written = decl.result()?;
         let body = decl.body()?;
@@ -428,6 +437,154 @@ impl<'a> Globals<'a> {
             });
             (locals.finish(), value)
         })
+    }
+
+    /// The value of `signature`, made from a type's possible representation
+    /// other than the stored one, as `from` says, with no local variables:
+    /// of its selector, the value with the stored components its `to`
+    /// computes from its own, the parameters, once the type's constraints
+    /// are checked; of its conversion from the stored one, the tuple of its
+    /// own its `from` computes from the stored ones. `None` if the
+    /// representation's conversions have errors, already reported, or after
+    /// reporting those in its `to` or `from`.
+    fn converted(
+        &mut self,
+        signature: &Signature,
+        from: &FromType,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<(Vec<hir::Local>, hir::Expr)> {
+        if !signature.valid {
+            return None;
+        }
+        let defined = &from.defined;
+        let stored = crate::named_types::stored(&from.decl)?.components()?;
+        let (representation, direction) = match &from.made {
+            Made::Selector(r) => (r, ast::Direction::To),
+            Made::From(r) => (r, ast::Direction::From),
+            Made::Constraint(_) => unreachable!("a constraint is checked on its own"),
+        };
+        let conversion = representation
+            .conversions()
+            .find(|c| c.direction() == Some(direction))?;
+        let own = representation.components()?;
+        let value = match direction {
+            ast::Direction::To => {
+                let at = signature.defined().unwrap_or_else(|| conversion.span());
+                let constrained = defined
+                    .constraints
+                    .iter()
+                    .all(|c| self.checked(c.operator, at, errors));
+                let components =
+                    self.conversion(signature, &conversion, &defined.components, &stored, errors);
+                if !constrained {
+                    return None;
+                }
+                hir::Expr::Select(defined.clone(), Box::new(components?))
+            }
+            ast::Direction::From => {
+                let Some(hir::Type::Tuple(components)) = &signature.result else {
+                    unreachable!("a conversion from the stored representation is of a tuple");
+                };
+                self.conversion(signature, &conversion, components, &own, errors)?
+            }
+        };
+        Some((Vec::new(), value))
+    }
+
+    /// The tuple of `components`, written in `written`, that `conversion`
+    /// computes, in `signature`, whose parameters are the components it
+    /// computes them from: each once, of its type, computed as a read-only
+    /// operator's value is. `None` after reporting why not.
+    fn conversion(
+        &mut self,
+        signature: &Signature,
+        conversion: &ast::Conversion,
+        components: &hir::Heading,
+        written: &ast::Heading,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let list = conversion.assignments()?;
+        let keyword = conversion
+            .keyword()
+            .map_or_else(String::new, |k| k.text().to_string());
+        let context = errors::conversion_note(&keyword, components);
+        let mut locals = Locals::default();
+        let mut names = ReadOnlyNames {
+            globals: self,
+            within: signature.id,
+            locals: &mut locals,
+        };
+        let mut ok = true;
+        let mut values: BTreeMap<String, hir::Expr> = BTreeMap::new();
+        let mut first: BTreeMap<String, Span> = BTreeMap::new();
+        // The components unknown names are fixed to, which aren't missing
+        // then.
+        let mut renamed: Vec<&str> = Vec::new();
+        for assign in list.assignments() {
+            let Some(ident) = assign.name().and_then(|n| n.ident()) else {
+                ok = false;
+                continue;
+            };
+            let (name, span) = (ident.text(), trendy_syntax::span(ident.text_range()));
+            let Some(ty) = components.get(name) else {
+                let rename = trendy_diag::closest(name, components.named().map(|(c, _)| c));
+                renamed.extend(rename);
+                errors.push(errors::unknown_attribute(
+                    errors::Noun::Component,
+                    name,
+                    span,
+                    &context,
+                    rename,
+                    None,
+                ));
+                ok = false;
+                continue;
+            };
+            if let Some(&earlier) = first.get(name) {
+                errors.push(errors::duplicate_attribute(
+                    errors::Noun::Component,
+                    name,
+                    span,
+                    earlier,
+                ));
+                ok = false;
+                continue;
+            }
+            first.insert(name.to_string(), span);
+            let origin = written
+                .attributes()
+                .find(|a| a.is_named(name))
+                .and_then(|a| a.type_expr())
+                .map_or(Origin::Builtin, Origin::Type);
+            let expected = Expected {
+                ty: ty.clone(),
+                origin,
+            };
+            match assign
+                .value()
+                .and_then(|v| Checker::new(&mut names).expr(&v, Some(&expected), errors))
+            {
+                Some(value) => {
+                    values.insert(name.to_string(), value);
+                }
+                None => ok = false,
+            }
+        }
+        let missing: Vec<&str> = components
+            .named()
+            .map(|(c, _)| c)
+            .filter(|c| !first.contains_key(*c) && !renamed.contains(c))
+            .collect();
+        if !missing.is_empty() {
+            errors.push(errors::missing_attributes(
+                errors::Noun::Component,
+                &missing,
+                &context,
+                list.span(),
+            ));
+            ok = false;
+        }
+        ok.then(|| ops::tuple(values))
     }
 
     /// The value of `signature`, an operator that computes `constraint`, of
@@ -597,6 +754,29 @@ impl Names for ReadOnlyNames<'_, '_, '_> {
             }
             Some(Local::Invalid) => return Lookup::Reported,
             None => {}
+        }
+        // In a constraint, a component of a possible representation other
+        // than the stored one, which its conversion computes from the
+        // stored components, the parameters.
+        let conversion = self.signature().constrains().and_then(|(defined, _)| {
+            let (id, _) = self.globals.operators.conversion(defined, name)?;
+            Some((id, defined.components.clone()))
+        });
+        if let Some((conversion, stored)) = conversion {
+            if !self.globals.checked(conversion, span, errors) {
+                return Lookup::Reported;
+            }
+            let args = stored
+                .attributes()
+                .map(|(k, _)| (k.to_string(), hir::Expr::Parameter(k.to_string())))
+                .collect();
+            let call = hir::Expr::Call(hir::Call {
+                operator: conversion,
+                types: Vec::new(),
+                args,
+                updated: BTreeMap::new(),
+            });
+            return Lookup::Found(hir::Expr::Extract(Box::new(call), name.to_string()));
         }
         // A read-only operator's value depends on its arguments alone, so
         // a variable of the program's is reported, once, with a fix that

@@ -143,6 +143,7 @@ codes! {
     UnchosenOperator => "A0056",
     SelectorName => "A0057",
     ConstantConstraint => "A0058",
+    Conversions => "A0059",
     Overflow => "R0001",
     DivisionByZero => "R0002",
     OutOfMemory => "R0003",

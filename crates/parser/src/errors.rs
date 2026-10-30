@@ -16,6 +16,7 @@ pub(crate) const PROJECTION_FORM: &str =
 pub(crate) const NARY_FORM: &str = "`{}` encloses what can be in any order, and `[]` what can't: `join{r, s, t}` and `times{r, s, t}` can be in any order, while `compose[r, s, t]` is `(r compose s) compose t`";
 pub(crate) const CONNECTIVE_FORM: &str = "`and{a, b, c}`, `or{a, b, c}` and `xor{a, b, c}` take any number of booleans, in braces, as their order doesn't matter, and are true when every one is, when one is, and when an odd number are";
 pub(crate) const EXTEND_FORM: &str = "`extend` takes new attributes, each `name := value`, where the value is computed from the tuple's own attributes: `r extend { total := price * quantity }`";
+pub(crate) const CONVERSION_FORM: &str = "a possible representation other than the one values are stored as converts to it with `to { stored := … }`, computing each stored component from its own, and from it with `from { this := … }`, computing each of its own from the stored ones";
 pub(crate) const REPLACE_FORM: &str = "`replace` takes attributes the operand has, each `name := value`, where the new value is computed from the tuple's own attributes: `r replace { price := price * 2 }`";
 pub(crate) const IMAGE_FORM: &str = "in an `extend`'s or a `replace`'s values, `!!r` is the tuples of `r` that match the tuple at hand on their common attributes, without those attributes; `r` is a name, or an expression in parentheses";
 pub(crate) const GROUP_FORM: &str = "`group` gathers attributes into new relation-valued attributes, each `name := {attributes}`: `r group { residents := {name} }`";
@@ -685,6 +686,9 @@ pub(crate) enum Assigning {
     Extend,
     Replace,
     Update,
+    /// A type's conversion, `to { stored := … }` or `from { this := … }`,
+    /// which computes a possible representation's components.
+    Conversion,
 }
 
 impl Assigning {
@@ -703,6 +707,7 @@ impl Assigning {
             Assigning::Extend => EXTEND_FORM,
             Assigning::Replace => REPLACE_FORM,
             Assigning::Update => UPDATE_FORM,
+            Assigning::Conversion => CONVERSION_FORM,
         }
     }
 
@@ -711,6 +716,7 @@ impl Assigning {
         match self {
             Assigning::Extend => "new attributes",
             Assigning::Replace | Assigning::Update => "attributes and their new values",
+            Assigning::Conversion => "components and their values",
         }
     }
 
@@ -719,6 +725,7 @@ impl Assigning {
         match self {
             Assigning::Extend => "new attribute",
             Assigning::Replace | Assigning::Update => "attribute",
+            Assigning::Conversion => "component",
         }
     }
 
@@ -730,6 +737,9 @@ impl Assigning {
             }
             Assigning::Replace | Assigning::Update => {
                 "write the name of the attribute it replaces and `:=` before the value, as in `price := price * 2`"
+            }
+            Assigning::Conversion => {
+                "write the name of the component it computes and `:=` before the value, as in `kelvin := celsius + 273.15e0`"
             }
         }
     }
@@ -756,6 +766,9 @@ pub(crate) fn assign_separator(
         Assigning::Update => {
             "in `update`, each attribute is given a new value computed from the tuple, with `:=`, as a variable is; `:` pairs a name with a given value in a tuple, and `=` compares"
         }
+        Assigning::Conversion => {
+            "in a conversion, each component is computed from the other representation's, with `:=`, as a variable is; `:` pairs a name with a given value in a tuple, and `=` compares"
+        }
     };
     Diagnostic::error(
         Code::AttributeSeparator,
@@ -781,6 +794,7 @@ pub(crate) fn unnamed_assign(assigning: Assigning, span: Span) -> Diagnostic {
         Assigning::Replace | Assigning::Update => {
             "an attribute's new value needs the attribute's name"
         }
+        Assigning::Conversion => "a component's value needs the component's name",
     };
     Diagnostic::error(Code::MissingToken, message, span, "this value has no name")
         .with_note(assigning.form())
@@ -798,6 +812,7 @@ pub(crate) fn assign_as(assigning: Assigning, span: Span, name: &str, value: &st
             match assigning {
                 Assigning::Extend => "new attribute",
                 Assigning::Replace | Assigning::Update => "attribute's new value",
+                Assigning::Conversion => "component's value",
             }
         ),
         span,

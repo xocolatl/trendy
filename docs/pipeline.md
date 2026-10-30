@@ -659,6 +659,15 @@ selection checks each, which folds when the components are constants
 operator when running. Checking a selector's call, or another selection,
 checks the type's constraints first (`Globals::checked`), so a
 constraint that selects a value of its own type closes a cycle (A0036).
+A type's possible representations but the stored one, the one without
+conversions, are sema's (`Namespaces::converted`): HIR has the stored
+components only. Each has a selector, whose value is the value with the
+stored components its `to` computes, and a conversion from the stored
+representation (`operators::Made`), whose value is the tuple of its
+components its `from` computes; a component of one, `v.c`, is the
+conversion's, called in an `Extend` of `v`'s stored components, so that
+`v` is computed once (`Checker::converted_component`), and a constraint
+names one as the conversion's call on its parameters.
 A type's order, `order [asc …]`, is checked as a load's is
 (`assign::order_items`), with every component named, and makes the type
 ordered (`hir::Defined::order`, `Type::has`), so of `any ordered`
@@ -1585,6 +1594,9 @@ the one it ends with, the site of the statement or value (`Expr::At`,
 which `Expr::at` leaves out for one that can't). Lowering emits
 `Inst::Site` before each, again after each call, whose callee sets its
 own, and before a loop's condition, which follows its body's statements;
+a function with no site of its own, as a type's selector, saves the one
+it is entered at, its caller's, and restores that after each call
+(`Inst::SaveSite`, `Inst::RestoreSite`);
 each site is a constant of the path, `<prelude>` for the prelude's, the
 line and the column. Codegen stores its address in the runtime's
 `trendy_rt_site`, which the runtime writes for every failure, its own

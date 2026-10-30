@@ -2145,6 +2145,22 @@ pub(crate) fn variable_in_read_only(
             "write the condition with the components and constants, without `{name}`"
         ));
     }
+    // A possible representation's `to` or `from`.
+    if let Some(from) = &operator.from_type {
+        return Diagnostic::error(
+            Code::VariableInReadOnly,
+            format!(
+                "a conversion of `{}` can't read the variable `{name}`",
+                from.defined.name
+            ),
+            span,
+            "a variable of the program's",
+        )
+        .with_note("a conversion computes a representation's components from another's alone, so that a value is the same whichever it is written in")
+        .with_help(format!(
+            "write it with the components and constants, without `{name}`"
+        ));
+    }
     let op = &operator.name;
     let d = Diagnostic::error(
         Code::VariableInReadOnly,
@@ -3822,6 +3838,37 @@ pub(crate) fn replaced_unknown_component(
         .with_secondary(operand.span(), format!("this is `{}`", defined.name))
 }
 
+/// The component `name`, at `span`, which a `replace` or an `update`, as
+/// `assigning` says, of a value of the type of the program's own
+/// `defined`, gives a value, but which is a component of another of its
+/// possible representations, with the components `own`, than the stored
+/// one.
+pub(crate) fn other_representations_component(
+    assigning: crate::ops::Assigning,
+    name: &str,
+    span: Span,
+    defined: &hir::Defined,
+    own: &hir::Heading,
+) -> Diagnostic {
+    let t = &defined.name;
+    let components: Vec<String> = own.named().map(|(c, _)| format!("{c}: …")).collect();
+    Diagnostic::error(
+        Code::Conversions,
+        format!("`{name}` is a component of another possible representation of `{t}`"),
+        span,
+        "not of the representation its values are stored as",
+    )
+    .with_note(format!(
+        "`{}` gives the components of the representation a value is stored as new values, and {}",
+        assigning.keyword(),
+        components_note(defined)
+    ))
+    .with_help(format!(
+        "select the value in that representation instead: `{t}{{{}}}`",
+        components.join(", ")
+    ))
+}
+
 /// `where`, at `span`, applied to `operand`, of type `ty`, which isn't a
 /// relation.
 pub(crate) fn not_restrictable(span: Span, ty: &hir::Type, operand: &Expr) -> Diagnostic {
@@ -4509,6 +4556,154 @@ pub(crate) fn cycle(cycle: &[Pending]) -> Diagnostic {
         };
         d.with_secondary(pending.via, label)
     })
+}
+
+/// How a type's possible representations relate, for notes.
+const REPRESENTATIONS: &str = "a type's values are stored as one of its possible representations, the one without conversions; each other converts to it with `to { stored := … }`, computing the stored components from its own, and from it with `from { own := … }`, computing its own from the stored ones";
+
+/// What a conversion, after `keyword`, `to` or `from`, computes: each of
+/// `components`, for notes.
+pub(crate) fn conversion_note(keyword: &str, components: &hir::Heading) -> String {
+    let names = named_attributes(components);
+    let which = if keyword.eq_ignore_ascii_case("to") {
+        "the stored representation's components"
+    } else {
+        "this representation's components"
+    };
+    format!(
+        "`{keyword}` computes each of {which}, {}, once; {REPRESENTATIONS}",
+        trendy_diag::conjoin(&names)
+    )
+}
+
+/// The type `name`, declared at `ident`, every one of whose possible
+/// representations has conversions, so that none is stored.
+pub(crate) fn no_stored_representation(name: &str, ident: &SyntaxToken) -> Diagnostic {
+    Diagnostic::error(
+        Code::Conversions,
+        format!("no possible representation of `{name}` is stored"),
+        trendy_syntax::span(ident.text_range()),
+        "each of its representations has conversions",
+    )
+    .with_note(REPRESENTATIONS)
+    .with_help("remove the conversions of the representation to store its values as")
+}
+
+/// `representation`, a second possible representation of the type `name`
+/// without conversions, after `stored`, the one its values are stored as.
+pub(crate) fn second_stored(
+    name: &str,
+    representation: &trendy_syntax::ast::Representation,
+    stored: &trendy_syntax::ast::Representation,
+) -> Diagnostic {
+    Diagnostic::error(
+        Code::Conversions,
+        format!("`{name}` has more than one possible representation without conversions"),
+        representation.span(),
+        "no `to` or `from`",
+    )
+    .with_secondary(stored.span(), "its values are stored as this one")
+    .with_note(REPRESENTATIONS)
+    .with_help("convert it to the stored one and from it, after its braces")
+}
+
+/// `representation`, other than the stored one, without a conversion
+/// `to` the stored one, if `to` is true, or else `from` it.
+pub(crate) fn missing_conversion(
+    representation: &trendy_syntax::ast::Representation,
+    to: bool,
+) -> Diagnostic {
+    let (missing, help) = if to {
+        (
+            "`to`",
+            "add `to { stored := … }`, computing each stored component from its own",
+        )
+    } else {
+        (
+            "`from`",
+            "add `from { own := … }`, computing each of its components from the stored ones",
+        )
+    };
+    Diagnostic::error(
+        Code::Conversions,
+        format!("this possible representation has no conversion {missing}"),
+        representation.span(),
+        format!("no {missing}"),
+    )
+    .with_note(REPRESENTATIONS)
+    .with_help(help)
+}
+
+/// `conversion`, given again after `first`, which goes the same way.
+pub(crate) fn repeated_conversion(
+    conversion: &trendy_syntax::ast::Conversion,
+    first: &trendy_syntax::ast::Conversion,
+) -> Diagnostic {
+    let keyword = conversion
+        .keyword()
+        .map_or_else(String::new, |k| k.text().to_string());
+    Diagnostic::error(
+        Code::DuplicateAttribute,
+        format!("`{keyword}` is given more than once"),
+        conversion.span(),
+        "given again here",
+    )
+    .with_secondary(first.span(), "first given here")
+    .with_note(REPRESENTATIONS)
+    .with_suggestion(
+        "delete the second",
+        vec![Edit {
+            span: conversion.removal(),
+            replacement: String::new(),
+        }],
+    )
+}
+
+/// `to` and `from`, whose assignments compute what the other's should: the
+/// representation's own components, and the stored ones.
+pub(crate) fn swapped_conversions(
+    to: &trendy_syntax::ast::Conversion,
+    from: &trendy_syntax::ast::Conversion,
+) -> Diagnostic {
+    let span = |c: &trendy_syntax::ast::Conversion| {
+        c.keyword()
+            .map_or_else(|| c.span(), |k| trendy_syntax::span(k.text_range()))
+    };
+    Diagnostic::error(
+        Code::Conversions,
+        "`to` and `from` are the wrong way round",
+        span(to),
+        "this computes this representation's own components",
+    )
+    .with_secondary(span(from), "and this the stored ones")
+    .with_note(REPRESENTATIONS)
+    .with_suggestion(
+        "swap `to` and `from`",
+        vec![
+            Edit {
+                span: span(to),
+                replacement: "from".to_string(),
+            },
+            Edit {
+                span: span(from),
+                replacement: "to".to_string(),
+            },
+        ],
+    )
+}
+
+/// The component `component`, at `span`, of a possible representation of
+/// the type `name`, which another of them has, at `first`.
+pub(crate) fn component_in_two(name: &str, component: &str, span: Span, first: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::DuplicateAttribute,
+        format!("two possible representations of `{name}` have a component `{component}`"),
+        span,
+        "a second one",
+    )
+    .with_secondary(first, "the first")
+    .with_note("a component's name says which representation it is of, as `v.c` reads it, so each is in one")
+    .with_help("rename one of them")
 }
 
 /// Why a type's constraint depends on the components alone, for notes.

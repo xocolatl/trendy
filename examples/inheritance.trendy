@@ -1,0 +1,135 @@
+/* The Third Manifesto's example types (chapters 3 and 6), on which
+   Type Inheritance and Relational Theory builds its running example of
+   inheritance: plane figures, which are ellipses or polygons, of which
+   circles are ellipses, rectangles polygons and squares rectangles. Its
+   root, `plane_figure`, is a dummy type, with no possible representation
+   of its own (chapter 12). The language has no inheritance yet, so for now
+   these are types of their own, and the subtypes come as it does. Each
+   result below is printed twice, folded when compiling and computed when
+   running, as in types.trendy. */
+
+/* Lengths and angles. A length, here a `distance`, since the prelude's
+   `length` of an array has the name, is never negative, and an angle is in
+   radians, from 0 up to a full turn; both are ordinal in Tutorial D, and
+   ordered here. */
+type distance {
+    { m: approximate },
+    constraint m >= 0e0,
+    order [asc m],
+};
+type angle {
+    { rho: approximate },
+    constraint rho >= 0e0 and rho < 2e0 * 3.14159e0,
+    order [asc rho],
+};
+
+/* A point in two-dimensional space, by its cartesian coordinates, within
+   the circle of radius 100 around the origin, as RM Prescription 23 has
+   it: TTM writes `SQRT ( X ** 2 + Y ** 2 ) <= 100.0`. A point has no
+   order.
+
+   TTM's polar representation, `POSSREP POLAR { R LENGTH, THETA ANGLE }`,
+   needs square roots and trigonometry, which trendy hasn't yet. It will
+   read, beside the cartesian one, with the origin's angle 0, as RM
+   Prescription 8 needs, so that every point has one polar
+   representation:
+
+     { r: distance, theta: angle }
+         to { x := r.m * cos{of: theta.rho}, y := r.m * sin{of: theta.rho} }
+         from {
+             r := distance{m: sqrt{of: x * x + y * y}},
+             theta := angle{rho: turn{of: atan2{y: y, x: x}}},
+         },
+     constraint r <> distance{m: 0e0} or theta = angle{rho: 0e0},
+
+   And DIST, the distance between two points:
+
+     operator dist{p1: point, p2: point}: distance [
+         distance{m: sqrt{of: (p1.x - p2.x) * (p1.x - p2.x) + (p1.y - p2.y) * (p1.y - p2.y)}}
+     ];
+*/
+type point {
+    { x: approximate, y: approximate },
+    constraint x * x + y * y <= 100e0 * 100e0,
+};
+
+/* A line segment, from one point to another (TTM's LINESEG). */
+type lineseg { { begin: point, end: point } };
+
+/* An ellipse, by its major and minor semiaxes, the major at least as long
+   as the minor, and its centre. */
+type ellipse {
+    { a: distance, b: distance, ctr: point },
+    constraint a >= b,
+};
+
+/* A polygon, by its vertices, numbered from 1, each at a point of its own:
+   a component can be a relation, and a constraint says what its tuples
+   are. */
+type polygon {
+    { vertices: relation { v_no: integer, vertex: point } },
+    constraint count{r: vertices{v_no}} = count{r: vertices},
+    constraint count{r: vertices{vertex}} = count{r: vertices},
+    constraint is_empty{r: vertices where v_no < 1 or v_no > count{r: vertices}},
+};
+
+/* The point on the other side of the origin (TTM's REFLECT). */
+operator reflect{p: point}: point [
+    point{x: -p.x, y: -p.y}
+];
+
+var p := point{x: 5e0, y: 2.5e0};
+var reflected := reflect{p: p};
+
+/* `THE_X ( P ) := 2.0`: a component changed with `update`, and one of a
+   value inside another, `THE_X ( THE_BEGIN ( LS ) ) := 6.5`. */
+var moved := [
+    var q := p;
+    update q { x := 2e0 };
+    q
+];
+var segment := [
+    var ls := lineseg{begin: p, end: reflected};
+    update ls { begin := begin replace { x := 6.5e0 } };
+    ls
+];
+
+/* An ellipse's semiaxes changed together, by one `update`, as TTM
+   recommends: one at a time, a major semiaxis of 3 would be shorter than
+   the minor one of 4 in between, which no ellipse has. */
+var squashed := [
+    var e := ellipse{a: distance{m: 5e0}, b: distance{m: 4e0}, ctr: p};
+    update e { a := distance{m: 3e0}, b := distance{m: 2e0} };
+    e
+];
+
+var triangle := polygon{vertices: relation {
+    { v_no: 1, vertex: point{x: 0e0, y: 0e0} },
+    { v_no: 2, vertex: point{x: 4e0, y: 0e0} },
+    { v_no: 3, vertex: point{x: 0e0, y: 3e0} },
+}};
+var corners := count{r: triangle.vertices};
+
+operator geometry{p: point, shape: polygon} [
+    call debug_value{v: reflect{p: p}};
+    var q := p;
+    update q { x := 2e0 };
+    call debug_value{v: q};
+    var ls := lineseg{begin: p, end: reflect{p: p}};
+    update ls { begin := begin replace { x := 6.5e0 } };
+    call debug_value{v: ls};
+    var e := ellipse{a: distance{m: 5e0}, b: distance{m: 4e0}, ctr: p};
+    update e { a := distance{m: 3e0}, b := distance{m: 2e0} };
+    call debug_value{v: e};
+    call debug_value{v: count{r: shape.vertices}};
+];
+
+operator main{} [
+    call debug_value{v: reflected};
+    call debug_value{v: moved};
+    call debug_value{v: segment};
+    call debug_value{v: squashed};
+    call debug_value{v: corners};
+
+    call geometry{p: p, shape: triangle};
+];

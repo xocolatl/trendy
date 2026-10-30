@@ -1741,7 +1741,7 @@ operator main{} [
 - **The components go in braces of their own,** inside the type's:
   `type celsius { { degrees: approximate } };`, even for one. The outer
   braces hold what the declaration says of the type: its possible
-  representation, its constraints and its order (see below). Their order
+  representations, its constraints and its order (see below). Their order
   doesn't matter to the compiler, but reads best that way: what the values
   are made of, which of those values the type has, and how they compare. Components written
   straight inside the type's braces, as a heading's attributes are, or
@@ -1877,6 +1877,52 @@ operator main{} [
   reported (P0042).
 - **A type has one order** (A0008). It goes in the type's braces, not
   the components', as a constraint does (P0041).
+
+A type can have more than one possible representation. Its values are
+stored as the one without conversions, and each other converts to it,
+with `to { stored := … }`, computing the stored components from its own,
+and from it, with `from { own := … }`, computing its own from the stored
+ones (*The Third Manifesto*, RM Prescription 4):
+
+```trendy
+type temperature {
+    { kelvin: approximate },
+    { celsius: approximate }
+        to { kelvin := celsius + 273.15e0 }
+        from { celsius := kelvin - 273.15e0 },
+    { fahrenheit: approximate }
+        to { kelvin := (fahrenheit - 32e0) * 5e0 / 9e0 + 273.15e0 }
+        from { fahrenheit := (kelvin - 273.15e0) * 9e0 / 5e0 + 32e0 },
+    constraint kelvin >= 0e0,
+    order [asc kelvin],
+};
+
+operator main{} [
+    var body := temperature{fahrenheit: 98.6e0};
+    call debug_value{v: body};
+    call debug_value{v: body.celsius};
+    call debug_value{v: body > temperature{celsius: 30e0}};
+];
+```
+
+- **Each representation has a selector,** named after the type and told
+  apart by its components' names, as operators of one name are:
+  `temperature{celsius: 37e0}` is the value whose stored components its
+  `to` computes. A value is written in its stored representation.
+- **A component of any representation is read with the dot:**
+  `body.celsius` is computed by its `from`, and a constraint can name
+  one, as `constraint celsius < 100e0` would. Equality and order are the
+  stored components'.
+- **Each component is in one representation** (A0008), since its name
+  says which, and each conversion computes each component it should,
+  once, of its type (A0009, A0008, A0004), and reads no variable
+  (A0050), so a value is the same in any representation.
+- **Exactly one representation is stored,** and each other has `to` and
+  `from`, once each (A0059, A0008). `to` and `from` the wrong way round
+  are swapped by the fix.
+- **`replace` and `update` change the stored representation's
+  components;** another's is an error (A0059), whose help selects the
+  value in that representation instead.
 
 ## Tuples
 

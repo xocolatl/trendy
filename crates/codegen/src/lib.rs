@@ -241,12 +241,8 @@ impl Functions {
                     .collect::<Result<Vec<_>, _>>()?;
                 b.ins().call(callee, &addresses);
             }
-            lir::Inst::Site(site) => {
-                let address = self.address(&lir::Place::whole(lir::Base::Data(*site)), frame, b)?;
-                let global = self.site_global()?;
-                let global = self.module.declare_data_in_func(global, b.func);
-                let at = b.ins().symbol_value(self.config.pointer_type(), global);
-                b.ins().store(MemFlagsData::trusted(), address, at, 0);
+            lir::Inst::Site(_) | lir::Inst::SaveSite { .. } | lir::Inst::RestoreSite { .. } => {
+                self.site_inst(inst, frame, b)?;
             }
             lir::Inst::CallRuntime { function, args } => {
                 let args: Vec<&lir::Place> = args.iter().collect();
@@ -517,6 +513,45 @@ impl Functions {
     }
 
     /// Import a runtime function, which takes parameters of types `params`.
+    /// `inst`, which sets, saves or restores the site the program is at,
+    /// in the runtime's `trendy_rt_site`.
+    fn site_inst(
+        &mut self,
+        inst: &lir::Inst,
+        frame: &Frame,
+        b: &mut FunctionBuilder,
+    ) -> Result<(), String> {
+        let pointer = self.config.pointer_type();
+        let flags = MemFlagsData::trusted();
+        let at = self.site_address(b)?;
+        match inst {
+            lir::Inst::Site(site) => {
+                let address = self.address(&lir::Place::whole(lir::Base::Data(*site)), frame, b)?;
+                b.ins().store(flags, address, at, 0);
+            }
+            lir::Inst::SaveSite { dst } => {
+                let site = b.ins().load(pointer, flags, at, 0);
+                let dst = self.address(dst, frame, b)?;
+                b.ins().store(flags, site, dst, 0);
+            }
+            lir::Inst::RestoreSite { src } => {
+                let src = self.address(src, frame, b)?;
+                let site = b.ins().load(pointer, flags, src, 0);
+                b.ins().store(flags, site, at, 0);
+            }
+            other => unreachable!("{other:?} doesn't set the site"),
+        }
+        Ok(())
+    }
+
+    /// The address of the runtime's `trendy_rt_site`, in the function `b`
+    /// builds.
+    fn site_address(&mut self, b: &mut FunctionBuilder) -> Result<Value, String> {
+        let global = self.site_global()?;
+        let global = self.module.declare_data_in_func(global, b.func);
+        Ok(b.ins().symbol_value(self.config.pointer_type(), global))
+    }
+
     /// The runtime's `trendy_rt_site`, which [`lir::Inst::Site`] sets,
     /// imported when first set.
     fn site_global(&mut self) -> Result<DataId, String> {

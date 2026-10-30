@@ -511,6 +511,13 @@ pub enum Inst {
     /// writes it. Codegen stores its address in the runtime's
     /// `trendy_rt_site`.
     Site(DataId),
+    /// Store at `dst`, an [`Layout::Address`], the site the program is at,
+    /// as [`Inst::Site`] sets it: a function with no site of its own saves
+    /// the one it is entered at, which a call it makes then changes.
+    SaveSite { dst: Place },
+    /// The program is at the site whose address `src` holds, which
+    /// [`Inst::SaveSite`] saved, again.
+    RestoreSite { src: Place },
     /// Call a runtime function, passing the address of each place.
     CallRuntime {
         function: RuntimeFn,
