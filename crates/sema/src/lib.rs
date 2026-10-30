@@ -8022,6 +8022,121 @@ type position { { latitude: approximate, longitude: approximate } };
     }
 
     #[test]
+    fn a_programs_own_types_components_are_updated() {
+        // `update` gives components new values, with the components in
+        // scope, and keeps the others; two of different components in a
+        // block merge. Folded in value blocks.
+        let source = "type position { { latitude: approximate, longitude: approximate } };
+var moved := [
+    var p := position{latitude: 1e0, longitude: 2e0};
+    update p { latitude := latitude + longitude };
+    p
+];
+var swapped := [
+    var p := position{latitude: 1e0, longitude: 2e0};
+    assign {
+        update p { latitude := longitude };
+        update p { longitude := latitude };
+    };
+    p
+];
+";
+        let vars = variables(source);
+        assert_eq!(
+            vars[0].init.to_string(),
+            "position{latitude: 3e0, longitude: 2e0}"
+        );
+        assert_eq!(
+            vars[1].init.to_string(),
+            "position{latitude: 2e0, longitude: 1e0}"
+        );
+        // A variable's, known only when running, is selected from its
+        // components, updated.
+        let program = analyze_str(&format!(
+            "{source}operator north{{var p: position}} [ update p {{ latitude := latitude + 1e0 }}; ];{MAIN}"
+        ))
+        .unwrap();
+        let north = program
+            .operators
+            .iter()
+            .find(|op| op.name == "north")
+            .unwrap();
+        let hir::OperatorKind::Update { body, .. } = &north.kind else {
+            panic!("an update operator");
+        };
+        let [(_, hir::Statement::Assign(assignments))] = &body.statements[..] else {
+            panic!("one assignment: {:?}", body.statements);
+        };
+        assert!(matches!(
+            &assignments[0].value,
+            hir::Expr::Select(_, components) if matches!(**components, hir::Expr::Extend(..))
+        ));
+    }
+
+    #[test]
+    fn a_programs_own_types_update_errors() {
+        let declared = "type position { { latitude: approximate, longitude: approximate } };
+var here := position{latitude: -1.29e0, longitude: 36.82e0};
+var stop := tuple { name: \"Nairobi\", at: here };
+var stops := array [here];
+";
+        let main = |body: &str| format!("{declared}operator main{{}} [\n    {body}\n];\n");
+        // A component that isn't one, fixed to the closest.
+        let source = main("update here { lattitude := 0e0 };");
+        assert_eq!(messages(&source), ["unknown component `lattitude`"]);
+        assert_eq!(fix(&source), main("update here { latitude := 0e0 };"));
+        // A component keeps its type, and is given once.
+        assert_eq!(
+            codes(&main("update here { latitude := \"south\" };")),
+            [Code::TypeMismatch]
+        );
+        assert_eq!(
+            codes(&main("update here { latitude := 0e0, latitude := 1e0 };")),
+            [Code::DuplicateAttribute]
+        );
+        // One that changes nothing, or has a condition.
+        assert_eq!(
+            messages(&main("update here { latitude := latitude };")),
+            ["this `update` gives each component its own value"]
+        );
+        assert_eq!(codes(&main("update here {};")), [Code::EmptyDoesNothing]);
+        assert_eq!(
+            codes(&main(
+                "update here { latitude := 0e0 } where longitude > 0e0;"
+            )),
+            [Code::WrongOperandType]
+        );
+        // Two in a block that give one component a value conflict.
+        assert_eq!(
+            codes(&main(
+                "assign {\n        update here { latitude := 0e0 };\n        update here { latitude := 1e0 };\n    };"
+            )),
+            [Code::ConflictingChanges]
+        );
+        // A component assigned on its own, as other languages assign a
+        // field, fixed to an `update` of the variable, or an assignment of
+        // the element, with a selector for a value inside.
+        let source = main("here.latitude := 0e0;");
+        assert_eq!(
+            messages(&source),
+            ["component `latitude` can't be assigned on its own"]
+        );
+        assert_eq!(fix(&source), main("update here { latitude := 0e0 };"));
+        assert_eq!(
+            fix(&main("stop.at.latitude := 0e0;")),
+            main("update stop { at := position{latitude: 0e0, longitude: at.longitude} };")
+        );
+        assert_eq!(
+            fix(&main("stops[1].latitude := 0e0;")),
+            main("stops[1] := position{latitude: 0e0, longitude: stops[1].longitude};")
+        );
+        // None when the value names a component, which `update` brings
+        // into scope.
+        let source = main("here.latitude := longitude;");
+        assert_eq!(fix(&source), source);
+    }
+
+    #[test]
     fn named_heading_errors() {
         let home = "heading home := { city: text, rooms: integer };\n";
         // Its name alone isn't a type: a relation's or a tuple's is.

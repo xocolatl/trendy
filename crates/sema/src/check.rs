@@ -1219,7 +1219,10 @@ impl<'a> Checker<'a> {
     /// says: each attribute's value is checked with the attributes of the
     /// tuple at hand in scope. A `replace`'s values have the types of the
     /// attributes they replace, and are computed from the old values, all
-    /// at once. An attribute given its own value is an error, and
+    /// at once. An `update` of a value of a type of the program's own gives
+    /// its components new values in the same way: it is the value selected
+    /// from its components, a `replace` of them (TTM chapter 5's scalar
+    /// update). An attribute given its own value is an error, and
     /// `unchanged` is the error for a list that leaves the operand as it
     /// is.
     pub(crate) fn assign_attributes(
@@ -1236,15 +1239,28 @@ impl<'a> Checker<'a> {
             operand: operand_expr,
         } = *assigned;
         let ty = self.ty(&operand);
-        let (hir::Type::Tuple(heading) | hir::Type::Relation(heading)) = &ty else {
-            let at = trendy_syntax::span(keyword.text_range());
-            errors.push(errors::not_projectable(
-                Some(assigning.keyword()),
-                at,
-                &ty,
-                operand_expr,
-            ));
-            return None;
+        let (heading, operand, defined) = match (&ty, assigning) {
+            (hir::Type::Tuple(heading) | hir::Type::Relation(heading), _) => {
+                (heading, operand, None)
+            }
+            (hir::Type::Defined(defined), ops::Assigning::Update) => {
+                (&defined.components, ops::components(operand), Some(defined))
+            }
+            _ => {
+                let at = trendy_syntax::span(keyword.text_range());
+                errors.push(errors::not_projectable(
+                    Some(assigning.keyword()),
+                    at,
+                    &ty,
+                    operand_expr,
+                ));
+                return None;
+            }
+        };
+        let noun = if defined.is_some() {
+            errors::Noun::Component
+        } else {
+            errors::Noun::Attribute
         };
         let assignments: Vec<(ast::Assign, String, Span)> = list
             .assignments()
@@ -1273,12 +1289,7 @@ impl<'a> Checker<'a> {
             if let Some(&(_, _, first)) = assignments.iter().find(|(_, n, _)| n == name)
                 && first != *span
             {
-                errors.push(errors::duplicate_attribute(
-                    errors::Noun::Attribute,
-                    name,
-                    *span,
-                    first,
-                ));
+                errors.push(errors::duplicate_attribute(noun, name, *span, first));
                 ok = false;
                 continue;
             }
@@ -1298,25 +1309,14 @@ impl<'a> Checker<'a> {
                 None => ok = false,
             }
         }
-        if !ok {
-            return None;
-        }
-        let own: Vec<&(ast::Assign, String, Span)> = assignments
-            .iter()
-            .filter(|(_, name, _)| is_own_value(&values[name], name))
-            .collect();
-        if own.len() == assignments.len() {
-            errors.push(unchanged(Unchanged::OwnValues));
-            return None;
-        }
-        if !own.is_empty() {
-            for (assign, name, _) in own {
-                errors.push(errors::own_attribute_value(name, assign, list));
-            }
+        if !ok || !changes_something(&assignments, &values, list, unchanged, errors) {
             return None;
         }
         match ops::extend(operand, hir::Heading::new(types), values, self.bindings()) {
-            Ok(result) => Some(result),
+            Ok(result) => Some(match defined {
+                Some(defined) => ops::select(defined.clone(), result),
+                None => result,
+            }),
             Err(failure) => {
                 let value = assignments
                     .iter()
@@ -1866,10 +1866,36 @@ impl<'a> Checker<'a> {
     }
 }
 
+/// Whether `assignments`, of `list`, with their values, `values`, give
+/// something a new value, after reporting each that gives an attribute its
+/// own: all of them at once, as `unchanged` says, or else one by one.
+fn changes_something(
+    assignments: &[(ast::Assign, String, Span)],
+    values: &BTreeMap<String, hir::Expr>,
+    list: &ast::AssignList,
+    unchanged: impl FnOnce(Unchanged) -> Diagnostic,
+    errors: &mut Vec<Diagnostic>,
+) -> bool {
+    let own: Vec<&(ast::Assign, String, Span)> = assignments
+        .iter()
+        .filter(|(_, name, _)| is_own_value(&values[name], name))
+        .collect();
+    if own.len() == assignments.len() {
+        errors.push(unchanged(Unchanged::OwnValues));
+        return false;
+    }
+    for (assign, name, _) in &own {
+        errors.push(errors::own_attribute_value(name, assign, list));
+    }
+    own.is_empty()
+}
+
 /// Whether `name`, at `span`, is right for `assigning` in an operand of type
 /// `ty`, written `operand`, after reporting why not: new for an `extend`,
-/// existing for a `replace`. `other` is the keyword's span, if every name
-/// is wrong for it. Also the type a `replace`'s value must have.
+/// existing for a `replace` or an `update`, and one of the components of
+/// an `update`'s value of a type of the program's own. `other` is the
+/// keyword's span, if every name is wrong for it. Also the type a
+/// `replace`'s or an `update`'s value must have.
 fn assigned_name(
     assigning: ops::Assigning,
     name: &str,
@@ -1879,8 +1905,26 @@ fn assigned_name(
     other: Option<Span>,
     errors: &mut Vec<Diagnostic>,
 ) -> (bool, Option<Expected>) {
-    let (hir::Type::Tuple(heading) | hir::Type::Relation(heading)) = ty else {
-        unreachable!("only tuples and relations have attributes to assign");
+    let heading = match ty {
+        hir::Type::Tuple(heading) | hir::Type::Relation(heading) => heading,
+        hir::Type::Defined(defined) => {
+            let Some(component) = defined.components.get(name) else {
+                errors.push(errors::updated_unknown_component(
+                    name, span, defined, operand,
+                ));
+                return (false, None);
+            };
+            return (
+                true,
+                Some(Expected {
+                    ty: component.clone(),
+                    origin: types::Origin::Component(operand.clone(), name.to_string()),
+                }),
+            );
+        }
+        _ => unreachable!(
+            "only tuples, relations and types of the program's own have names to assign"
+        ),
     };
     match (assigning, heading.get(name)) {
         (ops::Assigning::Extend, None) => (true, None),

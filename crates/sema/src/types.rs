@@ -46,6 +46,9 @@ pub(crate) enum Origin {
     /// The attribute named, of the operand written here, which a `replace`
     /// gives a new value of the same type.
     Replaced(Expr, String),
+    /// The component named, of the value of a type of the program's own
+    /// written here, which an `update` gives a new value of the same type.
+    Component(Expr, String),
     /// The variable named, assigned a value: where its type is set, by its
     /// declared type or else its initial value.
     Variable(String, Box<Origin>),
@@ -108,6 +111,7 @@ impl Origin {
             Origin::Heading(h) => Some(h.span()),
             Origin::Value(v)
             | Origin::Replaced(v, _)
+            | Origin::Component(v, _)
             | Origin::TypeParameter(_, v)
             | Origin::Columns(v) => Some(v.span()),
             Origin::Builtin => None,
@@ -138,7 +142,9 @@ impl Origin {
             Origin::Columns(_) => {
                 "`columns` gives a column for each attribute of these tuples".to_string()
             }
-            Origin::Replaced(_, name) => format!("`{name}` has the expected type here"),
+            Origin::Replaced(_, name) | Origin::Component(_, name) => {
+                format!("`{name}` has the expected type here")
+            }
             Origin::Variable(name, declared) => match **declared {
                 Origin::Type(_) => format!("`{name}` is declared with this type"),
                 _ => format!("`{name}` has this value's type"),

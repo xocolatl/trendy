@@ -165,7 +165,8 @@ enum Change {
     Value(hir::Expr, ast::Expr),
     /// `a[i] := x`, of an array: its element at a path given a new value.
     Element(ElementAt),
-    /// An `update` of a tuple: its attributes given new values.
+    /// An `update` of a tuple, or of a value of a type of the program's
+    /// own: its attributes, or its components, given new values.
     Attributes(hir::Heading, BTreeMap<String, hir::Expr>),
     /// A change to a relation's tuples.
     Tuples(TupleChange),
@@ -340,16 +341,20 @@ fn element(
 /// The error for `clause`, whose target, `written`, is an attribute, as
 /// other languages assign an object's field, `t.name := x`: a tuple's
 /// attributes are changed by `update`, as Tutorial D has no attribute
-/// pseudovariables (TTM chapter 3). It has a fix when the attributes end
-/// the target, after a variable or an element of one, and the value names
-/// none of the attributes that the fix brings into scope.
+/// pseudovariables (TTM chapter 3), and so are the components of a value
+/// of a type of the program's own. It has a fix when the names end the
+/// target, after a variable or an element of one, and the value names
+/// none of the attributes or components that the fix brings into scope:
+/// an `update` of the variable, or an assignment of the element, with a
+/// `replace` for each tuple inside, and a selector for each value of a
+/// type of the program's own.
 fn attribute_assigned(
     clause: &Clause,
     written: &ast::Expr,
     names: &mut dyn Assigning,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<Diagnostic> {
-    // The attributes at the end, outermost first, and what they are of.
+    // The names at the end, outermost first, and what they are of.
     let mut attributes = Vec::new();
     let mut base = written.clone();
     while let ast::Expr::Extract(extract) = &base {
@@ -358,7 +363,9 @@ fn attribute_assigned(
         base = extract.operand()?;
     }
     attributes.reverse();
-    let fix = (|| {
+    // Whether the names start at a variable, rather than at an element of
+    // one, and the type each is in, outermost first.
+    let path = (|| {
         let (name, positions) = target_path(&base)?;
         let ident = name.ident()?;
         let span = trendy_syntax::span(ident.text_range());
@@ -369,45 +376,100 @@ fn attribute_assigned(
             };
             ty = *element;
         }
-        // Each attribute's tuple, whose attributes are in scope where the
-        // fix gives the attribute its value.
-        let mut opened = Vec::new();
+        let mut holders = Vec::new();
         for attribute in &attributes {
-            let hir::Type::Tuple(heading) = ty else {
-                return None;
+            let inner = match &ty {
+                hir::Type::Tuple(heading) => heading.get(attribute)?.clone(),
+                hir::Type::Defined(defined) => defined.components.get(attribute)?.clone(),
+                _ => return None,
             };
-            ty = heading.get(attribute)?.clone();
-            opened.push(heading);
+            holders.push(std::mem::replace(&mut ty, inner));
         }
+        Some((positions.is_empty(), holders))
+    })();
+    let fix = (|| {
+        let (variable, holders) = path.as_ref()?;
+        // What each level's change brings into scope, where the fix gives
+        // the last name its value: the variable's `update`, and each
+        // tuple's `replace`, but not a selector.
+        let opened: Vec<Option<&hir::Heading>> = holders
+            .iter()
+            .enumerate()
+            .map(|(i, holder)| match holder {
+                hir::Type::Tuple(heading) => Some(heading),
+                hir::Type::Defined(defined) if i == 0 && *variable => Some(&defined.components),
+                _ => None,
+            })
+            .collect();
         let value = clause.operand()?;
         let captured = value
             .syntax()
             .descendants()
             .filter_map(ast::NameRef::cast)
             .filter_map(|name| name.ident())
-            .any(|ident| opened.iter().any(|h| h.get(ident.text()).is_some()));
+            .any(|ident| {
+                opened
+                    .iter()
+                    .flatten()
+                    .any(|h| h.get(ident.text()).is_some())
+            });
         if captured {
             return None;
         }
+        // Each level's value, as it is written where its change goes: in
+        // scope, if the level outside brings it there, or else read from
+        // that level's.
+        let base = base.syntax().text().to_string();
+        let mut levels = vec![base.clone()];
+        for (i, attribute) in attributes.iter().enumerate().take(attributes.len() - 1) {
+            levels.push(match opened[i] {
+                Some(_) => attribute.clone(),
+                None => format!("{}.{attribute}", levels[i]),
+            });
+        }
         // `a := a replace { b := x }`, inside out.
         let mut nested = value.syntax().text().to_string();
-        for (i, attribute) in attributes.iter().enumerate().skip(1).rev() {
-            nested = format!(
-                "{} replace {{ {attribute} := {nested} }}",
-                attributes[i - 1]
-            );
+        for i in (1..attributes.len()).rev() {
+            nested = changed(&holders[i], &levels[i], &attributes[i], &nested);
         }
         let first = &attributes[0];
-        let base = base.syntax().text().to_string();
-        let replacement = if positions.is_empty() {
+        let replacement = if *variable {
             format!("update {base} {{ {first} := {nested} }}")
         } else {
-            format!("{base} := {base} replace {{ {first} := {nested} }}")
+            format!("{base} := {}", changed(&holders[0], &base, first, &nested))
         };
-        Some((clause.span(), replacement, positions.is_empty()))
+        Some((clause.span(), replacement, *variable))
     })();
-    let attribute = attributes.last()?;
-    Some(errors::attribute_assigned(written.span(), attribute, fix))
+    let of = match path.as_ref().and_then(|(_, holders)| holders.last()) {
+        Some(hir::Type::Defined(defined)) => Some(defined),
+        _ => None,
+    };
+    let name = attributes.last()?;
+    Some(errors::attribute_assigned(written.span(), name, of, fix))
+}
+
+/// The value written `written`, of type `ty`, a tuple or a type of the
+/// program's own, with its attribute or component `name` given the value
+/// written `new`, as a fix writes it: a `replace` of a tuple, or the type's
+/// selector, of `new` and the value's other components.
+fn changed(ty: &hir::Type, written: &str, name: &str, new: &str) -> String {
+    match ty {
+        hir::Type::Defined(defined) => {
+            let components: Vec<String> = defined
+                .components
+                .named()
+                .map(|(component, _)| {
+                    if component == name {
+                        format!("{component}: {new}")
+                    } else {
+                        format!("{component}: {written}.{component}")
+                    }
+                })
+                .collect();
+            format!("{}{{{}}}", defined.name, components.join(", "))
+        }
+        _ => format!("{written} replace {{ {name} := {new} }}"),
+    }
 }
 
 /// `load`, the clause `clause`, of `target`: of a relation into an array
@@ -937,8 +999,9 @@ struct Target<'w> {
 }
 
 /// `clause`, an `update` after `keyword`, of `target`: of a tuple, its
-/// attributes given new values; of a relation, the tuples for which the
-/// condition is true, if there is one, replaced.
+/// attributes given new values, and of a value of a type of the program's
+/// own, its components; of a relation, the tuples for which the condition
+/// is true, if there is one, replaced.
 fn update(
     clause: &Clause,
     keyword: &SyntaxToken,
@@ -954,28 +1017,38 @@ fn update(
         list: &list,
         operand: target.written,
     };
+    let noun = match target.assignee.ty {
+        hir::Type::Defined(_) => errors::Noun::Component,
+        _ => errors::Noun::Attribute,
+    };
     let unchanged = |why| match why {
-        Unchanged::Empty => errors::empty_update(&list, &statement),
-        Unchanged::OwnValues => errors::own_values_updated(clause.span(), &statement),
+        Unchanged::Empty => errors::empty_update(noun, &list, &statement),
+        Unchanged::OwnValues => errors::own_values_updated(noun, clause.span(), &statement),
     };
     match (clause.where_keyword(), &target.assignee.ty) {
         // Of the variable itself, whose value isn't known until it runs,
         // so that the attributes' values come back: the changes are
         // merged, then applied to its value (`attributes_merged`).
-        (None, hir::Type::Tuple(_)) => {
-            match checker.assign_attributes(
+        (None, hir::Type::Tuple(_) | hir::Type::Defined(_)) => {
+            let updated = checker.assign_attributes(
                 target.assignee.target.read(),
                 &assigned,
                 unchanged,
                 errors,
-            )? {
+            )?;
+            // A type's value is selected from its components, updated.
+            let updated = match updated {
+                hir::Expr::Select(_, components) => *components,
+                updated => updated,
+            };
+            match updated {
                 hir::Expr::Extend(_, computed, values) => {
                     Some(Change::Attributes(computed, values))
                 }
                 _ => unreachable!("a variable's value is known only when running"),
             }
         }
-        (Some(token), hir::Type::Tuple(_)) => {
+        (Some(token), hir::Type::Tuple(_) | hir::Type::Defined(_)) => {
             let span = trendy_syntax::span(token.text_range());
             errors.push(errors::not_restrictable(
                 span,
@@ -1126,17 +1199,25 @@ fn merged(
             let mut changes = vec![(clause, computed, values)];
             for (clause, change) in list {
                 let Change::Attributes(computed, values) = change else {
-                    unreachable!("a tuple variable's changes are updates");
+                    unreachable!("a tuple's or a type's variable's changes are updates");
                 };
                 changes.push((clause, computed, values));
             }
-            attributes_merged(
-                assignee.current.clone(),
-                name,
-                changes,
-                names.bindings(),
-                errors,
-            )
+            // A type's value is selected from its components, which the
+            // updates change.
+            let defined = match &assignee.ty {
+                hir::Type::Defined(defined) => Some(defined),
+                _ => None,
+            };
+            let current = match defined {
+                Some(_) => ops::components(assignee.current.clone()),
+                None => assignee.current.clone(),
+            };
+            let merged = attributes_merged(current, name, changes, names.bindings(), errors)?;
+            Some(match defined {
+                Some(defined) => ops::select(defined.clone(), merged),
+                None => merged,
+            })
         }
         Change::Tuples(change) => {
             let mut changes = vec![(clause, change)];
@@ -1275,8 +1356,9 @@ fn known_effect(
 }
 
 /// The new value of the tuple variable `name`, whose value is `current`,
-/// from its `update`s, each in a clause and giving attributes new values:
-/// one `replace` of them all, if no two give the same attribute one.
+/// or of the components of its value of a type of the program's own, from
+/// its `update`s, each in a clause and giving attributes new values: one
+/// `replace` of them all, if no two give the same attribute one.
 fn attributes_merged(
     current: hir::Expr,
     name: &str,

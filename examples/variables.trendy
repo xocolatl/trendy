@@ -13,7 +13,8 @@ var r: relation { a: boolean, b: integer } := relation {
 /* Assignment (RM Prescription 21): `:=` gives a variable a new value of
    its type, and `insert`, `d_insert`, `delete`, `i_delete` and `update`
    are shorthands for changing a relation variable's tuples, or, with
-   `update`, a tuple variable's attributes. Implemented: main prints each
+   `update`, a tuple variable's attributes, and the components of a
+   variable of a type of the program's own. Implemented: main prints each
    variable after it changes. */
 var poets := relation {
     { name: "Ada", born: 1815 },
@@ -23,6 +24,11 @@ var poets := relation {
 key { name };
 
 var address := tuple { city: "Nairobi", postal_code: "00100" };
+
+/* A ship, at sea off Mombasa, by its latitude and longitude in degrees. */
+type position { { latitude: approximate, longitude: approximate } };
+
+var ship := position{latitude: -4.25e0, longitude: 39.75e0};
 var x := 1;
 var y := 2;
 
@@ -105,6 +111,11 @@ operator main{} [
 
     update address { postal_code := "00200" };
     call debug_value{v: address};
+
+    /* The ship sails half a degree east: a new value of its type, with
+       the latitude kept. */
+    update ship { longitude := longitude + 0.5e0 };
+    call debug_value{v: ship};
 
     /* An `assign` block makes its assignments at once, each computed
        from the variables as they were before it, so this swaps. */

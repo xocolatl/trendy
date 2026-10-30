@@ -39,9 +39,10 @@ pub(crate) struct Signature {
     /// The built-in it is, for the prelude's.
     pub(crate) builtin: Option<hir::Builtin>,
     /// The type of the program's own it is the selector of, named after
-    /// it, and where the type's name is declared: its value is the value
-    /// of the type its arguments are the components of.
-    pub(crate) selects: Option<(hir::Defined, Span)>,
+    /// it, and the type's declaration, where its parameters, the
+    /// components, are written: its value is the value of the type its
+    /// arguments are the components of.
+    pub(crate) selects: Option<(hir::Defined, ast::TypeDecl)>,
     /// Whether the parameters and the result type are valid. Calls of an
     /// operator with errors in them aren't checked, because those errors
     /// are already reported.
@@ -91,13 +92,14 @@ impl Signature {
         written.map_or(Origin::Builtin, Origin::Type)
     }
 
-    /// Where parameter `name` is written, for the program's own.
+    /// Where parameter `name` is written, for the program's own: a
+    /// selector's are its type's components.
     pub(crate) fn param_decl(&self, name: &str) -> Option<ast::AttributeType> {
-        self.decl
-            .as_ref()?
-            .params()?
-            .attributes()
-            .find(|a| a.is_named(name))
+        let params = match &self.selects {
+            Some((_, decl)) => decl.representation()?.components()?,
+            None => self.decl.as_ref()?.params()?,
+        };
+        params.attributes().find(|a| a.is_named(name))
     }
 
     /// The relation whose tuples the `per` parameter `name` is an attribute
@@ -112,10 +114,10 @@ impl Signature {
     /// Where the operator's name is written in its definition, for the
     /// program's own.
     pub(crate) fn defined(&self) -> Option<Span> {
-        if let Some((_, declared)) = &self.selects {
-            return Some(*declared);
-        }
-        let ident = self.decl.as_ref()?.name()?.ident()?;
+        let ident = match &self.selects {
+            Some((_, decl)) => decl.name()?.ident()?,
+            None => self.decl.as_ref()?.name()?.ident()?,
+        };
         Some(trendy_syntax::span(ident.text_range()))
     }
 
@@ -430,7 +432,7 @@ fn selector(
 ) -> Option<Signature> {
     let ident = decl.name()?.ident()?;
     let name = ident.text();
-    let (Some((declared, Some(defined))), Some((Kind::Selector, _))) =
+    let (Some((_, Some(defined))), Some((Kind::Selector, _))) =
         (namespaces.defined(name), namespaces.operator(name))
     else {
         return None;
@@ -454,7 +456,7 @@ fn selector(
         result: Some(hir::Type::Defined(defined.clone())),
         decl: None,
         builtin: None,
-        selects: Some((defined.clone(), declared)),
+        selects: Some((defined.clone(), decl.clone())),
         valid: true,
     })
 }

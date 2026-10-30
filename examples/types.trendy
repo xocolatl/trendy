@@ -2,8 +2,9 @@
    representation, the components its values are written with, in braces
    of their own inside the type's (The Third Manifesto, RM Prescription
    4). Their values are compared with `=` and `<>` only, as in
-   comparisons.trendy. Each result below is printed twice, folded when
-   compiling and computed when running. */
+   comparisons.trendy, and a variable's components are changed with
+   `update`, as in variables.trendy. Each result below is printed twice,
+   folded when compiling and computed when running. */
 
 /* A place on Earth, by its latitude and longitude, in degrees. */
 type position { { latitude: approximate, longitude: approximate } };

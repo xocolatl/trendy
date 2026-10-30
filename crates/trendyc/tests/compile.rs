@@ -133,6 +133,8 @@ fn variables() {
             "│ 1814 │ Ada   │",
             "└──────┴───────┘",
             r#"tuple { city: "Nairobi", postal_code: "00200" }"#,
+            // Half a degree east.
+            "position{latitude: -4.25e0, longitude: 4.025e1}",
             // Swapped, and two guests swapped between rooms.
             "tuple { x: 2, y: 1 }",
             "┌───────┬──────┐",

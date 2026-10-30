@@ -683,6 +683,7 @@ pub(crate) fn type_mismatch(
             "the operator's parameters of type `{name}` all take arguments of one type"
         )),
         Origin::Type(_)
+        | Origin::Component(..)
         | Origin::Variable(..)
         | Origin::Loaded(..)
         | Origin::Element(..)
@@ -2321,32 +2322,54 @@ pub(crate) fn own_value(
     deleted(d, statement)
 }
 
-/// An assignment whose target, at `target`, is attribute `attribute`, as
-/// other languages assign an object's field, `t.name := x`. `fix`, if
-/// there is one, is the assignment's span and its rewriting, by `update`
-/// of a variable, if the third is true, or else as an assignment of an
-/// array's element with the attribute replaced.
+/// An assignment whose target, at `target`, is the attribute `name` of a
+/// tuple, or the component `name` of a value of the type of the program's
+/// own `of`, as other languages assign an object's field, `t.name := x`.
+/// `fix`, if there is one, is the assignment's span and its rewriting, by
+/// `update` of a variable, if the third is true, or else as an assignment
+/// of an array's element with the attribute replaced.
 pub(crate) fn attribute_assigned(
     target: Span,
-    attribute: &str,
+    name: &str,
+    of: Option<&hir::Defined>,
     fix: Option<(Span, String, bool)>,
 ) -> Diagnostic {
-    let d = Diagnostic::error(
-        Code::AttributeAssigned,
-        format!("attribute `{attribute}` can't be assigned on its own"),
-        target,
-        "an attribute of a tuple",
-    )
-    .with_note("a tuple's attributes are changed by `update t { a := x }`, shorthand for `t := t replace { a := x }`; as in Tutorial D, an attribute is no variable to assign");
+    let d = match of {
+        None => Diagnostic::error(
+            Code::AttributeAssigned,
+            format!("attribute `{name}` can't be assigned on its own"),
+            target,
+            "an attribute of a tuple",
+        )
+        .with_note("a tuple's attributes are changed by `update t { a := x }`, shorthand for `t := t replace { a := x }`; as in Tutorial D, an attribute is no variable to assign"),
+        Some(defined) => {
+            let t = &defined.name;
+            Diagnostic::error(
+                Code::AttributeAssigned,
+                format!("component `{name}` can't be assigned on its own"),
+                target,
+                format!("a component of a `{t}`"),
+            )
+            .with_note(format!("the components of a variable's value are changed by `update v {{ c := x }}`, shorthand for `v := {t}{{…}}` of `x` and the other components as they were; a component is no variable to assign"))
+        }
+    };
+    let noun = if of.is_some() {
+        "component"
+    } else {
+        "attribute"
+    };
     match fix {
         Some((span, replacement, true)) => d.with_suggestion(
-            "change the attribute with `update`",
+            format!("change the {noun} with `update`"),
             vec![Edit { span, replacement }],
         ),
         Some((span, replacement, false)) => d.with_suggestion(
-            "assign the element with the attribute replaced",
+            format!("assign the element with the {noun} changed"),
             vec![Edit { span, replacement }],
         ),
+        None if of.is_some() => {
+            d.with_help("give the variable a new value with the component changed, by `update`")
+        }
         None => d.with_help(
             "give the tuple a new value with the attribute replaced, by `update` or `replace`",
         ),
@@ -2406,15 +2429,16 @@ pub(crate) fn inserted_into_itself(
     deleted(d, statement)
 }
 
-/// An `update`, at `span`, in `statement`, that gives each attribute its
-/// own value.
+/// An `update`, at `span`, in `statement`, that gives each attribute, or
+/// component, as `noun` says, its own value.
 pub(crate) fn own_values_updated(
+    noun: Noun,
     span: Span,
     statement: &trendy_syntax::ast::AssignStmt,
 ) -> Diagnostic {
     let d = Diagnostic::error(
         Code::NoChange,
-        "this `update` gives each attribute its own value",
+        format!("this `update` gives each {} its own value", noun.one()),
         span,
         "changes nothing",
     )
@@ -2462,23 +2486,25 @@ pub(crate) fn own_attribute_value(
 }
 
 /// Why giving something its own value is an error, for notes.
-const OWN_VALUE_RULE: &str = "a variable, an attribute or an element that isn't given a new value keeps its own, so giving it its own value changes nothing";
+const OWN_VALUE_RULE: &str = "a variable, an attribute, a component or an element that isn't given a new value keeps its own, so giving it its own value changes nothing";
 
 /// An `update` with an empty `list`, in `statement`, which would change
-/// nothing.
+/// nothing: of attributes or components, as `noun` says.
 pub(crate) fn empty_update(
+    noun: Noun,
     list: &trendy_syntax::ast::AssignList,
     statement: &trendy_syntax::ast::AssignStmt,
 ) -> Diagnostic {
+    let many = noun.many();
     let d = Diagnostic::error(
         Code::EmptyDoesNothing,
         "this `update` changes nothing",
         list.span(),
-        "no attributes",
+        format!("no {many}"),
     )
-    .with_note(
-        "`update` takes attributes the variable has, each `name := value`; with none it would change nothing",
-    );
+    .with_note(format!(
+        "`update` takes {many} the variable has, each `name := value`; with none it would change nothing"
+    ));
     deleted(d, statement)
 }
 
@@ -2539,7 +2565,7 @@ pub(crate) fn conflicting_tuple(
 }
 
 /// How an `assign` block's changes to one variable combine, for notes.
-const CHANGES_RULE: &str = "the changes in an `assign` block are made at once, each computed from the variables as they were before it: changes to a variable's tuples, attributes or elements combine, unless two remove the same tuple, set the same attribute, or set the same element or one in it, and `v := …` can't combine with any other change to `v`";
+const CHANGES_RULE: &str = "the changes in an `assign` block are made at once, each computed from the variables as they were before it: changes to a variable's tuples, attributes, components or elements combine, unless two remove the same tuple, set the same attribute or component, or set the same element or one in it, and `v := …` can't combine with any other change to `v`";
 
 /// `call name{…}`, at `span`, where `name` is `what`, not an operator.
 pub(crate) fn not_an_operator(name: &str, span: Span, what: &str) -> Diagnostic {
@@ -3714,6 +3740,24 @@ pub(crate) fn replaced_unknown(
     }
 }
 
+/// The component `name`, at `span`, which an `update` of `operand`, a value
+/// of the type of the program's own `defined`, gives a new value, but
+/// which the type hasn't.
+pub(crate) fn updated_unknown_component(
+    name: &str,
+    span: Span,
+    defined: &hir::Defined,
+    operand: &Expr,
+) -> Diagnostic {
+    let rename = closest(name, defined.components.named().map(|(c, _)| c));
+    let context = format!(
+        "`update` gives components the variable's value has new values of the same types, and {}",
+        components_note(defined)
+    );
+    unknown_attribute(Noun::Component, name, span, &context, rename, None)
+        .with_secondary(operand.span(), format!("this is `{}`", defined.name))
+}
+
 /// `where`, at `span`, applied to `operand`, of type `ty`, which isn't a
 /// relation.
 pub(crate) fn not_restrictable(span: Span, ty: &hir::Type, operand: &Expr) -> Diagnostic {
@@ -3729,6 +3773,9 @@ pub(crate) fn not_restrictable(span: Span, ty: &hir::Type, operand: &Expr) -> Di
     match ty {
         hir::Type::Tuple(_) => d.with_help(
             "a tuple satisfies a condition or doesn't: the condition itself, with `t.a` for its attributes, is that boolean",
+        ),
+        hir::Type::Defined(_) => d.with_help(
+            "a value satisfies a condition or doesn't: the condition itself, with `v.c` for its components, is that boolean",
         ),
         _ => d,
     }

@@ -1736,6 +1736,17 @@ operator main{} [
   type's name, nor a type a prelude operator's (A0057).
 - **`p.latitude` is a component's value,** with the dot of a tuple's
   attribute: TTM's `THE_LATITUDE(P)` (RM Prescription 5).
+- **`update p { latitude := x };` changes a component** of a variable's
+  value, and keeps the others: it is shorthand for
+  `p := position{latitude: x, longitude: p.longitude};`, as Tutorial D's
+  `UPDATE` of a scalar variable is (TTM chapter 5). Inside the braces, the
+  components are in scope by name, as a tuple's attributes are in its
+  `update`, and each keeps its type. In an `assign` block, `update`s of
+  different components merge, and two of the same one conflict (R0009).
+  `p.latitude := x;`, as other languages assign a field, is fixed to the
+  `update`, with the type's selector for a value inside the variable's,
+  as in `update stop { at := position{latitude: x, longitude: at.longitude} };`
+  (A0048).
 - **A value has no order:** values of a type of the program's own are
   equal when their components are, and compared only with `=` and `<>`;
   `<` is an error (A0022). A parameter of `any type` takes them, and one
@@ -2384,8 +2395,8 @@ operator main{} [
   (see [`var` and `out` parameters](#var-and-out-parameters)). Its other
   parameters are `const`, and an operator is not a variable (A0026).
 - **The shorthands are for relation variables,** but for `update`, which
-  is also for tuple variables, and an element's assignment, for array
-  variables. Each means an assignment:
+  is also for tuple variables and those of a program's own types, and an
+  element's assignment, for array variables. Each means an assignment:
 
 | Statement | Means |
 |---|---|
@@ -2394,6 +2405,7 @@ operator main{} [
 | `delete r where p;` | `r := r where not (p);` |
 | `i_delete r s;` | `r := r i_minus s;`, which fails if a tuple of `s` isn't in `r` (R0007) |
 | `update r { a := x };` | `r := r replace { a := x };`, of a relation or a tuple |
+| `update p { c := x };` | `p := t{c: x, d: p.d};`, of a value of a type of the program's own, `t`, with components `c` and `d` (see [A program's own types](#a-programs-own-types)) |
 | `update r { a := x } where p;` | `r := (r where not (p)) union ((r where p) replace { a := x });` |
 | `load a from r order [asc x];` | `a :=` the array of the tuples of `r`, in order (see [Loading a relation](#loading-a-relation)) |
 | `a[i] := x;` | `a :=` the array `a` with its element at position `i` changed to `x` (see [Changing an element](#changing-an-element)) |
