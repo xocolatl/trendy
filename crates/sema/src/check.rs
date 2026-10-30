@@ -1233,15 +1233,15 @@ impl<'a> Checker<'a> {
         expr: &Expr,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Expr> {
-        let constraints = self.names.operators().constraints(defined).to_vec();
         let at = expr.span();
-        if !constraints
+        if !defined
+            .constraints
             .iter()
             .all(|c| self.names.checked(c.operator, at, errors))
         {
             return None;
         }
-        match ops::select(defined.clone(), constraints, components, self.bindings()) {
+        match ops::select(defined.clone(), components, self.bindings()) {
             Ok(value) => Some(value),
             Err(failed) => {
                 errors.push(errors::failed(&failed, expr));

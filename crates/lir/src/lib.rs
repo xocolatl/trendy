@@ -265,6 +265,13 @@ pub enum RuntimeFn {
     /// the program's own the descriptor describes, breaks its constraint
     /// written `constraint`, a text, writing them.
     BrokenConstraint,
+    /// `trendy_rt_broken_constraint_in_file(value, descriptor, constraint,
+    /// attribute, path, line)`, which doesn't return: as
+    /// [`RuntimeFn::BrokenConstraint`], of a value `load_csv` read for the
+    /// attribute or component named `attribute`, a text, from the record
+    /// on line `line` (a [`Layout::Usize`]) of the file at `path`, a text,
+    /// writing where too.
+    BrokenConstraintInFile,
     /// `trendy_rt_check_key(src, descriptor, key, variable)`: stop the
     /// program if the relation `src`, of the type the descriptor
     /// describes, has two tuples with the same values for the attributes
@@ -456,6 +463,7 @@ impl RuntimeFn {
             RuntimeFn::IndexOutOfRange => "trendy_rt_index_out_of_range",
             RuntimeFn::ElementConflict => "trendy_rt_element_conflict",
             RuntimeFn::BrokenConstraint => "trendy_rt_broken_constraint",
+            RuntimeFn::BrokenConstraintInFile => "trendy_rt_broken_constraint_in_file",
             RuntimeFn::CheckKey => "trendy_rt_check_key",
             RuntimeFn::Concat => "trendy_rt_concat",
             RuntimeFn::Release => "trendy_rt_release",
@@ -708,6 +716,17 @@ pub enum Failure {
         descriptor: Place,
         constraint: Place,
     },
+    /// As [`Failure::BrokenConstraint`], of a value `load_csv` read for the
+    /// attribute or component named `attribute`, a text, from the record
+    /// on line `line` (a [`Layout::Usize`]) of the file at `path`, a text.
+    BrokenConstraintInFile {
+        value: Place,
+        descriptor: Place,
+        constraint: Place,
+        attribute: Place,
+        path: Place,
+        line: Place,
+    },
 }
 
 impl Failure {
@@ -743,6 +762,17 @@ impl Failure {
             } => (
                 RuntimeFn::BrokenConstraint,
                 vec![value, descriptor, constraint],
+            ),
+            Failure::BrokenConstraintInFile {
+                value,
+                descriptor,
+                constraint,
+                attribute,
+                path,
+                line,
+            } => (
+                RuntimeFn::BrokenConstraintInFile,
+                vec![value, descriptor, constraint, attribute, path, line],
             ),
         }
     }
@@ -803,7 +833,7 @@ pub enum Terminator {
     },
     /// Stop the program because of this failure, by calling its runtime
     /// function, which writes it, with its values.
-    Fail(Failure),
+    Fail(Box<Failure>),
 }
 
 /// Index into [`Program::data`].

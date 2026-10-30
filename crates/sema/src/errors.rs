@@ -4091,7 +4091,7 @@ const CONSTRAINT_RULE: &str = "a type is the values its constraints are true of,
 /// `expr`, which selects `broken.value`, whose components break a
 /// constraint of its type.
 fn broken_constraint(broken: &crate::ops::BrokenConstraint, expr: &Expr) -> Diagnostic {
-    let t = &broken.value.name;
+    let t = &broken.value.ty.name;
     let value = hir::Value::Defined(broken.value.clone());
     let message = format!("`{value}` isn't a value of `{t}`");
     let d = match broken.at {
@@ -6252,15 +6252,18 @@ pub(crate) fn unassigned_out(name: &str, operator: &str, ident: &SyntaxToken) ->
 }
 
 /// The rule for what `load_csv` reads.
-const CSV_FIELDS: &str = "`load_csv` reads each attribute of its array's tuples from the field in the column `columns` gives it: text as it is, and an integer, an approximate number or a boolean as `parse_integer`, `parse_approximate` and `parse_boolean` read them";
+const CSV_FIELDS: &str = "`load_csv` reads each attribute of its array's tuples from the field in the column `columns` gives it: text as it is, and an integer, an approximate number or a boolean as `parse_integer`, `parse_approximate` and `parse_boolean` read them; a value of a type of the program's own is selected from its components, each read from a column of its own";
 
 /// The rule for `load_csv`'s columns.
 const CSV_COLUMNS: &str = "`columns` gives each attribute of the tuples the position of the column it is read from, counting from 1, and each a column of its own";
 
 /// The array written `rows`, which `load_csv` loads, whose tuples have
-/// the attributes `unreadable`, by name and type, which it can't read
-/// from a field.
-pub(crate) fn unreadable_attributes(unreadable: &[(&str, &hir::Type)], rows: &Expr) -> Diagnostic {
+/// the attributes, or values with the components, `unreadable`, by name
+/// and type, which it can't read from a field.
+pub(crate) fn unreadable_attributes(
+    unreadable: &[(String, &hir::Type)],
+    rows: &Expr,
+) -> Diagnostic {
     let named: Vec<String> = unreadable
         .iter()
         .map(|(name, ty)| format!("`{name}`, of type `{ty}`"))

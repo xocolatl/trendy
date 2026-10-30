@@ -50,12 +50,18 @@ its result. `load_csv` is one too (`trendy_rt_load_csv`), given its
 array's descriptor, whose tuples' attributes' types say how to read
 their columns, and `columns`, a tuple of those attributes, each its
 column's position, and its descriptor; sema checks that each attribute
-is a type a field can be read as, known when compiling (A0055), and
-`columns` against the type it must have, the tuples' heading with every
-attribute an integer, which the signature can't say (`body::csv_loadable`,
-reporting at `types::Origin::Columns`), and its positions if they are
-known (R0016). The runtime reads the file as CSV (its `csv` module) and
-each field as `parse_*` reads one. A built-in can
+is a type a field can be read as, known when compiling (A0055), or a
+type of the program's own whose components are, and `columns` against
+the type it must have, the tuples' heading with every attribute an
+integer, or a tuple of its components' positions, which the signature
+can't say (`body::csv_loadable`, reporting at `types::Origin::Columns`),
+and its positions if they are known (R0016). The runtime reads the file
+as CSV (its `csv` module) and each field as `parse_*` reads one, into
+the scalars the tuples are laid out as, reaching into the components of
+a type's values (`Leaf`), and gives the line each record starts on, so
+that lowering can check the constraints of the types of the values in
+each record, once it is read, failing with its line
+(`records_constrained`). A built-in can
 have type parameters, of a kind too, and `per` parameters, declared as an
 operator's are, and checked against the compiler's, written as the
 operator sees them. A wrong prelude is an internal
@@ -640,8 +646,14 @@ which `update v { c := x }` assigns `v` and merges with others in an
 read-only operator of its own (`Signature::from_type`), whose parameters
 are the components and whose value is the condition, checked as a
 read-only operator's value is, so it reads no variable (A0050); no call
-can name it. `Expr::Select` carries the type's constraints
-(`hir::Constraint`, the operator and the condition as written), and a
+can name it. The type carries its constraints (`hir::Defined`'s
+`hir::Constraint`s, each the operator and the condition as written), as
+TTM has a type's constraint be part of its definition, and so does each
+of its values (`hir::DefinedValue`'s type), as TTM has every scalar
+value carry its type (RM Prescription 2). The constraints' operators
+come right after the prelude's, numbered as the types resolve
+(`named_types::resolve`), since a type is resolved, and its `Defined`
+copied into the types that name it, before any signature is made. A
 selection checks each, which folds when the components are constants
 (`ops::select`, R0017 when compiling) and is otherwise a call of each
 operator when running. Checking a selector's call, or another selection,

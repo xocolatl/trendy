@@ -619,6 +619,12 @@ impl<'a> FunctionBuilder<'a> {
         self.current = next;
     }
 
+    /// End the current block by stopping the program because of
+    /// `failure`, and go on building `next`.
+    fn fail(&mut self, failure: lir::Failure, next: lir::BlockId) {
+        self.end_block(lir::Terminator::Fail(Box::new(failure)), next);
+    }
+
     /// The slot of the statements' scopes, made when one first needs it.
     fn scope_slot(&mut self) -> lir::Place {
         if let Some(scope) = &self.scope {
@@ -832,23 +838,30 @@ impl<'a> FunctionBuilder<'a> {
                     self.write(&call.args["r"], lir::RuntimeFn::DebugTable, cx);
                 }
                 hir::UpdateBuiltin::LoadTextFile => {
-                    self.loaded(lir::RuntimeFn::LoadTextFile, call, "lines", Vec::new(), cx);
+                    let (lines, _) =
+                        self.loaded(lir::RuntimeFn::LoadTextFile, call, "lines", Vec::new(), cx);
+                    self.store(&call.updated["lines"], lines, cx);
                 }
                 hir::UpdateBuiltin::LoadCsv => {
                     // Whether the file has a header, and each attribute's
-                    // column, given their tuple's type's descriptor.
+                    // column, given their tuple's type's descriptor, and
+                    // where the line each record starts on goes.
                     let header = self.place(&call.args["header"], cx);
                     let columns = &call.args["columns"];
                     let ty = self.type_of(columns);
                     let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
                     let columns = self.place(columns, cx);
-                    self.loaded(
-                        lir::RuntimeFn::LoadCsv,
-                        call,
-                        "rows",
-                        vec![header, columns, descriptor],
-                        cx,
-                    );
+                    let lines = self.slot(lir::Layout::Struct(vec![
+                        lir::Layout::Address,
+                        lir::Layout::Usize,
+                    ]));
+                    let given = vec![header, columns, descriptor, lines.clone()];
+                    let (rows, path) =
+                        self.loaded(lir::RuntimeFn::LoadCsv, call, "rows", given, cx);
+                    let target = &call.updated["rows"];
+                    let ty = self.assigned(target).0.clone();
+                    self.records_constrained(&rows, &ty, &lines, &path, cx);
+                    self.store(target, rows, cx);
                 }
             },
             hir::OperatorKind::Update { .. } => {
@@ -900,8 +913,8 @@ impl<'a> FunctionBuilder<'a> {
     /// `call`, of `load_text_file` or `load_csv`, whose `out` parameter is
     /// `out`: what the runtime function `function` reads from the file at
     /// the path, as the arguments `given` after it say, into an array the
-    /// statement holds, given its type's descriptor, assigned to the
-    /// variable for `out`.
+    /// statement holds, of the type of the variable for `out`, given its
+    /// descriptor. The array, and the path.
     fn loaded(
         &mut self,
         function: lir::RuntimeFn,
@@ -909,20 +922,69 @@ impl<'a> FunctionBuilder<'a> {
         out: &str,
         given: Vec<lir::Place>,
         cx: &mut Lowering,
-    ) {
+    ) -> (lir::Place, lir::Place) {
         let path = self.place(&call.args["path"], cx);
-        let target = &call.updated[out];
-        let ty = self.assigned(target).0.clone();
+        let ty = self.assigned(&call.updated[out]).0.clone();
         let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
         let array = self.slot(layout(&ty));
-        let args = [array.clone(), path]
+        let args = [array.clone(), path.clone()]
             .into_iter()
             .chain(given)
             .chain([descriptor])
             .collect();
         self.insts.push(lir::Inst::CallRuntime { function, args });
         self.scoped = true;
-        self.store(target, array, cx);
+        (array, path)
+    }
+
+    /// Each record of `rows`, an array of type `ty` that `load_csv` read
+    /// from the file at `path`, whose records start on the lines at the
+    /// same positions in `lines`, checked against the constraints of the
+    /// types of the program's own of its values, as selecting them from
+    /// their components would: a value's own components first. The
+    /// program stops at the first broken, writing the line.
+    fn records_constrained(
+        &mut self,
+        rows: &lir::Place,
+        ty: &hir::Type,
+        lines: &lir::Place,
+        path: &lir::Place,
+        cx: &mut Lowering,
+    ) {
+        let hir::Type::Array(record) = ty else {
+            unreachable!("`load_csv` loads an array");
+        };
+        let hir::Type::Tuple(heading) = &**record else {
+            unreachable!("`load_csv` loads tuples");
+        };
+        let mut values = Vec::new();
+        constrained_values(heading, &[], "", &mut values);
+        if values.is_empty() {
+            return;
+        }
+        self.each_tuple(rows, layout(record), cx, |this, record, index, cx| {
+            let line = this.element(lines, index, lir::Layout::Usize);
+            for (fields, name, defined) in &values {
+                let mut value = record.clone();
+                value.path.extend(fields);
+                let ty = hir::Type::Defined((*defined).clone());
+                let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+                let attribute = this.text(name, cx);
+                this.constrained(
+                    defined,
+                    &value,
+                    |this, constraint, cx| lir::Failure::BrokenConstraintInFile {
+                        value: value.clone(),
+                        descriptor: descriptor.clone(),
+                        constraint: this.text(&constraint.text, cx),
+                        attribute: attribute.clone(),
+                        path: path.clone(),
+                        line: line.clone(),
+                    },
+                    cx,
+                );
+            }
+        });
     }
 
     /// A call of the runtime function `function`, which writes `value`,
@@ -1161,7 +1223,7 @@ impl<'a> FunctionBuilder<'a> {
             },
             none,
         );
-        self.end_block(lir::Terminator::Fail(failure), some);
+        self.fail(failure, some);
         let mut first = self.element(&src, &zero, tuple.clone());
         first.path.push(of);
         let best = self.slot(value.clone());
@@ -1431,9 +1493,7 @@ impl<'a> FunctionBuilder<'a> {
             hir::Expr::Only(operand) => self.only(operand, cx),
             // A value of a type of the program's own is laid out as the tuple
             // of its components.
-            hir::Expr::Select(defined, constraints, operand) => {
-                self.selected(defined, constraints, operand, cx)
-            }
+            hir::Expr::Select(defined, operand) => self.selected(defined, operand, cx),
             hir::Expr::Components(operand) => self.place(operand, cx),
             hir::Expr::Semijoin(lhs, rhs) => self.matching(lhs, rhs, false, cx),
             hir::Expr::Combine(combination, lhs, rhs) => self.combine(*combination, lhs, rhs, cx),
@@ -1749,7 +1809,7 @@ impl<'a> FunctionBuilder<'a> {
             position: at.clone(),
             length,
         };
-        self.end_block(lir::Terminator::Fail(failure), inside);
+        self.fail(failure, inside);
         // From 1 up to the count, so from 0 less 1, which can't overflow.
         let from_zero = self.slot(lir::Layout::I64);
         self.insts.push(lir::Inst::Binary {
@@ -1883,7 +1943,7 @@ impl<'a> FunctionBuilder<'a> {
                     count: usize_constant(len(shared), cx),
                     nested: u8_constant(u8::from(lengths[0] != lengths[1]), cx),
                 };
-                self.end_block(lir::Terminator::Fail(failure), apart);
+                self.fail(failure, apart);
             }
         }
     }
@@ -2199,22 +2259,42 @@ impl<'a> FunctionBuilder<'a> {
         })
     }
 
-    /// The only tuple of the relation `operand`, copied into a new stack
-    /// slot. The program stops if the relation has none, or several,
-    /// writing how many.
     /// The value of the type of the program's own `defined` selected from
-    /// `components`, laid out as the tuple of them, once each of
-    /// `constraints` is true of them: each is a call of its operator with
-    /// the components as its arguments, and the program stops at the first
-    /// that is false.
+    /// `components`, laid out as the tuple of them, once each of its
+    /// constraints is true of it (see [`FunctionBuilder::constrained`]).
     fn selected(
         &mut self,
         defined: &hir::Defined,
-        constraints: &[hir::Constraint],
         components: &hir::Expr,
         cx: &mut Lowering,
     ) -> lir::Place {
         let value = self.place(components, cx);
+        let ty = hir::Type::Defined(defined.clone());
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+        self.constrained(
+            defined,
+            &value,
+            |this, constraint, cx| lir::Failure::BrokenConstraint {
+                value: value.clone(),
+                descriptor: descriptor.clone(),
+                constraint: this.text(&constraint.text, cx),
+            },
+            cx,
+        );
+        value
+    }
+
+    /// Stop the program unless each constraint of `defined`, in order, is
+    /// true of the value at `value`, laid out as the tuple of its
+    /// components: each a call of its operator with the components as its
+    /// arguments, the first that is false failing as `broken` says.
+    fn constrained(
+        &mut self,
+        defined: &hir::Defined,
+        value: &lir::Place,
+        broken: impl Fn(&mut Self, &hir::Constraint, &mut Lowering) -> lir::Failure,
+        cx: &mut Lowering,
+    ) {
         let at_hand = hir::Expr::Current(0, defined.components.clone());
         let args: BTreeMap<String, hir::Expr> = defined
             .components
@@ -2224,7 +2304,7 @@ impl<'a> FunctionBuilder<'a> {
                 (name.to_string(), arg)
             })
             .collect();
-        for constraint in constraints {
+        for constraint in &defined.constraints {
             let call = hir::Expr::Call(hir::Call {
                 operator: constraint.operator,
                 types: Vec::new(),
@@ -2234,27 +2314,28 @@ impl<'a> FunctionBuilder<'a> {
             self.tuples.push(value.clone());
             let holds = self.place(&call, cx);
             self.tuples.pop();
-            let (kept, broken) = (self.new_block(), self.new_block());
+            let (kept, failed) = (self.new_block(), self.new_block());
             self.end_block(
                 lir::Terminator::Branch {
                     condition: holds,
                     then: kept,
-                    otherwise: broken,
+                    otherwise: failed,
                 },
-                broken,
+                failed,
             );
-            let text = hir::Expr::Constant(hir::Value::Text(constraint.text.clone()));
-            let ty = hir::Type::Defined(defined.clone());
-            let failure = lir::Failure::BrokenConstraint {
-                value: value.clone(),
-                descriptor: lir::Place::whole(lir::Base::Data(cx.descriptor(&ty))),
-                constraint: self.place(&text, cx),
-            };
-            self.end_block(lir::Terminator::Fail(failure), kept);
+            let failure = broken(self, constraint, cx);
+            self.fail(failure, kept);
         }
-        value
     }
 
+    /// A text constant's value, in a place.
+    fn text(&mut self, text: &str, cx: &mut Lowering) -> lir::Place {
+        self.place(&hir::Expr::Constant(hir::Value::Text(text.to_string())), cx)
+    }
+
+    /// The only tuple of the relation `operand`, copied into a new stack
+    /// slot. The program stops if the relation has none, or several,
+    /// writing how many.
     fn only(&mut self, operand: &hir::Expr, cx: &mut Lowering) -> lir::Place {
         let ty = self.type_of(operand);
         let hir::Type::Relation(heading) = &ty else {
@@ -2280,7 +2361,7 @@ impl<'a> FunctionBuilder<'a> {
             other,
         );
         let failure = lir::Failure::NotOneTuple { count };
-        self.end_block(lir::Terminator::Fail(failure), single);
+        self.fail(failure, single);
         let zero = usize_constant(0, cx);
         let tuple = layout(&hir::Type::Tuple(heading.clone()));
         let only = self.element(&src, &zero, tuple.clone());
@@ -2809,7 +2890,7 @@ impl<'a> FunctionBuilder<'a> {
                 rhs: field(rhs, j),
                 descriptor: lir::Place::whole(lir::Base::Data(cx.descriptor(ty))),
             };
-            self.end_block(lir::Terminator::Fail(failure), agree);
+            self.fail(failure, agree);
         }
         let result_ty = lhs_ty.and(rhs_ty);
         let hir::Type::Tuple(result) = &result_ty else {
@@ -3081,6 +3162,29 @@ fn lower_numeric(numeric: hir::Numeric) -> lir::Numeric {
 
 fn scalar_layout(scalar: hir::Scalar) -> lir::Layout {
     layout(&hir::Type::Scalar(scalar))
+}
+
+/// The values of types of the program's own with constraints in a tuple
+/// with `heading`, at `fields` in a tuple further out, named after
+/// `prefix` as `t.c` reads them, into `values`: each one's fields from the
+/// outermost tuple, its name, and its type, a value's components before it.
+fn constrained_values<'h>(
+    heading: &'h hir::Heading,
+    fields: &[usize],
+    prefix: &str,
+    values: &mut Vec<(Vec<usize>, String, &'h hir::Defined)>,
+) {
+    for (i, (name, ty)) in heading.attributes().enumerate() {
+        let hir::Type::Defined(defined) = ty else {
+            continue;
+        };
+        let at: Vec<usize> = fields.iter().copied().chain([i]).collect();
+        let named = format!("{prefix}{name}");
+        constrained_values(&defined.components, &at, &format!("{named}."), values);
+        if !defined.constraints.is_empty() {
+            values.push((at, named, defined));
+        }
+    }
 }
 
 /// Whether a value of type `ty` points to memory: whether it is or has a
@@ -3684,8 +3788,8 @@ mod tests {
             }
         );
         assert!(lowered.functions[0].blocks.iter().any(|b| matches!(
-            b.terminator,
-            lir::Terminator::Fail(lir::Failure::IndexOutOfRange { .. })
+            &b.terminator,
+            lir::Terminator::Fail(failure) if matches!(**failure, lir::Failure::IndexOutOfRange { .. })
         )));
         // As a value, as a value block computes one, the change is made in
         // a copy, which the statement holds.
@@ -3746,8 +3850,9 @@ mod tests {
             .iter()
             .filter(|b| {
                 matches!(
-                    b.terminator,
-                    lir::Terminator::Fail(lir::Failure::ElementConflict { .. })
+                    &b.terminator,
+                    lir::Terminator::Fail(failure)
+                        if matches!(**failure, lir::Failure::ElementConflict { .. })
                 )
             })
             .count();
@@ -4289,7 +4394,7 @@ mod tests {
         assert!(
             blocks
                 .iter()
-                .any(|b| b.terminator == lir::Terminator::Fail(lir::Failure::NoMax)),
+                .any(|b| b.terminator == lir::Terminator::Fail(Box::new(lir::Failure::NoMax))),
             "{blocks:#?}"
         );
         // Each tuple's `of` is compared with the greatest so far.
@@ -4759,8 +4864,9 @@ mod tests {
         let blocks = &lowered.functions[1].blocks;
         assert!(
             blocks.iter().any(|b| matches!(
-                b.terminator,
-                lir::Terminator::Fail(lir::Failure::IndexOutOfRange { .. })
+                &b.terminator,
+                lir::Terminator::Fail(failure)
+                    if matches!(**failure, lir::Failure::IndexOutOfRange { .. })
             )),
             "{blocks:#?}"
         );

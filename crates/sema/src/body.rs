@@ -456,13 +456,7 @@ impl Statements<'_, '_> {
         let hir::Type::Tuple(heading) = tuples else {
             unreachable!("`csv_readable` found the tuples' attributes");
         };
-        // A column's position for each attribute.
-        let positions = hir::Type::Tuple(hir::Heading::new(
-            heading
-                .named()
-                .map(|(name, _)| (name.to_string(), hir::Type::Scalar(hir::Scalar::Integer)))
-                .collect(),
-        ));
+        let positions = positions(heading);
         // Checked again, against the type it must have, which reports how
         // it differs.
         if *given_columns != positions {
@@ -1254,27 +1248,33 @@ impl BodyNames<'_, '_> {
     }
 }
 
+/// The type `load_csv`'s `columns` has for tuples with `heading`: of
+/// each attribute, the position of its column, an integer, or, for a value
+/// of a type of the program's own, a tuple of its components' positions.
+fn positions(heading: &hir::Heading) -> hir::Type {
+    hir::Type::Tuple(hir::Heading::new(
+        heading
+            .named()
+            .map(|(name, ty)| {
+                let position = match ty {
+                    hir::Type::Defined(defined) => positions(&defined.components),
+                    _ => hir::Type::Scalar(hir::Scalar::Integer),
+                };
+                (name.to_string(), position)
+            })
+            .collect(),
+    ))
+}
+
 /// Whether `load_csv` loads an array, written `rows`, of `tuples`, whose
 /// attributes it can read from fields: each of a type known here, text,
-/// an integer, an approximate number or a boolean. If not, it is
-/// reported.
+/// an integer, an approximate number or a boolean, or a type of the
+/// program's own whose components it can read. If not, it is reported.
 fn csv_readable(tuples: &hir::Type, rows: &ast::Expr, errors: &mut Vec<Diagnostic>) -> bool {
     match tuples {
         hir::Type::Tuple(heading) => {
-            let unreadable: Vec<(&str, &hir::Type)> = heading
-                .named()
-                .filter(|(_, ty)| {
-                    !matches!(
-                        ty,
-                        hir::Type::Scalar(
-                            hir::Scalar::Text
-                                | hir::Scalar::Integer
-                                | hir::Scalar::Approximate
-                                | hir::Scalar::Boolean
-                        )
-                    )
-                })
-                .collect();
+            let mut unreadable = Vec::new();
+            unreadable_attributes(heading, "", &mut unreadable);
             if unreadable.is_empty() {
                 return true;
             }
@@ -1290,10 +1290,31 @@ fn csv_readable(tuples: &hir::Type, rows: &ast::Expr, errors: &mut Vec<Diagnosti
     false
 }
 
+/// The attributes of `heading`, and the components of values of the
+/// program's own types in it, that no field can be read as, each named
+/// after `prefix` as `t.c` reads it, into `unreadable`.
+fn unreadable_attributes<'h>(
+    heading: &'h hir::Heading,
+    prefix: &str,
+    unreadable: &mut Vec<(String, &'h hir::Type)>,
+) {
+    for (name, ty) in heading.named() {
+        let named = format!("{prefix}{name}");
+        match ty {
+            hir::Type::Scalar(_) => {}
+            hir::Type::Defined(defined) => {
+                unreadable_attributes(&defined.components, &format!("{named}."), unreadable);
+            }
+            _ => unreadable.push((named, ty)),
+        }
+    }
+}
+
 /// Whether `columns`, the argument written `written` for `load_csv`'s
-/// `columns`, gives each attribute a column of its own, counting from 1,
-/// if it is known here. If not, it is reported (R0016), as it would be
-/// when the program runs.
+/// `columns`, gives each attribute, and each component of a value of a type
+/// of the program's own, a column of its own, counting from 1, if it is
+/// known here. If not, it is reported (R0016), as it would be when the
+/// program runs.
 fn distinct_columns(
     columns: &hir::Expr,
     written: &ast::Expr,
@@ -1302,35 +1323,54 @@ fn distinct_columns(
     let hir::Expr::Constant(hir::Value::Tuple(positions)) = columns else {
         return true;
     };
-    // Where an attribute's position is written: in a tuple selector, its
-    // value, and otherwise the whole argument.
-    let at = |name: &str| match written {
-        ast::Expr::Tuple(tuple) => tuple
-            .attributes()
-            .find(|a| a.is_named(name))
-            .and_then(|a| a.value())
-            .map_or_else(|| written.span(), |v| v.span()),
-        _ => written.span(),
-    };
+    let mut read = Vec::new();
+    columns_read(positions, "", written, &mut read);
     let mut ok = true;
-    let mut read: BTreeMap<i64, &str> = BTreeMap::new();
-    for (name, position) in positions.attributes() {
-        let &hir::Value::Integer(position) = position else {
-            unreachable!("a column's position is an integer, not `{position}`");
-        };
-        if position < 1 {
-            errors.push(errors::not_a_column(name, position, at(name)));
+    let mut first: BTreeMap<i64, usize> = BTreeMap::new();
+    for (i, (name, position, at)) in read.iter().enumerate() {
+        if *position < 1 {
+            errors.push(errors::not_a_column(name, *position, *at));
             ok = false;
-        } else if let Some(first) = read.insert(position, name) {
+        } else if let Some(&j) = first.get(position) {
+            let (other, _, other_at) = &read[j];
             errors.push(errors::shared_column(
-                first,
-                name,
-                position,
-                at(first),
-                at(name),
+                other, name, *position, *other_at, *at,
             ));
             ok = false;
+        } else {
+            first.insert(*position, i);
         }
     }
     ok
+}
+
+/// Each column `positions` gives, in order: the attribute or component
+/// read from it, named after `prefix` as `t.c` reads it, its position, and
+/// where that is written in `written`: in a tuple selector, its value, and
+/// otherwise the whole argument. A tuple of positions, for a value of a
+/// type of the program's own, gives its components'.
+fn columns_read(
+    positions: &hir::TupleValue,
+    prefix: &str,
+    written: &ast::Expr,
+    read: &mut Vec<(String, i64, Span)>,
+) {
+    for (name, position) in positions.attributes() {
+        let value = match written {
+            ast::Expr::Tuple(tuple) => tuple
+                .attributes()
+                .find(|a| a.is_named(name))
+                .and_then(|a| a.value()),
+            _ => None,
+        };
+        let value = value.as_ref().unwrap_or(written);
+        let named = format!("{prefix}{name}");
+        match position {
+            hir::Value::Integer(position) => read.push((named, *position, value.span())),
+            hir::Value::Tuple(components) => {
+                columns_read(components, &format!("{named}."), value, read);
+            }
+            other => unreachable!("a column's position is an integer, not `{other}`"),
+        }
+    }
 }

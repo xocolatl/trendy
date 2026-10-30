@@ -2248,12 +2248,9 @@ fn substitute(
         hir::Expr::And(lhs, rhs) => and(vec![sub(lhs)?, sub(rhs)?])?,
         hir::Expr::Ungroup(operand, names) => ungroup(sub(operand)?, names),
         hir::Expr::Only(operand) => only(sub(operand)?)?,
-        hir::Expr::Select(defined, constraints, components) => select(
-            defined,
-            constraints,
-            sub(components)?,
-            substitution.bindings,
-        )?,
+        hir::Expr::Select(defined, components) => {
+            select(defined, sub(components)?, substitution.bindings)?
+        }
         hir::Expr::Components(value) => components(sub(value)?),
         hir::Expr::Semijoin(lhs, rhs) => matching(sub(lhs)?, sub(rhs)?, false),
         hir::Expr::Combine(combination, lhs, rhs) => combined(sub(lhs)?, sub(rhs)?, combination)?,
@@ -2360,61 +2357,64 @@ pub(crate) fn extracted(
 }
 
 /// The value of the program's own type `defined` whose components are the
-/// tuple `components`: evaluated if they are a constant.
+/// tuple `components`, which fails unless each of the type's constraints
+/// is true of them: evaluated if they are a constant, as each constraint
+/// then is.
+///
+/// # Errors
+///
+/// Returns the constraint a constant's components break, or why
+/// computing one fails.
 pub(crate) fn select(
     defined: hir::Defined,
-    constraints: Vec<hir::Constraint>,
     components: hir::Expr,
     bindings: Bindings,
 ) -> Result<hir::Expr, Failed> {
     let hir::Expr::Constant(hir::Value::Tuple(tuple)) = components else {
-        return Ok(hir::Expr::Select(
-            defined,
-            constraints,
-            Box::new(components),
-        ));
+        return Ok(hir::Expr::Select(defined, Box::new(components)));
     };
-    let value = hir::DefinedValue {
-        name: defined.name.clone(),
-        components: tuple,
-    };
-    for constraint in &constraints {
-        let args = value
-            .components
-            .attributes()
-            .map(|(name, v)| (name.to_string(), hir::Expr::Constant(v.clone())))
-            .collect();
+    let args: BTreeMap<String, hir::Expr> = tuple
+        .attributes()
+        .map(|(name, v)| (name.to_string(), hir::Expr::Constant(v.clone())))
+        .collect();
+    // The first constraint that isn't true of them, and its value.
+    let mut first = None;
+    for constraint in &defined.constraints {
         let checked = call(
             hir::Call {
                 operator: constraint.operator,
                 types: Vec::new(),
-                args,
+                args: args.clone(),
                 updated: BTreeMap::new(),
             },
             bindings,
         )?;
-        match checked {
-            hir::Expr::Constant(hir::Value::Boolean(true)) => {}
-            hir::Expr::Constant(hir::Value::Boolean(false)) => {
-                let written = bindings.operators.get(constraint.operator).constrains();
-                return Err(Failed::Constraint(Box::new(BrokenConstraint {
-                    value,
-                    text: constraint.text.clone(),
-                    at: written.map(|(_, c)| c.span()),
-                })));
-            }
-            // Its value is known only when running, and so is whether the
-            // components satisfy it.
-            _ => {
-                return Ok(hir::Expr::Select(
-                    defined,
-                    constraints,
-                    Box::new(hir::Expr::Constant(hir::Value::Tuple(value.components))),
-                ));
-            }
+        if checked != hir::Expr::Constant(hir::Value::Boolean(true)) {
+            first = Some((constraint.clone(), checked));
+            break;
         }
     }
-    Ok(hir::Expr::Constant(hir::Value::Defined(value)))
+    let value = hir::DefinedValue {
+        ty: defined,
+        components: tuple,
+    };
+    match first {
+        None => Ok(hir::Expr::Constant(hir::Value::Defined(value))),
+        Some((constraint, hir::Expr::Constant(hir::Value::Boolean(false)))) => {
+            let written = bindings.operators.get(constraint.operator).constrains();
+            Err(Failed::Constraint(Box::new(BrokenConstraint {
+                value,
+                text: constraint.text,
+                at: written.map(|(_, c)| c.span()),
+            })))
+        }
+        // Its value is known only when running, and so is whether the
+        // components satisfy it.
+        Some(_) => Ok(hir::Expr::Select(
+            value.ty,
+            Box::new(hir::Expr::Constant(hir::Value::Tuple(value.components))),
+        )),
+    }
 }
 
 /// A value of a type of the program's own whose components break one of

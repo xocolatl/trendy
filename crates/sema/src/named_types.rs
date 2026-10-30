@@ -54,11 +54,14 @@ pub(crate) struct Cycled {
 }
 
 /// Resolve the attributes of each heading `file` declares, and the
-/// components of each type, into `namespaces`, reporting each cycle among
-/// them, and every error in their attributes.
+/// components and constraints of each type, into `namespaces`, reporting
+/// each cycle among them, and every error in their attributes. Each
+/// constraint is an operator, numbered from `first_constraint` in the order
+/// the types resolve, which [`crate::operators::signatures`] makes.
 pub(crate) fn resolve(
     file: &SourceFile,
     namespaces: &mut Namespaces,
+    first_constraint: hir::OperatorId,
     errors: &mut Vec<Diagnostic>,
 ) {
     let headings = file.headings().filter_map(|decl| {
@@ -89,6 +92,8 @@ pub(crate) fn resolve(
     for (name, _) in &declared {
         order.visit(name, &by_name, namespaces, errors);
     }
+    // Each constraint's operator, numbered in the order the types resolve.
+    let mut next = first_constraint.0;
     for name in &order.finished {
         let declared = by_name[name.as_str()];
         let Some(heading) = declared.decl.heading() else {
@@ -102,14 +107,26 @@ pub(crate) fn resolve(
         let Some(resolved) = resolved else {
             continue;
         };
-        match declared.decl {
+        match &declared.decl {
             Decl::Heading(_) => {
                 namespaces.attributes.insert(name.clone(), resolved);
             }
-            Decl::Type(_) => {
+            Decl::Type(decl) => {
+                let mut constraints = Vec::new();
+                for constraint in decl.constraints() {
+                    let text = constraint
+                        .condition()
+                        .map_or_else(String::new, |c| c.syntax().text().to_string());
+                    constraints.push(hir::Constraint {
+                        operator: hir::OperatorId(next),
+                        text,
+                    });
+                    next += 1;
+                }
                 let defined = hir::Defined {
                     name: name.clone(),
                     components: resolved,
+                    constraints,
                 };
                 namespaces.defined.insert(name.clone(), defined);
             }

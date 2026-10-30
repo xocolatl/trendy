@@ -140,7 +140,8 @@ impl Origin {
                 format!("`{name}` is given this argument's type")
             }
             Origin::Columns(_) => {
-                "`columns` gives a column for each attribute of these tuples".to_string()
+                "`columns` gives each attribute of these tuples a column, or its components' columns"
+                    .to_string()
             }
             Origin::Replaced(_, name) | Origin::Component(_, name) => {
                 format!("`{name}` has the expected type here")

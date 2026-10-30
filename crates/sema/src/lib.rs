@@ -112,8 +112,10 @@ pub(crate) fn check(
     let sites = Sites::new(source, &text);
 
     // The headings' attributes and the types' components first, which any
-    // type can name.
-    named_types::resolve(file, &mut namespaces, errors);
+    // type can name, and their constraints, whose operators come after the
+    // prelude's.
+    let first_constraint = hir::OperatorId(prelude.operators().len());
+    named_types::resolve(file, &mut namespaces, first_constraint, errors);
 
     // Every operator's signature first, so that anything can refer to an
     // operator defined after it.
@@ -6429,7 +6431,7 @@ mod tests {
         assert_eq!(missing[0].code, Code::MissingAttribute);
         assert_eq!(
             missing[0].secondary[0].message,
-            "`columns` gives a column for each attribute of these tuples"
+            "`columns` gives each attribute of these tuples a column, or its components' columns"
         );
         assert_eq!(
             fix(&call("tuple { city: 1, peopel: 2 }")),
@@ -6462,6 +6464,48 @@ mod tests {
         assert_eq!(
             fix(source),
             "operator main{} [\n    var rows: array tuple { city: text };\n    call load_csv{path: \"cities.csv\", header: true, columns: tuple { city: 1 }, out rows: rows};\n];\n"
+        );
+    }
+
+    #[test]
+    fn a_csv_file_is_read_into_values_of_a_programs_own_types() {
+        let call = |declared: &str, columns: &str| {
+            format!(
+                "type position {{ {{ latitude: approximate, longitude: approximate }} }};\ntype area {{ {{ name: text, parts: relation {{ part: text }} }} }};\n\noperator main{{}} [\n    var rows: array tuple {{ {declared} }};\n    call load_csv{{path: \"places.csv\", header: true, columns: {columns}, out rows: rows}};\n];\n"
+            )
+        };
+        // A value's components are read from columns of their own, given
+        // as a tuple of them, nested for a value inside.
+        analyze_str(&call(
+            "name: text, at: position",
+            "tuple { name: 1, at: tuple { latitude: 2, longitude: 3 } }",
+        ))
+        .unwrap();
+        // Not a column for the value as a whole.
+        let whole = errors(&call(
+            "name: text, at: position",
+            "tuple { name: 1, at: 2 }",
+        ));
+        assert_eq!(whole[0].code, Code::TypeMismatch);
+        assert_eq!(
+            whole[0].message,
+            "mismatched types: expected `tuple { latitude: integer, longitude: integer }`, found `integer`"
+        );
+        // A component is named as `t.c` reads it, in a column of its own,
+        // and one no field writes is unreadable.
+        assert_eq!(
+            messages(&call(
+                "name: text, at: position",
+                "tuple { name: 2, at: tuple { latitude: 2, longitude: 0 } }",
+            )),
+            [
+                "`at.latitude` and `name` are both read from column 2",
+                "`at.longitude` is read from column 0, but columns count from 1",
+            ]
+        );
+        assert_eq!(
+            messages(&call("a: area", "tuple { a: tuple { name: 1, parts: 2 } }")),
+            ["`load_csv` can't read `a.parts`, of type `relation { part: text }`, from a field"]
         );
     }
 
@@ -7897,6 +7941,7 @@ type position { { latitude: approximate, longitude: approximate } };
                 ]
                 .into(),
             ),
+            constraints: Vec::new(),
         };
         let place = hir::Defined {
             name: "place".to_string(),
@@ -7907,6 +7952,7 @@ type position { { latitude: approximate, longitude: approximate } };
                 ]
                 .into(),
             ),
+            constraints: Vec::new(),
         };
         let vars = variables(source);
         assert_eq!(vars[0].ty, hir::Type::Defined(place));
@@ -7941,7 +7987,7 @@ type position { { latitude: approximate, longitude: approximate } };
             panic!("a read-only operator");
         };
         assert_eq!(*result, hir::Type::Defined(position.clone()));
-        assert!(matches!(value, hir::Expr::Select(defined, _, _) if *defined == position));
+        assert!(matches!(value, hir::Expr::Select(defined, _) if *defined == position));
         assert_eq!(
             selector.params.keys().collect::<Vec<_>>(),
             ["latitude", "longitude"]
@@ -8069,7 +8115,7 @@ var swapped := [
         };
         assert!(matches!(
             &assignments[0].value,
-            hir::Expr::Select(_, _, components) if matches!(**components, hir::Expr::Extend(..))
+            hir::Expr::Select(_, components) if matches!(**components, hir::Expr::Extend(..))
         ));
     }
 
@@ -8189,7 +8235,7 @@ var landmarks := relation { { name: \"Petra\", at: here } } replace { at := at r
         };
         assert!(matches!(
             &**value,
-            hir::Expr::Select(_, _, components) if matches!(**components, hir::Expr::Extend(..))
+            hir::Expr::Select(_, components) if matches!(**components, hir::Expr::Extend(..))
         ));
     }
 
@@ -8285,12 +8331,16 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
         let hir::OperatorKind::ReadOnly { value, .. } = &selector.kind else {
             panic!("a read-only operator");
         };
-        let hir::Expr::Select(_, constraints, _) = value else {
+        let hir::Expr::Select(defined, _) = value else {
             panic!("a selection: {value:?}");
         };
-        let texts: Vec<&str> = constraints.iter().map(|c| c.text.as_str()).collect();
+        let texts: Vec<&str> = defined
+            .constraints
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect();
         assert_eq!(texts, ["value >= 0", "value <= 100"]);
-        let checks = &program.operators[constraints[0].operator.0];
+        let checks = &program.operators[defined.constraints[0].operator.0];
         assert!(matches!(
             &checks.kind,
             hir::OperatorKind::ReadOnly {

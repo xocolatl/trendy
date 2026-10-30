@@ -75,7 +75,7 @@ impl Program {
 }
 
 /// Index into [`Program::operators`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OperatorId(pub usize);
 
 /// Index into [`Program::variables`].
@@ -1231,7 +1231,7 @@ pub enum Expr {
     /// Relational Theory*, chapter 2). It fails unless each of the type's
     /// constraints, in order, is true of the components, since a type is
     /// the values its constraints are true of (TTM RM Prescription 23).
-    Select(Defined, Vec<Constraint>, Box<Expr>),
+    Select(Defined, Box<Expr>),
     /// The components of a value of one of the program's own types, in its
     /// possible representation, as a tuple: what its `THE_` operators
     /// extract from, as `v.c` is `Extract(Components(v), c)`.
@@ -1376,7 +1376,7 @@ impl Expr {
             | Expr::WithElements(..) => true,
             // A value breaks a constraint, or a constraint's operator
             // fails.
-            Expr::Select(_, constraints, operand) => !constraints.is_empty() || operand.can_fail(),
+            Expr::Select(defined, operand) => !defined.constraints.is_empty() || operand.can_fail(),
             Expr::Unary(_, operand) | Expr::At(_, operand) | Expr::Components(operand) => {
                 operand.can_fail()
             }
@@ -1545,9 +1545,7 @@ impl Expr {
             Expr::Load(relation, loading) => Expr::Load(Box::new(f(*relation, 0)), loading),
             Expr::Unload(array, unloading) => Expr::Unload(Box::new(f(*array, 0)), unloading),
             Expr::Only(operand) => Expr::Only(Box::new(f(*operand, 0))),
-            Expr::Select(defined, constraints, components) => {
-                Expr::Select(defined, constraints, Box::new(f(*components, 0)))
-            }
+            Expr::Select(defined, components) => Expr::Select(defined, Box::new(f(*components, 0))),
             Expr::Components(value) => Expr::Components(Box::new(f(*value, 0))),
             Expr::Call(call) => Expr::Call(Call {
                 args: call
@@ -1576,7 +1574,7 @@ impl Expr {
             | Expr::Rename(operand, _)
             | Expr::Ungroup(operand, _)
             | Expr::Only(operand)
-            | Expr::Select(_, _, operand)
+            | Expr::Select(_, operand)
             | Expr::Components(operand)
             | Expr::Load(operand, ..)
             | Expr::Unload(operand, ..) => f(operand, 0),
@@ -1719,9 +1717,7 @@ impl Expr {
             Expr::Restrict(operand, condition) => Expr::Restrict(inst(operand), inst(condition)),
             Expr::Only(operand) => Expr::Only(inst(operand)),
             // A type of the program's own has no type parameters in it.
-            Expr::Select(defined, constraints, components) => {
-                Expr::Select(defined.clone(), constraints.clone(), inst(components))
-            }
+            Expr::Select(defined, components) => Expr::Select(defined.clone(), inst(components)),
             Expr::Components(value) => Expr::Components(inst(value)),
             Expr::Current(depth, heading) => Expr::Current(*depth, heading.instantiated(types)),
             Expr::Call(call) => Expr::Call(call.instantiated(types)),
@@ -2443,19 +2439,21 @@ impl std::fmt::Display for Type {
 /// the read-only operator that computes it, a boolean, from a value's
 /// components, its parameters, and the condition as it is written, which a
 /// value that breaks it is reported with.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Constraint {
     pub operator: OperatorId,
     pub text: String,
 }
 
-/// A scalar type of the program's own: its name, and the components of its
+/// A scalar type of the program's own: its name, the components of its
 /// possible representation, as values of it are stored and selected (TTM
-/// RM Prescription 4).
+/// RM Prescription 4), and its constraints, in order, which every value's
+/// components satisfy (RM Prescription 23).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Defined {
     pub name: String,
     pub components: Heading,
+    pub constraints: Vec<Constraint>,
 }
 
 /// Source text for the heading: `{ a: integer, b: text }` or `{}`. A
@@ -2711,15 +2709,7 @@ impl Value {
             )),
             Value::Relation(relation) => Type::Relation(relation.heading.clone()),
             Value::Array(array) => Type::Array(Box::new(array.element.clone())),
-            Value::Defined(value) => {
-                let Type::Tuple(components) = Value::Tuple(value.components.clone()).ty() else {
-                    unreachable!("a tuple's type is a tuple type");
-                };
-                Type::Defined(Defined {
-                    name: value.name.clone(),
-                    components,
-                })
-            }
+            Value::Defined(value) => Type::Defined(value.ty.clone()),
         }
     }
 
@@ -2777,7 +2767,7 @@ impl std::fmt::Display for Value {
                     .attributes()
                     .map(|(name, value)| format!("{name}: {value}"))
                     .collect();
-                write!(f, "{}{{{}}}", value.name, components.join(", "))
+                write!(f, "{}{{{}}}", value.ty.name, components.join(", "))
             }
             Value::Relation(relation) => {
                 write!(f, "relation {} ", relation.heading)?;
@@ -2801,12 +2791,13 @@ impl std::fmt::Display for Value {
     }
 }
 
-/// A value of one of the program's own types, of the type named `name`: its
-/// components, in its possible representation. Two are equal when their
-/// components are (TTM RM Prescription 8).
+/// A value of one of the program's own types, `ty`, which it carries, as
+/// TTM has every scalar value carry its type (RM Prescription 2): its components,
+/// in its possible representation. Two of a type are equal when their
+/// components are (RM Prescription 8).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DefinedValue {
-    pub name: String,
+    pub ty: Defined,
     pub components: TupleValue,
 }
 
@@ -3458,10 +3449,12 @@ mod tests {
     fn a_programs_own_types_are_named_and_have_no_default() {
         let components =
             Heading::new([("degrees".to_string(), Type::Scalar(Scalar::Approximate))].into());
-        let ty = Type::Defined(Defined {
+        let celsius = Defined {
             name: "celsius".to_string(),
             components,
-        });
+            constraints: Vec::new(),
+        };
+        let ty = Type::Defined(celsius.clone());
         assert_eq!(ty.to_string(), "celsius");
         assert_eq!(ty.default_value(), None);
         // Nor has a tuple with one.
@@ -3469,7 +3462,7 @@ mod tests {
         assert_eq!(tuple.default_value(), None);
         // A value is written as its selector's invocation.
         let value = Value::Defined(DefinedValue {
-            name: "celsius".to_string(),
+            ty: celsius.clone(),
             components: TupleValue::new(
                 [(
                     "degrees".to_string(),
@@ -3481,16 +3474,7 @@ mod tests {
         assert_eq!(value.to_string(), "celsius{degrees: 2.15e1}");
         assert_eq!(value.ty(), ty);
         // Its components, and the value they select.
-        let select = Expr::Select(
-            Defined {
-                name: "celsius".to_string(),
-                components: Heading::new(
-                    [("degrees".to_string(), Type::Scalar(Scalar::Approximate))].into(),
-                ),
-            },
-            Vec::new(),
-            Box::new(Expr::Parameter("t".to_string())),
-        );
+        let select = Expr::Select(celsius, Box::new(Expr::Parameter("t".to_string())));
         assert_eq!(select.type_with(&|_| unreachable!()), ty);
         assert_eq!(
             Expr::Components(Box::new(select)).type_with(&|_| unreachable!()),

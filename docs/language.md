@@ -860,10 +860,14 @@ builtin operator load_text_file{path: text, out lines: array text};
    record is a header, which is skipped too. Each attribute is text, an
    integer, an approximate number or a boolean, read from its field as
    `parse_integer`, `parse_approximate` and `parse_boolean` read them,
-   and text as it is. The file is CSV as RFC 4180 has it: fields
-   separated by commas, records by line ends, as for `load_text_file`,
-   and a field with a comma, a quote or a line end in quotes, each quote
-   in it doubled. Empty lines are skipped. A file that can't be read
+   and text as it is, or a value of a type of the program's own whose
+   components are, which `columns` gives a tuple of their columns, as
+   `tuple { name: 1, at: tuple { latitude: 2, longitude: 3 } }` does, and
+   which is selected from them, so that one whose components break its
+   type's constraints fails (R0017). The file is CSV as RFC 4180 has it:
+   fields separated by commas, records by line ends, as for
+   `load_text_file`, and a field with a comma, a quote or a line end in
+   quotes, each quote in it doubled. Empty lines are skipped. A file that can't be read
    fails (R0012), as does one that isn't UTF-8 text (R0013), or isn't
    CSV (R0015), or hasn't a column `columns` gives, which two attributes
    can't share (R0016), or that has a field its attribute's type can't
@@ -1292,6 +1296,14 @@ operator main{} [
   type, which no field writes, is an error when compiling (A0055), as is
   an array whose tuples' type is a type parameter, whose attributes
   aren't known then.
+- **A value of a type of the program's own is read from its components'
+  columns,** which `columns` gives it as a tuple of them, nested for a
+  value inside: a position of a city is
+  `at: tuple { latitude: 6, longitude: 7 }`. The value is then selected
+  from them, so one whose components break its type's constraints stops
+  the program (R0017), writing the record's line, the attribute, the
+  value and the constraint. Errors name a component as `t.c` reads it,
+  as in `at.latitude`.
 - **The file is CSV as RFC 4180 has it:** fields separated by commas,
   and records by line ends, as for `load_text_file`; a field with a
   comma, a quote or a line end is in quotes, each quote in it doubled,
@@ -1798,7 +1810,8 @@ operator main{} [
 ```
 
 - **A value is checked where it is selected,** by the selector,
-  `replace` or `update`, the only ways a value of the type comes to be,
+  `replace` or `update`, or from a file's fields by `load_csv` (see [The
+  prelude](#the-prelude)), the only ways a value of the type comes to be,
   as TTM has a selector check its type's constraint. Components that
   break a constraint fail there, so no variable ever holds a value
   outside its type. The failure names the value and the constraint it

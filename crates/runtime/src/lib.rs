@@ -1876,6 +1876,46 @@ pub unsafe extern "C" fn trendy_rt_broken_constraint(
     }
 }
 
+/// Stop the program because `value`, of the type of the program's own
+/// `desc` describes, which `load_csv` read for the attribute or component
+/// named `attribute`, a text, from the record on line `*line` of the file
+/// at `path`, a text, breaks its constraint written `constraint`, a text,
+/// writing them (R0017).
+///
+/// # Safety
+///
+/// `value` must point to a valid value of the type `desc` describes, a
+/// type of the program's own, `constraint`, `attribute` and `path` to
+/// valid text values, and `line` to a `usize`.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_broken_constraint_in_file(
+    value: *const u8,
+    desc: *const TypeDesc,
+    constraint: *const u8,
+    attribute: *const u8,
+    path: *const u8,
+    line: *const usize,
+) -> ! {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let desc = &*desc;
+        let (constraint, attribute) = (read_text(constraint), read_text(attribute));
+        let (path, line) = (read_text(path), line.read_unaligned());
+        fail_with(|out| {
+            write!(out, "error[R0017]: line {line} of \"")?;
+            trendy_text::escape(path, out)?;
+            write!(out, "\" gives `{attribute}` ")?;
+            write_value(out, value, desc)?;
+            writeln!(
+                out,
+                ", which isn't a value of `{}`: it breaks the constraint `{constraint}`",
+                type_name(desc)
+            )
+        })
+    }
+}
+
 /// Stop the program because a relation has `*count` tuples, not one,
 /// where its only one is taken, writing the count (R0005).
 ///
@@ -2495,7 +2535,7 @@ pub unsafe extern "C" fn trendy_rt_parse_boolean(dst: *mut u8, from: *const Text
 #[cfg(not(test))]
 #[derive(Clone, Copy)]
 struct Place<'a> {
-    attribute: &'a str,
+    attribute: LeafName<'a>,
     column: usize,
     line: usize,
     path: &'a str,
@@ -2623,24 +2663,29 @@ fn file_text<'a>(path: &str, bytes: &'a [u8]) -> &'a str {
 /// Store at `dst` the array of the records of the CSV file at `path`, in
 /// the file's order, after the first if `header` is true, a header, of the
 /// type `desc` describes, an array of tuples, in memory the statement
-/// owns. Each attribute of the tuples is the field in the column that
-/// `columns`, a tuple of integers `columns_desc` describes, gives it,
-/// counting from 1: text as it is, and an integer, an approximate number
-/// or a boolean as `parse_integer`, `parse_approximate` and
-/// `parse_boolean` read one. Columns it doesn't give are skipped. Stops
-/// the program if a column isn't one of the file's, or two attributes
-/// have one (R0016), the file can't be read (R0012), isn't UTF-8 text
-/// (R0013) or CSV (R0015), a field isn't a value of its attribute's type
-/// (R0014), or the memory can't be allocated.
+/// owns, and at `lines` the line each record starts on, an array of
+/// `usize`s, in memory the statement owns too. Each attribute of the
+/// tuples is the field in the column that `columns`, a tuple
+/// `columns_desc` describes, gives it, counting from 1: text as it is, and
+/// an integer, an approximate number or a boolean as `parse_integer`,
+/// `parse_approximate` and `parse_boolean` read one. A value of a type of
+/// the program's own is read as its components, whose columns `columns`
+/// gives as a tuple of them; the caller checks its constraints. Columns it
+/// doesn't give are skipped. Stops the program if a column isn't one of
+/// the file's, or two attributes or components have one (R0016), the file
+/// can't be read (R0012), isn't UTF-8 text (R0013) or CSV (R0015), a field
+/// isn't a value of its type (R0014), or the memory can't be allocated.
 ///
 /// # Safety
 ///
 /// `path` must point to a valid text value, `header` to a valid boolean,
 /// `columns` to a valid tuple and `columns_desc` to its type's descriptor,
-/// of the attributes of the tuples `desc` describes, each an integer, and
-/// `desc` to a valid descriptor of an array of tuples whose attributes are
-/// text, integers, approximate numbers or booleans, and `dst` to memory
-/// for an array. The statement must have begun a scope.
+/// of the attributes of the tuples `desc` describes, each an integer, or a
+/// tuple of the same shape for the components of a value of a type of the
+/// program's own, and `desc` to a valid descriptor of an array of tuples
+/// whose attributes, and those values' components, are text, integers,
+/// approximate numbers, booleans or such values, and `dst` and `lines` to
+/// memory for an array. The statement must have begun a scope.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn trendy_rt_load_csv(
@@ -2649,6 +2694,7 @@ pub unsafe extern "C" fn trendy_rt_load_csv(
     header: *const u8,
     columns: *const u8,
     columns_desc: *const TypeDesc,
+    lines: *mut Text,
     desc: *const TypeDesc,
 ) {
     // SAFETY: guaranteed by the caller.
@@ -2657,43 +2703,37 @@ pub unsafe extern "C" fn trendy_rt_load_csv(
         let header = *header != 0;
         let desc = &*desc;
         let element = desc.element();
-        let attrs = attributes(element);
-        // Each attribute's column, counting from 0, as `columns` gives it,
-        // whose attributes are the tuples', in the same order.
-        let slots = allocate::<usize>(attrs.len());
-        for (i, position) in attributes(&*columns_desc).iter().enumerate() {
-            let n = columns.add(position.offset).cast::<i64>().read_unaligned();
-            let attr = name(&attrs[i]);
-            if n < 1 {
-                columns_fail(|out| {
-                    write!(
-                        out,
-                        "`{attr}` is read from column {n}, but columns count from 1"
-                    )
-                });
-            }
-            let index = usize::try_from(n - 1).unwrap_or(usize::MAX);
-            if let Some(first) = array(slots, i).iter().position(|&j| j == index) {
-                let first = name(&attrs[first]);
-                columns_fail(|out| {
-                    write!(out, "`{first}` and `{attr}` are both read from column {n}")
-                });
-            }
-            slots.add(i).write(index);
-        }
-        let indexes = array(slots, attrs.len());
+        // Each scalar read, and its column, as `columns` gives them.
+        let count_leaves = scalars(element);
+        let leaves_memory = allocate::<Leaf>(count_leaves);
+        let mut next = 0;
+        gather(
+            element,
+            0,
+            columns,
+            &*columns_desc,
+            leaves_memory,
+            &mut next,
+            element,
+        );
+        let leaves = array(leaves_memory, count_leaves);
+        let named = |leaf| LeafName {
+            desc: element,
+            leaf,
+        };
+        distinct_columns(leaves, element);
         let (contents, len) = read_file(path);
         let text = file_text(path, array(contents, len));
         let Records { count, fields } = csv_records(text, path, header);
-        if let Some(i) = indexes.iter().position(|&j| j >= fields)
+        if let Some(i) = leaves.iter().position(|l| l.column >= fields)
             && fields > 0
         {
-            let attr = name(&attrs[i]);
             columns_fail(|out| {
                 write!(
                     out,
-                    "`{attr}` is read from column {}, but \"",
-                    indexes[i].saturating_add(1)
+                    "`{}` is read from column {}, but \"",
+                    named(i),
+                    leaves[i].column.saturating_add(1)
                 )?;
                 trendy_text::escape(path, out)?;
                 let plural = if fields == 1 { "" } else { "s" };
@@ -2704,6 +2744,10 @@ pub unsafe extern "C" fn trendy_rt_load_csv(
             fail(Failure::OutOfMemory)
         };
         let rows = allocate_buffer(size, desc);
+        let Some(lines_size) = count.checked_mul(size_of::<usize>()) else {
+            fail(Failure::OutOfMemory)
+        };
+        let starts = allocate_buffer(lines_size, core::ptr::null());
         // Each record's tuple, made here, then copied into the array.
         let tuple = allocate::<u8>(element.size);
         // Every field after the header's, if there is one, as
@@ -2712,35 +2756,210 @@ pub unsafe extern "C" fn trendy_rt_load_csv(
         if header {
             all.by_ref().find(|f| f.last);
         }
-        let (mut i, mut j, mut first) = (0, 0, !header);
+        let (mut i, mut j, mut first, mut start) = (0, 0, !header, 0);
         for field in all {
-            if let Some(a) = indexes.iter().position(|&c| c == j) {
-                let attr = &attrs[a];
+            if j == 0 {
+                start = field.line;
+            }
+            if let Some(k) = leaves.iter().position(|l| l.column == j) {
+                let leaf = leaves[k];
                 let place = Place {
-                    attribute: name(attr),
+                    attribute: named(k),
                     column: j,
                     line: field.line,
                     path,
                     header: header.then_some(text),
                     first,
                 };
-                read_field(field, tuple.add(attr.offset), &*attr.desc, place);
+                read_field(field, tuple.add(leaf.offset), &*leaf.desc, place);
             }
             j += 1;
             if field.last {
                 copy_element(rows, rows.add(i * element.size), tuple, element);
+                starts
+                    .add(i * size_of::<usize>())
+                    .cast::<usize>()
+                    .write_unaligned(start);
                 i += 1;
                 j = 0;
                 first = false;
             }
         }
         free(tuple.cast());
-        free(slots.cast());
+        free(leaves_memory.cast());
         free(contents.cast());
         dst.write_unaligned(Text {
             bytes: rows,
             len: count,
         });
+        lines.write_unaligned(Text {
+            bytes: starts,
+            len: count,
+        });
+    }
+}
+
+/// Stop the program if two of `leaves`, the scalars the records' tuples,
+/// which `element` describes, are read as, have one column (R0016).
+#[cfg(not(test))]
+fn distinct_columns(leaves: &[Leaf], element: &TypeDesc) {
+    let named = |leaf| LeafName {
+        desc: element,
+        leaf,
+    };
+    for (i, leaf) in leaves.iter().enumerate() {
+        if let Some(first) = leaves[..i].iter().position(|l| l.column == leaf.column) {
+            columns_fail(|out| {
+                write!(
+                    out,
+                    "`{}` and `{}` are both read from column {}",
+                    named(first),
+                    named(i),
+                    leaf.column + 1
+                )
+            });
+        }
+    }
+}
+
+/// A scalar a CSV file's field is read into: an attribute of the records'
+/// tuples, or a component of a value of a type of the program's own in
+/// one, at `offset` in the tuple, of the type `desc` describes, from the
+/// column `column`, counting from 0.
+#[cfg(not(test))]
+#[derive(Clone, Copy)]
+struct Leaf {
+    offset: usize,
+    desc: *const TypeDesc,
+    column: usize,
+}
+
+/// How many scalars a tuple, or a value of a type of the program's own,
+/// that `desc` describes is read as: one for each attribute or component,
+/// and as many as its components are for a value of a type of the
+/// program's own in it.
+///
+/// # Safety
+///
+/// `desc` must be a valid descriptor of such a value.
+#[cfg(not(test))]
+unsafe fn scalars(desc: &TypeDesc) -> usize {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        attributes(desc)
+            .iter()
+            .map(|attr| {
+                let inner = &*attr.desc;
+                if inner.kind == KIND_DEFINED {
+                    scalars(inner)
+                } else {
+                    1
+                }
+            })
+            .sum()
+    }
+}
+
+/// Write at `leaves`, from the `next`th on, the scalars a tuple, or a value
+/// of a type of the program's own, that `values` describes is read as, at
+/// `base` in the records' tuples, which `element` describes, each with the
+/// column `columns` gives it: a tuple `columns_desc` describes, of the
+/// same shape, whose attributes are integers counting from 1, or such
+/// tuples for the components of a value of a type of the program's own.
+/// Stops the program if a position is below 1 (R0016).
+///
+/// # Safety
+///
+/// `values` and `columns_desc` must be valid descriptors of that shape,
+/// `columns` must point to a value of the latter, and `leaves` to room for
+/// the scalars.
+#[cfg(not(test))]
+unsafe fn gather(
+    values: &TypeDesc,
+    base: usize,
+    columns: *const u8,
+    columns_desc: &TypeDesc,
+    leaves: *mut Leaf,
+    next: &mut usize,
+    element: &TypeDesc,
+) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        for (attr, position) in attributes(values).iter().zip(attributes(columns_desc)) {
+            let inner = &*attr.desc;
+            let at = columns.add(position.offset);
+            if inner.kind == KIND_DEFINED {
+                gather(
+                    inner,
+                    base + attr.offset,
+                    at,
+                    &*position.desc,
+                    leaves,
+                    next,
+                    element,
+                );
+                continue;
+            }
+            let n = at.cast::<i64>().read_unaligned();
+            if n < 1 {
+                let name = LeafName {
+                    desc: element,
+                    leaf: *next,
+                };
+                columns_fail(|out| {
+                    write!(
+                        out,
+                        "`{name}` is read from column {n}, but columns count from 1"
+                    )
+                });
+            }
+            leaves.add(*next).write(Leaf {
+                offset: base + attr.offset,
+                desc: attr.desc,
+                column: usize::try_from(n - 1).unwrap_or(usize::MAX),
+            });
+            *next += 1;
+        }
+    }
+}
+
+/// The name of the `leaf`th scalar a CSV file's records' tuples, which
+/// `desc` describes, are read as, counting as [`gather`] does: an
+/// attribute's, or a component's after its value's, as `t.c` reads it.
+#[cfg(not(test))]
+#[derive(Clone, Copy)]
+struct LeafName<'a> {
+    desc: &'a TypeDesc,
+    leaf: usize,
+}
+
+#[cfg(not(test))]
+impl fmt::Display for LeafName<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (mut desc, mut leaf, mut dot) = (self.desc, self.leaf, "");
+        // SAFETY: `trendy_rt_load_csv`'s caller gives valid descriptors.
+        unsafe {
+            'values: loop {
+                for attr in attributes(desc) {
+                    let inner = &*attr.desc;
+                    let count = if inner.kind == KIND_DEFINED {
+                        scalars(inner)
+                    } else {
+                        1
+                    };
+                    if leaf < count {
+                        write!(f, "{dot}{}", name(attr))?;
+                        if inner.kind != KIND_DEFINED {
+                            return Ok(());
+                        }
+                        (desc, dot) = (inner, ".");
+                        continue 'values;
+                    }
+                    leaf -= count;
+                }
+                unreachable!("a leaf is one of the tuples' scalars");
+            }
+        }
     }
 }
 

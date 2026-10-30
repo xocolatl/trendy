@@ -258,14 +258,14 @@ impl<'a> Globals<'a> {
         // checks: a call of it is one of each of them, so a constraint
         // whose condition selects a value of its type closes a cycle.
         if let Some(defined) = signature.selects() {
-            let constraints = operators.constraints(defined);
-            let valid = constraints
+            let valid = defined
+                .constraints
                 .iter()
                 .all(|c| self.checked(c.operator, at, errors));
             if valid {
                 self.values
                     .entry(id)
-                    .or_insert_with(|| Signature::selection(defined, constraints.to_vec()));
+                    .or_insert_with(|| Signature::selection(defined));
                 self.locals.entry(id).or_default();
             }
             return valid;

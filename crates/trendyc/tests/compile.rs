@@ -682,19 +682,20 @@ fn text() {
             r#""Paraná""#,
             r#""Mekong""#,
             r#""Volga""#,
-            // The CSV file's first record after its header, then its
-            // records as a relation.
-            r#"tuple { basin_km2: 3.254555e6, length_km: 6650, name: "Nile", reaches_ocean: true }"#,
-            "┌────────────┬───────────┬─────────┬───────────────┐",
-            "│ basin_km2  │ length_km │ name    │ reaches_ocean │",
-            "├────────────┼───────────┼─────────┼───────────────┤",
-            "│     7.95e5 │      4909 │ Mekong  │ true          │",
-            "│     1.36e6 │      3531 │ Volga   │ false         │",
-            "│   1.8085e6 │      6300 │ Yangtze │ true          │",
-            "│ 2.582672e6 │      4880 │ Paraná  │ true          │",
-            "│ 3.254555e6 │      6650 │ Nile    │ true          │",
-            "│     7.05e6 │      6400 │ Amazon  │ true          │",
-            "└────────────┴───────────┴─────────┴───────────────┘",
+            // The CSV file's first record after its header, with the
+            // position of its mouth read from two columns, then its records
+            // as a relation.
+            r#"tuple { basin_km2: 3.254555e6, length_km: 6650, mouth_at: position{latitude: 3.146e1, longitude: 3.037e1}, name: "Nile", reaches_ocean: true }"#,
+            "┌────────────┬───────────┬─────────────────────────────────────────────────┬─────────┬───────────────┐",
+            "│ basin_km2  │ length_km │ mouth_at                                        │ name    │ reaches_ocean │",
+            "├────────────┼───────────┼─────────────────────────────────────────────────┼─────────┼───────────────┤",
+            "│     7.95e5 │      4909 │ position{latitude: 9.7e0, longitude: 1.066e2}   │ Mekong  │ true          │",
+            "│     1.36e6 │      3531 │ position{latitude: 4.58e1, longitude: 4.79e1}   │ Volga   │ false         │",
+            "│   1.8085e6 │      6300 │ position{latitude: 3.14e1, longitude: 1.219e2}  │ Yangtze │ true          │",
+            "│ 2.582672e6 │      4880 │ position{latitude: -3.4e1, longitude: -5.84e1}  │ Paraná  │ true          │",
+            "│ 3.254555e6 │      6650 │ position{latitude: 3.146e1, longitude: 3.037e1} │ Nile    │ true          │",
+            "│     7.05e6 │      6400 │ position{latitude: -1.7e-1, longitude: -4.9e1}  │ Amazon  │ true          │",
+            "└────────────┴───────────┴─────────────────────────────────────────────────┴─────────┴───────────────┘",
         ]
     );
 }
@@ -732,6 +733,114 @@ fn loaded_csv(name: &str, contents: &str, header: bool, columns: &str) -> (i32, 
     let (code, stderr) = run_source(&format!("csv_{name}"), &source);
     let path = path.to_str().unwrap().to_string();
     (code, stderr.replace(&path, "PATH"))
+}
+
+/// What loading `contents` as a CSV file, named for `name`, into stops at
+/// places of the program's own types writes, with the columns `columns`
+/// gives, a variable's, known only when the program runs, and the
+/// program's exit status. A place's position must be on Earth, and a
+/// stop's must have a name.
+fn loaded_stops(name: &str, contents: &str, columns: &str) -> (i32, String) {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("csv");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{name}.csv"));
+    std::fs::write(&path, contents).unwrap();
+    let source = format!(
+        "type position {{
+    {{ latitude: approximate, longitude: approximate }},
+    constraint latitude >= -90e0 and latitude <= 90e0,
+}};
+type stop {{ {{ name: text, at: position }}, constraint name <> \"\" }};
+
+operator main{{}} [
+    var rows: array tuple {{ day: integer, stop: stop }};
+    var columns := {columns};
+    call load_csv{{path: {:?}, header: true, columns: columns, out rows: rows}};
+    call debug_value{{v: rows}};
+];
+",
+        path.to_str().unwrap()
+    );
+    let (code, stderr) = run_source(&format!("csv_{name}"), &source);
+    let path = path.to_str().unwrap().to_string();
+    (code, stderr.replace(&path, "PATH"))
+}
+
+#[test]
+fn csv_files_load_values_of_a_programs_own_types() {
+    let columns =
+        "tuple { day: 1, stop: tuple { name: 2, at: tuple { latitude: 3, longitude: 4 } } }";
+    let header = "day,stop,latitude,longitude\n";
+    // Each value is selected from its components, each from its column.
+    assert_eq!(
+        loaded_stops("stops", &format!("{header}1,Lima,-12.05,-77.04\n"), columns),
+        (
+            0,
+            r#"array [tuple { day: 1, stop: stop{at: position{latitude: -1.205e1, longitude: -7.704e1}, name: "Lima"} }]"#
+                .to_string()
+                + "\n"
+        )
+    );
+    // Components that break a constraint stop the program, writing the
+    // record's line, the value, and the constraint: a value's components
+    // are checked before it, as they are selected first.
+    let broken = trendy_diag::Code::BrokenConstraint.id();
+    let site = site("csv_stops_broken", 10);
+    assert_eq!(
+        loaded_stops(
+            "stops_broken",
+            &format!("{header}1,Lima,-12.05,-77.04\n2,,95,0\n"),
+            columns
+        ),
+        (
+            1,
+            format!(
+                "error[{broken}]: line 3 of \"PATH\" gives `stop.at` position{{latitude: 9.5e1, longitude: 0e0}}, which isn't a value of `position`: it breaks the constraint `latitude >= -90e0 and latitude <= 90e0`\n{site}"
+            )
+        )
+    );
+    let site = self::site("csv_stops_unnamed", 10);
+    assert_eq!(
+        loaded_stops("stops_unnamed", &format!("{header}2,,9,0\n"), columns),
+        (
+            1,
+            format!(
+                "error[{broken}]: line 2 of \"PATH\" gives `stop` stop{{at: position{{latitude: 9e0, longitude: 0e0}}, name: \"\"}}, which isn't a value of `stop`: it breaks the constraint `name <> \"\"`\n{site}"
+            )
+        )
+    );
+    // A component's column, and a field that isn't of its type, are
+    // named as `t.c` reads it.
+    let columns_code = trendy_diag::Code::CsvColumns.id();
+    let (code, stderr) = loaded_stops(
+        "stops_shared",
+        header,
+        "tuple { day: 1, stop: tuple { name: 2, at: tuple { latitude: 3, longitude: 3 } } }",
+    );
+    assert_eq!(
+        (code, stderr.lines().next().unwrap()),
+        (
+            1,
+            &*format!(
+                "error[{columns_code}]: `stop.at.latitude` and `stop.at.longitude` are both read from column 3"
+            )
+        )
+    );
+    let (code, stderr) = loaded_stops(
+        "stops_unparsable",
+        &format!("{header}1,Lima,south,-77.04\n"),
+        columns,
+    );
+    assert_eq!(
+        (code, stderr.lines().next().unwrap()),
+        (
+            1,
+            &*format!(
+                "error[{}]: \"south\", in column 3 (\"latitude\") on line 2 of \"PATH\", isn't an approximate number, the type of `stop.at.latitude`",
+                trendy_diag::Code::Unparsable.id()
+            )
+        )
+    );
 }
 
 #[test]

@@ -25,7 +25,21 @@ operator list_rivers{} [
     ];
 ];
 
-heading river := { name: text, length_km: integer, basin_km2: approximate, reaches_ocean: boolean };
+/* A place on Earth, by its latitude and longitude, in degrees, as in
+   types.trendy. */
+type position {
+    { latitude: approximate, longitude: approximate },
+    constraint latitude >= -90e0 and latitude <= 90e0,
+    constraint longitude > -180e0 and longitude <= 180e0,
+};
+
+heading river := {
+    name: text,
+    length_km: integer,
+    basin_km2: approximate,
+    reaches_ocean: boolean,
+    mouth_at: position,
+};
 
 /* A CSV file's records, after its header, read when the program runs,
    into the variable for `rows`: an array of tuples, in the file's order,
@@ -33,13 +47,23 @@ heading river := { name: text, length_km: integer, basin_km2: approximate, reach
    from 1, read as its type. The file's columns have an order and no
    names, so the call names them, whatever the header calls them: its
    `km` is `length_km` here. Columns `columns` doesn't name, here
-   `native_name` and `mouth`, are skipped. */
+   `native_name` and `mouth`, are skipped. A value of a type of the
+   program's own, here the position of a river's mouth, is read from its
+   components' columns, a tuple of them, and selected from them, so a
+   record whose components break the type's constraints stops the program,
+   writing its line. */
 operator river_table{} [
     var rivers: array tuple river;
     call load_csv{
         path: "examples/rivers.csv",
         header: true,
-        columns: tuple { name: 1, length_km: 3, basin_km2: 4, reaches_ocean: 6 },
+        columns: tuple {
+            name: 1,
+            length_km: 3,
+            basin_km2: 4,
+            reaches_ocean: 6,
+            mouth_at: tuple { latitude: 7, longitude: 8 },
+        },
         out rows: rivers,
     };
     call debug_value{v: rivers[1]};

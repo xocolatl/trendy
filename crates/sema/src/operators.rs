@@ -157,23 +157,15 @@ impl Signature {
         Some(trendy_syntax::span(ident.text_range()))
     }
 
-    /// The value of a selector, of the type `defined`, with the
-    /// `constraints`: the value whose components are its parameters, if
-    /// they satisfy them.
-    pub(crate) fn selection(
-        defined: &hir::Defined,
-        constraints: Vec<hir::Constraint>,
-    ) -> hir::Expr {
+    /// The value of a selector, of the type `defined`: the value whose
+    /// components are its parameters, if they satisfy its constraints.
+    pub(crate) fn selection(defined: &hir::Defined) -> hir::Expr {
         let components = defined
             .components
             .attributes()
             .map(|(name, _)| (name.to_string(), hir::Expr::Parameter(name.to_string())))
             .collect();
-        hir::Expr::Select(
-            defined.clone(),
-            constraints,
-            Box::new(hir::Expr::Tuple(components)),
-        )
+        hir::Expr::Select(defined.clone(), Box::new(hir::Expr::Tuple(components)))
     }
 
     /// The parameters, as a call's error says what they are:
@@ -183,13 +175,12 @@ impl Signature {
     }
 }
 
-/// Every operator, by id: the prelude's, then the program's.
+/// Every operator, by id: the prelude's, then the constraints of the
+/// program's types, then the program's operators and selectors.
 pub(crate) struct Operators {
     list: Vec<Signature>,
     /// Each name's operators, which their parameters' names tell apart.
     by_name: HashMap<String, Vec<hir::OperatorId>>,
-    /// Each type of the program's own's constraints, by its name, in order.
-    constraints: HashMap<String, Vec<hir::Constraint>>,
 }
 
 /// A call's arguments, as they choose which operator of its name it
@@ -213,47 +204,20 @@ pub(crate) enum Chosen<'a> {
 
 impl Operators {
     /// The operators of `list`, by id, each named in the order they are
-    /// defined, but constraints, which no call can name, each of its type.
+    /// defined, but constraints, which no call can name.
     fn new(list: Vec<Signature>) -> Self {
         let mut by_name: HashMap<String, Vec<hir::OperatorId>> = HashMap::new();
-        let mut constraints: HashMap<String, Vec<hir::Constraint>> = HashMap::new();
-        for signature in &list {
-            match signature.constrains() {
-                Some((defined, constraint)) => {
-                    let text = constraint
-                        .condition()
-                        .map_or_else(String::new, |c| c.syntax().text().to_string());
-                    constraints
-                        .entry(defined.name.clone())
-                        .or_default()
-                        .push(hir::Constraint {
-                            operator: signature.id,
-                            text,
-                        });
-                }
-                None => by_name
-                    .entry(signature.name.clone())
-                    .or_default()
-                    .push(signature.id),
-            }
+        for signature in list.iter().filter(|s| s.constrains().is_none()) {
+            by_name
+                .entry(signature.name.clone())
+                .or_default()
+                .push(signature.id);
         }
-        Operators {
-            list,
-            by_name,
-            constraints,
-        }
+        Operators { list, by_name }
     }
 
     pub(crate) fn get(&self, id: hir::OperatorId) -> &Signature {
         &self.list[id.0]
-    }
-
-    /// The constraints of the type of the program's own `defined`, in
-    /// order: none, if it has none.
-    pub(crate) fn constraints(&self, defined: &hir::Defined) -> &[hir::Constraint] {
-        self.constraints
-            .get(&defined.name)
-            .map_or(&[], Vec::as_slice)
     }
 
     /// The operators named `name`, in the order they are defined.
@@ -404,6 +368,14 @@ pub(crate) fn signatures(
     errors: &mut Vec<Diagnostic>,
 ) -> Operators {
     let mut list: Vec<Signature> = prelude.signatures().collect();
+    for signature in constraints(file, namespaces) {
+        assert_eq!(
+            signature.id.0,
+            list.len(),
+            "constraints are numbered after the prelude's operators, in order"
+        );
+        list.push(signature);
+    }
     for item in file.items() {
         match item {
             Item::Operator(op) => {
@@ -492,12 +464,7 @@ pub(crate) fn signatures(
             )),
             Item::Type(decl) => {
                 let id = hir::OperatorId(list.len());
-                let Some(selector) = selector(id, &decl, namespaces) else {
-                    continue;
-                };
-                let constraints = constraints(&selector, &decl, list.len() + 1);
-                list.push(selector);
-                list.extend(constraints);
+                list.extend(selector(id, &decl, namespaces));
             }
             Item::Variable(_) | Item::Heading(_) => {}
         }
@@ -505,26 +472,60 @@ pub(crate) fn signatures(
     Operators::new(list)
 }
 
-/// The signatures of the constraints of the type `decl` declares, whose
-/// selector is `selector`, numbered from `first`: read-only operators of
-/// its components, of a boolean, each named for its type and its place
-/// among them, a name no source can write or call.
-fn constraints(selector: &Signature, decl: &ast::TypeDecl, first: usize) -> Vec<Signature> {
-    let Some(from) = &selector.from_type else {
-        unreachable!("a selector is made from its type");
-    };
-    decl.constraints()
-        .enumerate()
-        .map(|(i, constraint)| Signature {
-            id: hir::OperatorId(first + i),
-            name: format!("{} constraint {}", from.defined.name, i + 1),
-            result: Some(hir::Type::Scalar(hir::Scalar::Boolean)),
-            from_type: Some(FromType {
-                constraint: Some(constraint),
-                ..from.clone()
-            }),
-            ..selector.clone()
+/// The signatures of the constraints of the types `file` declares, in the
+/// order of the ids [`crate::named_types::resolve`] gave them: read-only
+/// operators of a type's components, of a boolean, each named for its type
+/// and its place among them, a name no source can write or call.
+fn constraints(file: &SourceFile, namespaces: &Namespaces) -> Vec<Signature> {
+    let mut constrained: Vec<(&hir::Defined, ast::TypeDecl)> = file
+        .types()
+        .filter_map(|decl| {
+            let ident = decl.name()?.ident()?;
+            let (_, defined) = namespaces.defined(ident.text())?;
+            let defined = defined.filter(|d| !d.constraints.is_empty())?;
+            namespaces.is_first_type(&ident).then_some((defined, decl))
         })
+        .collect();
+    constrained.sort_by_key(|(defined, _)| defined.constraints[0].operator);
+    let mut signatures = Vec::new();
+    for (defined, decl) in constrained {
+        let params = components(defined);
+        for (i, (constraint, written)) in defined
+            .constraints
+            .iter()
+            .zip(decl.constraints())
+            .enumerate()
+        {
+            signatures.push(Signature {
+                id: constraint.operator,
+                name: format!("{} constraint {}", defined.name, i + 1),
+                types: Vec::new(),
+                written: self::written(&params),
+                params: params.clone(),
+                unresolved: BTreeSet::new(),
+                read_only: true,
+                result: Some(hir::Type::Scalar(hir::Scalar::Boolean)),
+                decl: None,
+                builtin: None,
+                from_type: Some(FromType {
+                    defined: defined.clone(),
+                    decl: decl.clone(),
+                    constraint: Some(written),
+                }),
+                valid: true,
+            });
+        }
+    }
+    signatures
+}
+
+/// The parameters of an operator of the components of `defined`: its
+/// selector, or one of its constraints.
+fn components(defined: &hir::Defined) -> BTreeMap<String, hir::Parameter> {
+    defined
+        .components
+        .attributes()
+        .map(|(name, ty)| (name.to_string(), hir::Parameter::constant(ty.clone())))
         .collect()
 }
 
@@ -547,11 +548,7 @@ fn selector(
     if !namespaces.is_first_type(&ident) {
         return None;
     }
-    let params: BTreeMap<String, hir::Parameter> = defined
-        .components
-        .attributes()
-        .map(|(name, ty)| (name.to_string(), hir::Parameter::constant(ty.clone())))
-        .collect();
+    let params = components(defined);
     Some(Signature {
         id,
         name: name.to_string(),
