@@ -394,9 +394,8 @@ fn attribute_assigned(
                 // of, which the fix's `update` or `replace` brings into
                 // scope.
                 hir::Type::Defined(defined) => {
-                    let components = names
-                        .namespaces()
-                        .representations(&defined)
+                    let components = defined
+                        .possible_representations()
                         .find(|components| components.get(attribute).is_some())?
                         .clone();
                     of = Some(defined);
@@ -439,7 +438,7 @@ fn attribute_assigned(
         };
         Some((clause.span(), replacement, *variable))
     })();
-    let of = path.as_ref().and_then(|(_, _, of)| of.as_ref());
+    let of = path.as_ref().and_then(|(_, _, of)| of.as_deref());
     let name = attributes.last()?;
     Some(errors::attribute_assigned(written.span(), name, of, fix))
 }

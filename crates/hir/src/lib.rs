@@ -1282,7 +1282,7 @@ pub enum Expr {
     /// Relational Theory*, chapter 2). It fails unless each of the type's
     /// constraints, in order, is true of the components, since a type is
     /// the values its constraints are true of (TTM RM Prescription 23).
-    Select(Defined, Box<Expr>),
+    Select(Box<Defined>, Box<Expr>),
     /// The components of a value of one of the program's own types, in its
     /// possible representation, as a tuple: what its `THE_` operators
     /// extract from, as `v.c` is `Extract(Components(v), c)`.
@@ -2435,7 +2435,7 @@ pub type Key = BTreeSet<String>;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Type {
     Scalar(Scalar),
-    Defined(Defined),
+    Defined(Box<Defined>),
     Tuple(Heading),
     Relation(Heading),
     /// Arrays of elements of this type (TTM's ARRAY type generator, chapter
@@ -2445,6 +2445,18 @@ pub enum Type {
 }
 
 impl Type {
+    /// The values a value of the type is made of, laid out in order: a
+    /// tuple's attributes, or the stored components of a value of a type of
+    /// the program's own.
+    #[must_use]
+    pub fn fields(&self) -> Option<&Heading> {
+        match self {
+            Type::Tuple(heading) => Some(heading),
+            Type::Defined(defined) => Some(&defined.components),
+            _ => None,
+        }
+    }
+
     /// The type, in an operator instantiated with `types`: each type
     /// parameter in it replaced by its type, by index.
     #[must_use]
@@ -2529,20 +2541,96 @@ pub struct Constraint {
     pub text: String,
 }
 
-/// A scalar type of the program's own: its name, the components of its
-/// possible representation, as values of it are stored and selected (TTM
-/// RM Prescription 4), its constraints, in order, which every value's
-/// components satisfy (RM Prescription 23), and its order, if it has one:
-/// its values compared by their components, each of an ordered type, in
-/// turn, every one of them, so that it is a total order consistent with
-/// `=`, which makes the type ordered (*Type Inheritance and Relational
-/// Theory*, chapter 2).
+/// A scalar type of the program's own: its name, the components of the
+/// possible representation its values are stored as (TTM RM Prescription
+/// 4), its other possible representations, its constraints, in order,
+/// which every value's components satisfy (RM Prescription 23), and its
+/// order, if it has one: its values compared by their components, each of
+/// an ordered type, in turn, every one of them, so that it is a total
+/// order consistent with `=`, which makes the type ordered (*Type
+/// Inheritance and Relational Theory*, chapter 2).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Defined {
     pub name: String,
     pub components: Heading,
+    pub representations: Vec<Representation>,
     pub constraints: Vec<Constraint>,
     pub order: Option<Vec<OrderItem>>,
+}
+
+impl Defined {
+    /// The components of each of its possible representations, the stored
+    /// one's first.
+    pub fn possible_representations(&self) -> impl Iterator<Item = &Heading> {
+        std::iter::once(&self.components).chain(self.representations.iter().map(|r| &r.components))
+    }
+
+    /// The components of the possible representation with a component
+    /// named `name`, the stored one's or another's, and its conversion to
+    /// the stored one, if it isn't that.
+    #[must_use]
+    pub fn representation(&self, name: &str) -> Option<(&Heading, Option<OperatorId>)> {
+        if self.components.get(name).is_some() {
+            return Some((&self.components, None));
+        }
+        self.representations
+            .iter()
+            .find(|r| r.components.get(name).is_some())
+            .map(|r| (&r.components, Some(r.to)))
+    }
+}
+
+/// The type `load_csv` reads a record's fields as, for a value of type `ty`
+/// whose columns `columns`, the type of its part of the call's `columns`,
+/// gives: of a tuple, each attribute's; of a value of a type of the
+/// program's own, read in the possible representation whose components the
+/// columns name, the tuple of those, which is converted to the stored ones,
+/// or the type itself if it is read as stored, and so is each value inside
+/// it; and otherwise `ty` itself.
+#[must_use]
+pub fn read_as(ty: &Type, columns: &Type) -> Type {
+    let Type::Tuple(given) = columns else {
+        return ty.clone();
+    };
+    let read = |heading: &Heading| {
+        Heading::new(
+            heading
+                .attributes()
+                .map(|(name, ty)| {
+                    let read = given
+                        .get(name)
+                        .map_or_else(|| ty.clone(), |c| read_as(ty, c));
+                    (name.to_string(), read)
+                })
+                .collect(),
+        )
+    };
+    match ty {
+        Type::Tuple(heading) => Type::Tuple(read(heading)),
+        Type::Defined(defined) => {
+            let representation = given.named().find_map(|(c, _)| defined.representation(c));
+            if let Some((components, Some(_))) = representation {
+                return Type::Tuple(read(components));
+            }
+            let stored = read(&defined.components);
+            if stored == defined.components {
+                ty.clone()
+            } else {
+                Type::Tuple(stored)
+            }
+        }
+        _ => ty.clone(),
+    }
+}
+
+/// A possible representation of a type of the program's own other than
+/// the one its values are stored as: its components, and its conversion to
+/// the stored one, the read-only operator whose value is the tuple of the
+/// stored components its `to` computes from them, its parameters.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Representation {
+    pub components: Heading,
+    pub to: OperatorId,
 }
 
 /// Source text for the heading: `{ a: integer, b: text }` or `{}`. A
@@ -2886,7 +2974,7 @@ impl std::fmt::Display for Value {
 /// components are (RM Prescription 8).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DefinedValue {
-    pub ty: Defined,
+    pub ty: Box<Defined>,
     pub components: TupleValue,
 }
 
@@ -3542,10 +3630,11 @@ mod tests {
         let celsius = Defined {
             name: "celsius".to_string(),
             components,
+            representations: Vec::new(),
             constraints: Vec::new(),
             order: None,
         };
-        let ty = Type::Defined(celsius.clone());
+        let ty = Type::Defined(Box::new(celsius.clone()));
         assert_eq!(ty.to_string(), "celsius");
         assert_eq!(ty.default_value(), None);
         // Nor has a tuple with one.
@@ -3553,7 +3642,7 @@ mod tests {
         assert_eq!(tuple.default_value(), None);
         // A value is written as its selector's invocation.
         let value = Value::Defined(DefinedValue {
-            ty: celsius.clone(),
+            ty: Box::new(celsius.clone()),
             components: TupleValue::new(
                 [(
                     "degrees".to_string(),
@@ -3565,7 +3654,10 @@ mod tests {
         assert_eq!(value.to_string(), "celsius{degrees: 2.15e1}");
         assert_eq!(value.ty(), ty);
         // Its components, and the value they select.
-        let select = Expr::Select(celsius, Box::new(Expr::Parameter("t".to_string())));
+        let select = Expr::Select(
+            Box::new(celsius),
+            Box::new(Expr::Parameter("t".to_string())),
+        );
         assert_eq!(select.type_with(&|_| unreachable!()), ty);
         assert_eq!(
             Expr::Components(Box::new(select)).type_with(&|_| unreachable!()),

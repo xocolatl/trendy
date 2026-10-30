@@ -864,9 +864,11 @@ impl<'a> FunctionBuilder<'a> {
                     self.write(&call.args["r"], lir::RuntimeFn::DebugTable, cx);
                 }
                 hir::UpdateBuiltin::LoadTextFile => {
+                    let target = &call.updated["lines"];
+                    let ty = self.assigned(target).0.clone();
                     let (lines, _) =
-                        self.loaded(lir::RuntimeFn::LoadTextFile, call, "lines", Vec::new(), cx);
-                    self.store(&call.updated["lines"], lines, cx);
+                        self.loaded(lir::RuntimeFn::LoadTextFile, call, &ty, Vec::new(), cx);
+                    self.store(target, lines, cx);
                 }
                 hir::UpdateBuiltin::LoadCsv => {
                     // Whether the file has a header, and each attribute's
@@ -874,19 +876,27 @@ impl<'a> FunctionBuilder<'a> {
                     // where the line each record starts on goes.
                     let header = self.place(&call.args["header"], cx);
                     let columns = &call.args["columns"];
-                    let ty = self.type_of(columns);
-                    let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+                    let columns_ty = self.type_of(columns);
+                    let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&columns_ty)));
                     let columns = self.place(columns, cx);
                     let lines = self.slot(lir::Layout::Struct(vec![
                         lir::Layout::Address,
                         lir::Layout::Usize,
                     ]));
                     let given = vec![header, columns, descriptor, lines.clone()];
-                    let (rows, path) =
-                        self.loaded(lir::RuntimeFn::LoadCsv, call, "rows", given, cx);
                     let target = &call.updated["rows"];
                     let ty = self.assigned(target).0.clone();
-                    self.records_constrained(&rows, &ty, &lines, &path, cx);
+                    // Read as the columns say, then converted, each value
+                    // of a type of the program's own read in another
+                    // representation than the stored one.
+                    let hir::Type::Array(record) = &ty else {
+                        unreachable!("`load_csv` loads an array");
+                    };
+                    let read = hir::Type::Array(Box::new(hir::read_as(record, &columns_ty)));
+                    let (records, path) =
+                        self.loaded(lir::RuntimeFn::LoadCsv, call, &read, given, cx);
+                    let file = InFile { path, lines };
+                    let rows = self.records_checked(&records, &read, &ty, &file, cx);
                     self.store(target, rows, cx);
                 }
             },
@@ -936,23 +946,21 @@ impl<'a> FunctionBuilder<'a> {
         }
     }
 
-    /// `call`, of `load_text_file` or `load_csv`, whose `out` parameter is
-    /// `out`: what the runtime function `function` reads from the file at
-    /// the path, as the arguments `given` after it say, into an array the
-    /// statement holds, of the type of the variable for `out`, given its
-    /// descriptor. The array, and the path.
+    /// `call`, of `load_text_file` or `load_csv`: what the runtime function
+    /// `function` reads from the file at the path, as the arguments `given`
+    /// after it say, into an array the statement holds, of type `ty`, given
+    /// its descriptor. The array, and the path.
     fn loaded(
         &mut self,
         function: lir::RuntimeFn,
         call: &hir::Call,
-        out: &str,
+        ty: &hir::Type,
         given: Vec<lir::Place>,
         cx: &mut Lowering,
     ) -> (lir::Place, lir::Place) {
         let path = self.place(&call.args["path"], cx);
-        let ty = self.assigned(&call.updated[out]).0.clone();
-        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
-        let array = self.slot(layout(&ty));
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(ty)));
+        let array = self.slot(layout(ty));
         let args = [array.clone(), path.clone()]
             .into_iter()
             .chain(given)
@@ -963,54 +971,212 @@ impl<'a> FunctionBuilder<'a> {
         (array, path)
     }
 
-    /// Each record of `rows`, an array of type `ty` that `load_csv` read
-    /// from the file at `path`, whose records start on the lines at the
-    /// same positions in `lines`, checked against the constraints of the
-    /// types of the program's own of its values, as selecting them from
-    /// their components would: a value's own components first. The
-    /// program stops at the first broken, writing the line.
-    fn records_constrained(
+    /// The array of type `ty` of the records of `records`, an array of type
+    /// `read` that `load_csv` read from `file`: each value of a type of the
+    /// program's own in them read in another possible representation than
+    /// the stored one converted to it (see [`hir::read_as`]), and each
+    /// checked against its type's constraints, as selecting it would, inner
+    /// values first. The program stops at the first broken, writing the
+    /// line. The array is `records` itself, if nothing in them is converted,
+    /// and else a new one the statement holds.
+    fn records_checked(
         &mut self,
-        rows: &lir::Place,
+        records: &lir::Place,
+        read: &hir::Type,
         ty: &hir::Type,
-        lines: &lir::Place,
-        path: &lir::Place,
+        file: &InFile,
         cx: &mut Lowering,
-    ) {
-        let hir::Type::Array(record) = ty else {
+    ) -> lir::Place {
+        let (hir::Type::Array(read_record), hir::Type::Array(record)) = (read, ty) else {
             unreachable!("`load_csv` loads an array");
         };
-        let hir::Type::Tuple(heading) = &**record else {
-            unreachable!("`load_csv` loads tuples");
+        let converts = read != ty;
+        if !converts && !constrained(record) {
+            return records.clone();
+        }
+        let rows = if converts {
+            let mut count = records.clone();
+            count.path.push(1);
+            self.allocated(ty, count, cx)
+        } else {
+            records.clone()
         };
-        let mut values = Vec::new();
-        constrained_values(heading, &[], "", &mut values);
-        if values.is_empty() {
+        self.each_tuple(records, layout(read_record), cx, |this, read, index, cx| {
+            let row = if converts {
+                this.element(&rows, index, layout(record))
+            } else {
+                read.clone()
+            };
+            let at = Record {
+                file,
+                index: index.clone(),
+            };
+            let value = Reading {
+                dst: row,
+                src: read,
+                name: String::new(),
+                at: &at,
+            };
+            this.record_value(&value, record, read_record, cx);
+        });
+        if converts {
+            self.adopt(&rows, ty, cx);
+        }
+        rows
+    }
+
+    /// The value of type `ty` that `value` says where to write, which
+    /// `load_csv` read as `read`: written there, unless that is where it
+    /// was read, converted if `read` is another type, and checked, with each
+    /// value of a type of the program's own in it, inner first (see
+    /// [`FunctionBuilder::records_checked`]). A value of a type of the
+    /// program's own is read as a tuple of the components of the
+    /// representation the columns named, each read in turn, and, of another
+    /// than the stored one, converted by its conversion to it.
+    fn record_value(
+        &mut self,
+        value: &Reading,
+        ty: &hir::Type,
+        read: &hir::Type,
+        cx: &mut Lowering,
+    ) {
+        if ty == read {
+            if value.dst != value.src {
+                self.insts.push(lir::Inst::Copy {
+                    dst: value.dst.clone(),
+                    src: value.src.clone(),
+                    layout: layout(ty),
+                });
+            }
+            self.value_checked(&value.dst, ty, &value.name, value.at, cx);
             return;
         }
-        self.each_tuple(rows, layout(record), cx, |this, record, index, cx| {
-            let line = this.element(lines, index, lir::Layout::Usize);
-            for (fields, name, defined) in &values {
-                let mut value = record.clone();
-                value.path.extend(fields);
-                let ty = hir::Type::Defined((*defined).clone());
-                let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
-                let attribute = this.text(name, cx);
-                this.constrained(
-                    defined,
-                    &value,
-                    |this, constraint, cx| lir::Failure::BrokenConstraintInFile {
-                        value: value.clone(),
-                        descriptor: descriptor.clone(),
-                        constraint: this.text(&constraint.text, cx),
-                        attribute: attribute.clone(),
-                        path: path.clone(),
-                        line: line.clone(),
-                    },
-                    cx,
-                );
+        let hir::Type::Tuple(fields) = read else {
+            unreachable!("only a tuple is read as a value of another type");
+        };
+        let defined = match ty {
+            hir::Type::Tuple(heading) => {
+                self.attributes_read(value, heading, fields, cx);
+                return;
             }
-        });
+            hir::Type::Defined(defined) => defined,
+            _ => unreachable!("only tuples and types' values are read as tuples"),
+        };
+        let first = fields.named().next().map(|(c, _)| c);
+        match first.and_then(|c| defined.representation(c)) {
+            Some((own, None)) => self.attributes_read(value, own, fields, cx),
+            Some((own, Some(to))) => {
+                let components = Reading {
+                    dst: self.slot(layout(&hir::Type::Tuple(own.clone()))),
+                    ..value.clone()
+                };
+                self.attributes_read(&components, own, fields, cx);
+                let at_hand = hir::Expr::Current(0, own.clone());
+                let args = own
+                    .attributes()
+                    .map(|(c, _)| {
+                        let arg = hir::Expr::Extract(Box::new(at_hand.clone()), c.to_string());
+                        (c.to_string(), arg)
+                    })
+                    .collect();
+                let stored = hir::Expr::Call(hir::Call {
+                    operator: to,
+                    types: Vec::new(),
+                    args,
+                    updated: BTreeMap::new(),
+                });
+                self.tuples.push(components.dst);
+                let stored = self.place(&stored, cx);
+                self.tuples.pop();
+                self.insts.push(lir::Inst::Copy {
+                    dst: value.dst.clone(),
+                    src: stored,
+                    layout: layout(ty),
+                });
+            }
+            None => unreachable!("a type's value is read in one of its representations"),
+        }
+        self.constraints_checked(defined, &value.dst, &value.name, value.at, cx);
+    }
+
+    /// Each attribute of a tuple of `heading`, or component of a value of a
+    /// type of the program's own, in the value `value` says where to write,
+    /// read as `read`, a heading with the same names (see
+    /// [`FunctionBuilder::record_value`]).
+    fn attributes_read(
+        &mut self,
+        value: &Reading,
+        heading: &hir::Heading,
+        read: &hir::Heading,
+        cx: &mut Lowering,
+    ) {
+        let attributes = heading.attributes().zip(read.attributes());
+        for (i, ((attribute, ty), (_, read))) in attributes.enumerate() {
+            let mut inner = Reading {
+                name: dotted(&value.name, attribute),
+                ..value.clone()
+            };
+            inner.dst.path.push(i);
+            inner.src.path.push(i);
+            self.record_value(&inner, ty, read, cx);
+        }
+    }
+
+    /// Each value of a type of the program's own in the value of type `ty`,
+    /// named `name`, at `value` in a record of `at`, checked against its
+    /// type's constraints, inner values first, then the value itself.
+    fn value_checked(
+        &mut self,
+        value: &lir::Place,
+        ty: &hir::Type,
+        name: &str,
+        at: &Record,
+        cx: &mut Lowering,
+    ) {
+        let Some(heading) = ty.fields() else {
+            return;
+        };
+        for (i, (attribute, ty)) in heading.attributes().enumerate() {
+            let mut inner = value.clone();
+            inner.path.push(i);
+            self.value_checked(&inner, ty, &dotted(name, attribute), at, cx);
+        }
+        if let hir::Type::Defined(defined) = ty {
+            self.constraints_checked(defined, value, name, at, cx);
+        }
+    }
+
+    /// The value at `value`, named `name`, of the type of the program's own
+    /// `defined`, in a record of `at`, checked against its constraints: the
+    /// program stops at the first broken, writing the record's line.
+    fn constraints_checked(
+        &mut self,
+        defined: &hir::Defined,
+        value: &lir::Place,
+        name: &str,
+        at: &Record,
+        cx: &mut Lowering,
+    ) {
+        if defined.constraints.is_empty() {
+            return;
+        }
+        let line = self.element(&at.file.lines, &at.index, lir::Layout::Usize);
+        let ty = hir::Type::Defined(Box::new(defined.clone()));
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+        let attribute = self.text(name, cx);
+        self.constrained(
+            defined,
+            value,
+            |this, constraint, cx| lir::Failure::BrokenConstraintInFile {
+                value: value.clone(),
+                descriptor: descriptor.clone(),
+                constraint: this.text(&constraint.text, cx),
+                attribute: attribute.clone(),
+                path: at.file.path.clone(),
+                line: line.clone(),
+            },
+            cx,
+        );
     }
 
     /// A call of the runtime function `function`, which writes `value`,
@@ -2323,7 +2489,7 @@ impl<'a> FunctionBuilder<'a> {
         cx: &mut Lowering,
     ) -> lir::Place {
         let value = self.place(components, cx);
-        let ty = hir::Type::Defined(defined.clone());
+        let ty = hir::Type::Defined(Box::new(defined.clone()));
         let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
         self.constrained(
             defined,
@@ -3388,27 +3554,53 @@ fn order_leaves<'t>(
     }
 }
 
-/// The values of types of the program's own with constraints in a tuple
-/// with `heading`, at `fields` in a tuple further out, named after
-/// `prefix` as `t.c` reads them, into `values`: each one's fields from the
-/// outermost tuple, its name, and its type, a value's components before it.
-fn constrained_values<'h>(
-    heading: &'h hir::Heading,
-    fields: &[usize],
-    prefix: &str,
-    values: &mut Vec<(Vec<usize>, String, &'h hir::Defined)>,
-) {
-    for (i, (name, ty)) in heading.attributes().enumerate() {
-        let hir::Type::Defined(defined) = ty else {
-            continue;
-        };
-        let at: Vec<usize> = fields.iter().copied().chain([i]).collect();
-        let named = format!("{prefix}{name}");
-        constrained_values(&defined.components, &at, &format!("{named}."), values);
-        if !defined.constraints.is_empty() {
-            values.push((at, named, defined));
+/// Whether a value of type `ty` is or has a value of a type of the
+/// program's own with constraints.
+fn constrained(ty: &hir::Type) -> bool {
+    match ty {
+        hir::Type::Tuple(heading) => heading.attributes().any(|(_, ty)| constrained(ty)),
+        hir::Type::Defined(defined) => {
+            !defined.constraints.is_empty()
+                || defined
+                    .components
+                    .attributes()
+                    .any(|(_, ty)| constrained(ty))
         }
+        _ => false,
     }
+}
+
+/// `name`, of a value, and `attribute`, of it, as `t.c` reads that.
+fn dotted(name: &str, attribute: &str) -> String {
+    if name.is_empty() {
+        attribute.to_string()
+    } else {
+        format!("{name}.{attribute}")
+    }
+}
+
+/// The CSV file `load_csv` read: its path, and the line each record starts
+/// on, an array of them.
+struct InFile {
+    path: lir::Place,
+    lines: lir::Place,
+}
+
+/// A record of a CSV file, at `index`, from 0, among its records.
+struct Record<'f> {
+    file: &'f InFile,
+    index: lir::Place,
+}
+
+/// A value in a record `at`, as `load_csv` reads it: where it goes, in the
+/// array the statement fills, where `load_csv` read it, which is the same
+/// if it needs no conversion, and its name, as `t.c` reads it.
+#[derive(Clone)]
+struct Reading<'r> {
+    dst: lir::Place,
+    src: lir::Place,
+    name: String,
+    at: &'r Record<'r>,
 }
 
 /// Whether a value of type `ty` points to memory: whether it is or has a
@@ -3417,11 +3609,8 @@ fn points(ty: &hir::Type) -> bool {
     match ty {
         hir::Type::Scalar(scalar) => *scalar == hir::Scalar::Text,
         hir::Type::Relation(_) | hir::Type::Array(_) => true,
-        hir::Type::Tuple(heading)
-        | hir::Type::Defined(hir::Defined {
-            components: heading,
-            ..
-        }) => heading.attributes().any(|(_, ty)| points(ty)),
+        hir::Type::Tuple(heading) => heading.attributes().any(|(_, ty)| points(ty)),
+        hir::Type::Defined(defined) => defined.components.attributes().any(|(_, ty)| points(ty)),
         hir::Type::Parameter(_) => unreachable!("functions are of instantiated operators"),
     }
 }
@@ -3436,11 +3625,10 @@ fn layout(ty: &hir::Type) -> lir::Layout {
         hir::Type::Scalar(hir::Scalar::Text) | hir::Type::Relation(_) | hir::Type::Array(_) => {
             lir::Layout::Struct(vec![lir::Layout::Address, lir::Layout::Usize])
         }
-        hir::Type::Tuple(heading)
-        | hir::Type::Defined(hir::Defined {
-            components: heading,
-            ..
-        }) => lir::Layout::Struct(heading.attributes().map(|(_, ty)| layout(ty)).collect()),
+        hir::Type::Tuple(_) | hir::Type::Defined(_) => {
+            let fields = ty.fields().expect("tuples and types' values have fields");
+            lir::Layout::Struct(fields.attributes().map(|(_, ty)| layout(ty)).collect())
+        }
         hir::Type::Parameter(_) => unreachable!("functions are of instantiated operators"),
     }
 }

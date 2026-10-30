@@ -33,10 +33,21 @@ type position {
     constraint longitude > -180e0 and longitude <= 180e0,
 };
 
+/* An area, stored in square metres, and written in square kilometres
+   too, as in types.trendy's temperatures. */
+type area {
+    { m2: approximate },
+    { km2: approximate }
+        to { m2 := km2 * 1e6 }
+        from { km2 := m2 / 1e6 },
+    constraint m2 >= 0e0,
+    order [asc m2],
+};
+
 heading river := {
     name: text,
     length_km: integer,
-    basin_km2: approximate,
+    basin: area,
     reaches_ocean: boolean,
     mouth_at: position,
 };
@@ -51,7 +62,9 @@ heading river := {
    program's own, here the position of a river's mouth, is read from its
    components' columns, a tuple of them, and selected from them, so a
    record whose components break the type's constraints stops the program,
-   writing its line. */
+   writing its line. The components can be those of any of its possible
+   representations: a basin's area is read in square kilometres, as the
+   file gives it, and stored in square metres. */
 operator river_table{} [
     var rivers: array tuple river;
     call load_csv{
@@ -60,7 +73,7 @@ operator river_table{} [
         columns: tuple {
             name: 1,
             length_km: 3,
-            basin_km2: 4,
+            basin: tuple { km2: 4 },
             reaches_ocean: 6,
             mouth_at: tuple { latitude: 7, longitude: 8 },
         },

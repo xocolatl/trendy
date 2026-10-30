@@ -140,7 +140,7 @@ impl Origin {
                 format!("`{name}` is given this argument's type")
             }
             Origin::Columns(_) => {
-                "`columns` gives each attribute of these tuples a column, or its components' columns"
+                "`columns` gives each attribute of these tuples a column, or the columns of its components, in one of its possible representations"
                     .to_string()
             }
             Origin::Replaced(_, name) | Origin::Component(_, name) => {
@@ -377,7 +377,7 @@ pub(crate) fn resolve(
             // A type whose components have errors is reported where it is
             // declared.
             if let Some((_, defined)) = namespaces.defined(ident.text()) {
-                return defined.cloned().map(hir::Type::Defined);
+                return defined.map(|d| hir::Type::Defined(Box::new(d.clone())));
             }
             errors.push(match namespaces.heading(ident.text()) {
                 Some((declared, _)) => errors::heading_as_type(&ident, declared),

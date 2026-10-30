@@ -441,12 +441,14 @@ impl<'a> Globals<'a> {
 
     /// The value of `signature`, made from a type's possible representation
     /// other than the stored one, as `from` says, with no local variables:
-    /// of its selector, the value with the stored components its `to`
-    /// computes from its own, the parameters, once the type's constraints
-    /// are checked; of its conversion from the stored one, the tuple of its
-    /// own its `from` computes from the stored ones. `None` if the
-    /// representation's conversions have errors, already reported, or after
-    /// reporting those in its `to` or `from`.
+    /// of its selector, the value with the stored components its conversion
+    /// to the stored one computes from its own, the parameters, once the
+    /// type's constraints are checked; of that conversion, the tuple of the
+    /// stored components its `to` computes from its own; and of its
+    /// conversion from the stored one, the tuple of its own its `from`
+    /// computes from the stored ones. `None` if the representation's
+    /// conversions have errors, already reported, or after reporting those
+    /// in its `to` or `from`.
     fn converted(
         &mut self,
         signature: &Signature,
@@ -457,38 +459,70 @@ impl<'a> Globals<'a> {
             return None;
         }
         let defined = &from.defined;
-        let stored = crate::named_types::stored(&from.decl)?.components()?;
         let (representation, direction) = match &from.made {
-            Made::Selector(r) => (r, ast::Direction::To),
+            Made::Selector(_) => return self.selection(signature, defined, errors),
+            Made::To(r) => (r, ast::Direction::To),
             Made::From(r) => (r, ast::Direction::From),
             Made::Constraint(_) => unreachable!("a constraint is checked on its own"),
         };
         let conversion = representation
             .conversions()
             .find(|c| c.direction() == Some(direction))?;
-        let own = representation.components()?;
         let value = match direction {
             ast::Direction::To => {
-                let at = signature.defined().unwrap_or_else(|| conversion.span());
-                let constrained = defined
-                    .constraints
-                    .iter()
-                    .all(|c| self.checked(c.operator, at, errors));
-                let components =
-                    self.conversion(signature, &conversion, &defined.components, &stored, errors);
-                if !constrained {
-                    return None;
-                }
-                hir::Expr::Select(defined.clone(), Box::new(components?))
+                let own = representation.components()?;
+                self.conversion(signature, &conversion, &defined.components, &own, errors)?
             }
             ast::Direction::From => {
+                let stored = crate::named_types::stored(&from.decl)?.components()?;
                 let Some(hir::Type::Tuple(components)) = &signature.result else {
                     unreachable!("a conversion from the stored representation is of a tuple");
                 };
-                self.conversion(signature, &conversion, components, &own, errors)?
+                self.conversion(signature, &conversion, components, &stored, errors)?
             }
         };
         Some((Vec::new(), value))
+    }
+
+    /// The value of `signature`, the selector of a possible representation of
+    /// the type `defined` other than the stored one: the value with the
+    /// stored components the representation's conversion to the stored one
+    /// computes from its own, the parameters, once that conversion and the
+    /// type's constraints are checked. `None` if any has errors, reported
+    /// when it is checked.
+    fn selection(
+        &mut self,
+        signature: &Signature,
+        defined: &hir::Defined,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<(Vec<hir::Local>, hir::Expr)> {
+        let component = signature.params.keys().next()?;
+        let (_, to) = defined.representation(component)?;
+        let to = to.expect("only another representation's selector converts");
+        let at = signature.defined()?;
+        let converts = self.checked(to, at, errors);
+        let constrained = defined
+            .constraints
+            .iter()
+            .all(|c| self.checked(c.operator, at, errors));
+        if !converts || !constrained {
+            return None;
+        }
+        let args = signature
+            .params
+            .keys()
+            .map(|c| (c.clone(), hir::Expr::Parameter(c.clone())))
+            .collect();
+        let components = hir::Expr::Call(hir::Call {
+            operator: to,
+            types: Vec::new(),
+            args,
+            updated: BTreeMap::new(),
+        });
+        Some((
+            Vec::new(),
+            hir::Expr::Select(Box::new(defined.clone()), Box::new(components)),
+        ))
     }
 
     /// The tuple of `components`, written in `written`, that `conversion`

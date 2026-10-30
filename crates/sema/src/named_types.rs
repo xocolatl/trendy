@@ -188,14 +188,16 @@ pub(crate) struct Cycled {
 }
 
 /// Resolve the attributes of each heading `file` declares, and the
-/// components and constraints of each type, into `namespaces`, reporting
-/// each cycle among them, and every error in their attributes. Each
-/// constraint is an operator, numbered from `first_constraint` in the order
-/// the types resolve, which [`crate::operators::signatures`] makes.
+/// components, possible representations and constraints of each type, into
+/// `namespaces`, reporting each cycle among them, and every error in their
+/// attributes. Each constraint, and each representation's conversion to the
+/// stored one, is an operator, numbered from `first` in the order the types
+/// resolve, a type's constraints first, which
+/// [`crate::operators::signatures`] makes.
 pub(crate) fn resolve(
     file: &SourceFile,
     namespaces: &mut Namespaces,
-    first_constraint: hir::OperatorId,
+    first: hir::OperatorId,
     errors: &mut Vec<Diagnostic>,
 ) {
     let headings = file.headings().filter_map(|decl| {
@@ -236,8 +238,9 @@ pub(crate) fn resolve(
     for (name, _) in &declared {
         order.visit(name, &by_name, namespaces, errors);
     }
-    // Each constraint's operator, numbered in the order the types resolve.
-    let mut next = first_constraint.0;
+    // Each constraint's and conversion's operator, numbered in the order
+    // the types resolve.
+    let mut next = first.0;
     for name in &order.finished {
         let declared = by_name[name.as_str()];
         let Some(heading) = declared.decl.heading() else {
@@ -256,50 +259,89 @@ pub(crate) fn resolve(
                 namespaces.attributes.insert(name.clone(), resolved);
             }
             Decl::Type(decl) => {
-                let mut constraints = Vec::new();
-                for constraint in decl.constraints() {
-                    let text = constraint
-                        .condition()
-                        .map_or_else(String::new, |c| c.syntax().text().to_string());
-                    constraints.push(hir::Constraint {
-                        operator: hir::OperatorId(next),
-                        text,
-                    });
-                    next += 1;
-                }
-                let order = type_order(decl, name, &resolved, errors);
-                let defined = hir::Defined {
-                    name: name.clone(),
+                let convertible = &convertible[name.as_str()];
+                let resolved = Resolved {
+                    name,
                     components: resolved,
-                    constraints,
-                    order,
+                    convertible,
                 };
-                namespaces.defined.insert(name.clone(), defined);
-                // The others, with the types their components name
-                // resolved by now.
-                let converted: Vec<Converted> = decl
-                    .representations()
-                    .zip(&convertible[name.as_str()])
-                    .filter(|(r, _)| r.conversions().next().is_some())
-                    .filter_map(|(representation, &convertible)| {
-                        let heading = representation.components()?;
-                        let components = types::resolve_heading(
-                            &heading,
-                            &mut TypeParameters::None,
-                            namespaces,
-                            errors,
-                        )?;
-                        Some(Converted {
-                            decl: representation,
-                            components,
-                            convertible,
-                        })
-                    })
-                    .collect();
-                namespaces.converted.insert(name.clone(), converted);
+                defined(decl, resolved, &mut next, namespaces, errors);
             }
         }
     }
+}
+
+/// A type whose stored components are resolved, `components`, and, of its
+/// possible representations, whether each converts.
+struct Resolved<'r> {
+    name: &'r str,
+    components: hir::Heading,
+    convertible: &'r [bool],
+}
+
+/// The type `decl` declares, `resolved`, into `namespaces`: its
+/// representations but the stored one, with the types their components
+/// name resolved by now, its constraints and its order. Each constraint,
+/// then each representation's conversion to the stored one, is an operator
+/// numbered from `next` on.
+fn defined(
+    decl: &TypeDecl,
+    resolved: Resolved,
+    next: &mut usize,
+    namespaces: &mut Namespaces,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let Resolved {
+        name,
+        components,
+        convertible,
+    } = resolved;
+    let mut numbered = || {
+        let id = hir::OperatorId(*next);
+        *next += 1;
+        id
+    };
+    let constraints = decl
+        .constraints()
+        .map(|constraint| hir::Constraint {
+            operator: numbered(),
+            text: constraint
+                .condition()
+                .map_or_else(String::new, |c| c.syntax().text().to_string()),
+        })
+        .collect();
+    let converted: Vec<Converted> = decl
+        .representations()
+        .zip(convertible)
+        .filter(|(r, _)| r.conversions().next().is_some())
+        .filter_map(|(representation, &convertible)| {
+            let heading = representation.components()?;
+            let components =
+                types::resolve_heading(&heading, &mut TypeParameters::None, namespaces, errors)?;
+            Some(Converted {
+                decl: representation,
+                components,
+                convertible,
+            })
+        })
+        .collect();
+    let representations = converted
+        .iter()
+        .map(|c| hir::Representation {
+            components: c.components.clone(),
+            to: numbered(),
+        })
+        .collect();
+    let order = type_order(decl, name, &components, errors);
+    let defined = hir::Defined {
+        name: name.to_string(),
+        components,
+        representations,
+        constraints,
+        order,
+    };
+    namespaces.defined.insert(name.to_string(), defined);
+    namespaces.converted.insert(name.to_string(), converted);
 }
 
 /// The order `decl` gives its type, named `name`, with `components`, if it

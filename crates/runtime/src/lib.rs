@@ -2731,8 +2731,10 @@ fn file_text<'a>(path: &str, bytes: &'a [u8]) -> &'a str {
 /// `columns_desc` describes, gives it, counting from 1: text as it is, and
 /// an integer, an approximate number or a boolean as `parse_integer`,
 /// `parse_approximate` and `parse_boolean` read one. A value of a type of
-/// the program's own is read as its components, whose columns `columns`
-/// gives as a tuple of them; the caller checks its constraints. Columns it
+/// the program's own is read as its components, and a tuple, of the
+/// components of another possible representation of one, as its
+/// attributes, whose columns `columns` gives as a tuple of them; the caller
+/// converts those, and checks the type's constraints. Columns it
 /// doesn't give are skipped. Stops the program if a column isn't one of
 /// the file's, or two attributes or components have one (R0016), the file
 /// can't be read (R0012), isn't UTF-8 text (R0013) or CSV (R0015), a field
@@ -2744,9 +2746,10 @@ fn file_text<'a>(path: &str, bytes: &'a [u8]) -> &'a str {
 /// `columns` to a valid tuple and `columns_desc` to its type's descriptor,
 /// of the attributes of the tuples `desc` describes, each an integer, or a
 /// tuple of the same shape for the components of a value of a type of the
-/// program's own, and `desc` to a valid descriptor of an array of tuples
-/// whose attributes, and those values' components, are text, integers,
-/// approximate numbers, booleans or such values, and `dst` and `lines` to
+/// program's own, or the attributes of a tuple, and `desc` to a valid
+/// descriptor of an array of tuples whose attributes, and those values'
+/// components, are text, integers, approximate numbers, booleans or such
+/// values, and `dst` and `lines` to
 /// memory for an array. The statement must have begun a scope.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
@@ -2896,10 +2899,20 @@ struct Leaf {
     column: usize,
 }
 
+/// Whether a value of the type `desc` describes, in a CSV file's record, is
+/// read from several fields, each a scalar inside it: a value of a type of
+/// the program's own, from its components, or a tuple, from the components
+/// of another of its possible representations than the stored one, which
+/// compiled code converts.
+#[cfg(not(test))]
+fn read_from_fields(desc: &TypeDesc) -> bool {
+    desc.kind == KIND_DEFINED || desc.kind == KIND_TUPLE
+}
+
 /// How many scalars a tuple, or a value of a type of the program's own,
 /// that `desc` describes is read as: one for each attribute or component,
-/// and as many as its components are for a value of a type of the
-/// program's own in it.
+/// and as many as its scalars are for a value read from several fields
+/// (see [`read_from_fields`]).
 ///
 /// # Safety
 ///
@@ -2912,7 +2925,7 @@ unsafe fn scalars(desc: &TypeDesc) -> usize {
             .iter()
             .map(|attr| {
                 let inner = &*attr.desc;
-                if inner.kind == KIND_DEFINED {
+                if read_from_fields(inner) {
                     scalars(inner)
                 } else {
                     1
@@ -2927,8 +2940,9 @@ unsafe fn scalars(desc: &TypeDesc) -> usize {
 /// `base` in the records' tuples, which `element` describes, each with the
 /// column `columns` gives it: a tuple `columns_desc` describes, of the
 /// same shape, whose attributes are integers counting from 1, or such
-/// tuples for the components of a value of a type of the program's own.
-/// Stops the program if a position is below 1 (R0016).
+/// tuples for the scalars of a value read from several fields (see
+/// [`read_from_fields`]). Stops the program if a position is below 1
+/// (R0016).
 ///
 /// # Safety
 ///
@@ -2950,7 +2964,7 @@ unsafe fn gather(
         for (attr, position) in attributes(values).iter().zip(attributes(columns_desc)) {
             let inner = &*attr.desc;
             let at = columns.add(position.offset);
-            if inner.kind == KIND_DEFINED {
+            if read_from_fields(inner) {
                 gather(
                     inner,
                     base + attr.offset,
@@ -3004,14 +3018,14 @@ impl fmt::Display for LeafName<'_> {
             'values: loop {
                 for attr in attributes(desc) {
                     let inner = &*attr.desc;
-                    let count = if inner.kind == KIND_DEFINED {
+                    let count = if read_from_fields(inner) {
                         scalars(inner)
                     } else {
                         1
                     };
                     if leaf < count {
                         write!(f, "{dot}{}", name(attr))?;
-                        if inner.kind != KIND_DEFINED {
+                        if !read_from_fields(inner) {
                             return Ok(());
                         }
                         (desc, dot) = (inner, ".");

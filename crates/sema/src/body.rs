@@ -9,7 +9,7 @@ use trendy_syntax::SyntaxToken;
 use trendy_syntax::ast::{self, AstNode, VarDecl};
 
 use crate::assign::{Assignee, Assigning, Declared};
-use crate::check::{Checker, Lookup, Names, Written, argument_names};
+use crate::check::{self, Checker, Lookup, Names, Representation, Written, argument_names};
 use crate::locals::{Declaration, Local, Locals};
 use crate::operators::{Chosen, Operators, Signature};
 use crate::types::{Expected, Origin};
@@ -450,13 +450,18 @@ impl Statements<'_, '_> {
         let (Some(rows), Some(columns)) = (written("rows"), written("columns")) else {
             return false;
         };
-        if !csv_readable(tuples, &rows, errors) {
+        // Each value of a type of the program's own is read in the
+        // representation whose components the columns name.
+        if let hir::Type::Tuple(heading) = tuples
+            && !columns_named(heading, &columns, errors)
+        {
             return false;
         }
-        let hir::Type::Tuple(heading) = tuples else {
-            unreachable!("`csv_readable` found the tuples' attributes");
-        };
-        let positions = positions(heading);
+        let read = hir::read_as(tuples, given_columns);
+        if !csv_readable(tuples, &read, &rows, errors) {
+            return false;
+        }
+        let positions = positions(&read);
         // Checked again, against the type it must have, which reports how
         // it differs.
         if *given_columns != positions {
@@ -1248,33 +1253,43 @@ impl BodyNames<'_, '_> {
     }
 }
 
-/// The type `load_csv`'s `columns` has for tuples with `heading`: of
-/// each attribute, the position of its column, an integer, or, for a value
-/// of a type of the program's own, a tuple of its components' positions.
-fn positions(heading: &hir::Heading) -> hir::Type {
+/// The type `load_csv`'s `columns` has for values `read` as a record's
+/// fields are (see [`hir::read_as`]): a tuple, of each attribute, the
+/// position of its column, an integer, or, for a value of a type of the
+/// program's own, a tuple of its components' positions, in the
+/// representation it is read in.
+fn positions(read: &hir::Type) -> hir::Type {
+    let heading = match read {
+        hir::Type::Tuple(heading) => heading,
+        hir::Type::Defined(defined) => &defined.components,
+        _ => return hir::Type::Scalar(hir::Scalar::Integer),
+    };
     hir::Type::Tuple(hir::Heading::new(
         heading
             .named()
-            .map(|(name, ty)| {
-                let position = match ty {
-                    hir::Type::Defined(defined) => positions(&defined.components),
-                    _ => hir::Type::Scalar(hir::Scalar::Integer),
-                };
-                (name.to_string(), position)
-            })
+            .map(|(name, ty)| (name.to_string(), positions(ty)))
             .collect(),
     ))
 }
 
-/// Whether `load_csv` loads an array, written `rows`, of `tuples`, whose
-/// attributes it can read from fields: each of a type known here, text,
-/// an integer, an approximate number or a boolean, or a type of the
-/// program's own whose components it can read. If not, it is reported.
-fn csv_readable(tuples: &hir::Type, rows: &ast::Expr, errors: &mut Vec<Diagnostic>) -> bool {
+/// Whether `load_csv` loads an array, written `rows`, of `tuples`, which it
+/// reads as `read`, whose attributes it can read from fields: each of a
+/// type known here, text, an integer, an approximate number or a boolean,
+/// or a type of the program's own whose components it can read, in the
+/// representation it reads them in. If not, it is reported.
+fn csv_readable(
+    tuples: &hir::Type,
+    read: &hir::Type,
+    rows: &ast::Expr,
+    errors: &mut Vec<Diagnostic>,
+) -> bool {
     match tuples {
         hir::Type::Tuple(heading) => {
             let mut unreadable = Vec::new();
-            unreadable_attributes(heading, "", &mut unreadable);
+            let hir::Type::Tuple(read) = read else {
+                unreachable!("tuples are read as tuples");
+            };
+            unreadable_attributes(heading, read, "", &mut unreadable);
             if unreadable.is_empty() {
                 return true;
             }
@@ -1291,23 +1306,106 @@ fn csv_readable(tuples: &hir::Type, rows: &ast::Expr, errors: &mut Vec<Diagnosti
 }
 
 /// The attributes of `heading`, and the components of values of the
-/// program's own types in it, that no field can be read as, each named
-/// after `prefix` as `t.c` reads it, into `unreadable`.
+/// program's own types in it, in the representation they are read in, as
+/// `read` has them, that no field can be read as, each named after `prefix`
+/// as `t.c` reads it, into `unreadable`.
 fn unreadable_attributes<'h>(
     heading: &'h hir::Heading,
+    read: &hir::Heading,
     prefix: &str,
     unreadable: &mut Vec<(String, &'h hir::Type)>,
 ) {
     for (name, ty) in heading.named() {
         let named = format!("{prefix}{name}");
-        match ty {
-            hir::Type::Scalar(_) => {}
-            hir::Type::Defined(defined) => {
-                unreadable_attributes(&defined.components, &format!("{named}."), unreadable);
+        match (ty, read.get(name)) {
+            (hir::Type::Scalar(_), _) => {}
+            (hir::Type::Defined(defined), Some(hir::Type::Tuple(components))) => {
+                let first = components.named().next().map(|(c, _)| c);
+                let own = first
+                    .and_then(|c| defined.representation(c))
+                    .map_or(&defined.components, |(own, _)| own);
+                unreadable_attributes(own, components, &format!("{named}."), unreadable);
+            }
+            (hir::Type::Defined(defined), _) => {
+                let components = &defined.components;
+                unreadable_attributes(components, components, &format!("{named}."), unreadable);
             }
             _ => unreadable.push((named, ty)),
         }
     }
+}
+
+/// Whether `written`, the argument for `load_csv`'s `columns`, or a tuple
+/// selector in it, of the columns of tuples or a value with `heading`,
+/// names, for each value of a type of the program's own there, the
+/// components of one of its possible representations, as far as it is
+/// written as tuple selectors, after reporting why not: components of two
+/// representations (A0059), or a name that is no component of the one the
+/// others are of, or of any if none is.
+fn columns_named(
+    heading: &hir::Heading,
+    written: &ast::Expr,
+    errors: &mut Vec<Diagnostic>,
+) -> bool {
+    let ast::Expr::Tuple(tuple) = written else {
+        return true;
+    };
+    let mut ok = true;
+    for attribute in tuple.attributes() {
+        let name = attribute.name().and_then(|n| n.ident());
+        let ty = name.as_ref().and_then(|n| heading.get(n.text()));
+        let (Some(hir::Type::Defined(defined)), Some(value)) = (ty, attribute.value()) else {
+            continue;
+        };
+        let ast::Expr::Tuple(components) = &value else {
+            continue;
+        };
+        let written: Vec<(String, Span)> = components
+            .attributes()
+            .filter_map(|a| {
+                let ident = a.name()?.ident()?;
+                Some((
+                    ident.text().to_string(),
+                    trendy_syntax::span(ident.text_range()),
+                ))
+            })
+            .collect();
+        let named: Vec<(&str, Span)> = written.iter().map(|(n, s)| (n.as_str(), *s)).collect();
+        let rule = errors::OneRepresentation::Read;
+        let Some(chosen) = check::representation(defined, &named, rule, errors) else {
+            ok = false;
+            continue;
+        };
+        let own = match chosen {
+            Representation::Other(component) => defined.representation(component).map(|(h, _)| h),
+            Representation::Stored { .. } => Some(&defined.components),
+        };
+        let Some(own) = own else {
+            continue;
+        };
+        // A misspelling of a component of the representation, or, if no
+        // component of one is named, of any.
+        let candidates: Vec<&str> = match chosen {
+            Representation::Stored { known: false } => defined
+                .possible_representations()
+                .flat_map(|h| h.named().map(|(c, _)| c))
+                .collect(),
+            _ => own.named().map(|(c, _)| c).collect(),
+        };
+        for &(component, span) in &named {
+            if own.get(component).is_none() {
+                errors.push(errors::unknown_column_component(
+                    component,
+                    span,
+                    defined,
+                    &candidates,
+                ));
+                ok = false;
+            }
+        }
+        ok &= columns_named(own, &value, errors);
+    }
+    ok
 }
 
 /// Whether `columns`, the argument written `written` for `load_csv`'s

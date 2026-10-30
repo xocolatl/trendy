@@ -886,7 +886,8 @@ builtin operator load_text_file{path: text, out lines: array text};
    integer, an approximate number or a boolean, read from its field as
    `parse_integer`, `parse_approximate` and `parse_boolean` read them,
    and text as it is, or a value of a type of the program's own whose
-   components are, which `columns` gives a tuple of their columns, as
+   components are, in one of its possible representations, which
+   `columns` gives a tuple of their columns, as
    `tuple { name: 1, at: tuple { latitude: 2, longitude: 3 } }` does, and
    which is selected from them, so that one whose components break its
    type's constraints fails (R0017). The file is CSV as RFC 4180 has it:
@@ -1324,11 +1325,15 @@ operator main{} [
 - **A value of a type of the program's own is read from its components'
   columns,** which `columns` gives it as a tuple of them, nested for a
   value inside: a position of a city is
-  `at: tuple { latitude: 6, longitude: 7 }`. The value is then selected
-  from them, so one whose components break its type's constraints stops
-  the program (R0017), writing the record's line, the attribute, the
-  value and the constraint. Errors name a component as `t.c` reads it,
-  as in `at.latitude`.
+  `at: tuple { latitude: 6, longitude: 7 }`. They can be the components
+  of any of its possible representations, those of one (A0059), so that
+  a file's temperatures in degrees Celsius are
+  `mean: tuple { celsius: 3 }`, converted by its `to` to the stored
+  representation. The value is then selected from them, so one whose
+  components break its type's constraints stops the program (R0017),
+  writing the record's line, the attribute, the value and the
+  constraint, a value inside one first. Errors name a component as `t.c`
+  reads it, as in `at.latitude`.
 - **The file is CSV as RFC 4180 has it:** fields separated by commas,
   and records by line ends, as for `load_text_file`; a field with a
   comma, a quote or a line end is in quotes, each quote in it doubled,
@@ -1959,6 +1964,10 @@ operator main{} [
 - **An `update` in another representation than the stored one gives
   every stored component a new value,** so in an `assign` block it
   conflicts with any other change to the variable (R0009).
+- **`load_csv` reads a value in any representation,** from the columns
+  `columns` gives its components, as in `mean: tuple { celsius: 3 }`,
+  converting it to the stored one (see [The
+  prelude](#the-prelude)).
 
 ## Tuples
 

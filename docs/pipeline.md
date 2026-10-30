@@ -57,15 +57,23 @@ column's position, and its descriptor; sema checks that each attribute
 is a type a field can be read as, known when compiling (A0055), or a
 type of the program's own whose components are, and `columns` against
 the type it must have, the tuples' heading with every attribute an
-integer, or a tuple of its components' positions, which the signature
-can't say (`body::csv_loadable`, reporting at `types::Origin::Columns`),
+integer, or a tuple of its components' positions, in the representation
+whose components it names (`body::columns_named`, A0059 for two), which
+the signature can't say (`body::csv_loadable`, reporting at
+`types::Origin::Columns`),
 and its positions if they are known (R0016). The runtime reads the file
 as CSV (its `csv` module) and each field as `parse_*` reads one, into
 the scalars the tuples are laid out as, reaching into the components of
 a type's values (`Leaf`), and gives the line each record starts on, so
 that lowering can check the constraints of the types of the values in
 each record, once it is read, failing with its line
-(`records_constrained`). A built-in can
+(`records_checked`). `columns` can give a type's value the columns of
+the components of any of its possible representations: the runtime then
+reads it as a tuple of them, as `hir::read_as` says, and lowering
+converts each record into a new array, calling each such
+representation's conversion to the stored one, and checking each value's
+constraints as it is complete, inner values first (`record_value`). A
+built-in can
 have type parameters, of a kind too, and `per` parameters, declared as an
 operator's are, and checked against the compiler's, written as the
 operator sees them. A wrong prelude is an internal
@@ -657,8 +665,9 @@ can name it. The type carries its constraints (`hir::Defined`'s
 `hir::Constraint`s, each the operator and the condition as written), as
 TTM has a type's constraint be part of its definition, and so does each
 of its values (`hir::DefinedValue`'s type), as TTM has every scalar
-value carry its type (RM Prescription 2). The constraints' operators
-come right after the prelude's, numbered as the types resolve
+value carry its type (RM Prescription 2). The constraints' operators,
+and each possible representation's conversion to the stored one, come
+right after the prelude's, numbered as the types resolve
 (`named_types::resolve`), since a type is resolved, and its `Defined`
 copied into the types that name it, before any signature is made. A
 selection checks each, which folds when the components are constants
@@ -667,14 +676,21 @@ operator when running. Checking a selector's call, or another selection,
 checks the type's constraints first (`Globals::checked`), so a
 constraint that selects a value of its own type closes a cycle (A0036).
 A type's possible representations but the stored one, the one without
-conversions, are sema's (`Namespaces::converted`): HIR has the stored
-components only. Each has a selector, whose value is the value with the
-stored components its `to` computes, and a conversion from the stored
-representation (`operators::Made`), whose value is the tuple of its
-components its `from` computes; a component of one, `v.c`, is the
-conversion's, called in an `Extend` of `v`'s stored components, so that
-`v` is computed once (`Checker::converted_component`), and a constraint
-names one as the conversion's call on its parameters.
+conversions, are in its `Defined` too (`hir::Representation`): each with
+its components and its conversion to the stored one, whose value is the
+tuple of the stored components its `to` computes, unchecked. Sema keeps
+their declarations (`Namespaces::converted`). Each has a selector, whose
+value is the value its conversion to the stored one computes, selected,
+and a conversion from the stored representation (`operators::Made`),
+whose value is the tuple of its components its `from` computes; a
+component of one, `v.c`, is the conversion's, called in an `Extend` of
+`v`'s stored components, so that `v` is computed once
+(`Checker::converted_component`), and a constraint names one as the
+conversion's call on its parameters. A `replace` or an `update` gives the
+components of one representation new values (`check::representation`),
+with every representation's in scope (`ComponentNames`), and, of another
+than the stored one, selects the value in it, computed from the stored
+components at hand (`Replacement::Selected`, `Checker::selected_from`).
 A type's order, `order [asc …]`, is checked as a load's is
 (`assign::order_items`), with every component named, and makes the type
 ordered (`hir::Defined::order`, `Type::has`), so of `any ordered`

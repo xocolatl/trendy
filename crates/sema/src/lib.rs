@@ -114,8 +114,8 @@ pub(crate) fn check(
     // The headings' attributes and the types' components first, which any
     // type can name, and their constraints, whose operators come after the
     // prelude's.
-    let first_constraint = hir::OperatorId(prelude.operators().len());
-    named_types::resolve(file, &mut namespaces, first_constraint, errors);
+    let first = hir::OperatorId(prelude.operators().len());
+    named_types::resolve(file, &mut namespaces, first, errors);
 
     // Every operator's signature first, so that anything can refer to an
     // operator defined after it.
@@ -423,17 +423,6 @@ impl Namespaces {
     /// the one its values are stored as, whose components have no errors.
     pub(crate) fn converted(&self, name: &str) -> &[Converted] {
         self.converted.get(name).map_or(&[], Vec::as_slice)
-    }
-
-    /// The components of each possible representation of the program's own
-    /// type `defined` whose components have no errors: the stored one's
-    /// first.
-    pub(crate) fn representations<'d>(
-        &'d self,
-        defined: &'d hir::Defined,
-    ) -> impl Iterator<Item = &'d hir::Heading> {
-        std::iter::once(&defined.components)
-            .chain(self.converted(&defined.name).iter().map(|c| &c.components))
     }
 
     /// The program's own types' names.
@@ -6571,7 +6560,7 @@ mod tests {
         assert_eq!(missing[0].code, Code::MissingAttribute);
         assert_eq!(
             missing[0].secondary[0].message,
-            "`columns` gives each attribute of these tuples a column, or its components' columns"
+            "`columns` gives each attribute of these tuples a column, or the columns of its components, in one of its possible representations"
         );
         assert_eq!(
             fix(&call("tuple { city: 1, peopel: 2 }")),
@@ -6962,6 +6951,63 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
         assert_eq!(
             messages(&call("a: area", "tuple { a: tuple { name: 1, parts: 2 } }")),
             ["`load_csv` can't read `a.parts`, of type `relation { part: text }`, from a field"]
+        );
+    }
+
+    #[test]
+    fn a_csv_file_is_read_in_any_representation() {
+        let call = |columns: &str| {
+            format!(
+                "{TEMPERATURE}type bag {{\n    {{ items: relation {{ item: text }} }},\n    {{ item: text }}\n        to {{ items := relation {{ {{ item: item }} }} }}\n        from {{ item := value from items }},\n}};\n\noperator main{{}} [\n    var rows: array tuple {{ city: text, mean: temperature, contents: bag }};\n    call load_csv{{path: \"climate.csv\", header: true, columns: {columns}, out rows: rows}};\n];\n"
+            )
+        };
+        // A value's components are those of any of its possible
+        // representations, which it is converted from, even one whose
+        // stored components no field writes.
+        analyze_str(&call(
+            "tuple { city: 1, mean: tuple { celsius: 2 }, contents: tuple { item: 3 } }",
+        ))
+        .unwrap();
+        analyze_str(&call(
+            "tuple { city: 1, mean: tuple { kelvin: 2 }, contents: tuple { item: 3 } }",
+        ))
+        .unwrap();
+        assert_eq!(
+            messages(&call(
+                "tuple { city: 1, mean: tuple { kelvin: 2 }, contents: tuple { items: 3 } }"
+            )),
+            [
+                "`load_csv` can't read `contents.items`, of type `relation { item: text }`, from a field"
+            ]
+        );
+        // Those of one representation.
+        let mixed = errors(&call(
+            "tuple { city: 1, mean: tuple { celsius: 2, kelvin: 4 }, contents: tuple { item: 3 } }",
+        ));
+        assert_eq!(mixed.len(), 1, "{mixed:#?}");
+        assert_eq!(mixed[0].code, Code::Conversions);
+        assert_eq!(
+            mixed[0].message,
+            "`celsius` and `kelvin` are components of different possible representations of `temperature`"
+        );
+        assert!(mixed[0].suggestions.is_empty(), "{mixed:#?}");
+        // A misspelling is one of a representation's components, of the
+        // one the others are of, if they name one.
+        let source =
+            call("tuple { city: 1, mean: tuple { celsus: 2 }, contents: tuple { item: 3 } }");
+        assert_eq!(codes(&source), [Code::UnknownAttribute]);
+        assert_eq!(
+            fix(&source),
+            call("tuple { city: 1, mean: tuple { celsius: 2 }, contents: tuple { item: 3 } }")
+        );
+        let unknown = errors(&call(
+            "tuple { city: 1, mean: tuple { fahrenheit: 2 }, contents: tuple { item: 3 } }",
+        ));
+        assert_eq!(unknown[0].code, Code::UnknownAttribute);
+        assert!(unknown[0].suggestions.is_empty(), "{unknown:#?}");
+        assert!(
+            unknown[0].notes[0].contains("`temperature{kelvin: …}` or `temperature{celsius: …}`"),
+            "{unknown:#?}"
         );
     }
 
@@ -8397,6 +8443,7 @@ type position { { latitude: approximate, longitude: approximate } };
                 ]
                 .into(),
             ),
+            representations: Vec::new(),
             constraints: Vec::new(),
             order: None,
         };
@@ -8404,16 +8451,20 @@ type position { { latitude: approximate, longitude: approximate } };
             name: "place".to_string(),
             components: hir::Heading::new(
                 [
-                    ("at".to_string(), hir::Type::Defined(position.clone())),
+                    (
+                        "at".to_string(),
+                        hir::Type::Defined(Box::new(position.clone())),
+                    ),
                     ("name".to_string(), hir::Type::Scalar(hir::Scalar::Text)),
                 ]
                 .into(),
             ),
+            representations: Vec::new(),
             constraints: Vec::new(),
             order: None,
         };
         let vars = variables(source);
-        assert_eq!(vars[0].ty, hir::Type::Defined(place));
+        assert_eq!(vars[0].ty, hir::Type::Defined(Box::new(place)));
         assert_eq!(
             vars[0].init.to_string(),
             "place{at: position{latitude: -1.205e1, longitude: -7.704e1}, name: \"Lima\"}"
@@ -8424,7 +8475,10 @@ type position { { latitude: approximate, longitude: approximate } };
             vars[3].ty,
             hir::Type::Relation(hir::Heading::new(
                 [
-                    ("at".to_string(), hir::Type::Defined(position.clone())),
+                    (
+                        "at".to_string(),
+                        hir::Type::Defined(Box::new(position.clone()))
+                    ),
                     ("name".to_string(), hir::Type::Scalar(hir::Scalar::Text)),
                 ]
                 .into()
@@ -8444,8 +8498,8 @@ type position { { latitude: approximate, longitude: approximate } };
         let hir::OperatorKind::ReadOnly { result, value, .. } = &selector.kind else {
             panic!("a read-only operator");
         };
-        assert_eq!(*result, hir::Type::Defined(position.clone()));
-        assert!(matches!(value, hir::Expr::Select(defined, _) if *defined == position));
+        assert_eq!(*result, hir::Type::Defined(Box::new(position.clone())));
+        assert!(matches!(value, hir::Expr::Select(defined, _) if **defined == position));
         assert_eq!(
             selector.params.keys().collect::<Vec<_>>(),
             ["latitude", "longitude"]

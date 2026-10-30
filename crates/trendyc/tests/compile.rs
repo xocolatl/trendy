@@ -720,19 +720,20 @@ fn text() {
             r#""Mekong""#,
             r#""Volga""#,
             // The CSV file's first record after its header, with the
-            // position of its mouth read from two columns, then its records
-            // as a relation.
-            r#"tuple { basin_km2: 3.254555e6, length_km: 6650, mouth_at: position{latitude: 3.146e1, longitude: 3.037e1}, name: "Nile", reaches_ocean: true }"#,
-            "┌────────────┬───────────┬─────────────────────────────────────────────────┬─────────┬───────────────┐",
-            "│ basin_km2  │ length_km │ mouth_at                                        │ name    │ reaches_ocean │",
-            "├────────────┼───────────┼─────────────────────────────────────────────────┼─────────┼───────────────┤",
-            "│     7.95e5 │      4909 │ position{latitude: 9.7e0, longitude: 1.066e2}   │ Mekong  │ true          │",
-            "│     1.36e6 │      3531 │ position{latitude: 4.58e1, longitude: 4.79e1}   │ Volga   │ false         │",
-            "│   1.8085e6 │      6300 │ position{latitude: 3.14e1, longitude: 1.219e2}  │ Yangtze │ true          │",
-            "│ 2.582672e6 │      4880 │ position{latitude: -3.4e1, longitude: -5.84e1}  │ Paraná  │ true          │",
-            "│ 3.254555e6 │      6650 │ position{latitude: 3.146e1, longitude: 3.037e1} │ Nile    │ true          │",
-            "│     7.05e6 │      6400 │ position{latitude: -1.7e-1, longitude: -4.9e1}  │ Amazon  │ true          │",
-            "└────────────┴───────────┴─────────────────────────────────────────────────┴─────────┴───────────────┘",
+            // position of its mouth read from two columns, and its basin's
+            // area read in square kilometres, stored in square metres, then
+            // its records as a relation.
+            r#"tuple { basin: area{m2: 3.254555e12}, length_km: 6650, mouth_at: position{latitude: 3.146e1, longitude: 3.037e1}, name: "Nile", reaches_ocean: true }"#,
+            "┌───────────────────────┬───────────┬─────────────────────────────────────────────────┬─────────┬───────────────┐",
+            "│ basin                 │ length_km │ mouth_at                                        │ name    │ reaches_ocean │",
+            "├───────────────────────┼───────────┼─────────────────────────────────────────────────┼─────────┼───────────────┤",
+            "│ area{m2: 7.95e11}     │      4909 │ position{latitude: 9.7e0, longitude: 1.066e2}   │ Mekong  │ true          │",
+            "│ area{m2: 1.36e12}     │      3531 │ position{latitude: 4.58e1, longitude: 4.79e1}   │ Volga   │ false         │",
+            "│ area{m2: 1.8085e12}   │      6300 │ position{latitude: 3.14e1, longitude: 1.219e2}  │ Yangtze │ true          │",
+            "│ area{m2: 2.582672e12} │      4880 │ position{latitude: -3.4e1, longitude: -5.84e1}  │ Paraná  │ true          │",
+            "│ area{m2: 3.254555e12} │      6650 │ position{latitude: 3.146e1, longitude: 3.037e1} │ Nile    │ true          │",
+            "│ area{m2: 7.05e12}     │      6400 │ position{latitude: -1.7e-1, longitude: -4.9e1}  │ Amazon  │ true          │",
+            "└───────────────────────┴───────────┴─────────────────────────────────────────────────┴─────────┴───────────────┘",
         ]
     );
 }
@@ -772,25 +773,26 @@ fn loaded_csv(name: &str, contents: &str, header: bool, columns: &str) -> (i32, 
     (code, stderr.replace(&path, "PATH"))
 }
 
-/// What loading `contents` as a CSV file, named for `name`, into stops at
-/// places of the program's own types writes, with the columns `columns`
-/// gives, a variable's, known only when the program runs, and the
-/// program's exit status. A place's position must be on Earth, and a
-/// stop's must have a name.
-fn loaded_stops(name: &str, contents: &str, columns: &str) -> (i32, String) {
+/// What loading `contents` as a CSV file, named for `name`, writes, and
+/// the program's exit status: the file's records, after a header, read
+/// into tuples of `heading`, in a program that declares `types`, with the
+/// columns `columns` gives, a variable's, known only when the program
+/// runs. The file's path is written `PATH`.
+fn loaded_rows(
+    name: &str,
+    types: &str,
+    heading: &str,
+    contents: &str,
+    columns: &str,
+) -> (i32, String) {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("csv");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(format!("{name}.csv"));
     std::fs::write(&path, contents).unwrap();
     let source = format!(
-        "type position {{
-    {{ latitude: approximate, longitude: approximate }},
-    constraint latitude >= -90e0 and latitude <= 90e0,
-}};
-type stop {{ {{ name: text, at: position }}, constraint name <> \"\" }};
-
+        "{types}
 operator main{{}} [
-    var rows: array tuple {{ day: integer, stop: stop }};
+    var rows: array tuple {heading};
     var columns := {columns};
     call load_csv{{path: {:?}, header: true, columns: columns, out rows: rows}};
     call debug_value{{v: rows}};
@@ -801,6 +803,20 @@ operator main{{}} [
     let (code, stderr) = run_source(&format!("csv_{name}"), &source);
     let path = path.to_str().unwrap().to_string();
     (code, stderr.replace(&path, "PATH"))
+}
+
+/// What loading `contents` as a CSV file of stops at places, named for
+/// `name`, writes (see [`loaded_rows`]). A place's position must be on
+/// Earth, and a stop's must have a name.
+fn loaded_stops(name: &str, contents: &str, columns: &str) -> (i32, String) {
+    let types = "type position {
+    { latitude: approximate, longitude: approximate },
+    constraint latitude >= -90e0 and latitude <= 90e0,
+};
+type stop { { name: text, at: position }, constraint name <> \"\" };
+";
+    let heading = "{ day: integer, stop: stop }";
+    loaded_rows(name, types, heading, contents, columns)
 }
 
 #[test]
@@ -874,6 +890,77 @@ fn csv_files_load_values_of_a_programs_own_types() {
             1,
             &*format!(
                 "error[{}]: \"south\", in column 3 (\"latitude\") on line 2 of \"PATH\", isn't an approximate number, the type of `stop.at.latitude`",
+                trendy_diag::Code::Unparsable.id()
+            )
+        )
+    );
+}
+
+#[test]
+fn csv_files_load_values_in_another_representation() {
+    // A point by its polar coordinates, its distance from the origin in
+    // kilometres, stored in metres.
+    let types = "type distance {
+    { m: approximate },
+    { km: approximate } to { m := km * 1e3 } from { km := m / 1e3 },
+    constraint m >= 0e0,
+};
+type point {
+    { x: approximate, y: approximate },
+    { r: distance, theta: approximate }
+        to { x := r.m * cos{of: theta}, y := r.m * sin{of: theta} }
+        from { r := distance{m: sqrt{of: x * x + y * y}}, theta := atan2{y: y, x: x} },
+    constraint x * x + y * y <= 1e8,
+};
+";
+    let heading = "{ id: integer, at: point }";
+    let columns = "tuple { id: 1, at: tuple { r: tuple { km: 2 }, theta: 3 } }";
+    let header = "id,km,theta\n";
+    let loaded = |name: &str, records: &str| {
+        let contents = format!("{header}{records}");
+        loaded_rows(name, types, heading, &contents, columns)
+    };
+    // Each converted to the stored representation, inner values first.
+    assert_eq!(
+        loaded("points", "1,2,0\n2,0.5,0\n"),
+        (
+            0,
+            "array [tuple { at: point{x: 2e3, y: 0e0}, id: 1 }, tuple { at: point{x: 5e2, y: 0e0}, id: 2 }]\n"
+                .to_string()
+        )
+    );
+    // Each value checked against its type's constraints once converted,
+    // inner values first, writing the record's line and the value's name
+    // as the columns give it.
+    let broken = trendy_diag::Code::BrokenConstraint.id();
+    let site = site("csv_points_negative", 17);
+    assert_eq!(
+        loaded("points_negative", "1,2,0\n2,-1,0\n"),
+        (
+            1,
+            format!(
+                "error[{broken}]: line 3 of \"PATH\" gives `at.r` distance{{m: -1e3}}, which isn't a value of `distance`: it breaks the constraint `m >= 0e0`\n{site}"
+            )
+        )
+    );
+    let site = self::site("csv_points_far", 17);
+    assert_eq!(
+        loaded("points_far", "1,20,0\n"),
+        (
+            1,
+            format!(
+                "error[{broken}]: line 2 of \"PATH\" gives `at` point{{x: 2e4, y: 0e0}}, which isn't a value of `point`: it breaks the constraint `x * x + y * y <= 1e8`\n{site}"
+            )
+        )
+    );
+    // A field is named as the columns name it.
+    let (code, stderr) = loaded("points_unparsable", "1,far,0\n");
+    assert_eq!(
+        (code, stderr.lines().next().unwrap()),
+        (
+            1,
+            &*format!(
+                "error[{}]: \"far\", in column 2 (\"km\") on line 2 of \"PATH\", isn't an approximate number, the type of `at.r.km`",
                 trendy_diag::Code::Unparsable.id()
             )
         )

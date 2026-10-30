@@ -134,7 +134,8 @@ builtin operator load_text_file{path: text, out lines: array text};
    integer, an approximate number or a boolean, read from its field as
    `parse_integer`, `parse_approximate` and `parse_boolean` read them,
    and text as it is, or a value of a type of the program's own whose
-   components are, which `columns` gives a tuple of their columns, as
+   components are, in one of its possible representations, which
+   `columns` gives a tuple of their columns, as
    `tuple { name: 1, at: tuple { latitude: 2, longitude: 3 } }` does, and
    which is selected from them, so that one whose components break its
    type's constraints fails (R0017). The file is CSV as RFC 4180 has it:

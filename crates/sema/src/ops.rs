@@ -2386,7 +2386,7 @@ pub(crate) fn extracted(
 /// Returns the constraint a constant's components break, or why
 /// computing one fails.
 pub(crate) fn select(
-    defined: hir::Defined,
+    defined: Box<hir::Defined>,
     components: hir::Expr,
     bindings: Bindings,
 ) -> Result<hir::Expr, Failed> {

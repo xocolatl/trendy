@@ -3964,6 +3964,29 @@ pub(crate) fn replaced_unknown_component(
         .with_secondary(operand.span(), format!("this is `{}`", defined.name))
 }
 
+/// The component `name`, at `span`, whose column `load_csv`'s `columns`
+/// gives for a value of the type of the program's own `defined`, but which
+/// the type hasn't, or not in the possible representation the others named
+/// are of. `candidates` are the components it may be a misspelling of.
+pub(crate) fn unknown_column_component(
+    name: &str,
+    span: Span,
+    defined: &hir::Defined,
+    candidates: &[&str],
+) -> Diagnostic {
+    let rename = closest(name, candidates.iter().copied());
+    let selectors: Vec<String> = defined
+        .possible_representations()
+        .map(|components| selector_text(&defined.name, components))
+        .collect();
+    let context = format!(
+        "`load_csv` reads a value of `{}` from the columns of the components of one of its possible representations, as its selectors write them: {}",
+        defined.name,
+        trendy_diag::disjoin(&selectors)
+    );
+    unknown_attribute(Noun::Component, name, span, &context, rename, None)
+}
+
 /// The selector of the type `t` in the possible representation with the
 /// components `components`, quoted, with `…` for each argument.
 fn selector_text(t: &str, components: &hir::Heading) -> String {
@@ -3978,23 +4001,45 @@ pub(crate) fn mixed_representations(
     defined: &hir::Defined,
     first: (&str, Span, &hir::Heading),
     second: (&str, Span, &hir::Heading),
+    rule: OneRepresentation,
 ) -> Diagnostic {
     let t = &defined.name;
     let (one, one_span, ones) = first;
     let (other, other_span, others) = second;
     let listed = |components: &hir::Heading| selector_text(t, components);
+    let (why, help) = match rule {
+        OneRepresentation::Changed => (
+            "a `replace` or an `update` gives the components of one representation new values, keeps the others it has, and selects the value in it",
+            "give one representation's components new values at a time, as in `v replace { … } replace { … }`",
+        ),
+        OneRepresentation::Read => (
+            "`load_csv` reads the components of one representation, each from its column, and selects the value in it",
+            "give the columns of one representation's components",
+        ),
+    };
     Diagnostic::error(
         Code::Conversions,
-        format!("`{one}` and `{other}` are components of different possible representations of `{t}`"),
+        format!(
+            "`{one}` and `{other}` are components of different possible representations of `{t}`"
+        ),
         other_span,
         format!("not a component of the representation `{one}` is of"),
     )
     .with_secondary(one_span, format!("a component of {}", listed(ones)))
     .with_note(format!(
-        "a `replace` or an `update` gives the components of one representation new values, keeps the others it has, and selects the value in it; `{other}` is a component of {}",
+        "{why}; `{other}` is a component of {}",
         listed(others)
     ))
-    .with_help("give one representation's components new values at a time, as in `v replace { … } replace { … }`")
+    .with_help(help)
+}
+
+/// What names the components of one of a type's possible representations:
+/// a change, `replace` or `update`, whose values they are given, or
+/// `load_csv`'s `columns`, which they are read from.
+#[derive(Clone, Copy)]
+pub(crate) enum OneRepresentation {
+    Changed,
+    Read,
 }
 
 /// `where`, at `span`, applied to `operand`, of type `ty`, which isn't a
@@ -6717,7 +6762,7 @@ pub(crate) fn unassigned_out(name: &str, operator: &str, ident: &SyntaxToken) ->
 }
 
 /// The rule for what `load_csv` reads.
-const CSV_FIELDS: &str = "`load_csv` reads each attribute of its array's tuples from the field in the column `columns` gives it: text as it is, and an integer, an approximate number or a boolean as `parse_integer`, `parse_approximate` and `parse_boolean` read them; a value of a type of the program's own is selected from its components, each read from a column of its own";
+const CSV_FIELDS: &str = "`load_csv` reads each attribute of its array's tuples from the field in the column `columns` gives it: text as it is, and an integer, an approximate number or a boolean as `parse_integer`, `parse_approximate` and `parse_boolean` read them; a value of a type of the program's own is selected from its components, in one of its possible representations, each read from a column of its own";
 
 /// The rule for `load_csv`'s columns.
 const CSV_COLUMNS: &str = "`columns` gives each attribute of the tuples the position of the column it is read from, counting from 1, and each a column of its own";

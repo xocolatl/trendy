@@ -1355,7 +1355,7 @@ impl<'a> Checker<'a> {
         expr: &Expr,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Expr> {
-        let ty = hir::Type::Defined(defined.clone());
+        let ty = hir::Type::Defined(Box::new(defined.clone()));
         self.computed_from(ops::components(value), ty, selected, expr, errors)
     }
 
@@ -1424,7 +1424,7 @@ impl<'a> Checker<'a> {
         {
             return None;
         }
-        match ops::select(defined.clone(), components, self.bindings()) {
+        match ops::select(Box::new(defined.clone()), components, self.bindings()) {
             Ok(value) => Some(value),
             Err(failed) => {
                 errors.push(errors::failed(&failed, expr));
@@ -1485,7 +1485,7 @@ impl<'a> Checker<'a> {
                 heading.get(name).is_some() == (assigning == ops::Assigning::Extend)
             }))
         .then_some(keyword);
-        let (representations, candidates) = self.components_known(&changed, &heading);
+        let (representations, candidates) = components_known(&changed, &heading);
         let mut ok = true;
         let mut values = BTreeMap::new();
         let mut types = BTreeMap::new();
@@ -1535,7 +1535,7 @@ impl<'a> Checker<'a> {
             Changed::Attributes | Changed::Stored(..) => Some(Replacement::Attributes(replaced)),
             // Selected in the representation, from its components.
             Changed::Other(defined, selector) => {
-                let ty = hir::Type::Defined(defined.clone());
+                let ty = hir::Type::Defined(Box::new(defined.clone()));
                 let selected =
                     self.applied(selector, ty, replaced, &heading, operand_expr, errors)?;
                 Some(Replacement::Selected(selected))
@@ -1564,7 +1564,12 @@ impl<'a> Checker<'a> {
                 Some((heading.clone(), operand, Changed::Attributes))
             }
             (hir::Type::Defined(defined), ops::Assigning::Replace | ops::Assigning::Update) => {
-                match self.representation(defined, assignments, errors)? {
+                let named: Vec<(&str, Span)> = assignments
+                    .iter()
+                    .map(|(_, name, span)| (name.as_str(), *span))
+                    .collect();
+                let rule = errors::OneRepresentation::Changed;
+                match representation(defined, &named, rule, errors)? {
                     Representation::Stored { known } => Some((
                         defined.components.clone(),
                         ops::components(operand),
@@ -1590,34 +1595,6 @@ impl<'a> Checker<'a> {
                 None
             }
         }
-    }
-
-    /// The components of each possible representation of a type's value
-    /// that `changed` says a list gives new values, for errors, and the
-    /// names a component's misspelling may be one of: the representation's
-    /// it gives new values, `heading`, if the list names one, or else any.
-    fn components_known(
-        &self,
-        changed: &Changed,
-        heading: &hir::Heading,
-    ) -> (Vec<hir::Heading>, Vec<String>) {
-        let representations: Vec<hir::Heading> = match changed {
-            Changed::Attributes => Vec::new(),
-            Changed::Stored(defined, _) | Changed::Other(defined, _) => self
-                .names
-                .namespaces()
-                .representations(defined)
-                .cloned()
-                .collect(),
-        };
-        let candidates = match changed {
-            Changed::Stored(_, false) => representations
-                .iter()
-                .flat_map(|h| h.named().map(|(c, _)| c.to_string()))
-                .collect(),
-            _ => heading.named().map(|(c, _)| c.to_string()).collect(),
-        };
-        (representations, candidates)
     }
 
     /// The value `written`, of an assignment in a list that gives new
@@ -1648,46 +1625,6 @@ impl<'a> Checker<'a> {
                 checked_value(&mut names, written, expected, errors)
             }
         }
-    }
-
-    /// The possible representation of the type `defined` whose components
-    /// `assignments` give new values: the one the components they name are
-    /// of, or the stored one if they name none. `None` after reporting
-    /// components of two representations.
-    fn representation<'n>(
-        &self,
-        defined: &hir::Defined,
-        assignments: &'n [(ast::Assign, String, Span)],
-        errors: &mut Vec<Diagnostic>,
-    ) -> Option<Representation<'n>> {
-        let representations: Vec<&hir::Heading> =
-            self.names.namespaces().representations(defined).collect();
-        // The first component named, with its representation's position,
-        // the stored one's 0.
-        let mut first: Option<(usize, &str, Span)> = None;
-        for (_, name, span) in assignments {
-            let Some(at) = representations.iter().position(|h| h.get(name).is_some()) else {
-                continue;
-            };
-            match first {
-                None => first = Some((at, name, *span)),
-                Some((earlier, other, other_span)) if earlier != at => {
-                    errors.push(errors::mixed_representations(
-                        defined,
-                        (other, other_span, representations[earlier]),
-                        (name, *span, representations[at]),
-                    ));
-                    return None;
-                }
-                Some(_) => {}
-            }
-        }
-        Some(match first {
-            Some((at, name, _)) if at > 0 => Representation::Other(name),
-            known => Representation::Stored {
-                known: known.is_some(),
-            },
-        })
     }
 
     /// `postfix`, a `group` or a `wrap`, as `gathering` says, written
@@ -2339,12 +2276,73 @@ enum Changed<'t> {
     Other(&'t hir::Defined, hir::OperatorId),
 }
 
-/// The possible representation of a type whose components a `replace` or
-/// an `update` gives new values: the stored one, and whether a component
-/// of it is named, or another, named by its component.
-enum Representation<'n> {
+/// The components of each possible representation of a type's value that
+/// `changed` says a list gives new values, for errors, and the names a
+/// component's misspelling may be one of: the representation's it gives new
+/// values, `heading`, if the list names one, or else any.
+fn components_known(changed: &Changed, heading: &hir::Heading) -> (Vec<hir::Heading>, Vec<String>) {
+    let representations: Vec<hir::Heading> = match changed {
+        Changed::Attributes => Vec::new(),
+        Changed::Stored(defined, _) | Changed::Other(defined, _) => {
+            defined.possible_representations().cloned().collect()
+        }
+    };
+    let candidates = match changed {
+        Changed::Stored(_, false) => representations
+            .iter()
+            .flat_map(|h| h.named().map(|(c, _)| c.to_string()))
+            .collect(),
+        _ => heading.named().map(|(c, _)| c.to_string()).collect(),
+    };
+    (representations, candidates)
+}
+
+/// The possible representation of a type whose components something names:
+/// the stored one, and whether a component of it is named, or another,
+/// named by its component.
+pub(crate) enum Representation<'n> {
     Stored { known: bool },
     Other(&'n str),
+}
+
+/// The possible representation of the type `defined` whose components
+/// `named`, each with where it is written, are: the one those it has are
+/// of, or the stored one if it has none. `None` after reporting components
+/// of two representations, which `rule` says must be one's.
+pub(crate) fn representation<'n>(
+    defined: &hir::Defined,
+    named: &[(&'n str, Span)],
+    rule: errors::OneRepresentation,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<Representation<'n>> {
+    let representations: Vec<&hir::Heading> = defined.possible_representations().collect();
+    // The first component named, with its representation's position, the
+    // stored one's 0.
+    let mut first: Option<(usize, &str, Span)> = None;
+    for &(name, span) in named {
+        let Some(at) = representations.iter().position(|h| h.get(name).is_some()) else {
+            continue;
+        };
+        match first {
+            None => first = Some((at, name, span)),
+            Some((earlier, other, other_span)) if earlier != at => {
+                errors.push(errors::mixed_representations(
+                    defined,
+                    (other, other_span, representations[earlier]),
+                    (name, span, representations[at]),
+                    rule,
+                ));
+                return None;
+            }
+            Some(_) => {}
+        }
+    }
+    Some(match first {
+        Some((at, name, _)) if at > 0 => Representation::Other(name),
+        known => Representation::Stored {
+            known: known.is_some(),
+        },
+    })
 }
 
 /// What a `replace`, an `update` or an `extend` makes of its operand.
@@ -3057,14 +3055,9 @@ impl Names for ComponentNames<'_> {
     }
 
     fn candidates(&self) -> Vec<String> {
-        let components: Vec<String> = self
-            .outer
-            .namespaces()
-            .representations(&self.defined)
+        self.defined
+            .possible_representations()
             .flat_map(|h| h.named().map(|(c, _)| c.to_string()))
-            .collect();
-        components
-            .into_iter()
             .chain(self.outer.candidates())
             .collect()
     }
@@ -3078,9 +3071,8 @@ impl Names for ComponentNames<'_> {
     }
 
     fn hides(&self, name: &str) -> bool {
-        self.outer
-            .namespaces()
-            .representations(&self.defined)
+        self.defined
+            .possible_representations()
             .any(|h| h.get(name).is_some())
             || self.outer.hides(name)
     }
