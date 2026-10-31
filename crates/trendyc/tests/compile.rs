@@ -1048,6 +1048,47 @@ error[{not_of}]: polygon{{corners: relation {{ n: integer, name: text }} {{ {{ n
 }
 
 #[test]
+fn statements_narrow_when_running() {
+    // An `if` statement's branches and a `while` loop's block read a
+    // tested name's components, and an `update` changes them as the type
+    // the test shows.
+    let source = format!(
+        "{FIGURES}
+operator widen{{var f: plane_figure}} [
+    if f is ellipse then [
+        call debug_value{{v: f.a}};
+        update f {{ a := 2e0 * a }};
+        call debug_value{{v: f.a}};
+    ] else if f is polygon then [
+        call debug_value{{v: count{{r: f.corners}}}};
+    ];
+    var n := 0;
+    while f is ellipse and n < 2 loop [
+        call debug_value{{v: f.b + to_approximate{{from: n}}}};
+        n := n + 1;
+    ];
+];
+
+operator main{{}} [
+    var e: plane_figure := ellipse{{a: 3e0, b: 1e0}};
+    call widen{{var f: e}};
+    call debug_value{{v: e}};
+    var p: plane_figure := polygon{{corners: relation {{ {{ n: 1, name: \"n\" }} }}}};
+    call widen{{var f: p}};
+];
+"
+    );
+    let (code, stderr) = run_source("narrowed_statements", &source);
+    assert_eq!(
+        (code, stderr.lines().collect::<Vec<_>>()),
+        (
+            0,
+            vec!["3e0", "6e0", "1e0", "2e0", "ellipse{a: 6e0, b: 1e0}", "1"]
+        )
+    );
+}
+
+#[test]
 fn versions_are_chosen_when_running() {
     // Each call computes the version for its arguments' own types: of a
     // specification without a body, of one with a body for the rest, and
@@ -2404,6 +2445,10 @@ fn inheritance() {
             "│ plot │                 6e0 │",
             "│ pond │ 1.884955592153876e1 │",
             "└──────┴─────────────────────┘",
+            // Each figure, narrowed in an `if` statement's branch: the
+            // plot's vertices, and the pond's major semiaxis.
+            "3",
+            "distance{m: 3e0}",
         ]
     );
 }

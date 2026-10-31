@@ -9375,6 +9375,72 @@ var images := figures extend {{ same := !!(discs rename {{n as m}}) }};
     }
 
     #[test]
+    fn statements_narrow_names_until_one_may_assign_them() {
+        let types = "type figure union;\ntype disc is figure { { r: approximate } };\ntype square is figure { { side: approximate } };\nvar g: figure := disc{r: 1e0};\noperator touch{} [ g := square{side: 1e0}; ];\noperator grow{var f: figure} [ f := square{side: 2e0}; ];\n";
+        // An `if` statement's branches, as an `if`'s, a `while` loop's
+        // block, and an `update`, which keeps the value of the type; a
+        // `var` argument passes the variable as declared.
+        let valid = format!(
+            "{types}operator ok{{var f: figure, n: integer}} [
+    if f is disc then [
+        call debug_value{{v: f.r}};
+        update f {{ r := 2e0 * r }};
+        call debug_value{{v: f.r}};
+        call grow{{var f: f}};
+    ] else if not (f is square) then [
+        call debug_value{{v: 1}};
+    ] else [
+        call debug_value{{v: f.side}};
+    ];
+    var i := 0;
+    while f is disc and i < n loop [
+        call debug_value{{v: f.r}};
+        i := i + 1;
+    ];
+];{MAIN}"
+        );
+        assert!(analyze_str(&valid).is_ok(), "{:#?}", errors(&valid));
+        // A statement that may assign a name ends it: an assignment, a
+        // `var` argument, any call, of a variable of the program's, one in
+        // a branch inside, and one later in a loop.
+        for (body, assigned) in [
+            (
+                "f := square{side: 1e0};\n        call debug_value{v: f.r};",
+                "f := square{side: 1e0}",
+            ),
+            (
+                "call grow{var f: f};\n        call debug_value{v: f.r};",
+                "call grow{var f: f};",
+            ),
+            (
+                "if c then [ f := square{side: 1e0}; ];\n        call debug_value{v: f.r};",
+                "f := square{side: 1e0}",
+            ),
+            (
+                "while c loop [ call debug_value{v: f.r}; f := square{side: 1e0}; ];",
+                "f := square{side: 1e0}",
+            ),
+        ] {
+            let source = format!(
+                "{types}operator bad{{var f: figure, c: boolean}} [\n    if f is disc then [\n        {body}\n    ];\n];{MAIN}"
+            );
+            let found = errors(&source);
+            assert_eq!(found.len(), 1, "{source}: {found:#?}");
+            assert_eq!(found[0].code, Code::WrongOperandType, "{source}");
+            let label = &found[0]
+                .secondary
+                .iter()
+                .find(|l| l.message == "`f` may be assigned here");
+            let at = label.unwrap_or_else(|| panic!("{source}: {found:#?}")).span;
+            assert_eq!(&source[at.start..at.end], assigned, "{source}");
+        }
+        let called = format!(
+            "{types}operator bad{{}} [ if g is disc then [ call touch{{}}; call debug_value{{v: g.r}}; ]; ];{MAIN}"
+        );
+        assert_eq!(codes(&called), [Code::WrongOperandType]);
+    }
+
+    #[test]
     fn a_dummy_type_has_no_selector_order_or_components() {
         // A dummy type has no selector; a fix selects the one subtype whose
         // representation has the components named.

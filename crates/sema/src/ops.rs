@@ -2556,10 +2556,12 @@ fn tuple_of(
 /// takes the value of, or the component, of a value of a type of the
 /// program's own, of its stored representation or one of `others`. `None`
 /// after reporting why there is none: the operand isn't a tuple, or hasn't
-/// the attribute or component.
+/// the attribute or component. `ended` is where a statement may assign the
+/// operand, a name, which ended what a test showed of its value, if one
+/// did.
 pub(crate) fn extracted(
     extract: &ast::ExtractExpr,
-    operand: &Expr,
+    (operand, ended): (&Expr, Option<Span>),
     ty: &hir::Type,
     others: &[&hir::Heading],
     namespaces: &crate::Namespaces,
@@ -2581,7 +2583,11 @@ pub(crate) fn extracted(
         ),
         _ => {
             errors.push(errors::not_extractable(
-                &name, span, ty, operand, namespaces,
+                &name,
+                span,
+                ty,
+                (operand, ended),
+                namespaces,
             ));
             return None;
         }

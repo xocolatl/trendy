@@ -2126,8 +2126,48 @@ operator main{} [
   `x instanceof t`, Python's `isinstance(x, t)` and SQL's `x IS OF (t)`
   to `x is t`, SQL's `TREAT(x AS t)` to `treat x as t`, and Tutorial D's
   `IS_T(x)` and `TREAT_AS_T(x)` to them.
-- **Not yet:** narrowing in an `if` statement's blocks, which can assign
-  the name.
+
+In an update operator, an `if` statement's branches are narrowed as an
+`if`'s are, and so is a `while` loop's block by its condition, which is
+true where the block starts. A test shows what a value is only until a
+statement that may change it:
+
+```trendy
+type plane_figure union;
+type ellipse is plane_figure { { a: approximate, b: approximate } };
+type polygon is plane_figure { { corners: integer } };
+
+operator widen{var f: plane_figure} [
+    if f is ellipse then [
+        call debug_value{v: f.a};
+        update f { a := 2e0 * a };
+        call debug_value{v: f.a};
+    ] else if f is polygon then [
+        call debug_value{v: f.corners};
+        f := polygon{corners: f.corners + 1};
+    ];
+];
+
+operator main{} [
+    var lake: plane_figure := ellipse{a: 3e0, b: 2e0};
+    call widen{var f: lake};
+    call debug_value{v: lake};
+];
+```
+
+- **A statement that may assign a name ends its narrowing,** after it:
+  an assignment, an `insert` or a `delete` of it, a `load` into it, or a
+  `var` or `out` argument of it, in the statement or in one inside it. A
+  call may assign any variable of the program's, so it ends theirs. After
+  one, reading a component is an error that points at it (A0022).
+- **`update f { … }` keeps it:** it is `f := f replace { … }`, whose `f`
+  is narrowed, so it changes the components of the type the test shows,
+  and `f` holds a value of that type still.
+- **A loop runs its block again,** after what it assigns, so a name its
+  block may assign isn't narrowed anywhere in it, nor in its condition.
+- **A `var` or `out` argument passes the variable,** of its declared
+  type, which the operator can give any value of it: `call widen{var f:
+  lake}` passes `lake`, a `plane_figure`, wherever a test narrows it.
 
 An operator of a union type's values can be computed differently for
 each of its subtypes, by versions of it (IM Prescription 17): operators

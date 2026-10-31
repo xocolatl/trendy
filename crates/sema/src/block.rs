@@ -307,6 +307,13 @@ impl Names for BlockNames<'_> {
     fn bindings(&self) -> ops::Bindings<'_> {
         self.outer.bindings()
     }
+
+    fn narrowing_ended(&self, name: &str) -> Option<Span> {
+        if self.own(name).is_some() {
+            return None;
+        }
+        self.outer.narrowing_ended(name)
+    }
 }
 
 impl Assigning for BlockNames<'_> {

@@ -1053,6 +1053,15 @@ which can fail, so the guard rule computes the tests, which can't, first,
 and only then what they guard: a narrowed value is never treated unless
 its test is true. A false test shows nothing: a program can add subtypes
 to a union type, so what isn't of one isn't known to be of any other.
+In an update operator's body, `body::Statements` keeps the facts of the
+`if` statements and `while` loops the statement being checked is in,
+which `BodyNames` resolves names with (`narrowed::narrow`), and after
+each statement forgets those of the names it may assign
+(`narrowed::Assigns`, by its syntax, and the program's variables after a
+call), and those a loop may assign before its block. An `update` of a
+narrowed variable changes it as one of its narrowed type
+(`assign::Assignee::narrowed`), and keeps it narrowed; a `var` or `out`
+argument resolves the variable as declared (`Names::resolve_variable`).
 
 The relational operators combine attributes of types in one hierarchy
 (IM Prescription 13). A common attribute of a join's operands, of a

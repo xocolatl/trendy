@@ -11,6 +11,7 @@ use trendy_syntax::ast::{self, AstNode, VarDecl};
 use crate::assign::{Assignee, Assigning, Declared};
 use crate::check::{self, Checker, Lookup, Names, Representation, Written, argument_names};
 use crate::locals::{Declaration, Local, Locals};
+use crate::narrowed::{self, Facts};
 use crate::operators::{Chosen, Operators, Signature};
 use crate::types::{Expected, Origin};
 use crate::{Namespaces, Sites, assign, errors, locals, ops};
@@ -114,6 +115,8 @@ pub(crate) fn body(
         deferred,
         frozen: Vec::new(),
         outs: Outs::default(),
+        narrowed: Facts::default(),
+        ended: BTreeMap::new(),
     };
     let checked: Vec<ast::Statement> = body.statements().collect();
     let block = statements.block(&checked, errors)?;
@@ -173,6 +176,13 @@ struct Statements<'a, 'b> {
     /// The `out` parameters assigned on every path to the statement being
     /// checked, and its reads of them.
     outs: Outs,
+    /// What the tests of the `if` statements and `while` loops the
+    /// statement being checked is in show of the names' values, but of
+    /// those a statement before it may have assigned.
+    narrowed: Facts,
+    /// Where a statement may assign each name it ended what tests showed
+    /// of, in the branch or block being checked.
+    ended: BTreeMap<String, Span>,
 }
 
 impl Statements<'_, '_> {
@@ -183,7 +193,33 @@ impl Statements<'_, '_> {
             locals: &mut self.locals,
             frozen: &self.frozen,
             outs: &mut self.outs,
+            narrowed: &self.narrowed,
+            ended: &self.ended,
         }
+    }
+
+    /// What tests show of the names' values in `condition`'s statements if
+    /// it is true, and if it is false.
+    fn facts(&mut self, condition: &ast::Expr) -> (Facts, Facts) {
+        let mut names = self.names();
+        let checker = Checker::new(&mut names);
+        (
+            Facts::of(condition, true, &checker),
+            Facts::of(condition, false, &checker),
+        )
+    }
+
+    /// The names narrowed that `stmt` may assign, each with where: those it
+    /// names, and, if it calls an update operator, the program's variables,
+    /// which the operator may assign.
+    fn assigned(&self, stmt: &ast::Statement) -> BTreeMap<String, Span> {
+        let signature = self.cx.operators.get(self.within);
+        let global = |name: &str| {
+            self.cx.variable_ids.contains_key(name)
+                && !signature.is_parameter(name)
+                && self.locals.find(name).is_none()
+        };
+        narrowed::Assigns::of(stmt).of_names(self.narrowed.names(), global)
     }
 
     /// Report each read of an `out` parameter in the statement just
@@ -282,7 +318,28 @@ impl Statements<'_, '_> {
         Some((site, self.statement(stmt, errors)?))
     }
 
+    /// `stmt`, after which nothing is known of the value of a name it may
+    /// assign (see [`narrowed::Assigns`]). A loop's statements run again
+    /// after one does, and so does its condition, so it is not known in
+    /// them either.
     fn statement(
+        &mut self,
+        stmt: &ast::Statement,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Statement> {
+        let assigned = self.assigned(stmt);
+        if matches!(
+            stmt,
+            ast::Statement::While(_) | ast::Statement::Loop(_) | ast::Statement::For(_)
+        ) {
+            narrowed::forget(&mut self.narrowed, &assigned, &mut self.ended);
+        }
+        let checked = self.checked_statement(stmt, errors);
+        narrowed::forget(&mut self.narrowed, &assigned, &mut self.ended);
+        checked
+    }
+
+    fn checked_statement(
         &mut self,
         stmt: &ast::Statement,
         errors: &mut Vec<Diagnostic>,
@@ -697,11 +754,16 @@ impl Statements<'_, '_> {
         let statements: Vec<ast::Statement> = body.statements().collect();
         let block = match check {
             // The block may not run, so what it assigns isn't assigned
-            // after; the condition is computed before it.
+            // after; the condition is computed before it, so what it shows
+            // if true is so where the block starts.
             hir::Check::Before => {
                 self.flush(errors);
                 let before = self.outs.assigned.clone();
+                let (when_true, _) = self.facts(&written);
+                let (narrowed, ended) = (self.narrowed.clone(), self.ended.clone());
+                self.narrowed = narrowed.and(&when_true);
                 let block = self.block(&statements, errors);
+                (self.narrowed, self.ended) = (narrowed, ended);
                 self.outs.assigned = before;
                 block
             }
@@ -742,15 +804,21 @@ impl Statements<'_, '_> {
             _ => None,
         };
         // What the branch taken assigns is assigned after: what both do,
-        // unless the condition says which.
+        // unless the condition says which. Each branch knows what the
+        // condition shows of the names' values, as it is true or false.
         let before = self.outs.assigned.clone();
+        let (when_true, when_false) = self.facts(&condition_expr);
+        let (narrowed, ended) = (self.narrowed.clone(), self.ended.clone());
+        self.narrowed = narrowed.and(&when_true);
         let then = self.branch(
             Some(ast::ElseBranch::Block(then_block)),
             taken == Some(false),
             errors,
         );
         let after_then = std::mem::replace(&mut self.outs.assigned, before);
+        (self.narrowed, self.ended) = (narrowed.and(&when_false), ended.clone());
         let otherwise = self.branch(stmt.else_branch(), taken == Some(true), errors);
+        (self.narrowed, self.ended) = (narrowed, ended);
         let after_otherwise = std::mem::take(&mut self.outs.assigned);
         self.outs.assigned = match taken {
             Some(true) => after_then,
@@ -1038,28 +1106,21 @@ pub(crate) struct BodyNames<'a, 'b> {
     /// Where the statement being checked reads and assigns the operator's
     /// `out` parameters.
     outs: &'a mut Outs,
+    /// What tests show of the names' values where the statement is.
+    narrowed: &'a Facts,
+    /// Where a statement before it may assign each name it ended what
+    /// tests showed of.
+    ended: &'a BTreeMap<String, Span>,
 }
 
 impl BodyNames<'_, '_> {
     fn signature(&self) -> &Signature {
         self.cx.operators.get(self.within)
     }
-}
 
-impl Names for BodyNames<'_, '_> {
-    fn namespaces(&self) -> &Namespaces {
-        self.cx.namespaces
-    }
-
-    fn site(&self, at: Span) -> hir::Site {
-        self.cx.sites.at(at)
-    }
-
-    fn operators(&self) -> &Operators {
-        self.cx.operators
-    }
-
-    fn resolve(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {
+    /// What `name`, written at `span`, refers to, before what tests show
+    /// of its value.
+    fn found(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {
         if let Some(lookup) = self.signature().parameter(name) {
             if self.signature().mode(name) == Some(hir::Mode::Out) {
                 self.outs.reads.push((name.to_string(), span));
@@ -1100,6 +1161,34 @@ impl Names for BodyNames<'_, '_> {
             return Lookup::Reported;
         }
         Lookup::Unknown
+    }
+}
+
+impl Names for BodyNames<'_, '_> {
+    fn namespaces(&self) -> &Namespaces {
+        self.cx.namespaces
+    }
+
+    fn site(&self, at: Span) -> hir::Site {
+        self.cx.sites.at(at)
+    }
+
+    fn operators(&self) -> &Operators {
+        self.cx.operators
+    }
+
+    fn resolve(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {
+        let lookup = self.found(name, span, errors);
+        let facts = self.narrowed;
+        narrowed::narrow(facts, name, lookup, self)
+    }
+
+    fn resolve_variable(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {
+        self.found(name, span, errors)
+    }
+
+    fn narrowing_ended(&self, name: &str) -> Option<Span> {
+        self.ended.get(name).copied()
     }
 
     fn candidates(&self) -> Vec<String> {
@@ -1182,7 +1271,11 @@ impl Assigning for BodyNames<'_, '_> {
             errors.push(errors::assigned_in_loop(name, span, frozen.array));
             return None;
         }
-        Some(assignee)
+        let narrowed = self.narrowed.narrowed(name, &assignee.ty);
+        Some(Assignee {
+            narrowed,
+            ..assignee
+        })
     }
 }
 
@@ -1249,6 +1342,7 @@ impl BodyNames<'_, '_> {
                 ty: variable.ty.clone(),
                 keys: variable.keys.clone(),
                 declaration: Declared::Variable(cx.declarations[&variable.name].clone()),
+                narrowed: None,
             });
         }
         if let Some((kind, _)) = cx.namespaces.operator(name) {

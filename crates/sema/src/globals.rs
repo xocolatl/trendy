@@ -760,6 +760,10 @@ impl Names for Globals<'_> {
             values: &self.values,
         }
     }
+
+    fn narrowing_ended(&self, _: &str) -> Option<Span> {
+        None
+    }
 }
 
 /// Names in the body of the read-only operator `within`: its parameters and
@@ -912,6 +916,10 @@ impl Names for ReadOnlyNames<'_, '_, '_> {
             operators: self.globals.operators,
             values: &self.globals.values,
         }
+    }
+
+    fn narrowing_ended(&self, _: &str) -> Option<Span> {
+        None
     }
 }
 

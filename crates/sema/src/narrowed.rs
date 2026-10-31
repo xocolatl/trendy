@@ -6,13 +6,17 @@
 //! written (see [`hir::Connective::And`]). A test that is false shows
 //! nothing: a program can add subtypes to a union type, so a value that
 //! isn't of one of them needn't be of any other in particular.
+//!
+//! In an update operator's body, an `if` statement's branches, and a
+//! `while` loop's block, are narrowed as an `if` expression's branches
+//! are, until a statement that may assign the name (see [`Assigns`]).
 
 use std::collections::BTreeMap;
 
 use trendy_diag::{Diagnostic, Span};
 use trendy_hir as hir;
 use trendy_syntax::SyntaxKind;
-use trendy_syntax::ast::{self, Expr};
+use trendy_syntax::ast::{self, AstNode, Expr};
 
 use crate::Namespaces;
 use crate::check::{Checker, Lookup, Names};
@@ -107,6 +111,17 @@ impl Facts {
         self.0.is_empty()
     }
 
+    /// The names these show something of.
+    pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
+        self.0.keys().map(String::as_str)
+    }
+
+    /// These, but nothing of `name`, whose value may have changed: whether
+    /// they showed something of it.
+    pub(crate) fn forget(&mut self, name: &str) -> bool {
+        self.0.remove(name).is_some()
+    }
+
     /// The type that what `name` refers to, a value of type `ty`, is shown
     /// to be of, if it is narrower: the most specific subtype of `ty` it is
     /// tested to be of.
@@ -156,6 +171,143 @@ fn tested(test: &ast::IsExpr, checker: &Checker) -> Option<(String, hir::Type)> 
     Some((name, ty))
 }
 
+/// `lookup`, what `name` refers to, as `facts` narrow it: a value found,
+/// treated as one of the type they show it to be of, if that is narrower
+/// than its own, which `names` gives.
+pub(crate) fn narrow(facts: &Facts, name: &str, lookup: Lookup, names: &mut dyn Names) -> Lookup {
+    match lookup {
+        Lookup::Found(value) => {
+            let ty = Checker::new(names).ty(&value);
+            match facts.narrowed(name, &ty) {
+                Some(narrowed) => Lookup::Found(ops::treat_as(value, narrowed)),
+                None => Lookup::Found(value),
+            }
+        }
+        other => other,
+    }
+}
+
+/// What a statement may assign, by its syntax, in it and in the
+/// statements inside it, which ends what is known of the names' values:
+/// each variable an assignment's target names, or a `var` or `out`
+/// argument, with where the first is, and the first call, of an update
+/// operator, which may assign any of the program's variables.
+#[derive(Debug, Default)]
+pub(crate) struct Assigns {
+    pub(crate) names: BTreeMap<String, Span>,
+    pub(crate) call: Option<Span>,
+}
+
+impl Assigns {
+    pub(crate) fn of(statement: &ast::Statement) -> Assigns {
+        let mut assigns = Assigns::default();
+        assigns.gather(statement);
+        assigns
+    }
+
+    fn gather(&mut self, statement: &ast::Statement) {
+        match statement {
+            ast::Statement::Assign(stmt) => self.clauses(stmt),
+            ast::Statement::Block(block) => {
+                for stmt in block.statements() {
+                    self.clauses(&stmt);
+                }
+            }
+            ast::Statement::Call(stmt) => {
+                self.call.get_or_insert(stmt.span());
+                let arguments = stmt.arguments();
+                let modes = arguments.iter().flat_map(|a| {
+                    a.named()
+                        .filter_map(|arg| Some((arg.mode()?, arg.value()?)))
+                        .collect::<Vec<_>>()
+                });
+                for (mode, value) in modes {
+                    if mode.says() != ast::Said::Const
+                        && let ast::Expr::Name(name) = value
+                        && let Some(ident) = name.ident()
+                    {
+                        self.named(ident.text(), stmt.span());
+                    }
+                }
+            }
+            ast::Statement::If(stmt) => {
+                self.body_of(stmt.then_block());
+                match stmt.else_branch() {
+                    Some(ast::ElseBranch::Block(body)) => self.body(&body),
+                    Some(ast::ElseBranch::If(inner)) => self.gather(&ast::Statement::If(inner)),
+                    None => {}
+                }
+            }
+            ast::Statement::While(stmt) => self.body_of(stmt.body()),
+            ast::Statement::Loop(stmt) => self.body_of(stmt.body()),
+            ast::Statement::For(stmt) => self.body_of(stmt.body()),
+            ast::Statement::Var(_) | ast::Statement::Return(_) => {}
+        }
+    }
+
+    fn body_of(&mut self, body: Option<ast::Body>) {
+        if let Some(body) = body {
+            self.body(&body);
+        }
+    }
+
+    fn body(&mut self, body: &ast::Body) {
+        for statement in body.statements() {
+            self.gather(&statement);
+        }
+    }
+
+    /// The variables an assignment statement's clauses assign, but those an
+    /// `update` changes: it gives the components of the type a test shows
+    /// a value to be of new values, so the value is still one of it, as
+    /// only a union type has subtypes.
+    fn clauses(&mut self, stmt: &ast::AssignStmt) {
+        for clause in stmt
+            .clauses()
+            .filter(|c| !matches!(c, ast::Clause::Update(_)))
+        {
+            let target = clause.target().and_then(|t| crate::assign::target_path(&t));
+            if let Some(ident) = target.and_then(|(name, _)| name.ident()) {
+                self.named(ident.text(), clause.span());
+            }
+        }
+    }
+
+    fn named(&mut self, name: &str, at: Span) {
+        self.names.entry(name.to_string()).or_insert(at);
+    }
+
+    /// The names it assigns, and, if it calls an update operator, those of
+    /// `names` that `is_global` says are the program's variables.
+    pub(crate) fn of_names<'n>(
+        &self,
+        names: impl Iterator<Item = &'n str>,
+        is_global: impl Fn(&str) -> bool,
+    ) -> BTreeMap<String, Span> {
+        let mut assigned = self.names.clone();
+        if let Some(call) = self.call {
+            for name in names.filter(|n| is_global(n)) {
+                assigned.entry(name.to_string()).or_insert(call);
+            }
+        }
+        assigned
+    }
+}
+
+/// The names in `assigned` that `facts` show something of, which they
+/// then don't, each with where it may be assigned, into `ended`.
+pub(crate) fn forget(
+    facts: &mut Facts,
+    assigned: &BTreeMap<String, Span>,
+    ended: &mut BTreeMap<String, Span>,
+) {
+    for (name, at) in assigned {
+        if facts.forget(name) {
+            ended.insert(name.clone(), *at);
+        }
+    }
+}
+
 /// Names, `outer`'s, of which those `facts` narrow refer to their values as
 /// ones of the types the facts show them to be of, each treated as one
 /// (`hir::Expr::TreatAs`).
@@ -174,16 +326,81 @@ impl Names for Narrowed<'_> {
     }
 
     fn resolve(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {
-        match self.outer.resolve(name, span, errors) {
-            Lookup::Found(value) => {
-                let ty = Checker::new(&mut *self.outer).ty(&value);
-                match self.facts.narrowed(name, &ty) {
-                    Some(narrowed) => Lookup::Found(ops::treat_as(value, narrowed)),
-                    None => Lookup::Found(value),
-                }
-            }
-            other => other,
-        }
+        let lookup = self.outer.resolve(name, span, errors);
+        narrow(self.facts, name, lookup, &mut *self.outer)
+    }
+
+    fn resolve_variable(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {
+        self.outer.resolve_variable(name, span, errors)
+    }
+
+    fn narrowing_ended(&self, name: &str) -> Option<Span> {
+        self.outer.narrowing_ended(name)
+    }
+
+    fn candidates(&self) -> Vec<String> {
+        self.outer.candidates()
+    }
+
+    fn leaf_type(&self, leaf: &hir::Expr) -> hir::Type {
+        self.outer.leaf_type(leaf)
+    }
+
+    fn fresh_local(&mut self, local: hir::Local) -> hir::LocalId {
+        self.outer.fresh_local(local)
+    }
+
+    fn hides(&self, name: &str) -> bool {
+        self.outer.hides(name)
+    }
+
+    fn tuple_at_hand(&self) -> Option<&hir::Heading> {
+        self.outer.tuple_at_hand()
+    }
+
+    fn unnumbered(&self) -> bool {
+        self.outer.unnumbered()
+    }
+
+    fn type_parameters(&self) -> Option<&[hir::TypeParameter]> {
+        self.outer.type_parameters()
+    }
+
+    fn operators(&self) -> &Operators {
+        self.outer.operators()
+    }
+
+    fn checked(&mut self, id: hir::OperatorId, at: Span, errors: &mut Vec<Diagnostic>) -> bool {
+        self.outer.checked(id, at, errors)
+    }
+
+    fn bindings(&self) -> ops::Bindings<'_> {
+        self.outer.bindings()
+    }
+}
+
+/// Names, `outer`'s, each referring to a variable as it is declared,
+/// whatever a test shows of its value, as a `var` or `out` argument does
+/// (see [`Names::resolve_variable`]).
+pub(crate) struct Unnarrowed<'a> {
+    pub(crate) outer: &'a mut dyn Names,
+}
+
+impl Names for Unnarrowed<'_> {
+    fn namespaces(&self) -> &Namespaces {
+        self.outer.namespaces()
+    }
+
+    fn site(&self, at: Span) -> hir::Site {
+        self.outer.site(at)
+    }
+
+    fn resolve(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {
+        self.outer.resolve_variable(name, span, errors)
+    }
+
+    fn narrowing_ended(&self, name: &str) -> Option<Span> {
+        self.outer.narrowing_ended(name)
     }
 
     fn candidates(&self) -> Vec<String> {

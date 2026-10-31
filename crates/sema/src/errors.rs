@@ -3709,12 +3709,14 @@ pub(crate) fn method_call(
     }
 }
 
-/// `.name`, at `at`, applied to a value of type `ty`, which isn't a tuple.
+/// `.name`, at `at`, applied to `operand`, a value of type `ty`, which
+/// isn't a tuple. `ended` is where a statement may assign the operand, a
+/// name, which ended what a test showed of its value, if one did.
 pub(crate) fn not_extractable(
     name: &str,
     at: Span,
     ty: &hir::Type,
-    operand: &Expr,
+    (operand, ended): (&Expr, Option<Span>),
     namespaces: &Namespaces,
 ) -> Diagnostic {
     let d = Diagnostic::error(
@@ -3740,6 +3742,14 @@ pub(crate) fn not_extractable(
             let mut having = Vec::new();
             having_component(name, ty, namespaces, &mut having);
             let subject = operand.syntax().text().to_string();
+            let d = match ended {
+                Some(assigned) => d
+                    .with_secondary(assigned, format!("`{subject}` may be assigned here"))
+                    .with_note(format!(
+                        "a test shows what `{subject}`'s value is only until a statement that may assign it, which in a loop can come after, as the loop runs it again: an assignment, a `var` or `out` argument, or, of a variable of the program's, any call"
+                    )),
+                None => d,
+            };
             match having.as_slice() {
                 [] => d,
                 [only] => d.with_help(format!(

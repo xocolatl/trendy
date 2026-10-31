@@ -34,6 +34,7 @@ pub(crate) trait Assigning: Names {
 
 /// A variable an assignment assigns, of the program or local to the
 /// operator, or a `var` parameter, as it is declared.
+#[derive(Clone)]
 pub(crate) struct Assignee {
     pub(crate) target: hir::Target,
     /// Its value before the assignment: the variable itself, or, for a
@@ -44,6 +45,10 @@ pub(crate) struct Assignee {
     pub(crate) ty: hir::Type,
     pub(crate) keys: Vec<hir::Key>,
     pub(crate) declaration: Declared,
+    /// The narrower type a test shows its value to be of where it is
+    /// assigned, if one does (see [`crate::narrowed`]): the type an
+    /// `update` changes the components of, its value being one of it.
+    pub(crate) narrowed: Option<hir::Type>,
 }
 
 /// Where an assignee is declared.
@@ -65,6 +70,7 @@ impl Assignee {
             ty: local.ty.clone(),
             keys: local.keys.clone(),
             declaration: Declared::Variable(declaration.clone()),
+            narrowed: None,
         }
     }
 
@@ -77,6 +83,34 @@ impl Assignee {
             ty,
             keys: Vec::new(),
             declaration: Declared::Parameter(origin),
+            narrowed: None,
+        }
+    }
+
+    /// The variable as an `update` changes it: as a variable of the
+    /// narrower type a test shows its value to be of, if one does, whose
+    /// components the update gives new values, and otherwise as declared.
+    /// `update f { a := x }` is `f := f replace { a := x }`, whose `f` is
+    /// narrowed as any name is.
+    fn updated(&self) -> Assignee {
+        match &self.narrowed {
+            Some(ty) => Assignee {
+                ty: ty.clone(),
+                current: ops::treat_as(self.current.clone(), ty.clone()),
+                ..self.clone()
+            },
+            None => self.clone(),
+        }
+    }
+
+    /// The variable itself, as an `update` reads it, whose value is known
+    /// only when the program runs: as one of the narrower type a test shows
+    /// it to be of, if one does.
+    fn read(&self) -> hir::Expr {
+        let read = self.target.read();
+        match &self.narrowed {
+            Some(ty) => ops::treat_as(read, ty.clone()),
+            None => read,
         }
     }
 
@@ -286,7 +320,7 @@ fn change(
 /// The variable that `written`, an assignment's target, names, and the
 /// brackets of each position after it, from the variable's array in, if
 /// the target is a variable, or an element of one, as in `grid[i][j]`.
-fn target_path(written: &ast::Expr) -> Option<(ast::NameRef, Vec<ast::IndexExpr>)> {
+pub(crate) fn target_path(written: &ast::Expr) -> Option<(ast::NameRef, Vec<ast::IndexExpr>)> {
     let mut positions = Vec::new();
     let mut at = written.clone();
     loop {
@@ -1044,22 +1078,19 @@ fn update(
         list: &list,
         operand: target.written,
     };
-    let noun = errors::Noun::assigned(&target.assignee.ty);
+    let variable = target.assignee.updated();
+    let noun = errors::Noun::assigned(&variable.ty);
     let unchanged = |why| match why {
         Unchanged::Empty => errors::empty_update(noun, &list, &statement),
         Unchanged::OwnValues => errors::own_values_updated(noun, clause.span(), &statement),
     };
-    match (clause.where_keyword(), &target.assignee.ty) {
+    match (clause.where_keyword(), &variable.ty) {
         // Of the variable itself, whose value isn't known until it runs,
         // so that the attributes' values come back: the changes are
         // merged, then applied to its value (`attributes_merged`).
         (None, hir::Type::Tuple(_) | hir::Type::Defined(_)) => {
-            let updated = checker.assign_attributes(
-                target.assignee.target.read(),
-                &assigned,
-                unchanged,
-                errors,
-            )?;
+            let updated =
+                checker.assign_attributes(variable.read(), &assigned, unchanged, errors)?;
             let (tuple, representation) = match updated {
                 Replacement::Attributes(tuple) => (tuple, None),
                 // Of another representation than the stored one, its
@@ -1086,18 +1117,14 @@ fn update(
         }
         (Some(token), hir::Type::Tuple(_) | hir::Type::Defined(_)) => {
             let span = trendy_syntax::span(token.text_range());
-            errors.push(errors::not_restrictable(
-                span,
-                &target.assignee.ty,
-                target.written,
-            ));
+            errors.push(errors::not_restrictable(span, &variable.ty, target.written));
             None
         }
         (token, ty) => {
             let hir::Type::Relation(heading) = ty else {
                 // A scalar has no attributes to update.
                 checker.assign_attributes(
-                    target.assignee.current.clone(),
+                    variable.current.clone(),
                     &assigned,
                     unchanged,
                     errors,
@@ -1111,7 +1138,7 @@ fn update(
                 None => hir::Expr::Constant(hir::Value::Boolean(true)),
             };
             let selected = restricted(
-                target.assignee.current.clone(),
+                variable.current.clone(),
                 condition.clone(),
                 checker.bindings(),
             );
@@ -1259,7 +1286,14 @@ fn merged(
                 };
                 changes.push((clause, updated));
             }
-            updates_merged(assignee, representation, changes, names, errors)
+            // Of the variable as the updates change it: of a narrower type,
+            // a value of its declared type.
+            let value =
+                updates_merged(&assignee.updated(), representation, changes, names, errors)?;
+            Some(match &assignee.narrowed {
+                Some(_) => value.treated(&assignee.ty),
+                None => value,
+            })
         }
         Change::Tuples(change) => {
             let mut changes = vec![(clause, change)];

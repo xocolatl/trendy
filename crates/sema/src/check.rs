@@ -99,6 +99,14 @@ pub(crate) trait Names {
     /// What `name`, written at `span`, refers to.
     fn resolve(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup;
 
+    /// What `name`, written at `span`, refers to as a variable, which a
+    /// `var` or `out` argument passes: as it is declared, whatever a test
+    /// shows of its value, since the operator can give it any value of its
+    /// type (see [`crate::narrowed`]).
+    fn resolve_variable(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {
+        self.resolve(name, span, errors)
+    }
+
     /// The names in scope, which a name that refers to nothing may be a
     /// misspelling of.
     fn candidates(&self) -> Vec<String>;
@@ -152,6 +160,11 @@ pub(crate) trait Names {
 
     /// What evaluating a call substitutes, besides its arguments.
     fn bindings(&self) -> ops::Bindings<'_>;
+
+    /// Where a statement may assign `name`, if that ended what a test
+    /// showed of its value, in the branch or block being checked, so that
+    /// an error that needs it narrowed can say why it isn't.
+    fn narrowing_ended(&self, name: &str) -> Option<Span>;
 }
 
 /// A call's arguments, as written.
@@ -1117,10 +1130,14 @@ impl<'a> Checker<'a> {
                     }
                     // A variable of exactly the parameter's type, which the
                     // operator can give any value of it (*Type Inheritance
-                    // and Relational Theory*, IM Prescription 19).
+                    // and Relational Theory*, IM Prescription 19), as it is
+                    // declared.
                     Param::Variable(ty, _) => {
-                        let checked =
-                            self.typed_argument(&value, name, ty, None, &mut types, errors);
+                        let mut variables = crate::narrowed::Unnarrowed {
+                            outer: &mut *self.names,
+                        };
+                        let checked = Checker::new(&mut variables)
+                            .typed_argument(&value, name, ty, None, &mut types, errors);
                         match checked {
                             Some(hir::Expr::Treat(declared, variable)) => {
                                 let actual = self.ty(&variable);
@@ -1431,8 +1448,22 @@ impl<'a> Checker<'a> {
             errors.push(error);
             return None;
         }
+        // Where narrowing a name ended, for the error that needs it.
+        let ended = match unparenthesized(&operand_expr) {
+            Expr::Name(name) => name
+                .ident()
+                .and_then(|ident| self.names.narrowing_ended(ident.text())),
+            _ => None,
+        };
         let namespaces = self.namespaces();
-        let name = ops::extracted(extract, &operand_expr, &ty, &others, namespaces, errors)?;
+        let name = ops::extracted(
+            extract,
+            (&operand_expr, ended),
+            &ty,
+            &others,
+            namespaces,
+            errors,
+        )?;
         Some((operand, ty, name))
     }
 
@@ -3291,6 +3322,13 @@ impl Names for TupleNames<'_> {
     fn bindings(&self) -> ops::Bindings<'_> {
         self.outer.bindings()
     }
+
+    fn narrowing_ended(&self, name: &str) -> Option<Span> {
+        if self.heading.get(name).is_some() {
+            return None;
+        }
+        self.outer.narrowing_ended(name)
+    }
 }
 
 /// The value `written`, if there is one, checked with `names` in scope, as
@@ -3415,6 +3453,17 @@ impl Names for ComponentNames<'_> {
 
     fn bindings(&self) -> ops::Bindings<'_> {
         self.outer.bindings()
+    }
+
+    fn narrowing_ended(&self, name: &str) -> Option<Span> {
+        let component = self
+            .defined
+            .possible_representations()
+            .any(|h| h.get(name).is_some());
+        if component {
+            return None;
+        }
+        self.outer.narrowing_ended(name)
     }
 }
 

@@ -229,6 +229,21 @@ var outward := [
     numbers
 ];
 
+/* In an `if` statement's branches, a test narrows the name too, until a
+   statement may assign it: here each figure's major semiaxis, or its
+   number of vertices. */
+operator measure{figures: relation { name: text, figure: plane_figure }} [
+    var all: array plane_figure;
+    load all value from figures order [asc name] remove {name};
+    for figure in all loop [
+        if figure is ellipse then [
+            call debug_value{v: figure.a};
+        ] else if figure is polygon then [
+            call debug_value{v: count{r: figure.vertices}};
+        ];
+    ];
+];
+
 operator geometry{p: point, shape: polygon} [
     var opposite := reflect{p: p};
     call debug_value{v: opposite};
@@ -275,6 +290,7 @@ operator geometry{p: point, shape: polygon} [
     call debug_value{v: kind{figure: e}};
     call debug_value{v: kind{figure: shape}};
     call debug_table{r: figures extend { size := area{figure: figure} }{name, size}};
+    call measure{figures: figures};
 ];
 
 operator main{} [
@@ -298,6 +314,7 @@ operator main{} [
     call debug_value{v: kind{figure: squashed}};
     call debug_value{v: kind{figure: triangle}};
     call debug_table{r: sizes};
+    call measure{figures: figures};
 
     call geometry{p: pt, shape: triangle};
 ];
