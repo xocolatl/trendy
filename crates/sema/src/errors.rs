@@ -3349,14 +3349,15 @@ pub(crate) fn empty_operands(join: crate::ops::JoinKind, nary: &NaryExpr) -> Dia
 }
 
 /// The operator `name`, at `at`, called as a method of `operand`, as
-/// `operand.name` or `operand.name{…}`, written over `whole`. With a lone
-/// parameter `only`, the fix makes `operand` its argument.
+/// `operand.name` or `operand.name{…}`, written over `whole`. With `only`,
+/// the parameter the other arguments written leave, and those arguments,
+/// the fix makes `operand` its argument.
 pub(crate) fn method_call(
     name: &str,
     at: Span,
     operand: &Expr,
     whole: Span,
-    only: Option<&str>,
+    only: Option<(&str, &[AttributeValue])>,
     params: &str,
 ) -> Diagnostic {
     let d = Diagnostic::error(
@@ -3369,13 +3370,19 @@ pub(crate) fn method_call(
         "an operator is called by its name, with each argument named in braces after it, and none before it as a method's receiver: the parameters are {params}"
     ));
     match only {
-        Some(param) => d.with_suggestion(
-            format!("call `{name}` with it as `{param}`"),
-            vec![Edit {
-                span: whole,
-                replacement: format!("{name}{{{param}: {}}}", operand.syntax().text()),
-            }],
-        ),
+        Some((param, others)) => {
+            let arguments: Vec<String> =
+                std::iter::once(format!("{param}: {}", operand.syntax().text()))
+                    .chain(others.iter().map(|a| a.syntax().text().to_string()))
+                    .collect();
+            d.with_suggestion(
+                format!("call `{name}` with it as `{param}`"),
+                vec![Edit {
+                    span: whole,
+                    replacement: format!("{name}{{{}}}", arguments.join(", ")),
+                }],
+            )
+        }
         None => d.with_help(format!(
             "call it as `{name}{{…}}`, with this value as one of its arguments"
         )),

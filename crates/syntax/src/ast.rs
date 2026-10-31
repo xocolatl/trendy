@@ -79,6 +79,7 @@ ast_node!(BinaryExpr);
 ast_node!(ParenExpr);
 ast_node!(ExtractExpr);
 ast_node!(ProjectExpr);
+ast_node!(MethodCallExpr);
 ast_node!(PostfixExpr);
 ast_node!(NaryExpr);
 ast_node!(ImageExpr);
@@ -1230,6 +1231,19 @@ impl ProjectExpr {
     }
 }
 
+impl MethodCallExpr {
+    /// `x.f`, the value and the name called as its method.
+    #[must_use]
+    pub fn method(&self) -> Option<ExtractExpr> {
+        self.0.children().find_map(ExtractExpr::cast)
+    }
+
+    #[must_use]
+    pub fn arguments(&self) -> Option<Arguments> {
+        self.0.children().find_map(Arguments::cast)
+    }
+}
+
 impl PostfixExpr {
     /// The operator: `remove`, `rename` or `extend`.
     #[must_use]
@@ -1546,6 +1560,7 @@ pub enum Expr {
     Image(ImageExpr),
     From(FromExpr),
     Call(CallExpr),
+    MethodCall(MethodCallExpr),
     Block(ValueBlock),
 }
 
@@ -1570,6 +1585,7 @@ impl Expr {
             .or_else(|| ImageExpr::cast(node.clone()).map(Expr::Image))
             .or_else(|| FromExpr::cast(node.clone()).map(Expr::From))
             .or_else(|| CallExpr::cast(node.clone()).map(Expr::Call))
+            .or_else(|| MethodCallExpr::cast(node.clone()).map(Expr::MethodCall))
             .or_else(|| ValueBlock::cast(node).map(Expr::Block))
     }
 
@@ -1593,6 +1609,7 @@ impl Expr {
             Expr::Image(e) => e.syntax(),
             Expr::From(e) => e.syntax(),
             Expr::Call(e) => e.syntax(),
+            Expr::MethodCall(e) => e.syntax(),
             Expr::Block(e) => e.syntax(),
         }
     }

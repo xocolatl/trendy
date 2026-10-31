@@ -2124,13 +2124,7 @@ impl<'a> Parser<'a> {
         ) {
             self.missing_with_help(SyntaxKind::Ident, "name the operator to call after `call`");
         }
-        self.delimited(
-            Some(SyntaxKind::Arguments),
-            "argument list",
-            (SyntaxKind::LBrace, SyntaxKind::RBrace),
-            &[(SyntaxKind::LParen, SyntaxKind::RParen)],
-            |p| p.items(Self::at_argument, Self::argument),
-        );
+        self.arguments();
         self.end_statement();
         self.builder.finish_node();
     }
@@ -2880,19 +2874,24 @@ impl<'a> Parser<'a> {
         }
         match self.found_after(1).map(|f| f.kind) {
             Some(SyntaxKind::LParen) => self.paren_calls,
-            Some(SyntaxKind::LBrace) => {
-                self.mode_at(2).is_some()
-                    || self.at_named_argument(2)
-                    || match self.found_after(2) {
-                        // A projection's names are only ever followed by
-                        // `,` or its `}`.
-                        Some(f) if f.kind == SyntaxKind::Ident => self.continues_value(3),
-                        Some(f) => starts_value(f.kind),
-                        None => false,
-                    }
-            }
+            Some(SyntaxKind::LBrace) => self.at_arguments(1),
             _ => false,
         }
+    }
+
+    /// Whether the list opened at the significant token `n` after the next
+    /// one, or the next one for 0, holds arguments, which a projection's
+    /// names can't be: named ones, or one starting with a value, or with a
+    /// name the rest of a value follows, since a projection's names are
+    /// only ever followed by `,` or its `}`.
+    fn at_arguments(&mut self, n: usize) -> bool {
+        self.mode_at(n + 1).is_some()
+            || self.at_named_argument(n + 1)
+            || match self.lookahead_nth(n + 1) {
+                Some(f) if f.kind == SyntaxKind::Ident => self.continues_value(n + 2),
+                Some(f) => starts_value(f.kind),
+                None => false,
+            }
     }
 
     /// Whether a named argument starts at the significant token `n` after
@@ -2930,6 +2929,13 @@ impl<'a> Parser<'a> {
         self.start_node(SyntaxKind::NameRef);
         self.bump();
         self.builder.finish_node();
+        self.arguments();
+        self.builder.finish_node();
+    }
+
+    /// A call's arguments, in braces, or in parentheses, which are reported,
+    /// with a fix.
+    fn arguments(&mut self) {
         self.delimited(
             Some(SyntaxKind::Arguments),
             "argument list",
@@ -2937,7 +2943,6 @@ impl<'a> Parser<'a> {
             &[(SyntaxKind::LParen, SyntaxKind::RParen)],
             |p| p.items(Self::at_argument, Self::argument),
         );
-        self.builder.finish_node();
     }
 
     /// `name: value`, with a mode before the name if it has one, or a
@@ -3760,8 +3765,17 @@ impl<'a> Parser<'a> {
         loop {
             let next = self.lookahead().map(|f| f.kind);
             let method_call = extracted && next == Some(SyntaxKind::LParen);
+            let list =
+                method_call || (next == Some(SyntaxKind::LBrace) && !self.at_braced_statements());
+            let arguments = extracted && list && self.at_arguments(0);
             extracted = next == Some(SyntaxKind::Dot);
-            if next == Some(SyntaxKind::Dot) {
+            if arguments {
+                // `x.f{a: 1}` or `x.f("a")`: not a projection's names, so
+                // arguments, which sema reports.
+                self.builder
+                    .start_node_at(start, SyntaxKind::MethodCallExpr);
+                self.arguments();
+            } else if next == Some(SyntaxKind::Dot) {
                 self.builder.start_node_at(start, SyntaxKind::ExtractExpr);
                 self.bump();
                 if self.at(SyntaxKind::Ident) {
@@ -3780,9 +3794,7 @@ impl<'a> Parser<'a> {
                 self.bump();
                 self.expression();
                 self.expect(SyntaxKind::RBracket);
-            } else if (next == Some(SyntaxKind::LBrace) && !self.at_braced_statements())
-                || method_call
-            {
+            } else if list {
                 // `x.f()` is reported as `x.f{}` is, once its `()` is fixed.
                 self.builder.start_node_at(start, SyntaxKind::ProjectExpr);
                 let what = if method_call {
@@ -7076,6 +7088,54 @@ type rule { { constraint: text } };",
         // A constraint needs a condition.
         let errors = parse_str("type angle { { radians: approximate }, constraint };").errors;
         assert_eq!(errors[0].code, Code::MissingToken);
+    }
+
+    #[test]
+    fn a_method_calls_arguments_parse_as_arguments() {
+        let initial = |source: &str| {
+            let parse = parse_str(&format!("var x := {source};"));
+            let init = parse
+                .tree
+                .variables()
+                .next()
+                .unwrap()
+                .initializer()
+                .unwrap();
+            (init, parse.errors)
+        };
+        for written in ["s.f{a: 1}", "s.f{\"a\"}", "s.f{n + 1}", "s.f{a: 1}{b}"] {
+            let (init, errors) = initial(written);
+            assert!(errors.is_empty(), "{written}: {errors:#?}");
+            let call = match init {
+                Expr::Project(project) => project.operand().unwrap(),
+                init => init,
+            };
+            let Expr::MethodCall(call) = call else {
+                panic!("{written}: a method call");
+            };
+            assert!(call.method().is_some(), "{written}");
+            assert!(call.arguments().is_some(), "{written}");
+        }
+        // In parentheses, they get braces, and nothing else.
+        for (written, fixed) in [
+            ("s.f(\"a\")", "s.f{\"a\"}"),
+            ("s.f(a: 1, b: 2)", "s.f{a: 1, b: 2}"),
+            ("s.f(n + 1)", "s.f{n + 1}"),
+        ] {
+            let (init, errors) = initial(written);
+            assert!(matches!(init, Expr::MethodCall(_)), "{written}");
+            assert_eq!(
+                errors.iter().map(|e| e.code).collect::<Vec<_>>(),
+                [Code::WrongDelimiter],
+                "{written}"
+            );
+            let source = format!("var x := {written};");
+            assert_eq!(fix(&source), format!("var x := {fixed};"), "{written}");
+        }
+        // Names, or none, might be a projection's.
+        for written in ["s.f{}", "s.f{a}", "s.f{a, b}"] {
+            assert!(matches!(initial(written).0, Expr::Project(_)), "{written}");
+        }
     }
 
     #[test]

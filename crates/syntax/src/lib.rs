@@ -327,6 +327,10 @@ pub enum SyntaxKind {
     /// `name{}` is a projection to the parser, and sema makes it a call when
     /// `name` is an operator.
     CallExpr,
+    /// `x.f{a: 1}` or `x.f("a")`: arguments after an attribute's value, as
+    /// other languages call a method, which sema reports. `x.f{}` and
+    /// `x.f{a}` are projections to the parser.
+    MethodCallExpr,
     /// `{a, b}`: attribute names, as in a projection.
     NameList,
     /// `{a as b, c as d}`, in a `rename`.
@@ -398,7 +402,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 159] = [
+    pub const ALL: [SyntaxKind; 160] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -531,6 +535,7 @@ impl SyntaxKind {
         SyntaxKind::ImageExpr,
         SyntaxKind::FromExpr,
         SyntaxKind::CallExpr,
+        SyntaxKind::MethodCallExpr,
         SyntaxKind::NameList,
         SyntaxKind::RenameList,
         SyntaxKind::Renaming,
@@ -991,7 +996,8 @@ impl SyntaxKind {
             | SyntaxKind::NaryExpr
             | SyntaxKind::ImageExpr
             | SyntaxKind::FromExpr
-            | SyntaxKind::CallExpr => "expression",
+            | SyntaxKind::CallExpr
+            | SyntaxKind::MethodCallExpr => "expression",
             SyntaxKind::NameList => "attribute names",
             SyntaxKind::RenameList => "renamings",
             SyntaxKind::Renaming => "renaming",

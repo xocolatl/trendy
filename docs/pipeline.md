@@ -329,7 +329,10 @@ expression (`CallExpr`) is a name before arguments that a projection
 can't have: named ones, `f{a: x}`, or one starting with a value, `f{1}`,
 or with a name the rest of a value follows, `f{r where c}`, which sema
 reports, since a projection's names are only ever followed by `,` or its
-`}`. `f{}` and `f{a}` stay projections (`ProjectExpr`),
+`}`. Such a list after an attribute's name, `x.f{a: 1}` or `x.f("a")`, is
+a method call, as other languages write one (`MethodCallExpr`), which
+sema reports (A0022, or A0017 if `f` is an attribute). `f{}` and `f{a}`
+stay projections (`ProjectExpr`),
 and sema makes them calls of an operator; the parser can't, since it
 doesn't know what names are. A name before `(` is a call too, as other
 languages write one, fixed to braces (P0003), except in the condition of

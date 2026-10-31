@@ -8331,6 +8331,44 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
     }
 
     #[test]
+    fn a_method_calls_other_arguments_are_kept_in_its_fix() {
+        let scaled =
+            "operator scaled{n: integer, rate: integer}: integer [ n * rate ];\nvar seven := 7;\n";
+        let source = format!("{scaled}var x := seven.scaled{{rate: 2}};{MAIN}");
+        assert_eq!(codes(&source), [Code::WrongOperandType]);
+        let fixed = format!("{scaled}var x := scaled{{n: seven, rate: 2}};{MAIN}");
+        assert_eq!(fix(&source), fixed);
+        assert!(analyze_str(&fixed).is_ok());
+        // An argument without a name, or one the operator hasn't, leaves
+        // which parameter the value is for unknown.
+        for written in ["seven.scaled{2}", "seven.scaled{by: 2}"] {
+            let source = format!("{scaled}var x := {written};{MAIN}");
+            let diagnostics = errors(&source);
+            assert_eq!(
+                diagnostics.iter().map(|d| d.code).collect::<Vec<_>>(),
+                [Code::WrongOperandType],
+                "{written}"
+            );
+            assert!(diagnostics[0].suggestions.is_empty(), "{written}");
+        }
+        // An attribute's or a component's value is called as nothing.
+        let values =
+            "type point { {x: integer} };\nvar t := tuple { a: 1 };\nvar p := point{x: 1};\n";
+        for written in ["t.a{x: 1}", "p.x{y: 1}"] {
+            assert_eq!(
+                codes(&format!("{values}var x := {written};{MAIN}")),
+                [Code::NotAnOperator],
+                "{written}"
+            );
+        }
+        // A component named as an operator is still a component.
+        analyze_str(&format!(
+            "{values}operator x{{v: integer}}: integer [ v ];\nvar n := p.x;{MAIN}"
+        ))
+        .unwrap();
+    }
+
+    #[test]
     fn pythons_all_and_any_are_fixed() {
         // With a list's braces; in parentheses, the parser fixes them.
         for (written, fixed) in [("all{t, f}", "and{t, f}"), ("any{t, f}", "or{t, f}")] {

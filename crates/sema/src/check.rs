@@ -360,6 +360,7 @@ impl<'a> Checker<'a> {
                 self.assigned(postfix, assigning, expr, expected, errors)
             }
             Expr::Call(call) => self.written_call(call, expr, expected, errors),
+            Expr::MethodCall(call) => self.method_called(call, errors),
             Expr::Project(project) if let Some((ident, list)) = self.projected_call(project) => {
                 self.projection_call(&ident, &list, expr, expected, errors)
             }
@@ -579,49 +580,85 @@ impl<'a> Checker<'a> {
         self.matched(expected, element, expr, errors)
     }
 
-    /// The error for `extract`, `x.f`, of `operand`, of type `ty`, which has
-    /// no attribute `f`, if an operator is named `f`: a method call, as
-    /// object-oriented languages write one, which trendy writes `f{p: x}`.
+    /// The error for `extract`, `x.f`, of `operand`, of type `ty`, whose
+    /// other representations' components are `others`, if `x` has no
+    /// attribute or component `f` and an operator is named `f`: a method
+    /// call, as object-oriented languages write one, which trendy writes
+    /// `f{p: x}`.
     fn method_call(
         &self,
         extract: &ast::ExtractExpr,
         operand: &Expr,
         ty: &hir::Type,
+        others: &[&hir::Heading],
     ) -> Option<Diagnostic> {
         let ident = extract.attribute()?.ident()?;
         let name = ident.text();
-        if let hir::Type::Tuple(heading) = ty
-            && heading.get(name).is_some()
-        {
+        let has = match ty {
+            hir::Type::Tuple(heading) => heading.get(name).is_some(),
+            hir::Type::Defined(defined) => {
+                defined.components.get(name).is_some()
+                    || others.iter().any(|c| c.get(name).is_some())
+            }
+            _ => false,
+        };
+        if has {
             return None;
         }
-        // The operator of the name that takes one argument, `x`'s, if one
-        // does.
         let operators = self.names.operators();
-        let mut lone = operators.overloads(name).filter(|s| s.written.len() == 1);
-        let signature = lone.next().or_else(|| operators.overloads(name).next())?;
-        // The braces that follow, `x.f{…}`, hold the call's arguments; with
-        // none, `x.f`, `x` is its only one.
-        let braces = extract.syntax().parent().and_then(ast::ProjectExpr::cast);
-        let whole = braces
-            .as_ref()
-            .map_or_else(|| extract.span(), AstNode::span);
-        // `x` is the argument only if no other is written and just one
-        // overload takes one.
-        let only = (signature.written.len() == 1 && lone.next().is_none())
-            .then(|| signature.written.keys().next())
-            .flatten()
-            .filter(|_| {
-                braces
-                    .as_ref()
-                    .is_none_or(|p| p.names().is_some_and(|n| n.names().next().is_none()))
-            });
+        let first = operators.overloads(name).next()?;
+        // What follows `x.f`: the call's other arguments, in braces, or none.
+        // Names in braces, `x.f{a}`, might be attributes' or values, so
+        // which parameter `x` is for isn't known.
+        let parent = extract.syntax().parent();
+        let call = parent.clone().and_then(ast::MethodCallExpr::cast);
+        let projection = parent.and_then(ast::ProjectExpr::cast);
+        let whole = match (&call, &projection) {
+            (Some(call), _) => call.span(),
+            (None, Some(projection)) => projection.span(),
+            (None, None) => extract.span(),
+        };
+        let written: Option<Vec<ast::AttributeValue>> = match (&call, &projection) {
+            (Some(call), _) => call
+                .arguments()
+                .filter(|args| args.positional().next().is_none())
+                .map(|args| args.named().collect()),
+            (None, Some(projection)) => projection
+                .names()
+                .filter(|names| names.names().next().is_none())
+                .map(|_| Vec::new()),
+            (None, None) => Some(Vec::new()),
+        };
+        // The overloads that the arguments written leave one parameter
+        // of: `x` is for it if just one does.
+        let fitting: Vec<&Signature> = written.as_ref().map_or_else(Vec::new, |written| {
+            operators
+                .overloads(name)
+                .filter(|s| {
+                    s.written.len() == written.len() + 1
+                        && written.iter().all(|a| {
+                            a.name()
+                                .and_then(|n| n.ident())
+                                .is_some_and(|i| s.written.contains_key(i.text()))
+                        })
+                })
+                .collect()
+        });
+        let only = match (fitting.as_slice(), &written) {
+            ([signature], Some(written)) => signature
+                .written
+                .keys()
+                .find(|p| !written.iter().any(|a| a.is_named(p)))
+                .map(|param| (param.as_str(), written.as_slice())),
+            _ => None,
+        };
+        let signature = fitting.first().copied().unwrap_or(first);
         Some(errors::method_call(
             name,
             trendy_syntax::span(ident.text_range()),
             operand,
             whole,
-            only.map(String::as_str),
+            only,
             &operators.described(signature),
         ))
     }
@@ -1315,16 +1352,7 @@ impl<'a> Checker<'a> {
         expected: Option<&Expected>,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Expr> {
-        let operand_expr = extract.operand()?;
-        let operand = self.expr(&operand_expr, None, errors)?;
-        let ty = self.ty(&operand);
-        if let Some(error) = self.method_call(extract, &operand_expr, &ty) {
-            errors.push(error);
-            return None;
-        }
-        let others = self.other_components(&ty);
-        let others: Vec<&hir::Heading> = others.iter().collect();
-        let name = ops::extracted(extract, &operand_expr, &ty, &others, errors)?;
+        let (operand, ty, name) = self.extraction(extract, errors)?;
         let value = match &ty {
             hir::Type::Defined(defined) if defined.components.get(&name).is_none() => {
                 self.converted_component(defined, operand, &name, expr, errors)?
@@ -1333,6 +1361,50 @@ impl<'a> Checker<'a> {
             _ => ops::extract(operand, name),
         };
         self.matched(expected, value, expr, errors)
+    }
+
+    /// `extract`, `x.f`: the value `x`, its type, and `f`, if `x` has an
+    /// attribute or a component of that name, and otherwise reported, as a
+    /// method call if an operator is named `f`.
+    fn extraction(
+        &mut self,
+        extract: &ast::ExtractExpr,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<(hir::Expr, hir::Type, String)> {
+        let operand_expr = extract.operand()?;
+        let operand = self.expr(&operand_expr, None, errors)?;
+        let ty = self.ty(&operand);
+        let others = self.other_components(&ty);
+        let others: Vec<&hir::Heading> = others.iter().collect();
+        if let Some(error) = self.method_call(extract, &operand_expr, &ty, &others) {
+            errors.push(error);
+            return None;
+        }
+        let name = ops::extracted(extract, &operand_expr, &ty, &others, errors)?;
+        Some((operand, ty, name))
+    }
+
+    /// `call`, `x.f{a: 1}`: arguments after `x.f`, as object-oriented
+    /// languages call a method. The extraction reports a method call if
+    /// `f` is an operator, and an attribute's or a component's value takes
+    /// no arguments.
+    fn method_called(
+        &mut self,
+        call: &ast::MethodCallExpr,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let method = call.method()?;
+        let (_, ty, _) = self.extraction(&method, errors)?;
+        let what = match ty {
+            hir::Type::Defined(_) => "a component's value",
+            _ => "an attribute's value",
+        };
+        errors.push(errors::not_an_operator(
+            &method.syntax().text().to_string(),
+            method.span(),
+            what,
+        ));
+        None
     }
 
     /// The components of the possible representations of `ty`, if it is a
