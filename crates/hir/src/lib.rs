@@ -1295,6 +1295,15 @@ pub enum Expr {
     /// possible representation, as a tuple: what its `THE_` operators
     /// extract from, as `v.c` is `Extract(Components(v), c)`.
     Components(Box<Expr>),
+    /// The value of the expression, as a value of the type, a supertype of
+    /// the expression's: TREAT (*Type Inheritance and Relational Theory*,
+    /// IM Prescription 14), which gives a value its declared type where a
+    /// value of a subtype is substituted for one of it (IM Prescription
+    /// 16), or where what is known when compiling is narrower than what is
+    /// declared, as a variable's value can be. A value of a type in a
+    /// hierarchy is laid out as every value of its root's, so nothing
+    /// changes when running.
+    Treat(Box<Type>, Box<Expr>),
     /// The tuple at hand, with this heading: the one an `Extend` is computing
     /// attributes for, or a `Restrict` a condition, `depth` of them out from
     /// here, counting the innermost as 0. Its attributes are in scope by
@@ -1390,6 +1399,7 @@ impl Expr {
                 Type::Defined(defined) => Type::Tuple(defined.components),
                 other => panic!("the components of {other}"),
             },
+            Expr::Treat(ty, _) => (**ty).clone(),
         }
     }
 }
@@ -1436,9 +1446,11 @@ impl Expr {
             // A value breaks a constraint, or a constraint's operator
             // fails.
             Expr::Select(defined, operand) => !defined.constraints.is_empty() || operand.can_fail(),
-            Expr::Unary(_, operand) | Expr::At(_, operand) | Expr::Components(operand) => {
-                operand.can_fail()
-            }
+            // A value is a value of its type's supertypes.
+            Expr::Unary(_, operand)
+            | Expr::At(_, operand)
+            | Expr::Components(operand)
+            | Expr::Treat(_, operand) => operand.can_fail(),
             Expr::Tuple(attributes) => attributes.values().any(Expr::can_fail),
             Expr::Connective(_, operands) => operands.iter().any(Expr::can_fail),
             Expr::Extract(tuple, _) => tuple.can_fail(),
@@ -1452,6 +1464,32 @@ impl Expr {
             Expr::If(condition, then, otherwise) => {
                 condition.can_fail() || then.can_fail() || otherwise.can_fail()
             }
+        }
+    }
+
+    /// The expression, whose type is a subtype of `ty`, as one of `ty`: a
+    /// relation or an array known when compiling takes `ty`'s heading or
+    /// elements' type, which its value carries, a constant of `ty` stays
+    /// as it is, and anything else is treated as a value of `ty` (see
+    /// [`Expr::Treat`]), once.
+    #[must_use]
+    pub fn treated(self, ty: &Type) -> Expr {
+        match (self, ty) {
+            (Expr::Constant(Value::Relation(relation)), Type::Relation(heading)) => {
+                Expr::Constant(Value::Relation(RelationValue {
+                    heading: heading.clone(),
+                    tuples: relation.tuples,
+                }))
+            }
+            (Expr::Constant(Value::Array(array)), Type::Array(element)) => {
+                Expr::Constant(Value::Array(ArrayValue {
+                    element: (**element).clone(),
+                    elements: array.elements,
+                }))
+            }
+            (Expr::Constant(value), _) if value.ty() == *ty => Expr::Constant(value),
+            (Expr::Treat(_, inner), _) => inner.treated(ty),
+            (expr, _) => Expr::Treat(Box::new(ty.clone()), Box::new(expr)),
         }
     }
 
@@ -1606,6 +1644,7 @@ impl Expr {
             Expr::Only(operand) => Expr::Only(Box::new(f(*operand, 0))),
             Expr::Select(defined, components) => Expr::Select(defined, Box::new(f(*components, 0))),
             Expr::Components(value) => Expr::Components(Box::new(f(*value, 0))),
+            Expr::Treat(ty, value) => Expr::Treat(ty, Box::new(f(*value, 0))),
             Expr::Call(call) => Expr::Call(Call {
                 args: call
                     .args
@@ -1635,6 +1674,7 @@ impl Expr {
             | Expr::Only(operand)
             | Expr::Select(_, operand)
             | Expr::Components(operand)
+            | Expr::Treat(_, operand)
             | Expr::Load(operand, ..)
             | Expr::Unload(operand, ..) => f(operand, 0),
             Expr::Let(_, lhs, rhs)
@@ -1778,6 +1818,7 @@ impl Expr {
             // A type of the program's own has no type parameters in it.
             Expr::Select(defined, components) => Expr::Select(defined.clone(), inst(components)),
             Expr::Components(value) => Expr::Components(inst(value)),
+            Expr::Treat(ty, value) => Expr::Treat(Box::new(ty.instantiated(types)), inst(value)),
             Expr::Current(depth, heading) => Expr::Current(*depth, heading.instantiated(types)),
             Expr::Call(call) => Expr::Call(call.instantiated(types)),
         }
@@ -2519,6 +2560,86 @@ impl Type {
         }
     }
 
+    /// The union types a type of the program's own is a subtype of, the
+    /// immediate one first, and so on up: none for any other type.
+    fn supertypes(&self) -> &[String] {
+        match self {
+            Type::Defined(defined) => &defined.supertypes,
+            Type::Dummy(dummy) => &dummy.supertypes,
+            _ => &[],
+        }
+    }
+
+    /// Whether every value of the type is a value of `other` (*Type
+    /// Inheritance and Relational Theory*, IM Prescriptions 2, 3 and 22):
+    /// it is `other`, or one of `other`'s subtypes, or, for tuples and
+    /// relations with the same attributes, each attribute's type is a
+    /// subtype of `other`'s, and for arrays, the elements' type is.
+    #[must_use]
+    pub fn is_subtype_of(&self, other: &Type) -> bool {
+        match (self, other) {
+            _ if self == other => true,
+            (_, Type::Dummy(dummy)) => self.supertypes().contains(&dummy.name),
+            (Type::Tuple(a), Type::Tuple(b)) | (Type::Relation(a), Type::Relation(b)) => {
+                a.0.len() == b.0.len()
+                    && a.0.iter().all(|(name, ty)| {
+                        b.0.get(name).is_some_and(|wider| ty.is_subtype_of(wider))
+                    })
+            }
+            (Type::Array(a), Type::Array(b)) => a.is_subtype_of(b),
+            _ => false,
+        }
+    }
+
+    /// The most specific type that both this type and `other` are subtypes
+    /// of, if they have one (IM Prescriptions 8 and 24): of two types of
+    /// the program's own, the nearest union type above both, and of tuples
+    /// and relations with the same attributes, and arrays, attribute by
+    /// attribute, and element type.
+    #[must_use]
+    pub fn common_supertype(&self, other: &Type) -> Option<Type> {
+        if other.is_subtype_of(self) {
+            return Some(self.clone());
+        }
+        if self.is_subtype_of(other) {
+            return Some(other.clone());
+        }
+        match (self, other) {
+            (Type::Tuple(a), Type::Tuple(b)) => a.common_supertype(b).map(Type::Tuple),
+            (Type::Relation(a), Type::Relation(b)) => a.common_supertype(b).map(Type::Relation),
+            (Type::Array(a), Type::Array(b)) => a
+                .common_supertype(b)
+                .map(|element| Type::Array(Box::new(element))),
+            _ => {
+                let above = self.supertypes();
+                let nearest = above.iter().position(|s| other.supertypes().contains(s))?;
+                Some(Type::Dummy(Box::new(Dummy {
+                    name: above[nearest].clone(),
+                    supertypes: above[nearest + 1..].to_vec(),
+                })))
+            }
+        }
+    }
+
+    /// Whether some value is of both this type and `other` (IM
+    /// Prescription 7): one is a subtype of the other, since a union type's
+    /// subtypes are disjoint, or, for tuples and relations with the same
+    /// attributes, and arrays, each attribute's types, and the elements',
+    /// overlap.
+    #[must_use]
+    pub fn overlaps(&self, other: &Type) -> bool {
+        match (self, other) {
+            (Type::Tuple(a), Type::Tuple(b)) | (Type::Relation(a), Type::Relation(b)) => {
+                a.0.len() == b.0.len()
+                    && a.0
+                        .iter()
+                        .all(|(name, ty)| b.0.get(name).is_some_and(|other| ty.overlaps(other)))
+            }
+            (Type::Array(a), Type::Array(b)) => a.overlaps(b),
+            _ => self.is_subtype_of(other) || other.is_subtype_of(self),
+        }
+    }
+
     /// The type, in an operator instantiated with `types`: each type
     /// parameter in it replaced by its type, by index.
     #[must_use]
@@ -2861,6 +2982,21 @@ impl Scalar {
 pub struct Heading(BTreeMap<String, Type>);
 
 impl Heading {
+    /// The heading whose attributes' types are the most specific common
+    /// supertypes of this one's and `other`'s, if they have the same
+    /// attributes and each pair has one (see [`Type::common_supertype`]).
+    #[must_use]
+    pub fn common_supertype(&self, other: &Heading) -> Option<Heading> {
+        if self.0.len() != other.0.len() {
+            return None;
+        }
+        self.0
+            .iter()
+            .map(|(name, ty)| Some((name.clone(), ty.common_supertype(other.0.get(name)?)?)))
+            .collect::<Option<_>>()
+            .map(Heading)
+    }
+
     #[must_use]
     pub fn new(attributes: BTreeMap<String, Type>) -> Self {
         Heading(attributes)
@@ -3792,6 +3928,77 @@ mod tests {
         assert_eq!(ab, ba);
         assert_eq!(ba.to_string(), "tuple { a: integer, b: text }");
         assert_eq!(tuple(&[]).to_string(), "tuple {}");
+    }
+
+    #[test]
+    fn subtypes_are_subsets_of_their_union_types() {
+        let defined = |name: &str, supertypes: &[&str]| {
+            Type::Defined(Box::new(Defined {
+                name: name.to_string(),
+                components: Heading::default(),
+                representations: Vec::new(),
+                constraints: Vec::new(),
+                order: None,
+                supertypes: supertypes.iter().map(ToString::to_string).collect(),
+            }))
+        };
+        let dummy = |name: &str, supertypes: &[&str]| {
+            Type::Dummy(Box::new(Dummy {
+                name: name.to_string(),
+                supertypes: supertypes.iter().map(ToString::to_string).collect(),
+            }))
+        };
+        // figure > { curve > { ellipse, parabola }, polygon }
+        let figure = dummy("figure", &[]);
+        let curve = dummy("curve", &["figure"]);
+        let ellipse = defined("ellipse", &["curve", "figure"]);
+        let parabola = defined("parabola", &["curve", "figure"]);
+        let polygon = defined("polygon", &["figure"]);
+        assert!(ellipse.is_subtype_of(&figure));
+        assert!(ellipse.is_subtype_of(&curve));
+        assert!(curve.is_subtype_of(&figure));
+        assert!(!figure.is_subtype_of(&ellipse));
+        assert!(!ellipse.is_subtype_of(&polygon));
+        // The nearest union type above both.
+        assert_eq!(ellipse.common_supertype(&parabola), Some(curve.clone()));
+        assert_eq!(ellipse.common_supertype(&polygon), Some(figure.clone()));
+        assert_eq!(ellipse.common_supertype(&curve), Some(curve.clone()));
+        assert_eq!(
+            ellipse.common_supertype(&Type::Scalar(Scalar::Integer)),
+            None
+        );
+        // Subtypes of one type are disjoint.
+        assert!(ellipse.overlaps(&figure) && figure.overlaps(&ellipse));
+        assert!(!ellipse.overlaps(&polygon));
+        // Tuples, relations and arrays, attribute by attribute and element
+        // type.
+        let tuple = |ty: &Type| Type::Tuple(Heading::new([("s".to_string(), ty.clone())].into()));
+        let relation =
+            |ty: &Type| Type::Relation(Heading::new([("s".to_string(), ty.clone())].into()));
+        assert!(relation(&ellipse).is_subtype_of(&relation(&figure)));
+        assert!(!relation(&figure).is_subtype_of(&relation(&ellipse)));
+        assert_eq!(
+            tuple(&ellipse).common_supertype(&tuple(&polygon)),
+            Some(tuple(&figure))
+        );
+        let array = |ty: &Type| Type::Array(Box::new(ty.clone()));
+        assert_eq!(
+            array(&ellipse).common_supertype(&array(&parabola)),
+            Some(array(&curve))
+        );
+        assert!(!relation(&ellipse).overlaps(&relation(&polygon)));
+        // A known relation takes the wider heading, which its value
+        // carries; another value is treated as one of the wider type.
+        let empty = Expr::Constant(relation(&ellipse).default_value().unwrap());
+        assert_eq!(
+            empty.treated(&relation(&figure)),
+            Expr::Constant(relation(&figure).default_value().unwrap())
+        );
+        let value = Expr::Parameter("e".to_string());
+        assert_eq!(
+            value.clone().treated(&curve).treated(&figure),
+            Expr::Treat(Box::new(figure.clone()), Box::new(value))
+        );
     }
 
     #[test]

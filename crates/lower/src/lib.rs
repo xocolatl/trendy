@@ -1850,6 +1850,9 @@ impl<'a> FunctionBuilder<'a> {
             // of its components.
             hir::Expr::Select(defined, operand) => self.selected(defined, operand, cx),
             hir::Expr::Components(operand) => self.components(operand, cx),
+            // A value of a type in a hierarchy is laid out as one of each of
+            // its supertypes.
+            hir::Expr::Treat(_, operand) => self.place(operand, cx),
             hir::Expr::Semijoin(lhs, rhs) => self.matching(lhs, rhs, false, cx),
             hir::Expr::Combine(combination, lhs, rhs) => self.combine(*combination, lhs, rhs, cx),
             hir::Expr::Antijoin(lhs, rhs) => self.matching(lhs, rhs, true, cx),

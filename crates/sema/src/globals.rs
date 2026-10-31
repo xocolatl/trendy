@@ -697,7 +697,11 @@ impl Names for Globals<'_> {
     fn resolve(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {
         if self.ids.contains_key(name) {
             return match self.reach(name, span, errors) {
-                Some(variable) => Lookup::Found(hir::Expr::Constant(variable.init)),
+                // Of its declared type, which can be a supertype of its
+                // value's.
+                Some(variable) => {
+                    Lookup::Found(hir::Expr::Constant(variable.init).treated(&variable.ty))
+                }
                 None => Lookup::Reported,
             };
         }
@@ -980,9 +984,11 @@ fn variable(
             };
             (ty, init)
         }
+        // Its type is its value's declared type, which can be a supertype
+        // of the value's own.
         (None, Some(expr)) => {
-            let value = types::value(&expr, None, globals, errors)?;
-            (value.ty(), value)
+            let (value, ty) = types::value(&expr, None, globals, errors)?;
+            (ty, value)
         }
         (Some((None, _)), Some(expr)) => {
             // The type is invalid, but the value can still have errors of its
@@ -995,7 +1001,7 @@ fn variable(
                 ty: ty.clone(),
                 origin: types::Origin::Type(type_expr),
             };
-            let value = types::value(&expr, Some(&expected), globals, errors)?;
+            let (value, _) = types::value(&expr, Some(&expected), globals, errors)?;
             (ty, value)
         }
     };

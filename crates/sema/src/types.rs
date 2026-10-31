@@ -560,11 +560,14 @@ pub(crate) fn value(
     expected: Option<&Expected>,
     names: &mut dyn Names,
     errors: &mut Vec<Diagnostic>,
-) -> Option<hir::Value> {
-    match Checker::new(names).expr(expr, expected, errors)? {
-        hir::Expr::Constant(value) => Some(value),
+) -> Option<(hir::Value, hir::Type)> {
+    let mut checker = Checker::new(names);
+    let out = checker.expr(expr, expected, errors)?;
+    let ty = checker.ty(&out);
+    match crate::ops::known_value(&out) {
+        Some(value) => Some((value.clone(), ty)),
         // Nothing in one reads input (`Checker::call`).
-        other => unreachable!("an expression of constants folds to a constant: {other:?}"),
+        None => unreachable!("an expression of constants folds to a constant: {out:?}"),
     }
 }
 
@@ -759,28 +762,26 @@ pub(crate) fn relation_selector(
 
     let elements: Vec<Expr> = relation.elements().collect();
     let mut ok = true;
-    // Without a heading from the selector or the context, the first tuple
-    // that is valid on its own sets it for the rest, wherever it is, as the
-    // tuples have no order (see [`Alone`]).
-    let mut alone: Vec<Option<Alone<hir::Expr>>> = vec![None; elements.len()];
+    // Without a heading from the selector or the context, the tuples valid
+    // on their own set it for the rest, whatever their order, as the
+    // tuples have none (see [`Alone`] and [`widen`]).
+    let mut alone: Vec<Option<Alone<(hir::Expr, hir::Type)>>> = vec![None; elements.len()];
     if element.is_none() {
         for (tuple, alone) in elements.iter().zip(&mut alone) {
             let mut own_errors = Vec::new();
             let out = checker.expr(tuple, None, &mut own_errors);
+            let out = out.map(|out| {
+                let ty = checker.ty(&out);
+                (out, ty)
+            });
             let on_its_own = Alone::of(out, own_errors, tuple.span());
-            if let Alone::Valid(out) = &on_its_own {
-                let ty = checker.ty(out);
+            if let Alone::Valid((_, ty)) = &on_its_own {
                 if !matches!(ty, hir::Type::Tuple(_)) {
-                    errors.push(errors::not_a_tuple(&ty, tuple));
+                    errors.push(errors::not_a_tuple(ty, tuple));
                     *alone = Some(Alone::Failed(Vec::new()));
                     continue;
                 }
-                element = Some(Expected {
-                    ty,
-                    origin: Origin::Value(tuple.clone()),
-                });
-                *alone = Some(on_its_own);
-                break;
+                widen(&mut element, ty.clone(), tuple);
             }
             *alone = Some(on_its_own);
         }
@@ -789,7 +790,7 @@ pub(crate) fn relation_selector(
     let mut known: BTreeMap<hir::TupleValue, Span> = BTreeMap::new();
     for (tuple, alone) in elements.iter().zip(alone) {
         let out = match alone {
-            Some(alone) => alone.finish(element.is_some(), tuple.span(), errors, |errors| {
+            Some(alone) => alone.fit(element.as_ref(), tuple.span(), errors, |errors| {
                 checker.expr(tuple, element.as_ref(), errors)
             }),
             None => checker.expr(tuple, element.as_ref(), errors),
@@ -886,6 +887,61 @@ impl<T> Alone<T> {
     }
 }
 
+/// Values that meet, as an `if`'s branches, an array's elements, a
+/// relation's tuples and an operator's operands do, without a type expected
+/// of them, have the most specific common supertype of the types of those
+/// valid on their own (*Type Inheritance and Relational Theory*, IM
+/// Prescription 8), whatever their order: `expectation` is widened to it
+/// by the value written `written`, of type `ty`, valid on its own, if it
+/// has one with what the others before it set, and otherwise left for the
+/// value to be reported against (see [`fitted`]).
+pub(crate) fn widen(expectation: &mut Option<Expected>, ty: hir::Type, written: &Expr) {
+    match expectation {
+        None => {
+            *expectation = Some(Expected {
+                ty,
+                origin: Origin::Value(written.clone()),
+            });
+        }
+        Some(expected) => {
+            if let Some(common) = expected.ty.common_supertype(&ty) {
+                expected.ty = common;
+            }
+        }
+    }
+}
+
+impl Alone<(hir::Expr, hir::Type)> {
+    /// The value written at `span`, checked on its own, as a value of the
+    /// type values that meet have, `expected` (see [`widen`]), if there is
+    /// one: valid on its own, of that type or treated as one of that
+    /// supertype of its own, and otherwise as [`Alone::finish`] has it.
+    /// One valid on its own but of neither is checked against `expected`
+    /// by `check`, which reports it.
+    pub(crate) fn fit(
+        self,
+        expected: Option<&Expected>,
+        span: Span,
+        errors: &mut Vec<Diagnostic>,
+        check: impl FnOnce(&mut Vec<Diagnostic>) -> Option<hir::Expr>,
+    ) -> Option<hir::Expr> {
+        match self {
+            Alone::Valid((out, ty)) => match expected {
+                Some(expected) if ty == expected.ty => Some(out),
+                Some(expected) if ty.is_subtype_of(&expected.ty) => Some(out.treated(&expected.ty)),
+                Some(_) => check(errors),
+                None => Some(out),
+            },
+            Alone::Waiting(own) => {
+                Alone::Waiting(own).finish(expected.is_some(), span, errors, check)
+            }
+            Alone::Failed(own) => {
+                Alone::Failed(own).finish(expected.is_some(), span, errors, check)
+            }
+        }
+    }
+}
+
 /// Whether `error`, of a value written at `span`, is one that another
 /// value's type gives what it lacks: an empty relation's unknown heading,
 /// in the value. Errors elsewhere, as in an operator it calls, checked
@@ -934,19 +990,18 @@ pub(crate) fn array_selector(
         None => None,
     };
     let elements: Vec<Expr> = array.elements().collect();
-    let mut alone: Vec<Option<Alone<hir::Expr>>> = vec![None; elements.len()];
+    let mut alone: Vec<Option<Alone<(hir::Expr, hir::Type)>>> = vec![None; elements.len()];
     if element.is_none() {
         for (written, alone) in elements.iter().zip(&mut alone) {
             let mut own_errors = Vec::new();
             let out = checker.expr(written, None, &mut own_errors);
+            let out = out.map(|out| {
+                let ty = checker.ty(&out);
+                (out, ty)
+            });
             let on_its_own = Alone::of(out, own_errors, written.span());
-            if let Alone::Valid(out) = &on_its_own {
-                element = Some(Expected {
-                    ty: checker.ty(out),
-                    origin: Origin::Value(written.clone()),
-                });
-                *alone = Some(on_its_own);
-                break;
+            if let Alone::Valid((_, ty)) = &on_its_own {
+                widen(&mut element, ty.clone(), written);
             }
             *alone = Some(on_its_own);
         }
@@ -955,7 +1010,7 @@ pub(crate) fn array_selector(
     let mut values = Vec::new();
     for (written, alone) in elements.iter().zip(alone) {
         let out = match alone {
-            Some(alone) => alone.finish(element.is_some(), written.span(), errors, |errors| {
+            Some(alone) => alone.fit(element.as_ref(), written.span(), errors, |errors| {
                 checker.expr(written, element.as_ref(), errors)
             }),
             None => checker.expr(written, element.as_ref(), errors),

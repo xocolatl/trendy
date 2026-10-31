@@ -750,6 +750,49 @@ pub(crate) fn lone_subtype(ident: &SyntaxToken, subtypes: &[(String, Span)]) -> 
     }
 }
 
+/// Why a value of type `found` isn't one of `declared`, of one hierarchy,
+/// or with attributes or elements of one, if they are: `found` is a union
+/// type, whose values can be of its other subtypes, or the two are
+/// disjoint.
+fn hierarchy_note(declared: &hir::Type, found: &hir::Type) -> Option<String> {
+    match (declared, found) {
+        (hir::Type::Tuple(a), hir::Type::Tuple(b))
+        | (hir::Type::Relation(a), hir::Type::Relation(b)) => a
+            .attributes()
+            .find_map(|(name, ty)| hierarchy_note(ty, b.get(name)?)),
+        (hir::Type::Array(a), hir::Type::Array(b)) => hierarchy_note(a, b),
+        _ if declared.root().is_none()
+            || declared.root() != found.root()
+            || found.is_subtype_of(declared) =>
+        {
+            None
+        }
+        _ if declared.is_subtype_of(found) => Some(format!(
+            "a value of `{found}` is a value of one of its subtypes, which needn't be `{declared}`"
+        )),
+        _ => {
+            let common = declared.common_supertype(found)?;
+            Some(format!(
+                "`{declared}` and `{found}` are both `{common}`, but no value is of both: a union type's subtypes are disjoint"
+            ))
+        }
+    }
+}
+
+/// The argument written `written`, of type `actual`, for a `var` or `out`
+/// parameter of type `declared`, whose origin is `origin`, a supertype of
+/// `actual`.
+pub(crate) fn variable_subtype(
+    declared: &hir::Type,
+    actual: &hir::Type,
+    origin: &Origin,
+    written: &Expr,
+) -> Diagnostic {
+    type_mismatch(declared, origin, actual, None, written).with_note(format!(
+        "a `var` or `out` parameter's argument is a variable of exactly its type, since the operator can give it any value of `{declared}`, which a variable of `{actual}` can't hold (*Type Inheritance and Relational Theory*, IM Prescription 19)"
+    ))
+}
+
 /// A value written as `expr`, of type `found`, where `declared` is expected
 /// because of `origin`. `value` is the value, if it is a constant, for fixes
 /// that rewrite the literal.
@@ -769,6 +812,9 @@ pub(crate) fn type_mismatch(
         )
         .with_note("values never convert to another type implicitly"),
     );
+    if let Some(note) = hierarchy_note(declared, found) {
+        d = d.with_note(note);
+    }
     let unnamed = |ty: &hir::Type| ty.parameters().any(|p| p.name.is_none());
     if unnamed(declared) || unnamed(found) {
         d = d.with_note("each `any type`, `any tuple` or `any relation` written as a parameter's type is a type of its own; to make parameters' types the same, declare one type parameter after the signature, `types { T: any type }`, and write `T` in each");

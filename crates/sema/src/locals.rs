@@ -370,10 +370,7 @@ pub(crate) fn local(
         }
     };
     // A relation known when compiling is checked against the keys now.
-    let known = match &value {
-        hir::Expr::Constant(value) => Some(value),
-        _ => None,
-    };
+    let known = crate::ops::known_value(&value);
     let keys = keys::keys(decl, name, &ty, known, names, errors)?;
     Some((
         hir::Local {

@@ -1012,6 +1012,22 @@ one with run-time parts becomes `hir::Expr::Tuple` or
 `hir::Expr::Relation`. Duplicate tuples are an error only when both are
 constants; tuples known only when running become one if they are equal.
 
+A value of a subtype where one of a union type is expected, as `check::
+Checker::matched` allows (IM Prescription 16), keeps its declared type in
+`hir::Expr::Treat`, TREAT to a supertype, which lowering lays out as its
+operand (`hir::Expr::treated`; a known relation or array takes the wider
+heading or element type instead, which its value carries). What is known
+when compiling is never more specific than what is declared: a
+variable's, a let's, a parameter's, a call's or an attribute's known value
+is treated as its declared type (`ops::typed`), folding sees through a
+treat (`ops::known_value`), and what it folds has the type the unfolded
+expression would, so a check never depends on what folds. Values that
+meet, as an `if`'s branches, an array's elements, a relation's tuples and
+an operator's operands, are each checked on their own, and have the most
+specific common supertype of those valid on their own (`types::widen`, IM
+Prescription 8), whatever their order; operands only of types that overlap
+(IM Prescription 12), since a union type's subtypes are disjoint.
+
 In an `extend`'s or a `replace`'s values, names resolve first to the
 attributes of the tuple at hand (`check::TupleNames`), as `Current(0, …)`'s attributes, and then to
 whatever they name around the `extend`, one `Current` level deeper. An

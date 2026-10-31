@@ -8778,6 +8778,114 @@ heading home := { city: text, rooms: integer };
         );
     }
 
+    /// A union type, `figure`, and its subtypes, `disc` and `square`, as
+    /// tests of substitution declare them, with a value of each.
+    const FIGURES: &str = "type figure union;
+type disc is figure { { r: approximate } };
+type square is figure { { side: approximate } };
+var round := disc{r: 1e0};
+var box := square{side: 2e0};
+";
+
+    #[test]
+    fn a_subtypes_value_is_a_value_of_its_union_type() {
+        let variables = variables(&format!(
+            "{FIGURES}var f: figure := round;
+var shapes := relation {{ {{ s: round }}, {{ s: box }} }};
+var both := array [round, box];
+var either := if count{{r: shapes}} > 5 then round else box;
+var same := f = round;
+var also := round = f;
+var wrapped := tuple {{ s: f }};
+operator first{{}}: figure [ disc{{r: 3e0}} ];
+var made := first{{}};
+"
+        ));
+        let figure = || {
+            hir::Type::Dummy(Box::new(hir::Dummy {
+                name: "figure".to_string(),
+                supertypes: Vec::new(),
+            }))
+        };
+        let s = |ty: hir::Type| hir::Heading::new([("s".to_string(), ty)].into());
+        let types: BTreeMap<&str, &hir::Type> =
+            variables.iter().map(|v| (v.name.as_str(), &v.ty)).collect();
+        // Each has its declared type, the most specific common supertype
+        // of what meets in it, whatever its value's own type.
+        assert_eq!(types["f"], &figure());
+        assert_eq!(types["shapes"], &hir::Type::Relation(s(figure())));
+        assert_eq!(types["both"], &hir::Type::Array(Box::new(figure())));
+        assert_eq!(types["either"], &figure());
+        assert_eq!(types["wrapped"], &hir::Type::Tuple(s(figure())));
+        assert_eq!(types["made"], &figure());
+        let value = |name: &str| &variables.iter().find(|v| v.name == name).unwrap().init;
+        assert_eq!(value("f"), value("round"));
+        assert_eq!(value("same"), &hir::Value::Boolean(true));
+        assert_eq!(value("also"), &hir::Value::Boolean(true));
+        // A value known when compiling is no more specific than its
+        // declared type says: none of these is valid, though each value
+        // is a disc.
+        for invalid in [
+            "var x := f.r;",
+            "var x: disc := f;",
+            "var x := made.r;",
+            "var x := wrapped.s.r;",
+            "var x := both[1].r;",
+            "var x := (tuple from (shapes where s = round)).s.r;",
+            "var x := [ var y: figure := round; y.r ];",
+        ] {
+            let source = format!(
+                "{FIGURES}var f: figure := round;\nvar made := first{{}};\noperator first{{}}: figure [ disc{{r: 3e0}} ];\nvar wrapped := tuple {{ s: f }};\nvar both := array [round, box];\nvar shapes := relation {{ {{ s: round }}, {{ s: box }} }};\n{invalid}{MAIN}"
+            );
+            let found = errors(&source);
+            assert_eq!(found.len(), 1, "{invalid}: {found:#?}");
+            assert!(
+                matches!(found[0].code, Code::WrongOperandType | Code::TypeMismatch),
+                "{invalid}: {found:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn disjoint_subtypes_are_never_equal_and_variables_are_exact() {
+        // No value is both a disc and a square.
+        let found = errors(&format!("{FIGURES}var x := round = box;{MAIN}"));
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert_eq!(found[0].code, Code::TypeMismatch);
+        assert!(
+            found[0].notes.contains(
+                &"`disc` and `square` are both `figure`, but no value is of both: a union type's subtypes are disjoint"
+                    .to_string()
+            ),
+            "{found:#?}"
+        );
+        // A value of the union type can be of another subtype.
+        let found = errors(&format!(
+            "{FIGURES}var f: figure := round;\nvar x: disc := f;{MAIN}"
+        ));
+        assert!(
+            found[0].notes.contains(
+                &"a value of `figure` is a value of one of its subtypes, which needn't be `disc`"
+                    .to_string()
+            ),
+            "{found:#?}"
+        );
+        // A `var` parameter's argument is of exactly its type, which the
+        // operator can assign any value of.
+        let found = errors(&format!(
+            "{FIGURES}operator grow{{var f: figure}} [ f := box; ];\noperator main{{}} [ var d := round; call grow{{var f: d}}; ];"
+        ));
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert_eq!(found[0].code, Code::TypeMismatch);
+        assert!(
+            found[0]
+                .notes
+                .iter()
+                .any(|n| n.contains("IM Prescription 19")),
+            "{found:#?}"
+        );
+    }
+
     #[test]
     fn a_dummy_type_has_no_selector_order_or_components() {
         // A dummy type has no selector; a fix selects the one subtype whose

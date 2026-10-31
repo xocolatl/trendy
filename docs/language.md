@@ -1995,10 +1995,20 @@ type ellipse is plane_figure {
 };
 type polygon is plane_figure { { corners: integer } };
 
+var lake := ellipse{a: 3e0, b: 2e0};
+var field := polygon{corners: 4};
+
+/* A value of either kind is a plane figure. */
+var figures := relation {
+    { name: "Victoria", figure: lake },
+    { name: "Zócalo", figure: field },
+};
+
 operator main{} [
-    var lake := ellipse{a: 3e0, b: 2e0};
-    call debug_value{v: lake};
+    var figure: plane_figure := lake;
     call debug_value{v: lake.a};
+    call debug_value{v: figure = lake};
+    call debug_table{r: figures};
 ];
 ```
 
@@ -2028,9 +2038,27 @@ operator main{} [
   needs an initial value (A0006), and `<` is an error (A0022). `load_csv`
   reads a subtype's values as any type's, but not a union type's, since
   a record's columns can't say which subtype it is.
-- **Not yet:** a subtype's value where its union type's is expected,
-  `is` to tell the subtypes apart, and `treat` to take one as a value of
-  its subtype.
+- **A subtype's value is a value of its union type,** so it can be given
+  wherever one of the union type is expected: assigned to a variable,
+  passed to an operator, or held in an attribute or an element (IM
+  Prescription 16). It is the same value, so nothing is converted.
+- **Values that meet have the most specific type they all are** (IM
+  Prescription 8): `figures` above is a `relation { name: text, figure:
+  plane_figure }`, and so is an array of an ellipse and a polygon, or an
+  `if` that gives one or the other.
+- **What is known of a value is its declared type:** `figure` holds an
+  ellipse, but `figure.a` is an error, since a plane figure needn't be an
+  ellipse (A0022), and so is giving it where an ellipse is expected
+  (A0004), whether or not the compiler knows the value.
+- **`=` and `<>` compare values of types that overlap** (IM Prescription
+  12): `figure = lake` compares two plane figures, whichever is written
+  first, but `lake = field` is an error, since no ellipse is a polygon
+  (A0004).
+- **A `var` or `out` argument is of exactly its parameter's type** (IM
+  Prescription 19), since the operator can give the variable any value
+  of that type, which a variable of a subtype couldn't hold (A0004).
+- **Not yet:** `is` to tell the subtypes apart, and `treat` to take a
+  value as one of a subtype.
 
 ## Tuples
 

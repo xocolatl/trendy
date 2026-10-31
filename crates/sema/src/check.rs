@@ -238,14 +238,12 @@ impl<'a> Checker<'a> {
 
     /// The value `expr` is, if it is known when compiling.
     pub(crate) fn constant(expr: &hir::Expr) -> Option<&hir::Value> {
-        match expr {
-            hir::Expr::Constant(value) => Some(value),
-            _ => None,
-        }
+        ops::known_value(expr)
     }
 
-    /// `out`, written `expr`, if it has the expected type; otherwise report
-    /// the mismatch.
+    /// `out`, written `expr`, if it has the expected type, or a subtype of
+    /// it, as which it is then treated (*Type Inheritance and Relational
+    /// Theory*, IM Prescription 16); otherwise report the mismatch.
     pub(crate) fn matched(
         &self,
         expected: Option<&Expected>,
@@ -255,6 +253,7 @@ impl<'a> Checker<'a> {
     ) -> Option<hir::Expr> {
         let ty = self.ty(&out);
         match expected {
+            Some(e) if ty != e.ty && ty.is_subtype_of(&e.ty) => Some(out.treated(&e.ty)),
             Some(e) if ty != e.ty => {
                 errors.push(errors::type_mismatch(
                     &e.ty,
@@ -411,8 +410,8 @@ impl<'a> Checker<'a> {
     }
 
     /// An `if`'s branches, `then` and `else`, written `written`, of one
-    /// type: the type expected, or else that of the first valid on its own
-    /// (see [`types::Alone`]). The one a condition known when compiling
+    /// type: the type expected, or else the most specific common supertype
+    /// of those valid on their own (see [`types::widen`]). The one a condition known when compiling
     /// doesn't take, as `taken` says, is never computed, so its failures
     /// aren't reported, and it has no value if one makes it fail. `None`
     /// after reporting a branch's errors.
@@ -435,34 +434,31 @@ impl<'a> Checker<'a> {
                 out
             };
         let mut expectation = expected.cloned();
-        let mut alone: [Option<types::Alone<hir::Expr>>; 2] = [None, None];
+        let mut alone: [Option<types::Alone<(hir::Expr, hir::Type)>>; 2] = [None, None];
         if expectation.is_none() {
             for (i, branch) in written.iter().enumerate() {
                 let mut own = Vec::new();
-                let out = check(self, i, None, &mut own);
+                let out = check(self, i, None, &mut own).map(|out| {
+                    let ty = self.ty(&out);
+                    (out, ty)
+                });
                 let on_its_own = types::Alone::of(out, own, branch.span());
-                let valid = matches!(on_its_own, types::Alone::Valid(_));
-                if let types::Alone::Valid(out) = &on_its_own {
-                    expectation = Some(Expected {
-                        ty: self.ty(out),
-                        origin: types::Origin::Value(branch.clone()),
-                    });
+                if let types::Alone::Valid((_, ty)) = &on_its_own {
+                    types::widen(&mut expectation, ty.clone(), branch);
                 }
                 alone[i] = Some(on_its_own);
-                if valid {
-                    break;
-                }
             }
         }
-        let typed = expectation.is_some();
         let mut values = [None, None];
         let mut ok = true;
         for (i, alone) in alone.into_iter().enumerate() {
             let before = errors.len();
             let out = match alone {
-                Some(alone) => alone.finish(typed, written[i].span(), errors, |errors| {
-                    check(self, i, expectation.as_ref(), errors)
-                }),
+                Some(alone) => {
+                    alone.fit(expectation.as_ref(), written[i].span(), errors, |errors| {
+                        check(self, i, expectation.as_ref(), errors)
+                    })
+                }
                 None => check(self, i, expectation.as_ref(), errors),
             };
             // A branch not taken that would fail is no error.
@@ -1100,8 +1096,28 @@ impl<'a> Checker<'a> {
             pending = rest;
             for (value, name, param) in checked_now {
                 let checked = match param {
-                    Param::Value(ty) | Param::Variable(ty, _) => {
+                    Param::Value(ty) => {
                         self.typed_argument(&value, name, ty, None, &mut types, errors)
+                    }
+                    // A variable of exactly the parameter's type, which the
+                    // operator can give any value of it (*Type Inheritance
+                    // and Relational Theory*, IM Prescription 19).
+                    Param::Variable(ty, _) => {
+                        let checked =
+                            self.typed_argument(&value, name, ty, None, &mut types, errors);
+                        match checked {
+                            Some(hir::Expr::Treat(declared, variable)) => {
+                                let actual = self.ty(&variable);
+                                errors.push(errors::variable_subtype(
+                                    &declared,
+                                    &actual,
+                                    &signature.param_origin(name),
+                                    &value,
+                                ));
+                                None
+                            }
+                            checked => checked,
+                        }
                     }
                     Param::Per { relation, ty } => {
                         let heading = &relations[relation].1;

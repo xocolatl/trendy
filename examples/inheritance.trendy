@@ -161,6 +161,14 @@ var triangle := polygon{vertices: relation {
 }};
 var corners := count{r: triangle.vertices};
 
+/* Plane figures of both kinds in one relation: a value of a subtype is a
+   value of its union type, which the attribute is of, the most specific
+   type both are (IM Prescriptions 8 and 16). */
+var figures := relation {
+    { name: "pond", figure: squashed },
+    { name: "plot", figure: triangle },
+};
+
 /* The vertex nearest the origin, and the vertices' numbers in the points'
    order: the one at the origin, then the one 3 from it, on the y axis,
    then the one 4 from it, on the x axis. */
@@ -201,6 +209,10 @@ operator geometry{p: point, shape: polygon} [
     var numbers: array integer;
     load numbers value from shape.vertices order [asc vertex] remove {vertex};
     call debug_value{v: numbers};
+    call debug_table{r: relation {
+        { name: "pond", figure: e },
+        { name: "plot", figure: shape },
+    }};
 ];
 
 operator main{} [
@@ -217,6 +229,7 @@ operator main{} [
     call debug_value{v: corners};
     call debug_value{v: nearest};
     call debug_value{v: outward};
+    call debug_table{r: figures};
 
     call geometry{p: pt, shape: triangle};
 ];

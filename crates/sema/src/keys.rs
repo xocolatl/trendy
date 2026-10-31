@@ -174,7 +174,7 @@ fn tuple_places(
     relation
         .elements()
         .filter_map(|element| {
-            let value = types::value(&element, Some(&expected), scope, &mut Vec::new())?;
+            let (value, _) = types::value(&element, Some(&expected), scope, &mut Vec::new())?;
             match value {
                 hir::Value::Tuple(value) => Some((value, element.span())),
                 _ => None,

@@ -1418,7 +1418,7 @@ fn distinct_columns(
     written: &ast::Expr,
     errors: &mut Vec<Diagnostic>,
 ) -> bool {
-    let hir::Expr::Constant(hir::Value::Tuple(positions)) = columns else {
+    let Some(hir::Value::Tuple(positions)) = crate::ops::known_value(columns) else {
         return true;
     };
     let mut read = Vec::new();

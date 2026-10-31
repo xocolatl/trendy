@@ -955,6 +955,47 @@ error[{broken}]: ellipse{{a: 1e0, b: 3e0}} isn't a value of `ellipse`: it breaks
 }
 
 #[test]
+fn a_subtypes_value_is_its_union_types_when_running() {
+    // Values of either subtype where the union type's are expected:
+    // compared by their own types and components, and in arrays and
+    // relations of it, ordered by their types, then components.
+    let source = format!(
+        "{FIGURES}
+operator same{{f: plane_figure, g: plane_figure}}: boolean [ f = g ];
+
+operator shapes{{a: approximate}} [
+    var e := ellipse{{a: a, b: 1e0}};
+    var f: plane_figure := e;
+    var p: plane_figure := polygon{{corners: relation {{ {{ n: 1, name: \"n\" }} }}}};
+    call debug_value{{v: same{{f: f, g: e}}}};
+    call debug_value{{v: same{{f: f, g: p}}}};
+    call debug_value{{v: f = e}};
+    call debug_value{{v: array [p, f]}};
+    call debug_value{{v: relation {{ {{ s: p }}, {{ s: e }} }}}};
+];
+
+operator main{{}} [
+    call shapes{{a: 3e0}};
+];
+"
+    );
+    let (code, stderr) = run_source("substituted", &source);
+    assert_eq!(
+        (code, stderr.lines().collect::<Vec<_>>()),
+        (
+            0,
+            vec![
+                "true",
+                "false",
+                "true",
+                r#"array [polygon{corners: relation { n: integer, name: text } { { n: 1, name: "n" } }}, ellipse{a: 3e0, b: 1e0}]"#,
+                r#"relation { s: plane_figure } { { s: ellipse{a: 3e0, b: 1e0} }, { s: polygon{corners: relation { n: integer, name: text } { { n: 1, name: "n" } }} } }"#,
+            ]
+        )
+    );
+}
+
+#[test]
 fn csv_files_load_values_of_types_in_a_hierarchy() {
     // A subtype's value is read as any type's, and laid out after its own
     // type.
@@ -2092,6 +2133,13 @@ fn inheritance() {
             "3",
             "point{x: 0e0, y: 0e0}",
             "array [1, 3, 2]",
+            // Plane figures of both kinds, as values of their union type.
+            "┌─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┬──────┐",
+            "│ figure                                                                                                                                                                                              │ name │",
+            "├─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┼──────┤",
+            "│ ellipse{a: distance{m: 3e0}, b: distance{m: 2e0}, ctr: point{x: 5e0, y: 2.5e0}}                                                                                                                     │ pond │",
+            "│ polygon{vertices: relation { v_no: integer, vertex: point } { { v_no: 1, vertex: point{x: 0e0, y: 0e0} }, { v_no: 2, vertex: point{x: 4e0, y: 0e0} }, { v_no: 3, vertex: point{x: 0e0, y: 3e0} } }} │ plot │",
+            "└─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┴──────┘",
         ]
     );
 }

@@ -275,8 +275,8 @@ impl Operator {
 
 /// Checks one operand against an expectation, giving its checked form and
 /// its type, or `None` after reporting why it has none.
-pub(crate) type CheckOperand<'a, T> =
-    dyn FnMut(&Expr, Option<&Expected>, &mut Vec<Diagnostic>) -> Option<(T, hir::Type)> + 'a;
+pub(crate) type CheckOperand<'a> = dyn FnMut(&Expr, Option<&Expected>, &mut Vec<Diagnostic>) -> Option<(hir::Expr, hir::Type)>
+    + 'a;
 
 /// Check the operands of `op`, written `token`, in an expression whose
 /// value is `expected` to have a type. `check` checks one operand against
@@ -284,15 +284,15 @@ pub(crate) type CheckOperand<'a, T> =
 ///
 /// Returns the resolved operator, the checked operands and the type of the
 /// result, or `None` after reporting why there are none.
-pub(crate) fn check_operands<T>(
+pub(crate) fn check_operands(
     op: Operator,
     token: &SyntaxToken,
     operands: Vec<Option<Expr>>,
     expected: Option<&Expected>,
-    check: &mut CheckOperand<'_, T>,
+    check: &mut CheckOperand<'_>,
     kinds: &[hir::Kind],
     errors: &mut Vec<Diagnostic>,
-) -> Option<(Resolved, Vec<T>, hir::Type)> {
+) -> Option<(Resolved, Vec<hir::Expr>, hir::Type)> {
     // A context the operator can work in sets the operand type.
     let context = expected.filter(|e| op.result_is_operand() && op.resolve(&e.ty).is_some());
     let mut expectation = match op.operands() {
@@ -308,12 +308,17 @@ pub(crate) fn check_operands<T>(
     let mut ok = true;
     // Whether the operator was reported as not taking the operands' type.
     let mut wrong_type = false;
-    // Without an expected type, the first operand sets it for the rest,
-    // or, if its own type can't be known on its own, as an empty relation's
-    // heading, the first after it that can (see [`types::Alone`]).
-    let mut alone: Vec<Option<types::Alone<(T, hir::Type)>>> =
+    // Without an expected type, the operands valid on their own set it for
+    // the rest, as the most specific common supertype of theirs, whatever
+    // their order: as of an empty relation, whose heading can't be known
+    // on its own (see [`types::Alone`] and [`types::widen`]). Operands of
+    // types with no value in common, as two subtypes of a union type, have
+    // no value in common either, so one of them is reported, as never
+    // equal to the other (IM Prescription 12).
+    let mut alone: Vec<Option<types::Alone<(hir::Expr, hir::Type)>>> =
         operands.iter().map(|_| None).collect();
     if expectation.is_none() {
+        let mut first = None;
         for (operand, alone) in operands.iter().zip(&mut alone) {
             let Some(operand) = operand else {
                 break;
@@ -321,32 +326,29 @@ pub(crate) fn check_operands<T>(
             let mut own_errors = Vec::new();
             let checked = check(operand, None, &mut own_errors);
             let checked = types::Alone::of(checked, own_errors, operand.span());
-            if let types::Alone::Valid((_, ty)) = &checked {
-                // An operator that doesn't take this type is reported once;
-                // the other operands are still checked against it, so that
-                // an empty relation gets its heading and a mismatch is still
-                // reported.
-                if op.resolve(ty).is_none() {
-                    errors.push(errors::wrong_operand_type(
-                        op,
-                        token,
-                        ty,
-                        Some(operand),
-                        kinds,
-                    ));
-                    ok = false;
-                    wrong_type = true;
-                }
-                expectation = Some(Expected {
-                    ty: ty.clone(),
-                    origin: Origin::Value(operand.clone()),
-                });
+            if let types::Alone::Valid((_, ty)) = &checked
+                && expectation.as_ref().is_none_or(|e| e.ty.overlaps(ty))
+            {
+                types::widen(&mut expectation, ty.clone(), operand);
+                first.get_or_insert(operand);
             }
-            let waiting = matches!(checked, types::Alone::Waiting(_));
             *alone = Some(checked);
-            if !waiting {
-                break;
-            }
+        }
+        // An operator that doesn't take this type is reported once; the
+        // other operands are still checked against it, so that an empty
+        // relation gets its heading and a mismatch is still reported.
+        if let Some(expected) = &expectation
+            && op.resolve(&expected.ty).is_none()
+        {
+            errors.push(errors::wrong_operand_type(
+                op,
+                token,
+                &expected.ty,
+                first,
+                kinds,
+            ));
+            ok = false;
+            wrong_type = true;
         }
     }
     let mut checked = Vec::new();
@@ -356,14 +358,14 @@ pub(crate) fn check_operands<T>(
             continue;
         };
         let before = errors.len();
-        let typed = expectation.is_some();
+        let mut against = |errors: &mut Vec<Diagnostic>| {
+            check(&operand, expectation.as_ref(), errors).map(|(value, _)| value)
+        };
         let result = match alone {
-            // The operand that set a type the operator doesn't take.
+            // An operand that set a type the operator doesn't take.
             Some(types::Alone::Valid(_)) if wrong_type => continue,
-            Some(alone) => alone.finish(typed, operand.span(), errors, |errors| {
-                check(&operand, expectation.as_ref(), errors)
-            }),
-            None => check(&operand, expectation.as_ref(), errors),
+            Some(alone) => alone.fit(expectation.as_ref(), operand.span(), errors, against),
+            None => against(errors),
         };
         if wrong_type {
             // The operand was checked against a type the operator doesn't
@@ -378,7 +380,7 @@ pub(crate) fn check_operands<T>(
                 }
             }
         }
-        let Some((value, _)) = result else {
+        let Some(value) = result else {
             ok = false;
             continue;
         };
@@ -1109,13 +1111,18 @@ fn groups(headings: &[&hir::Heading]) -> Vec<usize> {
 ///
 /// Returns why constant tuples have no join: an attribute they disagree on.
 pub(crate) fn and(operands: Vec<hir::Expr>) -> Result<hir::Expr, Failed> {
-    let (constants, others): (Vec<_>, Vec<_>) = operands
-        .into_iter()
-        .partition(|e| matches!(e, hir::Expr::Constant(_)));
-    let mut constants = constants.into_iter().filter_map(|e| match e {
-        hir::Expr::Constant(value) => Some(value),
-        _ => None,
-    });
+    let (constants, others): (Vec<_>, Vec<_>) =
+        operands.into_iter().partition(|e| known_value(e).is_some());
+    // Of tuples, the type is of all their attributes, as declared, which
+    // can be supertypes of the values'.
+    let ty = constants
+        .iter()
+        .map(known_type)
+        .reduce(|lhs, rhs| match (lhs, rhs) {
+            (hir::Type::Tuple(a), hir::Type::Tuple(b)) => hir::Type::Tuple(a.and(&b)),
+            (lhs, _) => lhs,
+        });
+    let mut constants = constants.iter().filter_map(|e| known_value(e).cloned());
     let constant = match constants.next() {
         Some(first) => Some(
             constants
@@ -1125,9 +1132,10 @@ pub(crate) fn and(operands: Vec<hir::Expr>) -> Result<hir::Expr, Failed> {
         None => None,
     };
     let mut others = others.into_iter();
-    let first = match constant {
-        Some(value) => hir::Expr::Constant(value),
-        None => others
+    let first = match (constant, ty) {
+        (Some(hir::Value::Tuple(tuple)), Some(ty)) => typed(hir::Value::Tuple(tuple), &ty),
+        (Some(value), _) => hir::Expr::Constant(value),
+        (None, _) => others
             .next()
             .unwrap_or_else(|| hir::Expr::Constant(hir::Value::dee())),
     };
@@ -1386,9 +1394,10 @@ pub(crate) fn matching(lhs: hir::Expr, rhs: hir::Expr, negated: bool) -> hir::Ex
 pub(crate) fn only(operand: hir::Expr) -> Result<hir::Expr, Failed> {
     match operand {
         hir::Expr::Constant(hir::Value::Relation(relation)) => {
+            let ty = hir::Type::Tuple(relation.heading);
             let mut tuples = relation.tuples.into_iter();
             match (tuples.next(), tuples.len()) {
-                (Some(tuple), 0) => Ok(hir::Expr::Constant(hir::Value::Tuple(tuple))),
+                (Some(tuple), 0) => Ok(typed(hir::Value::Tuple(tuple), &ty)),
                 (None, _) => Err(Failed::NotOne(0)),
                 (Some(_), more) => Err(Failed::NotOne(more + 1)),
             }
@@ -1397,17 +1406,22 @@ pub(crate) fn only(operand: hir::Expr) -> Result<hir::Expr, Failed> {
     }
 }
 
-/// A tuple of these attributes, a constant if they all are.
+/// A tuple of these attributes, a constant if they all are, whose
+/// attributes are of their types, which can be supertypes of their values'.
 pub(crate) fn tuple(attributes: BTreeMap<String, hir::Expr>) -> hir::Expr {
     let constants: Option<BTreeMap<String, hir::Value>> = attributes
         .iter()
-        .map(|(name, e)| match e {
-            hir::Expr::Constant(value) => Some((name.clone(), value.clone())),
-            _ => None,
-        })
+        .map(|(name, e)| Some((name.clone(), known_value(e)?.clone())))
         .collect();
     match constants {
-        Some(constants) => hir::Expr::Constant(hir::Value::Tuple(hir::TupleValue::new(constants))),
+        Some(constants) => {
+            let heading = attributes
+                .iter()
+                .map(|(name, e)| (name.clone(), known_type(e)))
+                .collect();
+            let ty = hir::Type::Tuple(hir::Heading::new(heading));
+            typed(hir::Value::Tuple(hir::TupleValue::new(constants)), &ty)
+        }
         None => hir::Expr::Tuple(attributes),
     }
 }
@@ -1417,8 +1431,8 @@ pub(crate) fn tuple(attributes: BTreeMap<String, hir::Expr>) -> hir::Expr {
 pub(crate) fn relation(heading: hir::Heading, tuples: Vec<hir::Expr>) -> hir::Expr {
     let constants: Option<BTreeSet<hir::TupleValue>> = tuples
         .iter()
-        .map(|t| match t {
-            hir::Expr::Constant(hir::Value::Tuple(t)) => Some(t.clone()),
+        .map(|t| match known_value(t) {
+            Some(hir::Value::Tuple(t)) => Some(t.clone()),
             _ => None,
         })
         .collect();
@@ -1433,13 +1447,8 @@ pub(crate) fn relation(heading: hir::Heading, tuples: Vec<hir::Expr>) -> hir::Ex
 /// An array with elements of type `element`, in order, a constant if they
 /// all are.
 pub(crate) fn array(element: hir::Type, elements: Vec<hir::Expr>) -> hir::Expr {
-    let constants: Option<Vec<hir::Value>> = elements
-        .iter()
-        .map(|e| match e {
-            hir::Expr::Constant(value) => Some(value.clone()),
-            _ => None,
-        })
-        .collect();
+    let constants: Option<Vec<hir::Value>> =
+        elements.iter().map(|e| known_value(e).cloned()).collect();
     match constants {
         Some(elements) => {
             hir::Expr::Constant(hir::Value::Array(hir::ArrayValue { element, elements }))
@@ -1571,7 +1580,7 @@ pub(crate) fn index(array: hir::Expr, position: hir::Expr) -> Result<hir::Expr, 
     };
     match array {
         hir::Expr::Constant(hir::Value::Array(mut array)) => {
-            Ok(hir::Expr::Constant(array.elements.swap_remove(at)))
+            Ok(typed(array.elements.swap_remove(at), &array.element))
         }
         hir::Expr::Array(_, mut elements)
             if elements
@@ -1617,7 +1626,7 @@ pub(crate) fn with_elements(
             }
         }
     }
-    let known = |e: &hir::Expr| matches!(e, hir::Expr::Constant(_));
+    let known = |e: &hir::Expr| known_value(e).is_some();
     let hir::Expr::Constant(hir::Value::Array(mut value)) = array else {
         return Ok(hir::Expr::WithElements(Box::new(array), changes));
     };
@@ -1637,10 +1646,8 @@ pub(crate) fn with_elements(
                 _ => unreachable!("sema checks positions are integers"),
             })
             .collect();
-        let hir::Expr::Constant(element) = change.value else {
-            unreachable!("every value is known");
-        };
-        changed(&mut value, &path, element).map_err(Failed::Scalar)?;
+        let element = known_value(&change.value).expect("every value is known");
+        changed(&mut value, &path, element.clone()).map_err(Failed::Scalar)?;
     }
     Ok(hir::Expr::Constant(hir::Value::Array(value)))
 }
@@ -2001,11 +2008,18 @@ pub(crate) fn extend(
     attributes: BTreeMap<String, hir::Expr>,
     bindings: Bindings,
 ) -> Result<hir::Expr, TupleFailure> {
-    let folded = match &operand {
-        hir::Expr::Constant(hir::Value::Tuple(tuple)) => {
-            extended(tuple, &attributes, bindings)?.map(hir::Value::Tuple)
+    let folded = match known_value(&operand) {
+        Some(hir::Value::Tuple(tuple)) => {
+            let hir::Type::Tuple(heading) = known_type(&operand) else {
+                unreachable!("a tuple's type is a tuple type");
+            };
+            let ty = hir::Type::Tuple(heading.and(&computed));
+            return Ok(match extended(tuple, &attributes, bindings)? {
+                Some(tuple) => typed(hir::Value::Tuple(tuple), &ty),
+                None => hir::Expr::Extend(Box::new(operand), computed, attributes),
+            });
         }
-        hir::Expr::Constant(hir::Value::Relation(relation)) => {
+        Some(hir::Value::Relation(relation)) => {
             let mut tuples = BTreeSet::new();
             let mut all = true;
             for tuple in &relation.tuples {
@@ -2041,7 +2055,8 @@ fn extended(
     let mut computed = BTreeMap::new();
     for (name, value) in attributes {
         match substitute(value.clone(), 0, &Substitution::tuple(tuple, bindings)) {
-            Ok(hir::Expr::Constant(value)) => {
+            Ok(value) if known_value(&value).is_some() => {
+                let value = known_value(&value).expect("just checked").clone();
                 computed.insert(name.clone(), value);
             }
             Ok(_) => return Ok(None),
@@ -2076,12 +2091,38 @@ pub(crate) struct Bindings<'a> {
 struct Substitution<'a> {
     /// The tuple at hand where substituting starts, `Current(0)` there.
     tuple: Option<&'a hir::TupleValue>,
-    /// A call's arguments, for its callee's parameters.
-    args: Option<&'a BTreeMap<String, hir::Value>>,
+    /// A call's arguments, for its callee's parameters, each known when
+    /// compiling, of its parameter's type (see [`known_value`]).
+    args: Option<&'a BTreeMap<String, hir::Expr>>,
     /// The values of the callee's local variables known so far, each its
-    /// `Let`'s, once the value is known.
-    locals: &'a [(hir::LocalId, hir::Value)],
+    /// `Let`'s, once the value is known, of the local variable's type.
+    locals: &'a [(hir::LocalId, hir::Expr)],
     bindings: Bindings<'a>,
+}
+
+/// The value `expr` has, if it is known when compiling: a constant's, or
+/// that of one treated as a value of a supertype of its own type.
+pub(crate) fn known_value(expr: &hir::Expr) -> Option<&hir::Value> {
+    match expr {
+        hir::Expr::Constant(value) => Some(value),
+        hir::Expr::Treat(_, inner) => known_value(inner),
+        _ => None,
+    }
+}
+
+/// The type of `expr`, which is known when compiling (see
+/// [`known_value`]): its value's, or the one it is treated as.
+fn known_type(expr: &hir::Expr) -> hir::Type {
+    match expr {
+        hir::Expr::Treat(ty, _) => (**ty).clone(),
+        expr => known_value(expr).expect("a known value").ty(),
+    }
+}
+
+/// `value`, known when compiling, as an expression of type `ty`, its own
+/// type or a supertype of it, as what it is computed from says.
+fn typed(value: hir::Value, ty: &hir::Type) -> hir::Expr {
+    hir::Expr::Constant(value).treated(ty)
 }
 
 impl<'a> Substitution<'a> {
@@ -2106,10 +2147,7 @@ pub(crate) fn call(call: hir::Call, bindings: Bindings) -> Result<hir::Expr, Fai
     let known: Option<BTreeMap<String, hir::Value>> = call
         .args
         .iter()
-        .map(|(name, arg)| match arg {
-            hir::Expr::Constant(value) => Some((name.clone(), value.clone())),
-            _ => None,
-        })
+        .map(|(name, arg)| Some((name.clone(), known_value(arg)?.clone())))
         .collect();
     let Some(known) = known else {
         return Ok(hir::Expr::Call(call));
@@ -2160,15 +2198,15 @@ pub(crate) fn call(call: hir::Call, bindings: Bindings) -> Result<hir::Expr, Fai
     };
     let substitution = Substitution {
         tuple: None,
-        args: Some(&known),
+        args: Some(&call.args),
         locals: &[],
         bindings,
     };
     let evaluated = substitute(value, 0, &substitution)?;
-    Ok(match evaluated {
-        hir::Expr::Constant(_) => evaluated,
+    Ok(match known_value(&evaluated) {
+        Some(_) => evaluated,
         // Otherwise the call is made when the program runs.
-        _ => hir::Expr::Call(call),
+        None => hir::Expr::Call(call),
     })
 }
 
@@ -2274,19 +2312,18 @@ fn substitute(
 ) -> Result<hir::Expr, Failed> {
     let sub = |e: Box<hir::Expr>| substitute(*e, depth, substitution);
     Ok(match expr {
-        hir::Expr::Current(d, _) if d == depth && substitution.tuple.is_some() => {
-            hir::Expr::Constant(hir::Value::Tuple(
-                substitution.tuple.expect("just checked").clone(),
-            ))
+        hir::Expr::Current(d, heading) if d == depth && substitution.tuple.is_some() => {
+            let tuple = substitution.tuple.expect("just checked").clone();
+            typed(hir::Value::Tuple(tuple), &hir::Type::Tuple(heading))
         }
         hir::Expr::Current(d, heading) if d > depth && substitution.tuple.is_some() => {
             hir::Expr::Current(d - 1, heading)
         }
         hir::Expr::Parameter(name) if substitution.args.is_some() => {
-            hir::Expr::Constant(substitution.args.expect("just checked")[&name].clone())
+            substitution.args.expect("just checked")[&name].clone()
         }
         hir::Expr::Local(id) => match substitution.locals.iter().find(|(l, _)| *l == id) {
-            Some((_, value)) => hir::Expr::Constant(value.clone()),
+            Some((_, value)) => value.clone(),
             // An update operator's local variable's value is known only
             // when running.
             None => expr,
@@ -2349,6 +2386,7 @@ fn substitute(
             select(defined, sub(components)?, substitution.bindings)?
         }
         hir::Expr::Components(value) => components(sub(value)?),
+        hir::Expr::Treat(ty, value) => sub(value)?.treated(&ty),
         hir::Expr::Semijoin(lhs, rhs) => matching(sub(lhs)?, sub(rhs)?, false),
         hir::Expr::Combine(combination, lhs, rhs) => combined(sub(lhs)?, sub(rhs)?, combination)?,
         hir::Expr::Antijoin(lhs, rhs) => matching(sub(lhs)?, sub(rhs)?, true),
@@ -2384,7 +2422,7 @@ fn substituted_let(
     substitution: &Substitution,
 ) -> Result<hir::Expr, Failed> {
     Ok(match substitute(value, depth, substitution)? {
-        hir::Expr::Constant(value) => {
+        value if known_value(&value).is_some() => {
             let mut locals = substitution.locals.to_vec();
             locals.push((id, value));
             let inner = Substitution {
@@ -2476,12 +2514,17 @@ pub(crate) fn select(
     components: hir::Expr,
     bindings: Bindings,
 ) -> Result<hir::Expr, Failed> {
-    let hir::Expr::Constant(hir::Value::Tuple(tuple)) = components else {
+    let Some(hir::Value::Tuple(tuple)) = known_value(&components) else {
         return Ok(hir::Expr::Select(defined, Box::new(components)));
     };
-    let args: BTreeMap<String, hir::Expr> = tuple
+    let tuple = tuple.clone();
+    let args: BTreeMap<String, hir::Expr> = defined
+        .components
         .attributes()
-        .map(|(name, v)| (name.to_string(), hir::Expr::Constant(v.clone())))
+        .map(|(name, ty)| {
+            let value = tuple.get(name).expect("a value has its type's components");
+            (name.to_string(), typed(value.clone(), ty))
+        })
         .collect();
     // The first constraint that isn't true of them, and its value.
     let mut first = None;
@@ -2537,7 +2580,8 @@ pub(crate) struct BrokenConstraint {
 pub(crate) fn components(value: hir::Expr) -> hir::Expr {
     match value {
         hir::Expr::Constant(hir::Value::Defined(value)) => {
-            hir::Expr::Constant(hir::Value::Tuple(value.components))
+            let ty = hir::Type::Tuple(value.ty.components.clone());
+            typed(hir::Value::Tuple(value.components), &ty)
         }
         value => hir::Expr::Components(Box::new(value)),
     }
@@ -2547,13 +2591,20 @@ pub(crate) fn components(value: hir::Expr) -> hir::Expr {
 /// constant, and taken straight from a selector, a rename or a remove where
 /// nothing that can fail is dropped.
 pub(crate) fn extract(operand: hir::Expr, name: String) -> hir::Expr {
+    if let Some(hir::Value::Tuple(tuple)) = known_value(&operand) {
+        let value = tuple
+            .get(&name)
+            .cloned()
+            .expect("sema extracts only attributes the tuple has");
+        let hir::Type::Tuple(heading) = known_type(&operand) else {
+            unreachable!("a tuple's type is a tuple type");
+        };
+        let ty = heading
+            .get(&name)
+            .expect("the tuple's type has its attributes");
+        return typed(value, ty);
+    }
     match operand {
-        hir::Expr::Constant(hir::Value::Tuple(tuple)) => hir::Expr::Constant(
-            tuple
-                .get(&name)
-                .cloned()
-                .expect("sema extracts only attributes the tuple has"),
-        ),
         hir::Expr::Tuple(mut attributes)
             if attributes
                 .iter()
@@ -2588,9 +2639,12 @@ pub(crate) fn rename(operand: hir::Expr, renamings: BTreeMap<String, String>) ->
     if renamings.is_empty() {
         return operand;
     }
-    match operand {
-        hir::Expr::Constant(value) => hir::Expr::Constant(value.renamed(&renamings)),
-        operand => hir::Expr::Rename(Box::new(operand), renamings),
+    match known_value(&operand) {
+        Some(value) => typed(
+            value.renamed(&renamings),
+            &known_type(&operand).renamed(&renamings),
+        ),
+        None => hir::Expr::Rename(Box::new(operand), renamings),
     }
 }
 
@@ -2600,8 +2654,10 @@ pub(crate) fn remove(operand: hir::Expr, names: BTreeSet<String>) -> hir::Expr {
     if names.is_empty() {
         return operand;
     }
+    if let Some(value) = known_value(&operand) {
+        return typed(value.without(&names), &known_type(&operand).without(&names));
+    }
     match operand {
-        hir::Expr::Constant(value) => hir::Expr::Constant(value.without(&names)),
         hir::Expr::Remove(inner, mut earlier) => {
             earlier.extend(names);
             hir::Expr::Remove(inner, earlier)
@@ -2699,7 +2755,7 @@ fn known(expr: &hir::Expr) -> Option<Known> {
 ///
 /// Returns why the result can't exist.
 pub(crate) fn unary(op: hir::UnaryOp, operand: hir::Expr) -> Result<hir::Expr, hir::Failure> {
-    if let hir::Expr::Constant(value) = &operand {
+    if let Some(value) = known_value(&operand) {
         return op.apply(value).map(hir::Expr::Constant);
     }
     Ok(match (op, operand) {
@@ -2740,7 +2796,7 @@ pub(crate) fn binary(
     rhs: hir::Expr,
     bindings: Bindings,
 ) -> Result<hir::Expr, Failed> {
-    if let (hir::Expr::Constant(a), hir::Expr::Constant(b)) = (&lhs, &rhs) {
+    if let (Some(a), Some(b)) = (known_value(&lhs), known_value(&rhs)) {
         let compared = match op {
             hir::BinaryOp::Compare(hir::Comparison::Equal | hir::Comparison::NotEqual, _) => {
                 Vec::new()

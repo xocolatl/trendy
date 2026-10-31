@@ -170,13 +170,10 @@ impl<'a> BlockNames<'a> {
             return false;
         };
         let id = self.outer.fresh_local(local.clone());
-        let known = match value {
-            hir::Expr::Constant(value) => Some(value),
-            value => {
-                lets.push((id, hir::Expr::at(site, value)));
-                None
-            }
-        };
+        let known = crate::ops::known_value(&value).cloned();
+        if known.is_none() {
+            lets.push((id, hir::Expr::at(site, value)));
+        }
         declared.current = Some((id, local, known));
         true
     }
@@ -204,13 +201,13 @@ impl<'a> BlockNames<'a> {
                 .find(|declared| declared.current.as_ref().is_some_and(|(c, ..)| *c == id))
                 .expect("a value block assigns only its own local variables");
             let (_, local, _) = declared.current.take().expect("just found");
-            declared.current = Some(match assignment.value {
-                hir::Expr::Constant(value) => (id, local, Some(value)),
-                value => {
-                    let new = self.outer.fresh_local(local.clone());
-                    lets.push((new, hir::Expr::at(site, value)));
-                    (new, local, None)
-                }
+            let known = crate::ops::known_value(&assignment.value).cloned();
+            declared.current = Some(if known.is_some() {
+                (id, local, known)
+            } else {
+                let new = self.outer.fresh_local(local.clone());
+                lets.push((new, hir::Expr::at(site, assignment.value)));
+                (new, local, None)
             });
         }
         true
@@ -257,7 +254,11 @@ impl Names for BlockNames<'_> {
             return Lookup::Reported;
         }
         match &local.current {
-            Some((_, _, Some(value))) => Lookup::Found(hir::Expr::Constant(value.clone())),
+            // Of its declared type, which can be a supertype of its
+            // value's.
+            Some((_, local, Some(value))) => {
+                Lookup::Found(hir::Expr::Constant(value.clone()).treated(&local.ty))
+            }
             Some((id, _, None)) => Lookup::Found(hir::Expr::Local(*id)),
             // Its declaration's errors are already reported.
             None => Lookup::Reported,
@@ -330,7 +331,7 @@ impl Assigning for BlockNames<'_> {
             return Some(match known {
                 // No `Let` binds it: its name stands for its value.
                 Some(value) => Assignee {
-                    current: hir::Expr::Constant(value.clone()),
+                    current: hir::Expr::Constant(value.clone()).treated(&variable.ty),
                     ..assignee
                 },
                 None => assignee,
