@@ -8290,11 +8290,29 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
             ("length{a: r}", "count{r: r}"),
             ("ARRAY[1]", "array [1]"),
             ("a.length{}", "length{a: a}"),
+            ("a.length", "length{a: a}"),
+            ("a.length + 1", "length{a: a} + 1"),
         ] {
             let source = format!("{a}var x := {written};{MAIN}");
             let fixed_source = format!("{a}var x := {fixed};{MAIN}");
             assert_eq!(fix(&source), fixed_source, "{written}");
             assert!(analyze_str(&fixed_source).is_ok(), "{fixed}");
+        }
+    }
+
+    #[test]
+    fn a_method_call_is_fixed_only_when_its_parameter_is_known() {
+        let shows = "operator show{v: integer}: text [ to_text{from: v} ];\noperator show{n: integer}: text [ to_text{from: n} ];\nvar seven := 7;\n";
+        for written in ["seven.show", "seven.show{}"] {
+            let source = format!("{shows}var x := {written};{MAIN}");
+            let diagnostics = errors(&source);
+            assert_eq!(
+                diagnostics.iter().map(|d| d.code).collect::<Vec<_>>(),
+                [Code::WrongOperandType],
+                "{written}"
+            );
+            assert!(diagnostics[0].suggestions.is_empty(), "{written}");
+            assert!(!diagnostics[0].help.is_empty(), "{written}");
         }
     }
 

@@ -4342,7 +4342,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `[]`, an empty list | `array integer []`, with its elements' type, or `array []` where it is known |
 | `a[0]`, the first element | `a[1]` |
 | `a[-1]`, the last element | `a[length{a: a}]` |
-| `len(a)`, `a.length()`, `CARDINALITY(a)`, `size(a)` | `length{a: a}` |
+| `len(a)`, `a.length`, `a.length()`, `CARDINALITY(a)`, `size(a)` | `length{a: a}` |
 | `ORDER BY x DESC`, `LOAD A FROM R ORDER (DESC X)`, `orderby x descending` | `load a from r order [desc x];` |
 | `unnest(a) WITH ORDINALITY AS t(x, n)`, `enumerate(a)`, `LOAD R FROM A` | `load r from a as x numbered n;` |
 | `a := r order [asc x];` | `load a from r order [asc x];` |

@@ -3348,10 +3348,9 @@ pub(crate) fn empty_operands(join: crate::ops::JoinKind, nary: &NaryExpr) -> Dia
     .with_help(format!("write the relations, as in `{}`", list_of(join)))
 }
 
-/// `.name`, at `at`, applied to a value of type `ty`, which isn't a tuple.
 /// The operator `name`, at `at`, called as a method of `operand`, as
-/// `operand.name{}`, written over `whole`. With a lone parameter `only`,
-/// the fix makes `operand` its argument.
+/// `operand.name` or `operand.name{…}`, written over `whole`. With a lone
+/// parameter `only`, the fix makes `operand` its argument.
 pub(crate) fn method_call(
     name: &str,
     at: Span,
@@ -3383,6 +3382,7 @@ pub(crate) fn method_call(
     }
 }
 
+/// `.name`, at `at`, applied to a value of type `ty`, which isn't a tuple.
 pub(crate) fn not_extractable(name: &str, at: Span, ty: &hir::Type, operand: &Expr) -> Diagnostic {
     let d = Diagnostic::error(
         Code::WrongOperandType,

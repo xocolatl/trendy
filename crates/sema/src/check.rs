@@ -598,23 +598,24 @@ impl<'a> Checker<'a> {
         // The operator of the name that takes one argument, `x`'s, if one
         // does.
         let operators = self.names.operators();
-        let signature = operators
-            .overloads(name)
-            .find(|s| s.written.len() == 1)
-            .or_else(|| operators.overloads(name).next())?;
-        // `x.f{}`: the empty braces that follow are the call's arguments.
-        let braces = extract
-            .syntax()
-            .parent()
-            .and_then(ast::ProjectExpr::cast)
-            .filter(|p| p.names().is_some_and(|n| n.names().next().is_none()));
+        let mut lone = operators.overloads(name).filter(|s| s.written.len() == 1);
+        let signature = lone.next().or_else(|| operators.overloads(name).next())?;
+        // The braces that follow, `x.f{…}`, hold the call's arguments; with
+        // none, `x.f`, `x` is its only one.
+        let braces = extract.syntax().parent().and_then(ast::ProjectExpr::cast);
         let whole = braces
             .as_ref()
             .map_or_else(|| extract.span(), AstNode::span);
-        let only = (signature.written.len() == 1)
+        // `x` is the argument only if no other is written and just one
+        // overload takes one.
+        let only = (signature.written.len() == 1 && lone.next().is_none())
             .then(|| signature.written.keys().next())
             .flatten()
-            .filter(|_| braces.is_some());
+            .filter(|_| {
+                braces
+                    .as_ref()
+                    .is_none_or(|p| p.names().is_some_and(|n| n.names().next().is_none()))
+            });
         Some(errors::method_call(
             name,
             trendy_syntax::span(ident.text_range()),
