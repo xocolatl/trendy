@@ -1933,6 +1933,39 @@ pub unsafe extern "C" fn trendy_rt_broken_constraint(
     }
 }
 
+/// Stop the program because `value`, of the type of the program's own
+/// `desc` describes, is of both of its subtypes defined by constraints
+/// named `first` and `second`, texts, but a value has one most specific
+/// type (R0020).
+///
+/// # Safety
+///
+/// `value` must point to a valid value of the type `desc` describes, and
+/// `first` and `second` to valid text values.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_overlapping_subtypes(
+    value: *const u8,
+    desc: *const TypeDesc,
+    first: *const u8,
+    second: *const u8,
+) -> ! {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let (desc, first, second) = (&*desc, read_text(first), read_text(second));
+        fail_with(|out| {
+            out.write_str("error[R0020]: ")?;
+            write_value(out, value, desc)?;
+            writeln!(
+                out,
+                " is both {} `{first}` and {} `{second}`, but a value has one most specific type",
+                trendy_text::article(first),
+                trendy_text::article(second)
+            )
+        })
+    }
+}
+
 /// Stop the program because `value`, of the type in a hierarchy `desc`
 /// describes, isn't a value of the type named `ty`, a text, which it was
 /// treated as (R0019).

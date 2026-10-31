@@ -303,6 +303,12 @@ pub enum RuntimeFn {
     /// of a value `load_csv` read from the record `record` describes,
     /// laid out as [`Layout::record`], writing where too.
     BrokenConstraintInFile,
+    /// `trendy_rt_overlapping_subtypes(value, descriptor, first, second)`,
+    /// which doesn't return: stop the program because `value`, of the type
+    /// of the program's own the descriptor describes, is of both of its
+    /// subtypes defined by constraints named `first` and `second`, texts,
+    /// writing them.
+    OverlappingSubtypes,
     /// `trendy_rt_key_shared(shared, pair, src, descriptor, key)`: store at
     /// `shared`, a [`Layout::U8`], 1 if the relation `src`, of the type the
     /// descriptor describes, has two tuples with the same values for the
@@ -517,6 +523,7 @@ impl RuntimeFn {
             RuntimeFn::BrokenConstraint => "trendy_rt_broken_constraint",
             RuntimeFn::NotOfType => "trendy_rt_not_of_type",
             RuntimeFn::BrokenConstraintInFile => "trendy_rt_broken_constraint_in_file",
+            RuntimeFn::OverlappingSubtypes => "trendy_rt_overlapping_subtypes",
             RuntimeFn::KeyShared => "trendy_rt_key_shared",
             RuntimeFn::KeyViolated => "trendy_rt_key_violated",
             RuntimeFn::ComponentKeyViolated => "trendy_rt_component_key_violated",
@@ -794,6 +801,15 @@ pub enum Failure {
         constraint: Place,
         record: Place,
     },
+    /// `value`, of the type of the program's own `descriptor` describes, is
+    /// of both of its subtypes defined by constraints named `first` and
+    /// `second`, texts.
+    OverlappingSubtypes {
+        value: Place,
+        descriptor: Place,
+        first: Place,
+        second: Place,
+    },
     /// The tuples at `pair` of the relation `value`, of the type
     /// `descriptor` describes, about to be assigned to the variable named
     /// `variable`, a text, share their values for the key `key`, the
@@ -877,6 +893,15 @@ impl Failure {
             } => (
                 RuntimeFn::BrokenConstraintInFile,
                 vec![value, descriptor, constraint, record],
+            ),
+            Failure::OverlappingSubtypes {
+                value,
+                descriptor,
+                first,
+                second,
+            } => (
+                RuntimeFn::OverlappingSubtypes,
+                vec![value, descriptor, first, second],
             ),
             Failure::KeyViolated {
                 value,

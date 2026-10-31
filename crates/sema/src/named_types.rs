@@ -22,13 +22,24 @@ struct Declared {
     names: Vec<Contained>,
 }
 
-/// A heading or a type that another contains: its name, where, and whether
-/// it is a union type's subtype, whose values are among the union type's,
-/// rather than one its attributes or components are of.
+/// A heading or a type that another names: its name, where, and how.
 struct Contained {
     name: String,
     at: Span,
-    subtype: bool,
+    how: Named,
+}
+
+/// How a heading or a type names another, which then resolves first.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Named {
+    /// As the type of one of its attributes or components.
+    Holds,
+    /// A union type, as one of its subtypes, whose values are among its
+    /// own.
+    Subtype,
+    /// A subtype defined by a constraint, as its supertype, whose
+    /// components its values have.
+    Specializes,
 }
 
 /// A declaration with a name in the types' namespace.
@@ -192,41 +203,75 @@ fn convertible(decl: &TypeDecl, name: &str, errors: &mut Vec<Diagnostic>) -> Vec
 }
 
 /// A heading or a type in a cycle: its name, what it is, where it is
-/// declared, and where it names the next one, which the last names the
-/// first of, and whether that is as its subtype.
+/// declared, and where and how it names the next one, which the last names
+/// the first of.
 pub(crate) struct Cycled {
     pub(crate) name: String,
     pub(crate) what: &'static str,
     pub(crate) declared: Span,
     pub(crate) via: Span,
-    pub(crate) subtype: bool,
+    pub(crate) how: Named,
 }
 
-/// The union type each type is a subtype of, by name: the one it names
-/// after `is`, and where it names it, if that is a union type, and neither
-/// is in a cycle of union types that are subtypes of each other, which are
-/// left out.
+/// The type each type is a subtype of, by name: the one it names after
+/// `is`, and where it names it, if that is a union type, or a regular type,
+/// which it is then defined as a subtype of by a constraint, and neither is
+/// in a cycle of types that are subtypes of each other, which are left
+/// out.
 struct Supertypes {
     immediate: HashMap<String, (String, Span)>,
+    /// Those whose immediate supertype is a regular type.
+    constrained: HashSet<String>,
     cyclic: HashSet<String>,
 }
 
 impl Supertypes {
-    /// The immediate subtypes of the union type `name`, as it contains
-    /// them.
-    fn subtypes<'s>(&'s self, name: &'s str) -> impl Iterator<Item = Contained> + 's {
-        self.immediate
+    /// What `name` names as its supertype or subtypes, as it is resolved
+    /// after them: of a union type, its immediate subtypes, as it contains
+    /// them, and of a subtype defined by a constraint, its supertype, whose
+    /// components it has.
+    fn named<'s>(&'s self, name: &'s str) -> impl Iterator<Item = Contained> + 's {
+        let subtypes = self
+            .immediate
             .iter()
-            .filter(move |(_, (supertype, _))| supertype == name)
+            .filter(move |(subtype, (supertype, _))| {
+                supertype == name && !self.constrained.contains(*subtype)
+            })
             .map(|(subtype, (_, at))| Contained {
                 name: subtype.clone(),
                 at: *at,
-                subtype: true,
-            })
+                how: Named::Subtype,
+            });
+        let supertype = self
+            .immediate
+            .get(name)
+            .filter(|_| self.constrained.contains(name))
+            .map(|(supertype, at)| Contained {
+                name: supertype.clone(),
+                at: *at,
+                how: Named::Specializes,
+            });
+        subtypes.chain(supertype)
     }
 
-    /// The union types `name` is a subtype of, its immediate supertype
-    /// first, and so on up.
+    /// Whether a type is defined as a subtype of `name` by a constraint.
+    fn specialized(&self, name: &str) -> bool {
+        self.immediate.iter().any(|(subtype, (supertype, _))| {
+            supertype == name && self.constrained.contains(subtype)
+        })
+    }
+
+    /// The regular type `name` is defined as a subtype of by a constraint,
+    /// if it is one.
+    fn specializes(&self, name: &str) -> Option<&str> {
+        self.immediate
+            .get(name)
+            .filter(|_| self.constrained.contains(name))
+            .map(|(supertype, _)| supertype.as_str())
+    }
+
+    /// The types `name` is a subtype of, its immediate supertype first, and
+    /// so on up.
     fn of(&self, name: &str) -> Vec<String> {
         let mut chain = Vec::new();
         let mut at = name;
@@ -239,9 +284,11 @@ impl Supertypes {
 }
 
 /// The supertypes of the types `declared`, by name, after reporting each
-/// that isn't a union type, each union type with representations or with
-/// fewer than two subtypes, and each cycle of union types that are
-/// subtypes of each other, which are left out.
+/// that is neither a union type nor a regular type of the program's, each
+/// union type with representations or with fewer than two subtypes, each
+/// subtype of a regular type that isn't defined by a constraint alone, and
+/// each cycle of types that are subtypes of each other, which are left
+/// out.
 fn supertypes(
     declared: &[(String, Declared)],
     namespaces: &Namespaces,
@@ -254,6 +301,7 @@ fn supertypes(
         })
     };
     let mut immediate: HashMap<String, (String, Span)> = HashMap::new();
+    let mut constrained = HashSet::new();
     for (name, declared) in declared {
         let Decl::Type(decl) = &declared.decl else {
             continue;
@@ -269,15 +317,27 @@ fn supertypes(
             continue;
         };
         let supertype = ident.text();
+        let at = trendy_syntax::span(ident.text_range());
         if union_decl(supertype).is_some() {
-            let at = trendy_syntax::span(ident.text_range());
             immediate.insert(name.clone(), (supertype.to_string(), at));
-        } else if let Some((declared, _)) = namespaces.defined(supertype) {
-            errors.push(errors::not_a_union(&ident, Some(declared)));
+        } else if namespaces.defined(supertype).is_some() {
+            // A subtype of a regular type, defined by its constraints: a
+            // union type has no components for them to constrain.
+            // One with other errors, reported, is a subtype all the same if
+            // it has a constraint, so that its constraints read the
+            // supertype's components.
+            if decl.union_keyword().is_some() {
+                errors.push(errors::union_under_regular(name, &ident));
+            } else if specialized(decl, name, supertype, errors)
+                || decl.constraints().next().is_some()
+            {
+                immediate.insert(name.clone(), (supertype.to_string(), at));
+                constrained.insert(name.clone());
+            }
         } else if let Some((declared, _)) = namespaces.heading(supertype) {
             errors.push(errors::heading_as_type(&ident, declared));
         } else if hir::Scalar::from_name(supertype).is_some() {
-            errors.push(errors::not_a_union(&ident, None));
+            errors.push(errors::built_in_supertype(&ident));
         } else {
             errors.push(errors::unknown_type(
                 &ident,
@@ -305,7 +365,7 @@ fn supertypes(
                         what: "type",
                         declared: namespaces.defined(n).expect("a declared type").0,
                         via: immediate[n].1,
-                        subtype: false,
+                        how: Named::Holds,
                     })
                     .collect();
                 errors.push(errors::cyclic_supertypes(&cycle));
@@ -316,19 +376,34 @@ fn supertypes(
         }
     }
     immediate.retain(|name, _| !cyclic.contains(name));
-    // Each union type's subtypes: two at least, since one alone would have
-    // all its values.
-    for (name, _) in declared {
-        let Some(decl) = union_decl(name) else {
+    constrained.retain(|name| !cyclic.contains(name));
+    let supertypes = Supertypes {
+        immediate,
+        constrained,
+        cyclic,
+    };
+    lone_subtypes(declared, &supertypes, errors);
+    supertypes
+}
+
+/// Report each union type among `declared` with fewer than two subtypes,
+/// of `supertypes`: one alone would have all its values, and none none.
+fn lone_subtypes(
+    declared: &[(String, Declared)],
+    supertypes: &Supertypes,
+    errors: &mut Vec<Diagnostic>,
+) {
+    for (name, union) in declared {
+        let Decl::Type(decl) = &union.decl else {
             continue;
         };
-        if cyclic.contains(name) {
+        if decl.union_keyword().is_none() || supertypes.cyclic.contains(name) {
             continue;
         }
         let subtypes: Vec<(String, Span)> = declared
             .iter()
             .filter_map(|(n, _)| {
-                let (supertype, at) = immediate.get(n)?;
+                let (supertype, at) = supertypes.immediate.get(n)?;
                 (supertype == name).then(|| (n.clone(), *at))
             })
             .collect();
@@ -338,7 +413,32 @@ fn supertypes(
             errors.push(errors::lone_subtype(&ident, &subtypes));
         }
     }
-    Supertypes { immediate, cyclic }
+}
+
+/// Whether `decl`, which declares the type `name` a subtype of the regular
+/// type `supertype`, defines it by constraints alone: at least one, which
+/// says which of the supertype's values are its own, and no possible
+/// representation or order of its own, since its values are the
+/// supertype's, stored and ordered as they are; otherwise reported.
+fn specialized(decl: &TypeDecl, name: &str, supertype: &str, errors: &mut Vec<Diagnostic>) -> bool {
+    let mut ok = true;
+    if decl.constraints().next().is_none() {
+        errors.push(errors::unconstrained_subtype(decl, name, supertype));
+        ok = false;
+    }
+    for representation in decl.representations() {
+        errors.push(errors::specialized_representation(
+            &representation,
+            name,
+            supertype,
+        ));
+        ok = false;
+    }
+    for order in decl.orders() {
+        errors.push(errors::specialized_order(&order, name, supertype));
+        ok = false;
+    }
+    ok
 }
 
 /// Resolve the attributes of each heading `file` declares, and the
@@ -354,44 +454,26 @@ pub(crate) fn resolve(
     first: hir::OperatorId,
     errors: &mut Vec<Diagnostic>,
 ) {
-    let headings = file.headings().filter_map(|decl| {
-        let ident = decl.name()?.ident()?;
-        namespaces
-            .is_first_heading(&ident)
-            .then(|| (ident.text().to_string(), Decl::Heading(decl)))
-    });
-    let types = file.types().filter_map(|decl| {
-        let ident = decl.name()?.ident()?;
-        namespaces
-            .is_first_type(&ident)
-            .then(|| (ident.text().to_string(), Decl::Type(decl)))
-    });
-    let mut declared: Vec<(String, Declared)> = headings
-        .chain(types)
-        .map(|(name, decl)| {
-            let names = decl
-                .headings()
-                .iter()
-                .flat_map(|h| named(h, namespaces))
-                .collect();
-            (name, Declared { decl, names })
-        })
-        .collect();
+    let mut declared = declarations(file, namespaces);
+    let supertypes = supertypes(&declared, namespaces, errors);
     // Which representations convert, reported once for each type but a
-    // union type, whose representations are an error.
+    // union type, whose representations are an error, and a subtype
+    // defined by a constraint, whose values are stored as its supertype's.
     let convertible: HashMap<String, Vec<bool>> = declared
         .iter()
         .filter_map(|(name, declared)| match &declared.decl {
-            Decl::Type(decl) if decl.union_keyword().is_none() => {
+            Decl::Type(decl)
+                if decl.union_keyword().is_none() && !supertypes.constrained.contains(name) =>
+            {
                 Some((name.clone(), convertible(decl, name, errors)))
             }
             _ => None,
         })
         .collect();
-    let supertypes = supertypes(&declared, namespaces, errors);
-    // A union type contains its subtypes, as their values are its own.
+    // A union type contains its subtypes, as their values are its own, and
+    // a subtype defined by a constraint has its supertype's components.
     for (name, declared) in &mut declared {
-        declared.names.extend(supertypes.subtypes(name));
+        declared.names.extend(supertypes.named(name));
     }
     let by_name: HashMap<&str, &Declared> = declared.iter().map(|(n, d)| (n.as_str(), d)).collect();
 
@@ -418,6 +500,22 @@ pub(crate) fn resolve(
             }
             continue;
         }
+        // A subtype defined by a constraint has its supertype's components,
+        // resolved first.
+        if let (Decl::Type(decl), Some(supertype)) = (&declared.decl, supertypes.specializes(name))
+        {
+            if let Some(supertype) = namespaces.defined.get(supertype).cloned()
+                && !order.cyclic.contains(name)
+            {
+                let placed = Placed {
+                    name,
+                    supertypes: supertypes.of(name),
+                    specialized: supertypes.specialized(name),
+                };
+                specialization(decl, placed, supertype, &mut next, namespaces);
+            }
+            continue;
+        }
         let Some(heading) = declared.decl.heading() else {
             continue;
         };
@@ -436,16 +534,47 @@ pub(crate) fn resolve(
             Decl::Type(decl) => {
                 let convertible = &convertible[name.as_str()];
                 let resolved = Resolved {
-                    name,
+                    placed: Placed {
+                        name,
+                        supertypes: supertypes.of(name),
+                        specialized: supertypes.specialized(name),
+                    },
                     components: resolved,
                     convertible,
-                    supertypes: supertypes.of(name),
                 };
                 defined(decl, resolved, &mut next, namespaces, errors);
             }
         }
     }
     unions(&declared, &supertypes, namespaces);
+}
+
+/// The headings and types `file` declares, each the first of its name, by
+/// name, with what it names.
+fn declarations(file: &SourceFile, namespaces: &Namespaces) -> Vec<(String, Declared)> {
+    let headings = file.headings().filter_map(|decl| {
+        let ident = decl.name()?.ident()?;
+        namespaces
+            .is_first_heading(&ident)
+            .then(|| (ident.text().to_string(), Decl::Heading(decl)))
+    });
+    let types = file.types().filter_map(|decl| {
+        let ident = decl.name()?.ident()?;
+        namespaces
+            .is_first_type(&ident)
+            .then(|| (ident.text().to_string(), Decl::Type(decl)))
+    });
+    headings
+        .chain(types)
+        .map(|(name, decl)| {
+            let names = decl
+                .headings()
+                .iter()
+                .flat_map(|h| named(h, namespaces))
+                .collect();
+            (name, Declared { decl, names })
+        })
+        .collect()
 }
 
 /// Each union type's subtypes, of those `declared`, into `namespaces`, in
@@ -463,20 +592,74 @@ fn unions(declared: &[(String, Declared)], supertypes: &Supertypes, namespaces: 
             },
         };
         namespaces
-            .unions
+            .subtypes
             .entry(supertype.clone())
             .or_default()
             .push(subtype);
     }
 }
 
-/// A type whose stored components are resolved, `components`, and, of its
-/// possible representations, whether each converts, and its supertypes.
-struct Resolved<'r> {
+/// A type of the program's own, by name, with its place in its hierarchy:
+/// its supertypes, and whether a type is defined as a subtype of it by a
+/// constraint.
+struct Placed<'r> {
     name: &'r str,
+    supertypes: Vec<String>,
+    specialized: bool,
+}
+
+/// A type whose stored components are resolved, `components`, and, of its
+/// possible representations, whether each converts.
+struct Resolved<'r> {
+    placed: Placed<'r>,
     components: hir::Heading,
     convertible: &'r [bool],
-    supertypes: Vec<String>,
+}
+
+/// The type `decl` declares, `placed`, a subtype of the regular type
+/// `supertype` defined by its constraints (*Type Inheritance and
+/// Relational Theory*, IM Prescription 10), into `namespaces`: its values
+/// are the supertype's of which its constraints are true, so its
+/// components, representations, keys and order are the supertype's, and
+/// its constraints the supertype's, then its own, each an operator
+/// numbered from `next` on.
+fn specialization(
+    decl: &TypeDecl,
+    placed: Placed,
+    supertype: hir::Defined,
+    next: &mut usize,
+    namespaces: &mut Namespaces,
+) {
+    let mut constraints = supertype.constraints.clone();
+    let inherited = constraints.len();
+    constraints.extend(decl.constraints().map(|constraint| {
+        let operator = hir::OperatorId(*next);
+        *next += 1;
+        hir::Constraint {
+            operator,
+            text: constraint
+                .condition()
+                .map_or_else(String::new, |c| c.syntax().text().to_string()),
+        }
+    }));
+    let defined = hir::Defined {
+        name: placed.name.to_string(),
+        components: supertype.components.clone(),
+        representations: supertype.representations.clone(),
+        constraints,
+        keys: supertype.keys.clone(),
+        order: supertype.order.clone(),
+        supertypes: placed.supertypes,
+        specialized: placed.specialized,
+        specialization: Some(hir::Specialization {
+            supertype: Box::new(supertype),
+            inherited,
+        }),
+    };
+    namespaces.defined.insert(placed.name.to_string(), defined);
+    namespaces
+        .converted
+        .insert(placed.name.to_string(), Vec::new());
 }
 
 /// The type `decl` declares, `resolved`, into `namespaces`: its
@@ -492,10 +675,14 @@ fn defined(
     errors: &mut Vec<Diagnostic>,
 ) {
     let Resolved {
-        name,
+        placed:
+            Placed {
+                name,
+                supertypes,
+                specialized,
+            },
         components,
         convertible,
-        supertypes,
     } = resolved;
     let mut numbered = || {
         let id = hir::OperatorId(*next);
@@ -550,6 +737,8 @@ fn defined(
         keys,
         order: None,
         supertypes,
+        specialized,
+        specialization: None,
     };
     defined.order = type_order(decl, &defined, errors);
     namespaces.defined.insert(name.to_string(), defined);
@@ -611,7 +800,7 @@ fn named(heading: &ast::Heading, namespaces: &Namespaces) -> Vec<Contained> {
             Some(Contained {
                 name: ident.text().to_string(),
                 at: trendy_syntax::span(node.text_range()),
-                subtype: false,
+                how: Named::Holds,
             })
         })
         .collect()
@@ -621,9 +810,8 @@ fn named(heading: &ast::Heading, namespaces: &Namespaces) -> Vec<Contained> {
 /// names.
 #[derive(Default)]
 struct Search {
-    /// The ones being visited, each with where it names the next, and
-    /// whether as its subtype.
-    path: Vec<(String, Option<(Span, bool)>)>,
+    /// The ones being visited, each with where and how it names the next.
+    path: Vec<(String, Option<(Span, Named)>)>,
     /// The ones visited, each after those it names.
     finished: Vec<String>,
     /// The ones in a cycle.
@@ -645,7 +833,7 @@ impl Search {
             let cycle: Vec<Cycled> = self.path[start..]
                 .iter()
                 .map(|(name, via)| {
-                    let (via, subtype) = via.expect("one in the path names the next");
+                    let (via, how) = via.expect("one in the path names the next");
                     Cycled {
                         name: name.clone(),
                         what: by_name[name.as_str()].decl.what(),
@@ -655,7 +843,7 @@ impl Search {
                             .or_else(|| namespaces.defined(name).map(|(span, _)| span))
                             .expect("a declared heading or type"),
                         via,
-                        subtype,
+                        how,
                     }
                 })
                 .collect();
@@ -665,7 +853,7 @@ impl Search {
         }
         self.path.push((name.to_string(), None));
         for next in &by_name[name].names {
-            self.path.last_mut().expect("just pushed").1 = Some((next.at, next.subtype));
+            self.path.last_mut().expect("just pushed").1 = Some((next.at, next.how));
             self.visit(&next.name, by_name, namespaces, errors);
         }
         self.path.pop();

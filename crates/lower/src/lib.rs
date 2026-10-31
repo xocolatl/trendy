@@ -10,7 +10,7 @@ use trendy_lir as lir;
 /// Translate HIR to LIR. Infallible: sema has already rejected bad programs.
 #[must_use]
 pub fn lower(program: &hir::Program, path: &str) -> lir::Program {
-    let mut cx = Lowering::new(path, &program.unions);
+    let mut cx = Lowering::new(path, &program.subtypes);
 
     let mut variable_data = Vec::new();
     for variable in &program.variables {
@@ -171,11 +171,11 @@ struct Lowering {
 }
 
 impl Lowering {
-    /// For the program whose source is at `path`, with the union types
-    /// `unions`.
-    fn new(path: &str, unions: &BTreeMap<String, Vec<hir::Type>>) -> Self {
+    /// For the program whose source is at `path`, with the types'
+    /// immediate subtypes `subtypes`.
+    fn new(path: &str, subtypes: &BTreeMap<String, Vec<hir::Type>>) -> Self {
         Lowering {
-            families: Families::new(unions),
+            families: Families::new(subtypes),
             data: Vec::new(),
             descriptors: HashMap::new(),
             empty: None,
@@ -262,7 +262,7 @@ impl Lowering {
             // A value of a type in a hierarchy: its own type's descriptor's
             // address, then its components, in its type's variant of the
             // room for them.
-            hir::Value::Defined(value) if !value.ty.supertypes.is_empty() => {
+            hir::Value::Defined(value) if hir::Type::Defined(value.ty.clone()).root().is_some() => {
                 let own = self.components_descriptor(&value.ty);
                 let room = self.layout(&hir::Type::Defined(value.ty.clone()));
                 let lir::Layout::Struct(fields) = room else {
@@ -338,10 +338,10 @@ impl Lowering {
         let element = element.map_or(lir::Field::Usize(0), |element| {
             lir::Field::Address(self.descriptor(&element))
         });
-        // A type of the program's own's name, which values are written
-        // with, or none.
+        // The name a value of a type of the program's own is written with,
+        // or none.
         let name = match ty {
-            hir::Type::Defined(defined) => defined.name.as_str(),
+            hir::Type::Defined(defined) => defined.written(),
             _ => "",
         };
         let name_bytes = if name.is_empty() {
@@ -398,6 +398,7 @@ impl Lowering {
     fn components_descriptor(&mut self, defined: &hir::Defined) -> lir::DataId {
         let alone = hir::Defined {
             supertypes: Vec::new(),
+            specialized: false,
             ..defined.clone()
         };
         self.descriptor(&hir::Type::Defined(Box::new(alone)))
@@ -1166,7 +1167,7 @@ impl<'a> FunctionBuilder<'a> {
         }
         self.constraints_checked(defined, &target.dst, &value.name, value.at, cx);
         if in_hierarchy {
-            self.made_in_hierarchy(defined, target.dst, value.dst.clone(), cx);
+            self.made_in_hierarchy(defined, &target.dst, &value.dst, cx);
         }
     }
 
@@ -1176,21 +1177,158 @@ impl<'a> FunctionBuilder<'a> {
     fn made_in_hierarchy(
         &mut self,
         defined: &hir::Defined,
-        components: lir::Place,
-        dst: lir::Place,
+        components: &lir::Place,
+        dst: &lir::Place,
         cx: &mut Lowering,
     ) {
+        let mut at = dst.clone();
+        at.path.extend(cx.families.components_path(defined));
+        self.insts.push(lir::Inst::Copy {
+            dst: at,
+            src: components.clone(),
+            layout: cx.layout(&hir::Type::Tuple(defined.components.clone())),
+        });
+        self.tag_most_specific(defined, components, dst, cx);
+    }
+
+    /// Write at `dst`, a value in a hierarchy, the address of the descriptor
+    /// of the most specific type of the value of `defined` whose components
+    /// are at `components`, of which `defined`'s constraints are true (*Type
+    /// Inheritance and Relational Theory*, IM Prescription 10): of its
+    /// subtypes defined by constraints, the one whose specialization
+    /// constraints are true of them too, its most specific type in turn, or
+    /// else `defined` itself. A value of two of them stops the program,
+    /// writing both (R0020): a value has one most specific type.
+    fn tag_most_specific(
+        &mut self,
+        defined: &hir::Defined,
+        components: &lir::Place,
+        dst: &lir::Place,
+        cx: &mut Lowering,
+    ) {
+        let subtypes = cx.families.constrained(defined).to_vec();
+        let holds: Vec<lir::Place> = subtypes
+            .iter()
+            .map(|subtype| self.all_hold(subtype, components, cx))
+            .collect();
+        for (i, first) in subtypes.iter().enumerate() {
+            for (j, second) in subtypes.iter().enumerate().skip(i + 1) {
+                let (both, next) = (self.new_block(), self.new_block());
+                self.end_block(
+                    lir::Terminator::Branch {
+                        condition: holds[i].clone(),
+                        then: both,
+                        otherwise: next,
+                    },
+                    both,
+                );
+                let failed = self.new_block();
+                self.end_block(
+                    lir::Terminator::Branch {
+                        condition: holds[j].clone(),
+                        then: failed,
+                        otherwise: next,
+                    },
+                    failed,
+                );
+                let failure = lir::Failure::OverlappingSubtypes {
+                    value: components.clone(),
+                    descriptor: lir::Place::whole(lir::Base::Data(
+                        cx.components_descriptor(defined),
+                    )),
+                    first: self.text(&first.name, cx),
+                    second: self.text(&second.name, cx),
+                };
+                self.fail(failure, next);
+            }
+        }
+        let after = self.new_block();
+        for (subtype, holds) in subtypes.iter().zip(holds) {
+            let (of_it, not_of_it) = (self.new_block(), self.new_block());
+            self.end_block(
+                lir::Terminator::Branch {
+                    condition: holds,
+                    then: of_it,
+                    otherwise: not_of_it,
+                },
+                of_it,
+            );
+            self.tag_most_specific(subtype, components, dst, cx);
+            self.end_block(lir::Terminator::Jump(after), not_of_it);
+        }
         let own = lir::Place::whole(lir::Base::Data(cx.components_descriptor(defined)));
         let mut tag = dst.clone();
         tag.path.push(0);
         self.insts.push(lir::Inst::Address { dst: tag, src: own });
-        let mut at = dst;
-        at.path.extend(cx.families.components_path(defined));
+        self.end_block(lir::Terminator::Jump(after), after);
+    }
+
+    /// Whether the specialization constraints of `subtype`, a type defined
+    /// by constraints, are all true of the components at `components`, in
+    /// a new [`lir::Layout::U8`]: each computed until one is false.
+    fn all_hold(
+        &mut self,
+        subtype: &hir::Defined,
+        components: &lir::Place,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let result = self.slot(lir::Layout::U8);
         self.insts.push(lir::Inst::Copy {
-            dst: at,
-            src: components,
-            layout: cx.layout(&hir::Type::Tuple(defined.components.clone())),
+            dst: result.clone(),
+            src: u8_constant(0, cx),
+            layout: lir::Layout::U8,
         });
+        let done = self.new_block();
+        for constraint in subtype.own_constraints() {
+            let holds = self.holds(constraint, subtype, components, cx);
+            let next = self.new_block();
+            self.end_block(
+                lir::Terminator::Branch {
+                    condition: holds,
+                    then: next,
+                    otherwise: done,
+                },
+                next,
+            );
+        }
+        self.insts.push(lir::Inst::Copy {
+            dst: result.clone(),
+            src: u8_constant(1, cx),
+            layout: lir::Layout::U8,
+        });
+        self.end_block(lir::Terminator::Jump(done), done);
+        result
+    }
+
+    /// Whether `constraint`, of `defined`, is true of the value at `value`,
+    /// laid out as the tuple of its components: a call of its operator with
+    /// the components as its arguments, in a new place.
+    fn holds(
+        &mut self,
+        constraint: &hir::Constraint,
+        defined: &hir::Defined,
+        value: &lir::Place,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let at_hand = hir::Expr::Current(0, defined.components.clone());
+        let args: BTreeMap<String, hir::Expr> = defined
+            .components
+            .attributes()
+            .map(|(name, _)| {
+                let arg = hir::Expr::Extract(Box::new(at_hand.clone()), name.to_string());
+                (name.to_string(), arg)
+            })
+            .collect();
+        let call = hir::Expr::Call(hir::Call {
+            operator: constraint.operator,
+            types: Vec::new(),
+            args,
+            updated: BTreeMap::new(),
+        });
+        self.tuples.push(value.clone());
+        let holds = self.place(&call, cx);
+        self.tuples.pop();
+        holds
     }
 
     /// The tuple the conversion `operator`, of a type of the program's own,
@@ -2702,7 +2840,7 @@ impl<'a> FunctionBuilder<'a> {
         let mut own = value.clone();
         own.path.push(0);
         let done = self.new_block();
-        for leaf in cx.families.leaves_under(ty) {
+        for leaf in cx.families.members_under(ty) {
             let descriptor = cx.components_descriptor(&leaf);
             let address = self.slot(lir::Layout::Address);
             self.insts.push(lir::Inst::Address {
@@ -2793,7 +2931,7 @@ impl<'a> FunctionBuilder<'a> {
             return value;
         }
         let selected = self.slot(cx.layout(&ty));
-        self.made_in_hierarchy(defined, value, selected.clone(), cx);
+        self.made_in_hierarchy(defined, &value, &selected, cx);
         selected
     }
 
@@ -2862,25 +3000,8 @@ impl<'a> FunctionBuilder<'a> {
             }
         }
         let descriptor = lir::Place::whole(lir::Base::Data(cx.components_descriptor(defined)));
-        let at_hand = hir::Expr::Current(0, defined.components.clone());
-        let args: BTreeMap<String, hir::Expr> = defined
-            .components
-            .attributes()
-            .map(|(name, _)| {
-                let arg = hir::Expr::Extract(Box::new(at_hand.clone()), name.to_string());
-                (name.to_string(), arg)
-            })
-            .collect();
         for constraint in &defined.constraints {
-            let call = hir::Expr::Call(hir::Call {
-                operator: constraint.operator,
-                types: Vec::new(),
-                args: args.clone(),
-                updated: BTreeMap::new(),
-            });
-            self.tuples.push(value.clone());
-            let holds = self.place(&call, cx);
-            self.tuples.pop();
+            let holds = self.holds(constraint, defined, value, cx);
             let (kept, failed) = (self.new_block(), self.new_block());
             self.end_block(
                 lir::Terminator::Branch {
@@ -4267,57 +4388,105 @@ struct Reading<'r> {
 }
 
 /// How the values of the program's types are laid out. A value of a type
-/// in a hierarchy, a union type or a subtype of one, is laid out as every
-/// value of the union type at its top, its root: the address of its own
-/// type's descriptor, then room for the components of any of the types
-/// with them under the root, its leaves, so that a value of a subtype is
-/// already a value of its supertypes. A value of any other type of the
-/// program's own is laid out as the tuple of its components.
+/// in a hierarchy, under a union type or a regular type that a type is
+/// defined as a subtype of by a constraint, is laid out as every value of
+/// the type at its top, its root: the address of its own type's
+/// descriptor, then room for the components of any of the types under the
+/// root with a stored representation of their own, its variants, so that a
+/// value of a subtype is already a value of its supertypes. A type defined
+/// by constraints has the components, and the variant, of the type its
+/// values are stored as. A value of any other type of the program's own
+/// is laid out as the tuple of its components.
 struct Families {
-    /// Each root's leaves, in the order the program declares them.
-    leaves: HashMap<String, Vec<hir::Defined>>,
+    /// Each root's types a value can be of, in the order the program
+    /// declares them.
+    members: HashMap<String, Vec<hir::Defined>>,
+    /// Each root's types with a stored representation of their own, in the
+    /// order the program declares them.
+    variants: HashMap<String, Vec<hir::Defined>>,
+    /// Each regular type's subtypes defined by constraints, by its name.
+    constrained: HashMap<String, Vec<hir::Defined>>,
     /// Each root's room for its values' components: a
-    /// [`lir::Layout::Union`] of its leaves' components, in that order.
+    /// [`lir::Layout::Union`] of its variants' components, in that order.
     unions: HashMap<String, lir::Layout>,
 }
 
 impl Families {
-    /// The hierarchies of the union types `unions`, each with its
-    /// immediate subtypes.
-    fn new(unions: &BTreeMap<String, Vec<hir::Type>>) -> Self {
+    /// The hierarchies of the types `subtypes`, each with its immediate
+    /// subtypes.
+    fn new(subtypes: &BTreeMap<String, Vec<hir::Type>>) -> Self {
         fn collect(
             name: &str,
-            unions: &BTreeMap<String, Vec<hir::Type>>,
-            out: &mut Vec<hir::Defined>,
+            subtypes: &BTreeMap<String, Vec<hir::Type>>,
+            members: &mut Vec<hir::Defined>,
         ) {
-            for subtype in unions.get(name).into_iter().flatten() {
+            for subtype in subtypes.get(name).into_iter().flatten() {
                 match subtype {
-                    hir::Type::Defined(defined) => out.push((**defined).clone()),
-                    hir::Type::Dummy(dummy) => collect(&dummy.name, unions, out),
-                    _ => unreachable!("a union type's subtypes are the program's own types"),
+                    hir::Type::Defined(defined) => {
+                        members.push((**defined).clone());
+                        collect(&defined.name, subtypes, members);
+                    }
+                    hir::Type::Dummy(dummy) => collect(&dummy.name, subtypes, members),
+                    _ => unreachable!("a type's subtypes are the program's own types"),
                 }
             }
         }
-        let mut leaves = HashMap::new();
-        for root in unions.values().flatten().filter_map(hir::Type::root) {
-            if !leaves.contains_key(root) {
-                let mut found = Vec::new();
-                collect(root, unions, &mut found);
-                leaves.insert(root.to_string(), found);
+        let mut constrained: HashMap<String, Vec<hir::Defined>> = HashMap::new();
+        for (name, list) in subtypes {
+            for subtype in list {
+                if let hir::Type::Defined(defined) = subtype
+                    && defined.specialization.is_some()
+                {
+                    constrained
+                        .entry(name.clone())
+                        .or_default()
+                        .push((**defined).clone());
+                }
             }
         }
+        let mut members = HashMap::new();
+        for root in subtypes.values().flatten().filter_map(hir::Type::root) {
+            if members.contains_key(root) {
+                continue;
+            }
+            let mut found = Vec::new();
+            // A regular root is one of its own types, as its constrained
+            // subtypes' supertype.
+            if let Some(regular) = constrained
+                .get(root)
+                .and_then(|list| list.first())
+                .and_then(|subtype| subtype.specialization.as_ref())
+            {
+                found.push((*regular.supertype).clone());
+            }
+            collect(root, subtypes, &mut found);
+            members.insert(root.to_string(), found);
+        }
+        let variants = members
+            .iter()
+            .map(|(root, list)| {
+                let own = list
+                    .iter()
+                    .filter(|d| d.specialization.is_none())
+                    .cloned()
+                    .collect();
+                (root.clone(), own)
+            })
+            .collect();
         let mut families = Families {
-            leaves,
+            members,
+            variants,
+            constrained,
             unions: HashMap::new(),
         };
-        let roots: Vec<String> = families.leaves.keys().cloned().collect();
+        let roots: Vec<String> = families.variants.keys().cloned().collect();
         for root in roots {
             families.lay_out(&root);
         }
         families
     }
 
-    /// Lay out the hierarchy under `root`, after those its leaves'
+    /// Lay out the hierarchy under `root`, after those its variants'
     /// components are of, which contain none of its own types.
     fn lay_out(&mut self, root: &str) {
         fn roots<'t>(ty: &'t hir::Type, out: &mut Vec<&'t str>) {
@@ -4330,22 +4499,23 @@ impl Families {
         if self.unions.contains_key(root) {
             return;
         }
-        let leaves = self.leaves[root].clone();
+        let variants = self.variants[root].clone();
         let mut inside = Vec::new();
-        for leaf in &leaves {
-            leaf.components
+        for variant in &variants {
+            variant
+                .components
                 .attributes()
                 .for_each(|(_, ty)| roots(ty, &mut inside));
         }
         for nested in inside {
             self.lay_out(nested);
         }
-        let variants = leaves
+        let layouts = variants
             .iter()
-            .map(|leaf| self.layout(&hir::Type::Tuple(leaf.components.clone())))
+            .map(|variant| self.layout(&hir::Type::Tuple(variant.components.clone())))
             .collect();
         self.unions
-            .insert(root.to_string(), lir::Layout::Union(variants));
+            .insert(root.to_string(), lir::Layout::Union(layouts));
     }
 
     /// The layout of a value of type `ty`.
@@ -4375,9 +4545,12 @@ impl Families {
     /// a text, a relation or an array, or, in a hierarchy, could.
     fn points(&self, ty: &hir::Type) -> bool {
         if let Some(root) = ty.root() {
-            return self.leaves[root]
-                .iter()
-                .any(|leaf| leaf.components.attributes().any(|(_, ty)| self.points(ty)));
+            return self.variants[root].iter().any(|variant| {
+                variant
+                    .components
+                    .attributes()
+                    .any(|(_, ty)| self.points(ty))
+            });
         }
         match ty {
             hir::Type::Scalar(scalar) => *scalar == hir::Scalar::Text,
@@ -4392,29 +4565,40 @@ impl Families {
         }
     }
 
-    /// The types with components that are `ty`, in a hierarchy, or one of
+    /// The types a value can be of that are `ty`, in a hierarchy, or one of
     /// its subtypes.
-    fn leaves_under(&self, ty: &hir::Type) -> Vec<hir::Defined> {
+    fn members_under(&self, ty: &hir::Type) -> Vec<hir::Defined> {
         let root = ty.root().expect("a type in a hierarchy");
-        self.leaves[root]
+        self.members[root]
             .iter()
-            .filter(|leaf| hir::Type::Defined(Box::new((*leaf).clone())).is_subtype_of(ty))
+            .filter(|member| hir::Type::Defined(Box::new((*member).clone())).is_subtype_of(ty))
             .cloned()
             .collect()
     }
 
+    /// The subtypes of the regular type `defined` defined by constraints,
+    /// which a value of it may be of.
+    fn constrained(&self, defined: &hir::Defined) -> &[hir::Defined] {
+        self.constrained
+            .get(&defined.name)
+            .map_or(&[], Vec::as_slice)
+    }
+
     /// Where the components of a value of the type of the program's own
-    /// `defined` are, in its layout: in a hierarchy, its leaf's variant of
-    /// the root's room, after its type's descriptor's address; otherwise,
-    /// all of it.
+    /// `defined` are, in its layout: in a hierarchy, its variant of the
+    /// root's room, after its type's descriptor's address, which a type
+    /// defined by constraints shares with the type whose components it
+    /// has; otherwise, all of it.
     fn components_path(&self, defined: &hir::Defined) -> Vec<usize> {
-        let Some(root) = defined.supertypes.last() else {
+        let ty = hir::Type::Defined(Box::new(defined.clone()));
+        let Some(root) = ty.root() else {
             return Vec::new();
         };
-        let variant = self.leaves[root]
+        let stored = defined.stored_as();
+        let variant = self.variants[root]
             .iter()
-            .position(|leaf| leaf.name == defined.name)
-            .expect("a type in a hierarchy is one of its root's leaves");
+            .position(|variant| variant.name == stored.name)
+            .expect("a type in a hierarchy is stored as one of its root's variants");
         vec![1, variant]
     }
 }
@@ -4519,7 +4703,7 @@ mod tests {
         hir::Program {
             operators,
             variables,
-            unions: BTreeMap::new(),
+            subtypes: BTreeMap::new(),
             entry: hir::OperatorId(entry),
         }
     }

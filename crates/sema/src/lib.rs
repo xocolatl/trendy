@@ -41,12 +41,12 @@ pub fn analyze(prelude: &Prelude, file: &SourceFile) -> Result<hir::Program, Vec
     errors.sort_by_key(|d| d.span().start);
     match entry {
         Some(entry) if errors.is_empty() => {
-            let unions = checked.namespaces.unions.clone();
+            let subtypes = checked.namespaces.subtypes.clone();
             let (operators, variables) = checked.finish(prelude);
             Ok(hir::Program {
                 operators,
                 variables,
-                unions,
+                subtypes,
                 entry,
             })
         }
@@ -312,9 +312,9 @@ pub(crate) struct Namespaces {
     /// Each of the program's union types, all of them dummy types, unless
     /// its declaration has errors: [`named_types::resolve`] fills it in.
     dummies: HashMap<String, hir::Dummy>,
-    /// Each union type's immediate subtypes, in the order they are
-    /// declared, but those with errors.
-    unions: BTreeMap<String, Vec<hir::Type>>,
+    /// Each type's immediate subtypes, a union type's and a regular
+    /// type's, in the order they are declared, but those with errors.
+    subtypes: BTreeMap<String, Vec<hir::Type>>,
     /// The kinds, which only the prelude declares, by name, each with the
     /// built-in types of it.
     kinds: HashMap<String, (hir::Kind, BTreeSet<hir::Scalar>)>,
@@ -443,7 +443,26 @@ impl Namespaces {
     /// The immediate subtypes of the union type `name`, in the order they
     /// are declared, but those with errors.
     pub(crate) fn subtypes(&self, name: &str) -> &[hir::Type] {
-        self.unions.get(name).map_or(&[], Vec::as_slice)
+        self.subtypes.get(name).map_or(&[], Vec::as_slice)
+    }
+
+    /// The read-only operators selecting a value of `defined` calls, to
+    /// check its components and find its most specific type: its own
+    /// checks (see [`hir::Defined::checks`]), and the specialization
+    /// constraints of the subtypes defined by constraints that it may be
+    /// of, and theirs in turn.
+    pub(crate) fn selection_checks(&self, defined: &hir::Defined) -> Vec<hir::OperatorId> {
+        let mut checks: Vec<hir::OperatorId> = defined.checks().collect();
+        let mut pending: Vec<&str> = vec![&defined.name];
+        while let Some(name) = pending.pop() {
+            for subtype in self.subtypes(name) {
+                if let hir::Type::Defined(subtype) = subtype {
+                    checks.extend(subtype.own_constraints().iter().map(|c| c.operator));
+                    pending.push(&subtype.name);
+                }
+            }
+        }
+        checks
     }
 
     /// The possible representations of the program's own type `name` but
@@ -8814,22 +8833,22 @@ heading home := { city: text, rooms: integer };
         // Each union type's immediate subtypes, in the order they are
         // declared, each with its supertypes, the immediate one first.
         let subtypes = |name: &str| -> Vec<String> {
-            program.unions[name]
+            program.subtypes[name]
                 .iter()
                 .map(ToString::to_string)
                 .collect()
         };
         assert_eq!(subtypes("figure"), ["shape", "blob"]);
         assert_eq!(subtypes("shape"), ["disc", "square"]);
-        let hir::Type::Defined(disc) = &program.unions["shape"][0] else {
+        let hir::Type::Defined(disc) = &program.subtypes["shape"][0] else {
             panic!("a type with a representation");
         };
         assert_eq!(disc.supertypes, ["shape", "figure"]);
-        let hir::Type::Dummy(shape) = &program.unions["figure"][0] else {
+        let hir::Type::Dummy(shape) = &program.subtypes["figure"][0] else {
             panic!("a union type");
         };
         assert_eq!(shape.supertypes, ["figure"]);
-        assert_eq!(program.unions["figure"][0].root(), Some("figure"));
+        assert_eq!(program.subtypes["figure"][0].root(), Some("figure"));
         let subtype = |name: &str| format!("type {name} is figure {{ {{ r: approximate }} }};\n");
         let two = format!("{}{}", subtype("a"), subtype("b"));
         for (source, code, message) in [
@@ -8839,14 +8858,24 @@ heading home := { city: text, rooms: integer };
                 "the union type `figure` has no possible representation of its own",
             ),
             (
-                "type ellipse { { a: approximate } };\ntype circle is ellipse { { r: approximate } };\n".to_string(),
+                "type ellipse { { a: approximate } };\ntype circle is ellipse { constraint a > 0e0, { r: approximate } };\n".to_string(),
+                Code::Specialization,
+                "`circle` can't have a possible representation of its own yet",
+            ),
+            (
+                "type ellipse { { a: approximate } };\ntype circle is ellipse { constraint a > 0e0, order [asc a] };\n".to_string(),
+                Code::Specialization,
+                "`circle` can't have an order of its own",
+            ),
+            (
+                "type ellipse { { a: approximate } };\ntype round union is ellipse;\ntype disc is round { { r: approximate } };\ntype ring is round { { r: approximate, w: approximate } };\n".to_string(),
                 Code::UnionType,
-                "`ellipse` isn't a union type, so no type is a subtype of it",
+                "the union type `round` can't be a subtype of `ellipse`, which isn't a union type",
             ),
             (
                 "type t is integer { { a: integer } };\n".to_string(),
                 Code::UnionType,
-                "`integer` isn't a union type, so no type is a subtype of it",
+                "`integer` is a built-in type, so no type is a subtype of it",
             ),
             (
                 format!("type figure union;\n{two}type t is figur {{ {{ a: integer }} }};\n"),
@@ -9441,6 +9470,68 @@ var images := figures extend {{ same := !!(discs rename {{n as m}}) }};
     }
 
     #[test]
+    fn a_subtype_defined_by_constraints_is_its_supertypes_values_it_is_true_of() {
+        let types = "type ellipse { { a: approximate, b: approximate }, constraint a >= b };\ntype circle is ellipse { constraint a = b };\n";
+        let variables = variables(&format!(
+            "{types}var round := ellipse{{a: 2e0, b: 2e0}};
+var oval := ellipse{{a: 3e0, b: 2e0}};
+var widened := [ var e := round; update e {{ a := 3e0 }}; e ];
+var narrowed := [ var e := oval; update e {{ a := 2e0 }}; e ];
+var tests := tuple {{ round: round is circle, oval: oval is circle, widened: widened is circle, narrowed: narrowed is circle }};
+"
+        ));
+        let value = |name: &str| &variables.iter().find(|v| v.name == name).unwrap().init;
+        assert_eq!(
+            value("tests").to_string(),
+            "tuple { narrowed: true, oval: false, round: true, widened: false }"
+        );
+        // Declared an ellipse, of most specific type circle, written as the
+        // ellipse it is.
+        let ty = |name: &str| {
+            variables
+                .iter()
+                .find(|v| v.name == name)
+                .unwrap()
+                .ty
+                .to_string()
+        };
+        assert_eq!(ty("round"), "ellipse");
+        assert_eq!(value("round").to_string(), "ellipse{a: 2e0, b: 2e0}");
+        let hir::Value::Defined(round) = value("round") else {
+            panic!("{:?}", value("round"));
+        };
+        assert_eq!(round.ty.name, "circle");
+        // A circle variable holds circles only: an update that makes its
+        // value just an ellipse breaks its constraint.
+        let broken = errors(&format!(
+            "{types}var c := [ var c: circle := treat ellipse{{a: 1e0, b: 1e0}} as circle; update c {{ a := 2e0 }}; c ];{MAIN}"
+        ));
+        assert_eq!(broken[0].code, Code::BrokenConstraint, "{broken:#?}");
+        // A value of two subtypes of one type is an error.
+        let overlapping = errors(&format!(
+            "{types}type small is ellipse {{ constraint a < 1e0 }};\nvar dot := ellipse{{a: 5e-1, b: 5e-1}};{MAIN}"
+        ));
+        assert_eq!(overlapping[0].code, Code::OverlappingSubtypes);
+        assert_eq!(
+            overlapping[0].message,
+            "`ellipse{a: 5e-1, b: 5e-1}` is both a `circle` and a `small`, but a value has one most specific type"
+        );
+        // It needs a constraint.
+        assert_eq!(
+            codes(&format!(
+                "type ellipse {{ {{ a: approximate }} }};\ntype circle is ellipse {{ {{ r: approximate }} }};{MAIN}"
+            )),
+            [Code::Specialization, Code::Specialization]
+        );
+        // An update of a name narrowed to a circle changes it as an
+        // ellipse, after which it is an ellipse.
+        let updated = format!(
+            "type figure union;\ntype ellipse is figure {{ {{ a: approximate, b: approximate }}, constraint a >= b }};\ntype circle is ellipse {{ constraint a = b }};\ntype square is figure {{ {{ side: approximate }} }};\noperator widen{{var f: figure}} [ if f is circle then [ update f {{ a := 2e0 * a }}; call debug_value{{v: f.b}}; ]; ];{MAIN}"
+        );
+        assert!(analyze_str(&updated).is_ok(), "{:#?}", errors(&updated));
+    }
+
+    #[test]
     fn a_dummy_type_has_no_selector_order_or_components() {
         // A dummy type has no selector; a fix selects the one subtype whose
         // representation has the components named.
@@ -9508,6 +9599,8 @@ type position { { latitude: approximate, longitude: approximate } };
             keys: BTreeMap::new(),
             order: None,
             supertypes: Vec::new(),
+            specialized: false,
+            specialization: None,
         };
         let place = hir::Defined {
             name: "place".to_string(),
@@ -9526,6 +9619,8 @@ type position { { latitude: approximate, longitude: approximate } };
             keys: BTreeMap::new(),
             order: None,
             supertypes: Vec::new(),
+            specialized: false,
+            specialization: None,
         };
         let vars = variables(source);
         assert_eq!(vars[0].ty, hir::Type::Defined(Box::new(place)));

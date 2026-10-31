@@ -13,6 +13,7 @@ use trendy_syntax::{SyntaxKind, SyntaxToken};
 
 use crate::check::Written;
 use crate::globals::{Global, Pending};
+use crate::named_types::Named;
 use crate::operators::{Chosen, Operators, Signature};
 use crate::types::{Origin, TypeParameters};
 use crate::{Kind, Namespaces};
@@ -567,22 +568,31 @@ pub(crate) fn cyclic_types(cycle: &[crate::named_types::Cycled]) -> Diagnostic {
         .with_help(
             "keep a hierarchy as a relation of pairs instead, each with one it contains, as in `heading assembly := { major: text, minor: text };`",
         );
-    let d = if cycle.iter().any(|c| c.subtype) {
-        d.with_note("a union type contains each of its subtypes, whose values are among its own")
-    } else {
-        d
-    };
+    let d =
+        d.with_notes(cycle.iter().any(|c| c.how == Named::Subtype).then_some(
+            "a union type contains each of its subtypes, whose values are among its own",
+        ));
+    let d = d.with_notes(
+        cycle
+            .iter()
+            .any(|c| c.how == Named::Specializes)
+            .then_some("a subtype defined by a constraint contains its supertype, whose components its values have"),
+    );
     cycle.iter().enumerate().fold(d, |d, (i, cycled)| {
         let next = &cycle[(i + 1) % cycle.len()];
-        let label = if cycled.subtype {
-            format!(
+        let label = match cycled.how {
+            Named::Subtype => format!(
                 "`{}` is one of `{}`'s subtypes here",
                 next.name, cycled.name
-            )
-        } else if next.name == cycled.name {
-            format!("`{}` contains itself here", cycled.name)
-        } else {
-            format!("`{}` contains `{}` here", cycled.name, next.name)
+            ),
+            Named::Specializes => format!(
+                "`{}` is defined as a subtype of `{}` here",
+                cycled.name, next.name
+            ),
+            Named::Holds if next.name == cycled.name => {
+                format!("`{}` contains itself here", cycled.name)
+            }
+            Named::Holds => format!("`{}` contains `{}` here", cycled.name, next.name),
         };
         d.with_secondary(cycled.via, label)
     })
@@ -771,29 +781,100 @@ pub(crate) fn union_with_body(name: &str, body: &ast::TypeBody) -> Diagnostic {
     ))
 }
 
-/// A type declared `is` the type `ident` names, which isn't a union type:
-/// a type of the program's own, declared at `declared`, or, if `None`, a
-/// built-in one.
-pub(crate) fn not_a_union(ident: &SyntaxToken, declared: Option<Span>) -> Diagnostic {
+/// `ident`, a built-in type, named as a type's supertype.
+pub(crate) fn built_in_supertype(ident: &SyntaxToken) -> Diagnostic {
     let name = ident.text();
-    let d = Diagnostic::error(
+    Diagnostic::error(
         Code::UnionType,
-        format!("`{name}` isn't a union type, so no type is a subtype of it"),
+        format!("`{name}` is a built-in type, so no type is a subtype of it"),
+        trendy_syntax::span(ident.text_range()),
+        "a built-in type",
+    )
+    .with_note(UNION_NOTE)
+    .with_note(SPECIALIZATION_RULE)
+    .with_help(format!("remove `is {name}`"))
+}
+
+/// The union type `name`, declared a subtype of `ident`, a regular type.
+pub(crate) fn union_under_regular(name: &str, ident: &SyntaxToken) -> Diagnostic {
+    let supertype = ident.text();
+    Diagnostic::error(
+        Code::UnionType,
+        format!("the union type `{name}` can't be a subtype of `{supertype}`, which isn't a union type"),
         trendy_syntax::span(ident.text_range()),
         "not a union type",
     )
-    .with_note(UNION_NOTE)
-    .with_note("only union types have subtypes: a subtype of a type with possible representations, specialized by a constraint, as a circle is an ellipse whose semiaxes are equal, isn't in trendy yet");
-    match declared {
-        Some(declared) => d
-            .with_secondary(declared, "declared without `union` here")
-            .with_help(format!(
-                "declare `{name}` `union`, without representations, if each of its values is one of its subtypes', or remove `is {name}`"
-            )),
-        None => d.with_help(format!(
-            "a built-in type has no subtypes: remove `is {name}`"
-        )),
-    }
+    .with_note("a union type's supertypes are union types: a subtype of a type with possible representations is defined by constraints on its components, which a union type has none of")
+    .with_help(format!(
+        "declare `{name}` without `union`, defined by a constraint on `{supertype}`'s components, as in `type {name} is {supertype} {{ constraint … }};`, or remove `is {supertype}`"
+    ))
+}
+
+/// What a subtype of a regular type is, for its errors.
+const SPECIALIZATION_RULE: &str = "a subtype of a type with possible representations is defined by its specialization constraints, conditions on the supertype's components: its values are those of the supertype they are true of, as a circle is an ellipse whose semiaxes are equal (*Type Inheritance and Relational Theory*, IM Prescription 10)";
+
+/// `decl`, which declares `name` a subtype of the regular type `supertype`
+/// with no constraint.
+pub(crate) fn unconstrained_subtype(
+    decl: &trendy_syntax::ast::TypeDecl,
+    name: &str,
+    supertype: &str,
+) -> Diagnostic {
+    let at = decl
+        .name()
+        .and_then(|n| n.ident())
+        .map_or_else(|| decl.span(), |i| trendy_syntax::span(i.text_range()));
+    Diagnostic::error(
+        Code::Specialization,
+        format!("`{name}` is a subtype of `{supertype}` with no constraint to say which of its values are `{name}`'s"),
+        at,
+        "no specialization constraint",
+    )
+    .with_note(SPECIALIZATION_RULE)
+    .with_help(format!(
+        "add its constraint, a condition on `{supertype}`'s components, as in `type {name} is {supertype} {{ constraint … }};`"
+    ))
+}
+
+/// `representation`, written in the declaration of `name`, a subtype of
+/// the regular type `supertype` defined by a constraint.
+pub(crate) fn specialized_representation(
+    representation: &trendy_syntax::ast::Representation,
+    name: &str,
+    supertype: &str,
+) -> Diagnostic {
+    Diagnostic::error(
+        Code::Specialization,
+        format!("`{name}` can't have a possible representation of its own yet"),
+        representation.span(),
+        "a representation of its own",
+    )
+    .with_note(format!(
+        "`{name}`'s values are `{supertype}`'s, stored as their components, which a value of `{name}` has; a representation of its own, converted to and from them, isn't in trendy yet"
+    ))
+    .with_note(SPECIALIZATION_RULE)
+    .with_help(format!(
+        "remove it, and read the components `{supertype}` declares"
+    ))
+}
+
+/// `order`, written in the declaration of `name`, a subtype of the regular
+/// type `supertype` defined by a constraint.
+pub(crate) fn specialized_order(
+    order: &trendy_syntax::ast::TypeOrder,
+    name: &str,
+    supertype: &str,
+) -> Diagnostic {
+    Diagnostic::error(
+        Code::Specialization,
+        format!("`{name}` can't have an order of its own"),
+        order.span(),
+        "an order of its own",
+    )
+    .with_note(format!(
+        "`{name}`'s values are `{supertype}`'s, so they compare as `{supertype}`'s do, and have an order if it has one"
+    ))
+    .with_help(format!("remove it, and give `{supertype}` the order"))
 }
 
 /// The union type `ident` declares, whose only subtypes are `subtypes`,
@@ -4735,6 +4816,7 @@ pub(crate) fn failed(failed: &crate::ops::Failed, expr: &Expr) -> Diagnostic {
             unparsable(*builtin, text, *why, expr)
         }
         crate::ops::Failed::Constraint(broken) => broken_constraint(broken, expr),
+        crate::ops::Failed::Overlapping(overlapping) => overlapping_subtypes(overlapping, expr),
         crate::ops::Failed::Key(broken) => {
             let keyed = Keyed::Component {
                 ty: &broken.value.ty.name,
@@ -5099,6 +5181,40 @@ fn broken_constraint(broken: &crate::ops::BrokenConstraint, expr: &Expr) -> Diag
         ),
     };
     d.with_note(CONSTRAINT_RULE)
+}
+
+/// `expr`, which selects a value that is of two subtypes of its type
+/// defined by constraints, as `overlapping` says.
+fn overlapping_subtypes(overlapping: &crate::ops::Overlapping, expr: &Expr) -> Diagnostic {
+    let value = hir::Value::Defined(overlapping.value.clone());
+    let [a, b] = &overlapping.types;
+    let mut d = Diagnostic::error(
+        Code::OverlappingSubtypes,
+        format!(
+            "`{value}` is both {} and {}, but a value has one most specific type",
+            article(a),
+            article(b)
+        ),
+        expr.span(),
+        format!("of both `{a}` and `{b}`"),
+    );
+    for (name, declared) in overlapping.types.iter().zip(&overlapping.declared) {
+        if let Some(at) = declared {
+            d = d.with_secondary(*at, format!("`{name}` declared here"));
+        }
+    }
+    d.with_note(format!(
+        "a value has one most specific type, so the subtypes of a type defined by constraints are disjoint: no value of `{}` may be of both", overlapping.value.ty.name
+    ))
+    .with_help(format!(
+        "change a constraint so that no value is of both, or make one a subtype of the other, as in `type {b} is {a} {{ constraint … }};`"
+    ))
+}
+
+/// The type `name` with its indefinite article, as prose names a value of
+/// it: `` a `circle` ``, or `` an `ellipse` ``.
+fn article(name: &str) -> String {
+    format!("{} `{name}`", trendy_text::article(name))
 }
 
 /// `expr`, which takes `builtin`, `parse_integer`, `parse_approximate` or
@@ -7514,11 +7630,7 @@ pub(crate) fn argument_mode(
             let written = written.expect("a `const` parameter's argument may be marked `const`");
             let words = mode_words(written);
             let (help, edits) = mode_removal(written);
-            let a = if words.starts_with(['a', 'e', 'i', 'o', 'u']) {
-                "an"
-            } else {
-                "a"
-            };
+            let a = trendy_text::article(&words);
             (
                 format!(
                     "`{name}` isn't {a} `{words}` parameter, so its argument isn't marked `{words}`"

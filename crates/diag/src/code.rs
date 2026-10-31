@@ -153,6 +153,7 @@ codes! {
     TypeTest => "A0062",
     Versions => "A0063",
     MisplacedKey => "A0064",
+    Specialization => "A0065",
     Overflow => "R0001",
     DivisionByZero => "R0002",
     OutOfMemory => "R0003",
@@ -172,6 +173,7 @@ codes! {
     BrokenConstraint => "R0017",
     NoResult => "R0018",
     NotOfType => "R0019",
+    OverlappingSubtypes => "R0020",
     Internal => "X0000",
 }
 

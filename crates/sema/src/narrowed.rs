@@ -122,6 +122,23 @@ impl Facts {
         self.0.remove(name).is_some()
     }
 
+    /// These, after an `update` of `name`, whose value is then selected
+    /// again of the type it is updated as: of each type they show it to be
+    /// of, defined as a subtype by a constraint, which the new value may no
+    /// longer be of, the type its components are its supertype's of (see
+    /// [`updated_as`]).
+    pub(crate) fn updated(&mut self, name: &str) {
+        if let Some(types) = self.0.get_mut(name) {
+            for ty in types {
+                while let hir::Type::Defined(defined) = &*ty
+                    && let Some(specialization) = &defined.specialization
+                {
+                    *ty = hir::Type::Defined(specialization.supertype.clone());
+                }
+            }
+        }
+    }
+
     /// The type that what `name` refers to, a value of type `ty`, is shown
     /// to be of, if it is narrower: the most specific subtype of `ty` it is
     /// tested to be of.
@@ -187,6 +204,27 @@ pub(crate) fn narrow(facts: &Facts, name: &str, lookup: Lookup, names: &mut dyn 
     }
 }
 
+/// The type an `update` of a variable of type `declared`, whose value a
+/// test shows to be of `narrowed`, selects its value again of: `narrowed`,
+/// or, of a type defined as a subtype by a constraint, whose components
+/// are its supertype's, that supertype, as long as it is `declared` or one
+/// of its subtypes. A new value of the supertype may be of the subtype
+/// again, or not (*Type Inheritance and Relational Theory*, chapter 8,
+/// generalization by constraint).
+pub(crate) fn updated_as(narrowed: &hir::Type, declared: &hir::Type) -> hir::Type {
+    let mut ty = narrowed.clone();
+    while let hir::Type::Defined(defined) = &ty
+        && let Some(specialization) = &defined.specialization
+    {
+        let supertype = hir::Type::Defined(specialization.supertype.clone());
+        if !supertype.is_subtype_of(declared) {
+            break;
+        }
+        ty = supertype;
+    }
+    ty
+}
+
 /// What a statement may assign, by its syntax, in it and in the
 /// statements inside it, which ends what is known of the names' values:
 /// each variable an assignment's target names, or a `var` or `out`
@@ -196,6 +234,9 @@ pub(crate) fn narrow(facts: &Facts, name: &str, lookup: Lookup, names: &mut dyn 
 pub(crate) struct Assigns {
     pub(crate) names: BTreeMap<String, Span>,
     pub(crate) call: Option<Span>,
+    /// Each variable an `update` changes, whose narrowing it keeps, of the
+    /// type it is updated as (see [`Facts::updated`]).
+    pub(crate) updated: Vec<String>,
 }
 
 impl Assigns {
@@ -258,16 +299,17 @@ impl Assigns {
     }
 
     /// The variables an assignment statement's clauses assign, but those an
-    /// `update` changes: it gives the components of the type a test shows
-    /// a value to be of new values, so the value is still one of it, as
-    /// only a union type has subtypes.
+    /// `update` changes: it gives new values to the components of the type
+    /// it is updated as, so the value is still one of it.
     fn clauses(&mut self, stmt: &ast::AssignStmt) {
-        for clause in stmt
-            .clauses()
-            .filter(|c| !matches!(c, ast::Clause::Update(_)))
-        {
+        for clause in stmt.clauses() {
             let target = clause.target().and_then(|t| crate::assign::target_path(&t));
-            if let Some(ident) = target.and_then(|(name, _)| name.ident()) {
+            let Some(ident) = target.and_then(|(name, _)| name.ident()) else {
+                continue;
+            };
+            if matches!(clause, ast::Clause::Update(_)) {
+                self.updated.push(ident.text().to_string());
+            } else {
                 self.named(ident.text(), clause.span());
             }
         }

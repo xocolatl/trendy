@@ -82,6 +82,13 @@ type ellipse is plane_figure {
     constraint a >= b,
 };
 
+/* A circle is an ellipse whose semiaxes are equal: its values are the
+   ellipses its constraint is true of (IM Prescription 10), so selecting
+   an ellipse with equal semiaxes gives a circle, and changing one so that
+   they aren't gives just an ellipse again. It has no representation of
+   its own yet, so it is written as the ellipse it is. */
+type circle is ellipse { constraint a = b };
+
 /* A polygon, by its vertices, numbered from 1, each at a point of its own:
    a component can be a relation, whose keys say that no two vertices have
    one number or one point, which TTM writes as two constraints, that
@@ -154,6 +161,15 @@ var squashed := [
     e
 ];
 
+/* A well, selected as an ellipse, is a circle; widened, it is just an
+   ellipse again. */
+var well := ellipse{a: distance{m: 1e0}, b: distance{m: 1e0}, ctr: pt};
+var widened := [
+    var w := well;
+    update w { a := distance{m: 2e0} };
+    w
+];
+
 var triangle := polygon{vertices: relation {
     { v_no: 1, vertex: point{x: 0e0, y: 0e0} },
     { v_no: 2, vertex: point{x: 4e0, y: 0e0} },
@@ -197,6 +213,10 @@ operator kind{figure: plane_figure}: text;
 
 operator kind{figure: ellipse}: text [
     "ellipse"
+];
+
+operator kind{figure: circle}: text [
+    "circle"
 ];
 
 operator kind{figure: polygon}: text [
@@ -289,6 +309,10 @@ operator geometry{p: point, shape: polygon} [
     call debug_table{r: sided extend { n := count{r: figure.vertices} }{name, n}};
     call debug_value{v: kind{figure: e}};
     call debug_value{v: kind{figure: shape}};
+    var w := ellipse{a: distance{m: 1e0}, b: distance{m: 1e0}, ctr: p};
+    call debug_value{v: kind{figure: w}};
+    update w { a := distance{m: 2e0} };
+    call debug_value{v: kind{figure: w}};
     call debug_table{r: figures extend { size := area{figure: figure} }{name, size}};
     call measure{figures: figures};
 ];
@@ -313,6 +337,8 @@ operator main{} [
     call debug_table{r: edges};
     call debug_value{v: kind{figure: squashed}};
     call debug_value{v: kind{figure: triangle}};
+    call debug_value{v: kind{figure: well}};
+    call debug_value{v: kind{figure: widened}};
     call debug_table{r: sizes};
     call measure{figures: figures};
 

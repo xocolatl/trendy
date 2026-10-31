@@ -1200,6 +1200,9 @@ pub(crate) enum Failed {
     /// of one of its keys, of a value selected of a type of the program's
     /// own.
     Key(Box<BrokenKey>),
+    /// A value selected of a type of the program's own that is of two of
+    /// its subtypes defined by constraints.
+    Overlapping(Box<Overlapping>),
     /// A value treated as one of a type it isn't of.
     NotOfType(Box<(hir::Value, hir::Type)>),
 }
@@ -2110,6 +2113,9 @@ pub(crate) struct Bindings<'a> {
     /// Every operator, by id, for the built-ins among them, which the
     /// compiler evaluates.
     pub(crate) operators: &'a Operators,
+    /// The program's types, for the subtypes defined by constraints that a
+    /// value selected may be of.
+    pub(crate) namespaces: &'a crate::Namespaces,
     /// The read-only operators' checked values. A call is checked after its
     /// callee, so every operator a call's evaluation reaches is here. None
     /// reads a variable of the program's, so its value depends on its
@@ -2638,50 +2644,15 @@ pub(crate) fn select(
         ty: defined,
         components: tuple,
     };
-    let (defined, tuple) = (&value.ty, &value.components);
     // A relation-valued component's keys first, which constraints can
-    // assume: of a representation other than the stored one, its `from`
-    // computes the component, which may be known only when running.
-    for (component, keys) in &defined.keys {
-        let relation = match defined.representation(component) {
-            Some((_, Some(other))) => {
-                let converted = call(
-                    hir::Call {
-                        operator: other.from,
-                        types: Vec::new(),
-                        args: args.clone(),
-                        updated: BTreeMap::new(),
-                    },
-                    bindings,
-                )?;
-                match known_value(&converted) {
-                    Some(hir::Value::Tuple(own)) => own.get(component).cloned(),
-                    _ => None,
-                }
-            }
-            _ => tuple.get(component).cloned(),
-        };
-        let Some(hir::Value::Relation(relation)) = relation else {
-            return Ok(hir::Expr::Select(
-                value.ty.clone(),
-                Box::new(hir::Expr::Constant(hir::Value::Tuple(
-                    value.components.clone(),
-                ))),
-            ));
-        };
-        for key in keys {
-            if let Some((shared, [a, b])) = crate::keys::sharing(&relation, key).into_iter().next()
-            {
-                return Err(Failed::Key(Box::new(BrokenKey {
-                    value: value.clone(),
-                    component: component.clone(),
-                    shared,
-                    tuples: [a.clone(), b.clone()],
-                    at: crate::keys::written_in(defined, component, key, bindings.operators),
-                })));
-            }
-        }
+    // assume.
+    if !keys_hold(&value, &args, bindings)? {
+        return Ok(hir::Expr::Select(
+            value.ty,
+            Box::new(hir::Expr::Constant(hir::Value::Tuple(value.components))),
+        ));
     }
+    let defined = &value.ty;
     // The first constraint that isn't true of them, and its value.
     let mut first = None;
     for constraint in &defined.constraints {
@@ -2700,7 +2671,22 @@ pub(crate) fn select(
         }
     }
     match first {
-        None => Ok(hir::Expr::Constant(hir::Value::Defined(value))),
+        // Of the most specific type whose constraints are true of them,
+        // as the type it is selected of.
+        None => match most_specific(&value.ty, &args, &value, bindings)? {
+            Some(ty) => {
+                let selected = hir::Type::Defined(value.ty.clone());
+                let value = hir::DefinedValue {
+                    ty,
+                    components: value.components,
+                };
+                Ok(typed(hir::Value::Defined(value), &selected))
+            }
+            None => Ok(hir::Expr::Select(
+                value.ty,
+                Box::new(hir::Expr::Constant(hir::Value::Tuple(value.components))),
+            )),
+        },
         Some((constraint, hir::Expr::Constant(hir::Value::Boolean(false)))) => {
             let written = bindings.operators.get(constraint.operator).constrains();
             Err(Failed::Constraint(Box::new(BrokenConstraint {
@@ -2716,6 +2702,131 @@ pub(crate) fn select(
             Box::new(hir::Expr::Constant(hir::Value::Tuple(value.components))),
         )),
     }
+}
+
+/// Whether each key of each relation-valued component of `value`, a value
+/// of a type of the program's own whose components are `args`, is true of
+/// it: of a representation other than the stored one, its `from` computes
+/// the component. `false` if one is known only when running.
+///
+/// # Errors
+///
+/// Returns the first key broken, with its tuples, or why computing a
+/// component fails.
+fn keys_hold(
+    value: &hir::DefinedValue,
+    args: &BTreeMap<String, hir::Expr>,
+    bindings: Bindings,
+) -> Result<bool, Failed> {
+    let defined = &value.ty;
+    for (component, keys) in &defined.keys {
+        let relation = match defined.representation(component) {
+            Some((_, Some(other))) => {
+                let converted = call(
+                    hir::Call {
+                        operator: other.from,
+                        types: Vec::new(),
+                        args: args.clone(),
+                        updated: BTreeMap::new(),
+                    },
+                    bindings,
+                )?;
+                match known_value(&converted) {
+                    Some(hir::Value::Tuple(own)) => own.get(component).cloned(),
+                    _ => None,
+                }
+            }
+            _ => value.components.get(component).cloned(),
+        };
+        let Some(hir::Value::Relation(relation)) = relation else {
+            return Ok(false);
+        };
+        for key in keys {
+            if let Some((shared, [a, b])) = crate::keys::sharing(&relation, key).into_iter().next()
+            {
+                return Err(Failed::Key(Box::new(BrokenKey {
+                    value: value.clone(),
+                    component: component.clone(),
+                    shared,
+                    tuples: [a.clone(), b.clone()],
+                    at: crate::keys::written_in(defined, component, key, bindings.operators),
+                })));
+            }
+        }
+    }
+    Ok(true)
+}
+
+/// The most specific type of `value`, a value of `defined` whose
+/// components are `args`, of which `defined`'s constraints are true (*Type
+/// Inheritance and Relational Theory*, IM Prescription 10): of its
+/// subtypes defined by constraints, the one whose specialization
+/// constraints are true of them too, its most specific type in turn, or
+/// else `defined` itself. `None` if a constraint's value is known only
+/// when running.
+///
+/// # Errors
+///
+/// Returns two subtypes whose constraints are both true of them, since a
+/// value has one most specific type, or why computing a constraint fails.
+fn most_specific(
+    defined: &hir::Defined,
+    args: &BTreeMap<String, hir::Expr>,
+    value: &hir::DefinedValue,
+    bindings: Bindings,
+) -> Result<Option<Box<hir::Defined>>, Failed> {
+    let mut found: Option<&hir::Defined> = None;
+    for subtype in bindings.namespaces.subtypes(&defined.name) {
+        let hir::Type::Defined(subtype) = subtype else {
+            unreachable!("a regular type's subtypes are regular types");
+        };
+        let mut holds = true;
+        for constraint in subtype.own_constraints() {
+            let checked = call(
+                hir::Call {
+                    operator: constraint.operator,
+                    types: Vec::new(),
+                    args: args.clone(),
+                    updated: BTreeMap::new(),
+                },
+                bindings,
+            )?;
+            match checked {
+                hir::Expr::Constant(hir::Value::Boolean(true)) => {}
+                hir::Expr::Constant(hir::Value::Boolean(false)) => {
+                    holds = false;
+                    break;
+                }
+                _ => return Ok(None),
+            }
+        }
+        if !holds {
+            continue;
+        }
+        if let Some(other) = found {
+            let declared = |name: &str| bindings.namespaces.defined(name).map(|(at, _)| at);
+            return Err(Failed::Overlapping(Box::new(Overlapping {
+                value: value.clone(),
+                types: [other.name.clone(), subtype.name.clone()],
+                declared: [declared(&other.name), declared(&subtype.name)],
+            })));
+        }
+        found = Some(subtype);
+    }
+    match found {
+        Some(subtype) => most_specific(subtype, args, value, bindings),
+        None => Ok(Some(Box::new(defined.clone()))),
+    }
+}
+
+/// A value selected of a type of the program's own, `value`, that is of
+/// two of its subtypes defined by constraints, `types`, each declared
+/// where `declared` says, neither a subtype of the other.
+#[derive(Debug, Clone)]
+pub(crate) struct Overlapping {
+    pub(crate) value: hir::DefinedValue,
+    pub(crate) types: [String; 2],
+    pub(crate) declared: [Option<Span>; 2],
 }
 
 /// A value of a type of the program's own whose relation-valued

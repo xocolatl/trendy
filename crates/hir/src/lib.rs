@@ -15,9 +15,11 @@ pub struct Program {
     /// The prelude's built-in operators, then the program's own.
     pub operators: Vec<Operator>,
     pub variables: Vec<Variable>,
-    /// Each union type's immediate subtypes, by its name: what a value of
-    /// it can be, of which the largest decides how much room it takes.
-    pub unions: BTreeMap<String, Vec<Type>>,
+    /// Each type's immediate subtypes, by its name: a union type's, what
+    /// a value of it can be, of which the largest decides how much room it
+    /// takes, and a regular type's, defined by constraints, which decide
+    /// which a value of it is of (see [`Defined::specialization`]).
+    pub subtypes: BTreeMap<String, Vec<Type>>,
     /// The operator the executable starts in: a user operator with no
     /// parameters.
     pub entry: OperatorId,
@@ -2638,26 +2640,53 @@ impl Type {
         }
     }
 
-    /// The union type at the top of the hierarchy the type is in, by name,
-    /// if it is in one: itself, for a dummy type that is a subtype of none.
+    /// The type at the top of the hierarchy the type is in, by name, if it
+    /// is in one: a union type, or a regular type a type is defined as a
+    /// subtype of by a constraint; itself, if it is a subtype of none.
     /// Every value of every type in it is laid out alike, as one of the
-    /// union type's.
+    /// root's, after its own type.
     #[must_use]
     pub fn root(&self) -> Option<&str> {
         match self {
-            Type::Defined(defined) => defined.supertypes.last().map(String::as_str),
+            Type::Defined(defined) => match defined.supertypes.last() {
+                Some(root) => Some(root),
+                None => defined.specialized.then_some(defined.name.as_str()),
+            },
             Type::Dummy(dummy) => Some(dummy.supertypes.last().unwrap_or(&dummy.name)),
             _ => None,
         }
     }
 
-    /// The union types a type of the program's own is a subtype of, the
+    /// The types a type of the program's own is a subtype of, by name, the
     /// immediate one first, and so on up: none for any other type.
     fn supertypes(&self) -> &[String] {
         match self {
             Type::Defined(defined) => &defined.supertypes,
             Type::Dummy(dummy) => &dummy.supertypes,
             _ => &[],
+        }
+    }
+
+    /// The type a type of the program's own is a subtype of at `index`
+    /// among its supertypes (see [`Type::supertypes`]): a regular type, of
+    /// which it is defined as a subtype by a constraint, or a union type.
+    fn supertype(&self, index: usize) -> Type {
+        let dummy = |supertypes: &[String]| {
+            Type::Dummy(Box::new(Dummy {
+                name: supertypes[index].clone(),
+                supertypes: supertypes[index + 1..].to_vec(),
+            }))
+        };
+        match self {
+            Type::Defined(defined) => match (&defined.specialization, index) {
+                (Some(specialization), 0) => Type::Defined(specialization.supertype.clone()),
+                (Some(specialization), _) => {
+                    Type::Defined(specialization.supertype.clone()).supertype(index - 1)
+                }
+                (None, _) => dummy(&defined.supertypes),
+            },
+            Type::Dummy(own) => dummy(&own.supertypes),
+            _ => unreachable!("only a type of the program's own has supertypes"),
         }
     }
 
@@ -2671,6 +2700,9 @@ impl Type {
         match (self, other) {
             _ if self == other => true,
             (_, Type::Dummy(dummy)) => self.supertypes().contains(&dummy.name),
+            (_, Type::Defined(defined)) if defined.specialized => {
+                self.supertypes().contains(&defined.name)
+            }
             (Type::Tuple(a), Type::Tuple(b)) | (Type::Relation(a), Type::Relation(b)) => {
                 a.0.len() == b.0.len()
                     && a.0.iter().all(|(name, ty)| {
@@ -2684,7 +2716,7 @@ impl Type {
 
     /// The most specific type that both this type and `other` are subtypes
     /// of, if they have one (IM Prescriptions 8 and 24): of two types of
-    /// the program's own, the nearest union type above both, and of tuples
+    /// the program's own, the nearest type above both, and of tuples
     /// and relations with the same attributes, and arrays, attribute by
     /// attribute, and element type.
     #[must_use]
@@ -2704,10 +2736,7 @@ impl Type {
             _ => {
                 let above = self.supertypes();
                 let nearest = above.iter().position(|s| other.supertypes().contains(s))?;
-                Some(Type::Dummy(Box::new(Dummy {
-                    name: above[nearest].clone(),
-                    supertypes: above[nearest + 1..].to_vec(),
-                })))
+                Some(self.supertype(nearest))
             }
         }
     }
@@ -2841,9 +2870,31 @@ pub struct Defined {
     /// value of the type.
     pub keys: BTreeMap<String, Vec<Key>>,
     pub order: Option<Order>,
-    /// The union types it is a subtype of, the one it names first, and so
-    /// on up: none, if it names none.
+    /// The types it is a subtype of, by name, the one it names first, and
+    /// so on up: none, if it names none.
     pub supertypes: Vec<String>,
+    /// Whether a type is defined as a subtype of it by a constraint (see
+    /// [`Defined::specialization`]), which puts it in a hierarchy.
+    pub specialized: bool,
+    /// Of a type defined as a subtype of a regular type by a constraint,
+    /// what makes a value of that type one of it.
+    pub specialization: Option<Specialization>,
+}
+
+/// What makes a value of a regular type, `supertype`, one of its subtype
+/// defined by a constraint (*Type Inheritance and Relational Theory*, IM
+/// Prescription 10): a value of it is one of the subtype exactly when the
+/// subtype's specialization constraints are true of it, so a selector of
+/// the supertype can give one of the subtype (specialization by
+/// constraint), and an update can make one of the subtype one of just the
+/// supertype again (generalization by constraint). The subtype has no
+/// stored representation of its own, and its components, representations,
+/// keys and order are the supertype's; its constraints are the supertype's,
+/// the first `inherited`, then its own, its specialization constraints.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Specialization {
+    pub supertype: Box<Defined>,
+    pub inherited: usize,
 }
 
 /// A dummy type of the program's own (*Type Inheritance and Relational
@@ -2871,6 +2922,36 @@ pub struct Order {
 }
 
 impl Defined {
+    /// The constraints its declaration writes, not its supertype's: of a
+    /// type defined as a subtype of a regular type by a constraint, its
+    /// specialization constraints (see [`Specialization`]), and otherwise
+    /// all of them.
+    #[must_use]
+    pub fn own_constraints(&self) -> &[Constraint] {
+        let inherited = self.specialization.as_ref().map_or(0, |s| s.inherited);
+        &self.constraints[inherited..]
+    }
+
+    /// The type whose stored representation its values are stored as: of a
+    /// type defined as a subtype of a regular type by a constraint, which
+    /// has none of its own, its nearest supertype's that has one, and
+    /// otherwise itself.
+    #[must_use]
+    pub fn stored_as(&self) -> &Defined {
+        match &self.specialization {
+            Some(specialization) => specialization.supertype.stored_as(),
+            None => self,
+        }
+    }
+
+    /// The name its values are written with: of the first possible
+    /// representation it declares, or, if it declares none, of its nearest
+    /// supertype's, whose selector selects the same value.
+    #[must_use]
+    pub fn written(&self) -> &str {
+        &self.stored_as().name
+    }
+
     /// Its order, if it has one, and the components of the possible
     /// representation it compares.
     ///
@@ -2972,7 +3053,7 @@ pub fn read_as(ty: &Type, columns: &Type) -> Type {
                 return Type::Tuple(read(components));
             }
             let stored = read(&defined.components);
-            if stored == defined.components && defined.supertypes.is_empty() {
+            if stored == defined.components && ty.root().is_none() {
                 ty.clone()
             } else {
                 Type::Tuple(stored)
@@ -3373,7 +3454,7 @@ impl std::fmt::Display for Value {
                     .attributes()
                     .map(|(name, value)| format!("{name}: {value}"))
                     .collect();
-                write!(f, "{}{{{}}}", value.ty.name, components.join(", "))
+                write!(f, "{}{{{}}}", value.ty.written(), components.join(", "))
             }
             Value::Relation(relation) => {
                 write!(f, "relation {} ", relation.heading)?;
@@ -4060,6 +4141,8 @@ mod tests {
             keys: BTreeMap::new(),
             order: None,
             supertypes: Vec::new(),
+            specialized: false,
+            specialization: None,
         };
         let ty = Type::Defined(Box::new(celsius.clone()));
         assert_eq!(ty.to_string(), "celsius");
@@ -4120,6 +4203,8 @@ mod tests {
                 keys: BTreeMap::new(),
                 order: None,
                 supertypes: supertypes.iter().map(ToString::to_string).collect(),
+                specialized: false,
+                specialization: None,
             }))
         };
         let dummy = |name: &str, supertypes: &[&str]| {
@@ -4215,6 +4300,69 @@ mod tests {
             value.clone().treated(&curve).treated(&figure),
             Expr::Treat(Box::new(figure.clone()), Box::new(value))
         );
+    }
+
+    #[test]
+    fn a_subtype_defined_by_constraints_is_its_supertypes() {
+        let constraint = |n: usize| Constraint {
+            operator: OperatorId(n),
+            text: String::new(),
+        };
+        // figure > ellipse > circle, ellipse stored, circle by constraint.
+        let ellipse = Defined {
+            name: "ellipse".to_string(),
+            components: Heading::new([("a".to_string(), Type::Scalar(Scalar::Integer))].into()),
+            representations: Vec::new(),
+            constraints: vec![constraint(0)],
+            keys: BTreeMap::new(),
+            order: None,
+            supertypes: vec!["figure".to_string()],
+            specialized: true,
+            specialization: None,
+        };
+        let subtype = |name: &str, n: usize| Defined {
+            name: name.to_string(),
+            constraints: vec![constraint(0), constraint(n)],
+            supertypes: vec!["ellipse".to_string(), "figure".to_string()],
+            specialized: false,
+            specialization: Some(Specialization {
+                supertype: Box::new(ellipse.clone()),
+                inherited: 1,
+            }),
+            ..ellipse.clone()
+        };
+        let (circle, small) = (subtype("circle", 1), subtype("small", 2));
+        assert_eq!(circle.own_constraints(), [constraint(1)]);
+        assert_eq!(ellipse.own_constraints(), [constraint(0)]);
+        assert_eq!(circle.stored_as().name, "ellipse");
+        assert_eq!(circle.written(), "ellipse");
+        let ty = |d: &Defined| Type::Defined(Box::new(d.clone()));
+        assert!(ty(&circle).is_subtype_of(&ty(&ellipse)));
+        assert!(!ty(&ellipse).is_subtype_of(&ty(&circle)));
+        assert_eq!(ty(&circle).root(), Some("figure"));
+        // Two subtypes of a regular type meet at it, and higher up at the
+        // union type.
+        assert_eq!(
+            ty(&circle).common_supertype(&ty(&small)),
+            Some(ty(&ellipse))
+        );
+        let figure = Type::Dummy(Box::new(Dummy {
+            name: "figure".to_string(),
+            supertypes: Vec::new(),
+        }));
+        let polygon = Type::Defined(Box::new(Defined {
+            name: "polygon".to_string(),
+            supertypes: vec!["figure".to_string()],
+            specialized: false,
+            ..ellipse.clone()
+        }));
+        assert_eq!(ty(&circle).common_supertype(&polygon), Some(figure));
+        // A regular type with such subtypes and no supertype is a root.
+        let alone = Defined {
+            supertypes: Vec::new(),
+            ..ellipse.clone()
+        };
+        assert_eq!(ty(&alone).root(), Some("ellipse"));
     }
 
     #[test]

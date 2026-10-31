@@ -1637,8 +1637,9 @@ impl<'a> Checker<'a> {
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Expr> {
         let at = expr.span();
-        if !defined
-            .checks()
+        let checks = self.namespaces().selection_checks(defined);
+        if !checks
+            .into_iter()
             .all(|operator| self.names.checked(operator, at, errors))
         {
             return None;

@@ -1089,6 +1089,70 @@ operator main{{}} [
 }
 
 #[test]
+fn subtypes_defined_by_constraints_when_running() {
+    // Selecting an ellipse gives a circle if its semiaxes are equal, an
+    // update can make it just an ellipse, versions and tests see which, and
+    // a value of two subtypes stops the program.
+    let types = "type ellipse { { a: approximate, b: approximate }, constraint a >= b };
+type circle is ellipse { constraint a = b };
+type small is ellipse { constraint a < 1e0 };
+";
+    let source = format!(
+        "{types}
+operator kind{{e: ellipse}}: text [ \"ellipse\" ];
+operator kind{{e: circle}}: text [ \"circle\" ];
+
+operator shapes{{a: approximate}} [
+    var e := ellipse{{a: a, b: a}};
+    call debug_value{{v: tuple {{ circle: e is circle, kind: kind{{e: e}} }}}};
+    call debug_value{{v: e}};
+    update e {{ a := 2e0 * a }};
+    call debug_value{{v: tuple {{ circle: e is circle, kind: kind{{e: e}} }}}};
+    var dot := ellipse{{a: a / 4e0, b: a / 4e0}};
+];
+
+operator main{{}} [
+    call shapes{{a: 2e0}};
+];
+"
+    );
+    let (code, stderr) = run_source("constrained", &source);
+    let overlapping = trendy_diag::Code::OverlappingSubtypes.id();
+    assert_eq!(
+        (code, stderr),
+        (
+            1,
+            format!(
+                "tuple {{ circle: true, kind: \"circle\" }}
+ellipse{{a: 2e0, b: 2e0}}
+tuple {{ circle: false, kind: \"ellipse\" }}
+error[{overlapping}]: ellipse{{a: 5e-1, b: 5e-1}} is both a `circle` and a `small`, but a value has one most specific type
+{}",
+                site("constrained", 14)
+            )
+        )
+    );
+    // Read from a file, a value has its most specific type too.
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("csv");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("constrained.csv");
+    std::fs::write(&path, "name,a,b\nwell,2,2\npond,3,2\n").unwrap();
+    let source = format!(
+        "{types}
+operator main{{}} [
+    var rows: array tuple {{ name: text, e: ellipse }};
+    var columns := tuple {{ name: 1, e: tuple {{ a: 2, b: 3 }} }};
+    call load_csv{{path: {:?}, header: true, columns: columns, out rows: rows}};
+    call debug_value{{v: array [rows[1].e is circle, rows[2].e is circle]}};
+];
+",
+        path.to_str().unwrap()
+    );
+    let (code, stderr) = run_source("constrained_csv", &source);
+    assert_eq!((code, stderr.as_str()), (0, "array [true, false]\n"));
+}
+
+#[test]
 fn versions_are_chosen_when_running() {
     // Each call computes the version for its arguments' own types: of a
     // specification without a body, of one with a body for the rest, and
@@ -2438,6 +2502,10 @@ fn inheritance() {
             "└───┴──────┘",
             r#""ellipse""#,
             r#""3-gon""#,
+            // An ellipse with equal semiaxes is a circle, and widened, just
+            // an ellipse again.
+            r#""circle""#,
+            r#""ellipse""#,
             // Their areas, each computed by its kind's version.
             "┌──────┬─────────────────────┐",
             "│ name │ size                │",

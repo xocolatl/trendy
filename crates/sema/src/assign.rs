@@ -91,14 +91,19 @@ impl Assignee {
     /// narrower type a test shows its value to be of, if one does, whose
     /// components the update gives new values, and otherwise as declared.
     /// `update f { a := x }` is `f := f replace { a := x }`, whose `f` is
-    /// narrowed as any name is.
+    /// narrowed as any name is, and whose value is selected again, of the
+    /// type that has the components (see [`crate::narrowed::updated_as`]).
     fn updated(&self) -> Assignee {
         match &self.narrowed {
-            Some(ty) => Assignee {
-                ty: ty.clone(),
-                current: ops::treat_as(self.current.clone(), ty.clone()),
-                ..self.clone()
-            },
+            Some(narrowed) => {
+                let ty = crate::narrowed::updated_as(narrowed, &self.ty);
+                Assignee {
+                    current: ops::treat_as(self.current.clone(), ty.clone()),
+                    narrowed: (ty != self.ty).then(|| ty.clone()),
+                    ty,
+                    ..self.clone()
+                }
+            }
             None => self.clone(),
         }
     }

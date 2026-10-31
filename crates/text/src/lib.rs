@@ -85,12 +85,18 @@ pub fn parse_boolean(text: &str) -> Result<bool, Unparsable> {
 ///
 /// Returns an error if `out` does.
 pub fn write_component(ty: &str, component: &str, out: &mut impl fmt::Write) -> fmt::Result {
-    let article = if ty.starts_with(['a', 'e', 'i', 'o', 'u']) {
+    write!(out, "{} `{ty}`'s `{component}`", article(ty))
+}
+
+/// The indefinite article before `word`, in an error: `an` before one that
+/// starts with a vowel, and otherwise `a`.
+#[must_use]
+pub fn article(word: &str) -> &'static str {
+    if word.starts_with(['a', 'e', 'i', 'o', 'u']) {
         "an"
     } else {
         "a"
-    };
-    write!(out, "{article} `{ty}`'s `{component}`")
+    }
 }
 
 /// As [`escape`], but with `kept` written as it is.

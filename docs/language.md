@@ -2019,16 +2019,17 @@ operator main{} [
   type. Its values are selected by its subtypes' selectors:
   `plane_figure{a: 3e0, b: 2e0}` is fixed to the selector of the
   subtype whose components those are, `ellipse{a: 3e0, b: 2e0}` (A0061).
-  A union type with a representation of its own, whose subtypes its
-  constraints specialize, as Date's circles are ellipses whose semiaxes
-  are equal, isn't in trendy yet (A0060).
+  A union type with a representation of its own, all of whose values
+  are of its subtypes, isn't in trendy yet (A0060); a type with one has
+  subtypes defined by constraints instead (see
+  [Subtypes defined by constraints](#subtypes-defined-by-constraints)).
 - **A subtype names its union type after `is`,** between its name and
   its braces, and is otherwise a type of the program's own like any
   other, with its representations, constraints and order. Java's
   `extends`, and Kotlin's and C#'s `:`, are fixed to `is`, and Tutorial
   D's `IS { PLANE_FIGURE POSSREP … }` is reported (P0043). A union type
   can be a subtype of another, as in `type curve union is plane_figure;`,
-  but only a union type has subtypes (A0060).
+  but of no other type, and a built-in type has no subtypes (A0060).
 - **A union type has two subtypes at least,** since with one it would
   have that one's values, and with none no values (A0060). It isn't a
   subtype of itself, directly or through others, and contains each of
@@ -2258,6 +2259,62 @@ operator main{} [
 - **`i_delete r s` deletes tuples of overlapping types,** as
   `r i_minus s` does, while `insert r s` and `d_insert r s` insert those
   of `r`'s types or their subtypes, since `r` keeps its type.
+
+### Subtypes defined by constraints
+
+A subtype of a type with possible representations is defined by its
+constraints, conditions on the supertype's components: its values are
+those of the supertype they are true of (*Type Inheritance and
+Relational Theory*, chapter 8, IM Prescription 10). A circle is an
+ellipse whose semiaxes are equal:
+
+```trendy
+type ellipse { { a: approximate, b: approximate }, constraint a >= b };
+type circle is ellipse { constraint a = b };
+
+operator kind{e: ellipse}: text [ "an ellipse" ];
+operator kind{e: circle}: text [ "a circle" ];
+
+operator stretch{var e: ellipse} [
+    update e { a := 2e0 * a };
+];
+
+operator main{} [
+    var e := ellipse{a: 2e0, b: 2e0};
+    call debug_value{v: kind{e: e}};
+    call stretch{var e: e};
+    call debug_value{v: kind{e: e}};
+];
+```
+
+- **Selecting a value gives it its most specific type,** specialization
+  by constraint: `ellipse{a: 2e0, b: 2e0}` is a circle, though it is
+  declared an ellipse, and `is`, `treat`, narrowing and versions see it
+  as one. Selecting tests each subtype's constraints, and its subtypes'
+  in turn, when compiling if the components are known then, and
+  otherwise when the program runs.
+- **An update selects it again,** generalization by constraint:
+  `stretch` makes the circle just an ellipse, and an update can make an
+  ellipse a circle. A variable of type `circle` holds circles only, so an
+  update that makes its value just an ellipse fails, as one that breaks
+  any constraint does (R0017). An `update` of a name a test narrows to a
+  circle changes it as an ellipse, and it is narrowed to an ellipse
+  after.
+- **Its values are its supertype's:** a circle has an ellipse's
+  components, read as `c.a`, and its constraints read them. It needs a
+  constraint, and has no order of its own: its values are ordered as its
+  supertype's are (A0065). It is in its supertype's hierarchy, as a
+  union type's subtype is, and its constraints are its supertype's too.
+- **A value has one most specific type,** so a value of two subtypes of
+  one type, neither a subtype of the other, is an error when it is
+  selected (R0020): their constraints must never both be true.
+- **Written as its supertype's:** a circle is written `ellipse{a: 2e0,
+  b: 2e0}`, which selects it, as it declares no representation of its
+  own.
+- **Not yet:** a subtype's own possible representations, as a circle's
+  radius and centre, converted to and from its supertype's components,
+  with their selector, `circle{r: …, ctr: …}`, which a value is then
+  written as (A0065).
 
 ## Tuples
 

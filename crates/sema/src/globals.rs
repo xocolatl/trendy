@@ -283,8 +283,10 @@ impl<'a> Globals<'a> {
                 .as_ref()
                 .is_some_and(FromType::selects_stored)
         }) {
-            let valid = defined
-                .checks()
+            let valid = self
+                .namespaces
+                .selection_checks(defined)
+                .into_iter()
                 .all(|operator| self.checked(operator, at, errors));
             if valid {
                 self.values
@@ -521,8 +523,10 @@ impl<'a> Globals<'a> {
             .to;
         let at = signature.defined()?;
         let converts = self.checked(to, at, errors);
-        let constrained = defined
-            .checks()
+        let constrained = self
+            .namespaces
+            .selection_checks(defined)
+            .into_iter()
             .all(|operator| self.checked(operator, at, errors));
         if !converts || !constrained {
             return None;
@@ -757,6 +761,7 @@ impl Names for Globals<'_> {
     fn bindings(&self) -> ops::Bindings<'_> {
         ops::Bindings {
             operators: self.operators,
+            namespaces: self.namespaces,
             values: &self.values,
         }
     }
@@ -914,6 +919,7 @@ impl Names for ReadOnlyNames<'_, '_, '_> {
     fn bindings(&self) -> ops::Bindings<'_> {
         ops::Bindings {
             operators: self.globals.operators,
+            namespaces: self.globals.namespaces,
             values: &self.globals.values,
         }
     }

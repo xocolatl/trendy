@@ -1063,6 +1063,28 @@ narrowed variable changes it as one of its narrowed type
 (`assign::Assignee::narrowed`), and keeps it narrowed; a `var` or `out`
 argument resolves the variable as declared (`Names::resolve_variable`).
 
+A subtype defined by constraints, `type circle is ellipse { constraint
+a = b };` (IM Prescription 10), has no stored representation of its
+own: sema builds its `hir::Defined` from its supertype's
+(`named_types::specialization`), with the supertype's components,
+representations, keys and order, and its constraints after the
+supertype's (`hir::Specialization`). Its supertype is `specialized`,
+which makes a regular type with no supertype the root of a hierarchy,
+and `Program::subtypes` lists every type's immediate subtypes, a union
+type's and a regular type's. Selecting a value checks its type's
+constraints, then finds its most specific type: each constrained
+subtype's own constraints, and its subtypes' in turn, where two
+siblings' both true fail (R0020). Folding does it in `ops::most_specific`,
+whose operators `Namespaces::selection_checks` lists for sema to check
+first, and lowering in `FunctionBuilder::tag_most_specific`, which
+writes the type's descriptor's address in the value's tag, wherever a
+value is selected, by its selector, `replace`, `update` or `load_csv`.
+`Families` keeps each root's members, the types a value can be of, which
+`is` tests against, apart from its variants, the types with stored
+representations, whose components its room holds; a constrained subtype
+shares the variant of the type it is stored as (`Defined::stored_as`),
+and a value is written with that type's name (`Defined::written`).
+
 The relational operators combine attributes of types in one hierarchy
 (IM Prescription 13). A common attribute of a join's operands, of a
 `matching`'s, or of `!!`'s, and an attribute of an intersection's or a

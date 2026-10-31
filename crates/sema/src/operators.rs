@@ -887,7 +887,7 @@ fn numbered(file: &SourceFile, namespaces: &Namespaces) -> Vec<Signature> {
         };
         let params = component_parameters(&defined.components);
         for (i, (constraint, written)) in defined
-            .constraints
+            .own_constraints()
             .iter()
             .zip(decl.constraints())
             .enumerate()

@@ -37,6 +37,7 @@ impl Context<'_> {
     pub(crate) fn bindings(&self) -> ops::Bindings<'_> {
         ops::Bindings {
             operators: self.operators,
+            namespaces: self.namespaces,
             values: self.values,
         }
     }
@@ -209,17 +210,17 @@ impl Statements<'_, '_> {
         )
     }
 
-    /// The names narrowed that `stmt` may assign, each with where: those it
-    /// names, and, if it calls an update operator, the program's variables,
-    /// which the operator may assign.
-    fn assigned(&self, stmt: &ast::Statement) -> BTreeMap<String, Span> {
+    /// The names narrowed that `assigns`, of a statement, may assign, each
+    /// with where: those it names, and, if it calls an update operator,
+    /// the program's variables, which the operator may assign.
+    fn assigned(&self, assigns: &narrowed::Assigns) -> BTreeMap<String, Span> {
         let signature = self.cx.operators.get(self.within);
         let global = |name: &str| {
             self.cx.variable_ids.contains_key(name)
                 && !signature.is_parameter(name)
                 && self.locals.find(name).is_none()
         };
-        narrowed::Assigns::of(stmt).of_names(self.narrowed.names(), global)
+        assigns.of_names(self.narrowed.names(), global)
     }
 
     /// Report each read of an `out` parameter in the statement just
@@ -327,7 +328,8 @@ impl Statements<'_, '_> {
         stmt: &ast::Statement,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Statement> {
-        let assigned = self.assigned(stmt);
+        let assigns = narrowed::Assigns::of(stmt);
+        let assigned = self.assigned(&assigns);
         if matches!(
             stmt,
             ast::Statement::While(_) | ast::Statement::Loop(_) | ast::Statement::For(_)
@@ -336,6 +338,9 @@ impl Statements<'_, '_> {
         }
         let checked = self.checked_statement(stmt, errors);
         narrowed::forget(&mut self.narrowed, &assigned, &mut self.ended);
+        for name in &assigns.updated {
+            self.narrowed.updated(name);
+        }
         checked
     }
 
