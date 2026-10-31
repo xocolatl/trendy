@@ -2428,9 +2428,9 @@ pub struct TypeDesc {
     pub element: *const TypeDesc,
     /// For a type of the program's own, the UTF-8 bytes of its name, whose
     /// components are its attributes, and of the name its values are
-    /// written with: its own, or, if it declares no possible representation,
-    /// its nearest supertype's that does. For other kinds, the lengths are
-    /// 0.
+    /// written with, in the stored representation: of the type that
+    /// declares it, its own or, of a subtype defined by constraints, its
+    /// supertype's. For other kinds, the lengths are 0.
     pub name: *const u8,
     pub name_len: usize,
     pub written: *const u8,

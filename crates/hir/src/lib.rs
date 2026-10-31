@@ -2958,9 +2958,9 @@ impl Defined {
         }
     }
 
-    /// The name its values are written with: of the first possible
-    /// representation it declares, or, if it declares none, of its nearest
-    /// supertype's, whose selector selects the same value.
+    /// The name its values are written with, in the stored representation,
+    /// the one the others convert to: of the type that declares it, whose
+    /// selector in it selects the same value (see [`Defined::stored_as`]).
     #[must_use]
     pub fn written(&self) -> &str {
         &self.stored_as().name

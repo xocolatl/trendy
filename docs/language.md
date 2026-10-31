@@ -1811,7 +1811,9 @@ operator main{} [
   initial value (A0006).
 - **A value is written as its selector's invocation,** by `debug_value`,
   `debug_table` and `to_text`: `position{latitude: -1.29e0, longitude:
-  3.682e1}`, which reads back as the same value.
+  3.682e1}`, which reads back as the same value. It is in the stored
+  representation, the one the others convert to, whose components are
+  the value itself, so the text needs no conversion to read back.
 - **A type is scalar,** not a tuple: its components are its
   representation, not attributes, so nothing joins on them, and a value
   has the components its type declares, so none is projected away, added,
@@ -2325,10 +2327,12 @@ operator main{} [
 - **A value has one most specific type,** so a value of two subtypes of
   one type, neither a subtype of the other, is an error when it is
   selected (R0020): their constraints must never both be true.
-- **Not yet:** writing a value in the first possible representation its
-  most specific type declares, `circle{r: 3e0, ctr: 1}`: for now a circle
-  is written as the value of its supertype it is, `ellipse{a: 3e0, b: 3e0,
-  ctr: 1}`, which selects it.
+- **Written in the stored representation,** the one the others convert
+  to, as every value is: a circle is written as the ellipse it is,
+  `ellipse{a: 3e0, b: 3e0, ctr: 1}`, with the selector of the type that
+  declares that representation, which selects the circle again, and `is
+  circle` tells whether a value is one. A subtype's own representations
+  aren't its supertype's, so there is no `circle{a: …, b: …, ctr: …}`.
 
 ## Tuples
 
