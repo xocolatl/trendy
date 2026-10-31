@@ -23,6 +23,12 @@ trendy_opt = { path = "crates/opt" }
 trendy_codegen = { path = "crates/codegen" }
 trendy_fmt = { path = "crates/fmt" }
 
+# No debug info: on macOS it stays in each crate's object files, which every
+# rebuild leaves behind in target/debug/deps, and a folder of hundreds of
+# thousands of them slows every compile and every first launch of a test.
+[profile.dev]
+debug = false
+
 [profile.release]
 lto = true
 codegen-units = 1
