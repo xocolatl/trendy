@@ -2888,13 +2888,13 @@ pub struct Defined {
 /// the supertype can give one of the subtype (specialization by
 /// constraint), and an update can make one of the subtype one of just the
 /// supertype again (generalization by constraint). The subtype has no
-/// stored representation of its own, and its components, representations,
-/// keys and order are the supertype's; its constraints are the supertype's,
-/// the first `inherited`, then its own, its specialization constraints.
+/// stored representation of its own: its components, keys and order are
+/// the supertype's, its constraints the supertype's, then its own, its
+/// specialization constraints, and its representations the supertype's,
+/// then its own, each converted to and from the stored components.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Specialization {
     pub supertype: Box<Defined>,
-    pub inherited: usize,
 }
 
 /// A dummy type of the program's own (*Type Inheritance and Relational
@@ -2928,8 +2928,22 @@ impl Defined {
     /// all of them.
     #[must_use]
     pub fn own_constraints(&self) -> &[Constraint] {
-        let inherited = self.specialization.as_ref().map_or(0, |s| s.inherited);
+        let inherited = self
+            .specialization
+            .as_ref()
+            .map_or(0, |s| s.supertype.constraints.len());
         &self.constraints[inherited..]
+    }
+
+    /// The possible representations other than the stored one that its
+    /// declaration writes, not its supertype's (see [`Specialization`]).
+    #[must_use]
+    pub fn own_representations(&self) -> &[Representation] {
+        let inherited = self
+            .specialization
+            .as_ref()
+            .map_or(0, |s| s.supertype.representations.len());
+        &self.representations[inherited..]
     }
 
     /// The type whose stored representation its values are stored as: of a
@@ -3006,15 +3020,30 @@ impl Defined {
 
     /// The components of the possible representation with a component
     /// named `name`, the stored one's or another's, and, if it isn't the
-    /// stored one, the representation, with its conversions.
+    /// stored one, the representation, with its conversions (see
+    /// [`Defined::representation_with`]).
     #[must_use]
     pub fn representation(&self, name: &str) -> Option<(&Heading, Option<&Representation>)> {
-        if self.components.get(name).is_some() {
+        self.representation_with(&[name])
+    }
+
+    /// The components of the first possible representation, the stored one
+    /// first, with a component of each of `names`, and, if it isn't the
+    /// stored one, the representation. A subtype's representation can have
+    /// its supertype's component, which it carries unchanged, so a name
+    /// alone needn't say which.
+    #[must_use]
+    pub fn representation_with(
+        &self,
+        names: &[&str],
+    ) -> Option<(&Heading, Option<&Representation>)> {
+        let all = |heading: &Heading| names.iter().all(|n| heading.get(n).is_some());
+        if all(&self.components) {
             return Some((&self.components, None));
         }
         self.representations
             .iter()
-            .find(|r| r.components.get(name).is_some())
+            .find(|r| all(&r.components))
             .map(|r| (&r.components, Some(r)))
     }
 }
@@ -3048,7 +3077,8 @@ pub fn read_as(ty: &Type, columns: &Type) -> Type {
     match ty {
         Type::Tuple(heading) => Type::Tuple(read(heading)),
         Type::Defined(defined) => {
-            let representation = given.named().find_map(|(c, _)| defined.representation(c));
+            let names: Vec<&str> = given.named().map(|(c, _)| c).collect();
+            let representation = defined.representation_with(&names);
             if let Some((components, Some(_))) = representation {
                 return Type::Tuple(read(components));
             }
@@ -4327,7 +4357,6 @@ mod tests {
             specialized: false,
             specialization: Some(Specialization {
                 supertype: Box::new(ellipse.clone()),
-                inherited: 1,
             }),
             ..ellipse.clone()
         };

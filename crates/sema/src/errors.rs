@@ -712,7 +712,7 @@ pub(crate) fn type_test(
     let subject = operand.syntax().text().to_string();
     let (rule, what) = match testing {
         Testing::Is => (
-            "`x is t` is true if the value of `x` is of the type `t`, or of one of its subtypes (*Type Inheritance and Relational Theory*, IM Prescription 15), so it tells apart a union type's values",
+            "`x is t` is true if the value of `x` is of the type `t`, or of one of its subtypes (*Type Inheritance and Relational Theory*, IM Prescription 15), so it tells apart the values of a type's subtypes",
             ("the test is always true", "the test is never true"),
         ),
         Testing::Treat => (
@@ -836,25 +836,26 @@ pub(crate) fn unconstrained_subtype(
     ))
 }
 
-/// `representation`, written in the declaration of `name`, a subtype of
-/// the regular type `supertype` defined by a constraint.
-pub(crate) fn specialized_representation(
-    representation: &trendy_syntax::ast::Representation,
+/// `representation`, without conversions, written in the declaration of
+/// `name`, a subtype of the regular type `supertype` defined by a
+/// constraint.
+pub(crate) fn specialized_stored(
     name: &str,
+    representation: &trendy_syntax::ast::Representation,
     supertype: &str,
 ) -> Diagnostic {
     Diagnostic::error(
         Code::Specialization,
-        format!("`{name}` can't have a possible representation of its own yet"),
+        format!("`{name}`'s possible representation has no conversions"),
         representation.span(),
-        "a representation of its own",
+        "no `to` or `from`",
     )
     .with_note(format!(
-        "`{name}`'s values are `{supertype}`'s, stored as their components, which a value of `{name}` has; a representation of its own, converted to and from them, isn't in trendy yet"
+        "`{name}`'s values are `{supertype}`'s, stored as its components, so each representation of its own converts to them, `to {{ … }}`, computing them from its own, and from them, `from {{ … }}`, computing its own"
     ))
     .with_note(SPECIALIZATION_RULE)
     .with_help(format!(
-        "remove it, and read the components `{supertype}` declares"
+        "add its conversions after its components, as in `{{ r: … }} to {{ … }} from {{ r := … }}`, or remove it, and read the components `{supertype}` declares"
     ))
 }
 
@@ -5737,16 +5738,30 @@ pub(crate) fn swapped_conversions(
 
 /// The component `component`, at `span`, of a possible representation of
 /// the type `name`, which another of them has, at `first`.
-pub(crate) fn component_in_two(name: &str, component: &str, span: Span, first: Span) -> Diagnostic {
-    Diagnostic::error(
+pub(crate) fn component_in_two(
+    name: &str,
+    component: &str,
+    (span, first): (Span, Span),
+    supertype: Option<&str>,
+) -> Diagnostic {
+    let d = Diagnostic::error(
         Code::DuplicateAttribute,
         format!("two possible representations of `{name}` have a component `{component}`"),
         span,
         "a second one",
     )
     .with_secondary(first, "the first")
-    .with_note("a component's name says which representation it is of, as `v.c` reads it, so each is in one")
-    .with_help("rename one of them")
+    .with_note("a component's name says which representation it is of, as `v.c` reads it, so each is in one");
+    match supertype {
+        Some(supertype) => d
+            .with_note(format!(
+                "a representation of `{name}`'s own can have `{supertype}`'s component `{component}`, the same one, if its conversions carry it unchanged: `to {{ {component} := {component}, … }}` and `from {{ {component} := {component}, … }}`"
+            ))
+            .with_help(format!(
+                "carry `{component}` unchanged both ways, or rename it"
+            )),
+        None => d.with_help("rename one of them"),
+    }
 }
 
 /// Why a type's constraint depends on the components alone, for notes.

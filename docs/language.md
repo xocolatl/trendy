@@ -2269,8 +2269,13 @@ Relational Theory*, chapter 8, IM Prescription 10). A circle is an
 ellipse whose semiaxes are equal:
 
 ```trendy
-type ellipse { { a: approximate, b: approximate }, constraint a >= b };
-type circle is ellipse { constraint a = b };
+type ellipse { { a: approximate, b: approximate, ctr: integer }, constraint a >= b };
+type circle is ellipse {
+    constraint a = b,
+    { r: approximate, ctr: integer }
+        to { a := r, b := r, ctr := ctr }
+        from { r := a, ctr := ctr },
+};
 
 operator kind{e: ellipse}: text [ "an ellipse" ];
 operator kind{e: circle}: text [ "a circle" ];
@@ -2280,10 +2285,12 @@ operator stretch{var e: ellipse} [
 ];
 
 operator main{} [
-    var e := ellipse{a: 2e0, b: 2e0};
+    var e := ellipse{a: 2e0, b: 2e0, ctr: 0};
     call debug_value{v: kind{e: e}};
     call stretch{var e: e};
     call debug_value{v: kind{e: e}};
+    var c := circle{r: 3e0, ctr: 1};
+    call debug_value{v: c.r};
 ];
 ```
 
@@ -2305,16 +2312,23 @@ operator main{} [
   constraint, and has no order of its own: its values are ordered as its
   supertype's are (A0065). It is in its supertype's hierarchy, as a
   union type's subtype is, and its constraints are its supertype's too.
+- **Its own representations convert to its supertype's components:**
+  `{ r, ctr }`, as TTM derives a circle's possible representation from an
+  ellipse's, converts `to` them, computing them from its own, and `from`
+  them, computing its own, as any representation but the stored one does
+  (A0065). So `circle{r: 3e0, ctr: 1}` selects a circle, which fails
+  unless its constraints are true of the components `to` gives (R0017),
+  `c.r` reads its radius, and `update c { r := … }` changes it. A
+  component of its supertype's, as `ctr`, is the same one if both
+  conversions carry it unchanged, `ctr := ctr`; any other is a component
+  of two representations (A0008).
 - **A value has one most specific type,** so a value of two subtypes of
   one type, neither a subtype of the other, is an error when it is
   selected (R0020): their constraints must never both be true.
-- **Written as its supertype's:** a circle is written `ellipse{a: 2e0,
-  b: 2e0}`, which selects it, as it declares no representation of its
-  own.
-- **Not yet:** a subtype's own possible representations, as a circle's
-  radius and centre, converted to and from its supertype's components,
-  with their selector, `circle{r: …, ctr: …}`, which a value is then
-  written as (A0065).
+- **Not yet:** writing a value in the first possible representation its
+  most specific type declares, `circle{r: 3e0, ctr: 1}`: for now a circle
+  is written as the value of its supertype it is, `ellipse{a: 3e0, b: 3e0,
+  ctr: 1}`, which selects it.
 
 ## Tuples
 

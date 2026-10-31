@@ -8860,7 +8860,7 @@ heading home := { city: text, rooms: integer };
             (
                 "type ellipse { { a: approximate } };\ntype circle is ellipse { constraint a > 0e0, { r: approximate } };\n".to_string(),
                 Code::Specialization,
-                "`circle` can't have a possible representation of its own yet",
+                "`circle`'s possible representation has no conversions",
             ),
             (
                 "type ellipse { { a: approximate } };\ntype circle is ellipse { constraint a > 0e0, order [asc a] };\n".to_string(),
@@ -9521,7 +9521,7 @@ var tests := tuple {{ round: round is circle, oval: oval is circle, widened: wid
             codes(&format!(
                 "type ellipse {{ {{ a: approximate }} }};\ntype circle is ellipse {{ {{ r: approximate }} }};{MAIN}"
             )),
-            [Code::Specialization, Code::Specialization]
+            [Code::Specialization]
         );
         // An update of a name narrowed to a circle changes it as an
         // ellipse, after which it is an ellipse.
@@ -9529,6 +9529,65 @@ var tests := tuple {{ round: round is circle, oval: oval is circle, widened: wid
             "type figure union;\ntype ellipse is figure {{ {{ a: approximate, b: approximate }}, constraint a >= b }};\ntype circle is ellipse {{ constraint a = b }};\ntype square is figure {{ {{ side: approximate }} }};\noperator widen{{var f: figure}} [ if f is circle then [ update f {{ a := 2e0 * a }}; call debug_value{{v: f.b}}; ]; ];{MAIN}"
         );
         assert!(analyze_str(&updated).is_ok(), "{:#?}", errors(&updated));
+    }
+
+    #[test]
+    fn a_subtypes_own_representation_converts_to_its_supertypes_components() {
+        let circle = |to: &str, from: &str| {
+            format!(
+                "type ellipse {{ {{ a: approximate, b: approximate, ctr: integer }}, constraint a >= b }};
+type circle is ellipse {{
+    constraint a = b,
+    {{ r: approximate, ctr: integer }} to {{ {to} }} from {{ {from} }},
+}};
+"
+            )
+        };
+        let ttm = circle("a := r, b := r, ctr := ctr", "r := a, ctr := ctr");
+        // Its selector, its component, an update of it, and the component
+        // it carries unchanged, which is its supertype's.
+        let variables = variables(&format!(
+            "{ttm}var c := circle{{r: 2e0, ctr: 1}};
+var r := c.r;
+var bigger := [ var d := c; update d {{ r := 3e0 }}; d ];
+var moved := [ var d := c; update d {{ ctr := 2 }}; d ];
+var read := tuple {{ r: r, bigger: bigger.r, ctr: moved.ctr, a: moved.a }};
+"
+        ));
+        let value = |name: &str| &variables.iter().find(|v| v.name == name).unwrap().init;
+        assert_eq!(
+            value("read").to_string(),
+            "tuple { a: 2e0, bigger: 3e0, ctr: 2, r: 2e0 }"
+        );
+        // A selection whose components aren't of a circle fails.
+        let broken = errors(&format!(
+            "{}var c := circle{{r: 2e0, ctr: 1}};{MAIN}",
+            circle("a := r, b := r / 2e0, ctr := ctr", "r := a, ctr := ctr")
+        ));
+        assert_eq!(broken[0].code, Code::BrokenConstraint, "{broken:#?}");
+        // Each of its representations converts, and one that doesn't carry
+        // its supertype's component unchanged can't have it.
+        let unconverted = errors(&format!(
+            "type ellipse {{ {{ a: approximate, b: approximate }} }};\ntype circle is ellipse {{ constraint a = b, {{ r: approximate }} }};{MAIN}"
+        ));
+        assert_eq!(
+            unconverted
+                .iter()
+                .map(|e| e.message.as_str())
+                .collect::<Vec<_>>(),
+            ["`circle`'s possible representation has no conversions"]
+        );
+        let changed = errors(&format!(
+            "{}{MAIN}",
+            circle("a := r, b := r, ctr := ctr + 1", "r := a, ctr := ctr - 1")
+        ));
+        assert_eq!(changed[0].code, Code::DuplicateAttribute, "{changed:#?}");
+        assert!(
+            changed[0]
+                .notes
+                .iter()
+                .any(|n| n.contains("carry it unchanged"))
+        );
     }
 
     #[test]

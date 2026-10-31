@@ -1153,6 +1153,51 @@ operator main{{}} [
 }
 
 #[test]
+fn a_subtypes_own_representation_when_running() {
+    // Selected and updated by its radius; ordered by its type, as when
+    // compiling, so that a relation built when running equals one folded;
+    // and a circle variable's update that would make its value just an
+    // ellipse names the circle.
+    let source = "type ellipse { { a: approximate, b: approximate }, constraint a >= b };
+type circle is ellipse {
+    constraint a = b,
+    { r: approximate } to { a := r, b := r } from { r := a },
+};
+var folded := relation { { e: ellipse{a: 5e0, b: 5e0} }, { e: ellipse{a: 3e0, b: 2e0} } };
+
+operator run{x: approximate} [
+    var c := circle{r: x};
+    call debug_value{v: c.r};
+    update c { r := 2e0 * x };
+    call debug_value{v: c.a};
+    var built := relation { { e: ellipse{a: 5e0, b: x} }, { e: ellipse{a: 3e0, b: 2e0} } };
+    call debug_value{v: tuple { equal: built = folded, size: count{r: built union folded} }};
+    update c { a := 3e0 * x };
+];
+
+operator main{} [
+    call run{x: 5e0};
+];
+";
+    let (code, stderr) = run_source("own_representation", source);
+    let broken = trendy_diag::Code::BrokenConstraint.id();
+    assert_eq!(
+        (code, stderr),
+        (
+            1,
+            format!(
+                "5e0
+1e1
+tuple {{ equal: true, size: 2 }}
+error[{broken}]: ellipse{{a: 1.5e1, b: 1e1}} isn't a value of `circle`: it breaks the constraint `a = b`
+{}",
+                site("own_representation", 15)
+            )
+        )
+    );
+}
+
+#[test]
 fn versions_are_chosen_when_running() {
     // Each call computes the version for its arguments' own types: of a
     // specification without a body, of one with a body for the rest, and
@@ -2503,9 +2548,10 @@ fn inheritance() {
             r#""ellipse""#,
             r#""3-gon""#,
             // An ellipse with equal semiaxes is a circle, and widened, just
-            // an ellipse again.
+            // an ellipse again; a circle selected by its radius has it.
             r#""circle""#,
             r#""ellipse""#,
+            "distance{m: 2e0}",
             // Their areas, each computed by its kind's version.
             "┌──────┬─────────────────────┐",
             "│ name │ size                │",

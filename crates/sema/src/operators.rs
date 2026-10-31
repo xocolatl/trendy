@@ -181,6 +181,15 @@ impl Signature {
         params.attributes().find(|a| a.is_named(name))
     }
 
+    /// Whether its parameters are exactly `components`, as the selector's
+    /// of their representation are.
+    pub(crate) fn takes(&self, components: &hir::Heading) -> bool {
+        self.params.len() == components.attributes().count()
+            && components
+                .attributes()
+                .all(|(c, _)| self.params.contains_key(c))
+    }
+
     /// The type of the program's own it is a selector of.
     pub(crate) fn selects(&self) -> Option<&hir::Defined> {
         self.from_type.as_ref()?.selects()
@@ -320,6 +329,24 @@ impl Operators {
                     .selects()
                     .is_some_and(|ty| ty.name == defined.name)
                     && signature.params.contains_key(component)
+            })
+            .map(|signature| signature.id)
+    }
+
+    /// The selector of the type of the program's own `defined` in the
+    /// possible representation with exactly the components `components`, if
+    /// the type has selectors.
+    pub(crate) fn selector_of(
+        &self,
+        defined: &hir::Defined,
+        components: &hir::Heading,
+    ) -> Option<hir::OperatorId> {
+        self.overloads(&defined.name)
+            .find(|signature| {
+                signature
+                    .selects()
+                    .is_some_and(|ty| ty.name == defined.name)
+                    && signature.takes(components)
             })
             .map(|signature| signature.id)
     }
@@ -910,7 +937,7 @@ fn numbered(file: &SourceFile, namespaces: &Namespaces) -> Vec<Signature> {
             });
         }
         let converted = namespaces.converted(&defined.name);
-        for (representation, converted) in defined.representations.iter().zip(converted) {
+        for (representation, converted) in defined.own_representations().iter().zip(converted) {
             let own = component_parameters(&converted.components);
             let names: Vec<&str> = converted.components.named().map(|(c, _)| c).collect();
             let conversion =

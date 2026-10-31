@@ -306,7 +306,7 @@ impl Lowering {
 
     /// The descriptor of `ty`, laid out as `trendy_runtime::TypeDesc`:
     /// `{ kind: u8, size, attributes: *Attr, count, element: *TypeDesc,
-    /// name: *u8, name_len }`.
+    /// name: *u8, name_len, written: *u8, written_len }`.
     fn descriptor(&mut self, ty: &hir::Type) -> lir::DataId {
         if let Some(&id) = self.descriptors.get(ty) {
             return id;
@@ -338,25 +338,23 @@ impl Lowering {
         let element = element.map_or(lir::Field::Usize(0), |element| {
             lir::Field::Address(self.descriptor(&element))
         });
-        // The name a value of a type of the program's own is written with,
-        // or none.
-        let name = match ty {
-            hir::Type::Defined(defined) => defined.written(),
-            _ => "",
+        // A type of the program's own's name, and the name its values are
+        // written with, or none.
+        let (name, written) = match ty {
+            hir::Type::Defined(defined) => (defined.name.as_str(), defined.written()),
+            _ => ("", ""),
         };
-        let name_bytes = if name.is_empty() {
-            self.empty()
-        } else {
-            self.constant(vec![lir::Field::Bytes(name.as_bytes().to_vec())])
-        };
+        let (name, written) = (self.name(name), self.name(written));
         let id = self.constant(vec![
             lir::Field::U8(kind),
             lir::Field::Size(self.layout(ty)),
             lir::Field::Address(attributes),
             lir::Field::Usize(len(count)),
             element,
-            lir::Field::Address(name_bytes),
-            lir::Field::Usize(len(name.len())),
+            name.0,
+            name.1,
+            written.0,
+            written.1,
         ]);
         self.descriptors.insert(ty.clone(), id);
         id
@@ -376,19 +374,35 @@ impl Lowering {
             lir::Field::Offset(layout.clone(), vec![1]),
             lir::Field::Usize(0),
         ])]);
-        let name = ty.to_string();
-        let name_bytes = self.constant(vec![lir::Field::Bytes(name.as_bytes().to_vec())]);
+        let name = self.name(&ty.to_string());
+        let written = self.name("");
         let id = self.constant(vec![
             lir::Field::U8(KIND_UNION),
             lir::Field::Size(layout),
             lir::Field::Address(components),
             lir::Field::Usize(1),
             lir::Field::Usize(0),
-            lir::Field::Address(name_bytes),
-            lir::Field::Usize(len(name.len())),
+            name.0,
+            name.1,
+            written.0,
+            written.1,
         ]);
         self.descriptors.insert(ty.clone(), id);
         id
+    }
+
+    /// The fields of a descriptor that hold `name`: the address of its
+    /// UTF-8 bytes, and their length.
+    fn name(&mut self, name: &str) -> (lir::Field, lir::Field) {
+        let bytes = if name.is_empty() {
+            self.empty()
+        } else {
+            self.constant(vec![lir::Field::Bytes(name.as_bytes().to_vec())])
+        };
+        (
+            lir::Field::Address(bytes),
+            lir::Field::Usize(len(name.len())),
+        )
     }
 
     /// The descriptor of the components of a value of `defined`, as its
@@ -1147,8 +1161,8 @@ impl<'a> FunctionBuilder<'a> {
         } else {
             value.clone()
         };
-        let first = fields.named().next().map(|(c, _)| c);
-        match first.and_then(|c| defined.representation(c)) {
+        let names: Vec<&str> = fields.named().map(|(c, _)| c).collect();
+        match defined.representation_with(&names) {
             Some((own, None)) => self.attributes_read(&target, own, fields, cx),
             Some((own, Some(other))) => {
                 let components = Reading {
@@ -3013,15 +3027,18 @@ impl<'a> FunctionBuilder<'a> {
             );
             let (value, descriptor) = (value.clone(), descriptor.clone());
             let constraint = self.text(&constraint.text, cx);
+            let ty = self.text(&defined.name, cx);
             let failure = match checking {
                 Checking::Selected => lir::Failure::BrokenConstraint {
                     value,
                     descriptor,
+                    ty,
                     constraint,
                 },
                 Checking::Read(record) => lir::Failure::BrokenConstraintInFile {
                     value,
                     descriptor,
+                    ty,
                     constraint,
                     record: record.clone(),
                 },

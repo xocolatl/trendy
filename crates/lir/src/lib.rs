@@ -288,18 +288,19 @@ pub enum RuntimeFn {
     /// array in, or, if `nested` (a [`Layout::U8`]) is 1, one sets it and
     /// the other an element in it, writing the positions.
     ElementConflict,
-    /// `trendy_rt_broken_constraint(value, descriptor, constraint)`, which
-    /// doesn't return: stop the program because `value`, of the type of
-    /// the program's own the descriptor describes, breaks its constraint
-    /// written `constraint`, a text, writing them.
+    /// `trendy_rt_broken_constraint(value, descriptor, ty, constraint)`,
+    /// which doesn't return: stop the program because `value`, components
+    /// the descriptor describes, selected of the type named `ty`, a text,
+    /// break its constraint written `constraint`, a text, writing them.
     BrokenConstraint,
     /// `trendy_rt_not_of_type(value, descriptor, ty)`, which doesn't
     /// return: stop the program because `value`, of the type in a
     /// hierarchy the descriptor describes, isn't a value of the type named
     /// `ty`, a text, which it was treated as, writing them.
     NotOfType,
-    /// `trendy_rt_broken_constraint_in_file(value, descriptor, constraint,
-    /// record)`, which doesn't return: as [`RuntimeFn::BrokenConstraint`],
+    /// `trendy_rt_broken_constraint_in_file(value, descriptor, ty,
+    /// constraint, record)`, which doesn't return: as
+    /// [`RuntimeFn::BrokenConstraint`],
     /// of a value `load_csv` read from the record `record` describes,
     /// laid out as [`Layout::record`], writing where too.
     BrokenConstraintInFile,
@@ -779,11 +780,13 @@ pub enum Failure {
         count: Place,
         nested: Place,
     },
-    /// `value`, of the type of the program's own `descriptor` describes,
-    /// breaks its constraint written `constraint`, a text.
+    /// `value`, components `descriptor` describes, selected of the type of
+    /// the program's own named `ty`, a text, break its constraint written
+    /// `constraint`, a text.
     BrokenConstraint {
         value: Place,
         descriptor: Place,
+        ty: Place,
         constraint: Place,
     },
     /// `value`, of the type in a hierarchy `descriptor` describes, isn't a
@@ -798,6 +801,7 @@ pub enum Failure {
     BrokenConstraintInFile {
         value: Place,
         descriptor: Place,
+        ty: Place,
         constraint: Place,
         record: Place,
     },
@@ -875,10 +879,11 @@ impl Failure {
             Failure::BrokenConstraint {
                 value,
                 descriptor,
+                ty,
                 constraint,
             } => (
                 RuntimeFn::BrokenConstraint,
-                vec![value, descriptor, constraint],
+                vec![value, descriptor, ty, constraint],
             ),
             Failure::NotOfType {
                 value,
@@ -888,11 +893,12 @@ impl Failure {
             Failure::BrokenConstraintInFile {
                 value,
                 descriptor,
+                ty,
                 constraint,
                 record,
             } => (
                 RuntimeFn::BrokenConstraintInFile,
-                vec![value, descriptor, constraint, record],
+                vec![value, descriptor, ty, constraint, record],
             ),
             Failure::OverlappingSubtypes {
                 value,

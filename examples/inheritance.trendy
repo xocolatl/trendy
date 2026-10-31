@@ -85,9 +85,17 @@ type ellipse is plane_figure {
 /* A circle is an ellipse whose semiaxes are equal: its values are the
    ellipses its constraint is true of (IM Prescription 10), so selecting
    an ellipse with equal semiaxes gives a circle, and changing one so that
-   they aren't gives just an ellipse again. It has no representation of
-   its own yet, so it is written as the ellipse it is. */
-type circle is ellipse { constraint a = b };
+   they aren't gives just an ellipse again. TTM derives its possible
+   representation, by its radius and centre, from the ellipse's, `R =
+   THE_A ( ELLIPSE )` and `CTR = THE_CTR ( ELLIPSE )`: here it converts to
+   an ellipse's components and from them, and carries the centre, the
+   same component, unchanged. */
+type circle is ellipse {
+    constraint a = b,
+    { r: distance, ctr: point }
+        to { a := r, b := r, ctr := ctr }
+        from { r := a, ctr := ctr },
+};
 
 /* A polygon, by its vertices, numbered from 1, each at a point of its own:
    a component can be a relation, whose keys say that no two vertices have
@@ -162,8 +170,11 @@ var squashed := [
 ];
 
 /* A well, selected as an ellipse, is a circle; widened, it is just an
-   ellipse again. */
+   ellipse again. A ring is selected as a circle, by its radius, which
+   reads it too. */
 var well := ellipse{a: distance{m: 1e0}, b: distance{m: 1e0}, ctr: pt};
+var ring := circle{r: distance{m: 2e0}, ctr: pt};
+var ring_radius := ring.r;
 var widened := [
     var w := well;
     update w { a := distance{m: 2e0} };
@@ -313,6 +324,7 @@ operator geometry{p: point, shape: polygon} [
     call debug_value{v: kind{figure: w}};
     update w { a := distance{m: 2e0} };
     call debug_value{v: kind{figure: w}};
+    call debug_value{v: circle{r: distance{m: 2e0}, ctr: p}.r};
     call debug_table{r: figures extend { size := area{figure: figure} }{name, size}};
     call measure{figures: figures};
 ];
@@ -339,6 +351,7 @@ operator main{} [
     call debug_value{v: kind{figure: triangle}};
     call debug_value{v: kind{figure: well}};
     call debug_value{v: kind{figure: widened}};
+    call debug_value{v: ring_radius};
     call debug_table{r: sizes};
     call measure{figures: figures};
 

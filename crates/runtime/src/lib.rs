@@ -1903,31 +1903,31 @@ pub unsafe extern "C" fn trendy_rt_tuple_mismatch(
     }
 }
 
-/// Stop the program because `value`, of the type of the program's own
-/// `desc` describes, breaks its constraint written `constraint`, a text,
-/// writing them (R0017).
+/// Stop the program because `value`, components `desc` describes,
+/// selected of the type of the program's own named `ty`, a text, break its
+/// constraint written `constraint`, a text, writing them (R0017).
 ///
 /// # Safety
 ///
-/// `value` must point to a valid value of the type `desc` describes, a
-/// type of the program's own, and `constraint` to a valid text value.
+/// `value` must point to valid components `desc` describes, a type of the
+/// program's own's, and `ty` and `constraint` to valid text values.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn trendy_rt_broken_constraint(
     value: *const u8,
     desc: *const TypeDesc,
+    ty: *const u8,
     constraint: *const u8,
 ) -> ! {
     // SAFETY: guaranteed by the caller.
     unsafe {
-        let (desc, constraint) = (&*desc, read_text(constraint));
+        let (desc, ty, constraint) = (&*desc, read_text(ty), read_text(constraint));
         fail_with(|out| {
             out.write_str("error[R0017]: ")?;
             write_value(out, value, desc)?;
             writeln!(
                 out,
-                " isn't a value of `{}`: it breaks the constraint `{constraint}`",
-                type_name(desc)
+                " isn't a value of `{ty}`: it breaks the constraint `{constraint}`"
             )
         })
     }
@@ -1992,28 +1992,28 @@ pub unsafe extern "C" fn trendy_rt_not_of_type(
     }
 }
 
-/// Stop the program because `value`, of the type of the program's own
-/// `desc` describes, which `load_csv` read from the record `record`
-/// describes, breaks its constraint written `constraint`, a text, writing
-/// them (R0017).
+/// Stop the program because `value`, components `desc` describes, which
+/// `load_csv` read from the record `record` describes for a value of the
+/// type of the program's own named `ty`, a text, break its constraint
+/// written `constraint`, a text, writing them (R0017).
 ///
 /// # Safety
 ///
-/// `value` must point to a valid value of the type `desc` describes, a
-/// type of the program's own, `constraint` to a valid text value, and
+/// `value` must point to valid components `desc` describes, a type of the
+/// program's own's, `ty` and `constraint` to valid text values, and
 /// `record` to a valid [`Record`].
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn trendy_rt_broken_constraint_in_file(
     value: *const u8,
     desc: *const TypeDesc,
+    ty: *const u8,
     constraint: *const u8,
     record: *const Record,
 ) -> ! {
     // SAFETY: guaranteed by the caller.
     unsafe {
-        let desc = &*desc;
-        let constraint = read_text(constraint);
+        let (desc, ty, constraint) = (&*desc, read_text(ty), read_text(constraint));
         fail_with(|out| {
             out.write_str("error[R0017]: ")?;
             (*record).write_gives(out)?;
@@ -2021,8 +2021,7 @@ pub unsafe extern "C" fn trendy_rt_broken_constraint_in_file(
             write_value(out, value, desc)?;
             writeln!(
                 out,
-                ", which isn't a value of `{}`: it breaks the constraint `{constraint}`",
-                type_name(desc)
+                ", which isn't a value of `{ty}`: it breaks the constraint `{constraint}`"
             )
         })
     }
@@ -2428,9 +2427,14 @@ pub struct TypeDesc {
     /// what each element of its memory is. For other kinds, null.
     pub element: *const TypeDesc,
     /// For a type of the program's own, the UTF-8 bytes of its name, whose
-    /// components are its attributes. For other kinds, `name_len` is 0.
+    /// components are its attributes, and of the name its values are
+    /// written with: its own, or, if it declares no possible representation,
+    /// its nearest supertype's that does. For other kinds, the lengths are
+    /// 0.
     pub name: *const u8,
     pub name_len: usize,
+    pub written: *const u8,
+    pub written_len: usize,
 }
 
 impl TypeDesc {
@@ -3588,7 +3592,10 @@ pub unsafe fn write_value(out: &mut impl Write, value: *const u8, desc: &TypeDes
             }
             // Its selector's invocation, as a call is written.
             KIND_DEFINED => {
-                out.write_str(type_name(desc))?;
+                out.write_str(core::str::from_utf8_unchecked(core::slice::from_raw_parts(
+                    desc.written,
+                    desc.written_len,
+                )))?;
                 out.write_char('{')?;
                 for (i, attr) in attributes(desc).iter().enumerate() {
                     if i > 0 {
@@ -4117,6 +4124,8 @@ mod tests {
             element: core::ptr::null(),
             name: core::ptr::null(),
             name_len: 0,
+            written: core::ptr::null(),
+            written_len: 0,
         }
     }
 
@@ -4130,6 +4139,8 @@ mod tests {
             element: core::ptr::null(),
             name: core::ptr::null(),
             name_len: 0,
+            written: core::ptr::null(),
+            written_len: 0,
         }
     }
 
@@ -4144,6 +4155,8 @@ mod tests {
             element: core::ptr::null(),
             name: name.as_ptr(),
             name_len: name.len(),
+            written: name.as_ptr(),
+            written_len: name.len(),
         }
     }
 
@@ -4157,6 +4170,8 @@ mod tests {
             element: tuple,
             name: core::ptr::null(),
             name_len: 0,
+            written: core::ptr::null(),
+            written_len: 0,
         }
     }
 
@@ -4170,6 +4185,8 @@ mod tests {
             element,
             name: core::ptr::null(),
             name_len: 0,
+            written: core::ptr::null(),
+            written_len: 0,
         }
     }
 

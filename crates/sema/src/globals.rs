@@ -488,20 +488,35 @@ impl<'a> Globals<'a> {
         let conversion = representation
             .conversions()
             .find(|c| c.direction() == Some(direction))?;
+        // Each assigns components, whose types are written where they are
+        // declared.
         let value = match direction {
             ast::Direction::To => {
-                let own = representation.components()?;
-                self.conversion(signature, &conversion, &defined.components, &own, errors)?
+                let stored = self.stored_heading(defined);
+                let written = stored.as_ref();
+                self.conversion(signature, &conversion, &defined.components, written, errors)?
             }
             ast::Direction::From => {
-                let stored = crate::named_types::stored(&from.decl)?.components()?;
+                let own = representation.components();
                 let Some(hir::Type::Tuple(components)) = &signature.result else {
                     unreachable!("a conversion from the stored representation is of a tuple");
                 };
-                self.conversion(signature, &conversion, components, &stored, errors)?
+                self.conversion(signature, &conversion, components, own.as_ref(), errors)?
             }
         };
         Some((Vec::new(), value))
+    }
+
+    /// Where the stored components of `defined` are declared: in the stored
+    /// representation of the type its values are stored as, which a
+    /// subtype defined by constraints doesn't declare, found through that
+    /// type's selector.
+    fn stored_heading(&self, defined: &hir::Defined) -> Option<ast::Heading> {
+        let stored = defined.stored_as();
+        let (component, _) = stored.components.attributes().next()?;
+        let selector = self.operators.selector(stored, component)?;
+        let decl = &self.operators.get(selector).from_type.as_ref()?.decl;
+        crate::named_types::stored(decl)?.components()
     }
 
     /// The value of `signature`, the selector of a possible representation of
@@ -516,9 +531,11 @@ impl<'a> Globals<'a> {
         defined: &hir::Defined,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<(Vec<hir::Local>, hir::Expr)> {
-        let component = signature.params.keys().next()?;
-        let (_, other) = defined.representation(component)?;
-        let to = other
+        // Its representation, whose components are its parameters.
+        let to = defined
+            .representations
+            .iter()
+            .find(|r| signature.takes(&r.components))
             .expect("only another representation's selector converts")
             .to;
         let at = signature.defined()?;
@@ -557,7 +574,7 @@ impl<'a> Globals<'a> {
         signature: &Signature,
         conversion: &ast::Conversion,
         components: &hir::Heading,
-        written: &ast::Heading,
+        written: Option<&ast::Heading>,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Expr> {
         let list = conversion.assignments()?;
@@ -609,8 +626,7 @@ impl<'a> Globals<'a> {
             }
             first.insert(name.to_string(), span);
             let origin = written
-                .attributes()
-                .find(|a| a.is_named(name))
+                .and_then(|w| w.attributes().find(|a| a.is_named(name)))
                 .and_then(|a| a.type_expr())
                 .map_or(Origin::Builtin, Origin::Type);
             let expected = Expected {

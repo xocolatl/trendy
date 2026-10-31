@@ -1519,14 +1519,14 @@ impl<'a> Checker<'a> {
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Expr> {
         let components = ops::components(value);
-        let (converted, _) = self.converted(defined, components, name, expr, errors)?;
+        let (_, other) = defined.representation(name)?;
+        let (converted, _) = self.converted(defined, components, other?, expr, errors)?;
         Some(ops::extract(converted, name.to_string()))
     }
 
-    /// The components, in the possible representation of the type of the
-    /// program's own `defined` with the component `component`, other than
-    /// the stored one, of the value whose stored components are
-    /// `components`, written `expr`: a tuple of them, computed by its
+    /// The components, in the possible representation `other` of the type
+    /// of the program's own `defined`, of the value whose stored components
+    /// are `components`, written `expr`: a tuple of them, computed by its
     /// conversion from the stored ones, and its heading. `None` after
     /// reporting that the conversion fails, or if it has errors, already
     /// reported.
@@ -1534,12 +1534,11 @@ impl<'a> Checker<'a> {
         &mut self,
         defined: &hir::Defined,
         components: hir::Expr,
-        component: &str,
+        other: &hir::Representation,
         expr: &Expr,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<(hir::Expr, hir::Heading)> {
-        let (own, other) = defined.representation(component)?;
-        let (conversion, own) = (other?.from, own.clone());
+        let (conversion, own) = (other.from, other.components.clone());
         let result = hir::Type::Tuple(own.clone());
         let converted = self.applied(
             conversion,
@@ -1793,11 +1792,15 @@ impl<'a> Checker<'a> {
                         ops::components(operand),
                         Changed::Stored(defined, known),
                     )),
-                    Representation::Other(component) => {
-                        let selector = self.names.operators().selector(defined, component)?;
+                    Representation::Other(at) => {
+                        let other = &defined.representations[at];
+                        let selector = self
+                            .names
+                            .operators()
+                            .selector_of(defined, &other.components)?;
                         let at_hand = hir::Expr::Current(0, defined.components.clone());
                         let (converted, own) =
-                            self.converted(defined, at_hand, component, assigned.operand, errors)?;
+                            self.converted(defined, at_hand, other, assigned.operand, errors)?;
                         Some((own, converted, Changed::Other(defined, selector)))
                     }
                 }
@@ -2637,51 +2640,61 @@ fn components_known(changed: &Changed, heading: &hir::Heading) -> (Vec<hir::Head
 }
 
 /// The possible representation of a type whose components something names:
-/// the stored one, and whether a component of it is named, or another,
-/// named by its component.
-pub(crate) enum Representation<'n> {
+/// the stored one, and whether a component of it is named, or another, by
+/// its position among the type's others.
+pub(crate) enum Representation {
     Stored { known: bool },
-    Other(&'n str),
+    Other(usize),
 }
 
 /// The possible representation of the type `defined` whose components
-/// `named`, each with where it is written, are: the one those it has are
-/// of, or the stored one if it has none. `None` after reporting components
-/// of two representations, which `rule` says must be one's.
-pub(crate) fn representation<'n>(
+/// `named`, each with where it is written, are: the first, the stored one
+/// first, with all those it has, or the stored one if it has none. `None`
+/// after reporting components of two representations, which `rule` says
+/// must be one's.
+pub(crate) fn representation(
     defined: &hir::Defined,
-    named: &[(&'n str, Span)],
+    named: &[(&str, Span)],
     rule: errors::OneRepresentation,
     errors: &mut Vec<Diagnostic>,
-) -> Option<Representation<'n>> {
+) -> Option<Representation> {
     let representations: Vec<&hir::Heading> = defined.possible_representations().collect();
-    // The first component named, with its representation's position, the
-    // stored one's 0.
-    let mut first: Option<(usize, &str, Span)> = None;
-    for &(name, span) in named {
-        let Some(at) = representations.iter().position(|h| h.get(name).is_some()) else {
-            continue;
-        };
-        match first {
-            None => first = Some((at, name, span)),
-            Some((earlier, other, other_span)) if earlier != at => {
-                errors.push(errors::mixed_representations(
-                    defined,
-                    (other, other_span, representations[earlier]),
-                    (name, span, representations[at]),
-                    rule,
-                ));
-                return None;
-            }
-            Some(_) => {}
+    let known: Vec<(&str, Span)> = named
+        .iter()
+        .copied()
+        .filter(|(name, _)| representations.iter().any(|h| h.get(name).is_some()))
+        .collect();
+    let all = |heading: &hir::Heading| known.iter().all(|(name, _)| heading.get(name).is_some());
+    match representations.iter().position(|h| all(h)) {
+        Some(0) => Some(Representation::Stored {
+            known: !known.is_empty(),
+        }),
+        Some(at) => Some(Representation::Other(at - 1)),
+        None => {
+            // The first named, of its first representation, and one that
+            // isn't of it.
+            let (one, one_span) = known[0];
+            let at = representations
+                .iter()
+                .position(|h| h.get(one).is_some())
+                .expect("a known component is of a representation");
+            let (other, other_span) = *known
+                .iter()
+                .find(|(name, _)| representations[at].get(name).is_none())
+                .expect("no representation has them all");
+            let other_at = representations
+                .iter()
+                .position(|h| h.get(other).is_some())
+                .expect("a known component is of a representation");
+            errors.push(errors::mixed_representations(
+                defined,
+                (one, one_span, representations[at]),
+                (other, other_span, representations[other_at]),
+                rule,
+            ));
+            None
         }
     }
-    Some(match first {
-        Some((at, name, _)) if at > 0 => Representation::Other(name),
-        known => Representation::Stored {
-            known: known.is_some(),
-        },
-    })
 }
 
 /// What a `replace`, an `update` or an `extend` makes of its operand.

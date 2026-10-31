@@ -103,6 +103,21 @@ fn component_names(representation: &ast::Representation) -> Vec<(String, Span)> 
         .unwrap_or_default()
 }
 
+/// Whether `conversion` gives the component `name` the value of the
+/// component of the same name, `name := name`.
+fn carries(conversion: &ast::Conversion, name: &str) -> bool {
+    conversion.assignments().is_some_and(|list| {
+        list.assignments().any(|assign| {
+            let assigned = assign.name().and_then(|n| n.ident());
+            let value = match assign.value() {
+                Some(ast::Expr::Name(value)) => value.ident(),
+                _ => None,
+            };
+            assigned.is_some_and(|a| a.text() == name) && value.is_some_and(|v| v.text() == name)
+        })
+    })
+}
+
 /// The names `conversion` assigns.
 fn assigned_names(conversion: &ast::Conversion) -> Vec<String> {
     conversion
@@ -115,40 +130,130 @@ fn assigned_names(conversion: &ast::Conversion) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The names of the components a type's representations convert to and
+/// from, and, of a subtype defined by constraints, what it inherits.
+struct Names<'n> {
+    stored: &'n [(String, Span)],
+    inherited: Option<&'n Inherited<'n>>,
+}
+
+/// Whether `representation`, of the type `name`, with the conversions `to`
+/// and `from`, converts the right way round, and has components of its
+/// own, none of those `seen` so far, after reporting why not: a subtype's
+/// representation can have its supertype's component, the same one, if it
+/// carries it unchanged both ways, as TTM's circle's `ctr` is its
+/// ellipse's.
+fn both_ways(
+    name: &str,
+    representation: &ast::Representation,
+    (to, from): (&ast::Conversion, &ast::Conversion),
+    names: &Names,
+    seen: &mut Vec<(String, Span)>,
+    errors: &mut Vec<Diagnostic>,
+) -> bool {
+    let mut ok = true;
+    let own = component_names(representation);
+    let has = |list: &[(String, Span)], name: &str| list.iter().any(|(n, _)| n == name);
+    let (to_names, from_names) = (assigned_names(to), assigned_names(from));
+    // Only when no name is both representations'.
+    let swapped = !to_names.is_empty()
+        && !from_names.is_empty()
+        && to_names
+            .iter()
+            .all(|n| has(&own, n) && !has(names.stored, n))
+        && from_names
+            .iter()
+            .all(|n| has(names.stored, n) && !has(&own, n));
+    if swapped {
+        errors.push(errors::swapped_conversions(to, from));
+        ok = false;
+    }
+    for (component, span) in own {
+        let inherited = names.inherited.filter(|i| has(&i.taken, &component));
+        if inherited.is_some() && carries(to, &component) && carries(from, &component) {
+            continue;
+        }
+        if let Some((_, first)) = seen.iter().find(|(n, _)| *n == component) {
+            errors.push(errors::component_in_two(
+                name,
+                &component,
+                (span, *first),
+                inherited.map(|i| i.supertype),
+            ));
+            ok = false;
+        } else {
+            seen.push((component, span));
+        }
+    }
+    ok
+}
+
+/// The stored components a subtype defined by constraints converts its
+/// own representations to and from, its supertype's, and the components of
+/// all its supertypes' representations, which none of its own may have,
+/// each with where it is written; and the supertype, by name.
+struct Inherited<'s> {
+    stored: Vec<(String, Span)>,
+    taken: Vec<(String, Span)>,
+    supertype: &'s str,
+}
+
 /// Whether each of the possible representations of the type `decl`
 /// declares, named `name`, in order, but the stored one, can be converted
 /// to and from the stored one, after reporting why one can't: exactly one
-/// is stored, without conversions, and each other has `to` and `from`,
-/// once each, the right way round; and no component is in two.
-fn convertible(decl: &TypeDecl, name: &str, errors: &mut Vec<Diagnostic>) -> Vec<bool> {
+/// is stored, without conversions, or, of a subtype defined by constraints,
+/// `inherited`, none, and each other has `to` and `from`, once each, the
+/// right way round; and no component is in two.
+fn convertible(
+    decl: &TypeDecl,
+    name: &str,
+    inherited: Option<&Inherited>,
+    errors: &mut Vec<Diagnostic>,
+) -> Vec<bool> {
     let representations: Vec<ast::Representation> = decl.representations().collect();
     let stored = representations
         .iter()
         .position(|r| r.conversions().next().is_none());
-    let Some(stored) = stored else {
-        if let Some(ident) = decl.name().and_then(|n| n.ident()) {
-            errors.push(errors::no_stored_representation(name, &ident));
+    let (stored_names, mut seen) = match (inherited, stored) {
+        (Some(inherited), _) => (inherited.stored.clone(), inherited.taken.clone()),
+        (None, Some(stored)) => {
+            let names = component_names(&representations[stored]);
+            (names.clone(), names)
         }
-        return vec![false; representations.len()];
+        (None, None) => {
+            if let Some(ident) = decl.name().and_then(|n| n.ident()) {
+                errors.push(errors::no_stored_representation(name, &ident));
+            }
+            return vec![false; representations.len()];
+        }
     };
-    let stored_names = component_names(&representations[stored]);
-    let mut seen: Vec<(String, Span)> = stored_names.clone();
     representations
         .iter()
         .enumerate()
         .map(|(i, representation)| {
-            if i == stored {
+            if inherited.is_none() && Some(i) == stored {
                 return false;
             }
             let conversions: Vec<ast::Conversion> = representation.conversions().collect();
             let mut ok = true;
-            if conversions.is_empty() {
-                errors.push(errors::second_stored(
-                    name,
-                    representation,
-                    &representations[stored],
-                ));
-                ok = false;
+            match (inherited, stored) {
+                (Some(inherited), _) if conversions.is_empty() => {
+                    errors.push(errors::specialized_stored(
+                        name,
+                        representation,
+                        inherited.supertype,
+                    ));
+                    ok = false;
+                }
+                (None, Some(stored)) if conversions.is_empty() => {
+                    errors.push(errors::second_stored(
+                        name,
+                        representation,
+                        &representations[stored],
+                    ));
+                    ok = false;
+                }
+                _ => {}
             }
             let mut to = None;
             let mut from = None;
@@ -165,31 +270,11 @@ fn convertible(decl: &TypeDecl, name: &str, errors: &mut Vec<Diagnostic>) -> Vec
             }
             match (&to, &from) {
                 (Some(to), Some(from)) => {
-                    let own = component_names(representation);
-                    let has =
-                        |list: &[(String, Span)], name: &str| list.iter().any(|(n, _)| n == name);
-                    let (to_names, from_names) = (assigned_names(to), assigned_names(from));
-                    // Only when no name is both representations'.
-                    let swapped = !to_names.is_empty()
-                        && !from_names.is_empty()
-                        && to_names
-                            .iter()
-                            .all(|n| has(&own, n) && !has(&stored_names, n))
-                        && from_names
-                            .iter()
-                            .all(|n| has(&stored_names, n) && !has(&own, n));
-                    if swapped {
-                        errors.push(errors::swapped_conversions(to, from));
-                        ok = false;
-                    }
-                    for (component, span) in own {
-                        if let Some((_, first)) = seen.iter().find(|(n, _)| *n == component) {
-                            errors.push(errors::component_in_two(name, &component, span, *first));
-                            ok = false;
-                        } else {
-                            seen.push((component, span));
-                        }
-                    }
+                    let names = Names {
+                        stored: &stored_names,
+                        inherited,
+                    };
+                    ok &= both_ways(name, representation, (to, from), &names, &mut seen, errors);
                 }
                 _ if conversions.is_empty() => {}
                 _ => {
@@ -415,23 +500,54 @@ fn lone_subtypes(
     }
 }
 
+/// What the subtype `name` defined by constraints, if it is one, of those
+/// `declared`, inherits from its supertypes, as `supertypes` say, for its
+/// representations' conversions (see [`Inherited`]).
+fn inherited<'s>(
+    name: &str,
+    declared: &[(String, Declared)],
+    supertypes: &'s Supertypes,
+) -> Option<Inherited<'s>> {
+    let supertype = supertypes.specializes(name)?;
+    let decl = |n: &str| {
+        declared
+            .iter()
+            .find_map(|(d, declared)| match &declared.decl {
+                Decl::Type(decl) if d == n => Some(decl.clone()),
+                _ => None,
+            })
+    };
+    let mut taken = Vec::new();
+    let mut at = supertype;
+    loop {
+        let decl = decl(at)?;
+        for representation in decl.representations() {
+            taken.extend(component_names(&representation));
+        }
+        if let Some(next) = supertypes.specializes(at) {
+            at = next;
+        } else {
+            let stored = stored(&decl)
+                .map(|r| component_names(&r))
+                .unwrap_or_default();
+            return Some(Inherited {
+                stored,
+                taken,
+                supertype,
+            });
+        }
+    }
+}
+
 /// Whether `decl`, which declares the type `name` a subtype of the regular
-/// type `supertype`, defines it by constraints alone: at least one, which
-/// says which of the supertype's values are its own, and no possible
-/// representation or order of its own, since its values are the
-/// supertype's, stored and ordered as they are; otherwise reported.
+/// type `supertype`, defines it by constraints: at least one, which says
+/// which of the supertype's values are its own, and no order of its own,
+/// since its values are the supertype's, ordered as they are; otherwise
+/// reported.
 fn specialized(decl: &TypeDecl, name: &str, supertype: &str, errors: &mut Vec<Diagnostic>) -> bool {
     let mut ok = true;
     if decl.constraints().next().is_none() {
         errors.push(errors::unconstrained_subtype(decl, name, supertype));
-        ok = false;
-    }
-    for representation in decl.representations() {
-        errors.push(errors::specialized_representation(
-            &representation,
-            name,
-            supertype,
-        ));
         ok = false;
     }
     for order in decl.orders() {
@@ -457,15 +573,17 @@ pub(crate) fn resolve(
     let mut declared = declarations(file, namespaces);
     let supertypes = supertypes(&declared, namespaces, errors);
     // Which representations convert, reported once for each type but a
-    // union type, whose representations are an error, and a subtype
-    // defined by a constraint, whose values are stored as its supertype's.
+    // union type, whose representations are an error: of a subtype defined
+    // by a constraint, to and from its supertype's stored components.
     let convertible: HashMap<String, Vec<bool>> = declared
         .iter()
-        .filter_map(|(name, declared)| match &declared.decl {
-            Decl::Type(decl)
-                if decl.union_keyword().is_none() && !supertypes.constrained.contains(name) =>
-            {
-                Some((name.clone(), convertible(decl, name, errors)))
+        .filter_map(|(name, declared_type)| match &declared_type.decl {
+            Decl::Type(decl) if decl.union_keyword().is_none() => {
+                let inherited = inherited(name, &declared, &supertypes);
+                Some((
+                    name.clone(),
+                    convertible(decl, name, inherited.as_ref(), errors),
+                ))
             }
             _ => None,
         })
@@ -512,7 +630,16 @@ pub(crate) fn resolve(
                     supertypes: supertypes.of(name),
                     specialized: supertypes.specialized(name),
                 };
-                specialization(decl, placed, supertype, &mut next, namespaces);
+                let convertible = &convertible[name.as_str()];
+                specialization(
+                    decl,
+                    placed,
+                    supertype,
+                    convertible,
+                    &mut next,
+                    namespaces,
+                    errors,
+                );
             }
             continue;
         }
@@ -627,25 +754,36 @@ fn specialization(
     decl: &TypeDecl,
     placed: Placed,
     supertype: hir::Defined,
+    convertible: &[bool],
     next: &mut usize,
     namespaces: &mut Namespaces,
+    errors: &mut Vec<Diagnostic>,
 ) {
-    let mut constraints = supertype.constraints.clone();
-    let inherited = constraints.len();
-    constraints.extend(decl.constraints().map(|constraint| {
-        let operator = hir::OperatorId(*next);
+    let mut numbered = || {
+        let id = hir::OperatorId(*next);
         *next += 1;
+        id
+    };
+    let mut constraints = supertype.constraints.clone();
+    constraints.extend(decl.constraints().map(|constraint| {
         hir::Constraint {
-            operator,
+            operator: numbered(),
             text: constraint
                 .condition()
                 .map_or_else(String::new, |c| c.syntax().text().to_string()),
         }
     }));
+    let converted = converted(decl, convertible, namespaces, errors);
+    let mut representations = supertype.representations.clone();
+    representations.extend(converted.iter().map(|c| hir::Representation {
+        components: c.components.clone(),
+        to: numbered(),
+        from: numbered(),
+    }));
     let defined = hir::Defined {
         name: placed.name.to_string(),
         components: supertype.components.clone(),
-        representations: supertype.representations.clone(),
+        representations,
         constraints,
         keys: supertype.keys.clone(),
         order: supertype.order.clone(),
@@ -653,13 +791,38 @@ fn specialization(
         specialized: placed.specialized,
         specialization: Some(hir::Specialization {
             supertype: Box::new(supertype),
-            inherited,
         }),
     };
     namespaces.defined.insert(placed.name.to_string(), defined);
     namespaces
         .converted
-        .insert(placed.name.to_string(), Vec::new());
+        .insert(placed.name.to_string(), converted);
+}
+
+/// The possible representations `decl` declares with conversions, each
+/// with its components resolved, and whether `convertible` says it
+/// converts, by its position; those whose components have errors are left
+/// out.
+fn converted(
+    decl: &TypeDecl,
+    convertible: &[bool],
+    namespaces: &Namespaces,
+    errors: &mut Vec<Diagnostic>,
+) -> Vec<Converted> {
+    decl.representations()
+        .zip(convertible)
+        .filter(|(r, _)| r.conversions().next().is_some())
+        .filter_map(|(representation, &convertible)| {
+            let heading = representation.components()?;
+            let components =
+                types::resolve_heading(&heading, &mut TypeParameters::None, namespaces, errors)?;
+            Some(Converted {
+                decl: representation,
+                components,
+                convertible,
+            })
+        })
+        .collect()
 }
 
 /// The type `decl` declares, `resolved`, into `namespaces`: its
@@ -698,21 +861,7 @@ fn defined(
                 .map_or_else(String::new, |c| c.syntax().text().to_string()),
         })
         .collect();
-    let converted: Vec<Converted> = decl
-        .representations()
-        .zip(convertible)
-        .filter(|(r, _)| r.conversions().next().is_some())
-        .filter_map(|(representation, &convertible)| {
-            let heading = representation.components()?;
-            let components =
-                types::resolve_heading(&heading, &mut TypeParameters::None, namespaces, errors)?;
-            Some(Converted {
-                decl: representation,
-                components,
-                convertible,
-            })
-        })
-        .collect();
+    let converted = converted(decl, convertible, namespaces, errors);
     let representations = converted
         .iter()
         .map(|c| hir::Representation {
@@ -770,11 +919,9 @@ fn type_order(
     let rule = errors::OneRepresentation::Ordered;
     let (components, from) = match check::representation(defined, &named, rule, errors)? {
         Representation::Stored { .. } => (&defined.components, None),
-        Representation::Other(component) => {
-            let (components, other) = defined
-                .representation(component)
-                .expect("a component names its representation");
-            (components, other.map(|r| r.from))
+        Representation::Other(at) => {
+            let other = &defined.representations[at];
+            (&other.components, Some(other.from))
         }
     };
     let orders = errors::Orders::Type(defined);

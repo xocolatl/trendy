@@ -1083,7 +1083,17 @@ value is selected, by its selector, `replace`, `update` or `load_csv`.
 `is` tests against, apart from its variants, the types with stored
 representations, whose components its room holds; a constrained subtype
 shares the variant of the type it is stored as (`Defined::stored_as`),
-and a value is written with that type's name (`Defined::written`).
+and a value is written with that type's name (`Defined::written`), which
+a descriptor holds beside the type's own name, by which values are
+ordered and told apart. A constrained subtype's own representations
+convert to and from the stored components, its supertypes', as other
+representations do, and follow the supertypes' in its `representations`
+(`Defined::own_representations`); one can have a supertype's component,
+the same one, if both its conversions carry it unchanged
+(`named_types::carries`), so a component's name alone needn't say which
+representation it is of: `Defined::representation_with` and
+`check::representation` find the first, the stored one first, with every
+component named.
 
 The relational operators combine attributes of types in one hierarchy
 (IM Prescription 13). A common attribute of a join's operands, of a

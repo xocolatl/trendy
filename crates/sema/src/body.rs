@@ -1488,7 +1488,7 @@ fn columns_named(
             continue;
         };
         let own = match chosen {
-            Representation::Other(component) => defined.representation(component).map(|(h, _)| h),
+            Representation::Other(at) => Some(&defined.representations[at].components),
             Representation::Stored { .. } => Some(&defined.components),
         };
         let Some(own) = own else {
