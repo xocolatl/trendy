@@ -2527,18 +2527,14 @@ impl Type {
 
     /// The value a variable of this type starts with when none is given:
     /// for a tuple, each attribute's default. A type of the program's own
-    /// has none, nor a tuple with one, since no value of it is any more a
-    /// start than another.
-    ///
-    /// # Panics
-    ///
-    /// If the type has a type parameter in it, which only operators'
-    /// parameters, and not variables, have.
+    /// has none, since no value of it is any more a start than another,
+    /// nor has a type parameter, whose type each call gives, nor a tuple
+    /// with either. A relation or an array starts empty, whatever is in it.
     #[must_use]
     pub fn default_value(&self) -> Option<Value> {
         Some(match self {
             Type::Scalar(scalar) => scalar.default_value(),
-            Type::Defined(_) => return None,
+            Type::Defined(_) | Type::Parameter(_) => return None,
             Type::Tuple(heading) => Value::Tuple(TupleValue(
                 heading
                     .attributes()
@@ -2554,7 +2550,6 @@ impl Type {
                 element: (**element).clone(),
                 elements: Vec::new(),
             }),
-            Type::Parameter(p) => panic!("no variable has the type parameter {p}"),
         })
     }
 }
@@ -2970,8 +2965,8 @@ impl Value {
     }
 
     /// The value, in an operator instantiated with `types`: the only
-    /// values with a type parameter in their types are relations whose
-    /// headings have one, and so no tuples, or values with them inside.
+    /// values with a type parameter in their types are relations and
+    /// arrays with one in them, and so empty, or values with them inside.
     #[must_use]
     pub fn instantiated(&self, types: &[Type]) -> Value {
         match self {
@@ -3760,6 +3755,28 @@ mod tests {
         assert_eq!(ab, ba);
         assert_eq!(ba.to_string(), "tuple { a: integer, b: text }");
         assert_eq!(tuple(&[]).to_string(), "tuple {}");
+    }
+
+    #[test]
+    fn a_type_parameter_has_no_default_but_a_relation_or_an_array_of_one_has() {
+        let t = Type::Parameter(TypeParameter {
+            index: 0,
+            name: Some("T".to_string()),
+            any: Any::Type,
+        });
+        assert_eq!(t.default_value(), None);
+        let tuple = Type::Tuple(Heading::new([("v".to_string(), t.clone())].into()));
+        assert_eq!(tuple.default_value(), None);
+        let relation = Type::Relation(Heading::new([("v".to_string(), t.clone())].into()));
+        let array = Type::Array(Box::new(relation.clone()));
+        for ty in [relation, array] {
+            let empty = ty.default_value().expect("it starts empty");
+            assert_eq!(empty.ty(), ty);
+            assert_eq!(
+                empty.instantiated(&[Type::Scalar(Scalar::Integer)]).ty(),
+                ty.instantiated(&[Type::Scalar(Scalar::Integer)])
+            );
+        }
     }
 
     #[test]

@@ -68,6 +68,17 @@ operator alphabetical{r: relation { city: text, rain: integer }}: array text [
     names
 ];
 
+/* The same of any attribute, of any type with an order. `values` starts
+   as the empty array, as an array always does, though its elements' type
+   is `T`, which each call gives. */
+operator ascending{r: any relation, of: T per r}: array T
+    types { T: any ordered }
+[
+    var values: array T;
+    load values value from r{of} order [asc of];
+    values
+];
+
 /* The crops in the order of the years they were grown in, without the
    years: `remove` after the order leaves `year` out of the elements once
    the tuples are ordered by it, and keeps each, so teff is there twice.
@@ -107,6 +118,7 @@ var harvests := relation {
 
 var ranked := wettest_first{r: yearly};
 var names := alphabetical{r: yearly};
+var rains := ascending{r: yearly, of: rain};
 var crops := crops_by_year{r: harvests};
 var ranks := ranked_by_rain{r: yearly};
 var grown_crops := grown{crops: crops};
@@ -163,6 +175,7 @@ operator computed{wet: integer, mid: integer, low: integer, two: integer, city: 
     load ranked from yearly order [desc rain, asc city];
     call debug_value{v: ranked};
     call debug_value{v: alphabetical{r: yearly}};
+    call debug_value{v: ascending{r: yearly, of: rain}};
     var harvests := relation {
         { year: 2019 + at, crop: "teff" },
         { year: 2022, crop: "sorghum" },
@@ -196,6 +209,7 @@ operator main{} [
     call debug_value{v: named};
     call debug_value{v: ranked};
     call debug_value{v: names};
+    call debug_value{v: rains};
     call debug_value{v: crops};
     call debug_table{r: ranks};
     call debug_table{r: grown_crops};

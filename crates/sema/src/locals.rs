@@ -318,9 +318,9 @@ pub(crate) fn declarations(
 /// The local variable `decl` declares in the body of an operator with the
 /// type parameters `types`, or in a value block, whose names `names`
 /// resolves, and its initial value: the one given, or else its type's
-/// default, which a type parameter's type has none of. It is checked as a
-/// program variable's declaration is, but with a value known only when
-/// running.
+/// default, which a type parameter has none of, nor a tuple with one. It
+/// is checked as a program variable's declaration is, but with a value
+/// known only when running.
 pub(crate) fn local(
     decl: &VarDecl,
     types: &[hir::TypeParameter],
@@ -344,15 +344,7 @@ pub(crate) fn local(
         }
         (Some((ty, type_expr)), None) => {
             let ty = ty?;
-            // A type parameter has no default, nor has a type of the
-            // program's own.
-            let default = ty
-                .parameters()
-                .next()
-                .is_none()
-                .then(|| ty.default_value())
-                .flatten();
-            let Some(default) = default else {
+            let Some(default) = ty.default_value() else {
                 errors.push(errors::no_default_value(name, &ty, &type_expr));
                 return None;
             };

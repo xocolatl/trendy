@@ -1456,10 +1456,12 @@ operator main{} [
 
 - **A local variable starts with its initial value,** or its type's
   default, as the program's do; but its value is computed when its
-  declaration runs, from the parameters and variables then. A type with a
-  type parameter in it has no default, so a local variable of one needs
-  an initial value (A0006). A relation's keys are checked whenever it is
-  assigned (R0008), and when compiling if the value is known then.
+  declaration runs, from the parameters and variables then. A type
+  parameter has no default, since each call gives it a type, nor has a
+  tuple with one, so a local variable of one needs an initial value
+  (A0006); but a relation or an array with one starts empty, as any does.
+  A relation's keys are checked whenever it is assigned (R0008), and when
+  compiling if the value is known then.
 - **It is in scope in all of its block,** the body, or a branch of an
   `if` statement, so that its name means one thing there, and it hides a
   variable of the program's with its name before its declaration as well

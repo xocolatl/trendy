@@ -2429,9 +2429,11 @@ fn arrays() {
             // Generic over the elements' type.
             "1200",
             r#""Amara""#,
-            // Loaded: the wettest first, and the names alphabetically.
+            // Loaded: the wettest first, the names alphabetically, and the
+            // rain least first, by an operator generic over its type.
             r#"array [tuple { city: "Mumbai", rain: 2200 }, tuple { city: "Lagos", rain: 1500 }, tuple { city: "Cairo", rain: 25 }, tuple { city: "Lima", rain: 15 }]"#,
             r#"array ["Cairo", "Lagos", "Lima", "Mumbai"]"#,
+            "array [15, 25, 1500, 2200]",
             // Ordered by year, then without it: teff twice.
             r#"array ["teff", "sorghum", "teff"]"#,
             // Loaded back into relations: each city with its place in the

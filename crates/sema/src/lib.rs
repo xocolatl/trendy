@@ -7347,7 +7347,7 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
             own[0].help[0].contains("give the local variable a name of its own"),
             "{own:#?}"
         );
-        // A type parameter's type has no default.
+        // A type parameter has no default, nor has a tuple with one.
         let generic = errors(&format!(
             "operator f{{v: T}} types {{ T: any type }} [ var w: T; ];{MAIN}"
         ));
@@ -7356,6 +7356,22 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
             generic[0].message,
             "variable `w`, of type `T`, has no initial value"
         );
+        let tuple = errors(&format!(
+            "operator f{{v: T}} types {{ T: any type }} [ var w: tuple {{ v: T }}; ];{MAIN}"
+        ));
+        assert_eq!(tuple[0].code, Code::UntypedVariable);
+        // But a relation or an array with one starts empty, as any does.
+        for ty in [
+            "array T",
+            "relation { v: T }",
+            "array relation { v: T, n: integer }",
+            "relation { r: relation { v: T } }",
+        ] {
+            let program = format!(
+                "operator f{{v: T}} types {{ T: any type }} [ var w: {ty}; call debug_value{{v: w}}; ];{MAIN}"
+            );
+            assert!(analyze_str(&program).is_ok(), "{program}");
+        }
     }
 
     #[test]
