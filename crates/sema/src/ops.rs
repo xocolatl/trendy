@@ -1171,6 +1171,8 @@ pub(crate) enum Failed {
     /// Components that break a constraint of the type of the program's own
     /// a value is selected of.
     Constraint(Box<BrokenConstraint>),
+    /// A value treated as one of a type it isn't of.
+    NotOfType(Box<(hir::Value, hir::Type)>),
 }
 
 /// The tuples of `operand` for which `condition`, computed from the tuple at
@@ -2119,6 +2121,40 @@ fn known_type(expr: &hir::Expr) -> hir::Type {
     }
 }
 
+/// Whether the value of `value` is of type `ty` (IM Prescription 15):
+/// evaluated if it is known.
+pub(crate) fn is(value: hir::Expr, ty: hir::Type) -> hir::Expr {
+    match known_value(&value) {
+        Some(known) => hir::Expr::Constant(hir::Value::Boolean(known.is_of(&ty))),
+        None => hir::Expr::Is(Box::new(value), Box::new(ty)),
+    }
+}
+
+/// `value` treated as one of `ty`, a subtype of its type, which fails
+/// unless it is one (IM Prescription 14): evaluated if it is known to be
+/// one. A known value of another type is treated only when running, which
+/// never happens where it is narrowed: the test that narrows it is known
+/// to be false then, and decides what it guards without it.
+pub(crate) fn treat_as(value: hir::Expr, ty: hir::Type) -> hir::Expr {
+    match known_value(&value) {
+        Some(known) if known.is_of(&ty) => typed(known.clone(), &ty),
+        _ => hir::Expr::TreatAs(Box::new(ty), Box::new(value)),
+    }
+}
+
+/// `value` treated as one of `ty`, a subtype of its type, as `treat … as
+/// …` does: as [`treat_as`], but a known value of another type fails now.
+///
+/// # Errors
+///
+/// Returns the known value, and `ty`, if it isn't of `ty`.
+pub(crate) fn treated_as(value: hir::Expr, ty: hir::Type) -> Result<hir::Expr, Failed> {
+    match known_value(&value) {
+        Some(known) if !known.is_of(&ty) => Err(Failed::NotOfType(Box::new((known.clone(), ty)))),
+        _ => Ok(treat_as(value, ty)),
+    }
+}
+
 /// `value`, known when compiling, as an expression of type `ty`, its own
 /// type or a supertype of it, as what it is computed from says.
 fn typed(value: hir::Value, ty: &hir::Type) -> hir::Expr {
@@ -2387,6 +2423,8 @@ fn substitute(
         }
         hir::Expr::Components(value) => components(sub(value)?),
         hir::Expr::Treat(ty, value) => sub(value)?.treated(&ty),
+        hir::Expr::TreatAs(ty, value) => treated_as(sub(value)?, *ty)?,
+        hir::Expr::Is(value, ty) => is(sub(value)?, *ty),
         hir::Expr::Semijoin(lhs, rhs) => matching(sub(lhs)?, sub(rhs)?, false),
         hir::Expr::Combine(combination, lhs, rhs) => combined(sub(lhs)?, sub(rhs)?, combination)?,
         hir::Expr::Antijoin(lhs, rhs) => matching(sub(lhs)?, sub(rhs)?, true),
@@ -2463,6 +2501,7 @@ pub(crate) fn extracted(
     operand: &Expr,
     ty: &hir::Type,
     others: &[&hir::Heading],
+    namespaces: &crate::Namespaces,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<String> {
     let ident = extract.attribute()?.ident()?;
@@ -2480,7 +2519,9 @@ pub(crate) fn extracted(
             errors::components_note(defined),
         ),
         _ => {
-            errors.push(errors::not_extractable(&name, span, ty, operand));
+            errors.push(errors::not_extractable(
+                &name, span, ty, operand, namespaces,
+            ));
             return None;
         }
     };

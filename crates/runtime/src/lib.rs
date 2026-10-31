@@ -1902,6 +1902,32 @@ pub unsafe extern "C" fn trendy_rt_broken_constraint(
     }
 }
 
+/// Stop the program because `value`, of the type in a hierarchy `desc`
+/// describes, isn't a value of the type named `ty`, a text, which it was
+/// treated as (R0019).
+///
+/// # Safety
+///
+/// `value` must point to a valid value of the type `desc` describes, and
+/// `ty` to a valid text value.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_not_of_type(
+    value: *const u8,
+    desc: *const TypeDesc,
+    ty: *const u8,
+) -> ! {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let (desc, ty) = (&*desc, read_text(ty));
+        fail_with(|out| {
+            out.write_str("error[R0019]: ")?;
+            write_value(out, value, desc)?;
+            writeln!(out, " isn't a value of `{ty}`")
+        })
+    }
+}
+
 /// Stop the program because `value`, of the type of the program's own
 /// `desc` describes, which `load_csv` read for the attribute or component
 /// named `attribute`, a text, from the record on line `*line` of the file

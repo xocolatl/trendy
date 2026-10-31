@@ -34,6 +34,9 @@
       "include": "#load"
     },
     {
+      "include": "#type-test"
+    },
+    {
       "include": "#order"
     },
     {
@@ -264,6 +267,20 @@
         }
       },
       "match": "\\b(type)\\s+([A-Z_a-z][0-9A-Z_a-z]*)\\s*(?:(union)\\s*)?(?:(is)\\s+([A-Z_a-z][0-9A-Z_a-z]*)\\s*)?(?=[\\{\\;])"
+    },
+    "type-test": {
+      "captures": {
+        "1": {
+          "name": "keyword.other.trendy"
+        },
+        "2": {
+          "name": "entity.name.type.trendy"
+        },
+        "3": {
+          "name": "keyword.other.trendy"
+        }
+      },
+      "match": "(?<=[\\w)\\]}])\\s+(is)\\s+([A-Z_a-z][0-9A-Z_a-z]*)|\\b(treat)\\s+(?=[A-Z_a-z][0-9A-Z_a-z]*)"
     },
     "variable-declaration": {
       "captures": {

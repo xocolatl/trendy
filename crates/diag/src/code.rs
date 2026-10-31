@@ -86,6 +86,7 @@ codes! {
     ConstraintInRepresentation => "P0041",
     OrderedWord => "P0042",
     SupertypeSpelling => "P0043",
+    TypeTestSpelling => "P0044",
     DuplicateName => "A0001",
     MissingMain => "A0002",
     UnknownType => "A0003",
@@ -147,6 +148,7 @@ codes! {
     Conversions => "A0059",
     UnionType => "A0060",
     DummySelected => "A0061",
+    TypeTest => "A0062",
     Overflow => "R0001",
     DivisionByZero => "R0002",
     OutOfMemory => "R0003",
@@ -165,6 +167,7 @@ codes! {
     CsvColumns => "R0016",
     BrokenConstraint => "R0017",
     NoResult => "R0018",
+    NotOfType => "R0019",
     Internal => "X0000",
 }
 

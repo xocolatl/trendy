@@ -243,6 +243,123 @@ pub(crate) fn braced_supertype(open: Span, close: Option<usize>) -> Diagnostic {
     .with_help("write the union type's name after `is`, then the type's possible representations in its braces, each in braces of its own, with a colon before each component's type")
 }
 
+/// What a type test is, for its errors.
+const TYPE_TEST_NOTE: &str = "`x is t` is true if the value of `x` is of the type `t`, or of one of its subtypes (*Type Inheritance and Relational Theory*, IM Prescription 15)";
+
+/// Java's and JavaScript's `instanceof`, `found`, for `is`.
+pub(crate) fn type_test_spelling(found: Found) -> Diagnostic {
+    Diagnostic::error(
+        Code::TypeTestSpelling,
+        "a value's type is tested with `is`, not `instanceof`",
+        found.span,
+        "Java's and JavaScript's test",
+    )
+    .with_note(TYPE_TEST_NOTE)
+    .with_suggestion(
+        "write `is`",
+        vec![Edit {
+            span: found.span,
+            replacement: "is".to_string(),
+        }],
+    )
+}
+
+/// SQL's `IS OF (t)`: its word `is`, its `(`, and where its `)` is, if it
+/// is there.
+pub(crate) fn sql_type_test(is: Found, open: Found, close: Option<Span>) -> Diagnostic {
+    let span = Span::new(is.span.start, close.map_or(open.span.end, |c| c.end));
+    let d = Diagnostic::error(
+        Code::TypeTestSpelling,
+        "a value's type is tested with `is` and the type, not SQL's `IS OF (…)`",
+        span,
+        "SQL's test",
+    )
+    .with_note(TYPE_TEST_NOTE);
+    let Some(close) = close else {
+        return d;
+    };
+    d.with_suggestion(
+        "write `is` and the type",
+        vec![
+            Edit {
+                span: Span::new(is.span.start, open.span.end),
+                replacement: "is ".to_string(),
+            },
+            Edit {
+                span: close,
+                replacement: String::new(),
+            },
+        ],
+    )
+}
+
+/// Python's `isinstance(x, t)`: its name, its `(`, the comma between the
+/// value and the type, and its `)`.
+pub(crate) fn isinstance(word: Found, open: Found, comma: Found, close: Found) -> Diagnostic {
+    Diagnostic::error(
+        Code::TypeTestSpelling,
+        "a value's type is tested with `x is t`, not Python's `isinstance(x, t)`",
+        Span::new(word.span.start, close.span.end),
+        "Python's test",
+    )
+    .with_note(TYPE_TEST_NOTE)
+    .with_suggestion(
+        "write `x is t`",
+        vec![
+            Edit {
+                span: Span::new(word.span.start, open.span.end),
+                replacement: String::new(),
+            },
+            Edit {
+                span: comma.span,
+                replacement: " is".to_string(),
+            },
+            Edit {
+                span: close.span,
+                replacement: String::new(),
+            },
+        ],
+    )
+}
+
+/// SQL's `TREAT(x AS t)`: its word `treat`, its `(`, its `AS`, if it is
+/// there, and where its `)` is, if it is there.
+pub(crate) fn sql_treat(
+    treat: Found,
+    open: Found,
+    as_word: Option<Found>,
+    close: Option<Span>,
+) -> Diagnostic {
+    let span = Span::new(treat.span.start, close.map_or(open.span.end, |c| c.end));
+    let d = Diagnostic::error(
+        Code::TypeTestSpelling,
+        "a value is treated as one of a type with `treat x as t`, without SQL's parentheses",
+        span,
+        "SQL's `TREAT`",
+    )
+    .with_note("`treat x as t` is the value of `x`, as a value of `t`, a subtype of its type, which it fails unless it is one (*Type Inheritance and Relational Theory*, IM Prescription 14)");
+    let (Some(as_word), Some(close)) = (as_word, close) else {
+        return d;
+    };
+    d.with_suggestion(
+        "write `treat x as t`",
+        vec![
+            Edit {
+                span: Span::new(treat.span.start, open.span.end),
+                replacement: "treat ".to_string(),
+            },
+            Edit {
+                span: as_word.span,
+                replacement: "as".to_string(),
+            },
+            Edit {
+                span: close,
+                replacement: String::new(),
+            },
+        ],
+    )
+}
+
 /// What a subtype is, for its errors.
 const SUBTYPE_NOTE: &str = "a type declared `is` a union type is one of its subtypes, and its values are all the union type's (*Type Inheritance and Relational Theory*, chapter 12): `type plane_figure union;` and `type ellipse is plane_figure { { a: distance, b: distance } };`";
 

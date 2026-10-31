@@ -283,6 +283,11 @@ pub enum RuntimeFn {
     /// the program's own the descriptor describes, breaks its constraint
     /// written `constraint`, a text, writing them.
     BrokenConstraint,
+    /// `trendy_rt_not_of_type(value, descriptor, ty)`, which doesn't
+    /// return: stop the program because `value`, of the type in a
+    /// hierarchy the descriptor describes, isn't a value of the type named
+    /// `ty`, a text, which it was treated as, writing them.
+    NotOfType,
     /// `trendy_rt_broken_constraint_in_file(value, descriptor, constraint,
     /// attribute, path, line)`, which doesn't return: as
     /// [`RuntimeFn::BrokenConstraint`], of a value `load_csv` read for the
@@ -485,6 +490,7 @@ impl RuntimeFn {
             RuntimeFn::IndexOutOfRange => "trendy_rt_index_out_of_range",
             RuntimeFn::ElementConflict => "trendy_rt_element_conflict",
             RuntimeFn::BrokenConstraint => "trendy_rt_broken_constraint",
+            RuntimeFn::NotOfType => "trendy_rt_not_of_type",
             RuntimeFn::BrokenConstraintInFile => "trendy_rt_broken_constraint_in_file",
             RuntimeFn::CheckKey => "trendy_rt_check_key",
             RuntimeFn::Concat => "trendy_rt_concat",
@@ -745,6 +751,13 @@ pub enum Failure {
         descriptor: Place,
         constraint: Place,
     },
+    /// `value`, of the type in a hierarchy `descriptor` describes, isn't a
+    /// value of the type named `ty`, a text, which it was treated as.
+    NotOfType {
+        value: Place,
+        descriptor: Place,
+        ty: Place,
+    },
     /// As [`Failure::BrokenConstraint`], of a value `load_csv` read for the
     /// attribute or component named `attribute`, a text, from the record
     /// on line `line` (a [`Layout::Usize`]) of the file at `path`, a text.
@@ -792,6 +805,11 @@ impl Failure {
                 RuntimeFn::BrokenConstraint,
                 vec![value, descriptor, constraint],
             ),
+            Failure::NotOfType {
+                value,
+                descriptor,
+                ty,
+            } => (RuntimeFn::NotOfType, vec![value, descriptor, ty]),
             Failure::BrokenConstraintInFile {
                 value,
                 descriptor,

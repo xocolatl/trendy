@@ -7,6 +7,7 @@ mod globals;
 mod keys;
 mod locals;
 mod named_types;
+mod narrowed;
 mod operators;
 mod ops;
 mod prelude;
@@ -8847,6 +8848,155 @@ var made := first{{}};
     }
 
     #[test]
+    fn a_test_narrows_a_name_in_the_rest_of_its_condition() {
+        // Each of these reads a component only a subtype has, which is
+        // valid because a test shows the value is of it there, whichever
+        // order they are written in.
+        for (body, value) in [
+            ("f is disc and f.r > 0e0", "true"),
+            ("f.r > 0e0 and f is disc", "true"),
+            ("not (f is disc) or f.r > 0e0", "true"),
+            ("f is disc implies f.r > 0e0", "true"),
+            ("f is square implies f.side > 0e0", "true"),
+            (
+                "if f is disc then f.r > 0e0 else f is square and f.side > 0e0",
+                "true",
+            ),
+            ("if not (f is disc) then false else f.r > 0e0", "true"),
+            (
+                "count{r: relation { { s: f } } where s is disc and s.r > 0e0} = 1",
+                "true",
+            ),
+        ] {
+            let source = format!(
+                "{FIGURES}operator test{{f: figure}}: boolean [ {body} ];\nvar result := test{{f: round}};{MAIN}"
+            );
+            let variables = analyze_str(&source)
+                .unwrap_or_else(|e| panic!("{body}: {e:#?}"))
+                .variables;
+            let result = variables.iter().find(|v| v.name == "result").unwrap();
+            assert_eq!(result.init.to_string(), value, "{body}");
+        }
+        // `where` narrows its result's heading too.
+        let variables = variables(&format!(
+            "{FIGURES}var shapes := relation {{ {{ s: round }}, {{ s: box }} }};\nvar discs := shapes where s is disc;\nvar radii := discs extend {{ radius := s.r }};"
+        ));
+        let discs = variables.iter().find(|v| v.name == "discs").unwrap();
+        assert_eq!(discs.ty.to_string(), "relation { s: disc }");
+        // Without a test, it isn't; where a test shows it is of another
+        // subtype, it is one of that; and where a test is false, it isn't
+        // known to be of any other, as a program can add more.
+        for (body, code) in [
+            ("f.r > 0e0", Code::WrongOperandType),
+            ("f is square and f.r > 0e0", Code::UnknownAttribute),
+            (
+                "if f is disc then f.side > 0e0 else true",
+                Code::UnknownAttribute,
+            ),
+            ("f is square or f.r > 0e0", Code::WrongOperandType),
+            ("not (f is square) and f.r > 0e0", Code::WrongOperandType),
+            (
+                "if f is square then true else f.r > 0e0",
+                Code::WrongOperandType,
+            ),
+        ] {
+            let found = errors(&format!(
+                "{FIGURES}operator test{{f: figure}}: boolean [ {body} ];{MAIN}"
+            ));
+            assert_eq!(found.len(), 1, "{body}: {found:#?}");
+            assert_eq!(found[0].code, code, "{body}: {found:#?}");
+        }
+        // Help with the test to write first.
+        let found = errors(&format!(
+            "{FIGURES}operator test{{f: figure}}: boolean [ f.r > 0e0 ];{MAIN}"
+        ));
+        assert_eq!(
+            found[0].help,
+            [
+                "`r` is a component of `disc`: test `f` first, as in `f is disc and f.r …`, and in the rest of the condition it is one"
+            ]
+        );
+    }
+
+    #[test]
+    fn tests_and_treats_decide_something() {
+        // A test or a treat folds, of a value known when compiling.
+        let variables = variables(&format!(
+            "{FIGURES}var f: figure := round;\nvar yes := f is disc;\nvar no := f is square;\nvar r := (treat f as disc).r;"
+        ));
+        let value = |name: &str| {
+            variables
+                .iter()
+                .find(|v| v.name == name)
+                .unwrap()
+                .init
+                .to_string()
+        };
+        assert_eq!(
+            (value("yes"), value("no"), value("r")),
+            ("true".into(), "false".into(), "1e0".into())
+        );
+        // One always true, or never, or of a tuple's type, decides nothing.
+        for (test, message) in [
+            (
+                "round is figure",
+                "the test is always true: `round` is always a value of `figure`",
+            ),
+            (
+                "round is disc",
+                "the test is always true: `round` is always a value of `disc`",
+            ),
+            (
+                "round is square",
+                "the test is never true: no value of `disc` is a value of `square`",
+            ),
+            (
+                "1 is disc",
+                "the test is never true: no value of `integer` is a value of `disc`",
+            ),
+            (
+                "treat round as figure",
+                "the treat always succeeds: `round` is always a value of `figure`",
+            ),
+            (
+                "treat round as square",
+                "the treat never succeeds: no value of `disc` is a value of `square`",
+            ),
+            (
+                "tuple { s: f } is tuple { s: disc }",
+                "`is` tests a scalar value, not `tuple { s: f }`, of type `tuple { s: figure }`",
+            ),
+        ] {
+            let found = errors(&format!(
+                "{FIGURES}var f: figure := round;\nvar x := {test};{MAIN}"
+            ));
+            let found: Vec<(Code, &str)> =
+                found.iter().map(|e| (e.code, e.message.as_str())).collect();
+            assert_eq!(found, [(Code::TypeTest, message)], "{test}");
+        }
+        // A treat of a value known not to be of its type fails now.
+        let found = errors(&format!(
+            "{FIGURES}var f: figure := box;\nvar x := treat f as disc;{MAIN}"
+        ));
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert_eq!(found[0].code, Code::NotOfType);
+        assert_eq!(
+            found[0].message,
+            "`square{side: 2e0}` isn't a value of `disc`"
+        );
+        // Tutorial D's operators, fixed.
+        let source = format!(
+            "{FIGURES}var f: figure := round;\nvar x := IS_DISC{{f}};\nvar y := TREAT_AS_DISC{{f}};{MAIN}"
+        );
+        assert_eq!(
+            fix(&source),
+            format!(
+                "{FIGURES}var f: figure := round;\nvar x := f is disc;\nvar y := (treat f as disc);{MAIN}"
+            )
+        );
+    }
+
+    #[test]
     fn disjoint_subtypes_are_never_equal_and_variables_are_exact() {
         // No value is both a disc and a square.
         let found = errors(&format!("{FIGURES}var x := round = box;{MAIN}"));
@@ -8922,7 +9072,7 @@ var made := first{{}};
             ));
             assert_eq!(found.len(), 1, "{found:#?}");
             assert_eq!(found[0].code, Code::WrongOperandType);
-            assert_eq!(found[0].notes, [note], "{body}");
+            assert_eq!(found[0].notes[0], note, "{body}");
         }
     }
 

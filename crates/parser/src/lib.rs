@@ -3520,7 +3520,17 @@ impl<'a> Parser<'a> {
         // The right operand of a comparison just parsed: comparisons don't
         // chain, so another one after it is reported, with a fix.
         let mut compared: Option<Span> = None;
-        while let Some(operator) = self.binary_operator(0) {
+        loop {
+            // `x is t`, at a comparison's precedence.
+            if precedences.contains(&Precedence::COMPARISON) && self.at_type_test() {
+                self.builder.start_node_at(start, SyntaxKind::IsExpr);
+                self.type_test();
+                self.builder.finish_node();
+                continue;
+            }
+            let Some(operator) = self.binary_operator(0) else {
+                break;
+            };
             let BinaryOperator {
                 precedence,
                 found,
@@ -3577,6 +3587,176 @@ impl<'a> Parser<'a> {
             self.builder.finish_node();
         }
         self.value_end = self.last_end;
+    }
+
+    /// Whether a type test, `is t`, is next, after the value it tests: `is`,
+    /// in any case, or Java's and JavaScript's `instanceof`, before a type,
+    /// or SQL's `IS OF (`.
+    fn at_type_test(&self) -> bool {
+        let Some(word) = self
+            .lookahead_nth(0)
+            .filter(|f| f.kind == SyntaxKind::Ident)
+        else {
+            return false;
+        };
+        if !word.text.eq_ignore_ascii_case("is") && word.text != "instanceof" {
+            return false;
+        }
+        self.lookahead_nth(1).is_some_and(|next| {
+            matches!(
+                next.kind,
+                SyntaxKind::Ident
+                    | SyntaxKind::TupleKw
+                    | SyntaxKind::RelationKw
+                    | SyntaxKind::ArrayKw
+            )
+        })
+    }
+
+    /// `is t`, after the value it tests, which [`Parser::at_type_test`]
+    /// found. Java's and JavaScript's `instanceof`, and SQL's `IS OF (t)`,
+    /// are reported, with a fix.
+    fn type_test(&mut self) {
+        let word = self.found().expect("at the test");
+        self.bump();
+        let sql_of = self
+            .found()
+            .filter(|f| f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case("of"))
+            .filter(|_| {
+                self.found_after(1)
+                    .is_some_and(|f| f.kind == SyntaxKind::LParen)
+            });
+        if sql_of.is_some() {
+            self.bump();
+            let open = self.found().expect("`(` follows `OF`");
+            self.bump();
+            self.type_expr();
+            let close = self.found().filter(|f| f.kind == SyntaxKind::RParen);
+            if close.is_some() {
+                self.bump();
+            }
+            self.errors
+                .push(errors::sql_type_test(word, open, close.map(|c| c.span)));
+            return;
+        }
+        if word.text == "instanceof" {
+            self.errors.push(errors::type_test_spelling(word));
+        } else if word.text != "is" {
+            self.errors.push(errors::miscased_keyword(word, "is"));
+        }
+        self.type_expr();
+    }
+
+    /// Whether `treat x as t` starts here: `treat`, in any case, before a
+    /// value.
+    fn at_treat(&mut self) -> bool {
+        self.found()
+            .is_some_and(|f| f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case("treat"))
+            && self
+                .found_after(1)
+                .is_some_and(|f| f.kind == SyntaxKind::Ident || starts_value(f.kind))
+    }
+
+    /// Whether SQL's `TREAT(x AS t)` is next: `treat` then parentheses with
+    /// `as` directly in them.
+    fn at_sql_treat(&mut self) -> bool {
+        if self
+            .found_after(1)
+            .is_none_or(|f| f.kind != SyntaxKind::LParen)
+        {
+            return false;
+        }
+        let mut depth = 0usize;
+        let mut n = 1;
+        while let Some(found) = self.found_after(n) {
+            match found.kind {
+                SyntaxKind::LParen | SyntaxKind::LBrace | SyntaxKind::LBracket => depth += 1,
+                SyntaxKind::RParen | SyntaxKind::RBrace | SyntaxKind::RBracket => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return false;
+                    }
+                }
+                _ if depth == 1 && found.text.eq_ignore_ascii_case("as") => return true,
+                _ => {}
+            }
+            n += 1;
+        }
+        false
+    }
+
+    /// `treat x as t`, which [`Parser::at_treat`] found: the value of `x`,
+    /// as one of the type `t`. SQL's `TREAT(x AS t)` is reported, with a
+    /// fix.
+    fn treat_expr(&mut self) {
+        let sql = self.at_sql_treat();
+        self.start_node(SyntaxKind::TreatExpr);
+        let word = self.found().expect("at `treat`");
+        self.bump();
+        let open = sql.then(|| {
+            let open = self.found().expect("`(` follows `treat`");
+            self.bump();
+            open
+        });
+        self.expression();
+        let as_word = self.found().filter(|f| f.text.eq_ignore_ascii_case("as"));
+        match as_word {
+            Some(found) => {
+                self.bump();
+                if found.text != "as" && open.is_none() {
+                    self.errors.push(errors::miscased_keyword(found, "as"));
+                }
+            }
+            None => self.missing_with_help(
+                SyntaxKind::AsKw,
+                "write the type after `as`, as in `treat figure as ellipse`",
+            ),
+        }
+        self.type_expr();
+        if let Some(open) = open {
+            let close = self.found().filter(|f| f.kind == SyntaxKind::RParen);
+            if close.is_some() {
+                self.bump();
+            }
+            self.errors.push(errors::sql_treat(
+                word,
+                open,
+                as_word,
+                close.map(|c| c.span),
+            ));
+        } else if word.text != "treat" {
+            self.errors.push(errors::miscased_keyword(word, "treat"));
+        }
+        self.builder.finish_node();
+    }
+
+    /// Python's `isinstance(x, t)`, `x is t` in trendy, which is reported,
+    /// with a fix.
+    fn isinstance(&mut self) {
+        self.start_node(SyntaxKind::IsExpr);
+        let word = self.found().expect("at `isinstance`");
+        self.bump();
+        let open = self.found().expect("`(` follows `isinstance`");
+        self.bump();
+        self.expression();
+        let comma = self.found().filter(|f| f.kind == SyntaxKind::Comma);
+        if comma.is_some() {
+            self.bump();
+        } else {
+            self.missing(SyntaxKind::Comma);
+        }
+        self.type_expr();
+        let close = self.found().filter(|f| f.kind == SyntaxKind::RParen);
+        if close.is_some() {
+            self.bump();
+        } else {
+            self.missing(SyntaxKind::RParen);
+        }
+        self.builder.finish_node();
+        if let (Some(comma), Some(close)) = (comma, close) {
+            self.errors
+                .push(errors::isinstance(word, open, comma, close));
+        }
     }
 
     /// The dyadic operator at the significant token `n` after the next
@@ -4319,6 +4499,16 @@ impl<'a> Parser<'a> {
             self.start_node(SyntaxKind::Literal);
             self.bump();
             self.builder.finish_node();
+        } else if self
+            .found()
+            .is_some_and(|f| f.kind == SyntaxKind::Ident && f.text == "isinstance")
+            && self
+                .found_after(1)
+                .is_some_and(|f| f.kind == SyntaxKind::LParen)
+        {
+            self.isinstance();
+        } else if self.at_treat() {
+            self.treat_expr();
         } else if let Some((found, keyword)) = self.at_nary() {
             self.nary(found, keyword);
         } else if let Some((found, keyword)) = self.at_listed_booleans() {
@@ -6936,6 +7126,67 @@ SourceFile
         );
         // A heading's name as a relation value: the empty relation.
         assert_eq!(fix("var r := relation home;"), "var r := relation home {};");
+    }
+
+    #[test]
+    fn type_tests_and_treats() {
+        // `is` at a comparison's precedence, `treat` before a value, and
+        // either as an operand.
+        let parse = parse_str(
+            "var a := not x is disc and (treat x as disc).r > 0e0;
+var b := treat (tuple from r).s as disc;
+var is := 1;
+var treat := is + 1;",
+        );
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let kinds: Vec<SyntaxKind> = parse
+            .tree
+            .syntax()
+            .descendants()
+            .map(|n| n.kind())
+            .filter(|k| matches!(k, SyntaxKind::IsExpr | SyntaxKind::TreatExpr))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                SyntaxKind::IsExpr,
+                SyntaxKind::TreatExpr,
+                SyntaxKind::TreatExpr
+            ]
+        );
+        // Other languages' tests and treats, fixed.
+        for (source, fixed, code) in [
+            (
+                "var a := x instanceof disc;",
+                "var a := x is disc;",
+                Code::TypeTestSpelling,
+            ),
+            (
+                "var a := isinstance(x, disc);",
+                "var a := x is disc;",
+                Code::TypeTestSpelling,
+            ),
+            (
+                "var a := x IS OF (disc);",
+                "var a := x is disc;",
+                Code::TypeTestSpelling,
+            ),
+            (
+                "var a := TREAT(x AS disc);",
+                "var a := treat x as disc;",
+                Code::TypeTestSpelling,
+            ),
+            (
+                "var a := x IS disc;",
+                "var a := x is disc;",
+                Code::MiscasedKeyword,
+            ),
+        ] {
+            let parse = parse_str(source);
+            let codes: Vec<Code> = parse.errors.iter().map(|e| e.code).collect();
+            assert_eq!(codes, [code], "{source}: {:#?}", parse.errors);
+            assert_eq!(fix(source), fixed, "{source}");
+        }
     }
 
     #[test]

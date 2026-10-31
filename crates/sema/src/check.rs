@@ -15,6 +15,7 @@ use trendy_hir as hir;
 use trendy_syntax::SyntaxToken;
 use trendy_syntax::ast::{self, AstNode, AttributeValue, Expr, Said};
 
+use crate::narrowed::{self, Facts};
 use crate::operators::{ArgumentNames, Chosen, Operators, Param, Signature};
 use crate::ops::{self, Operator, Resolved};
 use crate::types::{self, Expected};
@@ -282,6 +283,8 @@ impl<'a> Checker<'a> {
                 self.matched(expected, hir::Expr::Constant(value), expr, errors)
             }
             Expr::Name(name_ref) => self.named(name_ref, expr, expected, errors),
+            Expr::Is(test) => self.type_test(test, expr, expected, errors),
+            Expr::Treat(treat) => self.treated(treat, expr, expected, errors),
             Expr::Block(block) => crate::block::value(block, &mut *self.names, expected, errors),
             Expr::Paren(paren) => self.expr(&paren.inner()?, expected, errors),
             Expr::Unary(unary) => {
@@ -398,7 +401,12 @@ impl<'a> Checker<'a> {
             Some(hir::Expr::Constant(hir::Value::Boolean(taken))) => Some(*taken),
             _ => None,
         };
-        let [then, otherwise] = self.branches(&branches, taken, expected, errors)?;
+        // What the condition's tests show where each branch is taken.
+        let shown = [
+            Facts::of(&condition_expr, true, self),
+            Facts::of(&condition_expr, false, self),
+        ];
+        let [then, otherwise] = self.branches(&branches, &shown, taken, expected, errors)?;
         match (taken, then, otherwise) {
             (Some(true), then, _) => then,
             (Some(false), _, otherwise) => otherwise,
@@ -411,13 +419,16 @@ impl<'a> Checker<'a> {
 
     /// An `if`'s branches, `then` and `else`, written `written`, of one
     /// type: the type expected, or else the most specific common supertype
-    /// of those valid on their own (see [`types::widen`]). The one a condition known when compiling
-    /// doesn't take, as `taken` says, is never computed, so its failures
-    /// aren't reported, and it has no value if one makes it fail. `None`
-    /// after reporting a branch's errors.
+    /// of those valid on their own (see [`types::widen`]), each with the
+    /// names narrowed that `shown` says the condition's tests show where
+    /// it is taken. The one a condition known when compiling doesn't take,
+    /// as `taken` says, is never computed, so its failures aren't
+    /// reported, and it has no value if one makes it fail. `None` after
+    /// reporting a branch's errors.
     fn branches(
         &mut self,
         written: &[Expr; 2],
+        shown: &[Facts; 2],
         taken: Option<bool>,
         expected: Option<&Expected>,
         errors: &mut Vec<Diagnostic>,
@@ -426,10 +437,10 @@ impl<'a> Checker<'a> {
         let check =
             |this: &mut Self, i: usize, expected: Option<&Expected>, errors: &mut Vec<_>| {
                 if !skipped(i) {
-                    return this.expr(&written[i], expected, errors);
+                    return this.narrowed(&written[i], &shown[i], expected, errors);
                 }
                 let mut own: Vec<Diagnostic> = Vec::new();
-                let out = this.expr(&written[i], expected, &mut own);
+                let out = this.narrowed(&written[i], &shown[i], expected, &mut own);
                 errors.extend(own.into_iter().filter(|d| d.code.kind() != CodeKind::Run));
                 out
             };
@@ -710,7 +721,9 @@ impl<'a> Checker<'a> {
         let call = if operator {
             list.names().next().is_none() || !self.names.has_value(name)
         } else {
-            errors::elsewhere(name).is_some() && !self.names.has_value(name)
+            let foreign = errors::elsewhere(name).is_some()
+                || errors::tutorial_d_tested(name, self.namespaces()).is_some();
+            foreign && !self.names.has_value(name)
         };
         call.then_some((ident, list))
     }
@@ -889,6 +902,9 @@ impl<'a> Checker<'a> {
     ) {
         if self.names.has_value(name) {
             errors.push(errors::not_an_operator(name, span, "a value"));
+        } else if let Some(error) = errors::tutorial_d_test(name, span, written, self.namespaces())
+        {
+            errors.push(error);
         } else if let Some(dummy) = self.names.namespaces().dummy(name) {
             // The names of the arguments, if each has one.
             let named = match written {
@@ -1415,7 +1431,8 @@ impl<'a> Checker<'a> {
             errors.push(error);
             return None;
         }
-        let name = ops::extracted(extract, &operand_expr, &ty, &others, errors)?;
+        let namespaces = self.namespaces();
+        let name = ops::extracted(extract, &operand_expr, &ty, &others, namespaces, errors)?;
         Some((operand, ty, name))
     }
 
@@ -2001,11 +2018,36 @@ impl<'a> Checker<'a> {
             ty: boolean.clone(),
             origin: types::Origin::Operator(token),
         };
+        // What each operand's tests show where the others are computed: of
+        // an `and`'s, if it is true, and of an `or`'s, if it is false, as
+        // the guard rule computes the others only then (see
+        // [`narrowed::Facts`]).
+        let shown: Vec<Facts> = operands
+            .iter()
+            .enumerate()
+            .map(|(i, operand)| {
+                let truth = match connective {
+                    hir::Connective::And => true,
+                    hir::Connective::Or => i == 0 && not_left,
+                    hir::Connective::Xor => return Facts::default(),
+                };
+                operand
+                    .as_ref()
+                    .map_or_else(Facts::default, |o| Facts::of(o, truth, self))
+            })
+            .collect();
         let checked: Vec<(Option<hir::Expr>, Vec<Diagnostic>)> = operands
             .into_iter()
-            .map(|operand| {
+            .enumerate()
+            .map(|(i, operand)| {
+                let facts = shown
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| *j != i)
+                    .fold(Facts::default(), |all, (_, facts)| all.and(facts));
                 let mut own = Vec::new();
-                let out = operand.and_then(|o| self.expr(&o, Some(&operand_expected), &mut own));
+                let out = operand
+                    .and_then(|o| self.narrowed(&o, &facts, Some(&operand_expected), &mut own));
                 (out, own)
             })
             .collect();
@@ -2047,6 +2089,90 @@ impl<'a> Checker<'a> {
             .map(|(i, operand)| operand.map(|o| if i == 0 && not_left { o.negated() } else { o }))
             .collect::<Option<_>>()?;
         Some(connective.of(operands))
+    }
+
+    /// `test`, `x is t`, written `expr`: whether the value of `x` is of the
+    /// type `t` (IM Prescription 15). `None` after reporting why it isn't
+    /// valid: its type is invalid, or its operand's, or the test is always
+    /// true or never.
+    fn type_test(
+        &mut self,
+        test: &ast::IsExpr,
+        expr: &Expr,
+        expected: Option<&Expected>,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let operand_expr = test.operand()?;
+        let operand = self.expr(&operand_expr, None, errors);
+        let written = test.type_expr()?;
+        let mut parameters = self.type_parameters();
+        let ty = types::resolve(&written, &mut parameters, self.namespaces(), errors)?;
+        let operand = operand?;
+        let actual = self.ty(&operand);
+        if let Some(error) =
+            errors::type_test(errors::Testing::Is, &actual, &ty, &operand_expr, &written)
+        {
+            errors.push(error);
+            return None;
+        }
+        self.matched(expected, ops::is(operand, ty), expr, errors)
+    }
+
+    /// `treat`, `treat x as t`, written `expr`: the value of `x` as one of
+    /// the type `t`, a subtype of its type, which fails unless it is one
+    /// (IM Prescription 14). `None` after reporting why it isn't valid: its
+    /// type is invalid, or its operand's, or it always succeeds or never,
+    /// or the value is known and isn't one.
+    fn treated(
+        &mut self,
+        treat: &ast::TreatExpr,
+        expr: &Expr,
+        expected: Option<&Expected>,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let operand_expr = treat.operand()?;
+        let operand = self.expr(&operand_expr, None, errors);
+        let written = treat.type_expr()?;
+        let mut parameters = self.type_parameters();
+        let ty = types::resolve(&written, &mut parameters, self.namespaces(), errors)?;
+        let operand = operand?;
+        let actual = self.ty(&operand);
+        if let Some(error) = errors::type_test(
+            errors::Testing::Treat,
+            &actual,
+            &ty,
+            &operand_expr,
+            &written,
+        ) {
+            errors.push(error);
+            return None;
+        }
+        match ops::treated_as(operand, ty) {
+            Ok(treated) => self.matched(expected, treated, expr, errors),
+            Err(failed) => {
+                errors.push(errors::failed(&failed, expr));
+                None
+            }
+        }
+    }
+
+    /// `expr`, checked as `expected` says, with the names `facts` narrow
+    /// narrowed, if they narrow any (see [`narrowed::Narrowed`]).
+    pub(crate) fn narrowed(
+        &mut self,
+        expr: &Expr,
+        facts: &Facts,
+        expected: Option<&Expected>,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        if facts.is_empty() {
+            return self.expr(expr, expected, errors);
+        }
+        let mut names = narrowed::Narrowed {
+            outer: &mut *self.names,
+            facts,
+        };
+        Checker::new(&mut names).expr(expr, expected, errors)
     }
 
     /// `binary`, a `where`, written `expr`: the tuples of its operand, a
@@ -2115,7 +2241,7 @@ impl<'a> Checker<'a> {
                 }
             },
         };
-        let condition = self.condition(heading, condition_expr, token, errors)?;
+        let condition = self.condition(heading.clone(), condition_expr, token, errors)?;
         let result = match restricted {
             Restricted::Relation(operand) => ops::restrict(operand, condition, self.bindings()),
             Restricted::Joined { operands, .. } => {
@@ -2130,7 +2256,17 @@ impl<'a> Checker<'a> {
             }
         };
         match result {
-            Ok(result) => self.matched(expected, result, expr, errors),
+            // Each tuple's attributes are of the types its tests show them
+            // to be of, which the result's heading says.
+            Ok(result) => {
+                let shown = Facts::of(condition_expr, true, self).heading(&heading);
+                let result = if shown == heading {
+                    result
+                } else {
+                    result.treated(&hir::Type::Relation(shown))
+                };
+                self.matched(expected, result, expr, errors)
+            }
             Err(failure) => {
                 errors.push(errors::extension_failure(&failure, condition_expr));
                 None

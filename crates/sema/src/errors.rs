@@ -679,6 +679,85 @@ pub(crate) fn dummy_selected(
     ))
 }
 
+/// What tests or treats a value's type: `is` or `treat`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Testing {
+    Is,
+    Treat,
+}
+
+/// The test `x is t`, or the treat `treat x as t`, as `testing` says, of
+/// the value written `operand`, of type `actual`, for the type `ty`,
+/// written `written`, if it decides nothing: it always succeeds, or never,
+/// or is of a tuple, a relation or an array, whose types are known when
+/// compiling.
+pub(crate) fn type_test(
+    testing: Testing,
+    actual: &hir::Type,
+    ty: &hir::Type,
+    operand: &Expr,
+    written: &ast::TypeExpr,
+) -> Option<Diagnostic> {
+    let at = trendy_syntax::span(written.syntax().text_range());
+    let subject = operand.syntax().text().to_string();
+    let (rule, what) = match testing {
+        Testing::Is => (
+            "`x is t` is true if the value of `x` is of the type `t`, or of one of its subtypes (*Type Inheritance and Relational Theory*, IM Prescription 15), so it tells apart a union type's values",
+            ("the test is always true", "the test is never true"),
+        ),
+        Testing::Treat => (
+            TREAT_RULE,
+            ("the treat always succeeds", "the treat never succeeds"),
+        ),
+    };
+    let d = if actual.is_subtype_of(ty) {
+        Diagnostic::error(
+            Code::TypeTest,
+            format!("{}: `{subject}` is always a value of `{ty}`", what.0),
+            at,
+            if actual == ty {
+                "its own type".to_string()
+            } else {
+                format!("a supertype of `{actual}`")
+            },
+        )
+        .with_note(rule)
+        .with_help(match testing {
+            Testing::Is => {
+                format!("leave the test out, or test `{subject}` for a type it may not be of")
+            }
+            Testing::Treat => format!("leave the treat out: `{subject}` is one already"),
+        })
+    } else if !actual.overlaps(ty) {
+        let d = Diagnostic::error(
+            Code::TypeTest,
+            format!("{}: no value of `{actual}` is a value of `{ty}`", what.1),
+            at,
+            "no value is of both",
+        )
+        .with_note(rule);
+        match hierarchy_note(ty, actual) {
+            Some(note) => d.with_note(note),
+            None => d,
+        }
+    } else if matches!(
+        actual,
+        hir::Type::Tuple(_) | hir::Type::Relation(_) | hir::Type::Array(_)
+    ) {
+        Diagnostic::error(
+            Code::TypeTest,
+            format!("`is` tests a scalar value, not `{subject}`, of type `{actual}`"),
+            at,
+            "a tuple's, a relation's or an array's type",
+        )
+        .with_note(rule)
+        .with_help("test the values in it, as in `t.s is ellipse`")
+    } else {
+        return None;
+    };
+    Some(d.with_secondary(operand.span(), format!("this is `{actual}`")))
+}
+
 /// The union type `name` declared with braces, `body`: a representation,
 /// constraints or an order, which a union type has none of.
 pub(crate) fn union_with_body(name: &str, body: &ast::TypeBody) -> Diagnostic {
@@ -3608,7 +3687,13 @@ pub(crate) fn method_call(
 }
 
 /// `.name`, at `at`, applied to a value of type `ty`, which isn't a tuple.
-pub(crate) fn not_extractable(name: &str, at: Span, ty: &hir::Type, operand: &Expr) -> Diagnostic {
+pub(crate) fn not_extractable(
+    name: &str,
+    at: Span,
+    ty: &hir::Type,
+    operand: &Expr,
+    namespaces: &Namespaces,
+) -> Diagnostic {
     let d = Diagnostic::error(
         Code::WrongOperandType,
         format!("`.{name}` can't be applied to {}", plural(ty)),
@@ -3623,11 +3708,47 @@ pub(crate) fn not_extractable(name: &str, at: Span, ty: &hir::Type, operand: &Ex
             .with_help(format!(
                 "to keep only the attribute, project on it: `r{{{name}}}`"
             )),
-        hir::Type::Dummy(dummy) => d.with_note(format!(
-            "`{}` is a union type, with no components of its own: its values are its subtypes', each with the components of its own type",
-            dummy.name
-        )),
+        hir::Type::Dummy(dummy) => {
+            let d = d.with_note(format!(
+                "`{}` is a union type, with no components of its own: its values are its subtypes', each with the components of its own type",
+                dummy.name
+            ))
+            .with_note("a program can add subtypes to a union type, so a value that isn't of one of them, as in an `else` after a test of it, isn't known to be of any other");
+            let mut having = Vec::new();
+            having_component(name, ty, namespaces, &mut having);
+            let subject = operand.syntax().text().to_string();
+            match having.as_slice() {
+                [] => d,
+                [only] => d.with_help(format!(
+                    "`{name}` is a component of `{only}`: test `{subject}` first, as in `{subject} is {only} and {subject}.{name} …`, and in the rest of the condition it is one"
+                )),
+                some => {
+                    let listed: Vec<String> = some.iter().map(|t| format!("`{t}`")).collect();
+                    d.with_help(format!(
+                        "`{name}` is a component of {}: test `{subject}` first, as in `{subject} is {} and {subject}.{name} …`, and in the rest of the condition it is one",
+                        trendy_diag::conjoin(&listed),
+                        some[0]
+                    ))
+                }
+            }
+        }
         _ => d.with_note("`t.name` is the value of the attribute `name` of the tuple `t`, or of the component `name` of `t`, a value of a type of the program's own"),
+    }
+}
+
+/// The types with a component `name`, in any representation, that are
+/// `ty` or under it, by name, into `out`.
+fn having_component(name: &str, ty: &hir::Type, namespaces: &Namespaces, out: &mut Vec<String>) {
+    match ty {
+        hir::Type::Defined(defined) if defined.representation(name).is_some() => {
+            out.push(defined.name.clone());
+        }
+        hir::Type::Dummy(dummy) => {
+            for subtype in namespaces.subtypes(&dummy.name) {
+                having_component(name, subtype, namespaces, out);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -4581,8 +4702,98 @@ pub(crate) fn failed(failed: &crate::ops::Failed, expr: &Expr) -> Diagnostic {
             unparsable(*builtin, text, *why, expr)
         }
         crate::ops::Failed::Constraint(broken) => broken_constraint(broken, expr),
+        crate::ops::Failed::NotOfType(treated) => {
+            let (value, ty) = &**treated;
+            Diagnostic::error(
+                Code::NotOfType,
+                format!("`{value}` isn't a value of `{ty}`"),
+                expr.span(),
+                format!("treated as one of `{ty}`"),
+            )
+            .with_note(TREAT_RULE)
+            .with_help(format!(
+                "test it first where it may be of another type, as in `if x is {ty} then … else …`, in which it is one"
+            ))
+        }
     }
 }
+
+/// What Tutorial D's operator `name` is, if it is `IS_T` or `TREAT_AS_T`,
+/// in any case, of a type of the program's own `T`: the test or the
+/// treat, and the type's name.
+pub(crate) fn tutorial_d_tested<'n>(
+    name: &str,
+    namespaces: &'n Namespaces,
+) -> Option<(Testing, &'n str)> {
+    let lower = name.to_lowercase();
+    let (testing, rest) = match lower.strip_prefix("treat_as_") {
+        Some(rest) => (Testing::Treat, rest),
+        None => (Testing::Is, lower.strip_prefix("is_")?),
+    };
+    let ty = namespaces
+        .defined_types()
+        .find(|t| t.eq_ignore_ascii_case(rest))?;
+    Some((testing, ty))
+}
+
+/// A call of `name`, at `span`, with `written` arguments, if it is Tutorial
+/// D's `IS_T(x)` or `TREAT_AS_T(x)`, of a type of the program's own `T`,
+/// in any case, and one value: `x is t` or `treat x as t` in trendy, which
+/// the fix writes.
+pub(crate) fn tutorial_d_test(
+    name: &str,
+    span: Span,
+    written: Written,
+    namespaces: &Namespaces,
+) -> Option<Diagnostic> {
+    let (testing, ty) = tutorial_d_tested(name, namespaces)?;
+    let (operand, end) = match written {
+        Written::Arguments(arguments) => {
+            let mut positional = arguments.positional();
+            let (Some(only), None, None) = (
+                positional.next(),
+                positional.next(),
+                arguments.named().next(),
+            ) else {
+                return None;
+            };
+            (only.syntax().text().to_string(), arguments.span().end)
+        }
+        Written::Nothing(list) => {
+            let mut names = list.names();
+            let (Some(only), None) = (names.next(), names.next()) else {
+                return None;
+            };
+            (only.syntax().text().to_string(), list.span().end)
+        }
+    };
+    let (replacement, rule) = match testing {
+        Testing::Is => (
+            format!("{operand} is {ty}"),
+            "`x is t` is true if the value of `x` is of the type `t`, or of one of its subtypes (*Type Inheritance and Relational Theory*, IM Prescription 15)",
+        ),
+        Testing::Treat => (format!("(treat {operand} as {ty})"), TREAT_RULE),
+    };
+    Some(
+        Diagnostic::error(
+            Code::UnknownName,
+            format!("unknown operator `{name}`"),
+            span,
+            "Tutorial D's operator",
+        )
+        .with_note(rule)
+        .with_suggestion(
+            format!("write `{replacement}`"),
+            vec![Edit {
+                span: Span::new(span.start, end),
+                replacement,
+            }],
+        ),
+    )
+}
+
+/// What `treat` does, for notes.
+const TREAT_RULE: &str = "`treat x as t` is the value of `x`, as a value of `t`, a subtype of its type, which it fails unless it is one (*Type Inheritance and Relational Theory*, IM Prescription 14)";
 
 /// What a type's constraints are, for notes.
 const CONSTRAINT_RULE: &str = "a type is the values its constraints are true of, so selecting a value, by its selector, `replace` or `update`, fails when its components break one (TTM RM Prescription 23)";

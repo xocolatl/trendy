@@ -2057,8 +2057,75 @@ operator main{} [
 - **A `var` or `out` argument is of exactly its parameter's type** (IM
   Prescription 19), since the operator can give the variable any value
   of that type, which a variable of a subtype couldn't hold (A0004).
-- **Not yet:** `is` to tell the subtypes apart, and `treat` to take a
-  value as one of a subtype.
+
+`x is t` tells the subtypes apart: it is true if the value of `x` is of
+the type `t`, or of one of its subtypes (IM Prescription 15). In the rest
+of the condition it is in, `x` is a `t`, so its components can be read:
+
+```trendy
+type plane_figure union;
+type ellipse is plane_figure { { a: approximate, b: approximate } };
+type polygon is plane_figure { { corners: integer } };
+
+var figures := relation {
+    { name: "Victoria", figure: ellipse{a: 3e0, b: 2e0} },
+    { name: "Zócalo", figure: polygon{corners: 4} },
+};
+
+/* relation { name: text, figure: ellipse } */
+var ellipses := figures where figure is ellipse;
+var wide := figures where figure.a > 2e0 and figure is ellipse;
+
+operator describe{f: plane_figure}: text [
+    if f is ellipse then "an ellipse " || to_text{from: f.a}
+    else if f is polygon then to_text{from: f.corners} || " corners"
+    else "a plane figure"
+];
+
+operator main{} [
+    call debug_table{r: ellipses extend { width := 2e0 * figure.a }};
+    call debug_value{v: describe{f: polygon{corners: 3}}};
+    call debug_value{v: treat value from (figures where name = "Victoria"){figure} as ellipse};
+];
+```
+
+- **A test narrows its name where the condition needs it to be true:**
+  in the other operands of an `and`, after `implies`, in an `if`'s `then`
+  branch, and in a `where`'s condition. `not` turns it round, as `else`
+  does: in `not (f is ellipse) or f.a > 2e0`, and in the `else` of `if
+  not (f is ellipse)`, `f` is an ellipse. A name only narrows: `x` in `x
+  is t`, not a longer expression.
+- **A test that is false shows nothing:** where `f is ellipse` is false,
+  `f` isn't known to be a polygon, though `plane_figure` has no other
+  subtype yet, since a program can add one. So `describe` above tests for
+  each kind it reads the components of, and has a branch for the rest,
+  and reading `f.corners` in an `else` after `f is ellipse` is an error
+  (A0022), as it is in TypeScript's closed unions.
+- **The order doesn't matter:** `figure.a > 2e0 and figure is ellipse`
+  is `wide` above too. A narrowed name's value is treated as one of the
+  type, which would fail if the test were false, so by the guard rule
+  (see [Boolean operators](#boolean-operators)) the test, which can't
+  fail, is computed first, and decides without the rest when it is
+  false.
+- **A `where` narrows its result's heading:** `ellipses` is a relation
+  of ellipses, so `figure.a` can be read in its `extend` with no test of
+  its own.
+- **A test decides something** (A0062): one always true, as `e is
+  plane_figure` of an ellipse, or never, as `e is polygon`, is an error.
+  So is a test of a tuple's, a relation's or an array's type, which is
+  known when compiling: `t.figure is ellipse` tests what is in it.
+- **`treat x as t` is the value of `x` as one of `t`,** a subtype of its
+  type, which fails unless it is one (IM Prescription 14): known when
+  compiling, it is reported then, and otherwise the program stops (R0019).
+  It says what a test can't show, and is seldom needed: where a value may
+  be of another type, test it instead. One that always succeeds, or never,
+  is an error (A0062).
+- **Other languages' tests and casts are fixed** (P0044, A0015): Java's
+  `x instanceof t`, Python's `isinstance(x, t)` and SQL's `x IS OF (t)`
+  to `x is t`, SQL's `TREAT(x AS t)` to `treat x as t`, and Tutorial D's
+  `IS_T(x)` and `TREAT_AS_T(x)` to them.
+- **Not yet:** narrowing in an `if` statement's blocks, which can assign
+  the name.
 
 ## Tuples
 
@@ -4424,6 +4491,8 @@ line after a comment on its own line, such as a file's header, is kept.
 | `type Home = { … }`, `interface Home { … }`, `struct Home { … }` | `heading home := { … };`, whose types are `relation home` and `tuple home` |
 | `TYPE PLANE_FIGURE UNION;`, an abstract class | `type plane_figure union;`, whose values are its subtypes' |
 | `class Ellipse extends PlaneFigure`, `class Ellipse : PlaneFigure`, `TYPE ELLIPSE IS { PLANE_FIGURE POSSREP … }` | `type ellipse is plane_figure { { a: approximate, … } };` |
+| `x instanceof Ellipse`, `isinstance(x, Ellipse)`, `x IS OF (ELLIPSE)`, `IS_ELLIPSE(X)` | `x is ellipse`, after which `x` is an ellipse in the rest of the condition |
+| `(Ellipse) x`, `x as Ellipse`, `TREAT(x AS ELLIPSE)`, `TREAT_AS_ELLIPSE(X)` | `treat x as ellipse`, or, where it may not be one, `x is ellipse and …` |
 | `[1, 2]`, `ARRAY[1, 2]` | `array [1, 2]` |
 | `[]`, an empty list | `array integer []`, with its elements' type, or `array []` where it is known |
 | `a[0]`, the first element | `a[1]` |

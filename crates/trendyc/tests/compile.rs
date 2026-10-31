@@ -996,6 +996,58 @@ operator main{{}} [
 }
 
 #[test]
+fn types_are_tested_and_treated_when_running() {
+    // A test tells the subtypes apart, narrows the name in the rest of the
+    // condition, in any order, and in a `where`'s result; a treat fails
+    // for a value of another type.
+    let source = format!(
+        "{FIGURES}
+operator describe{{f: plane_figure}}: text [
+    if f is ellipse then \"ellipse \" || to_text{{from: f.a}} else \"polygon\"
+];
+
+operator shapes{{a: approximate}} [
+    var e: plane_figure := ellipse{{a: a, b: 1e0}};
+    var p: plane_figure := polygon{{corners: relation {{ {{ n: 1, name: \"n\" }} }}}};
+    call debug_value{{v: e is ellipse}};
+    call debug_value{{v: p is ellipse}};
+    call debug_value{{v: describe{{f: e}}}};
+    call debug_value{{v: describe{{f: p}}}};
+    call debug_value{{v: e.a > 2e0 and e is ellipse}};
+    var both := relation {{ {{ s: e }}, {{ s: p }} }};
+    call debug_value{{v: both where s is ellipse and s.a > 2e0}};
+    call debug_value{{v: (treat e as ellipse).b}};
+    call debug_value{{v: treat p as ellipse}};
+];
+
+operator main{{}} [
+    call shapes{{a: 3e0}};
+];
+"
+    );
+    let (code, stderr) = run_source("tested", &source);
+    let not_of = trendy_diag::Code::NotOfType.id();
+    assert_eq!(
+        (code, stderr),
+        (
+            1,
+            format!(
+                "true
+false
+\"ellipse 3e0\"
+\"polygon\"
+true
+relation {{ s: ellipse }} {{ {{ s: ellipse{{a: 3e0, b: 1e0}} }} }}
+1e0
+error[{not_of}]: polygon{{corners: relation {{ n: integer, name: text }} {{ {{ n: 1, name: \"n\" }} }}}} isn't a value of `ellipse`
+{}",
+                site("tested", 24)
+            )
+        )
+    );
+}
+
+#[test]
 fn csv_files_load_values_of_types_in_a_hierarchy() {
     // A subtype's value is read as any type's, and laid out after its own
     // type.
@@ -2140,6 +2192,14 @@ fn inheritance() {
             "│ ellipse{a: distance{m: 3e0}, b: distance{m: 2e0}, ctr: point{x: 5e0, y: 2.5e0}}                                                                                                                     │ pond │",
             "│ polygon{vertices: relation { v_no: integer, vertex: point } { { v_no: 1, vertex: point{x: 0e0, y: 0e0} }, { v_no: 2, vertex: point{x: 4e0, y: 0e0} }, { v_no: 3, vertex: point{x: 0e0, y: 3e0} } }} │ plot │",
             "└─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┴──────┘",
+            // The ellipses among them, narrowed by `is`, and what each is.
+            "┌──────────────────┬──────┐",
+            "│ major            │ name │",
+            "├──────────────────┼──────┤",
+            "│ distance{m: 3e0} │ pond │",
+            "└──────────────────┴──────┘",
+            r#""ellipse""#,
+            r#""3-gon""#,
         ]
     );
 }

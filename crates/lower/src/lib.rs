@@ -1816,16 +1816,7 @@ impl<'a> FunctionBuilder<'a> {
                 let src = self.place(operand, cx);
                 self.unary(*op, src)
             }
-            // The attribute's own place within the tuple: no copy.
-            hir::Expr::Extract(tuple, name) => {
-                let ty = self.type_of(tuple);
-                let index = attribute_names(&ty)
-                    .position(|a| a == name)
-                    .expect("sema extracts only attributes the tuple has");
-                let mut place = self.place(tuple, cx);
-                place.path.push(index);
-                place
-            }
+            hir::Expr::Extract(tuple, name) => self.extracted(tuple, name, cx),
             hir::Expr::Tuple(attributes) => {
                 let ty = self.type_of(expr);
                 let dst = self.slot(cx.layout(&ty));
@@ -1850,9 +1841,9 @@ impl<'a> FunctionBuilder<'a> {
             // of its components.
             hir::Expr::Select(defined, operand) => self.selected(defined, operand, cx),
             hir::Expr::Components(operand) => self.components(operand, cx),
-            // A value of a type in a hierarchy is laid out as one of each of
-            // its supertypes.
-            hir::Expr::Treat(_, operand) => self.place(operand, cx),
+            hir::Expr::Treat(..) | hir::Expr::TreatAs(..) | hir::Expr::Is(..) => {
+                self.typed(expr, cx)
+            }
             hir::Expr::Semijoin(lhs, rhs) => self.matching(lhs, rhs, false, cx),
             hir::Expr::Combine(combination, lhs, rhs) => self.combine(*combination, lhs, rhs, cx),
             hir::Expr::Antijoin(lhs, rhs) => self.matching(lhs, rhs, true, cx),
@@ -2615,6 +2606,109 @@ impl<'a> FunctionBuilder<'a> {
             slot,
             pointee: element,
         })
+    }
+
+    /// The value of the attribute `name` of `tuple`: its own place within
+    /// the tuple, with no copy.
+    fn extracted(&mut self, tuple: &hir::Expr, name: &str, cx: &mut Lowering) -> lir::Place {
+        let ty = self.type_of(tuple);
+        let index = attribute_names(&ty)
+            .position(|a| a == name)
+            .expect("sema extracts only attributes the tuple has");
+        let mut place = self.place(tuple, cx);
+        place.path.push(index);
+        place
+    }
+
+    /// `expr`, a treat or a type test: a value of a type in a hierarchy is
+    /// laid out as one of each of its supertypes, so treating one up is
+    /// what it is, and treating one down tests its type first.
+    fn typed(&mut self, expr: &hir::Expr, cx: &mut Lowering) -> lir::Place {
+        match expr {
+            hir::Expr::Treat(_, operand) => self.place(operand, cx),
+            hir::Expr::TreatAs(ty, operand) => self.treated_as(ty, operand, cx),
+            hir::Expr::Is(operand, ty) => {
+                let value = self.place(operand, cx);
+                self.is_of(&value, ty, cx)
+            }
+            _ => unreachable!("only treats and tests are typed"),
+        }
+    }
+
+    /// Whether the value at `value`, of a type in a hierarchy, is of `ty`:
+    /// whether its own type's descriptor is one of the types' under `ty`
+    /// with components, or `ty`'s.
+    fn is_of(&mut self, value: &lir::Place, ty: &hir::Type, cx: &mut Lowering) -> lir::Place {
+        let is = self.slot(lir::Layout::U8);
+        let no = u8_constant(0, cx);
+        self.insts.push(lir::Inst::Copy {
+            dst: is.clone(),
+            src: no,
+            layout: lir::Layout::U8,
+        });
+        let mut own = value.clone();
+        own.path.push(0);
+        let done = self.new_block();
+        for leaf in cx.families.leaves_under(ty) {
+            let descriptor = cx.components_descriptor(&leaf);
+            let address = self.slot(lir::Layout::Address);
+            self.insts.push(lir::Inst::Address {
+                dst: address.clone(),
+                src: lir::Place::whole(lir::Base::Data(descriptor)),
+            });
+            let same = self.slot(lir::Layout::U8);
+            self.insts.push(lir::Inst::Binary {
+                dst: same.clone(),
+                op: lir::BinaryOp::Compare(lir::Comparison::Equal, lir::Operand::Usize),
+                lhs: own.clone(),
+                rhs: address,
+            });
+            let (yes, next) = (self.new_block(), self.new_block());
+            self.end_block(
+                lir::Terminator::Branch {
+                    condition: same,
+                    then: yes,
+                    otherwise: next,
+                },
+                yes,
+            );
+            let one = u8_constant(1, cx);
+            self.insts.push(lir::Inst::Copy {
+                dst: is.clone(),
+                src: one,
+                layout: lir::Layout::U8,
+            });
+            self.end_block(lir::Terminator::Jump(done), next);
+        }
+        self.end_block(lir::Terminator::Jump(done), done);
+        is
+    }
+
+    /// The value `operand`, of a type in a hierarchy, as a value of `ty`, a
+    /// subtype of its type: the program stops unless it is one (R0019).
+    fn treated_as(&mut self, ty: &hir::Type, operand: &hir::Expr, cx: &mut Lowering) -> lir::Place {
+        let value = self.place(operand, cx);
+        let is = self.is_of(&value, ty, cx);
+        let (kept, failed) = (self.new_block(), self.new_block());
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: is,
+                then: kept,
+                otherwise: failed,
+            },
+            failed,
+        );
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&self.type_of(operand))));
+        let name = self.text(&ty.to_string(), cx);
+        self.fail(
+            lir::Failure::NotOfType {
+                value: value.clone(),
+                descriptor,
+                ty: name,
+            },
+            kept,
+        );
+        value
     }
 
     /// The components of the value `operand`, of a type of the program's
@@ -4107,6 +4201,17 @@ impl Families {
             hir::Type::Dummy(_) => unreachable!("a dummy type is in a hierarchy"),
             hir::Type::Parameter(_) => unreachable!("functions are of instantiated operators"),
         }
+    }
+
+    /// The types with components that are `ty`, in a hierarchy, or one of
+    /// its subtypes.
+    fn leaves_under(&self, ty: &hir::Type) -> Vec<hir::Defined> {
+        let root = ty.root().expect("a type in a hierarchy");
+        self.leaves[root]
+            .iter()
+            .filter(|leaf| hir::Type::Defined(Box::new((*leaf).clone())).is_subtype_of(ty))
+            .cloned()
+            .collect()
     }
 
     /// Where the components of a value of the type of the program's own

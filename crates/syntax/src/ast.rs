@@ -77,6 +77,8 @@ ast_node!(PositionalArg);
 ast_node!(NameRef);
 ast_node!(UnaryExpr);
 ast_node!(BinaryExpr);
+ast_node!(IsExpr);
+ast_node!(TreatExpr);
 ast_node!(ParenExpr);
 ast_node!(ExtractExpr);
 ast_node!(ProjectExpr);
@@ -1183,6 +1185,46 @@ impl BinaryExpr {
     }
 }
 
+impl IsExpr {
+    /// The value tested.
+    #[must_use]
+    pub fn operand(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+
+    /// The word `is`, or another language's spelling of the test.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    /// The type the value is tested for.
+    #[must_use]
+    pub fn type_expr(&self) -> Option<TypeExpr> {
+        self.0.children().find_map(TypeExpr::cast)
+    }
+}
+
+impl TreatExpr {
+    /// The word `treat`, or another language's spelling of it.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    /// The value treated.
+    #[must_use]
+    pub fn operand(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+
+    /// The type it is treated as.
+    #[must_use]
+    pub fn type_expr(&self) -> Option<TypeExpr> {
+        self.0.children().find_map(TypeExpr::cast)
+    }
+}
+
 impl ParenExpr {
     #[must_use]
     pub fn inner(&self) -> Option<Expr> {
@@ -1588,6 +1630,8 @@ pub enum Expr {
     Name(NameRef),
     Unary(UnaryExpr),
     Binary(BinaryExpr),
+    Is(IsExpr),
+    Treat(TreatExpr),
     Paren(ParenExpr),
     Extract(ExtractExpr),
     Index(IndexExpr),
@@ -1613,6 +1657,8 @@ impl Expr {
             .or_else(|| NameRef::cast(node.clone()).map(Expr::Name))
             .or_else(|| UnaryExpr::cast(node.clone()).map(Expr::Unary))
             .or_else(|| BinaryExpr::cast(node.clone()).map(Expr::Binary))
+            .or_else(|| IsExpr::cast(node.clone()).map(Expr::Is))
+            .or_else(|| TreatExpr::cast(node.clone()).map(Expr::Treat))
             .or_else(|| ParenExpr::cast(node.clone()).map(Expr::Paren))
             .or_else(|| ExtractExpr::cast(node.clone()).map(Expr::Extract))
             .or_else(|| IndexExpr::cast(node.clone()).map(Expr::Index))
@@ -1637,6 +1683,8 @@ impl Expr {
             Expr::Name(e) => e.syntax(),
             Expr::Unary(e) => e.syntax(),
             Expr::Binary(e) => e.syntax(),
+            Expr::Is(e) => e.syntax(),
+            Expr::Treat(e) => e.syntax(),
             Expr::Paren(e) => e.syntax(),
             Expr::Extract(e) => e.syntax(),
             Expr::Index(e) => e.syntax(),

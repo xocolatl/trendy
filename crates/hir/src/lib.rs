@@ -1295,15 +1295,26 @@ pub enum Expr {
     /// possible representation, as a tuple: what its `THE_` operators
     /// extract from, as `v.c` is `Extract(Components(v), c)`.
     Components(Box<Expr>),
-    /// The value of the expression, as a value of the type, a supertype of
-    /// the expression's: TREAT (*Type Inheritance and Relational Theory*,
-    /// IM Prescription 14), which gives a value its declared type where a
-    /// value of a subtype is substituted for one of it (IM Prescription
-    /// 16), or where what is known when compiling is narrower than what is
-    /// declared, as a variable's value can be. A value of a type in a
-    /// hierarchy is laid out as every value of its root's, so nothing
-    /// changes when running.
+    /// The value of the expression, as a value of the type, which it is
+    /// known to be of: TREAT (*Type Inheritance and Relational Theory*, IM
+    /// Prescription 14) to a supertype of the expression's type, which
+    /// gives a value its declared type where a value of a subtype is
+    /// substituted for one of it (IM Prescription 16), or where what is
+    /// known when compiling is narrower than what is declared, as a
+    /// variable's value can be; or to the relation a restriction's
+    /// condition shows its tuples' attributes to be of. A value of a type
+    /// in a hierarchy is laid out as every value of its root's, so nothing
+    /// changes when running, and it can't fail.
     Treat(Box<Type>, Box<Expr>),
+    /// The value of the expression, as a value of the type, a subtype of
+    /// its type: TREAT down (IM Prescription 14), which fails unless the
+    /// value is of the type. A name narrowed by a test, `x is t`, is one,
+    /// which the guard rule computes only once the test is true (see
+    /// [`Connective::guarded`]).
+    TreatAs(Box<Type>, Box<Expr>),
+    /// Whether the value of the expression is of the type, or one of its
+    /// subtypes (IM Prescription 15).
+    Is(Box<Expr>, Box<Type>),
     /// The tuple at hand, with this heading: the one an `Extend` is computing
     /// attributes for, or a `Restrict` a condition, `depth` of them out from
     /// here, counting the innermost as 0. Its attributes are in scope by
@@ -1361,7 +1372,7 @@ impl Expr {
             Expr::Binary(op, lhs, _) => op
                 .result()
                 .map_or_else(|| lhs.type_with(leaf), Type::Scalar),
-            Expr::Connective(..) => Type::Scalar(Scalar::Boolean),
+            Expr::Connective(..) | Expr::Is(..) => Type::Scalar(Scalar::Boolean),
             Expr::Extract(tuple, name) => match tuple.type_with(leaf) {
                 Type::Tuple(heading) => heading
                     .get(name)
@@ -1399,7 +1410,7 @@ impl Expr {
                 Type::Defined(defined) => Type::Tuple(defined.components),
                 other => panic!("the components of {other}"),
             },
-            Expr::Treat(ty, _) => (**ty).clone(),
+            Expr::Treat(ty, _) | Expr::TreatAs(ty, _) => (**ty).clone(),
         }
     }
 }
@@ -1424,8 +1435,10 @@ impl Expr {
             // allocates the result, as building or loading an array does; adding
             // attributes computes them, which can fail too, as can a call,
             // which computes its operator's value, and an index can be out of
-            // range.
+            // range, and a value treated as one of a subtype of its type
+            // needn't be one.
             Expr::Unary(UnaryOp::Negate(Numeric::Integer), _)
+            | Expr::TreatAs(..)
             | Expr::Call(..)
             | Expr::Remove(..)
             | Expr::Rename(..)
@@ -1450,7 +1463,8 @@ impl Expr {
             Expr::Unary(_, operand)
             | Expr::At(_, operand)
             | Expr::Components(operand)
-            | Expr::Treat(_, operand) => operand.can_fail(),
+            | Expr::Treat(_, operand)
+            | Expr::Is(operand, _) => operand.can_fail(),
             Expr::Tuple(attributes) => attributes.values().any(Expr::can_fail),
             Expr::Connective(_, operands) => operands.iter().any(Expr::can_fail),
             Expr::Extract(tuple, _) => tuple.can_fail(),
@@ -1645,6 +1659,8 @@ impl Expr {
             Expr::Select(defined, components) => Expr::Select(defined, Box::new(f(*components, 0))),
             Expr::Components(value) => Expr::Components(Box::new(f(*value, 0))),
             Expr::Treat(ty, value) => Expr::Treat(ty, Box::new(f(*value, 0))),
+            Expr::TreatAs(ty, value) => Expr::TreatAs(ty, Box::new(f(*value, 0))),
+            Expr::Is(value, ty) => Expr::Is(Box::new(f(*value, 0)), ty),
             Expr::Call(call) => Expr::Call(Call {
                 args: call
                     .args
@@ -1675,6 +1691,8 @@ impl Expr {
             | Expr::Select(_, operand)
             | Expr::Components(operand)
             | Expr::Treat(_, operand)
+            | Expr::TreatAs(_, operand)
+            | Expr::Is(operand, _)
             | Expr::Load(operand, ..)
             | Expr::Unload(operand, ..) => f(operand, 0),
             Expr::Let(_, lhs, rhs)
@@ -1819,6 +1837,10 @@ impl Expr {
             Expr::Select(defined, components) => Expr::Select(defined.clone(), inst(components)),
             Expr::Components(value) => Expr::Components(inst(value)),
             Expr::Treat(ty, value) => Expr::Treat(Box::new(ty.instantiated(types)), inst(value)),
+            Expr::TreatAs(ty, value) => {
+                Expr::TreatAs(Box::new(ty.instantiated(types)), inst(value))
+            }
+            Expr::Is(value, ty) => Expr::Is(inst(value), Box::new(ty.instantiated(types))),
             Expr::Current(depth, heading) => Expr::Current(*depth, heading.instantiated(types)),
             Expr::Call(call) => Expr::Call(call.instantiated(types)),
         }
@@ -3116,6 +3138,14 @@ pub enum Value {
 }
 
 impl Value {
+    /// Whether the value is of the type `ty`: its own type is `ty` or one
+    /// of its subtypes (*Type Inheritance and Relational Theory*, IM
+    /// Prescription 15).
+    #[must_use]
+    pub fn is_of(&self, ty: &Type) -> bool {
+        self.ty().is_subtype_of(ty)
+    }
+
     #[must_use]
     pub fn ty(&self) -> Type {
         let scalar = |s| Type::Scalar(s);

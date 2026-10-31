@@ -169,6 +169,24 @@ var figures := relation {
     { name: "plot", figure: triangle },
 };
 
+/* The ellipses among them, with their major semiaxes: `is` tests a value's
+   type (IM Prescription 15), and in the rest of the condition, and in the
+   result's heading, `figure` is an ellipse, so its components can be read
+   in the `extend`. */
+var ellipses := figures where figure is ellipse;
+var majors := ellipses extend { major := figure.a }{name, major};
+
+/* What a figure is. A figure that isn't an ellipse isn't known to be a
+   polygon, though there is no other kind yet: a program can add one, so
+   each kind is tested for, and the rest are figures. */
+operator kind{figure: plane_figure}: text [
+    if figure is ellipse
+        then "ellipse"
+        else if figure is polygon
+        then to_text{from: count{r: figure.vertices}} || "-gon"
+        else "figure"
+];
+
 /* The vertex nearest the origin, and the vertices' numbers in the points'
    order: the one at the origin, then the one 3 from it, on the y axis,
    then the one 4 from it, on the x axis. */
@@ -209,10 +227,16 @@ operator geometry{p: point, shape: polygon} [
     var numbers: array integer;
     load numbers value from shape.vertices order [asc vertex] remove {vertex};
     call debug_value{v: numbers};
-    call debug_table{r: relation {
+    var figures := relation {
         { name: "pond", figure: e },
         { name: "plot", figure: shape },
-    }};
+    };
+    call debug_table{r: figures};
+    call debug_table{
+        r: (figures where figure is ellipse) extend { major := figure.a }{name, major},
+    };
+    call debug_value{v: kind{figure: e}};
+    call debug_value{v: kind{figure: shape}};
 ];
 
 operator main{} [
@@ -230,6 +254,9 @@ operator main{} [
     call debug_value{v: nearest};
     call debug_value{v: outward};
     call debug_table{r: figures};
+    call debug_table{r: majors};
+    call debug_value{v: kind{figure: squashed}};
+    call debug_value{v: kind{figure: triangle}};
 
     call geometry{p: pt, shape: triangle};
 ];

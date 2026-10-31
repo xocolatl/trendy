@@ -301,6 +301,13 @@ pub enum SyntaxKind {
     /// `x and y`, `x + y`, `r join s`, `r where p`, and the other dyadic
     /// operators.
     BinaryExpr,
+    /// `x is t`: whether a value is of a type. `is` is a contextual keyword,
+    /// an identifier elsewhere.
+    IsExpr,
+    /// `treat x as t`: a value as one of a subtype of its type, which it
+    /// fails unless it is. `treat` is a contextual keyword, an identifier
+    /// elsewhere.
+    TreatExpr,
     /// `(x)`
     ParenExpr,
     /// `t.a`: an attribute's value.
@@ -406,7 +413,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 161] = [
+    pub const ALL: [SyntaxKind; 163] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -529,6 +536,8 @@ impl SyntaxKind {
         SyntaxKind::NameRef,
         SyntaxKind::UnaryExpr,
         SyntaxKind::BinaryExpr,
+        SyntaxKind::IsExpr,
+        SyntaxKind::TreatExpr,
         SyntaxKind::ParenExpr,
         SyntaxKind::ExtractExpr,
         SyntaxKind::IndexExpr,
@@ -992,6 +1001,8 @@ impl SyntaxKind {
             SyntaxKind::Name | SyntaxKind::NameRef => "name",
             SyntaxKind::UnaryExpr
             | SyntaxKind::BinaryExpr
+            | SyntaxKind::IsExpr
+            | SyntaxKind::TreatExpr
             | SyntaxKind::ParenExpr
             | SyntaxKind::ExtractExpr
             | SyntaxKind::IndexExpr

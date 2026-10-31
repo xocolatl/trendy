@@ -82,8 +82,9 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
     // `value` and `from`, `any` and `type`, in `any type`, `types`, `per`,
     // a mode's `const` and `out`, `kind`, a load's `load`, `from`, `order`, `asc`,
     // `desc`, `keep` and `numbered`, a `for` loop's `in`, `heading`, `type`,
-    // a supertype's `is`, a type's `constraint` and `order`, and a
-    // conversion's `to` and `from`.
+    // a supertype's `is`, a type's `constraint` and `order`, a
+    // conversion's `to` and `from`, a type test's `is`, and a treat's
+    // `treat`.
     let keyword = match parent {
         Some(SyntaxKind::BuiltinType) => token.text() == "type",
         Some(SyntaxKind::AnyType) => matches!(token.text(), "any" | "type"),
@@ -102,6 +103,8 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
             | SyntaxKind::HeadingDecl
             | SyntaxKind::TypeDecl
             | SyntaxKind::Supertype
+            | SyntaxKind::IsExpr
+            | SyntaxKind::TreatExpr
             | SyntaxKind::Constraint
             | SyntaxKind::TypeOrder
             | SyntaxKind::Conversion,
@@ -765,6 +768,33 @@ mod tests {
                 ("figure", Class::Type, false),
                 ("r", Class::Attribute, true),
                 ("approximate", Class::Type, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn type_tests() {
+        assert_eq!(
+            highlight(
+                "operator f{x: figure}: boolean [ x is disc and (treat x as disc).r > 0e0 ];"
+            ),
+            [
+                ("operator", Class::Keyword, false),
+                ("f", Class::Operator, true),
+                ("x", Class::Parameter, true),
+                ("figure", Class::Type, false),
+                ("boolean", Class::Type, false),
+                ("x", Class::Parameter, false),
+                ("is", Class::Keyword, false),
+                ("disc", Class::Type, false),
+                ("and", Class::ExprOperator, false),
+                ("treat", Class::Keyword, false),
+                ("x", Class::Parameter, false),
+                ("as", Class::Keyword, false),
+                ("disc", Class::Type, false),
+                ("r", Class::Attribute, false),
+                (">", Class::ExprOperator, false),
+                ("0e0", Class::Number, false),
             ]
         );
     }

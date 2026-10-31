@@ -310,6 +310,21 @@ fn constraint_rule() -> Value {
     })
 }
 
+/// `x is t` and `treat x as t`: `is` is a keyword only between a value
+/// and a type, two names in a row elsewhere never, and `treat` only before
+/// a value. Semantic highlighting covers what the grammar can't tell, as a
+/// `treat` before a parenthesized value.
+fn type_test_rule(identifier: &str) -> Value {
+    json!({
+        "match": format!("(?<=[\\w)\\]}}])\\s+(is)\\s+({identifier})|\\b(treat)\\s+(?={identifier})"),
+        "captures": {
+            "1": { "name": "keyword.other.trendy" },
+            "2": { "name": "entity.name.type.trendy" },
+            "3": { "name": "keyword.other.trendy" },
+        },
+    })
+}
+
 /// `load a from`: `load` and `from` are keywords only around a load's
 /// array. Semantic highlighting covers the rest of a load, `asc` and
 /// `desc`, which a grammar can't tell from attributes so named.
@@ -411,6 +426,7 @@ fn generate(probed: &Probed) -> Value {
             { "include": "#key" },
             { "include": "#constraint" },
             { "include": "#load" },
+            { "include": "#type-test" },
             { "include": "#order" },
             { "include": "#for" },
             { "include": "#keywords" },
@@ -429,6 +445,7 @@ fn generate(probed: &Probed) -> Value {
             "key": key_rule(),
             "constraint": constraint_rule(),
             "load": load_rule(identifier),
+            "type-test": type_test_rule(identifier),
             "order": order_rule(),
             "for": for_rule(identifier),
             "call": operator_name_rule(SyntaxKind::CallKw, identifier),

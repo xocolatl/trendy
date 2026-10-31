@@ -1028,6 +1028,21 @@ specific common supertype of those valid on their own (`types::widen`, IM
 Prescription 8), whatever their order; operands only of types that overlap
 (IM Prescription 12), since a union type's subtypes are disjoint.
 
+`x is t` is `hir::Expr::Is`, and `treat x as t` `hir::Expr::TreatAs`,
+TREAT down, which fails unless the value is of the type (R0019), as
+lowering checks by comparing the value's own type's descriptor with each
+of those under `t` (`FunctionBuilder::is_of`). A test narrows its name
+in the rest of its condition (`narrowed::Facts`, from the condition's
+syntax): each operand of an `and` is checked with what the others show
+if true, of an `or` with what they show if false, an `if`'s branches with
+what its condition shows either way, and a `where`'s result heading
+takes what its condition shows of its attributes. A narrowed name
+(`narrowed::Narrowed`, a `check::Names`) refers to `TreatAs` of its value,
+which can fail, so the guard rule computes the tests, which can't, first,
+and only then what they guard: a narrowed value is never treated unless
+its test is true. A false test shows nothing: a program can add subtypes
+to a union type, so what isn't of one isn't known to be of any other.
+
 In an `extend`'s or a `replace`'s values, names resolve first to the
 attributes of the tuple at hand (`check::TupleNames`), as `Current(0, …)`'s attributes, and then to
 whatever they name around the `extend`, one `Current` level deeper. An
