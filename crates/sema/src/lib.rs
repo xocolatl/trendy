@@ -4248,6 +4248,47 @@ mod tests {
     }
 
     #[test]
+    fn only_a_scalar_operand_is_told_values_never_convert() {
+        let conversion = "values never convert to another type implicitly";
+        // A tuple, a relation or an array is told what it has instead.
+        for (operation, rule) in [
+            ("tuple { x: 1 } < tuple { x: 2 }", "tuples have no order"),
+            ("array [1] < array [2]", "arrays can only be compared"),
+            (
+                "array [1] || array [2]",
+                "`||` applies to scalar values, such as an array's elements, `a[i]`",
+            ),
+            ("-array [1]", "`-` applies to scalar values"),
+            (
+                "tuple { x: 1 } * tuple { x: 1 }",
+                "such as a tuple's attributes, `t.a`",
+            ),
+            (
+                "relation { { x: 1 } } + relation { { x: 1 } }",
+                "such as a relation's attributes in `where` or `extend`",
+            ),
+            // Other languages convert these to what the operator takes.
+            ("1 || \" people\"", conversion),
+            ("true + 1", conversion),
+            ("1 / 2", conversion),
+        ] {
+            let found = errors(&format!("var a := {operation};{MAIN}"));
+            assert_eq!(found.len(), 1, "{operation}: {found:#?}");
+            assert_eq!(found[0].code, Code::WrongOperandType, "{operation}");
+            let notes = &found[0].notes;
+            assert!(
+                notes.iter().any(|n| n.contains(rule)),
+                "{operation}: {notes:#?}"
+            );
+            assert_eq!(
+                notes.iter().any(|n| n == conversion),
+                rule == conversion,
+                "{operation}: {notes:#?}"
+            );
+        }
+    }
+
+    #[test]
     fn set_errors() {
         let source = format!(
             "var people := relation {{ {{ name: \"Ada\", city: \"London\" }} }};\nvar more := relation {{ {{ name: \"Wangari\", town: \"Nyeri\" }} }};\nvar a := people union more;\nvar b := union{{}};\nvar c := tuple {{ x: 1 }} union tuple {{ y: 1 }};\nvar d := people intersect relation {{ {{ name: 1, city: \"x\" }} }};{MAIN}"

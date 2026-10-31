@@ -5430,6 +5430,31 @@ fn plural(ty: &hir::Type) -> String {
     }
 }
 
+/// The rule that keeps the operator `op`, written `token`, from operands
+/// of type `ty`. Other languages convert a scalar to the type an operator
+/// takes, but no tuple, relation or array, whose operators are their own.
+fn operand_rule(op: crate::ops::Operator, token: &str, ty: &hir::Type) -> String {
+    use crate::ops::Operator;
+    match (op, ty) {
+        (Operator::Compare(_), hir::Type::Array(_)) => {
+            "arrays can only be compared with `=` and `<>`: they are equal if they have equal elements at each position".to_string()
+        }
+        (Operator::Compare(_), hir::Type::Tuple(_)) => {
+            "tuples have no order: they can only be compared with `=` and `<>`; relations can also be compared as sets, with `<=` and `<` for subset and proper subset".to_string()
+        }
+        (_, hir::Type::Array(_)) => format!(
+            "`{token}` applies to scalar values, such as an array's elements, `a[i]`, and not to an array, element by element or as a whole"
+        ),
+        (_, hir::Type::Tuple(_)) => format!(
+            "`{token}` applies to scalar values, such as a tuple's attributes, `t.a`, and not to a tuple"
+        ),
+        (_, hir::Type::Relation(_)) => format!(
+            "`{token}` applies to scalar values, such as a relation's attributes in `where` or `extend`, and not to a relation"
+        ),
+        _ => "values never convert to another type implicitly".to_string(),
+    }
+}
+
 /// The operator `op`, written `token`, applied to operands of type `ty`,
 /// which it doesn't take, as `first` is, if it is known: the first operand,
 /// which set the type.
@@ -5449,7 +5474,7 @@ pub(crate) fn wrong_operand_type(
         format!("`{}` takes {}", token.text(), op.takes()),
     )
     .with_parameter_note(ty)
-    .with_note("values never convert to another type implicitly");
+    .with_note(operand_rule(op, token.text(), ty));
     // `n || " people"`: the text was meant, not `||` of numbers or `T`s.
     let to_text = conversion(ty, &hir::Type::Scalar(hir::Scalar::Text));
     if let (Operator::Concatenate, Some(builtin), Some(first)) = (op, to_text, first)
@@ -5461,9 +5486,6 @@ pub(crate) fn wrong_operand_type(
     let hir::Type::Scalar(scalar) = *ty else {
         return match (op, ty) {
             (_, hir::Type::Parameter(p)) => kind_help(d, op, p, token.text(), kinds),
-            (Operator::Compare(_), hir::Type::Array(_)) => d.with_note(
-                "arrays can only be compared with `=` and `<>`: they are equal if they have equal elements at each position",
-            ),
             (Operator::Compare(_), hir::Type::Defined(defined)) => d
                 .with_note(format!(
                     "`{}` has no order, so its values can only be compared with `=` and `<>`, equal when their components are",
@@ -5473,9 +5495,6 @@ pub(crate) fn wrong_operand_type(
                     "give `{}` an order, `order [asc …]` in its braces, its components in the order they compare",
                     defined.name
                 )),
-            (Operator::Compare(_), _) => d.with_note(
-                "tuples have no order: they can only be compared with `=` and `<>`; relations can also be compared as sets, with `<=` and `<` for subset and proper subset",
-            ),
             _ => d,
         };
     };
