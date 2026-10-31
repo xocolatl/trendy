@@ -1292,11 +1292,11 @@ impl<'a> Checker<'a> {
             (Replacement::Attributes(components), hir::Type::Defined(defined)) => {
                 self.selected(defined, components, expr, errors)?
             }
-            (Replacement::Selected(selected), hir::Type::Defined(defined)) => {
-                self.selected_from(defined, operand, selected, expr, errors)?
+            (Replacement::Representation(replaced), hir::Type::Defined(defined)) => {
+                self.selected_in(defined, operand, replaced, expr, errors)?
             }
             (Replacement::Attributes(result), _) => result,
-            (Replacement::Selected(_), _) => {
+            (Replacement::Representation(_), _) => {
                 unreachable!("only a type's value is selected in another representation")
             }
         };
@@ -1396,20 +1396,28 @@ impl<'a> Checker<'a> {
         Some((converted, own))
     }
 
-    /// The value of the type of the program's own `defined` that
-    /// `selected`, of a `replace` or an `update` in another possible
-    /// representation than the stored one, computes from the stored
-    /// components of `value` at hand. `None` after reporting that it fails,
-    /// written `expr`, as a selection breaking a constraint does.
-    pub(crate) fn selected_from(
-        &self,
+    /// The value of the type of the program's own `defined` selected in the
+    /// representation `replaced` is of, from its components, which a
+    /// `replace` or an `update` replaced, computed from the stored
+    /// components of `value`. `None` after reporting that it fails, written
+    /// `expr`, as a selection breaking a constraint does.
+    pub(crate) fn selected_in(
+        &mut self,
         defined: &hir::Defined,
         value: hir::Expr,
-        selected: hir::Expr,
+        replaced: Replaced,
         expr: &Expr,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Expr> {
         let ty = hir::Type::Defined(Box::new(defined.clone()));
+        let Replaced {
+            selector,
+            components,
+            tuple,
+        } = replaced;
+        // From the stored components at hand,
+        let selected = self.applied(selector, ty.clone(), tuple, &components, expr, errors)?;
+        // which are `value`'s.
         self.computed_from(ops::components(value), ty, selected, expr, errors)
     }
 
@@ -1495,10 +1503,10 @@ impl<'a> Checker<'a> {
     /// at once. A `replace` or an `update` of a value of a type of the
     /// program's own gives its components new values in the same way, those
     /// of one of its possible representations (TTM chapter 5's scalar
-    /// update): of the stored one, the result is the tuple of them, which
-    /// the value is selected from, and of another, the value selected in
-    /// it, computed from the stored components at hand, which
-    /// [`Checker::selected_from`] computes from the operand's. An attribute
+    /// update): the result is the tuple of them, which the value is
+    /// selected from, of another than the stored one computed from the
+    /// stored components at hand, which [`Checker::selected_in`] computes
+    /// from the operand's. An attribute
     /// given its own value is an error, and `unchanged` is the error for a
     /// list that leaves the operand as it is.
     pub(crate) fn assign_attributes(
@@ -1587,13 +1595,11 @@ impl<'a> Checker<'a> {
         };
         match changed {
             Changed::Attributes | Changed::Stored(..) => Some(Replacement::Attributes(replaced)),
-            // Selected in the representation, from its components.
-            Changed::Other(defined, selector) => {
-                let ty = hir::Type::Defined(Box::new(defined.clone()));
-                let selected =
-                    self.applied(selector, ty, replaced, &heading, operand_expr, errors)?;
-                Some(Replacement::Selected(selected))
-            }
+            Changed::Other(_, selector) => Some(Replacement::Representation(Replaced {
+                selector,
+                components: heading,
+                tuple: replaced,
+            })),
         }
     }
 
@@ -1602,7 +1608,7 @@ impl<'a> Checker<'a> {
     /// representations, if it is a value of a type of the program's own,
     /// with their heading and the tuple of them. Those of another than the
     /// stored one are computed from the stored components at hand, which
-    /// the caller gives (`selected_from`). `None` after reporting why there
+    /// the caller gives (`selected_in`). `None` after reporting why there
     /// are none to give values.
     fn changed<'t>(
         &mut self,
@@ -2405,12 +2411,22 @@ pub(crate) enum Replacement {
     /// the program's own, which the value is selected from, with those the
     /// list assigns added or replaced.
     Attributes(hir::Expr),
-    /// A value of a type of the program's own, selected in another possible
-    /// representation than the stored one, from its components there with
-    /// those the list assigns replaced: computed from the stored components
-    /// at hand, `Current(0)`, which [`Checker::selected_from`] computes from
-    /// the operand's.
-    Selected(hir::Expr),
+    /// The components of a value of a type of the program's own in another
+    /// possible representation than the stored one, with those the list
+    /// assigns replaced, which the value is selected from in it.
+    Representation(Replaced),
+}
+
+/// The components of a value of a type of the program's own in the
+/// possible representation with `components`, other than the stored one,
+/// whose selector is `selector`, with some replaced: `tuple`, an `Extend`
+/// of the tuple of them its conversion computes from the stored components
+/// at hand, `Current(0)`, which [`Checker::selected_in`] computes from a
+/// value's.
+pub(crate) struct Replaced {
+    pub(crate) selector: hir::OperatorId,
+    pub(crate) components: hir::Heading,
+    pub(crate) tuple: hir::Expr,
 }
 
 /// The gatherings of a `group` or a `wrap`, as `gathering` says, in

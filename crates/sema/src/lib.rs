@@ -6917,11 +6917,40 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
             unknown[0].notes[0].contains("`temperature{kelvin: …}` or `temperature{celsius: …}`"),
             "{unknown:#?}"
         );
-        // Another representation's update gives every stored component a
-        // new value, so another change to the variable conflicts with it.
+        // Updates of two representations' components conflict in an
+        // `assign` block, since no selector takes them together.
         let source =
             program("assign { update t { celsius := 1e0 }; update t { kelvin := 300e0 }; };");
-        assert_eq!(codes(&source), [Code::ConflictingChanges]);
+        assert_eq!(
+            messages(&source),
+            [
+                "two changes to `t` conflict: they update components of different possible representations of `temperature`"
+            ]
+        );
+        // Of one, any, they combine, as they do of the stored one, each
+        // computed from the value as it was, unless two give one component
+        // a value.
+        let value = |change: &str| {
+            let source = format!(
+                "{PAIR}var v := [\n    var p := pair{{a: 1, b: 2}};\n    {change}\n    p\n];"
+            );
+            variables(&source)[0].init.to_string()
+        };
+        assert_eq!(
+            value("assign { update p { total := 10 }; update p { first := total }; };"),
+            "pair{a: 3, b: 7}"
+        );
+        assert_eq!(
+            value("assign { update p { a := 5 }; update p { b := a }; };"),
+            "pair{a: 5, b: 1}"
+        );
+        let source = format!(
+            "{PAIR}operator main{{}} [\n    var p := pair{{a: 1, b: 2}};\n    assign {{ update p {{ total := 10 }}; update p {{ total := 4, first := 1 }}; }};\n];\n"
+        );
+        assert_eq!(
+            messages(&source),
+            ["two changes to `p` conflict: both give `total` a new value"]
+        );
         // As other languages assign an object's field, fixed to `update`.
         let source = program("t.celsius := 25e0;");
         assert_eq!(fix(&source), program("update t { celsius := 25e0 };"));

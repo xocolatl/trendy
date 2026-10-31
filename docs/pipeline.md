@@ -689,8 +689,11 @@ the conversion from the stored one's, called in an `Extend` of
 conversion's call on its parameters. A `replace` or an `update` gives the
 components of one representation new values (`check::representation`),
 with every representation's in scope (`ComponentNames`), and, of another
-than the stored one, selects the value in it, computed from the stored
-components at hand (`Replacement::Selected`, `Checker::selected_from`).
+than the stored one, gives the tuple of them its conversion computes from
+the stored components at hand, replaced (`Replacement::Representation`),
+which the value is selected in, from the operand's stored components
+(`Checker::selected_in`); `update`s of one representation in an `assign`
+block merge first (`assign::updates_merged`), and of two conflict.
 A type's order, `order [asc …]`, names the components of one possible
 representation (`named_types::type_order`, `check::representation`), is
 checked as a load's is (`assign::order_items`), with every one of them

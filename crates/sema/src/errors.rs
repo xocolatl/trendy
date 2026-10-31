@@ -2696,6 +2696,32 @@ pub(crate) fn conflicting_changes(name: &str, first: Span, second: Span, why: &s
     )
 }
 
+/// Two `update`s of the variable `name`, of the type of the program's own
+/// `defined`, in one `assign` block, at `first` and `second`, that give
+/// new values to components of different possible representations, which
+/// no selector takes together.
+pub(crate) fn conflicting_representations(
+    name: &str,
+    defined: &hir::Defined,
+    first: Span,
+    second: Span,
+) -> Diagnostic {
+    Diagnostic::error(
+        Code::ConflictingChanges,
+        format!(
+            "two changes to `{name}` conflict: they update components of different possible representations of `{}`",
+            defined.name
+        ),
+        second,
+        "updates another representation's components",
+    )
+    .with_secondary(first, "the other change")
+    .with_note(format!(
+        "{CHANGES_RULE}; the value is selected in the representation whose components the updates give new values, keeping its others, so they must all be of one"
+    ))
+    .with_help("make them in two statements, one after the other")
+}
+
 /// Two `i_delete`s of the variable `name` in one `assign` block, at `first`
 /// and `second`, that both remove `tuple`.
 pub(crate) fn conflicting_tuple(
@@ -2717,7 +2743,7 @@ pub(crate) fn conflicting_tuple(
 }
 
 /// How an `assign` block's changes to one variable combine, for notes.
-const CHANGES_RULE: &str = "the changes in an `assign` block are made at once, each computed from the variables as they were before it: changes to a variable's tuples, attributes, components or elements combine, unless two remove the same tuple, set the same attribute or component, or set the same element or one in it, and `v := …` can't combine with any other change to `v`";
+const CHANGES_RULE: &str = "the changes in an `assign` block are made at once, each computed from the variables as they were before it: changes to a variable's tuples, attributes, components of one possible representation, or elements combine, unless two remove the same tuple, set the same attribute or component, or set the same element or one in it, and `v := …` can't combine with any other change to `v`";
 
 /// `call name{…}`, at `span`, where `name` is `what`, not an operator.
 pub(crate) fn not_an_operator(name: &str, span: Span, what: &str) -> Diagnostic {

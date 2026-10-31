@@ -14,7 +14,7 @@ use trendy_hir as hir;
 use trendy_syntax::ast::{self, AstNode, Clause, VarDecl};
 use trendy_syntax::{SyntaxKind, SyntaxToken};
 
-use crate::check::{Assigned, Checker, Names, Replacement, Unchanged};
+use crate::check::{Assigned, Checker, Names, Replaced, Replacement, Unchanged};
 use crate::types::{self, Expected, Origin};
 use crate::{errors, keys, ops};
 
@@ -166,15 +166,33 @@ enum Change {
     /// `a[i] := x`, of an array: its element at a path given a new value.
     Element(ElementAt),
     /// An `update` of a tuple, or of a value of a type of the program's
-    /// own: its attributes, or its stored components, given new values.
-    Attributes(hir::Heading, BTreeMap<String, hir::Expr>),
-    /// An `update` of a value of a type of the program's own in another
-    /// possible representation than the stored one, which gives every
-    /// stored component a new value: the value selected in it, computed
-    /// from the stored components at hand (see [`Replacement::Selected`]).
-    Selected(hir::Expr),
+    /// own: its attributes, or the components of one of its possible
+    /// representations, given new values.
+    Attributes(Updated),
     /// A change to a relation's tuples.
     Tuples(TupleChange),
+}
+
+/// What an `update` gives new values: `values`, of the types `computed`,
+/// each computed from the tuple at hand of the attributes, or components,
+/// it gives them, and, if they are the components of another possible
+/// representation than the stored one of a value of a type of the
+/// program's own, which.
+struct Updated {
+    computed: hir::Heading,
+    values: BTreeMap<String, hir::Expr>,
+    representation: Option<Other>,
+}
+
+/// A possible representation of a type of the program's own other than
+/// the stored one, whose components an `update` gives new values: its
+/// selector, its components, and the tuple of them its conversion computes
+/// from the stored components at hand, `Current(0)`.
+#[derive(Clone)]
+struct Other {
+    selector: hir::OperatorId,
+    components: hir::Heading,
+    converted: hir::Expr,
 }
 
 /// An element an assignment gives a new value: the change, and where its
@@ -1042,18 +1060,29 @@ fn update(
                 unchanged,
                 errors,
             )?;
-            match updated {
-                Replacement::Attributes(hir::Expr::Extend(_, computed, values)) => {
-                    Some(Change::Attributes(computed, values))
-                }
-                // Of another representation than the stored one, every
-                // stored component changes: the variable is given the value
-                // selected in it.
-                Replacement::Selected(selected) => Some(Change::Selected(selected)),
-                Replacement::Attributes(_) => {
-                    unreachable!("a variable's value is known only when running")
-                }
-            }
+            let (tuple, representation) = match updated {
+                Replacement::Attributes(tuple) => (tuple, None),
+                // Of another representation than the stored one, its
+                // components, which its conversion computes.
+                Replacement::Representation(Replaced {
+                    selector,
+                    components,
+                    tuple,
+                }) => (tuple, Some((selector, components))),
+            };
+            let hir::Expr::Extend(tuple, computed, values) = tuple else {
+                unreachable!("a variable's value is known only when running");
+            };
+            let representation = representation.map(|(selector, components)| Other {
+                selector,
+                components,
+                converted: *tuple,
+            });
+            Some(Change::Attributes(Updated {
+                computed,
+                values,
+                representation,
+            }))
         }
         (Some(token), hir::Type::Tuple(_) | hir::Type::Defined(_)) => {
             let span = trendy_syntax::span(token.text_range());
@@ -1173,16 +1202,13 @@ fn merged(
     // A whole new value conflicts with any other change.
     let whole = list
         .iter()
-        .position(|(_, c)| matches!(c, Change::Value(..) | Change::Selected(_)));
+        .position(|(_, c)| matches!(c, Change::Value(..)));
     if let (Some(i), true) = (whole, list.len() > 1) {
         // The first other change.
         let other = usize::from(i == 0);
         let (first, second) = (i.min(other), i.max(other));
         let written = match list[i].0 {
             Clause::Load(_) => format!("`load {name} from …`"),
-            Clause::Update(_) => format!(
-                "`update {name} {{…}}`, of components of another representation than the stored one,"
-            ),
             _ => format!("`{name} := …`"),
         };
         errors.push(errors::conflicting_changes(
@@ -1209,40 +1235,16 @@ fn merged(
             }
             Some(value)
         }
-        Change::Selected(selected) => {
-            let hir::Type::Defined(defined) = &assignee.ty else {
-                unreachable!("only a type's value is selected in another representation");
-            };
-            let target = clause.target()?;
-            let current = assignee.current.clone();
-            Checker::new(names).selected_from(defined, current, selected, &target, errors)
-        }
-        Change::Attributes(computed, values) => {
-            let mut changes = vec![(clause, computed, values)];
+        Change::Attributes(updated) => {
+            let representation = updated.representation.clone();
+            let mut changes = vec![(clause, updated)];
             for (clause, change) in list {
-                let Change::Attributes(computed, values) = change else {
+                let Change::Attributes(updated) = change else {
                     unreachable!("a tuple's or a type's variable's changes are updates");
                 };
-                changes.push((clause, computed, values));
+                changes.push((clause, updated));
             }
-            // A type's value is selected from its components, which the
-            // updates change.
-            let defined = match &assignee.ty {
-                hir::Type::Defined(defined) => Some(defined),
-                _ => None,
-            };
-            let current = match defined {
-                Some(_) => ops::components(assignee.current.clone()),
-                None => assignee.current.clone(),
-            };
-            let merged = attributes_merged(current, name, changes, names.bindings(), errors)?;
-            match defined {
-                Some(defined) => {
-                    let target = clause.target()?;
-                    Checker::new(names).selected(defined, merged, &target, errors)
-                }
-                None => Some(merged),
-            }
+            updates_merged(assignee, representation, changes, names, errors)
         }
         Change::Tuples(change) => {
             let mut changes = vec![(clause, change)];
@@ -1380,10 +1382,70 @@ fn known_effect(
     }
 }
 
+/// The new value of the variable `assignee`, of a tuple or of a type of
+/// the program's own, from its `changes`, `update`s, each in a clause: one
+/// of its attributes, or of the components of one of its possible
+/// representations, the first's, `representation` if it isn't the stored
+/// one, which the value is selected in, after reporting two of different
+/// representations, which no selector takes together.
+fn updates_merged(
+    assignee: &Assignee,
+    representation: Option<Other>,
+    changes: Vec<(&Clause, Updated)>,
+    names: &mut dyn Assigning,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<hir::Expr> {
+    let name = assignee.name.as_str();
+    let (first, _) = changes.first()?;
+    let target = first.target()?;
+    let selector = |updated: &Updated| updated.representation.as_ref().map(|r| r.selector);
+    let of = selector(&changes[0].1);
+    if let Some((clause, _)) = changes.iter().find(|(_, updated)| selector(updated) != of) {
+        let hir::Type::Defined(defined) = &assignee.ty else {
+            unreachable!("only a type's value has representations");
+        };
+        errors.push(errors::conflicting_representations(
+            name,
+            defined,
+            first.span(),
+            clause.span(),
+        ));
+        return None;
+    }
+    let changes = changes
+        .into_iter()
+        .map(|(clause, updated)| (clause, updated.computed, updated.values))
+        .collect();
+    let bindings = names.bindings();
+    match (&assignee.ty, representation) {
+        // Of another representation than the stored one, its components,
+        // computed from the stored ones, which the value is selected in.
+        (hir::Type::Defined(defined), Some(other)) => {
+            let tuple = attributes_merged(other.converted, name, changes, bindings, errors)?;
+            let replaced = Replaced {
+                selector: other.selector,
+                components: other.components,
+                tuple,
+            };
+            let current = assignee.current.clone();
+            Checker::new(names).selected_in(defined, current, replaced, &target, errors)
+        }
+        // A type's value is selected from its components, which the
+        // updates change.
+        (hir::Type::Defined(defined), None) => {
+            let current = ops::components(assignee.current.clone());
+            let merged = attributes_merged(current, name, changes, bindings, errors)?;
+            Checker::new(names).selected(defined, merged, &target, errors)
+        }
+        (_, _) => attributes_merged(assignee.current.clone(), name, changes, bindings, errors),
+    }
+}
+
 /// The new value of the tuple variable `name`, whose value is `current`,
-/// or of the components of its value of a type of the program's own, from
-/// its `update`s, each in a clause and giving attributes new values: one
-/// `replace` of them all, if no two give the same attribute one.
+/// or of the components of one of the possible representations of its
+/// value of a type of the program's own, from its `update`s, each in a
+/// clause and giving attributes new values: one `replace` of them all, if
+/// no two give the same attribute one.
 fn attributes_merged(
     current: hir::Expr,
     name: &str,

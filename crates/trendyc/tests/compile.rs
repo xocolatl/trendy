@@ -1970,7 +1970,9 @@ fn inheritance() {
             // half a turn from the point's, the distance between the two,
             // points selected by their polar coordinates, the origin's at
             // any angle, the point twice as far from the origin, by its
-            // polar `r`, then moved, a segment's begin moved, an ellipse's
+            // polar `r`, and also a quarter turn further round, by updates
+            // of `r` and `theta` combined, then moved, a segment's begin
+            // moved, an ellipse's
             // semiaxes changed together, a polygon's corners, its vertex
             // nearest the origin, by the points' polar order, and its
             // vertices' numbers in that order.
@@ -1980,6 +1982,7 @@ fn inheritance() {
             "point{x: 1.8369701987210297e-16, y: 3e0}",
             "point{x: 0e0, y: 0e0}",
             "point{x: 1e1, y: 5e0}",
+            "point{x: -5e0, y: 1e1}",
             "point{x: 2e0, y: 2.5e0}",
             "lineseg{begin: point{x: 6.5e0, y: 2.5e0}, end: point{x: -5e0, y: -2.5e0}}",
             "ellipse{a: distance{m: 3e0}, b: distance{m: 2e0}, ctr: point{x: 5e0, y: 2.5e0}}",

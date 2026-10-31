@@ -112,6 +112,20 @@ var farther := [
     q
 ];
 
+/* `THE_R ( P ) := …, THE_THETA ( P ) := …`, a multiple assignment (RM
+   Prescription 21): updates of the components of one representation, in
+   an `assign` block, each computed from the point as it was, combine into
+   one selection in it, here twice as far from the origin and a quarter
+   turn further round. */
+var turned := [
+    var q := pt;
+    assign {
+        update q { r := distance{m: 2e0 * r.m} };
+        update q { theta := angle{rho: theta.rho + pi{} / 2e0} };
+    };
+    q
+];
+
 /* `THE_X ( P ) := 2.0`: a component changed with `update`, and one of a
    value inside another, `THE_X ( THE_BEGIN ( LS ) ) := 6.5`. */
 var moved := [
@@ -161,6 +175,12 @@ operator geometry{p: point, shape: polygon} [
     var doubled := p;
     update doubled { r := distance{m: 2e0 * r.m} };
     call debug_value{v: doubled};
+    var round := p;
+    assign {
+        update round { r := distance{m: 2e0 * r.m} };
+        update round { theta := angle{rho: theta.rho + pi{} / 2e0} };
+    };
+    call debug_value{v: round};
     var q := p;
     update q { x := 2e0 };
     call debug_value{v: q};
@@ -184,6 +204,7 @@ operator main{} [
     call debug_value{v: north};
     call debug_value{v: origin};
     call debug_value{v: farther};
+    call debug_value{v: turned};
     call debug_value{v: moved};
     call debug_value{v: segment};
     call debug_value{v: squashed};

@@ -1966,15 +1966,14 @@ operator main{} [
   representations in one change are an error (A0059), since no selector
   takes them together.
 - **Every representation's components are in scope** in the values of a
-  `replace` or an `update`, as in a constraint, each but the stored ones
-  computed by its `from`: `body replace { kelvin := celsius }` is fine.
-- **An `update` in another representation than the stored one gives
-  every stored component a new value,** so in an `assign` block it
-  conflicts with any other change to the variable (R0009).
+  `replace` or an `update`, as in a constraint: `body replace { kelvin
+  := celsius }` is fine.
+- **In an `assign` block, `update`s of one representation's components
+  combine,** as a tuple's attributes' do, into one selection in it, and
+  `update`s of two representations' conflict (R0009).
 - **`load_csv` reads a value in any representation,** from the columns
   `columns` gives its components, as in `mean: tuple { celsius: 3 }`,
-  converting it to the stored one (see [The
-  prelude](#the-prelude)).
+  and selects it in that one (see [The prelude](#the-prelude)).
 
 ## Tuples
 
