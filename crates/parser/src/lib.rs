@@ -288,9 +288,9 @@ impl<'a> Parser<'a> {
     }
 
     /// Whether a type declaration starts here: `type`, a contextual keyword,
-    /// in any case, before a name and `{`, or Tutorial D's `POSSREP`, or
-    /// its `ORDERED` or `ORDINAL` before either. TypeScript's
-    /// `type Home = {…}` declares a heading instead.
+    /// in any case, before a name and `{`, `union` or a supertype, or
+    /// Tutorial D's `POSSREP`, or its `ORDERED` or `ORDINAL` before either.
+    /// TypeScript's `type Home = {…}` declares a heading instead.
     fn at_type_decl(&mut self) -> bool {
         self.found()
             .is_some_and(|f| f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case("type"))
@@ -298,13 +298,99 @@ impl<'a> Parser<'a> {
                 .found_after(1)
                 .is_some_and(|f| f.kind == SyntaxKind::Ident)
             && (self.ordered_at(2)
+                || self.supertype_at(2)
                 || self.found_after(2).is_some_and(|f| {
                     f.kind == SyntaxKind::LBrace
+                        || f.spells(SyntaxKind::UnionKw)
                         || (f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case("possrep"))
                 }))
     }
 
-    /// `type name { { name: type, … }, constraint …, order [asc …] };`: a
+    /// Whether a type's supertype starts at the significant token `n` from
+    /// the next one: `is`, in any case, or another language's way to name
+    /// a base type, Java's `extends` or Kotlin's and C#'s `:`, before a
+    /// name, or Tutorial D's `IS {`.
+    fn supertype_at(&mut self, n: usize) -> bool {
+        let at = |p: &mut Self, k: usize| if k == 0 { p.found() } else { p.found_after(k) };
+        let Some(found) = at(self, n) else {
+            return false;
+        };
+        let next = at(self, n + 1);
+        let word = found.kind == SyntaxKind::Ident
+            && (found.text.eq_ignore_ascii_case("is")
+                || found.text.eq_ignore_ascii_case("extends"));
+        (word || found.kind == SyntaxKind::Colon)
+            && next.is_some_and(|f| {
+                f.kind == SyntaxKind::Ident
+                    || (f.kind == SyntaxKind::LBrace && found.text.eq_ignore_ascii_case("is"))
+            })
+    }
+
+    /// `union`, in any case, after a type's name, which makes it a union
+    /// type: whether it is there.
+    fn union_word(&mut self) -> bool {
+        let Some(found) = self.found().filter(|f| f.spells(SyntaxKind::UnionKw)) else {
+            return false;
+        };
+        self.bump();
+        if found.kind != SyntaxKind::UnionKw {
+            self.errors.push(errors::miscased_keyword(found, "union"));
+        }
+        true
+    }
+
+    /// `is name`, after a type's name, which [`Parser::supertype_at`]
+    /// found: the union type it is a subtype of. Java's `extends` and
+    /// Kotlin's and C#'s `:` are reported, with a fix, and so is Tutorial
+    /// D's `IS { name POSSREP … }`, whose braces hold the supertype and the
+    /// possible representation together, with help, since its
+    /// representation is written another way too: whether it was, so
+    /// that the missing braces after it aren't reported again.
+    fn supertype(&mut self) -> bool {
+        self.start_node(SyntaxKind::Supertype);
+        let word = self.found().expect("at the supertype");
+        self.bump();
+        if !word.text.eq_ignore_ascii_case("is") {
+            let spaced = self.source[..word.span.start].ends_with(char::is_whitespace);
+            self.errors.push(errors::supertype_spelling(word, spaced));
+        } else if word.text != "is" {
+            self.errors.push(errors::miscased_keyword(word, "is"));
+        }
+        let braced = self.found().filter(|f| f.kind == SyntaxKind::LBrace);
+        if let Some(open) = braced {
+            let close = self.skip_braced();
+            self.errors.push(errors::braced_supertype(open.span, close));
+        } else {
+            self.start_node(SyntaxKind::TypeRef);
+            self.bump();
+            self.builder.finish_node();
+        }
+        self.builder.finish_node();
+        braced.is_some()
+    }
+
+    /// Consume the `{` next and everything up to its `}`, which other
+    /// braces may nest in: where that ends, if it is there.
+    fn skip_braced(&mut self) -> Option<usize> {
+        let mut depth = 0usize;
+        while let Some(found) = self.found() {
+            self.bump();
+            match found.kind {
+                SyntaxKind::LBrace => depth += 1,
+                SyntaxKind::RBrace => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(found.span.end);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// `type name { { name: type, … }, constraint …, order [asc …] };`, or
+    /// `type name union;`, with `is name` after the name for a subtype: a
     /// scalar type of the program's own, its possible representation,
     /// whose components are in braces of their own, its constraints, and
     /// its order, if it has one, in any order. Components written without
@@ -324,6 +410,11 @@ impl<'a> Parser<'a> {
             "add the type's name after `type`, as in `type celsius { { degrees: approximate } };`",
             &[SyntaxKind::LBrace],
         );
+        // `union`: a union type, whose values are its subtypes', which has
+        // no braces.
+        let union = self.union_word();
+        // `is name`: the union type it is a subtype of.
+        let tutorial_d = self.supertype_at(0) && self.supertype();
         // Tutorial D's `ORDERED` or `ORDINAL`, after the name.
         if self.ordered_at(0) {
             self.ordered_word();
@@ -390,7 +481,7 @@ impl<'a> Parser<'a> {
             };
             self.errors
                 .push(errors::bare_representation(open.span, close, possrep));
-        } else {
+        } else if !union && !tutorial_d {
             self.missing(SyntaxKind::LBrace);
         }
         self.expect(SyntaxKind::Semicolon);
@@ -6845,6 +6936,87 @@ SourceFile
         );
         // A heading's name as a relation value: the empty relation.
         assert_eq!(fix("var r := relation home;"), "var r := relation home {};");
+    }
+
+    #[test]
+    fn union_types_and_subtypes() {
+        let parse = parse_str(
+            "type figure union;
+type shape union is figure;
+type disc is shape { { r: approximate } };",
+        );
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let types: Vec<_> = parse.tree.types().collect();
+        let summary: Vec<(bool, Option<String>, bool)> = types
+            .iter()
+            .map(|t| {
+                (
+                    t.union_keyword().is_some(),
+                    t.supertype()
+                        .and_then(|s| s.type_ref())
+                        .and_then(|r| r.ident())
+                        .map(|i| i.text().to_string()),
+                    t.body().is_some(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (true, None, false),
+                (true, Some("figure".to_string()), false),
+                (false, Some("shape".to_string()), true),
+            ]
+        );
+        // Other languages' base types, and the words in another case,
+        // fixed.
+        for (source, fixed, code) in [
+            (
+                "type disc extends figure { { r: approximate } };",
+                "type disc is figure { { r: approximate } };",
+                Code::SupertypeSpelling,
+            ),
+            (
+                "type disc: figure { { r: approximate } };",
+                "type disc is figure { { r: approximate } };",
+                Code::SupertypeSpelling,
+            ),
+            (
+                "type disc : figure { { r: approximate } };",
+                "type disc is figure { { r: approximate } };",
+                Code::SupertypeSpelling,
+            ),
+            (
+                "type disc IS figure { { r: approximate } };",
+                "type disc is figure { { r: approximate } };",
+                Code::MiscasedKeyword,
+            ),
+            (
+                "type figure UNION;",
+                "type figure union;",
+                Code::MiscasedKeyword,
+            ),
+        ] {
+            let parse = parse_str(source);
+            let codes: Vec<Code> = parse.errors.iter().map(|e| e.code).collect();
+            assert_eq!(codes, [code], "{source}");
+            assert_eq!(fix(source), fixed, "{source}");
+            assert_eq!(parse.tree.types().count(), 1, "{source}");
+        }
+        // Tutorial D's braces around the supertype and the possible
+        // representation: one error, with help.
+        let source = "type disc is { figure possrep { r: approximate } };";
+        let parse = parse_str(source);
+        let codes: Vec<Code> = parse.errors.iter().map(|e| e.code).collect();
+        assert_eq!(codes, [Code::SupertypeSpelling], "{:#?}", parse.errors);
+        assert!(parse.errors[0].suggestions.is_empty());
+        // A type that isn't a union needs its braces.
+        let codes: Vec<Code> = parse_str("type disc is figure;")
+            .errors
+            .iter()
+            .map(|e| e.code)
+            .collect();
+        assert_eq!(codes, [Code::MissingToken]);
     }
 
     #[test]

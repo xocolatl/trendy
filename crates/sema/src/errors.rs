@@ -567,15 +567,187 @@ pub(crate) fn cyclic_types(cycle: &[crate::named_types::Cycled]) -> Diagnostic {
         .with_help(
             "keep a hierarchy as a relation of pairs instead, each with one it contains, as in `heading assembly := { major: text, minor: text };`",
         );
+    let d = if cycle.iter().any(|c| c.subtype) {
+        d.with_note("a union type contains each of its subtypes, whose values are among its own")
+    } else {
+        d
+    };
     cycle.iter().enumerate().fold(d, |d, (i, cycled)| {
         let next = &cycle[(i + 1) % cycle.len()];
-        let label = if next.name == cycled.name {
+        let label = if cycled.subtype {
+            format!(
+                "`{}` is one of `{}`'s subtypes here",
+                next.name, cycled.name
+            )
+        } else if next.name == cycled.name {
             format!("`{}` contains itself here", cycled.name)
         } else {
             format!("`{}` contains `{}` here", cycled.name, next.name)
         };
         d.with_secondary(cycled.via, label)
     })
+}
+
+/// What a union type is, for its errors.
+const UNION_NOTE: &str = "a union type, as in `type plane_figure union;`, has no values of its own: each of its values is one of its subtypes', each declared `is` it, with possible representations of its own, as in `type ellipse is plane_figure { { a: distance, b: distance } };` (*Type Inheritance and Relational Theory*, chapter 12)";
+
+/// The union types in `cycle`, each a subtype of the next, and the last of
+/// the first.
+pub(crate) fn cyclic_supertypes(cycle: &[crate::named_types::Cycled]) -> Diagnostic {
+    let first = &cycle[0];
+    let names: Vec<String> = cycle.iter().map(|c| format!("`{}`", c.name)).collect();
+    let message = match names.as_slice() {
+        [_] => format!("the union type `{}` is a subtype of itself", first.name),
+        _ => format!(
+            "the union types {} are subtypes of each other",
+            trendy_diag::conjoin(&names)
+        ),
+    };
+    let d = Diagnostic::error(Code::CyclicTypes, message, first.declared, "declared here")
+        .with_note("a union type's values are its subtypes', so one that is a subtype of itself, directly or through others, would be among its own values")
+        .with_help("make one of them a subtype of none, without `is`");
+    cycle.iter().enumerate().fold(d, |d, (i, cycled)| {
+        let next = &cycle[(i + 1) % cycle.len()];
+        d.with_secondary(
+            cycled.via,
+            format!("`{}` is a subtype of `{}` here", cycled.name, next.name),
+        )
+    })
+}
+
+/// A selection of the dummy type `dummy`, named at `span`, which has no
+/// selector, with arguments named `named`, if each has a name. The fix
+/// selects a value of the one subtype with a possible representation of
+/// those components, if one has.
+pub(crate) fn dummy_selected(
+    dummy: &hir::Dummy,
+    span: Span,
+    namespaces: &Namespaces,
+    named: Option<&BTreeSet<String>>,
+) -> Diagnostic {
+    // The types with representations under it, in the order declared.
+    fn leaves<'n>(name: &str, namespaces: &'n Namespaces, out: &mut Vec<&'n hir::Defined>) {
+        for subtype in namespaces.subtypes(name) {
+            match subtype {
+                hir::Type::Defined(defined) => out.push(defined),
+                hir::Type::Dummy(dummy) => leaves(&dummy.name, namespaces, out),
+                _ => {}
+            }
+        }
+    }
+    let mut selectable = Vec::new();
+    leaves(&dummy.name, namespaces, &mut selectable);
+    let d = Diagnostic::error(
+        Code::DummySelected,
+        format!("the union type `{}` has no selector", dummy.name),
+        span,
+        "a union type with no possible representation of its own",
+    )
+    .with_note("a union type with no possible representation of its own, a dummy type, has no selector: each of its values is selected by one of its subtypes' selectors (*Type Inheritance and Relational Theory*, chapter 12)");
+    let fitting: Vec<&&hir::Defined> = named.map_or_else(Vec::new, |named| {
+        selectable
+            .iter()
+            .filter(|defined| {
+                defined.possible_representations().any(|components| {
+                    components
+                        .attributes()
+                        .map(|(name, _)| name)
+                        .eq(named.iter().map(String::as_str))
+                })
+            })
+            .collect()
+    });
+    if let [only] = fitting.as_slice() {
+        return d.with_suggestion(
+            format!("select a `{0}`: `{0}{{…}}`", only.name),
+            vec![Edit {
+                span,
+                replacement: only.name.clone(),
+            }],
+        );
+    }
+    let selectors: Vec<String> = selectable
+        .iter()
+        .map(|defined| format!("`{}{{…}}`", defined.name))
+        .collect();
+    if selectors.is_empty() {
+        return d;
+    }
+    d.with_help(format!(
+        "select a value of one of its subtypes, with {}",
+        trendy_diag::disjoin(&selectors)
+    ))
+}
+
+/// The union type `name` declared with braces, `body`: a representation,
+/// constraints or an order, which a union type has none of.
+pub(crate) fn union_with_body(name: &str, body: &ast::TypeBody) -> Diagnostic {
+    Diagnostic::error(
+        Code::UnionType,
+        format!("the union type `{name}` has no possible representation of its own"),
+        trendy_syntax::span(body.syntax().text_range()),
+        "a union type's values are its subtypes'",
+    )
+    .with_note(UNION_NOTE)
+    .with_note("a union type with a possible representation of its own, whose subtypes its constraints specialize, isn't in trendy yet")
+    .with_help(format!(
+        "give each subtype of `{name}` its possible representations, or remove `union` to make `{name}` a type with them, and no subtypes"
+    ))
+}
+
+/// A type declared `is` the type `ident` names, which isn't a union type:
+/// a type of the program's own, declared at `declared`, or, if `None`, a
+/// built-in one.
+pub(crate) fn not_a_union(ident: &SyntaxToken, declared: Option<Span>) -> Diagnostic {
+    let name = ident.text();
+    let d = Diagnostic::error(
+        Code::UnionType,
+        format!("`{name}` isn't a union type, so no type is a subtype of it"),
+        trendy_syntax::span(ident.text_range()),
+        "not a union type",
+    )
+    .with_note(UNION_NOTE)
+    .with_note("only union types have subtypes: a subtype of a type with possible representations, specialized by a constraint, as a circle is an ellipse whose semiaxes are equal, isn't in trendy yet");
+    match declared {
+        Some(declared) => d
+            .with_secondary(declared, "declared without `union` here")
+            .with_help(format!(
+                "declare `{name}` `union`, without representations, if each of its values is one of its subtypes', or remove `is {name}`"
+            )),
+        None => d.with_help(format!(
+            "a built-in type has no subtypes: remove `is {name}`"
+        )),
+    }
+}
+
+/// The union type `ident` declares, whose only subtypes are `subtypes`,
+/// fewer than two, each with where it names the union type.
+pub(crate) fn lone_subtype(ident: &SyntaxToken, subtypes: &[(String, Span)]) -> Diagnostic {
+    let name = ident.text();
+    let message = match subtypes {
+        [] => format!("the union type `{name}` has no subtypes"),
+        [(only, _)] => format!("the union type `{name}` has only one subtype, `{only}`"),
+        _ => unreachable!("fewer than two subtypes"),
+    };
+    let d = Diagnostic::error(
+        Code::UnionType,
+        message,
+        trendy_syntax::span(ident.text_range()),
+        "declared here",
+    )
+    .with_note(UNION_NOTE)
+    .with_note("a union type with one subtype would have the same values as it, and with none it would have no values, so it has two subtypes at least (*Type Inheritance and Relational Theory*, exercise 12.4)");
+    let d = subtypes.iter().fold(d, |d, (subtype, at)| {
+        d.with_secondary(*at, format!("`{subtype}` is its only subtype"))
+    });
+    match subtypes {
+        [(only, _)] => d.with_help(format!(
+            "declare its other subtypes, as in `type … is {name} {{ … }};`, or write `{only}` where `{name}` is written"
+        )),
+        _ => d.with_help(format!(
+            "declare its subtypes, as in `type … is {name} {{ … }};`"
+        )),
+    }
 }
 
 /// A value written as `expr`, of type `found`, where `declared` is expected
@@ -3405,6 +3577,10 @@ pub(crate) fn not_extractable(name: &str, at: Span, ty: &hir::Type, operand: &Ex
             .with_help(format!(
                 "to keep only the attribute, project on it: `r{{{name}}}`"
             )),
+        hir::Type::Dummy(dummy) => d.with_note(format!(
+            "`{}` is a union type, with no components of its own: its values are its subtypes', each with the components of its own type",
+            dummy.name
+        )),
         _ => d.with_note("`t.name` is the value of the attribute `name` of the tuple `t`, or of the component `name` of `t`, a value of a type of the program's own"),
     }
 }
@@ -5423,6 +5599,7 @@ fn plural(ty: &hir::Type) -> String {
         hir::Type::Scalar(hir::Scalar::Approximate) => "approximate numbers".to_string(),
         hir::Type::Scalar(hir::Scalar::Text) => "text".to_string(),
         hir::Type::Defined(defined) => format!("values of `{}`", defined.name),
+        hir::Type::Dummy(dummy) => format!("values of `{}`", dummy.name),
         hir::Type::Tuple(_) => "tuples".to_string(),
         hir::Type::Relation(_) => "relations".to_string(),
         hir::Type::Array(_) => "arrays".to_string(),
@@ -5439,6 +5616,10 @@ fn operand_rule(op: crate::ops::Operator, token: &str, ty: &hir::Type) -> String
         (Operator::Compare(_), hir::Type::Array(_)) => {
             "arrays can only be compared with `=` and `<>`: they are equal if they have equal elements at each position".to_string()
         }
+        (Operator::Compare(_), hir::Type::Dummy(dummy)) => format!(
+            "`{}` is a union type, which has no order: its values, of its subtypes' types, can only be compared with `=` and `<>`",
+            dummy.name
+        ),
         (Operator::Compare(_), hir::Type::Tuple(_)) => {
             "tuples have no order: they can only be compared with `=` and `<>`; relations can also be compared as sets, with `<=` and `<` for subset and proper subset".to_string()
         }

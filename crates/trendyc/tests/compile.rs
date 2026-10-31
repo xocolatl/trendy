@@ -896,6 +896,109 @@ fn csv_files_load_values_of_a_programs_own_types() {
     );
 }
 
+/// A union type and its subtypes, as tests declare them.
+const FIGURES: &str = "type plane_figure union;
+type ellipse is plane_figure {
+    { a: approximate, b: approximate },
+    constraint a >= b,
+    order [asc a, asc b],
+};
+type polygon is plane_figure { { corners: relation { n: integer, name: text } } };
+";
+
+#[test]
+fn types_in_a_hierarchy_when_running() {
+    // Each value is laid out after its own type, which it is written as,
+    // compared by, and ordered by in a relation, by its components; and
+    // its components are read and changed, all when running.
+    let source = format!(
+        "{FIGURES}
+operator shapes{{a: approximate, name: text}} [
+    var e := ellipse{{a: a, b: 1e0}};
+    call debug_value{{v: e}};
+    call debug_value{{v: e.a}};
+    call debug_value{{v: e = ellipse{{a: 3e0, b: 1e0}}}};
+    call debug_value{{v: e < ellipse{{a: 3e0, b: 2e0}}}};
+    var p := polygon{{corners: relation {{ {{ n: 1, name: name }} }}}};
+    call debug_value{{v: p}};
+    call debug_value{{v: relation {{ {{ e: e }}, {{ e: ellipse{{a: 2e0, b: 2e0}} }} }}}};
+    update e {{ b := 2e0 }};
+    call debug_value{{v: e}};
+    var broken := ellipse{{a: 1e0, b: a}};
+];
+
+operator main{{}} [
+    call shapes{{a: 3e0, name: \"east\"}};
+];
+"
+    );
+    let (code, stderr) = run_source("hierarchy", &source);
+    let broken = trendy_diag::Code::BrokenConstraint.id();
+    assert_eq!(
+        (code, stderr),
+        (
+            1,
+            format!(
+                "ellipse{{a: 3e0, b: 1e0}}
+3e0
+true
+true
+polygon{{corners: relation {{ n: integer, name: text }} {{ {{ n: 1, name: \"east\" }} }}}}
+relation {{ e: ellipse }} {{ {{ e: ellipse{{a: 2e0, b: 2e0}} }}, {{ e: ellipse{{a: 3e0, b: 1e0}} }} }}
+ellipse{{a: 3e0, b: 2e0}}
+error[{broken}]: ellipse{{a: 1e0, b: 3e0}} isn't a value of `ellipse`: it breaks the constraint `a >= b`
+{}",
+                site("hierarchy", 20)
+            )
+        )
+    );
+}
+
+#[test]
+fn csv_files_load_values_of_types_in_a_hierarchy() {
+    // A subtype's value is read as any type's, and laid out after its own
+    // type.
+    let types = "type plane_figure union;
+type ellipse is plane_figure { { a: approximate, b: approximate }, constraint a >= b };
+type polygon is plane_figure { { corners: integer } };
+";
+    let heading = "{ name: text, lake: ellipse }";
+    let columns = "tuple { name: 1, lake: tuple { a: 2, b: 3 } }";
+    let header = "name,a,b\n";
+    assert_eq!(
+        loaded_rows(
+            "lakes",
+            types,
+            heading,
+            &format!("{header}Victoria,3,2\nTiticaca,5,1\n"),
+            columns
+        ),
+        (
+            0,
+            r#"array [tuple { lake: ellipse{a: 3e0, b: 2e0}, name: "Victoria" }, tuple { lake: ellipse{a: 5e0, b: 1e0}, name: "Titicaca" }]"#
+                .to_string()
+                + "\n"
+        )
+    );
+    let broken = trendy_diag::Code::BrokenConstraint.id();
+    let site = site("csv_lakes_broken", 8);
+    assert_eq!(
+        loaded_rows(
+            "lakes_broken",
+            types,
+            heading,
+            &format!("{header}Victoria,1,2\n"),
+            columns
+        ),
+        (
+            1,
+            format!(
+                "error[{broken}]: line 2 of \"PATH\" gives `lake` ellipse{{a: 1e0, b: 2e0}}, which isn't a value of `ellipse`: it breaks the constraint `a >= b`\n{site}"
+            )
+        )
+    );
+}
+
 #[test]
 fn csv_files_load_values_in_another_representation() {
     // A point by its polar coordinates, its distance from the origin in

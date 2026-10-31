@@ -10,7 +10,7 @@ use trendy_lir as lir;
 /// Translate HIR to LIR. Infallible: sema has already rejected bad programs.
 #[must_use]
 pub fn lower(program: &hir::Program, path: &str) -> lir::Program {
-    let mut cx = Lowering::new(path);
+    let mut cx = Lowering::new(path, &program.unions);
 
     let mut variable_data = Vec::new();
     for variable in &program.variables {
@@ -84,7 +84,7 @@ fn function(
         hir::OperatorKind::Update { locals, body } => {
             builder.declare(locals, cx);
             builder.block(&body, cx);
-            (builder.finish(None), false)
+            (builder.finish(None, cx), false)
         }
         hir::OperatorKind::ReadOnly {
             result,
@@ -96,10 +96,11 @@ fn function(
             builder.insts.push(lir::Inst::Copy {
                 dst: lir::Place::whole(lir::Base::Result),
                 src,
-                layout: layout(&result),
+                layout: cx.layout(&result),
             });
             let makes = builder.scoped;
-            (builder.finish(Some(layout(&result))), makes)
+            let layout = cx.layout(&result);
+            (builder.finish(Some(layout), cx), makes)
         }
         hir::OperatorKind::Builtin(_) => unreachable!("built-ins are runtime calls"),
     };
@@ -145,6 +146,8 @@ fn type_text(ty: &hir::Type) -> String {
 
 /// The program-wide part of lowering: the data objects, and the functions.
 struct Lowering {
+    /// How values are laid out.
+    families: Families,
     data: Vec<lir::Data>,
     /// Each type's descriptor, built once.
     descriptors: HashMap<hir::Type, lir::DataId>,
@@ -165,9 +168,11 @@ struct Lowering {
 }
 
 impl Lowering {
-    /// For the program whose source is at `path`.
-    fn new(path: &str) -> Self {
+    /// For the program whose source is at `path`, with the union types
+    /// `unions`.
+    fn new(path: &str, unions: &BTreeMap<String, Vec<hir::Type>>) -> Self {
         Lowering {
+            families: Families::new(unions),
             data: Vec::new(),
             descriptors: HashMap::new(),
             empty: None,
@@ -177,6 +182,17 @@ impl Lowering {
             sites: HashMap::new(),
             paths: HashMap::new(),
         }
+    }
+
+    /// The layout of a value of type `ty`.
+    fn layout(&self, ty: &hir::Type) -> lir::Layout {
+        self.families.layout(ty)
+    }
+
+    /// Whether a value of type `ty` points to memory (see
+    /// [`Families::points`]).
+    fn points(&self, ty: &hir::Type) -> bool {
+        self.families.points(ty)
     }
 
     /// The data object of `site`, laid out as `trendy_runtime::Site`: the
@@ -240,9 +256,24 @@ impl Lowering {
                 let bytes = self.buffer(lir::Field::Bytes(text.as_bytes().to_vec()));
                 lir::Field::Struct(vec![bytes, lir::Field::Usize(len(text.len()))])
             }
+            // A value of a type in a hierarchy: its own type's descriptor's
+            // address, then its components, in its type's variant of the
+            // room for them.
+            hir::Value::Defined(value) if !value.ty.supertypes.is_empty() => {
+                let own = self.components_descriptor(&value.ty);
+                let room = self.layout(&hir::Type::Defined(value.ty.clone()));
+                let lir::Layout::Struct(fields) = room else {
+                    unreachable!("a value in a hierarchy is laid out as a struct");
+                };
+                let components = self.value_field(&hir::Value::Tuple(value.components.clone()));
+                lir::Field::Struct(vec![
+                    lir::Field::Address(own),
+                    lir::Field::Variant(fields[1].clone(), Box::new(components)),
+                ])
+            }
             // Attributes come in name order, the heading's order, and a
-            // value of a type of the program's own is laid out as its
-            // components.
+            // value of any other type of the program's own is laid out as
+            // its components.
             hir::Value::Tuple(tuple)
             | hir::Value::Defined(hir::DefinedValue {
                 components: tuple, ..
@@ -277,6 +308,9 @@ impl Lowering {
         if let Some(&id) = self.descriptors.get(ty) {
             return id;
         }
+        if ty.root().is_some() {
+            return self.hierarchy_descriptor(ty);
+        }
         let (kind, heading, element) = match ty {
             hir::Type::Scalar(hir::Scalar::Boolean) => (KIND_BOOLEAN, None, None),
             hir::Type::Defined(defined) => (KIND_DEFINED, Some(&defined.components), None),
@@ -290,6 +324,7 @@ impl Lowering {
                 Some(hir::Type::Tuple(heading.clone())),
             ),
             hir::Type::Array(element) => (KIND_ARRAY, None, Some((**element).clone())),
+            hir::Type::Dummy(_) => unreachable!("a dummy type is in a hierarchy"),
             hir::Type::Parameter(_) => unreachable!("functions are of instantiated operators"),
         };
         let (attributes, count) = match heading {
@@ -313,7 +348,7 @@ impl Lowering {
         };
         let id = self.constant(vec![
             lir::Field::U8(kind),
-            lir::Field::Size(layout(ty)),
+            lir::Field::Size(self.layout(ty)),
             lir::Field::Address(attributes),
             lir::Field::Usize(len(count)),
             element,
@@ -324,11 +359,52 @@ impl Lowering {
         id
     }
 
+    /// The descriptor of `ty`, a type in a hierarchy, whose values are each
+    /// the address of its own type's descriptor (see
+    /// [`Lowering::components_descriptor`]) and then its components: a
+    /// `KIND_UNION` one, with one attribute, with no name or type, at where
+    /// the components are.
+    fn hierarchy_descriptor(&mut self, ty: &hir::Type) -> lir::DataId {
+        let layout = self.layout(ty);
+        let empty = self.empty();
+        let components = self.constant(vec![lir::Field::Struct(vec![
+            lir::Field::Address(empty),
+            lir::Field::Usize(0),
+            lir::Field::Offset(layout.clone(), vec![1]),
+            lir::Field::Usize(0),
+        ])]);
+        let name = ty.to_string();
+        let name_bytes = self.constant(vec![lir::Field::Bytes(name.as_bytes().to_vec())]);
+        let id = self.constant(vec![
+            lir::Field::U8(KIND_UNION),
+            lir::Field::Size(layout),
+            lir::Field::Address(components),
+            lir::Field::Usize(1),
+            lir::Field::Usize(0),
+            lir::Field::Address(name_bytes),
+            lir::Field::Usize(len(name.len())),
+        ]);
+        self.descriptors.insert(ty.clone(), id);
+        id
+    }
+
+    /// The descriptor of the components of a value of `defined`, as its
+    /// selector writes them: a `KIND_DEFINED` one, as of a value of the
+    /// type outside a hierarchy, which is laid out as its components. In a
+    /// hierarchy, a value starts with this one's address, as its own type.
+    fn components_descriptor(&mut self, defined: &hir::Defined) -> lir::DataId {
+        let alone = hir::Defined {
+            supertypes: Vec::new(),
+            ..defined.clone()
+        };
+        self.descriptor(&hir::Type::Defined(Box::new(alone)))
+    }
+
     /// A heading's attributes, laid out as an array of `trendy_runtime::Attr`:
     /// `{ name: *u8, name_len, offset, desc: *TypeDesc }`, in name order. A
     /// wrapped attribute, which the source can't name, has none.
     fn attributes(&mut self, heading: &hir::Heading) -> lir::DataId {
-        let tuple = layout(&hir::Type::Tuple(heading.clone()));
+        let tuple = self.layout(&hir::Type::Tuple(heading.clone()));
         let entries = heading
             .attributes()
             .enumerate()
@@ -366,6 +442,7 @@ const KIND_TUPLE: u8 = 4;
 const KIND_RELATION: u8 = 5;
 const KIND_ARRAY: u8 = 6;
 const KIND_DEFINED: u8 = 7;
+const KIND_UNION: u8 = 8;
 
 /// The part of lowering for one function.
 struct FunctionBuilder<'a> {
@@ -523,9 +600,9 @@ impl<'a> FunctionBuilder<'a> {
     /// no references to give up.
     fn declare(&mut self, locals: Vec<hir::Local>, cx: &mut Lowering) {
         for local in locals {
-            let layout = layout(&local.ty);
+            let layout = cx.layout(&local.ty);
             let value = self.slot(layout.clone());
-            let holds = points(&local.ty);
+            let holds = cx.points(&local.ty);
             if holds {
                 self.insts.push(lir::Inst::Copy {
                     dst: value.clone(),
@@ -615,7 +692,7 @@ impl<'a> FunctionBuilder<'a> {
 
     /// The function, its last block ended with a return, with a result
     /// laid out as `result`, if it has one.
-    fn finish(mut self, result: Option<lir::Layout>) -> lir::Function {
+    fn finish(mut self, result: Option<lir::Layout>, cx: &Lowering) -> lir::Function {
         self.end_block(lir::Terminator::Return, lir::BlockId(0));
         if let Some(entered) = self.entered.take() {
             let save = lir::Inst::SaveSite { dst: entered };
@@ -623,7 +700,7 @@ impl<'a> FunctionBuilder<'a> {
         }
         lir::Function {
             name: self.name,
-            params: params_layout(&self.params),
+            params: params_layout(&self.params, &cx.families),
             result,
             slots: self.slots,
             blocks: self.blocks,
@@ -719,7 +796,7 @@ impl<'a> FunctionBuilder<'a> {
         let start = self.position();
         let src = self.place(array, cx);
         let makes = std::mem::take(&mut self.scoped);
-        self.each_tuple(&src, layout(&element), cx, |this, at_hand, _, cx| {
+        self.each_tuple(&src, cx.layout(&element), cx, |this, at_hand, _, cx| {
             this.local_places[variable.0] = Some(LocalPlace {
                 value: at_hand,
                 holds: false,
@@ -914,7 +991,7 @@ impl<'a> FunctionBuilder<'a> {
                 // argument points to, though it can replace the value of
                 // the only variable holding it.
                 for (i, hir::Parameter { ty, mode }) in params.values().enumerate() {
-                    if *mode == hir::Mode::Const && points(ty) {
+                    if *mode == hir::Mode::Const && cx.points(ty) {
                         let mut arg = args.clone().expect("a parameter has a slot");
                         arg.path.push(i);
                         let descriptor = cx.descriptor(ty);
@@ -935,7 +1012,7 @@ impl<'a> FunctionBuilder<'a> {
                 // Each variable it updates is assigned its parameter's
                 // value as it ends, which its keys are checked against.
                 for target in call.updated.values() {
-                    let holder = self.holder(target);
+                    let holder = self.holder(target, cx);
                     self.check_keys(target, &holder, cx);
                 }
             }
@@ -960,7 +1037,7 @@ impl<'a> FunctionBuilder<'a> {
     ) -> (lir::Place, lir::Place) {
         let path = self.place(&call.args["path"], cx);
         let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(ty)));
-        let array = self.slot(layout(ty));
+        let array = self.slot(cx.layout(ty));
         let args = [array.clone(), path.clone()]
             .into_iter()
             .chain(given)
@@ -1001,24 +1078,29 @@ impl<'a> FunctionBuilder<'a> {
         } else {
             records.clone()
         };
-        self.each_tuple(records, layout(read_record), cx, |this, read, index, cx| {
-            let row = if converts {
-                this.element(&rows, index, layout(record))
-            } else {
-                read.clone()
-            };
-            let at = Record {
-                file,
-                index: index.clone(),
-            };
-            let value = Reading {
-                dst: row,
-                src: read,
-                name: String::new(),
-                at: &at,
-            };
-            this.record_value(&value, record, read_record, cx);
-        });
+        self.each_tuple(
+            records,
+            cx.layout(read_record),
+            cx,
+            |this, read, index, cx| {
+                let row = if converts {
+                    this.element(&rows, index, cx.layout(record))
+                } else {
+                    read.clone()
+                };
+                let at = Record {
+                    file,
+                    index: index.clone(),
+                };
+                let value = Reading {
+                    dst: row,
+                    src: read,
+                    name: String::new(),
+                    at: &at,
+                };
+                this.record_value(&value, record, read_record, cx);
+            },
+        );
         if converts {
             self.adopt(&rows, ty, cx);
         }
@@ -1045,7 +1127,7 @@ impl<'a> FunctionBuilder<'a> {
                 self.insts.push(lir::Inst::Copy {
                     dst: value.dst.clone(),
                     src: value.src.clone(),
-                    layout: layout(ty),
+                    layout: cx.layout(ty),
                 });
             }
             self.value_checked(&value.dst, ty, &value.name, value.at, cx);
@@ -1062,25 +1144,63 @@ impl<'a> FunctionBuilder<'a> {
             hir::Type::Defined(defined) => defined,
             _ => unreachable!("only tuples and types' values are read as tuples"),
         };
+        // Where its stored components go: where it goes, or, in a
+        // hierarchy, a place of their own, which it is then made of.
+        let in_hierarchy = ty.root().is_some();
+        let target = if in_hierarchy {
+            let stored = hir::Type::Tuple(defined.components.clone());
+            Reading {
+                dst: self.slot(cx.layout(&stored)),
+                ..value.clone()
+            }
+        } else {
+            value.clone()
+        };
         let first = fields.named().next().map(|(c, _)| c);
         match first.and_then(|c| defined.representation(c)) {
-            Some((own, None)) => self.attributes_read(value, own, fields, cx),
+            Some((own, None)) => self.attributes_read(&target, own, fields, cx),
             Some((own, Some(other))) => {
                 let components = Reading {
-                    dst: self.slot(layout(&hir::Type::Tuple(own.clone()))),
+                    dst: self.slot(cx.layout(&hir::Type::Tuple(own.clone()))),
                     ..value.clone()
                 };
                 self.attributes_read(&components, own, fields, cx);
                 let stored = self.converted(other.to, own, components.dst, cx);
                 self.insts.push(lir::Inst::Copy {
-                    dst: value.dst.clone(),
+                    dst: target.dst.clone(),
                     src: stored,
-                    layout: layout(ty),
+                    layout: cx.layout(&hir::Type::Tuple(defined.components.clone())),
                 });
             }
             None => unreachable!("a type's value is read in one of its representations"),
         }
-        self.constraints_checked(defined, &value.dst, &value.name, value.at, cx);
+        self.constraints_checked(defined, &target.dst, &value.name, value.at, cx);
+        if in_hierarchy {
+            self.made_in_hierarchy(defined, target.dst, value.dst.clone(), cx);
+        }
+    }
+
+    /// The value at `dst` of `defined`, a type in a hierarchy, made of the
+    /// components at `components`: its own type's descriptor's address,
+    /// then them.
+    fn made_in_hierarchy(
+        &mut self,
+        defined: &hir::Defined,
+        components: lir::Place,
+        dst: lir::Place,
+        cx: &mut Lowering,
+    ) {
+        let own = lir::Place::whole(lir::Base::Data(cx.components_descriptor(defined)));
+        let mut tag = dst.clone();
+        tag.path.push(0);
+        self.insts.push(lir::Inst::Address { dst: tag, src: own });
+        let mut at = dst;
+        at.path.extend(cx.families.components_path(defined));
+        self.insts.push(lir::Inst::Copy {
+            dst: at,
+            src: components,
+            layout: cx.layout(&hir::Type::Tuple(defined.components.clone())),
+        });
     }
 
     /// The tuple the conversion `operator`, of a type of the program's own,
@@ -1175,8 +1295,7 @@ impl<'a> FunctionBuilder<'a> {
             return;
         }
         let line = self.element(&at.file.lines, &at.index, lir::Layout::Usize);
-        let ty = hir::Type::Defined(Box::new(defined.clone()));
-        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.components_descriptor(defined)));
         let attribute = self.text(name, cx);
         self.constrained(
             defined,
@@ -1215,7 +1334,7 @@ impl<'a> FunctionBuilder<'a> {
         call: &hir::Call,
         cx: &mut Lowering,
     ) -> Option<lir::Place> {
-        let slot = self.slot(params_layout(params)?);
+        let slot = self.slot(params_layout(params, &cx.families)?);
         for (i, (name, param)) in params.iter().enumerate() {
             let mut dst = slot.clone();
             dst.path.push(i);
@@ -1225,11 +1344,11 @@ impl<'a> FunctionBuilder<'a> {
                     self.insts.push(lir::Inst::Copy {
                         dst,
                         src,
-                        layout: layout(&param.ty),
+                        layout: cx.layout(&param.ty),
                     });
                 }
                 hir::Mode::Var | hir::Mode::Out => {
-                    let src = self.holder(&call.updated[name]);
+                    let src = self.holder(&call.updated[name], cx);
                     self.insts.push(lir::Inst::Address { dst, src });
                 }
             }
@@ -1259,7 +1378,7 @@ impl<'a> FunctionBuilder<'a> {
         );
         self.scoped |= makes;
         let args = self.arguments(&params_of(callee, &call.types), call, cx);
-        let dst = self.slot(layout(&self.program.result(call)));
+        let dst = self.slot(cx.layout(&self.program.result(call)));
         self.insts.push(lir::Inst::Call {
             function,
             args,
@@ -1377,7 +1496,7 @@ impl<'a> FunctionBuilder<'a> {
         cx: &mut Lowering,
     ) -> lir::Place {
         let text = self.place(&call.args["from"], cx);
-        let dst = self.slot(layout(&self.program.result(call)));
+        let dst = self.slot(cx.layout(&self.program.result(call)));
         self.insts.push(lir::Inst::CallRuntime {
             function,
             args: vec![dst.clone(), text],
@@ -1404,7 +1523,7 @@ impl<'a> FunctionBuilder<'a> {
         let index = attribute_names(&ty)
             .position(|a| a == "of")
             .expect("`of` is an attribute");
-        let dst = self.slot(layout(of));
+        let dst = self.slot(cx.layout(of));
         let src = self.place(r, cx);
         let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
         let index = usize_constant(len(index), cx);
@@ -1435,8 +1554,8 @@ impl<'a> FunctionBuilder<'a> {
         let of = attribute_names(&ty)
             .position(|a| a == "of")
             .expect("`of` is an attribute");
-        let tuple = layout(&hir::Type::Tuple(heading.clone()));
-        let value = layout(&of_ty);
+        let tuple = cx.layout(&hir::Type::Tuple(heading.clone()));
+        let value = cx.layout(&of_ty);
         let src = self.place(r, cx);
         let mut count = src.clone();
         count.path.push(1);
@@ -1512,7 +1631,7 @@ impl<'a> FunctionBuilder<'a> {
                 continue;
             }
             let value = self.place(&assignment.value, cx);
-            let ty = layout(self.assigned(&assignment.target).0);
+            let ty = cx.layout(self.assigned(&assignment.target).0);
             let slot = self.slot(ty.clone());
             self.insts.push(lir::Inst::Copy {
                 dst: slot.clone(),
@@ -1535,7 +1654,7 @@ impl<'a> FunctionBuilder<'a> {
         }
         for (target, computed) in changed {
             let ty = self.assigned(&target).0.clone();
-            let holder = self.holder(&target);
+            let holder = self.holder(&target, cx);
             for change in computed {
                 self.changed_at(holder.clone(), &ty, change, cx);
             }
@@ -1602,7 +1721,7 @@ impl<'a> FunctionBuilder<'a> {
 
     /// Where the variable `target`'s value is, of the program or local, or
     /// a `var` or `out` parameter's variable.
-    fn holder(&self, target: &hir::Target) -> lir::Place {
+    fn holder(&self, target: &hir::Target, cx: &Lowering) -> lir::Place {
         match target {
             hir::Target::Variable(id) => lir::Place {
                 base: lir::Base::Data(self.variable_data[id.0]),
@@ -1613,15 +1732,15 @@ impl<'a> FunctionBuilder<'a> {
                 .expect("an update operator's local variables are placed first")
                 .value
                 .clone(),
-            hir::Target::Parameter(name) => self.pointee(name),
+            hir::Target::Parameter(name) => self.pointee(name, cx),
         }
     }
 
     /// The variable of the `var` or `out` parameter `name`, through its address.
-    fn pointee(&self, name: &str) -> lir::Place {
+    fn pointee(&self, name: &str, cx: &Lowering) -> lir::Place {
         lir::Place::whole(lir::Base::Indirect {
             slot: self.pointers[name],
-            pointee: layout(&self.params[name].ty),
+            pointee: cx.layout(&self.params[name].ty),
         })
     }
 
@@ -1630,8 +1749,8 @@ impl<'a> FunctionBuilder<'a> {
     /// arrays, with a reference taken to each, which the variable holds.
     fn store(&mut self, target: &hir::Target, value: lir::Place, cx: &mut Lowering) {
         let ty = self.assigned(target).0.clone();
-        let dst = self.holder(target);
-        if points(&ty) {
+        let dst = self.holder(target, cx);
+        if cx.points(&ty) {
             let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
             self.insts.push(lir::Inst::CallRuntime {
                 function: lir::RuntimeFn::Assign,
@@ -1642,7 +1761,7 @@ impl<'a> FunctionBuilder<'a> {
             self.insts.push(lir::Inst::Copy {
                 dst,
                 src: value,
-                layout: layout(&ty),
+                layout: cx.layout(&ty),
             });
         }
     }
@@ -1679,7 +1798,9 @@ impl<'a> FunctionBuilder<'a> {
                 });
                 self.place(body, cx)
             }
-            hir::Expr::Parameter(name) if self.pointers.contains_key(name) => self.pointee(name),
+            hir::Expr::Parameter(name) if self.pointers.contains_key(name) => {
+                self.pointee(name, cx)
+            }
             hir::Expr::Parameter(name) => {
                 let index = self
                     .params
@@ -1707,7 +1828,7 @@ impl<'a> FunctionBuilder<'a> {
             }
             hir::Expr::Tuple(attributes) => {
                 let ty = self.type_of(expr);
-                let dst = self.slot(layout(&ty));
+                let dst = self.slot(cx.layout(&ty));
                 self.fill_tuple(attributes, &dst, cx);
                 dst
             }
@@ -1728,7 +1849,7 @@ impl<'a> FunctionBuilder<'a> {
             // A value of a type of the program's own is laid out as the tuple
             // of its components.
             hir::Expr::Select(defined, operand) => self.selected(defined, operand, cx),
-            hir::Expr::Components(operand) => self.place(operand, cx),
+            hir::Expr::Components(operand) => self.components(operand, cx),
             hir::Expr::Semijoin(lhs, rhs) => self.matching(lhs, rhs, false, cx),
             hir::Expr::Combine(combination, lhs, rhs) => self.combine(*combination, lhs, rhs, cx),
             hir::Expr::Antijoin(lhs, rhs) => self.matching(lhs, rhs, true, cx),
@@ -1766,7 +1887,7 @@ impl<'a> FunctionBuilder<'a> {
         branches: [&hir::Expr; 2],
         cx: &mut Lowering,
     ) -> lir::Place {
-        let value = layout(&self.type_of(expr));
+        let value = cx.layout(&self.type_of(expr));
         let condition = self.place(condition, cx);
         let dst = self.slot(value.clone());
         let (then, otherwise, after) = (self.new_block(), self.new_block(), self.new_block());
@@ -1899,7 +2020,7 @@ impl<'a> FunctionBuilder<'a> {
             self.insts.push(lir::Inst::Copy {
                 dst: to,
                 src,
-                layout: layout(&ty),
+                layout: cx.layout(&ty),
             });
         }
     }
@@ -1914,7 +2035,7 @@ impl<'a> FunctionBuilder<'a> {
         tuples: &[hir::Expr],
         cx: &mut Lowering,
     ) -> lir::Place {
-        let tuple_layout = layout(&hir::Type::Tuple(heading.clone()));
+        let tuple_layout = cx.layout(&hir::Type::Tuple(heading.clone()));
         // A struct of tuples with one layout is an array: each is padded to
         // its alignment, so the stride is the tuple's size.
         let array = self.slot(lir::Layout::Struct(vec![
@@ -1938,7 +2059,7 @@ impl<'a> FunctionBuilder<'a> {
         let count = cx.constant(vec![lir::Field::Usize(tuples.len() as u64)]);
         let ty = hir::Type::Relation(heading.clone());
         let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
-        let dst = self.slot(layout(&ty));
+        let dst = self.slot(cx.layout(&ty));
         self.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::Relation,
             args: vec![
@@ -1965,7 +2086,7 @@ impl<'a> FunctionBuilder<'a> {
         cx: &mut Lowering,
     ) -> lir::Place {
         let ty = hir::Type::Array(Box::new(element.clone()));
-        let element_layout = layout(element);
+        let element_layout = cx.layout(element);
         let count = usize_constant(len(elements.len()), cx);
         let dst = self.allocated(&ty, count, cx);
         for (k, value) in elements.iter().enumerate() {
@@ -1992,7 +2113,7 @@ impl<'a> FunctionBuilder<'a> {
         let src = self.place(array, cx);
         let at = self.place(position, cx);
         let index = self.checked_index(&src, at, cx);
-        self.element(&src, &index, layout(&element))
+        self.element(&src, &index, cx.layout(&element))
     }
 
     /// The index, from 0, a [`lir::Layout::Usize`], of the element of the
@@ -2076,7 +2197,7 @@ impl<'a> FunctionBuilder<'a> {
         if computed.len() > 1 {
             self.keep_values(&ty, &computed, cx);
         }
-        let dst = self.slot(layout(&ty));
+        let dst = self.slot(cx.layout(&ty));
         let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
         self.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::Duplicate,
@@ -2095,7 +2216,7 @@ impl<'a> FunctionBuilder<'a> {
     fn computed(&mut self, change: &hir::ElementChange, cx: &mut Lowering) -> Computed {
         let mut copied = |this: &mut Self, expr: &hir::Expr| {
             let src = this.place(expr, cx);
-            let layout = layout(&this.type_of(expr));
+            let layout = cx.layout(&this.type_of(expr));
             let slot = this.slot(layout.clone());
             this.insts.push(lir::Inst::Copy {
                 dst: slot.clone(),
@@ -2189,7 +2310,7 @@ impl<'a> FunctionBuilder<'a> {
     fn keep_values(&mut self, ty: &hir::Type, computed: &[Computed], cx: &mut Lowering) {
         for change in computed {
             let element = element_at(ty, change.positions.len());
-            if points(&element) {
+            if cx.points(&element) {
                 let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&element)));
                 self.insts.push(lir::Inst::CallRuntime {
                     function: lir::RuntimeFn::Keep,
@@ -2224,10 +2345,10 @@ impl<'a> FunctionBuilder<'a> {
                 function: lir::RuntimeFn::Unique,
                 args: vec![at.clone(), descriptor],
             });
-            at = self.element(&at, &index, layout(&element));
+            at = self.element(&at, &index, cx.layout(&element));
             ty = *element;
         }
-        if points(&ty) {
+        if cx.points(&ty) {
             let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
             self.insts.push(lir::Inst::CallRuntime {
                 function: lir::RuntimeFn::Assign,
@@ -2237,7 +2358,7 @@ impl<'a> FunctionBuilder<'a> {
             self.insts.push(lir::Inst::Copy {
                 dst: at,
                 src: change.value,
-                layout: layout(&ty),
+                layout: cx.layout(&ty),
             });
         }
         self.scoped = true;
@@ -2257,7 +2378,7 @@ impl<'a> FunctionBuilder<'a> {
         let src = self.place(operand, cx);
         match (&ty, &result_ty) {
             (hir::Type::Tuple(heading), hir::Type::Tuple(result)) => {
-                let dst = self.slot(layout(&result_ty));
+                let dst = self.slot(cx.layout(&result_ty));
                 self.extended(heading, &src, attributes, result, &dst, cx);
                 dst
             }
@@ -2299,7 +2420,7 @@ impl<'a> FunctionBuilder<'a> {
             self.insts.push(lir::Inst::Copy {
                 dst: to,
                 src: from,
-                layout: layout(ty),
+                layout: cx.layout(ty),
             });
         }
         self.tuples.pop();
@@ -2318,8 +2439,8 @@ impl<'a> FunctionBuilder<'a> {
         result: &hir::Heading,
         cx: &mut Lowering,
     ) -> lir::Place {
-        let tuple = layout(&hir::Type::Tuple(heading.clone()));
-        let result_tuple = layout(&hir::Type::Tuple(result.clone()));
+        let tuple = cx.layout(&hir::Type::Tuple(heading.clone()));
+        let result_tuple = cx.layout(&hir::Type::Tuple(result.clone()));
         let result_ty = hir::Type::Relation(result.clone());
         let mut count = src.clone();
         count.path.push(1);
@@ -2350,7 +2471,7 @@ impl<'a> FunctionBuilder<'a> {
         let hir::Type::Relation(heading) = &ty else {
             unreachable!("sema restricts only relations");
         };
-        let tuple = layout(&hir::Type::Tuple(heading.clone()));
+        let tuple = cx.layout(&hir::Type::Tuple(heading.clone()));
         let src = self.place(operand, cx);
         let mut count = src.clone();
         count.path.push(1);
@@ -2402,7 +2523,7 @@ impl<'a> FunctionBuilder<'a> {
     /// allocates for the statement.
     fn allocated(&mut self, ty: &hir::Type, count: lir::Place, cx: &mut Lowering) -> lir::Place {
         let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(ty)));
-        let dst = self.slot(layout(ty));
+        let dst = self.slot(cx.layout(ty));
         self.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::Allocate,
             args: vec![dst.clone(), count, descriptor],
@@ -2420,7 +2541,7 @@ impl<'a> FunctionBuilder<'a> {
             hir::Type::Array(element) => (**element).clone(),
             _ => unreachable!("only relations and arrays are filled"),
         };
-        if points(&element) {
+        if cx.points(&element) {
             let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(ty)));
             self.insts.push(lir::Inst::CallRuntime {
                 function: lir::RuntimeFn::Adopt,
@@ -2493,9 +2614,22 @@ impl<'a> FunctionBuilder<'a> {
         })
     }
 
+    /// The components of the value `operand`, of a type of the program's
+    /// own, as a tuple: all of it, or, in a hierarchy, after its type.
+    fn components(&mut self, operand: &hir::Expr, cx: &mut Lowering) -> lir::Place {
+        let mut components = self.place(operand, cx);
+        if let hir::Type::Defined(defined) = self.type_of(operand) {
+            components
+                .path
+                .extend(cx.families.components_path(&defined));
+        }
+        components
+    }
+
     /// The value of the type of the program's own `defined` selected from
-    /// `components`, laid out as the tuple of them, once each of its
-    /// constraints is true of it (see [`FunctionBuilder::constrained`]).
+    /// `components`, once each of its constraints is true of them (see
+    /// [`FunctionBuilder::constrained`]): laid out as the tuple of them, or,
+    /// in a hierarchy, after its own type's descriptor's address.
     fn selected(
         &mut self,
         defined: &hir::Defined,
@@ -2504,7 +2638,7 @@ impl<'a> FunctionBuilder<'a> {
     ) -> lir::Place {
         let value = self.place(components, cx);
         let ty = hir::Type::Defined(Box::new(defined.clone()));
-        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.components_descriptor(defined)));
         self.constrained(
             defined,
             &value,
@@ -2515,7 +2649,12 @@ impl<'a> FunctionBuilder<'a> {
             },
             cx,
         );
-        value
+        if ty.root().is_none() {
+            return value;
+        }
+        let selected = self.slot(cx.layout(&ty));
+        self.made_in_hierarchy(defined, value, selected.clone(), cx);
+        selected
     }
 
     /// Stop the program unless each constraint of `defined`, in order, is
@@ -2597,7 +2736,7 @@ impl<'a> FunctionBuilder<'a> {
         let failure = lir::Failure::NotOneTuple { count };
         self.fail(failure, single);
         let zero = usize_constant(0, cx);
-        let tuple = layout(&hir::Type::Tuple(heading.clone()));
+        let tuple = cx.layout(&hir::Type::Tuple(heading.clone()));
         let only = self.element(&src, &zero, tuple.clone());
         let dst = self.slot(tuple.clone());
         self.insts.push(lir::Inst::Copy {
@@ -2630,7 +2769,7 @@ impl<'a> FunctionBuilder<'a> {
             unreachable!("sema reshapes only tuples and relations");
         };
         let attribute_types: Vec<&hir::Type> = heading.attributes().map(|(_, t)| t).collect();
-        let dst = self.slot(layout(result_ty));
+        let dst = self.slot(cx.layout(result_ty));
         if let hir::Type::Tuple(_) = ty {
             for (j, &i) in sources.iter().enumerate() {
                 let mut from = src.clone();
@@ -2641,12 +2780,12 @@ impl<'a> FunctionBuilder<'a> {
                         path: vec![j],
                     },
                     src: from,
-                    layout: layout(attribute_types[i]),
+                    layout: cx.layout(attribute_types[i]),
                 });
             }
             return dst;
         }
-        let tuple_layout = layout(&hir::Type::Tuple(heading.clone()));
+        let tuple_layout = cx.layout(&hir::Type::Tuple(heading.clone()));
         let offsets = cx.constant(
             sources
                 .iter()
@@ -2688,8 +2827,8 @@ impl<'a> FunctionBuilder<'a> {
             unreachable!("sema joins only relations");
         };
         let result_ty = lhs_ty.and(rhs_ty);
-        let lhs_tuple = layout(&hir::Type::Tuple(lhs_heading.clone()));
-        let rhs_tuple = layout(&hir::Type::Tuple(rhs_heading.clone()));
+        let lhs_tuple = cx.layout(&hir::Type::Tuple(lhs_heading.clone()));
+        let rhs_tuple = cx.layout(&hir::Type::Tuple(rhs_heading.clone()));
         let position =
             |heading: &hir::Heading, name: &str| heading.attributes().position(|(a, _)| a == name);
         let sources = attribute_names(&result_ty)
@@ -2723,7 +2862,7 @@ impl<'a> FunctionBuilder<'a> {
                 path: vec![0],
             },
         ];
-        let dst = self.slot(layout(&result_ty));
+        let dst = self.slot(cx.layout(&result_ty));
         self.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::And,
             args: [vec![dst.clone()], args].concat(),
@@ -2756,7 +2895,7 @@ impl<'a> FunctionBuilder<'a> {
             leaves,
         } = sorted(relation, &written, &loading.order);
         let relation_ty = hir::Type::Relation(heading.clone());
-        let tuple = layout(&hir::Type::Tuple(heading.clone()));
+        let tuple = cx.layout(&hir::Type::Tuple(heading.clone()));
         // Where an attribute is in the tuple, by name order.
         let attribute = |name: &str| {
             heading
@@ -2780,7 +2919,7 @@ impl<'a> FunctionBuilder<'a> {
         let hir::Type::Array(element) = &array_ty else {
             unreachable!("a load makes an array");
         };
-        let element = layout(element);
+        let element = cx.layout(element);
         let kept: Vec<(&str, &hir::Type)> = written
             .attributes()
             .filter(|(a, _)| !loading.removed.contains(*a))
@@ -2796,14 +2935,14 @@ impl<'a> FunctionBuilder<'a> {
                 lir::Field::Struct(vec![
                     lir::Field::Offset(tuple.clone(), vec![attribute(name)]),
                     to,
-                    lir::Field::Size(layout(ty)),
+                    lir::Field::Size(cx.layout(ty)),
                 ])
             })
             .collect();
         let count = usize_constant(len(items.len()), cx);
         let part_count = usize_constant(len(parts.len()), cx);
         let src = self.place(&relation, cx);
-        let dst = self.slot(layout(&array_ty));
+        let dst = self.slot(cx.layout(&array_ty));
         let args = vec![
             dst.clone(),
             src,
@@ -2841,7 +2980,7 @@ impl<'a> FunctionBuilder<'a> {
         let hir::Type::Relation(heading) = &relation_ty else {
             unreachable!("an unload makes a relation");
         };
-        let tuple = layout(&hir::Type::Tuple(heading.clone()));
+        let tuple = cx.layout(&hir::Type::Tuple(heading.clone()));
         // Where an attribute is in the tuple, by name order.
         let position = |name: &str| {
             heading
@@ -2860,10 +2999,10 @@ impl<'a> FunctionBuilder<'a> {
             (Some(named), _) => vec![part(
                 lir::Field::Usize(0),
                 named,
-                lir::Field::Size(layout(element)),
+                lir::Field::Size(cx.layout(element)),
             )],
             (None, hir::Type::Tuple(elements)) => {
-                let made = layout(element);
+                let made = cx.layout(element);
                 elements
                     .attributes()
                     .enumerate()
@@ -2871,7 +3010,7 @@ impl<'a> FunctionBuilder<'a> {
                         part(
                             lir::Field::Offset(made.clone(), vec![j]),
                             name,
-                            lir::Field::Size(layout(ty)),
+                            lir::Field::Size(cx.layout(ty)),
                         )
                     })
                     .collect()
@@ -2886,7 +3025,7 @@ impl<'a> FunctionBuilder<'a> {
         let part_count = usize_constant(len(parts.len()), cx);
         let number_count = usize_constant(len(numbers.len()), cx);
         let src = self.place(array, cx);
-        let dst = self.slot(layout(&relation_ty));
+        let dst = self.slot(cx.layout(&relation_ty));
         let args = vec![
             dst.clone(),
             src,
@@ -2930,7 +3069,7 @@ impl<'a> FunctionBuilder<'a> {
         let descriptor = |ty: &hir::Type, cx: &mut Lowering| {
             lir::Place::whole(lir::Base::Data(cx.descriptor(ty)))
         };
-        let dst = self.slot(layout(&lhs_ty));
+        let dst = self.slot(cx.layout(&lhs_ty));
         let args = vec![
             dst.clone(),
             lhs,
@@ -2971,7 +3110,7 @@ impl<'a> FunctionBuilder<'a> {
             hir::Combination::DisjointChanges => lir::Combination::DisjointChanges,
         };
         let combination = usize_constant(combination.code(), cx);
-        let dst = self.slot(layout(&ty));
+        let dst = self.slot(cx.layout(&ty));
         self.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::Combine,
             args: vec![dst.clone(), lhs, rhs, descriptor, combination],
@@ -2996,7 +3135,7 @@ impl<'a> FunctionBuilder<'a> {
             unreachable!("sema ungroups only relations");
         };
         let result_ty = ty.ungrouped(names);
-        let outer = layout(&hir::Type::Tuple(heading.clone()));
+        let outer = cx.layout(&hir::Type::Tuple(heading.clone()));
         let position =
             |heading: &hir::Heading, name: &str| heading.attributes().position(|(a, _)| a == name);
         // Each ungrouped attribute's position in the outer tuple, and the
@@ -3008,7 +3147,7 @@ impl<'a> FunctionBuilder<'a> {
                     unreachable!("sema ungroups only relation-valued attributes");
                 };
                 let at = position(heading, name).expect("an ungrouped attribute is the operand's");
-                (at, inner, layout(&hir::Type::Tuple(inner.clone())))
+                (at, inner, cx.layout(&hir::Type::Tuple(inner.clone())))
             })
             .collect();
         let sources = attribute_names(&result_ty)
@@ -3048,7 +3187,7 @@ impl<'a> FunctionBuilder<'a> {
         let descriptor = |ty: &hir::Type, cx: &mut Lowering| {
             lir::Place::whole(lir::Base::Data(cx.descriptor(ty)))
         };
-        let dst = self.slot(layout(&result_ty));
+        let dst = self.slot(cx.layout(&result_ty));
         let args = vec![
             dst.clone(),
             src,
@@ -3135,7 +3274,7 @@ impl<'a> FunctionBuilder<'a> {
         let hir::Type::Tuple(result) = &result_ty else {
             unreachable!("a tuple join is a tuple");
         };
-        let dst = self.slot(layout(&result_ty));
+        let dst = self.slot(cx.layout(&result_ty));
         for (k, (name, ty)) in result.attributes().enumerate() {
             let src = position(lhs_heading, name).map_or_else(
                 || {
@@ -3148,7 +3287,7 @@ impl<'a> FunctionBuilder<'a> {
             self.insts.push(lir::Inst::Copy {
                 dst: field(&dst, k),
                 src,
-                layout: layout(ty),
+                layout: cx.layout(ty),
             });
         }
         dst
@@ -3360,6 +3499,10 @@ impl<'a> FunctionBuilder<'a> {
         let (order, components) = defined
             .ordered_by()
             .expect("sema compares only ordered values");
+        let (mut lhs, mut rhs) = (lhs, rhs);
+        let path = cx.families.components_path(defined);
+        lhs.path.extend(path.iter().copied());
+        rhs.path.extend(path);
         // In another representation than the stored one, the components its
         // conversion computes.
         let (lhs, rhs) = match order.from {
@@ -3479,8 +3622,8 @@ fn lower_comparison(comparison: hir::Comparison) -> lir::Comparison {
 /// struct of its offset in a tuple of each and the address of its type's
 /// descriptor, as the runtime's joins take them.
 fn common_attributes(lhs: &hir::Heading, rhs: &hir::Heading, cx: &mut Lowering) -> Vec<lir::Field> {
-    let lhs_tuple = layout(&hir::Type::Tuple(lhs.clone()));
-    let rhs_tuple = layout(&hir::Type::Tuple(rhs.clone()));
+    let lhs_tuple = cx.layout(&hir::Type::Tuple(lhs.clone()));
+    let rhs_tuple = cx.layout(&hir::Type::Tuple(rhs.clone()));
     lhs.attributes()
         .enumerate()
         .filter_map(|(i, (name, ty))| {
@@ -3505,6 +3648,12 @@ fn zero_constant(layout: &lir::Layout, cx: &mut Lowering) -> lir::Place {
             lir::Layout::Usize | lir::Layout::Address => lir::Field::Usize(0),
             lir::Layout::Bytes(n) => lir::Field::Bytes(vec![0; *n]),
             lir::Layout::Struct(fields) => lir::Field::Struct(fields.iter().map(zero).collect()),
+            lir::Layout::Union(variants) => {
+                let first = variants
+                    .first()
+                    .map_or(lir::Field::Struct(Vec::new()), zero);
+                lir::Field::Variant(layout.clone(), Box::new(first))
+            }
         }
     }
     lir::Place {
@@ -3557,7 +3706,12 @@ fn lower_numeric(numeric: hir::Numeric) -> lir::Numeric {
 }
 
 fn scalar_layout(scalar: hir::Scalar) -> lir::Layout {
-    layout(&hir::Type::Scalar(scalar))
+    match scalar {
+        hir::Scalar::Boolean => lir::Layout::U8,
+        hir::Scalar::Integer => lir::Layout::I64,
+        hir::Scalar::Approximate => lir::Layout::F64Bits,
+        hir::Scalar::Text => lir::Layout::Struct(vec![lir::Layout::Address, lir::Layout::Usize]),
+    }
 }
 
 /// The relation a load of `relation`, of `heading`, ordered by `order`,
@@ -3826,33 +3980,145 @@ struct Reading<'r> {
     at: &'r Record<'r>,
 }
 
-/// Whether a value of type `ty` points to memory: whether it is or has a
-/// text, a relation or an array.
-fn points(ty: &hir::Type) -> bool {
-    match ty {
-        hir::Type::Scalar(scalar) => *scalar == hir::Scalar::Text,
-        hir::Type::Relation(_) | hir::Type::Array(_) => true,
-        hir::Type::Tuple(heading) => heading.attributes().any(|(_, ty)| points(ty)),
-        hir::Type::Defined(defined) => defined.components.attributes().any(|(_, ty)| points(ty)),
-        hir::Type::Parameter(_) => unreachable!("functions are of instantiated operators"),
-    }
+/// How the values of the program's types are laid out. A value of a type
+/// in a hierarchy, a union type or a subtype of one, is laid out as every
+/// value of the union type at its top, its root: the address of its own
+/// type's descriptor, then room for the components of any of the types
+/// with them under the root, its leaves, so that a value of a subtype is
+/// already a value of its supertypes. A value of any other type of the
+/// program's own is laid out as the tuple of its components.
+struct Families {
+    /// Each root's leaves, in the order the program declares them.
+    leaves: HashMap<String, Vec<hir::Defined>>,
+    /// Each root's room for its values' components: a
+    /// [`lir::Layout::Union`] of its leaves' components, in that order.
+    unions: HashMap<String, lir::Layout>,
 }
 
-/// The layout of a value of type `ty`: a value of a type of the program's
-/// own is laid out as the tuple of its components.
-fn layout(ty: &hir::Type) -> lir::Layout {
-    match ty {
-        hir::Type::Scalar(hir::Scalar::Boolean) => lir::Layout::U8,
-        hir::Type::Scalar(hir::Scalar::Integer) => lir::Layout::I64,
-        hir::Type::Scalar(hir::Scalar::Approximate) => lir::Layout::F64Bits,
-        hir::Type::Scalar(hir::Scalar::Text) | hir::Type::Relation(_) | hir::Type::Array(_) => {
-            lir::Layout::Struct(vec![lir::Layout::Address, lir::Layout::Usize])
+impl Families {
+    /// The hierarchies of the union types `unions`, each with its
+    /// immediate subtypes.
+    fn new(unions: &BTreeMap<String, Vec<hir::Type>>) -> Self {
+        fn collect(
+            name: &str,
+            unions: &BTreeMap<String, Vec<hir::Type>>,
+            out: &mut Vec<hir::Defined>,
+        ) {
+            for subtype in unions.get(name).into_iter().flatten() {
+                match subtype {
+                    hir::Type::Defined(defined) => out.push((**defined).clone()),
+                    hir::Type::Dummy(dummy) => collect(&dummy.name, unions, out),
+                    _ => unreachable!("a union type's subtypes are the program's own types"),
+                }
+            }
         }
-        hir::Type::Tuple(_) | hir::Type::Defined(_) => {
-            let fields = ty.fields().expect("tuples and types' values have fields");
-            lir::Layout::Struct(fields.attributes().map(|(_, ty)| layout(ty)).collect())
+        let mut leaves = HashMap::new();
+        for root in unions.values().flatten().filter_map(hir::Type::root) {
+            if !leaves.contains_key(root) {
+                let mut found = Vec::new();
+                collect(root, unions, &mut found);
+                leaves.insert(root.to_string(), found);
+            }
         }
-        hir::Type::Parameter(_) => unreachable!("functions are of instantiated operators"),
+        let mut families = Families {
+            leaves,
+            unions: HashMap::new(),
+        };
+        let roots: Vec<String> = families.leaves.keys().cloned().collect();
+        for root in roots {
+            families.lay_out(&root);
+        }
+        families
+    }
+
+    /// Lay out the hierarchy under `root`, after those its leaves'
+    /// components are of, which contain none of its own types.
+    fn lay_out(&mut self, root: &str) {
+        fn roots<'t>(ty: &'t hir::Type, out: &mut Vec<&'t str>) {
+            if let Some(root) = ty.root() {
+                out.push(root);
+            } else if let Some(fields) = ty.fields() {
+                fields.attributes().for_each(|(_, ty)| roots(ty, out));
+            }
+        }
+        if self.unions.contains_key(root) {
+            return;
+        }
+        let leaves = self.leaves[root].clone();
+        let mut inside = Vec::new();
+        for leaf in &leaves {
+            leaf.components
+                .attributes()
+                .for_each(|(_, ty)| roots(ty, &mut inside));
+        }
+        for nested in inside {
+            self.lay_out(nested);
+        }
+        let variants = leaves
+            .iter()
+            .map(|leaf| self.layout(&hir::Type::Tuple(leaf.components.clone())))
+            .collect();
+        self.unions
+            .insert(root.to_string(), lir::Layout::Union(variants));
+    }
+
+    /// The layout of a value of type `ty`.
+    fn layout(&self, ty: &hir::Type) -> lir::Layout {
+        if let Some(root) = ty.root() {
+            let union = self
+                .unions
+                .get(root)
+                .expect("every hierarchy is laid out first");
+            return lir::Layout::Struct(vec![lir::Layout::Address, union.clone()]);
+        }
+        match ty {
+            hir::Type::Scalar(scalar) => scalar_layout(*scalar),
+            hir::Type::Relation(_) | hir::Type::Array(_) => {
+                lir::Layout::Struct(vec![lir::Layout::Address, lir::Layout::Usize])
+            }
+            hir::Type::Tuple(_) | hir::Type::Defined(_) => {
+                let fields = ty.fields().expect("tuples and types' values have fields");
+                lir::Layout::Struct(fields.attributes().map(|(_, ty)| self.layout(ty)).collect())
+            }
+            hir::Type::Dummy(_) => unreachable!("a dummy type is in a hierarchy"),
+            hir::Type::Parameter(_) => unreachable!("functions are of instantiated operators"),
+        }
+    }
+
+    /// Whether a value of type `ty` points to memory: whether it is or has
+    /// a text, a relation or an array, or, in a hierarchy, could.
+    fn points(&self, ty: &hir::Type) -> bool {
+        if let Some(root) = ty.root() {
+            return self.leaves[root]
+                .iter()
+                .any(|leaf| leaf.components.attributes().any(|(_, ty)| self.points(ty)));
+        }
+        match ty {
+            hir::Type::Scalar(scalar) => *scalar == hir::Scalar::Text,
+            hir::Type::Relation(_) | hir::Type::Array(_) => true,
+            hir::Type::Tuple(_) | hir::Type::Defined(_) => ty
+                .fields()
+                .expect("tuples and types' values have fields")
+                .attributes()
+                .any(|(_, ty)| self.points(ty)),
+            hir::Type::Dummy(_) => unreachable!("a dummy type is in a hierarchy"),
+            hir::Type::Parameter(_) => unreachable!("functions are of instantiated operators"),
+        }
+    }
+
+    /// Where the components of a value of the type of the program's own
+    /// `defined` are, in its layout: in a hierarchy, its leaf's variant of
+    /// the root's room, after its type's descriptor's address; otherwise,
+    /// all of it.
+    fn components_path(&self, defined: &hir::Defined) -> Vec<usize> {
+        let Some(root) = defined.supertypes.last() else {
+            return Vec::new();
+        };
+        let variant = self.leaves[root]
+            .iter()
+            .position(|leaf| leaf.name == defined.name)
+            .expect("a type in a hierarchy is one of its root's leaves");
+        vec![1, variant]
     }
 }
 
@@ -3872,9 +4138,12 @@ fn params_of(op: &hir::Operator, types: &[hir::Type]) -> BTreeMap<String, hir::P
 
 /// The parameter struct of a user operator, if it has parameters: each
 /// `const` one's value, and the address of each other one's variable.
-fn params_layout(params: &BTreeMap<String, hir::Parameter>) -> Option<lir::Layout> {
+fn params_layout(
+    params: &BTreeMap<String, hir::Parameter>,
+    families: &Families,
+) -> Option<lir::Layout> {
     let field = |p: &hir::Parameter| match p.mode {
-        hir::Mode::Const => layout(&p.ty),
+        hir::Mode::Const => families.layout(&p.ty),
         hir::Mode::Var | hir::Mode::Out => lir::Layout::Address,
     };
     (!params.is_empty()).then(|| lir::Layout::Struct(params.values().map(field).collect()))
@@ -3951,6 +4220,7 @@ mod tests {
         hir::Program {
             operators,
             variables,
+            unions: BTreeMap::new(),
             entry: hir::OperatorId(entry),
         }
     }
@@ -4819,7 +5089,7 @@ mod tests {
         // `shout` stores its value where the caller says, in no scope of
         // its own.
         let shout = &lowered.functions[1];
-        assert_eq!(shout.result, Some(layout(&text())));
+        assert_eq!(shout.result, Some(scalar_layout(hir::Scalar::Text)));
         let runtime = |insts: &[lir::Inst]| -> Vec<lir::RuntimeFn> {
             insts
                 .iter()
@@ -4919,7 +5189,7 @@ mod tests {
         assert_eq!(names, ["main", "show{v: integer}", "show{v: text}"]);
         assert_eq!(
             lowered.functions[2].params,
-            Some(lir::Layout::Struct(vec![layout(&text)]))
+            Some(lir::Layout::Struct(vec![scalar_layout(hir::Scalar::Text)]))
         );
         let called: Vec<lir::FunctionId> = lowered.functions[0].blocks[0]
             .insts
@@ -5388,7 +5658,7 @@ mod tests {
             ]
             .into(),
         );
-        let mut cx = Lowering::new("test.trendy");
+        let mut cx = Lowering::new("test.trendy", &BTreeMap::new());
         let id = cx.descriptor(&hir::Type::Tuple(heading));
         let lir::Field::Address(attributes) = cx.data[id.0].fields[2] else {
             panic!("attributes are an address");
@@ -5402,7 +5672,7 @@ mod tests {
 
     #[test]
     fn descriptors_point_to_their_elements_type() {
-        let mut cx = Lowering::new("test.trendy");
+        let mut cx = Lowering::new("test.trendy", &BTreeMap::new());
         let element = |cx: &Lowering, id: lir::DataId| {
             let lir::Field::Address(element) = cx.data[id.0].fields[4] else {
                 panic!("the element's descriptor is an address");

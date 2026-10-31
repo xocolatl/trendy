@@ -1,6 +1,8 @@
 //! The headings and types declared with names: each one resolved once,
 //! after those it names, which can be declared in any order. One that
-//! contains itself, directly or through others, is reported.
+//! contains itself, directly or through others, is reported, and so is a
+//! union type that contains itself through its subtypes, or is a subtype
+//! of itself.
 
 use std::collections::{HashMap, HashSet};
 
@@ -14,10 +16,19 @@ use crate::types::{self, TypeParameters};
 use crate::{Converted, Namespaces};
 
 /// A heading's or a type's declaration, and the declared headings and
-/// types it names, each with where.
+/// types it contains.
 struct Declared {
     decl: Decl,
-    names: Vec<(String, Span)>,
+    names: Vec<Contained>,
+}
+
+/// A heading or a type that another contains: its name, where, and whether
+/// it is a union type's subtype, whose values are among the union type's,
+/// rather than one its attributes or components are of.
+struct Contained {
+    name: String,
+    at: Span,
+    subtype: bool,
 }
 
 /// A declaration with a name in the types' namespace.
@@ -45,10 +56,12 @@ impl Decl {
     }
 
     /// Every heading in it: a heading's attributes, or each of a type's
-    /// possible representations' components.
+    /// possible representations' components, which a union type has none
+    /// of, as its errors say.
     fn headings(&self) -> Vec<ast::Heading> {
         match self {
             Decl::Heading(decl) => decl.heading().into_iter().collect(),
+            Decl::Type(decl) if decl.union_keyword().is_some() => Vec::new(),
             Decl::Type(decl) => decl
                 .representations()
                 .filter_map(|r| r.components())
@@ -180,12 +193,152 @@ fn convertible(decl: &TypeDecl, name: &str, errors: &mut Vec<Diagnostic>) -> Vec
 
 /// A heading or a type in a cycle: its name, what it is, where it is
 /// declared, and where it names the next one, which the last names the
-/// first of.
+/// first of, and whether that is as its subtype.
 pub(crate) struct Cycled {
     pub(crate) name: String,
     pub(crate) what: &'static str,
     pub(crate) declared: Span,
     pub(crate) via: Span,
+    pub(crate) subtype: bool,
+}
+
+/// The union type each type is a subtype of, by name: the one it names
+/// after `is`, and where it names it, if that is a union type, and neither
+/// is in a cycle of union types that are subtypes of each other, which are
+/// left out.
+struct Supertypes {
+    immediate: HashMap<String, (String, Span)>,
+    cyclic: HashSet<String>,
+}
+
+impl Supertypes {
+    /// The immediate subtypes of the union type `name`, as it contains
+    /// them.
+    fn subtypes<'s>(&'s self, name: &'s str) -> impl Iterator<Item = Contained> + 's {
+        self.immediate
+            .iter()
+            .filter(move |(_, (supertype, _))| supertype == name)
+            .map(|(subtype, (_, at))| Contained {
+                name: subtype.clone(),
+                at: *at,
+                subtype: true,
+            })
+    }
+
+    /// The union types `name` is a subtype of, its immediate supertype
+    /// first, and so on up.
+    fn of(&self, name: &str) -> Vec<String> {
+        let mut chain = Vec::new();
+        let mut at = name;
+        while let Some((supertype, _)) = self.immediate.get(at) {
+            chain.push(supertype.clone());
+            at = supertype;
+        }
+        chain
+    }
+}
+
+/// The supertypes of the types `declared`, by name, after reporting each
+/// that isn't a union type, each union type with representations or with
+/// fewer than two subtypes, and each cycle of union types that are
+/// subtypes of each other, which are left out.
+fn supertypes(
+    declared: &[(String, Declared)],
+    namespaces: &Namespaces,
+    errors: &mut Vec<Diagnostic>,
+) -> Supertypes {
+    let union_decl = |name: &str| {
+        declared.iter().find_map(|(n, d)| match &d.decl {
+            Decl::Type(decl) if n == name && decl.union_keyword().is_some() => Some(decl),
+            _ => None,
+        })
+    };
+    let mut immediate: HashMap<String, (String, Span)> = HashMap::new();
+    for (name, declared) in declared {
+        let Decl::Type(decl) = &declared.decl else {
+            continue;
+        };
+        if let (Some(_), Some(body)) = (decl.union_keyword(), decl.body()) {
+            errors.push(errors::union_with_body(name, &body));
+        }
+        let Some(ident) = decl
+            .supertype()
+            .and_then(|s| s.type_ref())
+            .and_then(|r| r.ident())
+        else {
+            continue;
+        };
+        let supertype = ident.text();
+        if union_decl(supertype).is_some() {
+            let at = trendy_syntax::span(ident.text_range());
+            immediate.insert(name.clone(), (supertype.to_string(), at));
+        } else if let Some((declared, _)) = namespaces.defined(supertype) {
+            errors.push(errors::not_a_union(&ident, Some(declared)));
+        } else if let Some((declared, _)) = namespaces.heading(supertype) {
+            errors.push(errors::heading_as_type(&ident, declared));
+        } else if hir::Scalar::from_name(supertype).is_some() {
+            errors.push(errors::not_a_union(&ident, None));
+        } else {
+            errors.push(errors::unknown_type(
+                &ident,
+                namespaces,
+                &TypeParameters::None,
+            ));
+        }
+    }
+    // Union types that are subtypes of each other, each cycle reported once
+    // and left out.
+    let mut cyclic: HashSet<String> = HashSet::new();
+    for (name, _) in declared {
+        let mut path: Vec<&str> = Vec::new();
+        let mut at = name.as_str();
+        while let Some((supertype, _)) = immediate.get(at) {
+            if cyclic.contains(at) {
+                break;
+            }
+            path.push(at);
+            if let Some(start) = path.iter().position(|p| p == supertype) {
+                let cycle: Vec<Cycled> = path[start..]
+                    .iter()
+                    .map(|&n| Cycled {
+                        name: n.to_string(),
+                        what: "type",
+                        declared: namespaces.defined(n).expect("a declared type").0,
+                        via: immediate[n].1,
+                        subtype: false,
+                    })
+                    .collect();
+                errors.push(errors::cyclic_supertypes(&cycle));
+                cyclic.extend(cycle.into_iter().map(|c| c.name));
+                break;
+            }
+            at = supertype;
+        }
+    }
+    immediate.retain(|name, _| !cyclic.contains(name));
+    // Each union type's subtypes: two at least, since one alone would have
+    // all its values.
+    for (name, _) in declared {
+        let Some(decl) = union_decl(name) else {
+            continue;
+        };
+        if cyclic.contains(name) {
+            continue;
+        }
+        let subtypes: Vec<(String, Span)> = declared
+            .iter()
+            .filter_map(|(n, _)| {
+                let (supertype, at) = immediate.get(n)?;
+                (supertype == name).then(|| (n.clone(), *at))
+            })
+            .collect();
+        if subtypes.len() < 2
+            && let Some(ident) = decl.name().and_then(|n| n.ident())
+        {
+            errors.push(errors::lone_subtype(&ident, &subtypes));
+        }
+    }
+    Supertypes { immediate, cyclic }
 }
 
 /// Resolve the attributes of each heading `file` declares, and the
@@ -213,7 +366,7 @@ pub(crate) fn resolve(
             .is_first_type(&ident)
             .then(|| (ident.text().to_string(), Decl::Type(decl)))
     });
-    let declared: Vec<(String, Declared)> = headings
+    let mut declared: Vec<(String, Declared)> = headings
         .chain(types)
         .map(|(name, decl)| {
             let names = decl
@@ -224,14 +377,22 @@ pub(crate) fn resolve(
             (name, Declared { decl, names })
         })
         .collect();
-    // Which representations convert, reported once for each type.
-    let convertible: HashMap<&str, Vec<bool>> = declared
+    // Which representations convert, reported once for each type but a
+    // union type, whose representations are an error.
+    let convertible: HashMap<String, Vec<bool>> = declared
         .iter()
         .filter_map(|(name, declared)| match &declared.decl {
-            Decl::Type(decl) => Some((name.as_str(), convertible(decl, name, errors))),
-            Decl::Heading(_) => None,
+            Decl::Type(decl) if decl.union_keyword().is_none() => {
+                Some((name.clone(), convertible(decl, name, errors)))
+            }
+            _ => None,
         })
         .collect();
+    let supertypes = supertypes(&declared, namespaces, errors);
+    // A union type contains its subtypes, as their values are its own.
+    for (name, declared) in &mut declared {
+        declared.names.extend(supertypes.subtypes(name));
+    }
     let by_name: HashMap<&str, &Declared> = declared.iter().map(|(n, d)| (n.as_str(), d)).collect();
 
     // Each after those it names, and the cycles found on the way.
@@ -244,6 +405,19 @@ pub(crate) fn resolve(
     let mut next = first.0;
     for name in &order.finished {
         let declared = by_name[name.as_str()];
+        if let Decl::Type(decl) = &declared.decl
+            && decl.union_keyword().is_some()
+        {
+            // One in a cycle, of either kind, is left out.
+            if !order.cyclic.contains(name) && !supertypes.cyclic.contains(name) {
+                let dummy = hir::Dummy {
+                    name: name.clone(),
+                    supertypes: supertypes.of(name),
+                };
+                namespaces.dummies.insert(name.clone(), dummy);
+            }
+            continue;
+        }
         let Some(heading) = declared.decl.heading() else {
             continue;
         };
@@ -265,19 +439,44 @@ pub(crate) fn resolve(
                     name,
                     components: resolved,
                     convertible,
+                    supertypes: supertypes.of(name),
                 };
                 defined(decl, resolved, &mut next, namespaces, errors);
             }
         }
     }
+    unions(&declared, &supertypes, namespaces);
+}
+
+/// Each union type's subtypes, of those `declared`, into `namespaces`, in
+/// the order they are declared, but those with errors.
+fn unions(declared: &[(String, Declared)], supertypes: &Supertypes, namespaces: &mut Namespaces) {
+    for (name, _) in declared {
+        let Some((supertype, _)) = supertypes.immediate.get(name) else {
+            continue;
+        };
+        let subtype = match namespaces.defined.get(name) {
+            Some(defined) => hir::Type::Defined(Box::new(defined.clone())),
+            None => match namespaces.dummies.get(name) {
+                Some(dummy) => hir::Type::Dummy(Box::new(dummy.clone())),
+                None => continue,
+            },
+        };
+        namespaces
+            .unions
+            .entry(supertype.clone())
+            .or_default()
+            .push(subtype);
+    }
 }
 
 /// A type whose stored components are resolved, `components`, and, of its
-/// possible representations, whether each converts.
+/// possible representations, whether each converts, and its supertypes.
 struct Resolved<'r> {
     name: &'r str,
     components: hir::Heading,
     convertible: &'r [bool],
+    supertypes: Vec<String>,
 }
 
 /// The type `decl` declares, `resolved`, into `namespaces`: its
@@ -296,6 +495,7 @@ fn defined(
         name,
         components,
         convertible,
+        supertypes,
     } = resolved;
     let mut numbered = || {
         let id = hir::OperatorId(*next);
@@ -340,6 +540,7 @@ fn defined(
         representations,
         constraints,
         order: None,
+        supertypes,
     };
     defined.order = type_order(decl, &defined, errors);
     namespaces.defined.insert(name.to_string(), defined);
@@ -385,7 +586,7 @@ fn type_order(
 
 /// The declared headings, after `relation` or `tuple`, and types that
 /// `heading`'s attributes name, each with where.
-fn named(heading: &ast::Heading, namespaces: &Namespaces) -> Vec<(String, Span)> {
+fn named(heading: &ast::Heading, namespaces: &Namespaces) -> Vec<Contained> {
     heading
         .syntax()
         .descendants()
@@ -398,10 +599,11 @@ fn named(heading: &ast::Heading, namespaces: &Namespaces) -> Vec<(String, Span)>
                         .and_then(|r| r.ident())
                         .filter(|i| namespaces.defined(i.text()).is_some())
                 })?;
-            Some((
-                ident.text().to_string(),
-                trendy_syntax::span(node.text_range()),
-            ))
+            Some(Contained {
+                name: ident.text().to_string(),
+                at: trendy_syntax::span(node.text_range()),
+                subtype: false,
+            })
         })
         .collect()
 }
@@ -410,8 +612,9 @@ fn named(heading: &ast::Heading, namespaces: &Namespaces) -> Vec<(String, Span)>
 /// names.
 #[derive(Default)]
 struct Search {
-    /// The ones being visited, each with where it names the next.
-    path: Vec<(String, Option<Span>)>,
+    /// The ones being visited, each with where it names the next, and
+    /// whether as its subtype.
+    path: Vec<(String, Option<(Span, bool)>)>,
     /// The ones visited, each after those it names.
     finished: Vec<String>,
     /// The ones in a cycle.
@@ -432,15 +635,19 @@ impl Search {
         if let Some(start) = self.path.iter().position(|(n, _)| n == name) {
             let cycle: Vec<Cycled> = self.path[start..]
                 .iter()
-                .map(|(name, via)| Cycled {
-                    name: name.clone(),
-                    what: by_name[name.as_str()].decl.what(),
-                    declared: namespaces
-                        .heading(name)
-                        .map(|(span, _)| span)
-                        .or_else(|| namespaces.defined(name).map(|(span, _)| span))
-                        .expect("a declared heading or type"),
-                    via: via.expect("one in the path names the next"),
+                .map(|(name, via)| {
+                    let (via, subtype) = via.expect("one in the path names the next");
+                    Cycled {
+                        name: name.clone(),
+                        what: by_name[name.as_str()].decl.what(),
+                        declared: namespaces
+                            .heading(name)
+                            .map(|(span, _)| span)
+                            .or_else(|| namespaces.defined(name).map(|(span, _)| span))
+                            .expect("a declared heading or type"),
+                        via,
+                        subtype,
+                    }
                 })
                 .collect();
             self.cyclic.extend(cycle.iter().map(|c| c.name.clone()));
@@ -448,9 +655,9 @@ impl Search {
             return;
         }
         self.path.push((name.to_string(), None));
-        for (next, via) in &by_name[name].names {
-            self.path.last_mut().expect("just pushed").1 = Some(*via);
-            self.visit(next, by_name, namespaces, errors);
+        for next in &by_name[name].names {
+            self.path.last_mut().expect("just pushed").1 = Some((next.at, next.subtype));
+            self.visit(&next.name, by_name, namespaces, errors);
         }
         self.path.pop();
         self.finished.push(name.to_string());

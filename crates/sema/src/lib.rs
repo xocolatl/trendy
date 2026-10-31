@@ -12,7 +12,7 @@ mod ops;
 mod prelude;
 mod types;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use trendy_diag::{Diagnostic, Span};
 use trendy_hir as hir;
@@ -40,10 +40,12 @@ pub fn analyze(prelude: &Prelude, file: &SourceFile) -> Result<hir::Program, Vec
     errors.sort_by_key(|d| d.span().start);
     match entry {
         Some(entry) if errors.is_empty() => {
+            let unions = checked.namespaces.unions.clone();
             let (operators, variables) = checked.finish(prelude);
             Ok(hir::Program {
                 operators,
                 variables,
+                unions,
                 entry,
             })
         }
@@ -300,6 +302,12 @@ pub(crate) struct Namespaces {
     /// its values are stored as, in order, whose components have no
     /// errors: [`named_types::resolve`] fills it in too.
     converted: HashMap<String, Vec<Converted>>,
+    /// Each of the program's union types, all of them dummy types, unless
+    /// its declaration has errors: [`named_types::resolve`] fills it in.
+    dummies: HashMap<String, hir::Dummy>,
+    /// Each union type's immediate subtypes, in the order they are
+    /// declared, but those with errors.
+    unions: BTreeMap<String, Vec<hir::Type>>,
     /// The kinds, which only the prelude declares, by name, each with the
     /// built-in types of it.
     kinds: HashMap<String, (hir::Kind, BTreeSet<hir::Scalar>)>,
@@ -417,6 +425,18 @@ impl Namespaces {
     pub(crate) fn defined(&self, name: &str) -> Option<(Span, Option<&hir::Defined>)> {
         let span = *self.types.get(name)?;
         Some((span, self.defined.get(name)))
+    }
+
+    /// The program's own union type named `name`, a dummy type, unless it
+    /// isn't one, or its declaration has errors.
+    pub(crate) fn dummy(&self, name: &str) -> Option<&hir::Dummy> {
+        self.dummies.get(name)
+    }
+
+    /// The immediate subtypes of the union type `name`, in the order they
+    /// are declared, but those with errors.
+    pub(crate) fn subtypes(&self, name: &str) -> &[hir::Type] {
+        self.unions.get(name).map_or(&[], Vec::as_slice)
     }
 
     /// The possible representations of the program's own type `name` but
@@ -8667,6 +8687,138 @@ heading home := { city: text, rooms: integer };
     }
 
     #[test]
+    fn union_types_and_their_subtypes() {
+        let program = analyze_str(&format!(
+            "type figure union;\ntype shape union is figure;\ntype disc is shape {{ {{ r: approximate }} }};\ntype square is shape {{ {{ side: approximate }} }};\ntype blob is figure {{ {{ size: integer }} }};{MAIN}"
+        ))
+        .unwrap();
+        // Each union type's immediate subtypes, in the order they are
+        // declared, each with its supertypes, the immediate one first.
+        let subtypes = |name: &str| -> Vec<String> {
+            program.unions[name]
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        };
+        assert_eq!(subtypes("figure"), ["shape", "blob"]);
+        assert_eq!(subtypes("shape"), ["disc", "square"]);
+        let hir::Type::Defined(disc) = &program.unions["shape"][0] else {
+            panic!("a type with a representation");
+        };
+        assert_eq!(disc.supertypes, ["shape", "figure"]);
+        let hir::Type::Dummy(shape) = &program.unions["figure"][0] else {
+            panic!("a union type");
+        };
+        assert_eq!(shape.supertypes, ["figure"]);
+        assert_eq!(program.unions["figure"][0].root(), Some("figure"));
+        let subtype = |name: &str| format!("type {name} is figure {{ {{ r: approximate }} }};\n");
+        let two = format!("{}{}", subtype("a"), subtype("b"));
+        for (source, code, message) in [
+            (
+                format!("type figure union {{ {{ r: approximate }} }};\n{two}"),
+                Code::UnionType,
+                "the union type `figure` has no possible representation of its own",
+            ),
+            (
+                "type ellipse { { a: approximate } };\ntype circle is ellipse { { r: approximate } };\n".to_string(),
+                Code::UnionType,
+                "`ellipse` isn't a union type, so no type is a subtype of it",
+            ),
+            (
+                "type t is integer { { a: integer } };\n".to_string(),
+                Code::UnionType,
+                "`integer` isn't a union type, so no type is a subtype of it",
+            ),
+            (
+                format!("type figure union;\n{two}type t is figur {{ {{ a: integer }} }};\n"),
+                Code::UnknownType,
+                "unknown type `figur`",
+            ),
+            (
+                format!("type figure union;\n{}", subtype("disc")),
+                Code::UnionType,
+                "the union type `figure` has only one subtype, `disc`",
+            ),
+            (
+                "type figure union;\n".to_string(),
+                Code::UnionType,
+                "the union type `figure` has no subtypes",
+            ),
+            (
+                format!("type figure union is shape;\ntype shape union is figure;\n{two}"),
+                Code::CyclicTypes,
+                "the union types `figure` and `shape` are subtypes of each other",
+            ),
+            (
+                format!("type figure union;\n{}type cluster is figure {{ {{ parts: relation {{ part: figure }} }} }};\n", subtype("a")),
+                Code::CyclicTypes,
+                "the types `figure` and `cluster` contain each other",
+            ),
+            (
+                format!("type figure union;\n{two}var f: figure;\n"),
+                Code::UntypedVariable,
+                "variable `f`, of type `figure`, has no initial value",
+            ),
+        ] {
+            let found = errors(&format!("{source}{MAIN}"));
+            let found: Vec<(Code, &str)> = found.iter().map(|e| (e.code, e.message.as_str())).collect();
+            assert_eq!(found, [(code, message)], "{source}");
+        }
+        // A cycle through a union type says where it contains a subtype.
+        let cycle = errors(&format!(
+            "type figure union;\n{}type cluster is figure {{ {{ parts: relation {{ part: figure }} }} }};{MAIN}",
+            subtype("a")
+        ));
+        assert!(
+            cycle[0]
+                .secondary
+                .iter()
+                .any(|label| label.message == "`cluster` is one of `figure`'s subtypes here"),
+            "{cycle:#?}"
+        );
+    }
+
+    #[test]
+    fn a_dummy_type_has_no_selector_order_or_components() {
+        // A dummy type has no selector; a fix selects the one subtype whose
+        // representation has the components named.
+        let types = "type figure union;\ntype disc is figure { { r: approximate } };\ntype square is figure { { side: approximate } };\n";
+        let selected = errors(&format!("{types}var f := figure{{r: 1e0}};{MAIN}"));
+        assert_eq!(selected[0].code, Code::DummySelected, "{selected:#?}");
+        assert_eq!(
+            selected[0].message,
+            "the union type `figure` has no selector"
+        );
+        assert_eq!(
+            fix(&format!("{types}var f := figure{{r: 1e0}};{MAIN}")),
+            format!("{types}var f := disc{{r: 1e0}};{MAIN}")
+        );
+        let unfit = errors(&format!("{types}var f := figure{{x: 1e0}};{MAIN}"));
+        assert_eq!(
+            unfit[0].help,
+            ["select a value of one of its subtypes, with `disc{…}` or `square{…}`"]
+        );
+        // Nor an order, nor components.
+        for (body, note) in [
+            (
+                "x < y",
+                "`figure` is a union type, which has no order: its values, of its subtypes' types, can only be compared with `=` and `<>`",
+            ),
+            (
+                "x.r > 0e0",
+                "`figure` is a union type, with no components of its own: its values are its subtypes', each with the components of its own type",
+            ),
+        ] {
+            let found = errors(&format!(
+                "{types}operator f{{x: figure, y: figure}}: boolean [ {body} ];{MAIN}"
+            ));
+            assert_eq!(found.len(), 1, "{found:#?}");
+            assert_eq!(found[0].code, Code::WrongOperandType);
+            assert_eq!(found[0].notes, [note], "{body}");
+        }
+    }
+
+    #[test]
     fn a_programs_own_types() {
         // Declared in any order, nested, and in a heading; selected by the
         // type's name, a component read with a dot, and compared, all
@@ -8692,6 +8844,7 @@ type position { { latitude: approximate, longitude: approximate } };
             representations: Vec::new(),
             constraints: Vec::new(),
             order: None,
+            supertypes: Vec::new(),
         };
         let place = hir::Defined {
             name: "place".to_string(),
@@ -8708,6 +8861,7 @@ type position { { latitude: approximate, longitude: approximate } };
             representations: Vec::new(),
             constraints: Vec::new(),
             order: None,
+            supertypes: Vec::new(),
         };
         let vars = variables(source);
         assert_eq!(vars[0].ty, hir::Type::Defined(Box::new(place)));

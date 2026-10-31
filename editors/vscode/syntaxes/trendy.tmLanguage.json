@@ -252,9 +252,18 @@
         },
         "2": {
           "name": "entity.name.type.trendy"
+        },
+        "3": {
+          "name": "keyword.other.trendy"
+        },
+        "4": {
+          "name": "keyword.other.trendy"
+        },
+        "5": {
+          "name": "entity.name.type.trendy"
         }
       },
-      "match": "\\b(type)\\s+([A-Z_a-z][0-9A-Z_a-z]*)\\s*(?=\\{)"
+      "match": "\\b(type)\\s+([A-Z_a-z][0-9A-Z_a-z]*)\\s*(?:(union)\\s*)?(?:(is)\\s+([A-Z_a-z][0-9A-Z_a-z]*)\\s*)?(?=[\\{\\;])"
     },
     "variable-declaration": {
       "captures": {

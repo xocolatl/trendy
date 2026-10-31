@@ -2,10 +2,11 @@
    Type Inheritance and Relational Theory builds its running example of
    inheritance: plane figures, which are ellipses or polygons, of which
    circles are ellipses, rectangles polygons and squares rectangles. Its
-   root, `plane_figure`, is a dummy type, with no possible representation
-   of its own (chapter 12). The language has no inheritance yet, so for now
-   these are types of their own, and the subtypes come as it does. Each
-   result below is printed twice, folded when compiling and computed when
+   root, `plane_figure`, is a union type, and a dummy type, with no
+   possible representation of its own (chapter 12). Circles, rectangles
+   and squares are specialized by constraints, which trendy doesn't have
+   yet, so for now ellipses and polygons are its subtypes. Each result
+   below is printed twice, folded when compiling and computed when
    running, as in types.trendy. */
 
 /* Lengths and angles. A length, here a `distance`, since the prelude's
@@ -69,9 +70,14 @@ operator dist{p1: point, p2: point}: distance [
 /* A line segment, from one point to another (TTM's LINESEG). */
 type lineseg { { begin: point, end: point } };
 
+/* Every plane figure is an ellipse or a polygon: a value of a union type
+   is a value of one of its subtypes, each declared `is` it, and has no
+   representation of its own, so there is no `plane_figure{…}`. */
+type plane_figure union;
+
 /* An ellipse, by its major and minor semiaxes, the major at least as long
    as the minor, and its centre. */
-type ellipse {
+type ellipse is plane_figure {
     { a: distance, b: distance, ctr: point },
     constraint a >= b,
 };
@@ -79,7 +85,7 @@ type ellipse {
 /* A polygon, by its vertices, numbered from 1, each at a point of its own:
    a component can be a relation, and a constraint says what its tuples
    are. */
-type polygon {
+type polygon is plane_figure {
     { vertices: relation { v_no: integer, vertex: point } },
     constraint count{r: vertices{v_no}} = count{r: vertices},
     constraint count{r: vertices{vertex}} = count{r: vertices},

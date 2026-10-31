@@ -204,6 +204,48 @@ pub(crate) fn ordered_word(found: Found) -> Diagnostic {
     .with_help("list the components in the order they compare, in the type's braces")
 }
 
+/// A subtype's union type named as another language names a base type,
+/// `found`: Java's `extends`, or Kotlin's and C#'s `:`, which the fix makes
+/// `is`, with a space before it unless one is there, `spaced`.
+pub(crate) fn supertype_spelling(found: Found, spaced: bool) -> Diagnostic {
+    let replacement = if spaced { "is" } else { " is" };
+    Diagnostic::error(
+        Code::SupertypeSpelling,
+        format!(
+            "a type names the union type it is a subtype of after `is`, not `{}`",
+            found.text
+        ),
+        found.span,
+        "another language's way to name a base type",
+    )
+    .with_note(SUBTYPE_NOTE)
+    .with_suggestion(
+        "write `is`",
+        vec![Edit {
+            span: found.span,
+            replacement: replacement.to_string(),
+        }],
+    )
+}
+
+/// Tutorial D's `IS { name POSSREP … }`, from the `{` at `open` to where
+/// its `}` ends, `close`, if it is there: the supertype and the possible
+/// representation in braces together.
+pub(crate) fn braced_supertype(open: Span, close: Option<usize>) -> Diagnostic {
+    let span = close.map_or(open, |end| Span::new(open.start, end));
+    Diagnostic::error(
+        Code::SupertypeSpelling,
+        "the union type is named after `is`, without braces around it",
+        span,
+        "Tutorial D's braces",
+    )
+    .with_note(SUBTYPE_NOTE)
+    .with_help("write the union type's name after `is`, then the type's possible representations in its braces, each in braces of its own, with a colon before each component's type")
+}
+
+/// What a subtype is, for its errors.
+const SUBTYPE_NOTE: &str = "a type declared `is` a union type is one of its subtypes, and its values are all the union type's (*Type Inheritance and Relational Theory*, chapter 12): `type plane_figure union;` and `type ellipse is plane_figure { { a: distance, b: distance } };`";
+
 /// An order or constraints written inside a possible representation's
 /// braces, after its components, as Tutorial D writes a possrep's
 /// constraint.

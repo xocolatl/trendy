@@ -654,7 +654,15 @@ would, so HIR has no headings' names, and an expectation's origin follows
 the name to the declaration, where the attributes' types are written. A
 type of the program's own is scalar, so its name is its identity:
 `hir::Type::Defined` carries it, with its components, so that lowering
-lays a value out as the tuple of them. Its selector is a read-only
+lays a value out as the tuple of them. A union type with no
+representation, a dummy type, is `hir::Type::Dummy`, and each type
+carries the union types it is a subtype of (`supertypes`), the one it
+names after `is` first, which sema finds, reporting a supertype that isn't
+a union type, a union type with fewer than two subtypes or with braces
+(A0060), and union types that are subtypes of each other (A0049); a
+union type contains its subtypes for the cycle check, so no type
+contains itself through one. `hir::Program::unions` lists each union
+type's immediate subtypes, which lowering lays hierarchies out from. Its selector is a read-only
 operator named after it (`Signature::selects`), whose value is
 `Expr::Select` of the tuple of its parameters, so a call of it is checked,
 overloaded and folded as any call; no other operator can have the name
@@ -1531,6 +1539,16 @@ as `…`, as a type's source text does, so the runtime needn't know how such
 attributes are named. Its sizes and offsets are LIR's `Size` and `Offset` fields, which
 codegen resolves with the same layout engine as everything else, so the
 runtime never repeats the layout rules.
+
+A value of a type in a hierarchy, a union type or a subtype of one, is
+laid out as every value of the union type at its top: the address of its
+own type's `KIND_DEFINED` descriptor, then room for the components of any
+of the types with them under that union type (`Families`, a
+`Layout::Union` of them, each at its start), so that a value of a subtype
+is already a value of its supertypes, inside a relation or an array too,
+and nothing is copied to make it one. Its descriptor is `KIND_UNION`,
+whose one attribute says where the components are; the runtime compares,
+orders, writes and releases such a value by its own type's descriptor.
 
 Approximate arithmetic makes IEEE 754's `-0.0` into `0.0` by adding `0.0` to
 each result (`one_zero`), which leaves every other number as it is, so that

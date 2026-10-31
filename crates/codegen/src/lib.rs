@@ -801,6 +801,7 @@ fn field_layout(field: &lir::Field) -> lir::Layout {
         lir::Field::Address(_) | lir::Field::FieldAddress(..) => lir::Layout::Address,
         lir::Field::Bytes(raw) => lir::Layout::Bytes(raw.len()),
         lir::Field::Struct(inner) => lir::Layout::Struct(inner.iter().map(field_layout).collect()),
+        lir::Field::Variant(union, _) => union.clone(),
     }
 }
 
@@ -818,7 +819,9 @@ impl Target {
             lir::Layout::U8 | lir::Layout::Bytes(_) => 1,
             lir::Layout::I64 | lir::Layout::F64Bits => 8,
             lir::Layout::Usize | lir::Layout::Address => self.pointer_bytes,
-            lir::Layout::Struct(fields) => fields.iter().map(|f| self.align(f)).max().unwrap_or(1),
+            lir::Layout::Struct(fields) | lir::Layout::Union(fields) => {
+                fields.iter().map(|f| self.align(f)).max().unwrap_or(1)
+            }
         }
     }
 
@@ -832,6 +835,10 @@ impl Target {
                 let end = self.offsets(fields).last().map_or(0, |&last| {
                     last + self.size(fields.last().expect("offsets match fields"))
                 });
+                end.next_multiple_of(self.align(layout))
+            }
+            lir::Layout::Union(variants) => {
+                let end = variants.iter().map(|v| self.size(v)).max().unwrap_or(0);
                 end.next_multiple_of(self.align(layout))
             }
         }
@@ -854,14 +861,22 @@ impl Target {
         let mut offset = 0;
         let mut current = layout;
         for &index in path {
-            let lir::Layout::Struct(fields) = current else {
-                return Err(format!("a path goes into a non-struct {current:?}"));
-            };
-            let field = fields
-                .get(index)
-                .ok_or_else(|| format!("field {index} is out of range"))?;
-            offset += self.offsets(fields)[index];
-            current = field;
+            match current {
+                lir::Layout::Struct(fields) => {
+                    let field = fields
+                        .get(index)
+                        .ok_or_else(|| format!("field {index} is out of range"))?;
+                    offset += self.offsets(fields)[index];
+                    current = field;
+                }
+                // Each variant is at the union's start.
+                lir::Layout::Union(variants) => {
+                    current = variants
+                        .get(index)
+                        .ok_or_else(|| format!("variant {index} is out of range"))?;
+                }
+                _ => return Err(format!("a path goes into a non-struct {current:?}")),
+            }
         }
         Ok(offset)
     }
@@ -936,6 +951,11 @@ impl Target {
                 let start = out.bytes.len();
                 self.place_all(inner, out)?;
                 out.bytes.resize(start + self.size(&layout), 0);
+            }
+            lir::Field::Variant(union, value) => {
+                let start = out.bytes.len();
+                self.place(value, out)?;
+                out.bytes.resize(start + self.size(union), 0);
             }
         }
         Ok(())
@@ -1213,6 +1233,34 @@ mod tests {
 
         let empty = layout.lay_out(&[lir::Field::Struct(Vec::new())]).unwrap();
         assert_eq!((empty.bytes.len(), empty.align), (1, 1));
+    }
+
+    #[test]
+    fn unions_are_as_big_as_their_biggest_variant() {
+        let layout = Target {
+            pointer_bytes: 8,
+            endianness: Endianness::Little,
+        };
+        // A boolean, or two integers: 16 bytes, aligned to 8, each variant
+        // at the start.
+        let union = lir::Layout::Union(vec![
+            lir::Layout::Struct(vec![lir::Layout::U8]),
+            lir::Layout::Struct(vec![lir::Layout::I64, lir::Layout::I64]),
+        ]);
+        assert_eq!((layout.size(&union), layout.align(&union)), (16, 8));
+        let tagged = lir::Layout::Struct(vec![lir::Layout::Address, union.clone()]);
+        assert_eq!(layout.path_offset(&tagged, &[1, 1, 1]), Ok(16));
+        assert_eq!(layout.path_offset(&tagged, &[1, 0, 0]), Ok(8));
+        // A value of the smaller variant is padded to the union's size, so
+        // that what follows it is where it is for the bigger one.
+        let laid_out = layout
+            .lay_out(&[lir::Field::Struct(vec![
+                lir::Field::Variant(union, Box::new(lir::Field::Struct(vec![lir::Field::U8(1)]))),
+                lir::Field::U8(2),
+            ])])
+            .unwrap();
+        assert_eq!(laid_out.bytes.len(), 24);
+        assert_eq!((laid_out.bytes[0], laid_out.bytes[16]), (1, 2));
     }
 
     #[test]

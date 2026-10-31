@@ -42,6 +42,11 @@ pub const KIND_RELATION: u8 = 5;
 pub const KIND_ARRAY: u8 = 6;
 /// A type of the program's own, laid out as the tuple of its components.
 pub const KIND_DEFINED: u8 = 7;
+/// A type in a hierarchy, a union type or a subtype of one: a value is the
+/// address of the `KIND_DEFINED` descriptor of its own type, then its
+/// components, at the offset of the descriptor's one attribute, which has
+/// no name or type.
+pub const KIND_UNION: u8 = 8;
 
 /// [`trendy_rt_integer_failed`]'s and [`trendy_rt_approximate_failed`]'s
 /// operators: `+`.
@@ -136,6 +141,11 @@ pub unsafe fn equal(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> bool {
                         == core::slice::from_raw_parts(b.0, b.1)
             }
             KIND_TUPLE | KIND_DEFINED => tuples_equal(lhs, rhs, desc),
+            // Of the same type, with equal components.
+            KIND_UNION => {
+                let ((a, at), (b, bt)) = (own_type(lhs, desc), own_type(rhs, desc));
+                same_type(a, b) && equal(at, bt, a)
+            }
             KIND_RELATION | KIND_ARRAY => {
                 let ((a, count), (b, other)) = (read_slice(lhs), read_slice(rhs));
                 let element = desc.element();
@@ -414,6 +424,12 @@ unsafe fn each_buffer(value: *const u8, desc: &TypeDesc, f: &mut impl FnMut(*mut
                     each_buffer(value.add(attr.offset), &*attr.desc, f);
                 }
             }
+            // A value with null pointers, before its variable's
+            // declaration, has no type yet, and so none.
+            KIND_UNION if !value.cast::<*const TypeDesc>().read_unaligned().is_null() => {
+                let (own, components) = own_type(value, desc);
+                each_buffer(components, own, f);
+            }
             _ => {}
         }
     }
@@ -429,7 +445,8 @@ unsafe fn points(desc: &TypeDesc) -> bool {
     // SAFETY: guaranteed by the caller.
     unsafe {
         match desc.kind {
-            KIND_TEXT | KIND_RELATION | KIND_ARRAY => true,
+            // Which of a hierarchy's types a value has is known only from it.
+            KIND_TEXT | KIND_RELATION | KIND_ARRAY | KIND_UNION => true,
             KIND_TUPLE | KIND_DEFINED => attributes(desc).iter().any(|attr| points(&*attr.desc)),
             _ => false,
         }
@@ -1656,6 +1673,15 @@ pub unsafe fn order(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> core::cm
                 core::slice::from_raw_parts(a.0, a.1).cmp(core::slice::from_raw_parts(b.0, b.1))
             }
             KIND_TUPLE | KIND_DEFINED => compare_tuples(lhs, rhs, desc),
+            // By their types' names, then their components.
+            KIND_UNION => {
+                let ((a, at), (b, bt)) = (own_type(lhs, desc), own_type(rhs, desc));
+                if same_type(a, b) {
+                    order(at, bt, a)
+                } else {
+                    type_name(a).cmp(type_name(b))
+                }
+            }
             KIND_RELATION | KIND_ARRAY => {
                 let ((a, count), (b, other)) = (read_slice(lhs), read_slice(rhs));
                 let element = desc.element();
@@ -3355,6 +3381,11 @@ pub unsafe fn write_value(out: &mut impl Write, value: *const u8, desc: &TypeDes
                 out.write_str("tuple ")?;
                 write_tuple(out, value, desc)
             }
+            // As its own type's.
+            KIND_UNION => {
+                let (own, components) = own_type(value, desc);
+                write_value(out, components, own)
+            }
             // Its selector's invocation, as a call is written.
             KIND_DEFINED => {
                 out.write_str(type_name(desc))?;
@@ -3595,7 +3626,7 @@ unsafe fn write_type(out: &mut impl Write, desc: &TypeDesc) -> fmt::Result {
         KIND_APPROXIMATE => out.write_str("approximate"),
         KIND_TEXT => out.write_str("text"),
         // SAFETY: guaranteed by the caller.
-        KIND_DEFINED => out.write_str(unsafe { type_name(desc) }),
+        KIND_DEFINED | KIND_UNION => out.write_str(unsafe { type_name(desc) }),
         KIND_TUPLE => {
             out.write_str("tuple ")?;
             // SAFETY: guaranteed by the caller.
@@ -3708,11 +3739,38 @@ unsafe fn array<'a, T>(values: *const T, len: usize) -> &'a [T] {
     unsafe { core::slice::from_raw_parts(values, len) }
 }
 
+/// The descriptor of the own type of the value at `value`, of the type in
+/// a hierarchy `desc` describes, and where its components are.
+///
+/// # Safety
+///
+/// `value` must point to a valid value of that type, and `desc` must be a
+/// valid `KIND_UNION` descriptor.
+unsafe fn own_type<'d>(value: *const u8, desc: &TypeDesc) -> (&'d TypeDesc, *const u8) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let own = &*value.cast::<*const TypeDesc>().read_unaligned();
+        (own, value.add(attributes(desc)[0].offset))
+    }
+}
+
+/// Whether two own types' descriptors, `KIND_DEFINED` ones, describe the
+/// same type, whose name tells it.
+///
+/// # Safety
+///
+/// Both must be valid descriptors.
+unsafe fn same_type(a: &TypeDesc, b: &TypeDesc) -> bool {
+    // SAFETY: guaranteed by the caller.
+    core::ptr::eq(a, b) || unsafe { type_name(a) == type_name(b) }
+}
+
 /// The name of the type of the program's own that `desc` describes.
 ///
 /// # Safety
 ///
-/// `desc` must be a valid descriptor of such a type.
+/// `desc` must be a valid descriptor of such a type, or of a type in a
+/// hierarchy.
 unsafe fn type_name(desc: &TypeDesc) -> &str {
     // SAFETY: the compiler emits names as valid UTF-8.
     unsafe { core::str::from_utf8_unchecked(core::slice::from_raw_parts(desc.name, desc.name_len)) }

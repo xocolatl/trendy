@@ -48,6 +48,15 @@ pub fn highlights(file: &SourceFile) -> Vec<Highlight> {
 fn classify(token: &SyntaxToken) -> Option<Highlight> {
     let (class, definition) = match token.kind() {
         SyntaxKind::Comment => (Class::Comment, false),
+        // `union` in `type name union;` declares a union type, and takes
+        // no operands.
+        SyntaxKind::UnionKw
+            if token
+                .parent()
+                .is_some_and(|p| p.kind() == SyntaxKind::TypeDecl) =>
+        {
+            (Class::Keyword, false)
+        }
         kind if kind.is_operator() => (Class::ExprOperator, false),
         kind if kind.is_keyword() => (Class::Keyword, false),
         SyntaxKind::IntLiteral | SyntaxKind::ApproximateLiteral => (Class::Number, false),
@@ -73,8 +82,8 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
     // `value` and `from`, `any` and `type`, in `any type`, `types`, `per`,
     // a mode's `const` and `out`, `kind`, a load's `load`, `from`, `order`, `asc`,
     // `desc`, `keep` and `numbered`, a `for` loop's `in`, `heading`, `type`,
-    // a type's `constraint` and `order`, and a conversion's `to` and
-    // `from`.
+    // a supertype's `is`, a type's `constraint` and `order`, and a
+    // conversion's `to` and `from`.
     let keyword = match parent {
         Some(SyntaxKind::BuiltinType) => token.text() == "type",
         Some(SyntaxKind::AnyType) => matches!(token.text(), "any" | "type"),
@@ -92,6 +101,7 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
             | SyntaxKind::ForStmt
             | SyntaxKind::HeadingDecl
             | SyntaxKind::TypeDecl
+            | SyntaxKind::Supertype
             | SyntaxKind::Constraint
             | SyntaxKind::TypeOrder
             | SyntaxKind::Conversion,
@@ -737,6 +747,24 @@ mod tests {
                 ("a", Class::Parameter, true),
                 ("any", Class::Keyword, false),
                 ("ordered", Class::Type, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn union_types() {
+        assert_eq!(
+            highlight("type figure union;\ntype disc is figure { { r: approximate } };"),
+            [
+                ("type", Class::Keyword, false),
+                ("figure", Class::Type, true),
+                ("union", Class::Keyword, false),
+                ("type", Class::Keyword, false),
+                ("disc", Class::Type, true),
+                ("is", Class::Keyword, false),
+                ("figure", Class::Type, false),
+                ("r", Class::Attribute, true),
+                ("approximate", Class::Type, false),
             ]
         );
     }

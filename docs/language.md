@@ -1978,6 +1978,60 @@ operator main{} [
   `columns` gives its components, as in `mean: tuple { celsius: 3 }`,
   and selects it in that one (see [The prelude](#the-prelude)).
 
+### Union types
+
+A union type has no values of its own: each of its values is a value of
+one of its subtypes, each a type declared `is` it (*Type Inheritance and
+Relational Theory*, chapter 12, IM Prescription 20). Every plane figure
+is an ellipse or a polygon:
+
+```trendy
+/* Every plane figure is an ellipse or a polygon. */
+type plane_figure union;
+
+type ellipse is plane_figure {
+    { a: approximate, b: approximate },
+    constraint a >= b,
+};
+type polygon is plane_figure { { corners: integer } };
+
+operator main{} [
+    var lake := ellipse{a: 3e0, b: 2e0};
+    call debug_value{v: lake};
+    call debug_value{v: lake.a};
+];
+```
+
+- **A union type has no possible representation of its own,** and so
+  no selector and no components, which makes it what Date calls a dummy
+  type. Its values are selected by its subtypes' selectors:
+  `plane_figure{a: 3e0, b: 2e0}` is fixed to the selector of the
+  subtype whose components those are, `ellipse{a: 3e0, b: 2e0}` (A0061).
+  A union type with a representation of its own, whose subtypes its
+  constraints specialize, as Date's circles are ellipses whose semiaxes
+  are equal, isn't in trendy yet (A0060).
+- **A subtype names its union type after `is`,** between its name and
+  its braces, and is otherwise a type of the program's own like any
+  other, with its representations, constraints and order. Java's
+  `extends`, and Kotlin's and C#'s `:`, are fixed to `is`, and Tutorial
+  D's `IS { PLANE_FIGURE POSSREP … }` is reported (P0043). A union type
+  can be a subtype of another, as in `type curve union is plane_figure;`,
+  but only a union type has subtypes (A0060).
+- **A union type has two subtypes at least,** since with one it would
+  have that one's values, and with none no values (A0060). It isn't a
+  subtype of itself, directly or through others, and contains each of
+  its subtypes, so none of them has a component of it (A0049).
+- **Subtypes are disjoint:** a value carries its type, so no ellipse is
+  a polygon, and a value of the union type is of exactly one of its
+  subtypes.
+- **A union type has no default and no order,** so a variable of one
+  needs an initial value (A0006), and `<` is an error (A0022). `load_csv`
+  reads a subtype's values as any type's, but not a union type's, since
+  a record's columns can't say which subtype it is.
+- **Not yet:** a subtype's value where its union type's is expected,
+  `is` to tell the subtypes apart, and `treat` to take one as a value of
+  its subtype.
+
 ## Tuples
 
 A tuple type is written `tuple { name: type, … }`, and a tuple value
@@ -4340,6 +4394,8 @@ line after a comment on its own line, such as a file's header, is kept.
 | `rows = pd.read_csv(path, usecols=[0, 2])`, `read_csv(path)` | `call load_csv{path: path, header: true, columns: tuple { city: 1, people: 3 }, out rows: rows};`, an array of tuples whose columns the call names, from 1 |
 | `{ x: 1 }`, `TUPLE { X 1 }` | `tuple { x: 1 }` |
 | `type Home = { … }`, `interface Home { … }`, `struct Home { … }` | `heading home := { … };`, whose types are `relation home` and `tuple home` |
+| `TYPE PLANE_FIGURE UNION;`, an abstract class | `type plane_figure union;`, whose values are its subtypes' |
+| `class Ellipse extends PlaneFigure`, `class Ellipse : PlaneFigure`, `TYPE ELLIPSE IS { PLANE_FIGURE POSSREP … }` | `type ellipse is plane_figure { { a: approximate, … } };` |
 | `[1, 2]`, `ARRAY[1, 2]` | `array [1, 2]` |
 | `[]`, an empty list | `array integer []`, with its elements' type, or `array []` where it is known |
 | `a[0]`, the first element | `a[1]` |

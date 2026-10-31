@@ -114,6 +114,10 @@ pub enum Layout {
     /// Raw bytes, with no alignment.
     Bytes(usize),
     Struct(Vec<Layout>),
+    /// Room for a value of any one of these layouts, its variants: as big
+    /// and as aligned as the biggest and the most aligned of them. A
+    /// path's index into it is a variant's, which is at its start.
+    Union(Vec<Layout>),
 }
 
 impl Layout {
@@ -909,6 +913,9 @@ pub enum Field {
     /// index in each struct from the outermost in, as a pointer-sized
     /// integer.
     Offset(Layout, Vec<usize>),
+    /// A value of one of a [`Layout::Union`]'s variants, at its start, and
+    /// padded to the union's size.
+    Variant(Layout, Box<Field>),
 }
 
 impl Field {

@@ -219,17 +219,23 @@ fn builtin_type_rule(identifier: &str) -> Value {
     })
 }
 
-/// `type name {`: `type` is a keyword before a type's name, which two names
-/// in a row never are elsewhere.
+/// `type name {`, `type name union;` or `type name is super {`: `type` is a
+/// keyword before a type's name, which two names in a row never are
+/// elsewhere, and so is `is` before its supertype's.
 fn type_rule(identifier: &str) -> Value {
     json!({
         "match": format!(
-            "\\b(type)\\s+({identifier})\\s*(?={})",
-            regex_escape(SyntaxKind::LBrace.fixed_text().unwrap())
+            "\\b(type)\\s+({identifier})\\s*(?:({})\\s*)?(?:(is)\\s+({identifier})\\s*)?(?=[{}{}])",
+            SyntaxKind::UnionKw.fixed_text().unwrap(),
+            regex_escape(SyntaxKind::LBrace.fixed_text().unwrap()),
+            regex_escape(SyntaxKind::Semicolon.fixed_text().unwrap()),
         ),
         "captures": {
             "1": { "name": "keyword.other.trendy" },
             "2": { "name": "entity.name.type.trendy" },
+            "3": { "name": "keyword.other.trendy" },
+            "4": { "name": "keyword.other.trendy" },
+            "5": { "name": "entity.name.type.trendy" },
         },
     })
 }

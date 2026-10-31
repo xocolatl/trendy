@@ -973,6 +973,7 @@ impl Joining {
                 }
                 hir::Type::Scalar(_)
                 | hir::Type::Defined(_)
+                | hir::Type::Dummy(_)
                 | hir::Type::Array(_)
                 | hir::Type::Parameter(_) => {
                     errors.push(errors::not_joinable(

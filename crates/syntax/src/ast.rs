@@ -43,6 +43,7 @@ ast_node!(BuiltinType);
 ast_node!(KindDecl);
 ast_node!(HeadingDecl);
 ast_node!(TypeDecl);
+ast_node!(Supertype);
 ast_node!(TypeBody);
 ast_node!(Representation);
 ast_node!(Conversion);
@@ -312,6 +313,29 @@ impl TypeDecl {
         self.0.children().find_map(Name::cast)
     }
 
+    /// The word `union`, which makes it a union type, if it is one, in
+    /// any case, which the parser reports.
+    #[must_use]
+    pub fn union_keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).find(|t| {
+            t.kind() == SyntaxKind::UnionKw
+                || (t.kind() == SyntaxKind::Ident && t.text().eq_ignore_ascii_case("union"))
+        })
+    }
+
+    /// `is name`: the union type it is a subtype of, if it is one.
+    #[must_use]
+    pub fn supertype(&self) -> Option<Supertype> {
+        self.0.children().find_map(Supertype::cast)
+    }
+
+    /// Its body, the braces around its representations, constraints and
+    /// order, which a union type has none of.
+    #[must_use]
+    pub fn body(&self) -> Option<TypeBody> {
+        self.0.children().find_map(TypeBody::cast)
+    }
+
     /// Its first possible representation (see
     /// [`TypeDecl::representations`]).
     #[must_use]
@@ -338,6 +362,20 @@ impl TypeDecl {
     /// parser reports them out of place, among the components.
     pub fn orders(&self) -> impl Iterator<Item = TypeOrder> {
         self.0.descendants().filter_map(TypeOrder::cast)
+    }
+}
+
+impl Supertype {
+    /// The word `is`.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    /// The supertype, by name.
+    #[must_use]
+    pub fn type_ref(&self) -> Option<TypeRef> {
+        self.0.children().find_map(TypeRef::cast)
     }
 }
 

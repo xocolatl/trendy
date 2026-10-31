@@ -199,9 +199,13 @@ pub enum SyntaxKind {
     /// contextual keyword, an identifier elsewhere.
     HeadingDecl,
     /// `type name { { name: type, … } };`: a scalar type of the program's
-    /// own, with its possible representation. `type` is a contextual
+    /// own, with its possible representation, or `type name union;`, a
+    /// union type, whose values are its subtypes'. `type` is a contextual
     /// keyword, an identifier elsewhere.
     TypeDecl,
+    /// `is name`, after a type declaration's name: the union type it is a
+    /// subtype of. `is` is a contextual keyword, an identifier elsewhere.
+    Supertype,
     /// `{ { name: type, … }, constraint … }`: what a type declaration says
     /// of its type, its possible representation and its constraints.
     TypeBody,
@@ -402,7 +406,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 160] = [
+    pub const ALL: [SyntaxKind; 161] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -490,6 +494,7 @@ impl SyntaxKind {
         SyntaxKind::KindDecl,
         SyntaxKind::HeadingDecl,
         SyntaxKind::TypeDecl,
+        SyntaxKind::Supertype,
         SyntaxKind::TypeBody,
         SyntaxKind::Representation,
         SyntaxKind::Conversion,
@@ -975,6 +980,7 @@ impl SyntaxKind {
             SyntaxKind::KindDecl => "kind declaration",
             SyntaxKind::HeadingDecl => "heading declaration",
             SyntaxKind::TypeDecl => "type declaration",
+            SyntaxKind::Supertype => "supertype",
             SyntaxKind::TypeBody => "type's representation",
             SyntaxKind::Representation => "possible representation",
             SyntaxKind::Conversion => "conversion",

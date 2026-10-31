@@ -15,6 +15,9 @@ pub struct Program {
     /// The prelude's built-in operators, then the program's own.
     pub operators: Vec<Operator>,
     pub variables: Vec<Variable>,
+    /// Each union type's immediate subtypes, by its name: what a value of
+    /// it can be, of which the largest decides how much room it takes.
+    pub unions: BTreeMap<String, Vec<Type>>,
     /// The operator the executable starts in: a user operator with no
     /// parameters.
     pub entry: OperatorId,
@@ -2174,7 +2177,7 @@ impl Compared {
     pub fn of(ty: &Type) -> Compared {
         match ty {
             Type::Scalar(scalar) => Compared::Scalar(*scalar),
-            Type::Defined(_) => Compared::Defined,
+            Type::Defined(_) | Type::Dummy(_) => Compared::Defined,
             Type::Tuple(_) => Compared::Tuple,
             Type::Relation(_) => Compared::Relation,
             Type::Array(_) => Compared::Array,
@@ -2479,6 +2482,9 @@ pub type Key = BTreeSet<String>;
 pub enum Type {
     Scalar(Scalar),
     Defined(Box<Defined>),
+    /// A union type of the program's own with no possible representation,
+    /// a dummy type, whose values are its subtypes'.
+    Dummy(Box<Dummy>),
     Tuple(Heading),
     Relation(Heading),
     /// Arrays of elements of this type (TTM's ARRAY type generator, chapter
@@ -2500,12 +2506,25 @@ impl Type {
         }
     }
 
+    /// The union type at the top of the hierarchy the type is in, by name,
+    /// if it is in one: itself, for a dummy type that is a subtype of none.
+    /// Every value of every type in it is laid out alike, as one of the
+    /// union type's.
+    #[must_use]
+    pub fn root(&self) -> Option<&str> {
+        match self {
+            Type::Defined(defined) => defined.supertypes.last().map(String::as_str),
+            Type::Dummy(dummy) => Some(dummy.supertypes.last().unwrap_or(&dummy.name)),
+            _ => None,
+        }
+    }
+
     /// The type, in an operator instantiated with `types`: each type
     /// parameter in it replaced by its type, by index.
     #[must_use]
     pub fn instantiated(&self, types: &[Type]) -> Type {
         match self {
-            Type::Scalar(_) | Type::Defined(_) => self.clone(),
+            Type::Scalar(_) | Type::Defined(_) | Type::Dummy(_) => self.clone(),
             Type::Tuple(heading) => Type::Tuple(heading.instantiated(types)),
             Type::Relation(heading) => Type::Relation(heading.instantiated(types)),
             Type::Array(element) => Type::Array(Box::new(element.instantiated(types))),
@@ -2516,7 +2535,7 @@ impl Type {
     /// The type parameters in the type.
     pub fn parameters(&self) -> Box<dyn Iterator<Item = &TypeParameter> + '_> {
         match self {
-            Type::Scalar(_) | Type::Defined(_) => Box::new(std::iter::empty()),
+            Type::Scalar(_) | Type::Defined(_) | Type::Dummy(_) => Box::new(std::iter::empty()),
             Type::Tuple(heading) | Type::Relation(heading) => {
                 Box::new(heading.0.values().flat_map(Type::parameters))
             }
@@ -2528,13 +2547,13 @@ impl Type {
     /// The value a variable of this type starts with when none is given:
     /// for a tuple, each attribute's default. A type of the program's own
     /// has none, since no value of it is any more a start than another,
-    /// nor has a type parameter, whose type each call gives, nor a tuple
-    /// with either. A relation or an array starts empty, whatever is in it.
+    /// nor has a union type, nor a type parameter, whose type each call
+    /// gives, nor a tuple with one. A relation or an array starts empty, whatever is in it.
     #[must_use]
     pub fn default_value(&self) -> Option<Value> {
         Some(match self {
             Type::Scalar(scalar) => scalar.default_value(),
-            Type::Defined(_) | Type::Parameter(_) => return None,
+            Type::Defined(_) | Type::Dummy(_) | Type::Parameter(_) => return None,
             Type::Tuple(heading) => Value::Tuple(TupleValue(
                 heading
                     .attributes()
@@ -2561,6 +2580,7 @@ impl std::fmt::Display for Type {
         match self {
             Type::Scalar(scalar) => f.write_str(scalar.name()),
             Type::Defined(defined) => f.write_str(&defined.name),
+            Type::Dummy(dummy) => f.write_str(&dummy.name),
             Type::Tuple(heading) => write!(f, "tuple {heading}"),
             Type::Relation(heading) => write!(f, "relation {heading}"),
             Type::Array(element) => write!(f, "array {element}"),
@@ -2591,6 +2611,21 @@ pub struct Defined {
     pub representations: Vec<Representation>,
     pub constraints: Vec<Constraint>,
     pub order: Option<Order>,
+    /// The union types it is a subtype of, the one it names first, and so
+    /// on up: none, if it names none.
+    pub supertypes: Vec<String>,
+}
+
+/// A dummy type of the program's own (*Type Inheritance and Relational
+/// Theory*, chapter 12, IM Prescription 20): a union type, whose every
+/// value is of one of its immediate subtypes, each a type of the program's
+/// own or a dummy type itself, with no possible representation of its own,
+/// and so no selector and no components.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Dummy {
+    pub name: String,
+    /// The union types it is a subtype of, as [`Defined::supertypes`].
+    pub supertypes: Vec<String>,
 }
 
 /// The order of a type of the program's own (*Type Inheritance and
@@ -2657,7 +2692,8 @@ impl Defined {
 /// program's own, read in the possible representation whose components the
 /// columns name, the tuple of those, which is converted to the stored ones,
 /// or the type itself if it is read as stored, and so is each value inside
-/// it; and otherwise `ty` itself.
+/// it, but in a hierarchy, where it is laid out after its type, the tuple
+/// of its components; and otherwise `ty` itself.
 #[must_use]
 pub fn read_as(ty: &Type, columns: &Type) -> Type {
     let Type::Tuple(given) = columns else {
@@ -2684,7 +2720,7 @@ pub fn read_as(ty: &Type, columns: &Type) -> Type {
                 return Type::Tuple(read(components));
             }
             let stored = read(&defined.components);
-            if stored == defined.components {
+            if stored == defined.components && defined.supertypes.is_empty() {
                 ty.clone()
             } else {
                 Type::Tuple(stored)
@@ -3708,6 +3744,7 @@ mod tests {
             representations: Vec::new(),
             constraints: Vec::new(),
             order: None,
+            supertypes: Vec::new(),
         };
         let ty = Type::Defined(Box::new(celsius.clone()));
         assert_eq!(ty.to_string(), "celsius");

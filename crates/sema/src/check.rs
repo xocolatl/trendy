@@ -893,6 +893,25 @@ impl<'a> Checker<'a> {
     ) {
         if self.names.has_value(name) {
             errors.push(errors::not_an_operator(name, span, "a value"));
+        } else if let Some(dummy) = self.names.namespaces().dummy(name) {
+            // The names of the arguments, if each has one.
+            let named = match written {
+                Written::Arguments(arguments) if arguments.positional().next().is_none() => {
+                    arguments
+                        .named()
+                        .map(|a| Some(a.name()?.ident()?.text().to_string()))
+                        .collect()
+                }
+                Written::Arguments(_) => None,
+                Written::Nothing(_) => Some(BTreeSet::new()),
+            };
+            let namespaces = self.names.namespaces();
+            errors.push(errors::dummy_selected(
+                dummy,
+                span,
+                namespaces,
+                named.as_ref(),
+            ));
         } else {
             let of_array = self.of_array(written);
             let operators = self.names.operators().names();
@@ -1908,6 +1927,7 @@ impl<'a> Checker<'a> {
             }
             hir::Type::Scalar(_)
             | hir::Type::Defined(_)
+            | hir::Type::Dummy(_)
             | hir::Type::Array(_)
             | hir::Type::Parameter(_) => {
                 errors.push(errors::not_relational(operator, span, &ty, &operand_expr));

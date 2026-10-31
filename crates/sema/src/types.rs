@@ -374,10 +374,15 @@ pub(crate) fn resolve(
             if let Some(scalar) = hir::Scalar::from_name(ident.text()) {
                 return Some(hir::Type::Scalar(scalar));
             }
-            // A type whose components have errors is reported where it is
+            // A type whose declaration has errors is reported where it is
             // declared.
             if let Some((_, defined)) = namespaces.defined(ident.text()) {
-                return defined.map(|d| hir::Type::Defined(Box::new(d.clone())));
+                return match defined {
+                    Some(defined) => Some(hir::Type::Defined(Box::new(defined.clone()))),
+                    None => namespaces
+                        .dummy(ident.text())
+                        .map(|dummy| hir::Type::Dummy(Box::new(dummy.clone()))),
+                };
             }
             errors.push(match namespaces.heading(ident.text()) {
                 Some((declared, _)) => errors::heading_as_type(&ident, declared),
