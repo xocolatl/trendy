@@ -376,8 +376,9 @@ operator main{} [
 - **`return` is for leaving an operator early,** which no operator does
   yet: a body runs to its end (A0035). So a body's value is written alone,
   and `return x;` at its end is fixed to `x` (P0031).
-- **It doesn't call itself,** directly or through others (A0036): without
-  a conditional, nothing could stop the calls.
+- **It doesn't call itself,** directly or through others (A0036), yet: a
+  call is evaluated when compiling where it can be, as below, and the
+  compiler can't yet tell whether a recursive one would stop.
 - **A call is evaluated when compiling where its arguments are known
   then:** in an initial value, where variables have their initial values,
   and in a body, as `double{x: 21}` is, and in an `extend`'s or a

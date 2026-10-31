@@ -1329,16 +1329,21 @@ impl<'a> Parser<'a> {
                 self.flush_missing();
                 self.start_node(SyntaxKind::Error);
                 let before = self.errors.len();
+                let from = self.pos;
                 self.expression();
                 self.flush_missing();
                 // One that isn't an expression after all, such as `x += 1`,
                 // has its own error.
                 if self.errors.len() == before {
                     let end = self.last_end.unwrap_or(found.span.end);
-                    self.errors.push(errors::expression_statement(Span::new(
-                        found.span.start,
-                        end,
-                    )));
+                    let statement = Span::new(found.span.start, end);
+                    let error = match self.replaced_variable(from..self.pos) {
+                        Some((name, written)) => {
+                            errors::replace_statement(name, written, statement)
+                        }
+                        None => errors::expression_statement(statement),
+                    };
+                    self.errors.push(error);
                 }
                 if self.at(SyntaxKind::Semicolon) {
                     self.bump();
@@ -1469,6 +1474,47 @@ impl<'a> Parser<'a> {
         self.end_statement();
         self.builder.finish_node();
         self.form = outer_form;
+    }
+
+    /// The variable's name, and where `name replace` is written, if the
+    /// tokens at `tokens`, an expression, are `name replace { … }`, which
+    /// `update name { … }` assigns to the variable.
+    fn replaced_variable(&self, tokens: std::ops::Range<usize>) -> Option<(&'a str, Span)> {
+        let tokens: Vec<&Token> = self.tokens[tokens]
+            .iter()
+            .filter(|t| !is_skipped(t.kind))
+            .collect();
+        let [name, replace, open, .., close] = tokens.as_slice() else {
+            return None;
+        };
+        let shape = [name.kind, replace.kind, open.kind, close.kind];
+        if shape
+            != [
+                SyntaxKind::Ident,
+                SyntaxKind::ReplaceKw,
+                SyntaxKind::LBrace,
+                SyntaxKind::RBrace,
+            ]
+        {
+            return None;
+        }
+        // The braces after `replace` close only at the end, so that nothing
+        // follows the changed value, such as another `replace`.
+        let mut depth = 0_usize;
+        for (i, token) in tokens[2..].iter().enumerate() {
+            match token.kind {
+                SyntaxKind::LParen | SyntaxKind::LBrace | SyntaxKind::LBracket => depth += 1,
+                SyntaxKind::RParen | SyntaxKind::RBrace | SyntaxKind::RBracket => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 && i + 3 < tokens.len() {
+                        return None;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let name_text = &self.source[name.span.start..name.span.end];
+        Some((name_text, Span::new(name.span.start, replace.span.end)))
     }
 
     /// Whether the tokens at `tokens`, an expression, have outside any
@@ -7050,6 +7096,29 @@ type rule { { constraint: text } };",
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn a_replaced_variable_is_updated() {
+        let parse = parse_str("operator main{} [ t replace { a := 2 }; call f{}; ];");
+        assert_eq!(parse.errors.len(), 1, "{:#?}", parse.errors);
+        assert_eq!(parse.errors[0].code, Code::ExpressionStatement);
+        assert_eq!(parse.errors[0].primary.span, Span::new(18, 38));
+        assert_eq!(
+            fix("operator main{} [ t replace { a := 2 }; call f{}; ];"),
+            "operator main{} [ update t { a := 2 }; call f{}; ];"
+        );
+        // Anything else is a value of its own, which could be kept or written.
+        for source in [
+            "operator main{} [ t replace { a := 2 } replace { b := 3 }; call f{}; ];",
+            "operator main{} [ t replace { a := 2 } = u; call f{}; ];",
+            "operator main{} [ t.u replace { a := 2 }; call f{}; ];",
+            "operator main{} [ (t where a = 1) replace { a := 2 }; call f{}; ];",
+        ] {
+            let parse = parse_str(source);
+            assert_eq!(parse.errors.len(), 1, "{source}: {:#?}", parse.errors);
+            assert!(parse.errors[0].suggestions.is_empty(), "{source}");
+        }
     }
 
     #[test]

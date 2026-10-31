@@ -4709,7 +4709,7 @@ pub(crate) fn cycle(cycle: &[Pending]) -> Diagnostic {
             };
             Diagnostic::error(Code::Recursion, message, first.defined, "this constraint")
                 .with_note(
-                    "a type's constraints are checked whenever a value of it is selected, by its selector, `replace` or `update`, so a constraint that selects one, directly or through operators, would check itself without end",
+                    "a type's constraints are checked whenever a value of it is selected, by its selector, `replace` or `update`, so a constraint that selects one, directly or through operators, would check itself again",
                 )
                 .with_help("compute the condition from the components without selecting a value of the type")
         }
@@ -4720,7 +4720,7 @@ pub(crate) fn cycle(cycle: &[Pending]) -> Diagnostic {
             };
             Diagnostic::error(Code::Recursion, message, first.defined, "defined here")
                 .with_note(
-                    "a read-only operator can't call itself, directly or through others: without a condition to stop on, its call would never end",
+                    "a read-only operator can't call itself, directly or through others, yet: a call is evaluated when compiling where its arguments are known then, and the compiler can't yet tell whether a recursive one would stop",
                 )
                 .with_help("compute the value without calling the operator from its own body")
         }

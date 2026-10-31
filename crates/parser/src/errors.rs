@@ -1853,6 +1853,28 @@ pub(crate) fn expression_statement(span: Span) -> Diagnostic {
     .with_help("to see the value, write it with `call debug_value{v: …};`; to keep it, assign it, as in `x := …;`")
 }
 
+/// `name replace { … }`, at `statement`, as a statement, with `name
+/// replace` at `written`: a new value, where `update name { … }` would
+/// assign it to the variable.
+pub(crate) fn replace_statement(name: &str, written: Span, statement: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::ExpressionStatement,
+        "an expression is not a statement",
+        statement,
+        "a value that nothing uses",
+    )
+    .with_note(format!(
+        "`replace` gives a new value and leaves `{name}` as it was; `update {name} {{ … }};` assigns `{name}` that value, as `{name} := {name} replace {{ … }};` would"
+    ))
+    .with_suggestion(
+        format!("change `{name}` with `update`"),
+        vec![Edit {
+            span: written,
+            replacement: format!("update {name}"),
+        }],
+    )
+}
+
 /// `found`, an operand that can't start a statement, right after a
 /// statement, where its `;` goes, at `at`. A `;` alone doesn't fix it,
 /// and `after_value`, an operator before the operand may be what's
