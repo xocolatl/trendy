@@ -176,16 +176,37 @@ var figures := relation {
 var ellipses := figures where figure is ellipse;
 var majors := ellipses extend { major := figure.a }{name, major};
 
-/* What a figure is. A figure that isn't an ellipse isn't known to be a
-   polygon, though there is no other kind yet: a program can add one, so
-   each kind is tested for, and the rest are figures. */
-operator kind{figure: plane_figure}: text [
-    if figure is ellipse
-        then "ellipse"
-        else if figure is polygon
-        then to_text{from: count{r: figure.vertices}} || "-gon"
-        else "figure"
+/* What a figure is, and its area: an operator of a union type's values,
+   with no body, and a version for each kind of figure, which a call
+   computes for its argument's own type (IM Prescription 17). A program
+   that adds a kind of figure adds its versions, or is told to. A
+   polygon's area is half the sum, around it, of each edge's cross
+   product, by the shoelace formula. */
+operator kind{figure: plane_figure}: text;
+
+operator kind{figure: ellipse}: text [
+    "ellipse"
 ];
+
+operator kind{figure: polygon}: text [
+    to_text{from: count{r: figure.vertices}} || "-gon"
+];
+
+operator area{figure: plane_figure}: approximate;
+
+operator area{figure: ellipse}: approximate [
+    pi{} * figure.a.m * figure.b.m
+];
+
+operator area{figure: polygon}: approximate [
+    var n := count{r: figure.vertices};
+    var edges := (figure.vertices extend { next := v_no mod n + 1 })
+        join (figure.vertices rename {v_no as next, vertex as to});
+    var twice := sum{r: edges, of: vertex.x * to.y - to.x * vertex.y};
+    if twice < 0e0 then -twice / 2e0 else twice / 2e0
+];
+
+var sizes := figures extend { size := area{figure: figure} }{name, size};
 
 /* The vertex nearest the origin, and the vertices' numbers in the points'
    order: the one at the origin, then the one 3 from it, on the y axis,
@@ -237,6 +258,7 @@ operator geometry{p: point, shape: polygon} [
     };
     call debug_value{v: kind{figure: e}};
     call debug_value{v: kind{figure: shape}};
+    call debug_table{r: figures extend { size := area{figure: figure} }{name, size}};
 ];
 
 operator main{} [
@@ -257,6 +279,7 @@ operator main{} [
     call debug_table{r: majors};
     call debug_value{v: kind{figure: squashed}};
     call debug_value{v: kind{figure: triangle}};
+    call debug_table{r: sizes};
 
     call geometry{p: pt, shape: triangle};
 ];

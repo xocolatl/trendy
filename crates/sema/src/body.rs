@@ -1141,8 +1141,20 @@ impl Names for BodyNames<'_, '_> {
     }
 
     fn checked(&mut self, id: hir::OperatorId, _: Span, _: &mut Vec<Diagnostic>) -> bool {
-        // Every read-only operator is checked with the globals.
-        self.cx.values.contains_key(&id)
+        // Every read-only operator is checked with the globals, and a call
+        // of a specification computes one of its versions, or its own
+        // value, if it has a body.
+        let signature = self.cx.operators.get(id);
+        let bodiless = signature.decl.as_ref().is_some_and(|d| d.body().is_none());
+        let own = if bodiless {
+            signature.valid
+        } else {
+            self.cx.values.contains_key(&id)
+        };
+        own && signature
+            .versions
+            .iter()
+            .all(|version| self.cx.values.contains_key(&version.operator))
     }
 
     fn bindings(&self) -> ops::Bindings<'_> {

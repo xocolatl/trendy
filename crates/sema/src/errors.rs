@@ -1,7 +1,7 @@
 //! Sema's diagnostics. Each one says where the fix goes and, when the fix is
 //! mechanical, carries it.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use trendy_diag::{Code, Diagnostic, Edit, Span, closest, edit_distance, misspelling};
 use trendy_hir as hir;
@@ -4790,6 +4790,238 @@ pub(crate) fn tutorial_d_test(
             }],
         ),
     )
+}
+
+/// What versions are, for notes.
+const VERSIONS_RULE: &str = "operators of one name and the same parameters' names are one operator, the one whose parameters' types are supertypes of the others', its specification, and versions of it, the others, each with parameters of subtypes of those, which a call of it computes for arguments of them (*Type Inheritance and Relational Theory*, IM Prescription 17)";
+
+/// The error for `version`, if it is unlike the specification `spec` it is
+/// a version of: read-only and not, its parameters' modes, a `var` or
+/// `out` one of a subtype, its result of no subtype of `spec`'s, or either
+/// with type parameters.
+pub(crate) fn unlike_version(version: &Signature, spec: &Signature) -> Option<Diagnostic> {
+    let decl = version.decl.as_ref()?;
+    let ident = decl.name()?.ident()?;
+    let span = trendy_syntax::span(ident.text_range());
+    let name = &spec.name;
+    let narrowed_variable = version
+        .params
+        .iter()
+        .find(|(p, param)| param.mode != hir::Mode::Const && spec.params[*p].ty != param.ty);
+    let different_mode = version
+        .params
+        .iter()
+        .find(|(p, param)| spec.params[*p].mode != param.mode);
+    let (message, help) = if version.read_only != spec.read_only {
+        (
+            format!("a version of `{name}` is read-only exactly if `{name}` is"),
+            "give it a result type, as its specification has, or none".to_string(),
+        )
+    } else if !version.types.is_empty() || !spec.types.is_empty() {
+        (
+            format!("a generic operator, `{name}`, has no versions"),
+            "give the versions' parameters types of their own, without type parameters".to_string(),
+        )
+    } else if let Some((p, _)) = different_mode {
+        (
+            format!("a version of `{name}` takes `{p}` as its specification does"),
+            format!("give `{p}` the mode its specification gives it"),
+        )
+    } else if let Some((p, _)) = narrowed_variable {
+        (
+            format!("the `var` or `out` parameter `{p}` has a version's type of its own"),
+            format!(
+                "give `{p}` its specification's type: the operator can give the variable any value of it, which a variable of a subtype can't hold (IM Prescription 19)"
+            ),
+        )
+    } else if let (Some(own), Some(specified)) = (&version.result, &spec.result)
+        && !own.is_subtype_of(specified)
+    {
+        (
+            format!("a version of `{name}` is of `{specified}`, or a subtype of it, not `{own}`"),
+            format!("give it the result type `{specified}`, or one of its subtypes"),
+        )
+    } else {
+        return None;
+    };
+    let mut d = Diagnostic::error(Code::Versions, message, span, "a version of it")
+        .with_note(VERSIONS_RULE)
+        .with_help(help);
+    if let Some(at) = spec
+        .decl
+        .as_ref()
+        .and_then(ast::Operator::name)
+        .and_then(|n| n.ident())
+    {
+        d = d.with_secondary(trendy_syntax::span(at.text_range()), "its specification");
+    }
+    Some(d)
+}
+
+/// The operator `later`, which has the same name and parameters' names as
+/// `first`, neither a specification of the other: versions of one that
+/// isn't declared, written `specified`.
+pub(crate) fn unspecified_versions(
+    later: &Signature,
+    first: &Signature,
+    specified: &str,
+) -> Diagnostic {
+    let name = &later.name;
+    Diagnostic::error(
+        Code::Versions,
+        format!("`{name}` is defined twice with the same parameters, and no specification of both"),
+        defined_at(later),
+        "a version of what?",
+    )
+    .with_secondary(defined_at(first), "the other")
+    .with_note(VERSIONS_RULE)
+    .with_help(format!(
+        "declare their specification, of their parameters' union types, `{specified}`, which they are versions of"
+    ))
+}
+
+/// The operator `decl` defines without a body, which has no versions. The
+/// fix gives an update operator an empty body; a read-only operator's
+/// would need a value.
+pub(crate) fn bodiless_operator(decl: &ast::Operator) -> Diagnostic {
+    let ident = decl.name().and_then(|n| n.ident());
+    let name = ident
+        .as_ref()
+        .map_or_else(String::new, |i| i.text().to_string());
+    let span = ident.map_or_else(
+        || trendy_syntax::span(decl.syntax().text_range()),
+        |i| trendy_syntax::span(i.text_range()),
+    );
+    let d = Diagnostic::error(
+        Code::Versions,
+        format!("`{name}` has no body and no versions, so nothing computes it"),
+        span,
+        "declared without a body",
+    )
+    .with_note(VERSIONS_RULE)
+    .with_note("an operator without a body is a specification, of a union type's values, which its versions compute, one for each of the union type's subtypes");
+    if decl.result().is_some() {
+        return d.with_help(format!(
+            "give `{name}` a body with its value, `[ … ]`, before its `;`, or define its versions"
+        ));
+    }
+    let end = usize::from(decl.syntax().text_range().end());
+    d.with_suggestion(
+        "give it a body",
+        vec![Edit {
+            span: Span::empty(end - 1),
+            replacement: " []".to_string(),
+        }],
+    )
+}
+
+/// The specification `spec`, without a body, which no version is for of
+/// the arguments' types `combination`.
+pub(crate) fn missing_version(
+    spec: &Signature,
+    combination: &BTreeMap<String, hir::Type>,
+    namespaces: &Namespaces,
+) -> Diagnostic {
+    let name = &spec.name;
+    let spec_span = defined_at(spec);
+    let written: Vec<String> = spec
+        .params
+        .iter()
+        .map(|(p, param)| format!("{p}: {}", combination.get(p).unwrap_or(&param.ty)))
+        .collect();
+    let result = spec
+        .result
+        .as_ref()
+        .map_or_else(String::new, |r| format!(": {r}"));
+    let help = format!(
+        "define its version: `operator {name}{{{}}}{result} [ … ];`",
+        written.join(", ")
+    );
+    // Of one parameter's type, the program that declares it says so.
+    let (span, message, at_type) = match combination.values().collect::<Vec<_>>().as_slice() {
+        [only] => match namespaces.defined(&only.to_string()) {
+            Some((declared, _)) => (
+                declared,
+                format!("`{only}` has no version of `{name}`"),
+                true,
+            ),
+            None => (
+                spec_span,
+                format!("no version of `{name}` is for `{only}`"),
+                false,
+            ),
+        },
+        _ => (
+            spec_span,
+            format!(
+                "no version of `{name}` is for `{name}{{{}}}`",
+                written.join(", ")
+            ),
+            false,
+        ),
+    };
+    let d = Diagnostic::error(Code::Versions, message, span, "a value can be of this type")
+        .with_note(VERSIONS_RULE)
+        .with_note(format!(
+            "`{name}` has no body, so a version computes it for each type a value can be of"
+        ))
+        .with_help(help);
+    if at_type {
+        d.with_secondary(
+            spec_span,
+            format!("`{name}` is declared without a body here"),
+        )
+    } else {
+        d
+    }
+}
+
+/// Where the program's own operator `signature` is defined: its name.
+fn defined_at(signature: &Signature) -> Span {
+    let decl = signature.decl.as_ref().expect("the program's own operator");
+    match decl.name().and_then(|n| n.ident()) {
+        Some(ident) => trendy_syntax::span(ident.text_range()),
+        None => trendy_syntax::span(decl.syntax().text_range()),
+    }
+}
+
+/// The specification `spec`, of which the versions `defined` both are for
+/// the arguments' types `combination`, neither more specific than the
+/// other.
+pub(crate) fn ambiguous_versions(
+    spec: &Signature,
+    combination: &BTreeMap<String, hir::Type>,
+    defined: (Option<&ast::Operator>, Option<&ast::Operator>),
+) -> Diagnostic {
+    let name = &spec.name;
+    let written: Vec<String> = combination
+        .iter()
+        .map(|(p, ty)| format!("{p}: {ty}"))
+        .collect();
+    let at = |decl: Option<&ast::Operator>| {
+        decl.and_then(ast::Operator::name)
+            .and_then(|n| n.ident())
+            .map(|i| trendy_syntax::span(i.text_range()))
+    };
+    let span = at(defined.0).unwrap_or_else(|| defined_at(spec));
+    let mut d = Diagnostic::error(
+        Code::Versions,
+        format!(
+            "two versions of `{name}` are for `{name}{{{}}}`, neither more specific than the other",
+            written.join(", ")
+        ),
+        span,
+        "one",
+    )
+    .with_note(VERSIONS_RULE)
+    .with_help(format!(
+        "define a version for `{name}{{{}}}`, more specific than both",
+        written.join(", ")
+    ));
+    if let Some(other) = at(defined.1) {
+        d = d.with_secondary(other, "the other");
+    }
+    d
 }
 
 /// What `treat` does, for notes.

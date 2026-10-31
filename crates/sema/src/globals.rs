@@ -253,6 +253,24 @@ impl<'a> Globals<'a> {
     fn checked(&mut self, id: hir::OperatorId, at: Span, errors: &mut Vec<Diagnostic>) -> bool {
         let operators = self.operators;
         let signature = operators.get(id);
+        // A call of a specification computes one of its versions, each
+        // checked, or its own value, if it has a body.
+        if !signature.versions.is_empty() {
+            let mut valid = signature.valid;
+            for version in &signature.versions {
+                valid &= self.checked(version.operator, at, errors);
+            }
+            let bodiless = signature.decl.as_ref().is_some_and(|d| d.body().is_none());
+            return valid && (bodiless || self.checked_own(id, at, errors));
+        }
+        self.checked_own(id, at, errors)
+    }
+
+    /// Whether the read-only operator `id`, called at `at`, has a valid
+    /// value of its own, as [`Globals::checked`] says.
+    fn checked_own(&mut self, id: hir::OperatorId, at: Span, errors: &mut Vec<Diagnostic>) -> bool {
+        let operators = self.operators;
+        let signature = operators.get(id);
         // The stored representation's selector's value is the value its
         // arguments are the components of, with no body to check, but its
         // type's constraints, which it checks: a call of it is one of each

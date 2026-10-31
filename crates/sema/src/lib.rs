@@ -179,8 +179,13 @@ impl Checked {
                 if let Some(op) = prelude.operators().get(signature.id.0) {
                     return op.clone();
                 }
+                let bodiless = signature.decl.as_ref().is_some_and(|d| d.body().is_none());
                 let kind = match (signature.builtin, &signature.result) {
                     (Some(builtin), _) => hir::OperatorKind::Builtin(builtin),
+                    // Its versions compute it.
+                    (None, result) if bodiless => hir::OperatorKind::Specification {
+                        result: result.clone(),
+                    },
                     (None, Some(result)) => hir::OperatorKind::ReadOnly {
                         result: result.clone(),
                         locals: self
@@ -203,6 +208,7 @@ impl Checked {
                     types: signature.types.clone(),
                     params: signature.params.clone(),
                     kind,
+                    versions: signature.versions.clone(),
                 }
             })
             .collect();
@@ -463,15 +469,6 @@ impl Namespaces {
             .flat_map(|(name, defined)| defined.iter().map(|d| (name.as_str(), d.kind, d.span)))
     }
 
-    /// Whether `ident` names the first definition of an operator of its
-    /// name and parameters' names, not a duplicate.
-    pub(crate) fn is_first_operator(&self, ident: &SyntaxToken) -> bool {
-        let span = Some(trendy_syntax::span(ident.text_range()));
-        self.operators
-            .get(ident.text())
-            .is_some_and(|defined| defined.iter().any(|d| d.span == span))
-    }
-
     /// Whether `ident` is its variable name's first declaration, not a
     /// duplicate.
     pub(crate) fn is_first_variable(&self, ident: &SyntaxToken) -> bool {
@@ -528,12 +525,16 @@ fn collect_names(prelude: &Prelude, file: &SourceFile, errors: &mut Vec<Diagnost
                 .unwrap_or_default();
             let defined = namespaces.operators.entry(name.to_string()).or_default();
             match defined.iter().find(|d| d.params == params) {
-                Some(first) => errors.push(errors::duplicate_operator(
+                // The prelude's can't have versions.
+                Some(first) if first.span.is_none() => errors.push(errors::duplicate_operator(
                     name,
                     span,
                     (first.kind, first.span),
                     &params,
                 )),
+                // A version, or a duplicate, which its parameters' types
+                // tell, once they are resolved (`operators::signatures`).
+                Some(_) => {}
                 None => defined.push(OperatorName {
                     kind,
                     span: Some(span),
@@ -8914,6 +8915,125 @@ var made := first{{}};
             found[0].help,
             [
                 "`r` is a component of `disc`: test `f` first, as in `f is disc and f.r …`, and in the rest of the condition it is one"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_call_computes_the_version_for_its_arguments_types() {
+        let variables = variables(&format!(
+            "{FIGURES}operator sides{{f: figure}}: integer;
+operator sides{{f: disc}}: integer [ 0 ];
+operator sides{{f: square}}: integer [ 4 ];
+operator name{{f: figure}}: text [ \"a figure\" ];
+operator name{{f: square}}: text [ \"a square\" ];
+var f: figure := round;
+var round_sides := sides{{f: f}};
+var box_sides := sides{{f: box}};
+var round_name := name{{f: round}};
+var box_name := name{{f: box}};"
+        ));
+        let value = |name: &str| {
+            variables
+                .iter()
+                .find(|v| v.name == name)
+                .unwrap()
+                .init
+                .to_string()
+        };
+        assert_eq!(value("round_sides"), "0");
+        assert_eq!(value("box_sides"), "4");
+        // The specification's own body, where no version is for them.
+        assert_eq!(value("round_name"), "\"a figure\"");
+        assert_eq!(value("box_name"), "\"a square\"");
+        // The HIR lists the versions, most specific first.
+        let program = analyze_str(&format!(
+            "{FIGURES}operator sides{{f: figure}}: integer;
+operator sides{{f: disc}}: integer [ 0 ];
+operator sides{{f: square}}: integer [ 4 ];{MAIN}"
+        ))
+        .unwrap();
+        let spec = program
+            .operators
+            .iter()
+            .find(|o| o.name == "sides" && !o.versions.is_empty())
+            .unwrap();
+        assert!(matches!(spec.kind, hir::OperatorKind::Specification { .. }));
+        assert_eq!(spec.versions.len(), 2);
+    }
+
+    #[test]
+    fn versions_are_like_their_specification() {
+        let found = |defined: &str| -> Vec<(Code, String)> {
+            errors(&format!("{FIGURES}{defined}{MAIN}"))
+                .into_iter()
+                .map(|e| (e.code, e.message))
+                .collect()
+        };
+        for (defined, code, message) in [
+            (
+                "operator sides{f: figure}: integer;\noperator sides{f: disc}: integer [ 0 ];",
+                Code::Versions,
+                "`square` has no version of `sides`",
+            ),
+            (
+                "operator sides{f: figure}: integer;\noperator sides{f: disc}: text [ \"0\" ];\noperator sides{f: square}: integer [ 4 ];",
+                Code::Versions,
+                "a version of `sides` is of `integer`, or a subtype of it, not `text`",
+            ),
+            (
+                "operator sides{f: figure}: integer;\noperator sides{f: disc} [];\noperator sides{f: square}: integer [ 4 ];",
+                Code::Versions,
+                "a version of `sides` is read-only exactly if `sides` is",
+            ),
+            (
+                "operator sides{f: disc}: integer [ 0 ];\noperator sides{f: square}: integer [ 4 ];",
+                Code::Versions,
+                "`sides` is defined twice with the same parameters, and no specification of both",
+            ),
+            (
+                "operator sides{f: figure}: integer [ 1 ];\noperator sides{f: figure}: integer [ 2 ];",
+                Code::DuplicateName,
+                "`sides` is defined more than once with parameters named `f`",
+            ),
+            (
+                "operator sides{f: figure}: integer;",
+                Code::Versions,
+                "`sides` has no body and no versions, so nothing computes it",
+            ),
+            (
+                "operator grow{var f: figure};\noperator grow{var f: disc} [];\noperator grow{var f: square} [];",
+                Code::Versions,
+                "the `var` or `out` parameter `f` has a version's type of its own",
+            ),
+            (
+                "operator pair{f: figure, g: figure}: integer;\noperator pair{f: disc, g: figure}: integer [ 1 ];\noperator pair{f: figure, g: disc}: integer [ 2 ];\noperator pair{f: square, g: square}: integer [ 3 ];",
+                Code::Versions,
+                "two versions of `pair` are for `pair{f: disc, g: disc}`, neither more specific than the other",
+            ),
+        ] {
+            let found = found(defined);
+            assert!(
+                found.contains(&(code, message.to_string())),
+                "{defined}: {found:#?}"
+            );
+        }
+        // The fix for a specification's missing version names it.
+        let missing = errors(&format!(
+            "{FIGURES}operator sides{{f: figure}}: integer;\noperator sides{{f: disc}}: integer [ 0 ];{MAIN}"
+        ));
+        assert_eq!(
+            missing[0].help,
+            ["define its version: `operator sides{f: square}: integer [ … ];`"]
+        );
+        // And the one for versions without a specification declares it.
+        let unspecified = errors(&format!(
+            "{FIGURES}operator sides{{f: disc}}: integer [ 0 ];\noperator sides{{f: square}}: integer [ 4 ];{MAIN}"
+        ));
+        assert_eq!(
+            unspecified[0].help,
+            [
+                "declare their specification, of their parameters' union types, `operator sides{f: figure}: integer;`, which they are versions of"
             ]
         );
     }

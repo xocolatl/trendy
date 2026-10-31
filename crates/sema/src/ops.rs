@@ -2188,6 +2188,38 @@ pub(crate) fn call(call: hir::Call, bindings: Bindings) -> Result<hir::Expr, Fai
     let Some(known) = known else {
         return Ok(hir::Expr::Call(call));
     };
+    // A specification's call computes the first of its versions, the most
+    // specific, whose parameters the arguments' values are of, and
+    // otherwise its own value.
+    let versions = &bindings.operators.get(call.operator).versions;
+    if let Some(version) = versions.iter().find(|version| {
+        version
+            .params
+            .iter()
+            .all(|(name, ty)| known[name].is_of(ty))
+    }) {
+        let result = bindings.operators.get(call.operator).result.clone();
+        // Each argument of the version's parameter's type.
+        let typed_params = &bindings.operators.get(version.operator).params;
+        let args = known
+            .iter()
+            .map(|(name, value)| (name.clone(), typed(value.clone(), &typed_params[name].ty)))
+            .collect();
+        let computed = self::call(
+            hir::Call {
+                operator: version.operator,
+                args,
+                ..call.clone()
+            },
+            bindings,
+        )?;
+        // Of the specification's type, which its versions' are subtypes
+        // of; one known only when running is chosen then.
+        return Ok(match (result, known_value(&computed)) {
+            (Some(result), Some(_)) => computed.treated(&result),
+            _ => hir::Expr::Call(call),
+        });
+    }
     if let Some(builtin) = bindings.operators.get(call.operator).builtin {
         let hir::Builtin::ReadOnly(builtin) = builtin else {
             unreachable!("only read-only operators' calls are values");
@@ -2619,12 +2651,12 @@ pub(crate) struct BrokenConstraint {
 /// The components of `value`, a value of a type of the program's own, as a
 /// tuple: evaluated if it is a constant.
 pub(crate) fn components(value: hir::Expr) -> hir::Expr {
-    match value {
-        hir::Expr::Constant(hir::Value::Defined(value)) => {
-            let ty = hir::Type::Tuple(value.ty.components.clone());
-            typed(hir::Value::Tuple(value.components), &ty)
+    match known_value(&value) {
+        Some(hir::Value::Defined(known)) => {
+            let ty = hir::Type::Tuple(known.ty.components.clone());
+            typed(hir::Value::Tuple(known.components.clone()), &ty)
         }
-        value => hir::Expr::Components(Box::new(value)),
+        _ => hir::Expr::Components(Box::new(value)),
     }
 }
 

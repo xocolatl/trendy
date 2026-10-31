@@ -153,6 +153,7 @@ fn builtin_operator(
         name: name.to_string(),
         types,
         params,
+        versions: Vec::new(),
         kind: hir::OperatorKind::Builtin(builtin),
     })
 }

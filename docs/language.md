@@ -2127,6 +2127,53 @@ operator main{} [
 - **Not yet:** narrowing in an `if` statement's blocks, which can assign
   the name.
 
+An operator of a union type's values can be computed differently for
+each of its subtypes, by versions of it (IM Prescription 17): operators
+of its name and its parameters' names whose parameters are of subtypes
+of its own. A call names the operator, as any call does, and computes
+the most specific version whose parameters its arguments' values are of,
+when compiling if they are known then, and otherwise when running:
+
+```trendy
+type plane_figure union;
+type ellipse is plane_figure { { a: approximate, b: approximate } };
+type polygon is plane_figure { { corners: integer } };
+
+/* No body: a version for each kind of figure computes it. */
+operator sides{f: plane_figure}: integer;
+operator sides{f: ellipse}: integer [ 0 ];
+operator sides{f: polygon}: integer [ f.corners ];
+
+/* A body for the rest, and a version for ellipses. */
+operator name{f: plane_figure}: text [ "a plane figure" ];
+operator name{f: ellipse}: text [ "an ellipse" ];
+
+operator main{} [
+    var figures := relation {
+        { figure: ellipse{a: 3e0, b: 2e0} },
+        { figure: polygon{corners: 4} },
+    };
+    call debug_table{r: figures extend { sides := sides{f: figure}, name := name{f: figure} }};
+];
+```
+
+- **The operator is the specification,** the one whose parameters' types
+  are supertypes of all the others'. Without a body, `;` in its place, it
+  has a version for each type a value can be of, which is reported at the
+  type that has none (A0063): the program that adds a subtype to a union
+  type adds its versions. With a body, that computes it for the rest.
+- **A version is like its specification:** read-only exactly if it is,
+  with each parameter taken as it takes it, and a result of its result's
+  type or a subtype of it (A0063). A `var` or `out` parameter has its
+  specification's type, since the operator can give the variable any
+  value of it.
+- **One version is the most specific for any arguments:** two that are
+  both for some, neither more specific than the other, are an error
+  (A0063), as are two of the same types, or two of one name and
+  parameters with no specification of both, which the error writes
+  (A0001, A0063). A version has no name of its own: Tutorial D's
+  `OPERATOR AREA VERSION AREA_C …` is fixed (P0045).
+
 ## Tuples
 
 A tuple type is written `tuple { name: type, … }`, and a tuple value
@@ -4493,6 +4540,8 @@ line after a comment on its own line, such as a file's header, is kept.
 | `class Ellipse extends PlaneFigure`, `class Ellipse : PlaneFigure`, `TYPE ELLIPSE IS { PLANE_FIGURE POSSREP … }` | `type ellipse is plane_figure { { a: approximate, … } };` |
 | `x instanceof Ellipse`, `isinstance(x, Ellipse)`, `x IS OF (ELLIPSE)`, `IS_ELLIPSE(X)` | `x is ellipse`, after which `x` is an ellipse in the rest of the condition |
 | `(Ellipse) x`, `x as Ellipse`, `TREAT(x AS ELLIPSE)`, `TREAT_AS_ELLIPSE(X)` | `treat x as ellipse`, or, where it may not be one, `x is ellipse and …` |
+| an abstract method, `abstract double area();`, and its overrides | `operator area{f: plane_figure}: approximate;`, and a version for each subtype, `operator area{f: ellipse}: approximate [ … ];` |
+| `OPERATOR AREA_OF VERSION AREA_OF_C ( C CIRCLE ) …` | `operator area_of{c: circle} …`: a version has its specification's name |
 | `[1, 2]`, `ARRAY[1, 2]` | `array [1, 2]` |
 | `[]`, an empty list | `array integer []`, with its elements' type, or `array []` where it is known |
 | `a[0]`, the first element | `a[1]` |

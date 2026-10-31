@@ -57,6 +57,9 @@ fn optimized_operator(program: &hir::Program, operator: &hir::Operator) -> hir::
             }
         }
         hir::OperatorKind::Builtin(builtin) => hir::OperatorKind::Builtin(*builtin),
+        hir::OperatorKind::Specification { result } => hir::OperatorKind::Specification {
+            result: result.clone(),
+        },
     };
     hir::Operator {
         kind,

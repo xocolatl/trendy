@@ -1048,6 +1048,55 @@ error[{not_of}]: polygon{{corners: relation {{ n: integer, name: text }} {{ {{ n
 }
 
 #[test]
+fn versions_are_chosen_when_running() {
+    // Each call computes the version for its arguments' own types: of a
+    // specification without a body, of one with a body for the rest, and
+    // of an update operator, and in an `extend`, for each tuple.
+    let source = format!(
+        "{FIGURES}
+operator sides{{f: plane_figure}}: integer;
+operator sides{{f: ellipse}}: integer [ 0 ];
+operator sides{{f: polygon}}: integer [ count{{r: f.corners}} ];
+
+operator name{{f: plane_figure}}: text [ \"a figure\" ];
+operator name{{f: ellipse}}: text [ \"an ellipse\" ];
+
+operator show{{f: plane_figure}};
+operator show{{f: ellipse}} [ call debug_value{{v: f.a}}; ];
+operator show{{f: polygon}} [ call debug_value{{v: f.corners}}; ];
+
+operator shapes{{a: approximate}} [
+    var e: plane_figure := ellipse{{a: a, b: 1e0}};
+    var p: plane_figure := polygon{{corners: relation {{ {{ n: 1, name: \"n\" }} }}}};
+    call debug_value{{v: tuple {{ e: sides{{f: e}}, p: sides{{f: p}} }}}};
+    call debug_value{{v: tuple {{ e: name{{f: e}}, p: name{{f: p}} }}}};
+    call show{{f: e}};
+    call show{{f: p}};
+    call debug_value{{v: relation {{ {{ s: e }}, {{ s: p }} }} extend {{ n := sides{{f: s}} }} {{n}}}};
+];
+
+operator main{{}} [
+    call shapes{{a: 3e0}};
+];
+"
+    );
+    let (code, stderr) = run_source("versioned", &source);
+    assert_eq!(
+        (code, stderr.lines().collect::<Vec<_>>()),
+        (
+            0,
+            vec![
+                "tuple { e: 0, p: 1 }",
+                r#"tuple { e: "an ellipse", p: "a figure" }"#,
+                "3e0",
+                r#"relation { n: integer, name: text } { { n: 1, name: "n" } }"#,
+                "relation { n: integer } { { n: 0 }, { n: 1 } }",
+            ]
+        )
+    );
+}
+
+#[test]
 fn csv_files_load_values_of_types_in_a_hierarchy() {
     // A subtype's value is read as any type's, and laid out after its own
     // type.
@@ -2200,6 +2249,13 @@ fn inheritance() {
             "└──────────────────┴──────┘",
             r#""ellipse""#,
             r#""3-gon""#,
+            // Their areas, each computed by its kind's version.
+            "┌──────┬─────────────────────┐",
+            "│ name │ size                │",
+            "├──────┼─────────────────────┤",
+            "│ plot │                 6e0 │",
+            "│ pond │ 1.884955592153876e1 │",
+            "└──────┴─────────────────────┘",
         ]
     );
 }

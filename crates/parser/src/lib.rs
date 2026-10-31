@@ -758,6 +758,24 @@ impl<'a> Parser<'a> {
             "add a name after `operator`, such as `operator main{} [];`",
             &[SyntaxKind::LBrace, SyntaxKind::LParen],
         );
+        // Tutorial D's `VERSION name`, which a version needs none of.
+        if let Some(version) = self
+            .found()
+            .filter(|f| f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case("version"))
+            .filter(|_| {
+                self.found_after(1)
+                    .is_some_and(|f| f.kind == SyntaxKind::Ident)
+            })
+        {
+            let from = self.last_end.unwrap_or(version.span.start);
+            self.start_node(SyntaxKind::Error);
+            self.bump();
+            let name = self.found().expect("a name follows `VERSION`");
+            self.bump();
+            self.builder.finish_node();
+            self.errors
+                .push(errors::version_name(Span::new(from, name.span.end)));
+        }
         let angled = self.angled_type_parameters();
         let written = self.params();
         self.updates_clause(&written);
@@ -767,6 +785,13 @@ impl<'a> Parser<'a> {
             let at = self.last_end.unwrap_or(angled.span.end);
             self.errors
                 .push(errors::angled_type_parameters(&angled, declared, at));
+        }
+        // A specification signature, `operator area{f: plane_figure}:
+        // approximate;`, whose versions have the bodies.
+        if self.at(SyntaxKind::Semicolon) {
+            self.bump();
+            self.builder.finish_node();
+            return;
         }
         self.delimited(
             Some(SyntaxKind::Body),
@@ -7126,6 +7151,24 @@ SourceFile
         );
         // A heading's name as a relation value: the empty relation.
         assert_eq!(fix("var r := relation home;"), "var r := relation home {};");
+    }
+
+    #[test]
+    fn specifications_and_versions() {
+        // A specification signature has no body.
+        let parse = parse_str("operator area{f: figure}: approximate;\noperator draw{f: figure};");
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let bodies: Vec<bool> = parse
+            .tree
+            .operators()
+            .map(|op| op.body().is_some())
+            .collect();
+        assert_eq!(bodies, [false, false]);
+        // Tutorial D's version names, deleted.
+        let source = "operator area VERSION area_d{f: disc}: approximate [ 1e0 ];";
+        let codes: Vec<Code> = parse_str(source).errors.iter().map(|e| e.code).collect();
+        assert_eq!(codes, [Code::VersionName]);
+        assert_eq!(fix(source), "operator area{f: disc}: approximate [ 1e0 ];");
     }
 
     #[test]

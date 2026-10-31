@@ -103,6 +103,9 @@ fn function(
             (builder.finish(Some(layout), cx), makes)
         }
         hir::OperatorKind::Builtin(_) => unreachable!("built-ins are runtime calls"),
+        hir::OperatorKind::Specification { .. } => {
+            unreachable!("a specification's versions are called instead")
+        }
     };
     cx.functions.insert(function_id.0, lowered);
     cx.functions_of.insert(key, (function_id, makes));
@@ -977,15 +980,8 @@ impl<'a> FunctionBuilder<'a> {
                     self.store(target, rows, cx);
                 }
             },
-            hir::OperatorKind::Update { .. } => {
+            hir::OperatorKind::Update { .. } | hir::OperatorKind::Specification { .. } => {
                 let params = params_of(callee, &call.types);
-                let (function, _) = function(
-                    self.program,
-                    self.variable_data,
-                    call.operator,
-                    &call.types,
-                    cx,
-                );
                 let args = self.arguments(&params, call, cx);
                 // An assignment the operator makes must not free what an
                 // argument points to, though it can replace the value of
@@ -1002,13 +998,7 @@ impl<'a> FunctionBuilder<'a> {
                         self.scoped = true;
                     }
                 }
-                self.insts.push(lir::Inst::Call {
-                    function,
-                    args,
-                    result: None,
-                });
-                // The callee leaves the program at its own site.
-                self.after_call(cx);
+                self.invoke(call, args, None, cx);
                 // Each variable it updates is assigned its parameter's
                 // value as it ends, which its keys are checked against.
                 for target in call.updated.values() {
@@ -1367,26 +1357,93 @@ impl<'a> FunctionBuilder<'a> {
             hir::OperatorKind::Builtin(hir::Builtin::Update(_)) => {
                 unreachable!("only read-only operators are called in expressions")
             }
-            hir::OperatorKind::ReadOnly { .. } | hir::OperatorKind::Update { .. } => {}
+            hir::OperatorKind::ReadOnly { .. }
+            | hir::OperatorKind::Update { .. }
+            | hir::OperatorKind::Specification { .. } => {}
         }
-        let (function, makes) = function(
-            self.program,
-            self.variable_data,
-            call.operator,
-            &call.types,
-            cx,
-        );
-        self.scoped |= makes;
         let args = self.arguments(&params_of(callee, &call.types), call, cx);
         let dst = self.slot(cx.layout(&self.program.result(call)));
+        self.invoke(call, args, Some(dst.clone()), cx);
+        dst
+    }
+
+    /// Call the operator `call` names, with the argument struct `args`,
+    /// its value, if it is read-only, into `result`: of its versions, the
+    /// first whose parameters the arguments' values are of, and otherwise
+    /// its own function. A specification without a body has a version for
+    /// whatever the arguments' values are of, so the last is called,
+    /// untested, if none before it is.
+    fn invoke(
+        &mut self,
+        call: &hir::Call,
+        args: Option<lir::Place>,
+        result: Option<lir::Place>,
+        cx: &mut Lowering,
+    ) {
+        let callee = self.program.operator(call.operator);
+        if callee.versions.is_empty() {
+            self.call_function(call.operator, &call.types, args, result, cx);
+            return;
+        }
+        let params = params_of(callee, &call.types);
+        let bodiless = matches!(callee.kind, hir::OperatorKind::Specification { .. });
+        let done = self.new_block();
+        for (i, version) in callee.versions.iter().enumerate() {
+            let next = self.new_block();
+            if !(bodiless && i + 1 == callee.versions.len()) {
+                for (name, ty) in &version.params {
+                    let index = params
+                        .keys()
+                        .position(|p| p == name)
+                        .expect("a version's parameters are its specification's");
+                    let mut arg = args.clone().expect("a version has parameters");
+                    arg.path.push(index);
+                    let fits = self.is_of(&arg, ty, cx);
+                    let tested = self.new_block();
+                    self.end_block(
+                        lir::Terminator::Branch {
+                            condition: fits,
+                            then: tested,
+                            otherwise: next,
+                        },
+                        tested,
+                    );
+                }
+            }
+            self.call_function(
+                version.operator,
+                &call.types,
+                args.clone(),
+                result.clone(),
+                cx,
+            );
+            self.end_block(lir::Terminator::Jump(done), next);
+        }
+        if !bodiless {
+            self.call_function(call.operator, &call.types, args, result, cx);
+        }
+        self.end_block(lir::Terminator::Jump(done), done);
+    }
+
+    /// Call the function of the operator `operator`, instantiated with
+    /// `types`, with the argument struct `args`, its value into `result`.
+    fn call_function(
+        &mut self,
+        operator: hir::OperatorId,
+        types: &[hir::Type],
+        args: Option<lir::Place>,
+        result: Option<lir::Place>,
+        cx: &mut Lowering,
+    ) {
+        let (function, makes) = function(self.program, self.variable_data, operator, types, cx);
+        self.scoped |= makes;
         self.insts.push(lir::Inst::Call {
             function,
             args,
-            result: Some(dst.clone()),
+            result,
         });
         // The callee leaves the program at its own site.
         self.after_call(cx);
-        dst
     }
 
     /// The value of `call`, of the read-only built-in `builtin`, computed
@@ -4298,6 +4355,7 @@ mod tests {
 
     fn user(name: &str, params: &[&str], body: Vec<hir::Statement>) -> hir::Operator {
         hir::Operator {
+            versions: Vec::new(),
             name: name.to_string(),
             types: Vec::new(),
             params: params
@@ -4316,6 +4374,7 @@ mod tests {
 
     fn debug_value() -> hir::Operator {
         hir::Operator {
+            versions: Vec::new(),
             name: "debug_value".to_string(),
             types: hir::Builtin::Update(hir::UpdateBuiltin::DebugValue).types(),
             params: hir::Builtin::Update(hir::UpdateBuiltin::DebugValue).params(),
@@ -5111,6 +5170,7 @@ mod tests {
         // `call f{t: t};`, which makes nothing, but must keep `t`'s bytes
         // from being freed by an assignment `f` makes to `t`.
         let f = hir::Operator {
+            versions: Vec::new(),
             types: Vec::new(),
             name: "f".to_string(),
             params: [(
@@ -5162,6 +5222,7 @@ mod tests {
         // as `debug_value{v: shout{t: t}}`, and `unused`, which isn't.
         let text = || hir::Type::Scalar(hir::Scalar::Text);
         let read_only = |name: &str, value| hir::Operator {
+            versions: Vec::new(),
             name: name.to_string(),
             types: Vec::new(),
             params: [("t".to_string(), hir::Parameter::constant(text()))].into(),
@@ -5255,6 +5316,7 @@ mod tests {
             any: hir::Any::Type,
         };
         let show = hir::Operator {
+            versions: Vec::new(),
             name: "show".to_string(),
             types: vec![parameter.clone()],
             params: [(
@@ -5317,6 +5379,7 @@ mod tests {
     fn count_is_the_relations_count_as_an_integer() {
         // `debug_value{v: count{r: r}}`, of a relation variable.
         let count = hir::Operator {
+            versions: Vec::new(),
             name: "count".to_string(),
             types: hir::Builtin::ReadOnly(hir::ReadOnlyBuiltin::Count).types(),
             params: hir::Builtin::ReadOnly(hir::ReadOnlyBuiltin::Count).params(),
@@ -5360,6 +5423,7 @@ mod tests {
         // `debug_value{v: max{r: r, of: of}}`, of a relation variable whose
         // tuples have `of` beside their own attributes, as sema makes it.
         let max = hir::Operator {
+            versions: Vec::new(),
             name: "max".to_string(),
             types: hir::Builtin::ReadOnly(hir::ReadOnlyBuiltin::Max).types(),
             params: hir::Builtin::ReadOnly(hir::ReadOnlyBuiltin::Max).params(),
@@ -5452,6 +5516,7 @@ mod tests {
             tuples: BTreeSet::new(),
         });
         let f = hir::Operator {
+            versions: Vec::new(),
             name: "f".to_string(),
             types: Vec::new(),
             params: BTreeMap::new(),
@@ -5527,6 +5592,7 @@ mod tests {
             )),
         );
         let f = hir::Operator {
+            versions: Vec::new(),
             name: "f".to_string(),
             types: Vec::new(),
             params: [("p".to_string(), hir::Parameter::constant(integer()))].into(),
@@ -5598,6 +5664,7 @@ mod tests {
     /// descriptor and the position of `of`.
     fn numbers_calls(builtin: hir::Builtin) -> Vec<(lir::RuntimeFn, usize)> {
         let operator = hir::Operator {
+            versions: Vec::new(),
             name: builtin.name().to_string(),
             types: builtin.types(),
             params: builtin.params(),
@@ -5644,6 +5711,7 @@ mod tests {
         // `show{p: integer} [ call debug_value{v: to_text{from: p}};
         // call debug_value{v: to_approximate{from: p}}; ]`.
         let builtin = |builtin: hir::Builtin| hir::Operator {
+            versions: Vec::new(),
             name: builtin.name().to_string(),
             types: builtin.types(),
             params: builtin.params(),
@@ -6073,6 +6141,7 @@ mod tests {
             locals: Vec::new(),
         };
         let f = hir::Operator {
+            versions: Vec::new(),
             name: "f".to_string(),
             types: Vec::new(),
             params: [("p".to_string(), hir::Parameter::constant(integer()))].into(),

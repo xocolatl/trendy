@@ -360,6 +360,25 @@ pub(crate) fn sql_treat(
     )
 }
 
+/// Tutorial D's `VERSION name`, at `span` with the space before it, after
+/// an operator's name: a version is told apart by its parameters' types.
+pub(crate) fn version_name(span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::VersionName,
+        "a version of an operator has no name of its own",
+        span,
+        "Tutorial D's `VERSION`",
+    )
+    .with_note("operators of one name and the same parameters' names are versions of the one whose parameters' types are supertypes of the others', each for its own parameters' types, which a call's arguments' values choose (*Type Inheritance and Relational Theory*, IM Prescription 17)")
+    .with_suggestion(
+        "delete the version's name",
+        vec![Edit {
+            span,
+            replacement: String::new(),
+        }],
+    )
+}
+
 /// What a subtype is, for its errors.
 const SUBTYPE_NOTE: &str = "a type declared `is` a union type is one of its subtypes, and its values are all the union type's (*Type Inheritance and Relational Theory*, chapter 12): `type plane_figure union;` and `type ellipse is plane_figure { { a: distance, b: distance } };`";
 

@@ -45,6 +45,27 @@ pub(crate) struct Signature {
     /// operator with errors in them aren't checked, because those errors
     /// are already reported.
     pub(crate) valid: bool,
+    /// What it is among the operators of its name and its parameters'
+    /// names.
+    pub(crate) family: Family,
+    /// A specification's versions, each before those it is more specific
+    /// than (see [`hir::Operator::versions`]).
+    pub(crate) versions: Vec<hir::Version>,
+}
+
+/// What an operator is among those of its name and its parameters' names
+/// (*Type Inheritance and Relational Theory*, IM Prescription 17).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Family {
+    /// The only one, or the specification of the others, whose parameters'
+    /// types are supertypes of theirs.
+    Own,
+    /// A version of the specification with this id, which calls of it
+    /// compute for arguments of its parameters' types.
+    Version(hir::OperatorId),
+    /// One with the same parameters as another of which it is no version,
+    /// which is reported.
+    Duplicate,
 }
 
 /// An operator made from the declaration of a type of the program's own,
@@ -267,7 +288,11 @@ impl Operators {
     /// defined, but constraints and conversions, which no call can name.
     fn new(list: Vec<Signature>) -> Self {
         let mut by_name: HashMap<String, Vec<hir::OperatorId>> = HashMap::new();
-        let named = |s: &&Signature| s.constrains().is_none() && s.converts().is_none();
+        // A version is called through its specification, and a duplicate
+        // not at all.
+        let named = |s: &&Signature| {
+            s.constrains().is_none() && s.converts().is_none() && s.family == Family::Own
+        };
         for signature in list.iter().filter(named) {
             by_name
                 .entry(signature.name.clone())
@@ -416,6 +441,7 @@ impl Signature {
         let (builtin, result) = match &op.kind {
             hir::OperatorKind::Builtin(builtin) => (Some(*builtin), builtin.result()),
             hir::OperatorKind::ReadOnly { result, .. } => (None, Some(result.clone())),
+            hir::OperatorKind::Specification { result } => (None, result.clone()),
             hir::OperatorKind::Update { .. } => (None, None),
         };
         Signature {
@@ -430,6 +456,8 @@ impl Signature {
             decl: None,
             builtin,
             from_type: None,
+            family: Family::Own,
+            versions: Vec::new(),
             valid: true,
         }
     }
@@ -483,7 +511,273 @@ pub(crate) fn signatures(
             Item::Variable(_) | Item::Heading(_) => {}
         }
     }
+    families(&mut list, namespaces, errors);
     Operators::new(list)
+}
+
+/// Each set of the program's operators in `list` of one name and the same
+/// parameters' names, checked as a specification and its versions (*Type
+/// Inheritance and Relational Theory*, IM Prescription 17): the one whose
+/// parameters' types are supertypes of all the others', and the others,
+/// each with parameters of subtypes of those, which a call of it computes
+/// for arguments of them. One with nothing to be a version of, or another
+/// with the same types, is a duplicate; a version unlike its specification
+/// is reported, as is an operator without a body that has no versions, or
+/// a combination of its union types' subtypes that none is for, or two
+/// are, neither more specific than the other.
+fn families(list: &mut [Signature], namespaces: &Namespaces, errors: &mut Vec<Diagnostic>) {
+    let mut sets: BTreeMap<(String, Vec<String>), Vec<usize>> = BTreeMap::new();
+    for (i, signature) in list.iter().enumerate() {
+        if signature.decl.is_some() && signature.from_type.is_none() {
+            let names = signature.params.keys().cloned().collect();
+            sets.entry((signature.name.clone(), names))
+                .or_default()
+                .push(i);
+        }
+    }
+    for members in sets.into_values() {
+        let covers = |spec: &Signature, other: &Signature| {
+            other.params.iter().all(|(name, p)| {
+                spec.params
+                    .get(name)
+                    .is_some_and(|s| p.ty.is_subtype_of(&s.ty))
+            })
+        };
+        let same = |a: &Signature, b: &Signature| covers(a, b) && covers(b, a);
+        let spec = members
+            .iter()
+            .copied()
+            .find(|&i| members.iter().all(|&j| covers(&list[i], &list[j])));
+        let Some(spec) = spec else {
+            // None is a specification of the others: versions of one not
+            // declared, if the parameters' types have common supertypes,
+            // and otherwise each after the first is a duplicate of it.
+            let specified = specification_of(&members, list);
+            for &later in &members[1..] {
+                match &specified {
+                    Some(specified) => {
+                        errors.push(errors::unspecified_versions(
+                            &list[later],
+                            &list[members[0]],
+                            specified,
+                        ));
+                        list[later].family = Family::Duplicate;
+                        list[later].valid = false;
+                    }
+                    None => duplicate(list, members[0], later, errors),
+                }
+            }
+            continue;
+        };
+        let mut versions: Vec<usize> = Vec::new();
+        for &member in &members {
+            if member == spec {
+                continue;
+            }
+            if let Some(&earlier) = std::iter::once(&spec)
+                .chain(&versions)
+                .find(|&&e| same(&list[e], &list[member]))
+            {
+                duplicate(list, earlier, member, errors);
+                continue;
+            }
+            if let Some(error) = errors::unlike_version(&list[member], &list[spec]) {
+                errors.push(error);
+                list[member].valid = false;
+            }
+            list[member].family = Family::Version(list[spec].id);
+            versions.push(member);
+        }
+        // Each before those it is more specific than: its parameters' types
+        // are as deep in their hierarchies or deeper, and one is deeper.
+        let depth = |s: &Signature| -> usize {
+            s.params
+                .values()
+                .map(|p| match &p.ty {
+                    hir::Type::Defined(d) => d.supertypes.len() + 1,
+                    hir::Type::Dummy(d) => d.supertypes.len(),
+                    _ => 0,
+                })
+                .sum()
+        };
+        versions.sort_by_key(|&v| std::cmp::Reverse(depth(&list[v])));
+        let made: Vec<hir::Version> = versions
+            .iter()
+            .map(|&v| hir::Version {
+                operator: list[v].id,
+                params: list[v]
+                    .params
+                    .iter()
+                    .filter(|(name, p)| list[spec].params[*name].ty != p.ty)
+                    .map(|(name, p)| (name.clone(), p.ty.clone()))
+                    .collect(),
+            })
+            .collect();
+        list[spec].versions = made;
+        if list[spec].versions.is_empty() {
+            continue;
+        }
+        if let Some(error) = uncovered(&list[spec], list, namespaces) {
+            errors.push(error);
+            list[spec].valid = false;
+        }
+    }
+    // An operator without a body and without versions computes nothing.
+    for signature in list.iter_mut() {
+        let bodiless = signature.decl.as_ref().is_some_and(|d| d.body().is_none());
+        if bodiless && signature.versions.is_empty() && signature.family == Family::Own {
+            if let Some(decl) = &signature.decl {
+                errors.push(errors::bodiless_operator(decl));
+            }
+            signature.valid = false;
+        }
+    }
+}
+
+/// The specification `members`, of `list`, would be versions of, written
+/// as a definition: each parameter of the most specific common supertype
+/// of theirs, if they have one, and the result too, if they have results;
+/// `None` if a parameter's types have none, or they are all the same.
+fn specification_of(members: &[usize], list: &[Signature]) -> Option<String> {
+    let first = &list[members[0]];
+    let mut written = Vec::new();
+    let mut wider = false;
+    for (name, param) in &first.params {
+        let mut common = param.ty.clone();
+        for &member in &members[1..] {
+            common = common.common_supertype(&list[member].params.get(name)?.ty)?;
+        }
+        wider |= members.iter().any(|&m| list[m].params[name].ty != common);
+        written.push(format!("{name}: {common}"));
+    }
+    if !wider {
+        return None;
+    }
+    let result = match &first.result {
+        Some(result) => {
+            let mut common = result.clone();
+            for &member in &members[1..] {
+                common = common.common_supertype(list[member].result.as_ref()?)?;
+            }
+            format!(": {common}")
+        }
+        None => String::new(),
+    };
+    Some(format!(
+        "operator {}{{{}}}{result};",
+        first.name,
+        written.join(", ")
+    ))
+}
+
+/// Report `later`, of `list`, as a duplicate of `first`, which it has the
+/// same name, parameters' names and types as.
+fn duplicate(list: &mut [Signature], first: usize, later: usize, errors: &mut Vec<Diagnostic>) {
+    let ident = list[later]
+        .decl
+        .as_ref()
+        .and_then(ast::Operator::name)
+        .and_then(|n| n.ident());
+    let at = list[first]
+        .decl
+        .as_ref()
+        .and_then(ast::Operator::name)
+        .and_then(|n| n.ident());
+    if let (Some(ident), Some(at)) = (ident, at) {
+        let params: BTreeSet<String> = list[later].written.keys().cloned().collect();
+        errors.push(errors::duplicate_operator(
+            ident.text(),
+            trendy_syntax::span(ident.text_range()),
+            (
+                crate::Kind::Operator,
+                Some(trendy_syntax::span(at.text_range())),
+            ),
+            &params,
+        ));
+    }
+    list[later].family = Family::Duplicate;
+    list[later].valid = false;
+}
+
+/// The error for the specification `spec`, of `list`, if a combination of
+/// the types with components under its versions' parameters' union types
+/// has no version for it and it has no body, or two, neither more specific
+/// than the other.
+fn uncovered(spec: &Signature, list: &[Signature], namespaces: &Namespaces) -> Option<Diagnostic> {
+    // The parameters some version is narrower for, and the types each can
+    // be of.
+    let dispatched: BTreeSet<&String> =
+        spec.versions.iter().flat_map(|v| v.params.keys()).collect();
+    let mut combinations: Vec<BTreeMap<String, hir::Type>> = vec![BTreeMap::new()];
+    for name in &dispatched {
+        let kinds = leaves(&spec.params[*name].ty, namespaces);
+        combinations = combinations
+            .into_iter()
+            .flat_map(|so_far| {
+                kinds.iter().map(move |kind| {
+                    let mut more = so_far.clone();
+                    more.insert((*name).clone(), kind.clone());
+                    more
+                })
+            })
+            .collect();
+    }
+    let bodiless = spec.decl.as_ref().is_some_and(|d| d.body().is_none());
+    let fits = |version: &hir::Version, combination: &BTreeMap<String, hir::Type>| {
+        version
+            .params
+            .iter()
+            .all(|(name, ty)| combination[name].is_subtype_of(ty))
+    };
+    let narrower = |a: &hir::Version, b: &hir::Version| {
+        b.params.iter().all(|(name, ty)| {
+            a.params
+                .get(name)
+                .map_or(&spec.params[name].ty, |t| t)
+                .is_subtype_of(ty)
+        })
+    };
+    for combination in &combinations {
+        let fitting: Vec<&hir::Version> = spec
+            .versions
+            .iter()
+            .filter(|v| fits(v, combination))
+            .collect();
+        if fitting.is_empty() {
+            if bodiless {
+                return Some(errors::missing_version(spec, combination, namespaces));
+            }
+            continue;
+        }
+        let narrowest = fitting
+            .iter()
+            .find(|a| fitting.iter().all(|b| narrower(a, b)));
+        if narrowest.is_none() {
+            let [first, second, ..] = fitting.as_slice() else {
+                unreachable!("two fit, neither narrower");
+            };
+            let name = |v: &hir::Version| list[v.operator.0].decl.as_ref();
+            return Some(errors::ambiguous_versions(
+                spec,
+                combination,
+                (name(first), name(second)),
+            ));
+        }
+    }
+    None
+}
+
+/// The types with components a value of `ty` can be of: those under it, if
+/// it is a union type, and otherwise itself.
+fn leaves(ty: &hir::Type, namespaces: &Namespaces) -> Vec<hir::Type> {
+    match ty {
+        hir::Type::Dummy(dummy) => namespaces
+            .subtypes(&dummy.name)
+            .iter()
+            .flat_map(|subtype| leaves(subtype, namespaces))
+            .collect(),
+        other => vec![other.clone()],
+    }
 }
 
 /// The signature of `op`, the program's operator, whose id is `id`, with
@@ -496,9 +790,6 @@ fn operator(
     errors: &mut Vec<Diagnostic>,
 ) -> Option<Signature> {
     let ident = op.name().and_then(|n| n.ident())?;
-    if !namespaces.is_first_operator(&ident) {
-        return None;
-    }
     let declared = op.type_parameters();
     let (mut type_parameters, declared_valid) = declared.as_ref().map_or_else(
         || (Vec::new(), true),
@@ -563,6 +854,8 @@ fn operator(
         decl: Some(op),
         builtin: None,
         from_type: None,
+        family: Family::Own,
+        versions: Vec::new(),
     })
 }
 
@@ -611,6 +904,8 @@ fn numbered(file: &SourceFile, namespaces: &Namespaces) -> Vec<Signature> {
                 decl: None,
                 builtin: None,
                 from_type: Some(from_type(Made::Constraint(written))),
+                family: Family::Own,
+                versions: Vec::new(),
                 valid: true,
             });
         }
@@ -631,6 +926,8 @@ fn numbered(file: &SourceFile, namespaces: &Namespaces) -> Vec<Signature> {
                     decl: None,
                     builtin: None,
                     from_type: Some(from_type(made)),
+                    family: Family::Own,
+                    versions: Vec::new(),
                     valid: converted.convertible,
                 };
             signatures.push(conversion(
@@ -697,6 +994,8 @@ fn from_type(decl: &ast::TypeDecl, namespaces: &Namespaces) -> Vec<Signature> {
             made,
         }),
         valid,
+        family: Family::Own,
+        versions: Vec::new(),
     };
     let mut signatures = Vec::new();
     if let (true, Some(stored)) = (selects, crate::named_types::stored(decl)) {

@@ -1043,6 +1043,21 @@ and only then what they guard: a narrowed value is never treated unless
 its test is true. A false test shows nothing: a program can add subtypes
 to a union type, so what isn't of one isn't known to be of any other.
 
+Operators of one name and the same parameters' names are a
+specification and its versions (`operators::families`, once every
+signature's types are resolved, since only they tell a version from a
+duplicate): the one whose parameters' types are supertypes of all the
+others', and the others, recorded on it most specific first
+(`hir::Operator::versions`), and left out of the names calls choose
+among. One without a body is `hir::OperatorKind::Specification`, and
+needs a version for each combination of the types its union-typed
+parameters' values can be of. A call names the specification and is
+checked against it; folding computes the version for its known
+arguments' own types (`ops::call`), and lowering tests the arguments'
+types against each version in turn, calling the first that fits with
+the same argument struct, or the specification's own function
+(`FunctionBuilder::invoke`).
+
 In an `extend`'s or a `replace`'s values, names resolve first to the
 attributes of the tuple at hand (`check::TupleNames`), as `Current(0, …)`'s attributes, and then to
 whatever they name around the `extend`, one `Current` level deeper. An

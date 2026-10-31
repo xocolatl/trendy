@@ -68,6 +68,7 @@ impl Program {
     pub fn result(&self, call: &Call) -> Type {
         let result = match &self.operator(call.operator).kind {
             OperatorKind::ReadOnly { result, .. } => Some(result.clone()),
+            OperatorKind::Specification { result } => result.clone(),
             OperatorKind::Builtin(builtin) => builtin.result(),
             OperatorKind::Update { .. } => None,
         };
@@ -136,6 +137,23 @@ pub struct Operator {
     /// The parameters, by name. A call's arguments are a tuple of them.
     pub params: BTreeMap<String, Parameter>,
     pub kind: OperatorKind,
+    /// Its versions (*Type Inheritance and Relational Theory*, IM
+    /// Prescription 17), of subtypes of its parameters' union types, each
+    /// before those it is more specific than: a call computes the first
+    /// whose parameters its arguments' values are of, and otherwise its own
+    /// value or body. None for most operators.
+    pub versions: Vec<Version>,
+}
+
+/// A version of an operator: another operator, with the same parameters,
+/// each of a subtype of the operator's, which a call computes when its
+/// arguments' values are of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Version {
+    pub operator: OperatorId,
+    /// Its parameters' types, of those that are narrower than the
+    /// operator's: what its arguments' values must be of.
+    pub params: BTreeMap<String, Type>,
 }
 
 /// A parameter of an operator: its type, and how it takes its argument.
@@ -205,6 +223,9 @@ impl Operator {
                 value: value.instantiated(types),
             },
             OperatorKind::Builtin(builtin) => OperatorKind::Builtin(*builtin),
+            OperatorKind::Specification { result } => OperatorKind::Specification {
+                result: result.as_ref().map(|r| r.instantiated(types)),
+            },
         };
         Operator {
             name: self.name.clone(),
@@ -221,6 +242,7 @@ impl Operator {
                 })
                 .collect(),
             kind,
+            versions: self.versions.clone(),
         }
     }
 }
@@ -331,6 +353,10 @@ pub enum OperatorKind {
     /// Declared in the prelude and implemented by the compiler: an update
     /// operator, or a read-only one, with a [`Builtin::result`].
     Builtin(Builtin),
+    /// Declared without a body, as an operator of a union type's values,
+    /// which its versions compute, one for each type under it: read-only,
+    /// with this result type, or, without one, an update operator.
+    Specification { result: Option<Type> },
 }
 
 /// The operators the compiler implements. Each is declared in the prelude,
