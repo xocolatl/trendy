@@ -1022,6 +1022,19 @@ mod tests {
         let source = program("call debug_value{v: double{n}};");
         assert_eq!(codes(&source), [Code::PositionalArgument]);
         assert!(fix(&source).contains("double{x: n}"));
+        // So is a name the rest of a value follows.
+        for (written, fixed) in [
+            ("double{n + 1}", "double{x: n + 1}"),
+            (
+                "count{poets where born < 1500}",
+                "count{r: poets where born < 1500}",
+            ),
+            ("count{poets{name}}", "count{r: poets{name}}"),
+        ] {
+            let source = program(&format!("call debug_value{{v: {written}}};"));
+            assert_eq!(codes(&source), [Code::PositionalArgument], "{written}");
+            assert!(fix(&source).contains(fixed), "{written}");
+        }
         // A call whose arguments are known only when the program runs, as a
         // variable of the program's is, is made then.
         for value in ["double{x: n}", "scaled{x: 1, rate: rate}"] {
@@ -8284,6 +8297,7 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
             ("len{r: a}", "length{a: a}"),
             ("len{a}", "length{a: a}"),
             ("len{r}", "count{r: r}"),
+            ("len{r where x > 1}", "count{r: r where x > 1}"),
             ("size{x: a}", "length{a: a}"),
             ("CARDINALITY{a: a}", "length{a: a}"),
             ("count{r: a}", "length{a: a}"),

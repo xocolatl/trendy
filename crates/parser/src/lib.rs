@@ -2869,9 +2869,10 @@ impl<'a> Parser<'a> {
 
     /// Whether a call expression starts here: a name followed by its
     /// arguments, which have names, `f{a: x}`, or start with a value,
-    /// `f{1}`, which sema reports, or are in parentheses, as other
-    /// languages write a call. `f{}` and `f{a}` are projections to the
-    /// parser, and sema makes `f{}` a call when `f` is an operator.
+    /// `f{1}` or `f{r where c}`, which sema reports, or are in
+    /// parentheses, as other languages write a call. `f{}` and `f{a}` are
+    /// projections to the parser, and sema makes `f{}` a call when `f` is
+    /// an operator.
     fn at_call(&mut self) -> bool {
         let named = |f: Option<Found>| f.is_some_and(|f| f.kind == SyntaxKind::Ident);
         if !named(self.found()) {
@@ -2879,19 +2880,47 @@ impl<'a> Parser<'a> {
         }
         match self.found_after(1).map(|f| f.kind) {
             Some(SyntaxKind::LParen) => self.paren_calls,
-            Some(SyntaxKind::LBrace) => match self.found_after(2) {
-                _ if self.mode_at(2).is_some() => true,
-                Some(f) if f.kind == SyntaxKind::Ident => self.found_after(3).is_some_and(|f| {
-                    matches!(
-                        f.kind,
-                        SyntaxKind::Colon | SyntaxKind::Eq | SyntaxKind::ColonEq
-                    )
-                }),
-                Some(f) => starts_value(f.kind),
-                None => false,
-            },
+            Some(SyntaxKind::LBrace) => {
+                self.mode_at(2).is_some()
+                    || self.at_named_argument(2)
+                    || match self.found_after(2) {
+                        // A projection's names are only ever followed by
+                        // `,` or its `}`.
+                        Some(f) if f.kind == SyntaxKind::Ident => self.continues_value(3),
+                        Some(f) => starts_value(f.kind),
+                        None => false,
+                    }
+            }
             _ => false,
         }
+    }
+
+    /// Whether a named argument starts at the significant token `n` after
+    /// the next one, or the next one for 0: a name followed by `:`, or by
+    /// `=` or `:=`, as other languages name one.
+    fn at_named_argument(&mut self, n: usize) -> bool {
+        self.peek();
+        self.lookahead_nth(n)
+            .is_some_and(|f| f.kind == SyntaxKind::Ident)
+            && self.lookahead_nth(n + 1).is_some_and(|f| {
+                matches!(
+                    f.kind,
+                    SyntaxKind::Colon | SyntaxKind::Eq | SyntaxKind::ColonEq
+                )
+            })
+    }
+
+    /// Whether the significant token `n` after the next one, or the next
+    /// one for 0, continues the value before it: a postfix operator, `.`,
+    /// `[` or a list after it, or a dyadic operator.
+    fn continues_value(&self, n: usize) -> bool {
+        self.lookahead_nth(n).is_some_and(|f| {
+            matches!(
+                f.kind,
+                SyntaxKind::Dot | SyntaxKind::LBracket | SyntaxKind::LBrace | SyntaxKind::LParen
+            )
+        }) || self.postfix_operator(n).is_some()
+            || self.binary_operator(n).is_some()
     }
 
     /// `name{arguments}`, at [`Parser::at_call`]: a call of a read-only
@@ -2914,15 +2943,7 @@ impl<'a> Parser<'a> {
     /// `name: value`, with a mode before the name if it has one, or a
     /// value without a name, which sema reports.
     fn argument(&mut self) {
-        let named = self.mode_at(0).is_some()
-            || (self.at(SyntaxKind::Ident)
-                && self.found_after(1).is_some_and(|f| {
-                    matches!(
-                        f.kind,
-                        SyntaxKind::Colon | SyntaxKind::Eq | SyntaxKind::ColonEq
-                    )
-                }));
-        if named {
+        if self.mode_at(0).is_some() || self.at_named_argument(0) {
             self.moded_attribute(SyntaxKind::AttributeValue, true, Self::expression);
         } else {
             self.start_node(SyntaxKind::PositionalArg);
@@ -3403,7 +3424,7 @@ impl<'a> Parser<'a> {
         // The right operand of a comparison just parsed: comparisons don't
         // chain, so another one after it is reported, with a fix.
         let mut compared: Option<Span> = None;
-        while let Some(operator) = self.binary_operator() {
+        while let Some(operator) = self.binary_operator(0) {
             let BinaryOperator {
                 precedence,
                 found,
@@ -3462,10 +3483,11 @@ impl<'a> Parser<'a> {
         self.value_end = self.last_end;
     }
 
-    /// The dyadic operator at the next token, if any.
-    fn binary_operator(&self) -> Option<BinaryOperator<'a>> {
-        let found = self.lookahead_nth(0)?;
-        if let Some((keyword, tokens)) = self.sql_join_at() {
+    /// The dyadic operator at the significant token `n` after the next
+    /// one, or the next one for 0, if any.
+    fn binary_operator(&self, n: usize) -> Option<BinaryOperator<'a>> {
+        let found = self.lookahead_nth(n)?;
+        if let Some((keyword, tokens)) = self.sql_join_at(n) {
             return Some(BinaryOperator {
                 precedence: Precedence::JOIN,
                 found,
@@ -3490,7 +3512,7 @@ impl<'a> Parser<'a> {
         };
         // `not matching`: `not` is otherwise a prefix operator only.
         let matching = |f: Found| f.spells(SyntaxKind::MatchingKw);
-        if keyword == SyntaxKind::NotKw && self.lookahead_nth(1).is_some_and(matching) {
+        if keyword == SyntaxKind::NotKw && self.lookahead_nth(n + 1).is_some_and(matching) {
             return Some(BinaryOperator {
                 precedence: Precedence::JOIN,
                 found,
@@ -3506,14 +3528,15 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// SQL's spelling of a join at the next token, in any case: `natural
-    /// join` and `inner join`, which are `join`, `cross join`, which is
-    /// `times`, and the outer joins, `left`, `right` or `full`, optionally
-    /// followed by `outer`, then `join`, which have no equivalent. The
-    /// keyword it stands for, and how many tokens it is.
-    fn sql_join_at(&self) -> Option<(SyntaxKind, usize)> {
-        let word = |n: usize, word: &str| {
-            self.lookahead_nth(n)
+    /// SQL's spelling of a join at the significant token `n` after the
+    /// next one, or the next one for 0, in any case: `natural join` and
+    /// `inner join`, which are `join`, `cross join`, which is `times`, and
+    /// the outer joins, `left`, `right` or `full`, optionally followed by
+    /// `outer`, then `join`, which have no equivalent. The keyword it
+    /// stands for, and how many tokens it is.
+    fn sql_join_at(&self, n: usize) -> Option<(SyntaxKind, usize)> {
+        let word = |k: usize, word: &str| {
+            self.lookahead_nth(n + k)
                 .is_some_and(|f| f.text.eq_ignore_ascii_case(word))
         };
         let keyword = if word(0, "cross") {
@@ -3689,7 +3712,7 @@ impl<'a> Parser<'a> {
         let start = self.builder.checkpoint();
         self.binary_within(Precedence::UNION..=Precedence::JOIN);
         if let Some(operator) = self
-            .binary_operator()
+            .binary_operator(0)
             .filter(|o| o.keyword == SyntaxKind::WhereKw)
         {
             self.builder.start_node_at(start, SyntaxKind::BinaryExpr);
@@ -3768,7 +3791,7 @@ impl<'a> Parser<'a> {
                     "attribute names"
                 };
                 self.listed_names(what, errors::PROJECTION_FORM);
-            } else if let Some((found, keyword)) = self.postfix_operator() {
+            } else if let Some((found, keyword)) = self.postfix_operator(0) {
                 self.builder.start_node_at(start, SyntaxKind::PostfixExpr);
                 self.operator_token(found, keyword);
                 match keyword {
@@ -3808,10 +3831,11 @@ impl<'a> Parser<'a> {
         false
     }
 
-    /// The postfix operator at the next token, if any, and the keyword it is
-    /// or stands for.
-    fn postfix_operator(&self) -> Option<(Found<'a>, SyntaxKind)> {
-        let found = self.lookahead()?;
+    /// The postfix operator at the significant token `n` after the next
+    /// one, or the next one for 0, if any, and the keyword it is or stands
+    /// for.
+    fn postfix_operator(&self, n: usize) -> Option<(Found<'a>, SyntaxKind)> {
+        let found = self.lookahead_nth(n)?;
         let keyword = match found.kind {
             SyntaxKind::Ident => errors::operator_spelling(found.text)?,
             kind => kind,
@@ -6382,16 +6406,31 @@ SourceFile
                 .unwrap()
         };
         assert!(matches!(initial("f{a: 1}"), Expr::Call(_)));
-        // A value first is a positional argument, which sema reports.
-        assert!(matches!(initial("f{1}"), Expr::Call(_)));
+        // A value first is a positional argument, which sema reports, as
+        // is a name the rest of a value follows.
+        for call in [
+            "f{1}",
+            "f{r where a > 1}",
+            "f{a + 1}",
+            "f{t.a}",
+            "f{a[1]}",
+            "f{r{a}}",
+            "f{r remove {a}}",
+        ] {
+            assert!(matches!(initial(call), Expr::Call(_)), "{call}");
+        }
         // Postfix operators apply to the call.
         let Expr::Project(project) = initial("g{b: 2}{c}") else {
             panic!("a projection");
         };
         assert!(matches!(project.operand(), Some(Expr::Call(_))));
-        // `f{}` and `f{a}` are projections to the parser.
-        assert!(matches!(initial("f{}"), Expr::Project(_)));
-        assert!(matches!(initial("f{a}"), Expr::Project(_)));
+        // `f{}`, `f{a}` and `f{a, b}` are projections to the parser.
+        for projection in ["f{}", "f{a}", "f{a, b}"] {
+            assert!(
+                matches!(initial(projection), Expr::Project(_)),
+                "{projection}"
+            );
+        }
         // Other languages' spellings are fixed.
         assert_eq!(
             fix("operator f{x: integer} -> integer [ RETURN x; ];"),

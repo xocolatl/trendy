@@ -327,7 +327,9 @@ parsed as the value it means. Other languages' spellings of the result
 type, `-> type` and `returns type`, are fixed to `: type` (P0026). A call of one in an
 expression (`CallExpr`) is a name before arguments that a projection
 can't have: named ones, `f{a: x}`, or one starting with a value, `f{1}`,
-which sema reports. `f{}` and `f{a}` stay projections (`ProjectExpr`),
+or with a name the rest of a value follows, `f{r where c}`, which sema
+reports, since a projection's names are only ever followed by `,` or its
+`}`. `f{}` and `f{a}` stay projections (`ProjectExpr`),
 and sema makes them calls of an operator; the parser can't, since it
 doesn't know what names are. A name before `(` is a call too, as other
 languages write one, fixed to braces (P0003), except in the condition of
