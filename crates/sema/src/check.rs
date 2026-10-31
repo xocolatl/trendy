@@ -1593,9 +1593,11 @@ impl<'a> Checker<'a> {
 
     /// The value of the type of the program's own `defined` whose
     /// components are `components`, selected by `expr`, which fails unless
-    /// each of the type's constraints, each checked first if it isn't yet,
-    /// is true of them: evaluated if they are known when compiling. `None`
-    /// after reporting a constraint they break, or one with errors.
+    /// each of its relation-valued components' keys, and each of the
+    /// type's constraints, is true of them: evaluated if they are known
+    /// when compiling. Each constraint, and each conversion that computes
+    /// a keyed component, is checked first if it isn't yet. `None` after
+    /// reporting a key or a constraint they break, or one with errors.
     pub(crate) fn selected(
         &mut self,
         defined: &hir::Defined,
@@ -1605,9 +1607,8 @@ impl<'a> Checker<'a> {
     ) -> Option<hir::Expr> {
         let at = expr.span();
         if !defined
-            .constraints
-            .iter()
-            .all(|c| self.names.checked(c.operator, at, errors))
+            .checks()
+            .all(|operator| self.names.checked(operator, at, errors))
         {
             return None;
         }

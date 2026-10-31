@@ -1,11 +1,12 @@
-//! A relation variable's keys (TTM RM Prescription 15): each a set of its
+//! A relation variable's keys (TTM RM Prescription 15), and those of a
+//! type's relation-valued components: each a set of the relation's
 //! attributes, unique and irreducible, which its value must satisfy.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use trendy_diag::{Diagnostic, Span};
 use trendy_hir as hir;
-use trendy_syntax::ast::{Expr, Key, VarDecl};
+use trendy_syntax::ast::{self, AstNode, Expr, Key, TypeDecl, VarDecl};
 
 use crate::check::Names;
 use crate::types::{self, Expected, Origin};
@@ -25,19 +26,43 @@ pub(crate) fn keys(
     errors: &mut Vec<Diagnostic>,
 ) -> Option<Vec<hir::Key>> {
     let written: Vec<Key> = decl.keys().collect();
-    let hir::Type::Relation(heading) = ty else {
-        if written.is_empty() {
-            return Some(Vec::new());
-        }
-        errors.push(errors::key_not_relation(name, ty, &written));
-        return None;
-    };
     if written.is_empty() {
-        return Some(vec![
-            heading.attributes().map(|(a, _)| a.to_string()).collect(),
-        ]);
+        return Some(match ty {
+            hir::Type::Relation(heading) => {
+                vec![heading.attributes().map(|(a, _)| a.to_string()).collect()]
+            }
+            _ => Vec::new(),
+        });
     }
+    let (irreducible, mut ok) = checked(&written, errors::Keyed::Variable(name), ty, errors);
+    if !matches!(ty, hir::Type::Relation(_)) {
+        return None;
+    }
+    let relation = init.map(|init| match init {
+        hir::Value::Relation(relation) => relation,
+        _ => unreachable!("a relation variable's value is a relation"),
+    });
+    if let (Some(relation), Some(value)) = (relation, decl.initializer()) {
+        ok &= satisfied(name, &irreducible, relation, &value, scope, errors);
+    }
+    ok.then(|| irreducible.into_iter().map(|(_, a)| a).collect())
+}
 
+/// The keys `written` of the relation, of type `ty`, that `keyed` names:
+/// each that lists attributes it has and is irreducible, with its
+/// attributes, and whether every one is. Each that isn't is reported, as
+/// are keys of what isn't a relation, which can't have any.
+pub(crate) fn checked(
+    written: &[Key],
+    keyed: errors::Keyed,
+    ty: &hir::Type,
+    errors: &mut Vec<Diagnostic>,
+) -> (Vec<(Key, BTreeSet<String>)>, bool) {
+    let hir::Type::Relation(heading) = ty else {
+        errors.push(errors::key_not_relation(keyed, ty, written));
+        return (Vec::new(), false);
+    };
+    let name = keyed.name();
     let attributes: Vec<String> = heading
         .attributes()
         .map(|(a, _)| format!("`{a}`"))
@@ -57,7 +82,7 @@ pub(crate) fn keys(
             .names()
             .and_then(|list| ops::listed(&list, heading, errors::Noun::Key, &context, errors))
         {
-            Some(attributes) => keys.push((key, attributes)),
+            Some(attributes) => keys.push((key.clone(), attributes)),
             None => ok = false,
         }
     }
@@ -74,23 +99,82 @@ pub(crate) fn keys(
                 errors.push(errors::redundant_key(key, attributes, other, others));
                 ok = false;
             }
-            None => irreducible.push((key, attributes)),
+            None => irreducible.push((key.clone(), attributes.clone())),
         }
     }
+    (irreducible, ok)
+}
 
-    let relation = init.map(|init| match init {
-        hir::Value::Relation(relation) => relation,
-        _ => unreachable!("a relation variable's value is a relation"),
-    });
-    if let (Some(relation), Some(value)) = (relation, decl.initializer()) {
-        let irreducible: Vec<(Key, BTreeSet<String>)> = irreducible
-            .into_iter()
-            .map(|(key, attributes)| (key.clone(), attributes.clone()))
-            .collect();
-        ok &= satisfied(name, &irreducible, relation, &value, scope, errors);
+/// The keys of the relation-valued components of the type named `ty`,
+/// which `decl` declares, each of whose possible representations is in
+/// `representations` with its components resolved, by the component's
+/// name: those written after each component's type, checked as a
+/// variable's are (see [`checked`]). A key written among what the type says
+/// of itself is reported, with a fix that moves it after the one component
+/// it can be a key of, if there is one.
+pub(crate) fn components(
+    decl: &TypeDecl,
+    ty: &str,
+    representations: &[(ast::Representation, &hir::Heading)],
+    errors: &mut Vec<Diagnostic>,
+) -> BTreeMap<String, Vec<hir::Key>> {
+    let mut keys = BTreeMap::new();
+    // Each relation-valued component, with its attributes and where its
+    // type, and its keys, end.
+    let mut relations = Vec::new();
+    for (representation, heading) in representations {
+        let Some(components) = representation.components() else {
+            continue;
+        };
+        for component in components.attributes() {
+            let Some(ident) = component.name().and_then(|n| n.ident()) else {
+                continue;
+            };
+            let name = ident.text().to_string();
+            let Some(component_ty) = heading.get(&name) else {
+                continue;
+            };
+            if let hir::Type::Relation(inner) = component_ty {
+                let end = trendy_syntax::span(component.syntax().text_range()).end;
+                relations.push((name.clone(), inner.clone(), end));
+            }
+            let written: Vec<Key> = component.keys().collect();
+            if written.is_empty() {
+                continue;
+            }
+            let keyed = errors::Keyed::Component {
+                ty,
+                component: &name,
+            };
+            let (checked, _) = checked(&written, keyed, component_ty, errors);
+            if !checked.is_empty() {
+                keys.insert(name, checked.into_iter().map(|(_, a)| a).collect());
+            }
+        }
     }
-
-    ok.then(|| keys.into_iter().map(|(_, attributes)| attributes).collect())
+    for key in decl.misplaced_keys() {
+        let names: Vec<String> = key
+            .names()
+            .map(|list| {
+                list.names()
+                    .filter_map(|n| Some(n.ident()?.text().to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let candidates: Vec<(&str, usize)> = relations
+            .iter()
+            .filter(|(_, inner, _)| names.iter().all(|n| inner.get(n).is_some()))
+            .map(|(name, _, end)| (name.as_str(), *end))
+            .collect();
+        let text = format!("key {{ {} }}", names.join(", "));
+        let text = if names.is_empty() {
+            "key {}".to_string()
+        } else {
+            text
+        };
+        errors.push(errors::misplaced_key(&key, &text, ty, &candidates));
+    }
+    keys
 }
 
 /// The keys written in `decl` that are among `keys`, each with its
@@ -123,25 +207,73 @@ pub(crate) fn satisfied(
     let mut ok = true;
     let mut places = None;
     for (key, attributes) in keys {
-        let mut seen: BTreeMap<hir::TupleValue, &hir::TupleValue> = BTreeMap::new();
-        for tuple in &relation.tuples {
-            let shared = key_value(tuple, attributes);
-            let Some(first) = seen.get(&shared) else {
-                seen.insert(shared, tuple);
-                continue;
-            };
+        for (shared, [earlier, tuple]) in sharing(relation, attributes) {
             let places =
                 places.get_or_insert_with(|| tuple_places(value, &relation.heading, scope));
             let place = |t: &hir::TupleValue| places.iter().find(|(v, _)| v == t).map(|&(_, s)| s);
-            let (at, first) = match (place(first), place(tuple)) {
+            let (at, first) = match (place(earlier), place(tuple)) {
                 (Some(a), Some(b)) => (a.max(b), Some(a.min(b))),
                 _ => (value.span(), None),
             };
-            errors.push(errors::key_violated(name, key, &shared, at, first));
+            errors.push(errors::key_violated(
+                errors::Keyed::Variable(name),
+                Some(key.span()),
+                (&shared, [earlier, tuple]),
+                at,
+                first,
+            ));
             ok = false;
         }
     }
     ok
+}
+
+/// The tuples of `relation` that share their values for the key
+/// `attributes` with an earlier one, each with those values and the
+/// earlier one, the first it shares them with.
+pub(crate) fn sharing<'r>(
+    relation: &'r hir::RelationValue,
+    attributes: &BTreeSet<String>,
+) -> Vec<(hir::TupleValue, [&'r hir::TupleValue; 2])> {
+    let mut seen: BTreeMap<hir::TupleValue, &hir::TupleValue> = BTreeMap::new();
+    let mut shared = Vec::new();
+    for tuple in &relation.tuples {
+        let value = key_value(tuple, attributes);
+        match seen.get(&value) {
+            Some(&earlier) => shared.push((value, [earlier, tuple])),
+            None => {
+                seen.insert(value, tuple);
+            }
+        }
+    }
+    shared
+}
+
+/// Where the key `attributes` of the component `component` of `defined` is
+/// written, found through the type's selectors in `operators`, whose
+/// declaration it is in.
+pub(crate) fn written_in(
+    defined: &hir::Defined,
+    component: &str,
+    attributes: &BTreeSet<String>,
+    operators: &crate::operators::Operators,
+) -> Option<Span> {
+    let selector = operators.selector(defined, component)?;
+    let decl = &operators.get(selector).from_type.as_ref()?.decl;
+    decl.representations()
+        .filter_map(|r| r.components())
+        .flat_map(|components| components.attributes().collect::<Vec<_>>())
+        .filter(|c| c.is_named(component))
+        .flat_map(|c| c.keys().collect::<Vec<_>>())
+        .find(|key| {
+            let names: Option<BTreeSet<String>> = key.names().map(|list| {
+                list.names()
+                    .filter_map(|n| Some(n.ident()?.text().to_string()))
+                    .collect()
+            });
+            names.as_ref() == Some(attributes)
+        })
+        .map(|key| key.span())
 }
 
 /// `tuple`'s value for the key `attributes`: the tuple of just those.

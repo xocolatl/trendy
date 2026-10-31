@@ -2834,6 +2834,12 @@ pub struct Defined {
     pub components: Heading,
     pub representations: Vec<Representation>,
     pub constraints: Vec<Constraint>,
+    /// The keys of its relation-valued components, of any of its possible
+    /// representations, by the component's name: no two tuples of the
+    /// component's relation have the same values for one of its keys (RM
+    /// Prescription 15), which, as its constraints are, is true of every
+    /// value of the type.
+    pub keys: BTreeMap<String, Vec<Key>>,
     pub order: Option<Order>,
     /// The union types it is a subtype of, the one it names first, and so
     /// on up: none, if it names none.
@@ -2887,6 +2893,28 @@ impl Defined {
             }
         };
         Some((order, components))
+    }
+
+    /// Whether selecting a value of it checks anything: it has
+    /// constraints, or keys of components.
+    #[must_use]
+    pub fn is_constrained(&self) -> bool {
+        !self.constraints.is_empty() || !self.keys.is_empty()
+    }
+
+    /// The read-only operators selecting a value of it calls, to check its
+    /// components: each constraint's, and each conversion from the stored
+    /// representation that computes a keyed component of another.
+    pub fn checks(&self) -> impl Iterator<Item = OperatorId> + '_ {
+        let conversions = self
+            .keys
+            .keys()
+            .filter_map(|component| self.representation(component)?.1)
+            .map(|r| r.from);
+        self.constraints
+            .iter()
+            .map(|c| c.operator)
+            .chain(conversions)
     }
 
     /// The components of each of its possible representations, the stored
@@ -4029,6 +4057,7 @@ mod tests {
             components,
             representations: Vec::new(),
             constraints: Vec::new(),
+            keys: BTreeMap::new(),
             order: None,
             supertypes: Vec::new(),
         };
@@ -4088,6 +4117,7 @@ mod tests {
                 components: Heading::default(),
                 representations: Vec::new(),
                 constraints: Vec::new(),
+                keys: BTreeMap::new(),
                 order: None,
                 supertypes: supertypes.iter().map(ToString::to_string).collect(),
             }))

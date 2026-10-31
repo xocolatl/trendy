@@ -73,6 +73,37 @@ pub struct Text {
     pub len: usize,
 }
 
+/// Where `load_csv` read a value, for a failure to write, laid out as the
+/// compiler lays it out: the attribute or component it was read for, by
+/// name, the file's path, and the record's line, counting from 1.
+#[repr(C)]
+pub struct Record {
+    pub attribute: Text,
+    pub path: Text,
+    pub line: usize,
+}
+
+impl Record {
+    /// Write `` line 3 of "path" gives `attribute` ``, before what it gave.
+    ///
+    /// # Safety
+    ///
+    /// Its texts must be valid text values.
+    #[cfg(not(test))]
+    unsafe fn write_gives(&self, out: &mut Stderr) -> fmt::Result {
+        // SAFETY: guaranteed by the caller.
+        let (attribute, path) = unsafe {
+            (
+                read_text((&raw const self.attribute).cast()),
+                read_text((&raw const self.path).cast()),
+            )
+        };
+        write!(out, "line {} of \"", self.line)?;
+        trendy_text::escape(path, out)?;
+        write!(out, "\" gives `{attribute}`")
+    }
+}
+
 /// Store `lhs || rhs` at `dst`, in memory the statement owns. Stops the
 /// program if the memory can't be allocated.
 ///
@@ -1929,35 +1960,31 @@ pub unsafe extern "C" fn trendy_rt_not_of_type(
 }
 
 /// Stop the program because `value`, of the type of the program's own
-/// `desc` describes, which `load_csv` read for the attribute or component
-/// named `attribute`, a text, from the record on line `*line` of the file
-/// at `path`, a text, breaks its constraint written `constraint`, a text,
-/// writing them (R0017).
+/// `desc` describes, which `load_csv` read from the record `record`
+/// describes, breaks its constraint written `constraint`, a text, writing
+/// them (R0017).
 ///
 /// # Safety
 ///
 /// `value` must point to a valid value of the type `desc` describes, a
-/// type of the program's own, `constraint`, `attribute` and `path` to
-/// valid text values, and `line` to a `usize`.
+/// type of the program's own, `constraint` to a valid text value, and
+/// `record` to a valid [`Record`].
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn trendy_rt_broken_constraint_in_file(
     value: *const u8,
     desc: *const TypeDesc,
     constraint: *const u8,
-    attribute: *const u8,
-    path: *const u8,
-    line: *const usize,
+    record: *const Record,
 ) -> ! {
     // SAFETY: guaranteed by the caller.
     unsafe {
         let desc = &*desc;
-        let (constraint, attribute) = (read_text(constraint), read_text(attribute));
-        let (path, line) = (read_text(path), line.read_unaligned());
+        let constraint = read_text(constraint);
         fail_with(|out| {
-            write!(out, "error[R0017]: line {line} of \"")?;
-            trendy_text::escape(path, out)?;
-            write!(out, "\" gives `{attribute}` ")?;
+            out.write_str("error[R0017]: ")?;
+            (*record).write_gives(out)?;
+            out.write_char(' ')?;
             write_value(out, value, desc)?;
             writeln!(
                 out,
@@ -2097,29 +2124,30 @@ unsafe fn tuple_failed(message: &str, tuple: *const u8, desc: &TypeDesc) -> ! {
     })
 }
 
-/// Stop the program if the relation `value`, of the type `desc` describes,
-/// about to be assigned to the variable named `variable`, a text, has two
-/// tuples with the same values for the attributes of `key`, the
-/// descriptor of its projection on one of its keys, writing the variable,
-/// the key and the two tuples (R0008).
+/// Store at `shared`, a byte, 1 if the relation `value`, of the type `desc`
+/// describes, has two tuples with the same values for the attributes of
+/// `key`, the descriptor of its projection on one of its keys, and the
+/// positions of two such tuples at `pair`, two `usize`s; else 0.
 ///
 /// # Safety
 ///
 /// `value` must point to a valid relation of the type `desc` describes,
-/// `key` to the descriptor of a relation of some of its attributes, and
-/// `variable` to a valid text value.
+/// `key` to the descriptor of a relation of some of its attributes,
+/// `shared` to a byte, and `pair` to two `usize`s.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn trendy_rt_check_key(
+pub unsafe extern "C" fn trendy_rt_key_shared(
+    shared: *mut u8,
+    pair: *mut usize,
     value: *const u8,
     desc: *const TypeDesc,
     key: *const TypeDesc,
-    variable: *const u8,
 ) {
     // SAFETY: guaranteed by the caller; `allocate` gives memory for the
     // key's attributes and the tuples' positions, which nothing else
     // holds, freed once they are compared.
     unsafe {
+        shared.write(0);
         let (tuples, count) = read_slice(value);
         if count < 2 {
             return;
@@ -2152,38 +2180,151 @@ pub unsafe extern "C" fn trendy_rt_check_key(
         }
         let positions = core::slice::from_raw_parts_mut(slots, count);
         positions.sort_unstable_by(|&i, &j| on_key(i, j).then(i.cmp(&j)));
-        let shared = positions
+        if let Some(&[first, second]) = positions
             .windows(2)
-            .find(|pair| on_key(pair[0], pair[1]).is_eq());
-        if let Some(&[first, second]) = shared {
-            let variable = read_text(variable);
-            fail_with(|out| {
-                if key.is_empty() {
-                    write!(
-                        out,
-                        "error[R0008]: `{variable}` has two tuples, but its key {{}} allows at most one: "
-                    )?;
-                } else {
-                    write!(
-                        out,
-                        "error[R0008]: two tuples of `{variable}` have the same values for its key {{ "
-                    )?;
-                    for (i, attr) in key.iter().enumerate() {
-                        if i > 0 {
-                            out.write_str(", ")?;
-                        }
-                        out.write_str(name(attr))?;
-                    }
-                    out.write_str(" }: ")?;
-                }
-                write_value(out, tuples.add(first * element.size), element)?;
-                out.write_str(" and ")?;
-                write_value(out, tuples.add(second * element.size), element)?;
-                out.write_char('\n')
-            });
+            .find(|pair| on_key(pair[0], pair[1]).is_eq())
+        {
+            shared.write(1);
+            pair.write_unaligned(first);
+            pair.add(1).write_unaligned(second);
         }
         free(slots.cast());
         free(found.cast());
+    }
+}
+
+/// Stop the program because the tuples at the positions `pair` of the
+/// relation `value`, of the type `desc` describes, about to be assigned to
+/// the variable named `variable`, a text, have the same values for the
+/// attributes of `key`, the descriptor of its projection on one of the
+/// variable's keys, writing the variable, the key and the tuples (R0008).
+///
+/// # Safety
+///
+/// As for [`trendy_rt_key_shared`], with `pair` the positions it found,
+/// and `variable` a valid text value.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_key_violated(
+    value: *const u8,
+    desc: *const TypeDesc,
+    key: *const TypeDesc,
+    pair: *const usize,
+    variable: *const u8,
+) -> ! {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let variable = read_text(variable);
+        fail_with(|out| {
+            out.write_str("error[R0008]: ")?;
+            let relation = |out: &mut Stderr| write!(out, "`{variable}`");
+            write_key_violation(out, relation, value, &*desc, &*key, pair)
+        })
+    }
+}
+
+/// As [`trendy_rt_key_violated`], of the relation that is the component
+/// named `component`, a text, of a value selected of the type named `ty`,
+/// a text, with the attributes of `key` one of the component's keys.
+///
+/// # Safety
+///
+/// As for [`trendy_rt_key_violated`], with `ty` and `component` valid text
+/// values.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_component_key_violated(
+    value: *const u8,
+    desc: *const TypeDesc,
+    key: *const TypeDesc,
+    pair: *const usize,
+    ty: *const u8,
+    component: *const u8,
+) -> ! {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let (ty, component) = (read_text(ty), read_text(component));
+        fail_with(|out| {
+            out.write_str("error[R0008]: ")?;
+            let relation = |out: &mut Stderr| trendy_text::write_component(ty, component, out);
+            write_key_violation(out, relation, value, &*desc, &*key, pair)
+        })
+    }
+}
+
+/// As [`trendy_rt_component_key_violated`], of a value `load_csv` read
+/// from the record `record` describes, writing where too.
+///
+/// # Safety
+///
+/// As for [`trendy_rt_component_key_violated`], with `record` pointing to
+/// a valid [`Record`].
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_component_key_violated_in_file(
+    value: *const u8,
+    desc: *const TypeDesc,
+    key: *const TypeDesc,
+    pair: *const usize,
+    ty: *const u8,
+    component: *const u8,
+    record: *const Record,
+) -> ! {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let (ty, component) = (read_text(ty), read_text(component));
+        fail_with(|out| {
+            out.write_str("error[R0008]: ")?;
+            (*record).write_gives(out)?;
+            write!(out, " a value of `{ty}` in which ")?;
+            let relation = |out: &mut Stderr| write!(out, "its `{component}`");
+            write_key_violation(out, relation, value, &*desc, &*key, pair)
+        })
+    }
+}
+
+/// Write, as R0008 does, that the tuples at the positions `pair` of the
+/// relation `value`, of the type `desc` describes, which `relation` names,
+/// have the same values for the attributes of `key`, the descriptor of
+/// its projection on one of its keys: the key, and the tuples.
+///
+/// # Safety
+///
+/// As for [`trendy_rt_key_violated`].
+#[cfg(not(test))]
+unsafe fn write_key_violation(
+    out: &mut Stderr,
+    relation: impl Fn(&mut Stderr) -> fmt::Result,
+    value: *const u8,
+    desc: &TypeDesc,
+    key: &TypeDesc,
+    pair: *const usize,
+) -> fmt::Result {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let key = attributes(key);
+        if key.is_empty() {
+            relation(out)?;
+            out.write_str(" has two tuples, but its key {} allows at most one: ")?;
+        } else {
+            out.write_str("two tuples of ")?;
+            relation(out)?;
+            out.write_str(" have the same values for its key { ")?;
+            for (i, attr) in key.iter().enumerate() {
+                if i > 0 {
+                    out.write_str(", ")?;
+                }
+                out.write_str(name(attr))?;
+            }
+            out.write_str(" }: ")?;
+        }
+        let (tuples, _) = read_slice(value);
+        let element = desc.element();
+        let (first, second) = (pair.read_unaligned(), pair.add(1).read_unaligned());
+        write_value(out, tuples.add(first * element.size), element)?;
+        out.write_str(" and ")?;
+        write_value(out, tuples.add(second * element.size), element)?;
+        out.write_char('\n')
     }
 }
 

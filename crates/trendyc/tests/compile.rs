@@ -1144,6 +1144,98 @@ operator main{{}} [
 }
 
 #[test]
+fn components_keys_are_checked_when_running() {
+    // A selected value's relation-valued components satisfy their keys, of
+    // the stored representation and of another, whose conversion computes
+    // it, and so does a relation variable's value.
+    let types = "type outline {
+    { vertices: relation { v_no: integer, x: integer } key { v_no } key { x } },
+};
+type seg {
+    { len: integer },
+    { ends: relation { n: integer, x: integer } key { x } }
+        to { len := max{r: ends, of: x} - min{r: ends, of: x} }
+        from { ends := relation { { n: 1, x: 0 }, { n: 2, x: len } } },
+};
+";
+    let source = format!(
+        "{types}
+operator run{{n: integer}} [
+    var ok := outline{{vertices: relation {{ {{ v_no: 1, x: 0 }}, {{ v_no: 2, x: n }} }}}};
+    call debug_value{{v: count{{r: ok.vertices}}}};
+    call debug_value{{v: seg{{len: n}}.ends{{x}}}};
+    var r := relation {{ {{ a: 1, b: 2 }} }} key {{ a }};
+    insert r relation {{ {{ a: 2, b: n }} }};
+    call debug_value{{v: count{{r: r}}}};
+    var flat := seg{{len: n - 3}};
+];
+
+operator main{{}} [
+    call run{{n: 3}};
+];
+"
+    );
+    let (code, stderr) = run_source("component_keys", &source);
+    let violated = trendy_diag::Code::KeyViolated.id();
+    assert_eq!(
+        (code, stderr),
+        (
+            1,
+            format!(
+                "2
+relation {{ x: integer }} {{ {{ x: 0 }}, {{ x: 3 }} }}
+2
+error[{violated}]: two tuples of a `seg`'s `ends` have the same values for its key {{ x }}: tuple {{ n: 1, x: 0 }} and tuple {{ n: 2, x: 0 }}
+{}",
+                site("component_keys", 18)
+            )
+        )
+    );
+    let source = format!(
+        "{types}
+operator run{{n: integer}} [
+    var bad := outline{{vertices: relation {{ {{ v_no: 1, x: 0 }}, {{ v_no: n, x: 5 }} }}}};
+];
+
+operator main{{}} [
+    call run{{n: 1}};
+];
+"
+    );
+    let (code, stderr) = run_source("component_keys_stored", &source);
+    assert_eq!(
+        (code, stderr),
+        (
+            1,
+            format!(
+                "error[{violated}]: two tuples of an `outline`'s `vertices` have the same values for its key {{ v_no }}: tuple {{ v_no: 1, x: 0 }} and tuple {{ v_no: 1, x: 5 }}
+{}",
+                site("component_keys_stored", 12)
+            )
+        )
+    );
+    // A value read from a file, which names the record.
+    let (code, stderr) = loaded_rows(
+        "segments",
+        types,
+        "{ name: text, s: seg }",
+        "name,len\nlong,4\nflat,0\n",
+        "tuple { name: 1, s: tuple { len: 2 } }",
+    );
+    assert_eq!(
+        (code, stderr),
+        (
+            1,
+            format!(
+                "error[{violated}]: line 3 of \"PATH\" gives `s` a value of `seg` in which two tuples of its `ends` have the same values for its key {{ x }}: tuple {{ n: 1, x: 0 }} and tuple {{ n: 2, x: 0 }}
+{}",
+                site("csv_segments", 14)
+            )
+        )
+    );
+}
+
+#[test]
 fn csv_files_load_values_of_types_in_a_hierarchy() {
     // A subtype's value is read as any type's, and laid out after its own
     // type.

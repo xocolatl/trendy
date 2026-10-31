@@ -4725,6 +4725,20 @@ pub(crate) fn failed(failed: &crate::ops::Failed, expr: &Expr) -> Diagnostic {
             unparsable(*builtin, text, *why, expr)
         }
         crate::ops::Failed::Constraint(broken) => broken_constraint(broken, expr),
+        crate::ops::Failed::Key(broken) => {
+            let keyed = Keyed::Component {
+                ty: &broken.value.ty.name,
+                component: &broken.component,
+            };
+            let [a, b] = &broken.tuples;
+            key_violated(
+                keyed,
+                broken.at,
+                (&broken.shared, [a, b]),
+                expr.span(),
+                None,
+            )
+        }
         crate::ops::Failed::NotOfType(treated) => {
             let (value, ty) = &**treated;
             Diagnostic::error(
@@ -6273,17 +6287,56 @@ fn key_text(key: &Key) -> String {
     }
 }
 
-/// `keys`, on the variable `name` of type `ty`, which isn't a relation.
-pub(crate) fn key_not_relation(name: &str, ty: &hir::Type, keys: &[Key]) -> Diagnostic {
-    let d = Diagnostic::error(
-        Code::KeyNotRelation,
-        format!("`{name}` isn't a relation, so it can't have a key"),
-        keys[0].span(),
-        format!("a key on a variable of type `{ty}`"),
-    )
-    .with_note(
-        "a key says that no two tuples of a relation have the same values for its attributes, so only a relation variable has keys",
-    );
+/// What has keys: a relation variable, or a relation-valued component of
+/// a type of the program's own.
+#[derive(Clone, Copy)]
+pub(crate) enum Keyed<'a> {
+    Variable(&'a str),
+    Component { ty: &'a str, component: &'a str },
+}
+
+impl<'a> Keyed<'a> {
+    /// Its name: the variable's, or the component's.
+    pub(crate) fn name(self) -> &'a str {
+        match self {
+            Keyed::Variable(name)
+            | Keyed::Component {
+                component: name, ..
+            } => name,
+        }
+    }
+
+    /// The relation it keys, as an error, or the program when running,
+    /// names it: `` `capitals` ``, or `` a `polygon`'s `vertices` ``.
+    pub(crate) fn relation(self) -> String {
+        match self {
+            Keyed::Variable(name) => format!("`{name}`"),
+            Keyed::Component { ty, component } => {
+                let mut relation = String::new();
+                trendy_text::write_component(ty, component, &mut relation)
+                    .expect("writing to a string can't fail");
+                relation
+            }
+        }
+    }
+}
+
+/// `keys`, of `keyed`, of type `ty`, which isn't a relation.
+pub(crate) fn key_not_relation(keyed: Keyed, ty: &hir::Type, keys: &[Key]) -> Diagnostic {
+    let (message, label) = match keyed {
+        Keyed::Variable(name) => (
+            format!("`{name}` isn't a relation, so it can't have a key"),
+            format!("a key on a variable of type `{ty}`"),
+        ),
+        Keyed::Component { component, .. } => (
+            format!("the component `{component}` isn't a relation, so it can't have a key"),
+            format!("a key on a component of type `{ty}`"),
+        ),
+    };
+    let d = Diagnostic::error(Code::KeyNotRelation, message, keys[0].span(), label)
+        .with_note(
+            "a key says that no two tuples of a relation have the same values for its attributes, so only a relation variable, or a type's relation-valued component, has keys",
+        );
     let removals = keys
         .iter()
         .map(|key| Edit {
@@ -6297,6 +6350,53 @@ pub(crate) fn key_not_relation(name: &str, ty: &hir::Type, keys: &[Key]) -> Diag
         "the keys"
     };
     d.with_suggestion(format!("remove {what}"), removals)
+}
+
+/// The key `key`, written `text` canonically, among what the type `ty`
+/// says of itself, rather than after one of its components' types: of
+/// `candidates`, the relation-valued components with its attributes, each
+/// with where its type ends, the one it goes after if there is one.
+pub(crate) fn misplaced_key(
+    key: &Key,
+    text: &str,
+    ty: &str,
+    candidates: &[(&str, usize)],
+) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::MisplacedKey,
+        format!("a key of `{ty}` goes after its component's type"),
+        key.span(),
+        format!("among what `{ty}` says of itself"),
+    )
+    .with_note(format!(
+        "a type's key is a rule of one of its relation-valued components, so it is written after that component's type, as a relation variable's is after its own: `{{ {}: relation {{ … }} {text} }}`",
+        candidates.first().map_or("c", |(c, _)| c)
+    ));
+    match candidates {
+        [(component, end)] => d.with_suggestion(
+            format!("move it after `{component}`'s type"),
+            vec![
+                Edit {
+                    span: key.item_removal(),
+                    replacement: String::new(),
+                },
+                Edit {
+                    span: Span::empty(*end),
+                    replacement: format!(" {text}"),
+                },
+            ],
+        ),
+        [] => d.with_help(format!(
+            "no relation-valued component of `{ty}` has these attributes: a key lists attributes of the component's relation"
+        )),
+        several => {
+            let names: Vec<String> = several.iter().map(|(c, _)| format!("`{c}`")).collect();
+            d.with_help(format!(
+                "write it after the type of the component it is a rule of, {}",
+                trendy_diag::disjoin(&names)
+            ))
+        }
+    }
 }
 
 /// `key`, with the attributes `attributes`, which is redundant because of
@@ -6338,12 +6438,15 @@ pub(crate) fn redundant_key(
     )
 }
 
-/// Two tuples of the variable `name` with the same `value` for `key`:
-/// one at `at`, and the other at `first` if it has a place of its own.
+/// Two tuples, `tuples`, of the relation `keyed` keys with the same
+/// `value` for the key written at `key`, if its place is known: one at
+/// `at`, and the other at `first` if it has a place of its own, and
+/// otherwise both named in a note. Of a component, `at` is where a value
+/// of its type is selected.
 pub(crate) fn key_violated(
-    name: &str,
-    key: &Key,
-    value: &hir::TupleValue,
+    keyed: Keyed,
+    key: Option<Span>,
+    (value, tuples): (&hir::TupleValue, [&hir::TupleValue; 2]),
     at: Span,
     first: Option<Span>,
 ) -> Diagnostic {
@@ -6353,22 +6456,33 @@ pub(crate) fn key_violated(
         .collect();
     let empty = attributes.is_empty();
     let shared = format!("`{}`", attributes.join(", "));
-    let (label, first_label) = match (empty, first.is_some()) {
-        (true, true) => ("a second tuple".to_string(), "a first tuple".to_string()),
-        (true, false) => ("more than one tuple".to_string(), String::new()),
-        (false, true) => (
+    let (label, first_label) = match (empty, first.is_some(), keyed) {
+        (true, true, _) => ("a second tuple".to_string(), "a first tuple".to_string()),
+        (true, false, Keyed::Variable(_)) => ("more than one tuple".to_string(), String::new()),
+        (false, true, _) => (
             format!("has {shared} too"),
             format!("first tuple with {shared}"),
         ),
-        (false, false) => (format!("has two tuples with {shared}"), String::new()),
+        (false, false, Keyed::Variable(_)) => {
+            (format!("has two tuples with {shared}"), String::new())
+        }
+        (true, false, Keyed::Component { component, .. }) => (
+            format!("its `{component}` has more than one tuple"),
+            String::new(),
+        ),
+        (false, false, Keyed::Component { component, .. }) => (
+            format!("its `{component}` has two tuples with {shared}"),
+            String::new(),
+        ),
     };
+    let relation = keyed.relation();
     // As the program would say when running.
     let message = if empty {
-        format!("`{name}` has two tuples, but its key {{}} allows at most one")
+        format!("{relation} has two tuples, but its key {{}} allows at most one")
     } else {
         let names: Vec<&str> = value.attributes().map(|(a, _)| a).collect();
         format!(
-            "two tuples of `{name}` have the same values for its key {{ {} }}",
+            "two tuples of {relation} have the same values for its key {{ {} }}",
             names.join(", ")
         )
     };
@@ -6376,13 +6490,19 @@ pub(crate) fn key_violated(
     if let Some(first) = first {
         d = d.with_secondary(first, first_label);
     }
-    d.with_secondary(key.span(), "the key")
-        .with_note(if empty {
-            "`key {}` allows at most one tuple, since every tuple has the same values for no attributes"
-        } else {
-            "no two tuples can have the same values for a key's attributes"
-        })
-        .with_help("correct or remove one of these tuples, or declare the key that was meant")
+    if let Some(key) = key {
+        d = d.with_secondary(key, "the key");
+    }
+    d = d.with_note(if empty {
+        "`key {}` allows at most one tuple, since every tuple has the same values for no attributes"
+    } else {
+        "no two tuples can have the same values for a key's attributes"
+    });
+    if first.is_none() {
+        let [a, b] = tuples.map(|t| hir::Value::Tuple(t.clone()));
+        d = d.with_note(format!("the two tuples are `{a}` and `{b}`"));
+    }
+    d.with_help("correct or remove one of these tuples, or declare the key that was meant")
 }
 
 const LOAD: &str = "`load a from r` gives an array of tuples the tuples of a relation of their heading, and `load a value from r` an array the values of a relation's only attribute, of their type";

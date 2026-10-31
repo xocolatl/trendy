@@ -504,7 +504,7 @@ impl<'a> Parser<'a> {
             |p| {
                 p.items(
                     |p| p.at_heading_attribute() && !p.type_item_at(0),
-                    |p| p.moded_attribute(SyntaxKind::AttributeType, false, Self::attribute_type),
+                    |p| p.moded_attribute(SyntaxKind::AttributeType, false, Self::component_type),
                 );
                 // Where the components end, before the comma after them.
                 let (components, comma) = match p.last_end {
@@ -515,11 +515,16 @@ impl<'a> Parser<'a> {
                 };
                 let mut items = Vec::new();
                 while let Some(start) = p.found().filter(|_| p.type_item_at(0)) {
+                    // A key here is a component's, misplaced, which sema
+                    // reports, knowing which component is a relation.
+                    let key = p.key_at(0).is_some();
                     let what = p.type_item();
-                    items.push((
-                        Span::new(start.span.start, p.last_end.unwrap_or(start.span.end)),
-                        what,
-                    ));
+                    if !key {
+                        items.push((
+                            Span::new(start.span.start, p.last_end.unwrap_or(start.span.end)),
+                            what,
+                        ));
+                    }
                     if p.at(SyntaxKind::Comma) {
                         p.bump();
                     }
@@ -565,16 +570,20 @@ impl<'a> Parser<'a> {
 
     /// Whether what a type says of itself, beside its components, starts at
     /// the significant token `n` from the next one: an order or a
-    /// constraint.
+    /// constraint, or a key, which belongs after a component's type, as
+    /// sema reports.
     fn type_item_at(&mut self, n: usize) -> bool {
-        self.constraint_at(n) || self.order_at(n)
+        self.constraint_at(n) || self.order_at(n) || self.key_at(n).is_some()
     }
 
     /// What a type says of itself, beside its components, which
-    /// [`Parser::type_item_at`] found: its order or a constraint. What it
-    /// is, as an error says.
+    /// [`Parser::type_item_at`] found: its order, a constraint or a key.
+    /// What it is, as an error says.
     fn type_item(&mut self) -> &'static str {
-        if self.order_at(0) {
+        if let Some(spelling) = self.key_at(0) {
+            self.key(spelling);
+            "a key"
+        } else if self.order_at(0) {
             self.start_node(SyntaxKind::TypeOrder);
             self.order_list(|p| p.at_attribute() && !p.type_item_at(0));
             self.builder.finish_node();
@@ -1016,7 +1025,7 @@ impl<'a> Parser<'a> {
                             moded,
                         });
                     }
-                    p.moded_attribute(SyntaxKind::AttributeType, true, Self::attribute_type);
+                    p.moded_attribute(SyntaxKind::AttributeType, true, Self::parameter_type);
                 });
             },
         );
@@ -3166,18 +3175,25 @@ impl<'a> Parser<'a> {
         spans
     }
 
-    /// How the key at the next token is spelled, if one is there: `key`
-    /// in any case, or SQL's `primary key` or `unique`, followed by its
-    /// attributes in braces, or in SQL's parentheses.
+    /// How the key at the next token is spelled, if one is there (see
+    /// [`Parser::key_at`]).
     fn at_key(&mut self) -> Option<KeySpelling> {
+        self.key_at(0)
+    }
+
+    /// How the key at the significant token `n` from the next one is
+    /// spelled, if one is there, as a lookahead: `key` in any case, or
+    /// SQL's `primary key` or `unique`, followed by its attributes in
+    /// braces, or in SQL's parentheses.
+    fn key_at(&self, n: usize) -> Option<KeySpelling> {
         let word = |found: Option<Found>, word: &str| {
             found.is_some_and(|f| f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case(word))
         };
         let list = |found: Option<Found>| {
             found.is_some_and(|f| matches!(f.kind, SyntaxKind::LBrace | SyntaxKind::LParen))
         };
-        let next = self.found();
-        let after = self.found_after(1);
+        let next = self.lookahead_nth(n);
+        let after = self.lookahead_nth(n + 1);
         if word(next, "key") && list(after) {
             Some(KeySpelling::Key)
         } else if word(next, "primary") && word(after, "key") {
@@ -3244,13 +3260,48 @@ impl<'a> Parser<'a> {
         true
     }
 
-    /// An attribute's type, in a heading, and for a parameter, `per r`
-    /// after it, if it is evaluated for each tuple of the relation `r`.
-    /// `per` is a contextual keyword, recognized there before a name, in
-    /// any case, which is reported; sema reports it anywhere but in an
-    /// operator's parameters.
+    /// An attribute's type, in a heading (see [`Parser::typed_attribute`]),
+    /// whose keys are reported.
     fn attribute_type(&mut self) {
+        self.typed_attribute(Some(errors::Keyed::Heading));
+    }
+
+    /// A parameter's type (see [`Parser::typed_attribute`]), whose keys
+    /// are reported.
+    fn parameter_type(&mut self) {
+        self.typed_attribute(Some(errors::Keyed::Parameter));
+    }
+
+    /// A possible representation's component's type, and its keys, if it
+    /// is a relation (see [`Parser::typed_attribute`]).
+    fn component_type(&mut self) {
+        self.typed_attribute(None);
+    }
+
+    /// An attribute's type, and for a parameter, `per r` after it, if it is
+    /// evaluated for each tuple of the relation `r`, and keys after that,
+    /// which only a type's component can have, so that `unkeyed` says why
+    /// they are reported anywhere else. `per` is a contextual keyword,
+    /// recognized there before a name, in any case, which is reported;
+    /// sema reports it anywhere but in an operator's parameters.
+    fn typed_attribute(&mut self, unkeyed: Option<errors::Keyed>) {
         self.type_expr();
+        self.per();
+        // Looking ahead leaves the whitespace after the type to whatever
+        // comes next, unless it is a key.
+        while let Some(spelling) = self.key_at(0) {
+            let start = self.lookahead().map_or(0, |f| f.span.start);
+            self.key(spelling);
+            if let Some(keyed) = unkeyed {
+                let end = self.last_end.unwrap_or(start);
+                self.errors
+                    .push(errors::key_in_heading(keyed, Span::new(start, end)));
+            }
+        }
+    }
+
+    /// `per r`, after a parameter's type, if it is next.
+    fn per(&mut self) {
         // Looking ahead leaves the whitespace after the type to whatever
         // comes next, unless it is `per`.
         let Some(found) = self
@@ -5730,6 +5781,39 @@ SourceFile
                     .next()
                     .is_some()
             );
+        }
+    }
+
+    #[test]
+    fn keys_follow_a_components_type_and_nothing_else() {
+        // A component's keys are after its type, and one among what the
+        // type says of itself is left to sema, which knows the components'
+        // types.
+        let source = "type polygon {
+    { vertices: relation { v_no: integer, vertex: integer } key { v_no } key { vertex } },
+    key { v_no },
+};";
+        let parse = parse_str(source);
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let decl = parse.tree.types().next().unwrap();
+        let components = decl.representation().unwrap().components().unwrap();
+        let vertices = components.attributes().next().unwrap();
+        assert_eq!(vertices.keys().count(), 2);
+        assert_eq!(decl.misplaced_keys().count(), 1);
+        // Elsewhere, a key would be part of a relation type.
+        for (source, message) in [
+            (
+                "var r: relation { inner: relation { b: integer } key { b } };",
+                "an attribute in a heading can't have a key",
+            ),
+            (
+                "operator f{r: relation { a: integer } key { a }} [];",
+                "a parameter can't have a key",
+            ),
+        ] {
+            assert_eq!(messages(source), [message], "{source}");
+            let codes: Vec<Code> = parse_str(source).errors.iter().map(|d| d.code).collect();
+            assert_eq!(codes, [Code::KeyInHeading]);
         }
     }
 

@@ -2063,6 +2063,123 @@ mod tests {
     }
 
     #[test]
+    fn a_types_relation_valued_components_have_keys() {
+        let program = analyze_str(&format!(
+            "type outline {{
+    {{ vertices: relation {{ v_no: integer, x: integer }} key {{ v_no }} key {{ x }} }},
+}};
+var square := outline{{vertices: relation {{ {{ v_no: 1, x: 0 }}, {{ v_no: 2, x: 1 }} }}}};
+var extracted := square.vertices union relation {{ {{ v_no: 1, x: 5 }} }};{MAIN}"
+        ))
+        .unwrap();
+        let hir::Type::Defined(outline) = &program.variables[0].ty else {
+            panic!("{:?}", program.variables[0].ty);
+        };
+        let key = |names: &[&str]| -> hir::Key { names.iter().map(ToString::to_string).collect() };
+        assert_eq!(
+            outline.keys,
+            [("vertices".to_string(), vec![key(&["v_no"]), key(&["x"])])].into()
+        );
+        // An extracted value has no key: only what declares one does.
+        assert_eq!(program.variables[1].keys, [key(&["v_no", "x"])]);
+        // A key is checked as a variable's is.
+        for (component, message) in [
+            (
+                "{ n: integer key { n } }",
+                "the component `n` isn't a relation, so it can't have a key",
+            ),
+            (
+                "{ vs: relation { a: integer, b: integer } key { a } key { a, b } }",
+                "key `{ a, b }` contains key `{ a }`, so it isn't a key",
+            ),
+            (
+                "{ vs: relation { a: integer } key { c } }",
+                "unknown attribute `c`",
+            ),
+        ] {
+            let source = format!("type t {{ {component} }};{MAIN}");
+            assert_eq!(messages(&source), [message], "{source}");
+        }
+        // A key among what a type says of itself is moved after the one
+        // component it can be a key of.
+        let misplaced = format!(
+            "type outline {{\n    {{ vertices: relation {{ v_no: integer }} }},\n    key {{ v_no }},\n}};{MAIN}"
+        );
+        assert_eq!(codes(&misplaced), [Code::MisplacedKey]);
+        assert_eq!(
+            fix(&misplaced),
+            format!(
+                "type outline {{\n    {{ vertices: relation {{ v_no: integer }} key {{ v_no }} }},\n}};{MAIN}"
+            )
+        );
+        let inside = format!(
+            "type outline {{ {{ vertices: relation {{ v_no: integer }}, key {{ v_no }} }} }};{MAIN}"
+        );
+        assert_eq!(
+            fix(&inside),
+            format!(
+                "type outline {{ {{ vertices: relation {{ v_no: integer }} key {{ v_no }} }} }};{MAIN}"
+            )
+        );
+        let several = errors(&format!(
+            "type t {{ {{ a: relation {{ v: integer }}, b: relation {{ v: integer }} }}, key {{ v }} }};{MAIN}"
+        ));
+        assert_eq!(
+            several[0].help,
+            ["write it after the type of the component it is a rule of, `a` or `b`"]
+        );
+        assert!(several[0].suggestions.is_empty());
+    }
+
+    #[test]
+    fn selecting_a_value_checks_its_components_keys() {
+        // When compiling, as a constraint is, naming the two tuples.
+        let found = errors(&format!(
+            "type outline {{ {{ vertices: relation {{ v_no: integer, x: integer }} key {{ v_no }} }} }};
+var bad := outline{{vertices: relation {{ {{ v_no: 1, x: 0 }}, {{ v_no: 1, x: 5 }} }}}};{MAIN}"
+        ));
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert_eq!(found[0].code, Code::KeyViolated);
+        assert_eq!(
+            found[0].message,
+            "two tuples of an `outline`'s `vertices` have the same values for its key { v_no }"
+        );
+        assert_eq!(
+            found[0].primary.message,
+            "its `vertices` has two tuples with `v_no: 1`"
+        );
+        assert!(
+            found[0].notes.contains(
+                &"the two tuples are `tuple { v_no: 1, x: 0 }` and `tuple { v_no: 1, x: 5 }`"
+                    .to_string()
+            )
+        );
+        // By `update`, and of another representation's component, which its
+        // conversion computes.
+        let updated = codes(&format!(
+            "type outline {{ {{ vertices: relation {{ v_no: integer, x: integer }} key {{ v_no }} }} }};
+var o := outline{{vertices: relation {{ {{ v_no: 1, x: 0 }} }}}};
+var bad := [ var p := o; update p {{ vertices := vertices union relation {{ {{ v_no: 1, x: 5 }} }} }}; p ];{MAIN}"
+        ));
+        assert_eq!(updated, [Code::KeyViolated]);
+        let converted = errors(&format!(
+            "type seg {{
+    {{ len: integer }},
+    {{ ends: relation {{ n: integer, x: integer }} key {{ x }} }}
+        to {{ len := max{{r: ends, of: x}} - min{{r: ends, of: x}} }}
+        from {{ ends := relation {{ {{ n: 1, x: 0 }}, {{ n: 2, x: len }} }} }},
+}};
+var one := seg{{len: 3}};
+var zero := seg{{len: 0}};{MAIN}"
+        ));
+        assert_eq!(converted.len(), 1, "{converted:#?}");
+        assert_eq!(
+            converted[0].message,
+            "two tuples of a `seg`'s `ends` have the same values for its key { x }"
+        );
+    }
+
+    #[test]
     fn values_must_satisfy_their_keys() {
         let source = format!(
             "var r := relation {{\n    {{ a: 1, b: 2 }},\n    {{ a: 2, b: 2 }},\n    {{ a: 1, b: 3 }}\n}}\n    key {{ a }}\n    key {{ b }};{MAIN}"
@@ -9322,6 +9439,7 @@ type position { { latitude: approximate, longitude: approximate } };
             ),
             representations: Vec::new(),
             constraints: Vec::new(),
+            keys: BTreeMap::new(),
             order: None,
             supertypes: Vec::new(),
         };
@@ -9339,6 +9457,7 @@ type position { { latitude: approximate, longitude: approximate } };
             ),
             representations: Vec::new(),
             constraints: Vec::new(),
+            keys: BTreeMap::new(),
             order: None,
             supertypes: Vec::new(),
         };

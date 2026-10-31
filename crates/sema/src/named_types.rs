@@ -534,11 +534,20 @@ fn defined(
             from: numbered(),
         })
         .collect();
+    // Each representation, with its components resolved: the stored one's
+    // are the type's.
+    let resolved: Vec<(ast::Representation, &hir::Heading)> = stored(decl)
+        .map(|r| (r, &components))
+        .into_iter()
+        .chain(converted.iter().map(|c| (c.decl.clone(), &c.components)))
+        .collect();
+    let keys = crate::keys::components(decl, name, &resolved, errors);
     let mut defined = hir::Defined {
         name: name.to_string(),
         components,
         representations,
         constraints,
+        keys,
         order: None,
         supertypes,
     };

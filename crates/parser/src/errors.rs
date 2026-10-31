@@ -23,7 +23,7 @@ pub(crate) const GROUP_FORM: &str = "`group` gathers attributes into new relatio
 pub(crate) const WRAP_FORM: &str = "`wrap` gathers attributes into new tuple-valued attributes, each `name := {attributes}`: `r wrap { address := {street, city} }`";
 pub(crate) const UNGROUP_FORM: &str = "`ungroup` takes the relation-valued attributes to replace with their attributes: `r ungroup {members}`";
 pub(crate) const UNWRAP_FORM: &str = "`unwrap` takes the tuple-valued attributes to replace with their attributes: `r unwrap {address}`";
-pub(crate) const KEY_FORM: &str = "a key lists attributes after a relation variable's value, or after its type if it has no value: `var r := relation { … } key { a, b };`";
+pub(crate) const KEY_FORM: &str = "a key lists attributes after a relation variable's value, or after its type if it has no value, `var r := relation { … } key { a, b };`, or after a type's relation-valued component's type";
 pub(crate) const RENAME_FORM: &str =
     "`rename` takes renamings, each `old as new`: `r rename {postal_code as code}`";
 pub(crate) const TUPLE_VALUE_FORM: &str = "a tuple value has the form `tuple { name: value, … }`";
@@ -804,6 +804,36 @@ pub(crate) fn join_condition(found: Found, clause: Span, removal: Span) -> Diagn
             "rename attributes so that the ones to match have the same name, and the others different names, as in `r join s rename {r_id as id}`",
         )
     }
+}
+
+/// Where a key is written that can't have one, as [`key_in_heading`] says.
+#[derive(Clone, Copy)]
+pub(crate) enum Keyed {
+    /// After the type of an attribute in a heading.
+    Heading,
+    /// After an operator's parameter's type.
+    Parameter,
+}
+
+/// The key at `key`, written where `keyed` says, which can't have one: a
+/// key is a rule of a relation variable, or of a type's component, and not
+/// part of a relation type, whose values are all relations of its heading.
+pub(crate) fn key_in_heading(keyed: Keyed, key: Span) -> Diagnostic {
+    let (message, label, help) = match keyed {
+        Keyed::Heading => (
+            "an attribute in a heading can't have a key",
+            "a key of a relation type",
+            "to key relations of this heading wherever they are, make them a component of a type of your own, `type t { { c: relation { … } key { … } } };`, or, if they are facts in their own right, keep them in a relation variable, `var r: relation { … } key { … };`",
+        ),
+        Keyed::Parameter => (
+            "a parameter can't have a key",
+            "a key of the parameter's type",
+            "the variable an argument comes from has its own keys; to key relations wherever they are, make them a component of a type of your own, `type t { { c: relation { … } key { … } } };`",
+        ),
+    };
+    Diagnostic::error(Code::KeyInHeading, message, key, label)
+        .with_note("a key is a rule of a relation variable, or of a type's relation-valued component, and not part of a relation type, whose values are all the relations of its heading")
+        .with_help(help)
 }
 
 /// Keys, at `keys` and written `text`, before a variable's initial value,

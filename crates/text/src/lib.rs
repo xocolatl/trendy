@@ -2,8 +2,9 @@
 //! values from text, shared by the compiler (which reads text literals, and
 //! evaluates `parse_boolean` when compiling) and the runtime (which prints
 //! text values, and evaluates `parse_boolean` when running), so that the
-//! two can't disagree. It has no dependencies and doesn't need `std`, so
-//! both can use it.
+//! two can't disagree, and so are the words both write in an error they
+//! can each report. It has no dependencies and doesn't need `std`, so both
+//! can use it.
 
 #![cfg_attr(not(test), no_std)]
 
@@ -73,6 +74,23 @@ pub fn parse_boolean(text: &str) -> Result<bool, Unparsable> {
     } else {
         Err(Unparsable::Malformed)
     }
+}
+
+/// Write how an error names the relation that is the component
+/// `component` of a value of the type named `ty`, when compiling and when
+/// running: `` a `polygon`'s `vertices` ``, or `an` before a name that
+/// starts with a vowel.
+///
+/// # Errors
+///
+/// Returns an error if `out` does.
+pub fn write_component(ty: &str, component: &str, out: &mut impl fmt::Write) -> fmt::Result {
+    let article = if ty.starts_with(['a', 'e', 'i', 'o', 'u']) {
+        "an"
+    } else {
+        "a"
+    };
+    write!(out, "{article} `{ty}`'s `{component}`")
 }
 
 /// As [`escape`], but with `kept` written as it is.

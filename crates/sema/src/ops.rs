@@ -1196,6 +1196,10 @@ pub(crate) enum Failed {
     /// Components that break a constraint of the type of the program's own
     /// a value is selected of.
     Constraint(Box<BrokenConstraint>),
+    /// A relation-valued component with two tuples that share the values
+    /// of one of its keys, of a value selected of a type of the program's
+    /// own.
+    Key(Box<BrokenKey>),
     /// A value treated as one of a type it isn't of.
     NotOfType(Box<(hir::Value, hir::Type)>),
 }
@@ -2624,6 +2628,54 @@ pub(crate) fn select(
             (name.to_string(), typed(value.clone(), ty))
         })
         .collect();
+    let value = hir::DefinedValue {
+        ty: defined,
+        components: tuple,
+    };
+    let (defined, tuple) = (&value.ty, &value.components);
+    // A relation-valued component's keys first, which constraints can
+    // assume: of a representation other than the stored one, its `from`
+    // computes the component, which may be known only when running.
+    for (component, keys) in &defined.keys {
+        let relation = match defined.representation(component) {
+            Some((_, Some(other))) => {
+                let converted = call(
+                    hir::Call {
+                        operator: other.from,
+                        types: Vec::new(),
+                        args: args.clone(),
+                        updated: BTreeMap::new(),
+                    },
+                    bindings,
+                )?;
+                match known_value(&converted) {
+                    Some(hir::Value::Tuple(own)) => own.get(component).cloned(),
+                    _ => None,
+                }
+            }
+            _ => tuple.get(component).cloned(),
+        };
+        let Some(hir::Value::Relation(relation)) = relation else {
+            return Ok(hir::Expr::Select(
+                value.ty.clone(),
+                Box::new(hir::Expr::Constant(hir::Value::Tuple(
+                    value.components.clone(),
+                ))),
+            ));
+        };
+        for key in keys {
+            if let Some((shared, [a, b])) = crate::keys::sharing(&relation, key).into_iter().next()
+            {
+                return Err(Failed::Key(Box::new(BrokenKey {
+                    value: value.clone(),
+                    component: component.clone(),
+                    shared,
+                    tuples: [a.clone(), b.clone()],
+                    at: crate::keys::written_in(defined, component, key, bindings.operators),
+                })));
+            }
+        }
+    }
     // The first constraint that isn't true of them, and its value.
     let mut first = None;
     for constraint in &defined.constraints {
@@ -2641,10 +2693,6 @@ pub(crate) fn select(
             break;
         }
     }
-    let value = hir::DefinedValue {
-        ty: defined,
-        components: tuple,
-    };
     match first {
         None => Ok(hir::Expr::Constant(hir::Value::Defined(value))),
         Some((constraint, hir::Expr::Constant(hir::Value::Boolean(false)))) => {
@@ -2662,6 +2710,18 @@ pub(crate) fn select(
             Box::new(hir::Expr::Constant(hir::Value::Tuple(value.components))),
         )),
     }
+}
+
+/// A value of a type of the program's own whose relation-valued
+/// `component` has two tuples, `tuples`, with the same values, `shared`,
+/// for one of its keys, written at `at`.
+#[derive(Debug, Clone)]
+pub(crate) struct BrokenKey {
+    pub(crate) value: hir::DefinedValue,
+    pub(crate) component: String,
+    pub(crate) shared: hir::TupleValue,
+    pub(crate) tuples: [hir::TupleValue; 2],
+    pub(crate) at: Option<Span>,
 }
 
 /// A value of a type of the program's own whose components break one of

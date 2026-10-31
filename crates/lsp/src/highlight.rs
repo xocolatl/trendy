@@ -813,6 +813,22 @@ mod tests {
                 ("key", Class::Attribute, false),
             ]
         );
+        // A type's component's key, after its type.
+        let tokens = highlight("type t { { key: relation { key: integer } key { key } } };");
+        let words: Vec<(&str, Class)> = tokens
+            .iter()
+            .filter(|(text, ..)| *text == "key")
+            .map(|&(text, class, _)| (text, class))
+            .collect();
+        assert_eq!(
+            words,
+            [
+                ("key", Class::Attribute),
+                ("key", Class::Attribute),
+                ("key", Class::Keyword),
+                ("key", Class::Attribute),
+            ]
+        );
     }
 
     #[test]

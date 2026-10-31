@@ -1401,6 +1401,18 @@ mod tests {
             ),
             "type t {\n    { kelvin: approximate },\n    { celsius: approximate }\n        to { kelvin := celsius + 273.15e0 }\n        from { celsius := kelvin - 273.15e0 },\n};\n"
         );
+        // A component's keys follow its type, as a variable's do, each on
+        // a line of its own once the type breaks.
+        assert_eq!(
+            fmt("type t{{vs:relation{v:integer,w:integer}key{v}  key {w}}};"),
+            "type t { { vs: relation { v: integer, w: integer } key { v } key { w } } };\n"
+        );
+        assert_eq!(
+            fmt(
+                "type outline { { vertices: relation { v_no: integer, x: approximate, y: approximate, z: approximate, w: approximate } key { v_no } key { x, y } } };"
+            ),
+            "type outline {\n    {\n        vertices: relation {\n            v_no: integer,\n            x: approximate,\n            y: approximate,\n            z: approximate,\n            w: approximate,\n        }\n        key { v_no }\n        key { x, y },\n    },\n};\n"
+        );
     }
 
     #[test]

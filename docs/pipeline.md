@@ -219,10 +219,14 @@ text that fits nowhere is wrapped in an error node, up to the next definition
 keyword (`operator` or `var`). In a variable declaration, a missing `:` or
 `:=` is recognized from the type or value that follows it, and `=` is parsed
 as `:=` and reported. A variable's keys, `key { a, b }`, follow its value,
-or its type when it has none; `key` is a contextual keyword, recognized
-only there, before `{`. Keys written before the value are parsed and
-reported with a fix that moves them (P0020), and SQL's `primary key` and
-`unique` are parsed as keys and reported (P0019). Whitespace is attached to the innermost node that is open when it
+or its type when it has none, and a type's component's follow the
+component's type; `key` is a contextual keyword, recognized only there,
+before `{`. Keys written before the value are parsed and reported with a
+fix that moves them (P0020), and SQL's `primary key` and `unique` are
+parsed as keys and reported (P0019). A key after an attribute's type in a
+heading, or a parameter's, is parsed and reported (P0046), and one among
+a type's constraints and order is parsed and left to sema (A0064), which
+knows which of the type's components it can be a key of. Whitespace is attached to the innermost node that is open when it
 appears, so whitespace between definitions belongs to the file.
 
 Expressions use precedence climbing. From tightest to loosest: the prefix
@@ -876,7 +880,14 @@ may contain another, since a key is irreducible. Its initial value must
 satisfy them: two tuples with the same values for a key are an error. To
 point at the two tuples, sema evaluates each tuple of the initial value's
 relation selector again, only once a key is found violated; the value was
-already checked, so that can't fail.
+already checked, so that can't fail. A type's relation-valued
+components' keys are checked by the same rules (`keys::checked`), and
+kept by the component's name (`hir::Defined::keys`): selecting a value,
+as its constraints are, checks them first, and folding reports two
+tuples that share a key's values when compiling (R0008), with the
+component of another representation computed by its conversion from the
+stored one, which `hir::Defined::checks` lists with the constraints for
+sema to check first.
 
 An assignment's target must be a variable, not a parameter, which is
 read-only, nor an operator (A0026), and its value must have the variable's
@@ -1414,11 +1425,14 @@ don't call themselves, so that ends.
 An assignment statement computes each value into a slot of its own: a
 copy, since a value can be a variable's own place, which assigning another
 variable of the statement would change. Then each variable's keys are
-checked against its value (`trendy_rt_check_key`): the runtime sorts the
-tuples' positions by each key the variable declares, and if two next to
-each other have the same values for it, stops the program (R0008),
-writing the variable, the key and the two tuples. Only then are the
-variables assigned.
+checked against its value (`trendy_rt_key_shared`): the runtime sorts the
+tuples' positions by each key the variable declares, and gives two next
+to each other with the same values for it, if there are any, for which
+the program stops (R0008), writing the variable, the key and the two
+tuples. Only then are the variables assigned. A selected value's
+components' keys are checked the same way, before its constraints, and
+a failure writes the type and the component, or, for a value `load_csv`
+read, the record too (`Layout::record`).
 
 An `if` computes its condition, then branches to a block for each branch,
 which computes only its own value into one slot, and jumps to the block

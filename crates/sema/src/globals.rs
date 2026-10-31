@@ -273,9 +273,10 @@ impl<'a> Globals<'a> {
         let signature = operators.get(id);
         // The stored representation's selector's value is the value its
         // arguments are the components of, with no body to check, but its
-        // type's constraints, which it checks: a call of it is one of each
-        // of them, so a constraint whose condition selects a value of its
-        // type closes a cycle.
+        // type's constraints, and the conversions computing its keyed
+        // components, which it calls: a call of it is one of each of them,
+        // so a constraint whose condition selects a value of its type
+        // closes a cycle.
         if let Some(defined) = signature.selects().filter(|_| {
             signature
                 .from_type
@@ -283,9 +284,8 @@ impl<'a> Globals<'a> {
                 .is_some_and(FromType::selects_stored)
         }) {
             let valid = defined
-                .constraints
-                .iter()
-                .all(|c| self.checked(c.operator, at, errors));
+                .checks()
+                .all(|operator| self.checked(operator, at, errors));
             if valid {
                 self.values
                     .entry(id)
@@ -522,9 +522,8 @@ impl<'a> Globals<'a> {
         let at = signature.defined()?;
         let converts = self.checked(to, at, errors);
         let constrained = defined
-            .constraints
-            .iter()
-            .all(|c| self.checked(c.operator, at, errors));
+            .checks()
+            .all(|operator| self.checked(operator, at, errors));
         if !converts || !constrained {
             return None;
         }

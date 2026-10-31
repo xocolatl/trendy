@@ -365,6 +365,20 @@ impl TypeDecl {
     pub fn orders(&self) -> impl Iterator<Item = TypeOrder> {
         self.0.descendants().filter_map(TypeOrder::cast)
     }
+
+    /// The keys written among what it says of itself, in its body or
+    /// after a representation's components, rather than after a
+    /// component's type, where a key goes.
+    pub fn misplaced_keys(&self) -> impl Iterator<Item = Key> + use<> {
+        let body = self.body().map(|body| body.0);
+        let components = self
+            .representations()
+            .filter_map(|r| r.components())
+            .map(|heading| heading.0);
+        body.into_iter()
+            .chain(components)
+            .flat_map(|node| node.children().filter_map(Key::cast).collect::<Vec<_>>())
+    }
 }
 
 impl Supertype {
@@ -1567,6 +1581,32 @@ impl Key {
     pub fn removal(&self) -> Span {
         Span::new(preceded_from(&self.0.clone().into()), self.span().end)
     }
+
+    /// The span to delete to remove the key from a list it is an item of,
+    /// as a type's braces are: with the whitespace before it, and the comma
+    /// after it, or, if none follows, the one before it.
+    #[must_use]
+    pub fn item_removal(&self) -> Span {
+        let significant = |e: &SyntaxElement| !e.kind().is_trivia();
+        let element: SyntaxElement = self.0.clone().into();
+        let after = std::iter::successors(element.next_sibling_or_token(), |e| {
+            e.next_sibling_or_token()
+        })
+        .find(significant)
+        .filter(|e| e.kind() == SyntaxKind::Comma);
+        if let Some(comma) = after {
+            return Span::new(self.removal().start, span(comma.text_range()).end);
+        }
+        let before = std::iter::successors(element.prev_sibling_or_token(), |e| {
+            e.prev_sibling_or_token()
+        })
+        .find(significant)
+        .filter(|e| e.kind() == SyntaxKind::Comma);
+        match before {
+            Some(comma) => Span::new(span(comma.text_range()).start, self.span().end),
+            None => self.removal(),
+        }
+    }
 }
 
 /// Where the trivia before `element` starts: the end of the sibling before
@@ -1820,6 +1860,12 @@ impl AttributeType {
     #[must_use]
     pub fn per(&self) -> Option<Per> {
         self.0.children().find_map(Per::cast)
+    }
+
+    /// The keys after its type, which a type's relation-valued component
+    /// can have, and nothing else, as the parser reports.
+    pub fn keys(&self) -> impl Iterator<Item = Key> {
+        self.0.children().filter_map(Key::cast)
     }
 
     /// `var`, `const` or `out`, before a parameter's name, or another

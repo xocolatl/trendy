@@ -1271,8 +1271,9 @@ impl<'a> FunctionBuilder<'a> {
     }
 
     /// The value at `value`, named `name`, of the type of the program's own
-    /// `defined`, in a record of `at`, checked against its constraints: the
-    /// program stops at the first broken, writing the record's line.
+    /// `defined`, in a record of `at`, checked against its components' keys
+    /// and its constraints: the program stops at the first broken, writing
+    /// the record's line.
     fn constraints_checked(
         &mut self,
         defined: &hir::Defined,
@@ -1281,25 +1282,27 @@ impl<'a> FunctionBuilder<'a> {
         at: &Record,
         cx: &mut Lowering,
     ) {
-        if defined.constraints.is_empty() {
+        if !defined.is_constrained() {
             return;
         }
-        let line = self.element(&at.file.lines, &at.index, lir::Layout::Usize);
-        let descriptor = lir::Place::whole(lir::Base::Data(cx.components_descriptor(defined)));
+        // Laid out as `lir::Layout::record`.
+        let record = self.slot(lir::Layout::record());
         let attribute = self.text(name, cx);
-        self.constrained(
-            defined,
-            value,
-            |this, constraint, cx| lir::Failure::BrokenConstraintInFile {
-                value: value.clone(),
-                descriptor: descriptor.clone(),
-                constraint: this.text(&constraint.text, cx),
-                attribute: attribute.clone(),
-                path: at.file.path.clone(),
-                line: line.clone(),
-            },
-            cx,
-        );
+        let line = self.element(&at.file.lines, &at.index, lir::Layout::Usize);
+        let text = scalar_layout(hir::Scalar::Text);
+        for (i, (src, layout)) in [
+            (attribute, text.clone()),
+            (at.file.path.clone(), text),
+            (line, lir::Layout::Usize),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut dst = record.clone();
+            dst.path.push(i);
+            self.insts.push(lir::Inst::Copy { dst, src, layout });
+        }
+        self.constrained(defined, value, &Checking::Read(record), cx);
     }
 
     /// A call of the runtime function `function`, which writes `value`,
@@ -1745,23 +1748,16 @@ impl<'a> FunctionBuilder<'a> {
         if !matches!(ty, hir::Type::Relation(_)) {
             return;
         }
-        let names: Vec<&str> = attribute_names(&ty).collect();
-        let variable = hir::Expr::Constant(hir::Value::Text(self.target_name(target).to_string()));
+        let variable = self.target_name(target).to_string();
         for key in &keys {
-            if key.len() == names.len() {
-                continue;
-            }
-            let others: BTreeSet<String> = names
-                .iter()
-                .filter(|name| !key.contains(**name))
-                .map(|name| (*name).to_string())
-                .collect();
-            let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
-            let projected = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty.without(&others))));
-            let variable = self.place(&variable, cx);
-            self.insts.push(lir::Inst::CallRuntime {
-                function: lir::RuntimeFn::CheckKey,
-                args: vec![value.clone(), descriptor, projected, variable],
+            self.key_checked(value, &ty, key, cx, |this, failed, cx| {
+                lir::Failure::KeyViolated {
+                    value: failed.value,
+                    descriptor: failed.descriptor,
+                    key: failed.key,
+                    pair: failed.pair,
+                    variable: this.text(&variable, cx),
+                }
             });
         }
     }
@@ -2792,17 +2788,7 @@ impl<'a> FunctionBuilder<'a> {
     ) -> lir::Place {
         let value = self.place(components, cx);
         let ty = hir::Type::Defined(Box::new(defined.clone()));
-        let descriptor = lir::Place::whole(lir::Base::Data(cx.components_descriptor(defined)));
-        self.constrained(
-            defined,
-            &value,
-            |this, constraint, cx| lir::Failure::BrokenConstraint {
-                value: value.clone(),
-                descriptor: descriptor.clone(),
-                constraint: this.text(&constraint.text, cx),
-            },
-            cx,
-        );
+        self.constrained(defined, &value, &Checking::Selected, cx);
         if ty.root().is_none() {
             return value;
         }
@@ -2811,17 +2797,71 @@ impl<'a> FunctionBuilder<'a> {
         selected
     }
 
-    /// Stop the program unless each constraint of `defined`, in order, is
-    /// true of the value at `value`, laid out as the tuple of its
-    /// components: each a call of its operator with the components as its
-    /// arguments, the first that is false failing as `broken` says.
+    /// Stop the program unless each key of each relation-valued component
+    /// of `defined`, and then each of its constraints, in order, is true of
+    /// the value at `value`, laid out as the tuple of its components: a
+    /// component of another representation computed by its conversion
+    /// from the stored one, and each constraint a call of its operator with
+    /// the components as its arguments. The first that is false fails as
+    /// `checking` says.
     fn constrained(
         &mut self,
         defined: &hir::Defined,
         value: &lir::Place,
-        broken: impl Fn(&mut Self, &hir::Constraint, &mut Lowering) -> lir::Failure,
+        checking: &Checking,
         cx: &mut Lowering,
     ) {
+        for (component, keys) in &defined.keys {
+            let (heading, other) = defined
+                .representation(component)
+                .expect("a key is of one of the type's components");
+            let mut relation = match other {
+                Some(other) => self.converted(other.from, &defined.components, value.clone(), cx),
+                None => value.clone(),
+            };
+            relation.path.push(
+                heading
+                    .attributes()
+                    .position(|(c, _)| c == component)
+                    .expect("a representation has its components"),
+            );
+            let ty = heading
+                .get(component)
+                .expect("a representation has its components")
+                .clone();
+            for key in keys {
+                self.key_checked(&relation, &ty, key, cx, |this, failed, cx| {
+                    let ty = this.text(&defined.name, cx);
+                    let component = this.text(component, cx);
+                    let Failed {
+                        value,
+                        descriptor,
+                        key,
+                        pair,
+                    } = failed;
+                    match checking {
+                        Checking::Selected => lir::Failure::ComponentKeyViolated {
+                            value,
+                            descriptor,
+                            key,
+                            pair,
+                            ty,
+                            component,
+                        },
+                        Checking::Read(record) => lir::Failure::ComponentKeyViolatedInFile {
+                            value,
+                            descriptor,
+                            key,
+                            pair,
+                            ty,
+                            component,
+                            record: record.clone(),
+                        },
+                    }
+                });
+            }
+        }
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.components_descriptor(defined)));
         let at_hand = hir::Expr::Current(0, defined.components.clone());
         let args: BTreeMap<String, hir::Expr> = defined
             .components
@@ -2850,9 +2890,82 @@ impl<'a> FunctionBuilder<'a> {
                 },
                 failed,
             );
-            let failure = broken(self, constraint, cx);
+            let (value, descriptor) = (value.clone(), descriptor.clone());
+            let constraint = self.text(&constraint.text, cx);
+            let failure = match checking {
+                Checking::Selected => lir::Failure::BrokenConstraint {
+                    value,
+                    descriptor,
+                    constraint,
+                },
+                Checking::Read(record) => lir::Failure::BrokenConstraintInFile {
+                    value,
+                    descriptor,
+                    constraint,
+                    record: record.clone(),
+                },
+            };
             self.fail(failure, kept);
         }
+    }
+
+    /// Stop the program if the relation at `relation`, of type `ty`, has two
+    /// tuples with the same values for `key`, failing as `broken` says of
+    /// them. A key of the whole heading always holds.
+    fn key_checked(
+        &mut self,
+        relation: &lir::Place,
+        ty: &hir::Type,
+        key: &hir::Key,
+        cx: &mut Lowering,
+        broken: impl FnOnce(&mut Self, Failed, &mut Lowering) -> lir::Failure,
+    ) {
+        let names: Vec<&str> = attribute_names(ty).collect();
+        if key.len() == names.len() {
+            return;
+        }
+        let others: BTreeSet<String> = names
+            .iter()
+            .filter(|name| !key.contains(**name))
+            .map(|name| (*name).to_string())
+            .collect();
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(ty)));
+        let projected = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty.without(&others))));
+        let shared = self.slot(lir::Layout::U8);
+        let pair = self.slot(lir::Layout::Struct(vec![
+            lir::Layout::Usize,
+            lir::Layout::Usize,
+        ]));
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::KeyShared,
+            args: vec![
+                shared.clone(),
+                pair.clone(),
+                relation.clone(),
+                descriptor.clone(),
+                projected.clone(),
+            ],
+        });
+        let (kept, failed) = (self.new_block(), self.new_block());
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: shared,
+                then: failed,
+                otherwise: kept,
+            },
+            failed,
+        );
+        let failure = broken(
+            self,
+            Failed {
+                value: relation.clone(),
+                descriptor,
+                key: projected,
+                pair,
+            },
+            cx,
+        );
+        self.fail(failure, kept);
     }
 
     /// A text constant's value, in a place.
@@ -4087,12 +4200,12 @@ impl Conversion {
 }
 
 /// Whether a value of type `ty` is or has a value of a type of the
-/// program's own with constraints.
+/// program's own with constraints, or keys of components.
 fn constrained(ty: &hir::Type) -> bool {
     match ty {
         hir::Type::Tuple(heading) => heading.attributes().any(|(_, ty)| constrained(ty)),
         hir::Type::Defined(defined) => {
-            !defined.constraints.is_empty()
+            defined.is_constrained()
                 || defined
                     .components
                     .attributes()
@@ -4116,6 +4229,24 @@ fn dotted(name: &str, attribute: &str) -> String {
 struct InFile {
     path: lir::Place,
     lines: lir::Place,
+}
+
+/// What a value whose components are checked against its type's keys
+/// and constraints is: one selected, or one `load_csv` read from the record
+/// a place laid out as [`lir::Layout::record`] describes.
+enum Checking {
+    Selected,
+    Read(lir::Place),
+}
+
+/// The places a key check gives the failure it makes: the relation, its
+/// type's descriptor, the descriptor of its projection on the key, and the
+/// positions of two tuples that share their values for it.
+struct Failed {
+    value: lir::Place,
+    descriptor: lir::Place,
+    key: lir::Place,
+    pair: lir::Place,
 }
 
 /// A record of a CSV file, at `index`, from 0, among its records.

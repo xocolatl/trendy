@@ -134,6 +134,16 @@ impl Layout {
             Layout::Address,
         ])
     }
+
+    /// Where `load_csv` read a value, for a failure to write:
+    /// `trendy_runtime::Record`, of the text naming the attribute or
+    /// component it was read for, the file's path, a text, and the
+    /// record's line.
+    #[must_use]
+    pub fn record() -> Layout {
+        let text = || Layout::Struct(vec![Layout::Address, Layout::Usize]);
+        Layout::Struct(vec![text(), text(), Layout::Usize])
+    }
 }
 
 /// A location in memory: a base, then a path of field indexes through
@@ -289,19 +299,34 @@ pub enum RuntimeFn {
     /// `ty`, a text, which it was treated as, writing them.
     NotOfType,
     /// `trendy_rt_broken_constraint_in_file(value, descriptor, constraint,
-    /// attribute, path, line)`, which doesn't return: as
-    /// [`RuntimeFn::BrokenConstraint`], of a value `load_csv` read for the
-    /// attribute or component named `attribute`, a text, from the record
-    /// on line `line` (a [`Layout::Usize`]) of the file at `path`, a text,
-    /// writing where too.
+    /// record)`, which doesn't return: as [`RuntimeFn::BrokenConstraint`],
+    /// of a value `load_csv` read from the record `record` describes,
+    /// laid out as [`Layout::record`], writing where too.
     BrokenConstraintInFile,
-    /// `trendy_rt_check_key(src, descriptor, key, variable)`: stop the
-    /// program if the relation `src`, of the type the descriptor
-    /// describes, has two tuples with the same values for the attributes
-    /// of `key`, the descriptor of its projection on one of the keys of
-    /// the variable named `variable`, a text, which it is about to be
-    /// assigned to, writing the variable, the key and the two tuples.
-    CheckKey,
+    /// `trendy_rt_key_shared(shared, pair, src, descriptor, key)`: store at
+    /// `shared`, a [`Layout::U8`], 1 if the relation `src`, of the type the
+    /// descriptor describes, has two tuples with the same values for the
+    /// attributes of `key`, the descriptor of its projection on one of its
+    /// keys, and their positions at `pair`, two [`Layout::Usize`]s; else 0.
+    KeyShared,
+    /// `trendy_rt_key_violated(src, descriptor, key, pair, variable)`,
+    /// which doesn't return: stop the program because the tuples at `pair`
+    /// of the relation `src`, about to be assigned to the variable named
+    /// `variable`, a text, share their values for `key`, as
+    /// [`RuntimeFn::KeyShared`] found, writing the variable, the key and
+    /// the tuples.
+    KeyViolated,
+    /// `trendy_rt_component_key_violated(src, descriptor, key, pair, ty,
+    /// component)`, which doesn't return: as [`RuntimeFn::KeyViolated`],
+    /// of the relation that is the component named `component`, a text, of
+    /// a value selected of the type named `ty`, a text.
+    ComponentKeyViolated,
+    /// `trendy_rt_component_key_violated_in_file(src, descriptor, key,
+    /// pair, ty, component, record)`, which doesn't return: as
+    /// [`RuntimeFn::ComponentKeyViolated`], of a value `load_csv` read
+    /// from the record `record` describes, laid out as
+    /// [`Layout::record`], writing where too.
+    ComponentKeyViolatedInFile,
     /// `trendy_rt_concat(dst, lhs, rhs)`: store the concatenation of two
     /// texts at `dst`, in memory the statement owns (see
     /// [`RuntimeFn::Begin`]). It stops the program if the memory can't be
@@ -492,7 +517,10 @@ impl RuntimeFn {
             RuntimeFn::BrokenConstraint => "trendy_rt_broken_constraint",
             RuntimeFn::NotOfType => "trendy_rt_not_of_type",
             RuntimeFn::BrokenConstraintInFile => "trendy_rt_broken_constraint_in_file",
-            RuntimeFn::CheckKey => "trendy_rt_check_key",
+            RuntimeFn::KeyShared => "trendy_rt_key_shared",
+            RuntimeFn::KeyViolated => "trendy_rt_key_violated",
+            RuntimeFn::ComponentKeyViolated => "trendy_rt_component_key_violated",
+            RuntimeFn::ComponentKeyViolatedInFile => "trendy_rt_component_key_violated_in_file",
             RuntimeFn::Concat => "trendy_rt_concat",
             RuntimeFn::Release => "trendy_rt_release",
             RuntimeFn::Begin => "trendy_rt_begin",
@@ -758,16 +786,47 @@ pub enum Failure {
         descriptor: Place,
         ty: Place,
     },
-    /// As [`Failure::BrokenConstraint`], of a value `load_csv` read for the
-    /// attribute or component named `attribute`, a text, from the record
-    /// on line `line` (a [`Layout::Usize`]) of the file at `path`, a text.
+    /// As [`Failure::BrokenConstraint`], of a value `load_csv` read from the
+    /// record `record` describes, laid out as [`Layout::record`].
     BrokenConstraintInFile {
         value: Place,
         descriptor: Place,
         constraint: Place,
-        attribute: Place,
-        path: Place,
-        line: Place,
+        record: Place,
+    },
+    /// The tuples at `pair` of the relation `value`, of the type
+    /// `descriptor` describes, about to be assigned to the variable named
+    /// `variable`, a text, share their values for the key `key`, the
+    /// descriptor of its projection on the key, as
+    /// [`RuntimeFn::KeyShared`] found.
+    KeyViolated {
+        value: Place,
+        descriptor: Place,
+        key: Place,
+        pair: Place,
+        variable: Place,
+    },
+    /// As [`Failure::KeyViolated`], of the relation that is the component
+    /// named `component`, a text, of a value selected of the type named
+    /// `ty`, a text.
+    ComponentKeyViolated {
+        value: Place,
+        descriptor: Place,
+        key: Place,
+        pair: Place,
+        ty: Place,
+        component: Place,
+    },
+    /// As [`Failure::ComponentKeyViolated`], of a value `load_csv` read
+    /// from the record `record` describes, laid out as [`Layout::record`].
+    ComponentKeyViolatedInFile {
+        value: Place,
+        descriptor: Place,
+        key: Place,
+        pair: Place,
+        ty: Place,
+        component: Place,
+        record: Place,
     },
 }
 
@@ -814,12 +873,43 @@ impl Failure {
                 value,
                 descriptor,
                 constraint,
-                attribute,
-                path,
-                line,
+                record,
             } => (
                 RuntimeFn::BrokenConstraintInFile,
-                vec![value, descriptor, constraint, attribute, path, line],
+                vec![value, descriptor, constraint, record],
+            ),
+            Failure::KeyViolated {
+                value,
+                descriptor,
+                key,
+                pair,
+                variable,
+            } => (
+                RuntimeFn::KeyViolated,
+                vec![value, descriptor, key, pair, variable],
+            ),
+            Failure::ComponentKeyViolated {
+                value,
+                descriptor,
+                key,
+                pair,
+                ty,
+                component,
+            } => (
+                RuntimeFn::ComponentKeyViolated,
+                vec![value, descriptor, key, pair, ty, component],
+            ),
+            Failure::ComponentKeyViolatedInFile {
+                value,
+                descriptor,
+                key,
+                pair,
+                ty,
+                component,
+                record,
+            } => (
+                RuntimeFn::ComponentKeyViolatedInFile,
+                vec![value, descriptor, key, pair, ty, component, record],
             ),
         }
     }

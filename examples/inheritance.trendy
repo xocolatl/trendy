@@ -83,12 +83,12 @@ type ellipse is plane_figure {
 };
 
 /* A polygon, by its vertices, numbered from 1, each at a point of its own:
-   a component can be a relation, and a constraint says what its tuples
-   are. */
+   a component can be a relation, whose keys say that no two vertices have
+   one number or one point, which TTM writes as two constraints, that
+   counting the numbers, or the points, counts the vertices; and a
+   constraint says the numbers run from 1. */
 type polygon is plane_figure {
-    { vertices: relation { v_no: integer, vertex: point } },
-    constraint count{r: vertices{v_no}} = count{r: vertices},
-    constraint count{r: vertices{vertex}} = count{r: vertices},
+    { vertices: relation { v_no: integer, vertex: point } key { v_no } key { vertex } },
     constraint is_empty{r: vertices where v_no < 1 or v_no > count{r: vertices}},
 };
 

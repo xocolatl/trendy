@@ -1854,7 +1854,9 @@ operator main{} [
   when running, as `north{p: nairobi, by: 100e0}` would (R0017).
 - **Several constraints are one,** all of them true of every value, as
   TTM has one type constraint per type. Each is checked in order, so a
-  failure says which one a value breaks.
+  failure says which one a value breaks. A relation-valued component's
+  keys, written after its type, are checked before them (see
+  [Keys](#keys)).
 - **A constraint is a condition on the components alone,** in scope by
   name. It reads no variable of the program's, whose value changes
   (A0050), and selects no value of its own type, directly or through
@@ -2443,9 +2445,10 @@ operator main{} [];
   relation never has two equal tuples.
 - **`key {}` allows at most one tuple,** since every tuple has the same
   values for no attributes.
-- **Only relation variables have keys,** not tuple or scalar variables
-  (A0020), and not types or values: a key is a rule about what a variable
-  can hold.
+- **Only relation variables have keys,** and a type's relation-valued
+  components, below, not tuple or scalar variables (A0020), nor relation
+  types or values: a key is a rule about what a variable, or a type's
+  values, can hold.
 - **Every value must satisfy the keys.** Two tuples with the same values
   for a key are an error (R0008). An initial value is checked when
   compiling, and the error is reported at the two tuples; an assigned
@@ -2474,6 +2477,62 @@ operator main{} [];
 
 ```trendy,error
 var rivers: relation { name: text } key { name } := relation { { name: "Mekong" } };
+
+operator main{} [];
+```
+
+A type of the program's own can declare keys of its relation-valued
+components, each written after the component's type, as a relation
+variable's are after its own. They are rules of the type: no value of it
+has a component with two tuples that share a key's values, which, as its
+constraints are, is checked whenever a value is selected, by its
+selector, `replace`, `update` or `load_csv` (R0008), when compiling if the
+components are known then, and otherwise when the program runs:
+
+```trendy
+type outline {
+    { vertices: relation { v_no: integer, x: approximate, y: approximate } key { v_no } key { x, y } },
+};
+
+var triangle := outline{vertices: relation {
+    { v_no: 1, x: 0e0, y: 0e0 },
+    { v_no: 2, x: 4e0, y: 0e0 },
+    { v_no: 3, x: 0e0, y: 3e0 },
+}};
+
+operator main{} [
+    call debug_value{v: triangle};
+];
+```
+
+```trendy,error
+type outline { { vertices: relation { v_no: integer, x: approximate } key { v_no } } };
+
+var line := outline{vertices: relation { { v_no: 1, x: 0e0 }, { v_no: 1, x: 4e0 } }};
+
+operator main{} [];
+```
+
+- **The rules of a variable's keys hold:** a key lists attributes of the
+  component's relation, none contains another (A0025), and `key {}`
+  allows at most one tuple. A component that isn't a relation has no
+  keys (A0020).
+- **A component of any representation** can have keys, as a constraint
+  can name its components: one of a representation other than the stored
+  one is computed by its conversion when a value is selected.
+- **A key goes after its component's type:** one among the type's
+  constraints and order is fixed to after the type of the one component
+  with its attributes (A0064).
+- **A relation type has no keys:** its values are all the relations of
+  its heading, so a key of an attribute in a heading, or of a parameter,
+  is an error (P0046). To key relations of a heading wherever they are,
+  make them a type's component, and to key facts, keep them in a relation
+  variable.
+- **A value taken from a component is a relation like any other:**
+  `var vs := triangle.vertices` has the keys `vs` declares, and none else.
+
+```trendy,error
+var shapes: relation { name: text, vertices: relation { v_no: integer } key { v_no } };
 
 operator main{} [];
 ```
