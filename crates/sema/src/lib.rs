@@ -1831,7 +1831,7 @@ mod tests {
     fn an_operand_gives_an_empty_relation_its_heading() {
         let r = "var r := relation { { b: 1 } };\n";
         let heading = |value: &str| variables(&format!("{r}var v := {value};"))[1].ty.clone();
-        // Of operators of one heading, from another operand, or else the
+        // Of set operators, from another operand, or else the
         // type expected, whichever order they're written in.
         for (first, second) in [
             ("relation {} union r", "r union relation {}"),
@@ -9154,6 +9154,107 @@ operator sides{{f: square}}: integer [ 4 ];{MAIN}"
                 .any(|n| n.contains("IM Prescription 19")),
             "{found:#?}"
         );
+    }
+
+    #[test]
+    fn relational_operators_combine_attributes_of_one_hierarchy() {
+        // A union's attribute is of the most specific common supertype, an
+        // intersection's and a join's of the least specific common
+        // subtype, and a difference's and a semijoin's of the left
+        // operand's (IM Prescription 13).
+        let relations = "var discs := relation { { s: round, n: 1 } };
+var squares := relation { { s: box, n: 2 } };
+var figures := discs union squares;
+";
+        let variables = variables(&format!(
+            "{FIGURES}{relations}var either := xunion{{discs, squares}};
+var met := figures intersect discs;
+var joined := figures join discs{{s}};
+var left := figures minus discs;
+var right := discs minus figures;
+var matched := discs matching figures{{s}};
+var images := figures extend {{ same := !!(discs rename {{n as m}}) }};
+"
+        ));
+        let types: BTreeMap<&str, &hir::Type> =
+            variables.iter().map(|v| (v.name.as_str(), &v.ty)).collect();
+        let figure = hir::Type::Dummy(Box::new(hir::Dummy {
+            name: "figure".to_string(),
+            supertypes: Vec::new(),
+        }));
+        let disc = types["round"].clone();
+        let of = |ty: &hir::Type| {
+            hir::Type::Relation(hir::Heading::new(
+                [
+                    ("s".to_string(), ty.clone()),
+                    ("n".to_string(), hir::Type::Scalar(hir::Scalar::Integer)),
+                ]
+                .into(),
+            ))
+        };
+        for (name, ty) in [
+            ("figures", of(&figure)),
+            ("either", of(&figure)),
+            ("met", of(&disc)),
+            ("joined", of(&disc)),
+            ("left", of(&figure)),
+            ("right", of(&disc)),
+            ("matched", of(&disc)),
+        ] {
+            assert_eq!(types[name], &ty, "{name}");
+        }
+        let value = |name: &str| &variables.iter().find(|v| v.name == name).unwrap().init;
+        let hir::Value::Relation(figures) = value("figures") else {
+            panic!("{:?}", value("figures"));
+        };
+        assert_eq!(figures.tuples.len(), 2);
+        let hir::Value::Relation(met) = value("met") else {
+            panic!("{:?}", value("met"));
+        };
+        let hir::Value::Relation(discs) = value("discs") else {
+            panic!("{:?}", value("discs"));
+        };
+        assert_eq!(met.tuples, discs.tuples);
+        // Values of disjoint types never match, nor are equal, so a join or
+        // a comparison of them would decide nothing.
+        let disjoint = |note: &String| {
+            note.ends_with(
+                "are both `figure`, but no value is of both: a union type's subtypes are disjoint",
+            )
+        };
+        for (written, code) in [
+            ("discs join squares", Code::JoinTypeConflict),
+            ("discs not matching squares", Code::JoinTypeConflict),
+            ("discs compose squares{s}", Code::JoinTypeConflict),
+            (
+                "discs extend { other := !!squares }",
+                Code::JoinTypeConflict,
+            ),
+            ("discs intersect squares", Code::HeadingMismatch),
+            ("discs minus squares", Code::HeadingMismatch),
+            ("intersect{figures, discs, squares}", Code::HeadingMismatch),
+        ] {
+            let found = errors(&format!("{FIGURES}{relations}var x := {written};{MAIN}"));
+            assert_eq!(found.len(), 1, "{written}: {found:#?}");
+            assert_eq!(found[0].code, code, "{written}: {found:#?}");
+            assert!(found[0].notes.iter().any(disjoint), "{written}: {found:#?}");
+        }
+        // A union's attributes need a common supertype.
+        assert_eq!(
+            codes(&format!(
+                "{FIGURES}{relations}var x := discs union relation {{ {{ s: 1, n: 1 }} }};{MAIN}"
+            )),
+            [Code::HeadingMismatch]
+        );
+        // `i_delete` takes tuples of overlapping types, as `i_minus` does,
+        // but `insert` only those of the variable's types or subtypes.
+        let changed = |statement: &str| {
+            format!(
+                "{FIGURES}operator change{{var d: relation {{s: disc, n: integer}}, f: relation {{s: figure, n: integer}}}} [ {statement} ];{MAIN}"
+            )
+        };
+        assert!(analyze_str(&changed("i_delete d f matching d;")).is_ok());
+        assert_eq!(codes(&changed("insert d f;")), [Code::TypeMismatch]);
     }
 
     #[test]

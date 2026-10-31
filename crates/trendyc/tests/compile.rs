@@ -1097,6 +1097,53 @@ operator main{{}} [
 }
 
 #[test]
+fn relations_of_a_hierarchy_combine_when_running() {
+    // Relations whose attributes are of different types in the hierarchy
+    // combine (IM Prescription 13): a union's attribute is a plane
+    // figure's, an intersection's and a join's an ellipse's, which can be
+    // read, and a difference's and a semijoin's the left operand's.
+    let source = format!(
+        "{FIGURES}
+operator combined{{a: approximate}} [
+    var e: plane_figure := ellipse{{a: a, b: 1e0}};
+    var p: plane_figure := polygon{{corners: relation {{ {{ n: 1, name: \"n\" }} }}}};
+    var figures := relation {{ {{ f: e, k: 1 }}, {{ f: p, k: 2 }} }};
+    var ellipses := relation {{ {{ f: treat e as ellipse, k: 1 }} }};
+    call debug_value{{v: count{{r: ellipses union figures}}}};
+    call debug_value{{v: (figures intersect ellipses) extend {{ a := f.a }} {{a}}}};
+    call debug_value{{v: (figures join ellipses{{f}}) extend {{ a := f.a }} {{k, a}}}};
+    call debug_value{{v: (figures minus ellipses){{k}}}};
+    call debug_value{{v: (ellipses minus figures){{k}}}};
+    call debug_value{{v: (figures not matching ellipses){{k}}}};
+    var left := ellipses;
+    i_delete left figures matching ellipses;
+    call debug_value{{v: left}};
+];
+
+operator main{{}} [
+    call combined{{a: 3e0}};
+];
+"
+    );
+    let (code, stderr) = run_source("combined", &source);
+    assert_eq!(
+        (code, stderr.lines().collect::<Vec<_>>()),
+        (
+            0,
+            vec![
+                "2",
+                "relation { a: approximate } { { a: 3e0 } }",
+                "relation { a: approximate, k: integer } { { a: 3e0, k: 1 } }",
+                "relation { k: integer } { { k: 2 } }",
+                "relation { k: integer } {}",
+                "relation { k: integer } { { k: 2 } }",
+                "relation { f: ellipse, k: integer } {}",
+            ]
+        )
+    );
+}
+
+#[test]
 fn csv_files_load_values_of_types_in_a_hierarchy() {
     // A subtype's value is read as any type's, and laid out after its own
     // type.
@@ -2247,6 +2294,15 @@ fn inheritance() {
             "├──────────────────┼──────┤",
             "│ distance{m: 3e0} │ pond │",
             "└──────────────────┴──────┘",
+            // The ellipses and polygons, combined, are the figures, and
+            // the polygons' vertices, read once a difference of plane
+            // figures is intersected with them.
+            "true",
+            "┌───┬──────┐",
+            "│ n │ name │",
+            "├───┼──────┤",
+            "│ 3 │ plot │",
+            "└───┴──────┘",
             r#""ellipse""#,
             r#""3-gon""#,
             // Their areas, each computed by its kind's version.

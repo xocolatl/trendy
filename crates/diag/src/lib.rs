@@ -113,6 +113,14 @@ impl Diagnostic {
         self
     }
 
+    /// The diagnostic with each of `notes`, of which there may be none, as
+    /// an `Option` that is `None`.
+    #[must_use]
+    pub fn with_notes<N: Into<String>>(mut self, notes: impl IntoIterator<Item = N>) -> Self {
+        self.notes.extend(notes.into_iter().map(Into::into));
+        self
+    }
+
     #[must_use]
     pub fn with_help(mut self, help: impl Into<String>) -> Self {
         self.help.push(help.into());

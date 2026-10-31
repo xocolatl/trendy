@@ -3242,8 +3242,9 @@ impl<'a> FunctionBuilder<'a> {
         dst
     }
 
-    /// The relations `lhs` and `rhs`, of one type, combined as
+    /// The relations `lhs` and `rhs`, of the same attributes, combined as
     /// `combination` says, computed by the runtime into a new stack slot.
+    /// Their tuples are laid out alike, and described by the result's type.
     fn combine(
         &mut self,
         combination: hir::Combination,
@@ -3251,7 +3252,7 @@ impl<'a> FunctionBuilder<'a> {
         rhs: &hir::Expr,
         cx: &mut Lowering,
     ) -> lir::Place {
-        let ty = self.type_of(lhs);
+        let ty = combination.combined(&self.type_of(lhs), &self.type_of(rhs));
         let lhs = self.place(lhs, cx);
         let rhs = self.place(rhs, cx);
         let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));

@@ -176,6 +176,17 @@ var figures := relation {
 var ellipses := figures where figure is ellipse;
 var majors := ellipses extend { major := figure.a }{name, major};
 
+/* Relations of figures of different types combine (IM Prescription 13):
+   a union's attribute is of the most specific type both operands' are,
+   here `plane_figure`, a difference's of the left operand's, and an
+   intersection's of the more specific, since a value in both is of both.
+   So `others` is of plane figures, and `figure.vertices` can't be read
+   until it is intersected with the polygons. */
+var polygons := figures where figure is polygon;
+var everything := ellipses union polygons;
+var others := figures minus ellipses;
+var edges := (others intersect polygons) extend { n := count{r: figure.vertices} }{name, n};
+
 /* What a figure is, and its area: an operator of a union type's values,
    with no body, and a version for each kind of figure, which a call
    computes for its argument's own type (IM Prescription 17). A program
@@ -256,6 +267,11 @@ operator geometry{p: point, shape: polygon} [
     call debug_table{
         r: (figures where figure is ellipse) extend { major := figure.a }{name, major},
     };
+    var curved := figures where figure is ellipse;
+    var straight := figures where figure is polygon;
+    call debug_value{v: curved union straight = figures};
+    var sided := (figures minus curved) intersect straight;
+    call debug_table{r: sided extend { n := count{r: figure.vertices} }{name, n}};
     call debug_value{v: kind{figure: e}};
     call debug_value{v: kind{figure: shape}};
     call debug_table{r: figures extend { size := area{figure: figure} }{name, size}};
@@ -277,6 +293,8 @@ operator main{} [
     call debug_value{v: outward};
     call debug_table{r: figures};
     call debug_table{r: majors};
+    call debug_value{v: everything = figures};
+    call debug_table{r: edges};
     call debug_value{v: kind{figure: squashed}};
     call debug_value{v: kind{figure: triangle}};
     call debug_table{r: sizes};

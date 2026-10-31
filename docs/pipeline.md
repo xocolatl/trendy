@@ -1043,6 +1043,15 @@ and only then what they guard: a narrowed value is never treated unless
 its test is true. A false test shows nothing: a program can add subtypes
 to a union type, so what isn't of one isn't known to be of any other.
 
+The relational operators combine attributes of types in one hierarchy
+(IM Prescription 13). A common attribute of a join's operands, of a
+`matching`'s, or of `!!`'s, and an attribute of an intersection's or a
+difference's, has overlapping types, `Type::common_subtype`, which is
+the type of a join's in its result (`Heading::and`); a union's have a
+common supertype, its type in the result (`Combination::heading`).
+Lowering needs nothing more: values of the types in a hierarchy are laid
+out alike, and the runtime is given each operand's descriptor.
+
 Operators of one name and the same parameters' names are a
 specification and its versions (`operators::families`, once every
 signature's types are resolved, since only they tell a version from a
@@ -1151,8 +1160,8 @@ lowers to `trendy_rt_subset`, one pass over both in canonical order, with
 the operands swapped for `>=` and `>`, and a flag for the proper ones.
 
 `union`, `d_union`, `xunion`, `intersect`, `minus` and `i_minus` are joins
-to sema (`JoinKind`), with their own rule: operands of one heading
-(A0031). `intersect` becomes `And`, which of relations with all their
+to sema (`JoinKind`), with their own rule: operands of the same
+attributes, whose types fit (`JoinKind::fits`, A0031). `intersect` becomes `And`, which of relations with all their
 attributes in common is their intersection, and the others become
 `Combine`, with the `Combination`, computed by `trendy_rt_combine`: both
 operands are in canonical order, so one pass merges them into a result

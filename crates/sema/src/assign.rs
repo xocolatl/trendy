@@ -1159,7 +1159,22 @@ fn shorthand(
             added: None,
         });
     }
-    let tuples = checker.expr(&operand, Some(&target.expected), errors)?;
+    let tuples = match keyword.kind() {
+        // `i_delete r s` is `r := r i_minus s`, whose tuples are `r`'s, so
+        // the types of `s`'s attributes need only overlap `r`'s (*Type
+        // Inheritance and Relational Theory*, IM Prescription 13).
+        SyntaxKind::IDeleteKw => {
+            let mut own = Vec::new();
+            let out = checker.expr(&operand, None, &mut own);
+            match types::Alone::of(out, own, operand.span()) {
+                types::Alone::Valid(out) if checker.ty(&out).overlaps(&target.expected.ty) => {
+                    Some(out)
+                }
+                _ => checker.expr(&operand, Some(&target.expected), errors),
+            }
+        }
+        _ => checker.expr(&operand, Some(&target.expected), errors),
+    }?;
     if let hir::Expr::Constant(hir::Value::Relation(relation)) = &tuples
         && relation.tuples.is_empty()
     {

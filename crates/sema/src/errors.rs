@@ -729,17 +729,14 @@ pub(crate) fn type_test(
             Testing::Treat => format!("leave the treat out: `{subject}` is one already"),
         })
     } else if !actual.overlaps(ty) {
-        let d = Diagnostic::error(
+        Diagnostic::error(
             Code::TypeTest,
             format!("{}: no value of `{actual}` is a value of `{ty}`", what.1),
             at,
             "no value is of both",
         )
-        .with_note(rule);
-        match hierarchy_note(ty, actual) {
-            Some(note) => d.with_note(note),
-            None => d,
-        }
+        .with_note(rule)
+        .with_notes(hierarchy_note(ty, actual))
     } else if matches!(
         actual,
         hir::Type::Tuple(_) | hir::Type::Relation(_) | hir::Type::Array(_)
@@ -849,14 +846,24 @@ fn hierarchy_note(declared: &hir::Type, found: &hir::Type) -> Option<String> {
         _ if declared.is_subtype_of(found) => Some(format!(
             "a value of `{found}` is a value of one of its subtypes, which needn't be `{declared}`"
         )),
-        _ => {
-            let common = declared.common_supertype(found)?;
-            Some(format!(
-                "`{declared}` and `{found}` are both `{common}`, but no value is of both: a union type's subtypes are disjoint"
-            ))
-        }
+        _ => disjoint_note(declared, found),
     }
 }
+
+/// Why no value is of both `a` and `b`, if they are disjoint types in one
+/// hierarchy.
+fn disjoint_note(a: &hir::Type, b: &hir::Type) -> Option<String> {
+    if a.overlaps(b) {
+        return None;
+    }
+    let common = a.common_supertype(b)?;
+    Some(format!(
+        "`{a}` and `{b}` are both `{common}`, but no value is of both: a union type's subtypes are disjoint"
+    ))
+}
+
+/// The rule for attributes that are matched, by a join or `!!`.
+const MATCHED_TYPES: &str = "matched attributes must be of one type, or of types one of which is a subtype of the other, since values never convert to another type implicitly";
 
 /// The argument written `written`, of type `actual`, for a `var` or `out`
 /// parameter of type `declared`, whose origin is `origin`, a supertype of
@@ -889,11 +896,9 @@ pub(crate) fn type_mismatch(
             expr.span(),
             format!("this is `{found}`"),
         )
-        .with_note("values never convert to another type implicitly"),
+        .with_note("values never convert to another type implicitly")
+        .with_notes(hierarchy_note(declared, found)),
     );
-    if let Some(note) = hierarchy_note(declared, found) {
-        d = d.with_note(note);
-    }
     let unnamed = |ty: &hir::Type| ty.parameters().any(|p| p.name.is_none());
     if unnamed(declared) || unnamed(found) {
         d = d.with_note("each `any type`, `any tuple` or `any relation` written as a parameter's type is a type of its own; to make parameters' types the same, declare one type parameter after the signature, `types { T: any type }`, and write `T` in each");
@@ -3278,7 +3283,8 @@ pub(crate) fn image_type_conflict(
     .with_secondary(operand.span(), format!("`{name}` is `{ty}` here"))
     .with_note(format!("in the tuple at hand, `{name}` is `{at_hand}`"))
     .with_note(IMAGE_RULE)
-    .with_note("matched attributes must have the same type, since values never convert to another type implicitly")
+    .with_note(MATCHED_TYPES)
+    .with_notes(disjoint_note(ty, at_hand))
     .with_help(format!(
         "if the two `{name}`s mean different things, rename one: `!!(r rename {{{name} as other_{name}}})`"
     ))
@@ -3313,7 +3319,7 @@ pub(crate) fn not_joinable(
             "`matching` and `not matching` keep the tuples of a relation that have a match in another relation, or none; of tuples, compare them with `=`",
         ),
         kind if kind.is_set() => (
-            "relations of one heading",
+            "relations of the same attributes",
             "`union`, `d_union`, `xunion`, `intersect`, `minus` and `i_minus` combine the tuples of relations; Tutorial D's tuple union, of the attributes of tuples, is `join`",
         ),
         _ => (
@@ -3338,7 +3344,7 @@ pub(crate) fn tuple_union(span: Span) -> Diagnostic {
         Code::WrongOperandType,
         "`union` can't be applied to tuples",
         span,
-        "`union` takes relations of one heading",
+        "`union` takes relations of the same attributes",
     )
     .with_note("Tutorial D's tuple union, a tuple of both tuples' attributes, is `join` in trendy; `union` is of the tuples of relations")
     .with_suggestion(
@@ -3391,7 +3397,8 @@ pub(crate) fn join_type_conflict(
     .with_secondary(lhs, format!("`{name}` is `{lhs_ty}` here"))
     .with_secondary(rhs, format!("and `{rhs_ty}` here"))
     .with_note(JOIN_RULE)
-    .with_note("matched attributes must have the same type, since values never convert to another type implicitly")
+    .with_note(MATCHED_TYPES)
+    .with_notes(disjoint_note(lhs_ty, rhs_ty))
     .with_help(format!(
         "if the two `{name}`s mean different things, rename one: `… rename {{{name} as other_{name}}}`"
     ))
@@ -3544,18 +3551,22 @@ fn postfix_operand(expr: &Expr) -> String {
     }
 }
 
-/// The set operator `operator`, written at `span`, of operands whose
-/// headings differ: the first, written at `first.0` with heading `first.1`,
-/// and another, at `other.0` with `other.1`. When one attribute of each is
-/// named differently, with the same type, the fix renames the other's.
+/// The set operator `join`, written at `span`, of operands whose headings
+/// don't fit together (see [`crate::ops::JoinKind::fits`]): an earlier
+/// one, written at `first.0` with heading `first.1`, and another, at
+/// `other.0` with `other.1`. When one attribute of each is named
+/// differently, of types that fit, the fix renames the other's.
 pub(crate) fn heading_mismatch(
-    (operator, span): (&str, Span),
+    join: crate::ops::JoinKind,
+    span: Span,
     first: (&Expr, &hir::Heading),
     other: (&Expr, &hir::Heading),
 ) -> Diagnostic {
+    let operator = join.keyword();
+    // The attributes of `a` that `b` has none of to fit with.
     let only = |a: &hir::Heading, b: &hir::Heading| -> Vec<(String, hir::Type)> {
         a.attributes()
-            .filter(|(name, ty)| b.get(name) != Some(ty))
+            .filter(|(name, ty)| b.get(name).is_none_or(|other| !join.fits(ty, other)))
             .map(|(name, ty)| (name.to_string(), ty.clone()))
             .collect()
     };
@@ -3571,19 +3582,31 @@ pub(crate) fn heading_mismatch(
             trendy_diag::conjoin(&names)
         }
     };
+    let rule = if join.is_union() {
+        format!(
+            "`{operator}` combines tuples, so they must have the same attributes, each of one type, or of types in one hierarchy, whose most specific common supertype the result's is; rename or project an operand to match"
+        )
+    } else {
+        format!(
+            "`{operator}` compares tuples, so they must have the same attributes, each of one type, or of types one of which is a subtype of the other; rename or project an operand to match"
+        )
+    };
     let d = Diagnostic::error(
         Code::HeadingMismatch,
         format!("the operands of `{operator}` have different headings"),
         span,
-        format!("`{operator}` takes relations of one heading"),
+        format!("`{operator}` takes relations of the same attributes"),
     )
     .with_secondary(first.0.span(), format!("this has {}", listed(&first_only)))
     .with_secondary(other.0.span(), format!("and this {}", listed(&other_only)))
-    .with_note(format!(
-        "`{operator}` combines tuples, so they must have the same attributes, of the same types; rename or project an operand to match"
-    ));
+    .with_note(rule)
+    .with_notes(
+        first_only
+            .iter()
+            .find_map(|(name, ty)| disjoint_note(ty, other.1.get(name)?)),
+    );
     match (&first_only[..], &other_only[..]) {
-        ([(want, want_ty)], [(have, have_ty)]) if want_ty == have_ty && want != have => d
+        ([(want, want_ty)], [(have, have_ty)]) if join.fits(want_ty, have_ty) && want != have => d
             .with_suggestion(
                 format!("rename `{have}` to `{want}`"),
                 vec![Edit {

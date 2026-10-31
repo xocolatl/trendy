@@ -644,18 +644,18 @@ pub(crate) enum JoinKind {
     Matching,
     /// `not matching`, the antijoin: those that have none.
     NotMatching,
-    /// `union`, of relations of one heading: the tuples of either.
+    /// `union`, of relations of the same attributes: the tuples of either.
     Union,
     /// `d_union`: a union whose operands must have no tuple in common.
     DisjointUnion,
     /// `xunion`: the tuples of exactly one operand, as `xor` is of
     /// booleans.
     ExclusiveUnion,
-    /// `intersect`, of relations of one heading: the tuples of both, which
-    /// is their AND.
+    /// `intersect`, of relations of the same attributes: the tuples of
+    /// both, which is their AND.
     Intersect,
-    /// `minus`, of relations of one heading: the tuples of the left that
-    /// aren't in the right, from the left in a list.
+    /// `minus`, of relations of the same attributes: the tuples of the left
+    /// that aren't in the right, from the left in a list.
     Minus,
     /// `i_minus`: a minus whose right operand's tuples must all be in the
     /// left.
@@ -663,23 +663,6 @@ pub(crate) enum JoinKind {
 }
 
 impl JoinKind {
-    /// Whether its operands have one heading, which is the result's.
-    pub(crate) fn one_heading(self) -> bool {
-        match self {
-            JoinKind::Union
-            | JoinKind::DisjointUnion
-            | JoinKind::ExclusiveUnion
-            | JoinKind::Intersect
-            | JoinKind::Minus
-            | JoinKind::IncludedMinus => true,
-            JoinKind::Join
-            | JoinKind::Times
-            | JoinKind::Compose
-            | JoinKind::Matching
-            | JoinKind::NotMatching => false,
-        }
-    }
-
     /// The join written with the operator `tokens`, if they are one.
     fn of(tokens: &[SyntaxToken]) -> Option<JoinKind> {
         let kinds: Vec<SyntaxKind> = tokens.iter().map(SyntaxToken::kind).collect();
@@ -705,7 +688,39 @@ impl JoinKind {
         !matches!(self, JoinKind::Join | JoinKind::Times | JoinKind::Compose)
     }
 
-    /// Whether it is a set operator, of relations of one heading.
+    /// Whether it is a union, whose result has the tuples of every operand.
+    pub(crate) fn is_union(self) -> bool {
+        matches!(
+            self,
+            JoinKind::Union | JoinKind::DisjointUnion | JoinKind::ExclusiveUnion
+        )
+    }
+
+    /// Whether, of a set operator, operands' attributes of types `a` and `b`
+    /// fit together (*Type Inheritance and Relational Theory*, IM
+    /// Prescription 13): of a union, whose result has the values of both,
+    /// if they have a common supertype, which the result's attribute is
+    /// of, and otherwise, since the operands' tuples are compared, if some
+    /// value is of both (IM Prescription 12).
+    pub(crate) fn fits(self, a: &hir::Type, b: &hir::Type) -> bool {
+        if self.is_union() {
+            a.common_supertype(b).is_some()
+        } else {
+            a.overlaps(b)
+        }
+    }
+
+    /// Whether, of a set operator, operands of headings `a` and `b` fit
+    /// together: they have the same attributes, and each one's types fit.
+    fn headings_fit(self, a: &hir::Heading, b: &hir::Heading) -> bool {
+        if self.is_union() {
+            a.common_supertype(b).is_some()
+        } else {
+            a.common_subtype(b).is_some()
+        }
+    }
+
+    /// Whether it is a set operator, of relations of the same attributes.
     pub(crate) fn is_set(self) -> bool {
         matches!(
             self,
@@ -859,25 +874,27 @@ impl Joining {
             return self.same_headings(&operands, errors);
         }
         let mut ok = true;
-        // Each attribute name, with the first operand that has it.
-        let mut first: BTreeMap<&str, (Span, &hir::Type)> = BTreeMap::new();
+        // Each attribute name, with the operands before that have it. A
+        // common attribute's value in a tuple of the result is of each of
+        // its types, so each two must overlap (IM Prescription 13).
+        let mut earlier: BTreeMap<&str, Vec<(Span, &hir::Type)>> = BTreeMap::new();
         let mut shared = BTreeSet::new();
         for &(span, heading) in &operands {
             for (name, ty) in heading.attributes() {
-                let Some(&(earlier, earlier_ty)) = first.get(name) else {
-                    first.insert(name, (span, ty));
-                    continue;
-                };
-                shared.insert(name.to_string());
-                if earlier_ty != ty {
+                let before = earlier.entry(name).or_default();
+                if !before.is_empty() {
+                    shared.insert(name.to_string());
+                }
+                if let Some(&(at, before_ty)) = before.iter().find(|(_, b)| !b.overlaps(ty)) {
                     errors.push(errors::join_type_conflict(
                         self.operator(),
                         name,
-                        (earlier, earlier_ty),
+                        (at, before_ty),
                         (span, ty),
                     ));
                     ok = false;
                 }
+                before.push((span, ty));
             }
         }
         let headings: Vec<&hir::Heading> = operands.iter().map(|&(_, h)| h).collect();
@@ -991,23 +1008,31 @@ impl Joining {
     }
 
     /// How a set operator of `operands`, each with its heading, combines
-    /// them, if each has the first's heading; otherwise reported.
+    /// them, if their headings fit together (see [`JoinKind::fits`]):
+    /// each with the first, which the others are combined with, or, of an
+    /// intersection, whose tuples are of every operand, each two. Otherwise
+    /// reported.
     fn same_headings(
         &self,
         operands: &[(Span, &hir::Heading)],
         errors: &mut Vec<Diagnostic>,
     ) -> Option<Combined> {
         let mut ok = true;
-        if let (Some(&(_, first)), Some(first_expr)) = (operands.first(), self.operands.first()) {
-            for (&(_, heading), expr) in operands.iter().zip(&self.operands).skip(1) {
-                if heading != first {
-                    errors.push(errors::heading_mismatch(
-                        self.operator(),
-                        (first_expr, first),
-                        (expr, heading),
-                    ));
-                    ok = false;
-                }
+        for (i, (&(_, heading), expr)) in operands.iter().zip(&self.operands).enumerate().skip(1) {
+            let before = if self.kind == JoinKind::Intersect {
+                i
+            } else {
+                1
+            };
+            let unfit = (0..before).find(|&j| !self.kind.headings_fit(operands[j].1, heading));
+            if let Some(j) = unfit {
+                errors.push(errors::heading_mismatch(
+                    self.kind,
+                    self.span,
+                    (&self.operands[j], operands[j].1),
+                    (expr, heading),
+                ));
+                ok = false;
             }
         }
         ok.then_some(match self.kind {
@@ -1037,7 +1062,7 @@ impl Joining {
             let common = so_far.common(heading);
             for name in &common {
                 let (a, b) = (so_far.get(name)?, heading.get(name)?);
-                if a != b {
+                if !a.overlaps(b) {
                     errors.push(errors::join_type_conflict(
                         self.operator(),
                         name,
@@ -1069,7 +1094,7 @@ impl Joining {
                 ));
                 ok = false;
             }
-            so_far = so_far.and(heading).without(&common);
+            so_far = so_far.without(&common).and(&heading.without(&common));
             so_far_span = Span::new(first_span.start, span.end);
             steps.push(common);
         }
@@ -1351,7 +1376,7 @@ fn and_values(mut parts: Vec<hir::Value>) -> Option<hir::Value> {
     Some(result)
 }
 
-/// The relations `lhs` and `rhs`, of one heading, combined as
+/// The relations `lhs` and `rhs`, of the same attributes, combined as
 /// `combination` says: evaluated if both are constants.
 ///
 /// # Errors
@@ -2015,7 +2040,7 @@ pub(crate) fn extend(
             let hir::Type::Tuple(heading) = known_type(&operand) else {
                 unreachable!("a tuple's type is a tuple type");
             };
-            let ty = hir::Type::Tuple(heading.and(&computed));
+            let ty = hir::Type::Tuple(heading.with(&computed));
             return Ok(match extended(tuple, &attributes, bindings)? {
                 Some(tuple) => typed(hir::Value::Tuple(tuple), &ty),
                 None => hir::Expr::Extend(Box::new(operand), computed, attributes),
@@ -2034,7 +2059,7 @@ pub(crate) fn extend(
             }
             all.then(|| {
                 hir::Value::Relation(hir::RelationValue {
-                    heading: relation.heading.and(&computed),
+                    heading: relation.heading.with(&computed),
                     tuples,
                 })
             })

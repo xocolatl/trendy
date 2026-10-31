@@ -2359,7 +2359,7 @@ impl<'a> Checker<'a> {
         let mut ok = true;
         for name in &common {
             let (ty, at_hand_ty) = (heading.get(name)?, at_hand.get(name)?);
-            if ty != at_hand_ty {
+            if !ty.overlaps(at_hand_ty) {
                 errors.push(errors::image_type_conflict(
                     span,
                     &operand_expr,
@@ -2398,10 +2398,11 @@ impl<'a> Checker<'a> {
         errors: &mut Vec<Diagnostic>,
     ) -> Option<(Vec<hir::Expr>, ops::Combined)> {
         // Every operand is checked on its own, so that each one's errors are
-        // reported, and operands of different headings are, together. Of
-        // operands of one heading, one whose own can't be known, as an empty
-        // relation's, is checked again with another's, or else the result's
-        // (see [`types::Alone`]); of others, it is unknown.
+        // reported, and operands of different headings are, together. Of a
+        // set operator's operands, of the same attributes, one whose own
+        // can't be known, as an empty relation's, is checked again with
+        // another's, or else the result's (see [`types::Alone`]); of
+        // others, it is unknown.
         let alone: Vec<types::Alone<hir::Expr>> = joining
             .operands
             .iter()
@@ -2426,7 +2427,7 @@ impl<'a> Checker<'a> {
                     .filter(|e| matches!(e.ty, hir::Type::Relation(_)))
                     .cloned()
             })
-            .filter(|_| joining.kind.one_heading());
+            .filter(|_| joining.kind.is_set());
         let operands: Vec<Option<hir::Expr>> = alone
             .into_iter()
             .zip(&joining.operands)

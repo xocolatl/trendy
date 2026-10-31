@@ -2174,6 +2174,49 @@ operator main{} [
   (A0001, A0063). A version has no name of its own: Tutorial D's
   `OPERATOR AREA VERSION AREA_C …` is fixed (P0045).
 
+Relations whose attributes are of different types in one hierarchy
+combine (IM Prescription 13). A union's attribute is of the most specific
+type both operands' are, since it has the values of both; an
+intersection's or a join's common attribute is of the more specific one,
+since a value in both is of both; and a difference's or a `matching`'s
+attributes are the left operand's, whose tuples the result's are:
+
+```trendy
+type plane_figure union;
+type ellipse is plane_figure { { a: approximate, b: approximate } };
+type polygon is plane_figure { { corners: integer } };
+
+var ellipses := relation { { name: "pond", figure: ellipse{a: 3e0, b: 2e0} } };
+var polygons := relation { { name: "plot", figure: polygon{corners: 4} } };
+
+/* A relation of plane figures. */
+var figures := ellipses union polygons;
+
+/* Of ellipses, so `figure.a` can be read. */
+var majors := (figures intersect ellipses) extend { major := figure.a }{name, major};
+
+/* Of plane figures, the plot. */
+var others := figures minus ellipses;
+
+operator main{} [
+    call debug_table{r: majors};
+];
+```
+
+- **Matched and compared attributes overlap:** a join's, a `matching`'s
+  and `!!`'s common attributes, and an intersection's or a difference's
+  attributes, are of one type, or of types one of which is a subtype of
+  the other, so that a value can be in both. `ellipses join polygons` is
+  an error, since no ellipse is a polygon (A0027), and so is
+  `ellipses minus polygons`, which would be `ellipses` whatever their
+  values (A0031).
+- **A union's attributes have a common supertype:** `ellipses union
+  polygons` is of plane figures, but a union of ellipses and integers is
+  an error (A0031).
+- **`i_delete r s` deletes tuples of overlapping types,** as
+  `r i_minus s` does, while `insert r s` and `d_insert r s` insert those
+  of `r`'s types or their subtypes, since `r` keeps its type.
+
 ## Tuples
 
 A tuple type is written `tuple { name: type, … }`, and a tuple value
@@ -3966,8 +4009,10 @@ operator main{} [
 
 - **The result is a set,** with the attributes of both operands. A tuple
   that matches nothing, like Lima's above, isn't in the result.
-- **Common attributes must have the same type** in both operands (A0027),
-  since values never convert to another type implicitly.
+- **Common attributes must be of one type** in both operands (A0027),
+  since values never convert to another type implicitly, or, in a
+  hierarchy, of types one of which is a subtype of the other, which the
+  result's is (see [Union types](#union-types)).
 - **Rename to match:** to match attributes with different names, or keep
   apart attributes with the same name, rename them first. `rename` binds
   tighter than a join, so `r join s rename {id as r_id}` renames `s`'s
@@ -4060,7 +4105,8 @@ operator main{} [
 ```
 
 - **Written like the joins,** with their precedence, and their rules for
-  common attributes: at least one (A0028), of the same type (A0027). They
+  common attributes: at least one (A0028), of one type, or of types one
+  of which is a subtype of the other (A0027). They
   take relations only (A0022), and have no list form, since the order of
   the operands matters.
 - **To match several relations, chain them:** `r matching s matching t`
@@ -4086,8 +4132,8 @@ operator main{} [];
 `r union s` is the tuples of either relation, `r intersect s` the tuples
 of both, `r minus s` the tuples of `r` that aren't in `s`, and
 `r xunion s` the tuples of exactly one, as `xor` is of booleans. The
-relations must have the same heading, so an empty `relation {}` takes the
-other's, whichever side it is on. They are Tutorial D's `UNION`,
+relations must have the same attributes, so an empty `relation {}` takes
+the other's heading, whichever side it is on. They are Tutorial D's `UNION`,
 `INTERSECT` and `MINUS`, and SQL's `UNION`, `INTERSECT` and `EXCEPT`.
 
 ```trendy
@@ -4107,9 +4153,10 @@ operator main{} [
 ];
 ```
 
-- **One heading:** the same attributes, of the same types (A0031). When
-  each operand has one attribute the other lacks, of one type, the fix
-  renames it. They take relations; `union` of tuples, Tutorial D's tuple
+- **The same attributes,** each of one type in both (A0031), or of types
+  in one hierarchy, as [Union types](#union-types) describes. When each
+  operand has one attribute the other lacks, of one type, the fix renames
+  it. They take relations; `union` of tuples, Tutorial D's tuple
   union, is fixed to `join`.
 - **Precedence:** `intersect` and `minus` are ANDs in Algebra A and bind
   like the joins, while `union` is an OR and binds more loosely, as `or`

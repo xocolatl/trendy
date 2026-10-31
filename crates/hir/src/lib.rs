@@ -1241,18 +1241,23 @@ pub enum Expr {
     /// both operands' attributes (tuple join, or tuple union), which fails
     /// if they disagree on a common attribute, since no tuple would do. The
     /// operands are both relations or both tuples, whose common attributes
-    /// have the same types.
+    /// have overlapping types, and are of the least specific common
+    /// subtype of them in the result (see [`Heading::and`]). Values of the
+    /// types in a hierarchy are laid out alike, as its root's, so they
+    /// compare as they are.
     And(Box<Expr>, Box<Expr>),
-    /// Two relations of the same heading combined, as the `Combination`
+    /// Two relations of the same attributes combined, as the `Combination`
     /// says: the tuples of either, or of the left that aren't in the right,
-    /// where the checked ones fail if a tuple breaks their condition.
-    /// `intersect` is an `And`, of relations with all their attributes in
-    /// common.
+    /// where the checked ones fail if a tuple breaks their condition. Each
+    /// attribute's types overlap, for a minus, or, for a union, have a
+    /// common supertype, and the result's heading is as
+    /// [`Combination::heading`] says. `intersect` is an `And`, of
+    /// relations with all their attributes in common.
     Combine(Combination, Box<Expr>, Box<Expr>),
     /// The tuples of the left relation that have a match in the right, on
     /// their common attributes (`matching`, the semijoin): the result has
-    /// the left's heading. The operands' common attributes have the same
-    /// types.
+    /// the left's heading. The operands' common attributes have
+    /// overlapping types, as for `And`.
     Semijoin(Box<Expr>, Box<Expr>),
     /// The tuples of the left relation that have no match in the right
     /// (`not matching`, the antijoin), otherwise as for `Semijoin`.
@@ -1416,15 +1421,13 @@ impl Expr {
             Expr::Remove(operand, names) => operand.type_with(leaf).without(names),
             Expr::Rename(operand, renamings) => operand.type_with(leaf).renamed(renamings),
             Expr::And(lhs, rhs) => lhs.type_with(leaf).and(&rhs.type_with(leaf)),
-            Expr::Extend(operand, computed, _) => operand.type_with(leaf).with(
-                computed
-                    .attributes()
-                    .map(|(name, ty)| (name.to_string(), ty.clone())),
-            ),
+            Expr::Extend(operand, computed, _) => operand.type_with(leaf).with(computed),
             Expr::Current(_, heading) => Type::Tuple(heading.clone()),
             Expr::Ungroup(operand, names) => operand.type_with(leaf).ungrouped(names),
+            Expr::Combine(combination, lhs, rhs) => {
+                combination.combined(&lhs.type_with(leaf), &rhs.type_with(leaf))
+            }
             Expr::Restrict(operand, _)
-            | Expr::Combine(_, operand, _)
             | Expr::Semijoin(operand, _)
             | Expr::Antijoin(operand, _) => operand.type_with(leaf),
             Expr::Only(operand) => match operand.type_with(leaf) {
@@ -1925,7 +1928,8 @@ fn contains(comparison: Comparison, lhs: &Value, rhs: &Value) -> bool {
     small.tuples.is_subset(&large.tuples) && (!proper || small.tuples.len() < large.tuples.len())
 }
 
-/// How relations of one heading are combined, by [`Expr::Combine`].
+/// How relations of the same attributes are combined, by
+/// [`Expr::Combine`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Combination {
     /// The tuples of either (`union`, Algebra A's OR).
@@ -1945,6 +1949,45 @@ pub enum Combination {
     /// that changes to one variable in an `assign` block remove, which
     /// conflict if two remove the same tuple.
     DisjointChanges,
+}
+
+impl Combination {
+    /// The heading of relations of headings `lhs` and `rhs` combined (*Type
+    /// Inheritance and Relational Theory*, IM Prescription 13): of a union,
+    /// each attribute of the most specific common supertype of its types,
+    /// since it has the values of both, and of a minus, the left's, since
+    /// its tuples are the left's.
+    ///
+    /// # Panics
+    ///
+    /// If a union's operands' attributes have no common supertype, which
+    /// sema rules out.
+    #[must_use]
+    pub fn heading(self, lhs: &Heading, rhs: &Heading) -> Heading {
+        match self {
+            Combination::Union
+            | Combination::DisjointUnion
+            | Combination::ExclusiveUnion
+            | Combination::DisjointChanges => lhs
+                .common_supertype(rhs)
+                .unwrap_or_else(|| panic!("a union of {lhs:?} and {rhs:?}")),
+            Combination::Minus | Combination::IncludedMinus => lhs.clone(),
+        }
+    }
+
+    /// The type of relations of types `lhs` and `rhs` combined, as
+    /// [`Combination::heading`] says.
+    ///
+    /// # Panics
+    ///
+    /// If either type isn't a relation type, which sema rules out.
+    #[must_use]
+    pub fn combined(self, lhs: &Type, rhs: &Type) -> Type {
+        match (lhs, rhs) {
+            (Type::Relation(lhs), Type::Relation(rhs)) => Type::Relation(self.heading(lhs, rhs)),
+            _ => panic!("combining {lhs} and {rhs}"),
+        }
+    }
 }
 
 /// A tuple that breaks a checked [`Combination`]'s condition: one both
@@ -2669,23 +2712,35 @@ impl Type {
         }
     }
 
+    /// The least specific type that is a subtype of both this type and
+    /// `other`, whose values are those of both, if some value is (IM
+    /// Prescriptions 7 and 13): the more specific of the two, if one is a
+    /// subtype of the other, since a union type's subtypes are disjoint,
+    /// and of tuples and relations with the same attributes, and arrays,
+    /// attribute by attribute, and element type.
+    #[must_use]
+    pub fn common_subtype(&self, other: &Type) -> Option<Type> {
+        if self.is_subtype_of(other) {
+            return Some(self.clone());
+        }
+        if other.is_subtype_of(self) {
+            return Some(other.clone());
+        }
+        match (self, other) {
+            (Type::Tuple(a), Type::Tuple(b)) => a.common_subtype(b).map(Type::Tuple),
+            (Type::Relation(a), Type::Relation(b)) => a.common_subtype(b).map(Type::Relation),
+            (Type::Array(a), Type::Array(b)) => a
+                .common_subtype(b)
+                .map(|element| Type::Array(Box::new(element))),
+            _ => None,
+        }
+    }
+
     /// Whether some value is of both this type and `other` (IM
-    /// Prescription 7): one is a subtype of the other, since a union type's
-    /// subtypes are disjoint, or, for tuples and relations with the same
-    /// attributes, and arrays, each attribute's types, and the elements',
-    /// overlap.
+    /// Prescription 7): whether they have a common subtype.
     #[must_use]
     pub fn overlaps(&self, other: &Type) -> bool {
-        match (self, other) {
-            (Type::Tuple(a), Type::Tuple(b)) | (Type::Relation(a), Type::Relation(b)) => {
-                a.0.len() == b.0.len()
-                    && a.0
-                        .iter()
-                        .all(|(name, ty)| b.0.get(name).is_some_and(|other| ty.overlaps(other)))
-            }
-            (Type::Array(a), Type::Array(b)) => a.overlaps(b),
-            _ => self.is_subtype_of(other) || other.is_subtype_of(self),
-        }
+        self.common_subtype(other).is_some()
     }
 
     /// The type, in an operator instantiated with `types`: each type
@@ -3045,6 +3100,21 @@ impl Heading {
             .map(Heading)
     }
 
+    /// The heading whose attributes' types are the least specific common
+    /// subtypes of this one's and `other`'s, if they have the same
+    /// attributes and each pair has one (see [`Type::common_subtype`]).
+    #[must_use]
+    pub fn common_subtype(&self, other: &Heading) -> Option<Heading> {
+        if self.0.len() != other.0.len() {
+            return None;
+        }
+        self.0
+            .iter()
+            .map(|(name, ty)| Some((name.clone(), ty.common_subtype(other.0.get(name)?)?)))
+            .collect::<Option<_>>()
+            .map(Heading)
+    }
+
     #[must_use]
     pub fn new(attributes: BTreeMap<String, Type>) -> Self {
         Heading(attributes)
@@ -3112,12 +3182,27 @@ impl Heading {
         Heading(attributes)
     }
 
-    /// The attributes of both headings, whose common attributes have the
-    /// same types.
+    /// The attributes of both headings, a common one of the least specific
+    /// common subtype of its types, since its value in a tuple of a join
+    /// is of both (*Type Inheritance and Relational Theory*, IM
+    /// Prescription 13).
+    ///
+    /// # Panics
+    ///
+    /// If a common attribute's types have no common subtype, which sema
+    /// rules out.
     #[must_use]
     pub fn and(&self, other: &Heading) -> Heading {
         let mut attributes = self.0.clone();
-        attributes.extend(other.0.iter().map(|(name, ty)| (name.clone(), ty.clone())));
+        for (name, ty) in &other.0 {
+            let ty = match attributes.get(name) {
+                Some(own) => own
+                    .common_subtype(ty)
+                    .unwrap_or_else(|| panic!("joining `{name}` of {own} and {ty}")),
+                None => ty.clone(),
+            };
+            attributes.insert(name.clone(), ty);
+        }
         Heading(attributes)
     }
 
@@ -3129,6 +3214,20 @@ impl Heading {
             .filter(|name| other.0.contains_key(*name))
             .cloned()
             .collect()
+    }
+
+    /// The heading with the attributes of `computed` added, or replacing
+    /// those of the same names, as an `extend` or a `replace` has.
+    #[must_use]
+    pub fn with(&self, computed: &Heading) -> Heading {
+        let mut all = self.0.clone();
+        all.extend(
+            computed
+                .0
+                .iter()
+                .map(|(name, ty)| (name.clone(), ty.clone())),
+        );
+        Heading(all)
     }
 
     /// The heading without the attributes named.
@@ -3432,7 +3531,7 @@ impl Value {
         }
     }
 
-    /// This relation and `other`, of the same heading, combined as
+    /// This relation and `other`, of the same attributes, combined as
     /// `combination` says, as for [`Expr::Combine`].
     ///
     /// # Errors
@@ -3480,7 +3579,7 @@ impl Value {
             }
         };
         Ok(Value::Relation(RelationValue {
-            heading: lhs.heading.clone(),
+            heading: combination.heading(&lhs.heading, &rhs.heading),
             tuples,
         }))
     }
@@ -3737,22 +3836,17 @@ impl Type {
         }
     }
 
-    /// The tuple or relation type with `attributes` added, or replacing
-    /// those it has.
+    /// The tuple or relation type with the attributes of `computed` added,
+    /// or replacing those it has, as for [`Expr::Extend`].
     ///
     /// # Panics
     ///
     /// If the type isn't a tuple or relation type, which sema rules out.
     #[must_use]
-    pub fn with(&self, attributes: impl IntoIterator<Item = (String, Type)>) -> Type {
-        let added = |heading: &Heading| {
-            let mut all = heading.0.clone();
-            all.extend(attributes);
-            Heading(all)
-        };
+    pub fn with(&self, computed: &Heading) -> Type {
         match self {
-            Type::Tuple(heading) => Type::Tuple(added(heading)),
-            Type::Relation(heading) => Type::Relation(added(heading)),
+            Type::Tuple(heading) => Type::Tuple(heading.with(computed)),
+            Type::Relation(heading) => Type::Relation(heading.with(computed)),
             _ => panic!("adding attributes to {self}"),
         }
     }
@@ -4043,6 +4137,42 @@ mod tests {
             Some(array(&curve))
         );
         assert!(!relation(&ellipse).overlaps(&relation(&polygon)));
+        // The least specific common subtype is the more specific type, of
+        // two that overlap.
+        assert_eq!(figure.common_subtype(&ellipse), Some(ellipse.clone()));
+        assert_eq!(ellipse.common_subtype(&curve), Some(ellipse.clone()));
+        assert_eq!(ellipse.common_subtype(&polygon), None);
+        assert_eq!(
+            tuple(&curve).common_subtype(&tuple(&parabola)),
+            Some(tuple(&parabola))
+        );
+        // A join's common attribute is of it, and a union's attribute of
+        // the common supertype, a minus's of the left operand's (IM
+        // Prescription 13).
+        let heading = |ty: &Type| {
+            Heading::new(
+                [
+                    ("s".to_string(), ty.clone()),
+                    ("n".to_string(), Type::Scalar(Scalar::Integer)),
+                ]
+                .into(),
+            )
+        };
+        let joined = heading(&figure).and(&Heading::new([("s".to_string(), curve.clone())].into()));
+        assert_eq!(joined, heading(&curve));
+        let (ellipses, polygons) = (heading(&ellipse), heading(&polygon));
+        assert_eq!(
+            Combination::Union.heading(&ellipses, &polygons),
+            heading(&figure)
+        );
+        assert_eq!(
+            Combination::Minus.heading(&heading(&figure), &ellipses),
+            heading(&figure)
+        );
+        assert_eq!(
+            Combination::IncludedMinus.heading(&ellipses, &heading(&figure)),
+            ellipses
+        );
         // A known relation takes the wider heading, which its value
         // carries; another value is treated as one of the wider type.
         let empty = Expr::Constant(relation(&ellipse).default_value().unwrap());
