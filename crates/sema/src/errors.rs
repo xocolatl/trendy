@@ -2321,7 +2321,8 @@ const LOAD_CSV: hir::Builtin = hir::Builtin::Update(hir::UpdateBuiltin::LoadCsv)
 pub(crate) fn parameter_elsewhere(builtin: hir::Builtin, name: &str) -> Option<&'static str> {
     PARAMETERS_ELSEWHERE
         .iter()
-        .find(|&&(b, other, _)| b == builtin && other == name)
+        // Each overload of it, by its name.
+        .find(|&&(b, other, _)| b.name() == builtin.name() && other == name)
         .map(|&(.., ours)| ours)
 }
 

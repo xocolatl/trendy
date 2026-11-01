@@ -920,6 +920,23 @@ builtin operator load_text_file{
 builtin operator load_csv{path: text, header: boolean, columns: C, out rows: array T}
     types { C: any tuple, T: any tuple };
 
+/* Read the records of the CSV file at `path` into `rows`, as the other
+   `load_csv` does, but rather than stopping the program for a file it
+   can't read, give no rows, and its error in `errors`, and for a record it
+   can't, skip it, giving its error there: an `unreadable_file`, a
+   `not_utf8`, a `malformed_csv`, a `missing_column` or an
+   `unreadable_field`. A quoted field that isn't closed ends the records
+   read. A record whose value breaks its type's constraints still stops
+   the program (R0017). `errors` is empty when every record is read. */
+builtin operator load_csv{
+    path: text,
+    header: boolean,
+    columns: C,
+    out rows: array T,
+    out errors: relation { error: error },
+}
+    types { C: any tuple, T: any tuple };
+
 /* What went wrong, when a program fails: a value of one of `error`'s
    subtypes, each a kind of failure, with what it is about as its
    components. `fail e` stops the program with `e`'s message. A program
@@ -993,6 +1010,77 @@ operator message{error: not_utf8}: text [
         || " of "
         || to_text{from: error.path}
         || " isn't UTF-8 text"
+];
+
+/* The CSV file at `path` isn't CSV on the line `line`, as `problem` says
+   (R0015). */
+type malformed_csv is error { { path: text, line: integer, problem: text } };
+
+operator message{error: malformed_csv}: text [
+    "line "
+        || to_text{from: error.line}
+        || " of "
+        || to_text{from: error.path}
+        || " "
+        || error.problem
+];
+
+/* `attribute`, or a component, as `columns` names it, is read from the
+   column `column`, counting from 1, but the CSV file at `path` has
+   `columns` columns (R0016). */
+type missing_column is error { { path: text, attribute: text, column: integer, columns: integer } };
+
+operator message{error: missing_column}: text [
+    var columns := if error.columns = 1 then " column" else " columns";
+    "`"
+        || error.attribute
+        || "` is read from column "
+        || to_text{from: error.column}
+        || ", but "
+        || to_text{from: error.path}
+        || " has "
+        || to_text{from: error.columns}
+        || columns
+];
+
+/* The field `text`, in the column `column`, counting from 1, on the line
+   `line` of the CSV file at `path`, isn't a value of `type`, the type of
+   `attribute`, or a component, as `columns` names it, or is one out of its
+   range if `out_of_range` (R0014). */
+type unreadable_field is error {
+    {
+        path: text,
+        line: integer,
+        column: integer,
+        attribute: text,
+        type: text,
+        text: text,
+        out_of_range: boolean,
+    },
+};
+
+operator message{error: unreadable_field}: text [
+    var a := if error.type = "integer"
+        then "an integer"
+        else if error.type = "approximate"
+        then "an approximate number"
+        else "a boolean";
+    var why := if error.out_of_range then " is out of " || a || "'s range" else " isn't " || a;
+    /* With a header, line 1 is no record's. */
+    var header := if error.line = 1 then "; if line 1 is a header, `header: true` skips it" else "";
+    to_text{from: error.text}
+        || ", in column "
+        || to_text{from: error.column}
+        || " on line "
+        || to_text{from: error.line}
+        || " of "
+        || to_text{from: error.path}
+        || ","
+        || why
+        || ", the type of `"
+        || error.attribute
+        || "`"
+        || header
 ];
 ```
 
@@ -1474,6 +1562,35 @@ operator main{} [
   (R0013). pandas' and R's `read_csv` are fixed to it, then to a call
   with the variable its `out` argument, and pandas' `usecols` and
   `names`, and Python's `has_header`, to `columns` and `header`.
+- **Unless the call names `out errors`,** a `relation { error: error }`,
+  as `load_text_file`'s can: then a file that can't be read gives no rows
+  and its error, an `unreadable_file`, a `not_utf8` or a `missing_column`
+  (R0016), and each record that can't be is skipped, with its error, a
+  `malformed_csv` (R0015) or an `unreadable_field` (R0014), and the rest
+  are read. A quoted field that isn't closed ends the records read. Two
+  attributes of one column, or one of a column below 1, are the call's
+  mistakes, not the file's, so they still stop the program, as does a
+  record whose value breaks its type's constraints (R0017), for now.
+
+```trendy
+operator load_cities{path: text} [
+    var rows: array tuple { city: text, people: integer };
+    var errors: relation { error: error };
+    call load_csv{
+        path: path,
+        header: true,
+        columns: tuple { city: 1, people: 2 },
+        out rows: rows,
+        out errors: errors,
+    };
+    call debug_value{v: length{a: rows}};
+    call debug_value{v: (errors extend { message := message{error: error} }){message}};
+];
+
+operator main{} [
+    call load_cities{path: "cities.csv"};
+];
+```
 
 ```trendy,error
 operator main{} [
@@ -4640,7 +4757,10 @@ operator main{} [
   its own `fail`s. A built-in that reads input gives the world's errors as
   values instead, when its call names `out errors`: `unreadable_file {
   path, reason }` (R0012) and `not_utf8 { path, line }` (R0013), from
-  `load_text_file`.
+  `load_text_file` and `load_csv`, and from `load_csv` `malformed_csv {
+  path, line, problem }` (R0015), `missing_column { path, attribute,
+  column, columns }` (R0016) and `unreadable_field { path, line, column,
+  attribute, type, text, out_of_range }` (R0014).
 
 ## Literals
 

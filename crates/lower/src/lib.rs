@@ -984,26 +984,35 @@ impl<'a> FunctionBuilder<'a> {
                     let target = &call.updated["lines"];
                     let ty = self.assigned(target).0.clone();
                     let errors = self.errors(*builtin, cx);
-                    let given = errors.given.clone();
+                    let given = vec![errors.given.clone()];
                     let function = lir::RuntimeFn::LoadTextFileWithErrors;
                     let (lines, _) = self.loaded(function, call, &ty, given, cx);
                     self.store(target, lines, cx);
                     self.store(&call.updated["errors"], errors.value, cx);
                 }
-                hir::UpdateBuiltin::LoadCsv => {
+                hir::UpdateBuiltin::LoadCsv | hir::UpdateBuiltin::LoadCsvWithErrors => {
                     // Whether the file has a header, and each attribute's
                     // column, given their tuple's type's descriptor, and
                     // where the line each record starts on goes.
                     let header = self.place(&call.args["header"], cx);
                     let columns = &call.args["columns"];
                     let columns_ty = self.type_of(columns);
-                    let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&columns_ty)));
-                    let columns = self.place(columns, cx);
+                    let columns = self.columns(columns, &columns_ty, cx);
                     let lines = self.slot(lir::Layout::Struct(vec![
                         lir::Layout::Address,
                         lir::Layout::Usize,
                     ]));
-                    let given = vec![header, columns, descriptor, lines.clone()];
+                    let mut given = vec![header, columns, lines.clone()];
+                    // And, with `errors`, where they go, and their types.
+                    let errors = (*builtin == hir::UpdateBuiltin::LoadCsvWithErrors)
+                        .then(|| self.errors(*builtin, cx));
+                    let function = match &errors {
+                        Some(errors) => {
+                            given.push(errors.given.clone());
+                            lir::RuntimeFn::LoadCsvWithErrors
+                        }
+                        None => lir::RuntimeFn::LoadCsv,
+                    };
                     let target = &call.updated["rows"];
                     let ty = self.assigned(target).0.clone();
                     // Read as the columns say, then converted, each value
@@ -1013,11 +1022,13 @@ impl<'a> FunctionBuilder<'a> {
                         unreachable!("`load_csv` loads an array");
                     };
                     let read = hir::Type::Array(Box::new(hir::read_as(record, &columns_ty)));
-                    let (records, path) =
-                        self.loaded(lir::RuntimeFn::LoadCsv, call, &read, given, cx);
+                    let (records, path) = self.loaded(function, call, &read, given, cx);
                     let file = InFile { path, lines };
                     let rows = self.records_checked(&records, &read, &ty, &file, cx);
                     self.store(target, rows, cx);
+                    if let Some(errors) = errors {
+                        self.store(&call.updated["errors"], errors.value, cx);
+                    }
                 }
             },
             hir::OperatorKind::Update { .. } | hir::OperatorKind::Specification { .. } => {
@@ -1053,21 +1064,61 @@ impl<'a> FunctionBuilder<'a> {
         }
     }
 
-    /// Where `builtin`'s errors go, `relation { error: error }`, and what its
-    /// runtime function is given to make them: where they go, their
-    /// relation's descriptor, and the descriptor of each error's type, in
+    /// Where `builtin`'s errors go, `relation { error: error }`, as the
+    /// runtime's `Errors`, which its runtime function is given: the
+    /// relation of them, and the address of an array of descriptors'
+    /// addresses, their relation's, then each error's type's, in
     /// [`hir::UpdateBuiltin::errors`]'s order, as its selector writes its
     /// components.
     fn errors(&mut self, builtin: hir::UpdateBuiltin, cx: &mut Lowering) -> Errors {
         let ty = hir::BuiltinError::relation();
-        let value = self.slot(cx.layout(&ty));
-        let relation = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
-        let types = builtin.errors().iter().map(|&error| {
-            let defined = self.program.builtin_error(error);
-            lir::Place::whole(lir::Base::Data(cx.components_descriptor(defined)))
+        let given = self.slot(lir::Layout::Struct(vec![
+            cx.layout(&ty),
+            lir::Layout::Address,
+        ]));
+        let relation = cx.descriptor(&ty);
+        let types: Vec<lir::DataId> = builtin
+            .errors()
+            .iter()
+            .map(|&error| cx.components_descriptor(self.program.builtin_error(error)))
+            .collect();
+        let descriptors = std::iter::once(relation)
+            .chain(types)
+            .map(lir::Field::Address)
+            .collect();
+        let descriptors = lir::Place::whole(lir::Base::Data(cx.constant(descriptors)));
+        let field = |i| lir::Place {
+            path: [given.path.clone(), vec![i]].concat(),
+            ..given.clone()
+        };
+        self.insts.push(lir::Inst::Address {
+            dst: field(1),
+            src: descriptors,
         });
-        let given = [value.clone(), relation].into_iter().chain(types).collect();
-        Errors { value, given }
+        Errors {
+            value: field(0),
+            given,
+        }
+    }
+
+    /// `load_csv`'s `columns`, written `columns`, of type `ty`, as the
+    /// runtime's `Columns`: the tuple's address, and its type's
+    /// descriptor's.
+    fn columns(&mut self, columns: &hir::Expr, ty: &hir::Type, cx: &mut Lowering) -> lir::Place {
+        let tuple = self.place(columns, cx);
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(ty)));
+        let given = self.slot(lir::Layout::Struct(vec![
+            lir::Layout::Address,
+            lir::Layout::Address,
+        ]));
+        for (i, src) in [tuple, descriptor].into_iter().enumerate() {
+            let dst = lir::Place {
+                path: [given.path.clone(), vec![i]].concat(),
+                ..given.clone()
+            };
+            self.insts.push(lir::Inst::Address { dst, src });
+        }
+        given
     }
 
     /// `call`, of `load_text_file` or `load_csv`: what the runtime function
@@ -4413,7 +4464,7 @@ fn dotted(name: &str, attribute: &str) -> String {
 /// make them (see [`FunctionBuilder::errors`]).
 struct Errors {
     value: lir::Place,
-    given: Vec<lir::Place>,
+    given: lir::Place,
 }
 
 /// The CSV file `load_csv` read: its path, and the line each record starts

@@ -69,8 +69,19 @@ each a name and components), which sema checks the prelude declares as
 subtypes of `error` with just those components (`builtins::failures`),
 and lowering gives the runtime the relation's descriptor and each
 error's type's, as its selector writes its components
-(`FunctionBuilder::errors`), from which the runtime makes the value: its
-type's descriptor's address, then its components (`errors_of`). `load_csv` is one too (`trendy_rt_load_csv`), given its
+(`FunctionBuilder::errors`, the runtime's `Errors`), from which the
+runtime makes each value, its type's descriptor's address, then its
+components, and their relation, in canonical order (`Found`). `load_csv`
+has one too, whose reading the stopping one shares (`load_csv`, with or
+without a `Found`): with errors, a record that isn't CSV is skipped
+(`csv::Fields::skip_record`), but for an unclosed quote, which ends the
+records, as is one with another number of fields or a field its type
+can't read, each with its error, and the file's failures give no
+records; without, the file is checked as CSV first, then its columns,
+then its fields, each stopping the program, as before. The columns reach
+the runtime as a struct of the tuple's address and its descriptor's
+(`Columns`), and the errors as one too, so neither function takes more
+than seven arguments. `load_csv` is one too (`trendy_rt_load_csv`), given its
 array's descriptor, whose tuples' attributes' types say how to read
 their columns, and `columns`, a tuple of those attributes, each its
 column's position, and its descriptor; sema checks that each attribute

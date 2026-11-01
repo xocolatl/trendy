@@ -459,6 +459,11 @@ pub enum UpdateBuiltin {
     /// columns of their names, read when the program runs, as
     /// [`UpdateBuiltin::LoadTextFile`] reads a file's lines.
     LoadCsv,
+    /// As [`UpdateBuiltin::LoadCsv`], but a file it can't read gives its
+    /// error in the `out` parameter `errors`, as does each record it
+    /// can't, which it skips, rather than stopping the program (see
+    /// [`UpdateBuiltin::errors`]).
+    LoadCsvWithErrors,
 }
 
 impl UpdateBuiltin {
@@ -470,11 +475,27 @@ impl UpdateBuiltin {
             UpdateBuiltin::LoadTextFileWithErrors => {
                 &[BuiltinError::UnreadableFile, BuiltinError::NotUtf8]
             }
+            UpdateBuiltin::LoadCsvWithErrors => &[
+                BuiltinError::UnreadableFile,
+                BuiltinError::NotUtf8,
+                BuiltinError::MalformedCsv,
+                BuiltinError::MissingColumn,
+                BuiltinError::UnreadableField,
+            ],
             UpdateBuiltin::DebugValue
             | UpdateBuiltin::DebugTable
             | UpdateBuiltin::LoadTextFile
             | UpdateBuiltin::LoadCsv => &[],
         }
+    }
+
+    /// Whether it reads a CSV file, as `load_csv`, with its `columns`.
+    #[must_use]
+    pub fn reads_csv(self) -> bool {
+        matches!(
+            self,
+            UpdateBuiltin::LoadCsv | UpdateBuiltin::LoadCsvWithErrors
+        )
     }
 }
 
@@ -488,10 +509,22 @@ pub enum BuiltinError {
     UnreadableFile,
     /// A file isn't UTF-8 text, from a line on (R0013).
     NotUtf8,
+    /// A CSV file isn't CSV on a line, for a problem in words (R0015).
+    MalformedCsv,
+    /// An attribute is read from a column a CSV file hasn't (R0016).
+    MissingColumn,
+    /// A CSV file's field isn't a value of its attribute's type (R0014).
+    UnreadableField,
 }
 
 impl BuiltinError {
-    pub const ALL: [BuiltinError; 2] = [BuiltinError::UnreadableFile, BuiltinError::NotUtf8];
+    pub const ALL: [BuiltinError; 5] = [
+        BuiltinError::UnreadableFile,
+        BuiltinError::NotUtf8,
+        BuiltinError::MalformedCsv,
+        BuiltinError::MissingColumn,
+        BuiltinError::UnreadableField,
+    ];
 
     /// The name of its type.
     #[must_use]
@@ -499,23 +532,42 @@ impl BuiltinError {
         match self {
             BuiltinError::UnreadableFile => "unreadable_file",
             BuiltinError::NotUtf8 => "not_utf8",
+            BuiltinError::MalformedCsv => "malformed_csv",
+            BuiltinError::MissingColumn => "missing_column",
+            BuiltinError::UnreadableField => "unreadable_field",
         }
     }
 
     /// Its type's components.
     #[must_use]
     pub fn components(self) -> Heading {
-        let text = || Type::Scalar(Scalar::Text);
-        let components = match self {
-            BuiltinError::UnreadableFile => {
-                [("path".to_string(), text()), ("reason".to_string(), text())]
-            }
-            BuiltinError::NotUtf8 => [
-                ("path".to_string(), text()),
-                ("line".to_string(), Type::Scalar(Scalar::Integer)),
+        let (text, integer) = (Scalar::Text, Scalar::Integer);
+        let components: &[(&str, Scalar)] = match self {
+            BuiltinError::UnreadableFile => &[("path", text), ("reason", text)],
+            BuiltinError::NotUtf8 => &[("path", text), ("line", integer)],
+            BuiltinError::MalformedCsv => &[("path", text), ("line", integer), ("problem", text)],
+            BuiltinError::MissingColumn => &[
+                ("path", text),
+                ("attribute", text),
+                ("column", integer),
+                ("columns", integer),
+            ],
+            BuiltinError::UnreadableField => &[
+                ("path", text),
+                ("line", integer),
+                ("column", integer),
+                ("attribute", text),
+                ("type", text),
+                ("text", text),
+                ("out_of_range", Scalar::Boolean),
             ],
         };
-        Heading::new(components.into())
+        Heading::new(
+            components
+                .iter()
+                .map(|&(name, scalar)| (name.to_string(), Type::Scalar(scalar)))
+                .collect(),
+        )
     }
 
     /// The prelude's union type `error`, a root, whose subtypes these are.
@@ -537,7 +589,7 @@ impl BuiltinError {
 }
 
 impl Builtin {
-    pub const ALL: [Builtin; 20] = [
+    pub const ALL: [Builtin; 21] = [
         Builtin::Update(UpdateBuiltin::DebugValue),
         Builtin::Update(UpdateBuiltin::DebugTable),
         Builtin::ReadOnly(ReadOnlyBuiltin::Count),
@@ -558,6 +610,7 @@ impl Builtin {
         Builtin::Update(UpdateBuiltin::LoadTextFile),
         Builtin::Update(UpdateBuiltin::LoadTextFileWithErrors),
         Builtin::Update(UpdateBuiltin::LoadCsv),
+        Builtin::Update(UpdateBuiltin::LoadCsvWithErrors),
     ];
 
     #[must_use]
@@ -568,7 +621,9 @@ impl Builtin {
             Builtin::Update(
                 UpdateBuiltin::LoadTextFile | UpdateBuiltin::LoadTextFileWithErrors,
             ) => "load_text_file",
-            Builtin::Update(UpdateBuiltin::LoadCsv) => "load_csv",
+            Builtin::Update(UpdateBuiltin::LoadCsv | UpdateBuiltin::LoadCsvWithErrors) => {
+                "load_csv"
+            }
             Builtin::ReadOnly(builtin) => builtin.name(),
         }
     }
@@ -606,15 +661,17 @@ impl Builtin {
             // `C`, the columns of the tuples' attributes, and `T`, the
             // tuples, numbered in their names' order, as sema numbers
             // declared type parameters.
-            Builtin::Update(UpdateBuiltin::LoadCsv) => ["C", "T"]
-                .into_iter()
-                .enumerate()
-                .map(|(index, name)| TypeParameter {
-                    index,
-                    name: Some(name.to_string()),
-                    any: Any::Tuple,
-                })
-                .collect(),
+            Builtin::Update(UpdateBuiltin::LoadCsv | UpdateBuiltin::LoadCsvWithErrors) => {
+                ["C", "T"]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, name)| TypeParameter {
+                        index,
+                        name: Some(name.to_string()),
+                        any: Any::Tuple,
+                    })
+                    .collect()
+            }
             Builtin::ReadOnly(
                 ReadOnlyBuiltin::ToApproximate
                 | ReadOnlyBuiltin::ParseInteger
@@ -692,6 +749,14 @@ impl Builtin {
                 constant("header", Type::Scalar(Scalar::Boolean)),
                 constant("columns", parameter(0)),
                 out("rows", Type::Array(Box::new(parameter(1)))),
+            ]
+            .into(),
+            Builtin::Update(UpdateBuiltin::LoadCsvWithErrors) => [
+                constant("path", Type::Scalar(Scalar::Text)),
+                constant("header", Type::Scalar(Scalar::Boolean)),
+                constant("columns", parameter(0)),
+                out("rows", Type::Array(Box::new(parameter(1)))),
+                out("errors", BuiltinError::relation()),
             ]
             .into(),
             Builtin::ReadOnly(

@@ -722,6 +722,9 @@ fn text() {
             // error.
             "0",
             r#"relation { error: error } { { error: unreadable_file{path: "examples/lakes.txt", reason: "No such file or directory"} } }"#,
+            // A CSV file's records, one skipped, with its error.
+            "4",
+            r#"relation { message: text } { { message: "\"eighty-four\", in column 3 on line 5 of \"examples/lakes.csv\", isn't an integer, the type of `depth_m`" } }"#,
             // The CSV file's first record after its header, with the
             // position of its mouth read from two columns, and its basin's
             // area read in square kilometres, stored in square metres, then
@@ -1009,6 +1012,68 @@ operator main{{}} [
     ];
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(stderr.lines().collect::<Vec<_>>(), expected);
+}
+
+#[test]
+fn a_csv_file_gives_its_errors_when_asked() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("errors");
+    std::fs::create_dir_all(&dir).unwrap();
+    let cities = dir.join("cities.csv");
+    // A header, a good record, a field that isn't an integer, a stray
+    // quote, too few fields, a good record, an integer out of range, and a
+    // quoted field that isn't closed.
+    std::fs::write(
+        &cities,
+        "city,people\nLima,10883000\nCairo,many\nsay \"hi\",1\nHanoi\nNairobi,4397000\nRio,99999999999999999999\n\"Pune,2\n",
+    )
+    .unwrap();
+    let narrow = dir.join("narrow.csv");
+    std::fs::write(&narrow, "Lima\n").unwrap();
+    let source = format!(
+        "heading city := {{ city: text, people: integer }};
+
+operator show{{path: text, header: boolean}} [
+    var rows: array tuple city;
+    var errors: relation {{ error: error }};
+    call load_csv{{
+        path: path,
+        header: header,
+        columns: tuple {{ city: 1, people: 2 }},
+        out rows: rows,
+        out errors: errors,
+    }};
+    call debug_value{{v: rows}};
+    call debug_value{{v: (errors extend {{ m := message{{error: error}} }}){{m}}}};
+];
+
+operator main{{}} [
+    call show{{path: {cities:?}, header: true}};
+    call show{{path: {narrow:?}, header: false}};
+];
+"
+    );
+    let (code, stderr) = run_source("csv_errors", &source);
+    assert_eq!(code, 0, "{stderr}");
+    let (cities, narrow) = (cities.display(), narrow.display());
+    let messages = |messages: &[String]| {
+        let tuples: Vec<String> = messages.iter().map(|m| format!("{{ m: {m:?} }}")).collect();
+        format!("relation {{ m: text }} {{ {} }}", tuples.join(", "))
+    };
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            r#"array [tuple { city: "Lima", people: 10883000 }, tuple { city: "Nairobi", people: 4397000 }]"#.to_string(),
+            messages(&[
+                format!(r#""99999999999999999999", in column 2 on line 7 of "{cities}", is out of an integer's range, the type of `people`"#),
+                format!(r#""many", in column 2 on line 3 of "{cities}", isn't an integer, the type of `people`"#),
+                format!(r#"line 4 of "{cities}" has a quote in a field that isn't quoted"#),
+                format!(r#"line 5 of "{cities}" has 1 field, but the header has 2"#),
+                format!(r#"line 8 of "{cities}" starts a quoted field that isn't closed"#),
+            ]),
+            "array tuple { city: text, people: integer } []".to_string(),
+            messages(&[format!(r#"`people` is read from column 2, but "{narrow}" has 1 column"#)]),
+        ]
+    );
 }
 
 #[test]

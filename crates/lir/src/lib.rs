@@ -232,25 +232,38 @@ pub enum RuntimeFn {
     /// isn't UTF-8 text, or if the memory can't be allocated.
     LoadTextFile,
     /// `trendy_rt_load_text_file_with_errors(dst, path, errors,
-    /// errors_descriptor, unreadable_file, not_utf8, descriptor)`: as
-    /// [`RuntimeFn::LoadTextFile`], but a file that can't be read, or isn't
-    /// UTF-8 text, gives no lines, and at `errors`, rather than stopping the
-    /// program, the relation of its one error, of the type the descriptor
-    /// `unreadable_file` or `not_utf8` describes, as the type's selector
-    /// writes its components, in the relation `errors_descriptor`
-    /// describes, `relation { error: error }`, which is otherwise empty.
+    /// descriptor)`: as [`RuntimeFn::LoadTextFile`], but a file that can't
+    /// be read, or isn't UTF-8 text, gives no lines, and its error at
+    /// `errors`, rather than stopping the program: an `unreadable_file` or
+    /// a `not_utf8`. `errors` is a struct of `relation { error: error }`,
+    /// which it stores the errors in, none if the file is read, and the
+    /// address of an array of descriptors' addresses, the relation's, then
+    /// each error's type's, in `hir::UpdateBuiltin::errors`'s order, as
+    /// its selector writes its components.
     LoadTextFileWithErrors,
-    /// `trendy_rt_load_csv(dst, path, header, columns, columns_descriptor,
-    /// descriptor)`: store at `dst` the array of the records of the CSV
-    /// file at `path`, a text, in order, after its first if `header`, a
-    /// boolean, is true, of the type the descriptor describes, an array of
-    /// tuples whose attributes are the fields in the columns `columns`
-    /// gives them, a tuple of integers its descriptor describes, in memory
-    /// the statement owns. It stops the program if a column isn't one of
-    /// the file's, or two attributes have one, the file can't be read,
-    /// isn't UTF-8 text or CSV, a field isn't a value of its attribute's
-    /// type, or the memory can't be allocated.
+    /// `trendy_rt_load_csv(dst, path, header, columns, lines, descriptor)`:
+    /// store at `dst` the array of the records of the CSV file at `path`, a
+    /// text, in order, after its first if `header`, a boolean, is true, of
+    /// the type the descriptor describes, an array of tuples whose
+    /// attributes are the fields in the columns `columns` gives them, a
+    /// struct of the address of a tuple of integers and its type's
+    /// descriptor's, and at `lines` the line each starts on, both in memory
+    /// the statement owns.
+    /// It stops the program if a column isn't one of the file's, or two
+    /// attributes have one, the file can't be read, isn't UTF-8 text or
+    /// CSV, a field isn't a value of its attribute's type, or the memory
+    /// can't be allocated.
     LoadCsv,
+    /// `trendy_rt_load_csv_with_errors(dst, path, header, columns, lines,
+    /// errors, descriptor)`: as [`RuntimeFn::LoadCsv`], with `errors` as
+    /// [`RuntimeFn::LoadTextFileWithErrors`]'s, but rather than stopping the program for a
+    /// file it can't read, it gives no records, and its error at `errors`,
+    /// and for a record it can't, skips it, giving its error there, as
+    /// [`RuntimeFn::LoadTextFileWithErrors`] gives its: an
+    /// `unreadable_file`, a `not_utf8`, a `malformed_csv`, a
+    /// `missing_column` or an `unreadable_field`. Two attributes of one
+    /// column, or one of a column below 1, still stop it.
+    LoadCsvWithErrors,
     /// `trendy_rt_sum(dst, src, descriptor, index)`: store at `dst` the
     /// sum of the attribute `index` (a [`Field::Usize`], its position by
     /// name) of the tuples of the relation `src`, of the type the
@@ -524,6 +537,7 @@ impl RuntimeFn {
             RuntimeFn::Atan2 => "trendy_rt_atan2",
             RuntimeFn::LoadTextFile => "trendy_rt_load_text_file",
             RuntimeFn::LoadTextFileWithErrors => "trendy_rt_load_text_file_with_errors",
+            RuntimeFn::LoadCsvWithErrors => "trendy_rt_load_csv_with_errors",
             RuntimeFn::LoadCsv => "trendy_rt_load_csv",
             RuntimeFn::Sum => "trendy_rt_sum",
             RuntimeFn::Product => "trendy_rt_product",

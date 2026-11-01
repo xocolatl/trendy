@@ -119,10 +119,32 @@ impl<'a> Fields<'a> {
     }
 
     /// `why` the text isn't CSV, on `line`, after which there are no
-    /// fields.
+    /// fields, unless the record it is in is skipped
+    /// ([`Fields::skip_record`]).
     fn fail(&mut self, why: Malformed, line: usize) -> NotCsv {
         self.failed = true;
         NotCsv { why, line }
+    }
+
+    /// After a record that isn't CSV, go on from the next one: the one
+    /// after the next line end, as a field that isn't quoted ends at one.
+    /// A quoted field that isn't closed has none after it, so nothing
+    /// follows it.
+    pub(crate) fn skip_record(&mut self, why: Malformed) {
+        if why == Malformed::Unclosed {
+            return;
+        }
+        let bytes = self.text.as_bytes();
+        while self.at < bytes.len() {
+            if let Some(end) = self.line_end(self.at) {
+                self.at += end;
+                self.line += 1;
+                break;
+            }
+            self.at += 1;
+        }
+        self.starts = true;
+        self.failed = false;
     }
 }
 
@@ -315,6 +337,42 @@ mod tests {
                 why: Malformed::Unclosed,
                 line: 3
             })
+        );
+    }
+
+    #[test]
+    fn a_record_that_isnt_csv_can_be_skipped() {
+        // The fields after each record that isn't, and each one's line.
+        let text = "a,b\nsay \"hi\",x\nc,d\n\"hi\"!,x\ne,f\n\"never\nclosed\n";
+        let mut fields = Fields::new(text);
+        let mut read = Vec::new();
+        while let Some(field) = fields.next() {
+            match field {
+                Ok(field) => {
+                    let mut value = vec![0; field.len()];
+                    field.copy_to(&mut value);
+                    read.push((field.line, String::from_utf8(value).unwrap()));
+                }
+                Err(NotCsv { why, line }) => {
+                    read.push((line, format!("{why:?}")));
+                    fields.skip_record(why);
+                }
+            }
+        }
+        let read: Vec<(usize, &str)> = read.iter().map(|(l, v)| (*l, v.as_str())).collect();
+        assert_eq!(
+            read,
+            [
+                (1, "a"),
+                (1, "b"),
+                (2, "StrayQuote"),
+                (3, "c"),
+                (3, "d"),
+                (4, "AfterQuote"),
+                (5, "e"),
+                (5, "f"),
+                (6, "Unclosed"),
+            ]
         );
     }
 }

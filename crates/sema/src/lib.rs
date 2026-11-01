@@ -2538,7 +2538,7 @@ var zero := seg{{len: 0}};{MAIN}"
     #[test]
     fn the_prelude_has_error_and_its_messages() {
         let vars = variables(
-            "var a := message{error: failure{message: \"why\"}};\nvar b := message{error: not_one_tuple{count: 0}};\nvar c := message{error: not_one_tuple{count: 2}};\nvar d := message{error: index_out_of_range{position: 0, length: 3}};\nvar e := message{error: index_out_of_range{position: 4, length: 0}};\nvar f := message{error: index_out_of_range{position: 4, length: 1}};\nvar g := message{error: index_out_of_range{position: 4, length: 3}};\nvar h := message{error: division_by_zero{operation: \"7 div 0\"}};\nvar i := message{error: overflow{operation: \"9223372036854775807 + 1\"}};",
+            "var a := message{error: failure{message: \"why\"}};\nvar b := message{error: not_one_tuple{count: 0}};\nvar c := message{error: not_one_tuple{count: 2}};\nvar d := message{error: index_out_of_range{position: 0, length: 3}};\nvar e := message{error: index_out_of_range{position: 4, length: 0}};\nvar f := message{error: index_out_of_range{position: 4, length: 1}};\nvar g := message{error: index_out_of_range{position: 4, length: 3}};\nvar h := message{error: division_by_zero{operation: \"7 div 0\"}};\nvar i := message{error: overflow{operation: \"9223372036854775807 + 1\"}};\nvar j := message{error: unreadable_field{path: \"p.csv\", line: 1, column: 3, attribute: \"at.latitude\", type: \"approximate\", text: \"north\", out_of_range: false}};\nvar k := message{error: missing_column{path: \"p.csv\", attribute: \"km\", column: 4, columns: 3}};\nvar l := message{error: unreadable_field{path: \"p.csv\", line: 2, column: 1, attribute: \"open\", type: \"boolean\", text: \"maybe\", out_of_range: false}};",
         );
         let messages: Vec<String> = vars.iter().map(|v| v.init.to_string()).collect();
         assert_eq!(
@@ -2553,6 +2553,9 @@ var zero := seg{{len: 0}};{MAIN}"
                 "\"the array has 3 elements, so none at position 4\"",
                 "\"division by zero: 7 div 0 has no result\"",
                 "\"overflow: 9223372036854775807 + 1 is out of its type's range\"",
+                "\"\\\"north\\\", in column 3 on line 1 of \\\"p.csv\\\", isn't an approximate number, the type of `at.latitude`; if line 1 is a header, `header: true` skips it\"",
+                "\"`km` is read from column 4, but \\\"p.csv\\\" has 3 columns\"",
+                "\"\\\"maybe\\\", in column 1 on line 2 of \\\"p.csv\\\", isn't a boolean, the type of `open`\"",
             ]
         );
         // The compiler's contract with it: the errors the runtime makes,
