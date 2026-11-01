@@ -56,8 +56,11 @@
 //! turn, up to the entry, whose failing makes the program exit with
 //! status 1. Each block says where a failure in it goes
 //! ([`Block::failure`]): the function's failure exit, which gives up what
-//! the function holds, as the end of its statements and blocks would, and
-//! returns to its caller, failing ([`Terminator::Failed`]). Four things
+//! the function holds, as the end of its statements and blocks would,
+//! records that the failure passed through the call of it
+//! ([`RuntimeFn::Trace`]), and returns to its caller, failing
+//! ([`Terminator::Failed`]). The entry writes those calls after the error
+//! ([`RuntimeFn::WriteTrace`]). Four things
 //! fail: a call whose callee fails; a runtime function that fails on its
 //! own ([`RuntimeFn::fails`]), such as for memory it can't allocate, which
 //! writes its error and returns that it failed, checked as a call's is; an
@@ -416,6 +419,22 @@ pub enum RuntimeFn {
     /// address `saved` holds, which [`RuntimeFn::Innermost`] stored, was
     /// the innermost: those a function that fails began.
     EndSince,
+    /// `trendy_rt_trace(site, function)`: record that the failure under
+    /// way passes through a call of the function named `function`, a text,
+    /// made at the site whose address `site` holds, which the function
+    /// saved as it started: a function's failure exit does. A null site,
+    /// the entry's, records nothing.
+    Trace,
+    /// `trendy_rt_traced(dst)`: store at `dst`, a [`Layout::Usize`], how
+    /// many calls the trace has recorded.
+    Traced,
+    /// `trendy_rt_trace_since(since)`: forget the first `since` (a
+    /// [`Layout::Usize`]) calls the trace recorded, which
+    /// [`RuntimeFn::Traced`] counted: those of a failure another replaces.
+    TraceSince,
+    /// `trendy_rt_write_trace()`: write the calls the trace recorded, as
+    /// notes after the failure's error, and forget them.
+    WriteTrace,
     /// `trendy_rt_keep(value, descriptor)`: have the statement's scope hold
     /// a reference to each buffer a value, of the type the descriptor
     /// describes, points to: an update operator's argument, which a
@@ -562,7 +581,7 @@ pub enum RuntimeFn {
 
 impl RuntimeFn {
     /// Every runtime function, for checking the runtime against them.
-    pub const ALL: [RuntimeFn; 61] = [
+    pub const ALL: [RuntimeFn; 65] = [
         RuntimeFn::DebugValue,
         RuntimeFn::DebugTable,
         RuntimeFn::ToText,
@@ -605,6 +624,10 @@ impl RuntimeFn {
         RuntimeFn::End,
         RuntimeFn::Innermost,
         RuntimeFn::EndSince,
+        RuntimeFn::Trace,
+        RuntimeFn::Traced,
+        RuntimeFn::TraceSince,
+        RuntimeFn::WriteTrace,
         RuntimeFn::Keep,
         RuntimeFn::Retain,
         RuntimeFn::Adopt,
@@ -692,6 +715,10 @@ impl RuntimeFn {
             | RuntimeFn::End
             | RuntimeFn::Innermost
             | RuntimeFn::EndSince
+            | RuntimeFn::Trace
+            | RuntimeFn::Traced
+            | RuntimeFn::TraceSince
+            | RuntimeFn::WriteTrace
             | RuntimeFn::Retain
             | RuntimeFn::Adopt
             | RuntimeFn::Subset
@@ -746,6 +773,10 @@ impl RuntimeFn {
             RuntimeFn::End => "trendy_rt_end",
             RuntimeFn::Innermost => "trendy_rt_innermost",
             RuntimeFn::EndSince => "trendy_rt_end_since",
+            RuntimeFn::Trace => "trendy_rt_trace",
+            RuntimeFn::Traced => "trendy_rt_traced",
+            RuntimeFn::TraceSince => "trendy_rt_trace_since",
+            RuntimeFn::WriteTrace => "trendy_rt_write_trace",
             RuntimeFn::Keep => "trendy_rt_keep",
             RuntimeFn::Retain => "trendy_rt_retain",
             RuntimeFn::Adopt => "trendy_rt_adopt",

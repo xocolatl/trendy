@@ -30,10 +30,7 @@ pub fn lower(program: &hir::Program, path: &str) -> lir::Program {
     // compiling, which sema evaluates, has none. Built-ins are runtime
     // calls.
     let (main, _) = function(program, &variable_data, program.entry, &[], &mut cx);
-    let entry = match cx.waiting.clone() {
-        Some(waiting) => entry(program, &variable_data, main, &waiting, &mut cx),
-        None => main,
-    };
+    let entry = entry(program, &variable_data, main, &mut cx);
     lir::Program {
         functions: cx.functions.into_values().collect(),
         data: cx.data,
@@ -41,17 +38,17 @@ pub fn lower(program: &hir::Program, path: &str) -> lir::Program {
     }
 }
 
-/// The function the executable starts in when a `fail` may leave the
-/// program with its error waiting, which nothing takes: it calls `main`,
-/// and if that fails with an error waiting, writes the error's message, as
-/// `message` gives it, and where it failed (R0021), then fails. If
-/// `message` fails with an error of its own, that one is written instead;
-/// if it fails otherwise, its failure has written its error.
+/// The function the executable starts in: it calls `main`, and if that
+/// fails, writes the calls the failure passed through (its trace), after
+/// its error, then fails. A `fail`'s error waiting, with nothing to take
+/// it, is written first: its message, as `message` gives it, and where it
+/// failed (R0021). If `message` fails with an error of its own, that one
+/// is written instead; if it fails otherwise, its failure has written its
+/// error. Either way the trace written is the failure's that is.
 fn entry(
     program: &hir::Program,
     variable_data: &[lir::DataId],
     main: lir::FunctionId,
-    waiting: &Waiting,
     cx: &mut Lowering,
 ) -> lir::FunctionId {
     let id = cx.number();
@@ -62,23 +59,10 @@ fn entry(
         variable_data,
     );
     let (handle, done) = (b.new_block(), b.new_block());
-    // The scope `main` is called in, which none of the message's
-    // statement's outlast.
-    let outer = b.slot(lir::Layout::Address);
-    b.insts.push(lir::Inst::CallRuntime {
-        function: lir::RuntimeFn::Innermost,
-        args: vec![outer.clone()],
-    });
-    // The error being written, taken from where it waits, so that one a
-    // failing `message` leaves there is told apart.
-    let layout = cx.layout(&waiting.ty);
-    let held = b.slot(layout.clone());
-    let zero = zero_constant(&layout, cx);
-    b.insts.push(lir::Inst::Copy {
-        dst: held.clone(),
-        src: zero.clone(),
-        layout: layout.clone(),
-    });
+    let written = cx
+        .waiting
+        .clone()
+        .map(|waiting| Written::new(&mut b, waiting, cx));
     b.catches.push(handle);
     b.insts.push(lir::Inst::Call {
         function: main,
@@ -86,73 +70,154 @@ fn entry(
         result: None,
     });
     b.end_block(lir::Terminator::Return, handle);
-
-    b.insts.push(lir::Inst::CallRuntime {
-        function: lir::RuntimeFn::EndSince,
-        args: vec![outer],
-    });
-    let error = waiting.error();
-    let waits = b.is_of(&error, &waiting.ty, cx);
-    let take = b.new_block();
-    b.end_block(
-        lir::Terminator::Branch {
-            condition: waits,
-            then: take,
-            otherwise: done,
-        },
-        take,
-    );
-
-    let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&waiting.ty)));
-    b.insts.push(lir::Inst::CallRuntime {
-        function: lir::RuntimeFn::Release,
-        args: vec![held.clone(), descriptor.clone()],
-    });
-    for (dst, src) in [(held.clone(), error.clone()), (error, zero)] {
-        b.insts.push(lir::Inst::Copy {
-            dst,
-            src,
-            layout: layout.clone(),
-        });
+    if let Some(written) = &written {
+        written.write(&mut b, handle, done, cx);
     }
-    b.scoped(|this| {
-        let callee = this.program.operator(this.program.message);
-        let params = params_layout(&callee.params, &cx.families)
-            .expect("`message` has a parameter, the error");
-        let args = this.slot(params);
-        let mut arg = args.clone();
-        arg.path.push(0);
-        this.insts.push(lir::Inst::Copy {
-            dst: arg,
-            src: held.clone(),
-            layout: layout.clone(),
-        });
-        let message = this.slot(cx.layout(&hir::Type::Scalar(hir::Scalar::Text)));
-        let call = hir::Call {
-            operator: this.program.message,
-            types: Vec::new(),
-            args: BTreeMap::new(),
-            updated: BTreeMap::new(),
-        };
-        this.invoke(&call, Some(args), Some(message.clone()), cx);
-        this.insts.push(lir::Inst::RestoreSite {
-            src: waiting.site(),
-        });
-        let next = this.new_block();
-        this.fail(lir::Failure::Own { message }, next);
-    });
     b.catches.pop();
     b.end_block(lir::Terminator::Jump(done), done);
 
     b.insts.push(lir::Inst::CallRuntime {
-        function: lir::RuntimeFn::Release,
-        args: vec![held, descriptor],
+        function: lir::RuntimeFn::WriteTrace,
+        args: Vec::new(),
     });
+    if let Some(written) = &written {
+        written.release(&mut b, cx);
+    }
     let after = b.new_block();
     b.end_block(lir::Terminator::Failed, after);
     let lowered = b.finish(None, cx);
     cx.functions.insert(id.0, lowered);
     id
+}
+
+/// What the entry writes an error waiting with: where it waits, the scope
+/// `main` is called in, which none of the message's statement's outlast,
+/// and the error being written, taken from where it waits, so that one a
+/// failing `message` leaves there is told apart.
+struct Written {
+    waiting: Waiting,
+    outer: lir::Place,
+    held: lir::Place,
+    layout: lir::Layout,
+    zero: lir::Place,
+}
+
+impl Written {
+    /// Its slots, which the entry block of `b` sets as it starts: the
+    /// scope it is called in, and no error held.
+    fn new(b: &mut FunctionBuilder, waiting: Waiting, cx: &mut Lowering) -> Self {
+        let outer = b.slot(lir::Layout::Address);
+        b.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Innermost,
+            args: vec![outer.clone()],
+        });
+        let layout = cx.layout(&waiting.ty);
+        let held = b.slot(layout.clone());
+        let zero = zero_constant(&layout, cx);
+        b.insts.push(lir::Inst::Copy {
+            dst: held.clone(),
+            src: zero.clone(),
+            layout: layout.clone(),
+        });
+        Written {
+            waiting,
+            outer,
+            held,
+            layout,
+            zero,
+        }
+    }
+
+    /// At `handle`, where `main`'s failures go, with `b` building it:
+    /// write the error waiting, if there is one, and go to `done`, which
+    /// writes the trace. Each failure on the way goes to `handle` again.
+    fn write(
+        &self,
+        b: &mut FunctionBuilder,
+        handle: lir::BlockId,
+        done: lir::BlockId,
+        cx: &mut Lowering,
+    ) {
+        b.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::EndSince,
+            args: vec![self.outer.clone()],
+        });
+        let error = self.waiting.error();
+        let waits = b.is_of(&error, &self.waiting.ty, cx);
+        let take = b.new_block();
+        b.end_block(
+            lir::Terminator::Branch {
+                condition: waits,
+                then: take,
+                otherwise: done,
+            },
+            take,
+        );
+        self.release(b, cx);
+        for (dst, src) in [
+            (self.held.clone(), error.clone()),
+            (error, self.zero.clone()),
+        ] {
+            b.insts.push(lir::Inst::Copy {
+                dst,
+                src,
+                layout: self.layout.clone(),
+            });
+        }
+        // The calls the error's failure passed through, which a failing
+        // `message`'s replace.
+        let traced = b.slot(lir::Layout::Usize);
+        b.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Traced,
+            args: vec![traced.clone()],
+        });
+        let unwritten = b.new_block();
+        b.scoped(|this| {
+            let callee = this.program.operator(this.program.message);
+            let params = params_layout(&callee.params, &cx.families)
+                .expect("`message` has a parameter, the error");
+            let args = this.slot(params);
+            let mut arg = args.clone();
+            arg.path.push(0);
+            this.insts.push(lir::Inst::Copy {
+                dst: arg,
+                src: self.held.clone(),
+                layout: self.layout.clone(),
+            });
+            let message = this.slot(cx.layout(&hir::Type::Scalar(hir::Scalar::Text)));
+            let call = hir::Call {
+                operator: this.program.message,
+                types: Vec::new(),
+                args: BTreeMap::new(),
+                updated: BTreeMap::new(),
+            };
+            this.catches.push(unwritten);
+            this.invoke(&call, Some(args), Some(message.clone()), cx);
+            this.catches.pop();
+            this.insts.push(lir::Inst::RestoreSite {
+                src: self.waiting.site(),
+            });
+            let next = this.new_block();
+            this.fail(lir::Failure::Own { message }, next);
+        });
+        b.end_block(lir::Terminator::Jump(done), unwritten);
+        b.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::TraceSince,
+            args: vec![traced],
+        });
+        let next = b.new_block();
+        b.end_block(lir::Terminator::Jump(handle), next);
+    }
+
+    /// Give up the references the error held has, with `b` building the
+    /// code.
+    fn release(&self, b: &mut FunctionBuilder, cx: &mut Lowering) {
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&self.waiting.ty)));
+        b.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Release,
+            args: vec![self.held.clone(), descriptor],
+        });
+    }
 }
 
 /// Where a `fail`'s error waits for what takes it, a transaction or the
@@ -690,7 +755,8 @@ struct FunctionBuilder<'a> {
     /// statement's being lowered, or a value's in it, if any.
     site: Option<hir::Site>,
     /// Where the site the function is entered at is saved, once a call
-    /// changes it while the function has none of its own.
+    /// changes it while the function has none of its own, or its failure
+    /// exit records it.
     entered: Option<lir::Place>,
     /// The blocks that take the failures of the code being built,
     /// innermost last; with none, they go to the function's failure exit.
@@ -889,14 +955,18 @@ impl<'a> FunctionBuilder<'a> {
             self.at(self.site, cx);
             return;
         }
-        let entered = if let Some(entered) = &self.entered {
-            entered.clone()
-        } else {
-            let slot = self.slot(lir::Layout::Address);
-            self.entered = Some(slot.clone());
-            slot
-        };
+        let entered = self.entered();
         self.insts.push(lir::Inst::RestoreSite { src: entered });
+    }
+
+    /// Where the site the function is entered at is saved, as it starts.
+    fn entered(&mut self) -> lir::Place {
+        if let Some(entered) = &self.entered {
+            return entered.clone();
+        }
+        let slot = self.slot(lir::Layout::Address);
+        self.entered = Some(slot.clone());
+        slot
     }
 
     /// Where `expr`, computed at `site`, is: the site set while it is
@@ -917,10 +987,6 @@ impl<'a> FunctionBuilder<'a> {
     /// to the function's failure exit, made if one does.
     fn finish(mut self, result: Option<lir::Layout>, cx: &mut Lowering) -> lir::Function {
         self.end_block(lir::Terminator::Return, lir::BlockId(0));
-        if let Some(entered) = self.entered.take() {
-            let save = lir::Inst::SaveSite { dst: entered };
-            self.blocks[0].insts.insert(0, save);
-        }
         for i in 0..self.blocks.len() {
             if self.blocks[i].can_fail() {
                 let target = match self.handlers[i] {
@@ -937,6 +1003,10 @@ impl<'a> FunctionBuilder<'a> {
         if let Some(exit) = self.exit {
             self.failure_exit(exit, cx);
         }
+        if let Some(entered) = self.entered.take() {
+            let save = lir::Inst::SaveSite { dst: entered };
+            self.blocks[0].insts.insert(0, save);
+        }
         lir::Function {
             name: self.name,
             params: params_layout(&self.params, &cx.families),
@@ -952,7 +1022,9 @@ impl<'a> FunctionBuilder<'a> {
     /// function was entered, the innermost then, saved as it starts, and
     /// then releases its local variables' references. A local variable
     /// holds none before its declaration or after its block, so one
-    /// released there gives up only what it holds.
+    /// released there gives up only what it holds. Before it returns, it
+    /// records in the failure's trace that the failure passed through the
+    /// call of it, at the site it was entered at.
     fn failure_exit(&mut self, exit: lir::BlockId, cx: &mut Lowering) {
         self.current = exit;
         if self.begins {
@@ -983,6 +1055,12 @@ impl<'a> FunctionBuilder<'a> {
                 args: vec![value, lir::Place::whole(lir::Base::Data(descriptor))],
             });
         }
+        let (entered, name) = (self.entered(), self.name.clone());
+        let name = self.text(&name, cx);
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Trace,
+            args: vec![entered, name],
+        });
         self.end_block(lir::Terminator::Failed, exit);
     }
 
@@ -5256,12 +5334,19 @@ mod tests {
     }
 
     /// The program lowered, as if its source were `test.trendy`, without
-    /// the sites it sets, which only
-    /// [`statements_and_values_set_their_sites`] is about.
+    /// the sites it sets, saves and restores, which only
+    /// [`statements_and_values_set_their_sites`] is about: a function a
+    /// failure can pass through saves the one it is entered at, for its
+    /// trace.
     fn lower_program(program: &hir::Program) -> lir::Program {
         let mut lowered = lower(program, "test.trendy");
         for block in lowered.functions.iter_mut().flat_map(|f| &mut f.blocks) {
-            block.insts.retain(|i| !matches!(i, lir::Inst::Site(_)));
+            block.insts.retain(|i| {
+                !matches!(
+                    i,
+                    lir::Inst::Site(_) | lir::Inst::SaveSite { .. } | lir::Inst::RestoreSite { .. }
+                )
+            });
         }
         lowered
     }
@@ -5391,9 +5476,14 @@ mod tests {
         let main = &lowered.functions[0];
         let lines = |block: &lir::Block| block.insts.iter().filter_map(line).collect::<Vec<_>>();
         // The call's statement, again once `f` returns, which sets its
-        // own, then the loop's.
+        // own, then the loop's, after the site `main` is entered at is
+        // saved, for a failure's trace.
         assert_eq!(lines(&main.blocks[0]), [1, 1, 2]);
-        assert!(matches!(main.blocks[0].insts[1], lir::Inst::Call { .. }));
+        assert!(matches!(
+            main.blocks[0].insts[0],
+            lir::Inst::SaveSite { .. }
+        ));
+        assert!(matches!(main.blocks[0].insts[2], lir::Inst::Call { .. }));
         // The loop's condition is the loop's, though its body ran before.
         let test = main
             .blocks
@@ -5414,8 +5504,10 @@ mod tests {
             vec![debug_value(), user("main", &[], vec![])],
             vec![],
         ));
-        assert_eq!(lowered.functions.len(), 1);
-        assert_eq!(lowered.functions[lowered.entry.0].name, "main");
+        // `main`, and the entry, which calls it, and writes a failure's
+        // trace.
+        assert_eq!(lowered.functions.len(), 2);
+        assert_eq!(lowered.functions[lowered.entry.0].name, "__entry");
         assert_eq!(lowered.functions[0].params, None);
     }
 
@@ -5546,7 +5638,12 @@ mod tests {
             vec![variable("n", hir::Value::Integer(7))],
         ));
         let main = &lowered.functions[0];
-        assert_eq!(main.slots, [lir::Layout::I64, lir::Layout::I64]);
+        // Then where the site `main` is entered at is saved, which its
+        // failure exit records.
+        assert_eq!(
+            main.slots,
+            [lir::Layout::I64, lir::Layout::I64, lir::Layout::Address]
+        );
         assert!(matches!(
             main.blocks[0].insts[..2],
             [
@@ -5577,11 +5674,13 @@ mod tests {
         let main = &lowered.functions[0];
         let text = lir::Layout::Struct(vec![lir::Layout::Address, lir::Layout::Usize]);
         // Then where the scope `main` is entered in is saved, which its
-        // failure exit ends scopes back to.
+        // failure exit ends scopes back to, and the site it is entered
+        // at, which the exit records.
         let slots = [
             text.clone(),
             text,
             lir::Layout::scope(),
+            lir::Layout::Address,
             lir::Layout::Address,
         ];
         assert_eq!(main.slots, slots);
@@ -5783,6 +5882,7 @@ mod tests {
                 lir::RuntimeFn::Unique,
                 lir::RuntimeFn::End,
                 lir::RuntimeFn::EndSince,
+                lir::RuntimeFn::Trace,
             ]
         );
         assert_eq!(
@@ -5821,6 +5921,7 @@ mod tests {
                 lir::RuntimeFn::DebugValue,
                 lir::RuntimeFn::End,
                 lir::RuntimeFn::EndSince,
+                lir::RuntimeFn::Trace,
             ]
         );
     }
@@ -6064,12 +6165,14 @@ mod tests {
             ]))
         );
         let main = &lowered.functions[0];
+        // Then where the site `main` is entered at is saved, which its
+        // failure exit records.
         assert_eq!(
             main.slots,
-            [lir::Layout::Struct(vec![
-                lir::Layout::I64,
-                lir::Layout::I64
-            ])]
+            [
+                lir::Layout::Struct(vec![lir::Layout::I64, lir::Layout::I64]),
+                lir::Layout::Address
+            ]
         );
         let slot = |i| lir::Place {
             base: lir::Base::Slot(lir::SlotId(0)),
@@ -6198,7 +6301,7 @@ mod tests {
             vec![variable("t", hir::Value::Text("a".to_string()))],
         ));
         let names: Vec<&str> = lowered.functions.iter().map(|f| f.name.as_str()).collect();
-        assert_eq!(names, ["main", "shout"]);
+        assert_eq!(names, ["main", "shout", "__entry"]);
         // `shout` stores its value where the caller says, in no scope of
         // its own.
         let shout = &lowered.functions[1];
@@ -6301,7 +6404,10 @@ mod tests {
             vec![],
         ));
         let names: Vec<&str> = lowered.functions.iter().map(|f| f.name.as_str()).collect();
-        assert_eq!(names, ["main", "show{v: integer}", "show{v: text}"]);
+        assert_eq!(
+            names,
+            ["main", "show{v: integer}", "show{v: text}", "__entry"]
+        );
         assert_eq!(
             lowered.functions[2].params,
             Some(lir::Layout::Struct(vec![scalar_layout(hir::Scalar::Text)]))
@@ -6349,7 +6455,11 @@ mod tests {
             ],
             vec![variable("r", r)],
         ));
-        assert_eq!(lowered.functions.len(), 1, "a built-in has no function");
+        assert_eq!(
+            lowered.functions.len(),
+            2,
+            "a built-in has no function: `main` and the entry have"
+        );
         assert_eq!(
             lowered.functions[0].blocks[0].insts[0],
             lir::Inst::Unary {
@@ -6411,7 +6521,11 @@ mod tests {
             ],
             vec![variable("r", r)],
         ));
-        assert_eq!(lowered.functions.len(), 1, "a built-in has no function");
+        assert_eq!(
+            lowered.functions.len(),
+            2,
+            "a built-in has no function: `main` and the entry have"
+        );
         let blocks = &lowered.functions[0].blocks;
         assert!(
             blocks
@@ -6615,7 +6729,8 @@ mod tests {
         let function = |name: &str| lowered.functions.iter().find(|f| f.name == name).unwrap();
         // `f` saves the scope it is entered in, which its exit ends scopes
         // back to, then releases the relation, its one local variable
-        // that holds references.
+        // that holds references, then records the call in the failure's
+        // trace: where `f` was called, and its name.
         let f = function("f");
         let lir::Inst::CallRuntime {
             function: lir::RuntimeFn::Innermost,
@@ -6644,17 +6759,27 @@ mod tests {
             })
             .collect();
         assert_eq!(
-            runtime,
+            runtime[..2],
             [
                 (lir::RuntimeFn::EndSince, saved[0].clone()),
                 (lir::RuntimeFn::Release, r)
             ]
         );
+        assert_eq!(runtime[2].0, lir::RuntimeFn::Trace);
         // `half` begins no scope and holds nothing, and neither does
-        // `main`, whose calls pass nothing: their exits only fail.
+        // `main`, whose calls pass nothing: their exits only record the
+        // call and fail.
         for name in ["half", "main"] {
             let f = function(name);
-            assert!(exit_of(f).insts.is_empty(), "{name}");
+            let traced: Vec<_> = exit_of(f)
+                .insts
+                .iter()
+                .map(|i| match i {
+                    lir::Inst::CallRuntime { function, .. } => *function,
+                    other => panic!("{other:?}"),
+                })
+                .collect();
+            assert_eq!(traced, [lir::RuntimeFn::Trace], "{name}");
             assert!(!f.blocks[0].insts.iter().any(|i| matches!(
                 i,
                 lir::Inst::CallRuntime {
@@ -6798,7 +6923,11 @@ mod tests {
             ],
             vec![variable("r", r)],
         ));
-        assert_eq!(lowered.functions.len(), 1, "a built-in has no function");
+        assert_eq!(
+            lowered.functions.len(),
+            2,
+            "a built-in has no function: `main` and the entry have"
+        );
         lowered.functions[0].blocks[0]
             .insts
             .iter()
@@ -6873,6 +7002,7 @@ mod tests {
                 lir::RuntimeFn::End,
                 lir::RuntimeFn::DebugValue,
                 lir::RuntimeFn::EndSince,
+                lir::RuntimeFn::Trace,
             ]
         );
         assert!(

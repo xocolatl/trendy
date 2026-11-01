@@ -24,17 +24,25 @@ operator main{} [];
 A program that fails while it runs, as when an integer overflows (R0001),
 stops, writing the error to stderr as the compiler writes one, with the
 values involved, such as the operands of an operator that has no result,
-then where the program was, and exits with status 1. Where it was is the statement
+then where the program was, then the calls the failure passed through,
+innermost first, each as a note naming the operator and where it was
+called, and exits with status 1. Where it was is the statement
 running, or, in a value block, such as a read-only operator's body, the
 statement that gives a local variable the value being computed, or the
 value the block ends with. Here, a recipe in `projects/shopping` that
 serves no one, by its file's line, divides by zero where `shopping_list`
-scales each ingredient to the people a meal is cooked for:
+scales each ingredient to the people a meal is cooked for, which `main`
+calls:
 
 ```text
 error[R0002]: division by zero: 2e1 / 0e0 has no result
  --> projects/shopping/shopping.trendy:90:5
+  = note: in `shopping_list`, called at projects/shopping/shopping.trendy:183:5
 ```
+
+The calls aren't part of the error: an error is what went wrong, a value
+the program can test (see [Failures](#failures)), and the calls are
+where its failure went.
 
 ## Operators
 

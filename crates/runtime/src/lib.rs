@@ -2640,6 +2640,160 @@ pub struct Site {
     pub column: usize,
 }
 
+/// A call a failure passed through, which the function it failed in
+/// records as its failure exit runs: the site it was called at, and the
+/// function's name, a text.
+#[cfg(not(test))]
+#[derive(Clone, Copy)]
+struct Frame {
+    site: *const Site,
+    function: *const Text,
+}
+
+/// The calls the failure under way has passed through, innermost first,
+/// in memory from `malloc`, which the program keeps, and how many more it
+/// had no memory for, the outermost.
+#[cfg(not(test))]
+struct Trace {
+    frames: *mut Frame,
+    len: usize,
+    capacity: usize,
+    lost: usize,
+}
+
+/// The failure's trace, which only the thread the program runs on uses.
+#[cfg(not(test))]
+struct Traced(core::cell::UnsafeCell<Trace>);
+
+// SAFETY: the program runs on one thread.
+#[cfg(not(test))]
+unsafe impl Sync for Traced {}
+
+#[cfg(not(test))]
+impl Traced {
+    /// Where the trace is, which no two references to may be live at once.
+    fn get(&self) -> *mut Trace {
+        self.0.get()
+    }
+}
+
+/// The failure's trace.
+#[cfg(not(test))]
+static TRACE: Traced = Traced(core::cell::UnsafeCell::new(Trace {
+    frames: core::ptr::null_mut(),
+    len: 0,
+    capacity: 0,
+    lost: 0,
+}));
+
+/// Record that the failure under way passes through a call of the
+/// function named `function`, a text, made at the site `*site` holds, as
+/// the function's failure exit runs: none for one the runtime called,
+/// whose site is null. It can't fail: a call there is no memory to record
+/// is counted.
+///
+/// # Safety
+///
+/// `site` must point to a site's address, or null, and `function` to a
+/// valid text value that lasts as long as the program.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_trace(site: *const *const Site, function: *const Text) {
+    // SAFETY: guaranteed by the caller; the trace is only this thread's.
+    unsafe {
+        let site = site.read();
+        if site.is_null() {
+            return;
+        }
+        let trace = &mut *TRACE.get();
+        if trace.lost == 0 && trace.len == trace.capacity {
+            let capacity = (trace.capacity * 2).max(8);
+            let grown = capacity
+                .checked_mul(size_of::<Frame>())
+                .map_or(core::ptr::null_mut(), |bytes| {
+                    realloc(trace.frames.cast(), bytes)
+                });
+            if !grown.is_null() {
+                trace.frames = grown.cast();
+                trace.capacity = capacity;
+            }
+        }
+        if trace.lost == 0 && trace.len < trace.capacity {
+            trace.frames.add(trace.len).write(Frame { site, function });
+            trace.len += 1;
+        } else {
+            trace.lost += 1;
+        }
+    }
+}
+
+/// Store at `dst` how many calls the trace has recorded so far, for
+/// [`trendy_rt_trace_since`].
+///
+/// # Safety
+///
+/// `dst` must point to memory for a `usize`.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_traced(dst: *mut usize) {
+    // SAFETY: guaranteed by the caller; the trace is only this thread's.
+    unsafe { dst.write_unaligned((*TRACE.get()).len) }
+}
+
+/// Forget the first `*since` calls the trace recorded, keeping those
+/// recorded after [`trendy_rt_traced`] counted them: those of a failure
+/// that replaces the one they were for, as one writing the other's
+/// message.
+///
+/// # Safety
+///
+/// `since` must point to what [`trendy_rt_traced`] stored, with no calls
+/// forgotten since.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_trace_since(since: *const usize) {
+    // SAFETY: guaranteed by the caller; the trace is only this thread's,
+    // and holds `len` frames.
+    unsafe {
+        let trace = &mut *TRACE.get();
+        let since = since.read_unaligned().min(trace.len);
+        core::ptr::copy(trace.frames.add(since), trace.frames, trace.len - since);
+        trace.len -= since;
+    }
+}
+
+/// Write the calls the trace recorded, after the failure's error, each
+/// as a note, `= note: in `f`, called at path:line:column`, innermost
+/// first, and forget them.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn trendy_rt_write_trace() {
+    let mut out = Stderr::default();
+    // SAFETY: the trace is only this thread's, holds `len` frames, and
+    // each points to a site and a name compiled into the program, whose
+    // texts are UTF-8.
+    unsafe {
+        let trace = &mut *TRACE.get();
+        for i in 0..trace.len {
+            let frame = trace.frames.add(i).read();
+            let site = &*frame.site;
+            let path = read_text((&raw const site.path).cast());
+            let function = read_text(frame.function.cast());
+            // There is nowhere to report a failure to write to stderr.
+            let _ = writeln!(
+                out,
+                "  = note: in `{function}`, called at {path}:{}:{}",
+                site.line, site.column
+            );
+        }
+        if trace.lost > 0 {
+            let _ = writeln!(out, "  = note: and {} calls more", trace.lost);
+        }
+        (trace.len, trace.lost) = (0, 0);
+    }
+    out.flush();
+}
+
 /// The site the program is at, which compiled code sets before each
 /// statement runs, and each value of a value block's is computed, and
 /// again after each call, as the callee sets its own; null before the

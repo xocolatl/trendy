@@ -52,6 +52,13 @@ fn site(name: &str, line: usize) -> String {
     format!(" --> {name}.trendy:{line}:5\n")
 }
 
+/// The note a failure writes, after its error, for each call it passed
+/// through, innermost first: in the operator `operator`, called at the
+/// statement on `line` of the source `name` of a test's, indented once.
+fn called(name: &str, operator: &str, line: usize) -> String {
+    format!("  = note: in `{operator}`, called at {name}.trendy:{line}:5\n")
+}
+
 /// Compile `input` into the executable `output`, run it in `dir`, and
 /// return its exit code and what it wrote to stderr, where a failure's
 /// site names the source by its file's name alone. The C library
@@ -631,7 +638,11 @@ fn approximate_failures_stop_the_program() {
     for (name, expr, failure) in cases {
         let name = format!("approximate_{name}");
         let (code, stderr) = run_source(&name, &program(expr));
-        let expected = format!("1e0\n{failure}\n{}", site(&name, 3));
+        let expected = format!(
+            "1e0\n{failure}\n{}{}",
+            site(&name, 3),
+            called(&name, "f", 7)
+        );
         assert_eq!((code, stderr), (1, expected), "{expr}");
     }
 }
@@ -681,9 +692,10 @@ fn text_that_isnt_a_value_of_the_type_stops_the_program() {
         let (code, stderr) = run_source(&name, &program(operator, text));
         // Rust's `Debug` writes a text's escapes as trendy does.
         let expected = format!(
-            "1\nerror[{}]: {text:?} {why}\n{}",
+            "1\nerror[{}]: {text:?} {why}\n{}{}",
             Code::Unparsable.id(),
-            site(&name, 3)
+            site(&name, 3),
+            called(&name, "f", 7)
         );
         assert_eq!((code, stderr), (1, expected), "{text:?}");
     }
@@ -961,8 +973,10 @@ operator main{{}} [
         (
             1,
             format!(
-                "5e2\nerror[{failed}]: no conversion from pinch\n{}",
-                site("fail_value", 8)
+                "5e2\nerror[{failed}]: no conversion from pinch\n{}{}{}",
+                site("fail_value", 8),
+                called("fail_value", "grams", 15),
+                called("fail_value", "weigh", 20)
             )
         )
     );
@@ -971,14 +985,18 @@ operator main{{}} [
         run_source("fail_statement", &program("call weigh{unit: \"\"};")),
         (
             1,
-            format!("5e2\nerror[{failed}]: no unit\n --> fail_statement.trendy:13:9\n")
+            format!(
+                "5e2\nerror[{failed}]: no unit\n --> fail_statement.trendy:13:9\n{}",
+                called("fail_statement", "weigh", 20)
+            )
         )
     );
 }
 
 /// A `fail`'s error waits for what takes it, and with nothing to, the
 /// program writes its message as it stops: a `message` that fails then
-/// has its own failure written instead, once.
+/// has its own failure written instead, once, with its own trace, which
+/// starts at the `fail` it writes the message of.
 #[test]
 fn a_failing_message_writes_its_own_failure() {
     let source = "type grumpy is error { { n: integer } };
@@ -1001,8 +1019,9 @@ operator main{} [
         (
             1,
             format!(
-                "1\n{}\n --> failing_message.trendy:4:5\n",
-                division("10 div 0")
+                "1\n{}\n --> failing_message.trendy:4:5\n{}",
+                division("10 div 0"),
+                called("failing_message", "message{error: grumpy}", 8)
             )
         )
     );
@@ -1011,7 +1030,8 @@ operator main{} [
 /// A failure several calls deep, in a loop, makes each function it is in
 /// fail in turn, each giving up what its statements and local variables
 /// hold, a text and a relation here, and the program stops as it did where
-/// it happened, with its error and site, running nothing after.
+/// it happened, with its error and site, running nothing after, then the
+/// calls it passed through, innermost first.
 #[test]
 fn a_failure_deep_in_calls_stops_the_program() {
     let source = "operator share{total: integer, guests: integer}: integer [
@@ -1049,11 +1069,13 @@ operator main{} [
         (
             1,
             format!(
-                "{}{}\"injerapierogi\"\n\"sharing plov\"\n{}\n{}",
+                "{}{}\"injerapierogi\"\n\"sharing plov\"\n{}\n{}{}  = note: in `portion`, called at deep_failure.trendy:17:9\n{}",
                 served("injera"),
                 served("pierogi"),
                 division("12 div 0"),
-                site("deep_failure", 2)
+                site("deep_failure", 2),
+                called("deep_failure", "share", 9),
+                called("deep_failure", "serve", 24)
             )
         )
     );
@@ -1262,10 +1284,11 @@ operator main{} [
         "{stderr}"
     );
     assert_eq!(
-        lines[lines.len() - 2..],
+        lines[lines.len() - 3..],
         [
             format!(r"error[{failed}]: bad: \u{{1B}}[2J\u{{202E}}x"),
             " --> escaped.trendy:4:5".to_string(),
+            "  = note: in `show`, called at escaped.trendy:8:5".to_string(),
         ]
     );
     assert!(!stderr.contains('\u{1B}') && !stderr.contains('\u{202E}'));
@@ -1312,8 +1335,10 @@ polygon{{corners: relation {{ n: integer, name: text }} {{ {{ n: 1, name: \"east
 relation {{ e: ellipse }} {{ {{ e: ellipse{{a: 2e0, b: 2e0}} }}, {{ e: ellipse{{a: 3e0, b: 1e0}} }} }}
 ellipse{{a: 3e0, b: 2e0}}
 error[{broken}]: ellipse{{a: 1e0, b: 3e0}} isn't a value of `ellipse`: it breaks the constraint `a >= b`
-{}",
-                site("hierarchy", 20)
+{}{}{}",
+                site("hierarchy", 20),
+                called("hierarchy", "ellipse", 20),
+                called("hierarchy", "shapes", 24)
             )
         )
     );
@@ -1405,8 +1430,9 @@ true
 relation {{ s: ellipse }} {{ {{ s: ellipse{{a: 3e0, b: 1e0}} }} }}
 1e0
 error[{not_of}]: polygon{{corners: relation {{ n: integer, name: text }} {{ {{ n: 1, name: \"n\" }} }}}} isn't a value of `ellipse`
-{}",
-                site("tested", 24)
+{}{}",
+                site("tested", 24),
+                called("tested", "shapes", 28)
             )
         )
     );
@@ -1492,8 +1518,10 @@ operator main{{}} [
 ellipse{{a: 2e0, b: 2e0}}
 tuple {{ circle: false, kind: \"ellipse\" }}
 error[{overlapping}]: ellipse{{a: 5e-1, b: 5e-1}} is both a `circle` and a `small`, but a value has one most specific type
-{}",
-                site("constrained", 14)
+{}{}{}",
+                site("constrained", 14),
+                called("constrained", "ellipse", 14),
+                called("constrained", "shapes", 18)
             )
         )
     );
@@ -1555,8 +1583,9 @@ operator main{} [
 1e1
 tuple {{ equal: true, size: 2 }}
 error[{broken}]: ellipse{{a: 1.5e1, b: 1e1}} isn't a value of `circle`: it breaks the constraint `a = b`
-{}",
-                site("own_representation", 15)
+{}{}",
+                site("own_representation", 15),
+                called("own_representation", "run", 19)
             )
         )
     );
@@ -1701,8 +1730,10 @@ operator main{{}} [
 relation {{ x: integer }} {{ {{ x: 0 }}, {{ x: 3 }} }}
 2
 error[{violated}]: two tuples of a `seg`'s `ends` have the same values for its key {{ x }}: tuple {{ n: 1, x: 0 }} and tuple {{ n: 2, x: 0 }}
-{}",
-                site("component_keys", 18)
+{}{}{}",
+                site("component_keys", 18),
+                called("component_keys", "seg{len: integer}", 18),
+                called("component_keys", "run", 22)
             )
         )
     );
@@ -1724,8 +1755,10 @@ operator main{{}} [
             1,
             format!(
                 "error[{violated}]: two tuples of an `outline`'s `vertices` have the same values for its key {{ v_no }}: tuple {{ v_no: 1, x: 0 }} and tuple {{ v_no: 1, x: 5 }}
-{}",
-                site("component_keys_stored", 12)
+{}{}{}",
+                site("component_keys_stored", 12),
+                called("component_keys_stored", "outline", 12),
+                called("component_keys_stored", "run", 16)
             )
         )
     );
@@ -2359,7 +2392,7 @@ fn run_time_failures_stop_the_program() {
     for (name, expr, failure) in cases {
         let name = format!("fail_{name}");
         let (code, stderr) = run_source(&name, &program(expr));
-        let expected = format!("1\n{failure}\n{}", site(&name, 3));
+        let expected = format!("1\n{failure}\n{}{}", site(&name, 3), called(&name, "f", 8));
         assert_eq!((code, stderr), (1, expected), "{expr}");
     }
     // The smallest integer `mod -1` has a result.
@@ -2430,7 +2463,12 @@ fn values_that_arent_there_stop_the_program() {
     ];
     for (name, expr, code, message) in cases {
         let (status, stderr) = run_source(name, &program(expr));
-        let expected = format!("1\nerror[{}]: {message}\n{}", code.id(), site(name, 3));
+        let expected = format!(
+            "1\nerror[{}]: {message}\n{}{}",
+            code.id(),
+            site(name, 3),
+            called(name, "f", 8)
+        );
         assert_eq!((status, stderr), (1, expected), "{expr}");
     }
 }
@@ -2451,26 +2489,41 @@ fn values_that_break_their_types_constraints_stop_the_program() {
             trendy_diag::Code::BrokenConstraint.id()
         )
     };
+    // A selector's failure passes through the selector, called where the
+    // value is, then `f`; a replace checks the constraints in `f`.
+    let selector = |name: &str| called(name, "percentage", 5);
     let cases = [
         (
             "constraint_selector",
             "p := percentage{value: b - 1};",
             broken(-1, "value >= 0"),
+            true,
         ),
         (
             "constraint_replace",
             "p := p replace { value := value + 101 };",
             broken(101, "value <= 100"),
+            false,
         ),
         (
             "constraint_update",
             "update p { value := value - 1 };",
             broken(-1, "value >= 0"),
+            false,
         ),
     ];
-    for (name, body, message) in cases {
+    for (name, body, message, selected) in cases {
         let (status, stderr) = run_source(name, &program(body));
-        let expected = format!("{message}\n{}", site(name, 5));
+        let expected = format!(
+            "{message}\n{}{}{}",
+            site(name, 5),
+            if selected {
+                selector(name)
+            } else {
+                String::new()
+            },
+            called(name, "f", 10)
+        );
         assert_eq!((status, stderr), (1, expected), "{body}");
     }
     // Components that satisfy them select the value.
@@ -2521,9 +2574,11 @@ operator main{{}} [
         (
             1,
             format!(
-                "error[{}]: temperature{{kelvin: 2.27315e3}} isn't a value of `temperature`: it breaks the constraint `celsius < 1000e0`\n{}",
+                "error[{}]: temperature{{kelvin: 2.27315e3}} isn't a value of `temperature`: it breaks the constraint `celsius < 1000e0`\n{}{}{}",
                 trendy_diag::Code::BrokenConstraint.id(),
-                site("converted_broken", 10)
+                site("converted_broken", 10),
+                called("converted_broken", "temperature{celsius: approximate}", 10),
+                called("converted_broken", "show", 16)
             )
         )
     );
@@ -2573,9 +2628,10 @@ operator main{} [
 #[test]
 fn an_if_fails_only_if_the_branch_it_takes_does() {
     let overflow = format!(
-        "1\n{}\n{}",
+        "1\n{}\n{}{}",
         overflow("9223372036854775807 + 1"),
-        site("fail_if", 3)
+        site("fail_if", 3),
+        called("fail_if", "f", 8)
     );
     let (code, stderr) = run_source("if_safe", &program("if b = 0 then 0 else a div b"));
     assert_eq!((code, &stderr[..]), (0, "1\n0\n2\n"));
@@ -2604,9 +2660,10 @@ fn min_and_max_of_no_tuples_stop_the_program() {
             (
                 1,
                 format!(
-                    "1\nerror[{}]: the relation has no tuples, so it has no {which}\n{}",
+                    "1\nerror[{}]: the relation has no tuples, so it has no {which}\n{}{}",
                     Code::NoMinOrMax.id(),
-                    site(name, 3)
+                    site(name, 3),
+                    called(name, "f", 8)
                 )
             ),
             "{expr}"
@@ -2782,7 +2839,10 @@ fn assignments_that_break_a_rule_stop_the_program() {
         let (code, stderr) = run_source(name, &assigning(statement));
         assert_eq!(
             (code, stderr),
-            (1, format!("1\n{failure}\n{}", site(name, 6))),
+            (
+                1,
+                format!("1\n{failure}\n{}{}", site(name, 6), called(name, "f", 11))
+            ),
             "{statement}"
         );
     }

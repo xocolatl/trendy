@@ -1581,6 +1581,11 @@ holds, as the ends of its statements and blocks would have:
 - It then releases each local variable's references. A local variable
   holds none before its declaration or after its block, so one released
   there gives up only what it holds.
+- It records in the failure's trace that the failure passed through the
+  call of it (`trendy_rt_trace`): its name, and the site it was called
+  at, which the function saves as it starts. The runtime keeps the
+  calls in memory of its own; one it has none for is counted instead, so
+  recording can't fail.
 - It returns, failing (`Terminator::Failed`).
 
 A read-only operator's function begins no scope and holds nothing, so
@@ -1893,11 +1898,14 @@ may not write it: the error waits, with the site it failed at, in two
 variables of the program's own, `__failure` and `__failure_site`
 (`Waiting`, `FunctionBuilder::fail_with`), named in the system's
 namespace, which no program can name, and the block ends with
-`Terminator::Raise`. With nothing to take it, the program's entry is a
-function of lowering's own (`entry`), which calls `main` and, if it
-fails with an error waiting, writes its message at its site, after
-taking it from where it waits, so that a `message` that fails with an
-error of its own has that one written instead. Each failure is a runtime function of its own, which
+`Terminator::Raise`. The program's entry is a function of lowering's
+own (`entry`), which calls `main` and, if it fails, writes the
+failure's trace after its error, one note per call, innermost first
+(`trendy_rt_write_trace`). With an error waiting, which nothing took, it
+writes its message at its site first, after taking it from where it
+waits, so that a `message` that fails with an error of its own has that
+one written instead; one that fails at all has its own trace written,
+not the error's (`trendy_rt_traced`, `trendy_rt_trace_since`). Each failure is a runtime function of its own, which
 takes its values (`lir::Failure::call`), so the runtime needs no table of
 failures shared with the compiler. Then it writes where the program is, ` --> path:line:column`, as a compiler's error does. Sema
 gives each statement its site (`hir::Site`, its file and where it starts),
