@@ -133,7 +133,7 @@ pub unsafe extern "C" fn trendy_rt_concat(
     status(|| unsafe {
         let (lhs, rhs) = (lhs.read_unaligned(), rhs.read_unaligned());
         let Some(len) = lhs.len.checked_add(rhs.len) else {
-            return Err(fail(Failure::OutOfMemory));
+            return Err(out_of_memory());
         };
         let bytes = allocate_buffer(len, core::ptr::null())?;
         core::ptr::copy_nonoverlapping(lhs.bytes, bytes, lhs.len);
@@ -411,18 +411,18 @@ unsafe fn reserve(more: usize) -> Fallible {
     unsafe {
         let scope = &mut *CURRENT.load(Relaxed);
         let Some(needed) = scope.len.checked_add(more) else {
-            return Err(fail(Failure::OutOfMemory));
+            return Err(out_of_memory());
         };
         if needed <= scope.capacity {
             return Ok(());
         }
         let capacity = needed.max(scope.capacity * 2).max(8);
         let Some(bytes) = capacity.checked_mul(size_of::<*mut u8>()) else {
-            return Err(fail(Failure::OutOfMemory));
+            return Err(out_of_memory());
         };
         let grown = realloc(scope.buffers.cast(), bytes);
         if grown.is_null() {
-            return Err(fail(Failure::OutOfMemory));
+            return Err(out_of_memory());
         }
         scope.buffers = grown.cast();
         scope.capacity = capacity;
@@ -531,7 +531,7 @@ fn allocate_buffer(bytes: usize, desc: *const TypeDesc) -> Fallible<*mut u8> {
 #[cfg(not(test))]
 fn new_buffer(bytes: usize, desc: *const TypeDesc) -> Fallible<*mut u8> {
     let Some(total) = bytes.checked_add(HEADER) else {
-        return Err(fail(Failure::OutOfMemory));
+        return Err(out_of_memory());
     };
     // SAFETY: the block has room for the header and the bytes.
     unsafe {
@@ -890,7 +890,7 @@ unsafe fn copied(buffer: *const u8, len: usize, desc: &TypeDesc) -> Fallible<*mu
     unsafe {
         let element = desc.element();
         let Some(bytes) = len.checked_mul(element.size) else {
-            return Err(fail(Failure::OutOfMemory));
+            return Err(out_of_memory());
         };
         let copy = new_buffer(bytes, desc)?;
         for i in 0..len {
@@ -907,12 +907,12 @@ unsafe fn copied(buffer: *const u8, len: usize, desc: &TypeDesc) -> Fallible<*mu
 #[cfg(not(test))]
 fn allocate<T>(count: usize) -> Fallible<*mut T> {
     let Some(size) = count.checked_mul(size_of::<T>()) else {
-        return Err(fail(Failure::OutOfMemory));
+        return Err(out_of_memory());
     };
     // SAFETY: `malloc` has no preconditions.
     let memory = unsafe { malloc(size.max(1)) };
     if memory.is_null() {
-        return Err(fail(Failure::OutOfMemory));
+        return Err(out_of_memory());
     }
     Ok(memory.cast())
 }
@@ -949,12 +949,12 @@ impl<T> Temp<T> {
     /// leaving them as they are, if there is no memory for them.
     fn grow(&mut self, len: usize) -> Fallible {
         let Some(bytes) = len.checked_mul(size_of::<T>()) else {
-            return Err(fail(Failure::OutOfMemory));
+            return Err(out_of_memory());
         };
         // SAFETY: the memory is `allocate`'s, or `realloc`'s.
         let grown = unsafe { realloc(self.memory.cast(), bytes.max(1)) };
         if grown.is_null() {
-            return Err(fail(Failure::OutOfMemory));
+            return Err(out_of_memory());
         }
         self.memory = grown.cast();
         self.len = len;
@@ -1014,7 +1014,7 @@ pub unsafe extern "C" fn trendy_rt_reshape(
         let (tuples, count) = read_slice(src);
         let size = result.element().size;
         let Some(bytes) = count.checked_mul(size) else {
-            return Err(fail(Failure::OutOfMemory));
+            return Err(out_of_memory());
         };
         let attributes = attributes(result);
         let offsets = core::slice::from_raw_parts(offsets, attributes.len());
@@ -1144,7 +1144,7 @@ pub unsafe extern "C" fn trendy_rt_and(
 
         let size = result.element().size;
         let Some(bytes) = total.checked_mul(size) else {
-            return Err(fail(Failure::OutOfMemory));
+            return Err(out_of_memory());
         };
         let joined = Temp::<u8>::zeroed(bytes)?;
         let joined = joined.ptr();
@@ -1228,7 +1228,7 @@ pub unsafe extern "C" fn trendy_rt_ungroup(
         let size = result.element().size;
         let Some((total, bytes)) = total.and_then(|total| Some((total, total.checked_mul(size)?)))
         else {
-            return Err(fail(Failure::OutOfMemory));
+            return Err(out_of_memory());
         };
         let made = Temp::<u8>::zeroed(bytes)?;
         let made = made.ptr();
@@ -1384,10 +1384,10 @@ pub unsafe extern "C" fn trendy_rt_combine(
         let minus = matches!(combination, COMBINE_MINUS | COMBINE_INCLUDED_MINUS);
         let size = desc.element().size;
         let Some(room) = lhs_count.checked_add(rhs_count) else {
-            return Err(fail(Failure::OutOfMemory));
+            return Err(out_of_memory());
         };
         let Some(bytes) = room.checked_mul(size) else {
-            return Err(fail(Failure::OutOfMemory));
+            return Err(out_of_memory());
         };
         let out = allocate_buffer(bytes, desc)?;
         let tuple_desc = desc.element();
@@ -1628,7 +1628,7 @@ unsafe fn matching_runs(
                         .checked_mul(rhs_end - j)
                         .and_then(|n| n.checked_add(total))
                     else {
-                        return Err(fail(Failure::OutOfMemory));
+                        return Err(out_of_memory());
                     };
                     total = sum;
                     groups.ptr().add(count).write(Group {
@@ -1668,7 +1668,7 @@ pub unsafe extern "C" fn trendy_rt_allocate(
     status(|| unsafe {
         let count = count.read_unaligned();
         let Some(bytes) = count.checked_mul((*desc).element().size) else {
-            return Err(fail(Failure::OutOfMemory));
+            return Err(out_of_memory());
         };
         let tuples = allocate_buffer(bytes, desc)?;
         core::ptr::write_bytes(tuples, 0, bytes);
@@ -1764,7 +1764,7 @@ pub unsafe extern "C" fn trendy_rt_load(
         });
         let element = result.element();
         let Some(bytes) = len.checked_mul(element.size) else {
-            return Err(fail(Failure::OutOfMemory));
+            return Err(out_of_memory());
         };
         let out = allocate_buffer(bytes, result)?;
         // Each element is made here first, zeroed, as everywhere, so that
@@ -1818,7 +1818,7 @@ pub unsafe extern "C" fn trendy_rt_unload(
         let element = source.element().size;
         let size = result.element().size;
         let Some(bytes) = len.checked_mul(size) else {
-            return Err(fail(Failure::OutOfMemory));
+            return Err(out_of_memory());
         };
         // The tuples are made here first, zeroed, as everywhere, so that
         // the padding in them is zero, and share the elements' buffers
@@ -1833,7 +1833,7 @@ pub unsafe extern "C" fn trendy_rt_unload(
             // An array of tuples of no attributes takes no memory, so only
             // the integers limit its positions.
             let Ok(position) = i64::try_from(i + 1) else {
-                return Err(fail(Failure::IntegerOverflow));
+                return Err(overflowed("the position"));
             };
             for number in numbers {
                 to.add(*number).cast::<i64>().write_unaligned(position);
@@ -1996,35 +1996,28 @@ fn status(body: impl FnOnce() -> Fallible) -> bool {
     body().is_err()
 }
 
-/// Why the runtime fails where it has no values to write.
+/// Fail because memory for a result couldn't be allocated, with no error
+/// waiting, which nothing takes (R0003): making one needs memory too, and
+/// nothing after it can be relied on.
 #[cfg(not(test))]
-#[derive(Debug, Clone, Copy)]
-enum Failure {
-    /// An integer result out of range: a sum, a product, or a position.
-    IntegerOverflow,
-    /// An approximate result beyond the largest finite magnitude: a sum or
-    /// a product.
-    ApproximateOverflow,
-    /// Memory for a result couldn't be allocated.
-    OutOfMemory,
+fn out_of_memory() -> Failed {
+    fail_with(|out| out.write_str("error[R0003]: out of memory\n"))
 }
 
-/// Fail because of `failure`.
+/// Fail with an `overflow` whose operation is `operation`, as its message
+/// says it: an operation of no operands to write, as `the sum`.
 #[cfg(not(test))]
-fn fail(failure: Failure) -> Failed {
-    fail_with(|out| {
-        out.write_str(match failure {
-            Failure::IntegerOverflow => "error[R0001]: integer overflow\n",
-            Failure::ApproximateOverflow => "error[R0001]: approximate overflow\n",
-            Failure::OutOfMemory => "error[R0003]: out of memory\n",
-        })
-    })
+fn overflowed(operation: &str) -> Failed {
+    let Ok(operation) = Made::text(operation) else {
+        return Failed;
+    };
+    // SAFETY: the operation is a valid text.
+    unsafe { fail_as(OVERFLOW, &[("operation", operation.at())]) }
 }
 
-/// Write the error of `lhs op rhs`, of integers, which has no result, `op`
-/// being an `ARITHMETIC_` constant, with the operation: a division by zero
-/// (R0002), or else an overflow (R0001). A negation's `lhs` is 0. The
-/// program then fails.
+/// Fail with the error of `lhs op rhs`, of integers, which has no result,
+/// `op` being an `ARITHMETIC_` constant: a `division_by_zero` (R0002), or
+/// else an `overflow` (R0001), of the operation. A negation's `lhs` is 0.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub extern "C" fn trendy_rt_integer_failed(op: u32, lhs: i64, rhs: i64) {
@@ -2075,8 +2068,8 @@ impl fmt::Display for Number {
     }
 }
 
-/// Write the error of `lhs op rhs`, which has no result, as
-/// [`trendy_rt_integer_failed`] says, with the operation as trendy source
+/// Fail with the error of `lhs op rhs`, which has no result, as
+/// [`trendy_rt_integer_failed`] says, its operation as trendy source
 /// writes it, a negative right operand in parentheses.
 #[cfg(not(test))]
 fn arithmetic_failed(op: u32, lhs: Number, rhs: Number) {
@@ -2090,31 +2083,27 @@ fn arithmetic_failed(op: u32, lhs: Number, rhs: Number) {
         _ => internal_error("unknown arithmetic operator"),
     };
     let divides = matches!(op, ARITHMETIC_DIVIDE | ARITHMETIC_DIV | ARITHMETIC_MOD);
-    let (error, outcome) = match rhs {
-        _ if divides && rhs.is_zero() => ("R0002]: division by zero", "has no result"),
-        Number::Integer(_) => (
-            "R0001]: integer overflow",
-            "doesn't fit in a 64-bit integer",
-        ),
-        Number::Approximate(_) => (
-            "R0001]: approximate overflow",
-            "is too large for an approximate number",
-        ),
+    let kind = if divides && rhs.is_zero() {
+        DIVISION_BY_ZERO
+    } else {
+        OVERFLOW
     };
-    write_failure(|out| {
-        write!(out, "error[{error}: ")?;
+    let Ok(operation) = Made::written(|out| {
         if op == ARITHMETIC_NEGATE {
             out.write_str(symbol)?;
         } else {
             write!(out, "{lhs} {symbol} ")?;
         }
         if rhs.is_negative() {
-            write!(out, "({rhs})")?;
+            write!(out, "({rhs})")
         } else {
-            write!(out, "{rhs}")?;
+            write!(out, "{rhs}")
         }
-        writeln!(out, " {outcome}")
-    });
+    }) else {
+        return;
+    };
+    // SAFETY: the operation is a valid text.
+    let Failed = unsafe { fail_as(kind, &[("operation", operation.at())]) };
 }
 
 /// Write the error of tuples being joined that disagree on the common
@@ -2257,25 +2246,37 @@ pub unsafe extern "C" fn trendy_rt_warned(message: *const u8) {
     });
 }
 
-/// Write the error of a `fail`, whose message is `message`, a text
-/// (R0021). It is written as a
-/// table's cell is, its control characters and bidirectional controls
-/// escaped, so that a message made from a file's text can't change the
-/// terminal, or show other than what it says.
+/// Write the error at `error` that nothing took, a value of the prelude's
+/// type `error`, whose message is `message`, a text, with the code of its
+/// kind, if the language makes it ([`Failures`]), as `division_by_zero`'s
+/// R0002, or else a program's own's, R0021. It is written as a table's
+/// cell is, its control characters and bidirectional controls escaped, so
+/// that a message made from a file's text can't change the terminal, or
+/// show other than what it says.
 ///
 /// # Safety
 ///
-/// `message` must point to a valid text value.
+/// `message` must point to a valid text value, and `error` to a valid
+/// value of `error`.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn trendy_rt_failed(message: *const u8) {
+pub unsafe extern "C" fn trendy_rt_failed(message: *const u8, error: *const u8) {
     // SAFETY: guaranteed by the caller.
-    let message = unsafe { read_text(message) };
-    write_failure(|out| {
-        out.write_str("error[R0021]: ")?;
-        trendy_text::escape_bare(message, out)?;
-        out.write_char('\n')
-    });
+    unsafe {
+        let message = read_text(message);
+        let own = error.cast::<*const TypeDesc>().read_unaligned();
+        let failures = failures();
+        let kinds = core::slice::from_raw_parts(failures.kinds, failures.count);
+        let code = kinds
+            .iter()
+            .find(|kind| core::ptr::eq(kind.desc, own))
+            .map_or("R0021", |kind| read_text((&raw const kind.code).cast()));
+        write_failure(|out| {
+            write!(out, "error[{code}]: ")?;
+            trendy_text::escape_bare(message, out)?;
+            out.write_char('\n')
+        });
+    }
 }
 
 /// Write the error of `value`, components `desc` describes, which
@@ -2313,8 +2314,8 @@ pub unsafe extern "C" fn trendy_rt_broken_constraint_in_file(
     }
 }
 
-/// Write the error of a relation that has `*count` tuples, not one, where
-/// its only one is taken, with the count (R0005).
+/// Fail with the error of a relation that has `*count` tuples, not one,
+/// where its only one is taken: a `not_one_tuple` (R0005).
 ///
 /// # Safety
 ///
@@ -2324,14 +2325,10 @@ pub unsafe extern "C" fn trendy_rt_broken_constraint_in_file(
 pub unsafe extern "C" fn trendy_rt_not_one_tuple(count: *const usize) {
     // SAFETY: guaranteed by the caller.
     let count = unsafe { count.read_unaligned() };
-    write_failure(|out| {
-        out.write_str("error[R0005]: the relation has ")?;
-        match count {
-            0 => out.write_str("no tuples")?,
-            _ => write!(out, "{count} tuples")?,
-        }
-        out.write_str(", but exactly one is taken\n")
-    });
+    // A relation's tuples are in memory, so fewer than any integer.
+    let count = i64::try_from(count).unwrap_or(i64::MAX);
+    // SAFETY: the count is an integer.
+    let Failed = unsafe { fail_as(NOT_ONE_TUPLE, &[("count", (&raw const count).cast())]) };
 }
 
 /// Write the error of a relation that has no tuples, where the least value
@@ -2354,8 +2351,8 @@ pub extern "C" fn trendy_rt_no_max() {
     });
 }
 
-/// Write the error of an array of `*length` elements that has none at
-/// `*position`, with them (R0011).
+/// Fail with the error of an array of `*length` elements that has none at
+/// `*position`: an `index_out_of_range` (R0011).
 ///
 /// # Safety
 ///
@@ -2365,28 +2362,16 @@ pub extern "C" fn trendy_rt_no_max() {
 pub unsafe extern "C" fn trendy_rt_index_out_of_range(position: *const i64, length: *const i64) {
     // SAFETY: guaranteed by the caller.
     let (position, length) = unsafe { (position.read_unaligned(), length.read_unaligned()) };
-    write_failure(|out| {
-        out.write_str("error[R0011]: ")?;
-        match length {
-            _ if position < 1 => write!(
-                out,
-                "an array has no element at position {position}: positions count from 1"
-            )?,
-            0 => write!(
-                out,
-                "the array is empty, so it has no element at position {position}"
-            )?,
-            1 => write!(
-                out,
-                "the array has 1 element, so none at position {position}"
-            )?,
-            _ => write!(
-                out,
-                "the array has {length} elements, so none at position {position}"
-            )?,
-        }
-        out.write_char('\n')
-    });
+    // SAFETY: the position and the length are integers.
+    let Failed = unsafe {
+        fail_as(
+            INDEX_OUT_OF_RANGE,
+            &[
+                ("position", (&raw const position).cast()),
+                ("length", (&raw const length).cast()),
+            ],
+        )
+    };
 }
 
 /// Write the error of two changes to an array in an `assign` block that
@@ -3004,11 +2989,11 @@ pub unsafe extern "C" fn trendy_rt_sum(
         if column.kind == KIND_INTEGER {
             let mut sum = trendy_numeric::IntegerSum::default();
             column.values().for_each(|n| sum.add(n));
-            store_integer(dst, sum.total())
+            store_integer(dst, sum.total(), "the sum")
         } else {
             let mut sum = trendy_numeric::ApproximateSum::default();
             column.values().for_each(|x| sum.add(x));
-            store_approximate(dst, sum.total())
+            store_approximate(dst, sum.total(), "the sum")
         }
     })
 }
@@ -3037,7 +3022,7 @@ pub unsafe extern "C" fn trendy_rt_product(
         if column.kind == KIND_INTEGER {
             let mut product = trendy_numeric::IntegerProduct::default();
             column.values().for_each(|n| product.multiply(n));
-            return store_integer(dst, product.total());
+            return store_integer(dst, product.total(), "the product");
         }
         let mut product = trendy_numeric::ApproximateProduct::default();
         column.values().for_each(|x| product.multiply(x));
@@ -3048,7 +3033,7 @@ pub unsafe extern "C" fn trendy_rt_product(
                 exact.total(column.values(), memory.values())
             }
         };
-        store_approximate(dst, total)
+        store_approximate(dst, total, "the product")
     })
 }
 
@@ -3102,15 +3087,15 @@ impl Column {
 }
 
 /// Store the integer `total` at `dst`, or fail if there is none, being out
-/// of range.
+/// of range: an `overflow` of `operation`, as `the sum`.
 ///
 /// # Safety
 ///
 /// `dst` must point to memory for an integer.
 #[cfg(not(test))]
-unsafe fn store_integer(dst: *mut u8, total: Option<i64>) -> Fallible {
+unsafe fn store_integer(dst: *mut u8, total: Option<i64>, operation: &str) -> Fallible {
     let Some(total) = total else {
-        return Err(fail(Failure::IntegerOverflow));
+        return Err(overflowed(operation));
     };
     // SAFETY: guaranteed by the caller.
     unsafe { dst.cast::<i64>().write_unaligned(total) };
@@ -3118,15 +3103,16 @@ unsafe fn store_integer(dst: *mut u8, total: Option<i64>) -> Fallible {
 }
 
 /// Store the approximate number `total` at `dst`, or fail if there is
-/// none, being beyond the largest finite.
+/// none, being beyond the largest finite: an `overflow` of `operation`, as
+/// `the sum`.
 ///
 /// # Safety
 ///
 /// `dst` must point to memory for an approximate number.
 #[cfg(not(test))]
-unsafe fn store_approximate(dst: *mut u8, total: Option<f64>) -> Fallible {
+unsafe fn store_approximate(dst: *mut u8, total: Option<f64>, operation: &str) -> Fallible {
     let Some(total) = total else {
-        return Err(fail(Failure::ApproximateOverflow));
+        return Err(overflowed(operation));
     };
     // SAFETY: guaranteed by the caller.
     unsafe { dst.cast::<f64>().write_unaligned(total) };
@@ -3171,7 +3157,7 @@ unsafe fn written(value: *const u8, desc: &TypeDesc) -> Fallible<Text> {
             value,
             desc,
             |bytes| allocate_buffer(bytes, core::ptr::null()),
-            || fail(Failure::OutOfMemory),
+            out_of_memory,
         )
     }
 }
@@ -3420,7 +3406,7 @@ pub unsafe extern "C" fn trendy_rt_load_text_file_with_errors(
     // SAFETY: guaranteed by the caller.
     status(|| unsafe {
         let path = read_text(path.cast());
-        let mut found = Found::new((*errors).types);
+        let mut found = Found::new((*errors).relation);
         let lines = match file_or_error(path, &mut found)? {
             Some((_contents, text)) => lines_of(text, &*desc)?,
             None => lines_of("", &*desc)?,
@@ -3497,7 +3483,7 @@ unsafe fn lines_of(text: &str, desc: &TypeDesc) -> Fallible<Text> {
         let element = desc.element();
         let count = text.lines().count();
         let Some(size) = count.checked_mul(element.size) else {
-            return Err(fail(Failure::OutOfMemory));
+            return Err(out_of_memory());
         };
         let lines = allocate_buffer(size, desc)?;
         for (i, line) in text.lines().enumerate() {
@@ -3533,57 +3519,295 @@ fn scope_text(text: &str) -> Fallible<Text> {
 /// holds. Fails if the memory can't be allocated.
 #[cfg(not(test))]
 fn scope_written(write: impl Fn(&mut dyn Write) -> fmt::Result) -> Fallible<Text> {
-    let mut counted = Counted(0);
-    // Writing to memory fails only if it can't be counted, and then there
-    // is too much to allocate.
-    if write(&mut counted).is_err() {
-        return Err(fail(Failure::OutOfMemory));
-    }
-    let bytes = allocate_buffer(counted.0, core::ptr::null())?;
-    // SAFETY: the buffer has room for what is counted.
-    let mut filled = Filled {
-        bytes: unsafe { core::slice::from_raw_parts_mut(bytes, counted.0) },
-        len: 0,
+    let len = counted(&write)?;
+    let text = Text {
+        bytes: allocate_buffer(len, core::ptr::null())?,
+        len,
     };
-    if write(&mut filled).is_err() {
-        return Err(fail(Failure::OutOfMemory));
-    }
-    Ok(Text {
-        bytes,
-        len: counted.0,
-    })
+    filled(&write, &text)?;
+    Ok(text)
 }
 
-/// Where a load that gives its errors puts them, and their types, as the
-/// compiler lays it out: the relation of them, `relation { error: error }`,
-/// and the address of an array of descriptors' addresses, the relation's,
-/// then each error's type's, as its selector writes its components, in the
-/// order `hir::UpdateBuiltin::errors` lists them (see [`UNREADABLE_FILE`]).
+/// How many bytes `write` writes. Writing to memory fails only if they
+/// can't be counted, and then there are too many to allocate.
+#[cfg(not(test))]
+fn counted(write: &impl Fn(&mut dyn Write) -> fmt::Result) -> Fallible<usize> {
+    let mut counted = Counted(0);
+    write(&mut counted).map_err(|_| out_of_memory())?;
+    Ok(counted.0)
+}
+
+/// Write what `write` writes into `text`'s bytes, which [`counted`]
+/// counted.
+#[cfg(not(test))]
+fn filled(write: &impl Fn(&mut dyn Write) -> fmt::Result, text: &Text) -> Fallible {
+    // SAFETY: the buffer has room for what is counted.
+    let mut filled = Filled {
+        bytes: unsafe { core::slice::from_raw_parts_mut(text.bytes.cast_mut(), text.len) },
+        len: 0,
+    };
+    write(&mut filled).map_err(|_| out_of_memory())
+}
+
+/// A text a failure makes for its error, whose one reference is its own,
+/// given up when it is dropped, after the error takes its own
+/// ([`fail_as`]): held by no scope, which a statement that makes nothing
+/// hasn't begun.
+#[cfg(not(test))]
+struct Made(Text);
+
+#[cfg(not(test))]
+impl Made {
+    /// `text`. Fails if there is no memory for it.
+    fn text(text: &str) -> Fallible<Made> {
+        Made::written(|out| out.write_str(text))
+    }
+
+    /// What `write` writes. Fails if there is no memory for it.
+    fn written(write: impl Fn(&mut dyn Write) -> fmt::Result) -> Fallible<Made> {
+        let len = counted(&write)?;
+        let made = Made(Text {
+            bytes: new_buffer(len, core::ptr::null())?,
+            len,
+        });
+        filled(&write, &made.0)?;
+        Ok(made)
+    }
+
+    /// Where it is, as a component's value.
+    fn at(&self) -> *const u8 {
+        (&raw const self.0).cast()
+    }
+}
+
+#[cfg(not(test))]
+impl Drop for Made {
+    fn drop(&mut self) {
+        // SAFETY: the reference is its own.
+        unsafe { release_buffer(self.0.bytes.cast_mut()) }
+    }
+}
+
+/// Where a load that gives its errors puts them, as the compiler lays it
+/// out: the relation of them, `relation { error: error }`, and its
+/// descriptor's address. Their types are the compiler's table's
+/// ([`Failures`]).
 #[repr(C)]
 pub struct Errors {
     pub found: Text,
-    pub types: *const *const TypeDesc,
+    pub relation: *const TypeDesc,
 }
 
-/// The place of `unreadable_file`'s type among an [`Errors`]'s
-/// descriptors, after the relation's, as `hir::UpdateBuiltin::errors`
-/// lists the errors `load_csv` gives, of which `load_text_file`'s are the
-/// first two.
-pub const UNREADABLE_FILE: usize = 1;
+/// What the compiler tells the runtime, once, as the program starts
+/// ([`trendy_rt_failures`]), about the errors the language makes, values of
+/// the subtypes of the prelude's type `error`: where a failure's error
+/// waits for what takes it, a transaction or the program's entry, the
+/// program's own variable `__failure`, null when none waits, and where its
+/// site does, `__failure_site`; the type's descriptor; and each kind's,
+/// [`Kind`], in `hir::LanguageError::ALL`'s order, which [`KINDS`] names.
+#[repr(C)]
+pub struct Failures {
+    pub error: *mut u8,
+    pub site: *mut usize,
+    pub desc: *const TypeDesc,
+    pub kinds: *const Kind,
+    pub count: usize,
+}
+
+/// A kind of error the language makes, in the compiler's table
+/// ([`Failures`]): its type's name, its components' descriptor, as its
+/// selector writes them, and the code a failure with it is written with
+/// when nothing takes it.
+#[repr(C)]
+pub struct Kind {
+    pub name: Text,
+    pub desc: *const TypeDesc,
+    pub code: Text,
+}
+
+/// The names of the kinds of error the runtime makes, each at its place
+/// in the compiler's table, which [`trendy_rt_failures`] checks.
+pub const KINDS: [&str; 12] = [
+    "unreadable_file",
+    "not_utf8",
+    "malformed_csv",
+    "missing_column",
+    "unreadable_field",
+    "broken_constraint_in_file",
+    "component_key_violated_in_file",
+    "overlapping_subtypes_in_file",
+    "overflow",
+    "division_by_zero",
+    "not_one_tuple",
+    "index_out_of_range",
+];
+
+/// The place in [`KINDS`] of the kind named `name`, found when the runtime
+/// is compiled: a name that isn't one doesn't compile.
+const fn place(name: &str) -> usize {
+    let mut i = 0;
+    while i < KINDS.len() {
+        if same(KINDS[i].as_bytes(), name.as_bytes()) {
+            return i;
+        }
+        i += 1;
+    }
+    panic!("not a kind of error the runtime makes");
+}
+
+/// Whether `a` and `b` are the same bytes, as `==` would say, when the
+/// runtime is compiled.
+const fn same(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// The place of `unreadable_file` in the compiler's table of errors.
+pub const UNREADABLE_FILE: usize = place("unreadable_file");
 /// `not_utf8`'s, as [`UNREADABLE_FILE`] is.
-pub const NOT_UTF8: usize = 2;
+pub const NOT_UTF8: usize = place("not_utf8");
 /// `malformed_csv`'s, as [`UNREADABLE_FILE`] is.
-pub const MALFORMED_CSV: usize = 3;
+pub const MALFORMED_CSV: usize = place("malformed_csv");
 /// `missing_column`'s, as [`UNREADABLE_FILE`] is.
-pub const MISSING_COLUMN: usize = 4;
+pub const MISSING_COLUMN: usize = place("missing_column");
 /// `unreadable_field`'s, as [`UNREADABLE_FILE`] is.
-pub const UNREADABLE_FIELD: usize = 5;
+pub const UNREADABLE_FIELD: usize = place("unreadable_field");
 /// `broken_constraint_in_file`'s, as [`UNREADABLE_FILE`] is.
-pub const BROKEN_CONSTRAINT_IN_FILE: usize = 6;
+pub const BROKEN_CONSTRAINT_IN_FILE: usize = place("broken_constraint_in_file");
 /// `component_key_violated_in_file`'s, as [`UNREADABLE_FILE`] is.
-pub const COMPONENT_KEY_VIOLATED_IN_FILE: usize = 7;
+pub const COMPONENT_KEY_VIOLATED_IN_FILE: usize = place("component_key_violated_in_file");
 /// `overlapping_subtypes_in_file`'s, as [`UNREADABLE_FILE`] is.
-pub const OVERLAPPING_SUBTYPES_IN_FILE: usize = 8;
+pub const OVERLAPPING_SUBTYPES_IN_FILE: usize = place("overlapping_subtypes_in_file");
+/// `overflow`'s, as [`UNREADABLE_FILE`] is.
+pub const OVERFLOW: usize = place("overflow");
+/// `division_by_zero`'s, as [`UNREADABLE_FILE`] is.
+pub const DIVISION_BY_ZERO: usize = place("division_by_zero");
+/// `not_one_tuple`'s, as [`UNREADABLE_FILE`] is.
+pub const NOT_ONE_TUPLE: usize = place("not_one_tuple");
+/// `index_out_of_range`'s, as [`UNREADABLE_FILE`] is.
+pub const INDEX_OUT_OF_RANGE: usize = place("index_out_of_range");
+
+/// The compiler's table of errors, null until the program's entry gives
+/// it ([`trendy_rt_failures`]).
+#[cfg(not(test))]
+static FAILURES: core::sync::atomic::AtomicPtr<Failures> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
+/// Take the compiler's table of errors, `failures`, which lasts as long as
+/// the program, checking that each kind is where the runtime knows it
+/// ([`KINDS`]): if not, the compiler and the runtime disagree (X0000).
+///
+/// # Safety
+///
+/// `failures` must point to a valid [`Failures`], whose places are the
+/// program's variables, which last as long as it does.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_failures(failures: *mut Failures) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let table = &*failures;
+        let kinds = core::slice::from_raw_parts(table.kinds, table.count);
+        let agree = kinds.len() == KINDS.len()
+            && kinds
+                .iter()
+                .zip(KINDS)
+                .all(|(kind, name)| read_text((&raw const kind.name).cast()) == name);
+        if !agree {
+            internal_error("the compiler's table of errors isn't the runtime's");
+        }
+        FAILURES.store(failures, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// The compiler's table of errors, which the program's entry gives as it
+/// starts.
+#[cfg(not(test))]
+fn failures() -> &'static Failures {
+    let failures = FAILURES.load(core::sync::atomic::Ordering::Relaxed);
+    // SAFETY: the table lasts as long as the program.
+    unsafe { failures.as_ref() }.unwrap_or_else(|| internal_error("no table of errors was given"))
+}
+
+/// The kind at `kind` in the compiler's table of errors.
+#[cfg(not(test))]
+fn kind(kind: usize) -> &'static Kind {
+    // SAFETY: the table has the kinds `KINDS` names, as
+    // `trendy_rt_failures` checks, and each place is one of theirs.
+    unsafe { &*failures().kinds.add(kind) }
+}
+
+/// Write at `dst` the error of the kind at `kind` in the compiler's table,
+/// a value of the type `desc` describes, the prelude's `error`, whose
+/// components are `components`, each by name, a pointer to a value of its
+/// type, copied: the kind's descriptor, then the components, as its
+/// selector writes them. What they point to is held as the components
+/// were.
+///
+/// # Safety
+///
+/// `dst` must point to memory for a value `desc` describes, and
+/// `components` be the kind's, each pointing to a valid value.
+#[cfg(not(test))]
+unsafe fn make_error(dst: *mut u8, desc: &TypeDesc, kind: usize, components: &[(&str, *const u8)]) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let [within] = attributes(desc) else {
+            unreachable!("a value in a hierarchy has its components in one attribute");
+        };
+        let own = self::kind(kind).desc;
+        dst.cast::<*const TypeDesc>().write_unaligned(own);
+        for component in attributes(&*own) {
+            let (_, src) = components
+                .iter()
+                .find(|(n, _)| *n == name(component))
+                .expect("the compiler and the runtime agree on an error's components");
+            let at = dst.add(within.offset + component.offset);
+            core::ptr::copy_nonoverlapping(*src, at, (*component.desc).size);
+        }
+    }
+}
+
+/// Fail with the error of the kind at `kind` in the compiler's table,
+/// whose components are `components`, as [`make_error`] takes them, which
+/// the failing statement's scope holds what they point to of: the error
+/// waits, with the site the program is at, for what takes it, a
+/// transaction or the program's entry, which writes it, as a `fail`'s
+/// does. It takes references of its own before any an error waiting has
+/// are given up. With no memory for it, the program fails as it does for
+/// none, with no error.
+///
+/// # Safety
+///
+/// `components` must be the kind's, each pointing to a valid value.
+#[cfg(not(test))]
+unsafe fn fail_as(kind: usize, components: &[(&str, *const u8)]) -> Failed {
+    let failures = failures();
+    // SAFETY: the table's places and descriptors are the compiler's, and
+    // the rest is guaranteed by the caller.
+    unsafe {
+        let desc = &*failures.desc;
+        let Ok(made) = Temp::<u8>::zeroed(desc.size) else {
+            return Failed;
+        };
+        make_error(made.ptr(), desc, kind, components);
+        retain(made.ptr(), desc);
+        release(failures.error, desc);
+        core::ptr::copy_nonoverlapping(made.ptr(), failures.error, desc.size);
+        let site = SITE.load(core::sync::atomic::Ordering::Relaxed);
+        failures.site.write_unaligned(site as usize);
+    }
+    Failed
+}
 
 /// A relation-valued component of a value, as the compiler lays its names
 /// out: the name of the value's type, and the component's.
@@ -3744,10 +3968,10 @@ pub unsafe extern "C" fn trendy_rt_broken_constraint_error(
 
 /// The errors a load finds, as it finds them: their tuples, `{ error: … }`,
 /// one after another, in memory from `malloc`, freed when it is dropped,
-/// of the types an [`Errors`]'s descriptors describe.
+/// of the relation's type an [`Errors`]'s descriptor describes.
 #[cfg(not(test))]
 struct Found {
-    types: *const *const TypeDesc,
+    relation: *const TypeDesc,
     /// Null before the first.
     tuples: *mut u8,
     count: usize,
@@ -3756,10 +3980,10 @@ struct Found {
 
 #[cfg(not(test))]
 impl Found {
-    /// None yet, of the types the descriptors at `types` describe.
-    fn new(types: *const *const TypeDesc) -> Found {
+    /// None yet, of the relation's type `relation` describes.
+    fn new(relation: *const TypeDesc) -> Found {
         Found {
-            types,
+            relation,
             tuples: core::ptr::null_mut(),
             count: 0,
             capacity: 0,
@@ -3775,7 +3999,7 @@ impl Found {
     unsafe fn of(errors: &Errors) -> Fallible<Found> {
         // SAFETY: guaranteed by the caller.
         unsafe {
-            let mut found = Found::new(errors.types);
+            let mut found = Found::new(errors.relation);
             let size = found.relation().element().size;
             for i in 0..errors.found.len {
                 let src = errors.found.bytes.add(i * size);
@@ -3799,11 +4023,11 @@ impl Found {
             if self.count == self.capacity {
                 let capacity = self.capacity.saturating_mul(2).max(4);
                 let Some(bytes) = capacity.checked_mul(tuple.size) else {
-                    return Err(fail(Failure::OutOfMemory));
+                    return Err(out_of_memory());
                 };
                 let grown = realloc(self.tuples.cast(), bytes.max(1));
                 if grown.is_null() {
-                    return Err(fail(Failure::OutOfMemory));
+                    return Err(out_of_memory());
                 }
                 self.tuples = grown.cast();
                 self.capacity = capacity;
@@ -3819,20 +4043,20 @@ impl Found {
     ///
     /// # Safety
     ///
-    /// The descriptors must be valid.
+    /// The descriptor must be valid.
     unsafe fn relation(&self) -> &'static TypeDesc {
         // SAFETY: guaranteed by the caller.
-        unsafe { &**self.types }
+        unsafe { &*self.relation }
     }
 
-    /// Add an error of the type at `index` among the descriptors, whose
-    /// components are `components`, each by name, a pointer to a value of
-    /// its type, which the statement's scope holds what it points to of.
+    /// Add an error of the kind at `kind` in the compiler's table, whose
+    /// components are `components`, as [`make_error`] takes them, which
+    /// the statement's scope holds what they point to of.
     ///
     /// # Safety
     ///
-    /// The descriptors must be valid, and `components` the type's.
-    unsafe fn add(&mut self, index: usize, components: &[(&str, *const u8)]) -> Fallible {
+    /// The descriptor must be valid, and `components` the kind's.
+    unsafe fn add(&mut self, kind: usize, components: &[(&str, *const u8)]) -> Fallible {
         // SAFETY: guaranteed by the caller.
         unsafe {
             let tuple = self.relation().element();
@@ -3840,20 +4064,12 @@ impl Found {
             let [attribute] = attributes(tuple) else {
                 unreachable!("a relation of errors has one attribute");
             };
-            let [within] = attributes(&*attribute.desc) else {
-                unreachable!("a value in a hierarchy has its components in one attribute");
-            };
-            let own = *self.types.add(index);
-            let value = made.add(attribute.offset);
-            value.cast::<*const TypeDesc>().write_unaligned(own);
-            for component in attributes(&*own) {
-                let (_, src) = components
-                    .iter()
-                    .find(|(n, _)| *n == name(component))
-                    .expect("the compiler and the runtime agree on an error's components");
-                let at = value.add(within.offset + component.offset);
-                core::ptr::copy_nonoverlapping(*src, at, (*component.desc).size);
-            }
+            make_error(
+                made.add(attribute.offset),
+                &*attribute.desc,
+                kind,
+                components,
+            );
             self.count += 1;
             Ok(())
         }
@@ -3992,7 +4208,7 @@ pub unsafe extern "C" fn trendy_rt_load_csv_with_errors(
             header: *header != 0,
             columns: &*columns,
         };
-        let mut found = Found::new((*errors).types);
+        let mut found = Found::new((*errors).relation);
         let (rows, starts) = load_csv(&file, &*desc, Some(&mut found))?;
         let found = found.finish()?;
         dst.write_unaligned(rows);
@@ -4194,11 +4410,11 @@ impl Reading<'_> {
         unsafe {
             let (element, count) = (self.element, self.records.count);
             let Some(size) = count.checked_mul(element.size) else {
-                return Err(fail(Failure::OutOfMemory));
+                return Err(out_of_memory());
             };
             let rows = allocate_buffer(size, desc)?;
             let Some(lines_size) = count.checked_mul(size_of::<usize>()) else {
-                return Err(fail(Failure::OutOfMemory));
+                return Err(out_of_memory());
             };
             let starts = allocate_buffer(lines_size, core::ptr::null())?;
             // Each record's tuple, made here, then copied into the array.
@@ -4821,7 +5037,7 @@ fn try_read_file(path: &str) -> Fallible<Result<Temp<u8>, &'static str>> {
         return Ok(Err("a path can't contain the character U+0000"));
     }
     let Some(terminated) = path.len().checked_add(1) else {
-        return Err(fail(Failure::OutOfMemory));
+        return Err(out_of_memory());
     };
     // SAFETY: the memory is for the path's bytes and a NUL, read by `open`;
     // the descriptor is read, then closed, and `read` writes at most the
@@ -4839,7 +5055,7 @@ fn try_read_file(path: &str) -> Fallible<Result<Temp<u8>, &'static str>> {
             loop {
                 if len == contents.len {
                     let Some(grown) = contents.len.checked_mul(2) else {
-                        return Err(fail(Failure::OutOfMemory));
+                        return Err(out_of_memory());
                     };
                     contents.grow(grown)?;
                 }

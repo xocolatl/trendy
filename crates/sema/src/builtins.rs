@@ -367,7 +367,7 @@ pub(crate) fn operators(
 /// the compiler needs them, at its end: a program fails with a value of the
 /// union type `error`, writing its message, which the specification
 /// `message{error: error}: text` gives. So too the errors built-ins give
-/// (`hir::BuiltinError`), which the runtime makes, and the heading
+/// (`hir::LanguageError`), which the runtime makes, and the heading
 /// `transaction_collection`, what a transaction collects
 /// (`hir::transaction_collection`), whose tuples lowering makes.
 pub(crate) fn failures(
@@ -409,7 +409,7 @@ pub(crate) fn failures(
     }
     // The errors the built-ins give, each a subtype of `error` with the
     // components the runtime makes it with.
-    for error in hir::BuiltinError::ALL {
+    for error in hir::LanguageError::ALL {
         let declared = namespaces.defined(error.name()).and_then(|(_, d)| d);
         let components = error.components();
         let as_made = declared.is_some_and(|defined| {

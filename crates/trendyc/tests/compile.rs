@@ -609,18 +609,6 @@ fn approximate_failures_stop_the_program() {
         )
     };
     // The error writes the operation, with its operands' values.
-    let overflow = |operation: &str| {
-        format!(
-            "error[{}]: approximate overflow: {operation} is too large for an approximate number",
-            Code::Overflow.id()
-        )
-    };
-    let division = |operation: &str| {
-        format!(
-            "error[{}]: division by zero: {operation} has no result",
-            Code::DivisionByZero.id()
-        )
-    };
     let cases = [
         ("add", "a + a", overflow("1e308 + 1e308")),
         ("subtract", "-a - a", overflow("-1e308 - 1e308")),
@@ -971,7 +959,7 @@ fn transactions() {
         (
             0,
             format!(
-                "{moved}{table}{day}{table}warning[{}]: Cusco has 35 sacks left\n --> transactions.trendy:44:9\n{after}",
+                "{moved}{table}{day}{table}warning[{}]: Cusco has 35 sacks left\n --> transactions.trendy:54:9\n{after}relation {{ failed: boolean, message: text }} {{ {{ failed: true, message: \"division by zero: 40 div 0 has no result\" }} }}\n",
                 trendy_diag::Code::Warned.id()
             )
         )
@@ -982,8 +970,8 @@ fn transactions() {
 /// variable, a local variable, and a `var` parameter's variable, at any
 /// depth of the calls it makes, and many times over in a loop. Nested, a
 /// transaction undoes its own; without `collecting`, its failure goes on
-/// to the one around it. A failure of the language's own carries no error
-/// yet, so it goes on, and stops the program.
+/// to the one around it. A failure of the language's own, as a division
+/// by zero, it takes as it takes a `fail`, undoing what came before it.
 #[test]
 fn transactions_undo_what_a_failure_leaves() {
     let source = "type refused is error { { reason: text } };
@@ -1040,15 +1028,16 @@ operator main{} [
     call debug_table{r: log};
     var divided: relation transaction_collection;
     transaction collecting divided [
+        total := total + 1;
         total := total div (total - total);
     ];
-    call debug_value{v: \"not reached\"};
+    call debug_value{v: tuple { total: total, error: message{error: value from divided{error}} }};
 ];
 ";
     assert_eq!(
         run_source("undone", source),
         (
-            1,
+            0,
             "tuple { errors: 1, label: \"start\", total: 50 }
 1
 tuple { errors: 0, total: 60 }
@@ -1058,10 +1047,77 @@ tuple { errors: 1, total: 60 }
 ├───────┤
 │ by 10 │
 └───────┘
-error[R0002]: division by zero: 60 div 0 has no result
- --> undone.trendy:55:9
+tuple { error: \"division by zero: 61 div 0 has no result\", total: 60 }
 "
             .to_string()
+        )
+    );
+}
+
+/// The language's own failures: an error each, which a transaction
+/// takes, a value of the prelude's subtype of `error` for its kind; one
+/// nothing takes is written with its kind's code, as is a program's own
+/// `fail` of one of those kinds.
+#[test]
+fn the_languages_failures_are_errors_a_transaction_takes() {
+    let source = "var sacks: relation { city: text, n: integer } := relation {
+    { city: \"Lagos\", n: 4 },
+    { city: \"Hanoi\", n: 0 },
+}
+key { city };
+
+operator main{} [
+    var found: relation transaction_collection;
+    var zero := 0;
+    var big := 9223372036854775807;
+    var shelf := array [3, 1];
+    transaction collecting found [
+        call debug_value{v: 7 div zero};
+    ];
+    transaction collecting found [
+        call debug_value{v: big + 1};
+    ];
+    transaction collecting found [
+        call debug_value{v: value from sacks{n}};
+    ];
+    transaction collecting found [
+        call debug_value{v: shelf[zero + 3]};
+    ];
+    transaction collecting found [
+        call debug_value{v: sum{r: relation { { n: big }, { n: 1 } }, of: n}};
+    ];
+    call debug_value{v: (found extend { message := message{error: error} }){message, failed}};
+    call debug_value{v: shelf[zero + 5]};
+];
+";
+    let messages = [
+        "division by zero: 7 div 0 has no result",
+        "overflow: 9223372036854775807 + 1 is out of its type's range",
+        "overflow: the sum is out of its type's range",
+        "the array has 2 elements, so none at position 3",
+        "the relation has 2 tuples, but exactly one is taken",
+    ];
+    let taken: Vec<String> = messages
+        .iter()
+        .map(|message| format!("{{ failed: true, message: \"{message}\" }}"))
+        .collect();
+    assert_eq!(
+        run_source("taken", source),
+        (
+            1,
+            format!(
+                "relation {{ failed: boolean, message: text }} {{ {} }}\nerror[{}]: the array has 2 elements, so none at position 5\n --> taken.trendy:28:5\n",
+                taken.join(", "),
+                trendy_diag::Code::IndexOutOfRange.id()
+            )
+        )
+    );
+    let source = "operator main{} [\n    fail division_by_zero{operation: \"1 div 0\"};\n];\n";
+    assert_eq!(
+        run_source("own_kind", source),
+        (
+            1,
+            format!("{}\n --> own_kind.trendy:2:5\n", division("1 div 0"))
         )
     );
 }
@@ -2619,10 +2675,10 @@ fn run_source(name: &str, source: &str) -> (i32, String) {
     build_and_run(&input, &dir.join(name), &workspace_root())
 }
 
-/// The error an integer overflow writes, of `operation`.
+/// The error an overflow writes, of `operation`.
 fn overflow(operation: &str) -> String {
     format!(
-        "error[{}]: integer overflow: {operation} doesn't fit in a 64-bit integer",
+        "error[{}]: overflow: {operation} is out of its type's range",
         trendy_diag::Code::Overflow.id()
     )
 }

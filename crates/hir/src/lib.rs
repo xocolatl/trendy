@@ -8,6 +8,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use trendy_diag::Code;
+
 pub use trendy_text::Unparsable;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,20 +76,21 @@ impl Program {
         variables
     }
 
-    /// The type of `error`, which the prelude declares, as sema checks.
+    /// The type of `error`, a subtype of `error` the prelude declares, as
+    /// sema checks.
     ///
     /// # Panics
     ///
     /// If the prelude doesn't declare it, which sema rules out.
     #[must_use]
-    pub fn builtin_error(&self, error: BuiltinError) -> &Defined {
+    pub fn language_error(&self, error: LanguageError) -> &Defined {
         self.subtypes["error"]
             .iter()
             .find_map(|ty| match ty {
                 Type::Defined(defined) if defined.name == error.name() => Some(&**defined),
                 _ => None,
             })
-            .expect("the prelude declares the errors built-ins give")
+            .expect("the prelude declares the errors the language makes")
     }
 
     /// The type of `expr`, inside an operator with the parameters
@@ -485,7 +488,7 @@ pub enum UpdateBuiltin {
     LoadTextFile,
     /// As [`UpdateBuiltin::LoadTextFile`], but a file it can't read gives
     /// its error in the `out` parameter `errors` rather than stopping the
-    /// program (see [`UpdateBuiltin::errors`]).
+    /// program: an `unreadable_file` or a `not_utf8` ([`LanguageError`]).
     LoadTextFileWithErrors,
     /// The records of a CSV file, as tuples whose attributes are its
     /// columns of their names, read when the program runs, as
@@ -493,8 +496,8 @@ pub enum UpdateBuiltin {
     LoadCsv,
     /// As [`UpdateBuiltin::LoadCsv`], but a file it can't read gives its
     /// error in the `out` parameter `errors`, as does each record it
-    /// can't, which it skips, rather than stopping the program (see
-    /// [`UpdateBuiltin::errors`]).
+    /// can't, which it skips, rather than stopping the program: the
+    /// [`LanguageError`]s of reading a file.
     LoadCsvWithErrors,
 }
 
@@ -511,31 +514,6 @@ impl UpdateBuiltin {
             | UpdateBuiltin::LoadTextFileWithErrors
             | UpdateBuiltin::LoadCsv
             | UpdateBuiltin::LoadCsvWithErrors => true,
-        }
-    }
-
-    /// The errors it gives in its `out` parameter `errors`, rather than
-    /// stopping the program, if it has one.
-    #[must_use]
-    pub fn errors(self) -> &'static [BuiltinError] {
-        match self {
-            UpdateBuiltin::LoadTextFileWithErrors => {
-                &[BuiltinError::UnreadableFile, BuiltinError::NotUtf8]
-            }
-            UpdateBuiltin::LoadCsvWithErrors => &[
-                BuiltinError::UnreadableFile,
-                BuiltinError::NotUtf8,
-                BuiltinError::MalformedCsv,
-                BuiltinError::MissingColumn,
-                BuiltinError::UnreadableField,
-                BuiltinError::BrokenConstraintInFile,
-                BuiltinError::ComponentKeyViolatedInFile,
-                BuiltinError::OverlappingSubtypesInFile,
-            ],
-            UpdateBuiltin::DebugValue
-            | UpdateBuiltin::DebugTable
-            | UpdateBuiltin::LoadTextFile
-            | UpdateBuiltin::LoadCsv => &[],
         }
     }
 
@@ -565,12 +543,14 @@ pub fn transaction_collection(error_type: Type) -> Heading {
     )
 }
 
-/// An error a built-in gives, rather than stopping the program: a value of
-/// a subtype of the prelude's union type `error`, which the prelude
+/// An error the language makes: one a built-in gives in its `out`
+/// parameter `errors`, rather than stopping the program, or one a failure
+/// of the program's values fails with, which a transaction takes. A value
+/// of a subtype of the prelude's union type `error`, which the prelude
 /// declares with these components, as sema checks, and which the runtime
-/// makes.
+/// makes, knowing each by its place in [`LanguageError::ALL`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum BuiltinError {
+pub enum LanguageError {
     /// A file can't be read, for the system's reason (R0012).
     UnreadableFile,
     /// A file isn't UTF-8 text, from a line on (R0013).
@@ -592,32 +572,67 @@ pub enum BuiltinError {
     /// defined by constraints, but a value has one most specific type
     /// (R0020).
     OverlappingSubtypesInFile,
+    /// An operation's result is out of its type's range (R0001).
+    Overflow,
+    /// An operation divides by zero (R0002).
+    DivisionByZero,
+    /// A relation hasn't one tuple, where its only one is taken (R0005).
+    NotOneTuple,
+    /// An array has no element at a position (R0011).
+    IndexOutOfRange,
 }
 
-impl BuiltinError {
-    pub const ALL: [BuiltinError; 8] = [
-        BuiltinError::UnreadableFile,
-        BuiltinError::NotUtf8,
-        BuiltinError::MalformedCsv,
-        BuiltinError::MissingColumn,
-        BuiltinError::UnreadableField,
-        BuiltinError::BrokenConstraintInFile,
-        BuiltinError::ComponentKeyViolatedInFile,
-        BuiltinError::OverlappingSubtypesInFile,
+impl LanguageError {
+    pub const ALL: [LanguageError; 12] = [
+        LanguageError::UnreadableFile,
+        LanguageError::NotUtf8,
+        LanguageError::MalformedCsv,
+        LanguageError::MissingColumn,
+        LanguageError::UnreadableField,
+        LanguageError::BrokenConstraintInFile,
+        LanguageError::ComponentKeyViolatedInFile,
+        LanguageError::OverlappingSubtypesInFile,
+        LanguageError::Overflow,
+        LanguageError::DivisionByZero,
+        LanguageError::NotOneTuple,
+        LanguageError::IndexOutOfRange,
     ];
+
+    /// The code a failure with it is written with, when nothing takes it.
+    #[must_use]
+    pub fn code(self) -> Code {
+        match self {
+            LanguageError::UnreadableFile => Code::UnreadableFile,
+            LanguageError::NotUtf8 => Code::NotUtf8,
+            LanguageError::MalformedCsv => Code::MalformedCsv,
+            LanguageError::MissingColumn => Code::CsvColumns,
+            LanguageError::UnreadableField => Code::Unparsable,
+            LanguageError::BrokenConstraintInFile => Code::BrokenConstraint,
+            LanguageError::ComponentKeyViolatedInFile => Code::KeyViolated,
+            LanguageError::OverlappingSubtypesInFile => Code::OverlappingSubtypes,
+            LanguageError::Overflow => Code::Overflow,
+            LanguageError::DivisionByZero => Code::DivisionByZero,
+            LanguageError::NotOneTuple => Code::NotOneTuple,
+            LanguageError::IndexOutOfRange => Code::IndexOutOfRange,
+        }
+    }
 
     /// The name of its type.
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
-            BuiltinError::UnreadableFile => "unreadable_file",
-            BuiltinError::NotUtf8 => "not_utf8",
-            BuiltinError::MalformedCsv => "malformed_csv",
-            BuiltinError::MissingColumn => "missing_column",
-            BuiltinError::UnreadableField => "unreadable_field",
-            BuiltinError::BrokenConstraintInFile => "broken_constraint_in_file",
-            BuiltinError::ComponentKeyViolatedInFile => "component_key_violated_in_file",
-            BuiltinError::OverlappingSubtypesInFile => "overlapping_subtypes_in_file",
+            LanguageError::UnreadableFile => "unreadable_file",
+            LanguageError::NotUtf8 => "not_utf8",
+            LanguageError::MalformedCsv => "malformed_csv",
+            LanguageError::MissingColumn => "missing_column",
+            LanguageError::UnreadableField => "unreadable_field",
+            LanguageError::BrokenConstraintInFile => "broken_constraint_in_file",
+            LanguageError::ComponentKeyViolatedInFile => "component_key_violated_in_file",
+            LanguageError::OverlappingSubtypesInFile => "overlapping_subtypes_in_file",
+            LanguageError::Overflow => "overflow",
+            LanguageError::DivisionByZero => "division_by_zero",
+            LanguageError::NotOneTuple => "not_one_tuple",
+            LanguageError::IndexOutOfRange => "index_out_of_range",
         }
     }
 
@@ -626,16 +641,16 @@ impl BuiltinError {
     pub fn components(self) -> Heading {
         let (text, integer) = (Scalar::Text, Scalar::Integer);
         let components: &[(&str, Scalar)] = match self {
-            BuiltinError::UnreadableFile => &[("path", text), ("reason", text)],
-            BuiltinError::NotUtf8 => &[("path", text), ("line", integer)],
-            BuiltinError::MalformedCsv => &[("path", text), ("line", integer), ("problem", text)],
-            BuiltinError::MissingColumn => &[
+            LanguageError::UnreadableFile => &[("path", text), ("reason", text)],
+            LanguageError::NotUtf8 => &[("path", text), ("line", integer)],
+            LanguageError::MalformedCsv => &[("path", text), ("line", integer), ("problem", text)],
+            LanguageError::MissingColumn => &[
                 ("path", text),
                 ("attribute", text),
                 ("column", integer),
                 ("columns", integer),
             ],
-            BuiltinError::UnreadableField => &[
+            LanguageError::UnreadableField => &[
                 ("path", text),
                 ("line", integer),
                 ("column", integer),
@@ -644,7 +659,7 @@ impl BuiltinError {
                 ("text", text),
                 ("out_of_range", Scalar::Boolean),
             ],
-            BuiltinError::BrokenConstraintInFile => &[
+            LanguageError::BrokenConstraintInFile => &[
                 ("path", text),
                 ("line", integer),
                 ("attribute", text),
@@ -652,7 +667,7 @@ impl BuiltinError {
                 ("type", text),
                 ("constraint", text),
             ],
-            BuiltinError::ComponentKeyViolatedInFile => &[
+            LanguageError::ComponentKeyViolatedInFile => &[
                 ("path", text),
                 ("line", integer),
                 ("attribute", text),
@@ -662,7 +677,7 @@ impl BuiltinError {
                 ("first", text),
                 ("second", text),
             ],
-            BuiltinError::OverlappingSubtypesInFile => &[
+            LanguageError::OverlappingSubtypesInFile => &[
                 ("path", text),
                 ("line", integer),
                 ("attribute", text),
@@ -670,6 +685,9 @@ impl BuiltinError {
                 ("first", text),
                 ("second", text),
             ],
+            LanguageError::Overflow | LanguageError::DivisionByZero => &[("operation", text)],
+            LanguageError::NotOneTuple => &[("count", integer)],
+            LanguageError::IndexOutOfRange => &[("position", integer), ("length", integer)],
         };
         Heading::new(
             components
@@ -692,7 +710,7 @@ impl BuiltinError {
     #[must_use]
     pub fn relation() -> Type {
         Type::Relation(Heading::new(
-            [("error".to_string(), BuiltinError::union())].into(),
+            [("error".to_string(), LanguageError::union())].into(),
         ))
     }
 }
@@ -850,7 +868,7 @@ impl Builtin {
             Builtin::Update(UpdateBuiltin::LoadTextFileWithErrors) => [
                 constant("path", Type::Scalar(Scalar::Text)),
                 out("lines", Type::Array(Box::new(Type::Scalar(Scalar::Text)))),
-                out("errors", BuiltinError::relation()),
+                out("errors", LanguageError::relation()),
             ]
             .into(),
             Builtin::Update(UpdateBuiltin::LoadCsv) => [
@@ -865,7 +883,7 @@ impl Builtin {
                 constant("header", Type::Scalar(Scalar::Boolean)),
                 constant("columns", parameter(0)),
                 out("rows", Type::Array(Box::new(parameter(1)))),
-                out("errors", BuiltinError::relation()),
+                out("errors", LanguageError::relation()),
             ]
             .into(),
             Builtin::ReadOnly(

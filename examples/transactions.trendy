@@ -8,6 +8,16 @@ var granaries: relation { city: text, native: text, sacks: integer } := relation
 }
 key { city };
 
+/* The families each granary feeds: Tashkent's is new, and feeds none
+   yet. */
+var fed: relation { city: text, families: integer } := relation {
+    { city: "Accra", families: 6 },
+    { city: "Dhaka", families: 5 },
+    { city: "Cusco", families: 8 },
+    { city: "Tashkent", families: 0 },
+}
+key { city };
+
 /* Too few sacks in a granary for a transfer: an error of the program's
    own, which says what went wrong as values. */
 type too_few is error { { city: text, sacks: integer, asked: integer } };
@@ -91,4 +101,14 @@ operator main{} [
        writes it, and where it warned, and carries on. */
     call transfer{origin: "Cusco", destination: "Dhaka", n: 5};
     call debug_table{r: granaries};
+    /* A failure of the language's own is an error too, which a
+       transaction takes as it takes a `fail`'s: the sacks each family of
+       a granary gets, where Tashkent's feeds none, divide by zero, a
+       `division_by_zero`. */
+    var shares: relation { city: text, share: integer };
+    var unshared: relation transaction_collection;
+    transaction collecting unshared [
+        shares := ((granaries join fed) extend { share := sacks div families }){city, share};
+    ];
+    call report{collected: unshared};
 ];

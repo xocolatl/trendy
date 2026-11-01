@@ -63,14 +63,15 @@ statement, which nothing evaluates when compiling, and which lowering
 makes a runtime call (`trendy_rt_load_text_file`) and an assignment of
 its result. Its overload with `out errors`, `relation { error: error }`,
 gives a file's failures as values rather than stopping the program
-(`trendy_rt_load_text_file_with_errors`): the errors a built-in can give
-are the compiler's (`hir::UpdateBuiltin::errors`, `hir::BuiltinError`,
-each a name and components), which sema checks the prelude declares as
-subtypes of `error` with just those components (`builtins::failures`),
-and lowering gives the runtime the relation's descriptor and each
-error's type's, as its selector writes its components
-(`FunctionBuilder::errors`, the runtime's `Errors`), from which the
-runtime makes each value, its type's descriptor's address, then its
+(`trendy_rt_load_text_file_with_errors`): the errors the language makes
+are the compiler's (`hir::LanguageError`, each a name, components and a
+code), which sema checks the prelude declares as subtypes of `error`
+with just those components (`builtins::failures`). The entry gives the
+runtime a table of them, once, each kind's type's descriptor, as its
+selector writes its components, and its code (`Lowering::failures`, the
+runtime's `Failures`, which checks each kind is where it knows it), and
+lowering gives a load the relation's descriptor (`FunctionBuilder::errors`,
+the runtime's `Errors`), from which the runtime makes each value, its type's descriptor's address, then its
 components, and their relation, in canonical order (`Found`). `load_csv`
 has one too, whose reading the stopping one shares (`load_csv`, with or
 without a `Found`): with errors, a record that isn't CSV is skipped
@@ -1659,8 +1660,9 @@ began (`trendy_rt_untrace`), the error is added to the variable, as a
 union with `relation { { error: e, failed: true } }` and the block's
 warnings, checked against its keys (`FunctionBuilder::collect`), and
 `__failure` is released, and the program goes on after the transaction.
-Without `collecting`, or for a failure of the language's own, which has
-no error yet, the rollback ends in `Terminator::Raise`, and the failure
+Without `collecting`, or for a failure with no error, the language's
+own that has none yet, or running out of memory, the rollback ends in
+`Terminator::Raise`, and the failure
 goes on, to the transaction around it, or the function's failure exit.
 
 A warning goes to the innermost transaction with `collecting` running,
@@ -1839,10 +1841,10 @@ produced with Cranelift.
 - calling conventions, and the C-ABI `main` entry shim;
 - the checks of arithmetic instructions, each branching to a cold block that
   calls `trendy_rt_integer_failed` or `trendy_rt_approximate_failed` with
-  the operator and its operands, by value, which writes the error, with
-  the operation, such as `error[R0001]: integer overflow:
-  9223372036854775807 + 1 doesn't fit in a 64-bit integer`, to stderr,
-  then jumps to where the block's failures go. Integer overflow is detected with Cranelift's
+  the operator and its operands, by value, which fails with the error, an
+  `overflow` or a `division_by_zero` of the operation, such as
+  `9223372036854775807 + 1`, then jumps to where the block's failures
+  go. Integer overflow is detected with Cranelift's
   `sadd_overflow` and its kin, and division by zero, or of the smallest
   integer by -1, with explicit comparisons. Approximate operands are always
   finite, so an approximate result overflowed exactly when it is infinite,
@@ -1980,14 +1982,20 @@ values involved, as the error when compiling names them: an arithmetic
 operation and its operands, a tuple a combination or a change finds, a
 join's attribute and its values, a relation's count, an array's
 position and length, or a value and the constraint of its type it
-breaks; a program's own, `fail e`, writes its error's message, which
-lowering computes by calling the prelude's `message` with it, for
-`trendy_rt_failed` (R0021), but not where it fails, since what takes it
-may not write it: the error waits, with the site it failed at, in two
-variables of the program's own, `__failure` and `__failure_site`
-(`Waiting`, `FunctionBuilder::fail_with`), named in the system's
-namespace, which no program can name, and the block ends with
-`Terminator::Raise`. A warning that nothing collects is written where it
+breaks. A program's own, `fail e`, and the language's that are errors,
+an `overflow`, a `division_by_zero`, a `not_one_tuple` and an
+`index_out_of_range`, write their error's message, which lowering
+computes by calling the prelude's `message` with it, for
+`trendy_rt_failed`, with the code of the error's kind, in the table of
+errors (R0021 for one not in it), but not where they fail, since what
+takes the error may not write it: the error waits, with the site it
+failed at, in two variables of the program's own, `__failure` and
+`__failure_site` (`Waiting`), named in the system's namespace, which no
+program can name. A `fail` puts it there (`FunctionBuilder::fail_with`),
+and its block ends with `Terminator::Raise`; the runtime puts the
+language's there (`fail_as`), as the table says where they are, taking
+references of its own to what the error holds, and its function returns
+that it failed. A warning that nothing collects is written where it
 is given, its message and site as `warning[R0022]` (`trendy_rt_warned`),
 with no trace, as no call ends. The program's entry is a function of lowering's
 own (`entry`), which calls `main` and, if it fails, writes the
@@ -2072,7 +2080,7 @@ trendy_syntax  : trendy_diag trendy_text rowan
 trendy_lexer   : trendy_diag trendy_syntax
 trendy_parser  : trendy_diag trendy_syntax trendy_lexer
 trendy_fmt     : trendy_syntax trendy_lexer
-trendy_hir     : trendy_numeric trendy_text
+trendy_hir     : trendy_diag trendy_numeric trendy_text
 trendy_sema    : trendy_diag trendy_syntax trendy_hir trendy_text
 trendy_opt     : trendy_hir
 trendy_lir     :

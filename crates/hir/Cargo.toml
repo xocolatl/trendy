@@ -7,5 +7,6 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
+trendy_diag.workspace = true
 trendy_numeric.workspace = true
 trendy_text.workspace = true

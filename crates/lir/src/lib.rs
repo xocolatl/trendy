@@ -250,10 +250,9 @@ pub enum RuntimeFn {
     /// be read, or isn't UTF-8 text, gives no lines, and its error at
     /// `errors`, rather than failing: an `unreadable_file` or a
     /// `not_utf8`. `errors` is a struct of `relation { error: error }`,
-    /// which it stores the errors in, none if the file is read, and the
-    /// address of an array of descriptors' addresses, the relation's, then
-    /// each error's type's, in `hir::UpdateBuiltin::errors`'s order, as
-    /// its selector writes its components.
+    /// which it stores the errors in, none if the file is read, and its
+    /// descriptor's address; their types are in the table of errors
+    /// ([`RuntimeFn::Failures`]).
     LoadTextFileWithErrors,
     /// `trendy_rt_load_csv(dst, path, header, columns, lines, descriptor)`:
     /// store at `dst` the array of the records of the CSV file at `path`, a
@@ -353,8 +352,9 @@ pub enum RuntimeFn {
     /// isn't a value of the type named `ty`, a text, that it was treated
     /// as, with them.
     NotOfType,
-    /// `trendy_rt_failed(message)`: write the error of a `fail`, whose
-    /// message is `message`, a text.
+    /// `trendy_rt_failed(message, error)`: write the error `error`, a
+    /// value of the prelude's type `error`, that nothing took, whose
+    /// message is `message`, a text, with its kind's code.
     Failed,
     /// `trendy_rt_warned(message)`: write the warning of a `warn` outside
     /// any transaction, whose message is `message`, a text, and carry on.
@@ -443,6 +443,11 @@ pub enum RuntimeFn {
     /// `trendy_rt_write_trace()`: write the calls the trace recorded, as
     /// notes after the failure's error, and forget them.
     WriteTrace,
+    /// `trendy_rt_failures(failures)`: give the runtime, once, as the
+    /// program starts, the table at `failures` of the errors the language
+    /// makes, as its `Failures` lays it out: where a failure's error
+    /// waits, and each kind's type and code.
+    Failures,
     /// `trendy_rt_keep(value, descriptor)`: have the statement's scope hold
     /// a reference to each buffer a value, of the type the descriptor
     /// describes, points to: an update operator's argument, which a
@@ -589,7 +594,7 @@ pub enum RuntimeFn {
 
 impl RuntimeFn {
     /// Every runtime function, for checking the runtime against them.
-    pub const ALL: [RuntimeFn; 67] = [
+    pub const ALL: [RuntimeFn; 68] = [
         RuntimeFn::DebugValue,
         RuntimeFn::DebugTable,
         RuntimeFn::ToText,
@@ -638,6 +643,7 @@ impl RuntimeFn {
         RuntimeFn::TraceSince,
         RuntimeFn::Untrace,
         RuntimeFn::WriteTrace,
+        RuntimeFn::Failures,
         RuntimeFn::Keep,
         RuntimeFn::Retain,
         RuntimeFn::Adopt,
@@ -731,6 +737,7 @@ impl RuntimeFn {
             | RuntimeFn::TraceSince
             | RuntimeFn::Untrace
             | RuntimeFn::WriteTrace
+            | RuntimeFn::Failures
             | RuntimeFn::Retain
             | RuntimeFn::Adopt
             | RuntimeFn::Subset
@@ -791,6 +798,7 @@ impl RuntimeFn {
             RuntimeFn::TraceSince => "trendy_rt_trace_since",
             RuntimeFn::Untrace => "trendy_rt_untrace",
             RuntimeFn::WriteTrace => "trendy_rt_write_trace",
+            RuntimeFn::Failures => "trendy_rt_failures",
             RuntimeFn::Keep => "trendy_rt_keep",
             RuntimeFn::Retain => "trendy_rt_retain",
             RuntimeFn::Adopt => "trendy_rt_adopt",
@@ -1079,9 +1087,10 @@ pub enum Failure {
         descriptor: Place,
         ty: Place,
     },
-    /// The program fails with an error whose message is `message`, a text:
-    /// a `fail`.
-    Own { message: Place },
+    /// The program fails with the error at `error`, a value of the
+    /// prelude's type `error` that nothing took, whose message is
+    /// `message`, a text.
+    Own { message: Place, error: Place },
     /// As [`Failure::BrokenConstraint`], of a value `load_csv` read from the
     /// record `record` describes, laid out as [`Layout::record`].
     BrokenConstraintInFile {
@@ -1176,7 +1185,7 @@ impl Failure {
                 descriptor,
                 ty,
             } => (RuntimeFn::NotOfType, vec![value, descriptor, ty]),
-            Failure::Own { message } => (RuntimeFn::Failed, vec![message]),
+            Failure::Own { message, error } => (RuntimeFn::Failed, vec![message, error]),
             Failure::BrokenConstraintInFile {
                 value,
                 descriptor,

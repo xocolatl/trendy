@@ -38,12 +38,14 @@ pub fn lower(program: &hir::Program, path: &str) -> lir::Program {
     }
 }
 
-/// The function the executable starts in: it calls `main`, and if that
-/// fails, writes the calls the failure passed through (its trace), after
-/// its error, then fails. A `fail`'s error waiting, with nothing to take
-/// it, is written first: its message, as `message` gives it, and where it
-/// failed (R0021). If `message` fails with an error of its own, that one
-/// is written instead; if it fails otherwise, its failure has written its
+/// The function the executable starts in: it gives the runtime the table
+/// of the errors the language makes ([`Lowering::failures`]), calls
+/// `main`, and if that fails, writes the calls the failure passed through
+/// (its trace), after its error, then fails. An error waiting, with
+/// nothing to take it, a `fail`'s or the language's, is written first: its
+/// message, as `message` gives it, with its kind's code, and where it
+/// failed. If `message` fails with an error of its own, that one is
+/// written instead; if it fails otherwise, its failure has written its
 /// error. Either way the trace written is the failure's that is.
 fn entry(
     program: &hir::Program,
@@ -58,11 +60,14 @@ fn entry(
         BTreeMap::new(),
         variable_data,
     );
+    let failures = lir::Place::whole(lir::Base::Data(cx.failures(program)));
+    b.insts.push(lir::Inst::CallRuntime {
+        function: lir::RuntimeFn::Failures,
+        args: vec![failures],
+    });
     let (handle, done) = (b.new_block(), b.new_block());
-    let written = cx
-        .waiting
-        .clone()
-        .map(|waiting| Written::new(&mut b, waiting, cx));
+    let waiting = cx.waiting(program);
+    let written = Written::new(&mut b, waiting, cx);
     b.catching(handle, |b| {
         b.insts.push(lir::Inst::Call {
             function: main,
@@ -72,9 +77,7 @@ fn entry(
     });
     b.end_block(lir::Terminator::Return, handle);
     b.catches.push(handle);
-    if let Some(written) = &written {
-        written.write(&mut b, handle, done, cx);
-    }
+    written.write(&mut b, handle, done, cx);
     b.catches.pop();
     b.end_block(lir::Terminator::Jump(done), done);
 
@@ -82,9 +85,7 @@ fn entry(
         function: lir::RuntimeFn::WriteTrace,
         args: Vec::new(),
     });
-    if let Some(written) = &written {
-        written.release(&mut b, cx);
-    }
+    written.release(&mut b, cx);
     let after = b.new_block();
     b.end_block(lir::Terminator::Failed, after);
     let lowered = b.finish(None, cx);
@@ -184,7 +185,13 @@ impl Written {
                 src: self.waiting.site(),
             });
             let next = this.new_block();
-            this.fail(lir::Failure::Own { message }, next);
+            this.fail(
+                lir::Failure::Own {
+                    message,
+                    error: self.held.clone(),
+                },
+                next,
+            );
         });
         b.end_block(lir::Terminator::Jump(done), unwritten);
         b.insts.push(lir::Inst::CallRuntime {
@@ -341,11 +348,12 @@ impl Collection {
     }
 }
 
-/// Where a `fail`'s error waits for what takes it, a transaction or the
+/// Where a failure's error waits for what takes it, a transaction or the
 /// entry, which writes it: the program's own variable `__failure`, of the
 /// prelude's type `error`, null when no error waits, and `__failure_site`,
-/// the site it failed at. Their names are in the system's namespace,
-/// which no program can name.
+/// the site it failed at. A `fail` puts its error there, and the runtime
+/// the language's ([`Lowering::failures`]). Their names are in the
+/// system's namespace, which no program can name.
 #[derive(Debug, Clone)]
 struct Waiting {
     /// `__failure`'s data object.
@@ -507,7 +515,8 @@ struct Lowering {
     paths: HashMap<hir::File, lir::Field>,
     /// How many functions are numbered.
     numbered: usize,
-    /// Where a `fail`'s error waits, once one is lowered.
+    /// Where a failure's error waits, once a `fail` or the entry is
+    /// lowered.
     waiting: Option<Waiting>,
     /// The warnings of the innermost transaction running, once a
     /// transaction or a `warn` is lowered.
@@ -595,6 +604,33 @@ impl Lowering {
         let waiting = Waiting { error, site, ty };
         self.waiting = Some(waiting.clone());
         waiting
+    }
+
+    /// The table of the errors the language makes, which the entry gives
+    /// the runtime, laid out as its `Failures`: the addresses of where a
+    /// failure's error waits and its site ([`Waiting`]), the descriptor of
+    /// the prelude's type `error`, and of an array of each kind's, in
+    /// [`hir::LanguageError::ALL`]'s order, with their count. A kind, the
+    /// runtime's `Kind`, is its type's name, its components' descriptor,
+    /// and its code, as texts.
+    fn failures(&mut self, program: &hir::Program) -> lir::DataId {
+        let waiting = self.waiting(program);
+        let mut kinds = Vec::new();
+        for error in hir::LanguageError::ALL {
+            let name = self.value_field(&hir::Value::Text(error.name().to_string()));
+            let components = self.components_descriptor(program.language_error(error));
+            let code = self.value_field(&hir::Value::Text(error.code().id().to_string()));
+            kinds.extend([name, lir::Field::Address(components), code]);
+        }
+        let kinds = self.constant(kinds);
+        let error = self.descriptor(&waiting.ty);
+        self.constant(vec![
+            lir::Field::Address(waiting.error),
+            lir::Field::Address(waiting.site),
+            lir::Field::Address(error),
+            lir::Field::Address(kinds),
+            lir::Field::Usize(len(hir::LanguageError::ALL.len())),
+        ])
     }
 
     /// The layout of a value of type `ty`.
@@ -1859,7 +1895,7 @@ impl<'a> FunctionBuilder<'a> {
                 hir::UpdateBuiltin::LoadTextFileWithErrors => {
                     let target = &call.updated["lines"];
                     let ty = self.assigned(target).0.clone();
-                    let errors = self.errors(*builtin, cx);
+                    let errors = self.errors(cx);
                     let given = vec![errors.given.clone()];
                     let function = lir::RuntimeFn::LoadTextFileWithErrors;
                     let (lines, _) = self.loaded(function, call, &ty, given, cx);
@@ -1881,7 +1917,7 @@ impl<'a> FunctionBuilder<'a> {
                     let mut given = vec![header, columns, lines.clone()];
                     // And, with `errors`, where they go, and their types.
                     let errors = (*builtin == hir::UpdateBuiltin::LoadCsvWithErrors)
-                        .then(|| self.errors(*builtin, cx));
+                        .then(|| self.errors(cx));
                     let function = match &errors {
                         Some(errors) => {
                             given.push(errors.given.clone());
@@ -1941,36 +1977,24 @@ impl<'a> FunctionBuilder<'a> {
         }
     }
 
-    /// Where `builtin`'s errors go, `relation { error: error }`, as the
+    /// Where a load's errors go, `relation { error: error }`, as the
     /// runtime's `Errors`, which its runtime function is given: the
-    /// relation of them, and the address of an array of descriptors'
-    /// addresses, their relation's, then each error's type's, in
-    /// [`hir::UpdateBuiltin::errors`]'s order, as its selector writes its
-    /// components.
-    fn errors(&mut self, builtin: hir::UpdateBuiltin, cx: &mut Lowering) -> Errors {
-        let ty = hir::BuiltinError::relation();
+    /// relation of them, and its descriptor's address. Their types are in
+    /// the table the entry gives the runtime ([`Lowering::failures`]).
+    fn errors(&mut self, cx: &mut Lowering) -> Errors {
+        let ty = hir::LanguageError::relation();
         let given = self.slot(lir::Layout::Struct(vec![
             cx.layout(&ty),
             lir::Layout::Address,
         ]));
-        let relation = cx.descriptor(&ty);
-        let types: Vec<lir::DataId> = builtin
-            .errors()
-            .iter()
-            .map(|&error| cx.components_descriptor(self.program.builtin_error(error)))
-            .collect();
-        let descriptors = std::iter::once(relation)
-            .chain(types)
-            .map(lir::Field::Address)
-            .collect();
-        let descriptors = lir::Place::whole(lir::Base::Data(cx.constant(descriptors)));
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
         let field = |i| lir::Place {
             path: [given.path.clone(), vec![i]].concat(),
             ..given.clone()
         };
         self.insts.push(lir::Inst::Address {
             dst: field(1),
-            src: descriptors,
+            src: descriptor,
         });
         Errors {
             value: field(0),
@@ -5887,15 +5911,50 @@ mod tests {
         }
     }
 
-    fn program(operators: Vec<hir::Operator>, variables: Vec<hir::Variable>) -> hir::Program {
+    /// A program of `operators` and `variables`, with what the entry's
+    /// table of errors needs of the prelude, as sema gives it: the union
+    /// type `error`, and the errors the language makes; and a `message`
+    /// for the entry to write one with, which gives every error's message
+    /// as one text: none of these programs' errors is written.
+    fn program(mut operators: Vec<hir::Operator>, variables: Vec<hir::Variable>) -> hir::Program {
         let entry = operators.iter().position(|o| o.name == "main").unwrap();
+        let errors = hir::LanguageError::ALL
+            .iter()
+            .map(|error| {
+                hir::Type::Defined(Box::new(hir::Defined {
+                    name: error.name().to_string(),
+                    components: error.components(),
+                    representations: Vec::new(),
+                    constraints: Vec::new(),
+                    keys: BTreeMap::new(),
+                    order: None,
+                    supertypes: vec!["error".to_string()],
+                    specialized: false,
+                    specialization: None,
+                }))
+            })
+            .collect();
+        operators.push(hir::Operator {
+            versions: Vec::new(),
+            name: "message".to_string(),
+            types: Vec::new(),
+            params: [(
+                "error".to_string(),
+                hir::Parameter::constant(hir::LanguageError::union()),
+            )]
+            .into(),
+            kind: hir::OperatorKind::ReadOnly {
+                result: hir::Type::Scalar(hir::Scalar::Text),
+                locals: Vec::new(),
+                value: hir::Expr::Constant(hir::Value::Text("an error".to_string())),
+            },
+        });
         hir::Program {
+            message: hir::OperatorId(operators.len() - 1),
             operators,
             variables,
-            subtypes: BTreeMap::new(),
+            subtypes: [("error".to_string(), errors)].into(),
             entry: hir::OperatorId(entry),
-            // None of these fails, so no error's message is written.
-            message: hir::OperatorId(entry),
         }
     }
 
@@ -6007,9 +6066,9 @@ mod tests {
             vec![debug_value(), user("main", &[], vec![])],
             vec![],
         ));
-        // `main`, and the entry, which calls it, and writes a failure's
-        // trace.
-        assert_eq!(lowered.functions.len(), 2);
+        // `main`, the entry, which calls it, and writes a failure's error
+        // and trace, and `message`, which it writes the error with.
+        assert_eq!(lowered.functions.len(), 3);
         assert_eq!(lowered.functions[lowered.entry.0].name, "__entry");
         assert_eq!(lowered.functions[0].params, None);
     }
@@ -6804,7 +6863,7 @@ mod tests {
             vec![variable("t", hir::Value::Text("a".to_string()))],
         ));
         let names: Vec<&str> = lowered.functions.iter().map(|f| f.name.as_str()).collect();
-        assert_eq!(names, ["main", "shout", "__entry"]);
+        assert_eq!(names, ["main", "shout", "__entry", "message"]);
         // `shout` stores its value where the caller says, in no scope of
         // its own.
         let shout = &lowered.functions[1];
@@ -6909,7 +6968,13 @@ mod tests {
         let names: Vec<&str> = lowered.functions.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(
             names,
-            ["main", "show{v: integer}", "show{v: text}", "__entry"]
+            [
+                "main",
+                "show{v: integer}",
+                "show{v: text}",
+                "__entry",
+                "message"
+            ]
         );
         assert_eq!(
             lowered.functions[2].params,
@@ -6960,8 +7025,8 @@ mod tests {
         ));
         assert_eq!(
             lowered.functions.len(),
-            2,
-            "a built-in has no function: `main` and the entry have"
+            3,
+            "a built-in has no function: `main`, the entry and `message` have"
         );
         assert_eq!(
             lowered.functions[0].blocks[0].insts[0],
@@ -7026,8 +7091,8 @@ mod tests {
         ));
         assert_eq!(
             lowered.functions.len(),
-            2,
-            "a built-in has no function: `main` and the entry have"
+            3,
+            "a built-in has no function: `main`, the entry and `message` have"
         );
         let blocks = &lowered.functions[0].blocks;
         assert!(
@@ -7428,8 +7493,8 @@ mod tests {
         ));
         assert_eq!(
             lowered.functions.len(),
-            2,
-            "a built-in has no function: `main` and the entry have"
+            3,
+            "a built-in has no function: `main`, the entry and `message` have"
         );
         lowered.functions[0].blocks[0]
             .insts

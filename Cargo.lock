@@ -557,6 +557,7 @@ dependencies = [
 name = "trendy_hir"
 version = "0.1.0"
 dependencies = [
+ "trendy_diag",
  "trendy_numeric",
  "trendy_text",
 ]

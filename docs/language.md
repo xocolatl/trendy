@@ -3664,9 +3664,10 @@ literal. When the operands are known while compiling,
 this is a compile error (R0001 for overflow, R0002 for division by zero).
 Otherwise the program stops at that operator, writing the error to stderr,
 with the operation and its operands' values, such as `error[R0001]:
-integer overflow: 9223372036854775807 + 1 doesn't fit in a 64-bit
-integer`, and where it was (see [Programs](#programs)), and exits with
-status 1.
+overflow: 9223372036854775807 + 1 is out of its type's range`, and where
+it was (see [Programs](#programs)), and exits with status 1, unless a
+transaction takes the failure's error, an `overflow` or a
+`division_by_zero` (see [Transactions](#transactions)).
 
 ```trendy,error
 var big := 9223372036854775807 + 1;
@@ -4810,7 +4811,9 @@ of one of the subtypes of the prelude's union type `error` (see [Union
 types](#union-types)), which says what went wrong. Unless a transaction
 takes it (see [Transactions](#transactions)), it stops the program,
 writing the error's message and where it is, as a failure of the
-language's own does (R0021). The prelude's `message{error: error}: text`
+language's own does: with the code of its kind, R0021 for the prelude's
+`failure` and a program's own, or a language's failure's, as R0002 for
+`fail division_by_zero{operation: "1 div 0"}`. The prelude's `message{error: error}: text`
 writes the message: it has no body, so each subtype has its version. The
 prelude's `failure` says what went wrong in its own words, and a program
 declares subtypes of its own, each with its `message`, whose components
@@ -4868,8 +4871,9 @@ operator main{} [
   components: `not_one_tuple { count }` (R0005), `index_out_of_range {
   position, length }` (R0011), `division_by_zero { operation }` (R0002)
   and `overflow { operation }` (R0001), each with the message the failure
-  writes. A transaction takes only a `fail`'s error yet, so a program
-  meets them only in its own `fail`s. A built-in that reads input gives the world's errors as
+  writes: the failure fails with its error, which a transaction takes, as
+  it takes a `fail`'s, and the program writes with its message and code
+  if nothing does. A built-in that reads input gives the world's errors as
   values instead, when its call names `out errors`: `unreadable_file {
   path, reason }` (R0012) and `not_utf8 { path, line }` (R0013), from
   `load_text_file` and `load_csv`, and from `load_csv` `malformed_csv {
@@ -4988,9 +4992,13 @@ holds the error: `granaries` is as it was.
 - **A transaction is a statement,** so only an update operator's body
   has one: a read-only operator, or a value block, changes nothing, so a
   transaction in it would have nothing to undo (A0035).
-- **A failure of the language's own carries no error yet:** a
-  transaction undoes its statements, and the failure goes on, so it
-  stops the program, as before. Only a `fail`'s error is taken.
+- **A failure of the language's own is an error too,** which a
+  transaction takes as it takes a `fail`'s: an `overflow`, a
+  `division_by_zero`, a `not_one_tuple` or an `index_out_of_range`. The
+  language's other failures carry no error yet: a transaction undoes its
+  statements, and the failure goes on, and stops the program, as does
+  running out of memory (R0003), always, since making an error needs
+  memory too.
 - **SQL's habits are reported:** `BEGIN TRANSACTION` and `START
   TRANSACTION` are fixed to `transaction` (P0048); `COMMIT` is removed,
   as a transaction commits where its block ends, and `ROLLBACK` is a
