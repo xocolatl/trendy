@@ -264,6 +264,14 @@ pub enum RuntimeFn {
     /// `missing_column` or an `unreadable_field`. Two attributes of one
     /// column, or one of a column below 1, still stop it.
     LoadCsvWithErrors,
+    /// `trendy_rt_broken_constraint_error(errors, value, descriptor, ty,
+    /// constraint, record)`: add to the errors at `errors`, as
+    /// [`RuntimeFn::LoadCsvWithErrors`] gives them, that `value`, whose
+    /// components the descriptor describes, read from the record `record`
+    /// describes, laid out as [`Layout::record`], breaks the constraint of
+    /// the type named `ty` written `constraint`, both texts: a
+    /// `broken_constraint_in_file`.
+    BrokenConstraintError,
     /// `trendy_rt_sum(dst, src, descriptor, index)`: store at `dst` the
     /// sum of the attribute `index` (a [`Field::Usize`], its position by
     /// name) of the tuples of the relation `src`, of the type the
@@ -538,6 +546,7 @@ impl RuntimeFn {
             RuntimeFn::LoadTextFile => "trendy_rt_load_text_file",
             RuntimeFn::LoadTextFileWithErrors => "trendy_rt_load_text_file_with_errors",
             RuntimeFn::LoadCsvWithErrors => "trendy_rt_load_csv_with_errors",
+            RuntimeFn::BrokenConstraintError => "trendy_rt_broken_constraint_error",
             RuntimeFn::LoadCsv => "trendy_rt_load_csv",
             RuntimeFn::Sum => "trendy_rt_sum",
             RuntimeFn::Product => "trendy_rt_product",

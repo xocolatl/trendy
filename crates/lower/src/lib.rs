@@ -1024,7 +1024,8 @@ impl<'a> FunctionBuilder<'a> {
                     let read = hir::Type::Array(Box::new(hir::read_as(record, &columns_ty)));
                     let (records, path) = self.loaded(function, call, &read, given, cx);
                     let file = InFile { path, lines };
-                    let rows = self.records_checked(&records, &read, &ty, &file, cx);
+                    let errors_given = errors.as_ref().map(|errors| &errors.given);
+                    let rows = self.records_checked(&records, &read, &ty, &file, errors_given, cx);
                     self.store(target, rows, cx);
                     if let Some(errors) = errors {
                         self.store(&call.updated["errors"], errors.value, cx);
@@ -1152,43 +1153,65 @@ impl<'a> FunctionBuilder<'a> {
     /// the stored one converted to it (see [`hir::read_as`]), and each
     /// checked against its type's constraints, as selecting it would, inner
     /// values first. The program stops at the first broken, writing the
-    /// line. The array is `records` itself, if nothing in them is converted,
-    /// and else a new one the statement holds.
+    /// line, unless the call gives `errors`, the runtime's `Errors`: then a
+    /// record whose value breaks a constraint is skipped, with its error
+    /// there. The array is `records` itself, if nothing in them is
+    /// converted or skipped, and else a new one the statement holds.
     fn records_checked(
         &mut self,
         records: &lir::Place,
         read: &hir::Type,
         ty: &hir::Type,
         file: &InFile,
+        errors: Option<&lir::Place>,
         cx: &mut Lowering,
     ) -> lir::Place {
         let (hir::Type::Array(read_record), hir::Type::Array(record)) = (read, ty) else {
             unreachable!("`load_csv` loads an array");
         };
         let converts = read != ty;
-        if !converts && !constrained(record) {
+        let errors = errors.filter(|_| constrained(record));
+        if !converts && errors.is_none() && !constrained(record) {
             return records.clone();
         }
-        let rows = if converts {
+        let copies = converts || errors.is_some();
+        let rows = if copies {
             let mut count = records.clone();
             count.path.push(1);
             self.allocated(ty, count, cx)
         } else {
             records.clone()
         };
+        // With errors, where the next record kept goes, after those kept.
+        let kept = errors.map(|_| {
+            let kept = self.slot(lir::Layout::Usize);
+            let zero = usize_constant(0, cx);
+            self.insts.push(lir::Inst::Copy {
+                dst: kept.clone(),
+                src: zero,
+                layout: lir::Layout::Usize,
+            });
+            kept
+        });
         self.each_tuple(
             records,
             cx.layout(read_record),
             cx,
             |this, read, index, cx| {
-                let row = if converts {
-                    this.element(&rows, index, cx.layout(record))
+                let row = if copies {
+                    this.element(&rows, kept.as_ref().unwrap_or(index), cx.layout(record))
                 } else {
                     read.clone()
                 };
+                // A record skipped goes on after the record.
+                let after = this.new_block();
                 let at = Record {
                     file,
                     index: index.clone(),
+                    skip: errors.map(|errors| Skip {
+                        errors: errors.clone(),
+                        to: after,
+                    }),
                 };
                 let value = Reading {
                     dst: row,
@@ -1197,9 +1220,24 @@ impl<'a> FunctionBuilder<'a> {
                     at: &at,
                 };
                 this.record_value(&value, record, read_record, cx);
+                if let Some(kept) = &kept {
+                    this.insts.push(lir::Inst::Increment {
+                        place: kept.clone(),
+                    });
+                }
+                this.end_block(lir::Terminator::Jump(after), after);
             },
         );
-        if converts {
+        if let Some(kept) = kept {
+            let mut count = rows.clone();
+            count.path.push(1);
+            self.insts.push(lir::Inst::Copy {
+                dst: count,
+                src: kept,
+                layout: lir::Layout::Usize,
+            });
+        }
+        if copies {
             self.adopt(&rows, ty, cx);
         }
         rows
@@ -1547,7 +1585,11 @@ impl<'a> FunctionBuilder<'a> {
             dst.path.push(i);
             self.insts.push(lir::Inst::Copy { dst, src, layout });
         }
-        self.constrained(defined, value, &Checking::Read(record), cx);
+        let checking = Checking::Read {
+            record,
+            skip: at.skip.clone(),
+        };
+        self.constrained(defined, value, &checking, cx);
     }
 
     /// A call of the runtime function `function`, which writes `value`,
@@ -3098,7 +3140,7 @@ impl<'a> FunctionBuilder<'a> {
                             ty,
                             component,
                         },
-                        Checking::Read(record) => lir::Failure::ComponentKeyViolatedInFile {
+                        Checking::Read { record, .. } => lir::Failure::ComponentKeyViolatedInFile {
                             value,
                             descriptor,
                             key,
@@ -3133,13 +3175,32 @@ impl<'a> FunctionBuilder<'a> {
                     ty,
                     constraint,
                 },
-                Checking::Read(record) => lir::Failure::BrokenConstraintInFile {
+                Checking::Read { record, skip: None } => lir::Failure::BrokenConstraintInFile {
                     value,
                     descriptor,
                     ty,
                     constraint,
                     record: record.clone(),
                 },
+                // Its error, and on to the next record.
+                Checking::Read {
+                    record,
+                    skip: Some(skip),
+                } => {
+                    self.insts.push(lir::Inst::CallRuntime {
+                        function: lir::RuntimeFn::BrokenConstraintError,
+                        args: vec![
+                            skip.errors.clone(),
+                            value,
+                            descriptor,
+                            ty,
+                            constraint,
+                            record.clone(),
+                        ],
+                    });
+                    self.end_block(lir::Terminator::Jump(skip.to), kept);
+                    continue;
+                }
             };
             self.fail(failure, kept);
         }
@@ -4476,10 +4537,23 @@ struct InFile {
 
 /// What a value whose components are checked against its type's keys
 /// and constraints is: one selected, or one `load_csv` read from the record
-/// a place laid out as [`lir::Layout::record`] describes.
+/// a place laid out as [`lir::Layout::record`] describes, which is skipped
+/// for a constraint it breaks, if its call gives errors.
 enum Checking {
     Selected,
-    Read(lir::Place),
+    Read {
+        record: lir::Place,
+        skip: Option<Skip>,
+    },
+}
+
+/// Where a record of a CSV file whose value breaks a constraint goes:
+/// its error to `errors`, the runtime's `Errors`, and on to the block
+/// `to`, after the record.
+#[derive(Clone)]
+struct Skip {
+    errors: lir::Place,
+    to: lir::BlockId,
 }
 
 /// The places a key check gives the failure it makes: the relation, its
@@ -4492,10 +4566,12 @@ struct Failed {
     pair: lir::Place,
 }
 
-/// A record of a CSV file, at `index`, from 0, among its records.
+/// A record of a CSV file, at `index`, from 0, among its records, and
+/// where it goes if it is skipped.
 struct Record<'f> {
     file: &'f InFile,
     index: lir::Place,
+    skip: Option<Skip>,
 }
 
 /// A value in a record `at`, as `load_csv` reads it: where it goes, in the

@@ -36,20 +36,26 @@ operator list_missing{} [
     call debug_value{v: errors};
 ];
 
+/* A depth, in metres, below the surface. */
+type metres {
+    { m: integer },
+    constraint m > 0,
+};
+
 /* A lake, its name in its own language, and how deep it is. */
-heading lake := { name: text, native: text, depth_m: integer };
+heading lake := { name: text, native: text, depth: metres };
 
 /* A CSV file's record that can't be read stops the program, unless the
    call names `out errors`: then each such record is skipped, with its
    error, and the rest are read. Lake Victoria's depth is written in
-   words. */
+   words, and Titicaca's has a sign it shouldn't. */
 operator lake_table{} [
     var lakes: array tuple lake;
     var errors: relation { error: error };
     call load_csv{
         path: "examples/lakes.csv",
         header: true,
-        columns: tuple { name: 1, native: 2, depth_m: 3 },
+        columns: tuple { name: 1, native: 2, depth: tuple { m: 3 } },
         out rows: lakes,
         out errors: errors,
     };

@@ -925,9 +925,9 @@ builtin operator load_csv{path: text, header: boolean, columns: C, out rows: arr
    can't read, give no rows, and its error in `errors`, and for a record it
    can't, skip it, giving its error there: an `unreadable_file`, a
    `not_utf8`, a `malformed_csv`, a `missing_column` or an
-   `unreadable_field`. A quoted field that isn't closed ends the records
-   read. A record whose value breaks its type's constraints still stops
-   the program (R0017). `errors` is empty when every record is read. */
+   `unreadable_field`, or a `broken_constraint_in_file`, for a value that
+   breaks its type's constraints. A quoted field that isn't closed ends
+   the records read. `errors` is empty when every record is read. */
 builtin operator load_csv{
     path: text,
     header: boolean,
@@ -1081,6 +1081,30 @@ operator message{error: unreadable_field}: text [
         || error.attribute
         || "`"
         || header
+];
+
+/* The record on the line `line` of the CSV file at `path` gives
+   `attribute`, or a component, as `columns` names it, `value`, written as
+   `debug_value` writes it, which isn't a value of `type`: it breaks the
+   constraint `constraint` (R0017). */
+type broken_constraint_in_file is error {
+    { path: text, line: integer, attribute: text, value: text, type: text, constraint: text },
+};
+
+operator message{error: broken_constraint_in_file}: text [
+    "line "
+        || to_text{from: error.line}
+        || " of "
+        || to_text{from: error.path}
+        || " gives `"
+        || error.attribute
+        || "` "
+        || error.value
+        || ", which isn't a value of `"
+        || error.type
+        || "`: it breaks the constraint `"
+        || error.constraint
+        || "`"
 ];
 ```
 
@@ -1566,11 +1590,12 @@ operator main{} [
   as `load_text_file`'s can: then a file that can't be read gives no rows
   and its error, an `unreadable_file`, a `not_utf8` or a `missing_column`
   (R0016), and each record that can't be is skipped, with its error, a
-  `malformed_csv` (R0015) or an `unreadable_field` (R0014), and the rest
-  are read. A quoted field that isn't closed ends the records read. Two
-  attributes of one column, or one of a column below 1, are the call's
-  mistakes, not the file's, so they still stop the program, as does a
-  record whose value breaks its type's constraints (R0017), for now.
+  `malformed_csv` (R0015) or an `unreadable_field` (R0014), as is one
+  whose value breaks its type's constraints, with a
+  `broken_constraint_in_file` (R0017), and the rest are read. A quoted
+  field that isn't closed ends the records read. Two attributes of one
+  column, or one of a column below 1, are the call's mistakes, not the
+  file's, so they still stop the program.
 
 ```trendy
 operator load_cities{path: text} [
@@ -4759,8 +4784,10 @@ operator main{} [
   path, reason }` (R0012) and `not_utf8 { path, line }` (R0013), from
   `load_text_file` and `load_csv`, and from `load_csv` `malformed_csv {
   path, line, problem }` (R0015), `missing_column { path, attribute,
-  column, columns }` (R0016) and `unreadable_field { path, line, column,
-  attribute, type, text, out_of_range }` (R0014).
+  column, columns }` (R0016), `unreadable_field { path, line, column,
+  attribute, type, text, out_of_range }` (R0014) and
+  `broken_constraint_in_file { path, line, attribute, value, type,
+  constraint }` (R0017).
 
 ## Literals
 

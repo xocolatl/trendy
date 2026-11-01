@@ -481,6 +481,7 @@ impl UpdateBuiltin {
                 BuiltinError::MalformedCsv,
                 BuiltinError::MissingColumn,
                 BuiltinError::UnreadableField,
+                BuiltinError::BrokenConstraintInFile,
             ],
             UpdateBuiltin::DebugValue
             | UpdateBuiltin::DebugTable
@@ -515,15 +516,19 @@ pub enum BuiltinError {
     MissingColumn,
     /// A CSV file's field isn't a value of its attribute's type (R0014).
     UnreadableField,
+    /// A value a CSV file's record gives breaks its type's constraint
+    /// (R0017).
+    BrokenConstraintInFile,
 }
 
 impl BuiltinError {
-    pub const ALL: [BuiltinError; 5] = [
+    pub const ALL: [BuiltinError; 6] = [
         BuiltinError::UnreadableFile,
         BuiltinError::NotUtf8,
         BuiltinError::MalformedCsv,
         BuiltinError::MissingColumn,
         BuiltinError::UnreadableField,
+        BuiltinError::BrokenConstraintInFile,
     ];
 
     /// The name of its type.
@@ -535,6 +540,7 @@ impl BuiltinError {
             BuiltinError::MalformedCsv => "malformed_csv",
             BuiltinError::MissingColumn => "missing_column",
             BuiltinError::UnreadableField => "unreadable_field",
+            BuiltinError::BrokenConstraintInFile => "broken_constraint_in_file",
         }
     }
 
@@ -560,6 +566,14 @@ impl BuiltinError {
                 ("type", text),
                 ("text", text),
                 ("out_of_range", Scalar::Boolean),
+            ],
+            BuiltinError::BrokenConstraintInFile => &[
+                ("path", text),
+                ("line", integer),
+                ("attribute", text),
+                ("value", text),
+                ("type", text),
+                ("constraint", text),
             ],
         };
         Heading::new(

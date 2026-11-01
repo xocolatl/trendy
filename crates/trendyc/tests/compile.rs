@@ -722,9 +722,11 @@ fn text() {
             // error.
             "0",
             r#"relation { error: error } { { error: unreadable_file{path: "examples/lakes.txt", reason: "No such file or directory"} } }"#,
-            // A CSV file's records, one skipped, with its error.
-            "4",
-            r#"relation { message: text } { { message: "\"eighty-four\", in column 3 on line 5 of \"examples/lakes.csv\", isn't an integer, the type of `depth_m`" } }"#,
+            // A CSV file's records, two skipped, each with its error: a
+            // field that isn't a value of its type, and a value that
+            // breaks its type's constraint.
+            "3",
+            r#"relation { message: text } { { message: "\"eighty-four\", in column 3 on line 5 of \"examples/lakes.csv\", isn't an integer, the type of `depth.m`" }, { message: "line 3 of \"examples/lakes.csv\" gives `depth` metres{m: -281}, which isn't a value of `metres`: it breaks the constraint `m > 0`" } }"#,
             // The CSV file's first record after its header, with the
             // position of its mouth read from two columns, and its basin's
             // area read in square kilometres, stored in square metres, then

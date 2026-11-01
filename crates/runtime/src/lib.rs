@@ -3104,6 +3104,56 @@ pub const MALFORMED_CSV: usize = 3;
 pub const MISSING_COLUMN: usize = 4;
 /// `unreadable_field`'s, as [`UNREADABLE_FILE`] is.
 pub const UNREADABLE_FIELD: usize = 5;
+/// `broken_constraint_in_file`'s, as [`UNREADABLE_FILE`] is.
+pub const BROKEN_CONSTRAINT_IN_FILE: usize = 6;
+
+/// Add to the errors `errors` has that `value`, whose components the
+/// descriptor `desc` describes, read from the record `record` describes,
+/// isn't a value of the type named `ty`, a text: it breaks its constraint
+/// written `constraint`, a text, as `load_csv`'s caller finds once it has
+/// read the record: a `broken_constraint_in_file`, written as
+/// `debug_value` writes it.
+///
+/// # Safety
+///
+/// `errors` must point to valid [`Errors`] of the types
+/// [`UNREADABLE_FILE`] and those after it say, `value` to valid components
+/// `desc` describes, `ty` and `constraint` to valid text values, and
+/// `record` to a valid [`Record`]. The statement must have begun a scope.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_broken_constraint_error(
+    errors: *mut Errors,
+    value: *const u8,
+    desc: *const TypeDesc,
+    ty: *const Text,
+    constraint: *const Text,
+    record: *const Record,
+) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let mut found = Found::of(&*errors);
+        let Ok(written) = text_of(value, &*desc, |bytes| {
+            allocate_buffer(bytes, core::ptr::null())
+        }) else {
+            fail(Failure::OutOfMemory)
+        };
+        let record = &*record;
+        let line = i64::try_from(record.line).unwrap_or(i64::MAX);
+        found.add(
+            BROKEN_CONSTRAINT_IN_FILE,
+            &[
+                ("path", (&raw const record.path).cast()),
+                ("line", (&raw const line).cast()),
+                ("attribute", (&raw const record.attribute).cast()),
+                ("value", (&raw const written).cast()),
+                ("type", ty.cast()),
+                ("constraint", constraint.cast()),
+            ],
+        );
+        (&raw mut (*errors).found).write_unaligned(found.finish());
+    }
+}
 
 /// The errors a load finds, as it finds them: their tuples, `{ error: … }`,
 /// one after another, in memory from `malloc`, of the types an
@@ -3125,6 +3175,51 @@ impl Found {
             tuples: allocate::<u8>(0),
             count: 0,
             capacity: 0,
+        }
+    }
+
+    /// Those `errors` has, to add to.
+    ///
+    /// # Safety
+    ///
+    /// `errors` must be valid.
+    unsafe fn of(errors: &Errors) -> Found {
+        // SAFETY: guaranteed by the caller.
+        unsafe {
+            let mut found = Found::new(errors.types);
+            let size = found.relation().element().size;
+            for i in 0..errors.found.len {
+                let src = errors.found.bytes.add(i * size);
+                core::ptr::copy_nonoverlapping(src, found.room(), size);
+                found.count += 1;
+            }
+            found
+        }
+    }
+
+    /// Room for one more error's tuple, after those found, zeroed.
+    ///
+    /// # Safety
+    ///
+    /// The descriptors must be valid.
+    unsafe fn room(&mut self) -> *mut u8 {
+        // SAFETY: guaranteed by the caller.
+        unsafe {
+            let tuple = self.relation().element();
+            if self.count == self.capacity {
+                let capacity = self.capacity.saturating_mul(2).max(4);
+                let Some(bytes) = capacity.checked_mul(tuple.size) else {
+                    fail(Failure::OutOfMemory)
+                };
+                self.tuples = realloc(self.tuples.cast(), bytes).cast();
+                if self.tuples.is_null() {
+                    fail(Failure::OutOfMemory);
+                }
+                self.capacity = capacity;
+            }
+            let room = self.tuples.add(self.count * tuple.size);
+            core::ptr::write_bytes(room, 0, tuple.size);
+            room
         }
     }
 
@@ -3150,19 +3245,7 @@ impl Found {
         // SAFETY: guaranteed by the caller.
         unsafe {
             let tuple = self.relation().element();
-            if self.count == self.capacity {
-                let capacity = self.capacity.saturating_mul(2).max(4);
-                let Some(bytes) = capacity.checked_mul(tuple.size) else {
-                    fail(Failure::OutOfMemory)
-                };
-                self.tuples = realloc(self.tuples.cast(), bytes).cast();
-                if self.tuples.is_null() {
-                    fail(Failure::OutOfMemory);
-                }
-                self.capacity = capacity;
-            }
-            let made = self.tuples.add(self.count * tuple.size);
-            core::ptr::write_bytes(made, 0, tuple.size);
+            let made = self.room();
             let [attribute] = attributes(tuple) else {
                 unreachable!("a relation of errors has one attribute");
             };
