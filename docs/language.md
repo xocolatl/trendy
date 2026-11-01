@@ -1008,6 +1008,160 @@ operator message{error: overflow}: text [
     "overflow: " || error.operation || " is out of its type's range"
 ];
 
+/* Tuples being joined disagree on their common attribute `attribute`,
+   whose values in them, `first` and `second`, written as `debug_value`
+   writes them, differ, so they have no join (R0004). */
+type tuple_mismatch is error { { attribute: text, first: text, second: text } };
+
+operator message{error: tuple_mismatch}: text [
+    "the tuples disagree on `"
+        || error.attribute
+        || "`, so they have no join: `"
+        || error.attribute
+        || "` is "
+        || error.first
+        || " in one and "
+        || error.second
+        || " in the other"
+];
+
+/* A disjoint union, `d_union` or `d_insert`, adds a tuple, `value`,
+   written as `debug_value` writes it, which is already there (R0006). */
+type shared_tuple is error { { value: text } };
+
+operator message{error: shared_tuple}: text [
+    "d_union or d_insert adds a tuple that is already there: " || error.value
+];
+
+/* An included minus, `i_minus` or `i_delete`, removes a tuple, `value`,
+   written as `debug_value` writes it, which isn't there (R0007). */
+type missing_tuple is error { { value: text } };
+
+operator message{error: missing_tuple}: text [
+    "i_minus or i_delete removes a tuple that isn't there: " || error.value
+];
+
+/* The tuples `first` and `second`, written as `debug_value` writes them,
+   of the relation about to be assigned to the variable `variable`, share
+   their values for its key of the attributes `key`, separated by commas,
+   which a key of none allows at most one tuple (R0008). */
+type key_violated is error { { variable: text, key: text, first: text, second: text } };
+
+operator message{error: key_violated}: text [
+    var tuples := if error.key = ""
+        then "`" || error.variable || "` has two tuples, but its key {} allows at most one"
+        else "two tuples of `"
+            || error.variable
+            || "` have the same values for its key { "
+            || error.key
+            || " }";
+    tuples || ": " || error.first || " and " || error.second
+];
+
+/* As `key_violated`, of the relation-valued component `component` of a
+   value selected of the type named `type` (R0008). */
+type component_key_violated is error {
+    { type: text, component: text, key: text, first: text, second: text },
+};
+
+operator message{error: component_key_violated}: text [
+    var named := "`" || error.type || "`'s `" || error.component || "`";
+    var tuples := if error.key = ""
+        then named || " has two tuples, but its key {} allows at most one"
+        else "two tuples of "
+            || named
+            || " have the same values for its key { "
+            || error.key
+            || " }";
+    tuples || ": " || error.first || " and " || error.second
+];
+
+/* Two changes in an `assign` block remove a tuple, `value`, written as
+   `debug_value` writes it (R0009). */
+type tuple_removed_twice is error { { value: text } };
+
+operator message{error: tuple_removed_twice}: text [
+    "two changes in an assign block remove the same tuple: " || error.value
+];
+
+/* Two changes in an `assign` block set the array element at `element`,
+   its positions as trendy writes them, as `[2][1]`, or, if `within`, one
+   sets it and another an element in it (R0009). */
+type element_set_twice is error { { element: text, within: boolean } };
+
+operator message{error: element_set_twice}: text [
+    if error.within
+        then "one change in an assign block sets the element at "
+            || error.element
+            || ", and another an element in it"
+        else "two changes in an assign block set the same element, at " || error.element
+];
+
+/* A relation has no tuples where `aggregate`, `min` or `max`, takes the
+   least or greatest value of an attribute of them (R0010). */
+type no_min_or_max is error { { aggregate: text } };
+
+operator message{error: no_min_or_max}: text [
+    "the relation has no tuples, so it has no " || error.aggregate
+];
+
+/* `text` isn't a value of the type named `type`, `integer`,
+   `approximate` or `boolean`, that it is parsed as, or is one out of its
+   range, if `out_of_range` (R0014). */
+type unparsable is error { { text: text, type: text, out_of_range: boolean } };
+
+operator message{error: unparsable}: text [
+    var a := if error.type = "integer"
+        then "an integer"
+        else if error.type = "approximate"
+        then "an approximate number"
+        else "a boolean";
+    to_text{from: error.text}
+        || (if error.out_of_range then " is out of " || a || "'s range" else " isn't " || a)
+];
+
+/* `value`, written as `debug_value` writes it, selected of the type named
+   `type`, breaks its constraint written `constraint` (R0017). */
+type broken_constraint is error { { value: text, type: text, constraint: text } };
+
+operator message{error: broken_constraint}: text [
+    error.value
+        || " isn't a value of `"
+        || error.type
+        || "`: it breaks the constraint `"
+        || error.constraint
+        || "`"
+];
+
+/* `of`, a negative number, has no square root (R0018). */
+type no_square_root is error { { of: approximate } };
+
+operator message{error: no_square_root}: text [
+    to_text{from: error.of} || " has no square root"
+];
+
+/* `value`, written as `debug_value` writes it, treated as one of the type
+   named `type`, isn't one (R0019). */
+type not_of_type is error { { value: text, type: text } };
+
+operator message{error: not_of_type}: text [
+    error.value || " isn't a value of `" || error.type || "`"
+];
+
+/* `value`, written as `debug_value` writes it, is of both of the subtypes
+   `first` and `second` of its type defined by constraints, but a value
+   has one most specific type (R0020). */
+type overlapping_subtypes is error { { value: text, first: text, second: text } };
+
+operator message{error: overlapping_subtypes}: text [
+    error.value
+        || " is of both `"
+        || error.first
+        || "` and `"
+        || error.second
+        || "`, but a value has one most specific type"
+];
+
 /* The file at `path` can't be read, for `reason`, the system's words for
    why, as "No such file or directory" (R0012). */
 type unreadable_file is error { { path: text, reason: text } };
@@ -4853,10 +5007,12 @@ operator main{} [
   the same arguments whenever it is called. It fails in its value, as in a
   branch of an `if`, not with a `fail` statement, as its body is its value
   (A0035).
-- **Its message is written as a table's cell is,** with its control
-  characters and bidirectional controls escaped, so that a message made
-  from a file's text can't change the terminal or show what it doesn't
-  say.
+- **Its message is written with its control characters and
+  bidirectional controls escaped,** as a table's cell is, so that a
+  message made from a file's text can't change the terminal or show what
+  it doesn't say, but with its backslashes as they are: the values a
+  message shows, as `to_text` writes them, have escapes of their own, as
+  in `"4\t2" isn't an integer`.
 - **A `fail` fails when it is computed,** and a branch not taken isn't.
   One the compiler computes is reported when compiling, as other failures
   are: an initial value's, or a call's with arguments known then (R0021).
@@ -4868,12 +5024,22 @@ operator main{} [
   error: `fail;` alone, as another language rethrows the exception it
   handles, is reported (P0047), as nothing is ever being handled.
 - **The prelude's errors of the language's own failures** have plain
-  components: `not_one_tuple { count }` (R0005), `index_out_of_range {
-  position, length }` (R0011), `division_by_zero { operation }` (R0002)
-  and `overflow { operation }` (R0001), each with the message the failure
-  writes: the failure fails with its error, which a transaction takes, as
-  it takes a `fail`'s, and the program writes with its message and code
-  if nothing does. A built-in that reads input gives the world's errors as
+  components, a value of any type written as text, as `debug_value`
+  writes it: `overflow { operation }` (R0001), `division_by_zero {
+  operation }` (R0002), `tuple_mismatch { attribute, first, second }`
+  (R0004), `not_one_tuple { count }` (R0005), `shared_tuple { value }`
+  (R0006), `missing_tuple { value }` (R0007), `key_violated { variable,
+  key, first, second }` and `component_key_violated { type, component,
+  key, first, second }` (R0008), `tuple_removed_twice { value }` and
+  `element_set_twice { element, within }` (R0009), `no_min_or_max {
+  aggregate }` (R0010), `index_out_of_range { position, length }`
+  (R0011), `unparsable { text, type, out_of_range }` (R0014),
+  `broken_constraint { value, type, constraint }` (R0017),
+  `no_square_root { of }` (R0018), `not_of_type { value, type }` (R0019)
+  and `overlapping_subtypes { value, first, second }` (R0020), each with
+  the message the failure writes: the failure fails with its error, which
+  a transaction takes, as it takes a `fail`'s, and the program writes
+  with its message and code if nothing does. A built-in that reads input gives the world's errors as
   values instead, when its call names `out errors`: `unreadable_file {
   path, reason }` (R0012) and `not_utf8 { path, line }` (R0013), from
   `load_text_file` and `load_csv`, and from `load_csv` `malformed_csv {
@@ -4993,12 +5159,13 @@ holds the error: `granaries` is as it was.
   has one: a read-only operator, or a value block, changes nothing, so a
   transaction in it would have nothing to undo (A0035).
 - **A failure of the language's own is an error too,** which a
-  transaction takes as it takes a `fail`'s: an `overflow`, a
-  `division_by_zero`, a `not_one_tuple` or an `index_out_of_range`. The
-  language's other failures carry no error yet: a transaction undoes its
-  statements, and the failure goes on, and stops the program, as does
-  running out of memory (R0003), always, since making an error needs
-  memory too.
+  transaction takes as it takes a `fail`'s: each failure of the
+  program's values, a value of the prelude's subtype of `error` for its
+  kind (see [Failures](#failures)), as a `division_by_zero`. Only running
+  out of memory (R0003) has no error, since making one needs memory too:
+  a transaction undoes its statements, and the failure goes on, and
+  stops the program. The failures of reading a file can't happen in a
+  transaction, which reads nothing (A0066).
 - **SQL's habits are reported:** `BEGIN TRANSACTION` and `START
   TRANSACTION` are fixed to `transaction` (P0048); `COMMIT` is removed,
   as a transaction commits where its block ends, and `ROLLBACK` is a

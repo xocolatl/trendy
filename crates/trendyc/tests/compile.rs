@@ -959,7 +959,7 @@ fn transactions() {
         (
             0,
             format!(
-                "{moved}{table}{day}{table}warning[{}]: Cusco has 35 sacks left\n --> transactions.trendy:54:9\n{after}relation {{ failed: boolean, message: text }} {{ {{ failed: true, message: \"division by zero: 40 div 0 has no result\" }} }}\n",
+                "{moved}{table}{day}{table}warning[{}]: Cusco has 35 sacks left\n --> transactions.trendy:54:9\n{after}relation {{ failed: boolean, message: text }} {{ {{ failed: true, message: \"division by zero: 40 div 0 has no result\" }}, {{ failed: true, message: \"two tuples of `granaries` have the same values for its key {{ city }}: tuple {{ city: \\\"Dhaka\\\", native: \\\"ঢাকা\\\", sacks: 0 }} and tuple {{ city: \\\"Dhaka\\\", native: \\\"ঢাকা\\\", sacks: 30 }}\" }} }}\n",
                 trendy_diag::Code::Warned.id()
             )
         )
@@ -1118,6 +1118,111 @@ operator main{} [
         (
             1,
             format!("{}\n --> own_kind.trendy:2:5\n", division("1 div 0"))
+        )
+    );
+}
+
+/// Each of the language's other failures is an error a transaction takes
+/// too, its message as the failure wrote it.
+#[test]
+fn every_failure_of_the_programs_values_is_an_error() {
+    let source = "type outline {
+    { vertices: relation { v_no: integer, x: integer } key { v_no } },
+};
+
+type percentage {
+    { value: integer },
+    constraint value >= 0 and value <= 100,
+};
+
+type ellipse { { a: approximate, b: approximate }, constraint a >= b };
+type circle is ellipse { constraint a = b };
+type small is ellipse { constraint a < 1e0 };
+
+type plane_figure union;
+type oval is plane_figure { { width: approximate } };
+type polygon is plane_figure { { corners: integer } };
+
+var guests := relation { { room: 1, guest: \"Kenji\" } } key { room };
+var grid := array [array [1, 2], array [3, 4]];
+
+operator main{} [
+    var found: relation transaction_collection;
+    var one := 1;
+    var name := \"Ada\";
+    transaction collecting found [
+        call debug_value{v: tuple { name: name, born: 1815 } join tuple { name: name || \" Lovelace\" }};
+    ];
+    transaction collecting found [
+        call debug_value{v: relation { { n: one } } d_union relation { { n: 1 } }};
+    ];
+    transaction collecting found [
+        call debug_value{v: relation { { n: one } } i_minus relation { { n: 2 } }};
+    ];
+    transaction collecting found [
+        insert guests relation { { room: one, guest: \"Wanjiru\" } };
+    ];
+    transaction collecting found [
+        call debug_value{v: outline{vertices: relation { { v_no: 1, x: 0 }, { v_no: one, x: 4 } }}};
+    ];
+    transaction collecting found [
+        assign {
+            update guests { guest := \"Wanjiru\" } where room = one;
+            delete guests where guest = \"Kenji\";
+        };
+    ];
+    transaction collecting found [
+        assign {
+            grid[one + 1][one] := 0;
+            grid[2][1] := 9;
+        };
+    ];
+    transaction collecting found [
+        call debug_value{v: min{r: relation { { n: one } } where n > 1, of: n}};
+    ];
+    transaction collecting found [
+        call debug_value{v: parse_integer{from: name}};
+    ];
+    transaction collecting found [
+        call debug_value{v: percentage{value: one + 119}};
+    ];
+    transaction collecting found [
+        call debug_value{v: sqrt{of: to_approximate{from: -one}}};
+    ];
+    transaction collecting found [
+        var figure: plane_figure := polygon{corners: one + 3};
+        call debug_value{v: treat figure as oval};
+    ];
+    transaction collecting found [
+        call debug_value{v: ellipse{a: to_approximate{from: one} / 2e0, b: 5e-1}};
+    ];
+    call debug_value{v: (found extend { message := message{error: error} }){message}};
+];
+";
+    let messages = [
+        "\\\"Ada\\\" isn't an integer",
+        "-1e0 has no square root",
+        "d_union or d_insert adds a tuple that is already there: tuple { n: 1 }",
+        "ellipse{a: 5e-1, b: 5e-1} is of both `circle` and `small`, but a value has one most specific type",
+        "i_minus or i_delete removes a tuple that isn't there: tuple { n: 2 }",
+        "percentage{value: 120} isn't a value of `percentage`: it breaks the constraint `value >= 0 and value <= 100`",
+        "polygon{corners: 4} isn't a value of `oval`",
+        "the relation has no tuples, so it has no min",
+        "the tuples disagree on `name`, so they have no join: `name` is \\\"Ada\\\" in one and \\\"Ada Lovelace\\\" in the other",
+        "two changes in an assign block remove the same tuple: tuple { guest: \\\"Kenji\\\", room: 1 }",
+        "two changes in an assign block set the same element, at [2][1]",
+        "two tuples of `guests` have the same values for its key { room }: tuple { guest: \\\"Kenji\\\", room: 1 } and tuple { guest: \\\"Wanjiru\\\", room: 1 }",
+        "two tuples of `outline`'s `vertices` have the same values for its key { v_no }: tuple { v_no: 1, x: 0 } and tuple { v_no: 1, x: 4 }",
+    ];
+    let tuples: Vec<String> = messages
+        .iter()
+        .map(|message| format!("{{ message: \"{message}\" }}"))
+        .collect();
+    assert_eq!(
+        run_source("every_failure", source),
+        (
+            0,
+            format!("relation {{ message: text }} {{ {} }}\n", tuples.join(", "))
         )
     );
 }
@@ -1861,7 +1966,7 @@ operator main{{}} [
                 "tuple {{ circle: true, kind: \"circle\" }}
 ellipse{{a: 2e0, b: 2e0}}
 tuple {{ circle: false, kind: \"ellipse\" }}
-error[{overlapping}]: ellipse{{a: 5e-1, b: 5e-1}} is both a `circle` and a `small`, but a value has one most specific type
+error[{overlapping}]: ellipse{{a: 5e-1, b: 5e-1}} is of both `circle` and `small`, but a value has one most specific type
 {}{}{}",
                 site("constrained", 14),
                 called("constrained", "ellipse", 14),
@@ -2073,7 +2178,7 @@ operator main{{}} [
                 "2
 relation {{ x: integer }} {{ {{ x: 0 }}, {{ x: 3 }} }}
 2
-error[{violated}]: two tuples of a `seg`'s `ends` have the same values for its key {{ x }}: tuple {{ n: 1, x: 0 }} and tuple {{ n: 2, x: 0 }}
+error[{violated}]: two tuples of `seg`'s `ends` have the same values for its key {{ x }}: tuple {{ n: 1, x: 0 }} and tuple {{ n: 2, x: 0 }}
 {}{}{}",
                 site("component_keys", 18),
                 called("component_keys", "seg{len: integer}", 18),
@@ -2098,7 +2203,7 @@ operator main{{}} [
         (
             1,
             format!(
-                "error[{violated}]: two tuples of an `outline`'s `vertices` have the same values for its key {{ v_no }}: tuple {{ v_no: 1, x: 0 }} and tuple {{ v_no: 1, x: 5 }}
+                "error[{violated}]: two tuples of `outline`'s `vertices` have the same values for its key {{ v_no }}: tuple {{ v_no: 1, x: 0 }} and tuple {{ v_no: 1, x: 5 }}
 {}{}{}",
                 site("component_keys_stored", 12),
                 called("component_keys_stored", "outline", 12),

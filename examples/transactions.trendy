@@ -104,11 +104,15 @@ operator main{} [
     /* A failure of the language's own is an error too, which a
        transaction takes as it takes a `fail`'s: the sacks each family of
        a granary gets, where Tashkent's feeds none, divide by zero, a
-       `division_by_zero`. */
+       `division_by_zero`, and a second granary for Dhaka breaks the key,
+       a `key_violated`. */
     var shares: relation { city: text, share: integer };
-    var unshared: relation transaction_collection;
-    transaction collecting unshared [
+    var refused: relation transaction_collection;
+    transaction collecting refused [
         shares := ((granaries join fed) extend { share := sacks div families }){city, share};
     ];
-    call report{collected: unshared};
+    transaction collecting refused [
+        insert granaries relation { { city: "Dhaka", native: "ঢাকা", sacks: 0 } };
+    ];
+    call report{collected: refused};
 ];

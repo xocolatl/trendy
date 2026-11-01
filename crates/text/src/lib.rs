@@ -41,7 +41,7 @@ pub const BIDI_CONTROLS: [char; 9] = [
 ///
 /// Returns an error if `out` does.
 pub fn escape(text: &str, out: &mut impl fmt::Write) -> fmt::Result {
-    escape_but(text, out, None)
+    escape_but(text, out, &[])
 }
 
 /// Write `text` with nothing around it, as a table's cell shows it: as
@@ -53,7 +53,21 @@ pub fn escape(text: &str, out: &mut impl fmt::Write) -> fmt::Result {
 ///
 /// Returns an error if `out` does.
 pub fn escape_bare(text: &str, out: &mut impl fmt::Write) -> fmt::Result {
-    escape_but(text, out, Some('"'))
+    escape_but(text, out, &['"'])
+}
+
+/// Write `text`, a failure's or a warning's message, as [`escape_bare`]
+/// writes a table's cell, so that a control character can't break the
+/// line or change the terminal, nor a bidirectional control reorder it,
+/// but with backslashes as they are too: a message is prose, not a
+/// literal, and the values it shows are written as trendy writes them,
+/// with escapes of their own, which escaping again would double.
+///
+/// # Errors
+///
+/// Returns an error if `out` does.
+pub fn escape_message(text: &str, out: &mut impl fmt::Write) -> fmt::Result {
+    escape_but(text, out, &['"', '\\'])
 }
 
 /// Why a text isn't a value of a type, as an operator that reads one from
@@ -113,10 +127,10 @@ pub fn article(word: &str) -> &'static str {
     }
 }
 
-/// As [`escape`], but with `kept` written as it is.
-fn escape_but(text: &str, out: &mut impl fmt::Write, kept: Option<char>) -> fmt::Result {
+/// As [`escape`], but with the characters `kept` written as they are.
+fn escape_but(text: &str, out: &mut impl fmt::Write, kept: &[char]) -> fmt::Result {
     for c in text.chars() {
-        if Some(c) == kept {
+        if kept.contains(&c) {
             out.write_char(c)?;
             continue;
         }
@@ -140,28 +154,29 @@ mod tests {
 
     #[test]
     fn what_could_change_a_terminal_or_reorder_text_is_escaped() {
-        let escaped = |text: &str, bare: bool| {
+        let escaped = |text: &str, write: fn(&str, &mut String) -> fmt::Result| {
             let mut out = String::new();
-            if bare {
-                escape_bare(text, &mut out).unwrap();
-            } else {
-                escape(text, &mut out).unwrap();
-            }
+            write(text, &mut out).unwrap();
             out
         };
         // An escape sequence, a line break, and an override that shows
         // what follows it backwards.
         let text = "a\u{1B}[31m\"b\"\nc\u{202E}d\u{2066}";
         assert_eq!(
-            escaped(text, false),
+            escaped(text, escape),
             "a\\u{1B}[31m\\\"b\\\"\\nc\\u{202E}d\\u{2066}"
         );
         assert_eq!(
-            escaped(text, true),
+            escaped(text, escape_bare),
             "a\\u{1B}[31m\"b\"\\nc\\u{202E}d\\u{2066}"
         );
+        // A message's backslashes are its own, as in a value it shows.
+        assert_eq!(
+            escaped("\"4\\t2\"\tisn't one", escape_message),
+            "\"4\\t2\"\\tisn't one"
+        );
         // Other characters, right-to-left ones too, are as they are.
-        assert_eq!(escaped("שלום, 西安", false), "שלום, 西安");
+        assert_eq!(escaped("שלום, 西安", escape), "שלום, 西安");
     }
 
     #[test]

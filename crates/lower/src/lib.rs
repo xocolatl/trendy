@@ -1442,9 +1442,9 @@ impl<'a> FunctionBuilder<'a> {
     /// survive. Then, with `collecting`, it adds them to `collecting`, and
     /// takes a `fail`'s error waiting, which it adds too, forgets the calls
     /// its failure passed through, and goes on after the transaction.
-    /// Without, or for a failure of the language's own, which has no error
-    /// yet, the failure goes on, to the transaction around it, or the
-    /// function's failure exit.
+    /// Without, or for running out of memory, which has no error, the
+    /// failure goes on, to the transaction around it, or the function's
+    /// failure exit.
     fn transaction(
         &mut self,
         collecting: Option<&hir::Target>,

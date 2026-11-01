@@ -1660,9 +1660,8 @@ began (`trendy_rt_untrace`), the error is added to the variable, as a
 union with `relation { { error: e, failed: true } }` and the block's
 warnings, checked against its keys (`FunctionBuilder::collect`), and
 `__failure` is released, and the program goes on after the transaction.
-Without `collecting`, or for a failure with no error, the language's
-own that has none yet, or running out of memory, the rollback ends in
-`Terminator::Raise`, and the failure
+Without `collecting`, or for a failure with no error, running out of
+memory's, the rollback ends in `Terminator::Raise`, and the failure
 goes on, to the transaction around it, or the function's failure exit.
 
 A warning goes to the innermost transaction with `collecting` running,
@@ -1982,9 +1981,9 @@ values involved, as the error when compiling names them: an arithmetic
 operation and its operands, a tuple a combination or a change finds, a
 join's attribute and its values, a relation's count, an array's
 position and length, or a value and the constraint of its type it
-breaks. A program's own, `fail e`, and the language's that are errors,
-an `overflow`, a `division_by_zero`, a `not_one_tuple` and an
-`index_out_of_range`, write their error's message, which lowering
+breaks. A program's own, `fail e`, and the language's, each an error of
+the prelude's subtype for its kind (`hir::LanguageError`), write their
+error's message, which lowering
 computes by calling the prelude's `message` with it, for
 `trendy_rt_failed`, with the code of the error's kind, in the table of
 errors (R0021 for one not in it), but not where they fail, since what
@@ -1995,7 +1994,9 @@ program can name. A `fail` puts it there (`FunctionBuilder::fail_with`),
 and its block ends with `Terminator::Raise`; the runtime puts the
 language's there (`fail_as`), as the table says where they are, taking
 references of its own to what the error holds, and its function returns
-that it failed. A warning that nothing collects is written where it
+that it failed. A load without `out errors`, which no transaction is
+around (A0066), still writes its failure as it fails, as does running
+out of memory, which has no error. A warning that nothing collects is written where it
 is given, its message and site as `warning[R0022]` (`trendy_rt_warned`),
 with no trace, as no call ends. The program's entry is a function of lowering's
 own (`entry`), which calls `main` and, if it fails, writes the

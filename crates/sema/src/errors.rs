@@ -4935,7 +4935,7 @@ pub(crate) fn failed(failed: &crate::ops::Failed, expr: &Expr) -> Diagnostic {
         crate::ops::Failed::Own(message) => {
             // As the program would write it.
             let mut written = String::new();
-            trendy_text::escape_bare(message, &mut written)
+            trendy_text::escape_message(message, &mut written)
                 .expect("writing to a `String` cannot fail");
             Diagnostic::error(Code::Failed, written, expr.span(), "fails").with_note(FAIL_RULE)
         }

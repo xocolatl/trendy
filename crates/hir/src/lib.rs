@@ -580,10 +580,41 @@ pub enum LanguageError {
     NotOneTuple,
     /// An array has no element at a position (R0011).
     IndexOutOfRange,
+    /// Tuples being joined disagree on a common attribute (R0004).
+    TupleMismatch,
+    /// A disjoint union adds a tuple that is already there (R0006).
+    SharedTuple,
+    /// An included minus removes a tuple that isn't there (R0007).
+    MissingTuple,
+    /// Two tuples of a variable's relation have the same values for one of
+    /// its keys (R0008).
+    KeyViolated,
+    /// Two tuples of a value's relation-valued component have the same
+    /// values for one of its keys (R0008).
+    ComponentKeyViolated,
+    /// Two changes in an `assign` block remove the same tuple (R0009).
+    TupleRemovedTwice,
+    /// Two changes in an `assign` block set the same array element, or one
+    /// an element in the other's (R0009).
+    ElementSetTwice,
+    /// A relation has no tuples, where the least or greatest value of an
+    /// attribute is taken (R0010).
+    NoMinOrMax,
+    /// A text isn't a value of the type it is parsed as (R0014).
+    Unparsable,
+    /// A value selected breaks its type's constraint (R0017).
+    BrokenConstraint,
+    /// A negative number has no square root (R0018).
+    NoSquareRoot,
+    /// A value treated as one of a type isn't one (R0019).
+    NotOfType,
+    /// A value is of two subtypes of its type defined by constraints, but a
+    /// value has one most specific type (R0020).
+    OverlappingSubtypes,
 }
 
 impl LanguageError {
-    pub const ALL: [LanguageError; 12] = [
+    pub const ALL: [LanguageError; 25] = [
         LanguageError::UnreadableFile,
         LanguageError::NotUtf8,
         LanguageError::MalformedCsv,
@@ -596,6 +627,19 @@ impl LanguageError {
         LanguageError::DivisionByZero,
         LanguageError::NotOneTuple,
         LanguageError::IndexOutOfRange,
+        LanguageError::TupleMismatch,
+        LanguageError::SharedTuple,
+        LanguageError::MissingTuple,
+        LanguageError::KeyViolated,
+        LanguageError::ComponentKeyViolated,
+        LanguageError::TupleRemovedTwice,
+        LanguageError::ElementSetTwice,
+        LanguageError::NoMinOrMax,
+        LanguageError::Unparsable,
+        LanguageError::BrokenConstraint,
+        LanguageError::NoSquareRoot,
+        LanguageError::NotOfType,
+        LanguageError::OverlappingSubtypes,
     ];
 
     /// The code a failure with it is written with, when nothing takes it.
@@ -606,14 +650,29 @@ impl LanguageError {
             LanguageError::NotUtf8 => Code::NotUtf8,
             LanguageError::MalformedCsv => Code::MalformedCsv,
             LanguageError::MissingColumn => Code::CsvColumns,
-            LanguageError::UnreadableField => Code::Unparsable,
-            LanguageError::BrokenConstraintInFile => Code::BrokenConstraint,
-            LanguageError::ComponentKeyViolatedInFile => Code::KeyViolated,
-            LanguageError::OverlappingSubtypesInFile => Code::OverlappingSubtypes,
+            LanguageError::UnreadableField | LanguageError::Unparsable => Code::Unparsable,
+            LanguageError::BrokenConstraintInFile | LanguageError::BrokenConstraint => {
+                Code::BrokenConstraint
+            }
+            LanguageError::ComponentKeyViolatedInFile
+            | LanguageError::KeyViolated
+            | LanguageError::ComponentKeyViolated => Code::KeyViolated,
+            LanguageError::OverlappingSubtypesInFile | LanguageError::OverlappingSubtypes => {
+                Code::OverlappingSubtypes
+            }
             LanguageError::Overflow => Code::Overflow,
             LanguageError::DivisionByZero => Code::DivisionByZero,
             LanguageError::NotOneTuple => Code::NotOneTuple,
             LanguageError::IndexOutOfRange => Code::IndexOutOfRange,
+            LanguageError::TupleMismatch => Code::TupleMismatch,
+            LanguageError::SharedTuple => Code::SharedTuple,
+            LanguageError::MissingTuple => Code::MissingTuple,
+            LanguageError::TupleRemovedTwice | LanguageError::ElementSetTwice => {
+                Code::ConflictingChanges
+            }
+            LanguageError::NoMinOrMax => Code::NoMinOrMax,
+            LanguageError::NoSquareRoot => Code::NoResult,
+            LanguageError::NotOfType => Code::NotOfType,
         }
     }
 
@@ -633,6 +692,19 @@ impl LanguageError {
             LanguageError::DivisionByZero => "division_by_zero",
             LanguageError::NotOneTuple => "not_one_tuple",
             LanguageError::IndexOutOfRange => "index_out_of_range",
+            LanguageError::TupleMismatch => "tuple_mismatch",
+            LanguageError::SharedTuple => "shared_tuple",
+            LanguageError::MissingTuple => "missing_tuple",
+            LanguageError::KeyViolated => "key_violated",
+            LanguageError::ComponentKeyViolated => "component_key_violated",
+            LanguageError::TupleRemovedTwice => "tuple_removed_twice",
+            LanguageError::ElementSetTwice => "element_set_twice",
+            LanguageError::NoMinOrMax => "no_min_or_max",
+            LanguageError::Unparsable => "unparsable",
+            LanguageError::BrokenConstraint => "broken_constraint",
+            LanguageError::NoSquareRoot => "no_square_root",
+            LanguageError::NotOfType => "not_of_type",
+            LanguageError::OverlappingSubtypes => "overlapping_subtypes",
         }
     }
 
@@ -688,6 +760,40 @@ impl LanguageError {
             LanguageError::Overflow | LanguageError::DivisionByZero => &[("operation", text)],
             LanguageError::NotOneTuple => &[("count", integer)],
             LanguageError::IndexOutOfRange => &[("position", integer), ("length", integer)],
+            LanguageError::TupleMismatch => {
+                &[("attribute", text), ("first", text), ("second", text)]
+            }
+            LanguageError::SharedTuple
+            | LanguageError::MissingTuple
+            | LanguageError::TupleRemovedTwice => &[("value", text)],
+            LanguageError::KeyViolated => &[
+                ("variable", text),
+                ("key", text),
+                ("first", text),
+                ("second", text),
+            ],
+            LanguageError::ComponentKeyViolated => &[
+                ("type", text),
+                ("component", text),
+                ("key", text),
+                ("first", text),
+                ("second", text),
+            ],
+            LanguageError::ElementSetTwice => &[("element", text), ("within", Scalar::Boolean)],
+            LanguageError::NoMinOrMax => &[("aggregate", text)],
+            LanguageError::Unparsable => &[
+                ("text", text),
+                ("type", text),
+                ("out_of_range", Scalar::Boolean),
+            ],
+            LanguageError::BrokenConstraint => {
+                &[("value", text), ("type", text), ("constraint", text)]
+            }
+            LanguageError::NoSquareRoot => &[("of", Scalar::Approximate)],
+            LanguageError::NotOfType => &[("value", text), ("type", text)],
+            LanguageError::OverlappingSubtypes => {
+                &[("value", text), ("first", text), ("second", text)]
+            }
         };
         Heading::new(
             components

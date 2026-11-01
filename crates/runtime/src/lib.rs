@@ -1331,11 +1331,6 @@ pub unsafe extern "C" fn trendy_rt_subset(
     }
 }
 
-/// The start of the error [`trendy_rt_combine`] writes, before the tuple,
-/// when an included minus's right operand has a tuple the left lacks.
-#[cfg(not(test))]
-const MISSING_TUPLE: &str = "error[R0007]: i_minus or i_delete removes a tuple that isn't there: ";
-
 /// [`trendy_rt_combine`]'s union.
 pub const COMBINE_UNION: usize = 0;
 /// [`trendy_rt_combine`]'s union of operands with no tuple in common.
@@ -1412,18 +1407,10 @@ pub unsafe extern "C" fn trendy_rt_combine(
                 Ordering::Equal => {
                     match combination {
                         COMBINE_DISJOINT_UNION => {
-                            return Err(tuple_failed(
-                                "error[R0006]: d_union or d_insert adds a tuple that is already there: ",
-                                l,
-                                tuple_desc,
-                            ));
+                            return Err(tuple_failed(SHARED_TUPLE, l, tuple_desc));
                         }
                         COMBINE_DISJOINT_CHANGES => {
-                            return Err(tuple_failed(
-                                "error[R0009]: two changes in an assign block remove the same tuple: ",
-                                l,
-                                tuple_desc,
-                            ));
+                            return Err(tuple_failed(TUPLE_REMOVED_TWICE, l, tuple_desc));
                         }
                         _ => {}
                     }
@@ -2106,9 +2093,10 @@ fn arithmetic_failed(op: u32, lhs: Number, rhs: Number) {
     let Failed = unsafe { fail_as(kind, &[("operation", operation.at())]) };
 }
 
-/// Write the error of tuples being joined that disagree on the common
-/// attribute named `attribute`, a text, which is `lhs` in one and `rhs` in
-/// the other, of the type `desc` describes, with them (R0004).
+/// Fail with the error of tuples being joined that disagree on the
+/// common attribute named `attribute`, a text, which is `lhs` in one and
+/// `rhs` in the other, of the type `desc` describes: a `tuple_mismatch`,
+/// its values written as `debug_value` writes them (R0004).
 ///
 /// # Safety
 ///
@@ -2124,23 +2112,25 @@ pub unsafe extern "C" fn trendy_rt_tuple_mismatch(
 ) {
     // SAFETY: guaranteed by the caller.
     unsafe {
-        let (attribute, desc) = (read_text(attribute), &*desc);
-        write_failure(|out| {
-            write!(
-                out,
-                "error[R0004]: the tuples disagree on `{attribute}`, so they have no join: `{attribute}` is "
-            )?;
-            write_value(out, lhs, desc)?;
-            out.write_str(" in one and ")?;
-            write_value(out, rhs, desc)?;
-            out.write_str(" in the other\n")
-        });
+        let desc = &*desc;
+        let (Ok(first), Ok(second)) = (Made::value(lhs, desc), Made::value(rhs, desc)) else {
+            return;
+        };
+        let Failed = fail_as(
+            TUPLE_MISMATCH,
+            &[
+                ("attribute", attribute),
+                ("first", first.at()),
+                ("second", second.at()),
+            ],
+        );
     }
 }
 
-/// Write the error of `value`, components `desc` describes, selected of
-/// the type of the program's own named `ty`, a text, which break its
-/// constraint written `constraint`, a text, with them (R0017).
+/// Fail with the error of `value`, components `desc` describes, selected
+/// of the type of the program's own named `ty`, a text, which break its
+/// constraint written `constraint`, a text: a `broken_constraint`, the
+/// value written as `debug_value` writes it (R0017).
 ///
 /// # Safety
 ///
@@ -2156,22 +2146,25 @@ pub unsafe extern "C" fn trendy_rt_broken_constraint(
 ) {
     // SAFETY: guaranteed by the caller.
     unsafe {
-        let (desc, ty, constraint) = (&*desc, read_text(ty), read_text(constraint));
-        write_failure(|out| {
-            out.write_str("error[R0017]: ")?;
-            write_value(out, value, desc)?;
-            writeln!(
-                out,
-                " isn't a value of `{ty}`: it breaks the constraint `{constraint}`"
-            )
-        });
+        let Ok(value) = Made::value(value, &*desc) else {
+            return;
+        };
+        let Failed = fail_as(
+            BROKEN_CONSTRAINT,
+            &[
+                ("value", value.at()),
+                ("type", ty),
+                ("constraint", constraint),
+            ],
+        );
     }
 }
 
-/// Write the error of `value`, of the type of the program's own `desc`
-/// describes, which is of both of its subtypes defined by constraints
-/// named `first` and `second`, texts, but a value has one most specific
-/// type (R0020).
+/// Fail with the error of `value`, of the type of the program's own
+/// `desc` describes, which is of both of its subtypes defined by
+/// constraints named `first` and `second`, texts, but a value has one most
+/// specific type: an `overlapping_subtypes`, the value written as
+/// `debug_value` writes it (R0020).
 ///
 /// # Safety
 ///
@@ -2187,23 +2180,20 @@ pub unsafe extern "C" fn trendy_rt_overlapping_subtypes(
 ) {
     // SAFETY: guaranteed by the caller.
     unsafe {
-        let (desc, first, second) = (&*desc, read_text(first), read_text(second));
-        write_failure(|out| {
-            out.write_str("error[R0020]: ")?;
-            write_value(out, value, desc)?;
-            writeln!(
-                out,
-                " is both {} `{first}` and {} `{second}`, but a value has one most specific type",
-                trendy_text::article(first),
-                trendy_text::article(second)
-            )
-        });
+        let Ok(value) = Made::value(value, &*desc) else {
+            return;
+        };
+        let Failed = fail_as(
+            OVERLAPPING_SUBTYPES,
+            &[("value", value.at()), ("first", first), ("second", second)],
+        );
     }
 }
 
-/// Write the error of `value`, of the type in a hierarchy `desc`
+/// Fail with the error of `value`, of the type in a hierarchy `desc`
 /// describes, which isn't a value of the type named `ty`, a text, that it
-/// was treated as (R0019).
+/// was treated as: a `not_of_type`, the value written as `debug_value`
+/// writes it (R0019).
 ///
 /// # Safety
 ///
@@ -2218,12 +2208,10 @@ pub unsafe extern "C" fn trendy_rt_not_of_type(
 ) {
     // SAFETY: guaranteed by the caller.
     unsafe {
-        let (desc, ty) = (&*desc, read_text(ty));
-        write_failure(|out| {
-            out.write_str("error[R0019]: ")?;
-            write_value(out, value, desc)?;
-            writeln!(out, " isn't a value of `{ty}`")
-        });
+        let Ok(value) = Made::value(value, &*desc) else {
+            return;
+        };
+        let Failed = fail_as(NOT_OF_TYPE, &[("value", value.at()), ("type", ty)]);
     }
 }
 
@@ -2241,7 +2229,7 @@ pub unsafe extern "C" fn trendy_rt_warned(message: *const u8) {
     let message = unsafe { read_text(message) };
     write_failure(|out| {
         out.write_str("warning[R0022]: ")?;
-        trendy_text::escape_bare(message, out)?;
+        trendy_text::escape_message(message, out)?;
         out.write_char('\n')
     });
 }
@@ -2249,10 +2237,10 @@ pub unsafe extern "C" fn trendy_rt_warned(message: *const u8) {
 /// Write the error at `error` that nothing took, a value of the prelude's
 /// type `error`, whose message is `message`, a text, with the code of its
 /// kind, if the language makes it ([`Failures`]), as `division_by_zero`'s
-/// R0002, or else a program's own's, R0021. It is written as a table's
-/// cell is, its control characters and bidirectional controls escaped, so
-/// that a message made from a file's text can't change the terminal, or
-/// show other than what it says.
+/// R0002, or else a program's own's, R0021. It is written as
+/// [`trendy_text::escape_message`] writes it, its control characters and
+/// bidirectional controls escaped, so that a message made from a file's
+/// text can't change the terminal, or show other than what it says.
 ///
 /// # Safety
 ///
@@ -2273,7 +2261,7 @@ pub unsafe extern "C" fn trendy_rt_failed(message: *const u8, error: *const u8) 
             .map_or("R0021", |kind| read_text((&raw const kind.code).cast()));
         write_failure(|out| {
             write!(out, "error[{code}]: ")?;
-            trendy_text::escape_bare(message, out)?;
+            trendy_text::escape_message(message, out)?;
             out.write_char('\n')
         });
     }
@@ -2331,24 +2319,30 @@ pub unsafe extern "C" fn trendy_rt_not_one_tuple(count: *const usize) {
     let Failed = unsafe { fail_as(NOT_ONE_TUPLE, &[("count", (&raw const count).cast())]) };
 }
 
-/// Write the error of a relation that has no tuples, where the least value
-/// of an attribute is taken (R0010).
+/// Fail with the error of a relation that has no tuples, where the least
+/// value of an attribute is taken: a `no_min_or_max` (R0010).
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub extern "C" fn trendy_rt_no_min() {
-    write_failure(|out| {
-        out.write_str("error[R0010]: the relation has no tuples, so it has no min\n")
-    });
+    let Failed = no_min_or_max("min");
 }
 
-/// Write the error of a relation that has no tuples, where the greatest
-/// value of an attribute is taken (R0010).
+/// Fail with the error of a relation that has no tuples, where the
+/// greatest value of an attribute is taken: a `no_min_or_max` (R0010).
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub extern "C" fn trendy_rt_no_max() {
-    write_failure(|out| {
-        out.write_str("error[R0010]: the relation has no tuples, so it has no max\n")
-    });
+    let Failed = no_min_or_max("max");
+}
+
+/// Fail with a `no_min_or_max` of `aggregate`, `min` or `max`.
+#[cfg(not(test))]
+fn no_min_or_max(aggregate: &str) -> Failed {
+    let Ok(aggregate) = Made::text(aggregate) else {
+        return Failed;
+    };
+    // SAFETY: the aggregate is a valid text.
+    unsafe { fail_as(NO_MIN_OR_MAX, &[("aggregate", aggregate.at())]) }
 }
 
 /// Fail with the error of an array of `*length` elements that has none at
@@ -2374,10 +2368,11 @@ pub unsafe extern "C" fn trendy_rt_index_out_of_range(position: *const i64, leng
     };
 }
 
-/// Write the error of two changes to an array in an `assign` block that
-/// set the element at the `*count` `positions`, from the outermost array
-/// in, or, if `*nested` is 1, of one that sets it and another an element
-/// in it, with the positions (R0009).
+/// Fail with the error of two changes to an array in an `assign` block
+/// that set the element at the `*count` `positions`, from the outermost
+/// array in, or, if `*nested` is 1, of one that sets it and another an
+/// element in it: an `element_set_twice`, its element as trendy writes the
+/// positions, as `[2][1]` (R0009).
 ///
 /// # Safety
 ///
@@ -2392,40 +2387,41 @@ pub unsafe extern "C" fn trendy_rt_element_conflict(
 ) {
     // SAFETY: guaranteed by the caller.
     unsafe {
-        let (count, nested) = (count.read_unaligned(), nested.read() == 1);
-        write_failure(|out| {
-            if nested {
-                out.write_str("error[R0009]: one change in an assign block sets the element at ")?;
-            } else {
-                out.write_str(
-                    "error[R0009]: two changes in an assign block set the same element, at ",
-                )?;
-            }
+        let (count, within) = (count.read_unaligned(), nested.read());
+        let Ok(element) = Made::written(|out| {
             for i in 0..count {
                 write!(out, "[{}]", positions.add(i).read_unaligned())?;
             }
-            if nested {
-                out.write_str(", and another an element in it")?;
-            }
-            out.write_char('\n')
-        });
+            Ok(())
+        }) else {
+            return;
+        };
+        let Failed = fail_as(
+            ELEMENT_SET_TWICE,
+            &[
+                ("element", element.at()),
+                ("within", (&raw const within).cast()),
+            ],
+        );
     }
 }
 
-/// Fail, writing `message`, then the tuple at `tuple`, of the type `desc`
-/// describes.
+/// Fail with the error of the kind at `kind` in the compiler's table of
+/// the tuple at `tuple`, of the type `desc` describes, written as
+/// `debug_value` writes it: a `shared_tuple`, a `missing_tuple` or a
+/// `tuple_removed_twice`.
 ///
 /// # Safety
 ///
 /// `tuple` must point to a valid tuple of the type `desc` describes.
 #[cfg(not(test))]
-unsafe fn tuple_failed(message: &str, tuple: *const u8, desc: &TypeDesc) -> Failed {
-    fail_with(|out| {
-        out.write_str(message)?;
-        // SAFETY: guaranteed by the caller.
-        unsafe { write_value(out, tuple, desc)? };
-        out.write_char('\n')
-    })
+unsafe fn tuple_failed(kind: usize, tuple: *const u8, desc: &TypeDesc) -> Failed {
+    // SAFETY: guaranteed by the caller.
+    let Ok(tuple) = (unsafe { Made::value(tuple, desc) }) else {
+        return Failed;
+    };
+    // SAFETY: the tuple is a valid text.
+    unsafe { fail_as(kind, &[("value", tuple.at())]) }
 }
 
 /// Store at `shared`, a byte, 1 if the relation `value`, of the type `desc`
@@ -2496,11 +2492,11 @@ pub unsafe extern "C" fn trendy_rt_key_shared(
     })
 }
 
-/// Write the error of the tuples at the positions `pair` of the relation
-/// `value`, of the type `desc` describes, about to be assigned to the
-/// variable named `variable`, a text, which have the same values for the
-/// attributes of `key`, the descriptor of its projection on one of the
-/// variable's keys, with the variable, the key and the tuples (R0008).
+/// Fail with the error of the tuples at the positions `pair` of the
+/// relation `value`, of the type `desc` describes, about to be assigned to
+/// the variable named `variable`, a text, which have the same values for
+/// the attributes of `key`, the descriptor of its projection on one of the
+/// variable's keys: a `key_violated` (R0008).
 ///
 /// # Safety
 ///
@@ -2517,18 +2513,26 @@ pub unsafe extern "C" fn trendy_rt_key_violated(
 ) {
     // SAFETY: guaranteed by the caller.
     unsafe {
-        let variable = read_text(variable);
-        write_failure(|out| {
-            out.write_str("error[R0008]: ")?;
-            let relation = |out: &mut Stderr| write!(out, "`{variable}`");
-            write_key_violation(out, relation, value, &*desc, &*key, pair)
-        });
+        let made = |write: &dyn Fn(&mut dyn Write) -> fmt::Result| Made::written(write);
+        let Ok([key, first, second]) = key_violation(value, &*desc, &*key, pair, made) else {
+            return;
+        };
+        let Failed = fail_as(
+            KEY_VIOLATED,
+            &[
+                ("variable", variable),
+                ("key", key.at()),
+                ("first", first.at()),
+                ("second", second.at()),
+            ],
+        );
     }
 }
 
 /// As [`trendy_rt_key_violated`], of the relation that is the component
 /// named `component`, a text, of a value selected of the type named `ty`,
-/// a text, with the attributes of `key` one of the component's keys.
+/// a text, with the attributes of `key` one of the component's keys: a
+/// `component_key_violated`.
 ///
 /// # Safety
 ///
@@ -2546,12 +2550,20 @@ pub unsafe extern "C" fn trendy_rt_component_key_violated(
 ) {
     // SAFETY: guaranteed by the caller.
     unsafe {
-        let (ty, component) = (read_text(ty), read_text(component));
-        write_failure(|out| {
-            out.write_str("error[R0008]: ")?;
-            let relation = |out: &mut Stderr| trendy_text::write_component(ty, component, out);
-            write_key_violation(out, relation, value, &*desc, &*key, pair)
-        });
+        let made = |write: &dyn Fn(&mut dyn Write) -> fmt::Result| Made::written(write);
+        let Ok([key, first, second]) = key_violation(value, &*desc, &*key, pair, made) else {
+            return;
+        };
+        let Failed = fail_as(
+            COMPONENT_KEY_VIOLATED,
+            &[
+                ("type", ty),
+                ("component", component),
+                ("key", key.at()),
+                ("first", first.at()),
+                ("second", second.at()),
+            ],
+        );
     }
 }
 
@@ -2583,6 +2595,44 @@ pub unsafe extern "C" fn trendy_rt_component_key_violated_in_file(
             let relation = |out: &mut Stderr| write!(out, "its `{component}`");
             write_key_violation(out, relation, value, &*desc, &*key, pair)
         });
+    }
+}
+
+/// The texts of a key violation, its error's components, each made by
+/// `make` from what writes it: the attributes of `key`, the descriptor of
+/// the relation's projection on one of its keys, by name, separated by
+/// commas, and the tuples at the positions `pair` of the relation
+/// `value`, of the type `desc` describes, as `debug_value` writes them.
+///
+/// # Safety
+///
+/// As for [`write_key_violation`].
+#[cfg(not(test))]
+unsafe fn key_violation<T>(
+    value: *const u8,
+    desc: &TypeDesc,
+    key: &TypeDesc,
+    pair: *const usize,
+    make: impl Fn(&dyn Fn(&mut dyn Write) -> fmt::Result) -> Fallible<T>,
+) -> Fallible<[T; 3]> {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let names = make(&|out| {
+            for (i, attr) in attributes(key).iter().enumerate() {
+                if i > 0 {
+                    out.write_str(", ")?;
+                }
+                out.write_str(name(attr))?;
+            }
+            Ok(())
+        })?;
+        let (tuples, _) = read_slice(value);
+        let element = desc.element();
+        let tuple = |i: usize| {
+            let at = tuples.add(pair.add(i).read_unaligned() * element.size);
+            make(&|mut out| write_value(&mut out, at, element))
+        };
+        Ok([names, tuple(0)?, tuple(1)?])
     }
 }
 
@@ -3176,8 +3226,8 @@ pub unsafe extern "C" fn trendy_rt_parse_integer(dst: *mut i64, from: *const Tex
     // SAFETY: guaranteed by the caller.
     status(|| unsafe {
         let text = read_text(from.cast());
-        let n = trendy_numeric::parse_integer(text)
-            .map_err(|why| unparsable(text, "an integer", why, None))?;
+        let n =
+            trendy_numeric::parse_integer(text).map_err(|why| unparsed(text, "integer", why))?;
         dst.write_unaligned(n);
         Ok(())
     })
@@ -3198,7 +3248,7 @@ pub unsafe extern "C" fn trendy_rt_parse_approximate(dst: *mut f64, from: *const
     status(|| unsafe {
         let text = read_text(from.cast());
         let x = trendy_numeric::parse_approximate(text)
-            .map_err(|why| unparsable(text, "an approximate number", why, None))?;
+            .map_err(|why| unparsed(text, "approximate", why))?;
         dst.write_unaligned(x);
         Ok(())
     })
@@ -3216,9 +3266,9 @@ pub unsafe extern "C" fn trendy_rt_sqrt(dst: *mut f64, x: *const f64) -> bool {
     // SAFETY: guaranteed by the caller.
     let x = unsafe { x.read_unaligned() };
     status(|| {
-        let root = trendy_numeric::sqrt(x).ok_or_else(|| {
-            fail_with(|out| writeln!(out, "error[R0018]: {x:e} has no square root"))
-        })?;
+        // SAFETY: the operand is an approximate number.
+        let root = trendy_numeric::sqrt(x)
+            .ok_or_else(|| unsafe { fail_as(NO_SQUARE_ROOT, &[("of", (&raw const x).cast())]) })?;
         // SAFETY: guaranteed by the caller.
         unsafe { dst.write_unaligned(root) };
         Ok(())
@@ -3282,8 +3332,7 @@ pub unsafe extern "C" fn trendy_rt_parse_boolean(dst: *mut u8, from: *const Text
     // SAFETY: guaranteed by the caller.
     status(|| unsafe {
         let text = read_text(from.cast());
-        let b = trendy_text::parse_boolean(text)
-            .map_err(|why| unparsable(text, "a boolean", why, None))?;
+        let b = trendy_text::parse_boolean(text).map_err(|why| unparsed(text, "boolean", why))?;
         dst.write(u8::from(b));
         Ok(())
     })
@@ -3306,20 +3355,40 @@ struct Place<'a> {
     first: bool,
 }
 
-/// Fail because `text`, at `place` if it is a CSV file's field, isn't
-/// `a`, a value of its type, as `why` says. A header's field the message
-/// writes is read first, in memory the statement's scope holds; if there
-/// is none for it, that is the failure.
+/// Fail because `text` isn't a value of the type named `ty`, as `why`
+/// says: an `unparsable` (R0014).
 #[cfg(not(test))]
-fn unparsable(text: &str, a: &str, why: trendy_text::Unparsable, place: Option<Place>) -> Failed {
-    let heading = place.and_then(|place| {
-        let field = place
-            .header
-            .and_then(|text| csv::header(text).nth(place.column))?;
+fn unparsed(text: &str, ty: &str, why: trendy_text::Unparsable) -> Failed {
+    let (Ok(text), Ok(ty)) = (Made::text(text), Made::text(ty)) else {
+        return Failed;
+    };
+    let out_of_range = u8::from(why == trendy_text::Unparsable::OutOfRange);
+    // SAFETY: the text and the type are valid texts, and whether it is out
+    // of range a boolean.
+    unsafe {
+        fail_as(
+            UNPARSABLE,
+            &[
+                ("text", text.at()),
+                ("type", ty.at()),
+                ("out_of_range", (&raw const out_of_range).cast()),
+            ],
+        )
+    }
+}
+
+/// Fail because `text`, a CSV file's field at `place`, isn't `a`, a value
+/// of its type, as `why` says. A header's field the message writes is read
+/// first, in memory the statement's scope holds; if there is none for it,
+/// that is the failure.
+#[cfg(not(test))]
+fn unparsable_field(text: &str, a: &str, why: trendy_text::Unparsable, place: Place) -> Failed {
+    let heading = place
+        .header
+        .and_then(|text| csv::header(text).nth(place.column))
         // SAFETY: the statement has begun a scope, as
         // `trendy_rt_load_csv`'s caller guarantees.
-        Some(unsafe { field_value(field) })
-    });
+        .map(|field| unsafe { field_value(field) });
     let heading = match heading.transpose() {
         Ok(heading) => heading,
         Err(failed) => return failed,
@@ -3328,30 +3397,26 @@ fn unparsable(text: &str, a: &str, why: trendy_text::Unparsable, place: Option<P
         out.write_str("error[R0014]: \"")?;
         trendy_text::escape(text, out)?;
         out.write_char('"')?;
-        if let Some(place) = place {
-            write!(out, ", in column {}", place.column + 1)?;
-            if let Some(heading) = heading {
-                out.write_str(" (\"")?;
-                trendy_text::escape(heading, out)?;
-                out.write_str("\")")?;
-            }
-            write!(out, " on line {} of \"", place.line)?;
-            trendy_text::escape(place.path, out)?;
-            out.write_str("\",")?;
+        write!(out, ", in column {}", place.column + 1)?;
+        if let Some(heading) = heading {
+            out.write_str(" (\"")?;
+            trendy_text::escape(heading, out)?;
+            out.write_str("\")")?;
         }
+        write!(out, " on line {} of \"", place.line)?;
+        trendy_text::escape(place.path, out)?;
+        out.write_str("\",")?;
         match why {
             trendy_text::Unparsable::Malformed => write!(out, " isn't {a}")?,
             trendy_text::Unparsable::OutOfRange => write!(out, " is out of {a}'s range")?,
         }
-        if let Some(place) = place {
-            write!(out, ", the type of `{}`", place.attribute)?;
-            if place.first {
-                write!(
-                    out,
-                    "; if line {} is a header, `header: true` skips it",
-                    place.line
-                )?;
-            }
+        write!(out, ", the type of `{}`", place.attribute)?;
+        if place.first {
+            write!(
+                out,
+                "; if line {} is a header, `header: true` skips it",
+                place.line
+            )?;
         }
         out.write_char('\n')
     })
@@ -3574,6 +3639,17 @@ impl Made {
         Ok(made)
     }
 
+    /// The value at `value`, of the type `desc` describes, as
+    /// `debug_value` writes it. Fails if there is no memory for it.
+    ///
+    /// # Safety
+    ///
+    /// `value` must point to a valid value of the type `desc` describes.
+    unsafe fn value(value: *const u8, desc: &TypeDesc) -> Fallible<Made> {
+        // SAFETY: guaranteed by the caller.
+        Made::written(|mut out| unsafe { write_value(&mut out, value, desc) })
+    }
+
     /// Where it is, as a component's value.
     fn at(&self) -> *const u8 {
         (&raw const self.0).cast()
@@ -3627,7 +3703,7 @@ pub struct Kind {
 
 /// The names of the kinds of error the runtime makes, each at its place
 /// in the compiler's table, which [`trendy_rt_failures`] checks.
-pub const KINDS: [&str; 12] = [
+pub const KINDS: [&str; 25] = [
     "unreadable_file",
     "not_utf8",
     "malformed_csv",
@@ -3640,6 +3716,19 @@ pub const KINDS: [&str; 12] = [
     "division_by_zero",
     "not_one_tuple",
     "index_out_of_range",
+    "tuple_mismatch",
+    "shared_tuple",
+    "missing_tuple",
+    "key_violated",
+    "component_key_violated",
+    "tuple_removed_twice",
+    "element_set_twice",
+    "no_min_or_max",
+    "unparsable",
+    "broken_constraint",
+    "no_square_root",
+    "not_of_type",
+    "overlapping_subtypes",
 ];
 
 /// The place in [`KINDS`] of the kind named `name`, found when the runtime
@@ -3695,6 +3784,32 @@ pub const DIVISION_BY_ZERO: usize = place("division_by_zero");
 pub const NOT_ONE_TUPLE: usize = place("not_one_tuple");
 /// `index_out_of_range`'s, as [`UNREADABLE_FILE`] is.
 pub const INDEX_OUT_OF_RANGE: usize = place("index_out_of_range");
+/// `tuple_mismatch`'s, as [`UNREADABLE_FILE`] is.
+pub const TUPLE_MISMATCH: usize = place("tuple_mismatch");
+/// `shared_tuple`'s, as [`UNREADABLE_FILE`] is.
+pub const SHARED_TUPLE: usize = place("shared_tuple");
+/// `missing_tuple`'s, as [`UNREADABLE_FILE`] is.
+pub const MISSING_TUPLE: usize = place("missing_tuple");
+/// `key_violated`'s, as [`UNREADABLE_FILE`] is.
+pub const KEY_VIOLATED: usize = place("key_violated");
+/// `component_key_violated`'s, as [`UNREADABLE_FILE`] is.
+pub const COMPONENT_KEY_VIOLATED: usize = place("component_key_violated");
+/// `tuple_removed_twice`'s, as [`UNREADABLE_FILE`] is.
+pub const TUPLE_REMOVED_TWICE: usize = place("tuple_removed_twice");
+/// `element_set_twice`'s, as [`UNREADABLE_FILE`] is.
+pub const ELEMENT_SET_TWICE: usize = place("element_set_twice");
+/// `no_min_or_max`'s, as [`UNREADABLE_FILE`] is.
+pub const NO_MIN_OR_MAX: usize = place("no_min_or_max");
+/// `unparsable`'s, as [`UNREADABLE_FILE`] is.
+pub const UNPARSABLE: usize = place("unparsable");
+/// `broken_constraint`'s, as [`UNREADABLE_FILE`] is.
+pub const BROKEN_CONSTRAINT: usize = place("broken_constraint");
+/// `no_square_root`'s, as [`UNREADABLE_FILE`] is.
+pub const NO_SQUARE_ROOT: usize = place("no_square_root");
+/// `not_of_type`'s, as [`UNREADABLE_FILE`] is.
+pub const NOT_OF_TYPE: usize = place("not_of_type");
+/// `overlapping_subtypes`'s, as [`UNREADABLE_FILE`] is.
+pub const OVERLAPPING_SUBTYPES: usize = place("overlapping_subtypes");
 
 /// The compiler's table of errors, null until the program's entry gives
 /// it ([`trendy_rt_failures`]).
@@ -3844,22 +3959,8 @@ pub unsafe extern "C" fn trendy_rt_component_key_error(
     status(|| unsafe {
         let mut found = Found::of(&*errors)?;
         let (desc, record, of) = (&*desc, &*record, &*of);
-        let names = scope_written(|out| {
-            for (i, attr) in attributes(&*key).iter().enumerate() {
-                if i > 0 {
-                    out.write_str(", ")?;
-                }
-                out.write_str(name(attr))?;
-            }
-            Ok(())
-        })?;
-        let (tuples, _) = read_slice(value);
-        let element = desc.element();
-        let tuple = |i: usize| {
-            let at = tuples.add(pair.add(i).read_unaligned() * element.size);
-            written(at, element)
-        };
-        let (first, second) = (tuple(0)?, tuple(1)?);
+        let scoped = |write: &dyn Fn(&mut dyn Write) -> fmt::Result| scope_written(write);
+        let [names, first, second] = key_violation(value, desc, &*key, pair, scoped)?;
         let line = i64::try_from(record.line).unwrap_or(i64::MAX);
         found.add(
             COMPONENT_KEY_VIOLATED_IN_FILE,
@@ -4523,7 +4624,7 @@ impl Reading<'_> {
                 first: !self.file.header && start == self.records.first_line,
             };
             if !skips {
-                return Err(unparsable(value, a, why, Some(place)));
+                return Err(unparsable_field(value, a, why, place));
             }
             Ok(Some(BadRecord::Field {
                 text: value,
