@@ -1992,6 +1992,20 @@ pub unsafe extern "C" fn trendy_rt_not_of_type(
     }
 }
 
+/// Stop the program because it fails with an error whose message is
+/// `message`, a text, writing it (R0021): a `fail`.
+///
+/// # Safety
+///
+/// `message` must point to a valid text value.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_failed(message: *const u8) -> ! {
+    // SAFETY: guaranteed by the caller.
+    let message = unsafe { read_text(message) };
+    fail_with(|out| writeln!(out, "error[R0021]: {message}"))
+}
+
 /// Stop the program because `value`, components `desc` describes, which
 /// `load_csv` read from the record `record` describes for a value of the
 /// type of the program's own named `ty`, a text, break its constraint

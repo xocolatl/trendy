@@ -123,6 +123,9 @@ pub(crate) fn duplicate_operator(
         .with_help("delete the duplicate definition, or rename it or one of its parameters")
 }
 
+/// What a `fail` does.
+const FAIL_RULE: &str = "`fail e` stops the program with the error `e` and writes its message; it fails when it is computed, so one computed when compiling, as for an initial value or a call with constant arguments, is reported then";
+
 /// What a local variable's name must be.
 const LOCAL_NAMES: &str = "an operator's names, its parameters' and its local variables', each mean one thing wherever they are in scope, so no two there are the same, and a block's hide no other; they hide the program's variables of their names";
 
@@ -4817,6 +4820,10 @@ pub(crate) fn failed(failed: &crate::ops::Failed, expr: &Expr) -> Diagnostic {
                 None,
             )
         }
+        crate::ops::Failed::Own(message) => {
+            Diagnostic::error(Code::Failed, message.clone(), expr.span(), "fails")
+                .with_note(FAIL_RULE)
+        }
         crate::ops::Failed::NotOfType(treated) => {
             let (value, ty) = &**treated;
             Diagnostic::error(
@@ -6000,6 +6007,46 @@ pub(crate) fn unknown_relation_heading(span: Span) -> Diagnostic {
     )
     .with_note("a relation's heading comes from its selector's heading, from its tuples, or from the type expected of it")
     .with_help("write the heading, as in `relation { name: text } {}`, or declare the variable's type, as in `var r: relation { name: text } := relation {};`")
+}
+
+/// A `fail` at `span`, which has no value, with no type expected of it.
+pub(crate) fn untyped_failure(span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::UnknownEmptyType,
+        "the type of this `fail` is unknown",
+        span,
+        "no value, and no expected type",
+    )
+    .with_note("a `fail` has no value, as the program fails there, so its type is the one expected where it is written: a declared type's, an operator's result type, or the other branch's of an `if`")
+    .with_help("declare the type it is in place of, as in `var x: integer := …;`, or fail in a branch of an `if` whose other branch has a value")
+}
+
+/// The value written `written`, of the type `found`, which the `fail`
+/// written `keyword` fails with, but which isn't an error. A text is the
+/// message of the prelude's `failure`.
+pub(crate) fn not_an_error(written: &Expr, found: &hir::Type, keyword: &SyntaxToken) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::TypeMismatch,
+        format!("a program fails with an error, not a value of `{found}`"),
+        written.span(),
+        format!("this is `{found}`"),
+    )
+    .with_secondary(
+        trendy_syntax::span(keyword.text_range()),
+        "fails with an error",
+    )
+    .with_note("`fail e` stops the program with the error `e`, a value of a subtype of the prelude's union type `error`, and writes its message");
+    if *found == hir::Type::Scalar(hir::Scalar::Text) {
+        let text = written.syntax().text().to_string();
+        return d.with_suggestion(
+            "make it the message of the prelude's `failure`",
+            vec![Edit {
+                span: written.span(),
+                replacement: format!("failure{{message: {text}}}"),
+            }],
+        );
+    }
+    d.with_help("fail with a value of one of `error`'s subtypes: the prelude's `failure`, as in `fail failure{message: \"…\"}`, or one of the program's own, declared as `type no_conversion is error { { unit: text } };` with its `message`")
 }
 
 /// An array value at `span` with no elements and nothing else giving
@@ -7373,6 +7420,23 @@ pub(crate) fn if_in_block(stmt: &trendy_syntax::ast::IfStmt) -> Diagnostic {
     )
     .with_note(BLOCK)
     .with_help("choose between values with an `if` expression, as in `x := if c then a else b;`, whose branches can be value blocks")
+}
+
+/// `stmt`, a `fail` statement in `within`, a value block or a read-only
+/// operator's body, which ends with its value: a `fail` there is that
+/// value, or in it, and a statement before it would leave it unused.
+pub(crate) fn fail_statement_for_value(
+    stmt: &trendy_syntax::ast::FailStmt,
+    within: &str,
+) -> Diagnostic {
+    Diagnostic::error(
+        Code::Return,
+        format!("{within} fails with a `fail` in its value, not a statement"),
+        stmt.span(),
+        "a `fail` statement",
+    )
+    .with_note(format!("{within} has local variables, then its value; a `fail` has no value, so it goes where one does, the type expected there being its type"))
+    .with_help("fail in the value instead, as in `if ok then x else fail failure{message: \"…\"}`, or end the body with the `fail`, without its `;`")
 }
 
 /// `stmt`, a `return` in a value block: an early exit from the operator

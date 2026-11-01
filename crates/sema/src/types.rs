@@ -568,10 +568,20 @@ pub(crate) fn value(
     let mut checker = Checker::new(names);
     let out = checker.expr(expr, expected, errors)?;
     let ty = checker.ty(&out);
-    match crate::ops::known_value(&out) {
-        Some(value) => Some((value.clone(), ty)),
-        // Nothing in one reads input (`Checker::call`).
-        None => unreachable!("an expression of constants folds to a constant: {out:?}"),
+    if let Some(value) = crate::ops::known_value(&out) {
+        return Some((value.clone(), ty));
+    }
+    // Nothing in one reads input (`Checker::call`), so what is left is a
+    // `fail`, computed now.
+    match crate::ops::evaluated(out, names.bindings()) {
+        Ok(out) => match crate::ops::known_value(&out) {
+            Some(value) => Some((value.clone(), ty)),
+            None => unreachable!("an expression of constants folds to a constant: {out:?}"),
+        },
+        Err(failed) => {
+            errors.push(errors::failed(&failed, expr));
+            None
+        }
     }
 }
 

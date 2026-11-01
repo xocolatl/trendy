@@ -55,6 +55,7 @@ ast_node!(Requirement);
 ast_node!(Body);
 ast_node!(CallStmt);
 ast_node!(ReturnStmt);
+ast_node!(FailStmt);
 ast_node!(IfStmt);
 ast_node!(WhileStmt);
 ast_node!(LoopStmt);
@@ -80,6 +81,7 @@ ast_node!(UnaryExpr);
 ast_node!(BinaryExpr);
 ast_node!(IsExpr);
 ast_node!(TreatExpr);
+ast_node!(FailExpr);
 ast_node!(ParenExpr);
 ast_node!(ExtractExpr);
 ast_node!(ProjectExpr);
@@ -584,6 +586,7 @@ pub enum Statement {
     Assign(AssignStmt),
     Block(AssignBlock),
     Return(ReturnStmt),
+    Fail(FailStmt),
     If(IfStmt),
     While(WhileStmt),
     Loop(LoopStmt),
@@ -600,6 +603,7 @@ fn statements_of(node: &SyntaxNode) -> impl Iterator<Item = Statement> + use<> {
             .or_else(|| AssignStmt::cast(node.clone()).map(Statement::Assign))
             .or_else(|| AssignBlock::cast(node.clone()).map(Statement::Block))
             .or_else(|| ReturnStmt::cast(node.clone()).map(Statement::Return))
+            .or_else(|| FailStmt::cast(node.clone()).map(Statement::Fail))
             .or_else(|| IfStmt::cast(node.clone()).map(Statement::If))
             .or_else(|| WhileStmt::cast(node.clone()).map(Statement::While))
             .or_else(|| LoopStmt::cast(node.clone()).map(Statement::Loop))
@@ -628,6 +632,7 @@ impl Statement {
             Statement::Assign(s) => s.syntax(),
             Statement::Block(s) => s.syntax(),
             Statement::Return(s) => s.syntax(),
+            Statement::Fail(s) => s.syntax(),
             Statement::If(s) => s.syntax(),
             Statement::While(s) => s.syntax(),
             Statement::Loop(s) => s.syntax(),
@@ -1239,6 +1244,34 @@ impl IsExpr {
     }
 }
 
+impl FailExpr {
+    /// The word `fail`, or another language's, as `throw`.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    /// The error it fails with.
+    #[must_use]
+    pub fn error(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+}
+
+impl FailStmt {
+    /// The word `fail`, or another language's, as `throw`.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    /// The error it fails with.
+    #[must_use]
+    pub fn error(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+}
+
 impl TreatExpr {
     /// The word `treat`, or another language's spelling of it.
     #[must_use]
@@ -1692,6 +1725,7 @@ pub enum Expr {
     Binary(BinaryExpr),
     Is(IsExpr),
     Treat(TreatExpr),
+    Fail(FailExpr),
     Paren(ParenExpr),
     Extract(ExtractExpr),
     Index(IndexExpr),
@@ -1719,6 +1753,7 @@ impl Expr {
             .or_else(|| BinaryExpr::cast(node.clone()).map(Expr::Binary))
             .or_else(|| IsExpr::cast(node.clone()).map(Expr::Is))
             .or_else(|| TreatExpr::cast(node.clone()).map(Expr::Treat))
+            .or_else(|| FailExpr::cast(node.clone()).map(Expr::Fail))
             .or_else(|| ParenExpr::cast(node.clone()).map(Expr::Paren))
             .or_else(|| ExtractExpr::cast(node.clone()).map(Expr::Extract))
             .or_else(|| IndexExpr::cast(node.clone()).map(Expr::Index))
@@ -1745,6 +1780,7 @@ impl Expr {
             Expr::Binary(e) => e.syntax(),
             Expr::Is(e) => e.syntax(),
             Expr::Treat(e) => e.syntax(),
+            Expr::Fail(e) => e.syntax(),
             Expr::Paren(e) => e.syntax(),
             Expr::Extract(e) => e.syntax(),
             Expr::Index(e) => e.syntax(),

@@ -83,8 +83,8 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
     // a mode's `const` and `out`, `kind`, a load's `load`, `from`, `order`, `asc`,
     // `desc`, `keep` and `numbered`, a `for` loop's `in`, `heading`, `type`,
     // a supertype's `is`, a type's `constraint` and `order`, a
-    // conversion's `to` and `from`, a type test's `is`, and a treat's
-    // `treat`.
+    // conversion's `to` and `from`, a type test's `is`, a treat's
+    // `treat`, and a failure's `fail`.
     let keyword = match parent {
         Some(SyntaxKind::BuiltinType) => token.text() == "type",
         Some(SyntaxKind::AnyType) => matches!(token.text(), "any" | "type"),
@@ -105,6 +105,8 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
             | SyntaxKind::Supertype
             | SyntaxKind::IsExpr
             | SyntaxKind::TreatExpr
+            | SyntaxKind::FailExpr
+            | SyntaxKind::FailStmt
             | SyntaxKind::Constraint
             | SyntaxKind::TypeOrder
             | SyntaxKind::Conversion,
@@ -795,6 +797,27 @@ mod tests {
                 ("r", Class::Attribute, false),
                 (">", Class::ExprOperator, false),
                 ("0e0", Class::Number, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn failures() {
+        assert_eq!(
+            highlight("operator f{fail: boolean}: integer [ if fail then fail e else 1 ];"),
+            [
+                ("operator", Class::Keyword, false),
+                ("f", Class::Operator, true),
+                ("fail", Class::Parameter, true),
+                ("boolean", Class::Type, false),
+                ("integer", Class::Type, false),
+                ("if", Class::Keyword, false),
+                ("fail", Class::Parameter, false),
+                ("then", Class::Keyword, false),
+                ("fail", Class::Keyword, false),
+                ("e", Class::Variable, false),
+                ("else", Class::Keyword, false),
+                ("1", Class::Number, false),
             ]
         );
     }

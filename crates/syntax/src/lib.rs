@@ -247,6 +247,9 @@ pub enum SyntaxKind {
     AssignBlock,
     /// `return;` or `return value;`: leaving an operator early.
     ReturnStmt,
+    /// `fail e;`: the program fails with the error `e`. `fail` is a
+    /// contextual keyword, an identifier elsewhere.
+    FailStmt,
     /// `if c then [ … ] else [ … ];`: statements run if `c` is true, and
     /// else others, if any. An `else if` is one in another's `else`, with
     /// no `;` of its own.
@@ -311,6 +314,9 @@ pub enum SyntaxKind {
     /// fails unless it is. `treat` is a contextual keyword, an identifier
     /// elsewhere.
     TreatExpr,
+    /// `fail e`: the program fails with the error `e`, so it has no value.
+    /// `fail` is a contextual keyword, an identifier elsewhere.
+    FailExpr,
     /// `(x)`
     ParenExpr,
     /// `t.a`: an attribute's value.
@@ -416,7 +422,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 164] = [
+    pub const ALL: [SyntaxKind; 166] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -520,6 +526,7 @@ impl SyntaxKind {
         SyntaxKind::AssignStmt,
         SyntaxKind::AssignBlock,
         SyntaxKind::ReturnStmt,
+        SyntaxKind::FailStmt,
         SyntaxKind::IfStmt,
         SyntaxKind::WhileStmt,
         SyntaxKind::LoopStmt,
@@ -542,6 +549,7 @@ impl SyntaxKind {
         SyntaxKind::BinaryExpr,
         SyntaxKind::IsExpr,
         SyntaxKind::TreatExpr,
+        SyntaxKind::FailExpr,
         SyntaxKind::ParenExpr,
         SyntaxKind::ExtractExpr,
         SyntaxKind::IndexExpr,
@@ -1008,6 +1016,7 @@ impl SyntaxKind {
             | SyntaxKind::BinaryExpr
             | SyntaxKind::IsExpr
             | SyntaxKind::TreatExpr
+            | SyntaxKind::FailExpr
             | SyntaxKind::ParenExpr
             | SyntaxKind::ExtractExpr
             | SyntaxKind::IndexExpr
@@ -1032,6 +1041,7 @@ impl SyntaxKind {
             SyntaxKind::AssignStmt => "assignment statement",
             SyntaxKind::AssignBlock => "`assign` block",
             SyntaxKind::ReturnStmt => "`return` statement",
+            SyntaxKind::FailStmt => "`fail` statement",
             SyntaxKind::IfStmt => "`if` statement",
             SyntaxKind::WhileStmt | SyntaxKind::LoopStmt | SyntaxKind::ForStmt => "loop",
             SyntaxKind::Assignment => "assignment",

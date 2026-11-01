@@ -906,6 +906,68 @@ type polygon is plane_figure { { corners: relation { n: integer, name: text } } 
 ";
 
 #[test]
+fn failures() {
+    let (code, stderr) = run_example("failures");
+    assert_eq!(
+        (code, stderr.as_str()),
+        (
+            0,
+            "1e3\n6.41e2\n\"no conversion from pinch to grams\"\n\"the relation has 2 tuples, but exactly one is taken\"\n"
+        )
+    );
+}
+
+#[test]
+fn a_fail_stops_the_program_with_its_errors_message() {
+    let program = |main: &str| {
+        format!(
+            "type no_conversion is error {{ {{ unit: text }} }};
+
+operator message{{error: no_conversion}}: text [
+    \"no conversion from \" || error.unit
+];
+
+operator grams{{unit: text}}: approximate [
+    if unit = \"jin\" then 500e0 else fail no_conversion{{unit: unit}}
+];
+
+operator weigh{{unit: text}} [
+    if unit = \"\" then [
+        fail failure{{message: \"no unit\"}};
+    ];
+    call debug_value{{v: grams{{unit: unit}}}};
+];
+
+operator main{{}} [
+    call weigh{{unit: \"jin\"}};
+    {main}
+];
+"
+        )
+    };
+    let failed = trendy_diag::Code::Failed.id();
+    // A value's, where it is computed.
+    assert_eq!(
+        run_source("fail_value", &program("call weigh{unit: \"pinch\"};")),
+        (
+            1,
+            format!(
+                "5e2\nerror[{failed}]: no conversion from pinch\n{}",
+                site("fail_value", 8)
+            )
+        )
+    );
+    // A statement's, where it is.
+    assert_eq!(
+        run_source("fail_statement", &program("call weigh{unit: \"\"};")),
+        (
+            1,
+            format!("5e2\nerror[{failed}]: no unit\n --> fail_statement.trendy:13:9\n")
+        )
+    );
+}
+
+#[test]
 fn types_in_a_hierarchy_when_running() {
     // Each value is laid out after its own type, which it is written as,
     // compared by, and ordered by in a relation, by its components; and

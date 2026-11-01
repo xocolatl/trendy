@@ -23,6 +23,10 @@ pub struct Program {
     /// The operator the executable starts in: a user operator with no
     /// parameters.
     pub entry: OperatorId,
+    /// The prelude's `message{error: error}: text`, which writes the
+    /// message of an error, a value of the prelude's union type `error`,
+    /// that the program fails with (see [`Expr::Fail`]).
+    pub message: OperatorId,
 }
 
 impl Program {
@@ -914,6 +918,9 @@ pub enum Statement {
     /// variable, which the block lists, the element's value. Neither it nor
     /// a variable the array is computed from changes while the loop runs.
     For(LocalId, Expr, Block),
+    /// `fail e;`: the program fails with the error that the expression is,
+    /// as [`Expr::Fail`] does.
+    Fail(Expr),
 }
 
 /// When a loop checks its condition.
@@ -955,6 +962,7 @@ impl Statement {
                 array.instantiated(types),
                 body.instantiated(types),
             ),
+            Statement::Fail(error) => Statement::Fail(error.instantiated(types)),
         }
     }
 }
@@ -1348,6 +1356,13 @@ pub enum Expr {
     /// Whether the value of the expression is of the type, or one of its
     /// subtypes (IM Prescription 15).
     Is(Box<Expr>, Box<Type>),
+    /// `fail e`: the program fails with the error that the expression is,
+    /// a value of the prelude's union type `error`, writing its message
+    /// ([`Program::message`]), so it has no value. The type is the one a
+    /// value would have where it is written, as one branch of an `if`
+    /// takes the other's. It fails only if it is computed, as a branch not
+    /// taken isn't.
+    Fail(Box<Expr>, Box<Type>),
     /// The tuple at hand, with this heading: the one an `Extend` is computing
     /// attributes for, or a `Restrict` a condition, `depth` of them out from
     /// here, counting the innermost as 0. Its attributes are in scope by
@@ -1441,7 +1456,7 @@ impl Expr {
                 Type::Defined(defined) => Type::Tuple(defined.components),
                 other => panic!("the components of {other}"),
             },
-            Expr::Treat(ty, _) | Expr::TreatAs(ty, _) => (**ty).clone(),
+            Expr::Treat(ty, _) | Expr::TreatAs(ty, _) | Expr::Fail(_, ty) => (**ty).clone(),
         }
     }
 }
@@ -1469,6 +1484,7 @@ impl Expr {
             // range, and a value treated as one of a subtype of its type
             // needn't be one.
             Expr::Unary(UnaryOp::Negate(Numeric::Integer), _)
+            | Expr::Fail(..)
             | Expr::TreatAs(..)
             | Expr::Call(..)
             | Expr::Remove(..)
@@ -1692,6 +1708,7 @@ impl Expr {
             Expr::Treat(ty, value) => Expr::Treat(ty, Box::new(f(*value, 0))),
             Expr::TreatAs(ty, value) => Expr::TreatAs(ty, Box::new(f(*value, 0))),
             Expr::Is(value, ty) => Expr::Is(Box::new(f(*value, 0)), ty),
+            Expr::Fail(error, ty) => Expr::Fail(Box::new(f(*error, 0)), ty),
             Expr::Call(call) => Expr::Call(Call {
                 args: call
                     .args
@@ -1724,6 +1741,7 @@ impl Expr {
             | Expr::Treat(_, operand)
             | Expr::TreatAs(_, operand)
             | Expr::Is(operand, _)
+            | Expr::Fail(operand, _)
             | Expr::Load(operand, ..)
             | Expr::Unload(operand, ..) => f(operand, 0),
             Expr::Let(_, lhs, rhs)
@@ -1872,6 +1890,7 @@ impl Expr {
                 Expr::TreatAs(Box::new(ty.instantiated(types)), inst(value))
             }
             Expr::Is(value, ty) => Expr::Is(inst(value), Box::new(ty.instantiated(types))),
+            Expr::Fail(error, ty) => Expr::Fail(inst(error), Box::new(ty.instantiated(types))),
             Expr::Current(depth, heading) => Expr::Current(*depth, heading.instantiated(types)),
             Expr::Call(call) => Expr::Call(call.instantiated(types)),
         }

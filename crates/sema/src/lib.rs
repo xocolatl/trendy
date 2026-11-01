@@ -52,16 +52,7 @@ pub fn analyze(
     );
     errors.sort_by_key(|d| d.span().start);
     match entry {
-        Some(entry) if errors.is_empty() => {
-            let subtypes = checked.namespaces.subtypes.clone();
-            let (operators, variables) = checked.finish();
-            Ok(hir::Program {
-                operators,
-                variables,
-                subtypes,
-                entry,
-            })
-        }
+        Some(entry) if errors.is_empty() => Ok(checked.finish(entry)),
         _ => Err(errors),
     }
 }
@@ -220,6 +211,7 @@ pub(crate) fn check(files: &Files, errors: &mut Vec<Diagnostic>) -> Checked {
     // Every operator's signature first, so that anything can refer to an
     // operator defined after it.
     let operators = operators::signatures(builtins.operators, files, &namespaces, errors);
+    builtins::failures(&files.prelude, &namespaces, &operators, errors);
 
     // Then the globals: the variables' initial values, and the read-only
     // operators' values, which initial values can call and which read
@@ -265,9 +257,13 @@ pub(crate) fn check(files: &Files, errors: &mut Vec<Diagnostic>) -> Checked {
 }
 
 impl Checked {
-    /// The HIR operators, the built-ins first, with their bodies, and the
-    /// variables, of files without errors.
-    pub(crate) fn finish(mut self) -> (Vec<hir::Operator>, Vec<hir::Variable>) {
+    /// The program of files without errors, which starts in `entry`.
+    pub(crate) fn finish(mut self, entry: hir::OperatorId) -> hir::Program {
+        let message = self
+            .operators
+            .message()
+            .expect("a prelude without errors declares `message`")
+            .id;
         let operators = self
             .operators
             .iter()
@@ -311,7 +307,13 @@ impl Checked {
             .into_iter()
             .map(|v| v.expect("a program without errors has every variable"))
             .collect();
-        (operators, variables)
+        hir::Program {
+            operators,
+            variables,
+            subtypes: self.namespaces.subtypes,
+            entry,
+            message,
+        }
     }
 }
 
@@ -2436,6 +2438,117 @@ var zero := seg{{len: 0}};{MAIN}"
         assert_eq!(
             &prelude[declared.start - source.len()..declared.end - source.len()],
             "area"
+        );
+    }
+
+    /// A program's own error, and an operator that fails with it.
+    const NO_CONVERSION: &str = "type no_conversion is error { { unit: text } };\noperator message{error: no_conversion}: text [ \"no conversion from \" || error.unit ];\noperator grams{unit: text}: approximate [ if unit = \"kg\" then 1000e0 else fail no_conversion{unit: unit} ];\n";
+
+    #[test]
+    fn a_fail_fails_when_it_is_computed() {
+        // Not computed, as a branch not taken.
+        let vars = variables(&format!("{NO_CONVERSION}var kg := grams{{unit: \"kg\"}};"));
+        assert_eq!(
+            vars[0].init,
+            hir::Value::Approximate(hir::Approximate::new(1000.0))
+        );
+        // Computed when compiling: reported then, with its message.
+        let errors = errors(&format!(
+            "{NO_CONVERSION}var pinch := grams{{unit: \"pinch\"}};{MAIN}"
+        ));
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].code, Code::Failed);
+        assert_eq!(errors[0].message, "no conversion from pinch");
+        assert!(errors[0].notes[1].contains("computing `grams`'s value"));
+        let errors = self::errors(&format!(
+            "var direct: integer := fail failure{{message: \"direct\"}};{MAIN}"
+        ));
+        assert_eq!(errors[0].code, Code::Failed);
+        assert_eq!(errors[0].message, "direct");
+        // When running, as a statement always is.
+        analyze_str(&format!(
+            "{NO_CONVERSION}operator weigh{{unit: text}} [ call debug_value{{v: grams{{unit: unit}}}}; ];\noperator main{{}} [ call weigh{{unit: \"pinch\"}}; fail failure{{message: \"done\"}}; ];"
+        ))
+        .unwrap();
+        let body = main_body("operator main{} [ fail failure{message: \"done\"}; ];");
+        assert!(matches!(body[0].1, hir::Statement::Fail(_)), "{body:#?}");
+    }
+
+    #[test]
+    fn a_fail_has_the_type_expected_where_it_is() {
+        // An `if`'s other branch's.
+        let vars = variables(
+            "var n := 3;\nvar a := if n > 0 then 1 else fail failure{message: \"no\"};\nvar b := if n < 0 then fail failure{message: \"no\"} else \"yes\";",
+        );
+        assert_eq!(vars[1].init, hir::Value::Integer(1));
+        assert_eq!(vars[2].init, hir::Value::Text("yes".to_string()));
+        // None.
+        for source in [
+            "var a := fail failure{message: \"no\"};",
+            "operator f{x: boolean}: integer [ var y := if x then fail failure{message: \"a\"} else fail failure{message: \"b\"}; 1 ];",
+        ] {
+            let codes = codes(&format!("{source}{MAIN}"));
+            assert!(
+                !codes.is_empty() && codes.iter().all(|c| *c == Code::UnknownEmptyType),
+                "{source}: {codes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fail_fails_with_an_error() {
+        // A text is the prelude's `failure`'s message.
+        let source = "operator main{} [ fail \"empty\"; ];";
+        assert_eq!(codes(source), [Code::TypeMismatch]);
+        assert_eq!(
+            fix(source),
+            "operator main{} [ fail failure{message: \"empty\"}; ];"
+        );
+        let errors = errors("operator main{} [ fail 7; ];");
+        assert_eq!(errors[0].code, Code::TypeMismatch);
+        assert!(errors[0].suggestions.is_empty());
+        assert!(errors[0].help[0].contains("failure{message:"));
+        // A statement where a value goes.
+        for source in [
+            "operator f{}: integer [ fail failure{message: \"no\"}; 1 ];",
+            "var a: integer := [ fail failure{message: \"no\"}; 1 ];",
+        ] {
+            assert_eq!(
+                codes(&format!("{source}{MAIN}")),
+                [Code::Return],
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_prelude_has_error_and_its_messages() {
+        let vars = variables(
+            "var a := message{error: failure{message: \"why\"}};\nvar b := message{error: not_one_tuple{count: 0}};\nvar c := message{error: not_one_tuple{count: 2}};\nvar d := message{error: index_out_of_range{position: 0, length: 3}};\nvar e := message{error: index_out_of_range{position: 4, length: 0}};\nvar f := message{error: index_out_of_range{position: 4, length: 1}};\nvar g := message{error: index_out_of_range{position: 4, length: 3}};\nvar h := message{error: division_by_zero{operation: \"7 div 0\"}};\nvar i := message{error: overflow{operation: \"9223372036854775807 + 1\"}};",
+        );
+        let messages: Vec<String> = vars.iter().map(|v| v.init.to_string()).collect();
+        assert_eq!(
+            messages,
+            [
+                "\"why\"",
+                "\"the relation has no tuples, but exactly one is taken\"",
+                "\"the relation has 2 tuples, but exactly one is taken\"",
+                "\"an array has no element at position 0: positions count from 1\"",
+                "\"the array is empty, so it has no element at position 4\"",
+                "\"the array has 1 element, so none at position 4\"",
+                "\"the array has 3 elements, so none at position 4\"",
+                "\"division by zero: 7 div 0 has no result\"",
+                "\"overflow: 9223372036854775807 + 1 is out of its type's range\"",
+            ]
+        );
+        // The compiler's contract with it.
+        let source = trendy_prelude::SOURCE.replace("type error union;", "type error_ union;");
+        let errors = check_prelude(&parse(&source));
+        assert!(
+            errors
+                .iter()
+                .any(|d| d.code == Code::Internal && d.message.contains("`type error union;`")),
+            "{errors:#?}"
         );
     }
 
@@ -7648,7 +7761,8 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
                 hir::Statement::Call(_)
                 | hir::Statement::If(..)
                 | hir::Statement::Loop(..)
-                | hir::Statement::For(..) => None,
+                | hir::Statement::For(..)
+                | hir::Statement::Fail(_) => None,
             })
             .collect();
         let local = |i| vec![hir::Target::Local(hir::LocalId(i))];

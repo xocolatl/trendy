@@ -908,6 +908,62 @@ builtin operator load_text_file{path: text, out lines: array text};
    read (R0014). */
 builtin operator load_csv{path: text, header: boolean, columns: C, out rows: array T}
     types { C: any tuple, T: any tuple };
+
+/* What went wrong, when a program fails: a value of one of `error`'s
+   subtypes, each a kind of failure, with what it is about as its
+   components. `fail e` stops the program with `e`'s message. A program
+   declares kinds of its own as the prelude does, each with its
+   `message`. */
+type error union;
+
+/* What a failure says: a version for each of `error`'s subtypes. */
+operator message{error: error}: text;
+
+/* A failure a program describes in its own words, as in
+   `fail failure{message: "the list is empty"}`. */
+type failure is error { { message: text } };
+
+operator message{error: failure}: text [
+    error.message
+];
+
+/* A relation has `count` tuples where its only one is taken (R0005). */
+type not_one_tuple is error { { count: integer } };
+
+operator message{error: not_one_tuple}: text [
+    var tuples := if error.count = 0 then "no tuples" else to_text{from: error.count} || " tuples";
+    "the relation has " || tuples || ", but exactly one is taken"
+];
+
+/* An array of `length` elements has none at `position` (R0011). */
+type index_out_of_range is error { { position: integer, length: integer } };
+
+operator message{error: index_out_of_range}: text [
+    var at := "position " || to_text{from: error.position};
+    if error.position < 1
+        then "an array has no element at " || at || ": positions count from 1"
+        else if error.length = 0
+        then "the array is empty, so it has no element at " || at
+        else if error.length = 1
+        then "the array has 1 element, so none at " || at
+        else "the array has " || to_text{from: error.length} || " elements, so none at " || at
+];
+
+/* `operation`, written as trendy writes it, as `7 div 0`, divides by zero
+   (R0002). */
+type division_by_zero is error { { operation: text } };
+
+operator message{error: division_by_zero}: text [
+    "division by zero: " || error.operation || " has no result"
+];
+
+/* `operation`'s result, written as trendy writes it, as
+   `9223372036854775807 + 1`, is out of its type's range (R0001). */
+type overflow is error { { operation: text } };
+
+operator message{error: overflow}: text [
+    "overflow: " || error.operation || " is out of its type's range"
+];
 ```
 
 **`debug_value{v: any type}`** writes `v` to stderr, on one line, as trendy
@@ -4461,6 +4517,66 @@ behind a guard known only when the program runs is an error, since it
 fails whenever it is computed. Approximate numbers are simplified the same way, since
 they are finite and have one zero: `x + 0e0` is `x`, and `x * 0e0` is `0e0`.
 
+## Failures
+
+A program fails on purpose with `fail e`, where `e` is an *error*: a value
+of one of the subtypes of the prelude's union type `error` (see [Union
+types](#union-types)), which says what went wrong. It stops the program,
+writing the error's message and where it is, as a failure of the
+language's own does (R0021). The prelude's `message{error: error}: text`
+writes the message: it has no body, so each subtype has its version. The
+prelude's `failure` says what went wrong in its own words, and a program
+declares subtypes of its own, each with its `message`, whose components
+say what went wrong as values:
+
+```trendy
+type no_conversion is error { { unit: text } };
+
+operator message{error: no_conversion}: text [
+    "no conversion from " || error.unit || " to grams"
+];
+
+operator grams{unit: text}: approximate [
+    if unit = "jin" then 500e0 else fail no_conversion{unit: unit}
+];
+
+operator weigh{unit: text} [
+    if unit = "" then [
+        fail failure{message: "no unit"};
+    ];
+    call debug_value{v: grams{unit: unit}};
+];
+
+operator main{} [
+    call weigh{unit: "jin"};
+];
+```
+
+- **`fail e` is an expression, and `fail e;` a statement.** A `fail` has
+  no value, as the program stops there, so its type is the one expected
+  where it is: a declared type's, an operator's result type, or the other
+  branch's of an `if`, as an empty relation's heading is (A0011). Its error
+  is all that follows `fail`, so as an operand it needs parentheses
+  (P0022). `fail` is a contextual keyword, a name elsewhere.
+- **A read-only operator can fail,** as `div` does for a divisor of zero:
+  it is still a function of its arguments, a partial one, which fails for
+  the same arguments whenever it is called. It fails in its value, as in a
+  branch of an `if`, not with a `fail` statement, as its body is its value
+  (A0035).
+- **A `fail` fails when it is computed,** and a branch not taken isn't.
+  One the compiler computes is reported when compiling, as other failures
+  are: an initial value's, or a call's with arguments known then (R0021).
+- **An error is a value of one of `error`'s subtypes** (A0004): a text is
+  the message of the prelude's `failure`, `fail failure{message: "…"}`,
+  which is fixed. Java's, JavaScript's and C++'s `throw` and Python's and
+  Ruby's `raise` are fixed to `fail` (P0047).
+- **The prelude's errors of the language's own failures** have plain
+  components: `not_one_tuple { count }` (R0005), `index_out_of_range {
+  position, length }` (R0011), `division_by_zero { operation }` (R0002)
+  and `overflow { operation }` (R0001), each with the message the failure
+  writes. Nothing catches a failure yet, so a program meets them only in
+  its own `fail`s.
+
 ## Literals
 
 **Boolean literals** are `true` and `false`, in lowercase.
@@ -4766,6 +4882,8 @@ line after a comment on its own line, such as a file's header, is kept.
 | `type Home = { … }`, `interface Home { … }`, `struct Home { … }` | `heading home := { … };`, whose types are `relation home` and `tuple home` |
 | `TYPE PLANE_FIGURE UNION;`, an abstract class | `type plane_figure union;`, whose values are its subtypes' |
 | `class Ellipse extends PlaneFigure`, `class Ellipse : PlaneFigure`, `TYPE ELLIPSE IS { PLANE_FIGURE POSSREP … }` | `type ellipse is plane_figure { { a: approximate, … } };` |
+| `throw e`, `raise e`, `panic!("…")` | `fail e`, of an error, as `fail failure{message: "…"}` |
+| `class NoConversion extends Exception`, an exception of a program's own | `type no_conversion is error { { unit: text } };`, with its `message{error: no_conversion}` |
 | `x instanceof Ellipse`, `isinstance(x, Ellipse)`, `x IS OF (ELLIPSE)`, `IS_ELLIPSE(X)` | `x is ellipse`, after which `x` is an ellipse in the rest of the condition |
 | `(Ellipse) x`, `x as Ellipse`, `TREAT(x AS ELLIPSE)`, `TREAT_AS_ELLIPSE(X)` | `treat x as ellipse`, or, where it may not be one, `x is ellipse and …` |
 | an abstract method, `abstract double area();`, and its overrides | `operator area{f: plane_figure}: approximate;`, and a version for each subtype, `operator area{f: ellipse}: approximate [ … ];` |

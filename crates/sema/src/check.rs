@@ -298,6 +298,7 @@ impl<'a> Checker<'a> {
             Expr::Name(name_ref) => self.named(name_ref, expr, expected, errors),
             Expr::Is(test) => self.type_test(test, expr, expected, errors),
             Expr::Treat(treat) => self.treated(treat, expr, expected, errors),
+            Expr::Fail(fail) => self.failure(fail, expr, expected, errors),
             Expr::Block(block) => crate::block::value(block, &mut *self.names, expected, errors),
             Expr::Paren(paren) => self.expr(&paren.inner()?, expected, errors),
             Expr::Unary(unary) => {
@@ -2152,6 +2153,56 @@ impl<'a> Checker<'a> {
             return None;
         }
         self.matched(expected, ops::is(operand, ty), expr, errors)
+    }
+
+    /// `fail`, `fail e`, written `expr`: the program fails with the error
+    /// `e`, so it has no value, and the type expected where it is, as one
+    /// branch of an `if` takes the other's, which gives it one as it gives
+    /// an empty relation its heading (A0011). It fails only if it is
+    /// computed: folding computes it (see [`ops::evaluated`]).
+    fn failure(
+        &mut self,
+        fail: &ast::FailExpr,
+        expr: &Expr,
+        expected: Option<&Expected>,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let error = self.error(&fail.error()?, &fail.keyword()?, errors);
+        let Some(expected) = expected else {
+            errors.push(errors::untyped_failure(expr.span()));
+            return None;
+        };
+        Some(hir::Expr::Fail(
+            Box::new(error?),
+            Box::new(expected.ty.clone()),
+        ))
+    }
+
+    /// The error `written`, which the `fail` written `keyword` fails with:
+    /// a value of a subtype of the prelude's union type `error`, as a
+    /// value of it. `None` after reporting why it isn't one.
+    pub(crate) fn error(
+        &mut self,
+        written: &Expr,
+        keyword: &SyntaxToken,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let error = self.expr(written, None, errors)?;
+        // The prelude declares it, or that is reported.
+        let dummy = self.namespaces().dummy("error")?;
+        let ty = hir::Type::Dummy(Box::new(dummy.clone()));
+        let found = self.ty(&error);
+        if !found.is_subtype_of(&ty) {
+            errors.push(errors::not_an_error(written, &found, keyword));
+            return None;
+        }
+        // Computing it, as folding does, computes its message, as a call
+        // of `message` would.
+        let message = self.names.operators().message()?.id;
+        let at = trendy_syntax::span(keyword.text_range());
+        self.names
+            .checked(message, at, errors)
+            .then(|| error.treated(&ty))
     }
 
     /// `treat`, `treat x as t`, written `expr`: the value of `x` as one of

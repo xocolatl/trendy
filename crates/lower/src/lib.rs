@@ -790,7 +790,22 @@ impl<'a> FunctionBuilder<'a> {
             hir::Statement::For(variable, array, body) => {
                 self.for_statement(*variable, array, body, cx);
             }
+            hir::Statement::Fail(error) => self.scoped(|this| this.fail_with(error, cx)),
         }
+    }
+
+    /// Stop the program with the error `error`'s message, as the prelude's
+    /// `message` writes it (R0021). What comes after is never reached.
+    fn fail_with(&mut self, error: &hir::Expr, cx: &mut Lowering) {
+        let call = hir::Call {
+            operator: self.program.message,
+            types: Vec::new(),
+            args: BTreeMap::from([("error".to_string(), error.clone())]),
+            updated: BTreeMap::new(),
+        };
+        let message = self.read_only_call(&call, cx);
+        let next = self.new_block();
+        self.fail(lir::Failure::Own { message }, next);
     }
 
     /// A `for` loop of `body` over `array`, with the local variable
@@ -2048,6 +2063,11 @@ impl<'a> FunctionBuilder<'a> {
             hir::Expr::Components(operand) => self.components(operand, cx),
             hir::Expr::Treat(..) | hir::Expr::TreatAs(..) | hir::Expr::Is(..) => {
                 self.typed(expr, cx)
+            }
+            // It has no value: one is never computed in its slot.
+            hir::Expr::Fail(error, ty) => {
+                self.fail_with(error, cx);
+                self.slot(cx.layout(ty))
             }
             hir::Expr::Semijoin(lhs, rhs) => self.matching(lhs, rhs, false, cx),
             hir::Expr::Combine(combination, lhs, rhs) => self.combine(*combination, lhs, rhs, cx),
@@ -4722,6 +4742,8 @@ mod tests {
             variables,
             subtypes: BTreeMap::new(),
             entry: hir::OperatorId(entry),
+            // None of these fails, so no error's message is written.
+            message: hir::OperatorId(entry),
         }
     }
 

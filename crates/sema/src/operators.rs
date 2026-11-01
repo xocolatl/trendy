@@ -366,6 +366,20 @@ impl Operators {
             .map(|&id| self.get(id))
     }
 
+    /// The prelude's `message{error: error}: text`, a specification of its
+    /// union type `error`, which writes an error's message, if the prelude
+    /// declares it so.
+    pub(crate) fn message(&self) -> Option<&Signature> {
+        self.overloads("message").find(|s| {
+            let error = s.params.get("error").map(|p| &p.ty);
+            s.source == Source::Prelude
+                && s.written.keys().eq(["error"])
+                && matches!(error, Some(hir::Type::Dummy(d)) if d.name == "error")
+                && s.result == Some(hir::Type::Scalar(hir::Scalar::Text))
+                && s.decl.as_ref().is_some_and(|d| d.body().is_none())
+        })
+    }
+
     /// Whether an operator is named `name`.
     pub(crate) fn has(&self, name: &str) -> bool {
         self.by_name.contains_key(name)

@@ -1205,6 +1205,8 @@ pub(crate) enum Failed {
     Overlapping(Box<Overlapping>),
     /// A value treated as one of a type it isn't of.
     NotOfType(Box<(hir::Value, hir::Type)>),
+    /// A `fail`, of the error that writes this message.
+    Own(String),
 }
 
 /// The tuples of `operand` for which `condition`, computed from the tuple at
@@ -2313,6 +2315,43 @@ pub(crate) fn call(call: hir::Call, bindings: Bindings) -> Result<hir::Expr, Fai
     })
 }
 
+/// The failure of a `fail` of the error `error`: its message, as the
+/// prelude's `message` writes it, or that operator's own failure.
+fn own_failure(error: hir::Value, bindings: Bindings) -> Failed {
+    let Some(message) = bindings.operators.message() else {
+        // The prelude doesn't declare it, which is reported.
+        return Failed::Own(error.to_string());
+    };
+    let call = hir::Call {
+        operator: message.id,
+        types: Vec::new(),
+        args: BTreeMap::from([("error".to_string(), hir::Expr::Constant(error))]),
+        updated: BTreeMap::new(),
+    };
+    match self::call(call, bindings) {
+        Ok(hir::Expr::Constant(hir::Value::Text(text))) => Failed::Own(text),
+        Ok(other) => unreachable!("an error's message is known with the error: {other:?}"),
+        Err(failed) => failed,
+    }
+}
+
+/// `expr`, every part of which is known when compiling, computed: a
+/// constant, unless a `fail` in it is computed, as it is unless a
+/// condition leaves it out.
+///
+/// # Errors
+///
+/// Returns why it fails.
+pub(crate) fn evaluated(expr: hir::Expr, bindings: Bindings) -> Result<hir::Expr, Failed> {
+    let substitution = Substitution {
+        tuple: None,
+        args: None,
+        locals: &[],
+        bindings,
+    };
+    substitute(expr, 0, &substitution)
+}
+
 /// `array` with `changes` made, substituted as for [`substitute`].
 ///
 /// # Errors
@@ -2491,6 +2530,14 @@ fn substitute(
         hir::Expr::Components(value) => components(sub(value)?),
         hir::Expr::Treat(ty, value) => sub(value)?.treated(&ty),
         hir::Expr::TreatAs(ty, value) => treated_as(sub(value)?, *ty)?,
+        // Computed, it fails, once its error is known.
+        hir::Expr::Fail(error, ty) => {
+            let error = sub(error)?;
+            match known_value(&error) {
+                Some(value) => return Err(own_failure(value.clone(), substitution.bindings)),
+                None => hir::Expr::Fail(Box::new(error), ty),
+            }
+        }
         hir::Expr::Is(value, ty) => is(sub(value)?, *ty),
         hir::Expr::Semijoin(lhs, rhs) => matching(sub(lhs)?, sub(rhs)?, false),
         hir::Expr::Combine(combination, lhs, rhs) => combined(sub(lhs)?, sub(rhs)?, combination)?,

@@ -404,6 +404,14 @@ type's braces, or after Tutorial D's `POSSREP`, are parsed as the
 representation in its place and fixed to braces of their own (P0039);
 TypeScript's `type Home = {…}`, with its `=`, stays a heading's.
 
+`fail e` (`FailExpr`) and `fail e;` (`FailStmt`) have `fail` a contextual
+keyword before a name, a literal or `(`, so that `fail - 1` and `fail{}`
+are a variable's and an operator's. Its error is all that follows, as an
+`if`'s `else` branch is, so where a whole value goes it is parsed as one
+(`Parser::expression`), and as an operand it is reported (P0022). One that
+runs to a read-only body's end is its value (`Parser::at_value`). Other
+languages' `throw` and `raise` are parsed as it and fixed to it (P0047).
+
 `!!r` (`ImageExpr`), Tutorial D's image relation, takes a single operand:
 a name, a literal or a parenthesized expression. The lexer makes `!!` one
 token only when the two `!`s are together; a lone `!` is C's `not`, fixed
@@ -1112,6 +1120,27 @@ representation it is of: `Defined::representation_with` and
 `check::representation` find the first, the stored one first, with every
 component named.
 
+A program's own failure, `fail e`, is `hir::Expr::Fail` of its error, a
+value of the prelude's union type `error` as one of it, with the type a
+value would have where it is written, and `fail e;` is
+`hir::Statement::Fail`. A `fail` has no value, so as an expression it has
+no type without one expected, which sema reports as an empty relation's
+heading (A0011), so that what checks values on their own and fits them to
+another's type (`types::Alone`), as an `if`'s branches, gives it the
+other's. The prelude's `error` and its specification `message{error:
+error}: text` are the compiler's to rely on, as its built-ins are
+(`builtins::failures`, X0000 if missing; `Operators::message`,
+`hir::Program::message`). Checking a `fail` checks `message`'s versions,
+as a call of it would, since folding one computes its message. A `fail`
+isn't reported where it is checked, even of a known error: it fails when
+it is computed, which folding does where it computes a value, so
+`substitute` makes one whose error is known `ops::Failed::Own`, the
+message `message` writes, and keeps one in a branch not known to be taken,
+as any failure. An initial value with one in it is computed so
+(`ops::evaluated`, from `types::value`): R0021, at the initial value, or
+at a call with arguments known when compiling, with what computes the
+callee's value.
+
 The relational operators combine attributes of types in one hierarchy
 (IM Prescription 13). A common attribute of a join's operands, of a
 `matching`'s, or of `!!`'s, and an attribute of an intersection's or a
@@ -1775,7 +1804,9 @@ values involved, as the error when compiling names them: an arithmetic
 operation and its operands, a tuple a combination or a change finds, a
 join's attribute and its values, a relation's count, an array's
 position and length, or a value and the constraint of its type it
-breaks. Each failure is a runtime function of its own, which
+breaks; a program's own, `fail e`, writes its error's message, which
+lowering computes by calling the prelude's `message` with it
+(`FunctionBuilder::fail_with`), for `trendy_rt_failed` (R0021). Each failure is a runtime function of its own, which
 takes its values (`lir::Failure::call`), so the runtime needs no table of
 failures shared with the compiler. Then it writes where the program is, ` --> path:line:column`, as a compiler's error does. Sema
 gives each statement its site (`hir::Site`, its file and where it starts),

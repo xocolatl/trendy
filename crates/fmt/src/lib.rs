@@ -845,7 +845,8 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
     // and a load's `keep`, which one comes before too, an order item's
     // `asc` and `desc`, a `for` loop's `in`, `heading`, before a heading's
     // name, `type`, before a type's, `constraint`, before a condition, a
-    // type's `order`, and a conversion's `to` and `from`.
+    // type's `order`, a conversion's `to` and `from`, and `fail`, before
+    // an error, though it is in parentheses: `fail (e)`.
     let contextual_keyword = prev.kind() == Ident
         && prev.parent().is_some_and(|p| match p.kind() {
             BuiltinType => prev.text() == "type",
@@ -864,7 +865,9 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
             | SyntaxKind::Keeping
             | SyntaxKind::Numbering
             | SyntaxKind::OrderItem
-            | SyntaxKind::ForStmt => true,
+            | SyntaxKind::ForStmt
+            | SyntaxKind::FailExpr
+            | SyntaxKind::FailStmt => true,
             _ => false,
         });
     let load_keyword = next.kind() == Ident
@@ -1280,6 +1283,20 @@ mod tests {
         assert_eq!(
             fmt("var r := if a then relation {{x: 1}, {x: 2}} else relation {{x: 3}};"),
             "var r := if a\n    then relation {\n        { x: 1 },\n        { x: 2 },\n    }\n    else relation { { x: 3 } };\n"
+        );
+    }
+
+    #[test]
+    fn failures() {
+        assert_eq!(
+            fmt("operator f{n:integer}:integer[if n<0 then fail   e else n];"),
+            "operator f{n: integer}: integer [\n    if n < 0 then fail e else n\n];\n"
+        );
+        // A statement, and a space before parentheses, as `fail` isn't an
+        // operator's name.
+        assert_eq!(
+            fmt("operator f{} [ fail(e) ; ];"),
+            "operator f{} [\n    fail (e);\n];\n"
         );
     }
 

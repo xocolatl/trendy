@@ -140,6 +140,8 @@ enum StatementStart {
     /// `x += 1;`, `x++;` or `++x;`, as C and Python change a variable.
     Compound(Compound),
     Return,
+    /// `fail e;`, or another language's `throw e;`.
+    Fail,
     /// `debug_value{v: r};`, a call without `call`, or, where a value
     /// goes, a read-only operator's call.
     BareCall,
@@ -201,6 +203,10 @@ fn direction(word: &str) -> Option<&'static str> {
 /// Whether a value can start with a token of this kind, other than a name:
 /// a literal, a selector, a parenthesized expression, a prefix operator or
 /// an image relation.
+/// `fail`, and other languages' words for it: Java's, JavaScript's and
+/// C++'s `throw`, and Python's and Ruby's `raise`.
+const FAIL_WORDS: [&str; 3] = ["fail", "throw", "raise"];
+
 fn starts_value(kind: SyntaxKind) -> bool {
     kind.is_literal()
         || matches!(
@@ -1244,9 +1250,9 @@ impl<'a> Parser<'a> {
         let Some(found) = self.found() else {
             return false;
         };
-        // An `if` that runs to the end is the value, an `if` expression,
-        // and one that a `;` ends a statement.
-        if self.at_if() {
+        // An `if` or a `fail` that runs to the end is the value, an
+        // expression, and one that a `;` ends a statement.
+        if self.at_if() || self.at_fail() {
             return self.runs_to_end();
         }
         // `a = b` is a comparison that ends the body, and otherwise
@@ -1391,6 +1397,8 @@ impl<'a> Parser<'a> {
             StatementStart::Compound(compound)
         } else if found.spells(SyntaxKind::ReturnKw) {
             StatementStart::Return
+        } else if self.at_fail() {
+            StatementStart::Fail
         } else if found.kind == SyntaxKind::Ident && call_like {
             StatementStart::BareCall
         } else {
@@ -1446,6 +1454,13 @@ impl<'a> Parser<'a> {
             Some(StatementStart::Assignment) => self.assign_stmt(false),
             Some(StatementStart::Compound(compound)) => self.compound_assignment(compound),
             Some(StatementStart::Return) => self.return_stmt(),
+            Some(StatementStart::Fail) => {
+                self.start_node(SyntaxKind::FailStmt);
+                self.fail_word();
+                self.expression();
+                self.end_statement();
+                self.builder.finish_node();
+            }
             Some(StatementStart::BareCall) => {
                 self.errors.push(errors::missing_call(found));
                 self.call_stmt();
@@ -3402,6 +3417,8 @@ impl<'a> Parser<'a> {
         let from = self.lookahead().map(|f| f.span.start);
         if self.at_if() {
             self.if_expression();
+        } else if self.at_fail() {
+            self.fail_expr();
         } else {
             self.binary(Precedence::WHERE);
         }
@@ -3731,6 +3748,52 @@ impl<'a> Parser<'a> {
             && self
                 .found_after(1)
                 .is_some_and(|f| f.kind == SyntaxKind::Ident || starts_value(f.kind))
+    }
+
+    /// Whether `fail e` starts here: `fail`, in any case, or another
+    /// language's word for it, `throw` or `raise`, before a value that an
+    /// error can be. A value of the variable `fail` is followed by an
+    /// operator, `fail - 1`, a call of the operator by braces, `fail{}`,
+    /// and `x as fail` and `fail is t` are names.
+    fn at_fail(&mut self) -> bool {
+        let word = self.found().is_some_and(|f| {
+            f.kind == SyntaxKind::Ident
+                && FAIL_WORDS
+                    .iter()
+                    .any(|word| f.text.eq_ignore_ascii_case(word))
+        });
+        word && self.found_after(1).is_some_and(|f| {
+            f.kind.is_literal()
+                || f.kind == SyntaxKind::LParen
+                || (f.kind == SyntaxKind::Ident
+                    && !f.text.eq_ignore_ascii_case("as")
+                    && !f.text.eq_ignore_ascii_case("is"))
+        })
+    }
+
+    /// `fail e`, which [`Parser::at_fail`] found: the program fails with
+    /// the error `e`, all that follows.
+    fn fail_expr(&mut self) {
+        self.start_node(SyntaxKind::FailExpr);
+        self.fail_word();
+        self.expression();
+        self.builder.finish_node();
+    }
+
+    /// The word `fail`, which another language's, as `throw`, or another
+    /// case, is reported in place of, with a fix.
+    fn fail_word(&mut self) {
+        let word = self.found().expect("at `fail`");
+        self.bump();
+        if word.text == "fail" {
+            return;
+        }
+        let error = if word.text.eq_ignore_ascii_case("fail") {
+            errors::miscased_keyword(word, "fail")
+        } else {
+            errors::fail_spelling(word)
+        };
+        self.errors.push(error);
     }
 
     /// Whether SQL's `TREAT(x AS t)` is next: `treat` then parentheses with
@@ -4569,6 +4632,16 @@ impl<'a> Parser<'a> {
             let end = self.last_end.unwrap_or(from);
             self.errors
                 .push(errors::unparenthesized_if(Span::new(from, end)));
+            return;
+        }
+        if self.at_fail() {
+            // An operand: a `fail`'s error is all that follows, as an
+            // `if`'s `else` branch is.
+            let from = self.lookahead().map_or(0, |f| f.span.start);
+            self.fail_expr();
+            let end = self.last_end.unwrap_or(from);
+            self.errors
+                .push(errors::unparenthesized_fail(Span::new(from, end)));
             return;
         }
         if self.peek().is_some_and(SyntaxKind::is_literal) {
@@ -7279,6 +7352,64 @@ SourceFile
     }
 
     #[test]
+    fn failures() {
+        // `fail` before a value, as an expression, a body's value and a
+        // statement; elsewhere a name.
+        let parse = parse_str(
+            "operator f{x: integer}: integer [ if x > 0 then x else fail failure{message: \"negative\"} ];
+operator g{}: integer [ fail failure{message: \"none\"} ];
+operator h{} [ fail (failure{message: \"none\"}); ];
+var fail := 1;
+var a := fail - 1;
+var b := tuple { fail: fail }.fail;",
+        );
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let kinds: Vec<SyntaxKind> = parse
+            .tree
+            .syntax()
+            .descendants()
+            .map(|n| n.kind())
+            .filter(|k| matches!(k, SyntaxKind::FailExpr | SyntaxKind::FailStmt))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                SyntaxKind::FailExpr,
+                SyntaxKind::FailExpr,
+                SyntaxKind::FailStmt
+            ]
+        );
+        // Other languages' words, and a `fail` that is an operand, fixed.
+        for (source, fixed, code) in [
+            (
+                "operator f{} [ throw failure{message: \"x\"}; ];",
+                "operator f{} [ fail failure{message: \"x\"}; ];",
+                Code::FailSpelling,
+            ),
+            (
+                "var a: integer := if true then 1 else raise e;",
+                "var a: integer := if true then 1 else fail e;",
+                Code::FailSpelling,
+            ),
+            (
+                "var a: integer := FAIL e;",
+                "var a: integer := fail e;",
+                Code::MiscasedKeyword,
+            ),
+            (
+                "var a: text := \"x\" || fail e;",
+                "var a: text := \"x\" || (fail e);",
+                Code::UnorderedOperators,
+            ),
+        ] {
+            let parse = parse_str(source);
+            let codes: Vec<Code> = parse.errors.iter().map(|e| e.code).collect();
+            assert_eq!(codes, [code], "{source}: {:#?}", parse.errors);
+            assert_eq!(fix(source), fixed, "{source}");
+        }
+    }
+
+    #[test]
     fn type_tests_and_treats() {
         // `is` at a comparison's precedence, `treat` before a value, and
         // either as an operand.
@@ -7925,6 +8056,7 @@ type rule { { constraint: text } };",
                     .collect(),
                 Statement::Call(_)
                 | Statement::Return(_)
+                | Statement::Fail(_)
                 | Statement::Var(_)
                 | Statement::If(_)
                 | Statement::While(_)

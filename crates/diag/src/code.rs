@@ -89,6 +89,7 @@ codes! {
     TypeTestSpelling => "P0044",
     VersionName => "P0045",
     KeyInHeading => "P0046",
+    FailSpelling => "P0047",
     DuplicateName => "A0001",
     MissingMain => "A0002",
     UnknownType => "A0003",
@@ -174,6 +175,7 @@ codes! {
     NoResult => "R0018",
     NotOfType => "R0019",
     OverlappingSubtypes => "R0020",
+    Failed => "R0021",
     Internal => "X0000",
 }
 

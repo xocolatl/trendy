@@ -1,0 +1,54 @@
+/* A program fails on purpose with `fail e`, where `e` is an error: a value
+   of one of the subtypes of the prelude's union type `error`, which says
+   what went wrong. The program stops, writing its message, which the
+   prelude's `message` gives, a version for each subtype. */
+
+/* An error of the program's own: a unit with no conversion to grams. */
+type no_conversion is error { { unit: text } };
+
+operator message{error: no_conversion}: text [
+    "no conversion from " || error.unit || " to grams"
+];
+
+heading conversion := { unit: text, grams: approximate };
+
+/* Old units of weight: the Chinese jin, the South Asian tola and the
+   Ottoman okka. */
+var conversions: relation conversion := relation {
+    { unit: "jin", grams: 500e0 },
+    { unit: "tola", grams: 11.66e0 },
+    { unit: "okka", grams: 1282e0 },
+};
+
+/* `quantity` of `measured_in`, in grams. A read-only operator is a
+   function of its arguments, which can fail for some of them, as `div`
+   does for a divisor of zero: this one for a unit with no conversion. */
+operator in_grams{
+    quantity: approximate,
+    measured_in: text,
+    conversions: relation conversion,
+}: approximate [
+    var found := conversions where unit = measured_in;
+    if is_empty{r: found}
+        then fail no_conversion{unit: measured_in}
+        else quantity * value from found{grams}
+];
+
+/* As a statement, in an update operator. The prelude's `failure` says
+   what went wrong in its message. */
+operator weigh{quantity: approximate, measured_in: text} [
+    if quantity < 0e0 then [
+        fail failure{message: "a quantity can't be negative"};
+    ];
+    call debug_value{
+        v: in_grams{quantity: quantity, measured_in: measured_in, conversions: conversions},
+    };
+];
+
+operator main{} [
+    call weigh{quantity: 2e0, measured_in: "jin"};
+    call weigh{quantity: 5e-1, measured_in: "okka"};
+    /* What a failure would say. */
+    call debug_value{v: message{error: no_conversion{unit: "pinch"}}};
+    call debug_value{v: message{error: not_one_tuple{count: 2}}};
+];

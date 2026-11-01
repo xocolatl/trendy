@@ -386,9 +386,25 @@ impl Statements<'_, '_> {
                 );
             }
             ast::Statement::For(stmt) => return self.for_stmt(stmt, errors),
+            ast::Statement::Fail(stmt) => self.fail_stmt(stmt, errors),
         };
         self.settle(checked.as_ref(), errors);
         checked
+    }
+
+    /// `fail e;`: the program fails with the error `e`, when it runs.
+    fn fail_stmt(
+        &mut self,
+        stmt: &ast::FailStmt,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Statement> {
+        let (keyword, written) = (stmt.keyword()?, stmt.error()?);
+        let error = {
+            let mut names = self.names();
+            Checker::new(&mut names).error(&written, &keyword, errors)
+        };
+        self.flush(errors);
+        Some(hir::Statement::Fail(error?))
     }
 
     /// `for x in a loop [ … ];`: the block run for each element of the
@@ -986,7 +1002,7 @@ fn each_statement(block: &hir::Block, f: &mut dyn FnMut(&hir::Statement)) {
             hir::Statement::Loop(_, body, _) | hir::Statement::For(_, _, body) => {
                 each_statement(body, f);
             }
-            hir::Statement::Call(_) | hir::Statement::Assign(_) => {}
+            hir::Statement::Call(_) | hir::Statement::Assign(_) | hir::Statement::Fail(_) => {}
         }
     }
 }
@@ -1045,6 +1061,7 @@ fn exprs_in(block: &hir::Block, f: &mut dyn FnMut(&hir::Expr)) {
         }
         hir::Statement::If(condition, ..) | hir::Statement::Loop(condition, ..) => f(condition),
         hir::Statement::For(_, array, _) => f(array),
+        hir::Statement::Fail(error) => f(error),
     });
 }
 

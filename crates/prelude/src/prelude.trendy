@@ -148,3 +148,59 @@ builtin operator load_text_file{path: text, out lines: array text};
    read (R0014). */
 builtin operator load_csv{path: text, header: boolean, columns: C, out rows: array T}
     types { C: any tuple, T: any tuple };
+
+/* What went wrong, when a program fails: a value of one of `error`'s
+   subtypes, each a kind of failure, with what it is about as its
+   components. `fail e` stops the program with `e`'s message. A program
+   declares kinds of its own as the prelude does, each with its
+   `message`. */
+type error union;
+
+/* What a failure says: a version for each of `error`'s subtypes. */
+operator message{error: error}: text;
+
+/* A failure a program describes in its own words, as in
+   `fail failure{message: "the list is empty"}`. */
+type failure is error { { message: text } };
+
+operator message{error: failure}: text [
+    error.message
+];
+
+/* A relation has `count` tuples where its only one is taken (R0005). */
+type not_one_tuple is error { { count: integer } };
+
+operator message{error: not_one_tuple}: text [
+    var tuples := if error.count = 0 then "no tuples" else to_text{from: error.count} || " tuples";
+    "the relation has " || tuples || ", but exactly one is taken"
+];
+
+/* An array of `length` elements has none at `position` (R0011). */
+type index_out_of_range is error { { position: integer, length: integer } };
+
+operator message{error: index_out_of_range}: text [
+    var at := "position " || to_text{from: error.position};
+    if error.position < 1
+        then "an array has no element at " || at || ": positions count from 1"
+        else if error.length = 0
+        then "the array is empty, so it has no element at " || at
+        else if error.length = 1
+        then "the array has 1 element, so none at " || at
+        else "the array has " || to_text{from: error.length} || " elements, so none at " || at
+];
+
+/* `operation`, written as trendy writes it, as `7 div 0`, divides by zero
+   (R0002). */
+type division_by_zero is error { { operation: text } };
+
+operator message{error: division_by_zero}: text [
+    "division by zero: " || error.operation || " has no result"
+];
+
+/* `operation`'s result, written as trendy writes it, as
+   `9223372036854775807 + 1`, is out of its type's range (R0001). */
+type overflow is error { { operation: text } };
+
+operator message{error: overflow}: text [
+    "overflow: " || error.operation || " is out of its type's range"
+];

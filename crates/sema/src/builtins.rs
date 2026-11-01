@@ -11,7 +11,7 @@ use trendy_syntax::SyntaxToken;
 use trendy_syntax::ast::AstNode;
 
 use crate::Namespaces;
-use crate::operators::{self, Signature};
+use crate::operators::{self, Operators, Signature};
 use crate::types::{self, TypeParameters};
 
 /// An internal error, `message`, at the name `ident` in the prelude.
@@ -346,4 +346,32 @@ pub(crate) fn builtins(prelude: &SourceFile, errors: &mut Vec<Diagnostic>) -> Bu
         errors.push(Diagnostic::error(Code::Internal, message, end, "missing"));
     }
     Builtins { kinds, operators }
+}
+
+/// Report the prelude's `error` and `message` if it doesn't declare them as
+/// the compiler needs them, at its end: a program fails with a value of the
+/// union type `error`, writing its message, which the specification
+/// `message{error: error}: text` gives.
+pub(crate) fn failures(
+    prelude: &SourceFile,
+    namespaces: &Namespaces,
+    operators: &Operators,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let end = Span::empty(prelude.span().end);
+    if namespaces.dummy("error").is_none() {
+        errors.push(Diagnostic::error(
+            Code::Internal,
+            "the prelude doesn't declare `type error union;`, what a program fails with",
+            end,
+            "missing",
+        ));
+    } else if operators.message().is_none() {
+        errors.push(Diagnostic::error(
+            Code::Internal,
+            "the prelude doesn't declare `operator message{error: error}: text;`, which writes an error's message",
+            end,
+            "missing",
+        ));
+    }
 }

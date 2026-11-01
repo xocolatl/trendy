@@ -298,6 +298,10 @@ pub enum RuntimeFn {
     /// hierarchy the descriptor describes, isn't a value of the type named
     /// `ty`, a text, which it was treated as, writing them.
     NotOfType,
+    /// `trendy_rt_failed(message)`, which doesn't return: stop the program
+    /// because it fails with an error whose message is `message`, a text,
+    /// writing it.
+    Failed,
     /// `trendy_rt_broken_constraint_in_file(value, descriptor, ty,
     /// constraint, record)`, which doesn't return: as
     /// [`RuntimeFn::BrokenConstraint`],
@@ -523,6 +527,7 @@ impl RuntimeFn {
             RuntimeFn::ElementConflict => "trendy_rt_element_conflict",
             RuntimeFn::BrokenConstraint => "trendy_rt_broken_constraint",
             RuntimeFn::NotOfType => "trendy_rt_not_of_type",
+            RuntimeFn::Failed => "trendy_rt_failed",
             RuntimeFn::BrokenConstraintInFile => "trendy_rt_broken_constraint_in_file",
             RuntimeFn::OverlappingSubtypes => "trendy_rt_overlapping_subtypes",
             RuntimeFn::KeyShared => "trendy_rt_key_shared",
@@ -796,6 +801,9 @@ pub enum Failure {
         descriptor: Place,
         ty: Place,
     },
+    /// The program fails with an error whose message is `message`, a text:
+    /// a `fail`.
+    Own { message: Place },
     /// As [`Failure::BrokenConstraint`], of a value `load_csv` read from the
     /// record `record` describes, laid out as [`Layout::record`].
     BrokenConstraintInFile {
@@ -890,6 +898,7 @@ impl Failure {
                 descriptor,
                 ty,
             } => (RuntimeFn::NotOfType, vec![value, descriptor, ty]),
+            Failure::Own { message } => (RuntimeFn::Failed, vec![message]),
             Failure::BrokenConstraintInFile {
                 value,
                 descriptor,

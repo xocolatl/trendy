@@ -1158,6 +1158,44 @@ pub(crate) fn unparenthesized_if(span: Span) -> Diagnostic {
     )
 }
 
+/// A `fail` that is an operand, at `span`, whose error is all that
+/// follows.
+pub(crate) fn unparenthesized_fail(span: Span) -> Diagnostic {
+    let insert = |at: usize, text: &str| Edit {
+        span: Span::empty(at),
+        replacement: text.to_string(),
+    };
+    Diagnostic::error(
+        Code::UnorderedOperators,
+        "a `fail` that is an operand needs parentheses",
+        span,
+        "this `fail` takes all that follows",
+    )
+    .with_note("a `fail`'s error is all that follows, so in `x || fail e || y`, it could be `e` or `e || y`, and neither is assumed")
+    .with_suggestion(
+        "parenthesize the `fail`, ending where its error now ends",
+        vec![insert(span.start, "("), insert(span.end, ")")],
+    )
+}
+
+/// `throw` or `raise`, `found`, another language's word for `fail`.
+pub(crate) fn fail_spelling(found: Found) -> Diagnostic {
+    Diagnostic::error(
+        Code::FailSpelling,
+        format!("a program fails with `fail`, not `{}`", found.text),
+        found.span,
+        "another language's word",
+    )
+    .with_note("`fail e` stops the program with the error `e`, a value of one of the subtypes of the prelude's type `error`, as `fail failure{message: \"…\"}`")
+    .with_suggestion(
+        format!("replace `{}` with `fail`", found.text),
+        vec![Edit {
+            span: found.span,
+            replacement: "fail".to_string(),
+        }],
+    )
+}
+
 /// Which language's conditional expression is written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Conditional {

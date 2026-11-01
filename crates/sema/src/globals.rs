@@ -407,6 +407,11 @@ impl<'a> Globals<'a> {
                     errors.push(errors::call_in_read_only(&signature.name, stmt));
                     valid = false;
                 }
+                ast::Statement::Fail(stmt) => {
+                    let within = format!("the body of the read-only operator `{}`", signature.name);
+                    errors.push(errors::fail_statement_for_value(stmt, &within));
+                    valid = false;
+                }
                 ast::Statement::If(stmt) => {
                     errors.push(errors::if_in_read_only(&signature.name, stmt));
                     valid = false;

@@ -64,6 +64,10 @@ pub(crate) fn value(
                 errors.push(errors::return_in_block(stmt));
                 ok = false;
             }
+            ast::Statement::Fail(stmt) => {
+                errors.push(errors::fail_statement_for_value(stmt, "a value block"));
+                ok = false;
+            }
         }
     }
     let written = block.value()?;
