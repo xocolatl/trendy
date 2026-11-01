@@ -35,14 +35,19 @@ operator transfer{origin: text, destination: text, n: integer} [
 ];
 
 operator main{} [
+    /* The transfers, read from a file before any transaction: a
+       transaction's statements read and write nothing, at any depth of
+       the calls they make (A0066), since nothing undoes a read. */
+    var moves: array tuple { origin: text, destination: text, n: integer };
+    call load_csv{
+        path: "examples/moves.csv",
+        header: true,
+        columns: tuple { origin: 1, destination: 2, n: 3 },
+        out rows: moves,
+    };
     /* Each transfer in a transaction of its own: one that fails is
        undone, and the others are made. `collecting` adds a failure's
        error to `refused`, which collects the loop's. */
-    var moves := array [
-        tuple { origin: "Cusco", destination: "Accra", n: 20 },
-        tuple { origin: "Tashkent", destination: "Dhaka", n: 15 },
-        tuple { origin: "Accra", destination: "Tashkent", n: 30 },
-    ];
     var refused: relation { error: error };
     for m in moves loop [
         transaction collecting refused [

@@ -499,6 +499,21 @@ pub enum UpdateBuiltin {
 }
 
 impl UpdateBuiltin {
+    /// Whether it reads input or writes output, which a transaction's
+    /// statements do none of, at any depth of their calls, since nothing
+    /// undoes it: `debug_value` and `debug_table` write for the
+    /// programmer, so they are exempt.
+    #[must_use]
+    pub fn does_io(self) -> bool {
+        match self {
+            UpdateBuiltin::DebugValue | UpdateBuiltin::DebugTable => false,
+            UpdateBuiltin::LoadTextFile
+            | UpdateBuiltin::LoadTextFileWithErrors
+            | UpdateBuiltin::LoadCsv
+            | UpdateBuiltin::LoadCsvWithErrors => true,
+        }
+    }
+
     /// The errors it gives in its `out` parameter `errors`, rather than
     /// stopping the program, if it has one.
     #[must_use]

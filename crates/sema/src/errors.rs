@@ -4190,6 +4190,41 @@ pub(crate) fn collecting_mismatch(name: &str, span: Span, ty: &hir::Type) -> Dia
     ))
 }
 
+/// The call of `callee`, at `span`, in the transaction whose keyword is at
+/// `transaction`, which reads input or writes output through `steps`, the
+/// calls that lead from it to a built-in that does, the built-in's last,
+/// or itself, without any.
+pub(crate) fn io_in_transaction(
+    callee: &str,
+    span: Span,
+    transaction: Span,
+    steps: &[crate::body::IoStep],
+) -> Diagnostic {
+    let (message, label) = match steps.last() {
+        None => (
+            format!("`{callee}` reads a file, in a transaction"),
+            "reads a file".to_string(),
+        ),
+        Some(last) => (
+            format!(
+                "`{callee}` reads a file, in a transaction, as `{}` calls `{}`",
+                last.caller, last.callee
+            ),
+            "leads to reading a file".to_string(),
+        ),
+    };
+    let d = Diagnostic::error(Code::IoInTransaction, message, span, label)
+        .with_secondary(transaction, "in this transaction");
+    steps
+        .iter()
+        .fold(d, |d, step| match step.span {
+            Some(at) => d.with_secondary(at, format!("`{}` calls `{}` here", step.caller, step.callee)),
+            None => d.with_note(format!("`{}` runs its version `{}`", step.caller, step.callee)),
+        })
+        .with_note("a transaction's statements read no input and write no output, at any depth of the calls they make: a transaction is undone, and can be run again, but nothing undoes a read or a write; `debug_value` and `debug_table` write for the programmer, so they are exempt")
+        .with_help("read the file before the transaction, and pass what it gives to the statements in it; to write, keep what to write in a variable the transaction assigns, which its rollback undoes too, and write it after")
+}
+
 /// `stmt`, a transaction in the read-only operator `name`.
 pub(crate) fn transaction_in_read_only(
     name: &str,

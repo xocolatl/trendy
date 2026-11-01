@@ -158,6 +158,7 @@ codes! {
     Versions => "A0063",
     MisplacedKey => "A0064",
     Specialization => "A0065",
+    IoInTransaction => "A0066",
     Overflow => "R0001",
     DivisionByZero => "R0002",
     OutOfMemory => "R0003",

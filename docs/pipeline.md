@@ -683,7 +683,11 @@ directly or through the operators it calls, is reported once every body
 is checked (`body::Deferred`, `deferred_checks`), as a call that recurs
 with ever larger types is, and so is a call that passes such a variable to
 a `var` or `out` parameter of an operator that uses it by its own name
-too, which would make a copy and the variable itself differ (A0053). A
+too, which would make a copy and the variable itself differ (A0053), and
+so is a call in a transaction that leads to a built-in that reads input
+or writes output (`hir::UpdateBuiltin::does_io`), through the calls of
+every body, recorded as they are checked, and the versions of a
+specification called (`io_steps`, A0066), each step of the way labeled. A
 call's `var` and `out` arguments are checked where the call is, each a
 variable the body can assign, as an assignment's target is
 (`body::Statements::updated`), and each a different one. `Statements`

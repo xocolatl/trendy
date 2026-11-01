@@ -67,6 +67,20 @@ pub(crate) struct Deferred {
     in_loops: Vec<LoopCall>,
     /// Each variable of the program's passed to a `var` parameter.
     passed: Vec<Passed>,
+    /// Each call statement of an update operator, by the operator it is
+    /// in: the operator called, and where its name is written.
+    calls: Vec<(hir::OperatorId, hir::OperatorId, Span)>,
+    /// Each call statement in a transaction, which mustn't read input or
+    /// write output, at any depth of the calls it makes.
+    in_transactions: Vec<TransactionCall>,
+}
+
+/// A call, its callee's name written at `span`, of the operator `callee`,
+/// in a transaction, the innermost one's keyword written at `transaction`.
+struct TransactionCall {
+    callee: hir::OperatorId,
+    span: Span,
+    transaction: Span,
 }
 
 /// A call, at `span`, that passes the variable of the program's
@@ -115,6 +129,7 @@ pub(crate) fn body(
         locals: Locals::default(),
         deferred,
         frozen: Vec::new(),
+        transactions: Vec::new(),
         outs: Outs::default(),
         narrowed: Facts::default(),
         ended: BTreeMap::new(),
@@ -174,6 +189,9 @@ struct Statements<'a, 'b> {
     /// What each `for` loop the statement being checked is in keeps from
     /// changing, outermost first.
     frozen: Vec<Frozen>,
+    /// Where each transaction the statement being checked is in writes its
+    /// keyword, outermost first.
+    transactions: Vec<Span>,
     /// The `out` parameters assigned on every path to the statement being
     /// checked, and its reads of them.
     outs: Outs,
@@ -504,6 +522,11 @@ impl Statements<'_, '_> {
         let op = self.cx.operators.get(self.within);
         let mut ok = self.locals.enter(statements.iter().cloned(), op, errors);
         let before = self.outs.assigned.clone();
+        let keyword = stmt.keyword().map_or_else(
+            || stmt.span(),
+            |keyword| trendy_syntax::span(keyword.text_range()),
+        );
+        self.transactions.push(keyword);
         let mut checked = Vec::new();
         for statement in &statements {
             match self.sited(statement, errors) {
@@ -511,6 +534,7 @@ impl Statements<'_, '_> {
                 None => ok = false,
             }
         }
+        self.transactions.pop();
         let locals = self.locals.exit();
         if collecting.is_some() {
             self.outs.assigned = before;
@@ -710,6 +734,26 @@ impl Statements<'_, '_> {
         if !self.updated(&call, &args, signature.id, errors) {
             return None;
         }
+        self.defer(&call, signature, span, stmt.span());
+        Some(hir::Statement::Call(call))
+    }
+
+    /// Record what can only be checked once every body is of `call`, of
+    /// `signature`, its name written at `span`, the statement at
+    /// `statement`: that it is a call, and in which transaction, if any;
+    /// each type parameter it gives a type built from its caller's own;
+    /// and the variables of the program the `for` loops it is in keep from
+    /// changing.
+    fn defer(&mut self, call: &hir::Call, signature: &Signature, span: Span, statement: Span) {
+        let within = self.within;
+        self.deferred.calls.push((within, signature.id, span));
+        if let Some(&transaction) = self.transactions.last() {
+            self.deferred.in_transactions.push(TransactionCall {
+                callee: signature.id,
+                span,
+                transaction,
+            });
+        }
         // A type parameter passed on as it is never grows.
         for (parameter, ty) in signature.types.iter().zip(&call.types) {
             if !matches!(ty, hir::Type::Parameter(_)) && ty.parameters().next().is_some() {
@@ -738,11 +782,10 @@ impl Statements<'_, '_> {
         if !looped.is_empty() {
             self.deferred.in_loops.push(LoopCall {
                 callee: signature.id,
-                span: stmt.span(),
+                span: statement,
                 looped,
             });
         }
-        Some(hir::Statement::Call(call))
     }
 
     /// Count each argument in `args` for an `out` parameter of `callee`
@@ -1006,6 +1049,77 @@ pub(crate) fn deferred_checks(
             ));
         }
     }
+    for call in &deferred.in_transactions {
+        if let Some(steps) = io_steps(call.callee, &deferred.calls, operators) {
+            errors.push(errors::io_in_transaction(
+                &operators.get(call.callee).name,
+                call.span,
+                call.transaction,
+                &steps,
+            ));
+        }
+    }
+}
+
+/// The calls that lead from the update operator `callee` to a built-in
+/// that reads input or writes output ([`hir::UpdateBuiltin::does_io`]),
+/// through `calls`, every call statement, by the operator it is in, and
+/// the versions of a specification called: each step's caller's name,
+/// callee's, and where the call is, if it is one, the built-in's last;
+/// none if `callee` is one itself; `None` if it leads to none.
+fn io_steps(
+    callee: hir::OperatorId,
+    calls: &[(hir::OperatorId, hir::OperatorId, Span)],
+    operators: &Operators,
+) -> Option<Vec<IoStep>> {
+    let does_io = |id: hir::OperatorId| matches!(operators.get(id).builtin, Some(hir::Builtin::Update(b)) if b.does_io());
+    // How each operator reached was first reached: from which, and where.
+    let mut reached: HashMap<hir::OperatorId, Option<(hir::OperatorId, Option<Span>)>> =
+        HashMap::from([(callee, None)]);
+    let mut next = std::collections::VecDeque::from([callee]);
+    while let Some(id) = next.pop_front() {
+        if does_io(id) {
+            let mut steps = Vec::new();
+            let mut at = id;
+            while let Some(&Some((from, span))) = reached.get(&at) {
+                steps.push(IoStep {
+                    caller: operators.get(from).name.clone(),
+                    callee: operators.get(at).name.clone(),
+                    span,
+                });
+                at = from;
+            }
+            steps.reverse();
+            return Some(steps);
+        }
+        let onward = calls
+            .iter()
+            .filter(|(caller, ..)| *caller == id)
+            .map(|&(_, callee, span)| (callee, Some(span)))
+            .chain(
+                operators
+                    .get(id)
+                    .versions
+                    .iter()
+                    .map(|version| (version.operator, None)),
+            );
+        for (to, span) in onward {
+            if let std::collections::hash_map::Entry::Vacant(entry) = reached.entry(to) {
+                entry.insert(Some((id, span)));
+                next.push_back(to);
+            }
+        }
+    }
+    None
+}
+
+/// A step from an operator to one it calls, or a version of it it runs,
+/// on the way to input or output: their names, and where the call is, if
+/// it is one.
+pub(crate) struct IoStep {
+    pub(crate) caller: String,
+    pub(crate) callee: String,
+    pub(crate) span: Option<Span>,
 }
 
 /// The variables of the program that the update operator `id` assigns, in

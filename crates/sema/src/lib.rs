@@ -2603,6 +2603,62 @@ var zero := seg{{len: 0}};{MAIN}"
     }
 
     #[test]
+    fn transactions_read_and_write_nothing() {
+        let program = |main: &str| {
+            format!(
+                "operator read{{out lines: array text}} [ call load_text_file{{path: \"notes.txt\", out lines: lines}}; ];
+operator twice{{out lines: array text}} [ call read{{out lines: lines}}; ];
+operator main{{}} [ var lines: array text; {main} ];"
+            )
+        };
+        // At any depth of the calls, the chain labeled, each step where it
+        // calls the next.
+        let errors = errors(&program("transaction [ call twice{out lines: lines}; ];"));
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].code, Code::IoInTransaction);
+        assert_eq!(
+            errors[0].message,
+            "`twice` reads a file, in a transaction, as `read` calls `load_text_file`"
+        );
+        let labels: Vec<&str> = std::iter::once(&errors[0].primary)
+            .chain(&errors[0].secondary)
+            .map(|l| l.message.as_str())
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "leads to reading a file",
+                "in this transaction",
+                "`twice` calls `read` here",
+                "`read` calls `load_text_file` here"
+            ]
+        );
+        // In a transaction within one, or directly, too; but debug output,
+        // and a read outside any, are allowed.
+        for (main, failing) in [
+            (
+                "transaction [ transaction [ call load_text_file{path: \"a\", out lines: lines}; ]; ];",
+                true,
+            ),
+            (
+                "transaction [ call debug_value{v: 1}; call debug_table{r: relation { { n: 1 } }}; ];",
+                false,
+            ),
+            (
+                "call twice{out lines: lines}; transaction [ call debug_value{v: lines}; ];",
+                false,
+            ),
+        ] {
+            let source = program(main);
+            if failing {
+                assert_eq!(codes(&source), [Code::IoInTransaction], "{main}");
+            } else {
+                assert!(analyze_str(&source).is_ok(), "{main}");
+            }
+        }
+    }
+
+    #[test]
     fn the_prelude_has_error_and_its_messages() {
         let vars = variables(
             "var a := message{error: failure{message: \"why\"}};\nvar b := message{error: not_one_tuple{count: 0}};\nvar c := message{error: not_one_tuple{count: 2}};\nvar d := message{error: index_out_of_range{position: 0, length: 3}};\nvar e := message{error: index_out_of_range{position: 4, length: 0}};\nvar f := message{error: index_out_of_range{position: 4, length: 1}};\nvar g := message{error: index_out_of_range{position: 4, length: 3}};\nvar h := message{error: division_by_zero{operation: \"7 div 0\"}};\nvar i := message{error: overflow{operation: \"9223372036854775807 + 1\"}};\nvar j := message{error: unreadable_field{path: \"p.csv\", line: 1, column: 3, attribute: \"at.latitude\", type: \"approximate\", text: \"north\", out_of_range: false}};\nvar k := message{error: missing_column{path: \"p.csv\", attribute: \"km\", column: 4, columns: 3}};\nvar l := message{error: unreadable_field{path: \"p.csv\", line: 2, column: 1, attribute: \"open\", type: \"boolean\", text: \"maybe\", out_of_range: false}};\nvar m := message{error: component_key_violated_in_file{path: \"p.csv\", line: 2, attribute: \"s\", type: \"span\", component: \"days\", key: \"\", first: \"a\", second: \"b\"}};",

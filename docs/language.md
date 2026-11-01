@@ -4951,6 +4951,13 @@ holds the error: `granaries` is as it was.
   assigned on every path, since a failure the transaction takes undoes
   the assignment (A0054); one without `collecting` assigns what its block
   does, as its failure goes on.
+- **A transaction's statements read and write nothing,** at any depth
+  of the calls they make (A0066): a transaction can be undone, and run
+  again, but nothing undoes a read or a write. So a file is read before
+  the transaction, and what it gives passed to the statements in it, and
+  what a transaction decides to write is kept in a variable it assigns,
+  which its rollback undoes too, and written after it. `debug_value` and
+  `debug_table` write for the programmer, so they are exempt.
 - **A transaction is a statement,** so only an update operator's body
   has one: a read-only operator, or a value block, changes nothing, so a
   transaction in it would have nothing to undo (A0035).
