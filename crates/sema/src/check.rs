@@ -2167,7 +2167,12 @@ impl<'a> Checker<'a> {
         expected: Option<&Expected>,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Expr> {
-        let error = self.error(&fail.error()?, &fail.keyword()?, errors);
+        let error = self.error(
+            &fail.error()?,
+            &fail.keyword()?,
+            errors::Signal::Fail,
+            errors,
+        );
         let Some(expected) = expected else {
             errors.push(errors::untyped_failure(expr.span()));
             return None;
@@ -2178,13 +2183,15 @@ impl<'a> Checker<'a> {
         ))
     }
 
-    /// The error `written`, which the `fail` written `keyword` fails with:
-    /// a value of a subtype of the prelude's union type `error`, as a
-    /// value of it. `None` after reporting why it isn't one.
+    /// The error `written`, which the `fail` or `warn` written `keyword`,
+    /// as `signal` says, fails or warns with: a value of a subtype of the
+    /// prelude's union type `error`, as a value of it. `None` after
+    /// reporting why it isn't one.
     pub(crate) fn error(
         &mut self,
         written: &Expr,
         keyword: &SyntaxToken,
+        signal: errors::Signal,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Expr> {
         let error = self.expr(written, None, errors)?;
@@ -2193,7 +2200,7 @@ impl<'a> Checker<'a> {
         let ty = hir::Type::Dummy(Box::new(dummy.clone()));
         let found = self.ty(&error);
         if !found.is_subtype_of(&ty) {
-            errors.push(errors::not_an_error(written, &found, keyword));
+            errors.push(errors::not_an_error(written, &found, keyword, signal));
             return None;
         }
         // Computing it, as folding does, computes its message, as a call

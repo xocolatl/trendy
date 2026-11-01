@@ -4152,20 +4152,20 @@ pub(crate) fn loop_in_read_only(name: &str, stmt: &trendy_syntax::ast::Statement
 
 /// The name `name`, at `span`, after the `collecting` of the transaction
 /// `stmt`, of no variable: one is declared before the transaction, which
-/// the fix does, of the one type a transaction's errors have.
+/// the fix does, of the one type a transaction's collection has.
 pub(crate) fn undeclared_collecting(
     name: &str,
     span: Span,
     stmt: &trendy_syntax::ast::TransactionStmt,
 ) -> Diagnostic {
-    let declaration = format!("var {name}: relation {{ error: error }};");
+    let declaration = format!("var {name}: relation transaction_collection;");
     Diagnostic::error(
         Code::UnknownName,
         format!("unknown variable `{name}`"),
         span,
         "the transaction adds its errors to it",
     )
-    .with_note("a transaction's `collecting` names a variable declared before it, a `relation { error: error }`, which the transaction adds the errors it collects to, so that one variable can collect a loop's")
+    .with_note(COLLECTION)
     .with_suggestion(
         format!("declare it before the transaction: `{declaration}`"),
         vec![Edit {
@@ -4176,19 +4176,22 @@ pub(crate) fn undeclared_collecting(
 }
 
 /// The variable `name`, at `span`, of type `ty`, which a transaction's
-/// `collecting` names, but isn't a relation of errors.
+/// `collecting` names, but isn't a transaction's collection.
 pub(crate) fn collecting_mismatch(name: &str, span: Span, ty: &hir::Type) -> Diagnostic {
     Diagnostic::error(
         Code::TypeMismatch,
-        format!("`{name}` is a `{ty}`, not a relation of errors"),
+        format!("`{name}` is a `{ty}`, not a transaction's collection"),
         span,
         "the transaction adds its errors to it",
     )
-    .with_note("a transaction's `collecting` names a variable of type `relation { error: error }`, which the transaction adds the errors it collects to")
+    .with_note(COLLECTION)
     .with_help(format!(
-        "declare a variable for the errors, as `var {name}_errors: relation {{ error: error }};`, and name it after `collecting`"
+        "declare a variable for them, as `var {name}_collected: relation transaction_collection;`, and name it after `collecting`"
     ))
 }
+
+/// What a transaction's `collecting` names.
+const COLLECTION: &str = "a transaction's `collecting` names a variable declared before it, a `relation transaction_collection`, of the prelude's heading `{ error: error, failed: boolean }`, which the transaction adds what it collects to: the error a statement in it failed with, which rolled it back, `failed` true, and each it warned with, `failed` false, so that one variable can collect a loop's";
 
 /// The call of `callee`, at `span`, in the transaction whose keyword is at
 /// `transaction`, which reads input or writes output through `steps`, the
@@ -6136,18 +6139,61 @@ pub(crate) fn untyped_failure(span: Span) -> Diagnostic {
 /// The value written `written`, of the type `found`, which the `fail`
 /// written `keyword` fails with, but which isn't an error. A text is the
 /// message of the prelude's `failure`.
-pub(crate) fn not_an_error(written: &Expr, found: &hir::Type, keyword: &SyntaxToken) -> Diagnostic {
+/// What a statement, or an expression, does with an error: `fail` or
+/// `warn`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Signal {
+    Fail,
+    Warn,
+}
+
+impl Signal {
+    /// The keyword, `fail` or `warn`.
+    fn keyword(self) -> &'static str {
+        match self {
+            Signal::Fail => "fail",
+            Signal::Warn => "warn",
+        }
+    }
+
+    /// What a program does with the error, `fails` or `warns`.
+    fn verb(self) -> &'static str {
+        match self {
+            Signal::Fail => "fails",
+            Signal::Warn => "warns",
+        }
+    }
+}
+
+/// The value written `written`, of type `found`, which the `fail` or
+/// `warn` written `keyword`, as `signal` says, is given, but isn't an
+/// error.
+pub(crate) fn not_an_error(
+    written: &Expr,
+    found: &hir::Type,
+    keyword: &SyntaxToken,
+    signal: Signal,
+) -> Diagnostic {
+    let (word, verb) = (signal.keyword(), signal.verb());
+    let rule = match signal {
+        Signal::Fail => {
+            "`fail e` stops the program with the error `e`, a value of a subtype of the prelude's union type `error`, and writes its message"
+        }
+        Signal::Warn => {
+            "`warn e` warns with the error `e`, a value of a subtype of the prelude's union type `error`, which a transaction with `collecting` collects, or else the program writes its message, and carries on"
+        }
+    };
     let d = Diagnostic::error(
         Code::TypeMismatch,
-        format!("a program fails with an error, not a value of `{found}`"),
+        format!("a program {verb} with an error, not a value of `{found}`"),
         written.span(),
         format!("this is `{found}`"),
     )
     .with_secondary(
         trendy_syntax::span(keyword.text_range()),
-        "fails with an error",
+        format!("{verb} with an error"),
     )
-    .with_note("`fail e` stops the program with the error `e`, a value of a subtype of the prelude's union type `error`, and writes its message");
+    .with_note(rule);
     if *found == hir::Type::Scalar(hir::Scalar::Text) {
         let text = written.syntax().text().to_string();
         return d.with_suggestion(
@@ -6158,7 +6204,7 @@ pub(crate) fn not_an_error(written: &Expr, found: &hir::Type, keyword: &SyntaxTo
             }],
         );
     }
-    d.with_help("fail with a value of one of `error`'s subtypes: the prelude's `failure`, as in `fail failure{message: \"…\"}`, or one of the program's own, declared as `type no_conversion is error { { unit: text } };` with its `message`")
+    d.with_help(format!("{word} with a value of one of `error`'s subtypes: the prelude's `failure`, as in `{word} failure{{message: \"…\"}}`, or one of the program's own, declared as `type no_conversion is error {{ {{ unit: text }} }};` with its `message`"))
 }
 
 /// An array value at `span` with no elements and nothing else giving
@@ -7549,6 +7595,24 @@ pub(crate) fn fail_statement_for_value(
     )
     .with_note(format!("{within} has local variables, then its value; a `fail` has no value, so it goes where one does, the type expected there being its type"))
     .with_help("fail in the value instead, as in `if ok then x else fail failure{message: \"…\"}`, or end the body with the `fail`, without its `;`")
+}
+
+/// `stmt`, a `warn` statement in `within`, a value block or a read-only
+/// operator's body, which computes a value, changing nothing: one the
+/// compiler computes would lose its warning, so only an update operator
+/// warns.
+pub(crate) fn warn_for_value(stmt: &trendy_syntax::ast::WarnStmt, within: &str) -> Diagnostic {
+    let at = stmt
+        .keyword()
+        .map_or_else(|| stmt.span(), |t| trendy_syntax::span(t.text_range()));
+    Diagnostic::error(
+        Code::Return,
+        format!("{within} can't warn"),
+        at,
+        "a `warn` statement",
+    )
+    .with_note(format!("{within} computes a value, as a function of what it is given, which the compiler computes when it can, before the program runs: a warning would be lost then, so only an update operator warns, as it runs"))
+    .with_help("give what to warn about as part of the value, as a relation, empty if there is nothing, and warn in the update operator that computes it")
 }
 
 /// `stmt`, a `return` in a value block: an early exit from the operator

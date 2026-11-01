@@ -292,7 +292,10 @@ impl Assigns {
                     self.named(ident.text(), stmt.span());
                 }
             }
-            ast::Statement::Var(_) | ast::Statement::Return(_) | ast::Statement::Fail(_) => {}
+            ast::Statement::Var(_)
+            | ast::Statement::Return(_)
+            | ast::Statement::Fail(_)
+            | ast::Statement::Warn(_) => {}
         }
     }
 

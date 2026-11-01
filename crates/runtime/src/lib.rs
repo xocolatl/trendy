@@ -2238,6 +2238,25 @@ pub unsafe extern "C" fn trendy_rt_not_of_type(
     }
 }
 
+/// Write the warning of a `warn` outside any transaction, whose message is
+/// `message`, a text (R0022), escaped as [`trendy_rt_failed`] writes a
+/// failure's, with where the program is, and carry on.
+///
+/// # Safety
+///
+/// `message` must point to a valid text value.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_warned(message: *const u8) {
+    // SAFETY: guaranteed by the caller.
+    let message = unsafe { read_text(message) };
+    write_failure(|out| {
+        out.write_str("warning[R0022]: ")?;
+        trendy_text::escape_bare(message, out)?;
+        out.write_char('\n')
+    });
+}
+
 /// Write the error of a `fail`, whose message is `message`, a text
 /// (R0021). It is written as a
 /// table's cell is, its control characters and bidirectional controls
@@ -2838,9 +2857,10 @@ fn internal_error(message: &str) -> ! {
     unsafe { exit(1) }
 }
 
-/// Write the error of a failure to stderr: the message `write` writes, a
-/// line that starts with the compiler's error code, then where the
-/// program is, as a compiler's error says, ` --> path:line:column`. The
+/// Write the error of a failure, or a `warn`'s warning, to stderr: the
+/// message `write` writes, a line that starts with the compiler's code,
+/// then where the program is, as a compiler's error says,
+/// ` --> path:line:column`. The
 /// program then fails: compiled code goes on to where its block's
 /// failures go.
 #[cfg(not(test))]

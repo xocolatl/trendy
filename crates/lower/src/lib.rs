@@ -175,27 +175,11 @@ impl Written {
         });
         let unwritten = b.new_block();
         b.scoped(|this| {
-            let callee = this.program.operator(this.program.message);
-            let params = params_layout(&callee.params, &cx.families)
-                .expect("`message` has a parameter, the error");
-            let args = this.slot(params);
-            let mut arg = args.clone();
-            arg.path.push(0);
-            this.insts.push(lir::Inst::Copy {
-                dst: arg,
-                src: self.held.clone(),
-                layout: self.layout.clone(),
-            });
-            let message = this.slot(cx.layout(&hir::Type::Scalar(hir::Scalar::Text)));
-            let call = hir::Call {
-                operator: this.program.message,
-                types: Vec::new(),
-                args: BTreeMap::new(),
-                updated: BTreeMap::new(),
-            };
+            let mut message = None;
             this.catching(unwritten, |this| {
-                this.invoke(&call, Some(args), Some(message.clone()), cx);
+                message = Some(this.message_of(&self.held, cx));
             });
+            let message = message.expect("the message is computed");
             this.insts.push(lir::Inst::RestoreSite {
                 src: self.waiting.site(),
             });
@@ -219,6 +203,141 @@ impl Written {
             function: lir::RuntimeFn::Release,
             args: vec![self.held.clone(), descriptor],
         });
+    }
+}
+
+/// The warnings of the innermost transaction with `collecting` running,
+/// which it collects as it ends: the program's own variables
+/// `__warnings`, a `relation transaction_collection`, and `__collecting`,
+/// a boolean, whether one is running, named in the system's namespace, as
+/// [`Waiting`]'s are. A transaction with `collecting` puts aside the
+/// warnings of those around it as it begins, and takes its own back as it
+/// ends; one without leaves them, so that its warnings go to the one
+/// around it.
+#[derive(Debug, Clone)]
+struct Collection {
+    /// `__warnings`' data object.
+    warnings: lir::DataId,
+    /// `__collecting`'s.
+    collecting: lir::DataId,
+    /// `relation transaction_collection`.
+    ty: hir::Type,
+    /// The prelude's type `error`.
+    error: hir::Type,
+}
+
+/// What a transaction puts aside as it begins: the warnings collected so
+/// far, with their references, and whether a transaction with
+/// `collecting` was running.
+struct Aside {
+    warnings: lir::Place,
+    collecting: lir::Place,
+}
+
+impl Collection {
+    /// The warnings' place.
+    fn warnings(&self) -> lir::Place {
+        lir::Place {
+            base: lir::Base::Data(self.warnings),
+            path: vec![0],
+        }
+    }
+
+    /// The place of whether a transaction with `collecting` is running.
+    fn collecting(&self) -> lir::Place {
+        lir::Place {
+            base: lir::Base::Data(self.collecting),
+            path: vec![0],
+        }
+    }
+
+    /// Put aside the warnings collected so far, and whether a transaction
+    /// with `collecting` is running, as one begins, with `b` building it:
+    /// the warnings go, with their references, to a slot of their own, and
+    /// none are collected yet, as one is running.
+    fn put_aside(&self, b: &mut FunctionBuilder, cx: &mut Lowering) -> Aside {
+        let layout = cx.layout(&self.ty);
+        let aside = Aside {
+            warnings: b.slot(layout.clone()),
+            collecting: b.slot(lir::Layout::U8),
+        };
+        let none = self.none(b, cx);
+        let one = u8_constant(1, cx);
+        for (dst, src, layout) in [
+            (aside.warnings.clone(), self.warnings(), layout.clone()),
+            (self.warnings(), none, layout),
+            (aside.collecting.clone(), self.collecting(), lir::Layout::U8),
+            (self.collecting(), one, lir::Layout::U8),
+        ] {
+            b.insts.push(lir::Inst::Copy { dst, src, layout });
+        }
+        aside
+    }
+
+    /// Take back what `aside` put aside, as the transaction ends, with `b`
+    /// building it: the warnings its block collected, in a slot, with
+    /// their references.
+    fn take_back(&self, b: &mut FunctionBuilder, aside: &Aside, cx: &mut Lowering) -> lir::Place {
+        let layout = cx.layout(&self.ty);
+        let own = b.slot(layout.clone());
+        for (dst, src, layout) in [
+            (own.clone(), self.warnings(), layout.clone()),
+            (self.warnings(), aside.warnings.clone(), layout),
+            (self.collecting(), aside.collecting.clone(), lir::Layout::U8),
+        ] {
+            b.insts.push(lir::Inst::Copy { dst, src, layout });
+        }
+        own
+    }
+
+    /// No warnings, a constant.
+    fn none(&self, b: &mut FunctionBuilder, cx: &mut Lowering) -> lir::Place {
+        let hir::Type::Relation(heading) = &self.ty else {
+            unreachable!("a transaction's collection is a relation");
+        };
+        let none = hir::Value::Relation(hir::RelationValue {
+            heading: heading.clone(),
+            tuples: BTreeSet::new(),
+        });
+        b.place(&hir::Expr::Constant(none), cx)
+    }
+
+    /// The relation of one tuple of a transaction's collection, of the
+    /// error at `error` and `failed`, in a slot, in memory the statement
+    /// owns, with `b` building it.
+    fn one(
+        &self,
+        b: &mut FunctionBuilder,
+        error: &lir::Place,
+        failed: bool,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let hir::Type::Relation(heading) = &self.ty else {
+            unreachable!("a transaction's collection is a relation");
+        };
+        let tuple = b.slot(cx.layout(&hir::Type::Tuple(heading.clone())));
+        let (mut attribute, mut flag) = (tuple.clone(), tuple.clone());
+        attribute.path.push(0);
+        flag.path.push(1);
+        b.insts.push(lir::Inst::Copy {
+            dst: attribute,
+            src: error.clone(),
+            layout: cx.layout(&self.error),
+        });
+        b.insts.push(lir::Inst::Copy {
+            dst: flag,
+            src: u8_constant(u8::from(failed), cx),
+            layout: lir::Layout::U8,
+        });
+        let one = b.slot(cx.layout(&self.ty));
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&self.ty)));
+        let count = usize_constant(1, cx);
+        b.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Relation,
+            args: vec![one.clone(), tuple, count, descriptor],
+        });
+        b.scoped = true;
+        one
     }
 }
 
@@ -390,6 +509,9 @@ struct Lowering {
     numbered: usize,
     /// Where a `fail`'s error waits, once one is lowered.
     waiting: Option<Waiting>,
+    /// The warnings of the innermost transaction running, once a
+    /// transaction or a `warn` is lowered.
+    collection: Option<Collection>,
 }
 
 impl Lowering {
@@ -408,7 +530,42 @@ impl Lowering {
             paths: HashMap::new(),
             numbered: 0,
             waiting: None,
+            collection: None,
         }
+    }
+
+    /// Where the warnings of the innermost transaction running are, made
+    /// when first needed: none, and none running.
+    fn collection(&mut self, program: &hir::Program) -> Collection {
+        if let Some(collection) = &self.collection {
+            return collection.clone();
+        }
+        let error = program.operator(program.message).params["error"].ty.clone();
+        let heading = hir::transaction_collection(error.clone());
+        let none = hir::Value::Relation(hir::RelationValue {
+            heading: heading.clone(),
+            tuples: BTreeSet::new(),
+        });
+        let field = self.value_field(&none);
+        let mut variable = |name: &str, field| {
+            self.push(lir::Data {
+                kind: lir::DataKind::Variable {
+                    name: name.to_string(),
+                },
+                writable: true,
+                fields: vec![field],
+            })
+        };
+        let warnings = variable("__warnings", field);
+        let collecting = variable("__collecting", lir::Field::U8(0));
+        let collection = Collection {
+            warnings,
+            collecting,
+            ty: hir::Type::Relation(heading),
+            error,
+        };
+        self.collection = Some(collection.clone());
+        collection
     }
 
     /// The next function's id: they count up from 0.
@@ -1224,6 +1381,7 @@ impl<'a> FunctionBuilder<'a> {
                 self.for_statement(*variable, array, body, cx);
             }
             hir::Statement::Fail(error) => self.scoped(|this| this.fail_with(error, cx)),
+            hir::Statement::Warn(error) => self.warn(error, cx),
             hir::Statement::Transaction(collecting, body) => {
                 self.transaction(collecting.as_ref(), body, cx);
             }
@@ -1232,19 +1390,25 @@ impl<'a> FunctionBuilder<'a> {
 
     /// A transaction of `body`, with `collecting`, the variable it adds its
     /// errors to, if it has one. As it begins, each variable the block can
-    /// assign is kept, with references of its own ([`Kept`]), then the
-    /// block runs, its failures going to the transaction's rollback, and
-    /// as it ends, what was kept is given up.
+    /// assign is kept, with references of its own ([`Kept`]), and, with
+    /// `collecting`, the warnings collected so far, those of the
+    /// transactions around it, put aside ([`Collection`]); then the block
+    /// runs, its failures going to the transaction's rollback, with no
+    /// warnings yet. As it ends, what was kept is given up, and its
+    /// block's warnings are added to `collecting`. Without, they are those
+    /// of the transaction around it, and the block's go to it as they're
+    /// given.
     ///
     /// The rollback ends the scopes the block began, releases its local
     /// variables, and gives each variable kept its value back, with its
     /// references, which can't fail: nothing reads what the block left
-    /// there, as every statement of it has ended. Then, with `collecting`,
-    /// it takes a `fail`'s error waiting, which it adds to `collecting`,
-    /// forgets the calls its failure passed through, and goes on after the
-    /// transaction. Without, or for a failure of the language's own, which
-    /// has no error yet, the failure goes on, to the transaction around
-    /// it, or the function's failure exit.
+    /// there, as every statement of it has ended. Its block's warnings
+    /// survive. Then, with `collecting`, it adds them to `collecting`, and
+    /// takes a `fail`'s error waiting, which it adds too, forgets the calls
+    /// its failure passed through, and goes on after the transaction.
+    /// Without, or for a failure of the language's own, which has no error
+    /// yet, the failure goes on, to the transaction around it, or the
+    /// function's failure exit.
     fn transaction(
         &mut self,
         collecting: Option<&hir::Target>,
@@ -1252,6 +1416,7 @@ impl<'a> FunctionBuilder<'a> {
         cx: &mut Lowering,
     ) {
         let kept = self.kept(body, cx);
+        let collection = cx.collection(self.program);
         let (outer, traced) = (
             self.slot(lir::Layout::Address),
             self.slot(lir::Layout::Usize),
@@ -1264,6 +1429,7 @@ impl<'a> FunctionBuilder<'a> {
             function: lir::RuntimeFn::Traced,
             args: vec![traced.clone()],
         });
+        let collecting = collecting.map(|target| (target, collection.put_aside(self, cx)));
         for kept in &kept {
             kept.keep(self, cx);
         }
@@ -1271,6 +1437,10 @@ impl<'a> FunctionBuilder<'a> {
         self.catching(rollback, |this| this.block(body, cx));
         for kept in &kept {
             kept.give_up(self, cx);
+        }
+        if let Some((target, aside)) = &collecting {
+            let own = collection.take_back(self, aside, cx);
+            self.collect(&collection, target, own, None, cx);
         }
         self.end_block(lir::Terminator::Jump(after), rollback);
 
@@ -1284,10 +1454,11 @@ impl<'a> FunctionBuilder<'a> {
         for kept in &kept {
             kept.restore(self, cx);
         }
-        let Some(collecting) = collecting else {
+        let Some((target, aside)) = collecting else {
             self.end_block(lir::Terminator::Raise, after);
             return;
         };
+        let own = collection.take_back(self, &aside, cx);
         let waiting = cx.waiting(self.program);
         let error = waiting.error();
         let waits = self.is_of(&error, &waiting.ty, cx);
@@ -1304,56 +1475,124 @@ impl<'a> FunctionBuilder<'a> {
             function: lir::RuntimeFn::Untrace,
             args: vec![traced],
         });
-        self.scoped(|this| this.collect(collecting, &error, &waiting.ty, cx));
+        self.collect(&collection, target, own.clone(), Some(&error), cx);
         let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&waiting.ty)));
         self.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::Release,
             args: vec![error, descriptor],
         });
         self.end_block(lir::Terminator::Jump(after), raise);
+        self.collect(&collection, target, own, None, cx);
         self.end_block(lir::Terminator::Raise, after);
     }
 
-    /// Add the error at `error`, of the prelude's type `error`, `ty`, to
-    /// `collecting`, a relation of errors, a transaction's: its value, and
-    /// the relation of that error, combined, checked against its keys, and
-    /// assigned.
+    /// Add `own`, a transaction's block's warnings, which it holds, and
+    /// the error at `failed`, if the transaction takes one, to
+    /// `collecting`, in a scope of their own, then give up `own`.
     fn collect(
         &mut self,
+        collection: &Collection,
         collecting: &hir::Target,
-        error: &lir::Place,
-        ty: &hir::Type,
+        own: lir::Place,
+        failed: Option<&lir::Place>,
         cx: &mut Lowering,
     ) {
-        let errors = self.assigned(collecting).0.clone();
-        let hir::Type::Relation(heading) = &errors else {
-            unreachable!("a transaction collects a relation of errors");
-        };
-        let tuple = self.slot(cx.layout(&hir::Type::Tuple(heading.clone())));
-        let mut attribute = tuple.clone();
-        attribute.path.push(0);
-        self.insts.push(lir::Inst::Copy {
-            dst: attribute,
-            src: error.clone(),
-            layout: cx.layout(ty),
+        self.scoped(|this| {
+            let mut added = own.clone();
+            if let Some(error) = failed {
+                let one = collection.one(this, error, true, cx);
+                added = this.united(added, one, &collection.ty, cx);
+            }
+            let current = this.holder(collecting, cx);
+            let combined = this.united(current, added, &collection.ty, cx);
+            this.check_keys(collecting, &combined, cx);
+            this.store(collecting, combined, cx);
         });
-        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&errors)));
-        let one = self.slot(cx.layout(&errors));
-        let count = usize_constant(1, cx);
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&collection.ty)));
         self.insts.push(lir::Inst::CallRuntime {
-            function: lir::RuntimeFn::Relation,
-            args: vec![one.clone(), tuple, count, descriptor.clone()],
+            function: lir::RuntimeFn::Release,
+            args: vec![own, descriptor],
         });
-        let current = self.holder(collecting, cx);
-        let combined = self.slot(cx.layout(&errors));
+    }
+
+    /// The union of the relations at `lhs` and `rhs`, of type `ty`, in a
+    /// new slot, in memory the statement owns.
+    fn united(
+        &mut self,
+        lhs: lir::Place,
+        rhs: lir::Place,
+        ty: &hir::Type,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(ty)));
         let union = usize_constant(lir::Combination::Union.code(), cx);
+        let dst = self.slot(cx.layout(ty));
         self.insts.push(lir::Inst::CallRuntime {
             function: lir::RuntimeFn::Combine,
-            args: vec![combined.clone(), current, one, descriptor, union],
+            args: vec![dst.clone(), lhs, rhs, descriptor, union],
         });
         self.scoped = true;
-        self.check_keys(collecting, &combined, cx);
-        self.store(collecting, combined, cx);
+        dst
+    }
+
+    /// `warn e;`: the error `e` added, `failed` false, to the warnings of
+    /// the innermost transaction with `collecting` running, if one is
+    /// ([`Collection`]), or else its message written, as `message` gives
+    /// it (R0022).
+    fn warn(&mut self, error: &hir::Expr, cx: &mut Lowering) {
+        let collection = cx.collection(self.program);
+        let (add, write, after) = (self.new_block(), self.new_block(), self.new_block());
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: collection.collecting(),
+                then: add,
+                otherwise: write,
+            },
+            add,
+        );
+        self.scoped(|this| {
+            let value = this.place(error, cx);
+            let one = collection.one(this, &value, false, cx);
+            let combined = this.united(collection.warnings(), one, &collection.ty, cx);
+            this.assign_place(collection.warnings(), combined, &collection.ty, cx);
+        });
+        self.end_block(lir::Terminator::Jump(after), write);
+        self.scoped(|this| {
+            let value = this.place(error, cx);
+            let message = this.message_of(&value, cx);
+            this.insts.push(lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::Warned,
+                args: vec![message],
+            });
+        });
+        self.end_block(lir::Terminator::Jump(after), after);
+    }
+
+    /// The message of the error at `error`, a value of the prelude's type
+    /// `error`, as `message` gives it, in a slot, in memory the calling
+    /// statement owns.
+    fn message_of(&mut self, error: &lir::Place, cx: &mut Lowering) -> lir::Place {
+        let callee = self.program.operator(self.program.message);
+        let ty = callee.params["error"].ty.clone();
+        let params = params_layout(&callee.params, &cx.families)
+            .expect("`message` has a parameter, the error");
+        let args = self.slot(params);
+        let mut arg = args.clone();
+        arg.path.push(0);
+        self.insts.push(lir::Inst::Copy {
+            dst: arg,
+            src: error.clone(),
+            layout: cx.layout(&ty),
+        });
+        let message = self.slot(cx.layout(&hir::Type::Scalar(hir::Scalar::Text)));
+        let call = hir::Call {
+            operator: self.program.message,
+            types: Vec::new(),
+            args: BTreeMap::new(),
+            updated: BTreeMap::new(),
+        };
+        self.invoke(&call, Some(args), Some(message.clone()), cx);
+        message
     }
 
     /// What a transaction of `body` keeps as it begins: each variable the
@@ -2750,8 +2989,20 @@ impl<'a> FunctionBuilder<'a> {
     fn store(&mut self, target: &hir::Target, value: lir::Place, cx: &mut Lowering) {
         let ty = self.assigned(target).0.clone();
         let dst = self.holder(target, cx);
-        if cx.points(&ty) {
-            let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+        self.assign_place(dst, value, &ty, cx);
+    }
+
+    /// Assign the value at `value`, of type `ty`, to the variable at `dst`,
+    /// which takes references to what it points to.
+    fn assign_place(
+        &mut self,
+        dst: lir::Place,
+        value: lir::Place,
+        ty: &hir::Type,
+        cx: &mut Lowering,
+    ) {
+        if cx.points(ty) {
+            let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(ty)));
             self.insts.push(lir::Inst::CallRuntime {
                 function: lir::RuntimeFn::Assign,
                 args: vec![dst, value, descriptor],
@@ -2761,7 +3012,7 @@ impl<'a> FunctionBuilder<'a> {
             self.insts.push(lir::Inst::Copy {
                 dst,
                 src: value,
-                layout: cx.layout(&ty),
+                layout: cx.layout(ty),
             });
         }
     }

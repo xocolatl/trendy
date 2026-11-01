@@ -549,6 +549,22 @@ impl UpdateBuiltin {
     }
 }
 
+/// The heading of what a transaction collects, the prelude's
+/// `transaction_collection`, which sema checks it declares: each error,
+/// `error`, of the prelude's union type `error`, `error_type`, that a
+/// statement in the transaction failed or warned with, and whether it
+/// failed, `failed`.
+#[must_use]
+pub fn transaction_collection(error_type: Type) -> Heading {
+    Heading::new(
+        [
+            ("error".to_string(), error_type),
+            ("failed".to_string(), Type::Scalar(Scalar::Boolean)),
+        ]
+        .into(),
+    )
+}
+
 /// An error a built-in gives, rather than stopping the program: a value of
 /// a subtype of the prelude's union type `error`, which the prelude
 /// declares with these components, as sema checks, and which the runtime
@@ -1184,6 +1200,11 @@ pub enum Statement {
     /// `fail e;`: the program fails with the error that the expression is,
     /// as [`Expr::Fail`] does.
     Fail(Expr),
+    /// `warn e;`: the program warns with the error that the expression is,
+    /// and carries on: the innermost transaction with `collecting` running
+    /// collects it, as it does a failure, or, with none, the program writes
+    /// its message.
+    Warn(Expr),
     /// `transaction [ … ];`, or `transaction collecting e [ … ];`, with the
     /// variable `e`, a `relation { error: error }`: the block's statements,
     /// which, if one fails, are undone, all of them, every variable they
@@ -1214,7 +1235,9 @@ impl Statement {
             Statement::Loop(_, body, _)
             | Statement::For(_, _, body)
             | Statement::Transaction(_, body) => vec![body],
-            Statement::Call(_) | Statement::Assign(_) | Statement::Fail(_) => Vec::new(),
+            Statement::Call(_) | Statement::Assign(_) | Statement::Fail(_) | Statement::Warn(_) => {
+                Vec::new()
+            }
         }
     }
 
@@ -1248,6 +1271,7 @@ impl Statement {
                 body.instantiated(types),
             ),
             Statement::Fail(error) => Statement::Fail(error.instantiated(types)),
+            Statement::Warn(error) => Statement::Warn(error.instantiated(types)),
             Statement::Transaction(collecting, body) => {
                 Statement::Transaction(collecting.clone(), body.instantiated(types))
             }

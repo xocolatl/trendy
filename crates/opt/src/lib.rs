@@ -118,6 +118,7 @@ impl Optimizer<'_> {
                 hir::Statement::For(local, self.expr(array), self.block(body))
             }
             hir::Statement::Fail(error) => hir::Statement::Fail(self.expr(error)),
+            hir::Statement::Warn(error) => hir::Statement::Warn(self.expr(error)),
             hir::Statement::Transaction(collecting, body) => {
                 hir::Statement::Transaction(collecting, self.block(body))
             }

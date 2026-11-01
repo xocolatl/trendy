@@ -39,7 +39,8 @@ codes! {
     /// reported is freed for the next new one. Its letter says what kind of
     /// problem it is, not which layer finds it: `P` the source doesn't
     /// parse, `A` it parses but analysis rejects it, `R` it fails while
-    /// running, and `X` the compiler itself is wrong. Each letter's `0000`
+    /// running, or warns, with `warn`, and `X` the compiler itself is
+    /// wrong. Each letter's `0000`
     /// is reserved for a generic error of that kind. A rule that is broken
     /// at run time keeps its `R` code when the compiler catches it early.
     /// Each code's explanation lives in `crates/diag/errors/<code>.md`.
@@ -93,6 +94,7 @@ codes! {
     TransactionStart => "P0048",
     TransactionEnd => "P0049",
     ExceptionHandler => "P0050",
+    WarnSpelling => "P0051",
     DuplicateName => "A0001",
     MissingMain => "A0002",
     UnknownType => "A0003",
@@ -180,6 +182,7 @@ codes! {
     NotOfType => "R0019",
     OverlappingSubtypes => "R0020",
     Failed => "R0021",
+    Warned => "R0022",
     Internal => "X0000",
 }
 
@@ -219,7 +222,8 @@ impl Code {
     /// can show a program that produces it. Run-time rules such as overflow
     /// are reported while compiling when the compiler can tell they'll be
     /// broken; running out of memory, reading a file, which is never read
-    /// when compiling, and internal errors never are.
+    /// when compiling, a warning, which only an update operator gives, as
+    /// it runs, and internal errors never are.
     #[must_use]
     pub fn reported_when_compiling(self) -> bool {
         !matches!(
@@ -228,6 +232,7 @@ impl Code {
                 | Code::UnreadableFile
                 | Code::NotUtf8
                 | Code::MalformedCsv
+                | Code::Warned
                 | Code::Internal
         )
     }

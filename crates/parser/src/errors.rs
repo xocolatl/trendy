@@ -1178,20 +1178,41 @@ pub(crate) fn unparenthesized_fail(span: Span) -> Diagnostic {
     )
 }
 
-/// `throw` or `raise`, `found`, another language's word for `fail`.
-pub(crate) fn fail_spelling(found: Found) -> Diagnostic {
+/// `throw` or `raise`, or PL/pgSQL's `RAISE EXCEPTION`, `written` at
+/// `span`, another language's word for `fail`.
+pub(crate) fn fail_spelling(span: Span, written: &str) -> Diagnostic {
     Diagnostic::error(
         Code::FailSpelling,
-        format!("a program fails with `fail`, not `{}`", found.text),
-        found.span,
+        format!("a program fails with `fail`, not `{written}`"),
+        span,
         "another language's word",
     )
     .with_note("`fail e` stops the program with the error `e`, a value of one of the subtypes of the prelude's type `error`, as `fail failure{message: \"…\"}`")
     .with_suggestion(
-        format!("replace `{}` with `fail`", found.text),
+        format!("replace `{written}` with `fail`"),
         vec![Edit {
-            span: found.span,
+            span,
             replacement: "fail".to_string(),
+        }],
+    )
+}
+
+/// PL/pgSQL's `RAISE WARNING` or `RAISE NOTICE`, or a call such as
+/// JavaScript's `console.warn` or Python's `warnings.warn`, `written` at
+/// `span`, another language's way to warn.
+pub(crate) fn warn_spelling(span: Span, written: &str) -> Diagnostic {
+    Diagnostic::error(
+        Code::WarnSpelling,
+        format!("a program warns with `warn`, not `{written}`"),
+        span,
+        "another language's way to warn",
+    )
+    .with_note("`warn e;` warns with the error `e`, a value of one of the subtypes of the prelude's type `error`, as `warn failure{message: \"…\"};`, and carries on: the innermost transaction with `collecting` running collects it, or else the program writes its message")
+    .with_suggestion(
+        format!("replace `{written}` with `warn`"),
+        vec![Edit {
+            span,
+            replacement: "warn".to_string(),
         }],
     )
 }

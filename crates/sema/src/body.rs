@@ -405,25 +405,38 @@ impl Statements<'_, '_> {
             }
             ast::Statement::For(stmt) => return self.for_stmt(stmt, errors),
             ast::Statement::Transaction(stmt) => return self.transaction_stmt(stmt, errors),
-            ast::Statement::Fail(stmt) => self.fail_stmt(stmt, errors),
+            ast::Statement::Fail(stmt) => {
+                self.signal_stmt(errors::Signal::Fail, stmt.keyword(), stmt.error(), errors)
+            }
+            ast::Statement::Warn(stmt) => {
+                self.signal_stmt(errors::Signal::Warn, stmt.keyword(), stmt.error(), errors)
+            }
         };
         self.settle(checked.as_ref(), errors);
         checked
     }
 
-    /// `fail e;`: the program fails with the error `e`, when it runs.
-    fn fail_stmt(
+    /// `fail e;` or `warn e;`, as `signal` says, written `keyword` and
+    /// `written`: the program fails with the error `e`, when it runs, or
+    /// warns with it, and carries on.
+    fn signal_stmt(
         &mut self,
-        stmt: &ast::FailStmt,
+        signal: errors::Signal,
+        keyword: Option<SyntaxToken>,
+        written: Option<ast::Expr>,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Statement> {
-        let (keyword, written) = (stmt.keyword()?, stmt.error()?);
+        let (keyword, written) = (keyword?, written?);
         let error = {
             let mut names = self.names();
-            Checker::new(&mut names).error(&written, &keyword, errors)
+            Checker::new(&mut names).error(&written, &keyword, signal, errors)
         };
         self.flush(errors);
-        Some(hir::Statement::Fail(error?))
+        let error = error?;
+        Some(match signal {
+            errors::Signal::Fail => hir::Statement::Fail(error),
+            errors::Signal::Warn => hir::Statement::Warn(error),
+        })
     }
 
     /// `for x in a loop [ … ];`: the block run for each element of the
@@ -549,9 +562,9 @@ impl Statements<'_, '_> {
 
     /// The variable `collecting`, of the transaction `stmt`, names, which
     /// the transaction adds its errors to: one the operator can assign, of
-    /// type `relation { error: error }`, declared before. Adding to it reads
-    /// it, so an `out` parameter is assigned before (A0054). `None` after
-    /// reporting why it isn't one.
+    /// type `relation transaction_collection`, the prelude's heading,
+    /// declared before. Adding to it reads it, so an `out` parameter is
+    /// assigned before (A0054). `None` after reporting why it isn't one.
     fn collecting(
         &mut self,
         stmt: &ast::TransactionStmt,
@@ -561,13 +574,9 @@ impl Statements<'_, '_> {
         let ident = collecting.variable()?.ident()?;
         let (name, span) = (ident.text(), trendy_syntax::span(ident.text_range()));
         let error = self.cx.namespaces.dummy("error")?;
-        let errors_type = hir::Type::Relation(hir::Heading::new(
-            [(
-                "error".to_string(),
-                hir::Type::Dummy(Box::new(error.clone())),
-            )]
-            .into(),
-        ));
+        let errors_type = hir::Type::Relation(hir::transaction_collection(hir::Type::Dummy(
+            Box::new(error.clone()),
+        )));
         let known = self.locals.find(name).is_some()
             || self.cx.operators.get(self.within).is_parameter(name)
             || self.cx.variable_ids.contains_key(name);
@@ -1231,7 +1240,7 @@ fn exprs_in(block: &hir::Block, f: &mut dyn FnMut(&hir::Expr)) {
         }
         hir::Statement::If(condition, ..) | hir::Statement::Loop(condition, ..) => f(condition),
         hir::Statement::For(_, array, _) => f(array),
-        hir::Statement::Fail(error) => f(error),
+        hir::Statement::Fail(error) | hir::Statement::Warn(error) => f(error),
         hir::Statement::Transaction(..) => {}
     });
 }

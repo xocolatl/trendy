@@ -947,15 +947,20 @@ builtin operator load_csv{
 }
     types { C: any tuple, T: any tuple };
 
-/* What went wrong, when a program fails: a value of one of `error`'s
-   subtypes, each a kind of failure, with what it is about as its
-   components. `fail e` stops the program with `e`'s message. A program
-   declares kinds of its own as the prelude does, each with its
-   `message`. */
+/* What went wrong, when a program fails, or warns: a value of one of
+   `error`'s subtypes, each a kind of failure, with what it is about as
+   its components. `fail e` stops the program with `e`'s message, unless
+   a transaction takes it, and `warn e` carries on. A program declares
+   kinds of its own as the prelude does, each with its `message`. */
 type error union;
 
 /* What a failure says: a version for each of `error`'s subtypes. */
 operator message{error: error}: text;
+
+/* What a transaction collects, in the variable its `collecting` names:
+   each error a statement in it failed with, which rolled it back, and
+   each it warned with, which it carried on past. */
+heading transaction_collection := { error: error, failed: boolean };
 
 /* A failure a program describes in its own words, as in
    `fail failure{message: "the list is empty"}`. */
@@ -4855,7 +4860,8 @@ operator main{} [
 - **An error is a value of one of `error`'s subtypes** (A0004): a text is
   the message of the prelude's `failure`, `fail failure{message: "…"}`,
   which is fixed. Java's, JavaScript's and C++'s `throw` and Python's and
-  Ruby's `raise` are fixed to `fail` (P0047). A `fail` always gives its
+  Ruby's `raise`, and PL/pgSQL's `RAISE EXCEPTION`, are fixed to `fail`
+  (P0047). A `fail` always gives its
   error: `fail;` alone, as another language rethrows the exception it
   handles, is reported (P0047), as nothing is ever being handled.
 - **The prelude's errors of the language's own failures** have plain
@@ -4884,9 +4890,12 @@ fails, the transaction undoes them all, each variable they assigned
 given back the value it had as the transaction began, and the failure
 goes on, to the transaction around it, or else the program's end. With
 `collecting e`, the transaction takes the failure instead: it adds the
-failure's error to `e`, a variable of type `relation { error: error }`
-declared before it, and the statements after the transaction run. If
-none fails, what they did is kept, and `e` is as it was.
+failure's error to `e`, a variable of type `relation
+transaction_collection` declared before it, `failed` true, and the
+statements after the transaction run. If none fails, what they did is
+kept. Either way, the transaction adds each warning its statements gave,
+with `warn`, `failed` false. The prelude declares the heading:
+`transaction_collection := { error: error, failed: boolean }`.
 
 ```trendy
 var granaries: relation { city: text, sacks: integer } := relation {
@@ -4911,7 +4920,7 @@ operator transfer{origin: text, destination: text, n: integer} [
 ];
 
 operator main{} [
-    var found: relation { error: error };
+    var found: relation transaction_collection;
     transaction collecting found [
         call transfer{origin: "Tashkent", destination: "Accra", n: 15};
     ];
@@ -4939,14 +4948,32 @@ holds the error: `granaries` is as it was.
   and `out` parameters. What it wrote, as with `debug_value`, stays
   written.
 - **`collecting` names a variable, and adds to it:** one the operator
-  can assign, of type `relation { error: error }` (A0004), declared
-  before the transaction, which the fix for one that isn't does (A0015).
-  So one variable collects the errors of a loop's transactions, and the
-  statements after them test it as a relation, as in `if not
-  is_empty{r: found} then [ … ];`. Adding to an `out` parameter reads
-  it, so it is assigned before (A0054). A transaction declares no
-  variable: what it collects outlives it, so it is the program's to
-  declare, as any variable is.
+  can assign, of type `relation transaction_collection` (A0004),
+  declared before the transaction, which the fix for one that isn't does
+  (A0015). So one variable collects the errors of a loop's transactions,
+  and the statements after them test it as a relation, as in `if not
+  is_empty{r: found where failed} then [ … ];`. Adding to an `out`
+  parameter reads it, so it is assigned before (A0054). A transaction
+  declares no variable: what it collects outlives it, so it is the
+  program's to declare, as any variable is.
+- **`warn e;` warns with the error `e`, and carries on.** The innermost
+  transaction with `collecting` running, whatever operator the warning
+  is in, collects it, so no operator takes a parameter for its warnings
+  either; a transaction without `collecting` leaves its warnings to the
+  one around it. Whether a warning stopped anything is a fact about where
+  it happened, not about the error, so any error can be one, and
+  `failed` says which an error in a collection was. A transaction's
+  warnings survive its rollback, beside its failure, as what happened
+  while it ran. With no transaction collecting, the program writes a
+  warning's message, and where it warned, as it warns, and carries on
+  (R0022). Only an update
+  operator warns: a read-only operator, or a value block, computes a
+  value, which the compiler may compute before the program runs, when a
+  warning would be lost (A0035). `warn` is a contextual keyword, a name
+  elsewhere. PL/pgSQL's `RAISE WARNING` and `RAISE NOTICE`, and a call
+  of another language's operator that warns, as JavaScript's
+  `console.warn(…)` and Python's `warnings.warn(…)`, are fixed to it
+  (P0051).
 - **An `out` parameter only a collecting transaction assigns** isn't
   assigned on every path, since a failure the transaction takes undoes
   the assignment (A0054); one without `collecting` assigns what its block
@@ -5277,7 +5304,8 @@ line after a comment on its own line, such as a file's header, is kept.
 | `type Home = { … }`, `interface Home { … }`, `struct Home { … }` | `heading home := { … };`, whose types are `relation home` and `tuple home` |
 | `TYPE PLANE_FIGURE UNION;`, an abstract class | `type plane_figure union;`, whose values are its subtypes' |
 | `class Ellipse extends PlaneFigure`, `class Ellipse : PlaneFigure`, `TYPE ELLIPSE IS { PLANE_FIGURE POSSREP … }` | `type ellipse is plane_figure { { a: approximate, … } };` |
-| `throw e`, `raise e`, `panic!("…")` | `fail e`, of an error, as `fail failure{message: "…"}` |
+| `throw e`, `raise e`, `panic!("…")`, `RAISE EXCEPTION '…'` | `fail e`, of an error, as `fail failure{message: "…"}` |
+| `console.warn(…)`, `warnings.warn(…)`, `RAISE WARNING '…'` | `warn e;`, of an error, which a transaction collects, or the program writes |
 | `class NoConversion extends Exception`, an exception of a program's own | `type no_conversion is error { { unit: text } };`, with its `message{error: no_conversion}` |
 | `x instanceof Ellipse`, `isinstance(x, Ellipse)`, `x IS OF (ELLIPSE)`, `IS_ELLIPSE(X)` | `x is ellipse`, after which `x` is an ellipse in the rest of the condition |
 | `(Ellipse) x`, `x as Ellipse`, `TREAT(x AS ELLIPSE)`, `TREAT_AS_ELLIPSE(X)` | `treat x as ellipse`, or, where it may not be one, `x is ellipse and …` |

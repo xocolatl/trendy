@@ -950,12 +950,29 @@ fn transactions() {
 │ Tashkent │ Toshkent │    40 │
 └──────────┴──────────┴───────┘
 ";
+    let collected = |warned: &str, failed: &str| {
+        format!(
+            "relation {{ failed: boolean, message: text }} {{ {{ failed: false, message: \"{warned}\" }}, {{ failed: true, message: \"{failed}\" }} }}\n"
+        )
+    };
+    let moved = collected("Accra has 30 sacks left", "Tashkent has 10 sacks, not 15");
+    let day = collected("Dhaka has 20 sacks left", "Tashkent has 40 sacks, not 100");
+    let after = "┌──────────┬──────────┬───────┐
+│ city     │ native   │ sacks │
+├──────────┼──────────┼───────┤
+│ Accra    │ Nkran    │    30 │
+│ Cusco    │ Qusqu    │    35 │
+│ Dhaka    │ ঢাকা       │    30 │
+│ Tashkent │ Toshkent │    40 │
+└──────────┴──────────┴───────┘
+";
     assert_eq!(
         (code, stderr),
         (
             0,
             format!(
-                "relation {{ message: text }} {{ {{ message: \"Tashkent has 10 sacks, not 15\" }} }}\n{table}1\n{table}"
+                "{moved}{table}{day}{table}warning[{}]: Cusco has 35 sacks left\n --> transactions.trendy:44:9\n{after}",
+                trendy_diag::Code::Warned.id()
             )
         )
     );
@@ -988,23 +1005,23 @@ operator adjust{var total: integer, by: integer} [
 operator main{} [
     var total := 50;
     var label := \"start\";
-    var found: relation { error: error };
+    var found: relation transaction_collection;
     transaction collecting found [
         label := \"changed\";
         call adjust{var total: total, by: 70};
     ];
     call debug_value{v: tuple { total: total, label: label, errors: count{r: found} }};
-    var outer: relation { error: error };
+    var outer: relation transaction_collection;
     transaction collecting outer [
         call adjust{var total: total, by: 10};
-        var inner: relation { error: error };
+        var inner: relation transaction_collection;
         transaction collecting inner [
             call adjust{var total: total, by: 90};
         ];
         call debug_value{v: count{r: inner}};
     ];
     call debug_value{v: tuple { total: total, errors: count{r: outer} }};
-    var both: relation { error: error };
+    var both: relation transaction_collection;
     transaction collecting both [
         call adjust{var total: total, by: 5};
         transaction [
@@ -1014,14 +1031,14 @@ operator main{} [
     call debug_value{v: tuple { total: total, errors: count{r: both} }};
     var tries := 0;
     while tries < 50 loop [
-        var each: relation { error: error };
+        var each: relation transaction_collection;
         transaction collecting each [
             call adjust{var total: total, by: 200};
         ];
         tries := tries + count{r: each};
     ];
     call debug_table{r: log};
-    var divided: relation { error: error };
+    var divided: relation transaction_collection;
     transaction collecting divided [
         total := total div (total - total);
     ];
@@ -1068,7 +1085,7 @@ operator attempt{n: integer} [
 ];
 
 operator main{} [
-    var found: relation { error: error };
+    var found: relation transaction_collection;
     transaction collecting found [
         call attempt{n: 1};
     ];
@@ -1088,6 +1105,125 @@ operator main{} [
             )
         )
     );
+}
+
+/// Warnings, of a program that takes from its stock, and warns when it
+/// runs low, in transactions and outside.
+const WARNED: &str = "type running_low is error { { city: text, sacks: integer } };
+
+operator message{error: running_low}: text [
+    error.city || \" has \" || to_text{from: error.sacks} || \" sacks left\"
+];
+
+var stock: relation { city: text, sacks: integer } := relation {
+    { city: \"Accra\", sacks: 12 },
+    { city: \"Dhaka\", sacks: 3 },
+}
+key { city };
+
+operator take{from: text, n: integer} [
+    update stock { sacks := sacks - n } where city = from;
+    var left := sum{r: (stock where city = from){sacks}, of: sacks};
+    if left < 0 then [
+        fail failure{message: from || \" has too few sacks\"};
+    ];
+    if left < 10 then [
+        warn running_low{city: from, sacks: left};
+    ];
+];
+
+operator report{found: relation transaction_collection} [
+    call debug_value{v: (found extend { message := message{error: error} }){message, failed}};
+];
+
+operator main{} [
+    warn running_low{city: \"Cusco\", sacks: 1};
+    var found: relation transaction_collection;
+    transaction collecting found [
+        call take{from: \"Accra\", n: 5};
+    ];
+    call report{found: found};
+    var both: relation transaction_collection;
+    transaction collecting both [
+        call take{from: \"Accra\", n: 2};
+        call take{from: \"Dhaka\", n: 5};
+    ];
+    call report{found: both};
+    call debug_value{v: stock};
+    var outer: relation transaction_collection;
+    transaction collecting outer [
+        transaction [
+            call take{from: \"Accra\", n: 1};
+        ];
+        var inner: relation transaction_collection;
+        transaction collecting inner [
+            call take{from: \"Accra\", n: 1};
+            call take{from: \"Dhaka\", n: 9};
+        ];
+        call report{found: inner};
+    ];
+    call report{found: outer};
+    var many: relation transaction_collection;
+    var i := 0;
+    while i < 50 loop [
+        transaction collecting many [
+            call take{from: \"Dhaka\", n: 1};
+            call take{from: \"Dhaka\", n: 100};
+        ];
+        i := i + 1;
+    ];
+    call report{found: many};
+    transaction [
+        call take{from: \"Accra\", n: 1};
+    ];
+    call debug_value{v: stock};
+    transaction [
+        call take{from: \"Accra\", n: 1};
+        call take{from: \"Dhaka\", n: 100};
+    ];
+];
+";
+
+/// A warning goes to the innermost transaction with `collecting` running,
+/// at any depth of calls, beside its failure, surviving its rollback, and
+/// through transactions without `collecting`, many times over in a loop;
+/// with none running, the program writes it, as it warns, and carries on.
+#[test]
+fn warnings_go_to_the_innermost_collecting_transaction() {
+    let collected = |tuples: &[(bool, &str)]| {
+        let tuples: Vec<String> = tuples
+            .iter()
+            .map(|(failed, message)| format!("{{ failed: {failed}, message: \"{message}\" }}"))
+            .collect();
+        format!(
+            "relation {{ failed: boolean, message: text }} {{ {} }}\n",
+            tuples.join(", ")
+        )
+    };
+    let warned = |message: &str, line: usize, column: usize| {
+        format!(
+            "warning[{}]: {message}\n --> warned.trendy:{line}:{column}\n",
+            trendy_diag::Code::Warned.id()
+        )
+    };
+    let too_few = "Dhaka has too few sacks";
+    let expected = [
+        warned("Cusco has 1 sacks left", 29, 5),
+        collected(&[(false, "Accra has 7 sacks left")]),
+        collected(&[(false, "Accra has 5 sacks left"), (true, too_few)]),
+        "relation { city: text, sacks: integer } { { city: \"Accra\", sacks: 7 }, { city: \"Dhaka\", sacks: 3 } }\n".to_string(),
+        collected(&[(false, "Accra has 5 sacks left"), (true, too_few)]),
+        collected(&[(false, "Accra has 6 sacks left")]),
+        collected(&[(false, "Dhaka has 2 sacks left"), (true, too_few)]),
+        warned("Accra has 5 sacks left", 20, 9),
+        "relation { city: text, sacks: integer } { { city: \"Accra\", sacks: 5 }, { city: \"Dhaka\", sacks: 3 } }\n".to_string(),
+        warned("Accra has 4 sacks left", 20, 9),
+        format!(
+            "error[{}]: {too_few}\n --> warned.trendy:17:9\n  = note: in `take`, called at warned.trendy:71:9\n",
+            trendy_diag::Code::Failed.id()
+        ),
+    ];
+    assert_eq!(run_source("warned", WARNED), (1, expected.concat()));
 }
 
 #[test]

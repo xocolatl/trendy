@@ -148,6 +148,9 @@ enum StatementStart {
     Return,
     /// `fail e;`, or another language's `throw e;`.
     Fail,
+    /// `warn e;`, or another language's way to warn, as PL/pgSQL's `RAISE
+    /// WARNING e;` or JavaScript's `console.warn(e);`.
+    Warn,
     /// `fail;`, or another language's `throw;` or `raise`, which rethrows
     /// the exception being handled: trendy has none to.
     BareFail,
@@ -215,6 +218,15 @@ fn direction(word: &str) -> Option<&'static str> {
 /// `fail`, and other languages' words for it: Java's, JavaScript's and
 /// C++'s `throw`, and Python's and Ruby's `raise`.
 const FAIL_WORDS: [&str; 3] = ["fail", "throw", "raise"];
+
+/// PL/pgSQL's levels of `RAISE` that carry on, as `warn` does: `RAISE
+/// WARNING` and `RAISE NOTICE`. Its `RAISE EXCEPTION` fails.
+const SQL_WARN_LEVELS: [&str; 2] = ["warning", "notice"];
+
+/// The names of other languages' operators that warn, called on a module or
+/// an object, as in JavaScript's `console.warn` and Python's
+/// `warnings.warn` and `logging.warning`.
+const WARN_METHODS: [&str; 2] = ["warn", "warning"];
 
 fn starts_value(kind: SyntaxKind) -> bool {
     kind.is_literal()
@@ -1408,6 +1420,8 @@ impl<'a> Parser<'a> {
             StatementStart::Compound(compound)
         } else if found.spells(SyntaxKind::ReturnKw) {
             StatementStart::Return
+        } else if self.at_warn() {
+            StatementStart::Warn
         } else if self.at_fail() {
             StatementStart::Fail
         } else if self.at_bare_fail() {
@@ -1440,6 +1454,13 @@ impl<'a> Parser<'a> {
             Some(StatementStart::Transaction) => self.transaction_stmt(),
             Some(StatementStart::TransactionEnd) => self.transaction_end(found),
             Some(StatementStart::Try) => self.try_stmt(),
+            Some(StatementStart::Warn) => {
+                self.start_node(SyntaxKind::WarnStmt);
+                self.warn_word();
+                self.expression();
+                self.end_statement();
+                self.builder.finish_node();
+            }
             Some(StatementStart::BareFail) => {
                 self.skip_statement(&STATEMENT_STOPS);
                 self.errors.push(errors::bare_fail(found));
@@ -4009,23 +4030,105 @@ impl<'a> Parser<'a> {
 
     /// Whether `fail e` starts here: `fail`, in any case, or another
     /// language's word for it, `throw` or `raise`, before a value that an
-    /// error can be. A value of the variable `fail` is followed by an
-    /// operator, `fail - 1`, a call of the operator by braces, `fail{}`,
-    /// and `x as fail` and `fail is t` are names.
+    /// error can be ([`Parser::error_follows`]).
     fn at_fail(&mut self) -> bool {
-        let word = self.found().is_some_and(|f| {
+        self.found().is_some_and(|f| {
             f.kind == SyntaxKind::Ident
                 && FAIL_WORDS
                     .iter()
                     .any(|word| f.text.eq_ignore_ascii_case(word))
-        });
-        word && self.found_after(1).is_some_and(|f| {
+        }) && self.error_follows(1)
+    }
+
+    /// Whether `warn e;` starts here: `warn`, in any case, before a value
+    /// an error can be ([`Parser::error_follows`]), or another language's
+    /// way to warn, as PL/pgSQL's `RAISE WARNING e;` or JavaScript's
+    /// `console.warn(e);`.
+    fn at_warn(&mut self) -> bool {
+        let word = self
+            .found()
+            .is_some_and(|f| f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case("warn"));
+        (word && self.error_follows(1))
+            || self.at_sql_raise(&SQL_WARN_LEVELS)
+            || self.at_warn_method()
+    }
+
+    /// Whether the token `n` after the next starts a value an error can
+    /// be, after `fail` or `warn`, which are names elsewhere: a literal, a
+    /// parenthesis, or a name. A value of the variable `fail` is followed
+    /// by an operator, `fail - 1`, a call of the operator by braces,
+    /// `fail{}`, and `x as fail` and `fail is t` are names.
+    fn error_follows(&mut self, n: usize) -> bool {
+        self.found_after(n).is_some_and(|f| {
             f.kind.is_literal()
                 || f.kind == SyntaxKind::LParen
                 || (f.kind == SyntaxKind::Ident
                     && !f.text.eq_ignore_ascii_case("as")
                     && !f.text.eq_ignore_ascii_case("is"))
         })
+    }
+
+    /// Whether PL/pgSQL's `RAISE` of one of `levels` starts here, in any
+    /// case, before a value an error can be: `RAISE WARNING e`, not `raise
+    /// warning`, another language's `raise` of the error `warning`.
+    fn at_sql_raise(&mut self, levels: &[&str]) -> bool {
+        self.found()
+            .is_some_and(|f| f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case("raise"))
+            && self.found_after(1).is_some_and(|f| {
+                f.kind == SyntaxKind::Ident
+                    && levels
+                        .iter()
+                        .any(|level| f.text.eq_ignore_ascii_case(level))
+            })
+            && self.error_follows(2)
+    }
+
+    /// Whether another language's call of its operator that warns starts
+    /// here, as JavaScript's `console.warn(…)` and Python's
+    /// `warnings.warn(…)` ([`WARN_METHODS`]): no statement starts with a
+    /// name, a dot and a name, then a parenthesis.
+    fn at_warn_method(&mut self) -> bool {
+        self.found().is_some_and(|f| f.kind == SyntaxKind::Ident)
+            && self
+                .found_after(1)
+                .is_some_and(|f| f.kind == SyntaxKind::Dot)
+            && self.found_after(2).is_some_and(|f| {
+                f.kind == SyntaxKind::Ident
+                    && WARN_METHODS
+                        .iter()
+                        .any(|method| f.text.eq_ignore_ascii_case(method))
+            })
+            && self
+                .found_after(3)
+                .is_some_and(|f| f.kind == SyntaxKind::LParen)
+    }
+
+    /// The word `warn`, which another language's way to warn, PL/pgSQL's
+    /// `RAISE WARNING` or a call such as `console.warn`, or another case,
+    /// is reported in place of, with a fix.
+    fn warn_word(&mut self) {
+        let sql = self.at_sql_raise(&SQL_WARN_LEVELS);
+        if !sql && !self.at_warn_method() {
+            self.contextual_keyword("warn");
+            return;
+        }
+        let first = self.found().expect("at the way to warn");
+        self.bump();
+        if !sql {
+            // The dot.
+            self.bump();
+        }
+        let last = self.found().expect("the way to warn goes on");
+        self.bump();
+        let written = if sql {
+            format!("{} {}", first.text, last.text)
+        } else {
+            format!("{}.{}", first.text, last.text)
+        };
+        self.errors.push(errors::warn_spelling(
+            Span::new(first.span.start, last.span.end),
+            &written,
+        ));
     }
 
     /// Whether `fail` without an error is next, or another language's
@@ -4055,14 +4158,23 @@ impl<'a> Parser<'a> {
     /// case, is reported in place of, with a fix.
     fn fail_word(&mut self) {
         let word = self.found().expect("at `fail`");
+        let sql = self.at_sql_raise(&["exception"]);
         self.bump();
+        if sql {
+            let level = self.found().expect("`EXCEPTION` is next");
+            self.bump();
+            let span = Span::new(word.span.start, level.span.end);
+            let written = format!("{} {}", word.text, level.text);
+            self.errors.push(errors::fail_spelling(span, &written));
+            return;
+        }
         if word.text == "fail" {
             return;
         }
         let error = if word.text.eq_ignore_ascii_case("fail") {
             errors::miscased_keyword(word, "fail")
         } else {
-            errors::fail_spelling(word)
+            errors::fail_spelling(word.span, word.text)
         };
         self.errors.push(error);
     }
@@ -7677,6 +7789,16 @@ var b := tuple { fail: fail }.fail;",
                 Code::MiscasedKeyword,
             ),
             (
+                "operator f{} [ RAISE EXCEPTION failure{message: \"x\"}; ];",
+                "operator f{} [ fail failure{message: \"x\"}; ];",
+                Code::FailSpelling,
+            ),
+            (
+                "operator f{} [ raise exception; ];",
+                "operator f{} [ fail exception; ];",
+                Code::FailSpelling,
+            ),
+            (
                 "var a: text := \"x\" || fail e;",
                 "var a: text := \"x\" || (fail e);",
                 Code::UnorderedOperators,
@@ -7697,6 +7819,76 @@ var b := tuple { fail: fail }.fail;",
             let codes: Vec<Code> = parse.errors.iter().map(|e| e.code).collect();
             assert_eq!(codes, [Code::FailSpelling], "{source}");
             assert!(parse.errors[0].suggestions.is_empty(), "{source}");
+        }
+    }
+
+    #[test]
+    fn warnings() {
+        // `warn` before a value, as a statement; elsewhere a name.
+        let parse = parse_str(
+            "operator f{} [
+    warn failure{message: \"low\"};
+    warn (failure{message: \"low\"});
+    warn e;
+    var warn := 1;
+    warn := warn + 1;
+    call warn{n: warn};
+];",
+        );
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let warns: Vec<String> = parse
+            .tree
+            .syntax()
+            .descendants()
+            .filter_map(trendy_syntax::ast::WarnStmt::cast)
+            .map(|w| w.error().expect("an error").syntax().text().to_string())
+            .collect();
+        assert_eq!(
+            warns,
+            [
+                "failure{message: \"low\"}",
+                "(failure{message: \"low\"})",
+                "e"
+            ]
+        );
+        // Other languages' ways to warn, and another case, fixed; `raise
+        // warning;` raises the error `warning`.
+        for (source, fixed, code) in [
+            (
+                "operator f{} [ WARN e; ];",
+                "operator f{} [ warn e; ];",
+                Code::MiscasedKeyword,
+            ),
+            (
+                "operator f{} [ RAISE WARNING e; ];",
+                "operator f{} [ warn e; ];",
+                Code::WarnSpelling,
+            ),
+            (
+                "operator f{} [ raise notice failure{message: \"x\"}; ];",
+                "operator f{} [ warn failure{message: \"x\"}; ];",
+                Code::WarnSpelling,
+            ),
+            (
+                "operator f{} [ console.warn(e); ];",
+                "operator f{} [ warn(e); ];",
+                Code::WarnSpelling,
+            ),
+            (
+                "operator f{} [ logging.warning(e); ];",
+                "operator f{} [ warn(e); ];",
+                Code::WarnSpelling,
+            ),
+            (
+                "operator f{} [ raise warning; ];",
+                "operator f{} [ fail warning; ];",
+                Code::FailSpelling,
+            ),
+        ] {
+            let parse = parse_str(source);
+            let codes: Vec<Code> = parse.errors.iter().map(|e| e.code).collect();
+            assert_eq!(codes, [code], "{source}: {:#?}", parse.errors);
+            assert_eq!(fix(source), fixed, "{source}");
         }
     }
 
@@ -8429,6 +8621,7 @@ type rule { { constraint: text } };",
                 Statement::Call(_)
                 | Statement::Return(_)
                 | Statement::Fail(_)
+                | Statement::Warn(_)
                 | Statement::Var(_)
                 | Statement::If(_)
                 | Statement::While(_)

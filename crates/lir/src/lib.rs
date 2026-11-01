@@ -356,6 +356,9 @@ pub enum RuntimeFn {
     /// `trendy_rt_failed(message)`: write the error of a `fail`, whose
     /// message is `message`, a text.
     Failed,
+    /// `trendy_rt_warned(message)`: write the warning of a `warn` outside
+    /// any transaction, whose message is `message`, a text, and carry on.
+    Warned,
     /// `trendy_rt_broken_constraint_in_file(value, descriptor, ty,
     /// constraint, record)`: as [`RuntimeFn::BrokenConstraint`], of a
     /// value `load_csv` read from the record `record` describes, laid out
@@ -586,7 +589,7 @@ pub enum RuntimeFn {
 
 impl RuntimeFn {
     /// Every runtime function, for checking the runtime against them.
-    pub const ALL: [RuntimeFn; 66] = [
+    pub const ALL: [RuntimeFn; 67] = [
         RuntimeFn::DebugValue,
         RuntimeFn::DebugTable,
         RuntimeFn::ToText,
@@ -617,6 +620,7 @@ impl RuntimeFn {
         RuntimeFn::BrokenConstraint,
         RuntimeFn::NotOfType,
         RuntimeFn::Failed,
+        RuntimeFn::Warned,
         RuntimeFn::BrokenConstraintInFile,
         RuntimeFn::OverlappingSubtypes,
         RuntimeFn::KeyShared,
@@ -711,6 +715,7 @@ impl RuntimeFn {
             | RuntimeFn::BrokenConstraint
             | RuntimeFn::NotOfType
             | RuntimeFn::Failed
+            | RuntimeFn::Warned
             | RuntimeFn::BrokenConstraintInFile
             | RuntimeFn::OverlappingSubtypes
             | RuntimeFn::KeyViolated
@@ -768,6 +773,7 @@ impl RuntimeFn {
             RuntimeFn::BrokenConstraint => "trendy_rt_broken_constraint",
             RuntimeFn::NotOfType => "trendy_rt_not_of_type",
             RuntimeFn::Failed => "trendy_rt_failed",
+            RuntimeFn::Warned => "trendy_rt_warned",
             RuntimeFn::BrokenConstraintInFile => "trendy_rt_broken_constraint_in_file",
             RuntimeFn::OverlappingSubtypes => "trendy_rt_overlapping_subtypes",
             RuntimeFn::KeyShared => "trendy_rt_key_shared",

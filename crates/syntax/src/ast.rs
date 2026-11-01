@@ -56,6 +56,7 @@ ast_node!(Body);
 ast_node!(CallStmt);
 ast_node!(ReturnStmt);
 ast_node!(FailStmt);
+ast_node!(WarnStmt);
 ast_node!(IfStmt);
 ast_node!(WhileStmt);
 ast_node!(LoopStmt);
@@ -589,6 +590,7 @@ pub enum Statement {
     Block(AssignBlock),
     Return(ReturnStmt),
     Fail(FailStmt),
+    Warn(WarnStmt),
     If(IfStmt),
     While(WhileStmt),
     Loop(LoopStmt),
@@ -607,6 +609,7 @@ fn statements_of(node: &SyntaxNode) -> impl Iterator<Item = Statement> + use<> {
             .or_else(|| AssignBlock::cast(node.clone()).map(Statement::Block))
             .or_else(|| ReturnStmt::cast(node.clone()).map(Statement::Return))
             .or_else(|| FailStmt::cast(node.clone()).map(Statement::Fail))
+            .or_else(|| WarnStmt::cast(node.clone()).map(Statement::Warn))
             .or_else(|| IfStmt::cast(node.clone()).map(Statement::If))
             .or_else(|| WhileStmt::cast(node.clone()).map(Statement::While))
             .or_else(|| LoopStmt::cast(node.clone()).map(Statement::Loop))
@@ -637,6 +640,7 @@ impl Statement {
             Statement::Block(s) => s.syntax(),
             Statement::Return(s) => s.syntax(),
             Statement::Fail(s) => s.syntax(),
+            Statement::Warn(s) => s.syntax(),
             Statement::If(s) => s.syntax(),
             Statement::While(s) => s.syntax(),
             Statement::Loop(s) => s.syntax(),
@@ -1306,6 +1310,20 @@ impl FailStmt {
     }
 
     /// The error it fails with.
+    #[must_use]
+    pub fn error(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+}
+
+impl WarnStmt {
+    /// The word `warn`.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    /// The error it warns with.
     #[must_use]
     pub fn error(&self) -> Option<Expr> {
         self.0.children().find_map(Expr::cast)

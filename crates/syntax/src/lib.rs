@@ -252,6 +252,9 @@ pub enum SyntaxKind {
     /// `fail e;`: the program fails with the error `e`. `fail` is a
     /// contextual keyword, an identifier elsewhere.
     FailStmt,
+    /// `warn e;`: the program warns with the error `e`, and carries on.
+    /// `warn` is a contextual keyword, an identifier elsewhere.
+    WarnStmt,
     /// `if c then [ … ] else [ … ];`: statements run if `c` is true, and
     /// else others, if any. An `else if` is one in another's `else`, with
     /// no `;` of its own.
@@ -431,7 +434,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 169] = [
+    pub const ALL: [SyntaxKind; 170] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -537,6 +540,7 @@ impl SyntaxKind {
         SyntaxKind::AssignBlock,
         SyntaxKind::ReturnStmt,
         SyntaxKind::FailStmt,
+        SyntaxKind::WarnStmt,
         SyntaxKind::IfStmt,
         SyntaxKind::WhileStmt,
         SyntaxKind::LoopStmt,
@@ -1057,6 +1061,7 @@ impl SyntaxKind {
             SyntaxKind::AssignBlock => "`assign` block",
             SyntaxKind::ReturnStmt => "`return` statement",
             SyntaxKind::FailStmt => "`fail` statement",
+            SyntaxKind::WarnStmt => "`warn` statement",
             SyntaxKind::IfStmt => "`if` statement",
             SyntaxKind::WhileStmt | SyntaxKind::LoopStmt | SyntaxKind::ForStmt => "loop",
             SyntaxKind::TransactionStmt => "transaction",

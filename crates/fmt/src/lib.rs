@@ -846,8 +846,8 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
     // `asc` and `desc`, a `for` loop's `in`, `heading`, before a heading's
     // name, `type`, before a type's, `constraint`, before a condition, a
     // type's `order`, a conversion's `to` and `from`, `fail`, before an
-    // error, though it is in parentheses: `fail (e)`, and a transaction's
-    // `collecting`.
+    // error, though it is in parentheses: `fail (e)`, `warn`, and a
+    // transaction's `collecting`.
     let contextual_keyword = prev.kind() == Ident
         && prev.parent().is_some_and(|p| match p.kind() {
             BuiltinType => prev.text() == "type",
@@ -869,6 +869,7 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
             | SyntaxKind::ForStmt
             | SyntaxKind::FailExpr
             | SyntaxKind::FailStmt
+            | SyntaxKind::WarnStmt
             | SyntaxKind::Collecting => true,
             _ => false,
         });
@@ -1310,6 +1311,15 @@ mod tests {
         assert_eq!(
             fmt("operator f{} [ fail(e) ; ];"),
             "operator f{} [\n    fail (e);\n];\n"
+        );
+    }
+
+    #[test]
+    fn warnings() {
+        // As a `fail` statement is, a space before parentheses too.
+        assert_eq!(
+            fmt("operator f{}[warn   failure{message:\"low\"};warn(e);];"),
+            "operator f{} [\n    warn failure{message: \"low\"};\n    warn (e);\n];\n"
         );
     }
 

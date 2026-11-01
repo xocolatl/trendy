@@ -20,11 +20,19 @@ operator message{error: too_few}: text [
         || to_text{from: error.asked}
 ];
 
+/* A granary left with few sacks: not a failure, as nothing went wrong,
+   but worth knowing, so a transfer warns with it, and carries on. */
+type running_low is error { { city: text, sacks: integer } };
+
+operator message{error: running_low}: text [
+    error.city || " has " || to_text{from: error.sacks} || " sacks left"
+];
+
 /* Move `n` sacks from one granary to another: added to one first, then
    taken from the other, so one that fails to be taken leaves the
    transfer half made, which the transaction it is in undoes. Nothing
-   here says what a failure does to the caller, which may be in a
-   transaction, or several, or none. */
+   here says what a failure, or a warning, does to the caller, which may
+   be in a transaction, or several, or none. */
 operator transfer{origin: text, destination: text, n: integer} [
     update granaries { sacks := sacks + n } where city = destination;
     var have := sum{r: (granaries where city = origin){sacks}, of: sacks};
@@ -32,6 +40,15 @@ operator transfer{origin: text, destination: text, n: integer} [
         fail too_few{city: origin, sacks: have, asked: n};
     ];
     update granaries { sacks := sacks - n } where city = origin;
+    if have - n < 40 then [
+        warn running_low{city: origin, sacks: have - n};
+    ];
+];
+
+/* What a transaction collected: each error's message, and whether it
+   failed, rolling the transaction back, or only warned. */
+operator report{collected: relation transaction_collection} [
+    call debug_value{v: (collected extend { message := message{error: error} }){message, failed}};
 ];
 
 operator main{} [
@@ -47,25 +64,31 @@ operator main{} [
     };
     /* Each transfer in a transaction of its own: one that fails is
        undone, and the others are made. `collecting` adds a failure's
-       error to `refused`, which collects the loop's. */
-    var refused: relation { error: error };
+       error to `moved`, and each warning's, which collects the loop's. */
+    var moved: relation transaction_collection;
     for m in moves loop [
-        transaction collecting refused [
+        transaction collecting moved [
             call transfer{origin: m.origin, destination: m.destination, n: m.n};
         ];
     ];
-    call debug_value{v: (refused extend { message := message{error: error} }){message}};
+    call report{collected: moved};
     call debug_table{r: granaries};
     /* All or nothing: a day's transfers, in a transaction around them. A
        transaction without `collecting` lets its failure go on, after
-       undoing its own, to the one around it, which undoes the day's. */
-    var day: relation { error: error };
+       undoing its own, to the one around it, which undoes the day's. The
+       first transfer's warning survives the rollback, beside the failure,
+       as what happened while the day's ran. */
+    var day: relation transaction_collection;
     transaction collecting day [
         call transfer{origin: "Dhaka", destination: "Cusco", n: 5};
         transaction [
             call transfer{origin: "Tashkent", destination: "Cusco", n: 100};
         ];
     ];
-    call debug_value{v: count{r: day}};
+    call report{collected: day};
+    call debug_table{r: granaries};
+    /* Outside any transaction, nothing collects a warning: the program
+       writes it, and where it warned, and carries on. */
+    call transfer{origin: "Cusco", destination: "Dhaka", n: 5};
     call debug_table{r: granaries};
 ];

@@ -302,13 +302,11 @@ pub(crate) fn kinds(
                 decl.span(),
                 "a variable",
             )),
-            Item::Heading(decl) => errors.push(Diagnostic::error(
-                Code::Internal,
-                "the prelude declares no headings",
-                decl.span(),
-                "a heading",
-            )),
-            Item::Builtin(_) | Item::Kind(_) | Item::Operator(_) | Item::Type(_) => {}
+            Item::Builtin(_)
+            | Item::Kind(_)
+            | Item::Operator(_)
+            | Item::Type(_)
+            | Item::Heading(_) => {}
         }
     }
     // What is missing goes at the end.
@@ -369,7 +367,9 @@ pub(crate) fn operators(
 /// the compiler needs them, at its end: a program fails with a value of the
 /// union type `error`, writing its message, which the specification
 /// `message{error: error}: text` gives. So too the errors built-ins give
-/// (`hir::BuiltinError`), which the runtime makes.
+/// (`hir::BuiltinError`), which the runtime makes, and the heading
+/// `transaction_collection`, what a transaction collects
+/// (`hir::transaction_collection`), whose tuples lowering makes.
 pub(crate) fn failures(
     prelude: &SourceFile,
     namespaces: &Namespaces,
@@ -391,6 +391,21 @@ pub(crate) fn failures(
             end,
             "missing",
         ));
+    }
+    // What a transaction collects, whose tuples the compiler makes.
+    if let Some(error) = namespaces.dummy("error") {
+        let collection = hir::transaction_collection(hir::Type::Dummy(Box::new(error.clone())));
+        let declared = namespaces
+            .heading("transaction_collection")
+            .and_then(|(_, attributes)| attributes);
+        if declared != Some(&collection) {
+            errors.push(Diagnostic::error(
+                Code::Internal,
+                "the prelude doesn't declare `heading transaction_collection := { error: error, failed: boolean };`, what a transaction collects",
+                end,
+                "missing",
+            ));
+        }
     }
     // The errors the built-ins give, each a subtype of `error` with the
     // components the runtime makes it with.

@@ -424,6 +424,11 @@ impl<'a> Globals<'a> {
                     errors.push(errors::transaction_in_read_only(&signature.name, stmt));
                     valid = false;
                 }
+                ast::Statement::Warn(stmt) => {
+                    let within = format!("the read-only operator `{}`", signature.name);
+                    errors.push(errors::warn_for_value(stmt, &within));
+                    valid = false;
+                }
             }
         }
         let Some(written_value) = written_value else {

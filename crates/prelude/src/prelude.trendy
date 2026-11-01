@@ -179,15 +179,20 @@ builtin operator load_csv{
 }
     types { C: any tuple, T: any tuple };
 
-/* What went wrong, when a program fails: a value of one of `error`'s
-   subtypes, each a kind of failure, with what it is about as its
-   components. `fail e` stops the program with `e`'s message. A program
-   declares kinds of its own as the prelude does, each with its
-   `message`. */
+/* What went wrong, when a program fails, or warns: a value of one of
+   `error`'s subtypes, each a kind of failure, with what it is about as
+   its components. `fail e` stops the program with `e`'s message, unless
+   a transaction takes it, and `warn e` carries on. A program declares
+   kinds of its own as the prelude does, each with its `message`. */
 type error union;
 
 /* What a failure says: a version for each of `error`'s subtypes. */
 operator message{error: error}: text;
+
+/* What a transaction collects, in the variable its `collecting` names:
+   each error a statement in it failed with, which rolled it back, and
+   each it warned with, which it carried on past. */
+heading transaction_collection := { error: error, failed: boolean };
 
 /* A failure a program describes in its own words, as in
    `fail failure{message: "the list is empty"}`. */

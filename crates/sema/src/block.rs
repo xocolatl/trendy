@@ -64,6 +64,10 @@ pub(crate) fn value(
                 errors.push(errors::transaction_in_block(stmt));
                 ok = false;
             }
+            ast::Statement::Warn(stmt) => {
+                errors.push(errors::warn_for_value(stmt, "a value block"));
+                ok = false;
+            }
             ast::Statement::Return(stmt) => {
                 errors.push(errors::return_in_block(stmt));
                 ok = false;

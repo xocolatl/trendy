@@ -2536,11 +2536,54 @@ var zero := seg{{len: 0}};{MAIN}"
     }
 
     #[test]
+    fn a_warn_warns_with_an_error_in_an_update_operator() {
+        let body = main_body(
+            "operator main{} [ transaction [ warn failure{message: \"low\"}; ]; warn failure{message: \"low\"}; ];",
+        );
+        let [
+            (_, hir::Statement::Transaction(None, block)),
+            (_, hir::Statement::Warn(_)),
+        ] = &body[..]
+        else {
+            panic!("{body:#?}");
+        };
+        assert!(matches!(
+            block.statements[..],
+            [(_, hir::Statement::Warn(_))]
+        ));
+        // An error, as a `fail`'s is, and a text the prelude's `failure`'s
+        // message.
+        let source = "operator main{} [ warn \"low\"; ];";
+        let errors = errors(source);
+        assert_eq!(errors[0].code, Code::TypeMismatch);
+        assert!(errors[0].message.starts_with("a program warns"));
+        assert!(errors[0].notes[0].starts_with("`warn e`"));
+        assert_eq!(
+            fix(source),
+            "operator main{} [ warn failure{message: \"low\"}; ];"
+        );
+        let errors = self::errors("operator main{} [ warn 7; ];");
+        assert!(errors[0].suggestions.is_empty());
+        assert!(errors[0].help[0].contains("`warn failure{message:"));
+        // Not in a read-only operator, nor a value block, which compute a
+        // value.
+        for source in [
+            "operator f{}: integer [ warn failure{message: \"no\"}; 1 ];",
+            "var a: integer := [ warn failure{message: \"no\"}; 1 ];",
+        ] {
+            let errors = self::errors(&format!("{source}{MAIN}"));
+            assert_eq!(errors.len(), 1, "{source}: {errors:#?}");
+            assert_eq!(errors[0].code, Code::Return, "{source}");
+            assert!(errors[0].message.ends_with("can't warn"), "{source}");
+        }
+    }
+
+    #[test]
     fn transactions_add_their_errors_to_a_variable() {
         // `collecting` names a variable declared before, a relation of
         // errors.
         let source = "operator main{} [
-    var found: relation { error: error };
+    var found: relation transaction_collection;
     transaction collecting found [
         call debug_value{v: 1};
     ];
@@ -2567,11 +2610,15 @@ var zero := seg{{len: 0}};{MAIN}"
         assert_eq!(codes(undeclared), [Code::UnknownName]);
         assert_eq!(
             fix(undeclared),
-            "operator main{} [\n    var found: relation { error: error };\n    transaction collecting found [];\n];"
+            "operator main{} [\n    var found: relation transaction_collection;\n    transaction collecting found [];\n];"
         );
         for (source, code) in [
             (
                 "operator main{} [ var n := 1; transaction collecting n []; ];",
+                Code::TypeMismatch,
+            ),
+            (
+                "operator main{} [ var e: relation { error: error }; transaction collecting e []; ];",
                 Code::TypeMismatch,
             ),
             (
@@ -2590,7 +2637,7 @@ var zero := seg{{len: 0}};{MAIN}"
         // `out` parameter reads it.
         let out = |transaction: &str| {
             format!(
-                "operator f{{out n: integer}} [ var e: relation {{ error: error }}; {transaction} [ n := 1; ]; ];\noperator main{{}} [ var n := 0; call f{{out n: n}}; ];"
+                "operator f{{out n: integer}} [ var e: relation transaction_collection; {transaction} [ n := 1; ]; ];\noperator main{{}} [ var n := 0; call f{{out n: n}}; ];"
             )
         };
         assert_eq!(
@@ -2598,7 +2645,7 @@ var zero := seg{{len: 0}};{MAIN}"
             [Code::UnassignedOut]
         );
         assert!(analyze_str(&out("transaction")).is_ok());
-        let read = "operator f{out e: relation { error: error }} [ transaction collecting e []; ];\noperator main{} [ var e: relation { error: error }; call f{out e: e}; ];";
+        let read = "operator f{out e: relation transaction_collection} [ transaction collecting e []; ];\noperator main{} [ var e: relation transaction_collection; call f{out e: e}; ];";
         assert_eq!(codes(read), [Code::UnassignedOut]);
     }
 
@@ -2694,6 +2741,17 @@ operator main{{}} [ var lines: array text; {main} ];"
             errors.iter().any(|d| d.code == Code::Internal
                 && d.message
                     .contains("`type not_utf8 is error { { line: integer, path: text } };`")),
+            "{errors:#?}"
+        );
+        let source = trendy_prelude::SOURCE.replace(
+            "heading transaction_collection := { error: error, failed: boolean };",
+            "heading transaction_collection := { error: error, failed: integer };",
+        );
+        assert_ne!(source, trendy_prelude::SOURCE);
+        let errors = check_prelude(&parse(&source));
+        assert!(
+            errors.iter().any(|d| d.code == Code::Internal
+                && d.message.contains("`heading transaction_collection")),
             "{errors:#?}"
         );
         let source = trendy_prelude::SOURCE.replace("type error union;", "type error_ union;");
@@ -7917,6 +7975,7 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
                 | hir::Statement::Loop(..)
                 | hir::Statement::For(..)
                 | hir::Statement::Fail(_)
+                | hir::Statement::Warn(_)
                 | hir::Statement::Transaction(..) => None,
             })
             .collect();

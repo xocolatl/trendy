@@ -463,7 +463,16 @@ are a variable's and an operator's. Its error is all that follows, as an
 `if`'s `else` branch is, so where a whole value goes it is parsed as one
 (`Parser::expression`), and as an operand it is reported (P0022). One that
 runs to a read-only body's end is its value (`Parser::at_value`). Other
-languages' `throw` and `raise` are parsed as it and fixed to it (P0047).
+languages' `throw` and `raise`, and PL/pgSQL's `RAISE EXCEPTION`, are
+parsed as it and fixed to it (P0047).
+
+`warn e;` (`WarnStmt`), only a statement, has `warn` a contextual
+keyword as `fail` has, before a value an error can be
+(`Parser::error_follows`). PL/pgSQL's `RAISE WARNING` and `RAISE
+NOTICE`, before a value, and another language's call of its operator
+that warns, a name, a dot, `warn` or `warning`, then `(`, as
+`console.warn(…)` and `warnings.warn(…)`, are parsed as it and fixed to
+it (P0051); `raise warning;` is `raise` of the error `warning`.
 
 `transaction [ … ];` and `transaction collecting e [ … ];`
 (`TransactionStmt`, whose `collecting e` is a `Collecting` of the
@@ -647,9 +656,10 @@ computed from the variables as they were; `if` statements
 without an `else`; loops (`Statement::Loop`), of a condition, checked
 before or after each run of the block (`hir::Check`), and the block; and
 `for` loops (`Statement::For`), of the loop's variable, a local variable
-the block lists, the array and the block; and transactions
+the block lists, the array and the block; transactions
 (`Statement::Transaction`), of the variable its `collecting` adds its
-errors to, if it has one, and the block. A block's statements are walked, with
+errors to, if it has one, and the block; and `fail` and `warn`
+statements (`Statement::Fail`, `Statement::Warn`), of their error. A block's statements are walked, with
 the blocks in them (`Block::each_statement`), for what they assign
 (`Block::assigned`) and call (`Block::called`), and the program's
 variables a block assigns, through its calls at any depth
@@ -667,8 +677,10 @@ that of another local variable in scope (A0001), so none hides another.
 A transaction's `collecting` names a variable it adds its errors to, as
 an assignment's target is (`body::Statements::collecting`): declared
 before, which the fix for one that isn't does (A0015), of type
-`relation { error: error }` (A0004), and read, so an `out` parameter is
-assigned before (A0054). A transaction checks its block as a block of
+`relation transaction_collection`, the prelude's heading, which
+`builtins::failures` checks is the compiler's
+(`hir::transaction_collection`, X0000) (A0004), and read, so an `out`
+parameter is assigned before (A0054). A transaction checks its block as a block of
 its own; a read-only operator and a value block have none (A0035).
 An `if` statement whose condition is known when compiling runs only one
 block, and the other's failures aren't reported (`body::Statements`). A
@@ -1207,7 +1219,11 @@ component named.
 A program's own failure, `fail e`, is `hir::Expr::Fail` of its error, a
 value of the prelude's union type `error` as one of it, with the type a
 value would have where it is written, and `fail e;` is
-`hir::Statement::Fail`. A `fail` has no value, so as an expression it has
+`hir::Statement::Fail`; `warn e;` is `hir::Statement::Warn`, its error
+checked as a `fail`'s is (`Checker::error`, whose `errors::Signal` says
+which the diagnostics are about), but only in an update operator: a
+read-only operator and a value block compute a value, which folding may
+compute when compiling, when a warning would be lost (A0035). A `fail` has no value, so as an expression it has
 no type without one expected, which sema reports as an empty relation's
 heading (A0011), so that what checks values on their own and fits them to
 another's type (`types::Alone`), as an `if`'s branches, gives it the
@@ -1640,12 +1656,29 @@ which can't fail: every statement of the block has ended, so nothing
 reads what is released. With `collecting`, a `fail`'s error waiting is
 then taken: the trace forgets the calls recorded since the transaction
 began (`trendy_rt_untrace`), the error is added to the variable, as a
-union with `relation { { error: e } }`, checked against its keys
-(`FunctionBuilder::collect`), and `__failure` is released, and the program goes on after the
-transaction. Without `collecting`, or for a failure of the language's
-own, which has no error yet, the rollback ends in `Terminator::Raise`,
-and the failure goes on, to the transaction around it, or the function's
-failure exit.
+union with `relation { { error: e, failed: true } }` and the block's
+warnings, checked against its keys (`FunctionBuilder::collect`), and
+`__failure` is released, and the program goes on after the transaction.
+Without `collecting`, or for a failure of the language's own, which has
+no error yet, the rollback ends in `Terminator::Raise`, and the failure
+goes on, to the transaction around it, or the function's failure exit.
+
+A warning goes to the innermost transaction with `collecting` running,
+in whatever function: the warnings it has collected so far are in a
+variable of the program's own, `__warnings`, a `relation
+transaction_collection`, and whether one is running in another,
+`__collecting` (`Collection`), named in the system's namespace, as
+`__failure` is. As it begins, a transaction with `collecting` puts aside
+both, in slots of its own, with no warnings and one running in their
+place (`Collection::put_aside`); as it ends, it takes them back
+(`Collection::take_back`), and adds its block's warnings to its
+variable, whether the block ran to its end or its rollback did, so its
+warnings survive the rollback, beside its failure. One without
+`collecting` leaves them, so its block's warnings go to the transaction
+around it. `warn e;` (`FunctionBuilder::warn`) adds `{ error: e, failed:
+false }` to `__warnings` if one is running, and else writes the error's
+message, with its site (`trendy_rt_warned`, R0022), and the program
+carries on.
 
 An assignment statement computes each value into a slot of its own: a
 copy, since a value can be a variable's own place, which assigning another
@@ -1896,15 +1929,16 @@ guesswork.
   layer finds it, so a check can move between layers and keep its code:
   - `P`: the source doesn't parse (lexer and parser);
   - `A`: it parses, but analysis rejects it (sema);
-  - `R`: it fails while running. A run-time rule keeps its `R` code when
+  - `R`: it fails while running, or warns, with `warn` (R0022). A
+    run-time rule keeps its `R` code when
     sema catches it early, as with `9223372036854775807 + 1`: one rule, one
     code, one explanation;
   - `X`: the compiler or runtime itself is wrong. `X0000`, internal compiler
     error, is a bug, never the program's fault.
 
   Each letter's `0000` is reserved for a generic error of that kind. Severity
-  is not part of the code: warnings, when they come, will have codes of these
-  same kinds. Each code has an explanation in
+  is not part of the code: a warning has a code of these same kinds, as a
+  program's own, `warn e;`, does (R0022). Each code has an explanation in
   `crates/diag/errors/<code>.md`, printed by `trendyc --explain <code>`. The
   explanation of a code the compiler can report must contain a failing
   example in a ```` ```trendy,error ```` block and a corrected one in a
@@ -1953,7 +1987,9 @@ may not write it: the error waits, with the site it failed at, in two
 variables of the program's own, `__failure` and `__failure_site`
 (`Waiting`, `FunctionBuilder::fail_with`), named in the system's
 namespace, which no program can name, and the block ends with
-`Terminator::Raise`. The program's entry is a function of lowering's
+`Terminator::Raise`. A warning that nothing collects is written where it
+is given, its message and site as `warning[R0022]` (`trendy_rt_warned`),
+with no trace, as no call ends. The program's entry is a function of lowering's
 own (`entry`), which calls `main` and, if it fails, writes the
 failure's trace after its error, one note per call, innermost first
 (`trendy_rt_write_trace`). With an error waiting, which nothing took, it
