@@ -79,12 +79,15 @@ records, as is one with another number of fields or a field its type
 can't read, each with its error, and the file's failures give no
 records; without, the file is checked as CSV first, then its columns,
 then its fields, each stopping the program, as before. A record whose
-value breaks a constraint, which compiled code finds once it is read
-(`records_checked`), is skipped too: the constraint's failing branch adds
-its error to those the runtime found (`trendy_rt_broken_constraint_error`)
-and goes on to the next record, and each record kept is written to a new
-array at the count of those kept, its length once all are read, which
-then holds them. The columns reach
+value breaks a constraint or a component's key, or is of two subtypes
+defined by constraints, which compiled code finds once it is read
+(`records_checked`, `skippable`), is skipped too: what each check does
+where it fails is `Broken`, the failure, or, for such a record, a runtime
+function adding its error to those the runtime found
+(`trendy_rt_broken_constraint_error`, `trendy_rt_component_key_error`,
+`trendy_rt_overlapping_subtypes_error`) and a jump to the next record, and
+each record kept is written to a new array at the count of those kept,
+its length once all are read, which then holds them. The columns reach
 the runtime as a struct of the tuple's address and its descriptor's
 (`Columns`), and the errors as one too, so neither function takes more
 than seven arguments. `load_csv` is one too (`trendy_rt_load_csv`), given its

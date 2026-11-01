@@ -925,8 +925,10 @@ builtin operator load_csv{path: text, header: boolean, columns: C, out rows: arr
    can't read, give no rows, and its error in `errors`, and for a record it
    can't, skip it, giving its error there: an `unreadable_file`, a
    `not_utf8`, a `malformed_csv`, a `missing_column` or an
-   `unreadable_field`, or a `broken_constraint_in_file`, for a value that
-   breaks its type's constraints. A quoted field that isn't closed ends
+   `unreadable_field`, or, for a value that breaks its type's constraints,
+   or its components' keys, or is of two of its subtypes, a
+   `broken_constraint_in_file`, a `component_key_violated_in_file` or an
+   `overlapping_subtypes_in_file`. A quoted field that isn't closed ends
    the records read. `errors` is empty when every record is read. */
 builtin operator load_csv{
     path: text,
@@ -1105,6 +1107,74 @@ operator message{error: broken_constraint_in_file}: text [
         || "`: it breaks the constraint `"
         || error.constraint
         || "`"
+];
+
+/* The record on the line `line` of the CSV file at `path` gives
+   `attribute`, or a component, as `columns` names it, a value of `type`
+   whose component `component`, a relation, has two tuples, `first` and
+   `second`, written as `debug_value` writes them, that share their values
+   for its key of the attributes `key`, separated by commas, which a key
+   of none allows at most one tuple (R0008). */
+type component_key_violated_in_file is error {
+    {
+        path: text,
+        line: integer,
+        attribute: text,
+        type: text,
+        component: text,
+        key: text,
+        first: text,
+        second: text,
+    },
+};
+
+operator message{error: component_key_violated_in_file}: text [
+    var tuples := if error.key = ""
+        then "its `" || error.component || "` has two tuples, but its key {} allows at most one"
+        else "two tuples of its `"
+            || error.component
+            || "` have the same values for its key { "
+            || error.key
+            || " }";
+    "line "
+        || to_text{from: error.line}
+        || " of "
+        || to_text{from: error.path}
+        || " gives `"
+        || error.attribute
+        || "` a value of `"
+        || error.type
+        || "` in which "
+        || tuples
+        || ": "
+        || error.first
+        || " and "
+        || error.second
+];
+
+/* The record on the line `line` of the CSV file at `path` gives
+   `attribute`, or a component, as `columns` names it, `value`, written as
+   `debug_value` writes it, which is of both of the subtypes `first` and
+   `second` of its type defined by constraints, but a value has one most
+   specific type (R0020). */
+type overlapping_subtypes_in_file is error {
+    { path: text, line: integer, attribute: text, value: text, first: text, second: text },
+};
+
+operator message{error: overlapping_subtypes_in_file}: text [
+    "line "
+        || to_text{from: error.line}
+        || " of "
+        || to_text{from: error.path}
+        || " gives `"
+        || error.attribute
+        || "` "
+        || error.value
+        || ", which is of both `"
+        || error.first
+        || "` and `"
+        || error.second
+        || "`, but a value has one most specific type"
 ];
 ```
 
@@ -1592,7 +1662,10 @@ operator main{} [
   (R0016), and each record that can't be is skipped, with its error, a
   `malformed_csv` (R0015) or an `unreadable_field` (R0014), as is one
   whose value breaks its type's constraints, with a
-  `broken_constraint_in_file` (R0017), and the rest are read. A quoted
+  `broken_constraint_in_file` (R0017), or its components' keys, with a
+  `component_key_violated_in_file` (R0008), or is of two of its subtypes
+  defined by constraints, with an `overlapping_subtypes_in_file` (R0020),
+  and the rest are read. A quoted
   field that isn't closed ends the records read. Two attributes of one
   column, or one of a column below 1, are the call's mistakes, not the
   file's, so they still stop the program.
@@ -4785,9 +4858,12 @@ operator main{} [
   `load_text_file` and `load_csv`, and from `load_csv` `malformed_csv {
   path, line, problem }` (R0015), `missing_column { path, attribute,
   column, columns }` (R0016), `unreadable_field { path, line, column,
-  attribute, type, text, out_of_range }` (R0014) and
+  attribute, type, text, out_of_range }` (R0014),
   `broken_constraint_in_file { path, line, attribute, value, type,
-  constraint }` (R0017).
+  constraint }` (R0017), `component_key_violated_in_file { path, line,
+  attribute, type, component, key, first, second }` (R0008) and
+  `overlapping_subtypes_in_file { path, line, attribute, value, first,
+  second }` (R0020).
 
 ## Literals
 

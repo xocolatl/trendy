@@ -1079,6 +1079,83 @@ operator main{{}} [
 }
 
 #[test]
+fn a_csv_record_whose_value_breaks_its_type_is_skipped_when_asked() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("errors");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (shapes, spans) = (dir.join("shapes.csv"), dir.join("spans.csv"));
+    // A shape of two subtypes, a span whose days share one, and a
+    // negative width.
+    std::fs::write(&shapes, "w,h\n2,1\n3,3\n-1,2\n").unwrap();
+    std::fs::write(&spans, "first,second\nmon,mon\nmon,tue\n").unwrap();
+    let source = format!(
+        "type shape {{ {{ w: integer, h: integer }}, constraint w > 0 }};
+type square is shape {{ constraint w = h }};
+type wide is shape {{ constraint w >= h }};
+
+type span {{
+    {{ days: relation {{ day: integer, label: text }} key {{ day }} }},
+    {{ first: text, second: text }}
+        to {{ days := relation {{ {{ day: 1, label: first }}, {{ day: 1, label: second }} }} }}
+        from {{ first := min{{r: days, of: label}}, second := max{{r: days, of: label}} }},
+}};
+
+operator show{{shapes: text, spans: text}} [
+    var shaped: array tuple {{ shape: shape }};
+    var errors: relation {{ error: error }};
+    call load_csv{{
+        path: shapes,
+        header: true,
+        columns: tuple {{ shape: tuple {{ w: 1, h: 2 }} }},
+        out rows: shaped,
+        out errors: errors,
+    }};
+    call debug_value{{v: shaped}};
+    call debug_value{{v: (errors extend {{ m := message{{error: error}} }}){{m}}}};
+    var spanned: array tuple {{ span: span }};
+    call load_csv{{
+        path: spans,
+        header: true,
+        columns: tuple {{ span: tuple {{ first: 1, second: 2 }} }},
+        out rows: spanned,
+        out errors: errors,
+    }};
+    call debug_value{{v: length{{a: spanned}}}};
+    call debug_value{{v: (errors extend {{ m := message{{error: error}} }}){{m}}}};
+];
+
+operator main{{}} [
+    call show{{shapes: {shapes:?}, spans: {spans:?}}};
+];
+"
+    );
+    let (code, stderr) = run_source("csv_types", &source);
+    assert_eq!(code, 0, "{stderr}");
+    let (shapes, spans) = (shapes.display(), spans.display());
+    let messages = |messages: &[String]| {
+        let tuples: Vec<String> = messages.iter().map(|m| format!("{{ m: {m:?} }}")).collect();
+        format!("relation {{ m: text }} {{ {} }}", tuples.join(", "))
+    };
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            "array [tuple { shape: shape{h: 1, w: 2} }]".to_string(),
+            messages(&[
+                format!(
+                    "line 3 of \"{shapes}\" gives `shape` shape{{h: 3, w: 3}}, which is of both `square` and `wide`, but a value has one most specific type"
+                ),
+                format!(
+                    "line 4 of \"{shapes}\" gives `shape` shape{{h: 2, w: -1}}, which isn't a value of `shape`: it breaks the constraint `w > 0`"
+                ),
+            ]),
+            "1".to_string(),
+            messages(&[format!(
+                r#"line 3 of "{spans}" gives `span` a value of `span` in which two tuples of its `days` have the same values for its key {{ day }}: tuple {{ day: 1, label: "mon" }} and tuple {{ day: 1, label: "tue" }}"#
+            )]),
+        ]
+    );
+}
+
+#[test]
 fn written_text_cant_change_the_terminal() {
     // An escape sequence that clears the screen, and an override that
     // shows what follows it backwards, in a text known only when running.

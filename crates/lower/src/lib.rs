@@ -746,6 +746,18 @@ impl<'a> FunctionBuilder<'a> {
         self.end_block(lir::Terminator::Fail(Box::new(failure)), next);
     }
 
+    /// End the current block, where a check found a value broken, as
+    /// `broken` says, and go on in `next`, where it isn't.
+    fn broken(&mut self, broken: Broken, next: lir::BlockId) {
+        match broken {
+            Broken::Fail(failure) => self.end_block(lir::Terminator::Fail(failure), next),
+            Broken::Skip { function, args, to } => {
+                self.insts.push(lir::Inst::CallRuntime { function, args });
+                self.end_block(lir::Terminator::Jump(to), next);
+            }
+        }
+    }
+
     /// The slot of the statements' scopes, made when one first needs it.
     fn scope_slot(&mut self) -> lir::Place {
         if let Some(scope) = &self.scope {
@@ -1170,7 +1182,7 @@ impl<'a> FunctionBuilder<'a> {
             unreachable!("`load_csv` loads an array");
         };
         let converts = read != ty;
-        let errors = errors.filter(|_| constrained(record));
+        let errors = errors.filter(|_| skippable(record, &cx.families));
         if !converts && errors.is_none() && !constrained(record) {
             return records.clone();
         }
@@ -1310,9 +1322,14 @@ impl<'a> FunctionBuilder<'a> {
             }
             None => unreachable!("a type's value is read in one of its representations"),
         }
-        self.constraints_checked(defined, &target.dst, &value.name, value.at, cx);
-        if in_hierarchy {
-            self.made_in_hierarchy(defined, &target.dst, &value.dst, cx);
+        if defined.is_constrained() || in_hierarchy {
+            let checking = self.read_checking(&value.name, value.at, cx);
+            if defined.is_constrained() {
+                self.constrained(defined, &target.dst, &checking, cx);
+            }
+            if in_hierarchy {
+                self.made_in_hierarchy(defined, &target.dst, &value.dst, &checking, cx);
+            }
         }
     }
 
@@ -1324,6 +1341,7 @@ impl<'a> FunctionBuilder<'a> {
         defined: &hir::Defined,
         components: &lir::Place,
         dst: &lir::Place,
+        checking: &Checking,
         cx: &mut Lowering,
     ) {
         let mut at = dst.clone();
@@ -1333,7 +1351,7 @@ impl<'a> FunctionBuilder<'a> {
             src: components.clone(),
             layout: cx.layout(&hir::Type::Tuple(defined.components.clone())),
         });
-        self.tag_most_specific(defined, components, dst, cx);
+        self.tag_most_specific(defined, components, dst, checking, cx);
     }
 
     /// Write at `dst`, a value in a hierarchy, the address of the descriptor
@@ -1343,12 +1361,14 @@ impl<'a> FunctionBuilder<'a> {
     /// subtypes defined by constraints, the one whose specialization
     /// constraints are true of them too, its most specific type in turn, or
     /// else `defined` itself. A value of two of them stops the program,
-    /// writing both (R0020): a value has one most specific type.
+    /// writing both (R0020): a value has one most specific type; one read
+    /// from a CSV file whose call gives errors is skipped, with its error.
     fn tag_most_specific(
         &mut self,
         defined: &hir::Defined,
         components: &lir::Place,
         dst: &lir::Place,
+        checking: &Checking,
         cx: &mut Lowering,
     ) {
         let subtypes = cx.families.constrained(defined).to_vec();
@@ -1376,15 +1396,36 @@ impl<'a> FunctionBuilder<'a> {
                     },
                     failed,
                 );
-                let failure = lir::Failure::OverlappingSubtypes {
-                    value: components.clone(),
-                    descriptor: lir::Place::whole(lir::Base::Data(
-                        cx.components_descriptor(defined),
-                    )),
-                    first: self.text(&first.name, cx),
-                    second: self.text(&second.name, cx),
+                let value = components.clone();
+                let descriptor =
+                    lir::Place::whole(lir::Base::Data(cx.components_descriptor(defined)));
+                let (first, second) = (self.text(&first.name, cx), self.text(&second.name, cx));
+                let broken = match checking {
+                    Checking::Read {
+                        record,
+                        skip: Some(skip),
+                    } => Broken::Skip {
+                        function: lir::RuntimeFn::OverlappingSubtypesError,
+                        args: vec![
+                            skip.errors.clone(),
+                            value,
+                            descriptor,
+                            first,
+                            second,
+                            record.clone(),
+                        ],
+                        to: skip.to,
+                    },
+                    Checking::Selected | Checking::Read { .. } => {
+                        Broken::Fail(Box::new(lir::Failure::OverlappingSubtypes {
+                            value,
+                            descriptor,
+                            first,
+                            second,
+                        }))
+                    }
                 };
-                self.fail(failure, next);
+                self.broken(broken, next);
             }
         }
         let after = self.new_block();
@@ -1398,7 +1439,7 @@ impl<'a> FunctionBuilder<'a> {
                 },
                 of_it,
             );
-            self.tag_most_specific(subtype, components, dst, cx);
+            self.tag_most_specific(subtype, components, dst, checking, cx);
             self.end_block(lir::Terminator::Jump(after), not_of_it);
         }
         let own = lir::Place::whole(lir::Base::Data(cx.components_descriptor(defined)));
@@ -1548,26 +1589,21 @@ impl<'a> FunctionBuilder<'a> {
             inner.path.push(i);
             self.value_checked(&inner, ty, &dotted(name, attribute), at, cx);
         }
-        if let hir::Type::Defined(defined) = ty {
-            self.constraints_checked(defined, value, name, at, cx);
+        if let hir::Type::Defined(defined) = ty
+            && defined.is_constrained()
+        {
+            let checking = self.read_checking(name, at, cx);
+            self.constrained(defined, value, &checking, cx);
         }
     }
 
-    /// The value at `value`, named `name`, of the type of the program's own
-    /// `defined`, in a record of `at`, checked against its components' keys
-    /// and its constraints: the program stops at the first broken, writing
-    /// the record's line.
-    fn constraints_checked(
-        &mut self,
-        defined: &hir::Defined,
-        value: &lir::Place,
-        name: &str,
-        at: &Record,
-        cx: &mut Lowering,
-    ) {
-        if !defined.is_constrained() {
-            return;
-        }
+    /// How a value named `name`, in a record of `at`, is checked against
+    /// its type's components' keys and constraints, and the subtypes it
+    /// may be of: as one read from the record, which a place laid out as
+    /// [`lir::Layout::record`] describes, made here, which stops the program
+    /// at the first broken, writing the record's line, or, if its call gives
+    /// errors, skips the record, with its error.
+    fn read_checking(&mut self, name: &str, at: &Record, cx: &mut Lowering) -> Checking {
         // Laid out as `lir::Layout::record`.
         let record = self.slot(lir::Layout::record());
         let attribute = self.text(name, cx);
@@ -1585,11 +1621,10 @@ impl<'a> FunctionBuilder<'a> {
             dst.path.push(i);
             self.insts.push(lir::Inst::Copy { dst, src, layout });
         }
-        let checking = Checking::Read {
+        Checking::Read {
             record,
             skip: at.skip.clone(),
-        };
-        self.constrained(defined, value, &checking, cx);
+        }
     }
 
     /// A call of the runtime function `function`, which writes `value`,
@@ -2038,13 +2073,13 @@ impl<'a> FunctionBuilder<'a> {
         let variable = self.target_name(target).to_string();
         for key in &keys {
             self.key_checked(value, &ty, key, cx, |this, failed, cx| {
-                lir::Failure::KeyViolated {
+                Broken::Fail(Box::new(lir::Failure::KeyViolated {
                     value: failed.value,
                     descriptor: failed.descriptor,
                     key: failed.key,
                     pair: failed.pair,
                     variable: this.text(&variable, cx),
-                }
+                }))
             });
         }
     }
@@ -3085,18 +3120,13 @@ impl<'a> FunctionBuilder<'a> {
             return value;
         }
         let selected = self.slot(cx.layout(&ty));
-        self.made_in_hierarchy(defined, &value, &selected, cx);
+        self.made_in_hierarchy(defined, &value, &selected, &Checking::Selected, cx);
         selected
     }
 
-    /// Stop the program unless each key of each relation-valued component
-    /// of `defined`, and then each of its constraints, in order, is true of
-    /// the value at `value`, laid out as the tuple of its components: a
-    /// component of another representation computed by its conversion
-    /// from the stored one, and each constraint a call of its operator with
-    /// the components as its arguments. The first that is false fails as
-    /// `checking` says.
-    fn constrained(
+    /// Each relation-valued component of the value at `value`, of
+    /// `defined`, checked against its keys, as `checking` says.
+    fn component_keys_checked(
         &mut self,
         defined: &hir::Defined,
         value: &lir::Place,
@@ -3123,15 +3153,42 @@ impl<'a> FunctionBuilder<'a> {
                 .clone();
             for key in keys {
                 self.key_checked(&relation, &ty, key, cx, |this, failed, cx| {
-                    let ty = this.text(&defined.name, cx);
-                    let component = this.text(component, cx);
                     let Failed {
                         value,
                         descriptor,
                         key,
                         pair,
                     } = failed;
-                    match checking {
+                    if let Checking::Read {
+                        record,
+                        skip: Some(skip),
+                    } = checking
+                    {
+                        // The type's and the component's names, as the
+                        // runtime's `ComponentOf`.
+                        let names = vec![
+                            cx.value_field(&hir::Value::Text(defined.name.clone())),
+                            cx.value_field(&hir::Value::Text(component.clone())),
+                        ];
+                        let of = cx.constant(names);
+                        let of = lir::Place::whole(lir::Base::Data(of));
+                        return Broken::Skip {
+                            function: lir::RuntimeFn::ComponentKeyError,
+                            args: vec![
+                                skip.errors.clone(),
+                                value,
+                                descriptor,
+                                key,
+                                pair,
+                                of,
+                                record.clone(),
+                            ],
+                            to: skip.to,
+                        };
+                    }
+                    let ty = this.text(&defined.name, cx);
+                    let component = this.text(component, cx);
+                    Broken::Fail(Box::new(match checking {
                         Checking::Selected => lir::Failure::ComponentKeyViolated {
                             value,
                             descriptor,
@@ -3149,10 +3206,27 @@ impl<'a> FunctionBuilder<'a> {
                             component,
                             record: record.clone(),
                         },
-                    }
+                    }))
                 });
             }
         }
+    }
+
+    /// Stop the program unless each key of each relation-valued component
+    /// of `defined`, and then each of its constraints, in order, is true of
+    /// the value at `value`, laid out as the tuple of its components: a
+    /// component of another representation computed by its conversion
+    /// from the stored one, and each constraint a call of its operator with
+    /// the components as its arguments. The first that is false fails as
+    /// `checking` says.
+    fn constrained(
+        &mut self,
+        defined: &hir::Defined,
+        value: &lir::Place,
+        checking: &Checking,
+        cx: &mut Lowering,
+    ) {
+        self.component_keys_checked(defined, value, checking, cx);
         let descriptor = lir::Place::whole(lir::Base::Data(cx.components_descriptor(defined)));
         for constraint in &defined.constraints {
             let holds = self.holds(constraint, defined, value, cx);
@@ -3168,54 +3242,52 @@ impl<'a> FunctionBuilder<'a> {
             let (value, descriptor) = (value.clone(), descriptor.clone());
             let constraint = self.text(&constraint.text, cx);
             let ty = self.text(&defined.name, cx);
-            let failure = match checking {
-                Checking::Selected => lir::Failure::BrokenConstraint {
+            let broken = match checking {
+                Checking::Selected => Broken::Fail(Box::new(lir::Failure::BrokenConstraint {
                     value,
                     descriptor,
                     ty,
                     constraint,
-                },
-                Checking::Read { record, skip: None } => lir::Failure::BrokenConstraintInFile {
-                    value,
-                    descriptor,
-                    ty,
-                    constraint,
-                    record: record.clone(),
-                },
-                // Its error, and on to the next record.
+                })),
+                Checking::Read { record, skip: None } => {
+                    Broken::Fail(Box::new(lir::Failure::BrokenConstraintInFile {
+                        value,
+                        descriptor,
+                        ty,
+                        constraint,
+                        record: record.clone(),
+                    }))
+                }
                 Checking::Read {
                     record,
                     skip: Some(skip),
-                } => {
-                    self.insts.push(lir::Inst::CallRuntime {
-                        function: lir::RuntimeFn::BrokenConstraintError,
-                        args: vec![
-                            skip.errors.clone(),
-                            value,
-                            descriptor,
-                            ty,
-                            constraint,
-                            record.clone(),
-                        ],
-                    });
-                    self.end_block(lir::Terminator::Jump(skip.to), kept);
-                    continue;
-                }
+                } => Broken::Skip {
+                    function: lir::RuntimeFn::BrokenConstraintError,
+                    args: vec![
+                        skip.errors.clone(),
+                        value,
+                        descriptor,
+                        ty,
+                        constraint,
+                        record.clone(),
+                    ],
+                    to: skip.to,
+                },
             };
-            self.fail(failure, kept);
+            self.broken(broken, kept);
         }
     }
 
-    /// Stop the program if the relation at `relation`, of type `ty`, has two
-    /// tuples with the same values for `key`, failing as `broken` says of
-    /// them. A key of the whole heading always holds.
+    /// Check that the relation at `relation`, of type `ty`, has no two
+    /// tuples with the same values for `key`, doing what `broken` says of
+    /// them where it has. A key of the whole heading always holds.
     fn key_checked(
         &mut self,
         relation: &lir::Place,
         ty: &hir::Type,
         key: &hir::Key,
         cx: &mut Lowering,
-        broken: impl FnOnce(&mut Self, Failed, &mut Lowering) -> lir::Failure,
+        broken: impl FnOnce(&mut Self, Failed, &mut Lowering) -> Broken,
     ) {
         let names: Vec<&str> = attribute_names(ty).collect();
         if key.len() == names.len() {
@@ -3252,7 +3324,7 @@ impl<'a> FunctionBuilder<'a> {
             },
             failed,
         );
-        let failure = broken(
+        let broken = broken(
             self,
             Failed {
                 value: relation.clone(),
@@ -3262,7 +3334,7 @@ impl<'a> FunctionBuilder<'a> {
             },
             cx,
         );
-        self.fail(failure, kept);
+        self.broken(broken, kept);
     }
 
     /// A text constant's value, in a place.
@@ -4512,6 +4584,26 @@ fn constrained(ty: &hir::Type) -> bool {
     }
 }
 
+/// Whether a value of type `ty`, which a CSV file's record gives, can be
+/// skipped, for its call's errors: whether a check of it can fail, as
+/// it is or has a value of a type of the program's own with constraints,
+/// or keys of components, or with subtypes defined by constraints, of
+/// which it may be of two.
+fn skippable(ty: &hir::Type, families: &Families) -> bool {
+    match ty {
+        hir::Type::Tuple(heading) => heading.attributes().any(|(_, ty)| skippable(ty, families)),
+        hir::Type::Defined(defined) => {
+            constrained(ty)
+                || !families.constrained(defined).is_empty()
+                || defined
+                    .components
+                    .attributes()
+                    .any(|(_, ty)| skippable(ty, families))
+        }
+        _ => false,
+    }
+}
+
 /// `name`, of a value, and `attribute`, of it, as `t.c` reads that.
 fn dotted(name: &str, attribute: &str) -> String {
     if name.is_empty() {
@@ -4544,6 +4636,19 @@ enum Checking {
     Read {
         record: lir::Place,
         skip: Option<Skip>,
+    },
+}
+
+/// What happens where a check of a value finds it broken: the program
+/// stops with the failure, or, of one a CSV file's record gives whose call
+/// gives errors, the runtime function `function` adds its error, given
+/// `args`, and the record is skipped, on to the block `to`.
+enum Broken {
+    Fail(Box<lir::Failure>),
+    Skip {
+        function: lir::RuntimeFn,
+        args: Vec<lir::Place>,
+        to: lir::BlockId,
     },
 }
 

@@ -482,6 +482,8 @@ impl UpdateBuiltin {
                 BuiltinError::MissingColumn,
                 BuiltinError::UnreadableField,
                 BuiltinError::BrokenConstraintInFile,
+                BuiltinError::ComponentKeyViolatedInFile,
+                BuiltinError::OverlappingSubtypesInFile,
             ],
             UpdateBuiltin::DebugValue
             | UpdateBuiltin::DebugTable
@@ -519,16 +521,26 @@ pub enum BuiltinError {
     /// A value a CSV file's record gives breaks its type's constraint
     /// (R0017).
     BrokenConstraintInFile,
+    /// A value a CSV file's record gives has a relation-valued component
+    /// with two tuples that share their values for one of its keys
+    /// (R0008).
+    ComponentKeyViolatedInFile,
+    /// A value a CSV file's record gives is of two subtypes of its type
+    /// defined by constraints, but a value has one most specific type
+    /// (R0020).
+    OverlappingSubtypesInFile,
 }
 
 impl BuiltinError {
-    pub const ALL: [BuiltinError; 6] = [
+    pub const ALL: [BuiltinError; 8] = [
         BuiltinError::UnreadableFile,
         BuiltinError::NotUtf8,
         BuiltinError::MalformedCsv,
         BuiltinError::MissingColumn,
         BuiltinError::UnreadableField,
         BuiltinError::BrokenConstraintInFile,
+        BuiltinError::ComponentKeyViolatedInFile,
+        BuiltinError::OverlappingSubtypesInFile,
     ];
 
     /// The name of its type.
@@ -541,6 +553,8 @@ impl BuiltinError {
             BuiltinError::MissingColumn => "missing_column",
             BuiltinError::UnreadableField => "unreadable_field",
             BuiltinError::BrokenConstraintInFile => "broken_constraint_in_file",
+            BuiltinError::ComponentKeyViolatedInFile => "component_key_violated_in_file",
+            BuiltinError::OverlappingSubtypesInFile => "overlapping_subtypes_in_file",
         }
     }
 
@@ -574,6 +588,24 @@ impl BuiltinError {
                 ("value", text),
                 ("type", text),
                 ("constraint", text),
+            ],
+            BuiltinError::ComponentKeyViolatedInFile => &[
+                ("path", text),
+                ("line", integer),
+                ("attribute", text),
+                ("type", text),
+                ("component", text),
+                ("key", text),
+                ("first", text),
+                ("second", text),
+            ],
+            BuiltinError::OverlappingSubtypesInFile => &[
+                ("path", text),
+                ("line", integer),
+                ("attribute", text),
+                ("value", text),
+                ("first", text),
+                ("second", text),
             ],
         };
         Heading::new(

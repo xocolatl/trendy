@@ -272,6 +272,19 @@ pub enum RuntimeFn {
     /// the type named `ty` written `constraint`, both texts: a
     /// `broken_constraint_in_file`.
     BrokenConstraintError,
+    /// `trendy_rt_component_key_error(errors, value, descriptor, key,
+    /// pair, of, record)`: as [`RuntimeFn::BrokenConstraintError`] adds its
+    /// error, that the tuples at `pair` of the relation `value`, the
+    /// component of a value of a type `of` names, a struct of the type's
+    /// name and the component's, texts, share their values for `key`, as
+    /// [`RuntimeFn::KeyShared`] found: a `component_key_violated_in_file`.
+    ComponentKeyError,
+    /// `trendy_rt_overlapping_subtypes_error(errors, value, descriptor,
+    /// first, second, record)`: as [`RuntimeFn::BrokenConstraintError`]
+    /// adds its error, that `value` is of both of the subtypes of its type
+    /// named `first` and `second`, texts: an
+    /// `overlapping_subtypes_in_file`.
+    OverlappingSubtypesError,
     /// `trendy_rt_sum(dst, src, descriptor, index)`: store at `dst` the
     /// sum of the attribute `index` (a [`Field::Usize`], its position by
     /// name) of the tuples of the relation `src`, of the type the
@@ -547,6 +560,8 @@ impl RuntimeFn {
             RuntimeFn::LoadTextFileWithErrors => "trendy_rt_load_text_file_with_errors",
             RuntimeFn::LoadCsvWithErrors => "trendy_rt_load_csv_with_errors",
             RuntimeFn::BrokenConstraintError => "trendy_rt_broken_constraint_error",
+            RuntimeFn::ComponentKeyError => "trendy_rt_component_key_error",
+            RuntimeFn::OverlappingSubtypesError => "trendy_rt_overlapping_subtypes_error",
             RuntimeFn::LoadCsv => "trendy_rt_load_csv",
             RuntimeFn::Sum => "trendy_rt_sum",
             RuntimeFn::Product => "trendy_rt_product",

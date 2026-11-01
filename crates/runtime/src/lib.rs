@@ -3106,6 +3106,129 @@ pub const MISSING_COLUMN: usize = 4;
 pub const UNREADABLE_FIELD: usize = 5;
 /// `broken_constraint_in_file`'s, as [`UNREADABLE_FILE`] is.
 pub const BROKEN_CONSTRAINT_IN_FILE: usize = 6;
+/// `component_key_violated_in_file`'s, as [`UNREADABLE_FILE`] is.
+pub const COMPONENT_KEY_VIOLATED_IN_FILE: usize = 7;
+/// `overlapping_subtypes_in_file`'s, as [`UNREADABLE_FILE`] is.
+pub const OVERLAPPING_SUBTYPES_IN_FILE: usize = 8;
+
+/// A relation-valued component of a value, as the compiler lays its names
+/// out: the name of the value's type, and the component's.
+#[repr(C)]
+pub struct ComponentOf {
+    pub ty: Text,
+    pub component: Text,
+}
+
+/// Add to the errors `errors` has that the tuples at the positions `pair`
+/// of the relation `value`, of the type `desc` describes, the component
+/// `of` names of a value read from the record `record` describes, share
+/// their values for `key`, the descriptor of its projection on one of its
+/// keys: a `component_key_violated_in_file`, its tuples written as
+/// `debug_value` writes them.
+///
+/// # Safety
+///
+/// As for [`trendy_rt_broken_constraint_error`], with `value`, `desc`,
+/// `key` and `pair` as for [`trendy_rt_key_violated`], and `of` pointing
+/// to a valid [`ComponentOf`].
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_component_key_error(
+    errors: *mut Errors,
+    value: *const u8,
+    desc: *const TypeDesc,
+    key: *const TypeDesc,
+    pair: *const usize,
+    of: *const ComponentOf,
+    record: *const Record,
+) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let mut found = Found::of(&*errors);
+        let (desc, record, of) = (&*desc, &*record, &*of);
+        let names = scope_written(|out| {
+            for (i, attr) in attributes(&*key).iter().enumerate() {
+                if i > 0 {
+                    out.write_str(", ")?;
+                }
+                out.write_str(name(attr))?;
+            }
+            Ok(())
+        });
+        let (tuples, _) = read_slice(value);
+        let element = desc.element();
+        let tuple = |i: usize| {
+            let at = tuples.add(pair.add(i).read_unaligned() * element.size);
+            let Ok(text) = text_of(at, element, |bytes| {
+                allocate_buffer(bytes, core::ptr::null())
+            }) else {
+                fail(Failure::OutOfMemory)
+            };
+            text
+        };
+        let (first, second) = (tuple(0), tuple(1));
+        let line = i64::try_from(record.line).unwrap_or(i64::MAX);
+        found.add(
+            COMPONENT_KEY_VIOLATED_IN_FILE,
+            &[
+                ("path", (&raw const record.path).cast()),
+                ("line", (&raw const line).cast()),
+                ("attribute", (&raw const record.attribute).cast()),
+                ("type", (&raw const of.ty).cast()),
+                ("component", (&raw const of.component).cast()),
+                ("key", (&raw const names).cast()),
+                ("first", (&raw const first).cast()),
+                ("second", (&raw const second).cast()),
+            ],
+        );
+        (&raw mut (*errors).found).write_unaligned(found.finish());
+    }
+}
+
+/// Add to the errors `errors` has that `value`, of the type of the
+/// program's own `desc` describes, read from the record `record`
+/// describes, is of both of its subtypes defined by constraints named
+/// `first` and `second`, texts, but a value has one most specific type: an
+/// `overlapping_subtypes_in_file`, written as `debug_value` writes it.
+///
+/// # Safety
+///
+/// As for [`trendy_rt_broken_constraint_error`], with `first` and `second`
+/// pointing to valid text values.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_overlapping_subtypes_error(
+    errors: *mut Errors,
+    value: *const u8,
+    desc: *const TypeDesc,
+    first: *const Text,
+    second: *const Text,
+    record: *const Record,
+) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let mut found = Found::of(&*errors);
+        let Ok(written) = text_of(value, &*desc, |bytes| {
+            allocate_buffer(bytes, core::ptr::null())
+        }) else {
+            fail(Failure::OutOfMemory)
+        };
+        let record = &*record;
+        let line = i64::try_from(record.line).unwrap_or(i64::MAX);
+        found.add(
+            OVERLAPPING_SUBTYPES_IN_FILE,
+            &[
+                ("path", (&raw const record.path).cast()),
+                ("line", (&raw const line).cast()),
+                ("attribute", (&raw const record.attribute).cast()),
+                ("value", (&raw const written).cast()),
+                ("first", first.cast()),
+                ("second", second.cast()),
+            ],
+        );
+        (&raw mut (*errors).found).write_unaligned(found.finish());
+    }
+}
 
 /// Add to the errors `errors` has that `value`, whose components the
 /// descriptor `desc` describes, read from the record `record` describes,
