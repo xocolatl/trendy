@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-use trendy_diag::{Code, Diagnostic, Format};
+use trendy_diag::{Code, Diagnostic, Format, Sources};
 
 const USAGE: &str = "\
 usage: trendyc <input> [-o <output>] [--error-format=human|json]
@@ -46,14 +46,21 @@ fn run() -> Result<(), String> {
 fn build(input: &Path, output: &Path, format: Format) -> Result<(), String> {
     let path = input.display().to_string();
     let source = std::fs::read_to_string(input).map_err(|e| format!("{path}: {e}"))?;
-    let report = |errors: &[Diagnostic]| report(errors, format, &path, &source);
 
     let parse = trendy_parser::parse(&source, trendy_lexer::lex(&source));
     if !parse.errors.is_empty() {
-        return Err(report(&parse.errors));
+        let sources = Sources::one(&path, &source);
+        return Err(report(&parse.errors, format, &path, &sources));
     }
     let prelude = prelude()?;
-    let hir = trendy_sema::analyze(&prelude, &parse.tree).map_err(|errors| report(&errors))?;
+    // Sema's spans are in the program, then the prelude.
+    let hir = trendy_sema::analyze(&parse.tree, &prelude.tree).map_err(|errors| {
+        let sources = Sources::new([
+            (path.as_str(), source.as_str()),
+            (trendy_prelude::PATH, trendy_prelude::SOURCE),
+        ]);
+        report(&errors, format, &path, &sources)
+    })?;
 
     // Past sema, every failure is a compiler bug, not a user error.
     let hir = trendy_opt::optimized(hir);
@@ -63,29 +70,27 @@ fn build(input: &Path, output: &Path, format: Format) -> Result<(), String> {
     link(&object, output)
 }
 
-/// The prelude, parsed and checked. It is part of the compiler, so any error
-/// in it is a compiler bug.
-fn prelude() -> Result<trendy_sema::Prelude, String> {
+/// The prelude, parsed, which sema checks with the program. It is part of
+/// the compiler, so any error in it is a compiler bug: one that doesn't
+/// parse is reported here, and sema reports a declaration that doesn't
+/// match the compiler as an internal error.
+fn prelude() -> Result<trendy_parser::Parse, String> {
     let source = trendy_prelude::SOURCE;
     let parse = trendy_parser::parse(source, trendy_lexer::lex(source));
     if !parse.errors.is_empty() {
-        let rendered =
-            trendy_diag::render_all(&parse.errors, Format::Human, trendy_prelude::PATH, source);
+        let sources = Sources::one(trendy_prelude::PATH, source);
+        let rendered = trendy_diag::render_all(&parse.errors, Format::Human, &sources);
         return Err(format!(
             "error[X0000]: internal compiler error: the prelude doesn't parse\n{rendered}"
         ));
     }
-    trendy_sema::Prelude::load(&parse.tree).map_err(|errors| {
-        let rendered =
-            trendy_diag::render_all(&errors, Format::Human, trendy_prelude::PATH, source);
-        format!("error[X0000]: internal compiler error: the prelude is invalid\n{rendered}")
-    })
+    Ok(parse)
 }
 
-/// Rendered diagnostics, plus for people a summary that says where to learn
-/// more.
-fn report(errors: &[Diagnostic], format: Format, path: &str, source: &str) -> String {
-    let rendered = trendy_diag::render_all(errors, format, path, source);
+/// Rendered diagnostics, whose spans are in `sources`, plus for people a
+/// summary that says where to learn more about the program at `path`.
+fn report(errors: &[Diagnostic], format: Format, path: &str, sources: &Sources) -> String {
+    let rendered = trendy_diag::render_all(errors, format, sources);
     match format {
         Format::Json => rendered,
         Format::Human => {

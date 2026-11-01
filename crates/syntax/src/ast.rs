@@ -7,7 +7,7 @@
 use trendy_diag::Span;
 
 use crate::literal;
-use crate::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, span};
+use crate::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, Trendy, span};
 
 /// A typed wrapper around a node of one particular kind.
 pub trait AstNode: Sized {
@@ -36,6 +36,7 @@ macro_rules! ast_node {
     };
 }
 
+ast_node!(Unit);
 ast_node!(SourceFile);
 ast_node!(Operator);
 ast_node!(BuiltinOperator);
@@ -127,6 +128,25 @@ pub enum Item {
     Heading(HeadingDecl),
     Type(TypeDecl),
     Variable(VarDecl),
+}
+
+impl Unit {
+    /// The unit of `files`, with each file's tree, one after another: a
+    /// span in it is an offset into their texts one after another, so the
+    /// first file's spans are those it has alone.
+    #[must_use]
+    pub fn new(files: &[SourceFile]) -> Unit {
+        let children = files
+            .iter()
+            .map(|file| rowan::NodeOrToken::Node(file.0.green().into_owned()));
+        let kind = <Trendy as rowan::Language>::kind_to_raw(SyntaxKind::Unit);
+        Unit(SyntaxNode::new_root(rowan::GreenNode::new(kind, children)))
+    }
+
+    /// Its files, in order.
+    pub fn files(&self) -> impl Iterator<Item = SourceFile> {
+        self.0.children().filter_map(SourceFile::cast)
+    }
 }
 
 impl SourceFile {
@@ -1829,11 +1849,16 @@ impl HeadingRef {
         ident_of(&self.0)
     }
 
-    /// The declaration of the heading it names, in its file.
+    /// The declaration of the heading it names, in its file, or in the
+    /// first of its unit's files that declares it.
     #[must_use]
     pub fn declaration(&self) -> Option<HeadingDecl> {
-        let file = SourceFile::cast(self.0.ancestors().last()?)?;
-        file.heading(self.ident()?.text())
+        let name = self.ident()?;
+        let root = self.0.ancestors().last()?;
+        match Unit::cast(root.clone()) {
+            Some(unit) => unit.files().find_map(|file| file.heading(name.text())),
+            None => SourceFile::cast(root)?.heading(name.text()),
+        }
     }
 }
 

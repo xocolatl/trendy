@@ -51,8 +51,7 @@ fn run() -> Result<bool, String> {
             return Err(trendy_diag::render_all(
                 &parse.errors,
                 format,
-                &path,
-                &source,
+                &trendy_diag::Sources::one(&path, &source),
             ));
         }
         let formatted = trendy_fmt::format(&parse.tree);

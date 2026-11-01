@@ -42,29 +42,19 @@ const TYPE_ALIASES: &[(&str, hir::Scalar)] = &[
     ("varchar", hir::Scalar::Text),
 ];
 
-/// `name` is defined at `this` but was already defined at `first`, which
-/// has no span for a built-in.
-pub(crate) fn duplicate_name(
-    name: &str,
-    this: (Kind, Span),
-    first: (Kind, Option<Span>),
-) -> Diagnostic {
+/// `name` is defined at `this` but was already defined at `first`, in the
+/// prelude for a built-in.
+pub(crate) fn duplicate_name(name: &str, this: (Kind, Span), first: (Kind, Span)) -> Diagnostic {
     let d = Diagnostic::error(
         Code::DuplicateName,
         format!("`{name}` is defined more than once"),
         this.1,
         format!("redefined here as {}", this.0.describe()),
+    )
+    .with_secondary(
+        first.1,
+        format!("`{name}` is first defined here as {}", first.0.describe()),
     );
-    let d = match first.1 {
-        Some(span) => d.with_secondary(
-            span,
-            format!("`{name}` is first defined here as {}", first.0.describe()),
-        ),
-        None => d.with_note(format!(
-            "`{name}` is {}, declared in the prelude",
-            first.0.describe()
-        )),
-    };
     let note = if this.0 == Kind::Variable {
         "variables have a namespace of their own, so no two can have the same name, though a variable can have an operator's"
     } else {
@@ -75,24 +65,12 @@ pub(crate) fn duplicate_name(
 }
 
 /// The type `name`, declared at `declared`, whose name is that of an
-/// operator of kind `kind`, the program's defined at `operator`, or the
-/// prelude's: a type's name is its selector's, which no other operator can
-/// have.
-pub(crate) fn selector_name(
-    name: &str,
-    declared: Span,
-    kind: Kind,
-    operator: Option<Span>,
-) -> Diagnostic {
-    let d = match operator {
-        Some(operator) => Diagnostic::error(
-            Code::SelectorName,
-            format!("operator `{name}` has the name of a type"),
-            operator,
-            "the type's selector has this name",
-        )
-        .with_secondary(declared, format!("the type `{name}` is declared here")),
-        None => Diagnostic::error(
+/// operator of kind `kind`, defined at `operator`: a type's name is its
+/// selector's, which no other operator can have. The error is the
+/// operator's, unless it is the prelude's.
+pub(crate) fn selector_name(name: &str, declared: Span, kind: Kind, operator: Span) -> Diagnostic {
+    let d = match kind {
+        Kind::Builtin | Kind::Prelude => Diagnostic::error(
             Code::SelectorName,
             format!(
                 "type `{name}` has the name of {} in the prelude",
@@ -100,7 +78,15 @@ pub(crate) fn selector_name(
             ),
             declared,
             "its selector would have the prelude operator's name",
-        ),
+        )
+        .with_secondary(operator, format!("the prelude defines `{name}` here")),
+        _ => Diagnostic::error(
+            Code::SelectorName,
+            format!("operator `{name}` has the name of a type"),
+            operator,
+            "the type's selector has this name",
+        )
+        .with_secondary(declared, format!("the type `{name}` is declared here")),
     };
     d.with_note(format!(
         "a type's selector has its name: `{name}{{…}}` selects a value of the type from its components, so no other operator can have the name"
@@ -114,7 +100,7 @@ pub(crate) fn selector_name(
 pub(crate) fn duplicate_operator(
     name: &str,
     span: Span,
-    first: (Kind, Option<Span>),
+    first: (Kind, Span),
     params: &BTreeSet<String>,
 ) -> Diagnostic {
     let listed: Vec<String> = params.iter().map(|p| format!("`{p}`")).collect();
@@ -128,17 +114,11 @@ pub(crate) fn duplicate_operator(
         format!("`{name}` is defined more than once with {same}"),
         span,
         "redefined here as an operator",
+    )
+    .with_secondary(
+        first.1,
+        format!("`{name}` is first defined here as {}", first.0.describe()),
     );
-    let d = match first.1 {
-        Some(at) => d.with_secondary(
-            at,
-            format!("`{name}` is first defined here as {}", first.0.describe()),
-        ),
-        None => d.with_note(format!(
-            "`{name}` is {}, declared in the prelude",
-            first.0.describe()
-        )),
-    };
     d.with_note("operators have a namespace of their own, in which operators of one name are told apart by their parameters' names, which each call names its arguments with; so no two have the same name and the same parameters' names, though an operator can have a variable's name")
         .with_help("delete the duplicate definition, or rename it or one of its parameters")
 }
@@ -316,7 +296,7 @@ pub(crate) fn missing_main(file: &SourceFile, namespaces: &Namespaces) -> Diagno
     let near_miss = namespaces
         .operators()
         .filter(|&(name, kind, _)| kind == Kind::Operator && name.eq_ignore_ascii_case("main"))
-        .filter_map(|(name, _, span)| Some((name, span?)))
+        .map(|(name, _, span)| (name, span))
         .min_by_key(|&(_, span)| span.start);
     if let Some((name, span)) = near_miss {
         return Diagnostic::error(
@@ -1067,6 +1047,7 @@ pub(crate) fn type_mismatch(
             "the operator's parameters of type `{name}` all take arguments of one type"
         )),
         Origin::Type(_)
+        | Origin::Prelude(_)
         | Origin::Component(..)
         | Origin::Variable(..)
         | Origin::Loaded(..)
@@ -2665,7 +2646,11 @@ pub(crate) fn variable_in_read_only(
     }];
     // Each call, `f{…}`, or `f{}`, which the parser takes for a projection,
     // whose arguments' names choose this operator.
-    let file = decl.syntax().ancestors().last().expect("a node has a root");
+    let file = decl
+        .syntax()
+        .ancestors()
+        .find_map(SourceFile::cast)
+        .expect("an operator is in a file");
     let calls_it = |name_ref: Option<trendy_syntax::ast::NameRef>, written: Written| {
         name_ref.and_then(|n| n.ident()).is_some_and(|i| {
             i.text() == op
@@ -2675,7 +2660,7 @@ pub(crate) fn variable_in_read_only(
                 )
         })
     };
-    for node in file.descendants() {
+    for node in file.syntax().descendants() {
         let insertion = if let Some(call) = trendy_syntax::ast::CallExpr::cast(node.clone()) {
             call.arguments()
                 .filter(|args| calls_it(call.callee(), Written::Arguments(args)))
@@ -5106,9 +5091,12 @@ pub(crate) fn missing_version(
     }
 }
 
-/// Where the program's own operator `signature` is defined: its name.
+/// Where `signature`, an operator written in trendy, is defined: its name.
 fn defined_at(signature: &Signature) -> Span {
-    let decl = signature.decl.as_ref().expect("the program's own operator");
+    let decl = signature
+        .decl
+        .as_ref()
+        .expect("an operator written in trendy");
     match decl.name().and_then(|n| n.ident()) {
         Some(ident) => trendy_syntax::span(ident.text_range()),
         None => trendy_syntax::span(decl.syntax().text_range()),

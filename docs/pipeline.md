@@ -13,11 +13,20 @@ This document is about the compiler. For the language itself, see
 
 **`trendy_prelude`** holds the prelude: trendy source declaring the built-in
 types and operators, and defining operators in trendy, all part of every
-program. Drivers parse it next to the program. Sema checks every
-declaration against what the compiler implements (`hir::Builtin`, and the
-scalar types), then checks the prelude's own operators, with only the
-built-ins in scope, once, as a program's are (`sema::Source::Prelude`), and
-gives every program them as checked HIR. A built-in is read-only or
+program. Drivers parse it next to the program, and sema checks the two
+as one unit of two files (`ast::Unit`, `sema::Files`), the program's text
+first, then the prelude's, so that a span is an offset into both, and the
+program's spans are those it has alone. Sema checks every built-in's
+declaration against what the compiler implements (`hir::Builtin`, and
+the scalar types, `builtins::builtins`), which makes the built-ins'
+signatures, then the rest of the prelude with the program, in the same
+namespaces, the prelude's declarations first: nothing of it is frozen, so
+the program extends it as it does its own, with a subtype of a union type
+it declares, or a version of its specification, and a name both define
+is the program's duplicate of the prelude's. Each signature knows its
+file (`sema::Source`): a diagnostic labels the prelude's declarations, but
+no fix changes them (`types::Origin::Prelude`), as the prelude is part of
+the compiler. A built-in is read-only or
 update (`hir::ReadOnlyBuiltin`, `hir::UpdateBuiltin`). A read-only one has
 a result type, and is a function of its arguments, so its call is a value,
 which sema evaluates when compiling where they are known
@@ -77,9 +86,10 @@ built-in can
 have type parameters, of a kind too, and `per` parameters, declared as an
 operator's are, and checked against the compiler's, written as the
 operator sees them. A wrong prelude is an internal
-compiler error, and the tests keep it valid: a declaration that doesn't
-match the compiler is reported at it (X0000), and an error in an operator
-the prelude defines as it would be in a program. The language server
+compiler error, and the tests keep it valid (`sema::check_prelude`, which
+checks it alone): a declaration that doesn't match the compiler is
+reported at it (X0000), and an error in an operator the prelude defines
+as it would be in a program. The language server
 checks the file at `trendy_prelude::SOURCE_PATH`, where the prelude was
 when it was built, as the prelude, not as a program. A built-in is added in three
 places: its declaration in `prelude.trendy`, its `hir::Builtin` entry, and
@@ -150,10 +160,12 @@ file.
 
 ### diag (`trendy_diag`)
 
-**Provides:** `Span`, a byte range in the source, and `Diagnostic` (see
+**Provides:** `Span`, a byte range in a file's text, or in a unit's, its
+files' one after another, and `Diagnostic` (see
 [Diagnostics](#diagnostics)), along with the error `Code` registry and its
 explanations. It renders diagnostics both as text with source excerpts and as
-JSON.
+JSON, for the files their spans are in (`Sources`, which locates a span:
+its file, and where it is in it).
 
 **Must not:** know about any other stage. Every front-end layer depends on it,
 so it stays at the bottom of the graph.
@@ -166,6 +178,9 @@ so it stays at the bottom of the graph.
 - A typed view over the tree (`ast::SourceFile`, `ast::Operator`, …) with
   accessors that return `Option`, because a tree with errors can be missing
   any part.
+- `ast::Unit`, files checked together, a tree of their trees, one after
+  another, never parsed: a span in it is an offset into their texts, one
+  after another.
 - `literal`, the meaning of literals: the escape table, the integer syntax,
   and decoding. The lexer uses it to report malformed literals, and sema uses
   it (through `ast::Literal::value`) to decode them, so the rules exist in
@@ -626,8 +641,10 @@ than as `Span`.
 
 ### sema (`trendy_sema`)
 
-**Input:** the CST of a file with no syntax errors. **Output:** `hir::Program`,
-or every semantic error found.
+**Input:** the CSTs of a program and the prelude, with no syntax errors,
+checked as one unit (see [The prelude and the runtime](#the-prelude-and-the-runtime)).
+**Output:** `hir::Program`, or every semantic error found, its spans in the
+unit's.
 
 **Owns:** name resolution, type checking, and translating the CST to HIR.
 **It is the last layer allowed to report an error to the user.**
@@ -649,7 +666,7 @@ operator's parameters too when another has its name, as it does an
 instance of a generic operator, so that their symbols differ.
 
 Sema collects every name before checking anything, so errors can refer to
-definitions anywhere in the file. Then it resolves the headings'
+definitions anywhere in either file. Then it resolves the headings'
 attributes and the types' components (`named_types::resolve`), each
 after those of the headings and types it names, so that any type can
 name one, and reports each cycle among them (A0049). A heading's name is only a shorter way to write its attributes:
@@ -665,7 +682,7 @@ names after `is` first, which sema finds, reporting a supertype that isn't
 a union type, a union type with fewer than two subtypes or with braces
 (A0060), and union types that are subtypes of each other (A0049); a
 union type contains its subtypes for the cycle check, so no type
-contains itself through one. `hir::Program::unions` lists each union
+contains itself through one. `hir::Program::subtypes` lists each union
 type's immediate subtypes, which lowering lays hierarchies out from. Its selector is a read-only
 operator named after it (`Signature::selects`), whose value is
 `Expr::Select` of the tuple of its parameters, so a call of it is checked,
@@ -684,7 +701,7 @@ TTM has a type's constraint be part of its definition, and so does each
 of its values (`hir::DefinedValue`'s type), as TTM has every scalar
 value carry its type (RM Prescription 2). The constraints' operators,
 and each possible representation's conversions to the stored one and
-from it, come right after the prelude's, numbered as the types resolve
+from it, come right after the built-ins', numbered as the types resolve
 (`named_types::resolve`), since a type is resolved, and its `Defined`
 copied into the types that name it, before any signature is made. A
 selection checks each, which folds when the components are constants
@@ -1675,7 +1692,8 @@ Drivers read input, run the layers they need in order, and present the
 results. They contain no language logic of their own.
 
 - **`trendyc`**, the compiler: runs lexer, parser, sema, opt, lower and codegen,
-  renders diagnostics (`--error-format=human|json`), and links the object
+  renders diagnostics (`--error-format=human|json`), over the program and
+  the prelude, shown as `<prelude>`, and links the object
   with the system `cc`. `trendyc --explain <code>` prints an error code's
   explanation.
 - **`trendyfmt`**, the formatter command: runs lexer, parser and fmt, then
@@ -1683,7 +1701,8 @@ results. They contain no language logic of their own.
   exits non-zero instead.
 - **`trendy-lsp`** (crate `trendy_lsp`), the language server, speaking LSP over
   stdio. On every change it reports all lexer and parser errors, or, if there
-  are none, all sema errors. It offers each suggestion as a quick fix,
+  are none, all sema errors, a label in the prelude as a related location
+  in the prelude's file. It offers each suggestion as a quick fix,
   provides semantic highlighting by classifying tokens in the CST (so
   highlighting always agrees with the compiler, even in broken files), and answers formatting requests with fmt. It also converts
   byte spans to the UTF-16 positions LSP uses. The VS Code extension in
@@ -1725,7 +1744,10 @@ guesswork.
   an empty span directly after the previous token, not the token where the
   parser noticed the problem.
 - **Secondary labels give the context,** such as where a name was first
-  defined, or where the next definition starts.
+  defined, or where the next definition starts, in the prelude too, for
+  what it declares, with an excerpt under ` ::: <prelude>:line:column`.
+  The primary label and the fixes are never in the prelude, which is part
+  of the compiler, for an error of the program's.
 - **Notes give the relevant language rule,** such as the form of a
   definition, so the reader doesn't need outside knowledge.
 - **Suggestions carry a fix whenever it is mechanical.** A suggestion is a set
@@ -1743,7 +1765,8 @@ guesswork.
   lists or `{}` bodies. Each gets a precise message and a fix.
 
 Every channel carries all of this. `--error-format=json` gives one object per
-diagnostic, with offsets, lines, columns, labels and edits. The language
+diagnostic, with offsets, lines, columns, labels and edits, each with its
+file. The language
 server sends the code, related locations, and all notes and help in the
 message, and offers each suggestion as a quick fix.
 

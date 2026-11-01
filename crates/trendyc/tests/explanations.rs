@@ -11,12 +11,11 @@ use trendy_diag::{Code, Diagnostic};
 fn errors(source: &str) -> Vec<Diagnostic> {
     let prelude_source = trendy_prelude::SOURCE;
     let prelude = trendy_parser::parse(prelude_source, trendy_lexer::lex(prelude_source));
-    let prelude = trendy_sema::Prelude::load(&prelude.tree).unwrap();
     let parse = trendy_parser::parse(source, trendy_lexer::lex(source));
     if !parse.errors.is_empty() {
         return parse.errors;
     }
-    trendy_sema::analyze(&prelude, &parse.tree)
+    trendy_sema::analyze(&parse.tree, &prelude.tree)
         .err()
         .unwrap_or_default()
 }

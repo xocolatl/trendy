@@ -1,7 +1,6 @@
 //! Editor features as pure functions of document text.
 
-use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::fmt::Write;
 
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, Diagnostic, DiagnosticRelatedInformation,
@@ -12,35 +11,78 @@ use lsp_types::{
 use crate::highlight::{self, Class};
 use crate::position::LineIndex;
 
-/// The prelude, parsed and checked once. It ships with the server, and its
-/// tests in the compiler keep it valid.
-fn prelude() -> &'static trendy_sema::Prelude {
-    static PRELUDE: OnceLock<trendy_sema::Prelude> = OnceLock::new();
-    PRELUDE.get_or_init(|| {
+thread_local! {
+    /// The prelude, parsed once, which sema checks every program with. It
+    /// ships with the server, and its tests in the compiler keep it valid.
+    static PRELUDE: trendy_parser::Parse = {
         let source = trendy_prelude::SOURCE;
         let parse = trendy_parser::parse(source, trendy_lexer::lex(source));
         assert!(parse.errors.is_empty(), "the prelude doesn't parse");
-        trendy_sema::Prelude::load(&parse.tree).expect("the prelude is valid")
-    })
+        parse
+    };
 }
 
 /// Every lexer and parser error in the document at `uri`, or if there are
 /// none, every sema error: as the prelude's, if it is the prelude, and
-/// otherwise as a program's.
+/// otherwise as a program's, checked with the prelude.
 fn errors(uri: &Uri, source: &str) -> Vec<trendy_diag::Diagnostic> {
     let parse = trendy_parser::parse(source, trendy_lexer::lex(source));
     if !parse.errors.is_empty() {
         return parse.errors;
     }
     if is_prelude(uri) {
-        trendy_sema::Prelude::load(&parse.tree)
-            .err()
-            .unwrap_or_default()
+        trendy_sema::check_prelude(&parse.tree)
     } else {
-        trendy_sema::analyze(prelude(), &parse.tree)
-            .err()
-            .unwrap_or_default()
+        PRELUDE.with(|prelude| {
+            trendy_sema::analyze(&parse.tree, &prelude.tree)
+                .err()
+                .unwrap_or_default()
+        })
     }
+}
+
+/// Where the spans of the errors in a document are: in it, or, as sema
+/// checks a program with the prelude, in the prelude, after it.
+struct Files<'a> {
+    /// The document's, then the prelude's.
+    uris: [Uri; 2],
+    indexes: [LineIndex<'a>; 2],
+    sources: trendy_diag::Sources<'a>,
+}
+
+impl<'a> Files<'a> {
+    /// The files of the errors in the document at `uri`, `source`.
+    fn new(uri: &'a Uri, source: &'a str) -> Self {
+        let prelude = trendy_prelude::SOURCE;
+        Files {
+            uris: [uri.clone(), prelude_uri()],
+            indexes: [LineIndex::new(source), LineIndex::new(prelude)],
+            sources: trendy_diag::Sources::new([(uri.as_str(), source), ("<prelude>", prelude)]),
+        }
+    }
+
+    /// Where `span` is.
+    fn location(&self, span: trendy_diag::Span) -> Location {
+        let located = self.sources.locate(span);
+        Location::new(
+            self.uris[located.index].clone(),
+            self.indexes[located.index].range(located.span),
+        )
+    }
+}
+
+/// The `file` URI of the prelude's source, which the server was built from.
+fn prelude_uri() -> Uri {
+    let mut uri = String::from("file://");
+    for byte in trendy_prelude::SOURCE_PATH.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~/".contains(&byte) {
+            uri.push(char::from(byte));
+        } else {
+            // Writing to a `String` cannot fail.
+            let _ = write!(uri, "%{byte:02X}");
+        }
+    }
+    uri.parse().expect("a path, percent-encoded, is in a URI")
 }
 
 /// Whether `uri` is the prelude's source, which the server was built from.
@@ -63,17 +105,19 @@ fn is_prelude(uri: &Uri) -> bool {
 
 /// Errors to show in the editor.
 pub fn diagnostics(uri: &Uri, source: &str) -> Vec<Diagnostic> {
-    let index = LineIndex::new(source);
+    let files = Files::new(uri, source);
     errors(uri, source)
         .iter()
-        .map(|d| to_lsp(uri, &index, d))
+        .map(|d| to_lsp(&files, d))
         .collect()
 }
 
 /// An LSP diagnostic carrying everything the compiler would print: the
 /// message gets the notes, help, and what each fix does, and secondary labels
-/// become related locations.
-fn to_lsp(uri: &Uri, index: &LineIndex, d: &trendy_diag::Diagnostic) -> Diagnostic {
+/// become related locations, in the prelude too. An error is in the
+/// document, but for one in the prelude, which is the compiler's own, at
+/// the document's start, and related to where it is.
+fn to_lsp(files: &Files, d: &trendy_diag::Diagnostic) -> Diagnostic {
     let message = std::iter::once(d.message.clone())
         .chain(d.notes.iter().map(|note| format!("note: {note}")))
         .chain(d.help.iter().map(|help| format!("help: {help}")))
@@ -81,17 +125,24 @@ fn to_lsp(uri: &Uri, index: &LineIndex, d: &trendy_diag::Diagnostic) -> Diagnost
         .collect::<Vec<_>>()
         .join("\n");
 
-    let related: Vec<_> = d
-        .secondary
-        .iter()
+    let primary = files.location(d.span());
+    let in_document = primary.uri == files.uris[0];
+    let elsewhere = (!in_document).then_some(&d.primary);
+    let related: Vec<_> = elsewhere
+        .into_iter()
+        .chain(&d.secondary)
         .map(|label| DiagnosticRelatedInformation {
-            location: Location::new(uri.clone(), index.range(label.span)),
+            location: files.location(label.span),
             message: label.message.clone(),
         })
         .collect();
 
     Diagnostic {
-        range: index.range(d.span()),
+        range: if in_document {
+            primary.range
+        } else {
+            Range::default()
+        },
         severity: Some(DiagnosticSeverity::ERROR),
         code: Some(NumberOrString::String(d.code.id().to_string())),
         source: Some("trendy".to_string()),
@@ -103,26 +154,44 @@ fn to_lsp(uri: &Uri, index: &LineIndex, d: &trendy_diag::Diagnostic) -> Diagnost
 
 /// A quick fix for each suggestion on an error that touches `range`.
 pub fn code_actions(uri: &Uri, source: &str, range: Range) -> Vec<CodeActionOrCommand> {
-    let index = LineIndex::new(source);
+    let files = Files::new(uri, source);
     let mut actions = Vec::new();
     for d in errors(uri, source) {
-        let lsp = to_lsp(uri, &index, &d);
+        let lsp = to_lsp(&files, &d);
         if lsp.range.start > range.end || range.start > lsp.range.end {
             continue;
         }
         let only_one = d.suggestions.len() == 1;
         for suggestion in &d.suggestions {
-            let edits = suggestion
+            let edits: Vec<(Uri, TextEdit)> = suggestion
                 .edits
                 .iter()
-                .map(|e| TextEdit::new(index.range(e.span), e.replacement.clone()))
+                .map(|edit| {
+                    let location = files.location(edit.span);
+                    let text = TextEdit::new(location.range, edit.replacement.clone());
+                    (location.uri, text)
+                })
                 .collect();
             actions.push(CodeActionOrCommand::CodeAction(CodeAction {
                 title: suggestion.message.clone(),
                 kind: Some(CodeActionKind::QUICKFIX),
                 diagnostics: Some(vec![lsp.clone()]),
                 edit: Some(WorkspaceEdit {
-                    changes: Some(HashMap::from([(uri.clone(), edits)])),
+                    // Each file's edits.
+                    changes: Some(
+                        files
+                            .uris
+                            .iter()
+                            .filter_map(|uri| {
+                                let in_it: Vec<TextEdit> = edits
+                                    .iter()
+                                    .filter(|(at, _)| at == uri)
+                                    .map(|(_, edit)| edit.clone())
+                                    .collect();
+                                (!in_it.is_empty()).then(|| (uri.clone(), in_it))
+                            })
+                            .collect(),
+                    ),
                     ..WorkspaceEdit::default()
                 }),
                 is_preferred: Some(only_one),
@@ -250,9 +319,8 @@ mod tests {
 
     #[test]
     fn the_prelude_is_checked_as_the_prelude() {
-        let prelude: Uri = format!("file://{}", trendy_prelude::SOURCE_PATH)
-            .parse()
-            .unwrap();
+        let prelude = prelude_uri();
+        assert!(is_prelude(&prelude));
         assert_eq!(diagnostics(&prelude, trendy_prelude::SOURCE), []);
         // As a program, it has built-ins it can't declare, operators the
         // prelude already has, and no `main`.
@@ -303,6 +371,30 @@ mod tests {
         assert_eq!(
             related[0].location.range,
             Range::new(Position::new(0, 9), Position::new(0, 13))
+        );
+    }
+
+    #[test]
+    fn labels_in_the_prelude_are_related_information_there() {
+        let source = "operator debug_value{v: integer} [];\noperator main{} [];";
+        let diags = diagnostics(&uri(), source);
+        assert_eq!(diags.len(), 1, "{diags:#?}");
+        assert_eq!(
+            diags[0].range,
+            Range::new(Position::new(0, 9), Position::new(0, 20))
+        );
+        let related = diags[0].related_information.as_ref().unwrap();
+        assert_eq!(related[0].location.uri, prelude_uri());
+        let line = trendy_prelude::SOURCE
+            .lines()
+            .position(|line| line.starts_with("builtin operator debug_value{"))
+            .unwrap();
+        assert_eq!(
+            related[0].location.range,
+            Range::new(
+                Position::new(u32::try_from(line).unwrap(), 17),
+                Position::new(u32::try_from(line).unwrap(), 28)
+            )
         );
     }
 

@@ -9,14 +9,14 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use trendy_diag::{Diagnostic, Span};
 use trendy_hir as hir;
-use trendy_syntax::ast::{self, AstNode, SourceFile, VarDecl};
+use trendy_syntax::ast::{self, AstNode, VarDecl};
 
 use crate::assign::{self, Assignee, Assigning};
 use crate::check::{Checker, Lookup, Names};
 use crate::locals::{self, Declaration, Local, Locals};
 use crate::operators::{FromType, Made, Operators, Signature};
 use crate::types::{self, Expected, Origin};
-use crate::{Namespaces, Prelude, Sites, errors, keys, ops};
+use crate::{Files, Namespaces, Sites, errors, keys, ops};
 
 /// What the globals evaluate to.
 pub(crate) struct Evaluated {
@@ -97,27 +97,14 @@ pub(crate) struct Pending {
 }
 
 impl<'a> Globals<'a> {
-    /// The globals of a file, with `prelude`'s read-only operators, which
-    /// are checked already.
+    /// The globals of the files checked.
     pub(crate) fn new(
-        prelude: &Prelude,
         namespaces: &'a Namespaces,
         operators: &'a Operators,
         decls: &'a HashMap<String, VarDecl>,
         ids: &'a HashMap<String, hir::VariableId>,
         sites: &'a Sites<'a>,
     ) -> Self {
-        let prelude_values = prelude
-            .operators()
-            .iter()
-            .enumerate()
-            .filter_map(|(i, op)| match &op.kind {
-                hir::OperatorKind::ReadOnly { value, .. } => {
-                    Some((hir::OperatorId(i), value.clone()))
-                }
-                _ => None,
-            });
-        let values: HashMap<hir::OperatorId, hir::Expr> = prelude_values.collect();
         Globals {
             sites,
             namespaces,
@@ -125,11 +112,8 @@ impl<'a> Globals<'a> {
             decls,
             ids,
             variables: vec![None; ids.len()],
-            operator_states: values
-                .keys()
-                .map(|&id| (id, State::Done(Some(()))))
-                .collect(),
-            values,
+            operator_states: HashMap::new(),
+            values: HashMap::new(),
             locals: HashMap::new(),
             stack: Vec::new(),
             read: HashSet::new(),
@@ -140,8 +124,8 @@ impl<'a> Globals<'a> {
 
     /// Every variable's initial value, and every read-only operator's
     /// value, whether or not an initial value calls it.
-    pub(crate) fn evaluate(mut self, file: &SourceFile, errors: &mut Vec<Diagnostic>) -> Evaluated {
-        for decl in file.variables() {
+    pub(crate) fn evaluate(mut self, files: &Files, errors: &mut Vec<Diagnostic>) -> Evaluated {
+        for decl in files.variables() {
             let Some(ident) = decl.name().and_then(|n| n.ident()) else {
                 continue;
             };

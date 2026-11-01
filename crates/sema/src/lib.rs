@@ -1,6 +1,7 @@
 mod assign;
 mod block;
 mod body;
+mod builtins;
 mod check;
 mod errors;
 mod globals;
@@ -10,7 +11,6 @@ mod named_types;
 mod narrowed;
 mod operators;
 mod ops;
-mod prelude;
 mod types;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -18,14 +18,14 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use trendy_diag::{Diagnostic, Span};
 use trendy_hir as hir;
 use trendy_syntax::SyntaxToken;
-use trendy_syntax::ast::{self, AstNode, Item, SourceFile, VarDecl};
-
-pub use prelude::Prelude;
+use trendy_syntax::ast::{self, AstNode, HeadingDecl, Item, SourceFile, TypeDecl, VarDecl};
 
 use crate::operators::Operators;
 
-/// Check a parsed program and translate it to HIR. The prelude's
-/// operators are in scope.
+/// Check a parsed program with the prelude, as one unit of the two files,
+/// and translate it to HIR. The prelude's declarations are in scope as the
+/// program's own are, so the program can extend them: a subtype of the
+/// prelude's union type, a version of its specification.
 ///
 /// This is the last layer allowed to report errors to the user. Drivers run
 /// it only on trees without syntax errors; parts that are missing anyway are
@@ -33,16 +33,28 @@ use crate::operators::Operators;
 ///
 /// # Errors
 ///
-/// Returns every semantic error, in source order.
-pub fn analyze(prelude: &Prelude, file: &SourceFile) -> Result<hir::Program, Vec<Diagnostic>> {
+/// Returns every semantic error, in source order. Their spans are in the
+/// program's text followed by the prelude's (see `trendy_diag::Sources`),
+/// so the program's are those it has alone. A declaration in the prelude
+/// that doesn't match the compiler is an internal error.
+pub fn analyze(
+    program: &SourceFile,
+    prelude: &SourceFile,
+) -> Result<hir::Program, Vec<Diagnostic>> {
+    let (files, program) = Files::unit(program, prelude);
     let mut errors = Vec::new();
-    let checked = check(prelude, file, Source::Program, &mut errors);
-    let entry = entry(file, &checked.namespaces, &checked.operators, &mut errors);
+    let checked = check(&files, &mut errors);
+    let entry = entry(
+        &program,
+        &checked.namespaces,
+        &checked.operators,
+        &mut errors,
+    );
     errors.sort_by_key(|d| d.span().start);
     match entry {
         Some(entry) if errors.is_empty() => {
             let subtypes = checked.namespaces.subtypes.clone();
-            let (operators, variables) = checked.finish(prelude);
+            let (operators, variables) = checked.finish();
             Ok(hir::Program {
                 operators,
                 variables,
@@ -54,47 +66,127 @@ pub fn analyze(prelude: &Prelude, file: &SourceFile) -> Result<hir::Program, Vec
     }
 }
 
+/// Check the prelude alone: that it declares exactly the built-ins the
+/// compiler implements, each as it implements it, and that what it defines
+/// in trendy is valid, with only its own declarations in scope.
+///
+/// Every error, in source order: a declaration that doesn't match the
+/// compiler is an internal error, at the declaration, since the prelude
+/// is part of the compiler, and an error in what it defines in trendy is
+/// reported as a program's would be.
+#[must_use]
+pub fn check_prelude(prelude: &SourceFile) -> Vec<Diagnostic> {
+    let files = Files {
+        prelude: prelude.clone(),
+        program: None,
+    };
+    let mut errors = Vec::new();
+    check(&files, &mut errors);
+    errors.sort_by_key(|d| d.span().start);
+    errors
+}
+
 /// What a file is checked as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Source {
     /// A program, which declares no built-ins.
     Program,
-    /// The prelude, whose built-ins the prelude it is checked with already
-    /// has: its operators written in trendy are checked.
+    /// The prelude, which declares the built-ins, and is in every program.
     Prelude,
 }
 
-/// Where each place in a file is: the sites of what runs there.
+/// The files checked together, as one unit's: the prelude, and the
+/// program, unless the prelude is checked alone. The prelude's
+/// declarations come first, so a name defined in both is the program's
+/// duplicate of the prelude's.
+pub(crate) struct Files {
+    prelude: SourceFile,
+    program: Option<SourceFile>,
+}
+
+impl Files {
+    /// `program` and `prelude`, as the files of one unit, the program's
+    /// first, and the unit's program.
+    fn unit(program: &SourceFile, prelude: &SourceFile) -> (Files, SourceFile) {
+        let unit = ast::Unit::new(&[program.clone(), prelude.clone()]);
+        let mut files = unit.files();
+        let program = files.next().expect("a unit has the files it is made of");
+        let prelude = files.next().expect("a unit has the files it is made of");
+        let files = Files {
+            prelude,
+            program: Some(program.clone()),
+        };
+        (files, program)
+    }
+
+    /// Each file, with what it is checked as, the prelude first.
+    fn each(&self) -> impl Iterator<Item = (Source, &SourceFile)> {
+        std::iter::once((Source::Prelude, &self.prelude)).chain(
+            self.program
+                .iter()
+                .map(|program| (Source::Program, program)),
+        )
+    }
+
+    /// Every definition, each with the file it is in, the prelude's first,
+    /// each file's in source order.
+    pub(crate) fn items(&self) -> impl Iterator<Item = (Source, Item)> {
+        self.each()
+            .flat_map(|(source, file)| file.items().map(move |item| (source, item)))
+    }
+
+    pub(crate) fn headings(&self) -> impl Iterator<Item = HeadingDecl> {
+        self.each().flat_map(|(_, file)| file.headings())
+    }
+
+    pub(crate) fn types(&self) -> impl Iterator<Item = TypeDecl> {
+        self.each().flat_map(|(_, file)| file.types())
+    }
+
+    pub(crate) fn variables(&self) -> impl Iterator<Item = VarDecl> {
+        self.each().flat_map(|(_, file)| file.variables())
+    }
+}
+
+/// Where each place in the files is: the sites of what runs there.
 pub(crate) struct Sites<'a> {
-    file: hir::File,
-    map: trendy_diag::SourceMap<'a>,
+    /// The files, each as a site names it, in the order their texts are in
+    /// the unit's.
+    files: Vec<hir::File>,
+    sources: trendy_diag::Sources<'a>,
 }
 
 impl<'a> Sites<'a> {
-    /// The sites in `text`, the file `source` says.
-    pub(crate) fn new(source: Source, text: &'a str) -> Self {
-        let file = match source {
-            Source::Program => hir::File::Program,
-            Source::Prelude => hir::File::Prelude,
+    /// The sites in the files whose texts are `texts`, each with the file
+    /// it is, in the unit's order.
+    fn new(texts: &'a [(hir::File, String)]) -> Self {
+        let name = |file| match file {
+            hir::File::Program => "program",
+            hir::File::Prelude => "prelude",
         };
         Sites {
-            file,
-            map: trendy_diag::SourceMap::new(text),
+            files: texts.iter().map(|(file, _)| *file).collect(),
+            sources: trendy_diag::Sources::new(
+                texts
+                    .iter()
+                    .map(|(file, text)| (name(*file), text.as_str())),
+            ),
         }
     }
 
     /// The site of what starts at `span`.
     pub(crate) fn at(&self, span: Span) -> hir::Site {
-        let position = self.map.line_col(span.start);
+        let located = self.sources.locate(span);
+        let position = located.file.map.line_col(located.span.start);
         hir::Site {
-            file: self.file,
+            file: self.files[located.index],
             line: position.line,
             column: position.col,
         }
     }
 }
 
-/// A file, checked, with every error reported.
+/// Files, checked, with every error reported.
 pub(crate) struct Checked {
     namespaces: Namespaces,
     operators: Operators,
@@ -103,41 +195,45 @@ pub(crate) struct Checked {
     bodies: HashMap<hir::OperatorId, (Vec<hir::Local>, hir::Block)>,
 }
 
-/// Check `file`, as `source` says, with `prelude`'s operators in scope.
-pub(crate) fn check(
-    prelude: &Prelude,
-    file: &SourceFile,
-    source: Source,
-    errors: &mut Vec<Diagnostic>,
-) -> Checked {
-    let mut namespaces = collect_names(prelude, file, errors);
-    let text = file.syntax().text().to_string();
-    let sites = Sites::new(source, &text);
+/// Check `files`, as one unit.
+pub(crate) fn check(files: &Files, errors: &mut Vec<Diagnostic>) -> Checked {
+    // The built-ins first, as the compiler implements them, which only the
+    // prelude declares.
+    let builtins = builtins::builtins(&files.prelude, errors);
+    let mut namespaces = collect_names(&builtins, files, errors);
+    // The texts in the unit's order, the program's first.
+    let texts: Vec<(hir::File, String)> = files
+        .program
+        .iter()
+        .map(|program| (hir::File::Program, program))
+        .chain(std::iter::once((hir::File::Prelude, &files.prelude)))
+        .map(|(file, syntax)| (file, syntax.syntax().text().to_string()))
+        .collect();
+    let sites = Sites::new(&texts);
 
     // The headings' attributes and the types' components first, which any
     // type can name, and their constraints, whose operators come after the
-    // prelude's.
-    let first = hir::OperatorId(prelude.operators().len());
-    named_types::resolve(file, &mut namespaces, first, errors);
+    // built-ins.
+    let first = hir::OperatorId(builtins.operators.len());
+    named_types::resolve(files, &mut namespaces, first, errors);
 
     // Every operator's signature first, so that anything can refer to an
     // operator defined after it.
-    let operators = operators::signatures(prelude, file, &namespaces, source, errors);
+    let operators = operators::signatures(builtins.operators, files, &namespaces, errors);
 
     // Then the globals: the variables' initial values, and the read-only
     // operators' values, which initial values can call and which read
     // variables, each when first needed.
-    let declarations = declarations(file, &namespaces);
-    let variable_ids = variable_ids(file, &namespaces);
+    let declarations = declarations(files, &namespaces);
+    let variable_ids = variable_ids(files, &namespaces);
     let evaluated = globals::Globals::new(
-        prelude,
         &namespaces,
         &operators,
         &declarations,
         &variable_ids,
         &sites,
     )
-    .evaluate(file, errors);
+    .evaluate(files, errors);
 
     // Then the update operators' bodies, which refer to both.
     let context = body::Context {
@@ -169,16 +265,13 @@ pub(crate) fn check(
 }
 
 impl Checked {
-    /// The HIR operators, `prelude`'s as it has them, then the file's, with
-    /// their bodies, and the variables, of a file without errors.
-    pub(crate) fn finish(mut self, prelude: &Prelude) -> (Vec<hir::Operator>, Vec<hir::Variable>) {
+    /// The HIR operators, the built-ins first, with their bodies, and the
+    /// variables, of files without errors.
+    pub(crate) fn finish(mut self) -> (Vec<hir::Operator>, Vec<hir::Variable>) {
         let operators = self
             .operators
             .iter()
             .map(|signature| {
-                if let Some(op) = prelude.operators().get(signature.id.0) {
-                    return op.clone();
-                }
                 let bodiless = signature.decl.as_ref().is_some_and(|d| d.body().is_none());
                 let kind = match (signature.builtin, &signature.result) {
                     (Some(builtin), _) => hir::OperatorKind::Builtin(builtin),
@@ -283,12 +376,12 @@ impl Kind {
     }
 }
 
-/// The program's top-level names, each in its namespace: its first
-/// definition, and where it is (built-ins are in the prelude, so they have
-/// no span). Operators and variables have a namespace each, so a variable
-/// can have an operator's name; types and headings have a third. Operators
-/// of one name are told apart by their parameters' names, which every
-/// call writes, so a name has an operator for each set of them.
+/// The top-level names, the prelude's and the program's, each in its
+/// namespace: its first definition, and where it is. Operators and
+/// variables have a namespace each, so a variable can have an operator's
+/// name; types and headings have a third. Operators of one name are told
+/// apart by their parameters' names, which every call writes, so a name
+/// has an operator for each set of them.
 #[derive(Default)]
 pub(crate) struct Namespaces {
     /// User and built-in operators: each name's, with their parameters'
@@ -297,6 +390,9 @@ pub(crate) struct Namespaces {
     variables: HashMap<String, Span>,
     /// Where each heading is declared.
     headings: HashMap<String, Span>,
+    /// Where the prelude declares each built-in type, whose name no
+    /// heading or other type can have.
+    builtin_types: HashMap<String, Span>,
     /// Each heading's attributes, unless they have errors, which are
     /// reported: [`named_types::resolve`] fills it in.
     attributes: HashMap<String, hir::Heading>,
@@ -323,8 +419,8 @@ pub(crate) struct Namespaces {
 /// An operator's definition, as its name's namespace has it.
 struct OperatorName {
     kind: Kind,
-    /// Where it is defined, unless the prelude defines it.
-    span: Option<Span>,
+    /// Where it is defined: its name.
+    span: Span,
     /// Its parameters' names, as a call gives their arguments.
     params: BTreeSet<String>,
 }
@@ -399,8 +495,23 @@ impl Namespaces {
 
     /// The first operator named `name`: whether it is built in, and where
     /// it is defined.
-    pub(crate) fn operator(&self, name: &str) -> Option<(Kind, Option<Span>)> {
+    pub(crate) fn operator(&self, name: &str) -> Option<(Kind, Span)> {
         let first = self.operators.get(name)?.first()?;
+        Some((first.kind, first.span))
+    }
+
+    /// The first operator named `name` whose parameters are named
+    /// `params`: whether it is built in, and where it is defined.
+    pub(crate) fn operator_with(
+        &self,
+        name: &str,
+        params: &BTreeSet<String>,
+    ) -> Option<(Kind, Span)> {
+        let first = self
+            .operators
+            .get(name)?
+            .iter()
+            .find(|d| d.params == *params)?;
         Some((first.kind, first.span))
     }
 
@@ -482,7 +593,7 @@ impl Namespaces {
         self.types.get(ident.text()) == Some(&trendy_syntax::span(ident.text_range()))
     }
 
-    pub(crate) fn operators(&self) -> impl Iterator<Item = (&str, Kind, Option<Span>)> {
+    pub(crate) fn operators(&self) -> impl Iterator<Item = (&str, Kind, Span)> {
         self.operators
             .iter()
             .flat_map(|(name, defined)| defined.iter().map(|d| (name.as_str(), d.kind, d.span)))
@@ -496,99 +607,88 @@ impl Namespaces {
 }
 
 /// Record every top-level name in its namespace, the prelude's first,
-/// reporting each one defined more than once in it.
-fn collect_names(prelude: &Prelude, file: &SourceFile, errors: &mut Vec<Diagnostic>) -> Namespaces {
-    let mut namespaces = Namespaces {
-        kinds: Namespaces::with_kinds(prelude.kinds()).kinds,
-        ..Namespaces::default()
-    };
-    for op in prelude.operators() {
-        let kind = match op.kind {
-            hir::OperatorKind::Builtin(_) => Kind::Builtin,
-            _ => Kind::Prelude,
-        };
-        let params = operators::written(&op.params).into_keys().collect();
-        namespaces
-            .operators
-            .entry(op.name.clone())
-            .or_default()
-            .push(OperatorName {
-                kind,
-                span: None,
-                params,
-            });
-    }
-    for item in file.items() {
-        let (kind, name) = match item {
-            Item::Operator(ref op) => (Kind::Operator, op.name()),
-            Item::Variable(ref decl) => (Kind::Variable, decl.name()),
-            Item::Heading(ref decl) => (Kind::Heading, decl.name()),
-            Item::Type(ref decl) => (Kind::Defined, decl.name()),
-            // Reported as being outside the prelude, or the prelude's own,
-            // already in it.
+/// reporting each one defined more than once in them.
+fn collect_names(
+    builtins: &builtins::Builtins,
+    files: &Files,
+    errors: &mut Vec<Diagnostic>,
+) -> Namespaces {
+    let mut namespaces = Namespaces::with_kinds(&builtins.kinds);
+    for (source, item) in files.items() {
+        let prelude = source == Source::Prelude;
+        let (kind, name, params) = match item {
+            Item::Operator(ref op) => {
+                let kind = if prelude {
+                    Kind::Prelude
+                } else {
+                    Kind::Operator
+                };
+                (kind, op.name(), Some(op.params()))
+            }
+            Item::Builtin(ref decl) if prelude => (Kind::Builtin, decl.name(), Some(decl.params())),
+            Item::BuiltinType(ref decl) if prelude => (Kind::Type, decl.name(), None),
+            Item::Variable(ref decl) => (Kind::Variable, decl.name(), None),
+            Item::Heading(ref decl) => (Kind::Heading, decl.name(), None),
+            Item::Type(ref decl) => (Kind::Defined, decl.name(), None),
+            // The prelude's kinds are checked against the compiler, and
+            // built-ins outside it are reported.
             Item::Builtin(_) | Item::BuiltinType(_) | Item::Kind(_) => continue,
         };
         let Some(ident) = name.and_then(|n| n.ident()) else {
             continue;
         };
         let (name, span) = (ident.text(), trendy_syntax::span(ident.text_range()));
-        if let Item::Operator(op) = item {
-            let params: BTreeSet<String> = op
-                .params()
-                .map(|heading| {
-                    heading
-                        .attributes()
-                        .filter_map(|a| Some(a.name()?.ident()?.text().to_string()))
-                        .collect()
-                })
-                .unwrap_or_default();
+        if let Some(params) = params {
+            let params = param_names(params.as_ref());
             let defined = namespaces.operators.entry(name.to_string()).or_default();
             match defined.iter().find(|d| d.params == params) {
-                // The prelude's can't have versions.
-                Some(first) if first.span.is_none() => errors.push(errors::duplicate_operator(
-                    name,
-                    span,
-                    (first.kind, first.span),
-                    &params,
-                )),
+                // A built-in has no versions, so this is never called
+                // (`operators::signatures`).
+                Some(first) if first.kind == Kind::Builtin || kind == Kind::Builtin => errors.push(
+                    errors::duplicate_operator(name, span, (first.kind, first.span), &params),
+                ),
                 // A version, or a duplicate, which its parameters' types
                 // tell, once they are resolved (`operators::signatures`).
                 Some(_) => {}
-                None => defined.push(OperatorName {
-                    kind,
-                    span: Some(span),
-                    params,
-                }),
+                None => defined.push(OperatorName { kind, span, params }),
             }
             continue;
         }
         let first = match kind {
-            Kind::Variable => namespaces.variable(name).map(|s| (kind, Some(s))),
+            Kind::Variable => namespaces.variable(name).map(|s| (kind, s)),
             _ => namespaces
                 .heading(name)
-                .map(|(s, _)| (Kind::Heading, Some(s)))
-                .or_else(|| {
-                    namespaces
-                        .defined(name)
-                        .map(|(s, _)| (Kind::Defined, Some(s)))
-                })
-                .or_else(|| hir::Scalar::from_name(name).map(|_| (Kind::Type, None))),
+                .map(|(s, _)| (Kind::Heading, s))
+                .or_else(|| namespaces.defined(name).map(|(s, _)| (Kind::Defined, s)))
+                .or_else(|| namespaces.builtin_types.get(name).map(|&s| (Kind::Type, s))),
         };
-        match (first, kind) {
-            (Some(first), _) => errors.push(errors::duplicate_name(name, (kind, span), first)),
-            (None, Kind::Variable) => {
-                namespaces.variables.insert(name.to_string(), span);
+        let names = match (first, kind) {
+            (Some(first), _) => {
+                errors.push(errors::duplicate_name(name, (kind, span), first));
+                continue;
             }
-            (None, Kind::Defined) => {
-                namespaces.types.insert(name.to_string(), span);
-            }
-            (None, _) => {
-                namespaces.headings.insert(name.to_string(), span);
-            }
-        }
+            (None, Kind::Variable) => &mut namespaces.variables,
+            (None, Kind::Defined) => &mut namespaces.types,
+            (None, Kind::Type) => &mut namespaces.builtin_types,
+            (None, _) => &mut namespaces.headings,
+        };
+        names.insert(name.to_string(), span);
     }
-    selectors(file, &mut namespaces, errors);
+    selectors(files, &mut namespaces, errors);
     namespaces
+}
+
+/// The names of the parameters `params` declares, as a call gives their
+/// arguments, or none if it has none.
+pub(crate) fn param_names(params: Option<&ast::Heading>) -> BTreeSet<String> {
+    params
+        .map(|heading| {
+            heading
+                .attributes()
+                .filter_map(|a| Some(a.name()?.ident()?.text().to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Record each type's selector, an operator named after it, with its
@@ -597,8 +697,8 @@ fn collect_names(prelude: &Prelude, file: &SourceFile, errors: &mut Vec<Diagnost
 /// give way to the selector, as a duplicate does to the first definition,
 /// and a type with a prelude operator's name, reported at the type, has
 /// no selector.
-fn selectors(file: &SourceFile, namespaces: &mut Namespaces, errors: &mut Vec<Diagnostic>) {
-    for decl in file.types() {
+fn selectors(files: &Files, namespaces: &mut Namespaces, errors: &mut Vec<Diagnostic>) {
+    for decl in files.types() {
         let Some(ident) = decl.name().and_then(|n| n.ident()) else {
             continue;
         };
@@ -607,8 +707,11 @@ fn selectors(file: &SourceFile, namespaces: &mut Namespaces, errors: &mut Vec<Di
         }
         let (name, span) = (ident.text(), trendy_syntax::span(ident.text_range()));
         if let Some(others) = namespaces.operators.get(name) {
-            if let Some(other) = others.iter().find(|other| other.span.is_none()) {
-                errors.push(errors::selector_name(name, span, other.kind, None));
+            if let Some(other) = others
+                .iter()
+                .find(|other| matches!(other.kind, Kind::Builtin | Kind::Prelude))
+            {
+                errors.push(errors::selector_name(name, span, other.kind, other.span));
                 continue;
             }
             for other in others {
@@ -633,7 +736,7 @@ fn selectors(file: &SourceFile, namespaces: &mut Namespaces, errors: &mut Vec<Di
                 .or_default()
                 .push(OperatorName {
                     kind: Kind::Selector,
-                    span: Some(span),
+                    span,
                     params,
                 });
         }
@@ -641,8 +744,9 @@ fn selectors(file: &SourceFile, namespaces: &mut Namespaces, errors: &mut Vec<Di
 }
 
 /// The first declaration of each variable, by name.
-fn declarations(file: &SourceFile, namespaces: &Namespaces) -> HashMap<String, VarDecl> {
-    file.variables()
+fn declarations(files: &Files, namespaces: &Namespaces) -> HashMap<String, VarDecl> {
+    files
+        .variables()
         .filter_map(|decl| {
             let ident = decl.name()?.ident()?;
             namespaces
@@ -654,8 +758,9 @@ fn declarations(file: &SourceFile, namespaces: &Namespaces) -> HashMap<String, V
 
 /// Each variable's id, by name: its first declaration's place among them,
 /// in source order.
-fn variable_ids(file: &SourceFile, namespaces: &Namespaces) -> HashMap<String, hir::VariableId> {
-    file.variables()
+fn variable_ids(files: &Files, namespaces: &Namespaces) -> HashMap<String, hir::VariableId> {
+    files
+        .variables()
         .filter_map(|decl| {
             let ident = decl.name()?.ident()?;
             namespaces
@@ -679,16 +784,36 @@ mod tests {
         parse.tree
     }
 
-    fn prelude() -> Prelude {
-        Prelude::load(&parse(trendy_prelude::SOURCE)).unwrap()
+    thread_local! {
+        /// The prelude, parsed once for each thread's tests.
+        static PRELUDE: SourceFile = parse(trendy_prelude::SOURCE);
     }
 
     fn analyze_str(source: &str) -> Result<hir::Program, Vec<Diagnostic>> {
-        analyze(&prelude(), &parse(source))
+        PRELUDE.with(|prelude| analyze(&parse(source), prelude))
     }
 
+    /// The errors of the program `source`, each where its fix goes, in it,
+    /// not in the prelude, which is part of the compiler.
     fn errors(source: &str) -> Vec<Diagnostic> {
-        analyze_str(source).unwrap_err()
+        let errors = analyze_str(source).unwrap_err();
+        for d in &errors {
+            let edits = d.suggestions.iter().flat_map(|s| &s.edits);
+            for span in std::iter::once(d.primary.span).chain(edits.map(|e| e.span)) {
+                assert!(span.end <= source.len(), "{source}: {d:#?}");
+            }
+        }
+        errors
+    }
+
+    /// The prelude's text at `span`, in the unit of the program `source`
+    /// and the prelude.
+    fn in_prelude(source: &str, span: Span) -> &'static str {
+        let start = span
+            .start
+            .checked_sub(source.len())
+            .expect("in the prelude");
+        &trendy_prelude::SOURCE[start..span.end - source.len()]
     }
 
     fn messages(source: &str) -> Vec<String> {
@@ -842,6 +967,12 @@ mod tests {
             assert_eq!(errors[0].code, Code::DuplicateName, "{source}");
             assert_eq!(errors[0].message, message);
         }
+        // A call chooses the built-in, not its duplicate, which is never
+        // called.
+        let errors = errors(
+            "operator count{r: any relation}: integer [ 0 ];\noperator main{} [ call debug_value{v: count{r: relation { { x: 1 } }}}; ];",
+        );
+        assert_eq!(errors.len(), 1, "{errors:#?}");
         // `main` is the one without parameters.
         analyze_str("operator main{x: integer} [];\noperator main{} [];").unwrap();
     }
@@ -2266,12 +2397,45 @@ var zero := seg{{len: 0}};{MAIN}"
     }
 
     #[test]
-    fn the_prelude_loads() {
-        let prelude = prelude();
-        assert_eq!(prelude.operators()[0].name, "debug_value");
+    fn the_prelude_is_valid() {
+        assert_eq!(check_prelude(&parse(trendy_prelude::SOURCE)), Vec::new());
+        // Its built-ins are a program's first operators.
+        let program = analyze_str("operator main{} [];").unwrap();
+        assert_eq!(program.operators[0].name, "debug_value");
         assert_eq!(
-            prelude.operators()[0].params,
+            program.operators[0].params,
             hir::Builtin::Update(hir::UpdateBuiltin::DebugValue).params()
+        );
+    }
+
+    #[test]
+    fn a_program_extends_the_prelude() {
+        let prelude = format!(
+            "{}\ntype shape union;\ntype square is shape {{ {{ side: integer }} }};\ntype disc is shape {{ {{ radius: integer }} }};\noperator area{{s: shape}}: integer;\noperator area{{s: square}}: integer [ s.side * s.side ];\noperator area{{s: disc}}: integer [ 3 * s.radius * s.radius ];\n",
+            trendy_prelude::SOURCE
+        );
+        let prelude = parse(&prelude);
+        assert_eq!(check_prelude(&prelude), Vec::new());
+        let strip = "type strip is shape { { length: integer, width: integer } };\n";
+        let version = "operator area{s: strip}: integer [ s.length * s.width ];\n";
+        let program = format!(
+            "{strip}{version}var a := area{{s: strip{{length: 2, width: 3}}}};\nvar b := area{{s: square{{side: 2}}}};\noperator main{{}} [];"
+        );
+        let program = analyze(&parse(&program), &prelude).unwrap();
+        let values: Vec<_> = program.variables.iter().map(|v| v.init.clone()).collect();
+        assert_eq!(values, [hir::Value::Integer(6), hir::Value::Integer(4)]);
+        // Without its version, the program's type is reported, at it.
+        let source = format!("{strip}operator main{{}} [];");
+        let errors = analyze(&parse(&source), &prelude).unwrap_err();
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].code, Code::Versions);
+        let at = |span: Span| &source[span.start..span.end];
+        assert_eq!(at(errors[0].primary.span), "strip");
+        let declared = errors[0].secondary[0].span;
+        let prelude = prelude.syntax().text().to_string();
+        assert_eq!(
+            &prelude[declared.start - source.len()..declared.end - source.len()],
+            "area"
         );
     }
 
@@ -2282,7 +2446,7 @@ var zero := seg{{len: 0}};{MAIN}"
         assert!(trendy_prelude::SOURCE.contains(declared));
         let source =
             trendy_prelude::SOURCE.replacen(declared, "types { T: any tuple, C: any tuple }", 1);
-        Prelude::load(&parse(&source)).unwrap();
+        assert_eq!(check_prelude(&parse(&source)), Vec::new());
     }
 
     #[test]
@@ -2290,7 +2454,7 @@ var zero := seg{{len: 0}};{MAIN}"
         let wrong = |from: &str, to: &str| {
             assert!(trendy_prelude::SOURCE.contains(from), "{from}");
             let source = trendy_prelude::SOURCE.replacen(from, to, 1);
-            let errors = Prelude::load(&parse(&source)).unwrap_err();
+            let errors = check_prelude(&parse(&source));
             assert_eq!(errors.len(), 1, "{errors:#?}");
             assert_eq!(errors[0].code, Code::Internal);
             let span = errors[0].primary.span;
@@ -2542,9 +2706,13 @@ var zero := seg{{len: 0}};{MAIN}"
         .unwrap();
         // A built-in's name and parameters' names are taken, though not
         // its name with others.
-        let errors = errors("operator debug_value{v: integer} [];\noperator main{} [];");
+        let source = "operator debug_value{v: integer} [];\noperator main{} [];";
+        let errors = errors(source);
         assert_eq!(errors[0].code, Code::DuplicateName);
-        assert!(errors[0].notes[0].contains("declared in the prelude"));
+        assert_eq!(
+            in_prelude(source, errors[0].secondary[0].span),
+            "debug_value"
+        );
         analyze_str("operator debug_value{} [];\noperator main{} [];").unwrap();
     }
 
@@ -6378,20 +6546,20 @@ var zero := seg{{len: 0}};{MAIN}"
                 hir::Value::Boolean(true)
             ]
         );
-        // Their errors point at nothing in the prelude, which isn't the
-        // program's source.
+        // Their errors point at their declarations in the prelude, which no
+        // fix changes, as it is part of the compiler.
         let source = format!("{PLOTS}var x := some{{r: plots, of: 1}};{MAIN}");
         let errors = errors(&source);
         assert_eq!(errors.len(), 1, "{errors:#?}");
         assert_eq!(errors[0].code, Code::TypeMismatch);
-        assert!(errors[0].secondary.is_empty());
-        // Their names with their parameters' names are taken, as the
-        // built-ins' are.
-        let taken = self::errors(
-            "operator some{r: any relation, of: boolean per r}: boolean [ false ];\noperator main{} [];",
-        );
+        assert_eq!(in_prelude(&source, errors[0].secondary[0].span), "boolean");
+        assert_eq!(errors[0].suggestions.len(), 1, "{errors:#?}");
+        // Their names with their parameters' names and types are taken, as
+        // the program's own operators' are.
+        let source = "operator some{r: any relation, of: boolean per r}: boolean [ false ];\noperator main{} [];";
+        let taken = self::errors(source);
         assert_eq!(taken[0].code, Code::DuplicateName);
-        assert!(taken[0].notes[0].contains("declared in the prelude"));
+        assert_eq!(in_prelude(source, taken[0].secondary[0].span), "some");
     }
 
     #[test]

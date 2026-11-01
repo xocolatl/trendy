@@ -1,6 +1,5 @@
-//! The prelude: the declarations of the built-in operators, checked against
-//! the operators the compiler implements, and the operators it defines in
-//! trendy, checked as a program's are.
+//! The prelude's built-ins: its declarations of the kinds, types and
+//! operators the compiler implements, checked against it.
 
 use trendy_hir as hir;
 use trendy_syntax::ast::{BuiltinOperator, BuiltinType, Item, KindDecl, SourceFile};
@@ -11,9 +10,9 @@ use trendy_diag::{Code, Diagnostic, Span};
 use trendy_syntax::SyntaxToken;
 use trendy_syntax::ast::AstNode;
 
+use crate::Namespaces;
 use crate::operators::{self, Signature};
 use crate::types::{self, TypeParameters};
-use crate::{Namespaces, Source};
 
 /// An internal error, `message`, at the name `ident` in the prelude.
 fn internal(message: String, ident: &SyntaxToken) -> Diagnostic {
@@ -54,15 +53,17 @@ fn implemented(name: &str, params: &BTreeSet<String>) -> Option<hir::Builtin> {
         .or_else(|| named().next())
 }
 
-/// The built-in operator `decl` declares, with the parameters the
-/// compiler implements, or `None` after reporting why it isn't one. It is
-/// added to those `declared`, unless it already is.
+/// The signature of the built-in operator `decl` declares, whose id is
+/// `id`, with the parameters the compiler implements, or `None` after
+/// reporting why it isn't one. It is added to those `declared`, unless it
+/// already is.
 fn builtin_operator(
     decl: &BuiltinOperator,
+    id: hir::OperatorId,
     namespaces: &Namespaces,
     declared: &mut Vec<hir::Builtin>,
     errors: &mut Vec<Diagnostic>,
-) -> Option<hir::Operator> {
+) -> Option<Signature> {
     // A missing name is a syntax error, already reported.
     let ident = decl.name()?.ident()?;
     let name = ident.text();
@@ -149,13 +150,7 @@ fn builtin_operator(
         ));
         return None;
     }
-    Some(hir::Operator {
-        name: name.to_string(),
-        types,
-        params,
-        versions: Vec::new(),
-        kind: hir::OperatorKind::Builtin(builtin),
-    })
+    Some(Signature::builtin(id, builtin, types, params))
 }
 
 /// The kind `decl` declares, with what the compiler can require of its
@@ -277,122 +272,78 @@ fn builtin_types() -> impl Iterator<Item = &'static str> {
     hir::Scalar::ALL.into_iter().map(hir::Scalar::name)
 }
 
-/// The loaded prelude: its operators, the built-ins first, then those it
-/// defines in trendy, which every program has, checked already.
-#[derive(Debug, Clone)]
-pub struct Prelude {
-    operators: Vec<hir::Operator>,
+/// The prelude's built-ins, as the compiler implements them.
+pub(crate) struct Builtins {
     /// The kinds, each with the built-in types that declare it.
-    kinds: Vec<(hir::Kind, BTreeSet<hir::Scalar>)>,
+    pub(crate) kinds: Vec<(hir::Kind, BTreeSet<hir::Scalar>)>,
+    /// The built-in operators' signatures, numbered from 0 in the order
+    /// the prelude declares them.
+    pub(crate) operators: Vec<Signature>,
 }
 
-impl Prelude {
-    /// Load the prelude, checking that it declares exactly the built-in
-    /// operators the compiler implements, each with the right parameters,
-    /// and the operators it defines in trendy, which only it and the
-    /// built-ins are in scope for.
-    ///
-    /// # Errors
-    ///
-    /// Returns every way the prelude is wrong: a declaration that doesn't
-    /// match the compiler is an internal error, since the prelude is part
-    /// of the compiler, at the declaration, and an error in an operator it
-    /// defines is reported as a program's would be.
-    pub fn load(file: &SourceFile) -> Result<Prelude, Vec<Diagnostic>> {
-        let mut errors = Vec::new();
-        // The kinds first, which types declare and built-ins can name.
-        let mut kinds: Vec<(hir::Kind, BTreeSet<hir::Scalar>)> = Vec::new();
-        for item in file.items() {
-            if let Item::Kind(decl) = item
-                && let Some(kind) = kind_decl(&decl, &kinds, &mut errors)
-            {
-                kinds.push((kind, BTreeSet::new()));
+/// The built-ins `prelude` declares, checking that they are exactly those
+/// the compiler implements, each with the right parameters. The prelude is
+/// part of the compiler, so a declaration that doesn't match it is an
+/// internal error, at the declaration, as is a variable or a heading,
+/// which the prelude doesn't declare.
+pub(crate) fn builtins(prelude: &SourceFile, errors: &mut Vec<Diagnostic>) -> Builtins {
+    // The kinds first, which types declare and built-ins can name.
+    let mut kinds: Vec<(hir::Kind, BTreeSet<hir::Scalar>)> = Vec::new();
+    for item in prelude.items() {
+        if let Item::Kind(decl) = item
+            && let Some(kind) = kind_decl(&decl, &kinds, errors)
+        {
+            kinds.push((kind, BTreeSet::new()));
+        }
+    }
+    let mut types: Vec<String> = Vec::new();
+    for item in prelude.items() {
+        if let Item::BuiltinType(decl) = item {
+            builtin_type(&decl, &mut types, &mut kinds, errors);
+        }
+    }
+    let namespaces = Namespaces::with_kinds(&kinds);
+    let mut operators: Vec<Signature> = Vec::new();
+    // The built-ins declared, rightly or not, so that a wrong
+    // declaration isn't missing too.
+    let mut declared: Vec<hir::Builtin> = Vec::new();
+    for item in prelude.items() {
+        match item {
+            Item::Builtin(decl) => {
+                let id = hir::OperatorId(operators.len());
+                let op = builtin_operator(&decl, id, &namespaces, &mut declared, errors);
+                operators.extend(op);
             }
+            // Checked above, or with the program's.
+            Item::BuiltinType(_) | Item::Kind(_) | Item::Operator(_) | Item::Type(_) => {}
+            Item::Variable(decl) => errors.push(Diagnostic::error(
+                Code::Internal,
+                "the prelude declares no variables",
+                decl.span(),
+                "a variable",
+            )),
+            Item::Heading(decl) => errors.push(Diagnostic::error(
+                Code::Internal,
+                "the prelude declares no headings",
+                decl.span(),
+                "a heading",
+            )),
         }
-        let mut types: Vec<String> = Vec::new();
-        for item in file.items() {
-            if let Item::BuiltinType(decl) = item {
-                builtin_type(&decl, &mut types, &mut kinds, &mut errors);
-            }
-        }
-        let namespaces = Namespaces::with_kinds(&kinds);
-        let mut operators: Vec<hir::Operator> = Vec::new();
-        // The built-ins declared, rightly or not, so that a wrong
-        // declaration isn't missing too.
-        let mut declared: Vec<hir::Builtin> = Vec::new();
-        for item in file.items() {
-            match item {
-                Item::Builtin(decl) => {
-                    let op = builtin_operator(&decl, &namespaces, &mut declared, &mut errors);
-                    operators.extend(op);
-                }
-                // Checked above, or once the built-ins are known.
-                Item::BuiltinType(_) | Item::Kind(_) | Item::Operator(_) => {}
-                Item::Variable(decl) => errors.push(Diagnostic::error(
-                    Code::Internal,
-                    "the prelude declares no variables",
-                    decl.span(),
-                    "a variable",
-                )),
-                Item::Heading(decl) => errors.push(Diagnostic::error(
-                    Code::Internal,
-                    "the prelude declares no headings",
-                    decl.span(),
-                    "a heading",
-                )),
-                Item::Type(decl) => errors.push(Diagnostic::error(
-                    Code::Internal,
-                    "the prelude declares no types but built-in ones",
-                    decl.span(),
-                    "a type",
-                )),
-            }
-        }
-        // What is missing goes at the end.
-        let end = Span::empty(file.span().end);
-        let missing_operators = hir::Builtin::ALL
-            .into_iter()
-            .filter(|b| !declared.contains(b))
-            .map(|b| {
-                let params = operators::params_text(&operators::written(&b.params()));
-                format!("the prelude doesn't declare `{}{params}`", b.name())
-            });
-        let missing_types = builtin_types()
-            .filter(|t| !types.iter().any(|d| d == t))
-            .map(|t| format!("the prelude doesn't declare the type `{t}`"));
-        for message in missing_operators.chain(missing_types) {
-            errors.push(Diagnostic::error(Code::Internal, message, end, "missing"));
-        }
-        let builtins = Prelude { operators, kinds };
-
-        let checked = crate::check(&builtins, file, Source::Prelude, &mut errors);
-        if !errors.is_empty() {
-            errors.sort_by_key(|d| d.span().start);
-            return Err(errors);
-        }
-        let (operators, _) = checked.finish(&builtins);
-        Ok(Prelude {
-            operators,
-            kinds: builtins.kinds,
-        })
     }
-
-    /// The kinds, each with the built-in types that declare it.
-    pub(crate) fn kinds(&self) -> &[(hir::Kind, BTreeSet<hir::Scalar>)] {
-        &self.kinds
+    // What is missing goes at the end.
+    let end = Span::empty(prelude.span().end);
+    let missing_operators = hir::Builtin::ALL
+        .into_iter()
+        .filter(|b| !declared.contains(b))
+        .map(|b| {
+            let params = operators::params_text(&operators::written(&b.params()));
+            format!("the prelude doesn't declare `{}{params}`", b.name())
+        });
+    let missing_types = builtin_types()
+        .filter(|t| !types.iter().any(|d| d == t))
+        .map(|t| format!("the prelude doesn't declare the type `{t}`"));
+    for message in missing_operators.chain(missing_types) {
+        errors.push(Diagnostic::error(Code::Internal, message, end, "missing"));
     }
-
-    /// The operators, the built-ins first, each in the order the prelude
-    /// has them.
-    pub(crate) fn operators(&self) -> &[hir::Operator] {
-        &self.operators
-    }
-
-    /// The operators' signatures, by id.
-    pub(crate) fn signatures(&self) -> impl Iterator<Item = Signature> {
-        self.operators
-            .iter()
-            .enumerate()
-            .map(|(i, op)| Signature::of_prelude(hir::OperatorId(i), op))
-    }
+    Builtins { kinds, operators }
 }

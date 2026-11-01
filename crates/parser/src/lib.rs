@@ -7042,6 +7042,29 @@ SourceFile
     }
 
     #[test]
+    fn a_unit_has_its_files_one_after_another() {
+        let first = "var r: relation home := relation {};\n";
+        let second = "heading home := { city: text };\n";
+        let unit = trendy_syntax::ast::Unit::new(&[parse_str(first).tree, parse_str(second).tree]);
+        let files: Vec<SourceFile> = unit.files().collect();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].span(), Span::new(0, first.len()));
+        assert_eq!(
+            files[1].span(),
+            Span::new(first.len(), first.len() + second.len())
+        );
+        assert_eq!(unit.syntax().text().to_string(), format!("{first}{second}"));
+        // A name finds its declaration in another of the unit's files.
+        let named = files[0]
+            .syntax()
+            .descendants()
+            .find_map(trendy_syntax::ast::HeadingRef::cast)
+            .unwrap();
+        assert_eq!(named.declaration(), files[1].heading("home"));
+        assert!(named.declaration().is_some());
+    }
+
+    #[test]
     fn modes_are_before_names() {
         let source = "operator f{var r: integer, const n: integer, out m: integer} [ call f{var r: x, const n: 1, out m: y}; ];";
         let parse = parse_str(source);

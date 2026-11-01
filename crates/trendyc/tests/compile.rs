@@ -400,8 +400,7 @@ fn analyze(source: &str) -> trendy_hir::Program {
         assert!(parse.errors.is_empty(), "{source}: {:#?}", parse.errors);
         parse.tree
     };
-    let prelude = trendy_sema::Prelude::load(&parse(trendy_prelude::SOURCE)).unwrap();
-    trendy_sema::analyze(&prelude, &parse(source)).unwrap()
+    trendy_sema::analyze(&parse(source), &parse(trendy_prelude::SOURCE)).unwrap()
 }
 
 /// `written`, a value the program `source` wrote, read back as an

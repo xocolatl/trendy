@@ -361,11 +361,11 @@ mod tests {
     /// the heading of what it restricts.
     fn planned(source: &str) -> String {
         let prelude = trendy_prelude::SOURCE;
-        let parse = trendy_parser::parse(prelude, trendy_lexer::lex(prelude));
-        let prelude = trendy_sema::Prelude::load(&parse.tree).expect("the prelude is valid");
+        let prelude = trendy_parser::parse(prelude, trendy_lexer::lex(prelude));
         let parse = trendy_parser::parse(source, trendy_lexer::lex(source));
         assert!(parse.errors.is_empty(), "{:?}", parse.errors);
-        let program = trendy_sema::analyze(&prelude, &parse.tree).expect("the program is valid");
+        let program =
+            trendy_sema::analyze(&parse.tree, &prelude.tree).expect("the program is valid");
         let program = optimized(program);
         let operator = program
             .operators

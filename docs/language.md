@@ -597,7 +597,7 @@ operator main{} [
   nothing about them is built into the compiler.
 - **A type declares the kinds it is of,** as the prelude's do:
   `builtin type integer: { ordered, numeric };`. It must have what each
-  requires, which the prelude's loading checks. `boolean`, `integer`,
+  requires, which the compiler checks of the prelude. `boolean`, `integer`,
   `approximate` and `text` are ordered; relations aren't, as their `<` is
   subset, which isn't a total order. `integer` and `approximate` are
   numeric. A type of the program's own is ordered when its braces give
@@ -742,9 +742,16 @@ Some operators are part of every program, always in scope: the
 *prelude*'s, trendy source the compiler includes. A few the compiler
 implements itself, the *built-ins*, which the prelude declares with
 `builtin`, as it does the built-in types; the rest it defines in trendy, as
-any program could. They are checked once, as a program's own operators
-are, and compiled into a program only if it calls them. A program can't
-declare built-ins, nor define an operator with a name the prelude has.
+any program could. The prelude is checked with every program, its
+declarations as if the program had written them, so a program can extend
+what it declares as it can its own, with a subtype of a union type or a
+version of a specification (see [Union types](#union-types)), and an
+operator is compiled into a program only if it calls it. A program can't
+declare built-ins, nor define an operator with a built-in's name and
+parameters' names, as a built-in has no versions, nor one with the name
+and the parameters, their names and types, of an operator the prelude
+defines in trendy (A0001); the error points at the prelude's, shown as
+`<prelude>`.
 
 The prelude keeps built-ins as few as possible: what can be written in
 trendy is, so that it means exactly what its definition says, and when the

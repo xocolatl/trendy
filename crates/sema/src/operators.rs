@@ -6,11 +6,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use trendy_diag::{Diagnostic, Span};
 use trendy_hir as hir;
-use trendy_syntax::ast::{self, AstNode, Item, Said, SourceFile, TypeExpr};
+use trendy_syntax::ast::{self, AstNode, Item, Said, TypeExpr};
 
 use crate::check::Lookup;
 use crate::types::{self, Origin, TypeParameters};
-use crate::{Kind, Namespaces, Prelude, Source, errors};
+use crate::{Files, Kind, Namespaces, Source, errors};
 
 /// What a call needs to know about the operator it calls.
 #[derive(Clone)]
@@ -38,6 +38,9 @@ pub(crate) struct Signature {
     pub(crate) decl: Option<ast::Operator>,
     /// The built-in it is, for the prelude's.
     pub(crate) builtin: Option<hir::Builtin>,
+    /// The file it is in. The prelude's declarations are labeled, but no
+    /// fix changes them, as the prelude is part of the compiler.
+    pub(crate) source: Source,
     /// The type of the program's own it is made from, if it is a
     /// selector, a constraint or a conversion of it.
     pub(crate) from_type: Option<FromType>,
@@ -167,8 +170,11 @@ impl Signature {
 
     /// Where parameter `name`'s type is written.
     pub(crate) fn param_origin(&self, name: &str) -> Origin {
-        let written = self.param_decl(name).and_then(|a| a.type_expr());
-        written.map_or(Origin::Builtin, Origin::Type)
+        match self.param_decl(name).and_then(|a| a.type_expr()) {
+            Some(written) if self.source == Source::Prelude => Origin::Prelude(written),
+            Some(written) => Origin::Type(written),
+            None => Origin::Builtin,
+        }
     }
 
     /// Where parameter `name` is written, for the program's own: one made
@@ -461,27 +467,29 @@ impl Operators {
 }
 
 impl Signature {
-    /// The signature of the prelude's operator `op`, whose id is `id`. It
-    /// points at nothing in the prelude's source, which isn't the
-    /// program's.
-    pub(crate) fn of_prelude(id: hir::OperatorId, op: &hir::Operator) -> Self {
-        let (builtin, result) = match &op.kind {
-            hir::OperatorKind::Builtin(builtin) => (Some(*builtin), builtin.result()),
-            hir::OperatorKind::ReadOnly { result, .. } => (None, Some(result.clone())),
-            hir::OperatorKind::Specification { result } => (None, result.clone()),
-            hir::OperatorKind::Update { .. } => (None, None),
-        };
+    /// The signature of `builtin`, whose id is `id`, with the type
+    /// parameters and parameters its declaration has, which are the
+    /// compiler's. Its declaration isn't an operator's, so it points at
+    /// none (see [`Signature::param_origin`]).
+    pub(crate) fn builtin(
+        id: hir::OperatorId,
+        builtin: hir::Builtin,
+        types: Vec<hir::TypeParameter>,
+        params: BTreeMap<String, hir::Parameter>,
+    ) -> Self {
+        let result = builtin.result();
         Signature {
             id,
-            name: op.name.clone(),
-            types: op.types.clone(),
-            written: written(&op.params),
-            params: op.params.clone(),
+            name: builtin.name().to_string(),
+            types,
+            written: written(&params),
+            params,
             unresolved: BTreeSet::new(),
             read_only: result.is_some(),
             result,
             decl: None,
-            builtin,
+            builtin: Some(builtin),
+            source: Source::Prelude,
             from_type: None,
             family: Family::Own,
             versions: Vec::new(),
@@ -490,31 +498,32 @@ impl Signature {
     }
 }
 
-/// Every operator's signature: the prelude's, then the file's, each with
-/// its parameters and result type checked. Built-ins declared outside the
-/// prelude are reported. `main` is checked as an update operator, even
-/// with a result type, which is reported when the entry point is.
+/// Every operator's signature: the built-ins', then those of the types'
+/// constraints and conversions, then each file's operators and selectors,
+/// the prelude's first, each with its parameters and result type checked.
+/// Built-ins declared outside the prelude are reported. `main` is checked
+/// as an update operator, even with a result type, which is reported when
+/// the entry point is.
 pub(crate) fn signatures(
-    prelude: &Prelude,
-    file: &SourceFile,
+    builtins: Vec<Signature>,
+    files: &Files,
     namespaces: &Namespaces,
-    source: Source,
     errors: &mut Vec<Diagnostic>,
 ) -> Operators {
-    let mut list: Vec<Signature> = prelude.signatures().collect();
-    for signature in numbered(file, namespaces) {
+    let mut list = builtins;
+    for signature in numbered(files, namespaces) {
         assert_eq!(
             signature.id.0,
             list.len(),
-            "constraints and conversions are numbered after the prelude's operators, in order"
+            "constraints and conversions are numbered after the built-ins, in order"
         );
         list.push(signature);
     }
-    for item in file.items() {
+    for (source, item) in files.items() {
         match item {
             Item::Operator(op) => {
                 let id = hir::OperatorId(list.len());
-                list.extend(operator(op, id, namespaces, errors));
+                list.extend(operator(op, id, source, namespaces, errors));
             }
             Item::Builtin(_) | Item::BuiltinType(_) | Item::Kind(_)
                 if source == Source::Prelude => {}
@@ -528,7 +537,7 @@ pub(crate) fn signatures(
                 builtin.syntax(),
             )),
             Item::Type(decl) => {
-                for signature in from_type(&decl, namespaces) {
+                for signature in from_type(&decl, source, namespaces) {
                     list.push(Signature {
                         id: hir::OperatorId(list.len()),
                         ..signature
@@ -542,27 +551,38 @@ pub(crate) fn signatures(
     Operators::new(list)
 }
 
-/// Each set of the program's operators in `list` of one name and the same
-/// parameters' names, checked as a specification and its versions (*Type
-/// Inheritance and Relational Theory*, IM Prescription 17): the one whose
-/// parameters' types are supertypes of all the others', and the others,
-/// each with parameters of subtypes of those, which a call of it computes
-/// for arguments of them. One with nothing to be a version of, or another
-/// with the same types, is a duplicate; a version unlike its specification
-/// is reported, as is an operator without a body that has no versions, or
-/// a combination of its union types' subtypes that none is for, or two
-/// are, neither more specific than the other.
-fn families(list: &mut [Signature], namespaces: &Namespaces, errors: &mut Vec<Diagnostic>) {
+/// The operators in `list` written in trendy, each by its place in it, in
+/// sets of one name and the same parameters' names. A built-in's
+/// duplicate is in none, as it is one already.
+fn sets(list: &[Signature]) -> Vec<Vec<usize>> {
     let mut sets: BTreeMap<(String, Vec<String>), Vec<usize>> = BTreeMap::new();
     for (i, signature) in list.iter().enumerate() {
-        if signature.decl.is_some() && signature.from_type.is_none() {
+        if signature.decl.is_some()
+            && signature.from_type.is_none()
+            && signature.family == Family::Own
+        {
             let names = signature.params.keys().cloned().collect();
             sets.entry((signature.name.clone(), names))
                 .or_default()
                 .push(i);
         }
     }
-    for members in sets.into_values() {
+    sets.into_values().collect()
+}
+
+/// Each set of the operators in `list` written in trendy, the prelude's and
+/// the program's, of one name and the same parameters' names, checked as a
+/// specification and its versions (*Type Inheritance and Relational
+/// Theory*, IM Prescription 17): the one whose parameters' types are
+/// supertypes of all the others', and the others, each with parameters of
+/// subtypes of those, which a call of it computes for arguments of them.
+/// One with nothing to be a version of, or another with the same types, is
+/// a duplicate; a version unlike its specification is reported, as is an
+/// operator without a body that has no versions, or a combination of its
+/// union types' subtypes that none is for, or two are, neither more
+/// specific than the other.
+fn families(list: &mut [Signature], namespaces: &Namespaces, errors: &mut Vec<Diagnostic>) {
+    for members in sets(list) {
         let covers = |spec: &Signature, other: &Signature| {
             other.params.iter().all(|(name, p)| {
                 spec.params
@@ -715,10 +735,7 @@ fn duplicate(list: &mut [Signature], first: usize, later: usize, errors: &mut Ve
         errors.push(errors::duplicate_operator(
             ident.text(),
             trendy_syntax::span(ident.text_range()),
-            (
-                crate::Kind::Operator,
-                Some(trendy_syntax::span(at.text_range())),
-            ),
+            (crate::Kind::Operator, trendy_syntax::span(at.text_range())),
             &params,
         ));
     }
@@ -813,6 +830,7 @@ fn leaves(ty: &hir::Type, namespaces: &Namespaces) -> Vec<hir::Type> {
 fn operator(
     op: ast::Operator,
     id: hir::OperatorId,
+    source: Source,
     namespaces: &Namespaces,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<Signature> {
@@ -868,10 +886,16 @@ fn operator(
             }
         }
     }
+    // A built-in has no versions, so one with a built-in's name and its
+    // parameters' names, reported with the names, is never called.
+    let names = crate::param_names(op.params().as_ref());
+    let duplicate = namespaces
+        .operator_with(ident.text(), &names)
+        .is_some_and(|(kind, _)| kind == Kind::Builtin);
     Some(Signature {
         id,
         name: ident.text().to_string(),
-        valid: declared_valid && params_valid && result_valid && determined,
+        valid: declared_valid && params_valid && result_valid && determined && !duplicate,
         types: type_parameters,
         written: written(&seen),
         params: seen,
@@ -880,13 +904,18 @@ fn operator(
         result,
         decl: Some(op),
         builtin: None,
+        source,
         from_type: None,
-        family: Family::Own,
+        family: if duplicate {
+            Family::Duplicate
+        } else {
+            Family::Own
+        },
         versions: Vec::new(),
     })
 }
 
-/// The signatures of the constraints of the types `file` declares, and of
+/// The signatures of the constraints of the types `files` declare, and of
 /// their possible representations' conversions to the stored ones and
 /// from them, in the order of the ids [`crate::named_types::resolve`] gave
 /// them: read-only operators, each named for its type and its place among
@@ -895,9 +924,12 @@ fn operator(
 /// boolean; a conversion's parameters are the components of the
 /// representation it converts from, and its value the tuple of those of
 /// the one it converts to.
-fn numbered(file: &SourceFile, namespaces: &Namespaces) -> Vec<Signature> {
+fn numbered(files: &Files, namespaces: &Namespaces) -> Vec<Signature> {
     let mut signatures = Vec::new();
-    for decl in file.types() {
+    for (source, item) in files.items() {
+        let Item::Type(decl) = item else {
+            continue;
+        };
         let Some(ident) = decl.name().and_then(|n| n.ident()) else {
             continue;
         };
@@ -930,6 +962,7 @@ fn numbered(file: &SourceFile, namespaces: &Namespaces) -> Vec<Signature> {
                 result: Some(hir::Type::Scalar(hir::Scalar::Boolean)),
                 decl: None,
                 builtin: None,
+                source,
                 from_type: Some(from_type(Made::Constraint(written))),
                 family: Family::Own,
                 versions: Vec::new(),
@@ -952,6 +985,7 @@ fn numbered(file: &SourceFile, namespaces: &Namespaces) -> Vec<Signature> {
                     result: Some(hir::Type::Tuple(result)),
                     decl: None,
                     builtin: None,
+                    source,
                     from_type: Some(from_type(made)),
                     family: Family::Own,
                     versions: Vec::new(),
@@ -992,7 +1026,7 @@ fn component_parameters(components: &hir::Heading) -> BTreeMap<String, hir::Para
 /// reported. None for a type whose stored components have errors, and
 /// those of a representation with errors in its conversions, which are
 /// reported, are invalid.
-fn from_type(decl: &ast::TypeDecl, namespaces: &Namespaces) -> Vec<Signature> {
+fn from_type(decl: &ast::TypeDecl, source: Source, namespaces: &Namespaces) -> Vec<Signature> {
     let Some(ident) = decl.name().and_then(|n| n.ident()) else {
         return Vec::new();
     };
@@ -1015,6 +1049,7 @@ fn from_type(decl: &ast::TypeDecl, namespaces: &Namespaces) -> Vec<Signature> {
         result: Some(result),
         decl: None,
         builtin: None,
+        source,
         from_type: Some(FromType {
             defined: defined.clone(),
             decl: decl.clone(),

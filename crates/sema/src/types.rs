@@ -34,8 +34,12 @@ pub(crate) enum Origin {
     /// Another value that set the type, such as the tuple of a relation
     /// selector that gives the others theirs.
     Value(Expr),
-    /// A built-in operator's parameter, declared in the prelude: there is no
-    /// place in the program to point at.
+    /// A type written in the prelude, a parameter's of an operator it
+    /// defines in trendy: labeled, but never changed by a fix, as the
+    /// prelude is part of the compiler.
+    Prelude(TypeExpr),
+    /// A built-in operator's parameter, declared in the prelude, not as an
+    /// operator written in trendy is: there is nothing to point at.
     Builtin,
     /// An operator such as `and` or `+`, for its operands.
     Operator(SyntaxToken),
@@ -107,7 +111,7 @@ impl Origin {
     /// Where to point a secondary label, if anywhere.
     fn span(&self) -> Option<Span> {
         match self {
-            Origin::Type(t) => Some(t.span()),
+            Origin::Type(t) | Origin::Prelude(t) => Some(t.span()),
             Origin::Heading(h) => Some(h.span()),
             Origin::Value(v)
             | Origin::Replaced(v, _)
@@ -125,7 +129,7 @@ impl Origin {
 
     fn label(&self) -> String {
         match self {
-            Origin::Type(_) | Origin::Heading(_) | Origin::Builtin => {
+            Origin::Type(_) | Origin::Prelude(_) | Origin::Heading(_) | Origin::Builtin => {
                 "expected because of this type".to_string()
             }
             Origin::Value(v)

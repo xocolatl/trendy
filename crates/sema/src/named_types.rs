@@ -8,12 +8,12 @@ use std::collections::{HashMap, HashSet};
 
 use trendy_diag::{Diagnostic, Span};
 use trendy_hir as hir;
-use trendy_syntax::ast::{self, AstNode, HeadingDecl, HeadingRef, SourceFile, TypeDecl, TypeRef};
+use trendy_syntax::ast::{self, AstNode, HeadingDecl, HeadingRef, TypeDecl, TypeRef};
 
 use crate::check::{self, Representation};
 use crate::errors;
 use crate::types::{self, TypeParameters};
-use crate::{Converted, Namespaces};
+use crate::{Converted, Files, Namespaces};
 
 /// A heading's or a type's declaration, and the declared headings and
 /// types it contains.
@@ -557,7 +557,7 @@ fn specialized(decl: &TypeDecl, name: &str, supertype: &str, errors: &mut Vec<Di
     ok
 }
 
-/// Resolve the attributes of each heading `file` declares, and the
+/// Resolve the attributes of each heading `files` declare, and the
 /// components, possible representations and constraints of each type, into
 /// `namespaces`, reporting each cycle among them, and every error in their
 /// attributes. Each constraint, and each representation's conversion to the
@@ -565,12 +565,12 @@ fn specialized(decl: &TypeDecl, name: &str, supertype: &str, errors: &mut Vec<Di
 /// resolve, a type's constraints first, which
 /// [`crate::operators::signatures`] makes.
 pub(crate) fn resolve(
-    file: &SourceFile,
+    files: &Files,
     namespaces: &mut Namespaces,
     first: hir::OperatorId,
     errors: &mut Vec<Diagnostic>,
 ) {
-    let mut declared = declarations(file, namespaces);
+    let mut declared = declarations(files, namespaces);
     let supertypes = supertypes(&declared, namespaces, errors);
     // Which representations convert, reported once for each type but a
     // union type, whose representations are an error: of a subtype defined
@@ -676,16 +676,16 @@ pub(crate) fn resolve(
     unions(&declared, &supertypes, namespaces);
 }
 
-/// The headings and types `file` declares, each the first of its name, by
+/// The headings and types `files` declare, each the first of its name, by
 /// name, with what it names.
-fn declarations(file: &SourceFile, namespaces: &Namespaces) -> Vec<(String, Declared)> {
-    let headings = file.headings().filter_map(|decl| {
+fn declarations(files: &Files, namespaces: &Namespaces) -> Vec<(String, Declared)> {
+    let headings = files.headings().filter_map(|decl| {
         let ident = decl.name()?.ident()?;
         namespaces
             .is_first_heading(&ident)
             .then(|| (ident.text().to_string(), Decl::Heading(decl)))
     });
-    let types = file.types().filter_map(|decl| {
+    let types = files.types().filter_map(|decl| {
         let ident = decl.name()?.ident()?;
         namespaces
             .is_first_type(&ident)

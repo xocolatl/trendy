@@ -14,9 +14,10 @@ mod render;
 mod source;
 
 pub use code::{Code, CodeKind};
-pub use source::{LineCol, SourceMap};
+pub use source::{File, LineCol, Located, SourceMap, Sources};
 
-/// Byte range into the source text.
+/// Byte range into the source text: a file's, or a unit's, its files' one
+/// after another (see [`Sources`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Span {
     pub start: usize,
@@ -142,16 +143,17 @@ impl Diagnostic {
         self.primary.span
     }
 
-    /// Render for a person reading a terminal, with source excerpts.
+    /// Render for a person reading a terminal, with excerpts of the
+    /// `sources` its spans are in.
     #[must_use]
-    pub fn render(&self, path: &str, source: &str) -> String {
-        render::human(self, path, &SourceMap::new(source))
+    pub fn render(&self, sources: &Sources) -> String {
+        render::human(self, sources)
     }
 
     /// Render as one line of JSON, for tools and agents.
     #[must_use]
-    pub fn to_json(&self, path: &str, source: &str) -> String {
-        json::render(self, path, &SourceMap::new(source))
+    pub fn to_json(&self, sources: &Sources) -> String {
+        json::render(self, sources)
     }
 }
 
@@ -176,19 +178,18 @@ impl Format {
     }
 }
 
-/// Render diagnostics in the order given.
+/// Render diagnostics in the order given, whose spans are in `sources`.
 #[must_use]
-pub fn render_all(diagnostics: &[Diagnostic], format: Format, path: &str, source: &str) -> String {
-    let map = SourceMap::new(source);
+pub fn render_all(diagnostics: &[Diagnostic], format: Format, sources: &Sources) -> String {
     match format {
         Format::Human => diagnostics
             .iter()
-            .map(|d| render::human(d, path, &map))
+            .map(|d| render::human(d, sources))
             .collect::<Vec<_>>()
             .join("\n"),
         Format::Json => diagnostics
             .iter()
-            .map(|d| json::render(d, path, &map) + "\n")
+            .map(|d| json::render(d, sources) + "\n")
             .collect(),
     }
 }
