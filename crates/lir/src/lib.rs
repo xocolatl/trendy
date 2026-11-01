@@ -432,6 +432,11 @@ pub enum RuntimeFn {
     /// [`Layout::Usize`]) calls the trace recorded, which
     /// [`RuntimeFn::Traced`] counted: those of a failure another replaces.
     TraceSince,
+    /// `trendy_rt_untrace(since)`: forget the calls the trace recorded
+    /// after the first `since` (a [`Layout::Usize`]), which
+    /// [`RuntimeFn::Traced`] counted: those of a failure a transaction
+    /// takes.
+    Untrace,
     /// `trendy_rt_write_trace()`: write the calls the trace recorded, as
     /// notes after the failure's error, and forget them.
     WriteTrace,
@@ -581,7 +586,7 @@ pub enum RuntimeFn {
 
 impl RuntimeFn {
     /// Every runtime function, for checking the runtime against them.
-    pub const ALL: [RuntimeFn; 65] = [
+    pub const ALL: [RuntimeFn; 66] = [
         RuntimeFn::DebugValue,
         RuntimeFn::DebugTable,
         RuntimeFn::ToText,
@@ -627,6 +632,7 @@ impl RuntimeFn {
         RuntimeFn::Trace,
         RuntimeFn::Traced,
         RuntimeFn::TraceSince,
+        RuntimeFn::Untrace,
         RuntimeFn::WriteTrace,
         RuntimeFn::Keep,
         RuntimeFn::Retain,
@@ -718,6 +724,7 @@ impl RuntimeFn {
             | RuntimeFn::Trace
             | RuntimeFn::Traced
             | RuntimeFn::TraceSince
+            | RuntimeFn::Untrace
             | RuntimeFn::WriteTrace
             | RuntimeFn::Retain
             | RuntimeFn::Adopt
@@ -776,6 +783,7 @@ impl RuntimeFn {
             RuntimeFn::Trace => "trendy_rt_trace",
             RuntimeFn::Traced => "trendy_rt_traced",
             RuntimeFn::TraceSince => "trendy_rt_trace_since",
+            RuntimeFn::Untrace => "trendy_rt_untrace",
             RuntimeFn::WriteTrace => "trendy_rt_write_trace",
             RuntimeFn::Keep => "trendy_rt_keep",
             RuntimeFn::Retain => "trendy_rt_retain",

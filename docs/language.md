@@ -4802,7 +4802,8 @@ they are finite and have one zero: `x + 0e0` is `x`, and `x * 0e0` is `0e0`.
 
 A program fails on purpose with `fail e`, where `e` is an *error*: a value
 of one of the subtypes of the prelude's union type `error` (see [Union
-types](#union-types)), which says what went wrong. It stops the program,
+types](#union-types)), which says what went wrong. Unless a transaction
+takes it (see [Transactions](#transactions)), it stops the program,
 writing the error's message and where it is, as a failure of the
 language's own does (R0021). The prelude's `message{error: error}: text`
 writes the message: it has no body, so each subtype has its version. The
@@ -4854,13 +4855,15 @@ operator main{} [
 - **An error is a value of one of `error`'s subtypes** (A0004): a text is
   the message of the prelude's `failure`, `fail failure{message: "…"}`,
   which is fixed. Java's, JavaScript's and C++'s `throw` and Python's and
-  Ruby's `raise` are fixed to `fail` (P0047).
+  Ruby's `raise` are fixed to `fail` (P0047). A `fail` always gives its
+  error: `fail;` alone, as another language rethrows the exception it
+  handles, is reported (P0047), as nothing is ever being handled.
 - **The prelude's errors of the language's own failures** have plain
   components: `not_one_tuple { count }` (R0005), `index_out_of_range {
   position, length }` (R0011), `division_by_zero { operation }` (R0002)
   and `overflow { operation }` (R0001), each with the message the failure
-  writes. Nothing catches a failure yet, so a program meets them only in
-  its own `fail`s. A built-in that reads input gives the world's errors as
+  writes. A transaction takes only a `fail`'s error yet, so a program
+  meets them only in its own `fail`s. A built-in that reads input gives the world's errors as
   values instead, when its call names `out errors`: `unreadable_file {
   path, reason }` (R0012) and `not_utf8 { path, line }` (R0013), from
   `load_text_file` and `load_csv`, and from `load_csv` `malformed_csv {
@@ -4872,6 +4875,94 @@ operator main{} [
   attribute, type, component, key, first, second }` (R0008) and
   `overlapping_subtypes_in_file { path, line, attribute, value, first,
   second }` (R0020).
+
+## Transactions
+
+A transaction is a block of statements that are all done or none are
+(TTM OO Prescription 4): `transaction [ … ];`. If a statement in it
+fails, the transaction undoes them all, each variable they assigned
+given back the value it had as the transaction began, and the failure
+goes on, to the transaction around it, or else the program's end. With
+`collecting e`, the transaction takes the failure instead: it adds the
+failure's error to `e`, a variable of type `relation { error: error }`
+declared before it, and the statements after the transaction run. If
+none fails, what they did is kept, and `e` is as it was.
+
+```trendy
+var granaries: relation { city: text, sacks: integer } := relation {
+    { city: "Accra", sacks: 40 },
+    { city: "Tashkent", sacks: 10 },
+}
+key { city };
+
+type too_few is error { { city: text, sacks: integer } };
+
+operator message{error: too_few}: text [
+    error.city || " has " || to_text{from: error.sacks} || " sacks"
+];
+
+operator transfer{origin: text, destination: text, n: integer} [
+    update granaries { sacks := sacks + n } where city = destination;
+    var have := sum{r: (granaries where city = origin){sacks}, of: sacks};
+    if have < n then [
+        fail too_few{city: origin, sacks: have};
+    ];
+    update granaries { sacks := sacks - n } where city = origin;
+];
+
+operator main{} [
+    var found: relation { error: error };
+    transaction collecting found [
+        call transfer{origin: "Tashkent", destination: "Accra", n: 15};
+    ];
+    call debug_value{v: (found extend { message := message{error: error} }){message}};
+    call debug_table{r: granaries};
+];
+```
+
+Here Accra gets its 15 sacks before Tashkent turns out to have only 10,
+so the transaction undoes the transfer, Accra's sacks too, and `found`
+holds the error: `granaries` is as it was.
+
+- **Code never knows whether it is in a transaction.** An operator
+  fails, and whatever encloses it decides what that means, so no
+  operator takes a parameter for its errors (TTM, chapter 5, rules out
+  "a feedback argument on each and every operator invocation").
+- **Transactions nest** (TTM OO Prescription 5), with the same syntax at
+  every depth: an inner one's failure undoes its own block, and, without
+  `collecting`, goes on to the one around it, which undoes its own; with,
+  the one around it goes on.
+- **A transaction undoes everything its statements assigned:** the
+  program's variables, through the operators they call too, at any
+  depth, and the local variables of the operator it is in, declared
+  outside its block, and the variables passed to that operator's `var`
+  and `out` parameters. What it wrote, as with `debug_value`, stays
+  written.
+- **`collecting` names a variable, and adds to it:** one the operator
+  can assign, of type `relation { error: error }` (A0004), declared
+  before the transaction, which the fix for one that isn't does (A0015).
+  So one variable collects the errors of a loop's transactions, and the
+  statements after them test it as a relation, as in `if not
+  is_empty{r: found} then [ … ];`. Adding to an `out` parameter reads
+  it, so it is assigned before (A0054). A transaction declares no
+  variable: what it collects outlives it, so it is the program's to
+  declare, as any variable is.
+- **An `out` parameter only a collecting transaction assigns** isn't
+  assigned on every path, since a failure the transaction takes undoes
+  the assignment (A0054); one without `collecting` assigns what its block
+  does, as its failure goes on.
+- **A transaction is a statement,** so only an update operator's body
+  has one: a read-only operator, or a value block, changes nothing, so a
+  transaction in it would have nothing to undo (A0035).
+- **A failure of the language's own carries no error yet:** a
+  transaction undoes its statements, and the failure goes on, so it
+  stops the program, as before. Only a `fail`'s error is taken.
+- **SQL's habits are reported:** `BEGIN TRANSACTION` and `START
+  TRANSACTION` are fixed to `transaction` (P0048); `COMMIT` is removed,
+  as a transaction commits where its block ends, and `ROLLBACK` is a
+  `fail`, with an error that says why (P0049). Another language's `try`
+  and `catch` are a collecting transaction, its errors handled after it
+  (P0050).
 
 ## Literals
 
@@ -4979,12 +5070,13 @@ are case-sensitive. The keywords are `operator`, `var`, `call`, `builtin`,
 `ungroup`, `wrap`, `unwrap`, `join`, `times`, `compose`, `matching`,
 `union`, `d_union`, `xunion`, `intersect`, `minus`, `i_minus`, `where`,
 `as`, `insert`, `d_insert`, `delete`, `i_delete`, `update`, `assign`,
-`return`, `if`, `then`, `else`, `while`, `loop` and `for`, all lowercase,
-and a keyword can't be a name (P0017).
+`return`, `if`, `then`, `else`, `while`, `loop`, `for` and
+`transaction`, all lowercase, and a keyword can't be a name (P0017).
 `type` is a keyword only after `builtin` and before a type's name, `key`
 only where a variable's keys go, `value` and `from` only in `tuple from` and `value from`, and
 `load`, `from`, `order`, `asc` and `desc` only in a load, `in` only
-in a `for` loop, and `heading` only before a heading's name.
+in a `for` loop, `collecting` only after `transaction`, and `heading`
+only before a heading's name.
 
 Operators, values, and types with headings each have a namespace of
 their own. Values are variables and parameters, and a parameter hides a

@@ -125,6 +125,12 @@ enum StatementStart {
     While,
     Loop,
     For,
+    /// `transaction [ … ];`, or SQL's `BEGIN TRANSACTION`.
+    Transaction,
+    /// SQL's `COMMIT;` or `ROLLBACK;`, which a transaction has none of.
+    TransactionEnd,
+    /// Another language's `try { … } catch`, which trendy has none of.
+    Try,
     /// A heading's declaration, which goes at the top level.
     Heading,
     /// A type's declaration, which goes at the top level.
@@ -142,6 +148,9 @@ enum StatementStart {
     Return,
     /// `fail e;`, or another language's `throw e;`.
     Fail,
+    /// `fail;`, or another language's `throw;` or `raise`, which rethrows
+    /// the exception being handled: trendy has none to.
+    BareFail,
     /// `debug_value{v: r};`, a call without `call`, or, where a value
     /// goes, a read-only operator's call.
     BareCall,
@@ -1377,6 +1386,8 @@ impl<'a> Parser<'a> {
             || (found.kind == SyntaxKind::Ident && found.text.eq_ignore_ascii_case("foreach"))
         {
             StatementStart::For
+        } else if self.at_transaction() {
+            StatementStart::Transaction
         } else if found.text == "heading" && self.at_heading_decl() {
             StatementStart::Heading
         } else if found.text == "type" && self.at_type_decl() {
@@ -1399,6 +1410,12 @@ impl<'a> Parser<'a> {
             StatementStart::Return
         } else if self.at_fail() {
             StatementStart::Fail
+        } else if self.at_bare_fail() {
+            StatementStart::BareFail
+        } else if self.at_transaction_end() {
+            StatementStart::TransactionEnd
+        } else if self.at_try() {
+            StatementStart::Try
         } else if found.kind == SyntaxKind::Ident && call_like {
             StatementStart::BareCall
         } else {
@@ -1420,6 +1437,13 @@ impl<'a> Parser<'a> {
             Some(StatementStart::While) => self.while_stmt(),
             Some(StatementStart::Loop) => self.loop_stmt(),
             Some(StatementStart::For) => self.for_stmt(),
+            Some(StatementStart::Transaction) => self.transaction_stmt(),
+            Some(StatementStart::TransactionEnd) => self.transaction_end(found),
+            Some(StatementStart::Try) => self.try_stmt(),
+            Some(StatementStart::BareFail) => {
+                self.skip_statement(&STATEMENT_STOPS);
+                self.errors.push(errors::bare_fail(found));
+            }
             // A heading or a type declared in a body, as a local type: parsed
             // as one, and moved before the definition it is in.
             Some(start @ (StatementStart::Heading | StatementStart::Type)) => {
@@ -1954,6 +1978,239 @@ impl<'a> Parser<'a> {
         self.end_loop(&unbracketed, last_unbracketed);
         self.builder.finish_node();
         self.form = outer_form;
+    }
+
+    /// Whether a transaction starts here: `transaction`, or the same word
+    /// in another case before its block or `collecting`, or SQL's
+    /// `BEGIN TRANSACTION` or `START TRANSACTION`.
+    fn at_transaction(&mut self) -> bool {
+        let Some(found) = self.found() else {
+            return false;
+        };
+        let sql = found.kind == SyntaxKind::Ident
+            && ["begin", "start"]
+                .iter()
+                .any(|word| found.text.eq_ignore_ascii_case(word))
+            && self
+                .found_after(1)
+                .is_some_and(|f| f.spells(SyntaxKind::TransactionKw));
+        let miscased = found.spells(SyntaxKind::TransactionKw)
+            && self.found_after(1).is_some_and(|f| {
+                matches!(f.kind, SyntaxKind::LBracket | SyntaxKind::LBrace)
+                    || (f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case("collecting"))
+            });
+        found.kind == SyntaxKind::TransactionKw || miscased || sql
+    }
+
+    /// `transaction [ … ];` or `transaction collecting e [ … ];`: the
+    /// block's statements, undone, all of them, if one fails, and with
+    /// `collecting`, the errors they give, added to the variable `e`.
+    /// `collecting` is a contextual keyword. SQL's `BEGIN
+    /// TRANSACTION` and `START TRANSACTION` are fixed, and the habits of a
+    /// block (see [`Parser::branch`]) reported.
+    fn transaction_stmt(&mut self) {
+        let outer_form = std::mem::replace(&mut self.form, errors::TRANSACTION_FORM);
+        self.start_node(SyntaxKind::TransactionStmt);
+        let found = self.found().expect("at the transaction");
+        if !found.spells(SyntaxKind::TransactionKw) {
+            self.bump();
+            let keyword = self.found().expect("`transaction` follows");
+            self.errors
+                .push(errors::transaction_start(found, keyword.span.start));
+        }
+        self.any_case(SyntaxKind::TransactionKw);
+        if self.at_word("collecting") {
+            self.start_node(SyntaxKind::Collecting);
+            self.contextual_keyword("collecting");
+            if self.at(SyntaxKind::Ident) {
+                self.start_node(SyntaxKind::NameRef);
+                self.bump();
+                self.builder.finish_node();
+            } else {
+                self.missing_with_help(
+                    SyntaxKind::Ident,
+                    "name the variable the errors it collects are added to, as in `transaction collecting found [ … ];`",
+                );
+            }
+            self.builder.finish_node();
+        }
+        let mut unbracketed = Vec::new();
+        let last_unbracketed = self.branch(&mut unbracketed);
+        let shared = last_unbracketed && !self.at(SyntaxKind::Semicolon);
+        for &span in &unbracketed {
+            self.errors.push(errors::unbracketed_branch(
+                span,
+                shared,
+                "a transaction's block",
+            ));
+        }
+        if !shared {
+            self.expect(SyntaxKind::Semicolon);
+        }
+        self.builder.finish_node();
+        self.form = outer_form;
+    }
+
+    /// Whether SQL's end of a transaction is next: `COMMIT` or `ROLLBACK`,
+    /// in any case, alone, or before `WORK` or `TRANSACTION`, then `;`.
+    fn at_transaction_end(&mut self) -> bool {
+        let Some(found) = self.found() else {
+            return false;
+        };
+        let word = found.kind == SyntaxKind::Ident
+            && ["commit", "rollback"]
+                .iter()
+                .any(|word| found.text.eq_ignore_ascii_case(word));
+        word && self.found_after(1).is_some_and(|f| {
+            f.kind == SyntaxKind::Semicolon
+                || f.spells(SyntaxKind::TransactionKw)
+                || (f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case("work"))
+        })
+    }
+
+    /// SQL's `COMMIT;` or `ROLLBACK;`, starting at `found`, which
+    /// [`Parser::at_transaction_end`] found: skipped, and reported, with
+    /// the fix removing a `commit`, from the end of the statement before.
+    fn transaction_end(&mut self, found: Found) {
+        let (at, before) = (self.pos, self.last_end.unwrap_or(found.span.start));
+        self.skip_statement(&STATEMENT_STOPS);
+        let end = self.last_end.unwrap_or(found.span.end);
+        let commit = found.text.eq_ignore_ascii_case("commit");
+        let words = self.words(at..self.pos);
+        self.errors.push(errors::transaction_end(
+            found,
+            Span::new(before, end),
+            &words,
+            commit,
+        ));
+    }
+
+    /// The words of the tokens in `range`, as written, for a message.
+    fn words(&self, range: std::ops::Range<usize>) -> String {
+        let words: Vec<&str> = self.tokens[range]
+            .iter()
+            .filter(|token| !is_skipped(token.kind) && token.kind != SyntaxKind::Semicolon)
+            .map(|token| &self.source[token.span.start..token.span.end])
+            .collect();
+        words.join(" ")
+    }
+
+    /// Whether another language's `try` is next: `try`, in any case,
+    /// before a block in brackets, or before one in braces that `catch`,
+    /// `except`, `rescue` or `finally` follows, which a call's arguments
+    /// don't.
+    fn at_try(&mut self) -> bool {
+        let Some(found) = self.found() else {
+            return false;
+        };
+        if found.kind != SyntaxKind::Ident || !found.text.eq_ignore_ascii_case("try") {
+            return false;
+        }
+        match self.found_after(1).map(|f| f.kind) {
+            Some(SyntaxKind::LBracket) => true,
+            Some(SyntaxKind::LBrace) => {
+                let mut depth = 0_usize;
+                let mut n = 1;
+                while let Some(next) = self.found_after(n) {
+                    match next.kind {
+                        SyntaxKind::LBrace | SyntaxKind::LBracket | SyntaxKind::LParen => {
+                            depth += 1;
+                        }
+                        SyntaxKind::RBrace | SyntaxKind::RBracket | SyntaxKind::RParen => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return self.found_after(n + 1).is_some_and(at_handler);
+                            }
+                        }
+                        _ => {}
+                    }
+                    n += 1;
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// Another language's `try { … } catch (e) { … }`, which [`Parser::at_try`]
+    /// found: reported, its block parsed as a transaction's, whose
+    /// failures it takes, and the handlers after it skipped.
+    fn try_stmt(&mut self) {
+        self.start_node(SyntaxKind::TransactionStmt);
+        let found = self.found().expect("at `try`");
+        self.bump();
+        // In the brackets it is written with: the whole is reported.
+        let delims = if self.at(SyntaxKind::LBrace) {
+            (SyntaxKind::LBrace, SyntaxKind::RBrace)
+        } else {
+            (SyntaxKind::LBracket, SyntaxKind::RBracket)
+        };
+        self.delimited(
+            Some(SyntaxKind::Body),
+            "block",
+            delims,
+            &[],
+            Self::statements,
+        );
+        let mut handlers = None;
+        while let Some(handler) = self.found().filter(|f| at_handler(*f)) {
+            self.start_node(SyntaxKind::Error);
+            self.bump();
+            if self.at(SyntaxKind::LParen) || self.at(SyntaxKind::Ident) {
+                self.skip_to_block();
+            }
+            if self.at(SyntaxKind::LBracket) || self.at(SyntaxKind::LBrace) {
+                self.skip_balanced();
+            }
+            self.builder.finish_node();
+            let end = self.last_end.unwrap_or(handler.span.end);
+            handlers = Some(Span::new(
+                handlers.map_or(handler.span.start, |h: Span| h.start),
+                end,
+            ));
+        }
+        if self.at(SyntaxKind::Semicolon) {
+            self.bump();
+        }
+        self.builder.finish_node();
+        self.errors.push(errors::exception_handler(found, handlers));
+    }
+
+    /// Skip what comes before a handler's block, as `(e)` or `e`, up to the
+    /// block.
+    fn skip_to_block(&mut self) {
+        while let Some(kind) = self.peek() {
+            if matches!(
+                kind,
+                SyntaxKind::LBracket | SyntaxKind::LBrace | SyntaxKind::Semicolon
+            ) {
+                return;
+            }
+            if kind == SyntaxKind::LParen {
+                self.skip_balanced();
+            } else {
+                self.bump();
+            }
+        }
+    }
+
+    /// Skip a bracketed group, with all it contains, starting at its
+    /// opening bracket.
+    fn skip_balanced(&mut self) {
+        let mut depth = 0_usize;
+        while let Some(kind) = self.peek() {
+            self.bump();
+            match kind {
+                SyntaxKind::LBrace | SyntaxKind::LBracket | SyntaxKind::LParen => depth += 1,
+                SyntaxKind::RBrace | SyntaxKind::RBracket | SyntaxKind::RParen => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return;
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Whether C's `for (…; …; …)` is next: parentheses with a `;` right
@@ -3769,6 +4026,20 @@ impl<'a> Parser<'a> {
                     && !f.text.eq_ignore_ascii_case("as")
                     && !f.text.eq_ignore_ascii_case("is"))
         })
+    }
+
+    /// Whether `fail` without an error is next, or another language's
+    /// `throw` or `raise`, in any case, alone before a `;`.
+    fn at_bare_fail(&mut self) -> bool {
+        let word = self.found().is_some_and(|f| {
+            f.kind == SyntaxKind::Ident
+                && FAIL_WORDS
+                    .iter()
+                    .any(|word| f.text.eq_ignore_ascii_case(word))
+        });
+        word && self
+            .found_after(1)
+            .is_some_and(|f| f.kind == SyntaxKind::Semicolon)
     }
 
     /// `fail e`, which [`Parser::at_fail`] found: the program fails with
@@ -5611,6 +5882,15 @@ const STATEMENT_STOPS: [SyntaxKind; 3] = [
     SyntaxKind::VarKw,
 ];
 
+/// Whether `found` starts another language's handler of an exception, after
+/// a `try` block: `catch`, `except`, `rescue` or `finally`.
+fn at_handler(found: Found) -> bool {
+    found.kind == SyntaxKind::Ident
+        && ["catch", "except", "rescue", "finally"]
+            .iter()
+            .any(|word| found.text.eq_ignore_ascii_case(word))
+}
+
 fn is_skipped(kind: SyntaxKind) -> bool {
     kind.is_trivia() || kind == SyntaxKind::ErrorToken
 }
@@ -7407,6 +7687,98 @@ var b := tuple { fail: fail }.fail;",
             assert_eq!(codes, [code], "{source}: {:#?}", parse.errors);
             assert_eq!(fix(source), fixed, "{source}");
         }
+        // Without an error, as another language rethrows: no fix.
+        for source in [
+            "operator f{} [ fail; ];",
+            "operator f{} [ throw; ];",
+            "operator f{} [ raise; ];",
+        ] {
+            let parse = parse_str(source);
+            let codes: Vec<Code> = parse.errors.iter().map(|e| e.code).collect();
+            assert_eq!(codes, [Code::FailSpelling], "{source}");
+            assert!(parse.errors[0].suggestions.is_empty(), "{source}");
+        }
+    }
+
+    #[test]
+    fn transactions() {
+        // With and without `collecting`, nested; `collecting` is a name
+        // elsewhere, and `begin`, `commit` and `try` are too.
+        let parse = parse_str(
+            "operator f{} [
+    transaction [ call g{}; ];
+    transaction collecting found [
+        transaction [ var collecting := 1; ];
+    ];
+    var begin := 1;
+    commit := begin;
+    call try{n: 1};
+];",
+        );
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let transactions: Vec<Option<String>> = parse
+            .tree
+            .syntax()
+            .descendants()
+            .filter_map(trendy_syntax::ast::TransactionStmt::cast)
+            .map(|t| {
+                t.collecting()
+                    .and_then(|c| c.variable()?.ident())
+                    .map(|i| i.text().to_string())
+            })
+            .collect();
+        assert_eq!(transactions, [None, Some("found".to_string()), None]);
+        // SQL's words and another language's `try`, reported, with fixes
+        // where they are mechanical.
+        for (source, fixed, codes) in [
+            (
+                "operator f{} [ begin transaction [ call g{}; ]; ];",
+                Some("operator f{} [ transaction [ call g{}; ]; ];"),
+                vec![Code::TransactionStart],
+            ),
+            (
+                "operator f{} [ START TRANSACTION [ call g{}; ]; ];",
+                None,
+                vec![Code::TransactionStart, Code::MiscasedKeyword],
+            ),
+            (
+                "operator f{} [ transaction [ call g{}; commit; ]; ];",
+                Some("operator f{} [ transaction [ call g{}; ]; ];"),
+                vec![Code::TransactionEnd],
+            ),
+            (
+                "operator f{} [ transaction [ ROLLBACK WORK; ]; ];",
+                None,
+                vec![Code::TransactionEnd],
+            ),
+            (
+                "operator f{} [ try { call g{}; } catch (e) { call h{}; } ];",
+                None,
+                vec![Code::ExceptionHandler],
+            ),
+            (
+                "operator f{} [ try [ call g{}; ] except [ call h{}; ]; ];",
+                None,
+                vec![Code::ExceptionHandler],
+            ),
+        ] {
+            let parse = parse_str(source);
+            let found: Vec<Code> = parse.errors.iter().map(|e| e.code).collect();
+            assert_eq!(found, codes, "{source}: {:#?}", parse.errors);
+            if let Some(fixed) = fixed {
+                assert_eq!(fix(source), fixed, "{source}");
+            }
+        }
+        // A `try`'s block is a transaction's, whose statements are checked.
+        let parse = parse_str("operator f{} [ try [ call g{}; ] catch [ call h{}; ]; ];");
+        let tried = parse
+            .tree
+            .syntax()
+            .descendants()
+            .find_map(trendy_syntax::ast::TransactionStmt::cast)
+            .and_then(|t| t.body())
+            .map(|b| b.statements().count());
+        assert_eq!(tried, Some(1));
     }
 
     #[test]
@@ -8061,7 +8433,8 @@ type rule { { constraint: text } };",
                 | Statement::If(_)
                 | Statement::While(_)
                 | Statement::Loop(_)
-                | Statement::For(_) => Vec::new(),
+                | Statement::For(_)
+                | Statement::Transaction(_) => Vec::new(),
             })
             .collect()
     }

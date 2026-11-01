@@ -465,6 +465,17 @@ are a variable's and an operator's. Its error is all that follows, as an
 runs to a read-only body's end is its value (`Parser::at_value`). Other
 languages' `throw` and `raise` are parsed as it and fixed to it (P0047).
 
+`transaction [ … ];` and `transaction collecting e [ … ];`
+(`TransactionStmt`, whose `collecting e` is a `Collecting` of the
+contextual keyword and a `NameRef`) have their block parsed as an `if`'s
+branch is (`Parser::branch`). SQL's `BEGIN TRANSACTION` and `START
+TRANSACTION` are parsed as one and fixed to it (P0048); `COMMIT;` and
+`ROLLBACK;`, with or without `WORK` or `TRANSACTION`, are reported, a
+`commit` removed (P0049); another language's `try` before a block, in
+brackets, or in braces that `catch`, `except`, `rescue` or `finally`
+follows, is parsed as a transaction, its block's statements checked, and
+the handlers after it skipped, reported once (P0050).
+
 `!!r` (`ImageExpr`), Tutorial D's image relation, takes a single operand:
 a name, a literal or a parenthesized expression. The lexer makes `!!` one
 token only when the two `!`s are together; a lone `!` is C's `not`, fixed
@@ -636,7 +647,14 @@ computed from the variables as they were; `if` statements
 without an `else`; loops (`Statement::Loop`), of a condition, checked
 before or after each run of the block (`hir::Check`), and the block; and
 `for` loops (`Statement::For`), of the loop's variable, a local variable
-the block lists, the array and the block. The shorthands are already expanded, and an `assign`
+the block lists, the array and the block; and transactions
+(`Statement::Transaction`), of the variable its `collecting` adds its
+errors to, if it has one, and the block. A block's statements are walked, with
+the blocks in them (`Block::each_statement`), for what they assign
+(`Block::assigned`) and call (`Block::called`), and the program's
+variables a block assigns, through its calls at any depth
+(`Program::variables_assigned`), which sema's checks and lowering's
+transactions share. The shorthands are already expanded, and an `assign`
 block's changes to one variable merged into one value. A local
 variable's declaration is the assignment of its initial value, or its
 type's default, and `Expr::Local` reads it. A block lists the local
@@ -646,6 +664,12 @@ scope in all of the block, hiding a variable of the program's with its
 name, but is reported if it is used before its declaration (A0045), or
 after its block ends (A0015); and reports one with a parameter's name or
 that of another local variable in scope (A0001), so none hides another.
+A transaction's `collecting` names a variable it adds its errors to, as
+an assignment's target is (`body::Statements::collecting`): declared
+before, which the fix for one that isn't does (A0015), of type
+`relation { error: error }` (A0004), and read, so an `out` parameter is
+assigned before (A0054). A transaction checks its block as a block of
+its own; a read-only operator and a value block have none (A0035).
 An `if` statement whose condition is known when compiling runs only one
 block, and the other's failures aren't reported (`body::Statements`). A
 loop whose condition is known to be true would never end, since nothing
@@ -669,8 +693,10 @@ names collect as they resolve, and a change that reads its target, such
 as `insert`, are reported if they come before (A0054), and then what the
 statement assigns, an assignment's target or an `out` argument, counts
 as assigned; an `if` assigns what both its branches do, `while` and
-`for` loops nothing, since their blocks may not run, and a `loop …
-while` what its block does, before its condition. One not assigned when
+`for` loops nothing, since their blocks may not run, a transaction with
+`collecting` nothing, since a failure it takes undoes its block, one
+without what its block does, and a `loop … while` what its block does,
+before its condition. One not assigned when
 the body ends is reported too (A0054), unless its reads already are.
 `Combination::DisjointChanges` is the union of the tuples changes remove,
 which conflict (R0009) if two remove the same one. An element's
@@ -1591,6 +1617,31 @@ holds, as the ends of its statements and blocks would have:
 A read-only operator's function begins no scope and holds nothing, so
 its exit only fails. The program's variables, and a caller's variables
 that a `var` or `out` parameter updates, keep what they hold.
+
+A block's failures go to the innermost block that takes them as it is
+built (`FunctionBuilder::catches`, `catching`), and else to the failure
+exit: a transaction's take its block's. As it begins, a transaction
+keeps each variable its block can assign (`FunctionBuilder::kept`,
+`Kept`): the program's variables it assigns, through its calls at any
+depth (`hir::Program::variables_assigned`), and the operator's local
+variables declared outside the block, and `var` and `out` parameters,
+that it assigns, each copied to a slot of its own, which takes
+references of its own (`trendy_rt_retain`). It also saves the innermost
+scope, and how many calls the trace holds. If the block runs to its end,
+the kept values are released. Its failures go to its rollback, which ends the scopes the block
+began, releases the local variables declared in it, the blocks in it
+too (`hir::Block::declared`), and gives each kept variable its value
+back, releasing what it held, and taking the kept value's references,
+which can't fail: every statement of the block has ended, so nothing
+reads what is released. With `collecting`, a `fail`'s error waiting is
+then taken: the trace forgets the calls recorded since the transaction
+began (`trendy_rt_untrace`), the error is added to the variable, as a
+union with `relation { { error: e } }`, checked against its keys
+(`FunctionBuilder::collect`), and `__failure` is released, and the program goes on after the
+transaction. Without `collecting`, or for a failure of the language's
+own, which has no error yet, the rollback ends in `Terminator::Raise`,
+and the failure goes on, to the transaction around it, or the function's
+failure exit.
 
 An assignment statement computes each value into a slot of its own: a
 copy, since a value can be a variable's own place, which assigning another

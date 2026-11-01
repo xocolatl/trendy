@@ -386,6 +386,7 @@ impl Statements<'_, '_> {
                 );
             }
             ast::Statement::For(stmt) => return self.for_stmt(stmt, errors),
+            ast::Statement::Transaction(stmt) => return self.transaction_stmt(stmt, errors),
             ast::Statement::Fail(stmt) => self.fail_stmt(stmt, errors),
         };
         self.settle(checked.as_ref(), errors);
@@ -480,6 +481,86 @@ impl Statements<'_, '_> {
             locals,
         };
         ok.then_some(hir::Statement::For(id?, array, body))
+    }
+
+    /// `transaction [ … ];` or `transaction collecting e [ … ];`: the
+    /// block's statements, undone, all of them, if one fails, and with
+    /// `collecting`, the errors they give added to the variable `e`. A
+    /// failure it collects undoes what its block assigned, so an `out`
+    /// parameter the block assigns isn't assigned after it; one it doesn't
+    /// collect goes on, so after it, the block ran.
+    fn transaction_stmt(
+        &mut self,
+        stmt: &ast::TransactionStmt,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Statement> {
+        let collecting = stmt
+            .collecting()
+            .map(|collecting| self.collecting(stmt, &collecting, errors));
+        let statements: Vec<ast::Statement> = stmt
+            .body()
+            .map(|body| body.statements().collect())
+            .unwrap_or_default();
+        let op = self.cx.operators.get(self.within);
+        let mut ok = self.locals.enter(statements.iter().cloned(), op, errors);
+        let before = self.outs.assigned.clone();
+        let mut checked = Vec::new();
+        for statement in &statements {
+            match self.sited(statement, errors) {
+                Some(statement) => checked.push(statement),
+                None => ok = false,
+            }
+        }
+        let locals = self.locals.exit();
+        if collecting.is_some() {
+            self.outs.assigned = before;
+        }
+        ok &= stmt.body().is_some() && collecting.as_ref().is_none_or(Option::is_some);
+        let body = hir::Block {
+            statements: checked,
+            locals,
+        };
+        ok.then(|| hir::Statement::Transaction(collecting.flatten(), body))
+    }
+
+    /// The variable `collecting`, of the transaction `stmt`, names, which
+    /// the transaction adds its errors to: one the operator can assign, of
+    /// type `relation { error: error }`, declared before. Adding to it reads
+    /// it, so an `out` parameter is assigned before (A0054). `None` after
+    /// reporting why it isn't one.
+    fn collecting(
+        &mut self,
+        stmt: &ast::TransactionStmt,
+        collecting: &ast::Collecting,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Target> {
+        let ident = collecting.variable()?.ident()?;
+        let (name, span) = (ident.text(), trendy_syntax::span(ident.text_range()));
+        let error = self.cx.namespaces.dummy("error")?;
+        let errors_type = hir::Type::Relation(hir::Heading::new(
+            [(
+                "error".to_string(),
+                hir::Type::Dummy(Box::new(error.clone())),
+            )]
+            .into(),
+        ));
+        let known = self.locals.find(name).is_some()
+            || self.cx.operators.get(self.within).is_parameter(name)
+            || self.cx.variable_ids.contains_key(name);
+        if !known {
+            errors.push(errors::undeclared_collecting(name, span, stmt));
+            return None;
+        }
+        let assignee = self.names().assigned(name, span, errors)?;
+        if assignee.ty != errors_type {
+            errors.push(errors::collecting_mismatch(name, span, &assignee.ty));
+            return None;
+        }
+        if let hir::Target::Parameter(name) = &assignee.target {
+            self.outs.reads.push((name.clone(), span));
+            self.flush(errors);
+        }
+        Some(assignee.target)
     }
 
     /// The declaration `decl` of a local variable: its initial value's
@@ -956,26 +1037,19 @@ fn assigned_variables(
 /// Add each variable of the program that `block`'s statements assign, or
 /// pass to a `var` parameter, in blocks within it too, to `assigned`.
 fn assigned_in(block: &hir::Block, assigned: &mut Vec<hir::VariableId>) {
-    each_statement(block, &mut |statement| {
-        let targets: Vec<&hir::Target> = match statement {
-            hir::Statement::Assign(assignments) => assignments.iter().map(|a| &a.target).collect(),
-            hir::Statement::Call(call) => call.updated.values().collect(),
-            _ => Vec::new(),
-        };
-        for target in targets {
-            if let hir::Target::Variable(id) = target
-                && !assigned.contains(id)
-            {
-                assigned.push(*id);
-            }
+    for target in block.assigned() {
+        if let hir::Target::Variable(id) = target
+            && !assigned.contains(&id)
+        {
+            assigned.push(id);
         }
-    });
+    }
 }
 
 /// Add each variable of the program that `block`'s calls pass to a `var`
 /// parameter, in blocks within it too, to `passed`.
 fn passed_in(block: &hir::Block, passed: &mut Vec<hir::VariableId>) {
-    each_statement(block, &mut |statement| {
+    block.each_statement(&mut |statement| {
         let hir::Statement::Call(call) = statement else {
             return;
         };
@@ -987,24 +1061,6 @@ fn passed_in(block: &hir::Block, passed: &mut Vec<hir::VariableId>) {
             }
         }
     });
-}
-
-/// Call `f` with each of `block`'s statements, and those in blocks within
-/// them, each before those within it.
-fn each_statement(block: &hir::Block, f: &mut dyn FnMut(&hir::Statement)) {
-    for (_, statement) in &block.statements {
-        f(statement);
-        match statement {
-            hir::Statement::If(_, then, otherwise) => {
-                each_statement(then, f);
-                each_statement(otherwise, f);
-            }
-            hir::Statement::Loop(_, body, _) | hir::Statement::For(_, _, body) => {
-                each_statement(body, f);
-            }
-            hir::Statement::Call(_) | hir::Statement::Assign(_) | hir::Statement::Fail(_) => {}
-        }
-    }
 }
 
 /// The variables of the program that the update operator `id` reads, in
@@ -1052,7 +1108,7 @@ fn read_variables(
 /// Call `f` with each expression `block`'s statements compute, in blocks
 /// within it too.
 fn exprs_in(block: &hir::Block, f: &mut dyn FnMut(&hir::Expr)) {
-    each_statement(block, &mut |statement| match statement {
+    block.each_statement(&mut |statement| match statement {
         hir::Statement::Call(call) => call.args.values().for_each(&mut *f),
         hir::Statement::Assign(assignments) => {
             for assignment in assignments {
@@ -1062,6 +1118,7 @@ fn exprs_in(block: &hir::Block, f: &mut dyn FnMut(&hir::Expr)) {
         hir::Statement::If(condition, ..) | hir::Statement::Loop(condition, ..) => f(condition),
         hir::Statement::For(_, array, _) => f(array),
         hir::Statement::Fail(error) => f(error),
+        hir::Statement::Transaction(..) => {}
     });
 }
 
@@ -1109,11 +1166,7 @@ fn growing_recursion(
 /// Add each operator `block`'s statements call, in blocks within it too, to
 /// `called`.
 fn calls_in(block: &hir::Block, called: &mut Vec<hir::OperatorId>) {
-    each_statement(block, &mut |statement| {
-        if let hir::Statement::Call(call) = statement {
-            called.push(call.operator);
-        }
-    });
+    called.extend(block.called());
 }
 
 /// Names in the body of `within`: its parameters and its local variables,

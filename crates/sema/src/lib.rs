@@ -2536,6 +2536,73 @@ var zero := seg{{len: 0}};{MAIN}"
     }
 
     #[test]
+    fn transactions_add_their_errors_to_a_variable() {
+        // `collecting` names a variable declared before, a relation of
+        // errors.
+        let source = "operator main{} [
+    var found: relation { error: error };
+    transaction collecting found [
+        call debug_value{v: 1};
+    ];
+    call debug_value{v: found};
+];";
+        let program = analyze_str(source).unwrap();
+        let hir::OperatorKind::Update { locals, body } = &program.operator(program.entry).kind
+        else {
+            panic!("main is an update operator");
+        };
+        let [
+            _,
+            (_, hir::Statement::Transaction(Some(hir::Target::Local(found)), block)),
+            _,
+        ] = &body.statements[..]
+        else {
+            panic!("{:#?}", body.statements);
+        };
+        assert_eq!(block.statements.len(), 1);
+        assert_eq!(locals[found.0].name, "found");
+        // One not declared, which the fix declares, or of another type; a
+        // transaction where nothing changes.
+        let undeclared = "operator main{} [\n    transaction collecting found [];\n];";
+        assert_eq!(codes(undeclared), [Code::UnknownName]);
+        assert_eq!(
+            fix(undeclared),
+            "operator main{} [\n    var found: relation { error: error };\n    transaction collecting found [];\n];"
+        );
+        for (source, code) in [
+            (
+                "operator main{} [ var n := 1; transaction collecting n []; ];",
+                Code::TypeMismatch,
+            ),
+            (
+                "operator f{}: integer [ transaction [ var a := 1; ]; 1 ];\noperator main{} [];",
+                Code::Return,
+            ),
+            (
+                "var a: integer := [ transaction [ var b := 1; ]; 1 ];\noperator main{} [];",
+                Code::Return,
+            ),
+        ] {
+            assert_eq!(codes(source), [code], "{source}");
+        }
+        // A failure a transaction collects undoes what its block assigned,
+        // an `out` parameter too; one it doesn't goes on. Adding to an
+        // `out` parameter reads it.
+        let out = |transaction: &str| {
+            format!(
+                "operator f{{out n: integer}} [ var e: relation {{ error: error }}; {transaction} [ n := 1; ]; ];\noperator main{{}} [ var n := 0; call f{{out n: n}}; ];"
+            )
+        };
+        assert_eq!(
+            codes(&out("transaction collecting e")),
+            [Code::UnassignedOut]
+        );
+        assert!(analyze_str(&out("transaction")).is_ok());
+        let read = "operator f{out e: relation { error: error }} [ transaction collecting e []; ];\noperator main{} [ var e: relation { error: error }; call f{out e: e}; ];";
+        assert_eq!(codes(read), [Code::UnassignedOut]);
+    }
+
+    #[test]
     fn the_prelude_has_error_and_its_messages() {
         let vars = variables(
             "var a := message{error: failure{message: \"why\"}};\nvar b := message{error: not_one_tuple{count: 0}};\nvar c := message{error: not_one_tuple{count: 2}};\nvar d := message{error: index_out_of_range{position: 0, length: 3}};\nvar e := message{error: index_out_of_range{position: 4, length: 0}};\nvar f := message{error: index_out_of_range{position: 4, length: 1}};\nvar g := message{error: index_out_of_range{position: 4, length: 3}};\nvar h := message{error: division_by_zero{operation: \"7 div 0\"}};\nvar i := message{error: overflow{operation: \"9223372036854775807 + 1\"}};\nvar j := message{error: unreadable_field{path: \"p.csv\", line: 1, column: 3, attribute: \"at.latitude\", type: \"approximate\", text: \"north\", out_of_range: false}};\nvar k := message{error: missing_column{path: \"p.csv\", attribute: \"km\", column: 4, columns: 3}};\nvar l := message{error: unreadable_field{path: \"p.csv\", line: 2, column: 1, attribute: \"open\", type: \"boolean\", text: \"maybe\", out_of_range: false}};\nvar m := message{error: component_key_violated_in_file{path: \"p.csv\", line: 2, attribute: \"s\", type: \"span\", component: \"days\", key: \"\", first: \"a\", second: \"b\"}};",
@@ -7793,7 +7860,8 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
                 | hir::Statement::If(..)
                 | hir::Statement::Loop(..)
                 | hir::Statement::For(..)
-                | hir::Statement::Fail(_) => None,
+                | hir::Statement::Fail(_)
+                | hir::Statement::Transaction(..) => None,
             })
             .collect();
         let local = |i| vec![hir::Target::Local(hir::LocalId(i))];

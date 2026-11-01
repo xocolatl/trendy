@@ -60,6 +60,10 @@ pub(crate) fn value(
                 errors.push(errors::loop_in_block(statement));
                 ok = false;
             }
+            ast::Statement::Transaction(stmt) => {
+                errors.push(errors::transaction_in_block(stmt));
+                ok = false;
+            }
             ast::Statement::Return(stmt) => {
                 errors.push(errors::return_in_block(stmt));
                 ok = false;

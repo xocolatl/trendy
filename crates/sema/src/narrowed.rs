@@ -282,6 +282,16 @@ impl Assigns {
             ast::Statement::While(stmt) => self.body_of(stmt.body()),
             ast::Statement::Loop(stmt) => self.body_of(stmt.body()),
             ast::Statement::For(stmt) => self.body_of(stmt.body()),
+            ast::Statement::Transaction(stmt) => {
+                self.body_of(stmt.body());
+                if let Some(ident) = stmt
+                    .collecting()
+                    .and_then(|c| c.variable())
+                    .and_then(|v| v.ident())
+                {
+                    self.named(ident.text(), stmt.span());
+                }
+            }
             ast::Statement::Var(_) | ast::Statement::Return(_) | ast::Statement::Fail(_) => {}
         }
     }

@@ -42,6 +42,38 @@ impl Program {
         &self.variables[id.0]
     }
 
+    /// The program's variables that `block` assigns, or that the update
+    /// operators it calls do, at any depth, and their versions, each once:
+    /// directly, or by passing them to a `var` or `out` parameter.
+    #[must_use]
+    pub fn variables_assigned(&self, block: &Block) -> Vec<VariableId> {
+        let mut variables = Vec::new();
+        let mut add = |targets: Vec<Target>| {
+            for target in targets {
+                if let Target::Variable(id) = target
+                    && !variables.contains(&id)
+                {
+                    variables.push(id);
+                }
+            }
+        };
+        add(block.assigned());
+        let (mut seen, mut next) = (Vec::new(), block.called());
+        while let Some(id) = next.pop() {
+            if seen.contains(&id) {
+                continue;
+            }
+            seen.push(id);
+            let op = self.operator(id);
+            next.extend(op.versions.iter().map(|v| v.operator));
+            if let OperatorKind::Update { body, .. } = &op.kind {
+                add(body.assigned());
+                next.extend(body.called());
+            }
+        }
+        variables
+    }
+
     /// The type of `error`, which the prelude declares, as sema checks.
     ///
     /// # Panics
@@ -1137,6 +1169,15 @@ pub enum Statement {
     /// `fail e;`: the program fails with the error that the expression is,
     /// as [`Expr::Fail`] does.
     Fail(Expr),
+    /// `transaction [ … ];`, or `transaction collecting e [ … ];`, with the
+    /// variable `e`, a `relation { error: error }`: the block's statements,
+    /// which, if one fails, are undone, all of them, every variable they
+    /// assigned given back its value from before the transaction (TTM OO
+    /// Prescriptions 4 and 5). Then, with a variable, the failure's error
+    /// is added to it, and the statements after the transaction run;
+    /// without, the failure goes on, to the transaction around it, or the
+    /// program's end. Transactions nest.
+    Transaction(Option<Target>, Block),
 }
 
 /// When a loop checks its condition.
@@ -1149,6 +1190,19 @@ pub enum Check {
 }
 
 impl Statement {
+    /// The blocks in the statement: an `if`'s two, a loop's, or a
+    /// transaction's.
+    #[must_use]
+    pub fn blocks(&self) -> Vec<&Block> {
+        match self {
+            Statement::If(_, then, otherwise) => vec![then, otherwise],
+            Statement::Loop(_, body, _)
+            | Statement::For(_, _, body)
+            | Statement::Transaction(_, body) => vec![body],
+            Statement::Call(_) | Statement::Assign(_) | Statement::Fail(_) => Vec::new(),
+        }
+    }
+
     /// The statement, in an operator instantiated with `types`.
     #[must_use]
     pub fn instantiated(&self, types: &[Type]) -> Statement {
@@ -1179,6 +1233,9 @@ impl Statement {
                 body.instantiated(types),
             ),
             Statement::Fail(error) => Statement::Fail(error.instantiated(types)),
+            Statement::Transaction(collecting, body) => {
+                Statement::Transaction(collecting.clone(), body.instantiated(types))
+            }
         }
     }
 }
@@ -1228,6 +1285,71 @@ impl Block {
                 .collect(),
             locals: self.locals.clone(),
         }
+    }
+
+    /// Call `f` with each of the block's statements, and those in the
+    /// blocks within them, each before those within it.
+    pub fn each_statement(&self, f: &mut dyn FnMut(&Statement)) {
+        for (_, statement) in &self.statements {
+            f(statement);
+            for block in statement.blocks() {
+                block.each_statement(f);
+            }
+        }
+    }
+
+    /// What the block's statements assign, in the blocks within them too,
+    /// each once, in the order they first do: each assignment's target,
+    /// each variable a call passes to a `var` or `out` parameter, and each
+    /// a transaction adds its errors to.
+    #[must_use]
+    pub fn assigned(&self) -> Vec<Target> {
+        let mut assigned = Vec::new();
+        self.each_statement(&mut |statement| {
+            let targets: Vec<&Target> = match statement {
+                Statement::Assign(assignments) => assignments.iter().map(|a| &a.target).collect(),
+                Statement::Call(call) => call.updated.values().collect(),
+                Statement::Transaction(collecting, _) => collecting.iter().collect(),
+                _ => Vec::new(),
+            };
+            for target in targets {
+                if !assigned.contains(target) {
+                    assigned.push(target.clone());
+                }
+            }
+        });
+        assigned
+    }
+
+    /// The local variables declared in the block, and in the blocks
+    /// within it: each block's own, and each `for` loop's variable.
+    #[must_use]
+    pub fn declared(&self) -> Vec<LocalId> {
+        let mut declared = self.locals.clone();
+        self.each_statement(&mut |statement| {
+            if let Statement::For(variable, ..) = statement {
+                declared.push(*variable);
+            }
+            for block in statement.blocks() {
+                declared.extend(&block.locals);
+            }
+        });
+        declared
+    }
+
+    /// The operators the block's statements call, in the blocks within
+    /// them too, each once, in the order they first do.
+    #[must_use]
+    pub fn called(&self) -> Vec<OperatorId> {
+        let mut called = Vec::new();
+        self.each_statement(&mut |statement| {
+            if let Statement::Call(call) = statement
+                && !called.contains(&call.operator)
+            {
+                called.push(call.operator);
+            }
+        });
+        called
     }
 }
 

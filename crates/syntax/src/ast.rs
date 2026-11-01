@@ -60,6 +60,8 @@ ast_node!(IfStmt);
 ast_node!(WhileStmt);
 ast_node!(LoopStmt);
 ast_node!(ForStmt);
+ast_node!(TransactionStmt);
+ast_node!(Collecting);
 ast_node!(AssignStmt);
 ast_node!(AssignBlock);
 ast_node!(Assignment);
@@ -591,6 +593,7 @@ pub enum Statement {
     While(WhileStmt),
     Loop(LoopStmt),
     For(ForStmt),
+    Transaction(TransactionStmt),
     /// A local variable's declaration, as a program variable's is written.
     Var(VarDecl),
 }
@@ -608,6 +611,7 @@ fn statements_of(node: &SyntaxNode) -> impl Iterator<Item = Statement> + use<> {
             .or_else(|| WhileStmt::cast(node.clone()).map(Statement::While))
             .or_else(|| LoopStmt::cast(node.clone()).map(Statement::Loop))
             .or_else(|| ForStmt::cast(node.clone()).map(Statement::For))
+            .or_else(|| TransactionStmt::cast(node.clone()).map(Statement::Transaction))
             .or_else(|| VarDecl::cast(node).map(Statement::Var))
     })
 }
@@ -637,6 +641,7 @@ impl Statement {
             Statement::While(s) => s.syntax(),
             Statement::Loop(s) => s.syntax(),
             Statement::For(s) => s.syntax(),
+            Statement::Transaction(s) => s.syntax(),
             Statement::Var(s) => s.syntax(),
         }
     }
@@ -726,6 +731,41 @@ impl ForStmt {
     #[must_use]
     pub fn body(&self) -> Option<Body> {
         self.0.children().find_map(Body::cast)
+    }
+}
+
+impl TransactionStmt {
+    /// The `transaction`.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    /// `collecting e`, which adds the errors it collects to the variable
+    /// `e`, if it has one.
+    #[must_use]
+    pub fn collecting(&self) -> Option<Collecting> {
+        self.0.children().find_map(Collecting::cast)
+    }
+
+    /// The statements, undone if one fails.
+    #[must_use]
+    pub fn body(&self) -> Option<Body> {
+        self.0.children().find_map(Body::cast)
+    }
+}
+
+impl Collecting {
+    /// The word `collecting`.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    /// The variable the errors are added to.
+    #[must_use]
+    pub fn variable(&self) -> Option<NameRef> {
+        self.0.children().find_map(NameRef::cast)
     }
 }
 

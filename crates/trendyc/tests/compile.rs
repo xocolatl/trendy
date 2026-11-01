@@ -939,6 +939,158 @@ fn failures() {
 }
 
 #[test]
+fn transactions() {
+    let (code, stderr) = run_example("transactions");
+    let table = "┌──────────┬──────────┬───────┐
+│ city     │ native   │ sacks │
+├──────────┼──────────┼───────┤
+│ Accra    │ Nkran    │    30 │
+│ Cusco    │ Qusqu    │    40 │
+│ Dhaka    │ ঢাকা       │    25 │
+│ Tashkent │ Toshkent │    40 │
+└──────────┴──────────┴───────┘
+";
+    assert_eq!(
+        (code, stderr),
+        (
+            0,
+            format!(
+                "relation {{ message: text }} {{ {{ message: \"Tashkent has 10 sacks, not 15\" }} }}\n{table}1\n{table}"
+            )
+        )
+    );
+}
+
+/// A failure in a transaction undoes what its block assigned: a program
+/// variable, a local variable, and a `var` parameter's variable, at any
+/// depth of the calls it makes, and many times over in a loop. Nested, a
+/// transaction undoes its own; without `collecting`, its failure goes on
+/// to the one around it. A failure of the language's own carries no error
+/// yet, so it goes on, and stops the program.
+#[test]
+fn transactions_undo_what_a_failure_leaves() {
+    let source = "type refused is error { { reason: text } };
+
+operator message{error: refused}: text [
+    \"refused: \" || error.reason
+];
+
+var log: relation { entry: text } := relation {};
+
+operator adjust{var total: integer, by: integer} [
+    total := total + by;
+    insert log relation { { entry: \"by \" || to_text{from: by} } };
+    if total > 100 then [
+        fail refused{reason: \"over 100\"};
+    ];
+];
+
+operator main{} [
+    var total := 50;
+    var label := \"start\";
+    var found: relation { error: error };
+    transaction collecting found [
+        label := \"changed\";
+        call adjust{var total: total, by: 70};
+    ];
+    call debug_value{v: tuple { total: total, label: label, errors: count{r: found} }};
+    var outer: relation { error: error };
+    transaction collecting outer [
+        call adjust{var total: total, by: 10};
+        var inner: relation { error: error };
+        transaction collecting inner [
+            call adjust{var total: total, by: 90};
+        ];
+        call debug_value{v: count{r: inner}};
+    ];
+    call debug_value{v: tuple { total: total, errors: count{r: outer} }};
+    var both: relation { error: error };
+    transaction collecting both [
+        call adjust{var total: total, by: 5};
+        transaction [
+            call adjust{var total: total, by: 50};
+        ];
+    ];
+    call debug_value{v: tuple { total: total, errors: count{r: both} }};
+    var tries := 0;
+    while tries < 50 loop [
+        var each: relation { error: error };
+        transaction collecting each [
+            call adjust{var total: total, by: 200};
+        ];
+        tries := tries + count{r: each};
+    ];
+    call debug_table{r: log};
+    var divided: relation { error: error };
+    transaction collecting divided [
+        total := total div (total - total);
+    ];
+    call debug_value{v: \"not reached\"};
+];
+";
+    assert_eq!(
+        run_source("undone", source),
+        (
+            1,
+            "tuple { errors: 1, label: \"start\", total: 50 }
+1
+tuple { errors: 0, total: 60 }
+tuple { errors: 1, total: 60 }
+┌───────┐
+│ entry │
+├───────┤
+│ by 10 │
+└───────┘
+error[R0002]: division by zero: 60 div 0 has no result
+ --> undone.trendy:55:9
+"
+            .to_string()
+        )
+    );
+}
+
+/// A failure a transaction collects is written nowhere, nor are the calls
+/// it passed through: a failure nothing takes, later, writes its own.
+#[test]
+fn a_collected_failure_leaves_no_trace() {
+    let source = "type refused is error { { n: integer } };
+
+operator message{error: refused}: text [
+    \"refused \" || to_text{from: error.n}
+];
+
+operator refuse{n: integer} [
+    fail refused{n: n};
+];
+
+operator attempt{n: integer} [
+    call refuse{n: n};
+];
+
+operator main{} [
+    var found: relation { error: error };
+    transaction collecting found [
+        call attempt{n: 1};
+    ];
+    call debug_value{v: count{r: found}};
+    call refuse{n: 2};
+];
+";
+    assert_eq!(
+        run_source("collected", source),
+        (
+            1,
+            format!(
+                "1\nerror[{}]: refused 2\n{}{}",
+                trendy_diag::Code::Failed.id(),
+                " --> collected.trendy:8:5\n",
+                called("collected", "refuse", 21)
+            )
+        )
+    );
+}
+
+#[test]
 fn a_fail_stops_the_program_with_its_errors_message() {
     let program = |main: &str| {
         format!(

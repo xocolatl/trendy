@@ -2762,6 +2762,25 @@ pub unsafe extern "C" fn trendy_rt_trace_since(since: *const usize) {
     }
 }
 
+/// Forget the calls the trace recorded after the first `*since`, which
+/// [`trendy_rt_traced`] counted: those of a failure a transaction takes,
+/// which is written nowhere.
+///
+/// # Safety
+///
+/// `since` must point to what [`trendy_rt_traced`] stored, with no calls
+/// forgotten since.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_untrace(since: *const usize) {
+    // SAFETY: guaranteed by the caller; the trace is only this thread's.
+    unsafe {
+        let trace = &mut *TRACE.get();
+        trace.len = since.read_unaligned().min(trace.len);
+        trace.lost = 0;
+    }
+}
+
 /// Write the calls the trace recorded, after the failure's error, each
 /// as a note, `= note: in `f`, called at path:line:column`, innermost
 /// first, and forget them.

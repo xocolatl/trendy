@@ -420,6 +420,10 @@ impl<'a> Globals<'a> {
                     errors.push(errors::loop_in_read_only(&signature.name, statement));
                     valid = false;
                 }
+                ast::Statement::Transaction(stmt) => {
+                    errors.push(errors::transaction_in_read_only(&signature.name, stmt));
+                    valid = false;
+                }
             }
         }
         let Some(written_value) = written_value else {

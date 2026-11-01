@@ -1196,6 +1196,95 @@ pub(crate) fn fail_spelling(found: Found) -> Diagnostic {
     )
 }
 
+/// SQL's `BEGIN TRANSACTION` or `START TRANSACTION`, its first word `found`,
+/// before `transaction`, which starts at `keyword`: a transaction starts
+/// with `transaction`.
+pub(crate) fn transaction_start(found: Found, keyword: usize) -> Diagnostic {
+    Diagnostic::error(
+        Code::TransactionStart,
+        format!(
+            "a transaction starts with `transaction`, not `{} transaction`",
+            found.text
+        ),
+        found.span,
+        "SQL's word",
+    )
+    .with_note("a transaction is a block, `transaction [ … ];`: its statements are undone, all of them, if one fails, and kept if none does, as its block ends")
+    .with_suggestion(
+        format!("remove `{}`", found.text),
+        vec![Edit {
+            span: Span::new(found.span.start, keyword),
+            replacement: String::new(),
+        }],
+    )
+}
+
+/// SQL's `COMMIT;` or `ROLLBACK;`, its first word `found`, the statement
+/// `statement`, from the end of the one before, its words `words`: a
+/// transaction commits where its block ends, if `commit`, and rolls back
+/// when a statement in it fails.
+pub(crate) fn transaction_end(
+    found: Found,
+    statement: Span,
+    words: &str,
+    commit: bool,
+) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::TransactionEnd,
+        format!("a transaction has no `{words}`"),
+        found.span,
+        if commit {
+            "SQL's commit"
+        } else {
+            "SQL's rollback"
+        },
+    )
+    .with_note("a transaction is a block, `transaction [ … ];`: its statements are undone, all of them, if one fails, and kept if none does, as its block ends");
+    if commit {
+        d.with_suggestion(
+            "remove it: the transaction commits where its block ends",
+            vec![Edit {
+                span: statement,
+                replacement: String::new(),
+            }],
+        )
+    } else {
+        d.with_help("to roll the transaction back, fail with an error that says why, as `fail failure{message: \"…\"};`: the transaction undoes its statements and takes the error")
+    }
+}
+
+/// Another language's `try`, `found`, and its handlers, `handlers`, if any:
+/// a transaction takes its block's failures, as errors, which the program
+/// handles after it.
+pub(crate) fn exception_handler(found: Found, handlers: Option<Span>) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::ExceptionHandler,
+        "trendy has no `try`: a transaction takes its block's failures",
+        found.span,
+        "another language's exception handler",
+    )
+    .with_note("`transaction collecting e [ … ];` runs its block, and if a statement in it fails, undoes them all and adds the failure's error to the variable `e`, a relation of errors, which the statements after it can test")
+    .with_help("declare `var e: relation { error: error };`, write `transaction collecting e [ … ];`, then handle the errors in `e`, as `if not is_empty{r: e} then [ … ];`");
+    match handlers {
+        Some(span) => d.with_secondary(span, "handled here"),
+        None => d,
+    }
+}
+
+/// `fail;`, `found` its word, or another language's `throw;` or `raise`,
+/// which rethrows the exception being handled: a `fail` gives its error,
+/// as nothing is handled to fail with again.
+pub(crate) fn bare_fail(found: Found) -> Diagnostic {
+    Diagnostic::error(
+        Code::FailSpelling,
+        "a `fail` needs the error it fails with",
+        found.span,
+        "no error",
+    )
+    .with_note("`fail e;` fails with the error `e`, a value of one of the subtypes of the prelude's type `error`; nothing is ever being handled to fail with again, as a failure a transaction collects is a value in the variable it adds it to, and one it doesn't goes on")
+    .with_help("give the error that says what went wrong, as `fail failure{message: \"…\"};`, or, to let a transaction's failure go on, leave out its `collecting`")
+}
+
 /// Which language's conditional expression is written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Conditional {
@@ -1295,6 +1384,8 @@ const BRANCH_BRACKETS: &str = "an `if` statement's branches, and a loop's block,
 pub(crate) const LOOP_FORM: &str = "a loop has the form `while condition loop [ … ];`, which checks the condition before each run of its block, or `loop [ … ] while condition;`, which checks it after";
 
 pub(crate) const FOR_FORM: &str = "a `for` loop has the form `for x in a loop [ … ];`: its block run for each element of the array `a`, in order, with `x` its value";
+
+pub(crate) const TRANSACTION_FORM: &str = "a transaction has the form `transaction [ … ];`, or, adding its block's errors to the variable `e`, `transaction collecting e [ … ];`";
 
 /// C#'s and PHP's `foreach`, `found`: `for`.
 pub(crate) fn foreach(found: Found) -> Diagnostic {

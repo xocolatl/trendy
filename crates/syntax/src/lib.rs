@@ -133,6 +133,8 @@ pub enum SyntaxKind {
     LoopKw,
     /// `for`, before a `for` loop's variable.
     ForKw,
+    /// `transaction`, before a transaction's block.
+    TransactionKw,
     LBrace,
     RBrace,
     LBracket,
@@ -264,6 +266,13 @@ pub enum SyntaxKind {
     /// array `a`, in order, with `x` its value. `in` is a contextual
     /// keyword, an identifier elsewhere.
     ForStmt,
+    /// `transaction [ … ];` or `transaction collecting e [ … ];`:
+    /// statements that are undone, all of them, if one fails.
+    TransactionStmt,
+    /// `collecting e`, in a transaction, which adds the errors it collects
+    /// to the variable `e`. `collecting` is a contextual keyword, an
+    /// identifier elsewhere.
+    Collecting,
     /// `v := x`, in an assignment statement.
     Assignment,
     /// `insert r s` or `d_insert r s`, in an assignment statement.
@@ -422,7 +431,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 166] = [
+    pub const ALL: [SyntaxKind; 169] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -475,6 +484,7 @@ impl SyntaxKind {
         SyntaxKind::WhileKw,
         SyntaxKind::LoopKw,
         SyntaxKind::ForKw,
+        SyntaxKind::TransactionKw,
         SyntaxKind::LBrace,
         SyntaxKind::RBrace,
         SyntaxKind::LBracket,
@@ -531,6 +541,8 @@ impl SyntaxKind {
         SyntaxKind::WhileStmt,
         SyntaxKind::LoopStmt,
         SyntaxKind::ForStmt,
+        SyntaxKind::TransactionStmt,
+        SyntaxKind::Collecting,
         SyntaxKind::Assignment,
         SyntaxKind::Insertion,
         SyntaxKind::Deletion,
@@ -649,6 +661,7 @@ impl SyntaxKind {
                 | SyntaxKind::WhileKw
                 | SyntaxKind::LoopKw
                 | SyntaxKind::ForKw
+                | SyntaxKind::TransactionKw
         )
     }
 
@@ -865,6 +878,7 @@ impl SyntaxKind {
             SyntaxKind::WhileKw => "while",
             SyntaxKind::LoopKw => "loop",
             SyntaxKind::ForKw => "for",
+            SyntaxKind::TransactionKw => "transaction",
             SyntaxKind::LBrace => "{",
             SyntaxKind::RBrace => "}",
             SyntaxKind::LBracket => "[",
@@ -959,6 +973,7 @@ impl SyntaxKind {
             SyntaxKind::WhileKw => "`while`",
             SyntaxKind::LoopKw => "`loop`",
             SyntaxKind::ForKw => "`for`",
+            SyntaxKind::TransactionKw => "`transaction`",
             SyntaxKind::ForeignOperator => "operator",
             SyntaxKind::LBrace => "`{`",
             SyntaxKind::RBrace => "`}`",
@@ -1044,6 +1059,8 @@ impl SyntaxKind {
             SyntaxKind::FailStmt => "`fail` statement",
             SyntaxKind::IfStmt => "`if` statement",
             SyntaxKind::WhileStmt | SyntaxKind::LoopStmt | SyntaxKind::ForStmt => "loop",
+            SyntaxKind::TransactionStmt => "transaction",
+            SyntaxKind::Collecting => "`collecting` clause",
             SyntaxKind::Assignment => "assignment",
             SyntaxKind::Insertion => "insertion",
             SyntaxKind::Deletion => "deletion",

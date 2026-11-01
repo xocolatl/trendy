@@ -1,0 +1,66 @@
+/* A cooperative's granaries, each named in its city's own language too,
+   and the sacks of rice in each. */
+var granaries: relation { city: text, native: text, sacks: integer } := relation {
+    { city: "Accra", native: "Nkran", sacks: 40 },
+    { city: "Dhaka", native: "ঢাকা", sacks: 25 },
+    { city: "Cusco", native: "Qusqu", sacks: 60 },
+    { city: "Tashkent", native: "Toshkent", sacks: 10 },
+}
+key { city };
+
+/* Too few sacks in a granary for a transfer: an error of the program's
+   own, which says what went wrong as values. */
+type too_few is error { { city: text, sacks: integer, asked: integer } };
+
+operator message{error: too_few}: text [
+    error.city
+        || " has "
+        || to_text{from: error.sacks}
+        || " sacks, not "
+        || to_text{from: error.asked}
+];
+
+/* Move `n` sacks from one granary to another: added to one first, then
+   taken from the other, so one that fails to be taken leaves the
+   transfer half made, which the transaction it is in undoes. Nothing
+   here says what a failure does to the caller, which may be in a
+   transaction, or several, or none. */
+operator transfer{origin: text, destination: text, n: integer} [
+    update granaries { sacks := sacks + n } where city = destination;
+    var have := sum{r: (granaries where city = origin){sacks}, of: sacks};
+    if have < n then [
+        fail too_few{city: origin, sacks: have, asked: n};
+    ];
+    update granaries { sacks := sacks - n } where city = origin;
+];
+
+operator main{} [
+    /* Each transfer in a transaction of its own: one that fails is
+       undone, and the others are made. `collecting` adds a failure's
+       error to `refused`, which collects the loop's. */
+    var moves := array [
+        tuple { origin: "Cusco", destination: "Accra", n: 20 },
+        tuple { origin: "Tashkent", destination: "Dhaka", n: 15 },
+        tuple { origin: "Accra", destination: "Tashkent", n: 30 },
+    ];
+    var refused: relation { error: error };
+    for m in moves loop [
+        transaction collecting refused [
+            call transfer{origin: m.origin, destination: m.destination, n: m.n};
+        ];
+    ];
+    call debug_value{v: (refused extend { message := message{error: error} }){message}};
+    call debug_table{r: granaries};
+    /* All or nothing: a day's transfers, in a transaction around them. A
+       transaction without `collecting` lets its failure go on, after
+       undoing its own, to the one around it, which undoes the day's. */
+    var day: relation { error: error };
+    transaction collecting day [
+        call transfer{origin: "Dhaka", destination: "Cusco", n: 5};
+        transaction [
+            call transfer{origin: "Tashkent", destination: "Cusco", n: 100};
+        ];
+    ];
+    call debug_value{v: count{r: day}};
+    call debug_table{r: granaries};
+];

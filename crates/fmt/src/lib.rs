@@ -845,8 +845,9 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
     // and a load's `keep`, which one comes before too, an order item's
     // `asc` and `desc`, a `for` loop's `in`, `heading`, before a heading's
     // name, `type`, before a type's, `constraint`, before a condition, a
-    // type's `order`, a conversion's `to` and `from`, and `fail`, before
-    // an error, though it is in parentheses: `fail (e)`.
+    // type's `order`, a conversion's `to` and `from`, `fail`, before an
+    // error, though it is in parentheses: `fail (e)`, and a transaction's
+    // `collecting`.
     let contextual_keyword = prev.kind() == Ident
         && prev.parent().is_some_and(|p| match p.kind() {
             BuiltinType => prev.text() == "type",
@@ -867,7 +868,8 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
             | SyntaxKind::OrderItem
             | SyntaxKind::ForStmt
             | SyntaxKind::FailExpr
-            | SyntaxKind::FailStmt => true,
+            | SyntaxKind::FailStmt
+            | SyntaxKind::Collecting => true,
             _ => false,
         });
     let load_keyword = next.kind() == Ident
@@ -975,7 +977,7 @@ fn between_definitions(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool)
 fn spaced_after(kind: SyntaxKind) -> bool {
     use SyntaxKind::{
         ArrayKw, AssignKw, BuiltinKw, CallKw, Colon, Comma, DInsertKw, DeleteKw, IDeleteKw, IfKw,
-        InsertKw, NotKw, OperatorKw, RelationKw, ReturnKw, TupleKw, UpdateKw, VarKw,
+        InsertKw, NotKw, OperatorKw, RelationKw, ReturnKw, TransactionKw, TupleKw, UpdateKw, VarKw,
     };
     spaced_before(kind)
         || matches!(
@@ -998,6 +1000,7 @@ fn spaced_after(kind: SyntaxKind) -> bool {
                 | UpdateKw
                 | AssignKw
                 | ReturnKw
+                | TransactionKw
         )
 }
 
@@ -1221,6 +1224,16 @@ mod tests {
         assert_eq!(
             fmt("operator f{}[for   x   in a loop[call g{};];];"),
             "operator f{} [\n    for x in a loop [\n        call g{};\n    ];\n];\n"
+        );
+    }
+
+    #[test]
+    fn transactions() {
+        assert_eq!(
+            fmt(
+                "operator f{}[transaction[call g{};];transaction   collecting   found[transaction[n:=1;];];];"
+            ),
+            "operator f{} [\n    transaction [\n        call g{};\n    ];\n    transaction collecting found [\n        transaction [\n            n := 1;\n        ];\n    ];\n];\n"
         );
     }
 

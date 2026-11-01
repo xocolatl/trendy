@@ -63,13 +63,15 @@ fn entry(
         .waiting
         .clone()
         .map(|waiting| Written::new(&mut b, waiting, cx));
-    b.catches.push(handle);
-    b.insts.push(lir::Inst::Call {
-        function: main,
-        args: None,
-        result: None,
+    b.catching(handle, |b| {
+        b.insts.push(lir::Inst::Call {
+            function: main,
+            args: None,
+            result: None,
+        });
     });
     b.end_block(lir::Terminator::Return, handle);
+    b.catches.push(handle);
     if let Some(written) = &written {
         written.write(&mut b, handle, done, cx);
     }
@@ -191,9 +193,9 @@ impl Written {
                 args: BTreeMap::new(),
                 updated: BTreeMap::new(),
             };
-            this.catches.push(unwritten);
-            this.invoke(&call, Some(args), Some(message.clone()), cx);
-            this.catches.pop();
+            this.catching(unwritten, |this| {
+                this.invoke(&call, Some(args), Some(message.clone()), cx);
+            });
             this.insts.push(lir::Inst::RestoreSite {
                 src: self.waiting.site(),
             });
@@ -769,6 +771,63 @@ struct FunctionBuilder<'a> {
     exit: Option<lir::BlockId>,
 }
 
+/// A variable a transaction keeps as it begins: where it is, the slot its
+/// value is kept in, and its type.
+struct Kept {
+    variable: lir::Place,
+    value: lir::Place,
+    ty: hir::Type,
+}
+
+impl Kept {
+    /// Keep the variable's value, with references of its own, with `b`
+    /// building the code.
+    fn keep(&self, b: &mut FunctionBuilder, cx: &mut Lowering) {
+        b.insts.push(lir::Inst::Copy {
+            dst: self.value.clone(),
+            src: self.variable.clone(),
+            layout: cx.layout(&self.ty),
+        });
+        if cx.points(&self.ty) {
+            b.insts.push(lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::Retain,
+                args: vec![self.value.clone(), self.descriptor(cx)],
+            });
+        }
+    }
+
+    /// Give up the value kept, as the transaction commits.
+    fn give_up(&self, b: &mut FunctionBuilder, cx: &mut Lowering) {
+        if cx.points(&self.ty) {
+            b.insts.push(lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::Release,
+                args: vec![self.value.clone(), self.descriptor(cx)],
+            });
+        }
+    }
+
+    /// Give the variable its kept value back, as the transaction rolls
+    /// back: its references go to the variable, which gives up its own.
+    fn restore(&self, b: &mut FunctionBuilder, cx: &mut Lowering) {
+        if cx.points(&self.ty) {
+            b.insts.push(lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::Release,
+                args: vec![self.variable.clone(), self.descriptor(cx)],
+            });
+        }
+        b.insts.push(lir::Inst::Copy {
+            dst: self.variable.clone(),
+            src: self.value.clone(),
+            layout: cx.layout(&self.ty),
+        });
+    }
+
+    /// Its type's descriptor, as a place.
+    fn descriptor(&self, cx: &mut Lowering) -> lir::Place {
+        lir::Place::whole(lir::Base::Data(cx.descriptor(&self.ty)))
+    }
+}
+
 /// Where a local variable is: its value's place, and whether the variable
 /// holds references to the buffers its value points to, as a program's
 /// variable does, which the end of its block gives up: an update
@@ -1084,6 +1143,18 @@ impl<'a> FunctionBuilder<'a> {
         self.current = next;
     }
 
+    /// What `lower` adds, its failures going to `handler`: in blocks of
+    /// its own, since a block's failures go where they did as it ended.
+    fn catching(&mut self, handler: lir::BlockId, lower: impl FnOnce(&mut Self)) {
+        let start = self.new_block();
+        self.end_block(lir::Terminator::Jump(start), start);
+        self.catches.push(handler);
+        lower(self);
+        let next = self.new_block();
+        self.end_block(lir::Terminator::Jump(next), next);
+        self.catches.pop();
+    }
+
     /// End the current block by stopping the program because of
     /// `failure`, and go on building `next`.
     fn fail(&mut self, failure: lir::Failure, next: lir::BlockId) {
@@ -1153,7 +1224,188 @@ impl<'a> FunctionBuilder<'a> {
                 self.for_statement(*variable, array, body, cx);
             }
             hir::Statement::Fail(error) => self.scoped(|this| this.fail_with(error, cx)),
+            hir::Statement::Transaction(collecting, body) => {
+                self.transaction(collecting.as_ref(), body, cx);
+            }
         }
+    }
+
+    /// A transaction of `body`, with `collecting`, the variable it adds its
+    /// errors to, if it has one. As it begins, each variable the block can
+    /// assign is kept, with references of its own ([`Kept`]), then the
+    /// block runs, its failures going to the transaction's rollback, and
+    /// as it ends, what was kept is given up.
+    ///
+    /// The rollback ends the scopes the block began, releases its local
+    /// variables, and gives each variable kept its value back, with its
+    /// references, which can't fail: nothing reads what the block left
+    /// there, as every statement of it has ended. Then, with `collecting`,
+    /// it takes a `fail`'s error waiting, which it adds to `collecting`,
+    /// forgets the calls its failure passed through, and goes on after the
+    /// transaction. Without, or for a failure of the language's own, which
+    /// has no error yet, the failure goes on, to the transaction around
+    /// it, or the function's failure exit.
+    fn transaction(
+        &mut self,
+        collecting: Option<&hir::Target>,
+        body: &hir::Block,
+        cx: &mut Lowering,
+    ) {
+        let kept = self.kept(body, cx);
+        let (outer, traced) = (
+            self.slot(lir::Layout::Address),
+            self.slot(lir::Layout::Usize),
+        );
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Innermost,
+            args: vec![outer.clone()],
+        });
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Traced,
+            args: vec![traced.clone()],
+        });
+        for kept in &kept {
+            kept.keep(self, cx);
+        }
+        let (rollback, after) = (self.new_block(), self.new_block());
+        self.catching(rollback, |this| this.block(body, cx));
+        for kept in &kept {
+            kept.give_up(self, cx);
+        }
+        self.end_block(lir::Terminator::Jump(after), rollback);
+
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::EndSince,
+            args: vec![outer],
+        });
+        for id in body.declared() {
+            self.release_local(id, cx);
+        }
+        for kept in &kept {
+            kept.restore(self, cx);
+        }
+        let Some(collecting) = collecting else {
+            self.end_block(lir::Terminator::Raise, after);
+            return;
+        };
+        let waiting = cx.waiting(self.program);
+        let error = waiting.error();
+        let waits = self.is_of(&error, &waiting.ty, cx);
+        let (take, raise) = (self.new_block(), self.new_block());
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: waits,
+                then: take,
+                otherwise: raise,
+            },
+            take,
+        );
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Untrace,
+            args: vec![traced],
+        });
+        self.scoped(|this| this.collect(collecting, &error, &waiting.ty, cx));
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&waiting.ty)));
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Release,
+            args: vec![error, descriptor],
+        });
+        self.end_block(lir::Terminator::Jump(after), raise);
+        self.end_block(lir::Terminator::Raise, after);
+    }
+
+    /// Add the error at `error`, of the prelude's type `error`, `ty`, to
+    /// `collecting`, a relation of errors, a transaction's: its value, and
+    /// the relation of that error, combined, checked against its keys, and
+    /// assigned.
+    fn collect(
+        &mut self,
+        collecting: &hir::Target,
+        error: &lir::Place,
+        ty: &hir::Type,
+        cx: &mut Lowering,
+    ) {
+        let errors = self.assigned(collecting).0.clone();
+        let hir::Type::Relation(heading) = &errors else {
+            unreachable!("a transaction collects a relation of errors");
+        };
+        let tuple = self.slot(cx.layout(&hir::Type::Tuple(heading.clone())));
+        let mut attribute = tuple.clone();
+        attribute.path.push(0);
+        self.insts.push(lir::Inst::Copy {
+            dst: attribute,
+            src: error.clone(),
+            layout: cx.layout(ty),
+        });
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&errors)));
+        let one = self.slot(cx.layout(&errors));
+        let count = usize_constant(1, cx);
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Relation,
+            args: vec![one.clone(), tuple, count, descriptor.clone()],
+        });
+        let current = self.holder(collecting, cx);
+        let combined = self.slot(cx.layout(&errors));
+        let union = usize_constant(lir::Combination::Union.code(), cx);
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Combine,
+            args: vec![combined.clone(), current, one, descriptor, union],
+        });
+        self.scoped = true;
+        self.check_keys(collecting, &combined, cx);
+        self.store(collecting, combined, cx);
+    }
+
+    /// What a transaction of `body` keeps as it begins: each variable the
+    /// block can assign, and a slot for its value. These are the program's
+    /// variables it assigns, or the operators it calls do, at any depth,
+    /// and the operator's own local variables, declared outside the block,
+    /// and `var` and `out` parameters, it assigns or passes on to be.
+    fn kept(&mut self, body: &hir::Block, cx: &mut Lowering) -> Vec<Kept> {
+        let declared = body.declared();
+        let mut targets: Vec<hir::Target> = self
+            .program
+            .variables_assigned(body)
+            .into_iter()
+            .map(hir::Target::Variable)
+            .collect();
+        for target in body.assigned() {
+            let ours = match &target {
+                hir::Target::Variable(_) => false,
+                hir::Target::Local(id) => !declared.contains(id),
+                hir::Target::Parameter(_) => true,
+            };
+            if ours && !targets.contains(&target) {
+                targets.push(target);
+            }
+        }
+        targets
+            .into_iter()
+            .map(|target| {
+                let ty = self.assigned(&target).0.clone();
+                let variable = self.holder(&target, cx);
+                let value = self.slot(cx.layout(&ty));
+                Kept {
+                    variable,
+                    value,
+                    ty,
+                }
+            })
+            .collect()
+    }
+
+    /// Give up the references the local variable `id` holds, if it holds
+    /// any, and make its pointers null, as its block's end does.
+    fn release_local(&mut self, id: hir::LocalId, cx: &mut Lowering) {
+        let Some(place) = self.local_places[id.0].as_ref().filter(|p| p.holds) else {
+            return;
+        };
+        let value = place.value.clone();
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&self.locals[id.0].ty)));
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Release,
+            args: vec![value, descriptor],
+        });
     }
 
     /// Fail with the error `error`, which waits, with the site it fails

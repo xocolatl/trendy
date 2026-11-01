@@ -4150,6 +4150,79 @@ pub(crate) fn loop_in_read_only(name: &str, stmt: &trendy_syntax::ast::Statement
     .with_help("compute the value from the whole relation, as in `sum{r: r, of: x}` or `r extend { … }`, or make the operator an update operator, without a result type, invoked by `call`")
 }
 
+/// The name `name`, at `span`, after the `collecting` of the transaction
+/// `stmt`, of no variable: one is declared before the transaction, which
+/// the fix does, of the one type a transaction's errors have.
+pub(crate) fn undeclared_collecting(
+    name: &str,
+    span: Span,
+    stmt: &trendy_syntax::ast::TransactionStmt,
+) -> Diagnostic {
+    let declaration = format!("var {name}: relation {{ error: error }};");
+    Diagnostic::error(
+        Code::UnknownName,
+        format!("unknown variable `{name}`"),
+        span,
+        "the transaction adds its errors to it",
+    )
+    .with_note("a transaction's `collecting` names a variable declared before it, a `relation { error: error }`, which the transaction adds the errors it collects to, so that one variable can collect a loop's")
+    .with_suggestion(
+        format!("declare it before the transaction: `{declaration}`"),
+        vec![Edit {
+            span: Span::empty(stmt.span().start),
+            replacement: format!("{declaration}\n{}", indentation(stmt.syntax())),
+        }],
+    )
+}
+
+/// The variable `name`, at `span`, of type `ty`, which a transaction's
+/// `collecting` names, but isn't a relation of errors.
+pub(crate) fn collecting_mismatch(name: &str, span: Span, ty: &hir::Type) -> Diagnostic {
+    Diagnostic::error(
+        Code::TypeMismatch,
+        format!("`{name}` is a `{ty}`, not a relation of errors"),
+        span,
+        "the transaction adds its errors to it",
+    )
+    .with_note("a transaction's `collecting` names a variable of type `relation { error: error }`, which the transaction adds the errors it collects to")
+    .with_help(format!(
+        "declare a variable for the errors, as `var {name}_errors: relation {{ error: error }};`, and name it after `collecting`"
+    ))
+}
+
+/// `stmt`, a transaction in the read-only operator `name`.
+pub(crate) fn transaction_in_read_only(
+    name: &str,
+    stmt: &trendy_syntax::ast::TransactionStmt,
+) -> Diagnostic {
+    Diagnostic::error(
+        Code::Return,
+        "a read-only operator has no transactions",
+        transaction_start(stmt),
+        format!("a transaction in `{name}`"),
+    )
+    .with_note("a read-only operator computes one value and changes nothing, so a transaction in it would have nothing to undo; a failure in it goes to the transaction the statement that calls it is in")
+    .with_help("put the transaction around the statement that calls the operator, or make the operator an update operator, without a result type, invoked by `call`")
+}
+
+/// `stmt`, a transaction in a value block.
+pub(crate) fn transaction_in_block(stmt: &trendy_syntax::ast::TransactionStmt) -> Diagnostic {
+    Diagnostic::error(
+        Code::Return,
+        "a value block has no transactions",
+        transaction_start(stmt),
+        "a transaction in a value block",
+    )
+    .with_note(BLOCK)
+    .with_help("a value block changes nothing, so it has nothing to undo: put the transaction around the statement whose value the block computes")
+}
+
+/// Where to point at the transaction `stmt`: its keyword.
+fn transaction_start(stmt: &trendy_syntax::ast::TransactionStmt) -> Span {
+    stmt.keyword()
+        .map_or_else(|| stmt.span(), |t| trendy_syntax::span(t.text_range()))
+}
+
 /// `stmt`, a loop in a value block.
 pub(crate) fn loop_in_block(stmt: &trendy_syntax::ast::Statement) -> Diagnostic {
     Diagnostic::error(
@@ -7849,7 +7922,7 @@ pub(crate) fn unassigned_out(name: &str, operator: &str, ident: &SyntaxToken) ->
         "not always assigned",
     )
     .with_note(OUT_RULE)
-    .with_note("an `if` without `else`, a `while` loop and a `for` loop may not run their statements, so what only they assign isn't assigned on every path")
+    .with_note("an `if` without `else`, a `while` loop and a `for` loop may not run their statements, and a transaction that collects its errors may undo them, so what only they assign isn't assigned on every path")
     .with_help(format!("assign `{name}` before `{operator}` ends, whichever way it goes, or make it `var` if `{operator}` may leave its variable as it is"))
 }
 
