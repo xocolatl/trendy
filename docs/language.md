@@ -970,7 +970,11 @@ operator message{error: overflow}: text [
 source. Tuples and relations are written with their attributes in name
 order, relations with their heading first and their tuples in a fixed order,
 and an empty array with its elements' type, as in `array integer []`, so
-the output reads back as the same value. For example:
+the output reads back as the same value. A text's control characters, and
+the invisible characters that reorder what follows them (Unicode's
+bidirectional controls, such as U+202E), are written as escapes, as in
+`"\u{202E}"`, so that what is written shows what the text holds, in its
+order, and can't change the terminal it is written to. For example:
 `relation { a: boolean, b: integer } { { a: false, b: 25 }, { a: true, b: 3 } }`.
 The one exception is the attribute a `per` parameter's relation wraps its
 tuples' own attributes in, which no source can name: it is written `…`,
@@ -982,7 +986,8 @@ headed by its name, and a line for each tuple, in the same order as
 `debug_value`'s. A cell is as wide as its column's widest, in a
 terminal's columns, which a wide character, such as `李`, takes two of.
 Numbers go to the right, and everything else to the left: a text without
-its quotes, its control characters escaped as in a literal, and a tuple,
+its quotes, its control characters and bidirectional controls escaped as
+in a literal, and a tuple,
 a relation or an array as `debug_value` writes it.
 
 ```trendy
@@ -4563,6 +4568,10 @@ operator main{} [
   the same arguments whenever it is called. It fails in its value, as in a
   branch of an `if`, not with a `fail` statement, as its body is its value
   (A0035).
+- **Its message is written as a table's cell is,** with its control
+  characters and bidirectional controls escaped, so that a message made
+  from a file's text can't change the terminal or show what it doesn't
+  say.
 - **A `fail` fails when it is computed,** and a branch not taken isn't.
   One the compiler computes is reported when compiling, as other failures
   are: an initial value's, or a call's with arguments known then (R0021).

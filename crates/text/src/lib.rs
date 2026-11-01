@@ -20,9 +20,22 @@ pub const SIMPLE_ESCAPES: &[(char, char)] = &[
     ('0', '\0'),
 ];
 
+/// The characters that change the order text is shown in, the embeddings,
+/// overrides and isolates of Unicode's bidirectional algorithm (UAX #9):
+/// not control characters, but invisible, and able to make what text
+/// shows differ from what it holds, as CVE-2021-42574, "Trojan Source",
+/// shows of source code. They are rustc's
+/// `text_direction_codepoint_in_literal`'s.
+pub const BIDI_CONTROLS: [char; 9] = [
+    '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}',
+    '\u{2069}',
+];
+
 /// Write the body of a text literal for `text`: quotes and backslashes are
-/// escaped, as are control characters. The quotes around it are not
-/// written.
+/// escaped, as are control characters and [`BIDI_CONTROLS`], so that what
+/// is written shows what the text holds, in its order, and can't break the
+/// line it is on or change the terminal it is written to. The quotes
+/// around it are not written.
 ///
 /// # Errors
 ///
@@ -33,7 +46,8 @@ pub fn escape(text: &str, out: &mut impl fmt::Write) -> fmt::Result {
 
 /// Write `text` with nothing around it, as a table's cell shows it: as
 /// [`escape`] writes a literal's body, so that a control character can't
-/// break the line, but with quotes as they are, since none end it.
+/// break the line or change the terminal, nor a bidirectional control
+/// reorder it, but with quotes as they are, since none end it.
 ///
 /// # Errors
 ///
@@ -111,7 +125,9 @@ fn escape_but(text: &str, out: &mut impl fmt::Write, kept: Option<char>) -> fmt:
                 out.write_char('\\')?;
                 out.write_char(*name)?;
             }
-            None if c.is_control() => write!(out, "\\u{{{:X}}}", u32::from(c))?,
+            None if c.is_control() || BIDI_CONTROLS.contains(&c) => {
+                write!(out, "\\u{{{:X}}}", u32::from(c))?;
+            }
             None => out.write_char(c)?,
         }
     }
@@ -121,6 +137,32 @@ fn escape_but(text: &str, out: &mut impl fmt::Write, kept: Option<char>) -> fmt:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_could_change_a_terminal_or_reorder_text_is_escaped() {
+        let escaped = |text: &str, bare: bool| {
+            let mut out = String::new();
+            if bare {
+                escape_bare(text, &mut out).unwrap();
+            } else {
+                escape(text, &mut out).unwrap();
+            }
+            out
+        };
+        // An escape sequence, a line break, and an override that shows
+        // what follows it backwards.
+        let text = "a\u{1B}[31m\"b\"\nc\u{202E}d\u{2066}";
+        assert_eq!(
+            escaped(text, false),
+            "a\\u{1B}[31m\\\"b\\\"\\nc\\u{202E}d\\u{2066}"
+        );
+        assert_eq!(
+            escaped(text, true),
+            "a\\u{1B}[31m\"b\"\\nc\\u{202E}d\\u{2066}"
+        );
+        // Other characters, right-to-left ones too, are as they are.
+        assert_eq!(escaped("שלום, 西安", false), "שלום, 西安");
+    }
 
     #[test]
     fn booleans_are_read_from_their_words_in_any_case() {

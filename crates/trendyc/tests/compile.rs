@@ -968,6 +968,39 @@ operator main{{}} [
 }
 
 #[test]
+fn written_text_cant_change_the_terminal() {
+    // An escape sequence that clears the screen, and an override that
+    // shows what follows it backwards, in a text known only when running.
+    let source = "operator show{text: text} [
+    call debug_value{v: text};
+    call debug_table{r: relation { { text: text } }};
+    fail failure{message: \"bad: \" || text};
+];
+
+operator main{} [
+    call show{text: \"\\u{1B}[2J\\u{202E}x\"};
+];
+";
+    let failed = trendy_diag::Code::Failed.id();
+    let (code, stderr) = run_source("escaped", source);
+    assert_eq!(code, 1, "{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(lines[0], r#""\u{1B}[2J\u{202E}x""#);
+    assert!(
+        lines.iter().any(|l| l.contains(r"│ \u{1B}[2J\u{202E}x")),
+        "{stderr}"
+    );
+    assert_eq!(
+        lines[lines.len() - 2..],
+        [
+            format!(r"error[{failed}]: bad: \u{{1B}}[2J\u{{202E}}x"),
+            " --> escaped.trendy:4:5".to_string(),
+        ]
+    );
+    assert!(!stderr.contains('\u{1B}') && !stderr.contains('\u{202E}'));
+}
+
+#[test]
 fn types_in_a_hierarchy_when_running() {
     // Each value is laid out after its own type, which it is written as,
     // compared by, and ordered by in a relation, by its components; and

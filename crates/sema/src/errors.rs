@@ -4821,8 +4821,11 @@ pub(crate) fn failed(failed: &crate::ops::Failed, expr: &Expr) -> Diagnostic {
             )
         }
         crate::ops::Failed::Own(message) => {
-            Diagnostic::error(Code::Failed, message.clone(), expr.span(), "fails")
-                .with_note(FAIL_RULE)
+            // As the program would write it.
+            let mut written = String::new();
+            trendy_text::escape_bare(message, &mut written)
+                .expect("writing to a `String` cannot fail");
+            Diagnostic::error(Code::Failed, written, expr.span(), "fails").with_note(FAIL_RULE)
         }
         crate::ops::Failed::NotOfType(treated) => {
             let (value, ty) = &**treated;

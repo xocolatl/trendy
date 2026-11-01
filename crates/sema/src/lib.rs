@@ -2465,6 +2465,12 @@ var zero := seg{{len: 0}};{MAIN}"
         ));
         assert_eq!(errors[0].code, Code::Failed);
         assert_eq!(errors[0].message, "direct");
+        // Its message as the program would write it, so that it can't
+        // change the terminal, or show what it doesn't say.
+        let errors = self::errors(&format!(
+            "var direct: integer := fail failure{{message: \"a\\u{{1B}}[2J\\u{{202E}}b\"}};{MAIN}"
+        ));
+        assert_eq!(errors[0].message, "a\\u{1B}[2J\\u{202E}b");
         // When running, as a statement always is.
         analyze_str(&format!(
             "{NO_CONVERSION}operator weigh{{unit: text}} [ call debug_value{{v: grams{{unit: unit}}}}; ];\noperator main{{}} [ call weigh{{unit: \"pinch\"}}; fail failure{{message: \"done\"}}; ];"

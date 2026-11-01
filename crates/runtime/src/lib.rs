@@ -1993,7 +1993,10 @@ pub unsafe extern "C" fn trendy_rt_not_of_type(
 }
 
 /// Stop the program because it fails with an error whose message is
-/// `message`, a text, writing it (R0021): a `fail`.
+/// `message`, a text, writing it (R0021): a `fail`. It is written as a
+/// table's cell is, its control characters and bidirectional controls
+/// escaped, so that a message made from a file's text can't change the
+/// terminal, or show other than what it says.
 ///
 /// # Safety
 ///
@@ -2003,7 +2006,11 @@ pub unsafe extern "C" fn trendy_rt_not_of_type(
 pub unsafe extern "C" fn trendy_rt_failed(message: *const u8) -> ! {
     // SAFETY: guaranteed by the caller.
     let message = unsafe { read_text(message) };
-    fail_with(|out| writeln!(out, "error[R0021]: {message}"))
+    fail_with(|out| {
+        out.write_str("error[R0021]: ")?;
+        trendy_text::escape_bare(message, out)?;
+        out.write_char('\n')
+    })
 }
 
 /// Stop the program because `value`, components `desc` describes, which

@@ -109,7 +109,10 @@ directory of its own), embeds the archive, and passes it to `cc` with the
 object. **`trendy_text`**, `no_std` and dependency-free, holds the escape
 rules for text literals, so the compiler, which reads them and writes them
 in messages and in `to_text`'s folded values, and the runtime, which writes
-them, can't disagree, and so the words `parse_boolean` reads
+them, can't disagree, writing every control character and every
+bidirectional control (`BIDI_CONTROLS`) as an escape, so that nothing
+written can change a terminal or show text other than in its order, and so
+the words `parse_boolean` reads
 (`parse_boolean`), and why a text is no value of a type (`Unparsable`).
 **`trendy_numeric`**, `no_std` too, and depending only on `trendy_text`
 and `libm`, holds the exact sums
