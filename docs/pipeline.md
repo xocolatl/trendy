@@ -1440,7 +1440,7 @@ blocks: each block is a list of instructions (`Copy`, `Call`,
 conversions of a count to an integer and of an array's position less 1 to
 an index, `Element` and `Increment` for loops and indexes, and `Address`
 for a variable passed to a `var` or `out` parameter) ending in a
-terminator: `Return`, `Jump`, `Branch`, `Fail` or `Failed`. A block that
+terminator: `Return`, `Jump`, `Branch`, `Fail`, `Raise` or `Failed`. A block that
 can fail, by a call, an arithmetic instruction or a `Fail`, says where
 its failures go (`Block::failure`), and a function returns whether it
 failed. Instructions refer to memory through places: a data object, a
@@ -1887,8 +1887,17 @@ operation and its operands, a tuple a combination or a change finds, a
 join's attribute and its values, a relation's count, an array's
 position and length, or a value and the constraint of its type it
 breaks; a program's own, `fail e`, writes its error's message, which
-lowering computes by calling the prelude's `message` with it
-(`FunctionBuilder::fail_with`), for `trendy_rt_failed` (R0021). Each failure is a runtime function of its own, which
+lowering computes by calling the prelude's `message` with it, for
+`trendy_rt_failed` (R0021), but not where it fails, since what takes it
+may not write it: the error waits, with the site it failed at, in two
+variables of the program's own, `__failure` and `__failure_site`
+(`Waiting`, `FunctionBuilder::fail_with`), named in the system's
+namespace, which no program can name, and the block ends with
+`Terminator::Raise`. With nothing to take it, the program's entry is a
+function of lowering's own (`entry`), which calls `main` and, if it
+fails with an error waiting, writes its message at its site, after
+taking it from where it waits, so that a `message` that fails with an
+error of its own has that one written instead. Each failure is a runtime function of its own, which
 takes its values (`lir::Failure::call`), so the runtime needs no table of
 failures shared with the compiler. Then it writes where the program is, ` --> path:line:column`, as a compiler's error does. Sema
 gives each statement its site (`hir::Site`, its file and where it starts),

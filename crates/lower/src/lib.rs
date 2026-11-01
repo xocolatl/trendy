@@ -29,11 +29,162 @@ pub fn lower(program: &hir::Program, path: &str) -> lir::Program {
     // type parameters are given: an operator that is only called when
     // compiling, which sema evaluates, has none. Built-ins are runtime
     // calls.
-    let (entry, _) = function(program, &variable_data, program.entry, &[], &mut cx);
+    let (main, _) = function(program, &variable_data, program.entry, &[], &mut cx);
+    let entry = match cx.waiting.clone() {
+        Some(waiting) => entry(program, &variable_data, main, &waiting, &mut cx),
+        None => main,
+    };
     lir::Program {
         functions: cx.functions.into_values().collect(),
         data: cx.data,
         entry,
+    }
+}
+
+/// The function the executable starts in when a `fail` may leave the
+/// program with its error waiting, which nothing takes: it calls `main`,
+/// and if that fails with an error waiting, writes the error's message, as
+/// `message` gives it, and where it failed (R0021), then fails. If
+/// `message` fails with an error of its own, that one is written instead;
+/// if it fails otherwise, its failure has written its error.
+fn entry(
+    program: &hir::Program,
+    variable_data: &[lir::DataId],
+    main: lir::FunctionId,
+    waiting: &Waiting,
+    cx: &mut Lowering,
+) -> lir::FunctionId {
+    let id = cx.number();
+    let mut b = FunctionBuilder::new(
+        program,
+        "__entry".to_string(),
+        BTreeMap::new(),
+        variable_data,
+    );
+    let (handle, done) = (b.new_block(), b.new_block());
+    // The scope `main` is called in, which none of the message's
+    // statement's outlast.
+    let outer = b.slot(lir::Layout::Address);
+    b.insts.push(lir::Inst::CallRuntime {
+        function: lir::RuntimeFn::Innermost,
+        args: vec![outer.clone()],
+    });
+    // The error being written, taken from where it waits, so that one a
+    // failing `message` leaves there is told apart.
+    let layout = cx.layout(&waiting.ty);
+    let held = b.slot(layout.clone());
+    let zero = zero_constant(&layout, cx);
+    b.insts.push(lir::Inst::Copy {
+        dst: held.clone(),
+        src: zero.clone(),
+        layout: layout.clone(),
+    });
+    b.catches.push(handle);
+    b.insts.push(lir::Inst::Call {
+        function: main,
+        args: None,
+        result: None,
+    });
+    b.end_block(lir::Terminator::Return, handle);
+
+    b.insts.push(lir::Inst::CallRuntime {
+        function: lir::RuntimeFn::EndSince,
+        args: vec![outer],
+    });
+    let error = waiting.error();
+    let waits = b.is_of(&error, &waiting.ty, cx);
+    let take = b.new_block();
+    b.end_block(
+        lir::Terminator::Branch {
+            condition: waits,
+            then: take,
+            otherwise: done,
+        },
+        take,
+    );
+
+    let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&waiting.ty)));
+    b.insts.push(lir::Inst::CallRuntime {
+        function: lir::RuntimeFn::Release,
+        args: vec![held.clone(), descriptor.clone()],
+    });
+    for (dst, src) in [(held.clone(), error.clone()), (error, zero)] {
+        b.insts.push(lir::Inst::Copy {
+            dst,
+            src,
+            layout: layout.clone(),
+        });
+    }
+    b.scoped(|this| {
+        let callee = this.program.operator(this.program.message);
+        let params = params_layout(&callee.params, &cx.families)
+            .expect("`message` has a parameter, the error");
+        let args = this.slot(params);
+        let mut arg = args.clone();
+        arg.path.push(0);
+        this.insts.push(lir::Inst::Copy {
+            dst: arg,
+            src: held.clone(),
+            layout: layout.clone(),
+        });
+        let message = this.slot(cx.layout(&hir::Type::Scalar(hir::Scalar::Text)));
+        let call = hir::Call {
+            operator: this.program.message,
+            types: Vec::new(),
+            args: BTreeMap::new(),
+            updated: BTreeMap::new(),
+        };
+        this.invoke(&call, Some(args), Some(message.clone()), cx);
+        this.insts.push(lir::Inst::RestoreSite {
+            src: waiting.site(),
+        });
+        let next = this.new_block();
+        this.fail(lir::Failure::Own { message }, next);
+    });
+    b.catches.pop();
+    b.end_block(lir::Terminator::Jump(done), done);
+
+    b.insts.push(lir::Inst::CallRuntime {
+        function: lir::RuntimeFn::Release,
+        args: vec![held, descriptor],
+    });
+    let after = b.new_block();
+    b.end_block(lir::Terminator::Failed, after);
+    let lowered = b.finish(None, cx);
+    cx.functions.insert(id.0, lowered);
+    id
+}
+
+/// Where a `fail`'s error waits for what takes it, a transaction or the
+/// entry, which writes it: the program's own variable `__failure`, of the
+/// prelude's type `error`, null when no error waits, and `__failure_site`,
+/// the site it failed at. Their names are in the system's namespace,
+/// which no program can name.
+#[derive(Debug, Clone)]
+struct Waiting {
+    /// `__failure`'s data object.
+    error: lir::DataId,
+    /// `__failure_site`'s.
+    site: lir::DataId,
+    /// The prelude's type `error`.
+    ty: hir::Type,
+}
+
+impl Waiting {
+    /// The error's place.
+    fn error(&self) -> lir::Place {
+        lir::Place {
+            base: lir::Base::Data(self.error),
+            path: vec![0],
+        }
+    }
+
+    /// The site's place.
+    fn site(&self) -> lir::Place {
+        lir::Place {
+            base: lir::Base::Data(self.site),
+            path: vec![0],
+        }
     }
 }
 
@@ -60,7 +211,7 @@ fn function(
     }
     // Numbered before its body is lowered, so that a call of itself finds
     // it.
-    let function_id = lir::FunctionId(cx.functions_of.len());
+    let function_id = cx.number();
     cx.functions_of.insert(key.clone(), (function_id, false));
 
     let op = program.operator(id);
@@ -168,6 +319,10 @@ struct Lowering {
     sites: HashMap<hir::Site, lir::DataId>,
     /// Each file's path, as a text, made once.
     paths: HashMap<hir::File, lir::Field>,
+    /// How many functions are numbered.
+    numbered: usize,
+    /// Where a `fail`'s error waits, once one is lowered.
+    waiting: Option<Waiting>,
 }
 
 impl Lowering {
@@ -184,7 +339,38 @@ impl Lowering {
             path: path.to_string(),
             sites: HashMap::new(),
             paths: HashMap::new(),
+            numbered: 0,
+            waiting: None,
         }
+    }
+
+    /// The next function's id: they count up from 0.
+    fn number(&mut self) -> lir::FunctionId {
+        self.numbered += 1;
+        lir::FunctionId(self.numbered - 1)
+    }
+
+    /// Where a `fail`'s error waits, made when first needed, null.
+    fn waiting(&mut self, program: &hir::Program) -> Waiting {
+        if let Some(waiting) = &self.waiting {
+            return waiting.clone();
+        }
+        let ty = program.operator(program.message).params["error"].ty.clone();
+        let field = zero_field(&self.layout(&ty));
+        let mut variable = |name: &str, field| {
+            self.push(lir::Data {
+                kind: lir::DataKind::Variable {
+                    name: name.to_string(),
+                },
+                writable: true,
+                fields: vec![field],
+            })
+        };
+        let error = variable("__failure", field);
+        let site = variable("__failure_site", lir::Field::Usize(0));
+        let waiting = Waiting { error, site, ty };
+        self.waiting = Some(waiting.clone());
+        waiting
     }
 
     /// The layout of a value of type `ty`.
@@ -506,6 +692,15 @@ struct FunctionBuilder<'a> {
     /// Where the site the function is entered at is saved, once a call
     /// changes it while the function has none of its own.
     entered: Option<lir::Place>,
+    /// The blocks that take the failures of the code being built,
+    /// innermost last; with none, they go to the function's failure exit.
+    catches: Vec<lir::BlockId>,
+    /// For each block, the block that took its failures as it was built,
+    /// or `None` for the failure exit.
+    handlers: Vec<Option<lir::BlockId>>,
+    /// The function's failure exit, made when a block that can fail first
+    /// sends its failures there.
+    exit: Option<lir::BlockId>,
 }
 
 /// Where a local variable is: its value's place, and whether the variable
@@ -586,6 +781,9 @@ impl<'a> FunctionBuilder<'a> {
             tuples: Vec::new(),
             site: None,
             entered: None,
+            catches: Vec::new(),
+            handlers: vec![None],
+            exit: None,
         };
         let variables: Vec<(usize, String)> = builder
             .params
@@ -714,21 +912,30 @@ impl<'a> FunctionBuilder<'a> {
     }
 
     /// The function, its last block ended with a return, with a result
-    /// laid out as `result`, if it has one, and, if something in it can
-    /// fail, a failure exit, where each block that can sends its failures.
+    /// laid out as `result`, if it has one: each block that can fail sends
+    /// its failures to the block that took them as it was built, or else
+    /// to the function's failure exit, made if one does.
     fn finish(mut self, result: Option<lir::Layout>, cx: &mut Lowering) -> lir::Function {
         self.end_block(lir::Terminator::Return, lir::BlockId(0));
         if let Some(entered) = self.entered.take() {
             let save = lir::Inst::SaveSite { dst: entered };
             self.blocks[0].insts.insert(0, save);
         }
-        if self.blocks.iter().any(lir::Block::can_fail) {
-            let exit = self.failure_exit(cx);
-            for block in &mut self.blocks {
-                if block.can_fail() {
-                    block.failure = Some(exit);
-                }
+        for i in 0..self.blocks.len() {
+            if self.blocks[i].can_fail() {
+                let target = match self.handlers[i] {
+                    Some(handler) => handler,
+                    None => *self.exit.get_or_insert_with(|| {
+                        self.blocks.push(placeholder());
+                        self.handlers.push(None);
+                        lir::BlockId(self.blocks.len() - 1)
+                    }),
+                };
+                self.blocks[i].failure = Some(target);
             }
+        }
+        if let Some(exit) = self.exit {
+            self.failure_exit(exit, cx);
         }
         lir::Function {
             name: self.name,
@@ -746,8 +953,7 @@ impl<'a> FunctionBuilder<'a> {
     /// then releases its local variables' references. A local variable
     /// holds none before its declaration or after its block, so one
     /// released there gives up only what it holds.
-    fn failure_exit(&mut self, cx: &mut Lowering) -> lir::BlockId {
-        let exit = self.new_block();
+    fn failure_exit(&mut self, exit: lir::BlockId, cx: &mut Lowering) {
         self.current = exit;
         if self.begins {
             let saved = self.slot(lir::Layout::Address);
@@ -778,22 +984,25 @@ impl<'a> FunctionBuilder<'a> {
             });
         }
         self.end_block(lir::Terminator::Failed, exit);
-        exit
     }
 
     /// A new block, to be built later.
     fn new_block(&mut self) -> lir::BlockId {
         self.blocks.push(placeholder());
+        self.handlers.push(None);
         lir::BlockId(self.blocks.len() - 1)
     }
 
     /// End the current block with `terminator`, and go on building `next`.
+    /// Its failures go to the innermost block that takes them, which
+    /// [`FunctionBuilder::finish`] makes its failure target.
     fn end_block(&mut self, terminator: lir::Terminator, next: lir::BlockId) {
         self.blocks[self.current.0] = lir::Block {
             insts: std::mem::take(&mut self.insts),
             terminator,
             failure: None,
         };
+        self.handlers[self.current.0] = self.catches.last().copied();
         self.current = next;
     }
 
@@ -869,18 +1078,41 @@ impl<'a> FunctionBuilder<'a> {
         }
     }
 
-    /// Stop the program with the error `error`'s message, as the prelude's
-    /// `message` writes it (R0021). What comes after is never reached.
+    /// Fail with the error `error`, which waits, with the site it fails
+    /// at, for what takes it ([`Waiting`]): a transaction, or else the
+    /// entry, which writes its message (R0021). The error takes its own
+    /// references, before any an error waiting already has are given up:
+    /// one a failing `message` makes may be made of the one it writes.
+    /// What comes after is never reached.
     fn fail_with(&mut self, error: &hir::Expr, cx: &mut Lowering) {
-        let call = hir::Call {
-            operator: self.program.message,
-            types: Vec::new(),
-            args: BTreeMap::from([("error".to_string(), error.clone())]),
-            updated: BTreeMap::new(),
-        };
-        let message = self.read_only_call(&call, cx);
+        let waiting = cx.waiting(self.program);
+        let value = self.place(error, cx);
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&waiting.ty)));
+        let layout = cx.layout(&waiting.ty);
+        let held = self.slot(layout.clone());
+        self.insts.push(lir::Inst::Copy {
+            dst: held.clone(),
+            src: value,
+            layout: layout.clone(),
+        });
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Retain,
+            args: vec![held.clone(), descriptor.clone()],
+        });
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Release,
+            args: vec![waiting.error(), descriptor],
+        });
+        self.insts.push(lir::Inst::Copy {
+            dst: waiting.error(),
+            src: held,
+            layout,
+        });
+        self.insts.push(lir::Inst::SaveSite {
+            dst: waiting.site(),
+        });
         let next = self.new_block();
-        self.fail(lir::Failure::Own { message }, next);
+        self.end_block(lir::Terminator::Raise, next);
     }
 
     /// A `for` loop of `body` over `array`, with the local variable
@@ -4340,25 +4572,28 @@ fn common_attributes(lhs: &hir::Heading, rhs: &hir::Heading, cx: &mut Lowering) 
 /// A constant of `layout` with every byte zero, as a place: a value whose
 /// pointers are null.
 fn zero_constant(layout: &lir::Layout, cx: &mut Lowering) -> lir::Place {
-    fn zero(layout: &lir::Layout) -> lir::Field {
-        match layout {
-            lir::Layout::U8 => lir::Field::U8(0),
-            lir::Layout::I64 => lir::Field::I64(0),
-            lir::Layout::F64Bits => lir::Field::F64Bits(0),
-            lir::Layout::Usize | lir::Layout::Address => lir::Field::Usize(0),
-            lir::Layout::Bytes(n) => lir::Field::Bytes(vec![0; *n]),
-            lir::Layout::Struct(fields) => lir::Field::Struct(fields.iter().map(zero).collect()),
-            lir::Layout::Union(variants) => {
-                let first = variants
-                    .first()
-                    .map_or(lir::Field::Struct(Vec::new()), zero);
-                lir::Field::Variant(layout.clone(), Box::new(first))
-            }
-        }
-    }
     lir::Place {
-        base: lir::Base::Data(cx.constant(vec![zero(layout)])),
+        base: lir::Base::Data(cx.constant(vec![zero_field(layout)])),
         path: vec![0],
+    }
+}
+
+/// A field of zero bytes laid out as `layout`: null pointers, and no
+/// type, for a value of a type in a hierarchy.
+fn zero_field(layout: &lir::Layout) -> lir::Field {
+    match layout {
+        lir::Layout::U8 => lir::Field::U8(0),
+        lir::Layout::I64 => lir::Field::I64(0),
+        lir::Layout::F64Bits => lir::Field::F64Bits(0),
+        lir::Layout::Usize | lir::Layout::Address => lir::Field::Usize(0),
+        lir::Layout::Bytes(n) => lir::Field::Bytes(vec![0; *n]),
+        lir::Layout::Struct(fields) => lir::Field::Struct(fields.iter().map(zero_field).collect()),
+        lir::Layout::Union(variants) => {
+            let first = variants
+                .first()
+                .map_or(lir::Field::Struct(Vec::new()), zero_field);
+            lir::Field::Variant(layout.clone(), Box::new(first))
+        }
     }
 }
 

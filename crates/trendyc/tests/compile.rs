@@ -976,6 +976,38 @@ operator main{{}} [
     );
 }
 
+/// A `fail`'s error waits for what takes it, and with nothing to, the
+/// program writes its message as it stops: a `message` that fails then
+/// has its own failure written instead, once.
+#[test]
+fn a_failing_message_writes_its_own_failure() {
+    let source = "type grumpy is error { { n: integer } };
+
+operator message{error: grumpy}: text [
+    to_text{from: 10 div error.n}
+];
+
+operator fails{n: integer} [
+    fail grumpy{n: n};
+];
+
+operator main{} [
+    call debug_value{v: 1};
+    call fails{n: 0};
+];
+";
+    assert_eq!(
+        run_source("failing_message", source),
+        (
+            1,
+            format!(
+                "1\n{}\n --> failing_message.trendy:4:5\n",
+                division("10 div 0")
+            )
+        )
+    );
+}
+
 /// A failure several calls deep, in a loop, makes each function it is in
 /// fail in turn, each giving up what its statements and local variables
 /// hold, a text and a relation here, and the program stops as it did where

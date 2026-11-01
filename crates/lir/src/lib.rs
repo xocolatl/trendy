@@ -67,7 +67,10 @@
 //! [`Terminator::Fail`], whose runtime function takes the values involved.
 //! Each of those writes the error, with its values, to stderr, with the
 //! site the program is at, which [`Inst::Site`] sets. The runtime never
-//! stops the program itself.
+//! stops the program itself. A `fail` writes nothing: compiled code keeps
+//! its error, and where it was, and ends its block with
+//! [`Terminator::Raise`], for whatever takes the error, or else the entry,
+//! which writes it.
 //!
 //! # Type descriptors
 //!
@@ -418,6 +421,11 @@ pub enum RuntimeFn {
     /// describes, points to: an update operator's argument, which a
     /// variable the operator assigns may hold the only other reference to.
     Keep,
+    /// `trendy_rt_retain(value, descriptor)`: take a reference to each
+    /// buffer that a value, of the type the descriptor describes, points
+    /// to, for a copy of it that is to hold them: a `fail`'s error, which
+    /// waits for what takes it.
+    Retain,
     /// `trendy_rt_adopt(value, descriptor)`: have the buffer of a relation
     /// or array, of the type the descriptor describes, that
     /// [`RuntimeFn::Allocate`] made and compiled code filled, take a
@@ -554,7 +562,7 @@ pub enum RuntimeFn {
 
 impl RuntimeFn {
     /// Every runtime function, for checking the runtime against them.
-    pub const ALL: [RuntimeFn; 60] = [
+    pub const ALL: [RuntimeFn; 61] = [
         RuntimeFn::DebugValue,
         RuntimeFn::DebugTable,
         RuntimeFn::ToText,
@@ -598,6 +606,7 @@ impl RuntimeFn {
         RuntimeFn::Innermost,
         RuntimeFn::EndSince,
         RuntimeFn::Keep,
+        RuntimeFn::Retain,
         RuntimeFn::Adopt,
         RuntimeFn::Reshape,
         RuntimeFn::Relation,
@@ -683,6 +692,7 @@ impl RuntimeFn {
             | RuntimeFn::End
             | RuntimeFn::Innermost
             | RuntimeFn::EndSince
+            | RuntimeFn::Retain
             | RuntimeFn::Adopt
             | RuntimeFn::Subset
             | RuntimeFn::CompareText
@@ -737,6 +747,7 @@ impl RuntimeFn {
             RuntimeFn::Innermost => "trendy_rt_innermost",
             RuntimeFn::EndSince => "trendy_rt_end_since",
             RuntimeFn::Keep => "trendy_rt_keep",
+            RuntimeFn::Retain => "trendy_rt_retain",
             RuntimeFn::Adopt => "trendy_rt_adopt",
             RuntimeFn::Reshape => "trendy_rt_reshape",
             RuntimeFn::Relation => "trendy_rt_relation",
@@ -1224,11 +1235,12 @@ pub struct Block {
 
 impl Block {
     /// Whether something in the block can fail: a call, a runtime
-    /// function's that can, an arithmetic instruction, or a
-    /// [`Terminator::Fail`].
+    /// function's that can, an arithmetic instruction, a
+    /// [`Terminator::Fail`] or a [`Terminator::Raise`].
     #[must_use]
     pub fn can_fail(&self) -> bool {
-        self.insts.iter().any(Inst::can_fail) || matches!(self.terminator, Terminator::Fail(_))
+        self.insts.iter().any(Inst::can_fail)
+            || matches!(self.terminator, Terminator::Fail(_) | Terminator::Raise)
     }
 }
 
@@ -1264,6 +1276,9 @@ pub enum Terminator {
     /// writes its error, with its values, then go to the block's failure
     /// target.
     Fail(Box<Failure>),
+    /// Fail with an error compiled code has kept, a `fail`'s, writing
+    /// nothing: go to the block's failure target, which may take it.
+    Raise,
     /// Return to the caller, failing: the end of a function's failure exit.
     Failed,
 }

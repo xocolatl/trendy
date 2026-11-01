@@ -746,6 +746,21 @@ pub unsafe extern "C" fn trendy_rt_release(value: *mut u8, desc: *const TypeDesc
     }
 }
 
+/// Take a reference to each buffer the value at `value`, of the type `desc`
+/// describes, points to, for a copy of it that is to hold them: a
+/// `fail`'s error, which waits for what takes it.
+///
+/// # Safety
+///
+/// `value` must point to a valid value of the type `desc` describes, or
+/// one with null pointers, and `desc` to a valid descriptor.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_retain(value: *const u8, desc: *const TypeDesc) {
+    // SAFETY: guaranteed by the caller.
+    unsafe { retain(value, &*desc) }
+}
+
 /// Take a reference, for the buffer of the relation or array at `value`,
 /// of the type `desc` describes, to what each of its tuples or elements
 /// points to: compiled code has filled the buffer, which the runtime

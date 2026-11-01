@@ -208,6 +208,10 @@ impl Functions {
                         .brif(condition, blocks[then.0], &[], blocks[otherwise.0], &[]);
                 }
                 lir::Terminator::Fail(failure) => self.fail(failure, &frame, &mut b)?,
+                lir::Terminator::Raise => {
+                    let failure = self.failure_target()?;
+                    b.ins().jump(failure, &[]);
+                }
             }
         }
         self.failure = None;
