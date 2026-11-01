@@ -254,10 +254,7 @@ impl Functions {
                     .collect::<Result<Vec<_>, _>>()?;
                 let call = b.ins().call(callee, &addresses);
                 let failed = b.inst_results(call)[0];
-                let failure = self.failure_target()?;
-                let carry_on = b.create_block();
-                b.ins().brif(failed, failure, &[], carry_on, &[]);
-                b.switch_to_block(carry_on);
+                self.unless_failed(failed, b)?;
             }
             lir::Inst::Site(_) | lir::Inst::SaveSite { .. } | lir::Inst::RestoreSite { .. } => {
                 self.site_inst(inst, frame, b)?;
@@ -497,7 +494,8 @@ impl Functions {
     }
 
     /// Call the runtime function `function`, passing the address of each
-    /// of `args`.
+    /// of `args`, and if it can fail, go where the block's failures go if
+    /// it does.
     fn call_runtime(
         &mut self,
         function: lir::RuntimeFn,
@@ -512,7 +510,21 @@ impl Functions {
             .iter()
             .map(|place| self.address(place, frame, b))
             .collect::<Result<Vec<_>, _>>()?;
-        b.ins().call(callee, &args);
+        let call = b.ins().call(callee, &args);
+        if function.fails() {
+            let failed = b.inst_results(call)[0];
+            self.unless_failed(failed, b)?;
+        }
+        Ok(())
+    }
+
+    /// Go where the block's failures go if `failed`, which a call returned,
+    /// is nonzero, and carry on in a new block otherwise.
+    fn unless_failed(&mut self, failed: Value, b: &mut FunctionBuilder) -> Result<(), String> {
+        let failure = self.failure_target()?;
+        let carry_on = b.create_block();
+        b.ins().brif(failed, failure, &[], carry_on, &[]);
+        b.switch_to_block(carry_on);
         Ok(())
     }
 
@@ -606,6 +618,10 @@ impl Functions {
         signature
             .params
             .extend(params.iter().map(|&ty| AbiParam::new(ty)));
+        // Whether it failed.
+        if function.fails() {
+            signature.returns.push(AbiParam::new(types::I8));
+        }
         let id = self
             .module
             .declare_function(function.symbol(), Linkage::Import, &signature)
@@ -1210,6 +1226,29 @@ mod tests {
                 .any(|n| n.ends_with("trendy_rt_debug_value")),
             "{imported:?}"
         );
+    }
+
+    /// LIR names every function the runtime exports, and those it says can
+    /// fail are exactly those the runtime declares to return whether they
+    /// did, a `bool`, which codegen declares as returning a byte and
+    /// branches on.
+    #[test]
+    fn the_runtime_functions_that_fail_return_whether_they_did() {
+        let runtime = include_str!("../../runtime/src/lib.rs");
+        let exported: std::collections::BTreeMap<&str, bool> = runtime
+            .match_indices("extern \"C\" fn ")
+            .map(|(at, keyword)| {
+                let rest = &runtime[at + keyword.len()..];
+                let signature = &rest[..rest.find('{').unwrap()];
+                let name = &rest[..rest.find('(').unwrap()];
+                (name, signature.trim_end().ends_with("-> bool"))
+            })
+            .collect();
+        let named = lir::RuntimeFn::ALL
+            .iter()
+            .map(|f| (f.symbol(), f.fails()))
+            .collect();
+        assert_eq!(exported, named);
     }
 
     #[test]

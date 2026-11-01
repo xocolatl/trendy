@@ -24,6 +24,17 @@
 //! up when the statement ends. A buffer is freed when its last reference
 //! is given up, so a value lasts as long as something holds it, and no
 //! longer, however many a loop makes.
+//!
+//! # Failures
+//!
+//! The runtime never stops the program, but for an internal error. A
+//! function that can fail writes the error where the failure happens, and
+//! returns whether it failed, a `bool`, which compiled code checks as it
+//! does a call's. Inside, a failure is `Failed`, which a `Fallible`
+//! function gives up through its callers. A function that fails changes
+//! nothing but what the statement's scope holds, which ends as the
+//! statement fails, so a buffer half-built is released with it, and the
+//! function's own memory is a `Temp`, freed however it ends.
 
 #![cfg_attr(not(test), no_std)]
 
@@ -104,8 +115,8 @@ impl Record {
     }
 }
 
-/// Store `lhs || rhs` at `dst`, in memory the statement owns. Stops the
-/// program if the memory can't be allocated.
+/// Store `lhs || rhs` at `dst`, in memory the statement owns. Fails if the
+/// memory can't be allocated.
 ///
 /// # Safety
 ///
@@ -113,18 +124,23 @@ impl Record {
 /// one.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn trendy_rt_concat(dst: *mut Text, lhs: *const Text, rhs: *const Text) {
+pub unsafe extern "C" fn trendy_rt_concat(
+    dst: *mut Text,
+    lhs: *const Text,
+    rhs: *const Text,
+) -> bool {
     // SAFETY: guaranteed by the caller.
-    unsafe {
+    status(|| unsafe {
         let (lhs, rhs) = (lhs.read_unaligned(), rhs.read_unaligned());
         let Some(len) = lhs.len.checked_add(rhs.len) else {
-            fail(Failure::OutOfMemory)
+            return Err(fail(Failure::OutOfMemory));
         };
-        let bytes = allocate_buffer(len, core::ptr::null());
+        let bytes = allocate_buffer(len, core::ptr::null())?;
         core::ptr::copy_nonoverlapping(lhs.bytes, bytes, lhs.len);
         core::ptr::copy_nonoverlapping(rhs.bytes, bytes.add(lhs.len), rhs.len);
         dst.write_unaligned(Text { bytes, len });
-    }
+        Ok(())
+    })
 }
 
 /// Store at `dst` 1 if `lhs` and `rhs`, of the type `desc` describes, are
@@ -377,16 +393,53 @@ pub unsafe extern "C" fn trendy_rt_end_since(saved: *const *mut Scope) {
     }
 }
 
-/// Have the current statement's scope hold a reference to `buffer`, which
-/// it gives up when the statement ends. An immortal buffer needs none.
+/// Make room in the current statement's scope for `more` references more,
+/// so that holding them ([`hold_reserved`]) can't fail: a function that
+/// hands the scope references it can't take back does, before it changes
+/// anything. Fails if there is no memory for them.
+///
+/// # Safety
+///
+/// The statement must have begun a scope, if `more` isn't 0.
+#[cfg(not(test))]
+unsafe fn reserve(more: usize) -> Fallible {
+    use core::sync::atomic::Ordering::Relaxed;
+    if more == 0 {
+        return Ok(());
+    }
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let scope = &mut *CURRENT.load(Relaxed);
+        let Some(needed) = scope.len.checked_add(more) else {
+            return Err(fail(Failure::OutOfMemory));
+        };
+        if needed <= scope.capacity {
+            return Ok(());
+        }
+        let capacity = needed.max(scope.capacity * 2).max(8);
+        let Some(bytes) = capacity.checked_mul(size_of::<*mut u8>()) else {
+            return Err(fail(Failure::OutOfMemory));
+        };
+        let grown = realloc(scope.buffers.cast(), bytes);
+        if grown.is_null() {
+            return Err(fail(Failure::OutOfMemory));
+        }
+        scope.buffers = grown.cast();
+        scope.capacity = capacity;
+        Ok(())
+    }
+}
+
+/// Have the current statement's scope hold a reference to `buffer`, in
+/// room [`reserve`] made, which it gives up when the statement ends. An
+/// immortal buffer needs none.
 ///
 /// # Safety
 ///
 /// `buffer` must be a buffer, just past its header, whose reference the
-/// scope takes over. A statement that makes or replaces values that point
-/// to buffers has begun a scope.
+/// scope takes over, and the scope must have room for it.
 #[cfg(not(test))]
-unsafe fn hold(buffer: *mut u8) {
+unsafe fn hold_reserved(buffer: *mut u8) {
     use core::sync::atomic::Ordering::Relaxed;
     // SAFETY: guaranteed by the caller.
     unsafe {
@@ -394,21 +447,45 @@ unsafe fn hold(buffer: *mut u8) {
             return;
         }
         let scope = &mut *CURRENT.load(Relaxed);
-        if scope.len == scope.capacity {
-            let capacity = (scope.capacity * 2).max(8);
-            let Some(bytes) = capacity.checked_mul(size_of::<*mut u8>()) else {
-                fail(Failure::OutOfMemory)
-            };
-            let grown = realloc(scope.buffers.cast(), bytes);
-            if grown.is_null() {
-                fail(Failure::OutOfMemory);
-            }
-            scope.buffers = grown.cast();
-            scope.capacity = capacity;
-        }
         *scope.buffers.add(scope.len) = buffer;
         scope.len += 1;
     }
+}
+
+/// Have the current statement's scope hold a reference to `buffer`, as
+/// [`hold_reserved`] does, making room for it. If there is no memory for
+/// that, it gives the reference up and fails.
+///
+/// # Safety
+///
+/// `buffer` must be a buffer, just past its header, whose reference the
+/// scope takes over. A statement that makes or replaces values that point
+/// to buffers has begun a scope.
+#[cfg(not(test))]
+unsafe fn hold(buffer: *mut u8) -> Fallible {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        if let Err(failed) = reserve(1) {
+            release_buffer(buffer);
+            return Err(failed);
+        }
+        hold_reserved(buffer);
+    }
+    Ok(())
+}
+
+/// How many buffers the value at `value`, of the type `desc` describes,
+/// points to directly, as [`each_buffer`] goes through them.
+///
+/// # Safety
+///
+/// As for [`each_buffer`].
+#[cfg(not(test))]
+unsafe fn buffers(value: *const u8, desc: &TypeDesc) -> usize {
+    let mut count = 0;
+    // SAFETY: guaranteed by the caller.
+    unsafe { each_buffer(value, desc, &mut |_| count += 1) };
+    count
 }
 
 /// The header of `buffer`.
@@ -436,26 +513,29 @@ unsafe fn set_header(buffer: *mut u8, header: Header) {
 /// A new buffer for `bytes` bytes, of the relation or array `desc`
 /// describes, or of a text's bytes if it is null, which the current
 /// statement's scope holds the only reference to, holding references
-/// through none of its elements yet. Stops the program if there is no
-/// memory for it.
+/// through none of its elements yet. Fails if there is no memory for it.
 #[cfg(not(test))]
-fn allocate_buffer(bytes: usize, desc: *const TypeDesc) -> *mut u8 {
-    let buffer = new_buffer(bytes, desc);
-    // SAFETY: the buffer is new, and its one reference the scope's.
-    unsafe { hold(buffer) };
-    buffer
+fn allocate_buffer(bytes: usize, desc: *const TypeDesc) -> Fallible<*mut u8> {
+    // SAFETY: a statement that makes a buffer has begun a scope, which
+    // takes over the new buffer's one reference.
+    unsafe {
+        reserve(1)?;
+        let buffer = new_buffer(bytes, desc)?;
+        hold_reserved(buffer);
+        Ok(buffer)
+    }
 }
 
 /// A new buffer, as for [`allocate_buffer`], whose one reference is the
 /// caller's to give to what holds it.
 #[cfg(not(test))]
-fn new_buffer(bytes: usize, desc: *const TypeDesc) -> *mut u8 {
+fn new_buffer(bytes: usize, desc: *const TypeDesc) -> Fallible<*mut u8> {
     let Some(total) = bytes.checked_add(HEADER) else {
-        fail(Failure::OutOfMemory)
+        return Err(fail(Failure::OutOfMemory));
     };
     // SAFETY: the block has room for the header and the bytes.
     unsafe {
-        let buffer = allocate::<u8>(total).add(HEADER);
+        let buffer = allocate::<u8>(total)?.add(HEADER);
         set_header(
             buffer,
             Header {
@@ -464,7 +544,7 @@ fn new_buffer(bytes: usize, desc: *const TypeDesc) -> *mut u8 {
                 desc,
             },
         );
-        buffer
+        Ok(buffer)
     }
 }
 
@@ -599,17 +679,24 @@ unsafe fn release(value: *const u8, desc: &TypeDesc) {
 /// `src` must point to a valid value of the type `desc` describes, `desc`
 /// to a valid descriptor, and `dst` to a variable's value, which holds
 /// references to what it points to, or null pointers, and doesn't overlap
-/// `src`. The statement must have begun a scope.
+/// `src`. The statement must have begun a scope. Fails, assigning nothing,
+/// if there is no memory for the scope to hold the old value's references.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn trendy_rt_assign(dst: *mut u8, src: *const u8, desc: *const TypeDesc) {
+pub unsafe extern "C" fn trendy_rt_assign(
+    dst: *mut u8,
+    src: *const u8,
+    desc: *const TypeDesc,
+) -> bool {
     // SAFETY: guaranteed by the caller.
-    unsafe {
+    status(|| unsafe {
         let desc = &*desc;
+        reserve(buffers(dst, desc))?;
         retain(src, desc);
-        each_buffer(dst, desc, &mut |buffer| hold(buffer));
+        each_buffer(dst, desc, &mut |buffer| hold_reserved(buffer));
         core::ptr::copy_nonoverlapping(src, dst, desc.size);
-    }
+        Ok(())
+    })
 }
 
 /// Have the current statement's scope hold a reference to each buffer the
@@ -622,15 +709,19 @@ pub unsafe extern "C" fn trendy_rt_assign(dst: *mut u8, src: *const u8, desc: *c
 ///
 /// `value` must point to a valid value of the type `desc` describes, and
 /// `desc` to a valid descriptor. The statement must have begun a scope.
+/// Fails, keeping nothing, if there is no memory for the scope to hold
+/// them.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn trendy_rt_keep(value: *const u8, desc: *const TypeDesc) {
+pub unsafe extern "C" fn trendy_rt_keep(value: *const u8, desc: *const TypeDesc) -> bool {
     // SAFETY: guaranteed by the caller.
-    unsafe {
+    status(|| unsafe {
         let desc = &*desc;
+        reserve(buffers(value, desc))?;
         retain(value, desc);
-        each_buffer(value, desc, &mut |buffer| hold(buffer));
-    }
+        each_buffer(value, desc, &mut |buffer| hold_reserved(buffer));
+        Ok(())
+    })
 }
 
 /// Give up the references that the value at `value`, a local variable's of
@@ -726,20 +817,22 @@ unsafe fn copy_element(buffer: *mut u8, dst: *mut u8, src: *const u8, desc: &Typ
 /// `value` must point to a valid array of the type `desc` describes that
 /// holds a reference to its buffer: a variable's value, or an element of a
 /// buffer that only its holder holds. The statement must have begun a
-/// scope.
+/// scope. Fails, changing nothing, if there is no memory for the copy.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn trendy_rt_unique(value: *mut Text, desc: *const TypeDesc) {
+pub unsafe extern "C" fn trendy_rt_unique(value: *mut Text, desc: *const TypeDesc) -> bool {
     // SAFETY: guaranteed by the caller.
-    unsafe {
+    status(|| unsafe {
         let (buffer, len) = read_slice(value.cast());
         if header(buffer).count == 1 {
-            return;
+            return Ok(());
         }
-        let copy = copied(buffer, len, &*desc);
-        hold(buffer.cast_mut());
+        reserve(1)?;
+        let copy = copied(buffer, len, &*desc)?;
+        hold_reserved(buffer.cast_mut());
         value.write_unaligned(Text { bytes: copy, len });
-    }
+        Ok(())
+    })
 }
 
 /// Store at `dst` a copy of the array at `src`, of the type `desc`
@@ -750,21 +843,23 @@ pub unsafe extern "C" fn trendy_rt_unique(value: *mut Text, desc: *const TypeDes
 /// # Safety
 ///
 /// `src` must point to a valid array of the type `desc` describes, and
-/// `dst` to memory for one. The statement must have begun a scope.
+/// `dst` to memory for one. The statement must have begun a scope. Fails
+/// if there is no memory for the copy.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn trendy_rt_duplicate(
     dst: *mut Text,
     src: *const u8,
     desc: *const TypeDesc,
-) {
+) -> bool {
     // SAFETY: guaranteed by the caller.
-    unsafe {
+    status(|| unsafe {
         let (buffer, len) = read_slice(src);
-        let copy = copied(buffer, len, &*desc);
-        hold(copy);
+        let copy = copied(buffer, len, &*desc)?;
+        hold(copy)?;
         dst.write_unaligned(Text { bytes: copy, len });
-    }
+        Ok(())
+    })
 }
 
 /// A new buffer of copies of the `len` elements of `buffer`, an array's of
@@ -775,36 +870,104 @@ pub unsafe extern "C" fn trendy_rt_duplicate(
 ///
 /// `buffer` must hold `len` valid elements of the array's type.
 #[cfg(not(test))]
-unsafe fn copied(buffer: *const u8, len: usize, desc: &TypeDesc) -> *mut u8 {
+unsafe fn copied(buffer: *const u8, len: usize, desc: &TypeDesc) -> Fallible<*mut u8> {
     // SAFETY: guaranteed by the caller.
     unsafe {
         let element = desc.element();
         let Some(bytes) = len.checked_mul(element.size) else {
-            fail(Failure::OutOfMemory)
+            return Err(fail(Failure::OutOfMemory));
         };
-        let copy = new_buffer(bytes, desc);
+        let copy = new_buffer(bytes, desc)?;
         for i in 0..len {
             let at = i * element.size;
             copy_element(copy, copy.add(at), buffer.add(at), element);
         }
-        copy
+        Ok(copy)
     }
 }
 
 /// Memory for `count` values of type `T`, at least one byte, so that even
 /// an empty text, relation or array has an address. `malloc`'s memory is aligned
-/// for any type. Stops the program if there is none.
+/// for any type. Fails if there is none.
 #[cfg(not(test))]
-fn allocate<T>(count: usize) -> *mut T {
+fn allocate<T>(count: usize) -> Fallible<*mut T> {
     let Some(size) = count.checked_mul(size_of::<T>()) else {
-        fail(Failure::OutOfMemory)
+        return Err(fail(Failure::OutOfMemory));
     };
     // SAFETY: `malloc` has no preconditions.
     let memory = unsafe { malloc(size.max(1)) };
     if memory.is_null() {
-        fail(Failure::OutOfMemory);
+        return Err(fail(Failure::OutOfMemory));
     }
-    memory.cast()
+    Ok(memory.cast())
+}
+
+/// Memory for values of type `T`, as [`allocate`] gives it, for a
+/// function's own use while it runs, freed when it is dropped, however the
+/// function ends: room for `len` of them, which are a slice once written.
+#[cfg(not(test))]
+struct Temp<T> {
+    memory: *mut T,
+    len: usize,
+}
+
+#[cfg(not(test))]
+impl<T> Temp<T> {
+    /// Room for `len` values, not written yet. Fails if there is no memory
+    /// for them.
+    fn new(len: usize) -> Fallible<Self> {
+        Ok(Temp {
+            memory: allocate(len)?,
+            len,
+        })
+    }
+
+    /// Room for `len` values, all zero bytes.
+    fn zeroed(len: usize) -> Fallible<Self> {
+        let temp = Temp::new(len)?;
+        // SAFETY: the memory has room for `len` values.
+        unsafe { core::ptr::write_bytes(temp.memory, 0, len) };
+        Ok(temp)
+    }
+
+    /// Room for `len` values, the first of them as they were. Fails,
+    /// leaving them as they are, if there is no memory for them.
+    fn grow(&mut self, len: usize) -> Fallible {
+        let Some(bytes) = len.checked_mul(size_of::<T>()) else {
+            return Err(fail(Failure::OutOfMemory));
+        };
+        // SAFETY: the memory is `allocate`'s, or `realloc`'s.
+        let grown = unsafe { realloc(self.memory.cast(), bytes.max(1)) };
+        if grown.is_null() {
+            return Err(fail(Failure::OutOfMemory));
+        }
+        self.memory = grown.cast();
+        self.len = len;
+        Ok(())
+    }
+
+    /// Where the memory starts.
+    fn ptr(&self) -> *mut T {
+        self.memory
+    }
+
+    /// The values, which must all have been written.
+    ///
+    /// # Safety
+    ///
+    /// Each of the first `len` values must be valid.
+    unsafe fn values(&mut self) -> &mut [T] {
+        // SAFETY: guaranteed by the caller.
+        unsafe { core::slice::from_raw_parts_mut(self.memory, self.len) }
+    }
+}
+
+#[cfg(not(test))]
+impl<T> Drop for Temp<T> {
+    fn drop(&mut self) {
+        // SAFETY: `allocate` gave the memory, which only this frees.
+        unsafe { free(self.memory.cast()) }
+    }
 }
 
 /// Store at `dst` the relation at `src`, with each tuple reshaped into the
@@ -828,21 +991,21 @@ pub unsafe extern "C" fn trendy_rt_reshape(
     result: *const TypeDesc,
     source: *const TypeDesc,
     offsets: *const usize,
-) {
+) -> bool {
     // SAFETY: guaranteed by the caller; each size and offset is the layout
     // of the value it describes.
-    unsafe {
+    status(|| unsafe {
         let (result, source) = (&*result, &*source);
         let (tuples, count) = read_slice(src);
         let size = result.element().size;
         let Some(bytes) = count.checked_mul(size) else {
-            fail(Failure::OutOfMemory)
+            return Err(fail(Failure::OutOfMemory));
         };
         let attributes = attributes(result);
         let offsets = core::slice::from_raw_parts(offsets, attributes.len());
         // Each tuple with only the kept attributes, in the source's order.
-        let projected = allocate::<u8>(bytes);
-        core::ptr::write_bytes(projected, 0, bytes);
+        let projected = Temp::<u8>::zeroed(bytes)?;
+        let projected = projected.ptr();
         for i in 0..count {
             let from = tuples.add(i * source.element().size);
             let to = projected.add(i * size);
@@ -854,13 +1017,13 @@ pub unsafe extern "C" fn trendy_rt_reshape(
                 );
             }
         }
-        let canonical = canonical(projected, count, result);
-        free(projected.cast());
+        let canonical = canonical(projected, count, result)?;
         dst.write_unaligned(Text {
             bytes: canonical.0,
             len: canonical.1,
         });
-    }
+        Ok(())
+    })
 }
 
 /// Store at `dst` the relation `desc` describes whose tuples are the
@@ -879,12 +1042,13 @@ pub unsafe extern "C" fn trendy_rt_relation(
     tuples: *const u8,
     count: *const usize,
     desc: *const TypeDesc,
-) {
+) -> bool {
     // SAFETY: guaranteed by the caller.
-    unsafe {
-        let (bytes, len) = canonical(tuples, count.read_unaligned(), &*desc);
+    status(|| unsafe {
+        let (bytes, len) = canonical(tuples, count.read_unaligned(), &*desc)?;
         dst.write_unaligned(Text { bytes, len });
-    }
+        Ok(())
+    })
 }
 
 /// An attribute the operands of [`trendy_rt_and`] have in common: where it
@@ -949,27 +1113,28 @@ pub unsafe extern "C" fn trendy_rt_and(
     sources: *const Source,
     common: *const Common,
     common_count: *const usize,
-) {
+) -> bool {
     // SAFETY: guaranteed by the caller; each size and offset is the layout
     // of the value it describes.
-    unsafe {
+    status(|| unsafe {
         let (result, lhs_desc, rhs_desc) = (&*result, &*lhs_desc, &*rhs_desc);
         let ((lhs, lhs_count), (rhs, rhs_count)) = (read_slice(lhs), read_slice(rhs));
         let result_attrs = attributes(result);
         let sources = array(sources, result_attrs.len());
         let common = array(common, common_count.read_unaligned());
-        let lhs_sorted = sorted_on(common, true, lhs, lhs_count, lhs_desc.element().size);
-        let rhs_sorted = sorted_on(common, false, rhs, rhs_count, rhs_desc.element().size);
-        let (groups, total) = matching_runs(common, lhs_sorted, rhs_sorted);
+        let mut lhs_sorted = sorted_on(common, true, lhs, lhs_count, lhs_desc.element().size)?;
+        let mut rhs_sorted = sorted_on(common, false, rhs, rhs_count, rhs_desc.element().size)?;
+        let (lhs_sorted, rhs_sorted) = (lhs_sorted.values(), rhs_sorted.values());
+        let (mut groups, total) = matching_runs(common, lhs_sorted, rhs_sorted)?;
 
         let size = result.element().size;
         let Some(bytes) = total.checked_mul(size) else {
-            fail(Failure::OutOfMemory)
+            return Err(fail(Failure::OutOfMemory));
         };
-        let joined = allocate::<u8>(bytes);
-        core::ptr::write_bytes(joined, 0, bytes);
+        let joined = Temp::<u8>::zeroed(bytes)?;
+        let joined = joined.ptr();
         let mut k = 0;
-        for group in &*groups {
+        for group in &*groups.values() {
             for &l in &lhs_sorted[group.lhs_start..group.lhs_end] {
                 for &r in &rhs_sorted[group.rhs_start..group.rhs_end] {
                     let to = joined.add(k * size);
@@ -985,20 +1150,13 @@ pub unsafe extern "C" fn trendy_rt_and(
                 }
             }
         }
-        let canonical = canonical(joined, total, result);
-        for memory in [
-            joined.cast(),
-            groups.as_mut_ptr().cast(),
-            lhs_sorted.as_mut_ptr().cast(),
-            rhs_sorted.as_mut_ptr().cast(),
-        ] {
-            free(memory);
-        }
+        let canonical = canonical(joined, total, result)?;
         dst.write_unaligned(Text {
             bytes: canonical.0,
             len: canonical.1,
         });
-    }
+        Ok(())
+    })
 }
 
 /// A relation-valued attribute that [`trendy_rt_ungroup`] ungroups: where it
@@ -1035,10 +1193,10 @@ pub unsafe extern "C" fn trendy_rt_ungroup(
     sources: *const Source,
     ungrouped: *const Ungrouped,
     ungrouped_count: *const usize,
-) {
+) -> bool {
     // SAFETY: guaranteed by the caller; each size and offset is the layout
     // of the value it describes.
-    unsafe {
+    status(|| unsafe {
         let (result, source) = (&*result, &*source);
         let (tuples, count) = read_slice(src);
         let result_attrs = attributes(result);
@@ -1055,14 +1213,14 @@ pub unsafe extern "C" fn trendy_rt_ungroup(
         let size = result.element().size;
         let Some((total, bytes)) = total.and_then(|total| Some((total, total.checked_mul(size)?)))
         else {
-            fail(Failure::OutOfMemory)
+            return Err(fail(Failure::OutOfMemory));
         };
-        let made = allocate::<u8>(bytes);
-        core::ptr::write_bytes(made, 0, bytes);
+        let made = Temp::<u8>::zeroed(bytes)?;
+        let made = made.ptr();
         // For the tuple at hand, the index in each ungrouped relation of the
         // tuple being combined, counted up like an odometer.
-        let at =
-            core::slice::from_raw_parts_mut(allocate::<usize>(ungrouped.len()), ungrouped.len());
+        let mut at = Temp::<usize>::zeroed(ungrouped.len())?;
+        let at = at.values();
         let mut k = 0;
         for i in 0..count {
             let outer = tuple(i);
@@ -1105,14 +1263,13 @@ pub unsafe extern "C" fn trendy_rt_ungroup(
                 at[j + 1..].fill(0);
             }
         }
-        let canonical = canonical(made, total, result);
-        free(made.cast());
-        free(at.as_mut_ptr().cast());
+        let canonical = canonical(made, total, result)?;
         dst.write_unaligned(Text {
             bytes: canonical.0,
             len: canonical.1,
         });
-    }
+        Ok(())
+    })
 }
 
 /// Store at `dst`, a byte, 1 if every tuple of the relation `lhs` is in the
@@ -1185,9 +1342,9 @@ pub const COMBINE_DISJOINT_CHANGES: usize = 5;
 /// tuples of either, of exactly one, or of `lhs` but not `rhs`, in
 /// canonical order, in memory the statement owns. Both operands are in
 /// canonical order, so one pass merges them, and the result needs no
-/// sorting. Stops the program if a disjoint union's operands, or disjoint
-/// changes', share a tuple, or an included minus's right operand has one
-/// the left lacks.
+/// sorting. Fails if a disjoint union's operands, or disjoint changes',
+/// share a tuple, or an included minus's right operand has one the left
+/// lacks.
 ///
 /// # Safety
 ///
@@ -1202,22 +1359,22 @@ pub unsafe extern "C" fn trendy_rt_combine(
     rhs: *const u8,
     desc: *const TypeDesc,
     combination: *const usize,
-) {
+) -> bool {
     use core::cmp::Ordering;
     // SAFETY: guaranteed by the caller.
-    unsafe {
+    status(|| unsafe {
         let desc = &*desc;
         let ((lhs, lhs_count), (rhs, rhs_count)) = (read_slice(lhs), read_slice(rhs));
         let combination = combination.read_unaligned();
         let minus = matches!(combination, COMBINE_MINUS | COMBINE_INCLUDED_MINUS);
         let size = desc.element().size;
         let Some(room) = lhs_count.checked_add(rhs_count) else {
-            fail(Failure::OutOfMemory)
+            return Err(fail(Failure::OutOfMemory));
         };
         let Some(bytes) = room.checked_mul(size) else {
-            fail(Failure::OutOfMemory)
+            return Err(fail(Failure::OutOfMemory));
         };
-        let out = allocate_buffer(bytes, desc);
+        let out = allocate_buffer(bytes, desc)?;
         let tuple_desc = desc.element();
         let mut count = 0;
         let mut keep = |tuple: *const u8| {
@@ -1239,16 +1396,20 @@ pub unsafe extern "C" fn trendy_rt_combine(
                 }
                 Ordering::Equal => {
                     match combination {
-                        COMBINE_DISJOINT_UNION => tuple_failed(
-                            "error[R0006]: d_union or d_insert adds a tuple that is already there: ",
-                            l,
-                            tuple_desc,
-                        ),
-                        COMBINE_DISJOINT_CHANGES => tuple_failed(
-                            "error[R0009]: two changes in an assign block remove the same tuple: ",
-                            l,
-                            tuple_desc,
-                        ),
+                        COMBINE_DISJOINT_UNION => {
+                            return Err(tuple_failed(
+                                "error[R0006]: d_union or d_insert adds a tuple that is already there: ",
+                                l,
+                                tuple_desc,
+                            ));
+                        }
+                        COMBINE_DISJOINT_CHANGES => {
+                            return Err(tuple_failed(
+                                "error[R0009]: two changes in an assign block remove the same tuple: ",
+                                l,
+                                tuple_desc,
+                            ));
+                        }
                         _ => {}
                     }
                     // A tuple of both is in an exclusive union's result
@@ -1261,7 +1422,7 @@ pub unsafe extern "C" fn trendy_rt_combine(
                 }
                 Ordering::Greater => {
                     if combination == COMBINE_INCLUDED_MINUS {
-                        tuple_failed(MISSING_TUPLE, rhs.add(j * size), tuple_desc);
+                        return Err(tuple_failed(MISSING_TUPLE, rhs.add(j * size), tuple_desc));
                     }
                     if !minus {
                         keep(rhs.add(j * size));
@@ -1272,7 +1433,7 @@ pub unsafe extern "C" fn trendy_rt_combine(
         }
         // What is left of `rhs` is in no tuple of `lhs`.
         if combination == COMBINE_INCLUDED_MINUS && j < rhs_count {
-            tuple_failed(MISSING_TUPLE, rhs.add(j * size), tuple_desc);
+            return Err(tuple_failed(MISSING_TUPLE, rhs.add(j * size), tuple_desc));
         }
         if !minus {
             for k in j..rhs_count {
@@ -1283,7 +1444,8 @@ pub unsafe extern "C" fn trendy_rt_combine(
             bytes: out,
             len: count,
         });
-    }
+        Ok(())
+    })
 }
 
 /// Store at `dst` the tuples of the relation `lhs`, which `lhs_desc`
@@ -1306,18 +1468,20 @@ pub unsafe extern "C" fn trendy_rt_matching(
     common: *const Common,
     common_count: *const usize,
     negated: *const usize,
-) {
+) -> bool {
     // SAFETY: guaranteed by the caller; each size and offset is the layout
     // of the value it describes.
-    unsafe {
+    status(|| unsafe {
         let (lhs_desc, rhs_desc) = (&*lhs_desc, &*rhs_desc);
         let ((lhs, lhs_count), (rhs, rhs_count)) = (read_slice(lhs), read_slice(rhs));
         let common = array(common, common_count.read_unaligned());
         let negated = negated.read_unaligned() == 1;
-        let lhs_sorted = sorted_on(common, true, lhs, lhs_count, lhs_desc.element().size);
-        let rhs_sorted = sorted_on(common, false, rhs, rhs_count, rhs_desc.element().size);
+        let mut lhs_sorted = sorted_on(common, true, lhs, lhs_count, lhs_desc.element().size)?;
+        let mut rhs_sorted = sorted_on(common, false, rhs, rhs_count, rhs_desc.element().size)?;
+        let (lhs_sorted, rhs_sorted) = (lhs_sorted.values(), rhs_sorted.values());
         let size = lhs_desc.element().size;
-        let kept = allocate::<u8>(lhs_count * size);
+        let kept = Temp::<u8>::new(lhs_count * size)?;
+        let kept = kept.ptr();
         let (mut count, mut j) = (0, 0);
         // Both sorted on the common attributes, so each tuple of `lhs` is
         // matched by moving forward through `rhs`.
@@ -1334,19 +1498,13 @@ pub unsafe extern "C" fn trendy_rt_matching(
                 count += 1;
             }
         }
-        let canonical = canonical(kept, count, lhs_desc);
-        for memory in [
-            kept.cast(),
-            lhs_sorted.as_mut_ptr().cast(),
-            rhs_sorted.as_mut_ptr().cast(),
-        ] {
-            free(memory);
-        }
+        let canonical = canonical(kept, count, lhs_desc)?;
         dst.write_unaligned(Text {
             bytes: canonical.0,
             len: canonical.1,
         });
-    }
+        Ok(())
+    })
 }
 
 /// The order of two tuples by their values for the `common` attributes,
@@ -1376,48 +1534,64 @@ unsafe fn on_common(
 /// The `count` tuples at `tuples`, each `size` bytes, of the left operand
 /// of [`trendy_rt_and`] if `is_lhs`, and else the right, sorted by their
 /// values for the `common` attributes: an array of pointers to them, in
-/// new memory.
+/// memory of the caller's own. Fails if there is no memory for it.
 ///
 /// # Safety
 ///
 /// `tuples` must point to `count` valid tuples of that operand.
 #[cfg(not(test))]
-unsafe fn sorted_on<'a>(
+unsafe fn sorted_on(
     common: &[Common],
     is_lhs: bool,
     tuples: *const u8,
     count: usize,
     size: usize,
-) -> &'a mut [*const u8] {
-    // SAFETY: guaranteed by the caller; every pointer is written before
-    // the array is read.
+) -> Fallible<Temp<*const u8>> {
+    // SAFETY: guaranteed by the caller.
     unsafe {
-        let sorted = core::slice::from_raw_parts_mut(allocate::<*const u8>(count), count);
-        for (i, tuple) in sorted.iter_mut().enumerate() {
-            *tuple = tuples.add(i * size);
-        }
-        sorted.sort_unstable_by(|x, y| on_common(common, (*x, is_lhs), (*y, is_lhs)));
+        let mut sorted = pointers(tuples, count, size)?;
         sorted
+            .values()
+            .sort_unstable_by(|x, y| on_common(common, (*x, is_lhs), (*y, is_lhs)));
+        Ok(sorted)
     }
+}
+
+/// Pointers to the `count` tuples or elements at `values`, each `size`
+/// bytes, in order, in memory of the caller's own, for sorting. Fails if
+/// there is no memory for them.
+///
+/// # Safety
+///
+/// `values` must point to `count` values of `size` bytes.
+#[cfg(not(test))]
+unsafe fn pointers(values: *const u8, count: usize, size: usize) -> Fallible<Temp<*const u8>> {
+    let pointers = Temp::<*const u8>::new(count)?;
+    for i in 0..count {
+        // SAFETY: guaranteed by the caller; the memory has room for
+        // `count` pointers.
+        unsafe { pointers.ptr().add(i).write(values.add(i * size)) };
+    }
+    Ok(pointers)
 }
 
 /// The runs of tuples of `lhs` and of `rhs`, both sorted on the `common`
 /// attributes, that agree on them, in new memory, and how many tuples they
 /// make: the size of each run of `lhs` times the size of its run of `rhs`.
-/// Stops the program if that is more than memory can hold.
+/// Fails if that is more than memory can hold.
 ///
 /// # Safety
 ///
 /// `lhs` and `rhs` must point to valid tuples of [`trendy_rt_and`]'s left
 /// and right operands.
 #[cfg(not(test))]
-unsafe fn matching_runs<'a>(
+unsafe fn matching_runs(
     common: &[Common],
     lhs: &[*const u8],
     rhs: &[*const u8],
-) -> (&'a mut [Group], usize) {
+) -> Fallible<(Temp<Group>, usize)> {
     use core::cmp::Ordering;
-    let groups = allocate::<Group>(lhs.len().min(rhs.len()));
+    let mut groups = Temp::<Group>::new(lhs.len().min(rhs.len()))?;
     let (mut count, mut total) = (0, 0usize);
     let (mut i, mut j) = (0, 0);
     // SAFETY: guaranteed by the caller; the array has room for a run per
@@ -1439,10 +1613,10 @@ unsafe fn matching_runs<'a>(
                         .checked_mul(rhs_end - j)
                         .and_then(|n| n.checked_add(total))
                     else {
-                        fail(Failure::OutOfMemory)
+                        return Err(fail(Failure::OutOfMemory));
                     };
                     total = sum;
-                    groups.add(count).write(Group {
+                    groups.ptr().add(count).write(Group {
                         lhs_start: i,
                         lhs_end,
                         rhs_start: j,
@@ -1453,7 +1627,8 @@ unsafe fn matching_runs<'a>(
                 }
             }
         }
-        (core::slice::from_raw_parts_mut(groups, count), total)
+        groups.len = count;
+        Ok((groups, total))
     }
 }
 
@@ -1473,20 +1648,21 @@ pub unsafe extern "C" fn trendy_rt_allocate(
     dst: *mut Text,
     count: *const usize,
     desc: *const TypeDesc,
-) {
+) -> bool {
     // SAFETY: guaranteed by the caller.
-    unsafe {
+    status(|| unsafe {
         let count = count.read_unaligned();
         let Some(bytes) = count.checked_mul((*desc).element().size) else {
-            fail(Failure::OutOfMemory)
+            return Err(fail(Failure::OutOfMemory));
         };
-        let tuples = allocate_buffer(bytes, desc);
+        let tuples = allocate_buffer(bytes, desc)?;
         core::ptr::write_bytes(tuples, 0, bytes);
         dst.write_unaligned(Text {
             bytes: tuples,
             len: count,
         });
-    }
+        Ok(())
+    })
 }
 
 /// Put the tuples of the relation at `relation`, of the type `desc`
@@ -1499,13 +1675,14 @@ pub unsafe extern "C" fn trendy_rt_allocate(
 /// whose tuples may be in any order.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn trendy_rt_sort(relation: *mut Text, desc: *const TypeDesc) {
+pub unsafe extern "C" fn trendy_rt_sort(relation: *mut Text, desc: *const TypeDesc) -> bool {
     // SAFETY: guaranteed by the caller.
-    unsafe {
+    status(|| unsafe {
         let (tuples, count) = read_slice(relation.cast());
-        let (bytes, len) = canonical(tuples, count, &*desc);
+        let (bytes, len) = canonical(tuples, count, &*desc)?;
         relation.write_unaligned(Text { bytes, len });
-    }
+        Ok(())
+    })
 }
 
 /// An attribute [`trendy_rt_load`] orders tuples by: its offset in a tuple,
@@ -1556,18 +1733,15 @@ pub unsafe extern "C" fn trendy_rt_load(
     count: *const usize,
     parts: *const Part,
     part_count: *const usize,
-) {
+) -> bool {
     // SAFETY: guaranteed by the caller.
-    unsafe {
+    status(|| unsafe {
         let (source, result) = (&*source, &*result);
         let items = array(items, count.read_unaligned());
         let parts = array(parts, part_count.read_unaligned());
         let (tuples, len) = read_slice(src);
-        let size = source.element().size;
-        let order = core::slice::from_raw_parts_mut(allocate::<*const u8>(len), len);
-        for (i, tuple) in order.iter_mut().enumerate() {
-            *tuple = tuples.add(i * size);
-        }
+        let mut order = pointers(tuples, len, source.element().size)?;
+        let order = order.values();
         // A relation's tuples are distinct, so no two are equal in
         // canonical order, and the sort has one result.
         order.sort_unstable_by(|a, b| {
@@ -1575,23 +1749,22 @@ pub unsafe extern "C" fn trendy_rt_load(
         });
         let element = result.element();
         let Some(bytes) = len.checked_mul(element.size) else {
-            fail(Failure::OutOfMemory)
+            return Err(fail(Failure::OutOfMemory));
         };
-        let out = allocate_buffer(bytes, result);
+        let out = allocate_buffer(bytes, result)?;
         // Each element is made here first, zeroed, as everywhere, so that
         // the padding in it is zero.
-        let made = allocate::<u8>(element.size);
-        core::ptr::write_bytes(made, 0, element.size);
+        let made = Temp::<u8>::zeroed(element.size)?;
+        let made = made.ptr();
         for (i, tuple) in order.iter().enumerate() {
             for part in parts {
                 core::ptr::copy_nonoverlapping(tuple.add(part.from), made.add(part.to), part.size);
             }
             copy_element(out, out.add(i * element.size), made, element);
         }
-        free(made.cast());
-        free(order.as_mut_ptr().cast());
         dst.write_unaligned(Text { bytes: out, len });
-    }
+        Ok(())
+    })
 }
 
 /// Store at `dst` the relation, which `result` describes, of the elements
@@ -1620,9 +1793,9 @@ pub unsafe extern "C" fn trendy_rt_unload(
     part_count: *const usize,
     numbers: *const usize,
     number_count: *const usize,
-) {
+) -> bool {
     // SAFETY: guaranteed by the caller.
-    unsafe {
+    status(|| unsafe {
         let (source, result) = (&*source, &*result);
         let parts = array(parts, part_count.read_unaligned());
         let numbers = array(numbers, number_count.read_unaligned());
@@ -1630,13 +1803,13 @@ pub unsafe extern "C" fn trendy_rt_unload(
         let element = source.element().size;
         let size = result.element().size;
         let Some(bytes) = len.checked_mul(size) else {
-            fail(Failure::OutOfMemory)
+            return Err(fail(Failure::OutOfMemory));
         };
         // The tuples are made here first, zeroed, as everywhere, so that
         // the padding in them is zero, and share the elements' buffers
         // until `canonical` copies them, taking a reference to each.
-        let tuples = allocate::<u8>(bytes);
-        core::ptr::write_bytes(tuples, 0, bytes);
+        let tuples = Temp::<u8>::zeroed(bytes)?;
+        let tuples = tuples.ptr();
         for i in 0..len {
             let (from, to) = (elements.add(i * element), tuples.add(i * size));
             for part in parts {
@@ -1645,19 +1818,19 @@ pub unsafe extern "C" fn trendy_rt_unload(
             // An array of tuples of no attributes takes no memory, so only
             // the integers limit its positions.
             let Ok(position) = i64::try_from(i + 1) else {
-                fail(Failure::IntegerOverflow)
+                return Err(fail(Failure::IntegerOverflow));
             };
             for number in numbers {
                 to.add(*number).cast::<i64>().write_unaligned(position);
             }
         }
-        let (out, kept) = canonical(tuples, len, result);
-        free(tuples.cast());
+        let (out, kept) = canonical(tuples, len, result)?;
         dst.write_unaligned(Text {
             bytes: out,
             len: kept,
         });
-    }
+        Ok(())
+    })
 }
 
 /// The order of two tuples by the `items` of a load.
@@ -1684,22 +1857,25 @@ unsafe fn on_items(items: &[OrderItem], x: *const u8, y: *const u8) -> core::cmp
 
 /// The `count` tuples at `tuples`, with the attributes of `desc`, sorted
 /// canonically and without duplicates, copied into memory the current
-/// statement owns: that memory and how many tuples it holds.
+/// statement owns: that memory and how many tuples it holds. Fails if
+/// there is no memory for them.
 ///
 /// # Safety
 ///
 /// As for [`trendy_rt_reshape`]'s result.
 #[cfg(not(test))]
-unsafe fn canonical(tuples: *const u8, count: usize, desc: &TypeDesc) -> (*mut u8, usize) {
+unsafe fn canonical(
+    tuples: *const u8,
+    count: usize,
+    desc: &TypeDesc,
+) -> Fallible<(*mut u8, usize)> {
     // SAFETY: guaranteed by the caller.
     unsafe {
         let size = desc.element().size;
-        let order = core::slice::from_raw_parts_mut(allocate::<*const u8>(count), count);
-        for (i, tuple) in order.iter_mut().enumerate() {
-            *tuple = tuples.add(i * size);
-        }
+        let mut order = pointers(tuples, count, size)?;
+        let order = order.values();
         order.sort_unstable_by(|a, b| compare_tuples(*a, *b, desc));
-        let out = allocate_buffer(count * size, desc);
+        let out = allocate_buffer(count * size, desc)?;
         let mut kept = 0;
         for i in 0..count {
             if i > 0 && compare_tuples(order[i - 1], order[i], desc).is_eq() {
@@ -1708,8 +1884,7 @@ unsafe fn canonical(tuples: *const u8, count: usize, desc: &TypeDesc) -> (*mut u
             copy_element(out, out.add(kept * size), order[i], desc.element());
             kept += 1;
         }
-        free(order.as_mut_ptr().cast());
-        (out, kept)
+        Ok((out, kept))
     }
 }
 
@@ -1786,7 +1961,27 @@ unsafe fn compare_tuples(lhs: *const u8, rhs: *const u8, desc: &TypeDesc) -> cor
     }
 }
 
-/// Why the runtime stops the program where it has no values to write.
+/// A failure whose error is written, for which each function it happens
+/// in gives up its work, up to the exported function, which returns that
+/// it failed: compiled code then goes where its block's failures go.
+#[cfg(not(test))]
+#[must_use]
+struct Failed;
+
+/// What a function that can fail gives: its result, or [`Failed`]. A
+/// function that fails changes nothing but what the statement's scope
+/// holds, which ends as the statement fails.
+#[cfg(not(test))]
+type Fallible<T = ()> = Result<T, Failed>;
+
+/// Whether `body` failed, as an exported function that can fail returns
+/// it.
+#[cfg(not(test))]
+fn status(body: impl FnOnce() -> Fallible) -> bool {
+    body().is_err()
+}
+
+/// Why the runtime fails where it has no values to write.
 #[cfg(not(test))]
 #[derive(Debug, Clone, Copy)]
 enum Failure {
@@ -1799,9 +1994,9 @@ enum Failure {
     OutOfMemory,
 }
 
-/// Stop the program because of `failure`.
+/// Fail because of `failure`.
 #[cfg(not(test))]
-fn fail(failure: Failure) -> ! {
+fn fail(failure: Failure) -> Failed {
     fail_with(|out| {
         out.write_str(match failure {
             Failure::IntegerOverflow => "error[R0001]: integer overflow\n",
@@ -1877,10 +2072,7 @@ fn arithmetic_failed(op: u32, lhs: Number, rhs: Number) {
         ARITHMETIC_DIVIDE => "/",
         ARITHMETIC_DIV => "div",
         ARITHMETIC_MOD => "mod",
-        // The compiler and the runtime disagree: a bug.
-        _ => fail_with(|out| {
-            out.write_str("error[X0000]: internal error: unknown arithmetic operator\n")
-        }),
+        _ => internal_error("unknown arithmetic operator"),
     };
     let divides = matches!(op, ARITHMETIC_DIVIDE | ARITHMETIC_DIV | ARITHMETIC_MOD);
     let (error, outcome) = match rhs {
@@ -2201,14 +2393,14 @@ pub unsafe extern "C" fn trendy_rt_element_conflict(
     }
 }
 
-/// Stop the program, writing `message`, then the tuple at `tuple`, of the
-/// type `desc` describes.
+/// Fail, writing `message`, then the tuple at `tuple`, of the type `desc`
+/// describes.
 ///
 /// # Safety
 ///
 /// `tuple` must point to a valid tuple of the type `desc` describes.
 #[cfg(not(test))]
-unsafe fn tuple_failed(message: &str, tuple: *const u8, desc: &TypeDesc) -> ! {
+unsafe fn tuple_failed(message: &str, tuple: *const u8, desc: &TypeDesc) -> Failed {
     fail_with(|out| {
         out.write_str(message)?;
         // SAFETY: guaranteed by the caller.
@@ -2220,7 +2412,8 @@ unsafe fn tuple_failed(message: &str, tuple: *const u8, desc: &TypeDesc) -> ! {
 /// Store at `shared`, a byte, 1 if the relation `value`, of the type `desc`
 /// describes, has two tuples with the same values for the attributes of
 /// `key`, the descriptor of its projection on one of its keys, and the
-/// positions of two such tuples at `pair`, two `usize`s; else 0.
+/// positions of two such tuples at `pair`, two `usize`s; else 0. Fails if
+/// there is no memory to compare them in.
 ///
 /// # Safety
 ///
@@ -2235,28 +2428,27 @@ pub unsafe extern "C" fn trendy_rt_key_shared(
     value: *const u8,
     desc: *const TypeDesc,
     key: *const TypeDesc,
-) {
-    // SAFETY: guaranteed by the caller; `allocate` gives memory for the
-    // key's attributes and the tuples' positions, which nothing else
-    // holds, freed once they are compared.
-    unsafe {
+) -> bool {
+    // SAFETY: guaranteed by the caller; the key's attributes and the
+    // tuples' positions are written before they are read.
+    status(|| unsafe {
         shared.write(0);
         let (tuples, count) = read_slice(value);
         if count < 2 {
-            return;
+            return Ok(());
         }
         let (desc, key) = (&*desc, attributes(&*key));
         let element = desc.element();
         // The tuples' own attributes in the key, by name.
-        let found = allocate::<*const Attr>(key.len());
+        let found = Temp::<*const Attr>::new(key.len())?;
         let mut len = 0;
         for attr in attributes(element) {
             if key.iter().any(|k| name(k) == name(attr)) {
-                found.add(len).write(attr);
+                found.ptr().add(len).write(attr);
                 len += 1;
             }
         }
-        let compared = array(found, len);
+        let compared = array(found.ptr(), len);
         let on_key = |i: usize, j: usize| {
             let (a, b) = (tuples.add(i * element.size), tuples.add(j * element.size));
             compared
@@ -2267,11 +2459,11 @@ pub unsafe extern "C" fn trendy_rt_key_shared(
         };
         // The tuples' positions, in their keys' order, which puts tuples
         // with the same values for it next to each other.
-        let slots = allocate::<usize>(count);
+        let mut slots = Temp::<usize>::new(count)?;
         for i in 0..count {
-            slots.add(i).write(i);
+            slots.ptr().add(i).write(i);
         }
-        let positions = core::slice::from_raw_parts_mut(slots, count);
+        let positions = slots.values();
         positions.sort_unstable_by(|&i, &j| on_key(i, j).then(i.cmp(&j)));
         if let Some(&[first, second]) = positions
             .windows(2)
@@ -2281,9 +2473,8 @@ pub unsafe extern "C" fn trendy_rt_key_shared(
             pair.write_unaligned(first);
             pair.add(1).write_unaligned(second);
         }
-        free(slots.cast());
-        free(found.cast());
-    }
+        Ok(())
+    })
 }
 
 /// Write the error of the tuples at the positions `pair` of the relation
@@ -2442,11 +2633,19 @@ pub struct Site {
 pub static SITE: core::sync::atomic::AtomicPtr<Site> =
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
-/// Stop the program, writing its error as [`write_failure`] does, and
-/// exiting with status 1: a failure of the runtime's own.
+/// Fail, writing the error as [`write_failure`] does: a failure of the
+/// runtime's own.
 #[cfg(not(test))]
-fn fail_with(write: impl FnOnce(&mut Stderr) -> fmt::Result) -> ! {
+fn fail_with(write: impl FnOnce(&mut Stderr) -> fmt::Result) -> Failed {
     write_failure(write);
+    Failed
+}
+
+/// Stop the program because the compiler and the runtime disagree, a
+/// compiler bug, which nothing should catch, writing `message`.
+#[cfg(not(test))]
+fn internal_error(message: &str) -> ! {
+    write_failure(|out| writeln!(out, "error[X0000]: internal error: {message}"));
     // SAFETY: `exit` has no preconditions.
     unsafe { exit(1) }
 }
@@ -2551,39 +2750,32 @@ pub unsafe extern "C" fn trendy_rt_debug_value(value: *const u8, desc: *const Ty
 }
 
 /// Print the relation `value`, of the type `desc` describes, to stderr as
-/// a table, as [`write_table`] writes it. Stops the program if there is no
-/// memory for its columns' widths.
+/// a table, as [`write_table`] writes it. Fails if there is no memory for
+/// its columns' widths.
 ///
 /// # Safety
 ///
 /// As for [`trendy_rt_debug_value`], of a relation.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn trendy_rt_debug_table(value: *const u8, desc: *const TypeDesc) {
-    // SAFETY: guaranteed by the caller; `allocate` gives memory for a width
-    // of each attribute, aligned, which nothing else holds, freed once
-    // the table is written.
-    unsafe {
+pub unsafe extern "C" fn trendy_rt_debug_table(value: *const u8, desc: *const TypeDesc) -> bool {
+    // SAFETY: guaranteed by the caller; the widths are memory for a width
+    // of each attribute, which `write_table` writes before it reads.
+    status(|| unsafe {
         let desc = &*desc;
-        let widths = allocate::<usize>(desc.count);
+        let mut widths = Temp::<usize>::zeroed(desc.count)?;
         let mut out = Stderr::default();
         // There is nowhere to report a failure to write to stderr.
-        let _ = write_table(
-            &mut out,
-            value,
-            desc,
-            core::slice::from_raw_parts_mut(widths, desc.count),
-        );
+        let _ = write_table(&mut out, value, desc, widths.values());
         out.flush();
-        free(widths.cast());
-    }
+        Ok(())
+    })
 }
 
 /// Store at `dst` the sum of the attribute at `index`, its position by
 /// name, of the tuples of the relation `src`, of the type `desc` describes:
 /// the exact sum of the integers or approximate numbers, rounded once, as
-/// the compiler sums them. Stops the program if the sum is beyond its
-/// type's range.
+/// the compiler sums them. Fails if the sum is beyond its type's range.
 ///
 /// # Safety
 ///
@@ -2597,28 +2789,28 @@ pub unsafe extern "C" fn trendy_rt_sum(
     src: *const u8,
     desc: *const TypeDesc,
     index: *const usize,
-) {
+) -> bool {
     // SAFETY: guaranteed by the caller.
-    unsafe {
+    status(|| unsafe {
         let column = Column::new(src, &*desc, index.read_unaligned());
         if column.kind == KIND_INTEGER {
             let mut sum = trendy_numeric::IntegerSum::default();
             column.values().for_each(|n| sum.add(n));
-            store_integer(dst, sum.total());
+            store_integer(dst, sum.total())
         } else {
             let mut sum = trendy_numeric::ApproximateSum::default();
             column.values().for_each(|x| sum.add(x));
-            store_approximate(dst, sum.total());
+            store_approximate(dst, sum.total())
         }
-    }
+    })
 }
 
 /// Store at `dst` the product of the attribute at `index`, as
 /// [`trendy_rt_sum`] stores the sum: exact, rounded once, as the compiler
 /// multiplies. A product of approximate numbers too near halfway between two
 /// for 128 bits to tell which is worked out in full, in memory it frees.
-/// Stops the program if the product is beyond its type's range, or that
-/// memory can't be allocated.
+/// Fails if the product is beyond its type's range, or that memory can't
+/// be allocated.
 ///
 /// # Safety
 ///
@@ -2630,34 +2822,26 @@ pub unsafe extern "C" fn trendy_rt_product(
     src: *const u8,
     desc: *const TypeDesc,
     index: *const usize,
-) {
+) -> bool {
     // SAFETY: guaranteed by the caller.
-    unsafe {
+    status(|| unsafe {
         let column = Column::new(src, &*desc, index.read_unaligned());
         if column.kind == KIND_INTEGER {
             let mut product = trendy_numeric::IntegerProduct::default();
             column.values().for_each(|n| product.multiply(n));
-            store_integer(dst, product.total());
-            return;
+            return store_integer(dst, product.total());
         }
         let mut product = trendy_numeric::ApproximateProduct::default();
         column.values().for_each(|x| product.multiply(x));
         let total = match product.total() {
             trendy_numeric::Rounded::Nearest(total) => total,
             trendy_numeric::Rounded::Exact(exact) => {
-                let limbs = exact.limbs();
-                let memory = allocate::<u64>(limbs);
-                core::ptr::write_bytes(memory, 0, limbs);
-                let total = exact.total(
-                    column.values(),
-                    core::slice::from_raw_parts_mut(memory, limbs),
-                );
-                free(memory.cast());
-                total
+                let mut memory = Temp::<u64>::zeroed(exact.limbs())?;
+                exact.total(column.values(), memory.values())
             }
         };
-        store_approximate(dst, total);
-    }
+        store_approximate(dst, total)
+    })
 }
 
 /// The values of one attribute of the tuples of a relation, each `size`
@@ -2709,39 +2893,41 @@ impl Column {
     }
 }
 
-/// Store the integer `total` at `dst`, or stop the program if there is
-/// none, being out of range.
+/// Store the integer `total` at `dst`, or fail if there is none, being out
+/// of range.
 ///
 /// # Safety
 ///
 /// `dst` must point to memory for an integer.
 #[cfg(not(test))]
-unsafe fn store_integer(dst: *mut u8, total: Option<i64>) {
+unsafe fn store_integer(dst: *mut u8, total: Option<i64>) -> Fallible {
     let Some(total) = total else {
-        fail(Failure::IntegerOverflow)
+        return Err(fail(Failure::IntegerOverflow));
     };
     // SAFETY: guaranteed by the caller.
-    unsafe { dst.cast::<i64>().write_unaligned(total) }
+    unsafe { dst.cast::<i64>().write_unaligned(total) };
+    Ok(())
 }
 
-/// Store the approximate number `total` at `dst`, or stop the program if
-/// there is none, being beyond the largest finite.
+/// Store the approximate number `total` at `dst`, or fail if there is
+/// none, being beyond the largest finite.
 ///
 /// # Safety
 ///
 /// `dst` must point to memory for an approximate number.
 #[cfg(not(test))]
-unsafe fn store_approximate(dst: *mut u8, total: Option<f64>) {
+unsafe fn store_approximate(dst: *mut u8, total: Option<f64>) -> Fallible {
     let Some(total) = total else {
-        fail(Failure::ApproximateOverflow)
+        return Err(fail(Failure::ApproximateOverflow));
     };
     // SAFETY: guaranteed by the caller.
-    unsafe { dst.cast::<f64>().write_unaligned(total) }
+    unsafe { dst.cast::<f64>().write_unaligned(total) };
+    Ok(())
 }
 
 /// Store at `dst` the text [`trendy_rt_debug_value`] writes for `value`,
-/// of the type `desc` describes, in memory the statement owns. Stops the
-/// program if the memory can't be allocated.
+/// of the type `desc` describes, in memory the statement owns. Fails if
+/// the memory can't be allocated.
 ///
 /// # Safety
 ///
@@ -2753,22 +2939,38 @@ pub unsafe extern "C" fn trendy_rt_to_text(
     dst: *mut Text,
     value: *const u8,
     desc: *const TypeDesc,
-) {
+) -> bool {
+    // SAFETY: guaranteed by the caller.
+    status(|| unsafe {
+        dst.write_unaligned(written(value, &*desc)?);
+        Ok(())
+    })
+}
+
+/// The text [`trendy_rt_debug_value`] writes for `value`, of the type
+/// `desc` describes, in memory the statement's scope holds. Fails if the
+/// memory can't be allocated, as for a text too long to count.
+///
+/// # Safety
+///
+/// As for [`trendy_rt_debug_value`]. The statement must have begun a
+/// scope.
+#[cfg(not(test))]
+unsafe fn written(value: *const u8, desc: &TypeDesc) -> Fallible<Text> {
     // SAFETY: guaranteed by the caller.
     unsafe {
-        // Too long to count is too long to allocate.
-        let Ok(text) = text_of(value, &*desc, |bytes| {
-            allocate_buffer(bytes, core::ptr::null())
-        }) else {
-            fail(Failure::OutOfMemory)
-        };
-        dst.write_unaligned(text);
+        text_of(
+            value,
+            desc,
+            |bytes| allocate_buffer(bytes, core::ptr::null()),
+            || fail(Failure::OutOfMemory),
+        )
     }
 }
 
 /// Store at `dst` the integer the text `from` writes, as `parse_integer`
-/// reads one, and the compiler with it. Stops the program if the text
-/// writes none (R0014).
+/// reads one, and the compiler with it. Fails if the text writes none
+/// (R0014).
 ///
 /// # Safety
 ///
@@ -2776,20 +2978,20 @@ pub unsafe extern "C" fn trendy_rt_to_text(
 /// integer.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn trendy_rt_parse_integer(dst: *mut i64, from: *const Text) {
+pub unsafe extern "C" fn trendy_rt_parse_integer(dst: *mut i64, from: *const Text) -> bool {
     // SAFETY: guaranteed by the caller.
-    unsafe {
+    status(|| unsafe {
         let text = read_text(from.cast());
-        match trendy_numeric::parse_integer(text) {
-            Ok(n) => dst.write_unaligned(n),
-            Err(why) => unparsable(text, "an integer", why, None),
-        }
-    }
+        let n = trendy_numeric::parse_integer(text)
+            .map_err(|why| unparsable(text, "an integer", why, None))?;
+        dst.write_unaligned(n);
+        Ok(())
+    })
 }
 
 /// Store at `dst` the approximate number nearest the decimal number the
 /// text `from` writes, as `parse_approximate` reads one, and the compiler
-/// with it. Stops the program if the text writes none (R0014).
+/// with it. Fails if the text writes none (R0014).
 ///
 /// # Safety
 ///
@@ -2797,34 +2999,36 @@ pub unsafe extern "C" fn trendy_rt_parse_integer(dst: *mut i64, from: *const Tex
 /// approximate number.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn trendy_rt_parse_approximate(dst: *mut f64, from: *const Text) {
+pub unsafe extern "C" fn trendy_rt_parse_approximate(dst: *mut f64, from: *const Text) -> bool {
     // SAFETY: guaranteed by the caller.
-    unsafe {
+    status(|| unsafe {
         let text = read_text(from.cast());
-        match trendy_numeric::parse_approximate(text) {
-            Ok(x) => dst.write_unaligned(x),
-            Err(why) => unparsable(text, "an approximate number", why, None),
-        }
-    }
+        let x = trendy_numeric::parse_approximate(text)
+            .map_err(|why| unparsable(text, "an approximate number", why, None))?;
+        dst.write_unaligned(x);
+        Ok(())
+    })
 }
 
 /// Store at `dst` the square root of `*x`, as `sqrt` computes it, and the
-/// compiler with it. Stops the program if `*x` is negative, which has none
-/// (R0018).
+/// compiler with it. Fails if `*x` is negative, which has none (R0018).
 ///
 /// # Safety
 ///
 /// `x` must point to an approximate number, and `dst` to memory for one.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn trendy_rt_sqrt(dst: *mut f64, x: *const f64) {
+pub unsafe extern "C" fn trendy_rt_sqrt(dst: *mut f64, x: *const f64) -> bool {
     // SAFETY: guaranteed by the caller.
     let x = unsafe { x.read_unaligned() };
-    match trendy_numeric::sqrt(x) {
+    status(|| {
+        let root = trendy_numeric::sqrt(x).ok_or_else(|| {
+            fail_with(|out| writeln!(out, "error[R0018]: {x:e} has no square root"))
+        })?;
         // SAFETY: guaranteed by the caller.
-        Some(root) => unsafe { dst.write_unaligned(root) },
-        None => fail_with(|out| writeln!(out, "error[R0018]: {x:e} has no square root")),
-    }
+        unsafe { dst.write_unaligned(root) };
+        Ok(())
+    })
 }
 
 /// Store at `dst` the sine of `*x`, in radians, as `sin` computes it, and
@@ -2871,8 +3075,8 @@ pub unsafe extern "C" fn trendy_rt_atan2(dst: *mut f64, y: *const f64, x: *const
 }
 
 /// Store at `dst` the boolean the text `from` writes, as `parse_boolean`
-/// reads one, and the compiler with it. Stops the program if the text
-/// writes none (R0014).
+/// reads one, and the compiler with it. Fails if the text writes none
+/// (R0014).
 ///
 /// # Safety
 ///
@@ -2880,15 +3084,15 @@ pub unsafe extern "C" fn trendy_rt_atan2(dst: *mut f64, y: *const f64, x: *const
 /// boolean.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn trendy_rt_parse_boolean(dst: *mut u8, from: *const Text) {
+pub unsafe extern "C" fn trendy_rt_parse_boolean(dst: *mut u8, from: *const Text) -> bool {
     // SAFETY: guaranteed by the caller.
-    unsafe {
+    status(|| unsafe {
         let text = read_text(from.cast());
-        match trendy_text::parse_boolean(text) {
-            Ok(b) => dst.write(u8::from(b)),
-            Err(why) => unparsable(text, "a boolean", why, None),
-        }
-    }
+        let b = trendy_text::parse_boolean(text)
+            .map_err(|why| unparsable(text, "a boolean", why, None))?;
+        dst.write(u8::from(b));
+        Ok(())
+    })
 }
 
 /// Where a field of a CSV file is, for an attribute: in a column, counting
@@ -2908,24 +3112,33 @@ struct Place<'a> {
     first: bool,
 }
 
-/// Stop the program because `text`, at `place` if it is a CSV file's
-/// field, isn't `a`, a value of its type, as `why` says.
+/// Fail because `text`, at `place` if it is a CSV file's field, isn't
+/// `a`, a value of its type, as `why` says. A header's field the message
+/// writes is read first, in memory the statement's scope holds; if there
+/// is none for it, that is the failure.
 #[cfg(not(test))]
-fn unparsable(text: &str, a: &str, why: trendy_text::Unparsable, place: Option<Place>) -> ! {
+fn unparsable(text: &str, a: &str, why: trendy_text::Unparsable, place: Option<Place>) -> Failed {
+    let heading = place.and_then(|place| {
+        let field = place
+            .header
+            .and_then(|text| csv::header(text).nth(place.column))?;
+        // SAFETY: the statement has begun a scope, as
+        // `trendy_rt_load_csv`'s caller guarantees.
+        Some(unsafe { field_value(field) })
+    });
+    let heading = match heading.transpose() {
+        Ok(heading) => heading,
+        Err(failed) => return failed,
+    };
     fail_with(|out| {
         out.write_str("error[R0014]: \"")?;
         trendy_text::escape(text, out)?;
         out.write_char('"')?;
         if let Some(place) = place {
             write!(out, ", in column {}", place.column + 1)?;
-            if let Some(field) = place
-                .header
-                .and_then(|text| csv::header(text).nth(place.column))
-            {
+            if let Some(heading) = heading {
                 out.write_str(" (\"")?;
-                // SAFETY: the statement has begun a scope, as
-                // `trendy_rt_load_csv`'s caller guarantees.
-                trendy_text::escape(unsafe { field_value(field) }, out)?;
+                trendy_text::escape(heading, out)?;
                 out.write_str("\")")?;
             }
             write!(out, " on line {} of \"", place.line)?;
@@ -2954,8 +3167,8 @@ fn unparsable(text: &str, a: &str, why: trendy_text::Unparsable, place: Option<P
 /// the file's order, of the type `desc` describes, `array text`, in memory
 /// the statement owns: each line without the line feed, or the carriage
 /// return and line feed, that ends it. The last line needs no ending.
-/// Stops the program if the file can't be read (R0012), or isn't UTF-8
-/// text (R0013), or the memory can't be allocated.
+/// Fails if the file can't be read (R0012), or isn't UTF-8 text (R0013),
+/// or the memory can't be allocated.
 ///
 /// # Safety
 ///
@@ -2968,21 +3181,21 @@ pub unsafe extern "C" fn trendy_rt_load_text_file(
     dst: *mut Text,
     path: *const Text,
     desc: *const TypeDesc,
-) {
+) -> bool {
     // SAFETY: guaranteed by the caller.
-    unsafe {
+    status(|| unsafe {
         let path = read_text(path.cast());
-        let (contents, len) = read_file(path);
-        let text = file_text(path, array(contents, len));
-        dst.write_unaligned(lines_of(text, &*desc));
-        free(contents.cast());
-    }
+        let mut contents = read_file(path)?;
+        let text = file_text(path, contents.values())?;
+        dst.write_unaligned(lines_of(text, &*desc)?);
+        Ok(())
+    })
 }
 
-/// As [`trendy_rt_load_text_file`], but rather than stopping the program
-/// for a file that can't be read, or isn't UTF-8 text, store at `dst` no
-/// lines, and at `errors` its one error, an `unreadable_file` or a
-/// `not_utf8`, and none if the file is read.
+/// As [`trendy_rt_load_text_file`], but rather than failing for a file
+/// that can't be read, or isn't UTF-8 text, store at `dst` no lines, and
+/// at `errors` its one error, an `unreadable_file` or a `not_utf8`, and
+/// none if the file is read. Fails if the memory can't be allocated.
 ///
 /// # Safety
 ///
@@ -2995,53 +3208,58 @@ pub unsafe extern "C" fn trendy_rt_load_text_file_with_errors(
     path: *const Text,
     errors: *mut Errors,
     desc: *const TypeDesc,
-) {
+) -> bool {
     // SAFETY: guaranteed by the caller.
-    unsafe {
+    status(|| unsafe {
         let path = read_text(path.cast());
         let mut found = Found::new((*errors).types);
-        match file_or_error(path, &mut found) {
-            Some((contents, text)) => {
-                dst.write_unaligned(lines_of(text, &*desc));
-                free(contents.cast());
-            }
-            None => dst.write_unaligned(lines_of("", &*desc)),
-        }
-        (&raw mut (*errors).found).write_unaligned(found.finish());
-    }
+        let lines = match file_or_error(path, &mut found)? {
+            Some((_contents, text)) => lines_of(text, &*desc)?,
+            None => lines_of("", &*desc)?,
+        };
+        let found = found.finish()?;
+        dst.write_unaligned(lines);
+        (&raw mut (*errors).found).write_unaligned(found);
+        Ok(())
+    })
 }
 
-/// The text of the file at `path`, and the memory from `malloc` it is in,
-/// which the caller frees, or `None`, after adding to `found` why the file
-/// can't be read, or isn't UTF-8 text.
+/// The text of the file at `path`, and the memory it is in, which it
+/// lasts as long as, or `None`, after adding to `found` why the file can't
+/// be read, or isn't UTF-8 text. Fails if the memory for them can't be
+/// allocated.
 ///
 /// # Safety
 ///
 /// `found`'s descriptors must be those [`UNREADABLE_FILE`] and [`NOT_UTF8`]
 /// say. The statement must have begun a scope.
 #[cfg(not(test))]
-unsafe fn file_or_error<'a>(path: &str, found: &mut Found) -> Option<(*mut u8, &'a str)> {
-    // SAFETY: guaranteed by the caller.
+unsafe fn file_or_error<'a>(
+    path: &str,
+    found: &mut Found,
+) -> Fallible<Option<(Temp<u8>, &'a str)>> {
+    // SAFETY: guaranteed by the caller; the text is in the memory, which
+    // moving the memory's owner doesn't move.
     unsafe {
-        let (contents, len) = match try_read_file(path) {
+        let contents = match try_read_file(path)? {
             Ok(read) => read,
             Err(reason) => {
-                let (path, reason) = (scope_text(path), scope_text(reason));
+                let (path, reason) = (scope_text(path)?, scope_text(reason)?);
                 found.add(
                     UNREADABLE_FILE,
                     &[
                         ("path", (&raw const path).cast()),
                         ("reason", (&raw const reason).cast()),
                     ],
-                );
-                return None;
+                )?;
+                return Ok(None);
             }
         };
-        match try_file_text(array(contents, len)) {
-            Ok(text) => Some((contents, text)),
+        let bytes = core::slice::from_raw_parts(contents.ptr(), contents.len);
+        match try_file_text(bytes) {
+            Ok(text) => Ok(Some((contents, text))),
             Err(line) => {
-                free(contents.cast());
-                let path = scope_text(path);
+                let path = scope_text(path)?;
                 let line = i64::try_from(line).unwrap_or(i64::MAX);
                 found.add(
                     NOT_UTF8,
@@ -3049,8 +3267,8 @@ unsafe fn file_or_error<'a>(path: &str, found: &mut Found) -> Option<(*mut u8, &
                         ("path", (&raw const path).cast()),
                         ("line", (&raw const line).cast()),
                     ],
-                );
-                None
+                )?;
+                Ok(None)
             }
         }
     }
@@ -3063,19 +3281,19 @@ unsafe fn file_or_error<'a>(path: &str, found: &mut Found) -> Option<(*mut u8, &
 /// # Safety
 ///
 /// `desc` must be a valid descriptor of that array type. The statement
-/// must have begun a scope.
+/// must have begun a scope. Fails if the memory can't be allocated.
 #[cfg(not(test))]
-unsafe fn lines_of(text: &str, desc: &TypeDesc) -> Text {
+unsafe fn lines_of(text: &str, desc: &TypeDesc) -> Fallible<Text> {
     // SAFETY: guaranteed by the caller.
     unsafe {
         let element = desc.element();
         let count = text.lines().count();
         let Some(size) = count.checked_mul(element.size) else {
-            fail(Failure::OutOfMemory)
+            return Err(fail(Failure::OutOfMemory));
         };
-        let lines = allocate_buffer(size, desc);
+        let lines = allocate_buffer(size, desc)?;
         for (i, line) in text.lines().enumerate() {
-            let value = scope_text(line);
+            let value = scope_text(line)?;
             copy_element(
                 lines,
                 lines.add(i * element.size),
@@ -3083,49 +3301,49 @@ unsafe fn lines_of(text: &str, desc: &TypeDesc) -> Text {
                 element,
             );
         }
-        Text {
+        Ok(Text {
             bytes: lines,
             len: count,
-        }
+        })
     }
 }
 
 /// A text value of `text`'s bytes, in a buffer the statement's scope
-/// holds.
+/// holds. Fails if the memory can't be allocated.
 #[cfg(not(test))]
-fn scope_text(text: &str) -> Text {
-    let bytes = allocate_buffer(text.len(), core::ptr::null());
+fn scope_text(text: &str) -> Fallible<Text> {
+    let bytes = allocate_buffer(text.len(), core::ptr::null())?;
     // SAFETY: the buffer has room for the bytes.
     unsafe { core::ptr::copy_nonoverlapping(text.as_ptr(), bytes, text.len()) };
-    Text {
+    Ok(Text {
         bytes,
         len: text.len(),
-    }
+    })
 }
 
 /// A text value of what `write` writes, in a buffer the statement's scope
-/// holds.
+/// holds. Fails if the memory can't be allocated.
 #[cfg(not(test))]
-fn scope_written(write: impl Fn(&mut dyn Write) -> fmt::Result) -> Text {
+fn scope_written(write: impl Fn(&mut dyn Write) -> fmt::Result) -> Fallible<Text> {
     let mut counted = Counted(0);
     // Writing to memory fails only if it can't be counted, and then there
     // is too much to allocate.
     if write(&mut counted).is_err() {
-        fail(Failure::OutOfMemory);
+        return Err(fail(Failure::OutOfMemory));
     }
-    let bytes = allocate_buffer(counted.0, core::ptr::null());
+    let bytes = allocate_buffer(counted.0, core::ptr::null())?;
     // SAFETY: the buffer has room for what is counted.
     let mut filled = Filled {
         bytes: unsafe { core::slice::from_raw_parts_mut(bytes, counted.0) },
         len: 0,
     };
     if write(&mut filled).is_err() {
-        fail(Failure::OutOfMemory);
+        return Err(fail(Failure::OutOfMemory));
     }
-    Text {
+    Ok(Text {
         bytes,
         len: counted.0,
-    }
+    })
 }
 
 /// Where a load that gives its errors puts them, and their types, as the
@@ -3189,10 +3407,10 @@ pub unsafe extern "C" fn trendy_rt_component_key_error(
     pair: *const usize,
     of: *const ComponentOf,
     record: *const Record,
-) {
+) -> bool {
     // SAFETY: guaranteed by the caller.
-    unsafe {
-        let mut found = Found::of(&*errors);
+    status(|| unsafe {
+        let mut found = Found::of(&*errors)?;
         let (desc, record, of) = (&*desc, &*record, &*of);
         let names = scope_written(|out| {
             for (i, attr) in attributes(&*key).iter().enumerate() {
@@ -3202,19 +3420,14 @@ pub unsafe extern "C" fn trendy_rt_component_key_error(
                 out.write_str(name(attr))?;
             }
             Ok(())
-        });
+        })?;
         let (tuples, _) = read_slice(value);
         let element = desc.element();
         let tuple = |i: usize| {
             let at = tuples.add(pair.add(i).read_unaligned() * element.size);
-            let Ok(text) = text_of(at, element, |bytes| {
-                allocate_buffer(bytes, core::ptr::null())
-            }) else {
-                fail(Failure::OutOfMemory)
-            };
-            text
+            written(at, element)
         };
-        let (first, second) = (tuple(0), tuple(1));
+        let (first, second) = (tuple(0)?, tuple(1)?);
         let line = i64::try_from(record.line).unwrap_or(i64::MAX);
         found.add(
             COMPONENT_KEY_VIOLATED_IN_FILE,
@@ -3228,9 +3441,10 @@ pub unsafe extern "C" fn trendy_rt_component_key_error(
                 ("first", (&raw const first).cast()),
                 ("second", (&raw const second).cast()),
             ],
-        );
-        (&raw mut (*errors).found).write_unaligned(found.finish());
-    }
+        )?;
+        (&raw mut (*errors).found).write_unaligned(found.finish()?);
+        Ok(())
+    })
 }
 
 /// Add to the errors `errors` has that `value`, of the type of the
@@ -3252,15 +3466,11 @@ pub unsafe extern "C" fn trendy_rt_overlapping_subtypes_error(
     first: *const Text,
     second: *const Text,
     record: *const Record,
-) {
+) -> bool {
     // SAFETY: guaranteed by the caller.
-    unsafe {
-        let mut found = Found::of(&*errors);
-        let Ok(written) = text_of(value, &*desc, |bytes| {
-            allocate_buffer(bytes, core::ptr::null())
-        }) else {
-            fail(Failure::OutOfMemory)
-        };
+    status(|| unsafe {
+        let mut found = Found::of(&*errors)?;
+        let written = written(value, &*desc)?;
         let record = &*record;
         let line = i64::try_from(record.line).unwrap_or(i64::MAX);
         found.add(
@@ -3273,9 +3483,10 @@ pub unsafe extern "C" fn trendy_rt_overlapping_subtypes_error(
                 ("first", first.cast()),
                 ("second", second.cast()),
             ],
-        );
-        (&raw mut (*errors).found).write_unaligned(found.finish());
-    }
+        )?;
+        (&raw mut (*errors).found).write_unaligned(found.finish()?);
+        Ok(())
+    })
 }
 
 /// Add to the errors `errors` has that `value`, whose components the
@@ -3300,15 +3511,11 @@ pub unsafe extern "C" fn trendy_rt_broken_constraint_error(
     ty: *const Text,
     constraint: *const Text,
     record: *const Record,
-) {
+) -> bool {
     // SAFETY: guaranteed by the caller.
-    unsafe {
-        let mut found = Found::of(&*errors);
-        let Ok(written) = text_of(value, &*desc, |bytes| {
-            allocate_buffer(bytes, core::ptr::null())
-        }) else {
-            fail(Failure::OutOfMemory)
-        };
+    status(|| unsafe {
+        let mut found = Found::of(&*errors)?;
+        let written = written(value, &*desc)?;
         let record = &*record;
         let line = i64::try_from(record.line).unwrap_or(i64::MAX);
         found.add(
@@ -3321,17 +3528,19 @@ pub unsafe extern "C" fn trendy_rt_broken_constraint_error(
                 ("type", ty.cast()),
                 ("constraint", constraint.cast()),
             ],
-        );
-        (&raw mut (*errors).found).write_unaligned(found.finish());
-    }
+        )?;
+        (&raw mut (*errors).found).write_unaligned(found.finish()?);
+        Ok(())
+    })
 }
 
 /// The errors a load finds, as it finds them: their tuples, `{ error: … }`,
-/// one after another, in memory from `malloc`, of the types an
-/// [`Errors`]'s descriptors describe.
+/// one after another, in memory from `malloc`, freed when it is dropped,
+/// of the types an [`Errors`]'s descriptors describe.
 #[cfg(not(test))]
 struct Found {
     types: *const *const TypeDesc,
+    /// Null before the first.
     tuples: *mut u8,
     count: usize,
     capacity: usize,
@@ -3343,54 +3552,57 @@ impl Found {
     fn new(types: *const *const TypeDesc) -> Found {
         Found {
             types,
-            tuples: allocate::<u8>(0),
+            tuples: core::ptr::null_mut(),
             count: 0,
             capacity: 0,
         }
     }
 
-    /// Those `errors` has, to add to.
+    /// Those `errors` has, to add to. Fails if there is no memory for
+    /// them.
     ///
     /// # Safety
     ///
     /// `errors` must be valid.
-    unsafe fn of(errors: &Errors) -> Found {
+    unsafe fn of(errors: &Errors) -> Fallible<Found> {
         // SAFETY: guaranteed by the caller.
         unsafe {
             let mut found = Found::new(errors.types);
             let size = found.relation().element().size;
             for i in 0..errors.found.len {
                 let src = errors.found.bytes.add(i * size);
-                core::ptr::copy_nonoverlapping(src, found.room(), size);
+                core::ptr::copy_nonoverlapping(src, found.room()?, size);
                 found.count += 1;
             }
-            found
+            Ok(found)
         }
     }
 
-    /// Room for one more error's tuple, after those found, zeroed.
+    /// Room for one more error's tuple, after those found, zeroed. Fails
+    /// if there is no memory for it.
     ///
     /// # Safety
     ///
     /// The descriptors must be valid.
-    unsafe fn room(&mut self) -> *mut u8 {
+    unsafe fn room(&mut self) -> Fallible<*mut u8> {
         // SAFETY: guaranteed by the caller.
         unsafe {
             let tuple = self.relation().element();
             if self.count == self.capacity {
                 let capacity = self.capacity.saturating_mul(2).max(4);
                 let Some(bytes) = capacity.checked_mul(tuple.size) else {
-                    fail(Failure::OutOfMemory)
+                    return Err(fail(Failure::OutOfMemory));
                 };
-                self.tuples = realloc(self.tuples.cast(), bytes).cast();
-                if self.tuples.is_null() {
-                    fail(Failure::OutOfMemory);
+                let grown = realloc(self.tuples.cast(), bytes.max(1));
+                if grown.is_null() {
+                    return Err(fail(Failure::OutOfMemory));
                 }
+                self.tuples = grown.cast();
                 self.capacity = capacity;
             }
             let room = self.tuples.add(self.count * tuple.size);
             core::ptr::write_bytes(room, 0, tuple.size);
-            room
+            Ok(room)
         }
     }
 
@@ -3412,11 +3624,11 @@ impl Found {
     /// # Safety
     ///
     /// The descriptors must be valid, and `components` the type's.
-    unsafe fn add(&mut self, index: usize, components: &[(&str, *const u8)]) {
+    unsafe fn add(&mut self, index: usize, components: &[(&str, *const u8)]) -> Fallible {
         // SAFETY: guaranteed by the caller.
         unsafe {
             let tuple = self.relation().element();
-            let made = self.room();
+            let made = self.room()?;
             let [attribute] = attributes(tuple) else {
                 unreachable!("a relation of errors has one attribute");
             };
@@ -3435,31 +3647,41 @@ impl Found {
                 core::ptr::copy_nonoverlapping(*src, at, (*component.desc).size);
             }
             self.count += 1;
+            Ok(())
         }
     }
 
     /// The relation of the errors found, in canonical order, in memory the
-    /// statement owns, which takes references to their texts.
+    /// statement owns, which takes references to their texts. Fails if
+    /// there is no memory for it.
     ///
     /// # Safety
     ///
     /// The descriptors must be valid. The statement must have begun a
     /// scope.
-    unsafe fn finish(self) -> Text {
+    unsafe fn finish(self) -> Fallible<Text> {
         // SAFETY: guaranteed by the caller.
         unsafe {
-            let (bytes, len) = canonical(self.tuples, self.count, self.relation());
-            free(self.tuples.cast());
-            Text { bytes, len }
+            let (bytes, len) = canonical(self.tuples, self.count, self.relation())?;
+            Ok(Text { bytes, len })
         }
     }
 }
 
-/// `bytes`, the contents of the file at `path`, as text. Stops the program
-/// if they aren't UTF-8 (R0013).
 #[cfg(not(test))]
-fn file_text<'a>(path: &str, bytes: &'a [u8]) -> &'a str {
-    try_file_text(bytes).unwrap_or_else(|line| {
+impl Drop for Found {
+    fn drop(&mut self) {
+        // SAFETY: the tuples are `realloc`'s, or null, which only this
+        // frees.
+        unsafe { free(self.tuples.cast()) }
+    }
+}
+
+/// `bytes`, the contents of the file at `path`, as text. Fails if they
+/// aren't UTF-8 (R0013).
+#[cfg(not(test))]
+fn file_text<'a>(path: &str, bytes: &'a [u8]) -> Fallible<&'a str> {
+    try_file_text(bytes).map_err(|line| {
         fail_with(|out| {
             write!(out, "error[R0013]: line {line} of \"")?;
             trendy_text::escape(path, out)?;
@@ -3490,11 +3712,11 @@ fn try_file_text(bytes: &[u8]) -> Result<&str, usize> {
 /// components, and a tuple, of the components of another possible
 /// representation of one, as its attributes, whose columns `columns` gives
 /// as a tuple of them; the caller converts those, and checks the type's
-/// constraints. Columns it doesn't give are skipped. Stops the program if
-/// a column isn't one of the file's, or two attributes or components have
-/// one (R0016), the file can't be read (R0012), isn't UTF-8 text (R0013)
-/// or CSV (R0015), a field isn't a value of its type (R0014), or the
-/// memory can't be allocated.
+/// constraints. Columns it doesn't give are skipped. Fails if a column
+/// isn't one of the file's, or two attributes or components have one
+/// (R0016), the file can't be read (R0012), isn't UTF-8 text (R0013) or
+/// CSV (R0015), a field isn't a value of its type (R0014), or the memory
+/// can't be allocated.
 ///
 /// # Safety
 ///
@@ -3515,26 +3737,30 @@ pub unsafe extern "C" fn trendy_rt_load_csv(
     columns: *const Columns,
     lines: *mut Text,
     desc: *const TypeDesc,
-) {
+) -> bool {
     // SAFETY: guaranteed by the caller.
-    unsafe {
+    status(|| unsafe {
         let file = CsvFile {
             path: read_text(path.cast()),
             header: *header != 0,
             columns: &*columns,
         };
-        load_csv(dst, &file, lines, &*desc, None);
-    }
+        let (rows, starts) = load_csv(&file, &*desc, None)?;
+        dst.write_unaligned(rows);
+        lines.write_unaligned(starts);
+        Ok(())
+    })
 }
 
-/// As [`trendy_rt_load_csv`], but rather than stopping the program for a
-/// file it can't read, store no records at `dst`, and at `errors` its
+/// As [`trendy_rt_load_csv`], but rather than failing for a file it can't
+/// read, store no records at `dst`, and at `errors` its
 /// error, an `unreadable_file`, a `not_utf8` or a `missing_column`, and for
 /// a record it can't read, skip it, giving its error there, a
 /// `malformed_csv` or an `unreadable_field`, and none if every record is
 /// read. A quoted field that isn't closed ends the records read. Two
 /// attributes or components of one column, or one of a column below 1,
-/// mistakes of the call's, still stop the program.
+/// mistakes of the call's, still fail it, as memory that can't be
+/// allocated does.
 ///
 /// # Safety
 ///
@@ -3550,18 +3776,22 @@ pub unsafe extern "C" fn trendy_rt_load_csv_with_errors(
     lines: *mut Text,
     errors: *mut Errors,
     desc: *const TypeDesc,
-) {
+) -> bool {
     // SAFETY: guaranteed by the caller.
-    unsafe {
+    status(|| unsafe {
         let file = CsvFile {
             path: read_text(path.cast()),
             header: *header != 0,
             columns: &*columns,
         };
         let mut found = Found::new((*errors).types);
-        load_csv(dst, &file, lines, &*desc, Some(&mut found));
-        (&raw mut (*errors).found).write_unaligned(found.finish());
-    }
+        let (rows, starts) = load_csv(&file, &*desc, Some(&mut found))?;
+        let found = found.finish()?;
+        dst.write_unaligned(rows);
+        lines.write_unaligned(starts);
+        (&raw mut (*errors).found).write_unaligned(found);
+        Ok(())
+    })
 }
 
 /// The columns a CSV file's records are read from, as `load_csv`'s caller
@@ -3581,10 +3811,10 @@ struct CsvFile<'a> {
     columns: &'a Columns,
 }
 
-/// What [`trendy_rt_load_csv`] and [`trendy_rt_load_csv_with_errors`] do:
-/// with `found`, what the file can't be read for goes there, and so does
-/// what each record can't, which is skipped; without it, the first stops
-/// the program.
+/// What [`trendy_rt_load_csv`] and [`trendy_rt_load_csv_with_errors`] do,
+/// giving the records and the lines they start on: with `found`, what the
+/// file can't be read for goes there, and so does what each record can't,
+/// which is skipped; without it, the first fails.
 ///
 /// # Safety
 ///
@@ -3592,86 +3822,83 @@ struct CsvFile<'a> {
 /// [`trendy_rt_load_csv_with_errors`].
 #[cfg(not(test))]
 unsafe fn load_csv(
-    dst: *mut Text,
     file: &CsvFile,
-    lines: *mut Text,
     desc: &TypeDesc,
     mut found: Option<&mut Found>,
-) {
+) -> Fallible<(Text, Text)> {
     // SAFETY: guaranteed by the caller.
     unsafe {
         let element = desc.element();
         // Each scalar read, and its column, as `columns` gives them.
-        let count_leaves = scalars(element);
-        let leaves_memory = allocate::<Leaf>(count_leaves);
+        let mut leaves = Temp::<Leaf>::new(scalars(element))?;
         let mut next = 0;
         gather(
             element,
             0,
             file.columns.tuple,
             &*file.columns.desc,
-            leaves_memory,
+            leaves.ptr(),
             &mut next,
             element,
-        );
-        let leaves = array(leaves_memory, count_leaves);
-        distinct_columns(leaves, element);
+        )?;
+        let leaves = leaves.values();
+        distinct_columns(leaves, element)?;
         let read = if let Some(found) = found.as_deref_mut() {
-            file_or_error(file.path, found)
+            file_or_error(file.path, found)?
         } else {
-            let (contents, len) = read_file(file.path);
-            Some((contents, file_text(file.path, array(contents, len))))
+            let contents = read_file(file.path)?;
+            let bytes = core::slice::from_raw_parts(contents.ptr(), contents.len);
+            let text = file_text(file.path, bytes)?;
+            Some((contents, text))
         };
         // The file's records, and how many fields each has, unless it has
         // a failure of its own, which `found` has.
-        let read = read.and_then(|(contents, text)| {
-            let records = csv_records(text, file.path, file.header, found.is_none());
-            let present = columns_present(
-                leaves,
-                element,
-                file.path,
-                records.fields,
-                found.as_deref_mut(),
-            );
-            if !present {
-                free(contents.cast());
-            }
-            present.then_some((contents, text, records))
-        });
-        let (rows, starts) = match read {
-            Some((contents, text, records)) => {
-                let reading = Reading {
-                    file,
-                    text,
-                    leaves,
-                    element,
-                    records,
-                };
-                let read = reading.records(desc, found);
-                free(contents.cast());
-                read
-            }
-            None => (
-                Text {
-                    bytes: allocate_buffer(0, desc),
-                    len: 0,
-                },
-                Text {
-                    bytes: allocate_buffer(0, core::ptr::null()),
-                    len: 0,
-                },
-            ),
+        let Some((_contents, text)) = read else {
+            return no_records(desc);
         };
-        free(leaves_memory.cast());
-        dst.write_unaligned(rows);
-        lines.write_unaligned(starts);
+        let records = csv_records(text, file.path, file.header, found.is_none())?;
+        let present = columns_present(
+            leaves,
+            element,
+            file.path,
+            records.fields,
+            found.as_deref_mut(),
+        )?;
+        if !present {
+            return no_records(desc);
+        }
+        let reading = Reading {
+            file,
+            text,
+            leaves,
+            element,
+            records,
+        };
+        reading.records(desc, found)
     }
+}
+
+/// No records of the type `desc` describes, an array of tuples, and no
+/// lines they start on, in memory the statement owns. Fails if there is no
+/// memory for them.
+#[cfg(not(test))]
+fn no_records(desc: &TypeDesc) -> Fallible<(Text, Text)> {
+    Ok((
+        Text {
+            bytes: allocate_buffer(0, desc)?,
+            len: 0,
+        },
+        Text {
+            bytes: allocate_buffer(0, core::ptr::null())?,
+            len: 0,
+        },
+    ))
 }
 
 /// Whether the CSV file at `path`, whose records have `fields` fields,
 /// has every column of `leaves`, the scalars its records' tuples, which
 /// `element` describes, are read as. One it hasn't goes to `found`, if
-/// given, and else stops the program (R0016).
+/// given, and else fails (R0016).
 ///
 /// # Safety
 ///
@@ -3683,20 +3910,20 @@ unsafe fn columns_present(
     path: &str,
     fields: usize,
     found: Option<&mut Found>,
-) -> bool {
+) -> Fallible<bool> {
     let Some(i) = leaves.iter().position(|l| l.column >= fields) else {
-        return true;
+        return Ok(true);
     };
     // A file with no records has no columns to lack.
     if fields == 0 {
-        return true;
+        return Ok(true);
     }
     let named = LeafName {
         desc: element,
         leaf: i,
     };
     let Some(found) = found else {
-        columns_fail(|out| {
+        return Err(columns_fail(|out| {
             write!(
                 out,
                 "`{named}` is read from column {}, but \"",
@@ -3705,11 +3932,11 @@ unsafe fn columns_present(
             trendy_text::escape(path, out)?;
             let plural = if fields == 1 { "" } else { "s" };
             write!(out, "\" has {fields} column{plural}")
-        });
+        }));
     };
-    let attribute = scope_written(|out| write!(out, "{named}"));
+    let attribute = scope_written(|out| write!(out, "{named}"))?;
     let (path, column, columns) = (
-        scope_text(path),
+        scope_text(path)?,
         i64::try_from(leaves[i].column.saturating_add(1)).unwrap_or(i64::MAX),
         i64::try_from(fields).unwrap_or(i64::MAX),
     );
@@ -3723,9 +3950,9 @@ unsafe fn columns_present(
                 ("column", (&raw const column).cast()),
                 ("columns", (&raw const columns).cast()),
             ],
-        );
+        )?;
     }
-    false
+    Ok(false)
 }
 
 /// A CSV file's records being read: the file, its text, the scalars its
@@ -3745,25 +3972,30 @@ impl Reading<'_> {
     /// The records, an array of the type `desc` describes, and the line
     /// each starts on, in memory the statement owns. With `found`, each
     /// record it can't read is skipped, its error there; without, the
-    /// first stops the program.
+    /// first fails.
     ///
     /// # Safety
     ///
     /// As for [`load_csv`].
-    unsafe fn records(&self, desc: &TypeDesc, mut found: Option<&mut Found>) -> (Text, Text) {
+    unsafe fn records(
+        &self,
+        desc: &TypeDesc,
+        mut found: Option<&mut Found>,
+    ) -> Fallible<(Text, Text)> {
         // SAFETY: guaranteed by the caller.
         unsafe {
             let (element, count) = (self.element, self.records.count);
             let Some(size) = count.checked_mul(element.size) else {
-                fail(Failure::OutOfMemory)
+                return Err(fail(Failure::OutOfMemory));
             };
-            let rows = allocate_buffer(size, desc);
+            let rows = allocate_buffer(size, desc)?;
             let Some(lines_size) = count.checked_mul(size_of::<usize>()) else {
-                fail(Failure::OutOfMemory)
+                return Err(fail(Failure::OutOfMemory));
             };
-            let starts = allocate_buffer(lines_size, core::ptr::null());
+            let starts = allocate_buffer(lines_size, core::ptr::null())?;
             // Each record's tuple, made here, then copied into the array.
-            let tuple = allocate::<u8>(element.size);
+            let tuple = Temp::<u8>::new(element.size)?;
+            let tuple = tuple.ptr();
             let mut all = csv::Fields::new(self.text);
             // A record the errors skip, and why.
             let mut bad: Option<BadRecord> = None;
@@ -3779,7 +4011,7 @@ impl Reading<'_> {
                             .expect("without errors, the file is CSV, as `csv_records` found it");
                         malformed_error(found, self.file.path, line, |out| {
                             out.write_str(malformed_words(why))
-                        });
+                        })?;
                         all.skip_record(why);
                         (j, bad, in_header) = (0, None, false);
                         continue;
@@ -3789,7 +4021,7 @@ impl Reading<'_> {
                     start = field.line;
                 }
                 if !in_header && bad.is_none() {
-                    bad = self.field(field, j, start, tuple, found.is_some());
+                    bad = self.field(field, j, start, tuple, found.is_some())?;
                 }
                 j += 1;
                 if !field.last {
@@ -3800,7 +4032,7 @@ impl Reading<'_> {
                 } else if let Some(found) = found.as_deref_mut()
                     && (j != self.records.fields || bad.is_some())
                 {
-                    self.skipped(found, bad, j, start);
+                    self.skipped(found, bad, j, start)?;
                 } else {
                     copy_element(rows, rows.add(i * element.size), tuple, element);
                     starts
@@ -3811,8 +4043,7 @@ impl Reading<'_> {
                 }
                 (j, bad) = (0, None);
             }
-            free(tuple.cast());
-            (
+            Ok((
                 Text {
                     bytes: rows,
                     len: i,
@@ -3821,14 +4052,14 @@ impl Reading<'_> {
                     bytes: starts,
                     len: i,
                 },
-            )
+            ))
         }
     }
 
     /// Read `field`, in the column `column` of the record starting on
     /// `start`, into `tuple`, if a scalar is read from it: what is wrong
     /// with it, if `skips`, and else, for a field that isn't a value of its
-    /// type, stop the program (R0014).
+    /// type, fail (R0014).
     ///
     /// # Safety
     ///
@@ -3841,17 +4072,21 @@ impl Reading<'_> {
         start: usize,
         tuple: *mut u8,
         skips: bool,
-    ) -> Option<BadRecord<'a>>
+    ) -> Fallible<Option<BadRecord<'a>>>
     where
         Self: 'a,
     {
-        let k = self.leaves.iter().position(|l| l.column == column)?;
+        let Some(k) = self.leaves.iter().position(|l| l.column == column) else {
+            return Ok(None);
+        };
         let leaf = self.leaves[k];
         // SAFETY: guaranteed by the caller.
         unsafe {
             let leaf_desc = &*leaf.desc;
-            let (a, why) = try_read_field(field, tuple.add(leaf.offset), leaf_desc).err()?;
-            let value = field_value(field);
+            let Err((a, why)) = try_read_field(field, tuple.add(leaf.offset), leaf_desc)? else {
+                return Ok(None);
+            };
+            let value = field_value(field)?;
             let place = Place {
                 attribute: LeafName {
                     desc: self.element,
@@ -3864,14 +4099,14 @@ impl Reading<'_> {
                 first: !self.file.header && start == self.records.first_line,
             };
             if !skips {
-                unparsable(value, a, why, Some(place));
+                return Err(unparsable(value, a, why, Some(place)));
             }
-            Some(BadRecord::Field {
+            Ok(Some(BadRecord::Field {
                 text: value,
                 kind: leaf_desc.kind,
                 why,
                 place,
-            })
+            }))
         }
     }
 
@@ -3888,14 +4123,14 @@ impl Reading<'_> {
         bad: Option<BadRecord>,
         fields: usize,
         start: usize,
-    ) {
+    ) -> Fallible {
         // SAFETY: guaranteed by the caller.
         unsafe {
             if fields != self.records.fields {
                 malformed_error(found, self.file.path, start, |out| {
                     let (header, first) = (self.file.header, self.records.first_line);
                     field_count_words(out, fields, self.records.fields, header, first)
-                });
+                })
             } else if let Some(BadRecord::Field {
                 text,
                 kind,
@@ -3903,7 +4138,9 @@ impl Reading<'_> {
                 place,
             }) = bad
             {
-                field_error(found, text, kind, why, &place);
+                field_error(found, text, kind, why, &place)
+            } else {
+                Ok(())
             }
         }
     }
@@ -3935,8 +4172,8 @@ unsafe fn malformed_error(
     path: &str,
     line: usize,
     write: impl Fn(&mut dyn Write) -> fmt::Result,
-) {
-    let (path, problem) = (scope_text(path), scope_written(write));
+) -> Fallible {
+    let (path, problem) = (scope_text(path)?, scope_written(write)?);
     let line = i64::try_from(line).unwrap_or(i64::MAX);
     // SAFETY: guaranteed by the caller.
     unsafe {
@@ -3947,7 +4184,7 @@ unsafe fn malformed_error(
                 ("line", (&raw const line).cast()),
                 ("problem", (&raw const problem).cast()),
             ],
-        );
+        )
     }
 }
 
@@ -3964,7 +4201,7 @@ unsafe fn field_error(
     kind: u8,
     why: trendy_text::Unparsable,
     place: &Place,
-) {
+) -> Fallible {
     let ty = match kind {
         KIND_INTEGER => "integer",
         KIND_APPROXIMATE => "approximate",
@@ -3972,10 +4209,10 @@ unsafe fn field_error(
         kind => unreachable!("only a number or a boolean can't be read: {kind}"),
     };
     let (path, attribute, ty, text) = (
-        scope_text(place.path),
-        scope_written(|out| write!(out, "{}", place.attribute)),
-        scope_text(ty),
-        scope_text(text),
+        scope_text(place.path)?,
+        scope_written(|out| write!(out, "{}", place.attribute))?,
+        scope_text(ty)?,
+        scope_text(text)?,
     );
     let (line, column, out_of_range) = (
         i64::try_from(place.line).unwrap_or(i64::MAX),
@@ -3995,21 +4232,21 @@ unsafe fn field_error(
                 ("text", (&raw const text).cast()),
                 ("out_of_range", (&raw const out_of_range).cast()),
             ],
-        );
+        )
     }
 }
 
-/// Stop the program if two of `leaves`, the scalars the records' tuples,
-/// which `element` describes, are read as, have one column (R0016).
+/// Fail if two of `leaves`, the scalars the records' tuples, which
+/// `element` describes, are read as, have one column (R0016).
 #[cfg(not(test))]
-fn distinct_columns(leaves: &[Leaf], element: &TypeDesc) {
+fn distinct_columns(leaves: &[Leaf], element: &TypeDesc) -> Fallible {
     let named = |leaf| LeafName {
         desc: element,
         leaf,
     };
     for (i, leaf) in leaves.iter().enumerate() {
         if let Some(first) = leaves[..i].iter().position(|l| l.column == leaf.column) {
-            columns_fail(|out| {
+            return Err(columns_fail(|out| {
                 write!(
                     out,
                     "`{}` and `{}` are both read from column {}",
@@ -4017,9 +4254,10 @@ fn distinct_columns(leaves: &[Leaf], element: &TypeDesc) {
                     named(i),
                     leaf.column + 1
                 )
-            });
+            }));
         }
     }
+    Ok(())
 }
 
 /// A scalar a CSV file's field is read into: an attribute of the records'
@@ -4076,8 +4314,7 @@ unsafe fn scalars(desc: &TypeDesc) -> usize {
 /// column `columns` gives it: a tuple `columns_desc` describes, of the
 /// same shape, whose attributes are integers counting from 1, or such
 /// tuples for the scalars of a value read from several fields (see
-/// [`read_from_fields`]). Stops the program if a position is below 1
-/// (R0016).
+/// [`read_from_fields`]). Fails if a position is below 1 (R0016).
 ///
 /// # Safety
 ///
@@ -4093,7 +4330,7 @@ unsafe fn gather(
     leaves: *mut Leaf,
     next: &mut usize,
     element: &TypeDesc,
-) {
+) -> Fallible {
     // SAFETY: guaranteed by the caller.
     unsafe {
         for (attr, position) in attributes(values).iter().zip(attributes(columns_desc)) {
@@ -4108,7 +4345,7 @@ unsafe fn gather(
                     leaves,
                     next,
                     element,
-                );
+                )?;
                 continue;
             }
             let n = at.cast::<i64>().read_unaligned();
@@ -4117,12 +4354,12 @@ unsafe fn gather(
                     desc: element,
                     leaf: *next,
                 };
-                columns_fail(|out| {
+                return Err(columns_fail(|out| {
                     write!(
                         out,
                         "`{name}` is read from column {n}, but columns count from 1"
                     )
-                });
+                }));
             }
             leaves.add(*next).write(Leaf {
                 offset: base + attr.offset,
@@ -4132,6 +4369,7 @@ unsafe fn gather(
             *next += 1;
         }
     }
+    Ok(())
 }
 
 /// The name of the `leaf`th scalar a CSV file's records' tuples, which
@@ -4174,10 +4412,10 @@ impl fmt::Display for LeafName<'_> {
     }
 }
 
-/// Stop the program because `columns` doesn't give each attribute a
-/// column of the file, of its own, as `write` says (R0016).
+/// Fail because `columns` doesn't give each attribute a column of the
+/// file, of its own, as `write` says (R0016).
 #[cfg(not(test))]
-fn columns_fail(write: impl FnOnce(&mut Stderr) -> fmt::Result) -> ! {
+fn columns_fail(write: impl FnOnce(&mut Stderr) -> fmt::Result) -> Failed {
     fail_with(|out| {
         out.write_str("error[R0016]: ")?;
         write(out)?;
@@ -4197,12 +4435,12 @@ struct Records {
 }
 
 /// The records of the CSV text `text`, of the file at `path`, after its
-/// first, a header, if `header` is true. If `stops`, it stops the program
-/// if it isn't CSV, or a record has another number of fields than the
-/// first (R0015); otherwise each record that isn't CSV, or has another
-/// number, counts, as one an errors skip.
+/// first, a header, if `header` is true. If `stops`, it fails if it isn't
+/// CSV, or a record has another number of fields than the first (R0015);
+/// otherwise each record that isn't CSV, or has another number, counts, as
+/// one an errors skip.
 #[cfg(not(test))]
-fn csv_records(text: &str, path: &str, header: bool, stops: bool) -> Records {
+fn csv_records(text: &str, path: &str, header: bool, stops: bool) -> Fallible<Records> {
     let (mut records, mut fields, mut line) = (0_usize, 0, 0);
     // The first record's fields and line.
     let mut first: Option<(usize, usize)> = None;
@@ -4211,7 +4449,9 @@ fn csv_records(text: &str, path: &str, header: bool, stops: bool) -> Records {
         let field = match field {
             Ok(field) => field,
             Err(csv::NotCsv { why, line }) if stops => {
-                malformed(path, line, |out| out.write_str(malformed_words(why)))
+                return Err(malformed(path, line, |out| {
+                    out.write_str(malformed_words(why))
+                }));
             }
             Err(csv::NotCsv { why, .. }) => {
                 all.skip_record(why);
@@ -4229,14 +4469,16 @@ fn csv_records(text: &str, path: &str, header: bool, stops: bool) -> Records {
         match first {
             None => first = Some((fields, line)),
             Some((expected, _)) if expected == fields || !stops => {}
-            Some((expected, first_line)) => malformed(path, line, |out| {
-                field_count_words(out, fields, expected, header, first_line)
-            }),
+            Some((expected, first_line)) => {
+                return Err(malformed(path, line, |out| {
+                    field_count_words(out, fields, expected, header, first_line)
+                }));
+            }
         }
         records += 1;
         fields = 0;
     }
-    Records {
+    Ok(Records {
         count: if header {
             records.saturating_sub(1)
         } else {
@@ -4244,7 +4486,7 @@ fn csv_records(text: &str, path: &str, header: bool, stops: bool) -> Records {
         },
         fields: first.map_or(0, |(fields, _)| fields),
         first_line: first.map_or(0, |(_, line)| line),
-    }
+    })
 }
 
 /// What a CSV file's record isn't CSV for, `why`, after "line n of the
@@ -4280,10 +4522,10 @@ fn field_count_words(
     }
 }
 
-/// Stop the program because the CSV file at `path` isn't CSV on line
-/// `line`, as `write` says (R0015).
+/// Fail because the CSV file at `path` isn't CSV on line `line`, as
+/// `write` says (R0015).
 #[cfg(not(test))]
-fn malformed(path: &str, line: usize, write: impl FnOnce(&mut Stderr) -> fmt::Result) -> ! {
+fn malformed(path: &str, line: usize, write: impl FnOnce(&mut Stderr) -> fmt::Result) -> Failed {
     fail_with(|out| {
         write!(out, "error[R0015]: line {line} of \"")?;
         trendy_text::escape(path, out)?;
@@ -4295,30 +4537,32 @@ fn malformed(path: &str, line: usize, write: impl FnOnce(&mut Stderr) -> fmt::Re
 
 /// The value of the CSV field `field`: its text as written, or, with its
 /// doubled quotes made one, a copy in memory the statement's scope holds.
+/// Fails if there is no memory for the copy.
 ///
 /// # Safety
 ///
 /// The statement must have begun a scope, which holds the copy until it
 /// ends, as long as the value is used.
 #[cfg(not(test))]
-unsafe fn field_value(field: csv::Field<'_>) -> &str {
+unsafe fn field_value(field: csv::Field<'_>) -> Fallible<&str> {
     if let Some(written) = field.as_written() {
-        return written;
+        return Ok(written);
     }
     let len = field.len();
-    let bytes = allocate_buffer(len, core::ptr::null());
+    let bytes = allocate_buffer(len, core::ptr::null())?;
     // SAFETY: the buffer has room for the value's bytes, and they are the
     // field's UTF-8, with some quotes left out.
     unsafe {
         let value = core::slice::from_raw_parts_mut(bytes, len);
         field.copy_to(value);
-        core::str::from_utf8_unchecked(value)
+        Ok(core::str::from_utf8_unchecked(value))
     }
 }
 
 /// Read the CSV file's field `field` into `dst`, as a value of the type
 /// `desc` describes: text, an integer, an approximate number or a boolean;
 /// or what it isn't, `a`, as a value of the type is described, and why.
+/// Fails if the memory for a text can't be allocated.
 ///
 /// # Safety
 ///
@@ -4329,13 +4573,13 @@ unsafe fn try_read_field(
     field: csv::Field,
     dst: *mut u8,
     desc: &TypeDesc,
-) -> Result<(), (&'static str, trendy_text::Unparsable)> {
+) -> Fallible<Result<(), (&'static str, trendy_text::Unparsable)>> {
     // SAFETY: guaranteed by the caller.
     unsafe {
-        let value = field_value(field);
-        match desc.kind {
+        let value = field_value(field)?;
+        Ok(match desc.kind {
             KIND_TEXT => {
-                dst.cast::<Text>().write_unaligned(scope_text(value));
+                dst.cast::<Text>().write_unaligned(scope_text(value)?);
                 Ok(())
             }
             KIND_INTEGER => trendy_numeric::parse_integer(value)
@@ -4348,75 +4592,73 @@ unsafe fn try_read_field(
                 .map(|b| dst.write(u8::from(b)))
                 .map_err(|why| ("a boolean", why)),
             kind => unreachable!("`load_csv` reads no values of kind {kind}"),
-        }
+        })
     }
 }
 
-/// The bytes of the file at `path`, and their number, in memory from
-/// `malloc`, which the caller frees. Stops the program if the file can't
-/// be read (R0012), or the memory can't be allocated.
+/// The bytes of the file at `path`, in memory of the caller's own, its
+/// length theirs. Fails if the file can't be read (R0012), or the memory
+/// can't be allocated.
 #[cfg(not(test))]
-fn read_file(path: &str) -> (*mut u8, usize) {
-    try_read_file(path).unwrap_or_else(|reason| cant_read(path, reason))
+fn read_file(path: &str) -> Fallible<Temp<u8>> {
+    try_read_file(path)?.map_err(|reason| cant_read(path, reason))
 }
 
 /// As [`read_file`], but the reason the file can't be read, the system's,
-/// rather than stopping the program.
+/// rather than failing, which only memory that can't be allocated does.
 #[cfg(not(test))]
-fn try_read_file(path: &str) -> Result<(*mut u8, usize), &'static str> {
+fn try_read_file(path: &str) -> Fallible<Result<Temp<u8>, &'static str>> {
     // `open` takes the path as a C string, which ends at the first NUL.
     if path.contains('\0') {
-        return Err("a path can't contain the character U+0000");
+        return Ok(Err("a path can't contain the character U+0000"));
     }
     let Some(terminated) = path.len().checked_add(1) else {
-        fail(Failure::OutOfMemory)
+        return Err(fail(Failure::OutOfMemory));
     };
-    // SAFETY: the memory is for the path's bytes and a NUL, read by `open`
-    // and then freed; the descriptor is read, then closed, and `read`
-    // writes at most the room left in the memory.
+    // SAFETY: the memory is for the path's bytes and a NUL, read by `open`;
+    // the descriptor is read, then closed, and `read` writes at most the
+    // room left in the memory.
     unsafe {
-        let c_path = allocate::<u8>(terminated);
-        core::ptr::copy_nonoverlapping(path.as_ptr(), c_path, path.len());
-        *c_path.add(path.len()) = 0;
-        let fd = open(c_path, O_RDONLY);
-        free(c_path.cast());
+        let c_path = Temp::<u8>::new(terminated)?;
+        core::ptr::copy_nonoverlapping(path.as_ptr(), c_path.ptr(), path.len());
+        *c_path.ptr().add(path.len()) = 0;
+        let fd = open(c_path.ptr(), O_RDONLY);
         if fd < 0 {
-            return Err(reason());
+            return Ok(Err(reason()));
         }
-        let mut capacity = 4096;
-        let mut contents = allocate::<u8>(capacity);
-        let mut len = 0;
-        loop {
-            if len == capacity {
-                let Some(grown) = capacity.checked_mul(2) else {
-                    fail(Failure::OutOfMemory)
-                };
-                contents = realloc(contents.cast(), grown).cast();
-                if contents.is_null() {
-                    fail(Failure::OutOfMemory);
+        let read_all = |contents: &mut Temp<u8>| -> Fallible<Result<usize, &'static str>> {
+            let mut len = 0;
+            loop {
+                if len == contents.len {
+                    let Some(grown) = contents.len.checked_mul(2) else {
+                        return Err(fail(Failure::OutOfMemory));
+                    };
+                    contents.grow(grown)?;
                 }
-                capacity = grown;
+                let room = contents.len - len;
+                let Ok(n) = usize::try_from(read(fd, contents.ptr().add(len), room)) else {
+                    return Ok(Err(reason()));
+                };
+                if n == 0 {
+                    return Ok(Ok(len));
+                }
+                len += n;
             }
-            let Ok(n) = usize::try_from(read(fd, contents.add(len), capacity - len)) else {
-                let reason = reason();
-                free(contents.cast());
-                close(fd);
-                return Err(reason);
-            };
-            if n == 0 {
-                break;
-            }
-            len += n;
-        }
+        };
+        let read = Temp::<u8>::new(4096).and_then(|mut contents| {
+            Ok(read_all(&mut contents)?.map(|len| {
+                contents.len = len;
+                contents
+            }))
+        });
         close(fd);
-        Ok((contents, len))
+        read
     }
 }
 
-/// Stop the program because the file at `path` can't be read, for
-/// `reason`.
+/// Fail because the file at `path` can't be read, for `reason`.
 #[cfg(not(test))]
-fn cant_read(path: &str, reason: &str) -> ! {
+fn cant_read(path: &str, reason: &str) -> Failed {
     fail_with(|out| {
         out.write_str("error[R0012]: can't read \"")?;
         trendy_text::escape(path, out)?;
@@ -4447,23 +4689,26 @@ fn reason() -> &'static str {
 ///
 /// # Errors
 ///
-/// Returns an error if the length doesn't fit in a `usize`.
-unsafe fn text_of(
+/// Returns `allocate`'s error, or `too_long`'s if the length doesn't fit
+/// in a `usize`.
+unsafe fn text_of<E>(
     value: *const u8,
     desc: &TypeDesc,
-    allocate: impl FnOnce(usize) -> *mut u8,
-) -> Result<Text, fmt::Error> {
+    allocate: impl FnOnce(usize) -> Result<*mut u8, E>,
+    too_long: impl Fn() -> E,
+) -> Result<Text, E> {
     let mut counted = Counted(0);
     // SAFETY, throughout: guaranteed by the caller.
     unsafe {
-        write_value(&mut counted, value, desc)?;
+        write_value(&mut counted, value, desc).map_err(|_| too_long())?;
         let len = counted.0;
-        let bytes = allocate(len);
+        let bytes = allocate(len)?;
         let mut filled = Filled {
             bytes: core::slice::from_raw_parts_mut(bytes, len),
             len: 0,
         };
-        write_value(&mut filled, value, desc)?;
+        // As much as was counted, which fits.
+        write_value(&mut filled, value, desc).map_err(|_| too_long())?;
         Ok(Text { bytes, len })
     }
 }
@@ -5143,10 +5388,15 @@ mod tests {
         // vector has room for the bytes asked for.
         let text = unsafe {
             write_value(&mut written, value, desc).unwrap();
-            text_of(value, desc, |len| {
-                memory = vec![0; len];
-                memory.as_mut_ptr()
-            })
+            text_of(
+                value,
+                desc,
+                |len| {
+                    memory = vec![0; len];
+                    Ok(memory.as_mut_ptr())
+                },
+                || fmt::Error,
+            )
         }
         .unwrap();
         assert_eq!(text.len, memory.len());

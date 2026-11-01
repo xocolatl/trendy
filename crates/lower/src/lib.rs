@@ -5341,7 +5341,15 @@ mod tests {
         ));
         let main = &lowered.functions[0];
         let text = lir::Layout::Struct(vec![lir::Layout::Address, lir::Layout::Usize]);
-        assert_eq!(main.slots, [text.clone(), text, lir::Layout::scope()]);
+        // Then where the scope `main` is entered in is saved, which its
+        // failure exit ends scopes back to.
+        let slots = [
+            text.clone(),
+            text,
+            lir::Layout::scope(),
+            lir::Layout::Address,
+        ];
+        assert_eq!(main.slots, slots);
         let slot = |i| lir::Place::whole(lir::Base::Slot(lir::SlotId(i)));
         let runtime: Vec<_> = main.blocks[0]
             .insts
@@ -5355,6 +5363,7 @@ mod tests {
         assert_eq!(
             runtime,
             [
+                (lir::RuntimeFn::Innermost, slot(3)),
                 (lir::RuntimeFn::Begin, slot(2)),
                 (lir::RuntimeFn::Concat, slot(0)),
                 (lir::RuntimeFn::Concat, slot(1)),
@@ -5636,7 +5645,8 @@ mod tests {
             path: vec![0],
         };
         let slot = |i| lir::Place::whole(lir::Base::Slot(lir::SlotId(i)));
-        let insts = &lowered.functions[0].blocks[0].insts;
+        // After the scope the function is entered in is saved.
+        let insts = &lowered.functions[0].blocks[0].insts[1..];
         let lir::Inst::CallRuntime { function, args } = &insts[2] else {
             panic!("expected a runtime call, found {:?}", insts[2]);
         };
@@ -5682,7 +5692,9 @@ mod tests {
         ));
         let main = &lowered.functions[0];
         let slot = lir::Place::whole(lir::Base::Slot(lir::SlotId(0)));
-        let lir::Inst::CallRuntime { function, args } = &main.blocks[0].insts[1] else {
+        // After the scope `main` is entered in is saved, and its statement's
+        // begun.
+        let lir::Inst::CallRuntime { function, args } = &main.blocks[0].insts[2] else {
             panic!("{:?}", main.blocks[0].insts);
         };
         assert_eq!(*function, lir::RuntimeFn::And);
@@ -5734,7 +5746,7 @@ mod tests {
             )],
         ));
         let main = &lowered.functions[0];
-        let [entry, head, body, done] = &main.blocks[..] else {
+        let [entry, head, body, done, _failed] = &main.blocks[..] else {
             panic!("{:#?}", main.blocks);
         };
         let runtime = |block: &lir::Block| -> Vec<lir::RuntimeFn> {
@@ -5749,10 +5761,15 @@ mod tests {
         };
         // The result is allocated, then each tuple computed into it, then
         // sorted, in the statement's scope, which begins in a block ended
-        // before it was known to need one.
+        // before it was known to need one, after the scope `main` is
+        // entered in is saved.
         assert_eq!(
             runtime(entry),
-            [lir::RuntimeFn::Begin, lir::RuntimeFn::Allocate]
+            [
+                lir::RuntimeFn::Innermost,
+                lir::RuntimeFn::Begin,
+                lir::RuntimeFn::Allocate
+            ]
         );
         assert_eq!(entry.terminator, lir::Terminator::Jump(lir::BlockId(1)));
         assert!(matches!(
@@ -6230,7 +6247,10 @@ mod tests {
             Vec::new(),
         ));
         let f = lowered.functions.iter().find(|f| f.name == "f").unwrap();
-        let insts: Vec<&lir::Inst> = f.blocks.iter().flat_map(|b| &b.insts).collect();
+        // Those of the blocks before its failure exit, the last, after the
+        // scope it is entered in is saved.
+        let (_failed, blocks) = f.blocks.split_last().unwrap();
+        let insts: Vec<&lir::Inst> = blocks.iter().flat_map(|b| &b.insts).skip(1).collect();
         // The relation starts with a null pointer, is assigned its
         // value, and is released last; the integer is copied.
         let lir::Inst::Copy { dst: value, .. } = insts[0] else {
@@ -6605,15 +6625,19 @@ mod tests {
             })
             .collect();
         // The text is the statement's, so it begins a scope; the integer
-        // converts inline.
+        // converts inline. Making the text can fail, so the scope the
+        // function is entered in is saved first, which its failure exit
+        // ends scopes back to.
         assert_eq!(
             runtime,
             [
+                lir::RuntimeFn::Innermost,
                 lir::RuntimeFn::Begin,
                 lir::RuntimeFn::ToText,
                 lir::RuntimeFn::DebugValue,
                 lir::RuntimeFn::End,
                 lir::RuntimeFn::DebugValue,
+                lir::RuntimeFn::EndSince,
             ]
         );
         assert!(
@@ -6751,6 +6775,7 @@ mod tests {
         assert_eq!(
             runtime,
             [
+                lir::RuntimeFn::Innermost,
                 lir::RuntimeFn::Begin,
                 lir::RuntimeFn::Allocate,
                 lir::RuntimeFn::DebugValue,

@@ -137,7 +137,26 @@ only `unicode-width`, for the columns a terminal gives a table's cell
 (UAX #11), which a wide character, such as `李`, takes two of. `trendyc`'s `build.rs` builds it as a static library
 (`cargo rustc --crate-type staticlib` with `panic = "abort"`, in a target
 directory of its own), embeds the archive, and passes it to `cc` with the
-object. **`trendy_text`**, `no_std` and dependency-free, holds the escape
+object. The runtime never stops the program; only an internal error does
+(`internal_error`). A runtime function that can fail returns whether it
+did, which compiled code checks as it does a call's
+(`lir::RuntimeFn::fails`, which codegen's tests check against the
+runtime's source). It writes the error where the failure happens, with
+the site, and gives `Failed`, which says the error is written, up
+through the functions it is in, as their `Fallible` results, with `?`.
+A function that fails changes nothing but what the statement's scope
+holds, which ends as the statement fails:
+- It writes its result last.
+- It makes room in the scope (`reserve`) before it hands the scope
+  references it can't take back: a variable's old value, as `assign`,
+  `keep` and `unique` do.
+- A new buffer goes to the scope at once (`allocate_buffer`). Its
+  header counts only the elements it holds references through, so a
+  half-built one is released safely.
+- Its own memory, such as a sort's pointers or a file's bytes, is a
+  `Temp`, freed however the function ends.
+
+**`trendy_text`**, `no_std` and dependency-free, holds the escape
 rules for text literals, so the compiler, which reads them and writes them
 in messages and in `to_text`'s folded values, and the runtime, which writes
 them, can't disagree, writing every control character and every

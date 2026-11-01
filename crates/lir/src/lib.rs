@@ -57,16 +57,17 @@
 //! status 1. Each block says where a failure in it goes
 //! ([`Block::failure`]): the function's failure exit, which gives up what
 //! the function holds, as the end of its statements and blocks would, and
-//! returns to its caller, failing ([`Terminator::Failed`]). Three things
-//! fail: a call whose callee fails; an arithmetic instruction whose result
-//! doesn't exist, which first calls [`RuntimeFn::IntegerFailed`] or
-//! [`RuntimeFn::ApproximateFailed`] with the operation; and a check that
-//! fails, which ends its block with [`Terminator::Fail`], whose runtime
-//! function takes the values involved. Each of those runtime functions
-//! writes the error, with its values, to stderr, with the site the program
-//! is at, which [`Inst::Site`] sets. A runtime function that fails on its
-//! own, such as for memory it can't allocate, writes its error and stops
-//! the program itself.
+//! returns to its caller, failing ([`Terminator::Failed`]). Four things
+//! fail: a call whose callee fails; a runtime function that fails on its
+//! own ([`RuntimeFn::fails`]), such as for memory it can't allocate, which
+//! writes its error and returns that it failed, checked as a call's is; an
+//! arithmetic instruction whose result doesn't exist, which first calls
+//! [`RuntimeFn::IntegerFailed`] or [`RuntimeFn::ApproximateFailed`] with
+//! the operation; and a check that fails, which ends its block with
+//! [`Terminator::Fail`], whose runtime function takes the values involved.
+//! Each of those writes the error, with its values, to stderr, with the
+//! site the program is at, which [`Inst::Site`] sets. The runtime never
+//! stops the program itself.
 //!
 //! # Type descriptors
 //!
@@ -192,37 +193,35 @@ pub enum Base {
     },
 }
 
-/// A function in the runtime library.
+/// A function in the runtime library. One that can fail
+/// ([`RuntimeFn::fails`]) returns whether it did, a boolean.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeFn {
     /// `trendy_rt_debug_value(value, descriptor)`.
     DebugValue,
-    /// `trendy_rt_debug_table(value, descriptor)`, of a relation. It stops
-    /// the program if the memory for its columns' widths can't be
-    /// allocated.
+    /// `trendy_rt_debug_table(value, descriptor)`, of a relation. It fails
+    /// if the memory for its columns' widths can't be allocated.
     DebugTable,
     /// `trendy_rt_to_text(dst, value, descriptor)`: store at `dst` the
     /// text [`RuntimeFn::DebugValue`] writes for the value, of the type the
     /// descriptor describes, in memory the statement owns (see
-    /// [`RuntimeFn::Begin`]). It stops the program if the memory can't be
-    /// allocated.
+    /// [`RuntimeFn::Begin`]). It fails if the memory can't be allocated.
     ToText,
     /// `trendy_rt_parse_integer(dst, text)`: store at `dst` the integer the
-    /// text writes, as `parse_integer` reads one. It stops the program if
-    /// the text writes none.
+    /// text writes, as `parse_integer` reads one. It fails if the text
+    /// writes none.
     ParseInteger,
     /// `trendy_rt_parse_approximate(dst, text)`: store at `dst` the
     /// approximate number nearest the decimal number the text writes, as
-    /// `parse_approximate` reads one. It stops the program if the text
-    /// writes none.
+    /// `parse_approximate` reads one. It fails if the text writes none.
     ParseApproximate,
     /// `trendy_rt_parse_boolean(dst, text)`: store at `dst` the boolean the
-    /// text writes, as `parse_boolean` reads one. It stops the program if
-    /// the text writes none.
+    /// text writes, as `parse_boolean` reads one. It fails if the text
+    /// writes none.
     ParseBoolean,
     /// `trendy_rt_sqrt(dst, x)`: store at `dst` the square root of the
-    /// approximate number `x`, as `sqrt` computes it. It stops the program
-    /// if `x` is negative, which has none.
+    /// approximate number `x`, as `sqrt` computes it. It fails if `x` is
+    /// negative, which has none.
     Sqrt,
     /// `trendy_rt_sin(dst, x)`: store at `dst` the sine of the angle `x`,
     /// in radians, as `sin` computes it.
@@ -237,14 +236,14 @@ pub enum RuntimeFn {
     /// `trendy_rt_load_text_file(dst, path, descriptor)`: store at `dst` the
     /// array of the lines of the text file at `path`, a text, in order, of
     /// the type the descriptor describes, `array text`, in memory the
-    /// statement owns. It stops the program if the file can't be read, or
-    /// isn't UTF-8 text, or if the memory can't be allocated.
+    /// statement owns. It fails if the file can't be read, or isn't UTF-8
+    /// text, or if the memory can't be allocated.
     LoadTextFile,
     /// `trendy_rt_load_text_file_with_errors(dst, path, errors,
     /// descriptor)`: as [`RuntimeFn::LoadTextFile`], but a file that can't
     /// be read, or isn't UTF-8 text, gives no lines, and its error at
-    /// `errors`, rather than stopping the program: an `unreadable_file` or
-    /// a `not_utf8`. `errors` is a struct of `relation { error: error }`,
+    /// `errors`, rather than failing: an `unreadable_file` or a
+    /// `not_utf8`. `errors` is a struct of `relation { error: error }`,
     /// which it stores the errors in, none if the file is read, and the
     /// address of an array of descriptors' addresses, the relation's, then
     /// each error's type's, in `hir::UpdateBuiltin::errors`'s order, as
@@ -258,20 +257,20 @@ pub enum RuntimeFn {
     /// struct of the address of a tuple of integers and its type's
     /// descriptor's, and at `lines` the line each starts on, both in memory
     /// the statement owns.
-    /// It stops the program if a column isn't one of the file's, or two
-    /// attributes have one, the file can't be read, isn't UTF-8 text or
+    /// It fails if a column isn't one of the file's, or two attributes have
+    /// one, the file can't be read, isn't UTF-8 text or
     /// CSV, a field isn't a value of its attribute's type, or the memory
     /// can't be allocated.
     LoadCsv,
     /// `trendy_rt_load_csv_with_errors(dst, path, header, columns, lines,
     /// errors, descriptor)`: as [`RuntimeFn::LoadCsv`], with `errors` as
-    /// [`RuntimeFn::LoadTextFileWithErrors`]'s, but rather than stopping the program for a
-    /// file it can't read, it gives no records, and its error at `errors`,
+    /// [`RuntimeFn::LoadTextFileWithErrors`]'s, but rather than failing for
+    /// a file it can't read, it gives no records, and its error at `errors`,
     /// and for a record it can't, skips it, giving its error there, as
     /// [`RuntimeFn::LoadTextFileWithErrors`] gives its: an
     /// `unreadable_file`, a `not_utf8`, a `malformed_csv`, a
     /// `missing_column` or an `unreadable_field`. Two attributes of one
-    /// column, or one of a column below 1, still stop it.
+    /// column, or one of a column below 1, still fail it.
     LoadCsvWithErrors,
     /// `trendy_rt_broken_constraint_error(errors, value, descriptor, ty,
     /// constraint, record)`: add to the errors at `errors`, as
@@ -298,8 +297,8 @@ pub enum RuntimeFn {
     /// sum of the attribute `index` (a [`Field::Usize`], its position by
     /// name) of the tuples of the relation `src`, of the type the
     /// descriptor describes, whose type is integer or approximate: the
-    /// exact sum, rounded once. It stops the program if the sum is beyond
-    /// its type's range.
+    /// exact sum, rounded once. It fails if the sum is beyond its type's
+    /// range.
     Sum,
     /// `trendy_rt_product(dst, src, descriptor, index)`: as
     /// [`RuntimeFn::Sum`], of the product.
@@ -386,8 +385,7 @@ pub enum RuntimeFn {
     ComponentKeyViolatedInFile,
     /// `trendy_rt_concat(dst, lhs, rhs)`: store the concatenation of two
     /// texts at `dst`, in memory the statement owns (see
-    /// [`RuntimeFn::Begin`]). It stops the program if the memory can't be
-    /// allocated.
+    /// [`RuntimeFn::Begin`]). It fails if the memory can't be allocated.
     Concat,
     /// `trendy_rt_release(value, descriptor)`: give up the references
     /// that a local variable's value, of the type the descriptor
@@ -481,9 +479,9 @@ pub enum RuntimeFn {
     /// at `dst` the relations `lhs` and `rhs`, of the type the descriptor
     /// describes, combined as `combination` (a [`Field::Usize`], a
     /// [`Combination::code`]) says, sorted canonically, in
-    /// memory the statement owns. It stops the program if a disjoint
-    /// union's operands share a tuple, or an included minus's right operand
-    /// has one the left lacks.
+    /// memory the statement owns. It fails if a disjoint union's operands
+    /// share a tuple, or an included minus's right operand has one the left
+    /// lacks.
     Combine,
     /// `trendy_rt_allocate(dst, count, descriptor)`: store at `dst` a
     /// relation or an array, of the type the descriptor describes, of
@@ -555,6 +553,143 @@ pub enum RuntimeFn {
 }
 
 impl RuntimeFn {
+    /// Every runtime function, for checking the runtime against them.
+    pub const ALL: [RuntimeFn; 60] = [
+        RuntimeFn::DebugValue,
+        RuntimeFn::DebugTable,
+        RuntimeFn::ToText,
+        RuntimeFn::ParseInteger,
+        RuntimeFn::ParseApproximate,
+        RuntimeFn::ParseBoolean,
+        RuntimeFn::Sqrt,
+        RuntimeFn::Sin,
+        RuntimeFn::Cos,
+        RuntimeFn::Atan2,
+        RuntimeFn::LoadTextFile,
+        RuntimeFn::LoadTextFileWithErrors,
+        RuntimeFn::LoadCsv,
+        RuntimeFn::LoadCsvWithErrors,
+        RuntimeFn::BrokenConstraintError,
+        RuntimeFn::ComponentKeyError,
+        RuntimeFn::OverlappingSubtypesError,
+        RuntimeFn::Sum,
+        RuntimeFn::Product,
+        RuntimeFn::IntegerFailed,
+        RuntimeFn::ApproximateFailed,
+        RuntimeFn::TupleMismatch,
+        RuntimeFn::NotOneTuple,
+        RuntimeFn::NoMin,
+        RuntimeFn::NoMax,
+        RuntimeFn::IndexOutOfRange,
+        RuntimeFn::ElementConflict,
+        RuntimeFn::BrokenConstraint,
+        RuntimeFn::NotOfType,
+        RuntimeFn::Failed,
+        RuntimeFn::BrokenConstraintInFile,
+        RuntimeFn::OverlappingSubtypes,
+        RuntimeFn::KeyShared,
+        RuntimeFn::KeyViolated,
+        RuntimeFn::ComponentKeyViolated,
+        RuntimeFn::ComponentKeyViolatedInFile,
+        RuntimeFn::Concat,
+        RuntimeFn::Release,
+        RuntimeFn::Begin,
+        RuntimeFn::End,
+        RuntimeFn::Innermost,
+        RuntimeFn::EndSince,
+        RuntimeFn::Keep,
+        RuntimeFn::Adopt,
+        RuntimeFn::Reshape,
+        RuntimeFn::Relation,
+        RuntimeFn::And,
+        RuntimeFn::Ungroup,
+        RuntimeFn::Matching,
+        RuntimeFn::Subset,
+        RuntimeFn::Combine,
+        RuntimeFn::Allocate,
+        RuntimeFn::Unique,
+        RuntimeFn::Duplicate,
+        RuntimeFn::Sort,
+        RuntimeFn::Load,
+        RuntimeFn::Unload,
+        RuntimeFn::CompareText,
+        RuntimeFn::Equal,
+        RuntimeFn::Assign,
+    ];
+
+    /// Whether it can fail: for memory it can't allocate, as any that
+    /// makes a text, relation or array, or holds a reference in a
+    /// statement's scope, can, or for a value it can't make, as a sum
+    /// beyond its type's range, a text that writes no number, or a file it
+    /// can't read is. It returns whether it failed, a boolean, which
+    /// compiled code checks as it does a call's. The runtime functions a
+    /// failure calls only write its error, and don't fail themselves.
+    #[must_use]
+    pub fn fails(self) -> bool {
+        match self {
+            RuntimeFn::DebugTable
+            | RuntimeFn::ToText
+            | RuntimeFn::ParseInteger
+            | RuntimeFn::ParseApproximate
+            | RuntimeFn::ParseBoolean
+            | RuntimeFn::Sqrt
+            | RuntimeFn::LoadTextFile
+            | RuntimeFn::LoadTextFileWithErrors
+            | RuntimeFn::LoadCsv
+            | RuntimeFn::LoadCsvWithErrors
+            | RuntimeFn::BrokenConstraintError
+            | RuntimeFn::ComponentKeyError
+            | RuntimeFn::OverlappingSubtypesError
+            | RuntimeFn::Sum
+            | RuntimeFn::Product
+            | RuntimeFn::KeyShared
+            | RuntimeFn::Concat
+            | RuntimeFn::Keep
+            | RuntimeFn::Reshape
+            | RuntimeFn::Relation
+            | RuntimeFn::And
+            | RuntimeFn::Ungroup
+            | RuntimeFn::Matching
+            | RuntimeFn::Combine
+            | RuntimeFn::Allocate
+            | RuntimeFn::Unique
+            | RuntimeFn::Duplicate
+            | RuntimeFn::Sort
+            | RuntimeFn::Load
+            | RuntimeFn::Unload
+            | RuntimeFn::Assign => true,
+            RuntimeFn::DebugValue
+            | RuntimeFn::Sin
+            | RuntimeFn::Cos
+            | RuntimeFn::Atan2
+            | RuntimeFn::IntegerFailed
+            | RuntimeFn::ApproximateFailed
+            | RuntimeFn::TupleMismatch
+            | RuntimeFn::NotOneTuple
+            | RuntimeFn::NoMin
+            | RuntimeFn::NoMax
+            | RuntimeFn::IndexOutOfRange
+            | RuntimeFn::ElementConflict
+            | RuntimeFn::BrokenConstraint
+            | RuntimeFn::NotOfType
+            | RuntimeFn::Failed
+            | RuntimeFn::BrokenConstraintInFile
+            | RuntimeFn::OverlappingSubtypes
+            | RuntimeFn::KeyViolated
+            | RuntimeFn::ComponentKeyViolated
+            | RuntimeFn::ComponentKeyViolatedInFile
+            | RuntimeFn::Release
+            | RuntimeFn::Begin
+            | RuntimeFn::End
+            | RuntimeFn::Innermost
+            | RuntimeFn::EndSince
+            | RuntimeFn::Adopt
+            | RuntimeFn::Subset
+            | RuntimeFn::CompareText
+            | RuntimeFn::Equal => false,
+        }
+    }
+
     /// The symbol the runtime library exports.
     #[must_use]
     pub fn symbol(self) -> &'static str {
@@ -1088,8 +1223,9 @@ pub struct Block {
 }
 
 impl Block {
-    /// Whether something in the block can fail: a call, an arithmetic
-    /// instruction, or a [`Terminator::Fail`].
+    /// Whether something in the block can fail: a call, a runtime
+    /// function's that can, an arithmetic instruction, or a
+    /// [`Terminator::Fail`].
     #[must_use]
     pub fn can_fail(&self) -> bool {
         self.insts.iter().any(Inst::can_fail) || matches!(self.terminator, Terminator::Fail(_))
@@ -1097,12 +1233,14 @@ impl Block {
 }
 
 impl Inst {
-    /// Whether the instruction can fail: a call, whose callee can, or an
+    /// Whether the instruction can fail: a call, whose callee can, a
+    /// runtime function's that can ([`RuntimeFn::fails`]), or an
     /// arithmetic instruction, whose result may not exist.
     #[must_use]
     pub fn can_fail(&self) -> bool {
         match self {
             Inst::Call { .. } => true,
+            Inst::CallRuntime { function, .. } => function.fails(),
             Inst::Unary { op, .. } => op.can_fail(),
             Inst::Binary { op, .. } => op.can_fail(),
             _ => false,
