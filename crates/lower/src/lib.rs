@@ -494,6 +494,9 @@ struct FunctionBuilder<'a> {
     scoped: bool,
     /// The slot of the statements' scopes, one at a time.
     scope: Option<lir::Place>,
+    /// Whether the function begins scopes, a statement's or a loop's,
+    /// which its failure exit ends.
+    begins: bool,
     /// Where each tuple at hand is, innermost last: what `Current` refers
     /// to, inside an `Extend`'s values.
     tuples: Vec<lir::Place>,
@@ -551,6 +554,7 @@ fn placeholder() -> lir::Block {
     lir::Block {
         insts: Vec::new(),
         terminator: lir::Terminator::Return,
+        failure: None,
     }
 }
 
@@ -578,6 +582,7 @@ impl<'a> FunctionBuilder<'a> {
             insts: Vec::new(),
             scoped: false,
             scope: None,
+            begins: false,
             tuples: Vec::new(),
             site: None,
             entered: None,
@@ -709,12 +714,21 @@ impl<'a> FunctionBuilder<'a> {
     }
 
     /// The function, its last block ended with a return, with a result
-    /// laid out as `result`, if it has one.
-    fn finish(mut self, result: Option<lir::Layout>, cx: &Lowering) -> lir::Function {
+    /// laid out as `result`, if it has one, and, if something in it can
+    /// fail, a failure exit, where each block that can sends its failures.
+    fn finish(mut self, result: Option<lir::Layout>, cx: &mut Lowering) -> lir::Function {
         self.end_block(lir::Terminator::Return, lir::BlockId(0));
         if let Some(entered) = self.entered.take() {
             let save = lir::Inst::SaveSite { dst: entered };
             self.blocks[0].insts.insert(0, save);
+        }
+        if self.blocks.iter().any(lir::Block::can_fail) {
+            let exit = self.failure_exit(cx);
+            for block in &mut self.blocks {
+                if block.can_fail() {
+                    block.failure = Some(exit);
+                }
+            }
         }
         lir::Function {
             name: self.name,
@@ -723,6 +737,48 @@ impl<'a> FunctionBuilder<'a> {
             slots: self.slots,
             blocks: self.blocks,
         }
+    }
+
+    /// The function's failure exit, a block of its own, which gives up
+    /// what the function holds, as the end of its statements and blocks
+    /// would, then returns, failing: it ends the scopes begun since the
+    /// function was entered, the innermost then, saved as it starts, and
+    /// then releases its local variables' references. A local variable
+    /// holds none before its declaration or after its block, so one
+    /// released there gives up only what it holds.
+    fn failure_exit(&mut self, cx: &mut Lowering) -> lir::BlockId {
+        let exit = self.new_block();
+        self.current = exit;
+        if self.begins {
+            let saved = self.slot(lir::Layout::Address);
+            let innermost = lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::Innermost,
+                args: vec![saved.clone()],
+            };
+            self.blocks[0].insts.insert(0, innermost);
+            self.insts.push(lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::EndSince,
+                args: vec![saved],
+            });
+        }
+        let held: Vec<(lir::Place, hir::Type)> = self
+            .local_places
+            .iter()
+            .zip(&self.locals)
+            .filter_map(|(place, local)| {
+                let place = place.as_ref().filter(|place| place.holds)?;
+                Some((place.value.clone(), local.ty.clone()))
+            })
+            .collect();
+        for (value, ty) in held {
+            let descriptor = cx.descriptor(&ty);
+            self.insts.push(lir::Inst::CallRuntime {
+                function: lir::RuntimeFn::Release,
+                args: vec![value, lir::Place::whole(lir::Base::Data(descriptor))],
+            });
+        }
+        self.end_block(lir::Terminator::Failed, exit);
+        exit
     }
 
     /// A new block, to be built later.
@@ -736,6 +792,7 @@ impl<'a> FunctionBuilder<'a> {
         self.blocks[self.current.0] = lir::Block {
             insts: std::mem::take(&mut self.insts),
             terminator,
+            failure: None,
         };
         self.current = next;
     }
@@ -763,9 +820,15 @@ impl<'a> FunctionBuilder<'a> {
         if let Some(scope) = &self.scope {
             return scope.clone();
         }
-        let scope = self.slot(lir::Layout::scope());
+        let scope = self.new_scope();
         self.scope = Some(scope.clone());
         scope
+    }
+
+    /// A slot for a scope, which the function begins.
+    fn new_scope(&mut self) -> lir::Place {
+        self.begins = true;
+        self.slot(lir::Layout::scope())
     }
 
     /// Where the next instruction goes: the current block, and its index
@@ -849,7 +912,7 @@ impl<'a> FunctionBuilder<'a> {
             this.block(body, cx);
         });
         if makes {
-            let scope = self.slot(lir::Layout::scope());
+            let scope = self.new_scope();
             self.insert(
                 start,
                 lir::Inst::CallRuntime {
@@ -5465,16 +5528,21 @@ mod tests {
         let functions: Vec<lir::RuntimeFn> = calls.iter().map(|(f, _)| *f).collect();
         // The variable is made the only holder of its buffer, which is
         // then changed: an integer is copied in, with no reference to take.
+        // The position can be out of range, so the function saves the
+        // scope it is entered in, which its failure exit ends scopes back
+        // to.
         assert_eq!(
             functions,
             [
+                lir::RuntimeFn::Innermost,
                 lir::RuntimeFn::Begin,
                 lir::RuntimeFn::Unique,
-                lir::RuntimeFn::End
+                lir::RuntimeFn::End,
+                lir::RuntimeFn::EndSince,
             ]
         );
         assert_eq!(
-            calls[1].1,
+            calls[2].1,
             lir::Place {
                 base: lir::Base::Data(lir::DataId(1)),
                 path: vec![0],
@@ -5502,11 +5570,13 @@ mod tests {
         assert_eq!(
             functions,
             [
+                lir::RuntimeFn::Innermost,
                 lir::RuntimeFn::Begin,
                 lir::RuntimeFn::Duplicate,
                 lir::RuntimeFn::Unique,
                 lir::RuntimeFn::DebugValue,
-                lir::RuntimeFn::End
+                lir::RuntimeFn::End,
+                lir::RuntimeFn::EndSince,
             ]
         );
     }
@@ -5829,6 +5899,7 @@ mod tests {
         assert_eq!(
             functions,
             [
+                lir::RuntimeFn::Innermost,
                 lir::RuntimeFn::Begin,
                 lir::RuntimeFn::Keep,
                 lir::RuntimeFn::End
@@ -5907,6 +5978,7 @@ mod tests {
         assert_eq!(
             runtime(insts),
             [
+                lir::RuntimeFn::Innermost,
                 lir::RuntimeFn::Begin,
                 lir::RuntimeFn::DebugValue,
                 lir::RuntimeFn::End
@@ -6193,6 +6265,161 @@ mod tests {
             })
             .count();
         assert_eq!(releases, 1, "only the relation holds references");
+    }
+
+    /// `half{n: integer}: integer [ n div 2 ]`, whose division can fail;
+    /// `f{} [ var r: relation { v: integer }; var n := 1; call
+    /// debug_value{v: half{n: n}}; ]`, whose call of it can; `g{} []`,
+    /// where nothing can; and `main`, which calls `f` and `g`.
+    fn halving() -> hir::Program {
+        let heading = hir::Heading::new([("v".to_string(), integer())].into());
+        let local = |name: &str, ty| hir::Local {
+            name: name.to_string(),
+            ty,
+            keys: Vec::new(),
+        };
+        let declared = |id, value| {
+            hir::Statement::Assign(vec![hir::Assignment {
+                target: hir::Target::Local(hir::LocalId(id)),
+                value: hir::Expr::Constant(value),
+            }])
+        };
+        let empty = hir::Value::Relation(hir::RelationValue {
+            heading: heading.clone(),
+            tuples: BTreeSet::new(),
+        });
+        let half = hir::Operator {
+            versions: Vec::new(),
+            name: "half".to_string(),
+            types: Vec::new(),
+            params: [("n".to_string(), hir::Parameter::constant(integer()))].into(),
+            kind: hir::OperatorKind::ReadOnly {
+                result: integer(),
+                locals: Vec::new(),
+                value: hir::Expr::Binary(
+                    hir::BinaryOp::Div,
+                    Box::new(hir::Expr::Parameter("n".to_string())),
+                    Box::new(hir::Expr::Constant(hir::Value::Integer(2))),
+                ),
+            },
+        };
+        let halved = hir::Expr::Call(hir::Call {
+            operator: hir::OperatorId(1),
+            types: Vec::new(),
+            args: [("n".to_string(), hir::Expr::Local(hir::LocalId(1)))].into(),
+            updated: BTreeMap::new(),
+        });
+        let f = hir::Operator {
+            versions: Vec::new(),
+            name: "f".to_string(),
+            types: Vec::new(),
+            params: BTreeMap::new(),
+            kind: hir::OperatorKind::Update {
+                locals: vec![
+                    local("r", hir::Type::Relation(heading)),
+                    local("n", integer()),
+                ],
+                body: hir::Block {
+                    statements: sited(vec![
+                        declared(0, empty),
+                        declared(1, hir::Value::Integer(1)),
+                        call(0, vec![("v", halved)]),
+                    ]),
+                    locals: vec![hir::LocalId(0), hir::LocalId(1)],
+                },
+            },
+        };
+        program(
+            vec![
+                debug_value(),
+                half,
+                f,
+                user("g", &[], Vec::new()),
+                user("main", &[], vec![call(2, vec![]), call(3, vec![])]),
+            ],
+            Vec::new(),
+        )
+    }
+
+    /// The failure exit of `f`, its last block, which can't fail, where
+    /// each block that can sends its failures.
+    fn exit_of(f: &lir::Function) -> &lir::Block {
+        let exit = lir::BlockId(f.blocks.len() - 1);
+        for block in &f.blocks {
+            let target = block.can_fail().then_some(exit);
+            assert_eq!(block.failure, target, "{block:#?}");
+        }
+        let exit = f.blocks.last().unwrap();
+        assert_eq!(exit.terminator, lir::Terminator::Failed);
+        exit
+    }
+
+    #[test]
+    fn a_failure_exit_gives_up_what_the_function_holds() {
+        let lowered = lower_program(&halving());
+        let function = |name: &str| lowered.functions.iter().find(|f| f.name == name).unwrap();
+        // `f` saves the scope it is entered in, which its exit ends scopes
+        // back to, then releases the relation, its one local variable
+        // that holds references.
+        let f = function("f");
+        let lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Innermost,
+            args: saved,
+        } = &f.blocks[0].insts[0]
+        else {
+            panic!("{:#?}", f.blocks[0]);
+        };
+        let r = f.blocks[0]
+            .insts
+            .iter()
+            .find_map(|i| match i {
+                lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::Assign,
+                    args,
+                } => Some(args[0].clone()),
+                _ => None,
+            })
+            .unwrap();
+        let runtime: Vec<_> = exit_of(f)
+            .insts
+            .iter()
+            .map(|i| match i {
+                lir::Inst::CallRuntime { function, args } => (*function, args[0].clone()),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            runtime,
+            [
+                (lir::RuntimeFn::EndSince, saved[0].clone()),
+                (lir::RuntimeFn::Release, r)
+            ]
+        );
+        // `half` begins no scope and holds nothing, and neither does
+        // `main`, whose calls pass nothing: their exits only fail.
+        for name in ["half", "main"] {
+            let f = function(name);
+            assert!(exit_of(f).insts.is_empty(), "{name}");
+            assert!(!f.blocks[0].insts.iter().any(|i| matches!(
+                i,
+                lir::Inst::CallRuntime {
+                    function: lir::RuntimeFn::Innermost,
+                    ..
+                }
+            )));
+        }
+        // Nothing in `g` can fail, so it has no exit.
+        let g = function("g");
+        assert!(
+            g.blocks
+                .iter()
+                .all(|b| !b.can_fail() && b.failure.is_none())
+        );
+        assert!(
+            !g.blocks
+                .iter()
+                .any(|b| b.terminator == lir::Terminator::Failed)
+        );
     }
 
     #[test]

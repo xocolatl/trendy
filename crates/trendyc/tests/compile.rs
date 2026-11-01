@@ -976,6 +976,57 @@ operator main{{}} [
     );
 }
 
+/// A failure several calls deep, in a loop, makes each function it is in
+/// fail in turn, each giving up what its statements and local variables
+/// hold, a text and a relation here, and the program stops as it did where
+/// it happened, with its error and site, running nothing after.
+#[test]
+fn a_failure_deep_in_calls_stops_the_program() {
+    let source = "operator share{total: integer, guests: integer}: integer [
+    total div guests
+];
+
+operator portion{dish: text, guests: integer} [
+    var note := \"sharing \" || dish;
+    var served := relation { { dish: dish } };
+    call debug_value{v: note};
+    call debug_value{v: share{total: 12, guests: guests}};
+    call debug_value{v: served};
+];
+
+operator serve{dishes: array text, guests: integer} [
+    var plates := \"\";
+    for dish in dishes loop [
+        plates := plates || dish;
+        call portion{dish: dish, guests: guests};
+    ];
+    call debug_value{v: plates};
+];
+
+operator main{} [
+    call serve{dishes: array [\"injera\", \"pierogi\"], guests: 3};
+    call serve{dishes: array [\"plov\", \"khachapuri\"], guests: 0};
+    call debug_value{v: \"not reached\"};
+];
+";
+    let served = |dish: &str| {
+        format!("\"sharing {dish}\"\n4\nrelation {{ dish: text }} {{ {{ dish: \"{dish}\" }} }}\n")
+    };
+    assert_eq!(
+        run_source("deep_failure", source),
+        (
+            1,
+            format!(
+                "{}{}\"injerapierogi\"\n\"sharing plov\"\n{}\n{}",
+                served("injera"),
+                served("pierogi"),
+                division("12 div 0"),
+                site("deep_failure", 2)
+            )
+        )
+    );
+}
+
 #[test]
 fn a_text_file_gives_its_errors_when_asked() {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("errors");

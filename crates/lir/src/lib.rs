@@ -47,17 +47,26 @@
 //! a pointer to where the result goes, a stack slot of the caller's. What
 //! it makes, such as the result's texts, is the calling statement's, as if
 //! the caller had computed the value itself, so it begins no scope (see
-//! [`RuntimeFn::Begin`]).
+//! [`RuntimeFn::Begin`]). Every function returns a boolean, whether it
+//! failed, which the caller checks after the call.
 //!
 //! # Failures
 //!
-//! An arithmetic instruction whose result doesn't exist stops the program by
-//! calling [`RuntimeFn::IntegerFailed`] or [`RuntimeFn::ApproximateFailed`]
-//! with the operation, and a check that fails ends its block with
-//! [`Terminator::Fail`], whose runtime function takes the values involved.
-//! Each writes the error, with those values, to stderr and exits with
-//! status 1. Every failure, a runtime function's too, also writes the site
-//! the program is at, which [`Inst::Site`] sets.
+//! A failure makes the function it happens in fail, and so each caller in
+//! turn, up to the entry, whose failing makes the program exit with
+//! status 1. Each block says where a failure in it goes
+//! ([`Block::failure`]): the function's failure exit, which gives up what
+//! the function holds, as the end of its statements and blocks would, and
+//! returns to its caller, failing ([`Terminator::Failed`]). Three things
+//! fail: a call whose callee fails; an arithmetic instruction whose result
+//! doesn't exist, which first calls [`RuntimeFn::IntegerFailed`] or
+//! [`RuntimeFn::ApproximateFailed`] with the operation; and a check that
+//! fails, which ends its block with [`Terminator::Fail`], whose runtime
+//! function takes the values involved. Each of those runtime functions
+//! writes the error, with its values, to stderr, with the site the program
+//! is at, which [`Inst::Site`] sets. A runtime function that fails on its
+//! own, such as for memory it can't allocate, writes its error and stops
+//! the program itself.
 //!
 //! # Type descriptors
 //!
@@ -295,67 +304,62 @@ pub enum RuntimeFn {
     /// `trendy_rt_product(dst, src, descriptor, index)`: as
     /// [`RuntimeFn::Sum`], of the product.
     Product,
-    /// `trendy_rt_integer_failed(op, lhs, rhs)`, which doesn't return:
-    /// stop the program because `lhs op rhs`, of integers, has no result,
-    /// writing the operation: a division by zero, or an overflow. `op` is
-    /// an [`Arithmetic::code`]; a negation's `lhs` is 0. It takes them by
-    /// value, not by place, so only codegen calls it.
+    /// `trendy_rt_integer_failed(op, lhs, rhs)`: write the error of
+    /// `lhs op rhs`, of integers, which has no result, with the operation:
+    /// a division by zero, or an overflow. `op` is an [`Arithmetic::code`];
+    /// a negation's `lhs` is 0. It takes them by value, not by place, so
+    /// only codegen calls it.
     IntegerFailed,
     /// `trendy_rt_approximate_failed(op, lhs, rhs)`: as
     /// [`RuntimeFn::IntegerFailed`], of approximate numbers.
     ApproximateFailed,
-    /// `trendy_rt_tuple_mismatch(attribute, lhs, rhs, descriptor)`, which
-    /// doesn't return: stop the program because tuples being joined
-    /// disagree on the common attribute named `attribute`, a text, which is
-    /// `lhs` in one and `rhs` in the other, of the type the descriptor
-    /// describes, writing them.
+    /// `trendy_rt_tuple_mismatch(attribute, lhs, rhs, descriptor)`: write
+    /// the error of tuples being joined that disagree on the common
+    /// attribute named `attribute`, a text, which is `lhs` in one and `rhs`
+    /// in the other, of the type the descriptor describes, with them.
     TupleMismatch,
-    /// `trendy_rt_not_one_tuple(count)`, which doesn't return: stop the
-    /// program because a relation has `count` (a [`Layout::Usize`]) tuples,
-    /// not one, where its only one is taken, writing the count.
+    /// `trendy_rt_not_one_tuple(count)`: write the error of a relation
+    /// that has `count` (a [`Layout::Usize`]) tuples, not one, where its
+    /// only one is taken, with the count.
     NotOneTuple,
-    /// `trendy_rt_no_min()`, which doesn't return: stop the program
-    /// because a relation has no tuples, where the least value of an
-    /// attribute is taken.
+    /// `trendy_rt_no_min()`: write the error of a relation that has no
+    /// tuples, where the least value of an attribute is taken.
     NoMin,
     /// `trendy_rt_no_max()`: as [`RuntimeFn::NoMin`], of the greatest.
     NoMax,
-    /// `trendy_rt_index_out_of_range(position, length)`, which doesn't
-    /// return: stop the program because an array of `length` elements has
-    /// none at `position`, both [`Layout::I64`], writing them.
+    /// `trendy_rt_index_out_of_range(position, length)`: write the error
+    /// of an array of `length` elements that has none at `position`, both
+    /// [`Layout::I64`], with them.
     IndexOutOfRange,
-    /// `trendy_rt_element_conflict(positions, count, nested)`, which
-    /// doesn't return: stop the program because two changes to an array
-    /// in an `assign` block set the element at `positions`, a struct of
-    /// `count` (a [`Layout::Usize`]) [`Layout::I64`]s, from the outermost
-    /// array in, or, if `nested` (a [`Layout::U8`]) is 1, one sets it and
-    /// the other an element in it, writing the positions.
+    /// `trendy_rt_element_conflict(positions, count, nested)`: write the
+    /// error of two changes to an array in an `assign` block that set the
+    /// element at `positions`, a struct of `count` (a [`Layout::Usize`])
+    /// [`Layout::I64`]s, from the outermost array in, or, if `nested` (a
+    /// [`Layout::U8`]) is 1, of one that sets it and another an element in
+    /// it, with the positions.
     ElementConflict,
-    /// `trendy_rt_broken_constraint(value, descriptor, ty, constraint)`,
-    /// which doesn't return: stop the program because `value`, components
-    /// the descriptor describes, selected of the type named `ty`, a text,
-    /// break its constraint written `constraint`, a text, writing them.
+    /// `trendy_rt_broken_constraint(value, descriptor, ty, constraint)`:
+    /// write the error of `value`, components the descriptor describes,
+    /// selected of the type named `ty`, a text, which break its constraint
+    /// written `constraint`, a text, with them.
     BrokenConstraint,
-    /// `trendy_rt_not_of_type(value, descriptor, ty)`, which doesn't
-    /// return: stop the program because `value`, of the type in a
-    /// hierarchy the descriptor describes, isn't a value of the type named
-    /// `ty`, a text, which it was treated as, writing them.
+    /// `trendy_rt_not_of_type(value, descriptor, ty)`: write the error of
+    /// `value`, of the type in a hierarchy the descriptor describes, which
+    /// isn't a value of the type named `ty`, a text, that it was treated
+    /// as, with them.
     NotOfType,
-    /// `trendy_rt_failed(message)`, which doesn't return: stop the program
-    /// because it fails with an error whose message is `message`, a text,
-    /// writing it.
+    /// `trendy_rt_failed(message)`: write the error of a `fail`, whose
+    /// message is `message`, a text.
     Failed,
     /// `trendy_rt_broken_constraint_in_file(value, descriptor, ty,
-    /// constraint, record)`, which doesn't return: as
-    /// [`RuntimeFn::BrokenConstraint`],
-    /// of a value `load_csv` read from the record `record` describes,
-    /// laid out as [`Layout::record`], writing where too.
+    /// constraint, record)`: as [`RuntimeFn::BrokenConstraint`], of a
+    /// value `load_csv` read from the record `record` describes, laid out
+    /// as [`Layout::record`], with where too.
     BrokenConstraintInFile,
-    /// `trendy_rt_overlapping_subtypes(value, descriptor, first, second)`,
-    /// which doesn't return: stop the program because `value`, of the type
-    /// of the program's own the descriptor describes, is of both of its
-    /// subtypes defined by constraints named `first` and `second`, texts,
-    /// writing them.
+    /// `trendy_rt_overlapping_subtypes(value, descriptor, first, second)`:
+    /// write the error of `value`, of the type of the program's own the
+    /// descriptor describes, which is of both of its subtypes defined by
+    /// constraints named `first` and `second`, texts, with them.
     OverlappingSubtypes,
     /// `trendy_rt_key_shared(shared, pair, src, descriptor, key)`: store at
     /// `shared`, a [`Layout::U8`], 1 if the relation `src`, of the type the
@@ -363,23 +367,22 @@ pub enum RuntimeFn {
     /// attributes of `key`, the descriptor of its projection on one of its
     /// keys, and their positions at `pair`, two [`Layout::Usize`]s; else 0.
     KeyShared,
-    /// `trendy_rt_key_violated(src, descriptor, key, pair, variable)`,
-    /// which doesn't return: stop the program because the tuples at `pair`
-    /// of the relation `src`, about to be assigned to the variable named
-    /// `variable`, a text, share their values for `key`, as
-    /// [`RuntimeFn::KeyShared`] found, writing the variable, the key and
-    /// the tuples.
+    /// `trendy_rt_key_violated(src, descriptor, key, pair, variable)`:
+    /// write the error of the tuples at `pair` of the relation `src`, about
+    /// to be assigned to the variable named `variable`, a text, which share
+    /// their values for `key`, as [`RuntimeFn::KeyShared`] found, with the
+    /// variable, the key and the tuples.
     KeyViolated,
     /// `trendy_rt_component_key_violated(src, descriptor, key, pair, ty,
-    /// component)`, which doesn't return: as [`RuntimeFn::KeyViolated`],
+    /// component)`: as [`RuntimeFn::KeyViolated`],
     /// of the relation that is the component named `component`, a text, of
     /// a value selected of the type named `ty`, a text.
     ComponentKeyViolated,
     /// `trendy_rt_component_key_violated_in_file(src, descriptor, key,
-    /// pair, ty, component, record)`, which doesn't return: as
+    /// pair, ty, component, record)`: as
     /// [`RuntimeFn::ComponentKeyViolated`], of a value `load_csv` read
     /// from the record `record` describes, laid out as
-    /// [`Layout::record`], writing where too.
+    /// [`Layout::record`], with where too.
     ComponentKeyViolatedInFile,
     /// `trendy_rt_concat(dst, lhs, rhs)`: store the concatenation of two
     /// texts at `dst`, in memory the statement owns (see
@@ -402,6 +405,16 @@ pub enum RuntimeFn {
     /// `trendy_rt_end(scope)`: end the scope at `scope`, the innermost,
     /// giving up its references.
     End,
+    /// `trendy_rt_innermost(dst)`: store at `dst`, a [`Layout::Address`],
+    /// the address of the innermost scope, or null if there is none: as a
+    /// function that begins scopes starts, for its failure exit to end
+    /// those it began ([`RuntimeFn::EndSince`]).
+    Innermost,
+    /// `trendy_rt_end_since(saved)`: end, innermost first, as
+    /// [`RuntimeFn::End`] does, every scope begun since the one whose
+    /// address `saved` holds, which [`RuntimeFn::Innermost`] stored, was
+    /// the innermost: those a function that fails began.
+    EndSince,
     /// `trendy_rt_keep(value, descriptor)`: have the statement's scope hold
     /// a reference to each buffer a value, of the type the descriptor
     /// describes, points to: an update operator's argument, which a
@@ -586,6 +599,8 @@ impl RuntimeFn {
             RuntimeFn::Release => "trendy_rt_release",
             RuntimeFn::Begin => "trendy_rt_begin",
             RuntimeFn::End => "trendy_rt_end",
+            RuntimeFn::Innermost => "trendy_rt_innermost",
+            RuntimeFn::EndSince => "trendy_rt_end_since",
             RuntimeFn::Keep => "trendy_rt_keep",
             RuntimeFn::Adopt => "trendy_rt_adopt",
             RuntimeFn::Reshape => "trendy_rt_reshape",
@@ -617,7 +632,9 @@ pub enum Inst {
         layout: Layout,
     },
     /// Call a function, passing the address of its parameter struct, and
-    /// of where its result goes.
+    /// of where its result goes. If the callee fails, so does this, as if
+    /// the call were followed by a branch to the block's failure target,
+    /// which codegen emits.
     Call {
         function: FunctionId,
         args: Option<Place>,
@@ -707,6 +724,13 @@ pub enum UnaryOp {
 }
 
 impl UnaryOp {
+    /// Whether its result may not exist: an integer negation's, which
+    /// overflows for the smallest integer.
+    #[must_use]
+    pub fn can_fail(self) -> bool {
+        self == UnaryOp::Negate(Numeric::Integer)
+    }
+
     #[must_use]
     pub fn operand(self) -> Operand {
         match self {
@@ -719,9 +743,9 @@ impl UnaryOp {
 }
 
 /// A dyadic operator. Arithmetic is checked: a result that doesn't exist
-/// stops the program, as if the instruction were followed by a branch to a
-/// call to [`RuntimeFn::IntegerFailed`] or [`RuntimeFn::ApproximateFailed`].
-/// Codegen emits that branch. Approximate results are rounded as IEEE 754
+/// fails, as if the instruction were followed by a branch to a call to
+/// [`RuntimeFn::IntegerFailed`] or [`RuntimeFn::ApproximateFailed`], then
+/// to the block's failure target. Codegen emits those branches. Approximate results are rounded as IEEE 754
 /// binary64 rounds them, and must be finite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
@@ -756,6 +780,21 @@ pub enum Comparison {
 }
 
 impl BinaryOp {
+    /// Whether its result may not exist: arithmetic's, which overflows or
+    /// divides by zero.
+    #[must_use]
+    pub fn can_fail(self) -> bool {
+        match self {
+            BinaryOp::And | BinaryOp::Or | BinaryOp::Xor | BinaryOp::Compare(..) => false,
+            BinaryOp::Add(_)
+            | BinaryOp::Subtract(_)
+            | BinaryOp::Multiply(_)
+            | BinaryOp::Divide
+            | BinaryOp::Div
+            | BinaryOp::Mod => true,
+        }
+    }
+
     #[must_use]
     pub fn operand(self) -> Operand {
         match self {
@@ -800,7 +839,7 @@ impl Arithmetic {
     }
 }
 
-/// Why a program stops, at a [`Terminator::Fail`], with the values its
+/// Why a program fails, at a [`Terminator::Fail`], with the values its
 /// message writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Failure {
@@ -907,8 +946,8 @@ pub enum Failure {
 }
 
 impl Failure {
-    /// The runtime function that stops the program because of this
-    /// failure, and its arguments, each passed by address.
+    /// The runtime function that writes this failure's error, and its
+    /// arguments, each passed by address.
     #[must_use]
     pub fn call(&self) -> (RuntimeFn, Vec<&Place>) {
         match self {
@@ -1043,10 +1082,37 @@ pub struct BlockId(pub usize);
 pub struct Block {
     pub insts: Vec<Inst>,
     pub terminator: Terminator,
+    /// Where the program goes when something in the block fails, or
+    /// `None` if nothing in it can ([`Block::can_fail`]).
+    pub failure: Option<BlockId>,
+}
+
+impl Block {
+    /// Whether something in the block can fail: a call, an arithmetic
+    /// instruction, or a [`Terminator::Fail`].
+    #[must_use]
+    pub fn can_fail(&self) -> bool {
+        self.insts.iter().any(Inst::can_fail) || matches!(self.terminator, Terminator::Fail(_))
+    }
+}
+
+impl Inst {
+    /// Whether the instruction can fail: a call, whose callee can, or an
+    /// arithmetic instruction, whose result may not exist.
+    #[must_use]
+    pub fn can_fail(&self) -> bool {
+        match self {
+            Inst::Call { .. } => true,
+            Inst::Unary { op, .. } => op.can_fail(),
+            Inst::Binary { op, .. } => op.can_fail(),
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Terminator {
+    /// Return to the caller, which carries on.
     Return,
     Jump(BlockId),
     /// To `then` if the [`Layout::U8`] at `condition` is 1, and to
@@ -1056,9 +1122,12 @@ pub enum Terminator {
         then: BlockId,
         otherwise: BlockId,
     },
-    /// Stop the program because of this failure, by calling its runtime
-    /// function, which writes it, with its values.
+    /// Fail because of this failure: call its runtime function, which
+    /// writes its error, with its values, then go to the block's failure
+    /// target.
     Fail(Box<Failure>),
+    /// Return to the caller, failing: the end of a function's failure exit.
+    Failed,
 }
 
 /// Index into [`Program::data`].

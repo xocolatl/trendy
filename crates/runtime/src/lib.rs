@@ -339,6 +339,44 @@ pub unsafe extern "C" fn trendy_rt_end(scope: *mut Scope) {
     }
 }
 
+/// Store at `dst` the address of the innermost scope, or null if there is
+/// none, as a function that begins scopes starts, so that its failure exit
+/// can end those it began ([`trendy_rt_end_since`]).
+///
+/// # Safety
+///
+/// `dst` must point to memory for an address.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_innermost(dst: *mut *mut Scope) {
+    // SAFETY: guaranteed by the caller.
+    unsafe { dst.write(CURRENT.load(core::sync::atomic::Ordering::Relaxed)) }
+}
+
+/// End, innermost first, as [`trendy_rt_end`] does, every scope begun
+/// since the one whose address `saved` holds, which
+/// [`trendy_rt_innermost`] stored, was the innermost: those a function
+/// that fails began.
+///
+/// # Safety
+///
+/// `saved` must point to what [`trendy_rt_innermost`] stored as the
+/// function began, every scope it has begun since must still be valid,
+/// and those its callees began must have ended.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_end_since(saved: *const *mut Scope) {
+    use core::sync::atomic::Ordering::Relaxed;
+    // SAFETY: guaranteed by the caller: each scope from the innermost to
+    // the one saved is valid, and is the innermost when it ends.
+    unsafe {
+        let saved = saved.read();
+        while CURRENT.load(Relaxed) != saved {
+            trendy_rt_end(CURRENT.load(Relaxed));
+        }
+    }
+}
+
 /// Have the current statement's scope hold a reference to `buffer`, which
 /// it gives up when the statement ends. An immortal buffer needs none.
 ///
@@ -1773,20 +1811,21 @@ fn fail(failure: Failure) -> ! {
     })
 }
 
-/// Stop the program because `lhs op rhs`, of integers, has no result, `op`
-/// being an `ARITHMETIC_` constant, writing the operation: a division by
-/// zero (R0002), or else an overflow (R0001). A negation's `lhs` is 0.
+/// Write the error of `lhs op rhs`, of integers, which has no result, `op`
+/// being an `ARITHMETIC_` constant, with the operation: a division by zero
+/// (R0002), or else an overflow (R0001). A negation's `lhs` is 0. The
+/// program then fails.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub extern "C" fn trendy_rt_integer_failed(op: u32, lhs: i64, rhs: i64) -> ! {
-    arithmetic_failed(op, Number::Integer(lhs), Number::Integer(rhs))
+pub extern "C" fn trendy_rt_integer_failed(op: u32, lhs: i64, rhs: i64) {
+    arithmetic_failed(op, Number::Integer(lhs), Number::Integer(rhs));
 }
 
 /// As [`trendy_rt_integer_failed`], of approximate numbers.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub extern "C" fn trendy_rt_approximate_failed(op: u32, lhs: f64, rhs: f64) -> ! {
-    arithmetic_failed(op, Number::Approximate(lhs), Number::Approximate(rhs))
+pub extern "C" fn trendy_rt_approximate_failed(op: u32, lhs: f64, rhs: f64) {
+    arithmetic_failed(op, Number::Approximate(lhs), Number::Approximate(rhs));
 }
 
 /// An operand of an arithmetic operation that has no result.
@@ -1826,11 +1865,11 @@ impl fmt::Display for Number {
     }
 }
 
-/// Stop the program because `lhs op rhs` has no result, as
-/// [`trendy_rt_integer_failed`] says, writing the operation as trendy
-/// source writes it, with a negative right operand in parentheses.
+/// Write the error of `lhs op rhs`, which has no result, as
+/// [`trendy_rt_integer_failed`] says, with the operation as trendy source
+/// writes it, a negative right operand in parentheses.
 #[cfg(not(test))]
-fn arithmetic_failed(op: u32, lhs: Number, rhs: Number) -> ! {
+fn arithmetic_failed(op: u32, lhs: Number, rhs: Number) {
     let symbol = match op {
         ARITHMETIC_ADD => "+",
         ARITHMETIC_SUBTRACT | ARITHMETIC_NEGATE => "-",
@@ -1855,7 +1894,7 @@ fn arithmetic_failed(op: u32, lhs: Number, rhs: Number) -> ! {
             "is too large for an approximate number",
         ),
     };
-    fail_with(|out| {
+    write_failure(|out| {
         write!(out, "error[{error}: ")?;
         if op == ARITHMETIC_NEGATE {
             out.write_str(symbol)?;
@@ -1868,12 +1907,12 @@ fn arithmetic_failed(op: u32, lhs: Number, rhs: Number) -> ! {
             write!(out, "{rhs}")?;
         }
         writeln!(out, " {outcome}")
-    })
+    });
 }
 
-/// Stop the program because tuples being joined disagree on the common
+/// Write the error of tuples being joined that disagree on the common
 /// attribute named `attribute`, a text, which is `lhs` in one and `rhs` in
-/// the other, of the type `desc` describes, writing them (R0004).
+/// the other, of the type `desc` describes, with them (R0004).
 ///
 /// # Safety
 ///
@@ -1886,11 +1925,11 @@ pub unsafe extern "C" fn trendy_rt_tuple_mismatch(
     lhs: *const u8,
     rhs: *const u8,
     desc: *const TypeDesc,
-) -> ! {
+) {
     // SAFETY: guaranteed by the caller.
     unsafe {
         let (attribute, desc) = (read_text(attribute), &*desc);
-        fail_with(|out| {
+        write_failure(|out| {
             write!(
                 out,
                 "error[R0004]: the tuples disagree on `{attribute}`, so they have no join: `{attribute}` is "
@@ -1899,13 +1938,13 @@ pub unsafe extern "C" fn trendy_rt_tuple_mismatch(
             out.write_str(" in one and ")?;
             write_value(out, rhs, desc)?;
             out.write_str(" in the other\n")
-        })
+        });
     }
 }
 
-/// Stop the program because `value`, components `desc` describes,
-/// selected of the type of the program's own named `ty`, a text, break its
-/// constraint written `constraint`, a text, writing them (R0017).
+/// Write the error of `value`, components `desc` describes, selected of
+/// the type of the program's own named `ty`, a text, which break its
+/// constraint written `constraint`, a text, with them (R0017).
 ///
 /// # Safety
 ///
@@ -1918,23 +1957,23 @@ pub unsafe extern "C" fn trendy_rt_broken_constraint(
     desc: *const TypeDesc,
     ty: *const u8,
     constraint: *const u8,
-) -> ! {
+) {
     // SAFETY: guaranteed by the caller.
     unsafe {
         let (desc, ty, constraint) = (&*desc, read_text(ty), read_text(constraint));
-        fail_with(|out| {
+        write_failure(|out| {
             out.write_str("error[R0017]: ")?;
             write_value(out, value, desc)?;
             writeln!(
                 out,
                 " isn't a value of `{ty}`: it breaks the constraint `{constraint}`"
             )
-        })
+        });
     }
 }
 
-/// Stop the program because `value`, of the type of the program's own
-/// `desc` describes, is of both of its subtypes defined by constraints
+/// Write the error of `value`, of the type of the program's own `desc`
+/// describes, which is of both of its subtypes defined by constraints
 /// named `first` and `second`, texts, but a value has one most specific
 /// type (R0020).
 ///
@@ -1949,11 +1988,11 @@ pub unsafe extern "C" fn trendy_rt_overlapping_subtypes(
     desc: *const TypeDesc,
     first: *const u8,
     second: *const u8,
-) -> ! {
+) {
     // SAFETY: guaranteed by the caller.
     unsafe {
         let (desc, first, second) = (&*desc, read_text(first), read_text(second));
-        fail_with(|out| {
+        write_failure(|out| {
             out.write_str("error[R0020]: ")?;
             write_value(out, value, desc)?;
             writeln!(
@@ -1962,13 +2001,13 @@ pub unsafe extern "C" fn trendy_rt_overlapping_subtypes(
                 trendy_text::article(first),
                 trendy_text::article(second)
             )
-        })
+        });
     }
 }
 
-/// Stop the program because `value`, of the type in a hierarchy `desc`
-/// describes, isn't a value of the type named `ty`, a text, which it was
-/// treated as (R0019).
+/// Write the error of `value`, of the type in a hierarchy `desc`
+/// describes, which isn't a value of the type named `ty`, a text, that it
+/// was treated as (R0019).
 ///
 /// # Safety
 ///
@@ -1980,20 +2019,20 @@ pub unsafe extern "C" fn trendy_rt_not_of_type(
     value: *const u8,
     desc: *const TypeDesc,
     ty: *const u8,
-) -> ! {
+) {
     // SAFETY: guaranteed by the caller.
     unsafe {
         let (desc, ty) = (&*desc, read_text(ty));
-        fail_with(|out| {
+        write_failure(|out| {
             out.write_str("error[R0019]: ")?;
             write_value(out, value, desc)?;
             writeln!(out, " isn't a value of `{ty}`")
-        })
+        });
     }
 }
 
-/// Stop the program because it fails with an error whose message is
-/// `message`, a text, writing it (R0021): a `fail`. It is written as a
+/// Write the error of a `fail`, whose message is `message`, a text
+/// (R0021). It is written as a
 /// table's cell is, its control characters and bidirectional controls
 /// escaped, so that a message made from a file's text can't change the
 /// terminal, or show other than what it says.
@@ -2003,20 +2042,20 @@ pub unsafe extern "C" fn trendy_rt_not_of_type(
 /// `message` must point to a valid text value.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn trendy_rt_failed(message: *const u8) -> ! {
+pub unsafe extern "C" fn trendy_rt_failed(message: *const u8) {
     // SAFETY: guaranteed by the caller.
     let message = unsafe { read_text(message) };
-    fail_with(|out| {
+    write_failure(|out| {
         out.write_str("error[R0021]: ")?;
         trendy_text::escape_bare(message, out)?;
         out.write_char('\n')
-    })
+    });
 }
 
-/// Stop the program because `value`, components `desc` describes, which
+/// Write the error of `value`, components `desc` describes, which
 /// `load_csv` read from the record `record` describes for a value of the
-/// type of the program's own named `ty`, a text, break its constraint
-/// written `constraint`, a text, writing them (R0017).
+/// type of the program's own named `ty`, a text, and which break its
+/// constraint written `constraint`, a text, with them (R0017).
 ///
 /// # Safety
 ///
@@ -2031,11 +2070,11 @@ pub unsafe extern "C" fn trendy_rt_broken_constraint_in_file(
     ty: *const u8,
     constraint: *const u8,
     record: *const Record,
-) -> ! {
+) {
     // SAFETY: guaranteed by the caller.
     unsafe {
         let (desc, ty, constraint) = (&*desc, read_text(ty), read_text(constraint));
-        fail_with(|out| {
+        write_failure(|out| {
             out.write_str("error[R0017]: ")?;
             (*record).write_gives(out)?;
             out.write_char(' ')?;
@@ -2044,62 +2083,63 @@ pub unsafe extern "C" fn trendy_rt_broken_constraint_in_file(
                 out,
                 ", which isn't a value of `{ty}`: it breaks the constraint `{constraint}`"
             )
-        })
+        });
     }
 }
 
-/// Stop the program because a relation has `*count` tuples, not one,
-/// where its only one is taken, writing the count (R0005).
+/// Write the error of a relation that has `*count` tuples, not one, where
+/// its only one is taken, with the count (R0005).
 ///
 /// # Safety
 ///
 /// `count` must point to a `usize`.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn trendy_rt_not_one_tuple(count: *const usize) -> ! {
+pub unsafe extern "C" fn trendy_rt_not_one_tuple(count: *const usize) {
     // SAFETY: guaranteed by the caller.
     let count = unsafe { count.read_unaligned() };
-    fail_with(|out| {
+    write_failure(|out| {
         out.write_str("error[R0005]: the relation has ")?;
         match count {
             0 => out.write_str("no tuples")?,
             _ => write!(out, "{count} tuples")?,
         }
         out.write_str(", but exactly one is taken\n")
-    })
+    });
 }
 
-/// Stop the program because a relation has no tuples, where the least
+/// Write the error of a relation that has no tuples, where the least value
+/// of an attribute is taken (R0010).
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn trendy_rt_no_min() {
+    write_failure(|out| {
+        out.write_str("error[R0010]: the relation has no tuples, so it has no min\n")
+    });
+}
+
+/// Write the error of a relation that has no tuples, where the greatest
 /// value of an attribute is taken (R0010).
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub extern "C" fn trendy_rt_no_min() -> ! {
-    fail_with(|out| out.write_str("error[R0010]: the relation has no tuples, so it has no min\n"))
+pub extern "C" fn trendy_rt_no_max() {
+    write_failure(|out| {
+        out.write_str("error[R0010]: the relation has no tuples, so it has no max\n")
+    });
 }
 
-/// Stop the program because a relation has no tuples, where the greatest
-/// value of an attribute is taken (R0010).
-#[cfg(not(test))]
-#[unsafe(no_mangle)]
-pub extern "C" fn trendy_rt_no_max() -> ! {
-    fail_with(|out| out.write_str("error[R0010]: the relation has no tuples, so it has no max\n"))
-}
-
-/// Stop the program because an array of `*length` elements has none at
-/// `*position`, writing them (R0011).
+/// Write the error of an array of `*length` elements that has none at
+/// `*position`, with them (R0011).
 ///
 /// # Safety
 ///
 /// `position` and `length` must point to integers.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn trendy_rt_index_out_of_range(
-    position: *const i64,
-    length: *const i64,
-) -> ! {
+pub unsafe extern "C" fn trendy_rt_index_out_of_range(position: *const i64, length: *const i64) {
     // SAFETY: guaranteed by the caller.
     let (position, length) = unsafe { (position.read_unaligned(), length.read_unaligned()) };
-    fail_with(|out| {
+    write_failure(|out| {
         out.write_str("error[R0011]: ")?;
         match length {
             _ if position < 1 => write!(
@@ -2120,13 +2160,13 @@ pub unsafe extern "C" fn trendy_rt_index_out_of_range(
             )?,
         }
         out.write_char('\n')
-    })
+    });
 }
 
-/// Stop the program because two changes to an array in an `assign` block
+/// Write the error of two changes to an array in an `assign` block that
 /// set the element at the `*count` `positions`, from the outermost array
-/// in, or, if `*nested` is 1, one sets it and the other an element in it,
-/// writing the positions (R0009).
+/// in, or, if `*nested` is 1, of one that sets it and another an element
+/// in it, with the positions (R0009).
 ///
 /// # Safety
 ///
@@ -2138,11 +2178,11 @@ pub unsafe extern "C" fn trendy_rt_element_conflict(
     positions: *const i64,
     count: *const usize,
     nested: *const u8,
-) -> ! {
+) {
     // SAFETY: guaranteed by the caller.
     unsafe {
         let (count, nested) = (count.read_unaligned(), nested.read() == 1);
-        fail_with(|out| {
+        write_failure(|out| {
             if nested {
                 out.write_str("error[R0009]: one change in an assign block sets the element at ")?;
             } else {
@@ -2157,7 +2197,7 @@ pub unsafe extern "C" fn trendy_rt_element_conflict(
                 out.write_str(", and another an element in it")?;
             }
             out.write_char('\n')
-        })
+        });
     }
 }
 
@@ -2246,11 +2286,11 @@ pub unsafe extern "C" fn trendy_rt_key_shared(
     }
 }
 
-/// Stop the program because the tuples at the positions `pair` of the
-/// relation `value`, of the type `desc` describes, about to be assigned to
-/// the variable named `variable`, a text, have the same values for the
+/// Write the error of the tuples at the positions `pair` of the relation
+/// `value`, of the type `desc` describes, about to be assigned to the
+/// variable named `variable`, a text, which have the same values for the
 /// attributes of `key`, the descriptor of its projection on one of the
-/// variable's keys, writing the variable, the key and the tuples (R0008).
+/// variable's keys, with the variable, the key and the tuples (R0008).
 ///
 /// # Safety
 ///
@@ -2264,15 +2304,15 @@ pub unsafe extern "C" fn trendy_rt_key_violated(
     key: *const TypeDesc,
     pair: *const usize,
     variable: *const u8,
-) -> ! {
+) {
     // SAFETY: guaranteed by the caller.
     unsafe {
         let variable = read_text(variable);
-        fail_with(|out| {
+        write_failure(|out| {
             out.write_str("error[R0008]: ")?;
             let relation = |out: &mut Stderr| write!(out, "`{variable}`");
             write_key_violation(out, relation, value, &*desc, &*key, pair)
-        })
+        });
     }
 }
 
@@ -2293,15 +2333,15 @@ pub unsafe extern "C" fn trendy_rt_component_key_violated(
     pair: *const usize,
     ty: *const u8,
     component: *const u8,
-) -> ! {
+) {
     // SAFETY: guaranteed by the caller.
     unsafe {
         let (ty, component) = (read_text(ty), read_text(component));
-        fail_with(|out| {
+        write_failure(|out| {
             out.write_str("error[R0008]: ")?;
             let relation = |out: &mut Stderr| trendy_text::write_component(ty, component, out);
             write_key_violation(out, relation, value, &*desc, &*key, pair)
-        })
+        });
     }
 }
 
@@ -2322,17 +2362,17 @@ pub unsafe extern "C" fn trendy_rt_component_key_violated_in_file(
     ty: *const u8,
     component: *const u8,
     record: *const Record,
-) -> ! {
+) {
     // SAFETY: guaranteed by the caller.
     unsafe {
         let (ty, component) = (read_text(ty), read_text(component));
-        fail_with(|out| {
+        write_failure(|out| {
             out.write_str("error[R0008]: ")?;
             (*record).write_gives(out)?;
             write!(out, " a value of `{ty}` in which ")?;
             let relation = |out: &mut Stderr| write!(out, "its `{component}`");
             write_key_violation(out, relation, value, &*desc, &*key, pair)
-        })
+        });
     }
 }
 
@@ -2402,12 +2442,22 @@ pub struct Site {
 pub static SITE: core::sync::atomic::AtomicPtr<Site> =
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
-/// Stop the program, writing the message `write` writes to stderr, a line
-/// that starts with the compiler's error code, then where the program is,
-/// as a compiler's error says, ` --> path:line:column`, and exiting with
-/// status 1.
+/// Stop the program, writing its error as [`write_failure`] does, and
+/// exiting with status 1: a failure of the runtime's own.
 #[cfg(not(test))]
 fn fail_with(write: impl FnOnce(&mut Stderr) -> fmt::Result) -> ! {
+    write_failure(write);
+    // SAFETY: `exit` has no preconditions.
+    unsafe { exit(1) }
+}
+
+/// Write the error of a failure to stderr: the message `write` writes, a
+/// line that starts with the compiler's error code, then where the
+/// program is, as a compiler's error says, ` --> path:line:column`. The
+/// program then fails: compiled code goes on to where its block's
+/// failures go.
+#[cfg(not(test))]
+fn write_failure(write: impl FnOnce(&mut Stderr) -> fmt::Result) {
     let mut out = Stderr::default();
     // There is nowhere to report a failure to write to stderr.
     let _ = write(&mut out);
@@ -2428,8 +2478,6 @@ fn fail_with(write: impl FnOnce(&mut Stderr) -> fmt::Result) -> ! {
         let _ = writeln!(out, " --> {path}:{line}:{column}");
     }
     out.flush();
-    // SAFETY: `exit` has no preconditions.
-    unsafe { exit(1) }
 }
 
 /// A description of a type, emitted by the compiler.

@@ -1421,7 +1421,10 @@ blocks: each block is a list of instructions (`Copy`, `Call`,
 conversions of a count to an integer and of an array's position less 1 to
 an index, `Element` and `Increment` for loops and indexes, and `Address`
 for a variable passed to a `var` or `out` parameter) ending in a
-terminator: `Return`, `Jump`, `Branch` or `Fail`. Instructions refer to memory through places: a data object, a
+terminator: `Return`, `Jump`, `Branch`, `Fail` or `Failed`. A block that
+can fail, by a call, an arithmetic instruction or a `Fail`, says where
+its failures go (`Block::failure`), and a function returns whether it
+failed. Instructions refer to memory through places: a data object, a
 stack slot, the parameter struct, or what the address in a slot points to
 (`Base::Indirect`, such as the tuple a loop is at), plus a path through
 nested structs. Every value's shape is a `Layout`. There is no nesting and
@@ -1543,6 +1546,27 @@ call. So a statement that calls one that makes a text, relation or array
 has a scope. Lowering knows whether one does from its function, lowered at
 its first call, before the caller's statement ends; read-only operators
 don't call themselves, so that ends.
+
+A failure doesn't stop the program where it happens. Its runtime
+function writes its error, and the function it is in fails, then each
+caller in turn, up to the entry, whose failing ends the program with
+status 1. Each function in which something can fail has a failure exit,
+a block of its own where each of its blocks that can fail sends its
+failures (`finish`, `failure_exit`). The exit gives up what the function
+holds, as the ends of its statements and blocks would have:
+- It ends the scopes the function began. `trendy_rt_end_since` ends every
+  scope begun since the one `trendy_rt_innermost` saved as the function
+  started. Lowering doesn't know which scopes are open at a failure,
+  since a statement's scope is decided once the statement is lowered,
+  but the runtime's chain of scopes does.
+- It then releases each local variable's references. A local variable
+  holds none before its declaration or after its block, so one released
+  there gives up only what it holds.
+- It returns, failing (`Terminator::Failed`).
+
+A read-only operator's function begins no scope and holds nothing, so
+its exit only fails. The program's variables, and a caller's variables
+that a `var` or `out` parameter updates, keep what they hold.
 
 An assignment statement computes each value into a slot of its own: a
 copy, since a value can be a variable's own place, which assigning another
@@ -1705,15 +1729,19 @@ produced with Cranelift.
   calls `trendy_rt_integer_failed` or `trendy_rt_approximate_failed` with
   the operator and its operands, by value, which writes the error, with
   the operation, such as `error[R0001]: integer overflow:
-  9223372036854775807 + 1 doesn't fit in a 64-bit integer`, to stderr and
-  exits with status 1. Integer overflow is detected with Cranelift's
+  9223372036854775807 + 1 doesn't fit in a 64-bit integer`, to stderr,
+  then jumps to where the block's failures go. Integer overflow is detected with Cranelift's
   `sadd_overflow` and its kin, and division by zero, or of the smallest
   integer by -1, with explicit comparisons. Approximate operands are always
   finite, so an approximate result overflowed exactly when it is infinite,
   and there is never a NaN; a division is checked for a zero divisor first;
 - each `Terminator::Fail`, a call to its failure's runtime function, with
-  the addresses of the values it writes, and a trap, since it doesn't
-  return.
+  the addresses of the values it writes, then a jump to where the block's
+  failures go;
+- the boolean each function returns, whether it failed, a byte: after
+  each call, a branch on it to where the block's failures go, a cold
+  block, and in `main`, its exit status, 1 if the entry failed and 0 if
+  not.
 
 The calling convention: a function with parameters takes one pointer, to a
 struct of its parameters in name order, because a call's arguments are a

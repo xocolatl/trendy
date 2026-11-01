@@ -13,9 +13,11 @@ use trendy_lir as lir;
 
 /// Compile a program to a native object file.
 ///
-/// Every function becomes a local symbol named `trendy_op_<name>`. A C-ABI
-/// `main` is emitted alongside it that calls the program's entry function
-/// and returns 0, so the object links against the platform's C startup code.
+/// Every function becomes a local symbol named `trendy_op_<name>`, which
+/// returns whether it failed, a byte. A C-ABI `main` is emitted alongside
+/// it that calls the program's entry function and returns 1 if it failed
+/// and 0 if not, so the object links against the platform's C startup
+/// code.
 /// Variables become local data symbols named `trendy_var_<name>`, and
 /// constants `trendy_const_<index>`. Runtime functions are imported by their
 /// symbols, for the linker to resolve against the runtime library.
@@ -58,6 +60,8 @@ pub fn compile(program: &lir::Program) -> Result<Vec<u8>, String> {
             for _ in f.params.iter().chain(&f.result) {
                 signature.params.push(AbiParam::new(pointer));
             }
+            // Whether it failed.
+            signature.returns.push(AbiParam::new(types::I8));
             module
                 .declare_function(&mangle(&f.name), Linkage::Local, &signature)
                 .map_err(|e| e.to_string())
@@ -73,6 +77,7 @@ pub fn compile(program: &lir::Program) -> Result<Vec<u8>, String> {
         function_ids,
         runtime: HashMap::new(),
         site: None,
+        failure: None,
     };
     let mut ctx = functions.module.make_context();
     let mut fctx = FunctionBuilderContext::new();
@@ -105,9 +110,10 @@ pub fn compile(program: &lir::Program) -> Result<Vec<u8>, String> {
         b.switch_to_block(entry);
         b.seal_block(entry);
         let entry_fn = module.declare_func_in_func(functions.function_ids[program.entry.0], b.func);
-        b.ins().call(entry_fn, &[]);
-        let zero = b.ins().iconst(types::I32, 0);
-        b.ins().return_(&[zero]);
+        let call = b.ins().call(entry_fn, &[]);
+        let failed = b.inst_results(call)[0];
+        let status = b.ins().uextend(types::I32, failed);
+        b.ins().return_(&[status]);
         b.finalize(config);
     }
     module
@@ -133,6 +139,9 @@ struct Functions {
     runtime: HashMap<&'static str, FuncId>,
     /// The runtime's `trendy_rt_site`, imported when first set.
     site: Option<DataId>,
+    /// Where a failure in the block being built goes, its
+    /// [`lir::Block::failure`], if anything in it can fail.
+    failure: Option<cranelift_codegen::ir::Block>,
 }
 
 impl Functions {
@@ -160,6 +169,9 @@ impl Functions {
             .collect::<Result<Vec<_>, String>>()?;
         // Indexed by `lir::BlockId`.
         let blocks: Vec<_> = function.blocks.iter().map(|_| b.create_block()).collect();
+        for target in function.blocks.iter().filter_map(|block| block.failure) {
+            b.set_cold_block(blocks[target.0]);
+        }
         b.append_block_params_for_function_params(blocks[0]);
         b.switch_to_block(blocks[0]);
         let mut addresses = b.block_params(blocks[0]).iter().copied();
@@ -176,13 +188,13 @@ impl Functions {
             if i > 0 {
                 b.switch_to_block(cl_block);
             }
+            self.failure = block.failure.map(|target| blocks[target.0]);
             for inst in &block.insts {
                 self.inst(inst, &frame, &mut b)?;
             }
             match &block.terminator {
-                lir::Terminator::Return => {
-                    b.ins().return_(&[]);
-                }
+                lir::Terminator::Return => returned(false, &mut b),
+                lir::Terminator::Failed => returned(true, &mut b),
                 lir::Terminator::Jump(target) => {
                     b.ins().jump(blocks[target.0], &[]);
                 }
@@ -198,6 +210,7 @@ impl Functions {
                 lir::Terminator::Fail(failure) => self.fail(failure, &frame, &mut b)?,
             }
         }
+        self.failure = None;
         b.seal_all_blocks();
         b.finalize(self.config);
         Ok(())
@@ -239,7 +252,12 @@ impl Functions {
                     .chain(result)
                     .map(|place| self.address(place, frame, b))
                     .collect::<Result<Vec<_>, _>>()?;
-                b.ins().call(callee, &addresses);
+                let call = b.ins().call(callee, &addresses);
+                let failed = b.inst_results(call)[0];
+                let failure = self.failure_target()?;
+                let carry_on = b.create_block();
+                b.ins().brif(failed, failure, &[], carry_on, &[]);
+                b.switch_to_block(carry_on);
             }
             lir::Inst::Site(_) | lir::Inst::SaveSite { .. } | lir::Inst::RestoreSite { .. } => {
                 self.site_inst(inst, frame, b)?;
@@ -425,9 +443,9 @@ impl Functions {
         })
     }
 
-    /// Stop the program when `condition` is nonzero, because `operation`
-    /// has no result, in a cold block, and carry on in a new block
-    /// otherwise.
+    /// Fail when `condition` is nonzero, because `operation` has no result,
+    /// in a cold block that writes its error, then goes where the block's
+    /// failures go, and carry on in a new block otherwise.
     fn fail_if(
         &mut self,
         condition: Value,
@@ -448,14 +466,16 @@ impl Functions {
         let callee = self.module.declare_func_in_func(id, b.func);
         let op = b.ins().iconst(types::I32, i64::from(operation.op.code()));
         b.ins().call(callee, &[op, operation.lhs, operation.rhs]);
-        stopped(b);
+        let failure = self.failure_target()?;
+        b.ins().jump(failure, &[]);
 
         b.switch_to_block(carry_on);
         Ok(())
     }
 
-    /// End the current block by stopping the program because of `failure`,
-    /// whose runtime function writes it.
+    /// End the current block by failing because of `failure`: a call of
+    /// its runtime function, which writes its error, then a jump to where
+    /// the block's failures go.
     fn fail(
         &mut self,
         failure: &lir::Failure,
@@ -464,8 +484,16 @@ impl Functions {
     ) -> Result<(), String> {
         let (function, args) = failure.call();
         self.call_runtime(function, &args, frame, b)?;
-        stopped(b);
+        let target = self.failure_target()?;
+        b.ins().jump(target, &[]);
         Ok(())
+    }
+
+    /// Where a failure in the block being built goes, which LIR gives
+    /// every block that can fail.
+    fn failure_target(&self) -> Result<cranelift_codegen::ir::Block, String> {
+        self.failure
+            .ok_or_else(|| "a block that can fail has no failure target".to_string())
     }
 
     /// Call the runtime function `function`, passing the address of each
@@ -704,11 +732,10 @@ impl Operation {
     }
 }
 
-/// End the current block after a call to a runtime function that stops the
-/// program, and so doesn't return.
-fn stopped(b: &mut FunctionBuilder) {
-    b.ins()
-        .trap(cranelift_codegen::ir::TrapCode::unwrap_user(1));
+/// End the current block by returning whether the function `failed`.
+fn returned(failed: bool, b: &mut FunctionBuilder) {
+    let failed = b.ins().iconst(types::I8, i64::from(failed));
+    b.ins().return_(&[failed]);
 }
 
 /// The approximate number `value`, with IEEE 754's `-0.0` made `0.0`, since
@@ -1004,6 +1031,7 @@ mod tests {
                 blocks: vec![lir::Block {
                     insts: Vec::new(),
                     terminator: lir::Terminator::Return,
+                    failure: None,
                 }],
             }],
             data,
@@ -1126,6 +1154,7 @@ mod tests {
                     ],
                 }],
                 terminator: lir::Terminator::Return,
+                failure: None,
             }],
         };
         let main = lir::Function {
@@ -1133,27 +1162,35 @@ mod tests {
             params: None,
             result: None,
             slots: vec![args],
-            blocks: vec![lir::Block {
-                insts: vec![
-                    lir::Inst::Copy {
-                        dst: lir::Place {
-                            base: lir::Base::Slot(lir::SlotId(0)),
-                            path: vec![0],
+            blocks: vec![
+                lir::Block {
+                    insts: vec![
+                        lir::Inst::Copy {
+                            dst: lir::Place {
+                                base: lir::Base::Slot(lir::SlotId(0)),
+                                path: vec![0],
+                            },
+                            src: lir::Place {
+                                base: lir::Base::Data(lir::DataId(0)),
+                                path: vec![0],
+                            },
+                            layout: lir::Layout::I64,
                         },
-                        src: lir::Place {
-                            base: lir::Base::Data(lir::DataId(0)),
-                            path: vec![0],
+                        lir::Inst::Call {
+                            function: lir::FunctionId(0),
+                            args: Some(lir::Place::whole(lir::Base::Slot(lir::SlotId(0)))),
+                            result: None,
                         },
-                        layout: lir::Layout::I64,
-                    },
-                    lir::Inst::Call {
-                        function: lir::FunctionId(0),
-                        args: Some(lir::Place::whole(lir::Base::Slot(lir::SlotId(0)))),
-                        result: None,
-                    },
-                ],
-                terminator: lir::Terminator::Return,
-            }],
+                    ],
+                    terminator: lir::Terminator::Return,
+                    failure: Some(lir::BlockId(1)),
+                },
+                lir::Block {
+                    insts: Vec::new(),
+                    terminator: lir::Terminator::Failed,
+                    failure: None,
+                },
+            ],
         };
         let object_bytes = compile(&lir::Program {
             functions: vec![callee, main],
