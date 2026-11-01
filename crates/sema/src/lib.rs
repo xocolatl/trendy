@@ -110,6 +110,11 @@ impl Files {
         (files, program)
     }
 
+    /// The prelude.
+    pub(crate) fn prelude(&self) -> &SourceFile {
+        &self.prelude
+    }
+
     /// Each file, with what it is checked as, the prelude first.
     fn each(&self) -> impl Iterator<Item = (Source, &SourceFile)> {
         std::iter::once((Source::Prelude, &self.prelude)).chain(
@@ -188,10 +193,10 @@ pub(crate) struct Checked {
 
 /// Check `files`, as one unit.
 pub(crate) fn check(files: &Files, errors: &mut Vec<Diagnostic>) -> Checked {
-    // The built-ins first, as the compiler implements them, which only the
-    // prelude declares.
-    let builtins = builtins::builtins(&files.prelude, errors);
-    let mut namespaces = collect_names(&builtins, files, errors);
+    // The kinds and built-in types first, as the compiler implements them,
+    // which only the prelude declares.
+    let kinds = builtins::kinds(&files.prelude, errors);
+    let mut namespaces = collect_names(&kinds, files, errors);
     // The texts in the unit's order, the program's first.
     let texts: Vec<(hir::File, String)> = files
         .program
@@ -203,14 +208,13 @@ pub(crate) fn check(files: &Files, errors: &mut Vec<Diagnostic>) -> Checked {
     let sites = Sites::new(&texts);
 
     // The headings' attributes and the types' components first, which any
-    // type can name, and their constraints, whose operators come after the
-    // built-ins.
-    let first = hir::OperatorId(builtins.operators.len());
-    named_types::resolve(files, &mut namespaces, first, errors);
+    // type can name, a built-in's parameters too, and their constraints,
+    // whose operators come first.
+    named_types::resolve(files, &mut namespaces, hir::OperatorId(0), errors);
 
     // Every operator's signature first, so that anything can refer to an
     // operator defined after it.
-    let operators = operators::signatures(builtins.operators, files, &namespaces, errors);
+    let operators = operators::signatures(files, &namespaces, errors);
     builtins::failures(&files.prelude, &namespaces, &operators, errors);
 
     // Then the globals: the variables' initial values, and the read-only
@@ -611,11 +615,11 @@ impl Namespaces {
 /// Record every top-level name in its namespace, the prelude's first,
 /// reporting each one defined more than once in them.
 fn collect_names(
-    builtins: &builtins::Builtins,
+    kinds: &[(hir::Kind, BTreeSet<hir::Scalar>)],
     files: &Files,
     errors: &mut Vec<Diagnostic>,
 ) -> Namespaces {
-    let mut namespaces = Namespaces::with_kinds(&builtins.kinds);
+    let mut namespaces = Namespaces::with_kinds(kinds);
     for (source, item) in files.items() {
         let prelude = source == Source::Prelude;
         let (kind, name, params) = match item {
@@ -2401,11 +2405,15 @@ var zero := seg{{len: 0}};{MAIN}"
     #[test]
     fn the_prelude_is_valid() {
         assert_eq!(check_prelude(&parse(trendy_prelude::SOURCE)), Vec::new());
-        // Its built-ins are a program's first operators.
+        // Its built-ins are a program's operators.
         let program = analyze_str("operator main{} [];").unwrap();
-        assert_eq!(program.operators[0].name, "debug_value");
+        let debug_value = program
+            .operators
+            .iter()
+            .find(|op| op.name == "debug_value")
+            .unwrap();
         assert_eq!(
-            program.operators[0].params,
+            debug_value.params,
             hir::Builtin::Update(hir::UpdateBuiltin::DebugValue).params()
         );
     }
@@ -2547,7 +2555,20 @@ var zero := seg{{len: 0}};{MAIN}"
                 "\"overflow: 9223372036854775807 + 1 is out of its type's range\"",
             ]
         );
-        // The compiler's contract with it.
+        // The compiler's contract with it: the errors the runtime makes,
+        // each with its components.
+        let source = trendy_prelude::SOURCE.replace(
+            "type not_utf8 is error { { path: text, line: integer } };",
+            "type not_utf8 is error { { path: text, line: approximate } };",
+        );
+        assert_ne!(source, trendy_prelude::SOURCE);
+        let errors = check_prelude(&parse(&source));
+        assert!(
+            errors.iter().any(|d| d.code == Code::Internal
+                && d.message
+                    .contains("`type not_utf8 is error { { line: integer, path: text } };`")),
+            "{errors:#?}"
+        );
         let source = trendy_prelude::SOURCE.replace("type error union;", "type error_ union;");
         let errors = check_prelude(&parse(&source));
         assert!(

@@ -12,7 +12,9 @@ pub use trendy_text::Unparsable;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program {
-    /// The prelude's built-in operators, then the program's own.
+    /// Every operator: the types' constraints and conversions, then the
+    /// built-ins, then those written in trendy and the types' selectors,
+    /// the prelude's first.
     pub operators: Vec<Operator>,
     pub variables: Vec<Variable>,
     /// Each type's immediate subtypes, by its name: a union type's, what
@@ -38,6 +40,22 @@ impl Program {
     #[must_use]
     pub fn variable(&self, id: VariableId) -> &Variable {
         &self.variables[id.0]
+    }
+
+    /// The type of `error`, which the prelude declares, as sema checks.
+    ///
+    /// # Panics
+    ///
+    /// If the prelude doesn't declare it, which sema rules out.
+    #[must_use]
+    pub fn builtin_error(&self, error: BuiltinError) -> &Defined {
+        self.subtypes["error"]
+            .iter()
+            .find_map(|ty| match ty {
+                Type::Defined(defined) if defined.name == error.name() => Some(&**defined),
+                _ => None,
+            })
+            .expect("the prelude declares the errors built-ins give")
     }
 
     /// The type of `expr`, inside an operator with the parameters
@@ -433,14 +451,93 @@ pub enum UpdateBuiltin {
     /// when the program runs: reading the same file twice can give
     /// different lines.
     LoadTextFile,
+    /// As [`UpdateBuiltin::LoadTextFile`], but a file it can't read gives
+    /// its error in the `out` parameter `errors` rather than stopping the
+    /// program (see [`UpdateBuiltin::errors`]).
+    LoadTextFileWithErrors,
     /// The records of a CSV file, as tuples whose attributes are its
     /// columns of their names, read when the program runs, as
     /// [`UpdateBuiltin::LoadTextFile`] reads a file's lines.
     LoadCsv,
 }
 
+impl UpdateBuiltin {
+    /// The errors it gives in its `out` parameter `errors`, rather than
+    /// stopping the program, if it has one.
+    #[must_use]
+    pub fn errors(self) -> &'static [BuiltinError] {
+        match self {
+            UpdateBuiltin::LoadTextFileWithErrors => {
+                &[BuiltinError::UnreadableFile, BuiltinError::NotUtf8]
+            }
+            UpdateBuiltin::DebugValue
+            | UpdateBuiltin::DebugTable
+            | UpdateBuiltin::LoadTextFile
+            | UpdateBuiltin::LoadCsv => &[],
+        }
+    }
+}
+
+/// An error a built-in gives, rather than stopping the program: a value of
+/// a subtype of the prelude's union type `error`, which the prelude
+/// declares with these components, as sema checks, and which the runtime
+/// makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BuiltinError {
+    /// A file can't be read, for the system's reason (R0012).
+    UnreadableFile,
+    /// A file isn't UTF-8 text, from a line on (R0013).
+    NotUtf8,
+}
+
+impl BuiltinError {
+    pub const ALL: [BuiltinError; 2] = [BuiltinError::UnreadableFile, BuiltinError::NotUtf8];
+
+    /// The name of its type.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            BuiltinError::UnreadableFile => "unreadable_file",
+            BuiltinError::NotUtf8 => "not_utf8",
+        }
+    }
+
+    /// Its type's components.
+    #[must_use]
+    pub fn components(self) -> Heading {
+        let text = || Type::Scalar(Scalar::Text);
+        let components = match self {
+            BuiltinError::UnreadableFile => {
+                [("path".to_string(), text()), ("reason".to_string(), text())]
+            }
+            BuiltinError::NotUtf8 => [
+                ("path".to_string(), text()),
+                ("line".to_string(), Type::Scalar(Scalar::Integer)),
+            ],
+        };
+        Heading::new(components.into())
+    }
+
+    /// The prelude's union type `error`, a root, whose subtypes these are.
+    #[must_use]
+    pub fn union() -> Type {
+        Type::Dummy(Box::new(Dummy {
+            name: "error".to_string(),
+            supertypes: Vec::new(),
+        }))
+    }
+
+    /// The type of a built-in's `errors`: `relation { error: error }`.
+    #[must_use]
+    pub fn relation() -> Type {
+        Type::Relation(Heading::new(
+            [("error".to_string(), BuiltinError::union())].into(),
+        ))
+    }
+}
+
 impl Builtin {
-    pub const ALL: [Builtin; 19] = [
+    pub const ALL: [Builtin; 20] = [
         Builtin::Update(UpdateBuiltin::DebugValue),
         Builtin::Update(UpdateBuiltin::DebugTable),
         Builtin::ReadOnly(ReadOnlyBuiltin::Count),
@@ -459,6 +556,7 @@ impl Builtin {
         Builtin::ReadOnly(ReadOnlyBuiltin::Cos),
         Builtin::ReadOnly(ReadOnlyBuiltin::Atan2),
         Builtin::Update(UpdateBuiltin::LoadTextFile),
+        Builtin::Update(UpdateBuiltin::LoadTextFileWithErrors),
         Builtin::Update(UpdateBuiltin::LoadCsv),
     ];
 
@@ -467,7 +565,9 @@ impl Builtin {
         match self {
             Builtin::Update(UpdateBuiltin::DebugValue) => "debug_value",
             Builtin::Update(UpdateBuiltin::DebugTable) => "debug_table",
-            Builtin::Update(UpdateBuiltin::LoadTextFile) => "load_text_file",
+            Builtin::Update(
+                UpdateBuiltin::LoadTextFile | UpdateBuiltin::LoadTextFileWithErrors,
+            ) => "load_text_file",
             Builtin::Update(UpdateBuiltin::LoadCsv) => "load_csv",
             Builtin::ReadOnly(builtin) => builtin.name(),
         }
@@ -525,7 +625,9 @@ impl Builtin {
                 | ReadOnlyBuiltin::Cos
                 | ReadOnlyBuiltin::Atan2,
             )
-            | Builtin::Update(UpdateBuiltin::LoadTextFile) => Vec::new(),
+            | Builtin::Update(
+                UpdateBuiltin::LoadTextFile | UpdateBuiltin::LoadTextFileWithErrors,
+            ) => Vec::new(),
             Builtin::ReadOnly(ReadOnlyBuiltin::Min | ReadOnlyBuiltin::Max) => {
                 of_kind("ordered", &[Requirement::Order])
             }
@@ -543,6 +645,15 @@ impl Builtin {
         let types = self.types();
         let parameter = |index: usize| Type::Parameter(types[index].clone());
         let constant = |name: &str, ty: Type| (name.to_string(), Parameter::constant(ty));
+        let out = |name: &str, ty: Type| {
+            (
+                name.to_string(),
+                Parameter {
+                    ty,
+                    mode: Mode::Out,
+                },
+            )
+        };
         match self {
             Builtin::Update(UpdateBuiltin::DebugValue) => [constant("v", parameter(0))].into(),
             Builtin::Update(UpdateBuiltin::DebugTable)
@@ -567,26 +678,20 @@ impl Builtin {
             .into(),
             Builtin::Update(UpdateBuiltin::LoadTextFile) => [
                 constant("path", Type::Scalar(Scalar::Text)),
-                (
-                    "lines".to_string(),
-                    Parameter {
-                        ty: Type::Array(Box::new(Type::Scalar(Scalar::Text))),
-                        mode: Mode::Out,
-                    },
-                ),
+                out("lines", Type::Array(Box::new(Type::Scalar(Scalar::Text)))),
+            ]
+            .into(),
+            Builtin::Update(UpdateBuiltin::LoadTextFileWithErrors) => [
+                constant("path", Type::Scalar(Scalar::Text)),
+                out("lines", Type::Array(Box::new(Type::Scalar(Scalar::Text)))),
+                out("errors", BuiltinError::relation()),
             ]
             .into(),
             Builtin::Update(UpdateBuiltin::LoadCsv) => [
                 constant("path", Type::Scalar(Scalar::Text)),
                 constant("header", Type::Scalar(Scalar::Boolean)),
                 constant("columns", parameter(0)),
-                (
-                    "rows".to_string(),
-                    Parameter {
-                        ty: Type::Array(Box::new(parameter(1))),
-                        mode: Mode::Out,
-                    },
-                ),
+                out("rows", Type::Array(Box::new(parameter(1)))),
             ]
             .into(),
             Builtin::ReadOnly(

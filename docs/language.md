@@ -883,6 +883,17 @@ builtin operator atan2{y: approximate, x: approximate}: approximate;
    be read fails (R0012), as does one that isn't UTF-8 text (R0013). */
 builtin operator load_text_file{path: text, out lines: array text};
 
+/* Read the lines of the text file at `path` into `lines`, as the other
+   `load_text_file` does, but rather than stopping the program for a file
+   that can't be read, or isn't UTF-8 text, give no lines, and its error,
+   an `unreadable_file` or a `not_utf8`, in `errors`, which is empty when
+   the file is read. */
+builtin operator load_text_file{
+    path: text,
+    out lines: array text,
+    out errors: relation { error: error },
+};
+
 /* Read the records of the CSV file at `path` into `rows`, in the file's
    order, each a tuple whose attributes are the fields in the columns
    `columns` gives them: it has the tuples' attributes, each the position
@@ -963,6 +974,25 @@ type overflow is error { { operation: text } };
 
 operator message{error: overflow}: text [
     "overflow: " || error.operation || " is out of its type's range"
+];
+
+/* The file at `path` can't be read, for `reason`, the system's words for
+   why, as "No such file or directory" (R0012). */
+type unreadable_file is error { { path: text, reason: text } };
+
+operator message{error: unreadable_file}: text [
+    "can't read " || to_text{from: error.path} || ": " || error.reason
+];
+
+/* The file at `path` isn't UTF-8 text, from the line `line` on (R0013). */
+type not_utf8 is error { { path: text, line: integer } };
+
+operator message{error: not_utf8}: text [
+    "line "
+        || to_text{from: error.line}
+        || " of "
+        || to_text{from: error.path}
+        || " isn't UTF-8 text"
 ];
 ```
 
@@ -1329,6 +1359,29 @@ operator main{} [
 - **A file that can't be read stops the program** (R0012), writing its
   path and the system's reason, as does one that isn't UTF-8 text
   (R0013), writing the first line that isn't.
+- **Unless the call names `out errors`,** a `relation { error: error }`:
+  then such a file gives no lines, and its error in `errors`, which is
+  empty when the file is read. The error is an `unreadable_file{path,
+  reason}` or a `not_utf8{path, line}`, values of the prelude's subtypes
+  of `error` (see [Failures](#failures)), which the program can test and
+  read, write the message of, or fail with.
+
+```trendy
+operator count_lines{path: text} [
+    var lines: array text;
+    var errors: relation { error: error };
+    call load_text_file{path: path, out lines: lines, out errors: errors};
+    if is_empty{r: errors} then [
+        call debug_value{v: length{a: lines}};
+    ] else [
+        call debug_value{v: message{error: value from errors}};
+    ];
+];
+
+operator main{} [
+    call count_lines{path: "rivers.txt"};
+];
+```
 
 ```trendy,error
 operator main{} [
@@ -4584,7 +4637,10 @@ operator main{} [
   position, length }` (R0011), `division_by_zero { operation }` (R0002)
   and `overflow { operation }` (R0001), each with the message the failure
   writes. Nothing catches a failure yet, so a program meets them only in
-  its own `fail`s.
+  its own `fail`s. A built-in that reads input gives the world's errors as
+  values instead, when its call names `out errors`: `unreadable_file {
+  path, reason }` (R0012) and `not_utf8 { path, line }` (R0013), from
+  `load_text_file`.
 
 ## Literals
 

@@ -718,6 +718,10 @@ fn text() {
             r#""Paraná""#,
             r#""Mekong""#,
             r#""Volga""#,
+            // A file that can't be read, which gives no lines and its
+            // error.
+            "0",
+            r#"relation { error: error } { { error: unreadable_file{path: "examples/lakes.txt", reason: "No such file or directory"} } }"#,
             // The CSV file's first record after its header, with the
             // position of its mouth read from two columns, and its basin's
             // area read in square kilometres, stored in square metres, then
@@ -965,6 +969,46 @@ operator main{{}} [
             format!("5e2\nerror[{failed}]: no unit\n --> fail_statement.trendy:13:9\n")
         )
     );
+}
+
+#[test]
+fn a_text_file_gives_its_errors_when_asked() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("errors");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (good, bad) = (dir.join("good.txt"), dir.join("bad.txt"));
+    std::fs::write(&good, "Nile\nVolga\n").unwrap();
+    std::fs::write(&bad, b"Nile\nVolga\nAmaz\xF4nas\n").unwrap();
+    let source = format!(
+        "operator show{{path: text}} [
+    var lines: array text;
+    var errors: relation {{ error: error }};
+    call load_text_file{{path: path, out lines: lines, out errors: errors}};
+    call debug_value{{v: lines}};
+    call debug_value{{v: errors}};
+    if not is_empty{{r: errors}} then [
+        call debug_value{{v: message{{error: value from errors}}}};
+    ];
+];
+
+operator main{{}} [
+    call show{{path: {good:?}}};
+    call show{{path: {bad:?}}};
+];
+"
+    );
+    let (code, stderr) = run_source("text_errors", &source);
+    let bad = bad.display();
+    let expected = [
+        r#"array ["Nile", "Volga"]"#.to_string(),
+        "relation { error: error } {}".to_string(),
+        "array text []".to_string(),
+        format!(
+            r#"relation {{ error: error }} {{ {{ error: not_utf8{{line: 3, path: "{bad}"}} }} }}"#
+        ),
+        format!(r#""line 3 of \"{bad}\" isn't UTF-8 text""#),
+    ];
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stderr.lines().collect::<Vec<_>>(), expected);
 }
 
 #[test]

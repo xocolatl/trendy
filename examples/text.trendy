@@ -25,6 +25,17 @@ operator list_rivers{} [
     ];
 ];
 
+/* A file that can't be read stops the program, unless the call names
+   `out errors`: then it gives no lines, and its error, a value of one of
+   the prelude's subtypes of `error`. */
+operator list_missing{} [
+    var rivers: array text;
+    var errors: relation { error: error };
+    call load_text_file{path: "examples/lakes.txt", out lines: rivers, out errors: errors};
+    call debug_value{v: length{a: rivers}};
+    call debug_value{v: errors};
+];
+
 /* A place on Earth, by its latitude and longitude, in degrees, as in
    types.trendy. */
 type position {
@@ -92,5 +103,6 @@ operator main{} [
     call greet{name: "é\u{1F600}\"", punctuation: "\n"};
     call greet{name: "", punctuation: ""};
     call list_rivers{};
+    call list_missing{};
     call river_table{};
 ];

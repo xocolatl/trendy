@@ -123,6 +123,17 @@ builtin operator atan2{y: approximate, x: approximate}: approximate;
    be read fails (R0012), as does one that isn't UTF-8 text (R0013). */
 builtin operator load_text_file{path: text, out lines: array text};
 
+/* Read the lines of the text file at `path` into `lines`, as the other
+   `load_text_file` does, but rather than stopping the program for a file
+   that can't be read, or isn't UTF-8 text, give no lines, and its error,
+   an `unreadable_file` or a `not_utf8`, in `errors`, which is empty when
+   the file is read. */
+builtin operator load_text_file{
+    path: text,
+    out lines: array text,
+    out errors: relation { error: error },
+};
+
 /* Read the records of the CSV file at `path` into `rows`, in the file's
    order, each a tuple whose attributes are the fields in the columns
    `columns` gives them: it has the tuples' attributes, each the position
@@ -203,4 +214,23 @@ type overflow is error { { operation: text } };
 
 operator message{error: overflow}: text [
     "overflow: " || error.operation || " is out of its type's range"
+];
+
+/* The file at `path` can't be read, for `reason`, the system's words for
+   why, as "No such file or directory" (R0012). */
+type unreadable_file is error { { path: text, reason: text } };
+
+operator message{error: unreadable_file}: text [
+    "can't read " || to_text{from: error.path} || ": " || error.reason
+];
+
+/* The file at `path` isn't UTF-8 text, from the line `line` on (R0013). */
+type not_utf8 is error { { path: text, line: integer } };
+
+operator message{error: not_utf8}: text [
+    "line "
+        || to_text{from: error.line}
+        || " of "
+        || to_text{from: error.path}
+        || " isn't UTF-8 text"
 ];

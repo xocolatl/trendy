@@ -512,27 +512,28 @@ impl Signature {
     }
 }
 
-/// Every operator's signature: the built-ins', then those of the types'
-/// constraints and conversions, then each file's operators and selectors,
-/// the prelude's first, each with its parameters and result type checked.
+/// Every operator's signature: those of the types' constraints and
+/// conversions, then the built-ins', which can name the prelude's types,
+/// then each file's operators and selectors, the prelude's first, each
+/// with its parameters and result type checked.
 /// Built-ins declared outside the prelude are reported. `main` is checked
 /// as an update operator, even with a result type, which is reported when
 /// the entry point is.
 pub(crate) fn signatures(
-    builtins: Vec<Signature>,
     files: &Files,
     namespaces: &Namespaces,
     errors: &mut Vec<Diagnostic>,
 ) -> Operators {
-    let mut list = builtins;
+    let mut list = Vec::new();
     for signature in numbered(files, namespaces) {
         assert_eq!(
             signature.id.0,
             list.len(),
-            "constraints and conversions are numbered after the built-ins, in order"
+            "constraints and conversions are numbered first, in order"
         );
         list.push(signature);
     }
+    crate::builtins::operators(files.prelude(), namespaces, &mut list, errors);
     for (source, item) in files.items() {
         match item {
             Item::Operator(op) => {

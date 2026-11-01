@@ -2926,7 +2926,83 @@ pub unsafe extern "C" fn trendy_rt_load_text_file(
         let path = read_text(path.cast());
         let (contents, len) = read_file(path);
         let text = file_text(path, array(contents, len));
-        let desc = &*desc;
+        dst.write_unaligned(lines_of(text, &*desc));
+        free(contents.cast());
+    }
+}
+
+/// As [`trendy_rt_load_text_file`], but rather than stopping the program
+/// for a file that can't be read, or isn't UTF-8 text, store at `dst` no
+/// lines, and at `errors` the relation of its one error, of the type
+/// `unreadable_file` or `not_utf8` describes as its selector writes its
+/// components, in the relation `errors_desc` describes,
+/// `relation { error: error }`, which is otherwise empty.
+///
+/// # Safety
+///
+/// As for [`trendy_rt_load_text_file`], and `errors` must point to memory
+/// for a relation, and the descriptors be valid ones of those types.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_load_text_file_with_errors(
+    dst: *mut Text,
+    path: *const Text,
+    errors: *mut Text,
+    errors_desc: *const TypeDesc,
+    unreadable_file: *const TypeDesc,
+    not_utf8: *const TypeDesc,
+    desc: *const TypeDesc,
+) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let path = read_text(path.cast());
+        let errors_desc = &*errors_desc;
+        let failed = |error| {
+            dst.write_unaligned(lines_of("", &*desc));
+            errors.write_unaligned(errors_of(errors_desc, Some(error)));
+        };
+        let (contents, len) = match try_read_file(path) {
+            Ok(read) => read,
+            Err(reason) => {
+                let (path, reason) = (scope_text(path), scope_text(reason));
+                let components = [
+                    ("path", (&raw const path).cast()),
+                    ("reason", (&raw const reason).cast()),
+                ];
+                return failed((&*unreadable_file, &components[..]));
+            }
+        };
+        match try_file_text(array(contents, len)) {
+            Ok(text) => {
+                dst.write_unaligned(lines_of(text, &*desc));
+                errors.write_unaligned(errors_of(errors_desc, None));
+            }
+            Err(line) => {
+                let path = scope_text(path);
+                let line = i64::try_from(line).unwrap_or(i64::MAX);
+                let components = [
+                    ("path", (&raw const path).cast()),
+                    ("line", (&raw const line).cast()),
+                ];
+                failed((&*not_utf8, &components[..]));
+            }
+        }
+        free(contents.cast());
+    }
+}
+
+/// The array of the lines of `text`, of the type `desc` describes,
+/// `array text`, in memory the statement owns: each line without the line
+/// feed, or the carriage return and line feed, that ends it.
+///
+/// # Safety
+///
+/// `desc` must be a valid descriptor of that array type. The statement
+/// must have begun a scope.
+#[cfg(not(test))]
+unsafe fn lines_of(text: &str, desc: &TypeDesc) -> Text {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
         let element = desc.element();
         let count = text.lines().count();
         let Some(size) = count.checked_mul(element.size) else {
@@ -2934,12 +3010,7 @@ pub unsafe extern "C" fn trendy_rt_load_text_file(
         };
         let lines = allocate_buffer(size, desc);
         for (i, line) in text.lines().enumerate() {
-            let bytes = allocate_buffer(line.len(), core::ptr::null());
-            core::ptr::copy_nonoverlapping(line.as_ptr(), bytes, line.len());
-            let value = Text {
-                bytes,
-                len: line.len(),
-            };
+            let value = scope_text(line);
             copy_element(
                 lines,
                 lines.add(i * element.size),
@@ -2947,11 +3018,79 @@ pub unsafe extern "C" fn trendy_rt_load_text_file(
                 element,
             );
         }
-        free(contents.cast());
-        dst.write_unaligned(Text {
+        Text {
             bytes: lines,
             len: count,
-        });
+        }
+    }
+}
+
+/// A text value of `text`'s bytes, in a buffer the statement's scope
+/// holds.
+#[cfg(not(test))]
+fn scope_text(text: &str) -> Text {
+    let bytes = allocate_buffer(text.len(), core::ptr::null());
+    // SAFETY: the buffer has room for the bytes.
+    unsafe { core::ptr::copy_nonoverlapping(text.as_ptr(), bytes, text.len()) };
+    Text {
+        bytes,
+        len: text.len(),
+    }
+}
+
+/// An error, a value of a subtype of the prelude's `error`: the
+/// descriptor of its type, as its selector writes its components, and its
+/// components, each by name, a pointer to a value of its type.
+#[cfg(not(test))]
+type Error<'a> = (&'a TypeDesc, &'a [(&'a str, *const u8)]);
+
+/// The relation `desc` describes, `relation { error: error }`, of `error`,
+/// or of none, in memory the statement owns.
+///
+/// # Safety
+///
+/// `desc` must be a valid descriptor of that relation type, and `error`'s
+/// type one of `error`'s subtypes, each of its components pointing to a
+/// valid value of that component's type. The statement must have begun a
+/// scope.
+#[cfg(not(test))]
+unsafe fn errors_of(desc: &TypeDesc, error: Option<Error>) -> Text {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let tuple = desc.element();
+        let Some((own, components)) = error else {
+            return Text {
+                bytes: allocate_buffer(0, desc),
+                len: 0,
+            };
+        };
+        let buffer = allocate_buffer(tuple.size, desc);
+        // The tuple, `{ error: … }`, made here, then copied into the
+        // buffer, which takes references to its texts.
+        let made = allocate::<u8>(tuple.size);
+        core::ptr::write_bytes(made, 0, tuple.size);
+        let [attribute] = attributes(tuple) else {
+            unreachable!("a relation of errors has one attribute");
+        };
+        let [within] = attributes(&*attribute.desc) else {
+            unreachable!("a value in a hierarchy has its components in one attribute");
+        };
+        let value = made.add(attribute.offset);
+        value.cast::<*const TypeDesc>().write_unaligned(own);
+        for component in attributes(own) {
+            let (_, src) = components
+                .iter()
+                .find(|(n, _)| *n == name(component))
+                .expect("the compiler and the runtime agree on an error's components");
+            let size = (*component.desc).size;
+            core::ptr::copy_nonoverlapping(*src, value.add(within.offset + component.offset), size);
+        }
+        copy_element(buffer, buffer, made, tuple);
+        free(made.cast());
+        Text {
+            bytes: buffer,
+            len: 1,
+        }
     }
 }
 
@@ -2959,18 +3098,23 @@ pub unsafe extern "C" fn trendy_rt_load_text_file(
 /// if they aren't UTF-8 (R0013).
 #[cfg(not(test))]
 fn file_text<'a>(path: &str, bytes: &'a [u8]) -> &'a str {
-    match core::str::from_utf8(bytes) {
-        Ok(text) => text,
-        Err(error) => {
-            let before = &bytes[..error.valid_up_to()];
-            let line = before.split(|&b| b == b'\n').count();
-            fail_with(|out| {
-                write!(out, "error[R0013]: line {line} of \"")?;
-                trendy_text::escape(path, out)?;
-                out.write_str("\" isn't UTF-8 text\n")
-            })
-        }
-    }
+    try_file_text(bytes).unwrap_or_else(|line| {
+        fail_with(|out| {
+            write!(out, "error[R0013]: line {line} of \"")?;
+            trendy_text::escape(path, out)?;
+            out.write_str("\" isn't UTF-8 text\n")
+        })
+    })
+}
+
+/// As [`file_text`], but the line of the first byte that isn't UTF-8,
+/// rather than stopping the program.
+#[cfg(not(test))]
+fn try_file_text(bytes: &[u8]) -> Result<&str, usize> {
+    core::str::from_utf8(bytes).map_err(|error| {
+        let before = &bytes[..error.valid_up_to()];
+        before.split(|&b| b == b'\n').count()
+    })
 }
 
 /// Store at `dst` the array of the records of the CSV file at `path`, in
@@ -3444,9 +3588,16 @@ unsafe fn read_field(field: csv::Field, dst: *mut u8, desc: &TypeDesc, place: Pl
 /// be read (R0012), or the memory can't be allocated.
 #[cfg(not(test))]
 fn read_file(path: &str) -> (*mut u8, usize) {
+    try_read_file(path).unwrap_or_else(|reason| cant_read(path, reason))
+}
+
+/// As [`read_file`], but the reason the file can't be read, the system's,
+/// rather than stopping the program.
+#[cfg(not(test))]
+fn try_read_file(path: &str) -> Result<(*mut u8, usize), &'static str> {
     // `open` takes the path as a C string, which ends at the first NUL.
     if path.contains('\0') {
-        cant_read(path, "a path can't contain the character U+0000");
+        return Err("a path can't contain the character U+0000");
     }
     let Some(terminated) = path.len().checked_add(1) else {
         fail(Failure::OutOfMemory)
@@ -3461,7 +3612,7 @@ fn read_file(path: &str) -> (*mut u8, usize) {
         let fd = open(c_path, O_RDONLY);
         free(c_path.cast());
         if fd < 0 {
-            cant_read(path, reason());
+            return Err(reason());
         }
         let mut capacity = 4096;
         let mut contents = allocate::<u8>(capacity);
@@ -3478,7 +3629,10 @@ fn read_file(path: &str) -> (*mut u8, usize) {
                 capacity = grown;
             }
             let Ok(n) = usize::try_from(read(fd, contents.add(len), capacity - len)) else {
-                cant_read(path, reason());
+                let reason = reason();
+                free(contents.cast());
+                close(fd);
+                return Err(reason);
             };
             if n == 0 {
                 break;
@@ -3486,7 +3640,7 @@ fn read_file(path: &str) -> (*mut u8, usize) {
             len += n;
         }
         close(fd);
-        (contents, len)
+        Ok((contents, len))
     }
 }
 

@@ -17,9 +17,11 @@ program. Drivers parse it next to the program, and sema checks the two
 as one unit of two files (`ast::Unit`, `sema::Files`), the program's text
 first, then the prelude's, so that a span is an offset into both, and the
 program's spans are those it has alone. Sema checks every built-in's
-declaration against what the compiler implements (`hir::Builtin`, and
-the scalar types, `builtins::builtins`), which makes the built-ins'
-signatures, then the rest of the prelude with the program, in the same
+declaration against what the compiler implements: the kinds and the
+scalar types first (`builtins::kinds`), and the built-in operators
+(`hir::Builtin`, `builtins::operators`) once the types they can name, the
+prelude's among them, are resolved, which makes their signatures. It
+checks the rest of the prelude with the program, in the same
 namespaces, the prelude's declarations first: nothing of it is frozen, so
 the program extends it as it does its own, with a subtype of a union type
 it declares, or a version of its specification, and a name both define
@@ -59,7 +61,16 @@ into its `out` parameter's variable, since two reads can differ and a
 read-only operator's calls can't (TTM RM Prescription 3): a `call`
 statement, which nothing evaluates when compiling, and which lowering
 makes a runtime call (`trendy_rt_load_text_file`) and an assignment of
-its result. `load_csv` is one too (`trendy_rt_load_csv`), given its
+its result. Its overload with `out errors`, `relation { error: error }`,
+gives a file's failures as values rather than stopping the program
+(`trendy_rt_load_text_file_with_errors`): the errors a built-in can give
+are the compiler's (`hir::UpdateBuiltin::errors`, `hir::BuiltinError`,
+each a name and components), which sema checks the prelude declares as
+subtypes of `error` with just those components (`builtins::failures`),
+and lowering gives the runtime the relation's descriptor and each
+error's type's, as its selector writes its components
+(`FunctionBuilder::errors`), from which the runtime makes the value: its
+type's descriptor's address, then its components (`errors_of`). `load_csv` is one too (`trendy_rt_load_csv`), given its
 array's descriptor, whose tuples' attributes' types say how to read
 their columns, and `columns`, a tuple of those attributes, each its
 column's position, and its descriptor; sema checks that each attribute
@@ -712,7 +723,8 @@ TTM has a type's constraint be part of its definition, and so does each
 of its values (`hir::DefinedValue`'s type), as TTM has every scalar
 value carry its type (RM Prescription 2). The constraints' operators,
 and each possible representation's conversions to the stored one and
-from it, come right after the built-ins', numbered as the types resolve
+from it, come first, before the built-ins, which can name the prelude's
+types, numbered as the types resolve
 (`named_types::resolve`), since a type is resolved, and its `Defined`
 copied into the types that name it, before any signature is made. A
 selection checks each, which folds when the components are constants

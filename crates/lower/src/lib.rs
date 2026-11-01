@@ -980,6 +980,16 @@ impl<'a> FunctionBuilder<'a> {
                         self.loaded(lir::RuntimeFn::LoadTextFile, call, &ty, Vec::new(), cx);
                     self.store(target, lines, cx);
                 }
+                hir::UpdateBuiltin::LoadTextFileWithErrors => {
+                    let target = &call.updated["lines"];
+                    let ty = self.assigned(target).0.clone();
+                    let errors = self.errors(*builtin, cx);
+                    let given = errors.given.clone();
+                    let function = lir::RuntimeFn::LoadTextFileWithErrors;
+                    let (lines, _) = self.loaded(function, call, &ty, given, cx);
+                    self.store(target, lines, cx);
+                    self.store(&call.updated["errors"], errors.value, cx);
+                }
                 hir::UpdateBuiltin::LoadCsv => {
                     // Whether the file has a header, and each attribute's
                     // column, given their tuple's type's descriptor, and
@@ -1041,6 +1051,23 @@ impl<'a> FunctionBuilder<'a> {
                 unreachable!("`call` invokes only update operators")
             }
         }
+    }
+
+    /// Where `builtin`'s errors go, `relation { error: error }`, and what its
+    /// runtime function is given to make them: where they go, their
+    /// relation's descriptor, and the descriptor of each error's type, in
+    /// [`hir::UpdateBuiltin::errors`]'s order, as its selector writes its
+    /// components.
+    fn errors(&mut self, builtin: hir::UpdateBuiltin, cx: &mut Lowering) -> Errors {
+        let ty = hir::BuiltinError::relation();
+        let value = self.slot(cx.layout(&ty));
+        let relation = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+        let types = builtin.errors().iter().map(|&error| {
+            let defined = self.program.builtin_error(error);
+            lir::Place::whole(lir::Base::Data(cx.components_descriptor(defined)))
+        });
+        let given = [value.clone(), relation].into_iter().chain(types).collect();
+        Errors { value, given }
     }
 
     /// `call`, of `load_text_file` or `load_csv`: what the runtime function
@@ -4380,6 +4407,13 @@ fn dotted(name: &str, attribute: &str) -> String {
     } else {
         format!("{name}.{attribute}")
     }
+}
+
+/// Where a built-in's errors go, and what its runtime function is given to
+/// make them (see [`FunctionBuilder::errors`]).
+struct Errors {
+    value: lir::Place,
+    given: Vec<lir::Place>,
 }
 
 /// The CSV file `load_csv` read: its path, and the line each record starts

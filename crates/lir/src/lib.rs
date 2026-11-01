@@ -231,6 +231,15 @@ pub enum RuntimeFn {
     /// statement owns. It stops the program if the file can't be read, or
     /// isn't UTF-8 text, or if the memory can't be allocated.
     LoadTextFile,
+    /// `trendy_rt_load_text_file_with_errors(dst, path, errors,
+    /// errors_descriptor, unreadable_file, not_utf8, descriptor)`: as
+    /// [`RuntimeFn::LoadTextFile`], but a file that can't be read, or isn't
+    /// UTF-8 text, gives no lines, and at `errors`, rather than stopping the
+    /// program, the relation of its one error, of the type the descriptor
+    /// `unreadable_file` or `not_utf8` describes, as the type's selector
+    /// writes its components, in the relation `errors_descriptor`
+    /// describes, `relation { error: error }`, which is otherwise empty.
+    LoadTextFileWithErrors,
     /// `trendy_rt_load_csv(dst, path, header, columns, columns_descriptor,
     /// descriptor)`: store at `dst` the array of the records of the CSV
     /// file at `path`, a text, in order, after its first if `header`, a
@@ -514,6 +523,7 @@ impl RuntimeFn {
             RuntimeFn::Cos => "trendy_rt_cos",
             RuntimeFn::Atan2 => "trendy_rt_atan2",
             RuntimeFn::LoadTextFile => "trendy_rt_load_text_file",
+            RuntimeFn::LoadTextFileWithErrors => "trendy_rt_load_text_file_with_errors",
             RuntimeFn::LoadCsv => "trendy_rt_load_csv",
             RuntimeFn::Sum => "trendy_rt_sum",
             RuntimeFn::Product => "trendy_rt_product",
