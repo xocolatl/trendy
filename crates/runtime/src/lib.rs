@@ -2233,19 +2233,63 @@ pub unsafe extern "C" fn trendy_rt_warned(message: *const u8) {
 pub unsafe extern "C" fn trendy_rt_failed(message: *const u8, error: *const u8) {
     // SAFETY: guaranteed by the caller.
     unsafe {
-        let message = read_text(message);
-        let own = error.cast::<*const TypeDesc>().read_unaligned();
-        let failures = failures();
-        let kinds = core::slice::from_raw_parts(failures.kinds, failures.count);
-        let code = kinds
-            .iter()
-            .find(|kind| core::ptr::eq(kind.desc, own))
-            .map_or("R0021", |kind| read_text((&raw const kind.code).cast()));
+        let (message, code) = (read_text(message), code_of(error));
         write_failure(|out| {
             write!(out, "error[{code}]: ")?;
             trendy_text::escape_message(message, out)?;
             out.write_char('\n')
         });
+    }
+}
+
+/// Write the error at `error`, a value of the prelude's type `error`, that
+/// `main` gives, whose message is `message`, a text, as a failure, if the
+/// byte at `failed` is 1, or else as a warning, with the code of its kind,
+/// as [`trendy_rt_failed`] writes it, and no site, as an error holds none.
+///
+/// # Safety
+///
+/// `message` must point to a valid text value, `error` to a valid value of
+/// `error`, and `failed` to a byte.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_report(message: *const u8, error: *const u8, failed: *const u8) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let (message, code) = (read_text(message), code_of(error));
+        let severity = if failed.read() == 1 {
+            "error"
+        } else {
+            "warning"
+        };
+        let mut out = Stderr::default();
+        // There is nowhere to report a failure to write to stderr.
+        let _ = write!(out, "{severity}[{code}]: ")
+            .and_then(|()| trendy_text::escape_message(message, &mut out))
+            .and_then(|()| out.write_char('\n'));
+        out.flush();
+    }
+}
+
+/// The code of the error at `error`, a value of the prelude's type
+/// `error`: its kind's, if the language makes it ([`Failures`]), as
+/// `division_by_zero`'s R0002, or else a program's own's, R0021.
+///
+/// # Safety
+///
+/// `error` must point to a valid value of `error`.
+#[cfg(not(test))]
+unsafe fn code_of(error: *const u8) -> &'static str {
+    // SAFETY: guaranteed by the caller, and the table's kinds are the
+    // compiler's, which last as long as the program.
+    unsafe {
+        let own = error.cast::<*const TypeDesc>().read_unaligned();
+        let failures = failures();
+        let kinds = core::slice::from_raw_parts(failures.kinds, failures.count);
+        kinds
+            .iter()
+            .find(|kind| core::ptr::eq(kind.desc, own))
+            .map_or("R0021", |kind| read_text((&raw const kind.code).cast()))
     }
 }
 

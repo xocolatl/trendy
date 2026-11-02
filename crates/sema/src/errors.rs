@@ -3183,7 +3183,11 @@ pub(crate) fn main_with_result(decl: &trendy_syntax::ast::Operator) -> Diagnosti
     .with_suggestion("remove the result type, and the value", edits)
 }
 
-/// `operator main{…}`, whose parameters `params` must be empty.
+/// The rule of `main`'s parameters, which A0019 reports.
+const MAIN_PARAMETERS: &str = "execution starts in `main`, with no arguments; it can give the errors the program writes when it returns, and exits with 1 if one failed, as `out errors: relation transaction_collection`";
+
+/// `operator main{…}`, whose parameters `params` must be empty, or only
+/// `out errors`.
 pub(crate) fn main_with_params(params: &trendy_syntax::ast::Heading) -> Diagnostic {
     Diagnostic::error(
         Code::MainSignature,
@@ -3191,13 +3195,74 @@ pub(crate) fn main_with_params(params: &trendy_syntax::ast::Heading) -> Diagnost
         params.span(),
         "nothing passes arguments to `main`",
     )
-    .with_note("execution starts in `main`, with no arguments")
+    .with_note(MAIN_PARAMETERS)
     .with_suggestion(
         "remove the parameters",
         vec![Edit {
             span: params.span(),
             replacement: "{}".to_string(),
         }],
+    )
+}
+
+/// `main`'s parameter `errors`, written `param`, which sema made
+/// `given`: what is wrong with it, if anything, for the errors `main`
+/// gives, `out errors: relation transaction_collection`, the prelude's
+/// heading, whose fix is certain.
+pub(crate) fn main_errors(
+    param: &trendy_syntax::ast::AttributeType,
+    given: &hir::Parameter,
+    namespaces: &Namespaces,
+) -> Option<Diagnostic> {
+    let error = namespaces.dummy("error")?;
+    let expected = hir::Type::Relation(hir::transaction_collection(hir::Type::Dummy(Box::new(
+        error.clone(),
+    ))));
+    if given.ty != expected {
+        let written = param.type_expr()?;
+        return Some(
+            Diagnostic::error(
+                Code::MainSignature,
+                format!(
+                    "`main` gives its errors as a `relation transaction_collection`, not `{}`",
+                    given.ty
+                ),
+                written.span(),
+                format!("this is `{}`", given.ty),
+            )
+            .with_note(MAIN_PARAMETERS)
+            .with_suggestion(
+                "make it a `relation transaction_collection`",
+                vec![Edit {
+                    span: written.span(),
+                    replacement: "relation transaction_collection".to_string(),
+                }],
+            ),
+        );
+    }
+    if given.mode == hir::Mode::Out {
+        return None;
+    }
+    let name = param.name()?;
+    let edit = match param.mode() {
+        Some(mode) => Edit {
+            span: mode.span(),
+            replacement: "out".to_string(),
+        },
+        None => Edit {
+            span: Span::empty(name.span().start),
+            replacement: "out ".to_string(),
+        },
+    };
+    Some(
+        Diagnostic::error(
+            Code::MainSignature,
+            "`main`'s `errors` is an `out` parameter",
+            name.span(),
+            "`main` assigns its errors",
+        )
+        .with_note(MAIN_PARAMETERS)
+        .with_suggestion("make it `out`", vec![edit]),
     )
 }
 

@@ -359,6 +359,11 @@ pub enum RuntimeFn {
     /// `trendy_rt_warned(message)`: write the warning of a `warn` outside
     /// any transaction, whose message is `message`, a text, and carry on.
     Warned,
+    /// `trendy_rt_report(message, error, failed)`: write an error `main`
+    /// gives, a value of the prelude's type `error`, whose message is
+    /// `message`, a text, as a failure, if `failed`, a boolean, or else as
+    /// a warning, with its kind's code, and no site.
+    Report,
     /// `trendy_rt_broken_constraint_in_file(value, descriptor, ty,
     /// constraint, record)`: as [`RuntimeFn::BrokenConstraint`], of a
     /// value `load_csv` read from the record `record` describes, laid out
@@ -594,7 +599,7 @@ pub enum RuntimeFn {
 
 impl RuntimeFn {
     /// Every runtime function, for checking the runtime against them.
-    pub const ALL: [RuntimeFn; 68] = [
+    pub const ALL: [RuntimeFn; 69] = [
         RuntimeFn::DebugValue,
         RuntimeFn::DebugTable,
         RuntimeFn::ToText,
@@ -626,6 +631,7 @@ impl RuntimeFn {
         RuntimeFn::NotOfType,
         RuntimeFn::Failed,
         RuntimeFn::Warned,
+        RuntimeFn::Report,
         RuntimeFn::BrokenConstraintInFile,
         RuntimeFn::OverlappingSubtypes,
         RuntimeFn::KeyShared,
@@ -722,6 +728,7 @@ impl RuntimeFn {
             | RuntimeFn::NotOfType
             | RuntimeFn::Failed
             | RuntimeFn::Warned
+            | RuntimeFn::Report
             | RuntimeFn::BrokenConstraintInFile
             | RuntimeFn::OverlappingSubtypes
             | RuntimeFn::KeyViolated
@@ -781,6 +788,7 @@ impl RuntimeFn {
             RuntimeFn::NotOfType => "trendy_rt_not_of_type",
             RuntimeFn::Failed => "trendy_rt_failed",
             RuntimeFn::Warned => "trendy_rt_warned",
+            RuntimeFn::Report => "trendy_rt_report",
             RuntimeFn::BrokenConstraintInFile => "trendy_rt_broken_constraint_in_file",
             RuntimeFn::OverlappingSubtypes => "trendy_rt_overlapping_subtypes",
             RuntimeFn::KeyShared => "trendy_rt_key_shared",

@@ -2000,15 +2000,18 @@ the runtime writes no message of its own but running out of memory's,
 which has no error, and an internal error's. A warning that nothing collects is written where it
 is given, its message and site as `warning[R0022]` (`trendy_rt_warned`),
 with no trace, as no call ends. The program's entry is a function of lowering's
-own (`entry`), which calls `main` and, if it fails, writes the
+own (`entry`), which calls `main`, giving it, if it takes `out errors`, a
+variable for them, which it writes when `main` returns (`Given`): the
+warnings, then the failures (`trendy_rt_report`), with no site, failing
+if one failed. If `main` fails, it writes the
 failure's trace after its error, one note per call, innermost first
 (`trendy_rt_write_trace`). With an error waiting, which nothing took, it
 writes its message at its site first, after taking it from where it
 waits, so that a `message` that fails with an error of its own has that
 one written instead; one that fails at all has its own trace written,
 not the error's (`trendy_rt_traced`, `trendy_rt_trace_since`). Each failure is a runtime function of its own, which
-takes its values (`lir::Failure::call`), so the runtime needs no table of
-failures shared with the compiler. Then it writes where the program is, ` --> path:line:column`, as a compiler's error does. Sema
+takes its values (`lir::Failure::call`), and makes its error, of the
+kind the table of errors gives it. Then it writes where the program is, ` --> path:line:column`, as a compiler's error does. Sema
 gives each statement its site (`hir::Site`, its file and where it starts),
 and each value of a value block's that can fail, a local variable's or
 the one it ends with, the site of the statement or value (`Expr::At`,

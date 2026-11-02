@@ -322,8 +322,9 @@ impl Checked {
 }
 
 /// The operator named `main`, which must be the program's own, an update
-/// operator taking no parameters: the one without parameters, if there are
-/// several.
+/// operator taking no parameters, or only the errors it gives, `out
+/// errors: relation transaction_collection`: the one without parameters,
+/// if there are several.
 fn entry(
     file: &SourceFile,
     namespaces: &Namespaces,
@@ -340,9 +341,19 @@ fn entry(
         return None;
     };
     let mut valid = true;
-    if let Some(params) = decl.params().filter(|h| h.attributes().next().is_some()) {
-        errors.push(errors::main_with_params(&params));
-        valid = false;
+    if let Some(params) = decl.params() {
+        let given: Vec<_> = params.attributes().collect();
+        let error = match given.as_slice() {
+            [] => None,
+            [param] if param.is_named("errors") => {
+                errors::main_errors(param, &signature.params["errors"], namespaces)
+            }
+            _ => Some(errors::main_with_params(&params)),
+        };
+        if let Some(error) = error {
+            errors.push(error);
+            valid = false;
+        }
     }
     if decl.result().is_some() {
         errors.push(errors::main_with_result(decl));
@@ -3042,10 +3053,38 @@ operator main{{}} [ var lines: array text; {main} ];"
     }
 
     #[test]
-    fn main_takes_no_parameters() {
+    fn main_takes_no_parameters_but_its_errors() {
         let source = "operator main{args: text} [];";
         assert_eq!(codes(source), [Code::MainSignature]);
         assert_eq!(fix(source), "operator main{} [];");
+        let given = "operator main{out errors: relation transaction_collection} [ errors := relation {}; ];";
+        assert!(analyze_str(given).is_ok());
+        // An `out` parameter, of a `relation transaction_collection`,
+        // which the fixes make it; assigned, as any `out` parameter is.
+        for (source, fixed) in [
+            (
+                "operator main{errors: relation transaction_collection} [];",
+                "operator main{out errors: relation transaction_collection} [];",
+            ),
+            (
+                "operator main{var errors: relation transaction_collection} [];",
+                "operator main{out errors: relation transaction_collection} [];",
+            ),
+            (
+                "operator main{out errors: relation { error: error }} [ errors := relation {}; ];",
+                "operator main{out errors: relation transaction_collection} [ errors := relation {}; ];",
+            ),
+        ] {
+            assert_eq!(codes(source), [Code::MainSignature], "{source}");
+            assert_eq!(fix(source), fixed, "{source}");
+        }
+        assert_eq!(
+            codes("operator main{out errors: relation transaction_collection} [];"),
+            [Code::UnassignedOut]
+        );
+        let errors = errors("operator main{errors: text, more: integer} [];");
+        assert_eq!(errors[0].code, Code::MainSignature);
+        assert!(errors[0].notes[0].contains("out errors: relation transaction_collection"));
     }
 
     #[test]

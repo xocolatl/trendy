@@ -40,8 +40,9 @@ pub fn lower(program: &hir::Program, path: &str) -> lir::Program {
 
 /// The function the executable starts in: it gives the runtime the table
 /// of the errors the language makes ([`Lowering::failures`]), calls
-/// `main`, and if that fails, writes the calls the failure passed through
-/// (its trace), after its error, then fails. An error waiting, with
+/// `main`, and writes the errors it gives, if it takes `out errors`, and
+/// fails if one failed ([`Given`]); if `main` fails, it writes the calls
+/// the failure passed through (its trace), after its error, then fails. An error waiting, with
 /// nothing to take it, a `fail`'s or the language's, is written first: its
 /// message, as `message` gives it, with its kind's code, and where it
 /// failed. If `message` fails with an error of its own, that one is
@@ -68,13 +69,30 @@ fn entry(
     let (handle, done) = (b.new_block(), b.new_block());
     let waiting = cx.waiting(program);
     let written = Written::new(&mut b, waiting, cx);
+    let given = Given::new(&mut b, cx);
     b.catching(handle, |b| {
         b.insts.push(lir::Inst::Call {
             function: main,
-            args: None,
+            args: given.as_ref().map(|given| given.args.clone()),
             result: None,
         });
+        if let Some(given) = &given {
+            given.write(b, cx);
+        }
     });
+    if let Some(given) = &given {
+        given.release(&mut b, cx);
+        let (failing, returning) = (b.new_block(), b.new_block());
+        b.end_block(
+            lir::Terminator::Branch {
+                condition: given.failed.clone(),
+                then: failing,
+                otherwise: returning,
+            },
+            failing,
+        );
+        b.end_block(lir::Terminator::Failed, returning);
+    }
     b.end_block(lir::Terminator::Return, handle);
     b.catches.push(handle);
     written.write(&mut b, handle, done, cx);
@@ -86,11 +104,118 @@ fn entry(
         args: Vec::new(),
     });
     written.release(&mut b, cx);
+    if let Some(given) = &given {
+        given.release(&mut b, cx);
+    }
     let after = b.new_block();
     b.end_block(lir::Terminator::Failed, after);
     let lowered = b.finish(None, cx);
     cx.functions.insert(id.0, lowered);
     id
+}
+
+/// The errors `main` gives, if it takes `out errors`, a `relation
+/// transaction_collection`, which the entry writes when it returns: the
+/// warnings, then the failures, each with its message and its kind's code,
+/// and no site, as an error holds none, then fails if one failed.
+struct Given {
+    /// The relation, which `main` assigns: null until it does.
+    errors: lir::Place,
+    /// `main`'s arguments: the relation's address.
+    args: lir::Place,
+    /// Its type.
+    ty: hir::Type,
+    /// Whether one failed, a byte, 0 until a failure is written.
+    failed: lir::Place,
+}
+
+impl Given {
+    /// Its slots, if `main` takes `out errors`, which the entry block of
+    /// `b` sets as it starts: no errors, and none failed.
+    fn new(b: &mut FunctionBuilder, cx: &mut Lowering) -> Option<Self> {
+        let main = b.program.operator(b.program.entry);
+        let ty = main.params.get("errors")?.ty.clone();
+        let layout = cx.layout(&ty);
+        let errors = b.slot(layout.clone());
+        let failed = b.slot(lir::Layout::U8);
+        for (dst, src, layout) in [
+            (errors.clone(), zero_constant(&layout, cx), layout),
+            (failed.clone(), u8_constant(0, cx), lir::Layout::U8),
+        ] {
+            b.insts.push(lir::Inst::Copy { dst, src, layout });
+        }
+        let params = params_layout(&main.params, &cx.families).expect("`main` takes `errors`");
+        let args = b.slot(params);
+        let mut arg = args.clone();
+        arg.path.push(0);
+        b.insts.push(lir::Inst::Address {
+            dst: arg,
+            src: errors.clone(),
+        });
+        Some(Given {
+            errors,
+            args,
+            ty,
+            failed,
+        })
+    }
+
+    /// Write the errors, with `b` building the code: the warnings, then
+    /// the failures, noting that one failed.
+    fn write(&self, b: &mut FunctionBuilder, cx: &mut Lowering) {
+        let hir::Type::Relation(heading) = &self.ty else {
+            unreachable!("`main`'s errors are a relation");
+        };
+        let tuple = cx.layout(&hir::Type::Tuple(heading.clone()));
+        for failures in [false, true] {
+            b.each_tuple(&self.errors, tuple.clone(), cx, |b, at_hand, _, cx| {
+                let field = |i| lir::Place {
+                    path: [at_hand.path.clone(), vec![i]].concat(),
+                    ..at_hand.clone()
+                };
+                // `error`, then `failed`, in name order.
+                let (error, failed) = (field(0), field(1));
+                let (written, next) = (b.new_block(), b.new_block());
+                let (then, otherwise) = if failures {
+                    (written, next)
+                } else {
+                    (next, written)
+                };
+                b.end_block(
+                    lir::Terminator::Branch {
+                        condition: failed.clone(),
+                        then,
+                        otherwise,
+                    },
+                    written,
+                );
+                b.scoped(|b| {
+                    let message = b.message_of(&error, cx);
+                    b.insts.push(lir::Inst::CallRuntime {
+                        function: lir::RuntimeFn::Report,
+                        args: vec![message, error, failed.clone()],
+                    });
+                });
+                if failures {
+                    b.insts.push(lir::Inst::Copy {
+                        dst: self.failed.clone(),
+                        src: u8_constant(1, cx),
+                        layout: lir::Layout::U8,
+                    });
+                }
+                b.end_block(lir::Terminator::Jump(next), next);
+            });
+        }
+    }
+
+    /// Give up the references the errors hold, with `b` building the code.
+    fn release(&self, b: &mut FunctionBuilder, cx: &mut Lowering) {
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&self.ty)));
+        b.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Release,
+            args: vec![self.errors.clone(), descriptor],
+        });
+    }
 }
 
 /// What the entry writes an error waiting with: where it waits, the scope

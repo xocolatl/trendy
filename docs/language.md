@@ -44,6 +44,35 @@ The calls aren't part of the error: an error is what went wrong, a value
 the program can test (see [Failures](#failures)), and the calls are
 where its failure went.
 
+`main` can give errors, its one parameter, `out errors`, of the type a
+transaction collects into, `relation transaction_collection` (see
+[Transactions](#transactions)), which it assigns, as any `out`
+parameter (A0054). When it returns, the program writes them: the
+warnings, those whose `failed` is false, as `warning[code]: message`,
+then the failures, as `error[code]: message`, each with its kind's code
+and message, and no site, as an error holds none. It exits with 1 if
+one failed, and else with 0. A failure nothing takes still stops the
+program where it fails. Here the records a load skips are worth
+knowing, but not failures:
+
+```trendy
+operator main{out errors: relation transaction_collection} [
+    var rows: array tuple { city: text, people: integer };
+    var skipped: relation { error: error };
+    call load_csv{
+        path: "cities.csv",
+        header: true,
+        columns: tuple { city: 1, people: 2 },
+        out rows: rows,
+        out errors: skipped,
+    };
+    errors := skipped extend { failed := false };
+];
+```
+
+`main` takes no other parameters, and has no result type (A0019): the
+fixes make `errors` an `out` parameter, and of its type.
+
 ## Operators
 
 ```trendy

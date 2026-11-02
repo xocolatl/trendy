@@ -722,11 +722,9 @@ fn text() {
             // error.
             "0",
             r#"relation { error: error } { { error: unreadable_file{path: "examples/lakes.txt", reason: "No such file or directory"} } }"#,
-            // A CSV file's records, two skipped, each with its error: a
-            // field that isn't a value of its type, and a value that
-            // breaks its type's constraint.
+            // A CSV file's records, two skipped, whose errors `main` gives
+            // as warnings.
             "3",
-            r#"relation { message: text } { { message: "\"eighty-four\", in column 3 on line 5 of \"examples/lakes.csv\", isn't an integer, the type of `depth.m`" }, { message: "line 3 of \"examples/lakes.csv\" gives `depth` metres{m: -281}, which isn't a value of `metres`: it breaks the constraint `m > 0`" } }"#,
             // The CSV file's first record after its header, with the
             // position of its mouth read from two columns, and its basin's
             // area read in square kilometres, stored in square metres, then
@@ -742,6 +740,11 @@ fn text() {
             "│ area{m2: 3.254555e12} │      6650 │ position{latitude: 3.146e1, longitude: 3.037e1} │ Nile    │ true          │",
             "│ area{m2: 7.05e12}     │      6400 │ position{latitude: -1.7e-1, longitude: -4.9e1}  │ Amazon  │ true          │",
             "└───────────────────────┴───────────┴─────────────────────────────────────────────────┴─────────┴───────────────┘",
+            // What `main` gives, written as the program ends: a value
+            // that breaks its type's constraint, and a field that isn't a
+            // value of its type.
+            r#"warning[R0017]: line 3 of "examples/lakes.csv" gives `depth` metres{m: -281}, which isn't a value of `metres`: it breaks the constraint `m > 0`"#,
+            r#"warning[R0014]: "eighty-four", in column 3 on line 5 of "examples/lakes.csv", isn't an integer, the type of `depth.m`"#,
         ]
     );
 }
@@ -1224,6 +1227,49 @@ operator main{} [
             0,
             format!("relation {{ message: text }} {{ {} }}\n", tuples.join(", "))
         )
+    );
+}
+
+/// `main` can give errors, which the program writes as it ends, the
+/// warnings, then the failures, with no site, and it exits with 1 if one
+/// failed, as a failure nothing takes does, and else with 0.
+#[test]
+fn main_gives_the_errors_the_program_writes() {
+    let program = |collected: &str| {
+        format!(
+            "type running_low is error {{ {{ city: text, sacks: integer }} }};
+
+operator message{{error: running_low}}: text [
+    error.city || \" has \" || to_text{{from: error.sacks}} || \" sacks left\"
+];
+
+operator main{{out errors: relation transaction_collection}} [
+    var sacks := 0;
+    var found: relation transaction_collection;
+    transaction collecting found [
+        warn running_low{{city: \"Mombasa\", sacks: sacks}};
+        {collected}
+    ];
+    call debug_value{{v: \"done\"}};
+    errors := found;
+];
+"
+        )
+    };
+    let warned = format!(
+        "warning[{}]: Mombasa has 0 sacks left\n",
+        trendy_diag::Code::Failed.id()
+    );
+    assert_eq!(
+        run_source(
+            "main_failed",
+            &program("call debug_value{v: 12 div sacks};")
+        ),
+        (1, format!("\"done\"\n{warned}{}\n", division("12 div 0")))
+    );
+    assert_eq!(
+        run_source("main_warned", &program("")),
+        (0, format!("\"done\"\n{warned}"))
     );
 }
 

@@ -47,20 +47,18 @@ heading lake := { name: text, native: text, depth: metres };
 
 /* A CSV file's record that can't be read stops the program, unless the
    call names `out errors`: then each such record is skipped, with its
-   error, and the rest are read. Lake Victoria's depth is written in
-   words, and Titicaca's has a sign it shouldn't. */
-operator lake_table{} [
+   error, in `skipped`, and the rest are read. Lake Victoria's depth is
+   written in words, and Titicaca's has a sign it shouldn't. */
+operator lake_table{out skipped: relation { error: error }} [
     var lakes: array tuple lake;
-    var errors: relation { error: error };
     call load_csv{
         path: "examples/lakes.csv",
         header: true,
         columns: tuple { name: 1, native: 2, depth: tuple { m: 3 } },
         out rows: lakes,
-        out errors: errors,
+        out errors: skipped,
     };
     call debug_value{v: length{a: lakes}};
-    call debug_value{v: (errors extend { message := message{error: error} }){message}};
 ];
 
 /* A place on Earth, by its latitude and longitude, in degrees, as in
@@ -123,7 +121,10 @@ operator river_table{} [
     call debug_table{r: table};
 ];
 
-operator main{} [
+/* `main` gives the records skipped as warnings, worth knowing, but not
+   failures: the program writes them as it ends, after what it wrote
+   before, and exits with 0, as none failed. */
+operator main{out errors: relation transaction_collection} [
     call debug_value{v: greeting};
     call debug_value{v: nothing};
     call greet{name: "Ada", punctuation: "!"};
@@ -131,6 +132,8 @@ operator main{} [
     call greet{name: "", punctuation: ""};
     call list_rivers{};
     call list_missing{};
-    call lake_table{};
+    var skipped: relation { error: error };
+    call lake_table{out skipped: skipped};
     call river_table{};
+    errors := skipped extend { failed := false };
 ];
