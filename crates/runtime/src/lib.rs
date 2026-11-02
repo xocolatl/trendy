@@ -28,9 +28,11 @@
 //! # Failures
 //!
 //! The runtime never stops the program, but for an internal error. A
-//! function that can fail writes the error where the failure happens, and
-//! returns whether it failed, a `bool`, which compiled code checks as it
-//! does a call's. Inside, a failure is `Failed`, which a `Fallible`
+//! function that can fail makes its error, a value of the prelude's type
+//! `error`, which waits where the compiler's table of errors says
+//! (`Failures`, `fail_as`), and returns whether it failed, a `bool`,
+//! which compiled code checks as it does a call's. Running out of memory
+//! has no error, and writes its message as it happens. Inside, a failure is `Failed`, which a `Fallible`
 //! function gives up through its callers. A function that fails changes
 //! nothing but what the statement's scope holds, which ends as the
 //! statement fails, so a buffer half-built is released with it, and the
@@ -92,27 +94,6 @@ pub struct Record {
     pub attribute: Text,
     pub path: Text,
     pub line: usize,
-}
-
-impl Record {
-    /// Write `` line 3 of "path" gives `attribute` ``, before what it gave.
-    ///
-    /// # Safety
-    ///
-    /// Its texts must be valid text values.
-    #[cfg(not(test))]
-    unsafe fn write_gives(&self, out: &mut Stderr) -> fmt::Result {
-        // SAFETY: guaranteed by the caller.
-        let (attribute, path) = unsafe {
-            (
-                read_text((&raw const self.attribute).cast()),
-                read_text((&raw const self.path).cast()),
-            )
-        };
-        write!(out, "line {} of \"", self.line)?;
-        trendy_text::escape(path, out)?;
-        write!(out, "\" gives `{attribute}`")
-    }
 }
 
 /// Store `lhs || rhs` at `dst`, in memory the statement owns. Fails if the
@@ -1988,7 +1969,8 @@ fn status(body: impl FnOnce() -> Fallible) -> bool {
 /// nothing after it can be relied on.
 #[cfg(not(test))]
 fn out_of_memory() -> Failed {
-    fail_with(|out| out.write_str("error[R0003]: out of memory\n"))
+    write_failure(|out| out.write_str("error[R0003]: out of memory\n"));
+    Failed
 }
 
 /// Fail with an `overflow` whose operation is `operation`, as its message
@@ -2267,10 +2249,11 @@ pub unsafe extern "C" fn trendy_rt_failed(message: *const u8, error: *const u8) 
     }
 }
 
-/// Write the error of `value`, components `desc` describes, which
+/// Fail with the error of `value`, components `desc` describes, which
 /// `load_csv` read from the record `record` describes for a value of the
 /// type of the program's own named `ty`, a text, and which break its
-/// constraint written `constraint`, a text, with them (R0017).
+/// constraint written `constraint`, a text: a `broken_constraint_in_file`
+/// (R0017).
 ///
 /// # Safety
 ///
@@ -2287,19 +2270,10 @@ pub unsafe extern "C" fn trendy_rt_broken_constraint_in_file(
     record: *const Record,
 ) {
     // SAFETY: guaranteed by the caller.
-    unsafe {
-        let (desc, ty, constraint) = (&*desc, read_text(ty), read_text(constraint));
-        write_failure(|out| {
-            out.write_str("error[R0017]: ")?;
-            (*record).write_gives(out)?;
-            out.write_char(' ')?;
-            write_value(out, value, desc)?;
-            writeln!(
-                out,
-                ", which isn't a value of `{ty}`: it breaks the constraint `{constraint}`"
-            )
-        });
-    }
+    let Failed = unsafe {
+        broken_constraint_in_file(None, value, &*desc, ty, constraint, &*record)
+            .expect_err("with nothing to collect it, an error fails")
+    };
 }
 
 /// Fail with the error of a relation that has `*count` tuples, not one,
@@ -2568,7 +2542,7 @@ pub unsafe extern "C" fn trendy_rt_component_key_violated(
 }
 
 /// As [`trendy_rt_component_key_violated`], of a value `load_csv` read
-/// from the record `record` describes, writing where too.
+/// from the record `record` describes: a `component_key_violated_in_file`.
 ///
 /// # Safety
 ///
@@ -2585,17 +2559,16 @@ pub unsafe extern "C" fn trendy_rt_component_key_violated_in_file(
     component: *const u8,
     record: *const Record,
 ) {
-    // SAFETY: guaranteed by the caller.
-    unsafe {
-        let (ty, component) = (read_text(ty), read_text(component));
-        write_failure(|out| {
-            out.write_str("error[R0008]: ")?;
-            (*record).write_gives(out)?;
-            write!(out, " a value of `{ty}` in which ")?;
-            let relation = |out: &mut Stderr| write!(out, "its `{component}`");
-            write_key_violation(out, relation, value, &*desc, &*key, pair)
-        });
-    }
+    // SAFETY: guaranteed by the caller; the names are copied, and the
+    // error takes references of its own.
+    let Failed = unsafe {
+        let of = ComponentOf {
+            ty: ty.cast::<Text>().read_unaligned(),
+            component: component.cast::<Text>().read_unaligned(),
+        };
+        component_key_violated_in_file(None, value, &*desc, &*key, pair, &of, &*record)
+            .expect_err("with nothing to collect it, an error fails")
+    };
 }
 
 /// The texts of a key violation, its error's components, each made by
@@ -2606,7 +2579,9 @@ pub unsafe extern "C" fn trendy_rt_component_key_violated_in_file(
 ///
 /// # Safety
 ///
-/// As for [`write_key_violation`].
+/// `value` must point to a valid relation of the type `desc` describes,
+/// `key` be the descriptor of its projection on one of its keys, and
+/// `pair` point to two positions of its tuples.
 #[cfg(not(test))]
 unsafe fn key_violation<T>(
     value: *const u8,
@@ -2633,51 +2608,6 @@ unsafe fn key_violation<T>(
             make(&|mut out| write_value(&mut out, at, element))
         };
         Ok([names, tuple(0)?, tuple(1)?])
-    }
-}
-
-/// Write, as R0008 does, that the tuples at the positions `pair` of the
-/// relation `value`, of the type `desc` describes, which `relation` names,
-/// have the same values for the attributes of `key`, the descriptor of
-/// its projection on one of its keys: the key, and the tuples.
-///
-/// # Safety
-///
-/// As for [`trendy_rt_key_violated`].
-#[cfg(not(test))]
-unsafe fn write_key_violation(
-    out: &mut Stderr,
-    relation: impl Fn(&mut Stderr) -> fmt::Result,
-    value: *const u8,
-    desc: &TypeDesc,
-    key: &TypeDesc,
-    pair: *const usize,
-) -> fmt::Result {
-    // SAFETY: guaranteed by the caller.
-    unsafe {
-        let key = attributes(key);
-        if key.is_empty() {
-            relation(out)?;
-            out.write_str(" has two tuples, but its key {} allows at most one: ")?;
-        } else {
-            out.write_str("two tuples of ")?;
-            relation(out)?;
-            out.write_str(" have the same values for its key { ")?;
-            for (i, attr) in key.iter().enumerate() {
-                if i > 0 {
-                    out.write_str(", ")?;
-                }
-                out.write_str(name(attr))?;
-            }
-            out.write_str(" }: ")?;
-        }
-        let (tuples, _) = read_slice(value);
-        let element = desc.element();
-        let (first, second) = (pair.read_unaligned(), pair.add(1).read_unaligned());
-        write_value(out, tuples.add(first * element.size), element)?;
-        out.write_str(" and ")?;
-        write_value(out, tuples.add(second * element.size), element)?;
-        out.write_char('\n')
     }
 }
 
@@ -2874,14 +2804,6 @@ pub extern "C" fn trendy_rt_write_trace() {
 #[unsafe(export_name = "trendy_rt_site")]
 pub static SITE: core::sync::atomic::AtomicPtr<Site> =
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
-
-/// Fail, writing the error as [`write_failure`] does: a failure of the
-/// runtime's own.
-#[cfg(not(test))]
-fn fail_with(write: impl FnOnce(&mut Stderr) -> fmt::Result) -> Failed {
-    write_failure(write);
-    Failed
-}
 
 /// Stop the program because the compiler and the runtime disagree, a
 /// compiler bug, which nothing should catch, writing `message`.
@@ -3347,12 +3269,6 @@ struct Place<'a> {
     column: usize,
     line: usize,
     path: &'a str,
-    /// The file's CSV text, if its first record is a header, which names
-    /// the column.
-    header: Option<&'a str>,
-    /// Whether the field is in the file's first record, which isn't a
-    /// header.
-    first: bool,
 }
 
 /// Fail because `text` isn't a value of the type named `ty`, as `why`
@@ -3377,51 +3293,6 @@ fn unparsed(text: &str, ty: &str, why: trendy_text::Unparsable) -> Failed {
     }
 }
 
-/// Fail because `text`, a CSV file's field at `place`, isn't `a`, a value
-/// of its type, as `why` says. A header's field the message writes is read
-/// first, in memory the statement's scope holds; if there is none for it,
-/// that is the failure.
-#[cfg(not(test))]
-fn unparsable_field(text: &str, a: &str, why: trendy_text::Unparsable, place: Place) -> Failed {
-    let heading = place
-        .header
-        .and_then(|text| csv::header(text).nth(place.column))
-        // SAFETY: the statement has begun a scope, as
-        // `trendy_rt_load_csv`'s caller guarantees.
-        .map(|field| unsafe { field_value(field) });
-    let heading = match heading.transpose() {
-        Ok(heading) => heading,
-        Err(failed) => return failed,
-    };
-    fail_with(|out| {
-        out.write_str("error[R0014]: \"")?;
-        trendy_text::escape(text, out)?;
-        out.write_char('"')?;
-        write!(out, ", in column {}", place.column + 1)?;
-        if let Some(heading) = heading {
-            out.write_str(" (\"")?;
-            trendy_text::escape(heading, out)?;
-            out.write_str("\")")?;
-        }
-        write!(out, " on line {} of \"", place.line)?;
-        trendy_text::escape(place.path, out)?;
-        out.write_str("\",")?;
-        match why {
-            trendy_text::Unparsable::Malformed => write!(out, " isn't {a}")?,
-            trendy_text::Unparsable::OutOfRange => write!(out, " is out of {a}'s range")?,
-        }
-        write!(out, ", the type of `{}`", place.attribute)?;
-        if place.first {
-            write!(
-                out,
-                "; if line {} is a header, `header: true` skips it",
-                place.line
-            )?;
-        }
-        out.write_char('\n')
-    })
-}
-
 /// Store at `dst` the array of the lines of the text file at `path`, in
 /// the file's order, of the type `desc` describes, `array text`, in memory
 /// the statement owns: each line without the line feed, or the carriage
@@ -3444,9 +3315,13 @@ pub unsafe extern "C" fn trendy_rt_load_text_file(
     // SAFETY: guaranteed by the caller.
     status(|| unsafe {
         let path = read_text(path.cast());
-        let mut contents = read_file(path)?;
-        let text = file_text(path, contents.values())?;
-        dst.write_unaligned(lines_of(text, &*desc)?);
+        // With no errors to give its failure to, a file that can't be read
+        // fails.
+        let lines = match file_or_error(path, None)? {
+            Some((_contents, text)) => lines_of(text, &*desc)?,
+            None => lines_of("", &*desc)?,
+        };
+        dst.write_unaligned(lines);
         Ok(())
     })
 }
@@ -3472,7 +3347,7 @@ pub unsafe extern "C" fn trendy_rt_load_text_file_with_errors(
     status(|| unsafe {
         let path = read_text(path.cast());
         let mut found = Found::new((*errors).relation);
-        let lines = match file_or_error(path, &mut found)? {
+        let lines = match file_or_error(path, Some(&mut found))? {
             Some((_contents, text)) => lines_of(text, &*desc)?,
             None => lines_of("", &*desc)?,
         };
@@ -3484,18 +3359,19 @@ pub unsafe extern "C" fn trendy_rt_load_text_file_with_errors(
 }
 
 /// The text of the file at `path`, and the memory it is in, which it
-/// lasts as long as, or `None`, after adding to `found` why the file can't
-/// be read, or isn't UTF-8 text. Fails if the memory for them can't be
-/// allocated.
+/// lasts as long as, or `None`, after giving `found` why the file can't be
+/// read, or isn't UTF-8 text: an `unreadable_file` (R0012) or a `not_utf8`
+/// (R0013), which, with no `found`, it fails with ([`give`]). Fails too if
+/// the memory for them can't be allocated.
 ///
 /// # Safety
 ///
-/// `found`'s descriptors must be those [`UNREADABLE_FILE`] and [`NOT_UTF8`]
-/// say. The statement must have begun a scope.
+/// `found`'s descriptor must be valid. The statement must have begun a
+/// scope.
 #[cfg(not(test))]
 unsafe fn file_or_error<'a>(
     path: &str,
-    found: &mut Found,
+    mut found: Option<&mut Found>,
 ) -> Fallible<Option<(Temp<u8>, &'a str)>> {
     // SAFETY: guaranteed by the caller; the text is in the memory, which
     // moving the memory's owner doesn't move.
@@ -3504,7 +3380,8 @@ unsafe fn file_or_error<'a>(
             Ok(read) => read,
             Err(reason) => {
                 let (path, reason) = (scope_text(path)?, scope_text(reason)?);
-                found.add(
+                give(
+                    found,
                     UNREADABLE_FILE,
                     &[
                         ("path", (&raw const path).cast()),
@@ -3520,7 +3397,8 @@ unsafe fn file_or_error<'a>(
             Err(line) => {
                 let path = scope_text(path)?;
                 let line = i64::try_from(line).unwrap_or(i64::MAX);
-                found.add(
+                give(
+                    found.take(),
                     NOT_UTF8,
                     &[
                         ("path", (&raw const path).cast()),
@@ -3703,7 +3581,7 @@ pub struct Kind {
 
 /// The names of the kinds of error the runtime makes, each at its place
 /// in the compiler's table, which [`trendy_rt_failures`] checks.
-pub const KINDS: [&str; 25] = [
+pub const KINDS: [&str; 27] = [
     "unreadable_file",
     "not_utf8",
     "malformed_csv",
@@ -3729,6 +3607,8 @@ pub const KINDS: [&str; 25] = [
     "no_square_root",
     "not_of_type",
     "overlapping_subtypes",
+    "column_shared",
+    "column_below_one",
 ];
 
 /// The place in [`KINDS`] of the kind named `name`, found when the runtime
@@ -3810,6 +3690,10 @@ pub const NO_SQUARE_ROOT: usize = place("no_square_root");
 pub const NOT_OF_TYPE: usize = place("not_of_type");
 /// `overlapping_subtypes`'s, as [`UNREADABLE_FILE`] is.
 pub const OVERLAPPING_SUBTYPES: usize = place("overlapping_subtypes");
+/// `column_shared`'s, as [`UNREADABLE_FILE`] is.
+pub const COLUMN_SHARED: usize = place("column_shared");
+/// `column_below_one`'s, as [`UNREADABLE_FILE`] is.
+pub const COLUMN_BELOW_ONE: usize = place("column_below_one");
 
 /// The compiler's table of errors, null until the program's entry gives
 /// it ([`trendy_rt_failures`]).
@@ -3924,6 +3808,30 @@ unsafe fn fail_as(kind: usize, components: &[(&str, *const u8)]) -> Failed {
     Failed
 }
 
+/// Give the error of the kind at `kind` in the compiler's table, whose
+/// components are `components`, as [`make_error`] takes them, which the
+/// statement's scope holds what they point to of: to `found`, a load's
+/// errors, which collect it, or, with none, fail with it ([`fail_as`]).
+///
+/// # Safety
+///
+/// `found`'s descriptor must be valid, and `components` the kind's, each
+/// pointing to a valid value.
+#[cfg(not(test))]
+unsafe fn give(
+    found: Option<&mut Found>,
+    kind: usize,
+    components: &[(&str, *const u8)],
+) -> Fallible {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        match found {
+            Some(found) => found.add(kind, components),
+            None => Err(fail_as(kind, components)),
+        }
+    }
+}
+
 /// A relation-valued component of a value, as the compiler lays its names
 /// out: the name of the value's type, and the component's.
 #[repr(C)]
@@ -3958,11 +3866,41 @@ pub unsafe extern "C" fn trendy_rt_component_key_error(
     // SAFETY: guaranteed by the caller.
     status(|| unsafe {
         let mut found = Found::of(&*errors)?;
-        let (desc, record, of) = (&*desc, &*record, &*of);
+        let of = &*of;
+        component_key_violated_in_file(Some(&mut found), value, &*desc, &*key, pair, of, &*record)?;
+        (&raw mut (*errors).found).write_unaligned(found.finish()?);
+        Ok(())
+    })
+}
+
+/// Give `found` that the tuples at the positions `pair` of the relation
+/// `value`, of the type `desc` describes, the component `of` names of a
+/// value read from the record `record` describes, share their values for
+/// `key`, the descriptor of its projection on one of its keys: a
+/// `component_key_violated_in_file`, its tuples written as `debug_value`
+/// writes them, which, with no `found`, it fails with ([`give`]).
+///
+/// # Safety
+///
+/// As for [`give`], with `value`, `desc`, `key` and `pair` as for
+/// [`trendy_rt_key_violated`]. The statement must have begun a scope.
+#[cfg(not(test))]
+unsafe fn component_key_violated_in_file(
+    found: Option<&mut Found>,
+    value: *const u8,
+    desc: &TypeDesc,
+    key: &TypeDesc,
+    pair: *const usize,
+    of: &ComponentOf,
+    record: &Record,
+) -> Fallible {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
         let scoped = |write: &dyn Fn(&mut dyn Write) -> fmt::Result| scope_written(write);
-        let [names, first, second] = key_violation(value, desc, &*key, pair, scoped)?;
+        let [names, first, second] = key_violation(value, desc, key, pair, scoped)?;
         let line = i64::try_from(record.line).unwrap_or(i64::MAX);
-        found.add(
+        give(
+            found,
             COMPONENT_KEY_VIOLATED_IN_FILE,
             &[
                 ("path", (&raw const record.path).cast()),
@@ -3974,10 +3912,8 @@ pub unsafe extern "C" fn trendy_rt_component_key_error(
                 ("first", (&raw const first).cast()),
                 ("second", (&raw const second).cast()),
             ],
-        )?;
-        (&raw mut (*errors).found).write_unaligned(found.finish()?);
-        Ok(())
-    })
+        )
+    }
 }
 
 /// Add to the errors `errors` has that `value`, of the type of the
@@ -4048,23 +3984,56 @@ pub unsafe extern "C" fn trendy_rt_broken_constraint_error(
     // SAFETY: guaranteed by the caller.
     status(|| unsafe {
         let mut found = Found::of(&*errors)?;
-        let written = written(value, &*desc)?;
-        let record = &*record;
+        broken_constraint_in_file(
+            Some(&mut found),
+            value,
+            &*desc,
+            ty.cast(),
+            constraint.cast(),
+            &*record,
+        )?;
+        (&raw mut (*errors).found).write_unaligned(found.finish()?);
+        Ok(())
+    })
+}
+
+/// Give `found` that `value`, whose components `desc` describes, read from
+/// the record `record` describes, isn't a value of the type named `ty`, a
+/// text: it breaks its constraint written `constraint`, a text: a
+/// `broken_constraint_in_file`, written as `debug_value` writes it, which,
+/// with no `found`, it fails with ([`give`]).
+///
+/// # Safety
+///
+/// As for [`give`], with `value` pointing to valid components `desc`
+/// describes, and `ty` and `constraint` to valid text values. The
+/// statement must have begun a scope.
+#[cfg(not(test))]
+unsafe fn broken_constraint_in_file(
+    found: Option<&mut Found>,
+    value: *const u8,
+    desc: &TypeDesc,
+    ty: *const u8,
+    constraint: *const u8,
+    record: &Record,
+) -> Fallible {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let written = written(value, desc)?;
         let line = i64::try_from(record.line).unwrap_or(i64::MAX);
-        found.add(
+        give(
+            found,
             BROKEN_CONSTRAINT_IN_FILE,
             &[
                 ("path", (&raw const record.path).cast()),
                 ("line", (&raw const line).cast()),
                 ("attribute", (&raw const record.attribute).cast()),
                 ("value", (&raw const written).cast()),
-                ("type", ty.cast()),
-                ("constraint", constraint.cast()),
+                ("type", ty),
+                ("constraint", constraint),
             ],
-        )?;
-        (&raw mut (*errors).found).write_unaligned(found.finish()?);
-        Ok(())
-    })
+        )
+    }
 }
 
 /// The errors a load finds, as it finds them: their tuples, `{ error: … }`,
@@ -4202,21 +4171,8 @@ impl Drop for Found {
     }
 }
 
-/// `bytes`, the contents of the file at `path`, as text. Fails if they
-/// aren't UTF-8 (R0013).
-#[cfg(not(test))]
-fn file_text<'a>(path: &str, bytes: &'a [u8]) -> Fallible<&'a str> {
-    try_file_text(bytes).map_err(|line| {
-        fail_with(|out| {
-            write!(out, "error[R0013]: line {line} of \"")?;
-            trendy_text::escape(path, out)?;
-            out.write_str("\" isn't UTF-8 text\n")
-        })
-    })
-}
-
-/// As [`file_text`], but the line of the first byte that isn't UTF-8,
-/// rather than stopping the program.
+/// `bytes`, the contents of a file, as text, or else the line of the
+/// first byte that isn't UTF-8.
 #[cfg(not(test))]
 fn try_file_text(bytes: &[u8]) -> Result<&str, usize> {
     core::str::from_utf8(bytes).map_err(|error| {
@@ -4368,14 +4324,7 @@ unsafe fn load_csv(
         )?;
         let leaves = leaves.values();
         distinct_columns(leaves, element)?;
-        let read = if let Some(found) = found.as_deref_mut() {
-            file_or_error(file.path, found)?
-        } else {
-            let contents = read_file(file.path)?;
-            let bytes = core::slice::from_raw_parts(contents.ptr(), contents.len);
-            let text = file_text(file.path, bytes)?;
-            Some((contents, text))
-        };
+        let read = file_or_error(file.path, found.as_deref_mut())?;
         // The file's records, and how many fields each has, unless it has
         // a failure of its own, which `found` has.
         let Some((_contents, text)) = read else {
@@ -4447,18 +4396,6 @@ unsafe fn columns_present(
         desc: element,
         leaf: i,
     };
-    let Some(found) = found else {
-        return Err(columns_fail(|out| {
-            write!(
-                out,
-                "`{named}` is read from column {}, but \"",
-                leaves[i].column.saturating_add(1)
-            )?;
-            trendy_text::escape(path, out)?;
-            let plural = if fields == 1 { "" } else { "s" };
-            write!(out, "\" has {fields} column{plural}")
-        }));
-    };
     let attribute = scope_written(|out| write!(out, "{named}"))?;
     let (path, column, columns) = (
         scope_text(path)?,
@@ -4467,7 +4404,8 @@ unsafe fn columns_present(
     );
     // SAFETY: guaranteed by the caller.
     unsafe {
-        found.add(
+        give(
+            found,
             MISSING_COLUMN,
             &[
                 ("path", (&raw const path).cast()),
@@ -4534,7 +4472,7 @@ impl Reading<'_> {
                         let found = found
                             .as_deref_mut()
                             .expect("without errors, the file is CSV, as `csv_records` found it");
-                        malformed_error(found, self.file.path, line, |out| {
+                        malformed_error(Some(found), self.file.path, line, |out| {
                             out.write_str(malformed_words(why))
                         })?;
                         all.skip_record(why);
@@ -4546,7 +4484,7 @@ impl Reading<'_> {
                     start = field.line;
                 }
                 if !in_header && bad.is_none() {
-                    bad = self.field(field, j, start, tuple, found.is_some())?;
+                    bad = self.field(field, j, tuple, found.is_some())?;
                 }
                 j += 1;
                 if !field.last {
@@ -4581,10 +4519,10 @@ impl Reading<'_> {
         }
     }
 
-    /// Read `field`, in the column `column` of the record starting on
-    /// `start`, into `tuple`, if a scalar is read from it: what is wrong
-    /// with it, if `skips`, and else, for a field that isn't a value of its
-    /// type, fail (R0014).
+    /// Read `field`, in the column `column` of a record, into `tuple`, if a
+    /// scalar is read from it: what is wrong with it, if `skips`, and else,
+    /// for a field that isn't a value of its type, fail with an
+    /// `unreadable_field` (R0014).
     ///
     /// # Safety
     ///
@@ -4594,7 +4532,6 @@ impl Reading<'_> {
         &self,
         field: csv::Field<'a>,
         column: usize,
-        start: usize,
         tuple: *mut u8,
         skips: bool,
     ) -> Fallible<Option<BadRecord<'a>>>
@@ -4608,7 +4545,7 @@ impl Reading<'_> {
         // SAFETY: guaranteed by the caller.
         unsafe {
             let leaf_desc = &*leaf.desc;
-            let Err((a, why)) = try_read_field(field, tuple.add(leaf.offset), leaf_desc)? else {
+            let Err(why) = try_read_field(field, tuple.add(leaf.offset), leaf_desc)? else {
                 return Ok(None);
             };
             let value = field_value(field)?;
@@ -4620,11 +4557,10 @@ impl Reading<'_> {
                 column,
                 line: field.line,
                 path: self.file.path,
-                header: self.file.header.then_some(self.text),
-                first: !self.file.header && start == self.records.first_line,
             };
             if !skips {
-                return Err(unparsable_field(value, a, why, place));
+                // With no errors to give it to, it fails.
+                field_error(None, value, leaf_desc.kind, why, &place)?;
             }
             Ok(Some(BadRecord::Field {
                 text: value,
@@ -4652,7 +4588,7 @@ impl Reading<'_> {
         // SAFETY: guaranteed by the caller.
         unsafe {
             if fields != self.records.fields {
-                malformed_error(found, self.file.path, start, |out| {
+                malformed_error(Some(found), self.file.path, start, |out| {
                     let (header, first) = (self.file.header, self.records.first_line);
                     field_count_words(out, fields, self.records.fields, header, first)
                 })
@@ -4663,7 +4599,7 @@ impl Reading<'_> {
                 place,
             }) = bad
             {
-                field_error(found, text, kind, why, &place)
+                field_error(Some(found), text, kind, why, &place)
             } else {
                 Ok(())
             }
@@ -4685,15 +4621,16 @@ enum BadRecord<'a> {
     },
 }
 
-/// Add to `found` that the CSV file at `path` isn't CSV on `line`, as
-/// `write` says.
+/// Give `found` that the CSV file at `path` isn't CSV on `line`, as
+/// `write` says, a `malformed_csv`, which, with no `found`, it fails with
+/// ([`give`]).
 ///
 /// # Safety
 ///
-/// As for [`Found::add`]. The statement must have begun a scope.
+/// As for [`give`]. The statement must have begun a scope.
 #[cfg(not(test))]
 unsafe fn malformed_error(
-    found: &mut Found,
+    found: Option<&mut Found>,
     path: &str,
     line: usize,
     write: impl Fn(&mut dyn Write) -> fmt::Result,
@@ -4702,7 +4639,8 @@ unsafe fn malformed_error(
     let line = i64::try_from(line).unwrap_or(i64::MAX);
     // SAFETY: guaranteed by the caller.
     unsafe {
-        found.add(
+        give(
+            found,
             MALFORMED_CSV,
             &[
                 ("path", (&raw const path).cast()),
@@ -4713,15 +4651,16 @@ unsafe fn malformed_error(
     }
 }
 
-/// Add to `found` that `text`, at `place`, isn't a value of its type, of
-/// the kind `kind`, as `why` says.
+/// Give `found` that `text`, at `place`, isn't a value of its type, of the
+/// kind `kind`, as `why` says, an `unreadable_field`, which, with no
+/// `found`, it fails with ([`give`]).
 ///
 /// # Safety
 ///
-/// As for [`Found::add`]. The statement must have begun a scope.
+/// As for [`give`]. The statement must have begun a scope.
 #[cfg(not(test))]
 unsafe fn field_error(
-    found: &mut Found,
+    found: Option<&mut Found>,
     text: &str,
     kind: u8,
     why: trendy_text::Unparsable,
@@ -4746,7 +4685,8 @@ unsafe fn field_error(
     );
     // SAFETY: guaranteed by the caller.
     unsafe {
-        found.add(
+        give(
+            found,
             UNREADABLE_FIELD,
             &[
                 ("path", (&raw const path).cast()),
@@ -4762,24 +4702,42 @@ unsafe fn field_error(
 }
 
 /// Fail if two of `leaves`, the scalars the records' tuples, which
-/// `element` describes, are read as, have one column (R0016).
+/// `element` describes, are read as, have one column: a `column_shared`
+/// (R0016).
+///
+/// # Safety
+///
+/// The statement must have begun a scope.
 #[cfg(not(test))]
-fn distinct_columns(leaves: &[Leaf], element: &TypeDesc) -> Fallible {
-    let named = |leaf| LeafName {
-        desc: element,
-        leaf,
+unsafe fn distinct_columns(leaves: &[Leaf], element: &TypeDesc) -> Fallible {
+    let named = |leaf| {
+        scope_written(|out| {
+            write!(
+                out,
+                "{}",
+                LeafName {
+                    desc: element,
+                    leaf
+                }
+            )
+        })
     };
     for (i, leaf) in leaves.iter().enumerate() {
         if let Some(first) = leaves[..i].iter().position(|l| l.column == leaf.column) {
-            return Err(columns_fail(|out| {
-                write!(
-                    out,
-                    "`{}` and `{}` are both read from column {}",
-                    named(first),
-                    named(i),
-                    leaf.column + 1
+            let (first, second) = (named(first)?, named(i)?);
+            let column = i64::try_from(leaf.column.saturating_add(1)).unwrap_or(i64::MAX);
+            // SAFETY: the names are valid texts, and the column an
+            // integer.
+            return Err(unsafe {
+                fail_as(
+                    COLUMN_SHARED,
+                    &[
+                        ("first", (&raw const first).cast()),
+                        ("second", (&raw const second).cast()),
+                        ("column", (&raw const column).cast()),
+                    ],
                 )
-            }));
+            });
         }
     }
     Ok(())
@@ -4839,7 +4797,8 @@ unsafe fn scalars(desc: &TypeDesc) -> usize {
 /// column `columns` gives it: a tuple `columns_desc` describes, of the
 /// same shape, whose attributes are integers counting from 1, or such
 /// tuples for the scalars of a value read from several fields (see
-/// [`read_from_fields`]). Fails if a position is below 1 (R0016).
+/// [`read_from_fields`]). Fails if a position is below 1, a
+/// `column_below_one` (R0016).
 ///
 /// # Safety
 ///
@@ -4879,12 +4838,14 @@ unsafe fn gather(
                     desc: element,
                     leaf: *next,
                 };
-                return Err(columns_fail(|out| {
-                    write!(
-                        out,
-                        "`{name}` is read from column {n}, but columns count from 1"
-                    )
-                }));
+                let attribute = scope_written(|out| write!(out, "{name}"))?;
+                return Err(fail_as(
+                    COLUMN_BELOW_ONE,
+                    &[
+                        ("attribute", (&raw const attribute).cast()),
+                        ("column", (&raw const n).cast()),
+                    ],
+                ));
             }
             leaves.add(*next).write(Leaf {
                 offset: base + attr.offset,
@@ -4937,17 +4898,6 @@ impl fmt::Display for LeafName<'_> {
     }
 }
 
-/// Fail because `columns` doesn't give each attribute a column of the
-/// file, of its own, as `write` says (R0016).
-#[cfg(not(test))]
-fn columns_fail(write: impl FnOnce(&mut Stderr) -> fmt::Result) -> Failed {
-    fail_with(|out| {
-        out.write_str("error[R0016]: ")?;
-        write(out)?;
-        out.write_char('\n')
-    })
-}
-
 /// A CSV file's records to load, and how many fields each has.
 #[cfg(not(test))]
 struct Records {
@@ -4961,11 +4911,15 @@ struct Records {
 
 /// The records of the CSV text `text`, of the file at `path`, after its
 /// first, a header, if `header` is true. If `stops`, it fails if it isn't
-/// CSV, or a record has another number of fields than the first (R0015);
-/// otherwise each record that isn't CSV, or has another number, counts, as
-/// one an errors skip.
+/// CSV, or a record has another number of fields than the first, a
+/// `malformed_csv` (R0015); otherwise each record that isn't CSV, or has
+/// another number, counts, as one an errors skip.
+///
+/// # Safety
+///
+/// The statement must have begun a scope.
 #[cfg(not(test))]
-fn csv_records(text: &str, path: &str, header: bool, stops: bool) -> Fallible<Records> {
+unsafe fn csv_records(text: &str, path: &str, header: bool, stops: bool) -> Fallible<Records> {
     let (mut records, mut fields, mut line) = (0_usize, 0, 0);
     // The first record's fields and line.
     let mut first: Option<(usize, usize)> = None;
@@ -4973,12 +4927,15 @@ fn csv_records(text: &str, path: &str, header: bool, stops: bool) -> Fallible<Re
     while let Some(field) = all.next() {
         let field = match field {
             Ok(field) => field,
-            Err(csv::NotCsv { why, line }) if stops => {
-                return Err(malformed(path, line, |out| {
-                    out.write_str(malformed_words(why))
-                }));
-            }
-            Err(csv::NotCsv { why, .. }) => {
+            Err(csv::NotCsv { why, line }) => {
+                if stops {
+                    // SAFETY: guaranteed by the caller.
+                    unsafe {
+                        malformed_error(None, path, line, |out| {
+                            out.write_str(malformed_words(why))
+                        })?;
+                    }
+                }
                 all.skip_record(why);
                 (records, fields) = (records + 1, 0);
                 continue;
@@ -4993,12 +4950,15 @@ fn csv_records(text: &str, path: &str, header: bool, stops: bool) -> Fallible<Re
         }
         match first {
             None => first = Some((fields, line)),
-            Some((expected, _)) if expected == fields || !stops => {}
-            Some((expected, first_line)) => {
-                return Err(malformed(path, line, |out| {
-                    field_count_words(out, fields, expected, header, first_line)
-                }));
+            Some((expected, first_line)) if expected != fields && stops => {
+                // SAFETY: guaranteed by the caller.
+                unsafe {
+                    malformed_error(None, path, line, |out| {
+                        field_count_words(out, fields, expected, header, first_line)
+                    })?;
+                }
             }
+            Some(_) => {}
         }
         records += 1;
         fields = 0;
@@ -5047,19 +5007,6 @@ fn field_count_words(
     }
 }
 
-/// Fail because the CSV file at `path` isn't CSV on line `line`, as
-/// `write` says (R0015).
-#[cfg(not(test))]
-fn malformed(path: &str, line: usize, write: impl FnOnce(&mut Stderr) -> fmt::Result) -> Failed {
-    fail_with(|out| {
-        write!(out, "error[R0015]: line {line} of \"")?;
-        trendy_text::escape(path, out)?;
-        out.write_str("\" ")?;
-        write(out)?;
-        out.write_char('\n')
-    })
-}
-
 /// The value of the CSV field `field`: its text as written, or, with its
 /// doubled quotes made one, a copy in memory the statement's scope holds.
 /// Fails if there is no memory for the copy.
@@ -5086,8 +5033,7 @@ unsafe fn field_value(field: csv::Field<'_>) -> Fallible<&str> {
 
 /// Read the CSV file's field `field` into `dst`, as a value of the type
 /// `desc` describes: text, an integer, an approximate number or a boolean;
-/// or what it isn't, `a`, as a value of the type is described, and why.
-/// Fails if the memory for a text can't be allocated.
+/// or why it isn't one. Fails if the memory for a text can't be allocated.
 ///
 /// # Safety
 ///
@@ -5098,7 +5044,7 @@ unsafe fn try_read_field(
     field: csv::Field,
     dst: *mut u8,
     desc: &TypeDesc,
-) -> Fallible<Result<(), (&'static str, trendy_text::Unparsable)>> {
+) -> Fallible<Result<(), trendy_text::Unparsable>> {
     // SAFETY: guaranteed by the caller.
     unsafe {
         let value = field_value(field)?;
@@ -5107,30 +5053,20 @@ unsafe fn try_read_field(
                 dst.cast::<Text>().write_unaligned(scope_text(value)?);
                 Ok(())
             }
-            KIND_INTEGER => trendy_numeric::parse_integer(value)
-                .map(|n| dst.cast::<i64>().write_unaligned(n))
-                .map_err(|why| ("an integer", why)),
+            KIND_INTEGER => {
+                trendy_numeric::parse_integer(value).map(|n| dst.cast::<i64>().write_unaligned(n))
+            }
             KIND_APPROXIMATE => trendy_numeric::parse_approximate(value)
-                .map(|x| dst.cast::<f64>().write_unaligned(x))
-                .map_err(|why| ("an approximate number", why)),
-            KIND_BOOLEAN => trendy_text::parse_boolean(value)
-                .map(|b| dst.write(u8::from(b)))
-                .map_err(|why| ("a boolean", why)),
+                .map(|x| dst.cast::<f64>().write_unaligned(x)),
+            KIND_BOOLEAN => trendy_text::parse_boolean(value).map(|b| dst.write(u8::from(b))),
             kind => unreachable!("`load_csv` reads no values of kind {kind}"),
         })
     }
 }
 
 /// The bytes of the file at `path`, in memory of the caller's own, its
-/// length theirs. Fails if the file can't be read (R0012), or the memory
-/// can't be allocated.
-#[cfg(not(test))]
-fn read_file(path: &str) -> Fallible<Temp<u8>> {
-    try_read_file(path)?.map_err(|reason| cant_read(path, reason))
-}
-
-/// As [`read_file`], but the reason the file can't be read, the system's,
-/// rather than failing, which only memory that can't be allocated does.
+/// length theirs, or else the reason it can't be read, the system's.
+/// Fails only if the memory can't be allocated.
 #[cfg(not(test))]
 fn try_read_file(path: &str) -> Fallible<Result<Temp<u8>, &'static str>> {
     // `open` takes the path as a C string, which ends at the first NUL.
@@ -5179,16 +5115,6 @@ fn try_read_file(path: &str) -> Fallible<Result<Temp<u8>, &'static str>> {
         close(fd);
         read
     }
-}
-
-/// Fail because the file at `path` can't be read, for `reason`.
-#[cfg(not(test))]
-fn cant_read(path: &str, reason: &str) -> Failed {
-    fail_with(|out| {
-        out.write_str("error[R0012]: can't read \"")?;
-        trendy_text::escape(path, out)?;
-        writeln!(out, "\": {reason}")
-    })
 }
 
 /// The system's description of why the last call of the C library that

@@ -53,21 +53,6 @@ impl<'a> Field<'a> {
     }
 }
 
-/// The fields of the first record of CSV text, its header, as far as the
-/// text is CSV.
-pub(crate) fn header(text: &str) -> impl Iterator<Item = Field<'_>> {
-    let mut fields = Fields::new(text).flatten();
-    let mut ended = false;
-    core::iter::from_fn(move || {
-        if ended {
-            return None;
-        }
-        let field = fields.next()?;
-        ended = field.last;
-        Some(field)
-    })
-}
-
 /// Why text isn't CSV, and on which line, counting from 1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct NotCsv {
@@ -292,20 +277,6 @@ mod tests {
         );
         // A bare carriage return ends no line.
         assert_eq!(records("a\rb\n"), Ok(vec![record(1, &["a\rb"])]));
-    }
-
-    #[test]
-    fn the_header_is_the_first_records_fields() {
-        let names = |text| {
-            header(text)
-                .map(|f| f.as_written().unwrap_or("?"))
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(names("\n\nriver,\"km\"\nNile,6650\n"), ["river", "km"]);
-        assert_eq!(names("\"say \"\"hi\"\"\",x"), ["?", "x"]);
-        assert!(names("").is_empty());
-        // As far as it is CSV.
-        assert_eq!(names("a,b\"c\n"), ["a"]);
     }
 
     #[test]

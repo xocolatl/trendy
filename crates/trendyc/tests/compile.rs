@@ -897,7 +897,7 @@ fn csv_files_load_values_of_a_programs_own_types() {
         (
             1,
             &*format!(
-                "error[{}]: \"south\", in column 3 (\"latitude\") on line 2 of \"PATH\", isn't an approximate number, the type of `stop.at.latitude`",
+                "error[{}]: \"south\", in column 3 on line 2 of \"PATH\", isn't an approximate number, the type of `stop.at.latitude`",
                 trendy_diag::Code::Unparsable.id()
             )
         )
@@ -2341,7 +2341,7 @@ type point {
         (
             1,
             &*format!(
-                "error[{}]: \"far\", in column 2 (\"km\") on line 2 of \"PATH\", isn't an approximate number, the type of `at.r.km`",
+                "error[{}]: \"far\", in column 2 on line 2 of \"PATH\", isn't an approximate number, the type of `at.r.km`",
                 trendy_diag::Code::Unparsable.id()
             )
         )
@@ -2496,7 +2496,7 @@ fn csv_files_that_cant_be_read_stop_the_program() {
         csv_failed(
             "spaced",
             Code::Unparsable,
-            r#"" 10883000", in column 5 ("population") on line 2 of "PATH", isn't an integer, the type of `people`"#
+            r#"" 10883000", in column 5 on line 2 of "PATH", isn't an integer, the type of `people`"#
         )
     );
     assert_eq!(

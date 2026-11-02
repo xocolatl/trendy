@@ -611,10 +611,14 @@ pub enum LanguageError {
     /// A value is of two subtypes of its type defined by constraints, but a
     /// value has one most specific type (R0020).
     OverlappingSubtypes,
+    /// A load's `columns` gives two attributes one column (R0016).
+    ColumnShared,
+    /// A load's `columns` gives an attribute a column below 1 (R0016).
+    ColumnBelowOne,
 }
 
 impl LanguageError {
-    pub const ALL: [LanguageError; 25] = [
+    pub const ALL: [LanguageError; 27] = [
         LanguageError::UnreadableFile,
         LanguageError::NotUtf8,
         LanguageError::MalformedCsv,
@@ -640,6 +644,8 @@ impl LanguageError {
         LanguageError::NoSquareRoot,
         LanguageError::NotOfType,
         LanguageError::OverlappingSubtypes,
+        LanguageError::ColumnShared,
+        LanguageError::ColumnBelowOne,
     ];
 
     /// The code a failure with it is written with, when nothing takes it.
@@ -649,7 +655,9 @@ impl LanguageError {
             LanguageError::UnreadableFile => Code::UnreadableFile,
             LanguageError::NotUtf8 => Code::NotUtf8,
             LanguageError::MalformedCsv => Code::MalformedCsv,
-            LanguageError::MissingColumn => Code::CsvColumns,
+            LanguageError::MissingColumn
+            | LanguageError::ColumnShared
+            | LanguageError::ColumnBelowOne => Code::CsvColumns,
             LanguageError::UnreadableField | LanguageError::Unparsable => Code::Unparsable,
             LanguageError::BrokenConstraintInFile | LanguageError::BrokenConstraint => {
                 Code::BrokenConstraint
@@ -705,6 +713,8 @@ impl LanguageError {
             LanguageError::NoSquareRoot => "no_square_root",
             LanguageError::NotOfType => "not_of_type",
             LanguageError::OverlappingSubtypes => "overlapping_subtypes",
+            LanguageError::ColumnShared => "column_shared",
+            LanguageError::ColumnBelowOne => "column_below_one",
         }
     }
 
@@ -794,6 +804,10 @@ impl LanguageError {
             LanguageError::OverlappingSubtypes => {
                 &[("value", text), ("first", text), ("second", text)]
             }
+            LanguageError::ColumnShared => {
+                &[("first", text), ("second", text), ("column", integer)]
+            }
+            LanguageError::ColumnBelowOne => &[("attribute", text), ("column", integer)],
         };
         Heading::new(
             components

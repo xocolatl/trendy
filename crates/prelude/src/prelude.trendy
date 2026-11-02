@@ -444,6 +444,32 @@ operator message{error: missing_column}: text [
         || columns
 ];
 
+/* `first` and `second`, attributes, or components, as `columns` names
+   them, are both read from the column `column`, but each needs a column
+   of its own (R0016). */
+type column_shared is error { { first: text, second: text, column: integer } };
+
+operator message{error: column_shared}: text [
+    "`"
+        || error.first
+        || "` and `"
+        || error.second
+        || "` are both read from column "
+        || to_text{from: error.column}
+];
+
+/* `attribute`, or a component, as `columns` names it, is read from the
+   column `column`, below 1, but columns count from 1 (R0016). */
+type column_below_one is error { { attribute: text, column: integer } };
+
+operator message{error: column_below_one}: text [
+    "`"
+        || error.attribute
+        || "` is read from column "
+        || to_text{from: error.column}
+        || ", but columns count from 1"
+];
+
 /* The field `text`, in the column `column`, counting from 1, on the line
    `line` of the CSV file at `path`, isn't a value of `type`, the type of
    `attribute`, or a component, as `columns` names it, or is one out of its

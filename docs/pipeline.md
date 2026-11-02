@@ -1994,9 +1994,10 @@ program can name. A `fail` puts it there (`FunctionBuilder::fail_with`),
 and its block ends with `Terminator::Raise`; the runtime puts the
 language's there (`fail_as`), as the table says where they are, taking
 references of its own to what the error holds, and its function returns
-that it failed. A load without `out errors`, which no transaction is
-around (A0066), still writes its failure as it fails, as does running
-out of memory, which has no error. A warning that nothing collects is written where it
+that it failed. A load gives each error it finds to the errors its call
+names (`Found`), or, without `out errors`, fails with it (`give`), so
+the runtime writes no message of its own but running out of memory's,
+which has no error, and an internal error's. A warning that nothing collects is written where it
 is given, its message and site as `warning[R0022]` (`trendy_rt_warned`),
 with no trace, as no call ends. The program's entry is a function of lowering's
 own (`entry`), which calls `main` and, if it fails, writes the

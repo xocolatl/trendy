@@ -1212,6 +1212,32 @@ operator message{error: missing_column}: text [
         || columns
 ];
 
+/* `first` and `second`, attributes, or components, as `columns` names
+   them, are both read from the column `column`, but each needs a column
+   of its own (R0016). */
+type column_shared is error { { first: text, second: text, column: integer } };
+
+operator message{error: column_shared}: text [
+    "`"
+        || error.first
+        || "` and `"
+        || error.second
+        || "` are both read from column "
+        || to_text{from: error.column}
+];
+
+/* `attribute`, or a component, as `columns` names it, is read from the
+   column `column`, below 1, but columns count from 1 (R0016). */
+type column_below_one is error { { attribute: text, column: integer } };
+
+operator message{error: column_below_one}: text [
+    "`"
+        || error.attribute
+        || "` is read from column "
+        || to_text{from: error.column}
+        || ", but columns count from 1"
+];
+
 /* The field `text`, in the column `column`, counting from 1, on the line
    `line` of the CSV file at `path`, isn't a value of `type`, the type of
    `attribute`, or a component, as `columns` names it, or is one out of its
@@ -1777,7 +1803,10 @@ operator main{} [
   Columns `columns` doesn't name are skipped. Two attributes can't have
   one column, and a position below 1, or past the file's last column,
   is no column (R0016), which is an error when compiling if the
-  positions are known then, and otherwise stops the program.
+  positions are known then, and otherwise stops the program, with a
+  `column_shared { first, second, column }` or a `column_below_one {
+  attribute, column }`, mistakes in the call, which `out errors`
+  doesn't take.
 - **`header` says whether the first record is a header,** which is then
   skipped, as RFC 4180's `header=present` says. With `header: false`,
   the first record is a row, and if one of its fields isn't its
@@ -1788,8 +1817,8 @@ operator main{} [
   number or a boolean as `parse_integer`, `parse_approximate` and
   `parse_boolean` read them, so `2672.3` is an approximate number, and
   `yes` and `N` are booleans. A field that isn't one stops the program
-  (R0014), writing it, its column, with the header's name for it if
-  there is one, its line, and its attribute. An attribute of another
+  (R0014), writing it, its column, its line, and its attribute, an
+  `unreadable_field`. An attribute of another
   type, which no field writes, is an error when compiling (A0055), as is
   an array whose tuples' type is a type parameter, whose attributes
   aren't known then.
@@ -5050,7 +5079,8 @@ operator main{} [
   constraint }` (R0017), `component_key_violated_in_file { path, line,
   attribute, type, component, key, first, second }` (R0008) and
   `overlapping_subtypes_in_file { path, line, attribute, value, first,
-  second }` (R0020).
+  second }` (R0020). Without `out errors`, it fails with them, and the
+  program writes them as it writes any failure's error.
 
 ## Transactions
 
