@@ -9,8 +9,8 @@ use trendy_lir as lir;
 
 /// Translate HIR to LIR. Infallible: sema has already rejected bad programs.
 #[must_use]
-pub fn lower(program: &hir::Program, path: &str) -> lir::Program {
-    let mut cx = Lowering::new(path, &program.subtypes);
+pub fn lower(program: &hir::Program) -> lir::Program {
+    let mut cx = Lowering::new(&program.files, &program.subtypes);
 
     let mut variable_data = Vec::new();
     for variable in &program.variables {
@@ -676,12 +676,13 @@ struct Lowering {
     /// The function of each constraint's part that lowered code checks,
     /// and whether a call of it makes a text, relation or array.
     constraint_functions: HashMap<Checked, (lir::FunctionId, bool)>,
-    /// The program's source's path, as a failure writes it.
-    path: String,
+    /// Each of the program's files' path, by its [`hir::FileId`], as a
+    /// failure writes it.
+    files: Vec<String>,
     /// Each site's data object, made once.
     sites: HashMap<hir::Site, lir::DataId>,
     /// Each file's path, as a text, made once.
-    paths: HashMap<hir::File, lir::Field>,
+    paths: HashMap<hir::FileId, lir::Field>,
     /// How many functions are numbered.
     numbered: usize,
     /// Where a failure's error waits, once a `fail` or the entry is
@@ -693,9 +694,9 @@ struct Lowering {
 }
 
 impl Lowering {
-    /// For the program whose source is at `path`, with the types'
+    /// For the program whose files' paths are `files`, with the types'
     /// immediate subtypes `subtypes`.
-    fn new(path: &str, subtypes: &BTreeMap<String, Vec<hir::Type>>) -> Self {
+    fn new(files: &[String], subtypes: &BTreeMap<String, Vec<hir::Type>>) -> Self {
         Lowering {
             families: Families::new(subtypes),
             data: Vec::new(),
@@ -704,7 +705,7 @@ impl Lowering {
             functions: BTreeMap::new(),
             functions_of: HashMap::new(),
             constraint_functions: HashMap::new(),
-            path: path.to_string(),
+            files: files.to_vec(),
             sites: HashMap::new(),
             paths: HashMap::new(),
             numbered: 0,
@@ -815,8 +816,7 @@ impl Lowering {
     }
 
     /// The data object of `site`, laid out as `trendy_runtime::Site`: the
-    /// path of its file, the program's or `<prelude>`, as a text, then its
-    /// line and column.
+    /// path of its file, as a text, then its line and column.
     fn site(&mut self, site: hir::Site) -> lir::DataId {
         if let Some(&id) = self.sites.get(&site) {
             return id;
@@ -831,15 +831,12 @@ impl Lowering {
         id
     }
 
-    /// The path of `file`, the program's or `<prelude>`, as a text.
-    fn path_of(&mut self, file: hir::File) -> lir::Field {
+    /// The path of `file`, as a text.
+    fn path_of(&mut self, file: hir::FileId) -> lir::Field {
         if let Some(path) = self.paths.get(&file) {
             return path.clone();
         }
-        let text = match file {
-            hir::File::Program => self.path.clone(),
-            hir::File::Prelude => "<prelude>".to_string(),
-        };
+        let text = self.files[file.0].clone();
         let path = self.value_field(&hir::Value::Text(text));
         self.paths.insert(file, path.clone());
         path
@@ -6155,7 +6152,7 @@ mod tests {
             .enumerate()
             .map(|(i, statement)| {
                 let site = hir::Site {
-                    file: hir::File::Program,
+                    file: hir::FileId(0),
                     line: i + 1,
                     column: 5,
                 };
@@ -6170,7 +6167,7 @@ mod tests {
     /// failure can pass through saves the one it is entered at, for its
     /// trace.
     fn lower_program(program: &hir::Program) -> lir::Program {
-        let mut lowered = lower(program, "test.trendy");
+        let mut lowered = lower(program);
         for block in lowered.functions.iter_mut().flat_map(|f| &mut f.blocks) {
             block.insts.retain(|i| {
                 !matches!(
@@ -6316,6 +6313,7 @@ mod tests {
             message: hir::OperatorId(operators.len() - 1),
             operators,
             variables,
+            files: vec!["test.trendy".to_string()],
             constraints: Vec::new(),
             subtypes: [("error".to_string(), errors)].into(),
             entry: hir::OperatorId(entry),
@@ -6365,24 +6363,21 @@ mod tests {
             statements: sited(vec![call(0, vec![("v", x())])]),
             locals: Vec::new(),
         };
-        let lowered = lower(
-            &program(
-                vec![
-                    debug_value(),
-                    user("f", &[], vec![call(0, vec![("v", x())])]),
-                    user(
-                        "main",
-                        &[],
-                        vec![
-                            call(1, vec![]),
-                            hir::Statement::Loop(less, body, hir::Check::Before),
-                        ],
-                    ),
-                ],
-                vec![variable("x", hir::Value::Integer(0))],
-            ),
-            "test.trendy",
-        );
+        let lowered = lower(&program(
+            vec![
+                debug_value(),
+                user("f", &[], vec![call(0, vec![("v", x())])]),
+                user(
+                    "main",
+                    &[],
+                    vec![
+                        call(1, vec![]),
+                        hir::Statement::Loop(less, body, hir::Check::Before),
+                    ],
+                ),
+            ],
+            vec![variable("x", hir::Value::Integer(0))],
+        ));
         // Each site's line, its column 5 and its path the program's.
         let line = |inst: &lir::Inst| {
             let lir::Inst::Site(id) = inst else {
@@ -8003,7 +7998,7 @@ mod tests {
             ]
             .into(),
         );
-        let mut cx = Lowering::new("test.trendy", &BTreeMap::new());
+        let mut cx = Lowering::new(&["test.trendy".to_string()], &BTreeMap::new());
         let id = cx.descriptor(&hir::Type::Tuple(heading));
         let lir::Field::Address(attributes) = cx.data[id.0].fields[2] else {
             panic!("attributes are an address");
@@ -8017,7 +8012,7 @@ mod tests {
 
     #[test]
     fn descriptors_point_to_their_elements_type() {
-        let mut cx = Lowering::new("test.trendy", &BTreeMap::new());
+        let mut cx = Lowering::new(&["test.trendy".to_string()], &BTreeMap::new());
         let element = |cx: &Lowering, id: lir::DataId| {
             let lir::Field::Address(element) = cx.data[id.0].fields[4] else {
                 panic!("the element's descriptor is an address");

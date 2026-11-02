@@ -30,11 +30,19 @@ fn errors(uri: &Uri, source: &str) -> Vec<trendy_diag::Diagnostic> {
     if !parse.errors.is_empty() {
         return parse.errors;
     }
+    let file = trendy_sema::File {
+        path: uri.as_str(),
+        tree: &parse.tree,
+    };
     if is_prelude(uri) {
-        trendy_sema::check_prelude(&parse.tree)
+        trendy_sema::check_prelude(&file)
     } else {
         PRELUDE.with(|prelude| {
-            trendy_sema::analyze(&parse.tree, &prelude.tree)
+            let prelude = trendy_sema::File {
+                path: trendy_prelude::PATH,
+                tree: &prelude.tree,
+            };
+            trendy_sema::analyze(&[file], &prelude)
                 .err()
                 .unwrap_or_default()
         })

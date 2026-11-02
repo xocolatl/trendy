@@ -182,9 +182,9 @@ pub enum SyntaxKind {
     ErrorToken,
 
     // Nodes.
-    /// Files checked together, as a program is with the prelude: each
-    /// file's tree, one after another, never parsed.
-    Unit,
+    /// The files of a program, checked together: each of its units' files'
+    /// tree, the prelude's among them, one after another, never parsed.
+    Program,
     SourceFile,
     /// `operator name{params} [body];`, or, for a read-only operator,
     /// `operator name{params}: type [value];`.
@@ -533,7 +533,7 @@ impl SyntaxKind {
         SyntaxKind::ApproximateLiteral,
         SyntaxKind::TextLiteral,
         SyntaxKind::ErrorToken,
-        SyntaxKind::Unit,
+        SyntaxKind::Program,
         SyntaxKind::SourceFile,
         SyntaxKind::Operator,
         SyntaxKind::BuiltinOperator,
@@ -1038,7 +1038,7 @@ impl SyntaxKind {
     /// How a node kind is named in error messages.
     fn describe_node(self) -> Option<&'static str> {
         Some(match self {
-            SyntaxKind::Unit => "unit",
+            SyntaxKind::Program => "program",
             SyntaxKind::SourceFile => "source file",
             SyntaxKind::Operator => "operator definition",
             SyntaxKind::BuiltinOperator => "built-in operator declaration",

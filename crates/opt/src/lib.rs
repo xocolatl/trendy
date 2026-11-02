@@ -369,8 +369,15 @@ mod tests {
         let prelude = trendy_parser::parse(prelude, trendy_lexer::lex(prelude));
         let parse = trendy_parser::parse(source, trendy_lexer::lex(source));
         assert!(parse.errors.is_empty(), "{:?}", parse.errors);
-        let program =
-            trendy_sema::analyze(&parse.tree, &prelude.tree).expect("the program is valid");
+        let unit = trendy_sema::File {
+            path: "program.trendy",
+            tree: &parse.tree,
+        };
+        let prelude = trendy_sema::File {
+            path: trendy_prelude::PATH,
+            tree: &prelude.tree,
+        };
+        let program = trendy_sema::analyze(&[unit], &prelude).expect("the program is valid");
         let program = optimized(program);
         let operator = program
             .operators

@@ -19,6 +19,9 @@ pub struct Program {
     /// the prelude's first.
     pub operators: Vec<Operator>,
     pub variables: Vec<Variable>,
+    /// Each file of the program, by [`FileId`], its units' and the
+    /// prelude's: the path a failure in it writes it by.
+    pub files: Vec<String>,
     /// The constraints on the variables, which their initial values
     /// satisfy.
     pub constraints: Vec<VariableConstraint>,
@@ -1459,22 +1462,16 @@ impl Statement {
 /// or a value's, which a failure there says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Site {
-    pub file: File,
+    pub file: FileId,
     /// Counting from 1.
     pub line: usize,
     /// Counting from 1, in characters, as diagnostics count them.
     pub column: usize,
 }
 
-/// The source a [`Site`] is in.
+/// The file a [`Site`] is in: its place in [`Program::files`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum File {
-    /// The program's own.
-    Program,
-    /// The prelude's, whose operators written in trendy are in every
-    /// program.
-    Prelude,
-}
+pub struct FileId(pub usize);
 
 /// Statements run in order, an update operator's body or a branch of an
 /// `if` statement, with the local variables declared among them, which are

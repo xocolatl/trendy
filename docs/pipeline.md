@@ -13,10 +13,13 @@ This document is about the compiler. For the language itself, see
 
 **`trendy_prelude`** holds the prelude: trendy source declaring the built-in
 types and operators, and defining operators in trendy, all part of every
-program. Drivers parse it next to the program, and sema checks the two
-as one unit of two files (`ast::Unit`, `sema::Files`), the program's text
-first, then the prelude's, so that a span is an offset into both, and the
-program's spans are those it has alone. Sema checks every built-in's
+program. Drivers parse it next to the program's units' files, and sema
+checks them together, as one program (`ast::Program`, `sema::Files`), its
+units' texts first, main's first of all, then the prelude's, so that a
+span is an offset into them one after another, and main's unit's spans
+are those it has alone. Each file comes with its path
+(`trendy_sema::File`), which the HIR keeps (`hir::Program::files`), each
+site naming its file by its place there (`hir::FileId`). Sema checks every built-in's
 declaration against what the compiler implements: the kinds and the
 scalar types first (`builtins::kinds`), and the built-in operators
 (`hir::Builtin`, `builtins::operators`) once the types they can name, the
@@ -232,9 +235,9 @@ so it stays at the bottom of the graph.
 - A typed view over the tree (`ast::SourceFile`, `ast::Operator`, …) with
   accessors that return `Option`, because a tree with errors can be missing
   any part.
-- `ast::Unit`, files checked together, a tree of their trees, one after
-  another, never parsed: a span in it is an offset into their texts, one
-  after another.
+- `ast::Program`, the files checked together, a tree of their trees, one
+  after another, never parsed: a span in it is an offset into their texts,
+  one after another.
 - `literal`, the meaning of literals: the escape table, the integer syntax,
   and decoding. The lexer uses it to report malformed literals, and sema uses
   it (through `ast::Literal::value`) to decode them, so the rules exist in
@@ -2133,8 +2136,9 @@ own, and before a loop's condition, which follows its body's statements;
 a function with no site of its own, as a type's selector, saves the one
 it is entered at, its caller's, and restores that after each call
 (`Inst::SaveSite`, `Inst::RestoreSite`);
-each site is a constant of the path, `<prelude>` for the prelude's, the
-line and the column. Codegen stores its address in the runtime's
+each site is a constant of its file's path, as the HIR has it
+(`hir::Program::files`, `<prelude>` for the prelude's), the line and the
+column. Codegen stores its address in the runtime's
 `trendy_rt_site`, which the runtime writes for every failure, its own
 functions' too, out of memory included. The site is a statement's or a
 value's, not the operator's in it that failed, which the message says.

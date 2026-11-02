@@ -54,7 +54,15 @@ fn build(input: &Path, output: &Path, format: Format) -> Result<(), String> {
     }
     let prelude = prelude()?;
     // Sema's spans are in the program, then the prelude.
-    let hir = trendy_sema::analyze(&parse.tree, &prelude.tree).map_err(|errors| {
+    let unit = trendy_sema::File {
+        path: &path,
+        tree: &parse.tree,
+    };
+    let prelude_file = trendy_sema::File {
+        path: trendy_prelude::PATH,
+        tree: &prelude.tree,
+    };
+    let hir = trendy_sema::analyze(&[unit], &prelude_file).map_err(|errors| {
         let sources = Sources::new([
             (path.as_str(), source.as_str()),
             (trendy_prelude::PATH, trendy_prelude::SOURCE),
@@ -64,7 +72,7 @@ fn build(input: &Path, output: &Path, format: Format) -> Result<(), String> {
 
     // Past sema, every failure is a compiler bug, not a user error.
     let hir = trendy_opt::optimized(hir);
-    let lir = trendy_lower::lower(&hir, &path);
+    let lir = trendy_lower::lower(&hir);
     let object = trendy_codegen::compile(&lir)
         .map_err(|e| format!("error[X0000]: internal compiler error: {e}"))?;
     link(&object, output)

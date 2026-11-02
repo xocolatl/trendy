@@ -37,26 +37,26 @@ use crate::operators::Operators;
 /// # Errors
 ///
 /// Returns every semantic error, in source order. Their spans are in the
-/// program's text followed by the prelude's (see `trendy_diag::Sources`),
-/// so the program's are those it has alone. A declaration in the prelude
-/// that doesn't match the compiler is an internal error.
-pub fn analyze(
-    program: &SourceFile,
-    prelude: &SourceFile,
-) -> Result<hir::Program, Vec<Diagnostic>> {
-    let (files, program) = Files::unit(program, prelude);
+/// units' texts, one after another, then the prelude's (see
+/// `trendy_diag::Sources`), so the first unit's are those it has alone. A
+/// declaration in the prelude that doesn't match the compiler is an
+/// internal error.
+///
+/// # Panics
+///
+/// If `units` is empty: a program has main's unit, first.
+pub fn analyze(units: &[File], prelude: &File) -> Result<hir::Program, Vec<Diagnostic>> {
+    let files = Files::new(units, prelude);
     let mut errors = Vec::new();
-    sections::check(&program, &mut errors);
+    for unit in &files.units {
+        sections::check(unit, &mut errors);
+    }
     let checked = check(&files, &mut errors);
-    let entry = entry(
-        &program,
-        &checked.namespaces,
-        &checked.operators,
-        &mut errors,
-    );
+    let main = files.units.first().expect("a program has main's unit");
+    let entry = entry(main, &checked.namespaces, &checked.operators, &mut errors);
     errors.sort_by_key(|d| d.span().start);
     match entry {
-        Some(entry) if errors.is_empty() => Ok(checked.finish(entry)),
+        Some(entry) if errors.is_empty() => Ok(checked.finish(entry, &files)),
         _ => Err(errors),
     }
 }
@@ -70,11 +70,8 @@ pub fn analyze(
 /// is part of the compiler, and an error in what it defines in trendy is
 /// reported as a program's would be.
 #[must_use]
-pub fn check_prelude(prelude: &SourceFile) -> Vec<Diagnostic> {
-    let files = Files {
-        prelude: prelude.clone(),
-        program: None,
-    };
+pub fn check_prelude(prelude: &File) -> Vec<Diagnostic> {
+    let files = Files::new(&[], prelude);
     let mut errors = Vec::new();
     check(&files, &mut errors);
     errors.sort_by_key(|d| d.span().start);
@@ -90,28 +87,40 @@ pub(crate) enum Source {
     Prelude,
 }
 
-/// The files checked together, as one unit's: the prelude, and the
-/// program, unless the prelude is checked alone. The prelude's
+/// A file of the program, as a driver gives it to sema: its tree, parsed
+/// without errors, and its path, which a failure in it writes it by.
+#[derive(Clone, Copy)]
+pub struct File<'a> {
+    pub path: &'a str,
+    pub tree: &'a SourceFile,
+}
+
+/// The files checked together: the program's units', main's first, unless
+/// the prelude is checked alone, and the prelude. The prelude's
 /// declarations come first, so a name defined in both is the program's
 /// duplicate of the prelude's.
 pub(crate) struct Files {
     prelude: SourceFile,
-    program: Option<SourceFile>,
+    units: Vec<SourceFile>,
+    /// Each file's path, by its [`hir::FileId`]: the units' in order, then
+    /// the prelude's.
+    paths: Vec<String>,
 }
 
 impl Files {
-    /// `program` and `prelude`, as the files of one unit, the program's
-    /// first, and the unit's program.
-    fn unit(program: &SourceFile, prelude: &SourceFile) -> (Files, SourceFile) {
-        let unit = ast::Unit::new(&[program.clone(), prelude.clone()]);
-        let mut files = unit.files();
-        let program = files.next().expect("a unit has the files it is made of");
-        let prelude = files.next().expect("a unit has the files it is made of");
-        let files = Files {
+    /// The files of `units` and `prelude`, as the trees of one program, the
+    /// units' first, so that a span is an offset into their texts one after
+    /// another.
+    fn new(units: &[File], prelude: &File) -> Files {
+        let all: Vec<&File> = units.iter().chain(std::iter::once(prelude)).collect();
+        let trees: Vec<SourceFile> = all.iter().map(|file| file.tree.clone()).collect();
+        let mut files: Vec<SourceFile> = ast::Program::new(&trees).files().collect();
+        let prelude = files.pop().expect("a program has the files it is made of");
+        Files {
             prelude,
-            program: Some(program.clone()),
-        };
-        (files, program)
+            units: files,
+            paths: all.iter().map(|file| file.path.to_string()).collect(),
+        }
     }
 
     /// The prelude.
@@ -121,11 +130,8 @@ impl Files {
 
     /// Each file, with what it is checked as, the prelude first.
     fn each(&self) -> impl Iterator<Item = (Source, &SourceFile)> {
-        std::iter::once((Source::Prelude, &self.prelude)).chain(
-            self.program
-                .iter()
-                .map(|program| (Source::Program, program)),
-        )
+        std::iter::once((Source::Prelude, &self.prelude))
+            .chain(self.units.iter().map(|unit| (Source::Program, unit)))
     }
 
     /// Every definition, each with the file it is in, the prelude's first,
@@ -158,26 +164,16 @@ impl Files {
 
 /// Where each place in the files is: the sites of what runs there.
 pub(crate) struct Sites<'a> {
-    /// The files, each as a site names it, in the order their texts are in
-    /// the unit's.
-    files: Vec<hir::File>,
     sources: trendy_diag::Sources<'a>,
 }
 
 impl<'a> Sites<'a> {
-    /// The sites in the files whose texts are `texts`, each with the file
-    /// it is, in the unit's order.
-    fn new(texts: &'a [(hir::File, String)]) -> Self {
-        let name = |file| match file {
-            hir::File::Program => "program",
-            hir::File::Prelude => "prelude",
-        };
+    /// The sites in the files whose paths and texts are `files`, each file
+    /// at its [`hir::FileId`], in the program's order.
+    fn new(files: &'a [(&'a str, String)]) -> Self {
         Sites {
-            files: texts.iter().map(|(file, _)| *file).collect(),
             sources: trendy_diag::Sources::new(
-                texts
-                    .iter()
-                    .map(|(file, text)| (name(*file), text.as_str())),
+                files.iter().map(|(path, text)| (*path, text.as_str())),
             ),
         }
     }
@@ -187,7 +183,7 @@ impl<'a> Sites<'a> {
         let located = self.sources.locate(span);
         let position = located.file.map.line_col(located.span.start);
         hir::Site {
-            file: self.files[located.index],
+            file: hir::FileId(located.index),
             line: position.line,
             column: position.col,
         }
@@ -211,13 +207,13 @@ pub(crate) fn check(files: &Files, errors: &mut Vec<Diagnostic>) -> Checked {
     // which only the prelude declares.
     let kinds = builtins::kinds(&files.prelude, errors);
     let mut namespaces = collect_names(&kinds, files, errors);
-    // The texts in the unit's order, the program's first.
-    let texts: Vec<(hir::File, String)> = files
-        .program
+    // Each file's path and text, in the program's order, the units' first.
+    let texts: Vec<(&str, String)> = files
+        .units
         .iter()
-        .map(|program| (hir::File::Program, program))
-        .chain(std::iter::once((hir::File::Prelude, &files.prelude)))
-        .map(|(file, syntax)| (file, syntax.syntax().text().to_string()))
+        .chain(std::iter::once(&files.prelude))
+        .zip(&files.paths)
+        .map(|(file, path)| (path.as_str(), file.syntax().text().to_string()))
         .collect();
     let sites = Sites::new(&texts);
 
@@ -279,8 +275,8 @@ pub(crate) fn check(files: &Files, errors: &mut Vec<Diagnostic>) -> Checked {
 }
 
 impl Checked {
-    /// The program of files without errors, which starts in `entry`.
-    pub(crate) fn finish(mut self, entry: hir::OperatorId) -> hir::Program {
+    /// The program of `files`, without errors, which starts in `entry`.
+    pub(crate) fn finish(mut self, entry: hir::OperatorId, files: &Files) -> hir::Program {
         let message = self
             .operators
             .message()
@@ -332,6 +328,7 @@ impl Checked {
         hir::Program {
             operators,
             variables,
+            files: files.paths.clone(),
             constraints: self.constraints,
             subtypes: self.namespaces.subtypes,
             entry,
@@ -871,7 +868,32 @@ mod tests {
     }
 
     fn analyze_str(source: &str) -> Result<hir::Program, Vec<Diagnostic>> {
-        PRELUDE.with(|prelude| analyze(&parse(source), prelude))
+        PRELUDE.with(|prelude| analyze_with(&parse(source), prelude))
+    }
+
+    /// `program` analyzed, as the one unit of a program, with `prelude`.
+    fn analyze_with(
+        program: &SourceFile,
+        prelude: &SourceFile,
+    ) -> Result<hir::Program, Vec<Diagnostic>> {
+        let unit = File {
+            path: "program.trendy",
+            tree: program,
+        };
+        analyze(&[unit], &prelude_file(prelude))
+    }
+
+    /// `prelude` as the prelude's file.
+    fn prelude_file(prelude: &SourceFile) -> File<'_> {
+        File {
+            path: "<prelude>",
+            tree: prelude,
+        }
+    }
+
+    /// The errors of `prelude`, checked alone.
+    fn checked_prelude(prelude: &SourceFile) -> Vec<Diagnostic> {
+        check_prelude(&prelude_file(prelude))
     }
 
     /// The errors of the program `source`, each where its fix goes, in it,
@@ -2479,7 +2501,7 @@ var zero := seg{{len: 0}};{MAIN}"
 
     #[test]
     fn the_prelude_is_valid() {
-        assert_eq!(check_prelude(&parse(trendy_prelude::SOURCE)), Vec::new());
+        assert_eq!(checked_prelude(&parse(trendy_prelude::SOURCE)), Vec::new());
         // Its built-ins are a program's operators.
         let program = analyze_str("operator main{} [];").unwrap();
         let debug_value = program
@@ -2500,18 +2522,18 @@ var zero := seg{{len: 0}};{MAIN}"
             trendy_prelude::SOURCE
         );
         let prelude = parse(&prelude);
-        assert_eq!(check_prelude(&prelude), Vec::new());
+        assert_eq!(checked_prelude(&prelude), Vec::new());
         let strip = "type strip is shape { { length: integer, width: integer } };\n";
         let version = "operator area{s: strip}: integer [ s.length * s.width ];\n";
         let program = format!(
             "{strip}{version}var a := area{{s: strip{{length: 2, width: 3}}}};\nvar b := area{{s: square{{side: 2}}}};\noperator main{{}} [];"
         );
-        let program = analyze(&parse(&program), &prelude).unwrap();
+        let program = analyze_with(&parse(&program), &prelude).unwrap();
         let values: Vec<_> = program.variables.iter().map(|v| v.init.clone()).collect();
         assert_eq!(values, [hir::Value::Integer(6), hir::Value::Integer(4)]);
         // Without its version, the program's type is reported, at it.
         let source = format!("{strip}operator main{{}} [];");
-        let errors = analyze(&parse(&source), &prelude).unwrap_err();
+        let errors = analyze_with(&parse(&source), &prelude).unwrap_err();
         assert_eq!(errors.len(), 1, "{errors:#?}");
         assert_eq!(errors[0].code, Code::Versions);
         let at = |span: Span| &source[span.start..span.end];
@@ -2811,7 +2833,7 @@ operator main{{}} [ var lines: array text; {main} ];"
             "type not_utf8 is error { { path: text, line: approximate } };",
         );
         assert_ne!(source, trendy_prelude::SOURCE);
-        let errors = check_prelude(&parse(&source));
+        let errors = checked_prelude(&parse(&source));
         assert!(
             errors.iter().any(|d| d.code == Code::Internal
                 && d.message
@@ -2823,14 +2845,14 @@ operator main{{}} [ var lines: array text; {main} ];"
             "heading transaction_collection := { error: error, failed: integer };",
         );
         assert_ne!(source, trendy_prelude::SOURCE);
-        let errors = check_prelude(&parse(&source));
+        let errors = checked_prelude(&parse(&source));
         assert!(
             errors.iter().any(|d| d.code == Code::Internal
                 && d.message.contains("`heading transaction_collection")),
             "{errors:#?}"
         );
         let source = trendy_prelude::SOURCE.replace("type error union;", "type error_ union;");
-        let errors = check_prelude(&parse(&source));
+        let errors = checked_prelude(&parse(&source));
         assert!(
             errors
                 .iter()
@@ -2846,7 +2868,7 @@ operator main{{}} [ var lines: array text; {main} ];"
         assert!(trendy_prelude::SOURCE.contains(declared));
         let source =
             trendy_prelude::SOURCE.replacen(declared, "types { T: any tuple, C: any tuple }", 1);
-        assert_eq!(check_prelude(&parse(&source)), Vec::new());
+        assert_eq!(checked_prelude(&parse(&source)), Vec::new());
     }
 
     #[test]
@@ -2854,7 +2876,7 @@ operator main{{}} [ var lines: array text; {main} ];"
         let wrong = |from: &str, to: &str| {
             assert!(trendy_prelude::SOURCE.contains(from), "{from}");
             let source = trendy_prelude::SOURCE.replacen(from, to, 1);
-            let errors = check_prelude(&parse(&source));
+            let errors = checked_prelude(&parse(&source));
             assert_eq!(errors.len(), 1, "{errors:#?}");
             assert_eq!(errors[0].code, Code::Internal);
             let span = errors[0].primary.span;
@@ -3004,7 +3026,7 @@ operator main{{}} [ var lines: array text; {main} ];"
         )
         .unwrap();
         let site = |line, column| hir::Site {
-            file: hir::File::Program,
+            file: hir::FileId(0),
             line,
             column,
         };
@@ -3036,7 +3058,7 @@ operator main{{}} [ var lines: array text; {main} ];"
         let hir::Expr::At(at, _) = value else {
             panic!("{value:?}");
         };
-        assert_eq!(at.file, hir::File::Prelude);
+        assert_eq!(program.files[at.file.0], "<prelude>");
     }
 
     #[test]

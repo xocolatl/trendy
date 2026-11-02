@@ -36,7 +36,7 @@ macro_rules! ast_node {
     };
 }
 
-ast_node!(Unit);
+ast_node!(Program);
 ast_node!(SourceFile);
 ast_node!(SectionHeader);
 ast_node!(Operator);
@@ -144,17 +144,17 @@ pub enum Item {
     Database(DatabaseDecl),
 }
 
-impl Unit {
-    /// The unit of `files`, with each file's tree, one after another: a
+impl Program {
+    /// The program of `files`, with each file's tree, one after another: a
     /// span in it is an offset into their texts one after another, so the
     /// first file's spans are those it has alone.
     #[must_use]
-    pub fn new(files: &[SourceFile]) -> Unit {
+    pub fn new(files: &[SourceFile]) -> Program {
         let children = files
             .iter()
             .map(|file| rowan::NodeOrToken::Node(file.0.green().into_owned()));
-        let kind = <Trendy as rowan::Language>::kind_to_raw(SyntaxKind::Unit);
-        Unit(SyntaxNode::new_root(rowan::GreenNode::new(kind, children)))
+        let kind = <Trendy as rowan::Language>::kind_to_raw(SyntaxKind::Program);
+        Program(SyntaxNode::new_root(rowan::GreenNode::new(kind, children)))
     }
 
     /// Its files, in order.
@@ -2084,13 +2084,13 @@ impl HeadingRef {
     }
 
     /// The declaration of the heading it names, in its file, or in the
-    /// first of its unit's files that declares it.
+    /// first of its program's files that declares it.
     #[must_use]
     pub fn declaration(&self) -> Option<HeadingDecl> {
         let name = self.ident()?;
         let root = self.0.ancestors().last()?;
-        match Unit::cast(root.clone()) {
-            Some(unit) => unit.files().find_map(|file| file.heading(name.text())),
+        match Program::cast(root.clone()) {
+            Some(program) => program.files().find_map(|file| file.heading(name.text())),
             None => SourceFile::cast(root)?.heading(name.text()),
         }
     }

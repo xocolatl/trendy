@@ -15,7 +15,15 @@ fn errors(source: &str) -> Vec<Diagnostic> {
     if !parse.errors.is_empty() {
         return parse.errors;
     }
-    trendy_sema::analyze(&parse.tree, &prelude.tree)
+    let unit = trendy_sema::File {
+        path: "program.trendy",
+        tree: &parse.tree,
+    };
+    let prelude = trendy_sema::File {
+        path: trendy_prelude::PATH,
+        tree: &prelude.tree,
+    };
+    trendy_sema::analyze(&[unit], &prelude)
         .err()
         .unwrap_or_default()
 }

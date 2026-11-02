@@ -407,7 +407,16 @@ fn analyze(source: &str) -> trendy_hir::Program {
         assert!(parse.errors.is_empty(), "{source}: {:#?}", parse.errors);
         parse.tree
     };
-    trendy_sema::analyze(&parse(source), &parse(trendy_prelude::SOURCE)).unwrap()
+    let (program, prelude) = (parse(source), parse(trendy_prelude::SOURCE));
+    let unit = trendy_sema::File {
+        path: "program.trendy",
+        tree: &program,
+    };
+    let prelude = trendy_sema::File {
+        path: trendy_prelude::PATH,
+        tree: &prelude,
+    };
+    trendy_sema::analyze(&[unit], &prelude).unwrap()
 }
 
 /// `written`, a value the program `source` wrote, read back as an
