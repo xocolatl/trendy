@@ -3055,6 +3055,69 @@ operator main{{}} [ var lines: array text; {main} ];"
     }
 
     #[test]
+    fn tclose_closes_a_relation_of_two_attributes_of_one_type() {
+        // Folded when the relation is known: every path, cycles too.
+        let vars = variables(
+            "var closed := relation { { a: 1, b: 2 }, { a: 2, b: 3 }, { a: 3, b: 2 } } tclose;",
+        );
+        let pairs = |pairs: &[(i64, i64)]| {
+            hir::Value::Relation(hir::RelationValue {
+                heading: hir::Heading::new(
+                    [
+                        ("a".to_string(), hir::Type::Scalar(hir::Scalar::Integer)),
+                        ("b".to_string(), hir::Type::Scalar(hir::Scalar::Integer)),
+                    ]
+                    .into(),
+                ),
+                tuples: pairs
+                    .iter()
+                    .map(|&(a, b)| {
+                        hir::TupleValue::new(
+                            [
+                                ("a".to_string(), hir::Value::Integer(a)),
+                                ("b".to_string(), hir::Value::Integer(b)),
+                            ]
+                            .into(),
+                        )
+                    })
+                    .collect(),
+            })
+        };
+        assert_eq!(
+            vars[0].init,
+            pairs(&[(1, 2), (1, 3), (2, 2), (2, 3), (3, 2), (3, 3)])
+        );
+        // Not two attributes of one type, nor a relation: what to close is
+        // the program's to say.
+        for (source, code) in [
+            (
+                "var x := relation { { a: 1, b: 2, c: 3 } } tclose;",
+                Code::TcloseOperand,
+            ),
+            (
+                "var x := relation { { a: 1, b: \"two\" } } tclose;",
+                Code::TcloseOperand,
+            ),
+            (
+                "var x := tuple { a: 1, b: 2 } tclose;",
+                Code::WrongOperandType,
+            ),
+        ] {
+            let errors = errors(&format!("{source}{MAIN}"));
+            assert_eq!(errors.len(), 1, "{source}: {errors:#?}");
+            assert_eq!(errors[0].code, code, "{source}");
+            assert!(errors[0].suggestions.is_empty(), "{source}");
+        }
+        let errors = errors(&format!(
+            "var r := relation {{ {{ a: 1, b: 2, c: \"x\" }} }};\nvar x := (r where a > 0) tclose;{MAIN}"
+        ));
+        assert!(
+            errors[0].help[0].contains("`(r where a > 0){a, b} tclose`"),
+            "{errors:#?}"
+        );
+    }
+
+    #[test]
     fn a_units_interface_declares_what_its_implementation_defines() {
         // An interface operator's heading, and its definition repeating
         // it, are one operator, called by its name.

@@ -88,6 +88,7 @@ pub enum SyntaxKind {
     UngroupKw,
     WrapKw,
     UnwrapKw,
+    TcloseKw,
     JoinKw,
     TimesKw,
     ComposeKw,
@@ -438,7 +439,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 171] = [
+    pub const ALL: [SyntaxKind; 172] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -466,6 +467,7 @@ impl SyntaxKind {
         SyntaxKind::UngroupKw,
         SyntaxKind::WrapKw,
         SyntaxKind::UnwrapKw,
+        SyntaxKind::TcloseKw,
         SyntaxKind::JoinKw,
         SyntaxKind::TimesKw,
         SyntaxKind::ComposeKw,
@@ -645,6 +647,7 @@ impl SyntaxKind {
                 | SyntaxKind::UngroupKw
                 | SyntaxKind::WrapKw
                 | SyntaxKind::UnwrapKw
+                | SyntaxKind::TcloseKw
                 | SyntaxKind::JoinKw
                 | SyntaxKind::TimesKw
                 | SyntaxKind::ComposeKw
@@ -694,6 +697,7 @@ impl SyntaxKind {
                 | SyntaxKind::UngroupKw
                 | SyntaxKind::WrapKw
                 | SyntaxKind::UnwrapKw
+                | SyntaxKind::TcloseKw
                 | SyntaxKind::JoinKw
                 | SyntaxKind::TimesKw
                 | SyntaxKind::ComposeKw
@@ -862,6 +866,7 @@ impl SyntaxKind {
             SyntaxKind::UngroupKw => "ungroup",
             SyntaxKind::WrapKw => "wrap",
             SyntaxKind::UnwrapKw => "unwrap",
+            SyntaxKind::TcloseKw => "tclose",
             SyntaxKind::JoinKw => "join",
             SyntaxKind::TimesKw => "times",
             SyntaxKind::ComposeKw => "compose",
@@ -957,6 +962,7 @@ impl SyntaxKind {
             SyntaxKind::UngroupKw => "`ungroup`",
             SyntaxKind::WrapKw => "`wrap`",
             SyntaxKind::UnwrapKw => "`unwrap`",
+            SyntaxKind::TcloseKw => "`tclose`",
             SyntaxKind::JoinKw => "`join`",
             SyntaxKind::TimesKw => "`times`",
             SyntaxKind::ComposeKw => "`compose`",

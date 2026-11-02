@@ -4647,6 +4647,33 @@ impl<'a> Parser<'a> {
         self.builder.finish_node();
     }
 
+    /// Whether Tutorial D's `TCLOSE r` is next: `tclose`, in any case,
+    /// before an operand, where trendy writes it after one.
+    fn at_prefix_tclose(&mut self) -> bool {
+        let word = self.found().is_some_and(|f| {
+            f.kind == SyntaxKind::TcloseKw
+                || (f.kind == SyntaxKind::Ident
+                    && errors::operator_spelling(f.text) == Some(SyntaxKind::TcloseKw))
+        });
+        word && self.found_after(1).is_some_and(|f| {
+            matches!(f.kind, SyntaxKind::Ident | SyntaxKind::LParen) || starts_value(f.kind)
+        })
+    }
+
+    /// Tutorial D's `TCLOSE r`, which [`Parser::at_prefix_tclose`] found:
+    /// parsed as trendy's `r tclose`, the operand with its own postfix
+    /// operators, and fixed to it.
+    fn prefix_tclose(&mut self) {
+        self.start_node(SyntaxKind::PostfixExpr);
+        let word = self.found().expect("at `tclose`");
+        self.bump();
+        let operand = self.found().map_or(word.span.end, |f| f.span.start);
+        self.postfix();
+        self.builder.finish_node();
+        let end = self.last_end.unwrap_or(operand);
+        self.errors.push(errors::prefix_tclose(word, operand, end));
+    }
+
     /// An operand, then postfix operators, which bind tighter than any
     /// other: attribute extraction, `t.a`, projections, `r{a, b}`, `remove`
     /// and `rename`. So `a and b{x}` projects `b`, and `-t.a` negates `t.a`.
@@ -4655,6 +4682,8 @@ impl<'a> Parser<'a> {
         let start = self.builder.checkpoint();
         if self.at(SyntaxKind::BangBang) {
             self.image();
+        } else if self.at_prefix_tclose() {
+            self.prefix_tclose();
         } else {
             self.primary();
         }
@@ -4712,6 +4741,8 @@ impl<'a> Parser<'a> {
                     }
                     SyntaxKind::GroupKw | SyntaxKind::WrapKw => self.gather_list(keyword),
                     SyntaxKind::UngroupKw | SyntaxKind::UnwrapKw => self.unpacked(keyword),
+                    // Nothing follows it.
+                    SyntaxKind::TcloseKw => {}
                     _ => self.names(errors::PROJECTION_FORM),
                 }
             } else {
@@ -4761,6 +4792,7 @@ impl<'a> Parser<'a> {
                 | SyntaxKind::UngroupKw
                 | SyntaxKind::WrapKw
                 | SyntaxKind::UnwrapKw
+                | SyntaxKind::TcloseKw
         )
         .then_some((found, keyword))
     }
@@ -8017,6 +8049,52 @@ var b := tuple { fail: fail }.fail;",
             assert_eq!(codes, [Code::FailSpelling], "{source}");
             assert!(parse.errors[0].suggestions.is_empty(), "{source}");
         }
+    }
+
+    #[test]
+    fn transitive_closure() {
+        // After its operand, as the other relational operators are, so a
+        // restriction after it restricts the closure.
+        let parse = parse_str("var cycles := uses tclose where unit = used;");
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let init = parse
+            .tree
+            .variables()
+            .next()
+            .unwrap()
+            .initializer()
+            .unwrap();
+        let Expr::Binary(restriction) = init else {
+            panic!("{init:?}");
+        };
+        let Some(Expr::Postfix(closed)) = restriction.lhs() else {
+            panic!("{restriction:?}");
+        };
+        assert_eq!(closed.operator().unwrap().kind(), SyntaxKind::TcloseKw);
+        assert_eq!(
+            closed.operand().unwrap().syntax().text().to_string(),
+            "uses"
+        );
+        // Tutorial D's `TCLOSE r`, before its operand, fixed to after it.
+        for (source, fixed) in [
+            ("var x := TCLOSE r;", "var x := r tclose;"),
+            (
+                "var x := tclose (r where a = 1);",
+                "var x := (r where a = 1) tclose;",
+            ),
+            (
+                "var x := TCLOSE r{a, b} where a = 1;",
+                "var x := r{a, b} tclose where a = 1;",
+            ),
+        ] {
+            let parse = parse_str(source);
+            let codes: Vec<Code> = parse.errors.iter().map(|e| e.code).collect();
+            assert_eq!(codes, [Code::TcloseOrder], "{source}: {:#?}", parse.errors);
+            assert_eq!(fix(source), fixed, "{source}");
+        }
+        // A keyword, never a name.
+        let parse = parse_str("var tclose := 1;");
+        assert!(!parse.errors.is_empty());
     }
 
     #[test]

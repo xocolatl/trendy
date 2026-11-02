@@ -1787,6 +1787,13 @@ pub enum Expr {
     /// The tuples of the left relation that have no match in the right
     /// (`not matching`, the antijoin), otherwise as for `Semijoin`.
     Antijoin(Box<Expr>, Box<Expr>),
+    /// The transitive closure of a relation of two attributes of one type
+    /// (`tclose`, Algebra A's TCLOSE, the one of its operators the others
+    /// can't express): the relation of the same heading whose tuples are
+    /// those of a path between their values, through the operand's tuples,
+    /// each an arc from one attribute's value to the other's. The closure is
+    /// the same whichever attribute an arc starts at, so neither is named.
+    Tclose(Box<Expr>),
     /// A tuple, or each tuple of a relation, with attributes computed, each
     /// by its expression from the tuple at hand, which is `Current(0, …)` in
     /// it. An attribute the operand hasn't is added (`extend`); one it has
@@ -1961,7 +1968,8 @@ impl Expr {
             }
             Expr::Restrict(operand, _)
             | Expr::Semijoin(operand, _)
-            | Expr::Antijoin(operand, _) => operand.type_with(leaf),
+            | Expr::Antijoin(operand, _)
+            | Expr::Tclose(operand) => operand.type_with(leaf),
             Expr::Only(operand) => match operand.type_with(leaf) {
                 Type::Relation(heading) => Type::Tuple(heading),
                 other => panic!("the only tuple of {other}"),
@@ -2010,6 +2018,7 @@ impl Expr {
             | Expr::Restrict(..)
             | Expr::Semijoin(..)
             | Expr::Antijoin(..)
+            | Expr::Tclose(..)
             | Expr::Combine(..)
             | Expr::Extend(..)
             | Expr::Relation(..)
@@ -2184,6 +2193,7 @@ impl Expr {
             }
             Expr::Semijoin(lhs, rhs) => Expr::Semijoin(Box::new(f(*lhs, 0)), Box::new(f(*rhs, 0))),
             Expr::Antijoin(lhs, rhs) => Expr::Antijoin(Box::new(f(*lhs, 0)), Box::new(f(*rhs, 0))),
+            Expr::Tclose(operand) => Expr::Tclose(Box::new(f(*operand, 0))),
             Expr::Extend(operand, computed, attributes) => Expr::Extend(
                 Box::new(f(*operand, 0)),
                 computed,
@@ -2258,7 +2268,8 @@ impl Expr {
             | Expr::Is(operand, _)
             | Expr::Fail(operand, _)
             | Expr::Load(operand, ..)
-            | Expr::Unload(operand, ..) => f(operand, 0),
+            | Expr::Unload(operand, ..)
+            | Expr::Tclose(operand) => f(operand, 0),
             Expr::Let(_, lhs, rhs)
             | Expr::Binary(_, lhs, rhs)
             | Expr::And(lhs, rhs)
@@ -2391,6 +2402,7 @@ impl Expr {
             }
             Expr::Semijoin(lhs, rhs) => Expr::Semijoin(inst(lhs), inst(rhs)),
             Expr::Antijoin(lhs, rhs) => Expr::Antijoin(inst(lhs), inst(rhs)),
+            Expr::Tclose(operand) => Expr::Tclose(inst(operand)),
             Expr::Extend(operand, computed, attributes) => {
                 Expr::Extend(inst(operand), computed.instantiated(types), all(attributes))
             }
@@ -4255,6 +4267,63 @@ impl Value {
             heading: combination.heading(&lhs.heading, &rhs.heading),
             tuples,
         }))
+    }
+
+    /// The transitive closure of this relation, of two attributes of one
+    /// type, as for [`Expr::Tclose`]: a tuple for each path through its
+    /// tuples, each an arc from its first attribute's value to its
+    /// second's, in name order, from the path's first value to its last.
+    ///
+    /// # Panics
+    ///
+    /// If it isn't a relation of two attributes, which sema rules out.
+    #[must_use]
+    pub fn tclose(&self) -> Value {
+        let Value::Relation(relation) = self else {
+            panic!("the transitive closure of {self:?}");
+        };
+        let names: Vec<&str> = relation
+            .heading
+            .attributes()
+            .map(|(name, _)| name)
+            .collect();
+        let [from, to] = names[..] else {
+            panic!(
+                "the transitive closure of a relation of {} attributes",
+                names.len()
+            );
+        };
+        let value = |tuple: &TupleValue, name| tuple.get(name).expect("the heading's").clone();
+        let mut arcs: BTreeMap<Value, BTreeSet<Value>> = BTreeMap::new();
+        for tuple in &relation.tuples {
+            arcs.entry(value(tuple, from))
+                .or_default()
+                .insert(value(tuple, to));
+        }
+        let mut tuples = BTreeSet::new();
+        for (start, ends) in &arcs {
+            // Each value a path from `start` reaches, once.
+            let mut reached: BTreeSet<&Value> = BTreeSet::new();
+            let mut next: Vec<&Value> = ends.iter().collect();
+            while let Some(end) = next.pop() {
+                if reached.insert(end) {
+                    next.extend(arcs.get(end).into_iter().flatten());
+                }
+            }
+            tuples.extend(reached.into_iter().map(|end| {
+                TupleValue::new(
+                    [
+                        (from.to_string(), start.clone()),
+                        (to.to_string(), end.clone()),
+                    ]
+                    .into(),
+                )
+            }));
+        }
+        Value::Relation(RelationValue {
+            heading: relation.heading.clone(),
+            tuples,
+        })
     }
 
     /// The tuples of this relation that have a match in `other` on their

@@ -39,8 +39,8 @@ key { name };
 
    Underneath, the operators are those of Algebra A (The Third Manifesto,
    Appendix A): and, or and not, which generalize join, union and
-   complement, with remove, rename and compose. The others are defined in
-   terms of them. Not, the complement, can be infinite, so it is only used
+   complement, with remove, rename and compose, and tclose. The others are
+   defined in terms of them. Not, the complement, can be infinite, so it is only used
    underneath, never written.
 
    In where, extend and replace, the attributes of the tuple at hand are in
@@ -62,13 +62,6 @@ key { name };
    `not (t in r)`.
 
    call debug_value{v: tuple { name: "Ada", born: 1815 } in people};
-*/
-
-/* Transitive closure, of a relation of degree two whose attributes have
-   the same type (RM Very Strong Suggestion 6).
-   Tutorial D: TCLOSE R
-
-   call debug_table{r: tclose relation { { from: 1, to: 2 }, { from: 2, to: 3 } }};
 */
 
 /* Projection, and its complement, remove (Algebra A's REMOVE). The result
@@ -494,6 +487,68 @@ operator aggregate{
     call debug_table{r: b where count{r: !!(b rename {name as other, place as elsewhere})} > 1};
 ];
 
+/* Transitive closure, of a relation of two attributes of one type, each
+   tuple an arc from one value to another: the relation of the same heading
+   with a tuple for every path. Which attribute an arc starts at doesn't
+   matter, so neither is named. Below, where the water of each river and
+   lake goes, and so what reaches the Nile, and the stations on the
+   Yamanote line's loop, which a path leads from back to: a cycle. It is
+   Algebra A's TCLOSE, the one of its operators the others can't express.
+   Tutorial D: TCLOSE R, which TTM discusses with RM Prescription 19;
+   its generalized form is RM Very Strong Suggestion 6.
+   Implemented, and printed twice like the projections. */
+var flows := relation {
+    { from: "Kagera", to: "Lake Victoria" },
+    { from: "Lake Victoria", to: "White Nile" },
+    { from: "White Nile", to: "Nile" },
+    { from: "Blue Nile", to: "Nile" },
+    { from: "Atbara", to: "Nile" },
+};
+var waters := relation {
+    { name: "Kagera", native: "Kagera" },
+    { name: "Lake Victoria", native: "Nalubaale" },
+    { name: "White Nile", native: "النيل الأبيض" },
+    { name: "Blue Nile", native: "ዓባይ" },
+    { name: "Atbara", native: "عطبرة" },
+    { name: "Nile", native: "النيل" },
+}
+key { name };
+
+var stops := relation {
+    { from: "Tokyo", to: "Shinagawa" },
+    { from: "Shinagawa", to: "Shibuya" },
+    { from: "Shibuya", to: "Shinjuku" },
+    { from: "Shinjuku", to: "Ikebukuro" },
+    { from: "Ikebukuro", to: "Ueno" },
+    { from: "Ueno", to: "Tokyo" },
+    { from: "Shinjuku", to: "Nakano" },
+};
+var stations := relation {
+    { name: "Tokyo", native: "東京" },
+    { name: "Shinagawa", native: "品川" },
+    { name: "Shibuya", native: "渋谷" },
+    { name: "Shinjuku", native: "新宿" },
+    { name: "Ikebukuro", native: "池袋" },
+    { name: "Ueno", native: "上野" },
+    { name: "Nakano", native: "中野" },
+}
+key { name };
+
+var downstream := flows tclose;
+var into_the_nile := (flows tclose where to = "Nile"){from} rename {from as name} join waters;
+var on_the_loop := (stops tclose where from = to){from} rename {from as name} join stations;
+
+operator close{
+    f: relation { from: text, to: text },
+    w: relation { name: text, native: text },
+    s: relation { from: text, to: text },
+    t: relation { name: text, native: text },
+} [
+    call debug_table{r: f tclose};
+    call debug_table{r: (f tclose where to = "Nile"){from} rename {from as name} join w};
+    call debug_table{r: (s tclose where from = to){from} rename {from as name} join t};
+];
+
 operator main{} [
     call debug_table{r: names};
     call debug_table{r: places};
@@ -549,6 +604,9 @@ operator main{} [
     call debug_value{v: compounded};
     call debug_table{r: by_region};
     call debug_table{r: same_year};
+    call debug_table{r: downstream};
+    call debug_table{r: into_the_nile};
+    call debug_table{r: on_the_loop};
 
     call project_births{r: births};
     call project_signs{r: signs};
@@ -585,4 +643,6 @@ operator main{} [
     call checked_names{b: births, c: cities};
 
     call aggregate{b: births, s: signs, p: rates, h: harvests, g: regions};
+
+    call close{f: flows, w: waters, s: stops, t: stations};
 ];

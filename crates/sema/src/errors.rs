@@ -4745,6 +4745,7 @@ pub(crate) fn not_relational(
         "insert" | "d_insert" | "delete" | "i_delete" => {
             "`insert`, `d_insert`, `delete` and `i_delete` add and remove the tuples of a relation variable; another variable is given a new value with `:=`, and a tuple variable new attribute values with `update`"
         }
+        "tclose" => TCLOSE_RULE,
         _ => "`tuple from` and `value from` take the only tuple of a relation",
     };
     Diagnostic::error(
@@ -8356,4 +8357,65 @@ pub(crate) fn definition_mismatch(
             replacement: heading_text(declared),
         }],
     )
+}
+
+/// What `tclose` is, for the notes of its errors.
+const TCLOSE_RULE: &str = "`r tclose` is the transitive closure of `r`, a relation of two attributes of one type, each tuple an arc from one value to the other: a tuple for each path through them, as `contains tclose` gives every part a whole contains, at any depth (TTM's TCLOSE)";
+
+/// The relation written `operand`, of heading `heading`, which `tclose`,
+/// `keyword`, can't close: it hasn't two attributes, or they are of two
+/// types. Which to keep, or convert, is the program's to say.
+pub(crate) fn tclose_operand(
+    keyword: &SyntaxToken,
+    operand: &Expr,
+    heading: &hir::Heading,
+) -> Diagnostic {
+    let attributes: Vec<(&str, &hir::Type)> = heading.attributes().collect();
+    let (message, label) = match attributes.as_slice() {
+        [(a, a_ty), (b, b_ty)] => (
+            format!(
+                "`tclose` closes a relation of two attributes of one type, but `{a}` is `{a_ty}` and `{b}` is `{b_ty}`"
+            ),
+            "two types".to_string(),
+        ),
+        _ => (
+            format!(
+                "`tclose` closes a relation of two attributes, not of {}",
+                attributes.len()
+            ),
+            format!("this has {} attributes", attributes.len()),
+        ),
+    };
+    // The projections on two attributes of one type it could be closed as.
+    // A name or a parenthesized operand is projected as it is, and another
+    // in parentheses, so that the projection is of all of it.
+    let written = operand.syntax().text().to_string();
+    let projected = if matches!(operand, Expr::Name(_) | Expr::Paren(_)) {
+        written
+    } else {
+        format!("({written})")
+    };
+    let pairs: Vec<String> = attributes
+        .iter()
+        .enumerate()
+        .flat_map(|(i, (a, a_ty))| {
+            attributes[i + 1..]
+                .iter()
+                .filter(move |(_, b_ty)| a_ty == b_ty)
+                .map(move |(b, _)| (*a, *b))
+        })
+        .map(|(a, b)| format!("`{projected}{{{a}, {b}}} tclose`"))
+        .collect();
+    let d = Diagnostic::error(Code::TcloseOperand, message, operand.span(), label)
+        .with_secondary(trendy_syntax::span(keyword.text_range()), "closes it")
+        .with_note(TCLOSE_RULE);
+    if pairs.is_empty() {
+        return d.with_help(
+            "the ends of each arc are of one type: project it on the two that are, converting one to the other's type with `extend` first",
+        );
+    }
+    d.with_help(format!(
+        "project it on two attributes of one type, the ends of each arc, as {}",
+        trendy_diag::disjoin(&pairs)
+    ))
 }

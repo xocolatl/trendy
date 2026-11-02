@@ -515,6 +515,12 @@ pub enum RuntimeFn {
     /// canonically, in memory the statement owns. The other arguments are
     /// as for [`RuntimeFn::And`]'s.
     Matching,
+    /// `trendy_rt_tclose(dst, src, descriptor)`: store at `dst` the
+    /// transitive closure of the relation at `src`, of two attributes of
+    /// one type, of the type the descriptor describes, in memory the
+    /// statement owns: a tuple for each path through its tuples. Fails if
+    /// the memory can't be allocated.
+    Tclose,
     /// `trendy_rt_subset(dst, lhs, rhs, descriptor, proper)`: store at
     /// `dst`, a [`Layout::U8`], whether every tuple of the relation `lhs` is
     /// in the relation `rhs`, of the type the descriptor describes, and, if
@@ -599,7 +605,7 @@ pub enum RuntimeFn {
 
 impl RuntimeFn {
     /// Every runtime function, for checking the runtime against them.
-    pub const ALL: [RuntimeFn; 69] = [
+    pub const ALL: [RuntimeFn; 70] = [
         RuntimeFn::DebugValue,
         RuntimeFn::DebugTable,
         RuntimeFn::ToText,
@@ -658,6 +664,7 @@ impl RuntimeFn {
         RuntimeFn::And,
         RuntimeFn::Ungroup,
         RuntimeFn::Matching,
+        RuntimeFn::Tclose,
         RuntimeFn::Subset,
         RuntimeFn::Combine,
         RuntimeFn::Allocate,
@@ -704,6 +711,7 @@ impl RuntimeFn {
             | RuntimeFn::And
             | RuntimeFn::Ungroup
             | RuntimeFn::Matching
+            | RuntimeFn::Tclose
             | RuntimeFn::Combine
             | RuntimeFn::Allocate
             | RuntimeFn::Unique
@@ -815,6 +823,7 @@ impl RuntimeFn {
             RuntimeFn::And => "trendy_rt_and",
             RuntimeFn::Ungroup => "trendy_rt_ungroup",
             RuntimeFn::Matching => "trendy_rt_matching",
+            RuntimeFn::Tclose => "trendy_rt_tclose",
             RuntimeFn::Combine => "trendy_rt_combine",
             RuntimeFn::Subset => "trendy_rt_subset",
             RuntimeFn::Allocate => "trendy_rt_allocate",

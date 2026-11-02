@@ -987,7 +987,7 @@ fn spaced_after(kind: SyntaxKind) -> bool {
         ArrayKw, AssignKw, BuiltinKw, CallKw, Colon, Comma, DInsertKw, DeleteKw, IDeleteKw, IfKw,
         InsertKw, NotKw, OperatorKw, RelationKw, ReturnKw, TransactionKw, TupleKw, UpdateKw, VarKw,
     };
-    spaced_before(kind)
+    between_parts(kind)
         || matches!(
             kind,
             OperatorKw
@@ -1012,10 +1012,17 @@ fn spaced_after(kind: SyntaxKind) -> bool {
         )
 }
 
-/// Whether a space always goes before, and after, a token of this kind:
-/// `:=`, and the postfix operators and other words between two parts, such
-/// as a loop's `while` and `loop`.
+/// Whether a space always goes before a token of this kind: a word between
+/// two parts, or `tclose`, which ends its operand's expression, as in
+/// `(r tclose)`.
 fn spaced_before(kind: SyntaxKind) -> bool {
+    kind == SyntaxKind::TcloseKw || between_parts(kind)
+}
+
+/// Whether a token of this kind goes between two parts, with a space before
+/// and after it: `:=`, the postfix operators with a second part, and other
+/// words, such as a loop's `while` and `loop`.
+fn between_parts(kind: SyntaxKind) -> bool {
     use SyntaxKind::{
         AsKw, ColonEq, ElseKw, ExtendKw, GroupKw, LoopKw, RemoveKw, RenameKw, ReplaceKw, ThenKw,
         UngroupKw, UnwrapKw, WhereKw, WhileKw, WrapKw,
@@ -1318,6 +1325,22 @@ mod tests {
         assert_eq!(
             fmt("operator f{} [ fail(e) ; ];"),
             "operator f{} [\n    fail (e);\n];\n"
+        );
+    }
+
+    #[test]
+    fn transitive_closure() {
+        assert_eq!(
+            fmt("var x:=(r{a,b})tclose where a=b;"),
+            "var x := (r{a, b}) tclose where a = b;\n"
+        );
+        assert_eq!(
+            fmt("var x:=count{r:(r  tclose)};"),
+            "var x := count{r: (r tclose)};\n"
+        );
+        assert_eq!(
+            fmt("var x:=r tclose tclose{a}=r tclose ;"),
+            "var x := r tclose tclose{a} = r tclose;\n"
         );
     }
 

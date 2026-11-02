@@ -613,8 +613,8 @@ order has no meaning in the language.
 
 The relational operators are those of Algebra A (TTM Appendix A), so that
 the optimizer has few to rewrite: `Remove`, which projection also becomes,
-`Rename`, and `And`, which `join`, `times` and `compose` all become, with
-compose's common attributes then removed. `Extend` adds attributes, or
+`Rename`, `And`, which `join`, `times` and `compose` all become, with
+compose's common attributes then removed, and `Tclose`. `Extend` adds attributes, or
 replaces them with new values of the same types, each computed by an
 expression from the tuple at hand, `Current(depth, …)`: the tuple of the
 `Extend` `depth` levels out, so that a nested `extend` can refer to an
@@ -1408,6 +1408,21 @@ and SQL's `except` and `union all` are fixed.
 A defines UNGROUP with an infinite relation, which no program can hold.
 So it has its own HIR node, `Ungroup`, folded when its operand is a
 constant (`Value::ungrouped`), and computed by the runtime otherwise.
+
+`tclose` is Algebra A's ◄TCLOSE►, `Tclose`, which Tutorial D's `TCLOSE r`
+is as it is, with nothing to rewrite. It is the one of Algebra A's
+operators the others can't express: Appendix A reduces the algebra to
+◄REMOVE► and ◄NOR► or ◄NAND►, "plus ◄TCLOSE►". The parser takes it as a postfix operator without
+operands of its own, and Tutorial D's `TCLOSE r` as a word before its
+operand, which it reports with the fix that moves it after (P0054). Sema
+checks the operand's heading (`check::closed`): two attributes of one
+type (A0069), whichever is an arc's start, since closing the arcs the
+other way round gives the same tuples. A constant operand is folded
+(`Value::tclose`, a search from each value), and lowering calls
+`trendy_rt_tclose` otherwise, which grows the closure semi-naively: each
+step joins only the pairs the last one found to the arcs, whose canonical
+order lets it find a value's arcs by binary search, until a step finds
+no pair the closure lacks.
 
 The arithmetic operators are overloaded on integers and approximate numbers
 (`ops::Operator` resolves to a typed `hir::BinaryOp`): the operand type

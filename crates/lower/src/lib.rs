@@ -3250,6 +3250,7 @@ impl<'a> FunctionBuilder<'a> {
                 self.slot(cx.layout(ty))
             }
             hir::Expr::Semijoin(lhs, rhs) => self.matching(lhs, rhs, false, cx),
+            hir::Expr::Tclose(operand) => self.closed(operand, cx),
             hir::Expr::Combine(combination, lhs, rhs) => self.combine(*combination, lhs, rhs, cx),
             hir::Expr::Antijoin(lhs, rhs) => self.matching(lhs, rhs, true, cx),
             hir::Expr::Restrict(operand, condition) => self.restrict(operand, condition, cx),
@@ -4708,6 +4709,22 @@ impl<'a> FunctionBuilder<'a> {
     /// The tuples of the relation `lhs` that have a match in `rhs`, or, if
     /// `negated`, those that have none, computed by the runtime into a new
     /// stack slot.
+    /// The transitive closure of the relation `operand`, of two attributes
+    /// of one type, in a new slot, in memory the statement owns: the
+    /// runtime's, given the relation's descriptor, the result's too.
+    fn closed(&mut self, operand: &hir::Expr, cx: &mut Lowering) -> lir::Place {
+        let ty = self.type_of(operand);
+        let src = self.place(operand, cx);
+        let dst = self.slot(cx.layout(&ty));
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Tclose,
+            args: vec![dst.clone(), src, descriptor],
+        });
+        self.scoped = true;
+        dst
+    }
+
     fn matching(
         &mut self,
         lhs: &hir::Expr,

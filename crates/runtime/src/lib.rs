@@ -1490,6 +1490,173 @@ pub unsafe extern "C" fn trendy_rt_matching(
     })
 }
 
+/// Store at `dst` the transitive closure of the relation at `src`, of two
+/// attributes of one type, of the type `desc` describes, in memory the
+/// statement owns: a tuple for each path through its tuples, each an arc
+/// from its first attribute's value, in name order, to its second's, from
+/// the path's first value to its last, as the compiler computes it
+/// (`hir::Value::tclose`). The closure grows a step at a time, each step's
+/// new pairs joined to the arcs, until a step adds none. Fails if the
+/// memory can't be allocated.
+///
+/// # Safety
+///
+/// `src` must point to a valid relation of the type `desc` describes, a
+/// relation of two attributes of one type, and `dst` to memory for one.
+/// The statement must have begun a scope.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_tclose(
+    dst: *mut Text,
+    src: *const u8,
+    desc: *const TypeDesc,
+) -> bool {
+    // SAFETY: guaranteed by the caller; each size and offset is the layout
+    // of the value it describes.
+    status(|| unsafe {
+        let desc = &*desc;
+        let element = desc.element();
+        let [from, to] = attributes(element) else {
+            internal_error("the transitive closure of a relation without two attributes");
+        };
+        let value = &*from.desc;
+        let (tuples, count) = read_slice(src);
+        // Each pair is of the values its tuple has, where they are in the
+        // operand, which outlives the call. The operand's tuples are in
+        // canonical order, so its arcs are in the pairs' order.
+        let mut arcs = Pairs::new(count)?;
+        for i in 0..count {
+            let tuple = tuples.add(i * element.size);
+            arcs.push([tuple.add(from.offset), tuple.add(to.offset)])?;
+        }
+        let by_pair = |a: &[*const u8; 2], b: &[*const u8; 2]| {
+            order(a[0], b[0], value).then_with(|| order(a[1], b[1], value))
+        };
+        let arcs = arcs.values();
+        let mut closure = Pairs::of(arcs)?;
+        let mut step = Pairs::of(arcs)?;
+        loop {
+            let mut found = Pairs::new(step.len)?;
+            for pair in step.values() {
+                // The arcs from where the pair ends.
+                let first = arcs.partition_point(|arc| order(arc[0], pair[1], value).is_lt());
+                for arc in arcs[first..]
+                    .iter()
+                    .take_while(|arc| order(arc[0], pair[1], value).is_eq())
+                {
+                    let made = [pair[0], arc[1]];
+                    if closure
+                        .values()
+                        .binary_search_by(|p| by_pair(p, &made))
+                        .is_err()
+                    {
+                        found.push(made)?;
+                    }
+                }
+            }
+            if found.len == 0 {
+                break;
+            }
+            let found = found.values_mut();
+            found.sort_unstable_by(by_pair);
+            let mut new = Pairs::new(found.len())?;
+            for (i, pair) in found.iter().enumerate() {
+                if i == 0 || by_pair(&found[i - 1], pair).is_ne() {
+                    new.push(*pair)?;
+                }
+            }
+            closure = closure.merged(&new, by_pair)?;
+            step = new;
+        }
+        let made = Temp::<u8>::zeroed(closure.len * element.size)?;
+        for (i, pair) in closure.values().iter().enumerate() {
+            let tuple = made.ptr().add(i * element.size);
+            core::ptr::copy_nonoverlapping(pair[0], tuple.add(from.offset), value.size);
+            core::ptr::copy_nonoverlapping(pair[1], tuple.add(to.offset), value.size);
+        }
+        let (bytes, len) = canonical(made.ptr(), closure.len, desc)?;
+        dst.write_unaligned(Text { bytes, len });
+        Ok(())
+    })
+}
+
+/// Pairs of values, each by where it is, as [`trendy_rt_tclose`] makes its
+/// closure's tuples: in memory of a function's own, which grows as they are
+/// added.
+#[cfg(not(test))]
+struct Pairs {
+    memory: Temp<[*const u8; 2]>,
+    len: usize,
+}
+
+#[cfg(not(test))]
+impl Pairs {
+    /// None yet, with room for `capacity`. Fails if there is no memory for
+    /// them.
+    fn new(capacity: usize) -> Fallible<Pairs> {
+        Ok(Pairs {
+            memory: Temp::new(capacity.max(1))?,
+            len: 0,
+        })
+    }
+
+    /// `pairs`, copied. Fails if there is no memory for them.
+    fn of(pairs: &[[*const u8; 2]]) -> Fallible<Pairs> {
+        let mut copied = Pairs::new(pairs.len())?;
+        for pair in pairs {
+            copied.push(*pair)?;
+        }
+        Ok(copied)
+    }
+
+    /// Add `pair`, after those so far. Fails if there is no memory for it.
+    fn push(&mut self, pair: [*const u8; 2]) -> Fallible {
+        if self.len == self.memory.len {
+            self.memory.grow(self.len.saturating_mul(2).max(4))?;
+        }
+        // SAFETY: the memory has room for one more.
+        unsafe { self.memory.ptr().add(self.len).write(pair) };
+        self.len += 1;
+        Ok(())
+    }
+
+    /// Those added.
+    fn values(&self) -> &[[*const u8; 2]] {
+        // SAFETY: the first `len` are written.
+        unsafe { core::slice::from_raw_parts(self.memory.ptr(), self.len) }
+    }
+
+    /// Those added, to reorder.
+    fn values_mut(&mut self) -> &mut [[*const u8; 2]] {
+        // SAFETY: the first `len` are written.
+        unsafe { core::slice::from_raw_parts_mut(self.memory.ptr(), self.len) }
+    }
+
+    /// These and `more`, both in the order `order` gives, merged in it.
+    /// Fails if there is no memory for them.
+    fn merged(
+        &self,
+        more: &Pairs,
+        order: impl Fn(&[*const u8; 2], &[*const u8; 2]) -> core::cmp::Ordering,
+    ) -> Fallible<Pairs> {
+        let (left, right) = (self.values(), more.values());
+        let mut merged = Pairs::new(left.len() + right.len())?;
+        let (mut i, mut j) = (0, 0);
+        while i < left.len() || j < right.len() {
+            let next = if j == right.len() || (i < left.len() && order(&left[i], &right[j]).is_le())
+            {
+                i += 1;
+                left[i - 1]
+            } else {
+                j += 1;
+                right[j - 1]
+            };
+            merged.push(next)?;
+        }
+        Ok(merged)
+    }
+}
+
 /// The order of two tuples by their values for the `common` attributes,
 /// each tuple from the left operand of [`trendy_rt_and`] if its flag says
 /// so, and else from the right.

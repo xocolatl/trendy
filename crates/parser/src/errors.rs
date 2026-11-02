@@ -3028,6 +3028,38 @@ pub(crate) fn second_keeping(span: Span, first: Span) -> Diagnostic {
     .with_help("write one list: the attributes to remove, or those to keep")
 }
 
+/// Tutorial D's `TCLOSE r`, `word` before the operand from `operand` to
+/// `end`: trendy writes it after its operand, as its other relational
+/// operators. The fix moves it there.
+pub(crate) fn prefix_tclose(word: Found, operand: usize, end: usize) -> Diagnostic {
+    Diagnostic::error(
+        Code::TcloseOrder,
+        format!(
+            "`tclose` goes after its operand, not before, as Tutorial D's `{}`",
+            word.text
+        ),
+        word.span,
+        "before its operand",
+    )
+    .with_note(TCLOSE_RULE)
+    .with_suggestion(
+        "write it after its operand",
+        vec![
+            Edit {
+                span: Span::new(word.span.start, operand),
+                replacement: String::new(),
+            },
+            Edit {
+                span: Span::empty(end),
+                replacement: " tclose".to_string(),
+            },
+        ],
+    )
+}
+
+/// What `tclose` is, for the notes of its errors.
+pub(crate) const TCLOSE_RULE: &str = "`r tclose` is the transitive closure of `r`, a relation of two attributes of one type, as `contains tclose` gives every part a whole contains, at any depth; it follows its operand, as the other relational operators do, so `r tclose where a = b` is `(r tclose) where a = b`";
+
 /// What a unit is, for the notes of its errors.
 const UNIT_RULE: &str = "a unit is one file, named by its path from the program's root, as `lakes/depths.trendy` is `lakes.depths`; `interface` starts the declarations other units see, and `implementation` those they don't, each up to the next";
 

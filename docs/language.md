@@ -5005,6 +5005,61 @@ var unlisted := born except listed;
 operator main{} [];
 ```
 
+### Transitive closure
+
+`r tclose` is the transitive closure of a relation of two attributes of
+one type, each tuple an arc from one value to another: the relation of
+the same heading with a tuple for every path, `{ from: x, to: y }` for
+each `y` that arcs lead to from `x`. It is Tutorial D's `TCLOSE` (TTM,
+chapter 6, with RM Prescription 19), and what SQL's `WITH RECURSIVE`
+computes for a graph.
+
+```trendy
+var flows := relation {
+    { from: "Kagera", to: "Lake Victoria" },
+    { from: "Lake Victoria", to: "White Nile" },
+    { from: "White Nile", to: "Nile" },
+    { from: "Blue Nile", to: "Nile" },
+};
+var downstream := flows tclose;
+var into_the_nile := (flows tclose where to = "Nile"){from};
+var stops := relation {
+    { from: "Tokyo", to: "Shinagawa" },
+    { from: "Shinagawa", to: "Shibuya" },
+    { from: "Shibuya", to: "Tokyo" },
+    { from: "Shibuya", to: "Meguro" },
+};
+var on_the_loop := (stops tclose where from = to){from};
+
+operator main{} [
+    call debug_table{r: on_the_loop};
+];
+```
+
+- **Two attributes of one type,** the ends of each arc (A0069). Which
+  attribute an arc starts at doesn't matter: closing the arcs the other
+  way round gives the same tuples, so neither is named. A relation of
+  more attributes is projected on the two first, with an end of another
+  type converted by `extend`, and the help names the pairs of one type it
+  has.
+- **A cycle is a path from a value back to itself,** so
+  `r tclose where a = b` is the values on a cycle, as `on_the_loop` is,
+  without Meguro, which nothing leads back to.
+- **Postfix, binding like a projection:** `r tclose where a = b` closes
+  `r`, then restricts the closure, and `r{a, b} tclose` closes a
+  projection. Tutorial D's `TCLOSE r` is fixed to `r tclose` (P0054).
+- **One of Algebra A's operators,** with `remove`, `rename` and the
+  joins' AND, and the one the others can't express (TTM Appendix A). Its
+  generalized form, which concatenates and aggregates along each path (RM
+  Very Strong Suggestion 6), is still to come.
+
+```trendy,error
+var flows := relation { { from: "Kagera", to: "Lake Victoria" } };
+var downstream := TCLOSE flows;
+
+operator main{} [];
+```
+
 ### Precedence
 
 From tightest to loosest:
@@ -5012,7 +5067,7 @@ From tightest to loosest:
 | Operators | Grouping |
 |---|---|
 | `!!`, of a name or a parenthesized expression | none: see below |
-| postfix `.a`, indexing `[…]`, projection `{…}`, `remove {…}`, `rename {…}`, `extend {…}`, `replace {…}`, `group {…}`, `ungroup {…}`, `wrap {…}` and `unwrap {…}` | left |
+| postfix `.a`, indexing `[…]`, projection `{…}`, `remove {…}`, `rename {…}`, `extend {…}`, `replace {…}`, `group {…}`, `ungroup {…}`, `wrap {…}`, `unwrap {…}` and `tclose` | left |
 | prefix `not`, `-`, `+`, `tuple from` and `value from` | |
 | `*`, `/`, `div`, `mod` | left |
 | `+`, `-`, `\|\|` | left |
@@ -5417,7 +5472,7 @@ Names are ASCII letters, digits and `_`, and don't start with a digit. They
 are case-sensitive. The keywords are `operator`, `var`, `call`, `builtin`,
 `tuple`, `relation`, `array`, `true`, `false`, `not`, `and`, `or`, `xor`,
 `implies`, `div`, `mod`, `remove`, `rename`, `extend`, `replace`, `group`,
-`ungroup`, `wrap`, `unwrap`, `join`, `times`, `compose`, `matching`,
+`ungroup`, `wrap`, `unwrap`, `tclose`, `join`, `times`, `compose`, `matching`,
 `union`, `d_union`, `xunion`, `intersect`, `minus`, `i_minus`, `where`,
 `as`, `insert`, `d_insert`, `delete`, `i_delete`, `update`, `assign`,
 `return`, `if`, `then`, `else`, `while`, `loop`, `for` and
@@ -5666,6 +5721,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `R GROUP ( { B, C } AS G )` | `r group { g := {b, c} }` |
 | `R UNGROUP ( G )` | `r ungroup {g}` |
 | `R WRAP ( { B, C } AS W )`, `R UNWRAP ( W )` | `r wrap { w := {b, c} }`, `r unwrap {w}` |
+| `TCLOSE R`, SQL's `WITH RECURSIVE` for what a graph reaches | `r tclose` |
 | `GROUP BY a` with the group's rows | `r group { rows := {…every attribute but a…} }` |
 | `PRIMARY KEY (a)`, `UNIQUE (a)`, `KEY { A }` | `key { a }` |
 | `NATURAL JOIN`, `INNER JOIN`, `JOIN … USING (a)` | `join` |

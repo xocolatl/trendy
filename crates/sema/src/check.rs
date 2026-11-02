@@ -12,8 +12,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use trendy_diag::{CodeKind, Diagnostic, Span, renamed};
 use trendy_hir as hir;
-use trendy_syntax::SyntaxToken;
 use trendy_syntax::ast::{self, AstNode, AttributeValue, Expr, Said};
+use trendy_syntax::{SyntaxKind, SyntaxToken};
 
 use crate::narrowed::{self, Facts};
 use crate::operators::{ArgumentNames, Chosen, Operators, Param, Signature};
@@ -301,28 +301,11 @@ impl<'a> Checker<'a> {
             Expr::Fail(fail) => self.failure(fail, expr, expected, errors),
             Expr::Block(block) => crate::block::value(block, &mut *self.names, expected, errors),
             Expr::Paren(paren) => self.expr(&paren.inner()?, expected, errors),
-            Expr::Unary(unary) => {
-                if let Some(literal) = ops::negated_literal(unary) {
-                    let value = ops::negative_value(&literal, expr, errors)?;
-                    return self.matched(expected, hir::Expr::Constant(value), expr, errors);
-                }
-                let token = unary.operator()?;
-                let (resolved, operands, result) =
-                    self.operands(&token, vec![unary.operand()], expected, errors)?;
-                types::result_type(expected, &result, expr, errors)?;
-                let [operand] = <[hir::Expr; 1]>::try_from(operands).ok()?;
-                match resolved {
-                    Resolved::Identity => Some(operand),
-                    Resolved::Unary(op) => {
-                        types::evaluated(ops::unary(op, operand), expr, None, errors)
-                    }
-                    Resolved::Binary(_) | Resolved::Connective { .. } => None,
-                }
-            }
+            Expr::Unary(unary) => self.prefixed(unary, expr, expected, errors),
             Expr::Binary(binary)
                 if binary
                     .operator()
-                    .is_some_and(|t| t.kind() == trendy_syntax::SyntaxKind::WhereKw) =>
+                    .is_some_and(|t| t.kind() == SyntaxKind::WhereKw) =>
             {
                 self.restricted(binary, expr, expected, errors)
             }
@@ -333,39 +316,15 @@ impl<'a> Checker<'a> {
                 self.joined(expr, expected, errors)
             }
             Expr::Nary(_) => None,
-            Expr::Binary(binary) => {
-                let token = binary.operator()?;
-                let (resolved, operands, result) =
-                    self.operands(&token, vec![binary.lhs(), binary.rhs()], expected, errors)?;
-                types::result_type(expected, &result, expr, errors)?;
-                let Ok([lhs, rhs]) = <[hir::Expr; 2]>::try_from(operands) else {
-                    return None;
-                };
-                let Resolved::Binary(op) = resolved else {
-                    unreachable!("a connective, which `Checker::connective` checks");
-                };
-                if let hir::BinaryOp::Compare(..) = op
-                    && !self.orders_checked(
-                        &self.ty(&lhs),
-                        trendy_syntax::span(token.text_range()),
-                        errors,
-                    )
-                {
-                    return None;
-                }
-                match ops::binary(op, lhs, rhs, self.bindings()) {
-                    Ok(result) => Some(result),
-                    Err(ops::Failed::Scalar(failure)) => {
-                        errors.push(errors::failure(failure, expr, binary.rhs().as_ref()));
-                        None
-                    }
-                    Err(failed) => {
-                        errors.push(errors::failed(&failed, expr));
-                        None
-                    }
-                }
-            }
+            Expr::Binary(binary) => self.infixed(binary, expr, expected, errors),
             Expr::Extract(extract) => self.extracted(extract, expr, expected, errors),
+            Expr::Postfix(postfix)
+                if postfix
+                    .operator()
+                    .is_some_and(|t| t.kind() == SyntaxKind::TcloseKw) =>
+            {
+                self.closed(postfix, expr, expected, errors)
+            }
             Expr::Postfix(postfix) if let Some(gathering) = ops::Gathering::of(postfix) => {
                 self.gathered(postfix, gathering, expr, expected, errors)
             }
@@ -388,6 +347,73 @@ impl<'a> Checker<'a> {
             Expr::Array(array) => types::array_selector(array, expected, self, errors),
             Expr::Index(index) => self.indexed(index, expr, expected, errors),
             Expr::If(if_expr) => self.conditional(if_expr, expected, errors),
+        }
+    }
+
+    /// `unary`, written `expr`, an operator before its operand: a negative
+    /// literal, or `not`, `-` or `+` of an operand.
+    fn prefixed(
+        &mut self,
+        unary: &ast::UnaryExpr,
+        expr: &Expr,
+        expected: Option<&Expected>,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        if let Some(literal) = ops::negated_literal(unary) {
+            let value = ops::negative_value(&literal, expr, errors)?;
+            return self.matched(expected, hir::Expr::Constant(value), expr, errors);
+        }
+        let token = unary.operator()?;
+        let (resolved, operands, result) =
+            self.operands(&token, vec![unary.operand()], expected, errors)?;
+        types::result_type(expected, &result, expr, errors)?;
+        let [operand] = <[hir::Expr; 1]>::try_from(operands).ok()?;
+        match resolved {
+            Resolved::Identity => Some(operand),
+            Resolved::Unary(op) => types::evaluated(ops::unary(op, operand), expr, None, errors),
+            Resolved::Binary(_) | Resolved::Connective { .. } => None,
+        }
+    }
+
+    /// `binary`, written `expr`, an operator between two scalar operands,
+    /// or a comparison: neither a connective, a join nor a restriction,
+    /// which have their own checks.
+    fn infixed(
+        &mut self,
+        binary: &ast::BinaryExpr,
+        expr: &Expr,
+        expected: Option<&Expected>,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let token = binary.operator()?;
+        let (resolved, operands, result) =
+            self.operands(&token, vec![binary.lhs(), binary.rhs()], expected, errors)?;
+        types::result_type(expected, &result, expr, errors)?;
+        let Ok([lhs, rhs]) = <[hir::Expr; 2]>::try_from(operands) else {
+            return None;
+        };
+        let Resolved::Binary(op) = resolved else {
+            unreachable!("a connective, which `Checker::connective` checks");
+        };
+        if let hir::BinaryOp::Compare(..) = op
+            && !self.orders_checked(
+                &self.ty(&lhs),
+                trendy_syntax::span(token.text_range()),
+                errors,
+            )
+        {
+            return None;
+        }
+        match ops::binary(op, lhs, rhs, self.bindings()) {
+            Ok(result) => Some(result),
+            Err(ops::Failed::Scalar(failure)) => {
+                errors.push(errors::failure(failure, expr, binary.rhs().as_ref()));
+                None
+            }
+            Err(failed) => {
+                errors.push(errors::failed(&failed, expr));
+                None
+            }
         }
     }
 
@@ -1360,6 +1386,32 @@ impl<'a> Checker<'a> {
             self.bindings(),
         )?;
         Ok(ops::remove(extended, dropped))
+    }
+
+    /// `postfix`, `r tclose`, written `expr`: the transitive closure of
+    /// `r`, a relation of two attributes of one type (TTM's TCLOSE). `None`
+    /// after reporting why it isn't one.
+    fn closed(
+        &mut self,
+        postfix: &ast::PostfixExpr,
+        expr: &Expr,
+        expected: Option<&Expected>,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Expr> {
+        let (operand_expr, keyword) = (postfix.operand()?, postfix.operator()?);
+        let operand = self.expr(&operand_expr, None, errors)?;
+        let ty = self.ty(&operand);
+        let hir::Type::Relation(heading) = &ty else {
+            let at = trendy_syntax::span(keyword.text_range());
+            errors.push(errors::not_relational("tclose", at, &ty, &operand_expr));
+            return None;
+        };
+        let types: Vec<&hir::Type> = heading.attributes().map(|(_, ty)| ty).collect();
+        if !matches!(types[..], [a, b] if a == b) {
+            errors.push(errors::tclose_operand(&keyword, &operand_expr, heading));
+            return None;
+        }
+        self.matched(expected, ops::tclose(operand), expr, errors)
     }
 
     /// `postfix`, an `extend` or a `replace`, as `assigning` says, written

@@ -1422,6 +1422,15 @@ pub(crate) fn matching(lhs: hir::Expr, rhs: hir::Expr, negated: bool) -> hir::Ex
     }
 }
 
+/// The transitive closure of the relation `operand`, of two attributes of
+/// one type: evaluated if it is a constant.
+pub(crate) fn tclose(operand: hir::Expr) -> hir::Expr {
+    match operand {
+        hir::Expr::Constant(relation) => hir::Expr::Constant(relation.tclose()),
+        operand => hir::Expr::Tclose(Box::new(operand)),
+    }
+}
+
 /// The only tuple of the relation `operand`: evaluated if it is a constant.
 ///
 /// # Errors
@@ -2542,6 +2551,7 @@ fn substitute(
         hir::Expr::Semijoin(lhs, rhs) => matching(sub(lhs)?, sub(rhs)?, false),
         hir::Expr::Combine(combination, lhs, rhs) => combined(sub(lhs)?, sub(rhs)?, combination)?,
         hir::Expr::Antijoin(lhs, rhs) => matching(sub(lhs)?, sub(rhs)?, true),
+        hir::Expr::Tclose(operand) => tclose(sub(operand)?),
         // The condition is one tuple at hand further in.
         hir::Expr::Restrict(operand, condition) => {
             let condition = substitute(*condition, depth + 1, substitution)?;
