@@ -289,7 +289,8 @@ pub(crate) fn missing_main(file: &SourceFile, namespaces: &Namespaces) -> Diagno
     const MESSAGE: &str = "program has no `main` operator";
     const ENTRY_NOTE: &str = "execution starts in the operator named `main`";
 
-    if let Some(span) = namespaces.variable("main") {
+    let at = file.span();
+    if let Some(span) = namespaces.variable("main", at) {
         return Diagnostic::error(
             Code::MissingMain,
             MESSAGE,
@@ -303,7 +304,7 @@ pub(crate) fn missing_main(file: &SourceFile, namespaces: &Namespaces) -> Diagno
     // `Main` or `MAIN` is almost certainly meant to be the entry point, so the
     // fix goes there.
     let near_miss = namespaces
-        .operators()
+        .operators(at)
         .filter(|&(name, kind, _)| kind == Kind::Operator && name.eq_ignore_ascii_case("main"))
         .map(|(name, _, span)| (name, span))
         .min_by_key(|&(_, span)| span.start);
@@ -389,9 +390,9 @@ pub(crate) fn unknown_type(
         ));
     }
     let kind = namespaces
-        .variable(name)
+        .variable(name, span)
         .map(|_| Kind::Variable)
-        .or_else(|| namespaces.operator(name).map(|(kind, _)| kind));
+        .or_else(|| namespaces.operator(name, span).map(|(kind, _)| kind));
     if let Some(kind) = kind {
         return d.with_note(format!("`{name}` is {}, not a type", kind.describe()));
     }
@@ -421,7 +422,7 @@ pub(crate) fn unknown_type(
             let types: Vec<&str> = hir::Scalar::ALL
                 .iter()
                 .map(|t| t.name())
-                .chain(namespaces.defined_types())
+                .chain(namespaces.defined_types(span))
                 .chain(declared.iter().copied())
                 .collect();
             closest(name, types).map(written)
@@ -511,9 +512,9 @@ pub(crate) fn unknown_heading(ident: &SyntaxToken, namespaces: &Namespaces) -> D
     );
     let kind = hir::Scalar::from_name(name)
         .map(|_| Kind::Type)
-        .or_else(|| namespaces.defined(name).map(|_| Kind::Defined))
-        .or_else(|| namespaces.variable(name).map(|_| Kind::Variable))
-        .or_else(|| namespaces.operator(name).map(|(kind, _)| kind));
+        .or_else(|| namespaces.defined(name, span).map(|_| Kind::Defined))
+        .or_else(|| namespaces.variable(name, span).map(|_| Kind::Variable))
+        .or_else(|| namespaces.operator(name, span).map(|(kind, _)| kind));
     if let Some(kind) = kind {
         let d = d.with_note(format!("`{name}` is {}, not a heading", kind.describe()));
         return match kind {
@@ -525,7 +526,7 @@ pub(crate) fn unknown_heading(ident: &SyntaxToken, namespaces: &Namespaces) -> D
             ),
         };
     }
-    let mut headings: Vec<&str> = namespaces.headings().collect();
+    let mut headings: Vec<&str> = namespaces.headings(span).collect();
     headings.sort_unstable();
     spelled_like(
         d,
@@ -2377,7 +2378,7 @@ pub(crate) fn operator_as_value(name: &str, span: Span, operators: &Operators) -
         "operators can't be used as values",
     );
     let mut read_only = operators
-        .overloads(name)
+        .overloads(name, span)
         .filter(|signature| signature.read_only);
     let Some(first) = read_only.next() else {
         return d.with_help(format!(
@@ -2663,9 +2664,10 @@ pub(crate) fn variable_in_read_only(
         .expect("an operator is in a file");
     let calls_it = |name_ref: Option<trendy_syntax::ast::NameRef>, written: Written| {
         name_ref.and_then(|n| n.ident()).is_some_and(|i| {
+            let at = trendy_syntax::span(i.text_range());
             i.text() == op
                 && matches!(
-                    operators.chosen(op, &crate::check::argument_names(written)),
+                    operators.chosen(op, &crate::check::argument_names(written), at),
                     Some(Chosen::One(chosen)) if chosen.id == operator.id
                 )
         })
@@ -3220,7 +3222,7 @@ pub(crate) fn main_errors(
     given: &hir::Parameter,
     namespaces: &Namespaces,
 ) -> Option<Diagnostic> {
-    let error = namespaces.dummy("error")?;
+    let error = namespaces.dummy_named("error")?;
     let expected = hir::Type::Relation(hir::transaction_collection(hir::Type::Dummy(Box::new(
         error.clone(),
     ))));
@@ -5028,10 +5030,11 @@ pub(crate) fn failed(failed: &crate::ops::Failed, expr: &Expr) -> Diagnostic {
 }
 
 /// What Tutorial D's operator `name` is, if it is `IS_T` or `TREAT_AS_T`,
-/// in any case, of a type of the program's own `T`: the test or the
-/// treat, and the type's name.
+/// in any case, of a type of the program's own `T` that the unit `at` is
+/// in sees: the test or the treat, and the type's name.
 pub(crate) fn tutorial_d_tested<'n>(
     name: &str,
+    at: Span,
     namespaces: &'n Namespaces,
 ) -> Option<(Testing, &'n str)> {
     let lower = name.to_lowercase();
@@ -5040,7 +5043,7 @@ pub(crate) fn tutorial_d_tested<'n>(
         None => (Testing::Is, lower.strip_prefix("is_")?),
     };
     let ty = namespaces
-        .defined_types()
+        .defined_types(at)
         .find(|t| t.eq_ignore_ascii_case(rest))?;
     Some((testing, ty))
 }
@@ -5055,7 +5058,7 @@ pub(crate) fn tutorial_d_test(
     written: Written,
     namespaces: &Namespaces,
 ) -> Option<Diagnostic> {
-    let (testing, ty) = tutorial_d_tested(name, namespaces)?;
+    let (testing, ty) = tutorial_d_tested(name, span, namespaces)?;
     let (operand, end) = match written {
         Written::Arguments(arguments) => {
             let mut positional = arguments.positional();
@@ -5266,8 +5269,8 @@ pub(crate) fn missing_version(
     );
     // Of one parameter's type, the program that declares it says so.
     let (span, message, at_type) = match combination.values().collect::<Vec<_>>().as_slice() {
-        [only] => match namespaces.defined(&only.to_string()) {
-            Some((declared, _)) => (
+        [only] => match namespaces.type_declared(&only.to_string()) {
+            Some(declared) => (
                 declared,
                 format!("`{only}` has no version of `{name}`"),
                 true,

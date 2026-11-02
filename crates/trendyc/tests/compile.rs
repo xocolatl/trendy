@@ -409,10 +409,12 @@ fn analyze(source: &str) -> trendy_hir::Program {
     };
     let (program, prelude) = (parse(source), parse(trendy_prelude::SOURCE));
     let unit = trendy_sema::File {
+        name: "program",
         path: "program.trendy",
         tree: &program,
     };
     let prelude = trendy_sema::File {
+        name: trendy_prelude::NAME,
         path: trendy_prelude::PATH,
         tree: &prelude,
     };

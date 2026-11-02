@@ -393,8 +393,8 @@ impl Names for Narrowed<'_> {
         self.outer.narrowing_ended(name)
     }
 
-    fn candidates(&self) -> Vec<String> {
-        self.outer.candidates()
+    fn candidates(&self, at: Span) -> Vec<String> {
+        self.outer.candidates(at)
     }
 
     fn leaf_type(&self, leaf: &hir::Expr) -> hir::Type {
@@ -458,8 +458,8 @@ impl Names for Unnarrowed<'_> {
         self.outer.narrowing_ended(name)
     }
 
-    fn candidates(&self) -> Vec<String> {
-        self.outer.candidates()
+    fn candidates(&self, at: Span) -> Vec<String> {
+        self.outer.candidates(at)
     }
 
     fn leaf_type(&self, leaf: &hir::Expr) -> hir::Type {

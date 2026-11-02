@@ -401,11 +401,14 @@ fn supertypes(
         else {
             continue;
         };
-        let supertype = ident.text();
+        let written = ident.text();
         let at = trendy_syntax::span(ident.text_range());
+        // What it names, as its unit sees it.
+        let named = namespaces.type_named(written, at);
+        let supertype = named.as_deref().unwrap_or(written);
         if union_decl(supertype).is_some() {
             immediate.insert(name.clone(), (supertype.to_string(), at));
-        } else if namespaces.defined(supertype).is_some() {
+        } else if named.is_some() {
             // A subtype of a regular type, defined by its constraints: a
             // union type has no components for them to constrain.
             // One with other errors, reported, is a subtype all the same if
@@ -419,9 +422,9 @@ fn supertypes(
                 immediate.insert(name.clone(), (supertype.to_string(), at));
                 constrained.insert(name.clone());
             }
-        } else if let Some((declared, _)) = namespaces.heading(supertype) {
+        } else if let Some((declared, _)) = namespaces.heading(written, at) {
             errors.push(errors::heading_as_type(&ident, declared));
-        } else if hir::Scalar::from_name(supertype).is_some() {
+        } else if hir::Scalar::from_name(written).is_some() {
             errors.push(errors::built_in_supertype(&ident));
         } else {
             errors.push(errors::unknown_type(
@@ -448,7 +451,7 @@ fn supertypes(
                     .map(|&n| Cycled {
                         name: n.to_string(),
                         what: "type",
-                        declared: namespaces.defined(n).expect("a declared type").0,
+                        declared: namespaces.type_declared(n).expect("a declared type"),
                         via: immediate[n].1,
                         how: Named::Holds,
                     })
@@ -676,20 +679,24 @@ pub(crate) fn resolve(
     unions(&declared, &supertypes, namespaces);
 }
 
-/// The headings and types `files` declare, each the first of its name, by
-/// name, with what it names.
+/// The headings and types `files` declare, each the first of its name in
+/// its unit, by identity, with what it names.
 fn declarations(files: &Files, namespaces: &Namespaces) -> Vec<(String, Declared)> {
+    let identity = |ident: &trendy_syntax::SyntaxToken| {
+        let unit = namespaces.unit_at(trendy_syntax::span(ident.text_range()));
+        namespaces.type_identity(ident.text(), unit)
+    };
     let headings = files.headings().filter_map(|decl| {
         let ident = decl.name()?.ident()?;
         namespaces
             .is_first_heading(&ident)
-            .then(|| (ident.text().to_string(), Decl::Heading(decl)))
+            .then(|| (identity(&ident), Decl::Heading(decl)))
     });
     let types = files.types().filter_map(|decl| {
         let ident = decl.name()?.ident()?;
         namespaces
             .is_first_type(&ident)
-            .then(|| (ident.text().to_string(), Decl::Type(decl)))
+            .then(|| (identity(&ident), Decl::Type(decl)))
     });
     headings
         .chain(types)
@@ -930,23 +937,25 @@ fn type_order(
 }
 
 /// The declared headings, after `relation` or `tuple`, and types that
-/// `heading`'s attributes name, each with where.
+/// `heading`'s attributes name, each by its identity, as their unit sees
+/// them, with where.
 fn named(heading: &ast::Heading, namespaces: &Namespaces) -> Vec<Contained> {
     heading
         .syntax()
         .descendants()
         .filter_map(|node| {
-            let ident = HeadingRef::cast(node.clone())
+            let at = trendy_syntax::span(node.text_range());
+            let name = HeadingRef::cast(node.clone())
                 .and_then(|r| r.ident())
-                .filter(|i| namespaces.heading(i.text()).is_some())
+                .and_then(|i| namespaces.heading_named(i.text(), at))
                 .or_else(|| {
                     TypeRef::cast(node.clone())
                         .and_then(|r| r.ident())
-                        .filter(|i| namespaces.defined(i.text()).is_some())
+                        .and_then(|i| namespaces.type_named(i.text(), at))
                 })?;
             Some(Contained {
-                name: ident.text().to_string(),
-                at: trendy_syntax::span(node.text_range()),
+                name,
+                at,
                 how: Named::Holds,
             })
         })
@@ -985,9 +994,7 @@ impl Search {
                         name: name.clone(),
                         what: by_name[name.as_str()].decl.what(),
                         declared: namespaces
-                            .heading(name)
-                            .map(|(span, _)| span)
-                            .or_else(|| namespaces.defined(name).map(|(span, _)| span))
+                            .type_declared(name)
                             .expect("a declared heading or type"),
                         via,
                         how,

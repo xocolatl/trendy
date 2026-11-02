@@ -3,7 +3,7 @@
 //! initial values are known when compiling, so a constraint they break is
 //! reported then, with what breaks it where its form says.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 use trendy_diag::{Diagnostic, Span};
 use trendy_hir as hir;
@@ -65,7 +65,7 @@ fn constraint(
     }
     if !holds {
         let breaches = initial.breaches(&written);
-        let mentioned: Vec<&str> = names.mentioned.iter().map(String::as_str).collect();
+        let mentioned: Vec<&str> = names.mentioned.keys().map(String::as_str).collect();
         errors.push(errors::constraint_broken_initially(
             ident.text(),
             &written,
@@ -84,13 +84,12 @@ fn constraint(
         .filter_map(|conjunct| part(conjunct, &boolean, cx))
         .collect();
     parts.sort_by_key(|part| part.condition.can_fail());
+    let unit = cx
+        .namespaces
+        .unit_at(trendy_syntax::span(ident.text_range()));
     Some(hir::VariableConstraint {
-        name: ident.text().to_string(),
-        variables: names
-            .mentioned
-            .iter()
-            .map(|name| cx.variable_ids[name])
-            .collect(),
+        name: cx.namespaces.constraint_identity(ident.text(), unit),
+        variables: names.mentioned.values().copied().collect(),
         parts,
         written: written.syntax().text().to_string(),
     })
@@ -201,8 +200,8 @@ struct ConditionNames<'c, 'a> {
     cx: &'c Context<'a>,
     initial: bool,
     locals: Locals,
-    /// The variables it mentions, by name.
-    mentioned: BTreeSet<String>,
+    /// The variables it mentions, by the names it writes.
+    mentioned: BTreeMap<String, hir::VariableId>,
 }
 
 impl<'c, 'a> ConditionNames<'c, 'a> {
@@ -211,7 +210,7 @@ impl<'c, 'a> ConditionNames<'c, 'a> {
             cx,
             initial,
             locals: Locals::default(),
-            mentioned: BTreeSet::new(),
+            mentioned: BTreeMap::new(),
         }
     }
 
@@ -294,8 +293,8 @@ impl Names for ConditionNames<'_, '_> {
     }
 
     fn resolve(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {
-        if let Some(&id) = self.cx.variable_ids.get(name) {
-            self.mentioned.insert(name.to_string());
+        if let Some(id) = self.cx.declared.find(name, span) {
+            self.mentioned.insert(name.to_string(), id);
             // A variable with errors in its declaration is already reported.
             return match &self.cx.variables[id.0] {
                 // Of its declared type, which can be a supertype of its
@@ -307,15 +306,15 @@ impl Names for ConditionNames<'_, '_> {
                 None => Lookup::Reported,
             };
         }
-        if self.cx.namespaces.operator(name).is_some() {
+        if self.cx.namespaces.operator(name, span).is_some() {
             errors.push(errors::operator_as_value(name, span, self.cx.operators));
             return Lookup::Reported;
         }
         Lookup::Unknown
     }
 
-    fn candidates(&self) -> Vec<String> {
-        self.cx.variable_ids.keys().cloned().collect()
+    fn candidates(&self, at: Span) -> Vec<String> {
+        self.cx.declared.names(at).map(str::to_string).collect()
     }
 
     fn leaf_type(&self, leaf: &hir::Expr) -> hir::Type {

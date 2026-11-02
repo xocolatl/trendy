@@ -21,13 +21,14 @@ use crate::{Files, Kind, Namespaces, errors, keys, ops, sections};
 /// Check every database's relvars and constraints in `files`, reporting
 /// what is wrong with them.
 pub(crate) fn check(files: &Files, cx: &Context, errors: &mut Vec<Diagnostic>) {
-    // Each database's relvars, by name, the first declaration of each.
+    // Each database's relvars, by name, the first declaration of each, by
+    // the database's identity.
     let mut relvars: BTreeMap<String, BTreeMap<String, Relvar>> = BTreeMap::new();
     for decl in files.relvars() {
         let Some((database, name, relvar)) = self::relvar(&decl, cx, errors) else {
             continue;
         };
-        let of = relvars.entry(database).or_default();
+        let of = relvars.entry(database.identity).or_default();
         match of.get(&name) {
             Some(first) => errors.push(errors::duplicate_name(
                 &name,
@@ -39,11 +40,20 @@ pub(crate) fn check(files: &Files, cx: &Context, errors: &mut Vec<Diagnostic>) {
             }
         }
     }
-    // Each database's constraints, by name, where each is first declared.
+    // Each database's constraints, by name, where each is first declared,
+    // by the database's identity.
     let mut declared: BTreeMap<String, BTreeMap<String, Span>> = BTreeMap::new();
     for decl in files.constraints().filter(|d| d.part_of().is_some()) {
         constraint(&decl, &relvars, &mut declared, cx, errors);
     }
+}
+
+/// A database a declaration adds to.
+struct Database {
+    /// Its name, as the declaration writes it.
+    name: String,
+    /// What it is called in the program.
+    identity: String,
 }
 
 /// A database's relvar, as declared.
@@ -61,10 +71,10 @@ fn relvar(
     decl: &VarDecl,
     cx: &Context,
     errors: &mut Vec<Diagnostic>,
-) -> Option<(String, String, Relvar)> {
+) -> Option<(Database, String, Relvar)> {
     let database = known_database(&decl.part_of()?, cx, errors)?;
     let ident = decl.name()?.ident()?;
-    let ty = relvar_type(decl, &database, ident.text(), cx, errors);
+    let ty = relvar_type(decl, &database.name, ident.text(), cx, errors);
     let relvar = Relvar {
         span: trendy_syntax::span(ident.text_range()),
         ty,
@@ -120,16 +130,19 @@ fn known_database(
     part_of: &ast::PartOf,
     cx: &Context,
     errors: &mut Vec<Diagnostic>,
-) -> Option<String> {
+) -> Option<Database> {
     let ident = part_of.database()?.ident()?;
     let name = ident.text();
-    if cx.namespaces.database(name).is_none() {
-        let candidates: Vec<&str> = cx.namespaces.database_names().collect();
-        let span = trendy_syntax::span(ident.text_range());
+    let span = trendy_syntax::span(ident.text_range());
+    let Some(identity) = cx.namespaces.database_named(name, span) else {
+        let candidates: Vec<&str> = cx.namespaces.database_names(span).collect();
         errors.push(errors::unknown_name(name, span, "database", &candidates));
         return None;
-    }
-    Some(name.to_string())
+    };
+    Some(Database {
+        name: name.to_string(),
+        identity,
+    })
 }
 
 /// Check the constraint `decl` of a database, whose relvars are
@@ -145,7 +158,7 @@ fn constraint(
     let database = known_database(&decl.part_of()?, cx, errors)?;
     let ident = decl.name()?.ident()?;
     let span = trendy_syntax::span(ident.text_range());
-    let names_of = declared.entry(database.clone()).or_default();
+    let names_of = declared.entry(database.identity.clone()).or_default();
     if let Some(&first) = names_of.get(ident.text()) {
         errors.push(errors::duplicate_name(
             ident.text(),
@@ -157,8 +170,8 @@ fn constraint(
     }
     let written = decl.condition()?;
     let empty = BTreeMap::new();
-    let of = relvars.get(&database).unwrap_or(&empty);
-    let mut names = DatabaseNames::new(cx, &database, of);
+    let of = relvars.get(&database.identity).unwrap_or(&empty);
+    let mut names = DatabaseNames::new(cx, &database.name, of);
     let boolean = Expected {
         ty: hir::Type::Scalar(hir::Scalar::Boolean),
         origin: Origin::Operator(decl.keyword()?),
@@ -233,7 +246,7 @@ impl Names for DatabaseNames<'_, '_> {
             errors.push(errors::database_in_its_definition(name, span));
             return Lookup::Reported;
         }
-        if self.cx.variable_ids.contains_key(name) {
+        if self.cx.declared.find(name, span).is_some() {
             errors.push(errors::variable_in_database_constraint(
                 name,
                 span,
@@ -241,14 +254,14 @@ impl Names for DatabaseNames<'_, '_> {
             ));
             return Lookup::Reported;
         }
-        if self.cx.namespaces.operator(name).is_some() {
+        if self.cx.namespaces.operator(name, span).is_some() {
             errors.push(errors::operator_as_value(name, span, self.cx.operators));
             return Lookup::Reported;
         }
         Lookup::Unknown
     }
 
-    fn candidates(&self) -> Vec<String> {
+    fn candidates(&self, _: Span) -> Vec<String> {
         self.relvars.keys().cloned().collect()
     }
 

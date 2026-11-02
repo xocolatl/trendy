@@ -380,15 +380,16 @@ pub(crate) fn resolve(
             }
             // A type whose declaration has errors is reported where it is
             // declared.
-            if let Some((_, defined)) = namespaces.defined(ident.text()) {
+            let at = trendy_syntax::span(ident.text_range());
+            if let Some((_, defined)) = namespaces.defined(ident.text(), at) {
                 return match defined {
                     Some(defined) => Some(hir::Type::Defined(Box::new(defined.clone()))),
                     None => namespaces
-                        .dummy(ident.text())
+                        .dummy(ident.text(), at)
                         .map(|dummy| hir::Type::Dummy(Box::new(dummy.clone()))),
                 };
             }
-            errors.push(match namespaces.heading(ident.text()) {
+            errors.push(match namespaces.heading(ident.text(), at) {
                 Some((declared, _)) => errors::heading_as_type(&ident, declared),
                 None => errors::unknown_type(&ident, namespaces, parameters),
             });
@@ -443,7 +444,8 @@ pub(crate) fn resolve_heading_expr(
         }
         ast::HeadingExpr::Named(named) => {
             let ident = named.ident()?;
-            let Some((_, attributes)) = namespaces.heading(ident.text()) else {
+            let at = trendy_syntax::span(ident.text_range());
+            let Some((_, attributes)) = namespaces.heading(ident.text(), at) else {
                 errors.push(errors::unknown_heading(&ident, namespaces));
                 return None;
             };
@@ -634,7 +636,9 @@ pub(crate) fn tuple_selector(
     // `tuple celsius { degrees: 1e0 }`, for the type's selector.
     if let Some(ast::HeadingExpr::Named(named)) = tuple.heading()
         && let Some(ident) = named.ident()
-        && let Some((declared, _)) = checker.namespaces().defined(ident.text())
+        && let Some((declared, _)) = checker
+            .namespaces()
+            .defined(ident.text(), trendy_syntax::span(ident.text_range()))
     {
         errors.push(errors::tuple_of_type(&ident, tuple, declared));
         return None;

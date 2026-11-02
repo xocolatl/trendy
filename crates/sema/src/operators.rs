@@ -10,13 +10,17 @@ use trendy_syntax::ast::{self, AstNode, Item, Said, Section, TypeExpr};
 
 use crate::check::Lookup;
 use crate::types::{self, Origin, TypeParameters};
-use crate::{Files, Kind, Namespaces, Source, errors};
+use crate::{Files, Kind, Namespaces, Source, errors, scope};
 
 /// What a call needs to know about the operator it calls.
 #[derive(Clone)]
 pub(crate) struct Signature {
     pub(crate) id: hir::OperatorId,
+    /// Its name, as calls write it. The HIR calls it by its identity (see
+    /// [`crate::scope`]).
     pub(crate) name: String,
+    /// The unit it is declared in.
+    pub(crate) unit: hir::FileId,
     /// The type parameters: those declared with `types`, then one for each
     /// `any` written as a parameter's type.
     pub(crate) types: Vec<hir::TypeParameter>,
@@ -268,6 +272,20 @@ impl Signature {
         hir::Expr::Select(defined, Box::new(hir::Expr::Tuple(components)))
     }
 
+    /// What it is called in the program, of `namespaces`: a selector as
+    /// its type is, and a type's constraint or conversion as it is named
+    /// after its type already.
+    pub(crate) fn identity(&self, namespaces: &Namespaces) -> String {
+        match &self.from_type {
+            Some(from) if from.selects().is_some() => from.defined.name.clone(),
+            Some(_) => self.name.clone(),
+            None => {
+                let params = self.written.keys().cloned().collect();
+                namespaces.operator_identity(&self.name, &params, self.unit)
+            }
+        }
+    }
+
     /// The parameters, as a call's error says what they are:
     /// `` `greet{name: text}` ``.
     pub(crate) fn text(&self) -> String {
@@ -279,8 +297,13 @@ impl Signature {
 /// program's types, then the program's operators and selectors.
 pub(crate) struct Operators {
     list: Vec<Signature>,
-    /// Each name's operators, which their parameters' names tell apart.
+    /// The program's units, which tell which operators a call sees.
+    units: scope::Units,
+    /// Each name's operators, as calls write it, which the unit a call is
+    /// in and their parameters' names tell apart.
     by_name: HashMap<String, Vec<hir::OperatorId>>,
+    /// Each type of the program's own's selectors, by its identity.
+    selectors: HashMap<String, Vec<hir::OperatorId>>,
 }
 
 /// A call's arguments, as they choose which operator of its name it
@@ -304,9 +327,11 @@ pub(crate) enum Chosen<'a> {
 
 impl Operators {
     /// The operators of `list`, by id, each named in the order they are
-    /// defined, but constraints and conversions, which no call can name.
-    fn new(list: Vec<Signature>) -> Self {
+    /// defined, but constraints and conversions, which no call can name,
+    /// in the program of `units`.
+    fn new(list: Vec<Signature>, units: scope::Units) -> Self {
         let mut by_name: HashMap<String, Vec<hir::OperatorId>> = HashMap::new();
+        let mut selectors: HashMap<String, Vec<hir::OperatorId>> = HashMap::new();
         // A version is called through its specification, and a duplicate
         // not at all.
         let named = |s: &&Signature| {
@@ -317,12 +342,33 @@ impl Operators {
                 .entry(signature.name.clone())
                 .or_default()
                 .push(signature.id);
+            if let Some(defined) = signature.selects() {
+                selectors
+                    .entry(defined.name.clone())
+                    .or_default()
+                    .push(signature.id);
+            }
         }
-        Operators { list, by_name }
+        Operators {
+            list,
+            units,
+            by_name,
+            selectors,
+        }
     }
 
     pub(crate) fn get(&self, id: hir::OperatorId) -> &Signature {
         &self.list[id.0]
+    }
+
+    /// The selectors of the type of the program's own `defined`, in the
+    /// order they are defined.
+    fn selectors(&self, defined: &hir::Defined) -> impl Iterator<Item = &Signature> {
+        self.selectors
+            .get(&defined.name)
+            .into_iter()
+            .flatten()
+            .map(|&id| self.get(id))
     }
 
     /// The selector of the type of the program's own `defined` in the
@@ -333,13 +379,8 @@ impl Operators {
         defined: &hir::Defined,
         component: &str,
     ) -> Option<hir::OperatorId> {
-        self.overloads(&defined.name)
-            .find(|signature| {
-                signature
-                    .selects()
-                    .is_some_and(|ty| ty.name == defined.name)
-                    && signature.params.contains_key(component)
-            })
+        self.selectors(defined)
+            .find(|signature| signature.params.contains_key(component))
             .map(|signature| signature.id)
     }
 
@@ -351,30 +392,33 @@ impl Operators {
         defined: &hir::Defined,
         components: &hir::Heading,
     ) -> Option<hir::OperatorId> {
-        self.overloads(&defined.name)
-            .find(|signature| {
-                signature
-                    .selects()
-                    .is_some_and(|ty| ty.name == defined.name)
-                    && signature.takes(components)
-            })
+        self.selectors(defined)
+            .find(|signature| signature.takes(components))
             .map(|signature| signature.id)
     }
 
-    /// The operators named `name`, in the order they are defined.
-    pub(crate) fn overloads(&self, name: &str) -> impl Iterator<Item = &Signature> {
+    /// The operators named `name` that the unit `viewer` sees, in the order
+    /// they are defined.
+    fn seen(&self, name: &str, viewer: hir::FileId) -> impl Iterator<Item = &Signature> {
         self.by_name
             .get(name)
             .into_iter()
             .flatten()
             .map(|&id| self.get(id))
+            .filter(move |signature| self.units.sees(viewer, signature.unit))
+    }
+
+    /// The operators named `name` that the unit `at` is in sees, in the
+    /// order they are defined.
+    pub(crate) fn overloads(&self, name: &str, at: Span) -> impl Iterator<Item = &Signature> {
+        self.seen(name, self.units.at(at))
     }
 
     /// The prelude's `message{error: error}: text`, a specification of its
     /// union type `error`, which writes an error's message, if the prelude
     /// declares it so.
     pub(crate) fn message(&self) -> Option<&Signature> {
-        self.overloads("message").find(|s| {
+        self.seen("message", self.units.prelude()).find(|s| {
             let error = s.params.get("error").map(|p| &p.ty);
             s.source == Source::Prelude
                 && s.written.keys().eq(["error"])
@@ -384,20 +428,20 @@ impl Operators {
         })
     }
 
-    /// Whether an operator is named `name`.
-    pub(crate) fn has(&self, name: &str) -> bool {
-        self.by_name.contains_key(name)
+    /// Whether an operator named `name` is one the unit `at` is in sees.
+    pub(crate) fn has(&self, name: &str, at: Span) -> bool {
+        self.overloads(name, at).next().is_some()
     }
 
-    /// The operator named `name` that a call whose arguments are named
-    /// `args` calls, if one is named so: the only one, or the one whose
-    /// parameters `args` names. Otherwise it is the one they name most
-    /// nearly, each argument it has no parameter for, and each parameter
-    /// they don't name, counting two, but an argument whose name is a
-    /// misspelling of a parameter's they don't name, or that has no name,
-    /// one, for both.
-    pub(crate) fn chosen(&self, name: &str, args: &ArgumentNames) -> Option<Chosen<'_>> {
-        let overloads: Vec<&Signature> = self.overloads(name).collect();
+    /// The operator named `name` that a call at `at` whose arguments are
+    /// named `args` calls, if the unit it is in sees one named so: the
+    /// only one, or the one whose parameters `args` names. Otherwise it is
+    /// the one they name most nearly, each argument it has no parameter
+    /// for, and each parameter they don't name, counting two, but an
+    /// argument whose name is a misspelling of a parameter's they don't
+    /// name, or that has no name, one, for both.
+    pub(crate) fn chosen(&self, name: &str, args: &ArgumentNames, at: Span) -> Option<Chosen<'_>> {
+        let overloads: Vec<&Signature> = self.overloads(name, at).collect();
         if let [only] = overloads.as_slice() {
             return Some(Chosen::One(only));
         }
@@ -438,12 +482,12 @@ impl Operators {
         })
     }
 
-    /// `signature`'s parameters, as a call's error says what they are:
-    /// `` `greet{name: text}` ``, and those of the other operators of its
-    /// name, which a call's arguments' names choose among.
-    pub(crate) fn described(&self, signature: &Signature) -> String {
+    /// `signature`'s parameters, as a call's error at `at` says what they
+    /// are: `` `greet{name: text}` ``, and those of the other operators of
+    /// its name the call sees, which its arguments' names choose among.
+    pub(crate) fn described(&self, signature: &Signature, at: Span) -> String {
         let others: Vec<String> = self
-            .overloads(&signature.name)
+            .overloads(&signature.name, at)
             .filter(|s| s.id != signature.id)
             .map(Signature::text)
             .collect();
@@ -463,14 +507,17 @@ impl Operators {
         self.list.iter()
     }
 
-    /// Every operator's name, which a misspelled one, or another
-    /// language's, may be, with the names of its parameters that take
-    /// values, as a call gives their arguments: those a lone argument can
-    /// be for, not a `var` or `out` one's variable. A name with several
-    /// operators is there for each, in the order they are defined.
-    pub(crate) fn names(&self) -> Vec<(&str, Vec<&str>)> {
+    /// The name of every operator the unit `at` is in sees, which a
+    /// misspelled one, or another language's, may be, with the names of
+    /// its parameters that take values, as a call gives their arguments:
+    /// those a lone argument can be for, not a `var` or `out` one's
+    /// variable. A name with several operators is there for each, in the
+    /// order they are defined.
+    pub(crate) fn names(&self, at: Span) -> Vec<(&str, Vec<&str>)> {
+        let viewer = self.units.at(at);
         self.list
             .iter()
+            .filter(|signature| self.units.sees(viewer, signature.unit))
             .map(|signature| {
                 let params = signature
                     .written
@@ -494,11 +541,13 @@ impl Signature {
         builtin: hir::Builtin,
         types: Vec<hir::TypeParameter>,
         params: BTreeMap<String, hir::Parameter>,
+        unit: hir::FileId,
     ) -> Self {
         let result = builtin.result();
         Signature {
             id,
             name: builtin.name().to_string(),
+            unit,
             types,
             written: written(&params),
             params,
@@ -571,24 +620,37 @@ pub(crate) fn signatures(
         }
     }
     families(&mut list, namespaces, errors);
-    Operators::new(list)
+    Operators::new(list, namespaces.units().clone())
 }
 
 /// The operators in `list` written in trendy, each by its place in it, in
-/// sets of one name and the same parameters' names. A built-in's
-/// duplicate is in none, as it is one already.
+/// sets of one name and the same parameters' names: one set, if the
+/// prelude has one of them, as every unit sees it, and otherwise one for
+/// each unit, as none sees another's. A built-in's duplicate is in none, as
+/// it is one already.
 fn sets(list: &[Signature]) -> Vec<Vec<usize>> {
-    let mut sets: BTreeMap<(String, Vec<String>), Vec<usize>> = BTreeMap::new();
-    for (i, signature) in list.iter().enumerate() {
-        if signature.decl.is_some()
-            && signature.from_type.is_none()
-            && signature.family == Family::Own
-        {
-            let names = signature.params.keys().cloned().collect();
-            sets.entry((signature.name.clone(), names))
-                .or_default()
-                .push(i);
-        }
+    // An operator's name and its parameters' names.
+    type Named = (String, Vec<String>);
+    let trendy = |signature: &&Signature| {
+        signature.decl.is_some() && signature.from_type.is_none() && signature.family == Family::Own
+    };
+    let named = |signature: &Signature| -> Named {
+        (
+            signature.name.clone(),
+            signature.params.keys().cloned().collect(),
+        )
+    };
+    let prelude: BTreeSet<Named> = list
+        .iter()
+        .filter(trendy)
+        .filter(|signature| signature.source == Source::Prelude)
+        .map(named)
+        .collect();
+    let mut sets: BTreeMap<(Named, Option<hir::FileId>), Vec<usize>> = BTreeMap::new();
+    for (i, signature) in list.iter().enumerate().filter(|(_, s)| trendy(s)) {
+        let named = named(signature);
+        let unit = (!prelude.contains(&named)).then_some(signature.unit);
+        sets.entry((named, unit)).or_default().push(i);
     }
     sets.into_values().collect()
 }
@@ -998,11 +1060,16 @@ fn operator(
     // parameters' names, reported with the names, is never called.
     let names = crate::param_names(op.params().as_ref());
     let duplicate = namespaces
-        .operator_with(ident.text(), &names)
+        .operator_with(
+            ident.text(),
+            &names,
+            trendy_syntax::span(ident.text_range()),
+        )
         .is_some_and(|(kind, _)| kind == Kind::Builtin);
     Some(Signature {
         id,
         name: ident.text().to_string(),
+        unit: namespaces.unit_at(trendy_syntax::span(ident.text_range())),
         valid: declared_valid && params_valid && result_valid && determined && !duplicate,
         types: type_parameters,
         written: written(&seen),
@@ -1041,7 +1108,9 @@ fn numbered(files: &Files, namespaces: &Namespaces) -> Vec<Signature> {
         let Some(ident) = decl.name().and_then(|n| n.ident()) else {
             continue;
         };
-        let Some((_, Some(defined))) = namespaces.defined(ident.text()) else {
+        let Some((_, Some(defined))) =
+            namespaces.defined(ident.text(), trendy_syntax::span(ident.text_range()))
+        else {
             continue;
         };
         if !namespaces.is_first_type(&ident) {
@@ -1062,6 +1131,7 @@ fn numbered(files: &Files, namespaces: &Namespaces) -> Vec<Signature> {
             signatures.push(Signature {
                 id: constraint.operator,
                 name: format!("{} constraint {}", defined.name, i + 1),
+                unit: namespaces.unit_at(trendy_syntax::span(ident.text_range())),
                 types: Vec::new(),
                 written: self::written(&params),
                 params: params.clone(),
@@ -1085,6 +1155,7 @@ fn numbered(files: &Files, namespaces: &Namespaces) -> Vec<Signature> {
                 |id, name, params: BTreeMap<String, hir::Parameter>, result, made| Signature {
                     id,
                     name,
+                    unit: namespaces.unit_at(trendy_syntax::span(ident.text_range())),
                     types: Vec::new(),
                     written: self::written(&params),
                     params,
@@ -1139,16 +1210,19 @@ fn from_type(decl: &ast::TypeDecl, source: Source, namespaces: &Namespaces) -> V
         return Vec::new();
     };
     let name = ident.text();
-    let Some((_, Some(defined))) = namespaces.defined(name) else {
+    let at = trendy_syntax::span(ident.text_range());
+    let Some((_, Some(defined))) = namespaces.defined(name, at) else {
         return Vec::new();
     };
     if !namespaces.is_first_type(&ident) {
         return Vec::new();
     }
-    let selects = matches!(namespaces.operator(name), Some((Kind::Selector, _)));
+    let selects = matches!(namespaces.operator(name, at), Some((Kind::Selector, _)));
+    let unit = namespaces.unit_at(trendy_syntax::span(ident.text_range()));
     let made = |made: Made, params: BTreeMap<String, hir::Parameter>, result, valid| Signature {
         id: hir::OperatorId(0),
         name: name.to_string(),
+        unit,
         types: Vec::new(),
         written: written(&params),
         params,

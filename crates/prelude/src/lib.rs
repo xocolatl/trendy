@@ -12,6 +12,10 @@ pub const SOURCE: &str = include_str!("prelude.trendy");
 /// The name shown for the prelude in internal error messages.
 pub const PATH: &str = "<prelude>";
 
+/// The prelude's unit's name, under `trendy.`, which is kept for the units
+/// that come with the compiler.
+pub const NAME: &str = "trendy.prelude";
+
 /// Where the prelude's source was when the compiler was built: the
 /// language server checks the file there as the prelude, not a program.
 pub const SOURCE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/prelude.trendy");

@@ -107,13 +107,13 @@ pub(crate) trait Names {
         self.resolve(name, span, errors)
     }
 
-    /// The names in scope, which a name that refers to nothing may be a
-    /// misspelling of.
-    fn candidates(&self) -> Vec<String>;
+    /// The names in scope at `at`, which a name written there that refers
+    /// to nothing may be a misspelling of.
+    fn candidates(&self, at: Span) -> Vec<String>;
 
-    /// Whether a value named `name` is in scope.
-    fn has_value(&self, name: &str) -> bool {
-        self.candidates().iter().any(|c| c == name)
+    /// Whether a value named `name` is in scope at `at`.
+    fn has_value(&self, name: &str, at: Span) -> bool {
+        self.candidates(at).iter().any(|c| c == name)
     }
 
     /// The type of `leaf`, a variable or parameter that [`Names::resolve`]
@@ -174,6 +174,17 @@ pub(crate) enum Written<'a> {
     Arguments(&'a ast::Arguments),
     /// None, in `f{}`, a projection on no attributes to the parser.
     Nothing(&'a ast::NameList),
+}
+
+impl Written<'_> {
+    /// Where the arguments are written, in the unit whose operators the
+    /// call sees.
+    pub(crate) fn span(self) -> Span {
+        match self {
+            Written::Arguments(arguments) => arguments.span(),
+            Written::Nothing(list) => list.span(),
+        }
+    }
 }
 
 /// Checks expressions whose names `names` resolves.
@@ -543,7 +554,7 @@ impl<'a> Checker<'a> {
                 None
             }
             Lookup::Unknown => {
-                if self.names.namespaces().database(name).is_some() {
+                if self.names.namespaces().database(name, span).is_some() {
                     errors.push(errors::database_as_value(name, span));
                     return None;
                 }
@@ -551,7 +562,7 @@ impl<'a> Checker<'a> {
                     errors.push(errors::constant_as_value(name, written, &operator));
                     return None;
                 }
-                let candidates = self.names.candidates();
+                let candidates = self.names.candidates(span);
                 let candidates: Vec<&str> = candidates.iter().map(String::as_str).collect();
                 errors.push(if self.names.unnumbered() {
                     errors::unnumbered_position(name, span, &candidates)
@@ -588,7 +599,7 @@ impl<'a> Checker<'a> {
         let constant = self
             .names
             .operators()
-            .overloads(&operator)
+            .overloads(&operator, span)
             .any(|signature| signature.read_only && signature.written.is_empty());
         constant.then_some((operator, written))
     }
@@ -657,7 +668,8 @@ impl<'a> Checker<'a> {
             return None;
         }
         let operators = self.names.operators();
-        let first = operators.overloads(name).next()?;
+        let at = trendy_syntax::span(ident.text_range());
+        let first = operators.overloads(name, at).next()?;
         // What follows `x.f`: the call's other arguments, in braces, or none.
         // Names in braces, `x.f{a}`, might be attributes' or values, so
         // which parameter `x` is for isn't known.
@@ -684,7 +696,7 @@ impl<'a> Checker<'a> {
         // of: `x` is for it if just one does.
         let fitting: Vec<&Signature> = written.as_ref().map_or_else(Vec::new, |written| {
             operators
-                .overloads(name)
+                .overloads(name, at)
                 .filter(|s| {
                     s.written.len() == written.len() + 1
                         && written.iter().all(|a| {
@@ -706,11 +718,11 @@ impl<'a> Checker<'a> {
         let signature = fitting.first().copied().unwrap_or(first);
         Some(errors::method_call(
             name,
-            trendy_syntax::span(ident.text_range()),
+            at,
             operand,
             whole,
             only,
-            &operators.described(signature),
+            &operators.described(signature, at),
         ))
     }
 
@@ -761,13 +773,14 @@ impl<'a> Checker<'a> {
         let ident = name_ref.ident()?;
         let list = project.names()?;
         let name = ident.text();
-        let operator = self.names.operators().has(name);
+        let at = trendy_syntax::span(ident.text_range());
+        let operator = self.names.operators().has(name, at);
         let call = if operator {
-            list.names().next().is_none() || !self.names.has_value(name)
+            list.names().next().is_none() || !self.names.has_value(name, at)
         } else {
             let foreign = errors::elsewhere(name).is_some()
-                || errors::tutorial_d_tested(name, self.namespaces()).is_some();
-            foreign && !self.names.has_value(name)
+                || errors::tutorial_d_tested(name, at, self.namespaces()).is_some();
+            foreign && !self.names.has_value(name, at)
         };
         call.then_some((ident, list))
     }
@@ -797,7 +810,10 @@ impl<'a> Checker<'a> {
         expected: Option<&Expected>,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Expr> {
-        let known = self.names.operators().has(ident.text());
+        let known = self
+            .names
+            .operators()
+            .has(ident.text(), trendy_syntax::span(ident.text_range()));
         if known && list.names().next().is_some() {
             self.positional_names(ident, list, errors);
             return None;
@@ -815,9 +831,10 @@ impl<'a> Checker<'a> {
         errors: &mut Vec<Diagnostic>,
     ) {
         let operators = self.names.operators();
+        let at = trendy_syntax::span(ident.text_range());
         // The one these arguments choose, if one is nearest.
         let (signature, chosen) =
-            match operators.chosen(ident.text(), &argument_names(Written::Nothing(list))) {
+            match operators.chosen(ident.text(), &argument_names(Written::Nothing(list)), at) {
                 Some(Chosen::One(signature)) => (signature, true),
                 Some(Chosen::Tied(tied)) => (tied[0], false),
                 None => unreachable!("a projected call is of an operator"),
@@ -830,7 +847,7 @@ impl<'a> Checker<'a> {
             errors.push(errors::positional_argument(
                 name.span(),
                 only_param.map(String::as_str),
-                &operators.described(signature),
+                &operators.described(signature, at),
             ));
         }
     }
@@ -883,7 +900,7 @@ impl<'a> Checker<'a> {
         let signature = match self
             .names
             .operators()
-            .chosen(name, &argument_names(written))
+            .chosen(name, &argument_names(written), span)
         {
             Some(Chosen::One(signature)) => signature.clone(),
             Some(Chosen::Tied(tied)) => {
@@ -896,7 +913,8 @@ impl<'a> Checker<'a> {
             }
         };
         if !signature.read_only {
-            let projectable = matches!(written, Written::Nothing(_)) && self.names.has_value(name);
+            let projectable =
+                matches!(written, Written::Nothing(_)) && self.names.has_value(name, span);
             errors.push(errors::operator_call_without_value(
                 name,
                 span,
@@ -944,12 +962,12 @@ impl<'a> Checker<'a> {
         written: Written,
         errors: &mut Vec<Diagnostic>,
     ) {
-        if self.names.has_value(name) {
+        if self.names.has_value(name, span) {
             errors.push(errors::not_an_operator(name, span, "a value"));
         } else if let Some(error) = errors::tutorial_d_test(name, span, written, self.namespaces())
         {
             errors.push(error);
-        } else if let Some(dummy) = self.names.namespaces().dummy(name) {
+        } else if let Some(dummy) = self.names.namespaces().dummy(name, span) {
             // The names of the arguments, if each has one.
             let named = match written {
                 Written::Arguments(arguments) if arguments.positional().next().is_none() => {
@@ -970,7 +988,7 @@ impl<'a> Checker<'a> {
             ));
         } else {
             let of_array = self.of_array(written);
-            let operators = self.names.operators().names();
+            let operators = self.names.operators().names(span);
             errors.push(errors::unknown_operator(
                 name,
                 span,
@@ -993,7 +1011,7 @@ impl<'a> Checker<'a> {
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Call> {
         let params = &signature.written;
-        let signature_text = self.names.operators().described(signature);
+        let signature_text = self.names.operators().described(signature, written.span());
         let mut ok = true;
 
         let (named, positional): (Vec<AttributeValue>, Vec<ast::PositionalArg>) = match written {
@@ -2252,7 +2270,7 @@ impl<'a> Checker<'a> {
     ) -> Option<hir::Expr> {
         let error = self.expr(written, None, errors)?;
         // The prelude declares it, or that is reported.
-        let dummy = self.namespaces().dummy("error")?;
+        let dummy = self.namespaces().dummy_named("error")?;
         let ty = hir::Type::Dummy(Box::new(dummy.clone()));
         let found = self.ty(&error);
         if !found.is_subtype_of(&ty) {
@@ -3407,11 +3425,11 @@ impl Names for TupleNames<'_> {
         }
     }
 
-    fn candidates(&self) -> Vec<String> {
+    fn candidates(&self, at: Span) -> Vec<String> {
         self.heading
             .named()
             .map(|(name, _)| name.to_string())
-            .chain(self.outer.candidates())
+            .chain(self.outer.candidates(at))
             .collect()
     }
 
@@ -3540,11 +3558,11 @@ impl Names for ComponentNames<'_> {
         }
     }
 
-    fn candidates(&self) -> Vec<String> {
+    fn candidates(&self, at: Span) -> Vec<String> {
         self.defined
             .possible_representations()
             .flat_map(|h| h.named().map(|(c, _)| c.to_string()))
-            .chain(self.outer.candidates())
+            .chain(self.outer.candidates(at))
             .collect()
     }
 

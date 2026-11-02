@@ -53,12 +53,19 @@ fn build(input: &Path, output: &Path, format: Format) -> Result<(), String> {
         return Err(report(&parse.errors, format, &path, &sources));
     }
     let prelude = prelude()?;
-    // Sema's spans are in the program, then the prelude.
+    // Sema's spans are in the program, then the prelude. A unit's name is
+    // its path from the directory of `main`'s file.
+    let name = input
+        .file_stem()
+        .map(|stem| stem.to_string_lossy())
+        .ok_or_else(|| format!("{path}: not a file's path"))?;
     let unit = trendy_sema::File {
+        name: &name,
         path: &path,
         tree: &parse.tree,
     };
     let prelude_file = trendy_sema::File {
+        name: trendy_prelude::NAME,
         path: trendy_prelude::PATH,
         tree: &prelude.tree,
     };

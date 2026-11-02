@@ -150,7 +150,13 @@ fn builtin_operator(
         ));
         return None;
     }
-    Some(Signature::builtin(id, builtin, types, params))
+    Some(Signature::builtin(
+        id,
+        builtin,
+        types,
+        params,
+        namespaces.units().prelude(),
+    ))
 }
 
 /// The kind `decl` declares, with what the compiler can require of its
@@ -395,7 +401,7 @@ pub(crate) fn failures(
     errors: &mut Vec<Diagnostic>,
 ) {
     let end = Span::empty(prelude.span().end);
-    if namespaces.dummy("error").is_none() {
+    if namespaces.dummy_named("error").is_none() {
         errors.push(Diagnostic::error(
             Code::Internal,
             "the prelude doesn't declare `type error union;`, what a program fails with",
@@ -411,11 +417,9 @@ pub(crate) fn failures(
         ));
     }
     // What a transaction collects, whose tuples the compiler makes.
-    if let Some(error) = namespaces.dummy("error") {
+    if let Some(error) = namespaces.dummy_named("error") {
         let collection = hir::transaction_collection(hir::Type::Dummy(Box::new(error.clone())));
-        let declared = namespaces
-            .heading("transaction_collection")
-            .and_then(|(_, attributes)| attributes);
+        let declared = namespaces.heading_attributes("transaction_collection");
         if declared != Some(&collection) {
             errors.push(Diagnostic::error(
                 Code::Internal,
@@ -428,7 +432,7 @@ pub(crate) fn failures(
     // The errors the built-ins give, each a subtype of `error` with the
     // components the runtime makes it with.
     for error in hir::LanguageError::ALL {
-        let declared = namespaces.defined(error.name()).and_then(|(_, d)| d);
+        let declared = namespaces.defined_named(error.name());
         let components = error.components();
         let as_made = declared.is_some_and(|defined| {
             defined.supertypes == ["error"]

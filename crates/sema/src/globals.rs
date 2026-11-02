@@ -16,7 +16,7 @@ use crate::check::{Checker, Lookup, Names};
 use crate::locals::{self, Declaration, Local, Locals};
 use crate::operators::{FromType, Made, Operators, Signature};
 use crate::types::{self, Expected, Origin};
-use crate::{Files, Namespaces, Sites, errors, keys, ops};
+use crate::{Files, Namespaces, Sites, errors, keys, ops, scope};
 
 /// What the globals evaluate to.
 pub(crate) struct Evaluated {
@@ -35,10 +35,8 @@ pub(crate) struct Globals<'a> {
     sites: &'a Sites<'a>,
     namespaces: &'a Namespaces,
     operators: &'a Operators,
-    /// The first declaration of each variable, by name.
-    decls: &'a HashMap<String, VarDecl>,
-    /// Each variable's id, by name.
-    ids: &'a HashMap<String, hir::VariableId>,
+    /// Each variable's id and declaration, by the name its unit writes.
+    declared: &'a scope::Variables,
     /// Each variable, by id, once its evaluation has started.
     variables: Vec<Option<State<hir::Variable>>>,
     /// Each read-only operator whose value's checking has started.
@@ -101,17 +99,15 @@ impl<'a> Globals<'a> {
     pub(crate) fn new(
         namespaces: &'a Namespaces,
         operators: &'a Operators,
-        decls: &'a HashMap<String, VarDecl>,
-        ids: &'a HashMap<String, hir::VariableId>,
+        declared: &'a scope::Variables,
         sites: &'a Sites<'a>,
     ) -> Self {
         Globals {
             sites,
             namespaces,
             operators,
-            decls,
-            ids,
-            variables: vec![None; ids.len()],
+            declared,
+            variables: vec![None; declared.len()],
             operator_states: HashMap::new(),
             values: HashMap::new(),
             locals: HashMap::new(),
@@ -129,8 +125,11 @@ impl<'a> Globals<'a> {
             let Some(ident) = decl.name().and_then(|n| n.ident()) else {
                 continue;
             };
-            if self.namespaces.is_first_variable(&ident) {
-                self.variable(ident.text(), errors);
+            let at = trendy_syntax::span(ident.text_range());
+            if let Some(id) = self.declared.find(ident.text(), at)
+                && self.namespaces.is_first_variable(&ident)
+            {
+                self.variable(id, errors);
             } else {
                 // A duplicate, already reported, but it can have errors of
                 // its own.
@@ -157,20 +156,24 @@ impl<'a> Globals<'a> {
         }
     }
 
-    /// The first declared variable named `name`, evaluated if it isn't yet.
-    fn variable(&mut self, name: &str, errors: &mut Vec<Diagnostic>) -> Option<hir::Variable> {
-        let id = *self.ids.get(name)?;
+    /// The variable `id`, evaluated if it isn't yet.
+    fn variable(
+        &mut self,
+        id: hir::VariableId,
+        errors: &mut Vec<Diagnostic>,
+    ) -> Option<hir::Variable> {
         match &self.variables[id.0] {
             Some(State::Done(variable)) => return variable.clone(),
             Some(State::Evaluating) => unreachable!("cycles are caught at the reference"),
             None => {}
         }
-        let decl = self.decls.get(name)?.clone();
-        let declared = trendy_syntax::span(decl.name()?.ident()?.text_range());
+        let decl = self.declared.decl(id).clone();
+        let ident = decl.name()?.ident()?;
+        let declared = trendy_syntax::span(ident.text_range());
         self.variables[id.0] = Some(State::Evaluating);
         self.stack.push(Pending {
             global: Global::Variable(id),
-            name: name.to_string(),
+            name: ident.text().to_string(),
             defined: declared,
             via: declared,
         });
@@ -180,16 +183,15 @@ impl<'a> Globals<'a> {
         variable
     }
 
-    /// The variable `name`, referred to at `span`, evaluated if it isn't
+    /// The variable `id`, referred to at `span`, evaluated if it isn't
     /// yet, or `None` after reporting why it has none, such as a cycle its
     /// reference closes.
     fn reach(
         &mut self,
-        name: &str,
+        id: hir::VariableId,
         span: Span,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<hir::Variable> {
-        let id = *self.ids.get(name)?;
         if let Some(State::Evaluating) = self.variables[id.0] {
             let start = self
                 .stack
@@ -201,16 +203,16 @@ impl<'a> Globals<'a> {
         if let Some(innermost) = self.stack.last_mut() {
             innermost.via = span;
         }
-        self.variable(name, errors)
+        self.variable(id, errors)
     }
 
-    /// The type of the variable `name`, as its declaration writes it, or
+    /// The type of the variable `id`, as its declaration writes it, or
     /// the named heading of the selector its initial value is, as in
     /// `relation home { … }`, or else as its value has it, if that is
     /// known: its initial value isn't evaluated here, as that could lose
     /// its errors.
-    fn written_type(&self, name: &str) -> Option<String> {
-        let decl = &self.decls[name];
+    fn written_type(&self, id: hir::VariableId) -> Option<String> {
+        let decl = self.declared.decl(id);
         if let Some(written) = decl.type_expr() {
             return Some(written.syntax().text().to_string());
         }
@@ -224,7 +226,7 @@ impl<'a> Globals<'a> {
         {
             return Some(format!("{kind} {}", ident.text()));
         }
-        match &self.variables[self.ids[name].0] {
+        match &self.variables[id.0] {
             Some(State::Done(Some(variable))) => Some(variable.ty.to_string()),
             _ => None,
         }
@@ -730,8 +732,8 @@ impl Names for Globals<'_> {
     }
 
     fn resolve(&mut self, name: &str, span: Span, errors: &mut Vec<Diagnostic>) -> Lookup {
-        if self.ids.contains_key(name) {
-            return match self.reach(name, span, errors) {
+        if let Some(id) = self.declared.find(name, span) {
+            return match self.reach(id, span, errors) {
                 // Of its declared type, which can be a supertype of its
                 // value's.
                 Some(variable) => {
@@ -740,15 +742,15 @@ impl Names for Globals<'_> {
                 None => Lookup::Reported,
             };
         }
-        if self.namespaces.operator(name).is_some() {
+        if self.namespaces.operator(name, span).is_some() {
             errors.push(errors::operator_as_value(name, span, self.operators));
             return Lookup::Reported;
         }
         Lookup::Unknown
     }
 
-    fn candidates(&self) -> Vec<String> {
-        self.decls.keys().cloned().collect()
+    fn candidates(&self, at: Span) -> Vec<String> {
+        self.declared.names(at).map(str::to_string).collect()
     }
 
     fn leaf_type(&self, leaf: &hir::Expr) -> hir::Type {
@@ -824,7 +826,7 @@ impl Names for ReadOnlyNames<'_, '_, '_> {
                     name,
                     span,
                     decl,
-                    self.globals.ids.contains_key(name),
+                    self.globals.declared.find(name, span).is_some(),
                 ));
                 return Lookup::Reported;
             }
@@ -861,9 +863,9 @@ impl Names for ReadOnlyNames<'_, '_, '_> {
         // A read-only operator's value depends on its arguments alone, so
         // a variable of the program's is reported, once, with a fix that
         // passes it as a parameter, of its type as written, if it is.
-        if self.globals.ids.contains_key(name) {
+        if let Some(id) = self.globals.declared.find(name, span) {
             if self.globals.read.insert((self.within, name.to_string())) {
-                let ty = self.globals.written_type(name);
+                let ty = self.globals.written_type(id);
                 errors.push(errors::variable_in_read_only(
                     name,
                     span,
@@ -878,7 +880,7 @@ impl Names for ReadOnlyNames<'_, '_, '_> {
             errors.push(errors::per_as_value(name, relation, span));
             return Lookup::Reported;
         }
-        if self.globals.namespaces.operator(name).is_some() {
+        if self.globals.namespaces.operator(name, span).is_some() {
             errors.push(errors::operator_as_value(
                 name,
                 span,
@@ -889,11 +891,11 @@ impl Names for ReadOnlyNames<'_, '_, '_> {
         Lookup::Unknown
     }
 
-    fn candidates(&self) -> Vec<String> {
+    fn candidates(&self, at: Span) -> Vec<String> {
         self.signature()
             .parameter_names()
             .chain(self.locals.names())
-            .chain(self.globals.ids.keys().map(String::as_str))
+            .chain(self.globals.declared.names(at))
             .map(str::to_string)
             .collect()
     }
@@ -952,7 +954,7 @@ impl Assigning for ReadOnlyNames<'_, '_, '_> {
     ) -> Option<Assignee> {
         let op = self.globals.operators.get(self.within);
         if op.is_parameter(name) {
-            let hidden = self.globals.ids.contains_key(name);
+            let hidden = self.globals.declared.find(name, span).is_some();
             errors.push(errors::assigned_parameter(name, span, hidden));
             return None;
         }
@@ -975,7 +977,7 @@ impl Assigning for ReadOnlyNames<'_, '_, '_> {
                     name,
                     span,
                     decl,
-                    self.globals.ids.contains_key(name),
+                    self.globals.declared.find(name, span).is_some(),
                 ));
                 return None;
             }
@@ -987,9 +989,9 @@ impl Assigning for ReadOnlyNames<'_, '_, '_> {
             Some(Local::Invalid) => return None,
             None => {}
         }
-        if self.globals.ids.contains_key(name) {
+        if self.globals.declared.find(name, span).is_some() {
             errors.push(errors::assigned_in_read_only(name, span, &op.name));
-        } else if let Some((kind, _)) = self.globals.namespaces.operator(name) {
+        } else if let Some((kind, _)) = self.globals.namespaces.operator(name, span) {
             errors.push(errors::assigned_operator(name, span, kind));
         } else {
             let variables: Vec<&str> = self.locals.names().collect();
@@ -1051,8 +1053,12 @@ fn variable(
         }
     };
     let keys = keys::keys(decl, ident.text(), &ty, Some(&init), globals, errors)?;
-    namespaces.is_first_variable(&ident).then(|| hir::Variable {
-        name: ident.text().to_string(),
+    let id = globals
+        .declared
+        .find(ident.text(), trendy_syntax::span(ident.text_range()))
+        .filter(|_| namespaces.is_first_variable(&ident))?;
+    Some(hir::Variable {
+        name: globals.declared.identity(id).to_string(),
         ty,
         init,
         keys,

@@ -14,7 +14,7 @@ use crate::locals::{Declaration, Local, Locals};
 use crate::narrowed::{self, Facts};
 use crate::operators::{Chosen, Operators, Signature};
 use crate::types::{Expected, Origin};
-use crate::{Namespaces, Sites, assign, errors, locals, ops};
+use crate::{Namespaces, Sites, assign, errors, locals, ops, scope};
 
 /// Everything a body can refer to.
 pub(crate) struct Context<'a> {
@@ -26,9 +26,8 @@ pub(crate) struct Context<'a> {
     pub(crate) values: &'a HashMap<hir::OperatorId, hir::Expr>,
     /// Each variable, by id: `None` for one with errors, already reported.
     pub(crate) variables: &'a [Option<hir::Variable>],
-    pub(crate) variable_ids: &'a HashMap<String, hir::VariableId>,
-    /// Each variable's declaration, by name.
-    pub(crate) declarations: &'a HashMap<String, VarDecl>,
+    /// Each variable's id and declaration, by the name its unit writes.
+    pub(crate) declared: &'a scope::Variables,
 }
 
 impl Context<'_> {
@@ -251,7 +250,7 @@ impl Statements<'_, '_> {
     fn assigned(&self, assigns: &narrowed::Assigns) -> BTreeMap<String, Span> {
         let signature = self.cx.operators.get(self.within);
         let global = |name: &str| {
-            self.cx.variable_ids.contains_key(name)
+            self.cx.declared.seen(name, signature.unit).is_some()
                 && !signature.is_parameter(name)
                 && self.locals.find(name).is_none()
         };
@@ -590,13 +589,13 @@ impl Statements<'_, '_> {
     ) -> Option<hir::Target> {
         let ident = collecting.variable()?.ident()?;
         let (name, span) = (ident.text(), trendy_syntax::span(ident.text_range()));
-        let error = self.cx.namespaces.dummy("error")?;
+        let error = self.cx.namespaces.dummy_named("error")?;
         let errors_type = hir::Type::Relation(hir::transaction_collection(hir::Type::Dummy(
             Box::new(error.clone()),
         )));
         let known = self.locals.find(name).is_some()
             || self.cx.operators.get(self.within).is_parameter(name)
-            || self.cx.variable_ids.contains_key(name);
+            || self.cx.declared.find(name, span).is_some();
         if !known {
             errors.push(errors::undeclared_collecting(name, span, stmt));
             return None;
@@ -704,7 +703,7 @@ impl Statements<'_, '_> {
             .as_ref()
             .map(|args| argument_names(Written::Arguments(args)))
             .unwrap_or_default();
-        let signature = match cx.operators.chosen(name, &names) {
+        let signature = match cx.operators.chosen(name, &names, span) {
             Some(Chosen::One(signature)) => signature,
             Some(Chosen::Tied(tied)) => {
                 // Without arguments, a syntax error, which is reported.
@@ -723,12 +722,12 @@ impl Statements<'_, '_> {
                 } else if self.locals.find(name).is_some() {
                     Some("a local variable")
                 } else {
-                    cx.namespaces.variable(name).map(|_| "a variable")
+                    cx.namespaces.variable(name, span).map(|_| "a variable")
                 };
                 if let Some(what) = what {
                     errors.push(errors::not_an_operator(name, span, what));
                 } else {
-                    let operators = cx.operators.names();
+                    let operators = cx.operators.names(span);
                     errors.push(errors::unknown_operator(
                         name,
                         span,
@@ -1349,7 +1348,7 @@ impl BodyNames<'_, '_> {
                     name,
                     span,
                     decl,
-                    self.cx.variable_ids.contains_key(name),
+                    self.cx.declared.find(name, span).is_some(),
                 ));
                 return Lookup::Reported;
             }
@@ -1360,7 +1359,7 @@ impl BodyNames<'_, '_> {
             Some(Local::Invalid) => return Lookup::Reported,
             None => {}
         }
-        if let Some(&id) = self.cx.variable_ids.get(name) {
+        if let Some(id) = self.cx.declared.find(name, span) {
             // A variable with errors in its declaration is already reported.
             return match self.cx.variables[id.0] {
                 Some(_) => Lookup::Found(hir::Expr::Variable(id)),
@@ -1371,7 +1370,7 @@ impl BodyNames<'_, '_> {
             errors.push(errors::per_as_value(name, relation, span));
             return Lookup::Reported;
         }
-        if self.cx.namespaces.operator(name).is_some() {
+        if self.cx.namespaces.operator(name, span).is_some() {
             errors.push(errors::operator_as_value(name, span, self.cx.operators));
             return Lookup::Reported;
         }
@@ -1406,11 +1405,11 @@ impl Names for BodyNames<'_, '_> {
         self.ended.get(name).copied()
     }
 
-    fn candidates(&self) -> Vec<String> {
+    fn candidates(&self, at: Span) -> Vec<String> {
         self.signature()
             .parameter_names()
             .chain(self.locals.names())
-            .chain(self.cx.variable_ids.keys().map(String::as_str))
+            .chain(self.cx.declared.names(at))
             .map(str::to_string)
             .collect()
     }
@@ -1501,7 +1500,7 @@ impl BodyNames<'_, '_> {
             return Some(assignee);
         }
         if signature.is_parameter(name) {
-            let hidden = cx.variable_ids.contains_key(name);
+            let hidden = cx.declared.find(name, span).is_some();
             errors.push(errors::assigned_parameter(name, span, hidden));
             return None;
         }
@@ -1522,7 +1521,7 @@ impl BodyNames<'_, '_> {
                     name,
                     span,
                     decl,
-                    cx.variable_ids.contains_key(name),
+                    cx.declared.find(name, span).is_some(),
                 ));
                 return None;
             }
@@ -1534,27 +1533,23 @@ impl BodyNames<'_, '_> {
             Some(Local::Invalid) => return None,
             None => {}
         }
-        if let Some(&id) = cx.variable_ids.get(name) {
+        if let Some(id) = cx.declared.find(name, span) {
             // A variable with errors in its declaration is already reported.
             let variable = cx.variables[id.0].as_ref()?;
             return Some(Assignee {
                 target: hir::Target::Variable(id),
                 current: hir::Expr::Variable(id),
-                name: variable.name.clone(),
+                name: name.to_string(),
                 ty: variable.ty.clone(),
                 keys: variable.keys.clone(),
-                declaration: Declared::Variable(cx.declarations[&variable.name].clone()),
+                declaration: Declared::Variable(cx.declared.decl(id).clone()),
                 narrowed: None,
             });
         }
-        if let Some((kind, _)) = cx.namespaces.operator(name) {
+        if let Some((kind, _)) = cx.namespaces.operator(name, span) {
             errors.push(errors::assigned_operator(name, span, kind));
         } else {
-            let variables: Vec<&str> = self
-                .locals
-                .names()
-                .chain(cx.variable_ids.keys().map(String::as_str))
-                .collect();
+            let variables: Vec<&str> = self.locals.names().chain(cx.declared.names(span)).collect();
             errors.push(errors::unknown_name(name, span, "variable", &variables));
         }
         None

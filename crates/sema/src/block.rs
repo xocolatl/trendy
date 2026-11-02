@@ -277,10 +277,10 @@ impl Names for BlockNames<'_> {
         }
     }
 
-    fn candidates(&self) -> Vec<String> {
+    fn candidates(&self, at: Span) -> Vec<String> {
         self.declared()
             .map(str::to_string)
-            .chain(self.outer.candidates())
+            .chain(self.outer.candidates(at))
             .collect()
     }
 
@@ -356,7 +356,7 @@ impl Assigning for BlockNames<'_> {
                 None => assignee,
             });
         }
-        if self.outer.has_value(name) {
+        if self.outer.has_value(name, span) {
             errors.push(errors::assigned_outside_block(name, span));
         } else {
             let variables: Vec<&str> = self.declared().collect();

@@ -30,15 +30,29 @@ fn errors(uri: &Uri, source: &str) -> Vec<trendy_diag::Diagnostic> {
     if !parse.errors.is_empty() {
         return parse.errors;
     }
-    let file = trendy_sema::File {
-        path: uri.as_str(),
-        tree: &parse.tree,
-    };
     if is_prelude(uri) {
+        let file = trendy_sema::File {
+            name: trendy_prelude::NAME,
+            path: uri.as_str(),
+            tree: &parse.tree,
+        };
         trendy_sema::check_prelude(&file)
     } else {
+        // A unit's name is its path from the directory of `main`'s file,
+        // which the document is checked as.
+        let path = uri.path().as_estr().decode().into_string_lossy();
+        let name = std::path::Path::new(path.as_ref()).file_stem().map_or_else(
+            || path.to_string(),
+            |stem| stem.to_string_lossy().into_owned(),
+        );
+        let file = trendy_sema::File {
+            name: &name,
+            path: uri.as_str(),
+            tree: &parse.tree,
+        };
         PRELUDE.with(|prelude| {
             let prelude = trendy_sema::File {
+                name: trendy_prelude::NAME,
                 path: trendy_prelude::PATH,
                 tree: &prelude.tree,
             };

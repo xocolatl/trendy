@@ -142,6 +142,14 @@ operator main{} [];
   representations,** its logical interface (TTM RM Prescription 4): other
   units select its values and read their components, and its constraint
   holds whoever selects one. How its values are stored is hidden anyway.
+- **A unit's names are its own.** A name written in a unit is one it
+  declares, or one of the prelude's, which every unit sees, so two units
+  can each declare one of a name, which is no duplicate (A0001). The
+  program calls a declaration by its name if one unit declares it, and
+  otherwise by its name qualified by its unit's, `lakes::metres`, in
+  every unit that declares it, `main`'s too, as errors, failures and
+  `debug_value` write it. The prelude's names are always plain, as no
+  unit can declare one.
 - **A unit has one interface and one implementation, the interface
   first** (P0053). `interface` and `implementation` are contextual
   keywords, names elsewhere.

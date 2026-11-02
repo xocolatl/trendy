@@ -8059,6 +8059,19 @@ SourceFile
             .unwrap();
         assert_eq!(named.declaration(), files[1].heading("home"));
         assert!(named.declaration().is_some());
+        // Its own file's first, though an earlier one declares the name.
+        let program = trendy_syntax::ast::Program::new(&[
+            parse_str(second).tree,
+            parse_str(&format!("{first}{second}")).tree,
+        ]);
+        let files: Vec<SourceFile> = program.files().collect();
+        let named = files[1]
+            .syntax()
+            .descendants()
+            .find_map(trendy_syntax::ast::HeadingRef::cast)
+            .unwrap();
+        assert_eq!(named.declaration(), files[1].heading("home"));
+        assert_ne!(named.declaration(), files[0].heading("home"));
     }
 
     #[test]

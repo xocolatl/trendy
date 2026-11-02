@@ -2861,7 +2861,7 @@ fn most_specific(
             continue;
         }
         if let Some(other) = found {
-            let declared = |name: &str| bindings.namespaces.defined(name).map(|(at, _)| at);
+            let declared = |name: &str| bindings.namespaces.type_declared(name);
             return Err(Failed::Overlapping(Box::new(Overlapping {
                 value: value.clone(),
                 types: [other.name.clone(), subtype.name.clone()],

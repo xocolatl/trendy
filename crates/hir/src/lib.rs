@@ -1470,7 +1470,7 @@ pub struct Site {
 }
 
 /// The file a [`Site`] is in: its place in [`Program::files`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FileId(pub usize);
 
 /// Statements run in order, an update operator's body or a branch of an

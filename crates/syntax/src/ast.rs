@@ -2083,16 +2083,18 @@ impl HeadingRef {
         ident_of(&self.0)
     }
 
-    /// The declaration of the heading it names, in its file, or in the
-    /// first of its program's files that declares it.
+    /// The declaration of the heading it names: its own file's, or else
+    /// that of the first of its program's other files that declares it. A
+    /// unit's own declaration of a name comes before another's, and a name
+    /// it doesn't declare is the prelude's, which no other unit can declare.
     #[must_use]
     pub fn declaration(&self) -> Option<HeadingDecl> {
         let name = self.ident()?;
-        let root = self.0.ancestors().last()?;
-        match Program::cast(root.clone()) {
-            Some(program) => program.files().find_map(|file| file.heading(name.text())),
-            None => SourceFile::cast(root)?.heading(name.text()),
-        }
+        let own = self.0.ancestors().find_map(SourceFile::cast)?;
+        own.heading(name.text()).or_else(|| {
+            let program = Program::cast(self.0.ancestors().last()?)?;
+            program.files().find_map(|file| file.heading(name.text()))
+        })
     }
 }
 

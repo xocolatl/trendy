@@ -16,10 +16,12 @@ fn errors(source: &str) -> Vec<Diagnostic> {
         return parse.errors;
     }
     let unit = trendy_sema::File {
+        name: "program",
         path: "program.trendy",
         tree: &parse.tree,
     };
     let prelude = trendy_sema::File {
+        name: trendy_prelude::NAME,
         path: trendy_prelude::PATH,
         tree: &prelude.tree,
     };

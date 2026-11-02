@@ -784,10 +784,10 @@ than as `Span`.
 
 ### sema (`trendy_sema`)
 
-**Input:** the CSTs of a program and the prelude, with no syntax errors,
-checked as one unit (see [The prelude and the runtime](#the-prelude-and-the-runtime)).
+**Input:** the CSTs of a program's units and the prelude, with no syntax
+errors, checked as one program (see [The prelude and the runtime](#the-prelude-and-the-runtime)).
 **Output:** `hir::Program`, or every semantic error found, its spans in the
-unit's.
+program's.
 
 **Owns:** name resolution, type checking, and translating the CST to HIR.
 **It is the last layer allowed to report an error to the user.**
@@ -807,6 +807,24 @@ the one they name most nearly, which its errors are checked against
 (A0056 when two are equally near). Lowering names a function after its
 operator's parameters too when another has its name, as it does an
 instance of a generic operator, so that their symbols differ.
+
+Each unit has a scope of its own (`scope`): a name written in a unit is
+one of its own declarations, or else one of the prelude's, which every
+unit sees, never another unit's, so two units can each declare a name,
+and a duplicate is one in a unit's scope. A specification and its versions
+are one family only where every unit sees it: the prelude's, with each
+unit's versions of it, and otherwise each unit's own. Each declaration has
+one name in the HIR, its identity: its name, if one unit of the program
+declares it in its namespace (an operator, with its parameters' names),
+and otherwise its name qualified by its unit's, `lakes::metres`, in every
+unit that declares it, main's included. The prelude's names are always
+plain, as no unit can declare one. Since every name in the HIR is one
+declaration's, lowering and the runtime need no scopes. Sema's tables are
+keyed by identity, each entry with its unit, and a written name is looked
+up with where it is written, whose unit is the one that sees it
+(`Namespaces::unit_at`); a variable is found in `scope::Variables`. A
+unit's name is its path from the directory of `main`'s file, which the
+driver gives (`trendy_sema::File::name`).
 
 Sema collects every name before checking anything, so errors can refer to
 definitions anywhere in either file. Then it resolves the headings'
