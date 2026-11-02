@@ -30,6 +30,7 @@ pub(crate) const RENAME_FORM: &str =
 pub(crate) const TUPLE_VALUE_FORM: &str = "a tuple value has the form `tuple { name: value, … }`";
 pub(crate) const BUILTIN_FORM: &str = "built-ins are declared as `builtin type name;`, or `builtin type name: { kind, … };` with the kinds it is of, `builtin operator name{params};`, or `builtin operator name{params}: type;` with a result type, then `types { T: any type }` for type parameters, only in the prelude";
 pub(crate) const TYPE_DECL_FORM: &str = "a type is declared as `type name { { component: type, … } };`, with the components of its possible representation in braces of their own";
+pub(crate) const DATABASE_FORM: &str = "a database is declared as `database name;`, and its units add relvars and constraints to it, each named after it: `var name.pantry: relation { … };`, `constraint name.stocked := …;`";
 pub(crate) const CONSTRAINT_DECL_FORM: &str = "a constraint is declared as `constraint name := condition;`, a condition on the unit's variables that holds whenever a statement ends";
 pub(crate) const KIND_FORM: &str = "a kind is declared as `kind name { requirement, … };`, with what each of its types must have, such as `<`";
 pub(crate) const ASSIGNMENT_FORM: &str = "an assignment statement is `name := value;`, or a shorthand for one: `insert r s;`, `d_insert r s;`, `delete r where p;`, `i_delete r s;` or `update r { a := x } where p;`";
@@ -484,6 +485,8 @@ pub(crate) fn nested_definition(
     )
     .with_note(if what == "constraint" {
         "a constraint is about the program's variables, which statements change, so it is a definition of the program, checked after every statement that assigns what it mentions; an operator's body declares only local variables"
+    } else if what == "database's relvar" {
+        "a database's relvar is part of its database's definition, which outlives the program, not a local variable; an operator's body declares only local variables"
     } else {
         "headings and types, as operators and the program's variables, are definitions of the program, which any operator can use; an operator's body declares only local variables"
     })
@@ -3160,6 +3163,69 @@ pub(crate) fn sql_assertion(
     )
     .with_note(CONSTRAINT_DECL_RULE)
     .with_suggestion("declare a constraint", edits)
+}
+
+/// What a database is, for the notes of its errors.
+const DATABASE_RULE: &str = "a database, `database kitchen;`, is a variable that outlives the program, whose value is its relvars together (TTM's dbvar, a tuplevar); its units add each relvar, `var kitchen.pantry: relation { … };`, and each constraint, `constraint kitchen.stocked := …;`";
+
+/// SQL's `CREATE DATABASE`, at `span`: the fix declares a database.
+pub(crate) fn sql_database(span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::DatabaseForm,
+        "a database is declared `database name;`, not as SQL's `CREATE DATABASE`",
+        span,
+        "SQL's statement",
+    )
+    .with_note(DATABASE_RULE)
+    .with_suggestion(
+        "declare a database",
+        vec![Edit {
+            span,
+            replacement: "database".to_string(),
+        }],
+    )
+}
+
+/// SQL's `CREATE SCHEMA`, at `span`: a schema is a part of a database, its
+/// names apart from the rest, which trendy's units are, so whether a
+/// database is meant is the program's to say.
+pub(crate) fn sql_schema(span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::DatabaseForm,
+        "trendy has no schemas: a database is declared `database name;`",
+        span,
+        "SQL's statement",
+    )
+    .with_note(DATABASE_RULE)
+    .with_note("an SQL schema keeps some names of a database apart from its others, as a unit keeps its declarations apart")
+    .with_help("declare a database, `database name;`, or put what the schema holds in a unit of its own")
+}
+
+/// Tutorial D's kind of relvar, `word`, after a variable's name, where
+/// `span` deletes it with the whitespace before it.
+pub(crate) fn relvar_kind(word: Found, span: Span) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::DatabaseForm,
+        format!(
+            "trendy writes no kind of relvar, as Tutorial D's `{}`",
+            word.text
+        ),
+        word.span,
+        "Tutorial D's word",
+    )
+    .with_note(DATABASE_RULE);
+    if word.text.eq_ignore_ascii_case("private") {
+        d.with_note("a variable of the program's is private, as Tutorial D's private relvar is")
+            .with_suggestion(
+                "remove the word",
+                vec![Edit {
+                    span,
+                    replacement: String::new(),
+                }],
+            )
+    } else {
+        d.with_help("a database's relvar is declared with its database's name: `var kitchen.pantry: relation { … };`, after `database kitchen;`")
+    }
 }
 
 /// What a unit is, for the notes of its errors.

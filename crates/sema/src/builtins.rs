@@ -308,6 +308,18 @@ pub(crate) fn kinds(
                 trendy_syntax::span(decl.syntax().text_range()),
                 "a constraint",
             )),
+            Item::Database(decl) => errors.push(Diagnostic::error(
+                Code::Internal,
+                "the prelude declares no databases",
+                trendy_syntax::span(decl.syntax().text_range()),
+                "a database",
+            )),
+            Item::Relvar(decl) => errors.push(Diagnostic::error(
+                Code::Internal,
+                "the prelude declares no databases' relvars",
+                decl.span(),
+                "a relvar",
+            )),
             Item::Builtin(_)
             | Item::Kind(_)
             | Item::Operator(_)

@@ -930,6 +930,13 @@ fn failures() {
 }
 
 #[test]
+fn databases() {
+    // A database's definition, its relvars and constraints, which nothing
+    // reads yet.
+    assert_eq!(run_example("databases"), (0, String::new()));
+}
+
+#[test]
 fn units() {
     let (code, stderr) = run_example("units");
     assert_eq!(

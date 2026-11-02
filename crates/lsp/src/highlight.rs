@@ -85,8 +85,9 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
     // a supertype's `is`, a type's `constraint` and `order`, a
     // conversion's `to` and `from`, a type test's `is`, a treat's
     // `treat`, a failure's `fail`, a warning's `warn`, a transaction's
-    // `collecting`, a unit's `interface` and `implementation`, and a
-    // constraint's declaration's `constraint`.
+    // `collecting`, a unit's `interface` and `implementation`, a
+    // constraint's declaration's `constraint`, and a database's
+    // declaration's `database`.
     let keyword = match parent {
         Some(SyntaxKind::BuiltinType) => token.text() == "type",
         Some(SyntaxKind::AnyType) => matches!(token.text(), "any" | "type"),
@@ -104,6 +105,7 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
             | SyntaxKind::ForStmt
             | SyntaxKind::HeadingDecl
             | SyntaxKind::ConstraintDecl
+            | SyntaxKind::DatabaseDecl
             | SyntaxKind::TypeDecl
             | SyntaxKind::Supertype
             | SyntaxKind::IsExpr
@@ -142,9 +144,11 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
         (Some(SyntaxKind::Name), Some(SyntaxKind::Operator | SyntaxKind::BuiltinOperator)) => {
             (Class::Operator, true)
         }
-        (Some(SyntaxKind::Name), Some(SyntaxKind::VarDecl | SyntaxKind::ForStmt)) => {
-            (Class::Variable, true)
-        }
+        // A database is a variable, one that outlives the program.
+        (
+            Some(SyntaxKind::Name),
+            Some(SyntaxKind::VarDecl | SyntaxKind::ForStmt | SyntaxKind::DatabaseDecl),
+        ) => (Class::Variable, true),
         // An attribute declared, gathered, or made of an array's elements
         // or their positions, by a load's `as x` or `numbered n`.
         (
@@ -623,6 +627,25 @@ mod tests {
                 ("home", Class::Type, false),
                 ("relation", Class::Keyword, false),
                 ("home", Class::Type, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn databases() {
+        // The keyword, and the database, a variable, declared and named
+        // before what is added to it.
+        assert_eq!(
+            highlight("database kitchen;\nvar kitchen.pantry: relation { item: text };"),
+            [
+                ("database", Class::Keyword, false),
+                ("kitchen", Class::Variable, true),
+                ("var", Class::Keyword, false),
+                ("kitchen", Class::Variable, false),
+                ("pantry", Class::Variable, true),
+                ("relation", Class::Keyword, false),
+                ("item", Class::Attribute, true),
+                ("text", Class::Type, false),
             ]
         );
     }

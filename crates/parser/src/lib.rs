@@ -141,6 +141,9 @@ enum StatementStart {
     Type,
     /// A constraint's declaration, which goes at the top level.
     Constraint,
+    /// A database's relvar's declaration, `var kitchen.pantry: …`, which
+    /// goes at the top level.
+    PartVar,
     /// `break;` or `LEAVE name;`, which trendy has none of.
     Exit,
     Call,
@@ -307,6 +310,7 @@ impl<'a> Parser<'a> {
                 SyntaxKind::Ident if self.at_type_decl() => self.type_decl(),
                 SyntaxKind::Ident if self.at_heading_decl() => self.heading_decl(),
                 SyntaxKind::Ident if self.at_constraint_decl(false) => self.constraint_decl(),
+                SyntaxKind::Ident if self.at_database_decl() => self.database_decl(),
                 SyntaxKind::Ident if self.at_section_header() => self.section_header(),
                 _ => self.junk(found),
             }
@@ -917,8 +921,12 @@ impl<'a> Parser<'a> {
     /// D's `CONSTRAINT name condition` writes it, rather than a name its
     /// condition starts with, before an operator or the `;`.
     fn constraint_named(&mut self) -> bool {
-        self.found().is_some_and(|f| f.kind == SyntaxKind::Ident)
-            && self.found_after(1).is_some_and(|f| {
+        // The name, after the database it adds the constraint to, if it is
+        // one's.
+        let at = if self.prefixed_at(0) { 2 } else { 0 };
+        let found = |p: &mut Self, n: usize| if n == 0 { p.found() } else { p.found_after(n) };
+        found(self, at).is_some_and(|f| f.kind == SyntaxKind::Ident)
+            && found(self, at + 1).is_some_and(|f| {
                 matches!(
                     f.kind,
                     SyntaxKind::ColonEq
@@ -971,6 +979,7 @@ impl<'a> Parser<'a> {
             self.form = outer_form;
             return;
         }
+        self.part_of();
         self.name(
             "add the constraint's name after `constraint`, as in `constraint known := cities{country} <= countries;`",
             &[SyntaxKind::ColonEq],
@@ -1039,6 +1048,114 @@ impl<'a> Parser<'a> {
             }
         }
         false
+    }
+
+    /// Whether a database's declaration starts here: `database`, a
+    /// contextual keyword, in any case, before a name, or SQL's `create
+    /// database` or `create schema`.
+    fn at_database_decl(&mut self) -> bool {
+        let Some(first) = self.found().filter(|f| f.kind == SyntaxKind::Ident) else {
+            return false;
+        };
+        let next = self.found_after(1);
+        if first.text.eq_ignore_ascii_case("create") {
+            return next.is_some_and(|f| {
+                f.kind == SyntaxKind::Ident
+                    && (f.text.eq_ignore_ascii_case("database")
+                        || f.text.eq_ignore_ascii_case("schema"))
+            });
+        }
+        first.text.eq_ignore_ascii_case("database")
+            && next.is_some_and(|f| f.kind == SyntaxKind::Ident)
+    }
+
+    /// `database name;`: a database, which its units add relvars and
+    /// constraints to, each named after it, as `var name.r: …`. `database`
+    /// in another case, and SQL's `CREATE DATABASE name`, are reported,
+    /// with fixes, and `CREATE SCHEMA name` with help, as a schema is a
+    /// part of a database, not one.
+    fn database_decl(&mut self) {
+        let outer_form = std::mem::replace(&mut self.form, errors::DATABASE_FORM);
+        self.start_node(SyntaxKind::DatabaseDecl);
+        let keyword = self.found().expect("at a database's declaration");
+        self.bump();
+        if keyword.text.eq_ignore_ascii_case("create") {
+            let word = self
+                .found()
+                .expect("`database` or `schema` follows `create`");
+            self.bump();
+            let span = Span::new(keyword.span.start, word.span.end);
+            self.errors
+                .push(if word.text.eq_ignore_ascii_case("schema") {
+                    errors::sql_schema(span)
+                } else {
+                    errors::sql_database(span)
+                });
+        } else if keyword.text != "database" {
+            self.errors
+                .push(errors::miscased_keyword(keyword, "database"));
+        }
+        self.name(
+            "add the database's name after `database`, as in `database kitchen;`",
+            &[SyntaxKind::Semicolon],
+        );
+        self.expect(SyntaxKind::Semicolon);
+        self.builder.finish_node();
+        self.form = outer_form;
+    }
+
+    /// Whether a name and `.`, then a name, start at the significant token
+    /// `n` from the next one: a database's name before what a declaration
+    /// adds to it.
+    fn prefixed_at(&mut self, n: usize) -> bool {
+        let found = |p: &mut Self, k: usize| if k == 0 { p.found() } else { p.found_after(k) };
+        found(self, n).is_some_and(|f| f.kind == SyntaxKind::Ident)
+            && found(self, n + 1).is_some_and(|f| f.kind == SyntaxKind::Dot)
+            && found(self, n + 2).is_some_and(|f| f.kind == SyntaxKind::Ident)
+    }
+
+    /// `name.`, the database a declaration adds what it names to, if it
+    /// is there.
+    fn part_of(&mut self) {
+        if !self.prefixed_at(0) {
+            return;
+        }
+        self.start_node(SyntaxKind::PartOf);
+        self.start_node(SyntaxKind::NameRef);
+        self.bump();
+        self.builder.finish_node();
+        self.bump();
+        self.builder.finish_node();
+    }
+
+    /// Tutorial D's kind of relvar after a variable's name, `REAL`, `BASE`,
+    /// `PUBLIC` or `PRIVATE`, in any case, before its type, consumed and
+    /// reported: a private relvar is a variable of the program's, and the
+    /// fix removes the word; a real, base or public one is a database's,
+    /// which is declared with its database's name, with help.
+    fn relvar_kind(&mut self) {
+        let Some(word) = self.found().filter(|f| {
+            f.kind == SyntaxKind::Ident
+                && ["real", "base", "public", "private"]
+                    .iter()
+                    .any(|w| f.text.eq_ignore_ascii_case(w))
+        }) else {
+            return;
+        };
+        if !self
+            .found_after(1)
+            .is_some_and(|f| f.spells(SyntaxKind::RelationKw))
+        {
+            return;
+        }
+        // With the whitespace before it, so that a `:` missing after it goes
+        // where it was.
+        let before = self.last_end.unwrap_or(word.span.start);
+        self.start_node(SyntaxKind::Error);
+        self.bump();
+        self.builder.finish_node();
+        self.errors
+            .push(errors::relvar_kind(word, Span::new(before, word.span.end)));
     }
 
     /// Whether a requirement starts here: an operator, or a name.
@@ -1667,6 +1784,8 @@ impl<'a> Parser<'a> {
             StatementStart::Type
         } else if self.at_constraint_decl(true) {
             StatementStart::Constraint
+        } else if found.kind == SyntaxKind::VarKw && self.prefixed_at(1) {
+            StatementStart::PartVar
         } else if exit {
             StatementStart::Exit
         } else if self.at_call_keyword() {
@@ -1700,9 +1819,9 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// A heading, a type or a constraint, as `start` says, declared in a
-    /// body at `found`, as a local one: parsed as one, and moved before the
-    /// definition it is in.
+    /// A heading, a type, a constraint or a database's relvar, as `start`
+    /// says, declared in a body at `found`, as a local one: parsed as one,
+    /// and moved before the definition it is in.
     fn nested_definition(&mut self, start: StatementStart, found: Found) {
         let before = self.last_end.unwrap_or(found.span.start);
         let what = match start {
@@ -1713,6 +1832,10 @@ impl<'a> Parser<'a> {
             StatementStart::Type => {
                 self.type_decl();
                 "type"
+            }
+            StatementStart::PartVar => {
+                self.var_decl();
+                "database's relvar"
             }
             _ => {
                 self.constraint_decl();
@@ -1760,7 +1883,8 @@ impl<'a> Parser<'a> {
             Some(
                 start @ (StatementStart::Heading
                 | StatementStart::Type
-                | StatementStart::Constraint),
+                | StatementStart::Constraint
+                | StatementStart::PartVar),
             ) => self.nested_definition(start, found),
             Some(StatementStart::Exit) => {
                 self.errors.push(errors::loop_exit(found));
@@ -3658,10 +3782,12 @@ impl<'a> Parser<'a> {
         let outer_form = std::mem::replace(&mut self.form, errors::VARIABLE_FORM);
         self.start_node(SyntaxKind::VarDecl);
         self.bump();
+        self.part_of();
         self.name(
             "add a name after `var`, such as `var count: integer := 0;`",
             &[SyntaxKind::Colon, SyntaxKind::ColonEq, SyntaxKind::Eq],
         );
+        self.relvar_kind();
 
         let starts_type = |k| {
             matches!(
@@ -6130,6 +6256,7 @@ impl<'a> Parser<'a> {
         }) && !self.at_heading_decl()
             && !self.at_type_decl()
             && !self.at_constraint_decl(false)
+            && !self.at_database_decl()
             && !self.at_section_header()
         {
             self.bump();
@@ -8340,6 +8467,86 @@ var b := tuple { fail: fail }.fail;",
         let parse =
             parse_str("operator main{} [\n    var constraint := 1;\n    constraint := 2;\n];");
         assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+    }
+
+    #[test]
+    fn database_declarations() {
+        // A database, and what its units add to it, each named after it.
+        let source = "database kitchen;\nvar kitchen.pantry: relation { item: text } key { item };\nconstraint kitchen.stocked := is_empty{r: pantry};";
+        let parse = parse_str(source);
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let database = parse.tree.databases().next().unwrap();
+        assert_eq!(
+            database.name().unwrap().syntax().text().to_string(),
+            "kitchen"
+        );
+        assert_eq!(parse.tree.variables().count(), 0);
+        let relvar = parse.tree.relvars().next().unwrap();
+        let of = |part: Option<trendy_syntax::ast::PartOf>| {
+            part.unwrap()
+                .database()
+                .unwrap()
+                .syntax()
+                .text()
+                .to_string()
+        };
+        assert_eq!(of(relvar.part_of()), "kitchen");
+        assert_eq!(relvar.name().unwrap().syntax().text().to_string(), "pantry");
+        let constraint = parse.tree.constraints().next().unwrap();
+        assert_eq!(of(constraint.part_of()), "kitchen");
+        assert_eq!(
+            constraint.name().unwrap().syntax().text().to_string(),
+            "stocked"
+        );
+        // An unnamed constraint's condition can start with an attribute.
+        let parse = parse_str("constraint t.a > 0;");
+        let codes: Vec<Code> = parse.errors.iter().map(|e| e.code).collect();
+        assert_eq!(codes, [Code::ConstraintForm], "{:#?}", parse.errors);
+        assert!(parse.tree.constraints().next().unwrap().part_of().is_none());
+        // Other languages' ways, fixed where it is certain what is meant.
+        for (source, fixed, codes) in [
+            (
+                "CREATE DATABASE kitchen;",
+                "database kitchen;",
+                &[Code::DatabaseForm][..],
+            ),
+            (
+                "Database kitchen;",
+                "database kitchen;",
+                &[Code::MiscasedKeyword],
+            ),
+            (
+                "var pantry private relation { item: text };",
+                "var pantry: relation { item: text };",
+                &[Code::DatabaseForm, Code::MissingToken],
+            ),
+        ] {
+            let parse = parse_str(source);
+            let found: Vec<Code> = parse.errors.iter().map(|e| e.code).collect();
+            assert_eq!(found, codes, "{source}: {:#?}", parse.errors);
+            assert_eq!(fix(source), fixed, "{source}");
+        }
+        for source in [
+            "create schema kitchen;",
+            "var pantry REAL relation { item: text };",
+        ] {
+            let parse = parse_str(source);
+            let help = parse.errors.iter().find(|e| e.code == Code::DatabaseForm);
+            assert!(
+                help.is_some_and(|e| e.suggestions.is_empty()),
+                "{source}: {:#?}",
+                parse.errors
+            );
+        }
+        // In a body, moved before its operator.
+        let source = "database kitchen;\n\noperator main{} [\n    var kitchen.pantry: relation { item: text };\n];";
+        let parse = parse_str(source);
+        let found: Vec<Code> = parse.errors.iter().map(|e| e.code).collect();
+        assert_eq!(found, [Code::NestedDefinition], "{:#?}", parse.errors);
+        assert_eq!(
+            fix(source),
+            "database kitchen;\n\nvar kitchen.pantry: relation { item: text };\n\noperator main{} [\n];"
+        );
     }
 
     #[test]

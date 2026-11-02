@@ -212,6 +212,13 @@ pub enum SyntaxKind {
     /// satisfy whenever a statement ends. `constraint` is a contextual
     /// keyword, an identifier elsewhere.
     ConstraintDecl,
+    /// `database name;`: a database, which its units add relvars and
+    /// constraints to. `database` is a contextual keyword, an identifier
+    /// elsewhere.
+    DatabaseDecl,
+    /// `name.`, before a variable's or a constraint's name: the database
+    /// the declaration adds it to.
+    PartOf,
     /// `type name { { name: type, … } };`: a scalar type of the program's
     /// own, with its possible representation, or `type name union;`, a
     /// union type, whose values are its subtypes'. `type` is a contextual
@@ -443,7 +450,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 173] = [
+    pub const ALL: [SyntaxKind; 175] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -535,6 +542,8 @@ impl SyntaxKind {
         SyntaxKind::SectionHeader,
         SyntaxKind::HeadingDecl,
         SyntaxKind::ConstraintDecl,
+        SyntaxKind::DatabaseDecl,
+        SyntaxKind::PartOf,
         SyntaxKind::TypeDecl,
         SyntaxKind::Supertype,
         SyntaxKind::TypeBody,
@@ -1038,6 +1047,8 @@ impl SyntaxKind {
             SyntaxKind::SectionHeader => "section header",
             SyntaxKind::HeadingDecl => "heading declaration",
             SyntaxKind::ConstraintDecl => "constraint declaration",
+            SyntaxKind::DatabaseDecl => "database declaration",
+            SyntaxKind::PartOf => "database the declaration adds to",
             SyntaxKind::TypeDecl => "type declaration",
             SyntaxKind::Supertype => "supertype",
             SyntaxKind::TypeBody => "type's representation",

@@ -1,0 +1,24 @@
+/* A library's database: its books, each with its title in its own
+   language too, its members, and the books on loan, a database's relvars,
+   which outlive any program that uses them (TTM RM Prescription 16). Each
+   is declared on its own, with the database's name before its own, as a
+   unit adds it, and so is each constraint, in which the relvars are named
+   alone. Nothing reads a database yet: this is its definition, which the
+   catalog records. */
+interface
+
+database library;
+
+var library.books: relation { isbn: text, title: text, native: text } key { isbn };
+var library.members: relation { member: integer, name: text } key { member };
+
+/* A book is on loan to one member at a time. */
+var library.loans: relation { isbn: text, member: integer } key { isbn };
+
+/* What is on loan is a book the library has, to a member it has. */
+constraint library.lent_books := loans{isbn} <= books{isbn};
+constraint library.lent_to_members := loans{member} <= members{member};
+
+implementation
+
+operator main{} [];

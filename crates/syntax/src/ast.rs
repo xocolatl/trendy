@@ -45,6 +45,8 @@ ast_node!(BuiltinType);
 ast_node!(KindDecl);
 ast_node!(HeadingDecl);
 ast_node!(ConstraintDecl);
+ast_node!(DatabaseDecl);
+ast_node!(PartOf);
 ast_node!(TypeDecl);
 ast_node!(Supertype);
 ast_node!(TypeBody);
@@ -134,8 +136,12 @@ pub enum Item {
     Kind(KindDecl),
     Heading(HeadingDecl),
     Type(TypeDecl),
+    /// A variable of the program's, without a database's name before it.
     Variable(VarDecl),
+    /// A database's relvar, `var kitchen.pantry: …`.
+    Relvar(VarDecl),
     Constraint(ConstraintDecl),
+    Database(DatabaseDecl),
 }
 
 impl Unit {
@@ -214,9 +220,22 @@ impl SourceFile {
                 .or_else(|| KindDecl::cast(node.clone()).map(Item::Kind))
                 .or_else(|| HeadingDecl::cast(node.clone()).map(Item::Heading))
                 .or_else(|| TypeDecl::cast(node.clone()).map(Item::Type))
-                .or_else(|| VarDecl::cast(node.clone()).map(Item::Variable))
-                .or_else(|| ConstraintDecl::cast(node).map(Item::Constraint))
+                .or_else(|| {
+                    VarDecl::cast(node.clone()).map(|decl| {
+                        if decl.part_of().is_some() {
+                            Item::Relvar(decl)
+                        } else {
+                            Item::Variable(decl)
+                        }
+                    })
+                })
+                .or_else(|| ConstraintDecl::cast(node.clone()).map(Item::Constraint))
+                .or_else(|| DatabaseDecl::cast(node).map(Item::Database))
         })
+    }
+
+    pub fn databases(&self) -> impl Iterator<Item = DatabaseDecl> {
+        self.0.children().filter_map(DatabaseDecl::cast)
     }
 
     pub fn constraints(&self) -> impl Iterator<Item = ConstraintDecl> {
@@ -246,8 +265,20 @@ impl SourceFile {
         self.0.children().filter_map(Operator::cast)
     }
 
+    /// The program's variables, without the databases' relvars.
     pub fn variables(&self) -> impl Iterator<Item = VarDecl> {
-        self.0.children().filter_map(VarDecl::cast)
+        self.0
+            .children()
+            .filter_map(VarDecl::cast)
+            .filter(|decl| decl.part_of().is_none())
+    }
+
+    /// The databases' relvars, each `var kitchen.pantry: …`.
+    pub fn relvars(&self) -> impl Iterator<Item = VarDecl> {
+        self.0
+            .children()
+            .filter_map(VarDecl::cast)
+            .filter(|decl| decl.part_of().is_some())
     }
 }
 
@@ -389,6 +420,13 @@ impl ConstraintDecl {
         significant_tokens(&self.0).next()
     }
 
+    /// The database it adds the constraint to, `kitchen.` before its name,
+    /// if it is one's.
+    #[must_use]
+    pub fn part_of(&self) -> Option<PartOf> {
+        self.0.children().find_map(PartOf::cast)
+    }
+
     /// Its name, which the parser reports missing.
     #[must_use]
     pub fn name(&self) -> Option<Name> {
@@ -399,6 +437,27 @@ impl ConstraintDecl {
     #[must_use]
     pub fn condition(&self) -> Option<Expr> {
         self.0.children().find_map(Expr::cast)
+    }
+}
+
+impl DatabaseDecl {
+    /// The word `database`, or SQL's `create`, which the parser reports.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    #[must_use]
+    pub fn name(&self) -> Option<Name> {
+        self.0.children().find_map(Name::cast)
+    }
+}
+
+impl PartOf {
+    /// The database's name.
+    #[must_use]
+    pub fn database(&self) -> Option<NameRef> {
+        self.0.children().find_map(NameRef::cast)
     }
 }
 
@@ -1719,6 +1778,13 @@ impl VarDecl {
     #[must_use]
     pub fn name(&self) -> Option<Name> {
         self.0.children().find_map(Name::cast)
+    }
+
+    /// The database it adds the relvar to, `kitchen.` before its name, if
+    /// it is one's.
+    #[must_use]
+    pub fn part_of(&self) -> Option<PartOf> {
+        self.0.children().find_map(PartOf::cast)
     }
 
     /// The declared type, from `: type`.

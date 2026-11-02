@@ -59,6 +59,10 @@ pub(crate) fn duplicate_name(name: &str, this: (Kind, Span), first: (Kind, Span)
         "variables have a namespace of their own, so no two can have the same name, though a variable can have an operator's"
     } else if this.0 == Kind::Constraint {
         "constraints have a namespace of their own, so no two can have the same name, though a constraint can have any other's"
+    } else if this.0 == Kind::Database || first.0 == Kind::Database {
+        "a database is a variable, which outlives the program, so it shares the variables' namespace, and no variable can have its name"
+    } else if this.0 == Kind::Relvar {
+        "a database's relvars are named within it, so no two of its relvars can have the same name, though one can have a variable's"
     } else {
         "headings share a namespace with the types, so no two can have the same name, nor a heading a built-in type's, though a heading can have a variable's or an operator's"
     };
@@ -8541,4 +8545,118 @@ pub(crate) fn tuples_outside(tuples: &[&hir::TupleValue], within: &str) -> Strin
 /// has `tuples`.
 pub(crate) fn tuples_in(tuples: &[&hir::TupleValue], relation: &str) -> String {
     format!("`{relation}` has {}", listed_tuples(tuples))
+}
+
+/// What a database is, for the notes of its errors.
+const DATABASE_RULE: &str = "a database, `database kitchen;`, is a variable that outlives the program, whose value is its relvars together (TTM's dbvar, RM Prescription 16); its units add each relvar, `var kitchen.pantry: relation { … };`, and each constraint, `constraint kitchen.stocked := …;`, in which its relvars are named alone";
+
+/// The relvar `name` of `database`, declared by `decl` with an initial
+/// value, which the fix removes: a database's value is its own.
+pub(crate) fn relvar_initialized(decl: &ast::VarDecl, database: &str, name: &str) -> Diagnostic {
+    let initializer = decl
+        .syntax()
+        .children()
+        .find(|n| n.kind() == SyntaxKind::Initializer)
+        .expect("an initialized declaration has an initializer");
+    // With the whitespace before it.
+    let start = initializer
+        .prev_sibling_or_token()
+        .filter(|e| e.kind() == SyntaxKind::Whitespace)
+        .map_or(initializer.text_range().start(), |e| e.text_range().start());
+    let removal = Span::new(start.into(), initializer.text_range().end().into());
+    Diagnostic::error(
+        Code::DatabasePart,
+        format!("`{database}.{name}` has no initial value: a database's relvar's value is the database's"),
+        trendy_syntax::span(initializer.text_range()),
+        "the program's value for it",
+    )
+    .with_note(DATABASE_RULE)
+    .with_note("a database outlives every program that uses it, so its value is never one program's to give")
+    .with_suggestion(
+        "remove the initial value",
+        vec![Edit {
+            span: removal,
+            replacement: String::new(),
+        }],
+    )
+}
+
+/// The relvar `name` of `database`, at `span`, declared without its type.
+pub(crate) fn untyped_relvar(database: &str, name: &str, span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::DatabasePart,
+        format!("`{database}.{name}` has no type: a database's relvar's type is written"),
+        span,
+        "no type",
+    )
+    .with_note(DATABASE_RULE)
+    .with_help(format!(
+        "write its heading, as in `var {database}.{name}: relation {{ name: text }};`"
+    ))
+}
+
+/// The relvar `name` of `database`, whose type, written `written`, is
+/// `ty`, not a relation type: a database holds only relvars.
+pub(crate) fn relvar_not_relation(
+    database: &str,
+    name: &str,
+    written: &ast::TypeExpr,
+    ty: &hir::Type,
+) -> Diagnostic {
+    Diagnostic::error(
+        Code::DatabasePart,
+        format!("a database holds only relvars, but `{database}.{name}` is `{ty}`"),
+        trendy_syntax::span(written.syntax().text_range()),
+        "not a relation type",
+    )
+    .with_note(DATABASE_RULE)
+    .with_note("TTM's database is a container for relvars, and nothing else (RM Prescription 16)")
+    .with_help(format!(
+        "keep the value in a relation, as `relation {{ value: {ty} }} key {{}}` holds one"
+    ))
+}
+
+/// `name`, written at `span`, a variable of the program's, in a
+/// constraint of `database`, which mentions only its relvars.
+pub(crate) fn variable_in_database_constraint(
+    name: &str,
+    span: Span,
+    database: &str,
+) -> Diagnostic {
+    Diagnostic::error(
+        Code::DatabasePart,
+        format!("a constraint of `{database}` mentions only its relvars, not the program's variable `{name}`"),
+        span,
+        "a variable of the program's",
+    )
+    .with_note(DATABASE_RULE)
+    .with_note("a database's constraint shall mention no variables other than its relvars (TTM RM Prescription 23): it holds for every program that uses the database, which another program couldn't check of this one's variables")
+    .with_help("keep a rule about both in the program's update operators, which fail when a change they make would break it")
+}
+
+/// The database `name`, written at `span` in its own definition, where its
+/// relvars are named alone.
+pub(crate) fn database_in_its_definition(name: &str, span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::DatabasePart,
+        format!("in `{name}`'s definition, its relvars are named alone"),
+        span,
+        "not needed here",
+    )
+    .with_note(DATABASE_RULE)
+    .with_help(format!(
+        "write a relvar's name alone, as `pantry`, not `{name}.pantry`"
+    ))
+}
+
+/// The database `name`, written at `span` as a value.
+pub(crate) fn database_as_value(name: &str, span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::DatabasePart,
+        format!("`{name}` is a database, not a value"),
+        span,
+        "a database",
+    )
+    .with_note(DATABASE_RULE)
+    .with_note("a database is declared, with its relvars and constraints, for its definition, which its catalog records; no statement reads one yet")
 }

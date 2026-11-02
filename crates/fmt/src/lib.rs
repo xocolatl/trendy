@@ -959,7 +959,7 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
 
 /// The whitespace between definitions, after `prev`, a `;`: declarations
 /// of one kind in a row, variables', headings', types', built-in types',
-/// kinds' or constraints', go on adjacent lines unless the source groups them with a blank
+/// kinds', constraints' or databases', go on adjacent lines unless the source groups them with a blank
 /// line, as `blank_line` says, and everything else is separated by a blank
 /// line.
 fn between_definitions(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'static str {
@@ -971,6 +971,7 @@ fn between_definitions(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool)
         SyntaxKind::BuiltinType,
         SyntaxKind::KindDecl,
         SyntaxKind::ConstraintDecl,
+        SyntaxKind::DatabaseDecl,
     ]
     .into_iter()
     .any(both);
@@ -1326,6 +1327,16 @@ mod tests {
         assert_eq!(
             fmt("operator f{} [ fail(e) ; ];"),
             "operator f{} [\n    fail (e);\n];\n"
+        );
+    }
+
+    #[test]
+    fn database_declarations() {
+        assert_eq!(
+            fmt(
+                "database   kitchen;\nvar kitchen . pantry:relation{item:text}key{item};\nconstraint kitchen.stocked:=is_empty{r:pantry};"
+            ),
+            "database kitchen;\n\nvar kitchen.pantry: relation { item: text } key { item };\n\nconstraint kitchen.stocked := is_empty{r: pantry};\n"
         );
     }
 

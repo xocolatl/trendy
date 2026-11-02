@@ -543,6 +543,10 @@ impl<'a> Checker<'a> {
                 None
             }
             Lookup::Unknown => {
+                if self.names.namespaces().database(name).is_some() {
+                    errors.push(errors::database_as_value(name, span));
+                    return None;
+                }
                 if let Some((operator, written)) = self.constant_elsewhere(name_ref, name, span) {
                     errors.push(errors::constant_as_value(name, written, &operator));
                     return None;

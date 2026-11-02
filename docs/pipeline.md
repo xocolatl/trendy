@@ -449,6 +449,17 @@ D's `CONSTRAINT name condition`, without `:=`, `name: condition`, and
 SQL's `CREATE ASSERTION name CHECK (condition)`, whose parentheses around
 the whole condition the fix removes, are reported with fixes (P0055).
 
+`database name;` (`DatabaseDecl`) is a definition, `database` a contextual
+keyword at a definition's start before a name, and a name, `.` and a
+name before a variable's or a constraint's name is the database it adds
+it to (`PartOf`): `var kitchen.pantry: …` and `constraint kitchen.stocked
+:= …`. In a body, such a variable is moved before the operator (P0034).
+SQL's `CREATE DATABASE`, which is fixed, and `CREATE SCHEMA`, and Tutorial
+D's `REAL`, `BASE`, `PUBLIC` and `PRIVATE` after a variable's name, are
+reported (P0056). A variable with a database's name before it is a relvar,
+`ast::Item::Relvar`, never one of the program's variables
+(`SourceFile::variables` leaves them out).
+
 `heading name := { … };` (`HeadingDecl`) is a definition, `heading` a
 contextual keyword recognized at a definition's start before a name.
 After `relation` or `tuple`, in a type or a selector, a name in place of
@@ -1069,6 +1080,16 @@ reading the variables), and a part that is false ends the statement with
 where the part has them, which the runtime makes a `constraint_violated`
 or a `constraint_violated_by` of (`trendy_rt_constraint_violated`,
 `_by`), as it does for the language's other failures.
+
+A database shares the variables' namespace, and its relvars and
+constraints are named within it (`databases::check`, after the globals). A
+relvar's type is written and a relation type, with its keys and no initial
+value (A0070). A database's constraint is checked as a boolean function
+of the database's relvars: its names (`DatabaseNames`) resolve each relvar
+as `hir::Expr::Parameter`, with its type, report a program's variable or
+the database's own name (A0070), and record what it mentions, for A0058.
+A database's name as a value is A0070 in any names, from the checker's
+unknown name. Nothing is kept in HIR yet: no statement reads a database.
 
 An assignment's target must be a variable, not a parameter, which is
 read-only, nor an operator (A0026), and its value must have the variable's

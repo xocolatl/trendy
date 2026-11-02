@@ -48,7 +48,8 @@ pub(crate) fn check(file: &SourceFile, errors: &mut Vec<Diagnostic>) {
             continue;
         }
         if let Item::Constraint(decl) = &item {
-            if ast::section_of(decl.syntax()) == Section::Interface {
+            // A database's constraints are part of it, as visible as it is.
+            if decl.part_of().is_none() && ast::section_of(decl.syntax()) == Section::Interface {
                 errors.push(errors::interface_constraint(
                     decl,
                     moved(file, decl.syntax(), Section::Implementation),
@@ -74,7 +75,8 @@ pub(crate) fn check(file: &SourceFile, errors: &mut Vec<Diagnostic>) {
 
 /// The names of types and headings `item`, if it is in its unit's
 /// interface, mentions where other units see them, each with where: an
-/// operator's parameters' and result's types, a heading's attributes', and
+/// operator's parameters' and result's types, a database's relvar's type,
+/// a heading's attributes', and
 /// a type's components' and supertype's. Its body, its constraints and its
 /// conversions are its unit's own.
 fn mentioned(item: &Item) -> Vec<(String, Span)> {
@@ -84,6 +86,11 @@ fn mentioned(item: &Item) -> Vec<(String, Span)> {
             .map(|p| p.syntax().clone())
             .into_iter()
             .chain(op.result().map(|r| r.syntax().clone()))
+            .collect(),
+        Item::Relvar(decl) if ast::section_of(decl.syntax()) == Section::Interface => decl
+            .type_expr()
+            .map(|t| t.syntax().clone())
+            .into_iter()
             .collect(),
         Item::Heading(decl) if ast::section_of(decl.syntax()) == Section::Interface => decl
             .heading()

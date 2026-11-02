@@ -4,6 +4,7 @@ mod body;
 mod builtins;
 mod check;
 mod constraints;
+mod databases;
 mod errors;
 mod globals;
 mod keys;
@@ -149,6 +150,10 @@ impl Files {
     pub(crate) fn constraints(&self) -> impl Iterator<Item = ast::ConstraintDecl> {
         self.each().flat_map(|(_, file)| file.constraints())
     }
+
+    pub(crate) fn relvars(&self) -> impl Iterator<Item = VarDecl> {
+        self.each().flat_map(|(_, file)| file.relvars())
+    }
 }
 
 /// Where each place in the files is: the sites of what runs there.
@@ -252,6 +257,7 @@ pub(crate) fn check(files: &Files, errors: &mut Vec<Diagnostic>) -> Checked {
         declarations: &declarations,
     };
     let constraints = constraints::check(files, &context, errors);
+    databases::check(files, &context, errors);
     let mut bodies = HashMap::new();
     let mut deferred = body::Deferred::default();
     for signature in operators.iter().filter(|s| !s.read_only) {
@@ -383,6 +389,10 @@ pub(crate) enum Kind {
     /// An operator the prelude defines in trendy.
     Prelude,
     Variable,
+    /// A database, which is a variable.
+    Database,
+    /// A database's relvar.
+    Relvar,
     Constraint,
     Heading,
     /// A built-in type.
@@ -399,6 +409,8 @@ impl Kind {
             Kind::Operator | Kind::Prelude => "an operator",
             Kind::Builtin => "a built-in operator",
             Kind::Variable => "a variable",
+            Kind::Database => "a database",
+            Kind::Relvar => "a database's relvar",
             Kind::Constraint => "a constraint",
             Kind::Heading => "a heading",
             Kind::Type => "a built-in type",
@@ -423,6 +435,9 @@ pub(crate) struct Namespaces {
     /// Where each constraint is declared: no name refers to one, so they
     /// have a namespace of their own.
     constraints: HashMap<String, Span>,
+    /// Where each database is declared: a database is a variable, so it
+    /// shares the variables' namespace.
+    databases: HashMap<String, Span>,
     /// Where each heading is declared.
     headings: HashMap<String, Span>,
     /// Where the prelude declares each built-in type, whose name no
@@ -555,6 +570,16 @@ impl Namespaces {
         self.variables.get(name).copied()
     }
 
+    /// Where the database named `name` is declared.
+    pub(crate) fn database(&self, name: &str) -> Option<Span> {
+        self.databases.get(name).copied()
+    }
+
+    /// The databases' names.
+    pub(crate) fn database_names(&self) -> impl Iterator<Item = &str> {
+        self.databases.keys().map(String::as_str)
+    }
+
     /// Whether `ident` is its constraint name's first declaration, not a
     /// duplicate.
     pub(crate) fn is_first_constraint(&self, ident: &SyntaxToken) -> bool {
@@ -669,12 +694,20 @@ fn collect_names(
             Item::Builtin(ref decl) if prelude => (Kind::Builtin, decl.name(), Some(decl.params())),
             Item::BuiltinType(ref decl) if prelude => (Kind::Type, decl.name(), None),
             Item::Variable(ref decl) => (Kind::Variable, decl.name(), None),
-            Item::Constraint(ref decl) => (Kind::Constraint, decl.name(), None),
+            Item::Database(ref decl) => (Kind::Database, decl.name(), None),
+            Item::Constraint(ref decl) if decl.part_of().is_none() => {
+                (Kind::Constraint, decl.name(), None)
+            }
             Item::Heading(ref decl) => (Kind::Heading, decl.name(), None),
             Item::Type(ref decl) => (Kind::Defined, decl.name(), None),
             // The prelude's kinds are checked against the compiler, and
-            // built-ins outside it are reported.
-            Item::Builtin(_) | Item::BuiltinType(_) | Item::Kind(_) => continue,
+            // built-ins outside it are reported; a database's relvars and
+            // constraints are named within it (`databases::check`).
+            Item::Builtin(_)
+            | Item::BuiltinType(_)
+            | Item::Kind(_)
+            | Item::Relvar(_)
+            | Item::Constraint(_) => continue,
         };
         let Some(ident) = name.and_then(|n| n.ident()) else {
             continue;
@@ -697,7 +730,10 @@ fn collect_names(
             continue;
         }
         let first = match kind {
-            Kind::Variable => namespaces.variable(name).map(|s| (kind, s)),
+            Kind::Variable | Kind::Database => namespaces
+                .variable(name)
+                .map(|s| (Kind::Variable, s))
+                .or_else(|| namespaces.database(name).map(|s| (Kind::Database, s))),
             Kind::Constraint => namespaces.constraints.get(name).map(|&s| (kind, s)),
             _ => namespaces
                 .heading(name)
@@ -711,6 +747,7 @@ fn collect_names(
                 continue;
             }
             (None, Kind::Variable) => &mut namespaces.variables,
+            (None, Kind::Database) => &mut namespaces.databases,
             (None, Kind::Constraint) => &mut namespaces.constraints,
             (None, Kind::Defined) => &mut namespaces.types,
             (None, Kind::Type) => &mut namespaces.builtin_types,
@@ -3077,6 +3114,80 @@ operator main{{}} [ var lines: array text; {main} ];"
             "debug_value"
         );
         analyze_str("operator debug_value{} [];\noperator main{} [];").unwrap();
+    }
+
+    #[test]
+    fn databases_are_declared_with_their_relvars_and_constraints() {
+        const KITCHEN: &str = "database kitchen;\nvar stock := 5;\nvar kitchen.pantry: relation { item: text, grams: integer } key { item };\nvar kitchen.recipes: relation { recipe: text, item: text } key { recipe, item };\n";
+        // In the interface or not, its relvars named alone in its
+        // constraints, and a variable of the program's can have a relvar's
+        // name.
+        let valid = format!(
+            "interface\n\n{}constraint kitchen.known := recipes{{item}} <= pantry{{item}};\n\nimplementation\n\nvar stock := 5;\nvar pantry := 1;{MAIN}",
+            KITCHEN.replace("var stock := 5;\n", "")
+        );
+        assert!(
+            analyze_str(&valid).is_ok(),
+            "{:#?}",
+            analyze_str(&valid).err()
+        );
+        for (added, codes) in [
+            (
+                "var kitchen.seeded: relation { a: integer } := relation { { a: 1 } };",
+                &[Code::DatabasePart][..],
+            ),
+            ("var kitchen.count: integer;", &[Code::DatabasePart]),
+            ("var kitchen.loose;", &[Code::DatabasePart]),
+            (
+                "var kitchn.more: relation { a: integer };",
+                &[Code::UnknownName],
+            ),
+            (
+                "var kitchen.pantry: relation { a: integer };",
+                &[Code::DuplicateName],
+            ),
+            ("var kitchen := 1;", &[Code::DuplicateName]),
+            ("database stock;", &[Code::DuplicateName]),
+            (
+                "constraint kitchen.c := is_empty{r: kitchen.pantry};",
+                &[Code::DatabasePart],
+            ),
+            ("constraint kitchen.c := stock > 0;", &[Code::DatabasePart]),
+            (
+                "constraint kitchen.c := 1 < 2;",
+                &[Code::ConstantConstraint],
+            ),
+            ("constraint kitchen.c := pantry;", &[Code::TypeMismatch]),
+            (
+                "constraint kitchen.c := count{r: pantry} > 0;\nconstraint kitchen.c := count{r: pantry} > 1;",
+                &[Code::DuplicateName],
+            ),
+            (
+                "operator f{} [ call debug_value{v: kitchen}; ];",
+                &[Code::DatabasePart],
+            ),
+        ] {
+            let found = errors(&format!("{KITCHEN}{added}{MAIN}"));
+            let found: Vec<Code> = found.iter().map(|e| e.code).collect();
+            assert_eq!(found, codes, "{added}");
+        }
+        // The fixes that are certain: an initial value removed.
+        assert_eq!(
+            fix(&format!(
+                "{KITCHEN}var kitchen.seeded: relation {{ a: integer }} := relation {{ {{ a: 1 }} }};{MAIN}"
+            )),
+            format!("{KITCHEN}var kitchen.seeded: relation {{ a: integer }};{MAIN}")
+        );
+        // A constraint of one database can share another's name, and a
+        // unit's own.
+        let shared = format!(
+            "{KITCHEN}database cellar;\nvar cellar.wines: relation {{ wine: text }} key {{ wine }};\nconstraint kitchen.some := count{{r: pantry}} >= 0;\nconstraint cellar.some := count{{r: wines}} >= 0;\nconstraint some := stock >= 0;{MAIN}"
+        );
+        assert!(
+            analyze_str(&shared).is_ok(),
+            "{:#?}",
+            analyze_str(&shared).err()
+        );
     }
 
     #[test]

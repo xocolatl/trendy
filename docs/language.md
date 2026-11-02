@@ -3430,6 +3430,66 @@ CONSTRAINT known_countries official{country} <= countries;
 operator main{} [];
 ```
 
+## Databases
+
+A database is a variable that outlives the program, whose value is its
+relvars together: TTM's database (RM Prescription 16), which Appendix D
+calls a dbvar, a tuple variable with a relation-valued attribute for each
+relvar. `database kitchen;` declares one, and its units add to it, each
+relvar and each constraint declared on its own, as Tutorial D declares
+them, with the database's name before its own:
+
+```trendy
+interface
+
+database kitchen;
+
+var kitchen.pantry: relation { item: text, grams: integer } key { item };
+var kitchen.recipes: relation { recipe: text, item: text } key { recipe, item };
+
+/* Nothing in the pantry weighs less than nothing, and a recipe needs only
+   what the pantry keeps. */
+constraint kitchen.stocked := is_empty{r: pantry where grams < 0};
+constraint kitchen.known := recipes{item} <= pantry{item};
+
+implementation
+
+operator main{} [];
+```
+
+- **Only relvars:** a database holds relations, each a relvar with its
+  type written and its keys, and no initial value, as its value is the
+  database's, which outlives every program; a fix removes one (A0070).
+- **Its constraints mention its relvars alone,** named alone in them,
+  without the database's name: a database's constraint holds for every
+  program that uses the database (RM Prescription 23), which none could
+  check of another program's variables (A0070). As a unit's constraints,
+  one that mentions none is A0058.
+- **Names:** a database is a variable, so it shares the variables'
+  namespace (A0001). Its relvars and constraints are named within it, so
+  a relvar can have a program variable's name, or another database's
+  relvar's.
+- **In the interface:** a unit's interface may declare a database and add
+  to it, as what is shared and outlives the program, while its other
+  variables stay its implementation's.
+- **Declared for its definition:** the catalog records what it holds,
+  and no statement reads a database yet (A0070).
+- SQL's `CREATE DATABASE name` is fixed to `database name;`, and Tutorial
+  D's `PRIVATE` before a relvar's type removed; SQL's `CREATE SCHEMA`, and
+  Tutorial D's `REAL`, `BASE` and `PUBLIC` relvars, are reported with help
+  (P0056).
+
+```trendy,error
+database kitchen;
+
+var kitchen.pantry: relation { item: text, grams: integer } key { item };
+var kitchen.count: integer;
+
+constraint kitchen.stocked := is_empty{r: kitchen.pantry where grams < 0};
+
+operator main{} [];
+```
+
 ## Arrays
 
 An array is a list of values of one type, its elements, in order. An
@@ -5618,8 +5678,8 @@ are case-sensitive. The keywords are `operator`, `var`, `call`, `builtin`,
 only where a variable's keys go, `value` and `from` only in `tuple from` and `value from`, and
 `load`, `from`, `order`, `asc` and `desc` only in a load, `in` only
 in a `for` loop, `collecting` only after `transaction`, `heading`
-only before a heading's name, and `constraint` only before a
-constraint's name or condition.
+only before a heading's name, `constraint` only before a constraint's
+name or condition, and `database` only before a database's name.
 
 Operators, values, and types with headings each have a namespace of
 their own. Values are variables and parameters, and a parameter hides a
@@ -5630,7 +5690,8 @@ parameter. No two operators can have the same name, nor two variables,
 nor two headings, nor a heading and a type, nor two constraints (A0001),
 and a type's name is its selector's, which no other operator can have
 (A0057). No name refers to a constraint, so constraints have a namespace
-of their own.
+of their own. A database is a variable, and shares the variables'
+namespace; its relvars and constraints are named within it.
 
 ```trendy
 var greet := "Hello";
@@ -5865,6 +5926,8 @@ line after a comment on its own line, such as a file's header, is kept.
 | `GROUP BY a` with the group's rows | `r group { rows := {…every attribute but a…} }` |
 | `PRIMARY KEY (a)`, `UNIQUE (a)`, `KEY { A }` | `key { a }` |
 | `CONSTRAINT c e`, `CREATE ASSERTION c CHECK (e)` | `constraint c := e;` |
+| `CREATE DATABASE d` | `database d;` |
+| `VAR R REAL RELATION { … }`, `CREATE TABLE d.r (…)` | `var d.r: relation { … };` |
 | `NATURAL JOIN`, `INNER JOIN`, `JOIN … USING (a)` | `join` |
 | `CROSS JOIN` | `times` |
 | `JOIN { R1, R2, R3 }` | `join{r1, r2, r3}` |

@@ -17,7 +17,8 @@ use crate::operators::Operators;
 use crate::types::{Expected, Origin};
 use crate::{Files, Namespaces, errors, ops, sections};
 
-/// Every constraint of `files`, checked: its condition, a boolean, mentions
+/// Every constraint on the variables of `files`, a database's aside (see
+/// [`crate::databases`]), checked: its condition, a boolean, mentions
 /// one or more variables, and their initial values satisfy it. The valid
 /// ones, after reporting the rest.
 pub(crate) fn check(
@@ -27,6 +28,7 @@ pub(crate) fn check(
 ) -> Vec<hir::VariableConstraint> {
     files
         .constraints()
+        .filter(|decl| decl.part_of().is_none())
         .filter_map(|decl| constraint(&decl, cx, errors))
         .collect()
 }
