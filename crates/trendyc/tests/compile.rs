@@ -944,7 +944,8 @@ fn units() {
 #[test]
 fn constraints() {
     // Quechua, added with where it is official at once, which the
-    // constraints the initial values satisfy hold of too.
+    // constraints the initial values satisfy hold of too; and Esperanto,
+    // official nowhere, which a transaction refuses, with the error.
     let (code, stderr) = run_example("constraints");
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(
@@ -959,7 +960,38 @@ fn constraints() {
             "│ Peru     │ Quechua  │ Runa Simi │",
             "│ Tanzania │ Swahili  │ Kiswahili │",
             "└──────────┴──────────┴───────────┘",
+            "3",
+            r#""the statement breaks the constraint `official_somewhere`: `languages{language} <= official{language}` is false of relation { language: text } { { language: \"Esperanto\" } }""#,
         ]
+    );
+}
+
+#[test]
+fn a_statement_that_breaks_a_constraint_fails() {
+    // Checked as each statement that assigns a variable it mentions ends,
+    // whether it assigns or passes it to a `var` parameter: the first
+    // part false, with the tuples that make it false where its form says.
+    let source = "var countries := relation { { country: \"Kenya\" } } key { country };\nvar official := relation { { language: \"Swahili\", country: \"Kenya\" } } key { language, country };\nvar stock := 2;\n\nconstraint known_countries := official{country} <= countries;\nconstraint stocked := stock > 0 and 10 div stock > 1;\n\noperator halve{var n: integer} [\n    n := n div 2;\n];\n\noperator main{} [\n    call halve{var n: stock};\n    call debug_value{v: stock};\n    insert official relation { { language: \"Hindi\", country: \"India\" } };\n];\n";
+    let (code, stderr) = run_source("constraint_broken", source);
+    assert_eq!(code, 1, "{stderr}");
+    assert_eq!(
+        stderr,
+        format!(
+            "1\nerror[R0023]: the statement breaks the constraint `known_countries`: `official{{country}} <= countries` is false of relation {{ country: text }} {{ {{ country: \"India\" }} }}\n{}",
+            site("constraint_broken", 15)
+        )
+    );
+    let (code, stderr) = run_source(
+        "constraint_broken_by_var",
+        &source.replace("call debug_value{v: stock};", "call halve{var n: stock};"),
+    );
+    assert_eq!(code, 1, "{stderr}");
+    assert_eq!(
+        stderr,
+        format!(
+            "error[R0023]: the statement breaks the constraint `stocked`: `stock > 0` is false\n{}",
+            site("constraint_broken_by_var", 14)
+        )
     );
 }
 

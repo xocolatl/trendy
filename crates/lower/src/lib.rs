@@ -560,18 +560,7 @@ fn function(
             result,
             locals,
             value,
-        } => {
-            builder.bind(locals);
-            let src = builder.place(&value, cx);
-            builder.insts.push(lir::Inst::Copy {
-                dst: lir::Place::whole(lir::Base::Result),
-                src,
-                layout: cx.layout(&result),
-            });
-            let makes = builder.scoped;
-            let layout = cx.layout(&result);
-            (builder.finish(Some(layout), cx), makes)
-        }
+        } => builder.valued(locals, &value, &result, cx),
         hir::OperatorKind::Builtin(_) => unreachable!("built-ins are runtime calls"),
         hir::OperatorKind::Specification { .. } => {
             unreachable!("a specification's versions are called instead")
@@ -579,6 +568,58 @@ fn function(
     };
     cx.functions.insert(function_id.0, lowered);
     cx.functions_of.insert(key, (function_id, makes));
+    (function_id, makes)
+}
+
+/// A part of a constraint, which lowered code checks with a function of
+/// its own: the part's condition, a boolean, or, if `tuples`, the
+/// relation of the tuples that make it false, as `debug_value` writes it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct Checked {
+    /// The constraint, by its place in [`hir::Program::constraints`].
+    constraint: usize,
+    /// The part, by its place in [`hir::VariableConstraint::parts`].
+    part: usize,
+    tuples: bool,
+}
+
+/// The function computing `checked`, as [`function`] makes an operator's,
+/// with no parameters: it reads the program's variables.
+fn constraint_function(
+    program: &hir::Program,
+    variable_data: &[lir::DataId],
+    checked: Checked,
+    cx: &mut Lowering,
+) -> (lir::FunctionId, bool) {
+    if let Some(&lowered) = cx.constraint_functions.get(&checked) {
+        return lowered;
+    }
+    let function_id = cx.number();
+    let constraint = &program.constraints[checked.constraint];
+    let part = &constraint.parts[checked.part];
+    // Named, as a failure's trace writes it, by its constraint, its part,
+    // if it has several, and what it computes.
+    let which = if constraint.parts.len() > 1 {
+        format!(", part {}", checked.part + 1)
+    } else {
+        String::new()
+    };
+    let tuples = if checked.tuples { ", its tuples" } else { "" };
+    let name = format!("constraint {}{which}{tuples}", constraint.name);
+    let builder = FunctionBuilder::new(program, name, BTreeMap::new(), variable_data);
+    let (lowered, makes) = match (&part.breaking, checked.tuples) {
+        (Some(breaking), true) => builder.written(part.locals.clone(), breaking, cx),
+        (None, true) => unreachable!("only a part whose form says which tuples break it has them"),
+        (_, false) => builder.valued(
+            part.locals.clone(),
+            &part.condition,
+            &hir::Type::Scalar(hir::Scalar::Boolean),
+            cx,
+        ),
+    };
+    cx.functions.insert(function_id.0, lowered);
+    cx.constraint_functions
+        .insert(checked, (function_id, makes));
     (function_id, makes)
 }
 
@@ -632,6 +673,9 @@ struct Lowering {
     /// The function of each operator and list of types lowered code calls
     /// it with, and whether a call of it makes a text, relation or array.
     functions_of: HashMap<(hir::OperatorId, Vec<hir::Type>), (lir::FunctionId, bool)>,
+    /// The function of each constraint's part that lowered code checks,
+    /// and whether a call of it makes a text, relation or array.
+    constraint_functions: HashMap<Checked, (lir::FunctionId, bool)>,
     /// The program's source's path, as a failure writes it.
     path: String,
     /// Each site's data object, made once.
@@ -659,6 +703,7 @@ impl Lowering {
             empty: None,
             functions: BTreeMap::new(),
             functions_of: HashMap::new(),
+            constraint_functions: HashMap::new(),
             path: path.to_string(),
             sites: HashMap::new(),
             paths: HashMap::new(),
@@ -1288,6 +1333,50 @@ impl<'a> FunctionBuilder<'a> {
         self.locals = locals;
     }
 
+    /// The function whose result is `value`, of the type `result`, with the
+    /// local variables `locals`, which its `Let`s give values, as a
+    /// read-only operator's is: and whether a call of it makes a text,
+    /// relation or array.
+    fn valued(
+        mut self,
+        locals: Vec<hir::Local>,
+        value: &hir::Expr,
+        result: &hir::Type,
+        cx: &mut Lowering,
+    ) -> (lir::Function, bool) {
+        self.bind(locals);
+        let src = self.place(value, cx);
+        let layout = cx.layout(result);
+        self.insts.push(lir::Inst::Copy {
+            dst: lir::Place::whole(lir::Base::Result),
+            src,
+            layout: layout.clone(),
+        });
+        let makes = self.scoped;
+        (self.finish(Some(layout), cx), makes)
+    }
+
+    /// The function whose result is `value` written as `debug_value`
+    /// writes it, a text, with the local variables `locals`, as for
+    /// [`FunctionBuilder::valued`]: a call of it makes the text.
+    fn written(
+        mut self,
+        locals: Vec<hir::Local>,
+        value: &hir::Expr,
+        cx: &mut Lowering,
+    ) -> (lir::Function, bool) {
+        self.bind(locals);
+        let ty = self.type_of(value);
+        let src = self.place(value, cx);
+        let descriptor = lir::Place::whole(lir::Base::Data(cx.descriptor(&ty)));
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::ToText,
+            args: vec![lir::Place::whole(lir::Base::Result), src, descriptor],
+        });
+        let layout = scalar_layout(hir::Scalar::Text);
+        (self.finish(Some(layout), cx), true)
+    }
+
     /// The statements of `block`, then the release of the references its
     /// local variables hold: every statement that could point into what
     /// they point to has ended, and holds its own. Releasing makes their
@@ -1527,11 +1616,16 @@ impl<'a> FunctionBuilder<'a> {
     /// The statement, in a scope of its own if it needs one: an `if`'s
     /// statements each in their own, and its condition in another.
     fn statement(&mut self, statement: &hir::Statement, cx: &mut Lowering) {
+        let assigns = statement.assigns();
         match statement {
-            hir::Statement::Call(call) => self.scoped(|this| this.call(call, cx)),
-            hir::Statement::Assign(assignments) => {
-                self.scoped(|this| this.assign(assignments, cx));
-            }
+            hir::Statement::Call(call) => self.scoped(|this| {
+                this.call(call, cx);
+                this.constraints_checked(&assigns, cx);
+            }),
+            hir::Statement::Assign(assignments) => self.scoped(|this| {
+                this.assign(assignments, cx);
+                this.constraints_checked(&assigns, cx);
+            }),
             hir::Statement::If(condition, then, otherwise) => {
                 self.if_statement(condition, [then, otherwise], cx);
             }
@@ -1545,8 +1639,76 @@ impl<'a> FunctionBuilder<'a> {
             hir::Statement::Warn(error) => self.warn(error, cx),
             hir::Statement::Transaction(collecting, body) => {
                 self.transaction(collecting.as_ref(), body, cx);
+                self.scoped(|this| this.constraints_checked(&assigns, cx));
             }
         }
+    }
+
+    /// Check the constraints on the program's variables `assigned`, the
+    /// targets a statement assigned as it ends, mentions one or more of:
+    /// each part of each, in turn, failing with the first that is false,
+    /// and the tuples that make it false where its form says which.
+    fn constraints_checked(&mut self, assigned: &[&hir::Target], cx: &mut Lowering) {
+        let variables: BTreeSet<hir::VariableId> = assigned
+            .iter()
+            .filter_map(|target| match target {
+                hir::Target::Variable(id) => Some(*id),
+                hir::Target::Local(_) | hir::Target::Parameter(_) => None,
+            })
+            .collect();
+        let program = self.program;
+        for (index, constraint) in program.constraints.iter().enumerate() {
+            if constraint.variables.is_disjoint(&variables) {
+                continue;
+            }
+            for (part, written) in constraint.parts.iter().enumerate() {
+                let checked = Checked {
+                    constraint: index,
+                    part,
+                    tuples: false,
+                };
+                let holds = self.slot(scalar_layout(hir::Scalar::Boolean));
+                self.call_constraint(checked, holds.clone(), cx);
+                let (kept, broken) = (self.new_block(), self.new_block());
+                self.end_block(
+                    lir::Terminator::Branch {
+                        condition: holds,
+                        then: kept,
+                        otherwise: broken,
+                    },
+                    broken,
+                );
+                let name = self.text(&constraint.name, cx);
+                let condition = self.text(&written.written, cx);
+                let tuples = written.breaking.is_some().then(|| {
+                    let tuples = self.slot(scalar_layout(hir::Scalar::Text));
+                    let checked = Checked {
+                        tuples: true,
+                        ..checked
+                    };
+                    self.call_constraint(checked, tuples.clone(), cx);
+                    tuples
+                });
+                let failure = lir::Failure::ConstraintViolated {
+                    constraint: name,
+                    condition,
+                    tuples,
+                };
+                self.fail(failure, kept);
+            }
+        }
+    }
+
+    /// Call the function of `checked`, its value into `result`.
+    fn call_constraint(&mut self, checked: Checked, result: lir::Place, cx: &mut Lowering) {
+        let (function, makes) = constraint_function(self.program, self.variable_data, checked, cx);
+        self.scoped |= makes;
+        self.insts.push(lir::Inst::Call {
+            function,
+            args: None,
+            result: Some(result),
+        });
+        self.after_call(cx);
     }
 
     /// A transaction of `body`, with `collecting`, the variable it adds its
@@ -6041,6 +6203,65 @@ mod tests {
                 },
             },
         }
+    }
+
+    #[test]
+    fn constraints_are_checked_after_what_assigns_their_variables() {
+        // A constraint on `stock` alone: assigning `stock` checks its part,
+        // by a function of its own, and assigning `other` doesn't.
+        let assign = |id, n| {
+            hir::Statement::Assign(vec![hir::Assignment {
+                target: hir::Target::Variable(hir::VariableId(id)),
+                value: hir::Expr::Constant(hir::Value::Integer(n)),
+            }])
+        };
+        let mut program = program(
+            vec![user("main", &[], vec![assign(0, 4), assign(1, 0)])],
+            vec![
+                variable("stock", hir::Value::Integer(5)),
+                variable("other", hir::Value::Integer(1)),
+            ],
+        );
+        program.constraints.push(hir::VariableConstraint {
+            name: "stocked".to_string(),
+            variables: [hir::VariableId(0)].into(),
+            parts: vec![hir::ConstraintPart {
+                condition: hir::Expr::Binary(
+                    hir::BinaryOp::Compare(
+                        hir::Comparison::Greater,
+                        hir::Compared::Scalar(hir::Scalar::Integer),
+                    ),
+                    Box::new(hir::Expr::Variable(hir::VariableId(0))),
+                    Box::new(hir::Expr::Constant(hir::Value::Integer(0))),
+                ),
+                breaking: None,
+                locals: Vec::new(),
+                written: "stock > 0".to_string(),
+            }],
+            written: "stock > 0".to_string(),
+        });
+        let lowered = lower_program(&program);
+        let names: Vec<&str> = lowered.functions.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["main", "constraint stocked", "__entry", "message"]);
+        let checks = lowered.functions[0]
+            .blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .filter(|inst| matches!(inst, lir::Inst::Call { function, .. } if function.0 == 1))
+            .count();
+        assert_eq!(checks, 1);
+        let failures: Vec<&lir::Failure> = lowered.functions[0]
+            .blocks
+            .iter()
+            .filter_map(|b| match &b.terminator {
+                lir::Terminator::Fail(failure) => Some(&**failure),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            matches!(failures[..], [lir::Failure::ConstraintViolated { .. }]),
+            "{failures:#?}"
+        );
     }
 
     fn debug_value() -> hir::Operator {

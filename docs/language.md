@@ -1273,6 +1273,34 @@ operator message{error: overlapping_subtypes}: text [
         || "`, but a value has one most specific type"
 ];
 
+/* A statement left the variables so that the constraint named
+   `constraint` is false: its condition, or the operand of its `and` that
+   is, written `condition` (R0023). */
+type constraint_violated is error { { constraint: text, condition: text } };
+
+operator message{error: constraint_violated}: text [
+    "the statement breaks the constraint `"
+        || error.constraint
+        || "`: `"
+        || error.condition
+        || "` is false"
+];
+
+/* As `constraint_violated`, with the tuples that make `condition` false,
+   written as `debug_value` writes the relation of them: those of `a` that
+   aren't in `b`, for `a <= b`, and those of `e`, for `is_empty{r: e}`
+   (R0023). */
+type constraint_violated_by is error { { constraint: text, condition: text, tuples: text } };
+
+operator message{error: constraint_violated_by}: text [
+    "the statement breaks the constraint `"
+        || error.constraint
+        || "`: `"
+        || error.condition
+        || "` is false of "
+        || error.tuples
+];
+
 /* The file at `path` can't be read, for `reason`, the system's words for
    why, as "No such file or directory" (R0012). */
 type unreadable_file is error { { path: text, reason: text } };
@@ -3326,7 +3354,23 @@ constraint known_countries := official{country} <= countries{country};
 constraint known_languages := official{language} <= languages{language};
 constraint official_somewhere := languages{language} <= official{language};
 
-operator main{} [];
+/* A language, with where it is official, at once, as neither holds without
+   the other. */
+operator add_quechua{} [
+    assign {
+        insert languages relation { { language: "Quechua", native: "Runa Simi" } };
+        insert official relation { { language: "Quechua", country: "Peru" } };
+    };
+];
+
+operator main{} [
+    call add_quechua{};
+    var refused: relation transaction_collection;
+    transaction collecting refused [
+        insert languages relation { { language: "Esperanto", native: "Esperanto" } };
+    ];
+    call debug_value{v: refused{error}};
+];
 ```
 
 - **A condition on variables,** of any type, which it mentions one or
@@ -3339,6 +3383,19 @@ operator main{} [];
   where its form says: the tuples of `a` that aren't in `b`, for
   `a <= b`, and of `b` that aren't in `a`, for `a >= b`; the tuples of
   `e`, for `is_empty{r: e}`; and the operands of an `and` that are false.
+- **Every statement that assigns a variable it mentions is checked as it
+  ends:** an assignment, an `assign` block, a call that passes the
+  variable to a `var` or `out` parameter, and a transaction that adds its
+  errors to it. Its parts, the operands of its `and`s, are checked in
+  turn, those that can't fail first, as an `and` computes them, and a
+  statement that leaves one false fails (R0023), with a
+  `constraint_violated { constraint, condition }`, or, where its form says
+  which tuples make it false, a `constraint_violated_by { constraint,
+  condition, tuples }`, with the relation of them as `debug_value` writes
+  it. A collecting transaction takes the failure, and gives the variables
+  back their values, so no statement after it sees them broken; otherwise
+  the program stops. Changes that only hold together are made in one
+  statement, an `assign` block, as `add_quechua` below makes them.
 - **A unit's own.** A unit's variables are its implementation's, so its
   constraints are too, and one in the interface is an error, whose fix
   moves it (A0067). A constraint is a definition, at the top level, so one
@@ -5308,8 +5365,10 @@ operator main{} [
   aggregate }` (R0010), `index_out_of_range { position, length }`
   (R0011), `unparsable { text, type, out_of_range }` (R0014),
   `broken_constraint { value, type, constraint }` (R0017),
-  `no_square_root { of }` (R0018), `not_of_type { value, type }` (R0019)
-  and `overlapping_subtypes { value, first, second }` (R0020), each with
+  `no_square_root { of }` (R0018), `not_of_type { value, type }` (R0019),
+  `overlapping_subtypes { value, first, second }` (R0020), and
+  `constraint_violated { constraint, condition }` and
+  `constraint_violated_by { constraint, condition, tuples }` (R0023), each with
   the message the failure writes: the failure fails with its error, which
   a transaction takes, as it takes a `fail`'s, and the program writes
   with its message and code if nothing does. A built-in that reads input gives the world's errors as

@@ -145,7 +145,7 @@ impl Program {
 pub struct OperatorId(pub usize);
 
 /// Index into [`Program::variables`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VariableId(pub usize);
 
 /// Index into an update operator's local variables
@@ -618,10 +618,16 @@ pub enum LanguageError {
     ColumnShared,
     /// A load's `columns` gives an attribute a column below 1 (R0016).
     ColumnBelowOne,
+    /// A statement leaves the variables so that a constraint on them is
+    /// false (R0023).
+    ConstraintViolated,
+    /// As [`LanguageError::ConstraintViolated`], with the tuples that break
+    /// it, where its form says which (R0023).
+    ConstraintViolatedBy,
 }
 
 impl LanguageError {
-    pub const ALL: [LanguageError; 27] = [
+    pub const ALL: [LanguageError; 29] = [
         LanguageError::UnreadableFile,
         LanguageError::NotUtf8,
         LanguageError::MalformedCsv,
@@ -649,6 +655,8 @@ impl LanguageError {
         LanguageError::OverlappingSubtypes,
         LanguageError::ColumnShared,
         LanguageError::ColumnBelowOne,
+        LanguageError::ConstraintViolated,
+        LanguageError::ConstraintViolatedBy,
     ];
 
     /// The code a failure with it is written with, when nothing takes it.
@@ -684,6 +692,9 @@ impl LanguageError {
             LanguageError::NoMinOrMax => Code::NoMinOrMax,
             LanguageError::NoSquareRoot => Code::NoResult,
             LanguageError::NotOfType => Code::NotOfType,
+            LanguageError::ConstraintViolated | LanguageError::ConstraintViolatedBy => {
+                Code::ConstraintViolated
+            }
         }
     }
 
@@ -718,6 +729,8 @@ impl LanguageError {
             LanguageError::OverlappingSubtypes => "overlapping_subtypes",
             LanguageError::ColumnShared => "column_shared",
             LanguageError::ColumnBelowOne => "column_below_one",
+            LanguageError::ConstraintViolated => "constraint_violated",
+            LanguageError::ConstraintViolatedBy => "constraint_violated_by",
         }
     }
 
@@ -811,6 +824,10 @@ impl LanguageError {
                 &[("first", text), ("second", text), ("column", integer)]
             }
             LanguageError::ColumnBelowOne => &[("attribute", text), ("column", integer)],
+            LanguageError::ConstraintViolated => &[("constraint", text), ("condition", text)],
+            LanguageError::ConstraintViolatedBy => {
+                &[("constraint", text), ("condition", text), ("tuples", text)]
+            }
         };
         Heading::new(
             components
@@ -1382,6 +1399,24 @@ impl Statement {
         }
     }
 
+    /// What the statement assigns itself, not in the blocks within it or
+    /// the operators it calls: each assignment's target, each variable a
+    /// call passes to a `var` or `out` parameter, and the variable a
+    /// transaction adds its errors to.
+    #[must_use]
+    pub fn assigns(&self) -> Vec<&Target> {
+        match self {
+            Statement::Assign(assignments) => assignments.iter().map(|a| &a.target).collect(),
+            Statement::Call(call) => call.updated.values().collect(),
+            Statement::Transaction(collecting, _) => collecting.iter().collect(),
+            Statement::If(..)
+            | Statement::Loop(..)
+            | Statement::For(..)
+            | Statement::Fail(_)
+            | Statement::Warn(_) => Vec::new(),
+        }
+    }
+
     /// The statement, in an operator instantiated with `types`.
     #[must_use]
     pub fn instantiated(&self, types: &[Type]) -> Statement {
@@ -1486,13 +1521,7 @@ impl Block {
     pub fn assigned(&self) -> Vec<Target> {
         let mut assigned = Vec::new();
         self.each_statement(&mut |statement| {
-            let targets: Vec<&Target> = match statement {
-                Statement::Assign(assignments) => assignments.iter().map(|a| &a.target).collect(),
-                Statement::Call(call) => call.updated.values().collect(),
-                Statement::Transaction(collecting, _) => collecting.iter().collect(),
-                _ => Vec::new(),
-            };
-            for target in targets {
+            for target in statement.assigns() {
                 if !assigned.contains(target) {
                     assigned.push(target.clone());
                 }
@@ -3138,13 +3167,32 @@ impl BinaryOp {
 pub struct VariableConstraint {
     /// Unique among the constraints.
     pub name: String,
-    /// The condition, a boolean computed from the variables, which it
-    /// mentions one or more of.
+    /// The variables it mentions, one or more: a statement that assigns
+    /// one is followed by its check.
+    pub variables: BTreeSet<VariableId>,
+    /// The condition, the conjunction of its parts, each the operand of an
+    /// `and` it is, or itself, in the order they are checked: those that
+    /// can't fail before those that can, as an `and` computes them (see
+    /// [`Connective::guarded`]), each in the order it is written.
+    pub parts: Vec<ConstraintPart>,
+    /// The condition as it is written.
+    pub written: String,
+}
+
+/// A part of a constraint's condition (see [`VariableConstraint::parts`]),
+/// which an error says is false when it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConstraintPart {
+    /// A boolean computed from the variables.
     pub condition: Expr,
-    /// The local variables of the value blocks in it, which its `Let`s give
-    /// values.
+    /// The relation of the tuples that make it false, where its form says
+    /// which: of `a` that aren't in `b`, for `a <= b`, and of `e`, for
+    /// `is_empty{r: e}`.
+    pub breaking: Option<Expr>,
+    /// The local variables of the value blocks in both, which their `Let`s
+    /// give values.
     pub locals: Vec<Local>,
-    /// The condition as it is written, which an error says is broken.
+    /// The part as it is written.
     pub written: String,
 }
 

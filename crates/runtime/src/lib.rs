@@ -2364,6 +2364,55 @@ pub unsafe extern "C" fn trendy_rt_not_of_type(
     }
 }
 
+/// Fail with the error of a statement that left the variables so that the
+/// constraint named `constraint`, a text, is false: its part written
+/// `condition`, a text: a `constraint_violated` (R0023).
+///
+/// # Safety
+///
+/// `constraint` and `condition` must point to valid text values.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_constraint_violated(
+    constraint: *const u8,
+    condition: *const u8,
+) {
+    // SAFETY: guaranteed by the caller.
+    let Failed = unsafe {
+        fail_as(
+            CONSTRAINT_VIOLATED,
+            &[("constraint", constraint), ("condition", condition)],
+        )
+    };
+}
+
+/// As [`trendy_rt_constraint_violated`], with the relation of the tuples
+/// that make the part false, written as `debug_value` writes it, `tuples`,
+/// a text: a `constraint_violated_by` (R0023).
+///
+/// # Safety
+///
+/// `constraint`, `condition` and `tuples` must point to valid text values.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_constraint_violated_by(
+    constraint: *const u8,
+    condition: *const u8,
+    tuples: *const u8,
+) {
+    // SAFETY: guaranteed by the caller.
+    let Failed = unsafe {
+        fail_as(
+            CONSTRAINT_VIOLATED_BY,
+            &[
+                ("constraint", constraint),
+                ("condition", condition),
+                ("tuples", tuples),
+            ],
+        )
+    };
+}
+
 /// Write the warning of a `warn` outside any transaction, whose message is
 /// `message`, a text (R0022), escaped as [`trendy_rt_failed`] writes a
 /// failure's, with where the program is, and carry on.
@@ -3792,7 +3841,7 @@ pub struct Kind {
 
 /// The names of the kinds of error the runtime makes, each at its place
 /// in the compiler's table, which [`trendy_rt_failures`] checks.
-pub const KINDS: [&str; 27] = [
+pub const KINDS: [&str; 29] = [
     "unreadable_file",
     "not_utf8",
     "malformed_csv",
@@ -3820,6 +3869,8 @@ pub const KINDS: [&str; 27] = [
     "overlapping_subtypes",
     "column_shared",
     "column_below_one",
+    "constraint_violated",
+    "constraint_violated_by",
 ];
 
 /// The place in [`KINDS`] of the kind named `name`, found when the runtime
@@ -3905,6 +3956,10 @@ pub const OVERLAPPING_SUBTYPES: usize = place("overlapping_subtypes");
 pub const COLUMN_SHARED: usize = place("column_shared");
 /// `column_below_one`'s, as [`UNREADABLE_FILE`] is.
 pub const COLUMN_BELOW_ONE: usize = place("column_below_one");
+/// `constraint_violated`'s, as [`UNREADABLE_FILE`] is.
+pub const CONSTRAINT_VIOLATED: usize = place("constraint_violated");
+/// `constraint_violated_by`'s, as [`UNREADABLE_FILE`] is.
+pub const CONSTRAINT_VIOLATED_BY: usize = place("constraint_violated_by");
 
 /// The compiler's table of errors, null until the program's entry gives
 /// it ([`trendy_rt_failures`]).

@@ -45,4 +45,14 @@ operator add_quechua{} [
 operator main{} [
     call add_quechua{};
     call debug_table{r: official join languages};
+    /* Esperanto, official in no country: inserting it alone breaks
+       `official_somewhere`, so the statement fails, and the transaction
+       takes the failure, gives `languages` back the value it had, and keeps
+       the error, which says what broke it. */
+    var refused: relation transaction_collection;
+    transaction collecting refused [
+        insert languages relation { { language: "Esperanto", native: "Esperanto" } };
+    ];
+    call debug_value{v: count{r: languages}};
+    call debug_value{v: message{error: value from refused{error}}};
 ];

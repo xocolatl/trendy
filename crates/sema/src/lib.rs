@@ -3089,11 +3089,32 @@ operator main{{}} [ var lines: array text; {main} ];"
         let constraint = &program.constraints[0];
         assert_eq!(constraint.name, "stocked");
         assert_eq!(constraint.written, "stock > 0");
-        let mut mentions = false;
-        constraint.condition.for_each_child(|child, _| {
-            mentions |= matches!(child, hir::Expr::Variable(_));
-        });
-        assert!(mentions, "{:#?}", constraint.condition);
+        let stock = program
+            .variables
+            .iter()
+            .position(|v| v.name == "stock")
+            .unwrap();
+        assert_eq!(constraint.variables, [hir::VariableId(stock)].into());
+        // Its parts, an `and`'s operands, those that can't fail first, each
+        // with the relation of the tuples that make it false where its form
+        // says which.
+        let program = analyze_str(&format!(
+            "{DECLARED}constraint c := (10 div stock > 1 and is_empty{{r: cities where city = \"Lima\"}}) and stock > 0;{MAIN}"
+        ))
+        .unwrap();
+        let parts: Vec<(&str, bool)> = program.constraints[0]
+            .parts
+            .iter()
+            .map(|p| (p.written.as_str(), p.breaking.is_some()))
+            .collect();
+        assert_eq!(
+            parts,
+            [
+                ("stock > 0", false),
+                ("10 div stock > 1", false),
+                ("is_empty{r: cities where city = \"Lima\"}", true),
+            ]
+        );
         // One the initial values break, with what breaks it where its form
         // says: the tuples outside the right of `<=`, a false operand of
         // `and`, and the tuples of `is_empty`'s relation.

@@ -45,7 +45,7 @@ fn constraint(
         origin: Origin::Operator(decl.keyword()?),
     };
     let mut names = ConditionNames::new(cx, false);
-    let condition = Checker::new(&mut names).expr(&written, Some(&boolean), errors)?;
+    Checker::new(&mut names).expr(&written, Some(&boolean), errors)?;
     // Of the initial values, checked again, so that a part that fails is
     // reported where it is, as in an initial value.
     let mut initial = ConditionNames::new(cx, true);
@@ -72,14 +72,123 @@ fn constraint(
         ));
         return None;
     }
-    cx.namespaces
-        .is_first_constraint(&ident)
-        .then(|| hir::VariableConstraint {
-            name: ident.text().to_string(),
-            condition,
-            locals: names.locals.finish(),
-            written: written.syntax().text().to_string(),
-        })
+    if !cx.namespaces.is_first_constraint(&ident) {
+        return None;
+    }
+    // Its parts, those that can't fail first, as an `and` computes them,
+    // each of a kind in the order it is written.
+    let mut parts: Vec<hir::ConstraintPart> = conjuncts(&written)
+        .iter()
+        .filter_map(|conjunct| part(conjunct, &boolean, cx))
+        .collect();
+    parts.sort_by_key(|part| part.condition.can_fail());
+    Some(hir::VariableConstraint {
+        name: ident.text().to_string(),
+        variables: names
+            .mentioned
+            .iter()
+            .map(|name| cx.variable_ids[name])
+            .collect(),
+        parts,
+        written: written.syntax().text().to_string(),
+    })
+}
+
+/// The part of a constraint's condition `written` is, a conjunct of it,
+/// with the tuples that make it false where its form says which. It is
+/// part of a condition already checked, so it has no errors of its own.
+fn part(written: &Expr, boolean: &Expected, cx: &Context) -> Option<hir::ConstraintPart> {
+    let mut names = ConditionNames::new(cx, false);
+    let mut errors = Vec::new();
+    let condition = Checker::new(&mut names).expr(written, Some(boolean), &mut errors)?;
+    let breaking = match form(written) {
+        Form::Within { from, within } => {
+            let from = Checker::new(&mut names).expr(&from, None, &mut errors)?;
+            let within = Checker::new(&mut names).expr(&within, None, &mut errors)?;
+            ops::combined(from, within, hir::Combination::Minus).ok()
+        }
+        Form::Empty(relation) => Checker::new(&mut names).expr(&relation, None, &mut errors),
+        Form::And(_) | Form::Other => None,
+    };
+    Some(hir::ConstraintPart {
+        condition,
+        breaking,
+        locals: names.locals.finish(),
+        written: written.syntax().text().to_string(),
+    })
+}
+
+/// The conjuncts of `written`, a condition: the operands of each `and` it
+/// is, in parentheses or not, in the order they are written, or itself.
+fn conjuncts(written: &Expr) -> Vec<Expr> {
+    match form(written) {
+        Form::And(operands) => operands.iter().flat_map(conjuncts).collect(),
+        _ => vec![unparenthesized(written)],
+    }
+}
+
+/// `written` without the parentheses around it.
+fn unparenthesized(written: &Expr) -> Expr {
+    match written {
+        Expr::Paren(paren) => paren
+            .inner()
+            .map_or_else(|| written.clone(), |inner| unparenthesized(&inner)),
+        _ => written.clone(),
+    }
+}
+
+/// What a condition's form says of what makes it false.
+enum Form {
+    /// `a and b`, or `and{a, b}`: its operands, each of which makes it
+    /// false when it is.
+    And(Vec<Expr>),
+    /// `a <= b`, or `b >= a`, of relations: the tuples of `from` that
+    /// aren't in `within`.
+    Within { from: Expr, within: Expr },
+    /// `is_empty{r: e}`: the tuples of `e`.
+    Empty(Expr),
+    /// Anything else, which says nothing of it.
+    Other,
+}
+
+/// The form of `written`, in parentheses or not.
+fn form(written: &Expr) -> Form {
+    match unparenthesized(written) {
+        expr @ (Expr::Binary(_) | Expr::Nary(_)) => {
+            if let Some(connecting) =
+                ops::Connecting::of(&expr).filter(|c| c.token.kind() == SyntaxKind::AndKw)
+            {
+                return Form::And(connecting.operands.into_iter().flatten().collect());
+            }
+            let Expr::Binary(binary) = &expr else {
+                return Form::Other;
+            };
+            match (binary.operator(), binary.lhs(), binary.rhs()) {
+                (Some(token), Some(lhs), Some(rhs)) if token.kind() == SyntaxKind::LtEq => {
+                    Form::Within {
+                        from: lhs,
+                        within: rhs,
+                    }
+                }
+                (Some(token), Some(lhs), Some(rhs)) if token.kind() == SyntaxKind::GtEq => {
+                    Form::Within {
+                        from: rhs,
+                        within: lhs,
+                    }
+                }
+                _ => Form::Other,
+            }
+        }
+        Expr::Call(call) => call
+            .callee()
+            .and_then(|c| c.ident())
+            .filter(|ident| ident.text() == "is_empty")
+            .and_then(|_| call.arguments())
+            .and_then(|args| args.named().find(|a| a.is_named("r")))
+            .and_then(|r| r.value())
+            .map_or(Form::Other, Form::Empty),
+        _ => Form::Other,
+    }
 }
 
 /// The names in a constraint's condition: the variables, as variables,
@@ -133,73 +242,38 @@ impl<'c, 'a> ConditionNames<'c, 'a> {
     fn breaches(&mut self, written: &Expr) -> Vec<(Span, String)> {
         let span = trendy_syntax::span(written.syntax().text_range());
         let false_here = || vec![(span, "this is false".to_string())];
-        match written {
-            Expr::Paren(paren) => match paren.inner() {
-                Some(inner) => self.breaches(&inner),
-                None => false_here(),
+        match form(written) {
+            Form::And(operands) => {
+                let mut breaches = Vec::new();
+                for operand in operands {
+                    if self.known(&operand) == Some(hir::Value::Boolean(false)) {
+                        breaches.extend(self.breaches(&operand));
+                    }
+                }
+                if breaches.is_empty() {
+                    false_here()
+                } else {
+                    breaches
+                }
+            }
+            Form::Within { from, within } => match (self.known(&from), self.known(&within)) {
+                (Some(hir::Value::Relation(from)), Some(hir::Value::Relation(kept))) => {
+                    let outside: Vec<&hir::TupleValue> =
+                        from.tuples.difference(&kept.tuples).collect();
+                    let written_within = within.syntax().text().to_string();
+                    vec![(span, errors::tuples_outside(&outside, &written_within))]
+                }
+                _ => false_here(),
             },
-            Expr::Binary(_) | Expr::Nary(_) => {
-                if let Some(connecting) =
-                    ops::Connecting::of(written).filter(|c| c.token.kind() == SyntaxKind::AndKw)
-                {
-                    let mut breaches = Vec::new();
-                    for operand in connecting.operands.into_iter().flatten() {
-                        if self.known(&operand) == Some(hir::Value::Boolean(false)) {
-                            breaches.extend(self.breaches(&operand));
-                        }
-                    }
-                    return if breaches.is_empty() {
-                        false_here()
-                    } else {
-                        breaches
-                    };
+            Form::Empty(relation) => match self.known(&relation) {
+                Some(hir::Value::Relation(value)) => {
+                    let tuples: Vec<&hir::TupleValue> = value.tuples.iter().collect();
+                    let written_relation = relation.syntax().text().to_string();
+                    vec![(span, errors::tuples_in(&tuples, &written_relation))]
                 }
-                let Expr::Binary(binary) = written else {
-                    return false_here();
-                };
-                let (Some(token), Some(lhs), Some(rhs)) =
-                    (binary.operator(), binary.lhs(), binary.rhs())
-                else {
-                    return false_here();
-                };
-                let (from, within) = match token.kind() {
-                    SyntaxKind::LtEq => (lhs, rhs),
-                    SyntaxKind::GtEq => (rhs, lhs),
-                    _ => return false_here(),
-                };
-                let written_within = within.syntax().text().to_string();
-                match (self.known(&from), self.known(&within)) {
-                    (Some(hir::Value::Relation(from)), Some(hir::Value::Relation(within))) => {
-                        let outside: Vec<&hir::TupleValue> =
-                            from.tuples.difference(&within.tuples).collect();
-                        vec![(span, errors::tuples_outside(&outside, &written_within))]
-                    }
-                    _ => false_here(),
-                }
-            }
-            Expr::Call(call) => {
-                let emptied = call
-                    .callee()
-                    .and_then(|c| c.ident())
-                    .filter(|ident| ident.text() == "is_empty")
-                    .and_then(|_| call.arguments())
-                    .and_then(|args| args.named().find(|a| a.is_named("r")))
-                    .and_then(|r| r.value());
-                let Some(relation) = emptied else {
-                    return false_here();
-                };
-                match self.known(&relation) {
-                    Some(hir::Value::Relation(value)) => {
-                        let tuples: Vec<&hir::TupleValue> = value.tuples.iter().collect();
-                        vec![(
-                            span,
-                            errors::tuples_in(&tuples, &relation.syntax().text().to_string()),
-                        )]
-                    }
-                    _ => false_here(),
-                }
-            }
-            _ => false_here(),
+                _ => false_here(),
+            },
+            Form::Other => false_here(),
         }
     }
 }

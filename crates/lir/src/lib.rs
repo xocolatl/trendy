@@ -352,6 +352,16 @@ pub enum RuntimeFn {
     /// isn't a value of the type named `ty`, a text, that it was treated
     /// as, with them.
     NotOfType,
+    /// `trendy_rt_constraint_violated(constraint, condition)`: write the
+    /// error of a statement that left the variables so that the constraint
+    /// named `constraint`, a text, is false: its part written `condition`,
+    /// a text.
+    ConstraintViolated,
+    /// `trendy_rt_constraint_violated_by(constraint, condition, tuples)`:
+    /// as [`RuntimeFn::ConstraintViolated`], with the relation of the
+    /// tuples that make it false, written as `debug_value` writes it,
+    /// `tuples`, a text.
+    ConstraintViolatedBy,
     /// `trendy_rt_failed(message, error)`: write the error `error`, a
     /// value of the prelude's type `error`, that nothing took, whose
     /// message is `message`, a text, with its kind's code.
@@ -605,7 +615,7 @@ pub enum RuntimeFn {
 
 impl RuntimeFn {
     /// Every runtime function, for checking the runtime against them.
-    pub const ALL: [RuntimeFn; 70] = [
+    pub const ALL: [RuntimeFn; 72] = [
         RuntimeFn::DebugValue,
         RuntimeFn::DebugTable,
         RuntimeFn::ToText,
@@ -635,6 +645,8 @@ impl RuntimeFn {
         RuntimeFn::ElementConflict,
         RuntimeFn::BrokenConstraint,
         RuntimeFn::NotOfType,
+        RuntimeFn::ConstraintViolated,
+        RuntimeFn::ConstraintViolatedBy,
         RuntimeFn::Failed,
         RuntimeFn::Warned,
         RuntimeFn::Report,
@@ -734,6 +746,8 @@ impl RuntimeFn {
             | RuntimeFn::ElementConflict
             | RuntimeFn::BrokenConstraint
             | RuntimeFn::NotOfType
+            | RuntimeFn::ConstraintViolated
+            | RuntimeFn::ConstraintViolatedBy
             | RuntimeFn::Failed
             | RuntimeFn::Warned
             | RuntimeFn::Report
@@ -794,6 +808,8 @@ impl RuntimeFn {
             RuntimeFn::ElementConflict => "trendy_rt_element_conflict",
             RuntimeFn::BrokenConstraint => "trendy_rt_broken_constraint",
             RuntimeFn::NotOfType => "trendy_rt_not_of_type",
+            RuntimeFn::ConstraintViolated => "trendy_rt_constraint_violated",
+            RuntimeFn::ConstraintViolatedBy => "trendy_rt_constraint_violated_by",
             RuntimeFn::Failed => "trendy_rt_failed",
             RuntimeFn::Warned => "trendy_rt_warned",
             RuntimeFn::Report => "trendy_rt_report",
@@ -1108,6 +1124,16 @@ pub enum Failure {
     /// prelude's type `error` that nothing took, whose message is
     /// `message`, a text.
     Own { message: Place, error: Place },
+    /// A statement left the variables so that the constraint named
+    /// `constraint`, a text, is false: its part written `condition`, a
+    /// text, with, where its form says which, the relation of the tuples
+    /// that make it false, written as `debug_value` writes it, `tuples`, a
+    /// text.
+    ConstraintViolated {
+        constraint: Place,
+        condition: Place,
+        tuples: Option<Place>,
+    },
     /// As [`Failure::BrokenConstraint`], of a value `load_csv` read from the
     /// record `record` describes, laid out as [`Layout::record`].
     BrokenConstraintInFile {
@@ -1203,6 +1229,17 @@ impl Failure {
                 ty,
             } => (RuntimeFn::NotOfType, vec![value, descriptor, ty]),
             Failure::Own { message, error } => (RuntimeFn::Failed, vec![message, error]),
+            Failure::ConstraintViolated {
+                constraint,
+                condition,
+                tuples,
+            } => match tuples {
+                None => (RuntimeFn::ConstraintViolated, vec![constraint, condition]),
+                Some(tuples) => (
+                    RuntimeFn::ConstraintViolatedBy,
+                    vec![constraint, condition, tuples],
+                ),
+            },
             Failure::BrokenConstraintInFile {
                 value,
                 descriptor,

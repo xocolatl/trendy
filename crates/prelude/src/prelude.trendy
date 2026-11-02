@@ -394,6 +394,34 @@ operator message{error: overlapping_subtypes}: text [
         || "`, but a value has one most specific type"
 ];
 
+/* A statement left the variables so that the constraint named
+   `constraint` is false: its condition, or the operand of its `and` that
+   is, written `condition` (R0023). */
+type constraint_violated is error { { constraint: text, condition: text } };
+
+operator message{error: constraint_violated}: text [
+    "the statement breaks the constraint `"
+        || error.constraint
+        || "`: `"
+        || error.condition
+        || "` is false"
+];
+
+/* As `constraint_violated`, with the tuples that make `condition` false,
+   written as `debug_value` writes the relation of them: those of `a` that
+   aren't in `b`, for `a <= b`, and those of `e`, for `is_empty{r: e}`
+   (R0023). */
+type constraint_violated_by is error { { constraint: text, condition: text, tuples: text } };
+
+operator message{error: constraint_violated_by}: text [
+    "the statement breaks the constraint `"
+        || error.constraint
+        || "`: `"
+        || error.condition
+        || "` is false of "
+        || error.tuples
+];
+
 /* The file at `path` can't be read, for `reason`, the system's words for
    why, as "No such file or directory" (R0012). */
 type unreadable_file is error { { path: text, reason: text } };
