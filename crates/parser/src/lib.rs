@@ -1,4 +1,5 @@
 mod errors;
+mod imports;
 mod sequences;
 mod unordered;
 
@@ -264,6 +265,16 @@ const SQL_WARN_LEVELS: [&str; 2] = ["warning", "notice"];
 /// `warnings.warn` and `logging.warning`.
 const WARN_METHODS: [&str; 2] = ["warn", "warning"];
 
+/// Whether a token of this kind is a word: a name, or a keyword, which a
+/// unit's name can have as a part, as a file can be named `join.trendy`.
+fn is_word(kind: SyntaxKind) -> bool {
+    kind == SyntaxKind::Ident || kind.is_keyword()
+}
+
+/// The most tokens [`Parser::statement_ahead`] reads of another language's
+/// statement.
+const STATEMENT_LIMIT: usize = 64;
+
 fn starts_value(kind: SyntaxKind) -> bool {
     kind.is_literal()
         || matches!(
@@ -312,6 +323,7 @@ impl<'a> Parser<'a> {
                 SyntaxKind::Ident if self.at_constraint_decl(false) => self.constraint_decl(),
                 SyntaxKind::Ident if self.at_database_decl() => self.database_decl(),
                 SyntaxKind::Ident if self.at_section_header() => self.section_header(),
+                SyntaxKind::Ident if self.at_uses() => self.uses_decl(),
                 _ => self.junk(found),
             }
         }
@@ -819,7 +831,14 @@ impl<'a> Parser<'a> {
             return true;
         }
         let kind = |p: &mut Self, n| p.found_after(n).map(|f| f.kind);
+        // `interface` and then a section's `uses { … }`, not TypeScript's
+        // `interface uses { … }`.
+        let uses_after_header = first.text.eq_ignore_ascii_case("interface")
+            && self
+                .found_after(1)
+                .is_some_and(|f| f.text.eq_ignore_ascii_case("uses"));
         errors::record_keyword(first.text).is_some()
+            && !uses_after_header
             && match kind(self, 2) {
                 Some(SyntaxKind::LBrace) => true,
                 Some(SyntaxKind::Eq | SyntaxKind::ColonEq) => {
@@ -1102,6 +1121,181 @@ impl<'a> Parser<'a> {
         self.expect(SyntaxKind::Semicolon);
         self.builder.finish_node();
         self.form = outer_form;
+    }
+
+    /// Whether a `uses` starts here: `uses`, a contextual keyword, in any
+    /// case, before `{`, or another bracket, or before a unit's name, as
+    /// Delphi writes one without braces.
+    fn at_uses(&mut self) -> bool {
+        self.found()
+            .is_some_and(|f| f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case("uses"))
+            && self.found_after(1).is_some_and(|f| {
+                matches!(
+                    f.kind,
+                    SyntaxKind::LBrace | SyntaxKind::LParen | SyntaxKind::LBracket
+                ) || is_word(f.kind)
+            })
+    }
+
+    /// `uses { lakes.depths, recipes as r };`: the units whose interfaces
+    /// the section's declarations see, each by its name, and, after `as`,
+    /// the one the unit gives it. `uses` in another case is reported, as
+    /// are Delphi's units without braces, `uses lakes, recipes;`, which the
+    /// fix encloses in them, and a `uses` of no unit, which it removes.
+    fn uses_decl(&mut self) {
+        let outer_form = std::mem::replace(&mut self.form, errors::USES_FORM);
+        self.start_node(SyntaxKind::UsesDecl);
+        let keyword = self.found().expect("at a `uses`");
+        self.bump();
+        if keyword.text != "uses" {
+            self.errors.push(errors::miscased_keyword(keyword, "uses"));
+        }
+        let bracketed = [SyntaxKind::LBrace, SyntaxKind::LParen, SyntaxKind::LBracket]
+            .into_iter()
+            .any(|open| self.at(open));
+        let empty = if bracketed {
+            let empty = self.found_after(1).is_some_and(|f| {
+                matches!(
+                    f.kind,
+                    SyntaxKind::RBrace | SyntaxKind::RParen | SyntaxKind::RBracket
+                )
+            });
+            self.delimited(
+                Some(SyntaxKind::UnitList),
+                "units",
+                (SyntaxKind::LBrace, SyntaxKind::RBrace),
+                &[
+                    (SyntaxKind::LParen, SyntaxKind::RParen),
+                    (SyntaxKind::LBracket, SyntaxKind::RBracket),
+                ],
+                |p| p.items(Self::at_used_unit, Self::used_unit),
+            );
+            empty
+        } else {
+            let start = self
+                .found()
+                .expect("a unit's name follows `uses`")
+                .span
+                .start;
+            self.items(Self::at_used_unit, Self::used_unit);
+            let end = self.last_end.unwrap_or(start);
+            self.errors
+                .push(errors::uses_without_braces(Span::new(start, end)));
+            false
+        };
+        self.expect(SyntaxKind::Semicolon);
+        self.builder.finish_node();
+        if empty {
+            let span = Span::new(
+                keyword.span.start,
+                self.last_end.unwrap_or(keyword.span.end),
+            );
+            self.errors
+                .push(errors::empty_uses(span, self.removal_end(span)));
+        }
+        self.form = outer_form;
+    }
+
+    /// Whether a unit a `uses` names starts here: a word, or a path in
+    /// quotes, as another language writes the file it imports.
+    fn at_used_unit(&mut self) -> bool {
+        self.found()
+            .is_some_and(|f| is_word(f.kind) || f.kind == SyntaxKind::TextLiteral)
+    }
+
+    /// A unit a `uses` names, which [`Parser::at_used_unit`] found, and,
+    /// after `as`, the one word the unit gives it. A path in quotes, as in
+    /// `"lakes/depths.trendy"`, is reported, and fixed to the unit's name,
+    /// as is a name of several words given after `as`.
+    fn used_unit(&mut self) {
+        self.start_node(SyntaxKind::UsedUnit);
+        let first = self.found().expect("at a unit");
+        if first.kind == SyntaxKind::TextLiteral {
+            self.start_node(SyntaxKind::Error);
+            self.bump();
+            self.builder.finish_node();
+            self.errors.push(errors::unit_path(first));
+        } else {
+            self.unit_name();
+        }
+        // Lookahead alone, so that the trivia after the unit is its list's.
+        let next = |p: &Self, n: usize| p.lookahead_nth(n).map(|f| f.kind);
+        if next(self, 0) == Some(SyntaxKind::AsKw) {
+            self.bump();
+            self.name(
+                "add the name the unit gives it after `as`, as in `uses { lakes.depths as depths };`",
+                &[SyntaxKind::Comma, SyntaxKind::RBrace],
+            );
+            if next(self, 0) == Some(SyntaxKind::Dot) {
+                let start = self.found().expect("at `.`").span.start;
+                self.start_node(SyntaxKind::Error);
+                while next(self, 0) == Some(SyntaxKind::Dot) && next(self, 1).is_some_and(is_word) {
+                    self.bump();
+                    self.bump();
+                }
+                if next(self, 0) == Some(SyntaxKind::Dot) {
+                    self.bump();
+                }
+                self.builder.finish_node();
+                let end = self.last_end.unwrap_or(start);
+                self.errors
+                    .push(errors::dotted_alias(Span::new(start, end)));
+            }
+        }
+        self.builder.finish_node();
+    }
+
+    /// A unit's name: words, its path's parts, between `.`s. Rust's and
+    /// C++'s `::` and a path's `/` between them are reported, and fixed to
+    /// `.`, and Java's `.*` after them, which imports every name, removed,
+    /// as a `uses` brings every name the interface declares.
+    fn unit_name(&mut self) {
+        self.start_node(SyntaxKind::UnitName);
+        self.bump();
+        loop {
+            // Lookahead alone, so that the trivia after the name is the
+            // unit's.
+            let kind = |p: &Self, n: usize| p.lookahead_nth(n).map(|f| f.kind);
+            let Some(next) = self.lookahead() else {
+                break;
+            };
+            match next.kind {
+                SyntaxKind::Dot if kind(self, 1).is_some_and(is_word) => {
+                    self.bump();
+                    self.bump();
+                }
+                SyntaxKind::Dot if kind(self, 1) == Some(SyntaxKind::Star) => {
+                    self.start_node(SyntaxKind::Error);
+                    self.bump();
+                    let star = self.bump();
+                    self.builder.finish_node();
+                    self.errors
+                        .push(errors::star_import(Span::new(next.span.start, star.end)));
+                }
+                SyntaxKind::Colon
+                    if kind(self, 1) == Some(SyntaxKind::Colon)
+                        && self
+                            .lookahead_nth(1)
+                            .is_some_and(|f| f.span.start == next.span.end)
+                        && kind(self, 2).is_some_and(is_word) =>
+                {
+                    self.bump();
+                    let second = self.bump();
+                    self.errors.push(errors::unit_separator(
+                        Span::new(next.span.start, second.end),
+                        "::",
+                    ));
+                    self.bump();
+                }
+                SyntaxKind::Slash if kind(self, 1).is_some_and(is_word) => {
+                    self.bump();
+                    self.errors.push(errors::unit_separator(next.span, "/"));
+                    self.bump();
+                }
+                _ => break,
+            }
+        }
+        self.builder.finish_node();
     }
 
     /// Whether a name and `.`, then a name, start at the significant token
@@ -6242,7 +6436,7 @@ impl<'a> Parser<'a> {
     /// Wrap tokens that don't start a definition in an error node, up to the
     /// next definition keyword or the end of input. `first` is the next token.
     fn junk(&mut self, first: Found<'a>) {
-        if self.unit_habit(first) {
+        if self.unit_habit(first) || self.import_habit(first) {
             return;
         }
         let name = self.found_after(1);
@@ -6258,6 +6452,7 @@ impl<'a> Parser<'a> {
             && !self.at_constraint_decl(false)
             && !self.at_database_decl()
             && !self.at_section_header()
+            && !self.at_uses()
         {
             self.bump();
         }
@@ -6356,6 +6551,72 @@ impl<'a> Parser<'a> {
             self.removal_end(span),
         ));
         true
+    }
+
+    /// Another language's way to use a unit, at `first`, where a definition
+    /// goes (see [`imports`]), consumed and reported, with a fix writing the
+    /// `uses` it means, if that is certain: whether it was one.
+    fn import_habit(&mut self, first: Found<'a>) -> bool {
+        if first.kind != SyntaxKind::Ident
+            || !imports::IMPORT_WORDS
+                .iter()
+                .any(|word| first.text.eq_ignore_ascii_case(word))
+        {
+            return false;
+        }
+        let tokens = self.statement_ahead();
+        let Some(import) = imports::recognized(&tokens) else {
+            return false;
+        };
+        self.start_node(SyntaxKind::Error);
+        for _ in &tokens {
+            self.bump();
+        }
+        self.builder.finish_node();
+        let end = tokens.last().map_or(first.span.end, |last| last.span.end);
+        self.errors.push(errors::foreign_import(
+            &import,
+            Span::new(first.span.start, end),
+        ));
+        true
+    }
+
+    /// The significant tokens of the statement that starts at the next one,
+    /// as another language writes one: up to its `;`, or, outside brackets,
+    /// the end of its line or a definition's keyword, and at most
+    /// [`STATEMENT_LIMIT`].
+    fn statement_ahead(&mut self) -> Vec<Found<'a>> {
+        let Some(first) = self.found() else {
+            return Vec::new();
+        };
+        let mut tokens = vec![first];
+        let mut depth = 0_usize;
+        while tokens.len() < STATEMENT_LIMIT {
+            let last = tokens[tokens.len() - 1];
+            if depth == 0 && last.kind == SyntaxKind::Semicolon {
+                break;
+            }
+            let Some(next) = self.found_after(tokens.len()) else {
+                break;
+            };
+            let line_ends = self.source[last.span.end..next.span.start].contains('\n');
+            let definition = matches!(
+                next.kind,
+                SyntaxKind::OperatorKw | SyntaxKind::VarKw | SyntaxKind::BuiltinKw
+            );
+            if depth == 0 && (line_ends || definition) {
+                break;
+            }
+            match next.kind {
+                SyntaxKind::LParen | SyntaxKind::LBrace | SyntaxKind::LBracket => depth += 1,
+                SyntaxKind::RParen | SyntaxKind::RBrace | SyntaxKind::RBracket => {
+                    depth = depth.saturating_sub(1);
+                }
+                _ => {}
+            }
+            tokens.push(next);
+        }
+        tokens
     }
 
     /// Where removing the text at `span` ends: after the line ends and the
@@ -8484,6 +8745,213 @@ var b := tuple { fail: fail }.fail;",
         let parse =
             parse_str("operator main{} [\n    var constraint := 1;\n    constraint := 2;\n];");
         assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+    }
+
+    #[test]
+    fn uses_declarations() {
+        // The units a section uses, each by its path, one with a name of
+        // the unit's own for it.
+        let source = "uses { lakes.depths, recipes as r, join };\n\noperator main{} [];";
+        let parse = parse_str(source);
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let uses = parse.tree.uses().next().unwrap();
+        let units: Vec<(String, Option<String>)> = uses
+            .units()
+            .map(|u| {
+                (
+                    u.name().unwrap().text(),
+                    u.alias().map(|a| a.syntax().text().to_string()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            units,
+            [
+                ("lakes.depths".to_string(), None),
+                ("recipes".to_string(), Some("r".to_string())),
+                ("join".to_string(), None),
+            ]
+        );
+        assert_eq!(parse.tree.items().count(), 1);
+        // After a header, not TypeScript's interface.
+        let parse = parse_str("interface\n\nuses { a };\n\nimplementation\n\nuses { b };");
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let sections: Vec<Section> = parse.tree.uses().map(|u| u.section()).collect();
+        assert_eq!(sections, [Section::Interface, Section::Implementation]);
+        // `uses` is a name elsewhere.
+        let parse = parse_str("var uses := 1;");
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+    }
+
+    #[test]
+    fn other_ways_to_write_uses_are_fixed() {
+        fixed_with(&[
+            ("Uses { a };", "uses { a };", &[Code::MiscasedKeyword][..]),
+            (
+                "uses lakes, recipes;",
+                "uses { lakes, recipes };",
+                &[Code::UsesForm],
+            ),
+            ("uses {};\nvar x := 1;", "var x := 1;", &[Code::UsesForm]),
+            ("uses ( a );", "uses { a };", &[Code::WrongDelimiter]),
+            (
+                "uses { lakes::depths };",
+                "uses { lakes.depths };",
+                &[Code::UsesForm],
+            ),
+            (
+                "uses { lakes/depths };",
+                "uses { lakes.depths };",
+                &[Code::UsesForm],
+            ),
+            (
+                "uses { lakes.depths.* };",
+                "uses { lakes.depths };",
+                &[Code::UsesForm],
+            ),
+            (
+                "uses { \"lakes/depths.trendy\" };",
+                "uses { lakes.depths };",
+                &[Code::UsesForm],
+            ),
+        ]);
+    }
+
+    #[test]
+    fn other_languages_imports_are_fixed() {
+        fixed_with(&[
+            (
+                "import lakes.depths;",
+                "uses { lakes.depths };",
+                &[Code::UsesForm],
+            ),
+            (
+                "import lakes.depths as d, recipes\nvar x := 1;",
+                "uses { lakes.depths as d, recipes };\nvar x := 1;",
+                &[Code::UsesForm],
+            ),
+            (
+                "import lakes.depths.*;",
+                "uses { lakes.depths };",
+                &[Code::UsesForm],
+            ),
+            (
+                "import qualified Lakes.Depths as D",
+                "uses { Lakes.Depths as D };",
+                &[Code::UsesForm],
+            ),
+            (
+                "import Lakes.Depths (deepest, record)",
+                "uses { Lakes.Depths };",
+                &[Code::UsesForm],
+            ),
+            (
+                "from lakes.depths import deepest, record",
+                "uses { lakes.depths };",
+                &[Code::UsesForm],
+            ),
+            (
+                "import \"lakes/depths\"",
+                "uses { lakes.depths };",
+                &[Code::UsesForm],
+            ),
+            (
+                "import (\n    \"lakes/depths\"\n    r \"recipes\"\n)",
+                "uses { lakes.depths, recipes as r };",
+                &[Code::UsesForm],
+            ),
+            (
+                "import { deepest } from \"./lakes/depths.js\";",
+                "uses { lakes.depths };",
+                &[Code::UsesForm],
+            ),
+            (
+                "import * as d from \"./lakes/depths.js\";",
+                "uses { lakes.depths as d };",
+                &[Code::UsesForm],
+            ),
+            (
+                "use lakes::depths::*;",
+                "uses { lakes.depths };",
+                &[Code::UsesForm],
+            ),
+            (
+                "use crate::lakes::depths::{deepest, record};",
+                "uses { lakes.depths };",
+                &[Code::UsesForm],
+            ),
+            (
+                "using Lakes.Depths;",
+                "uses { Lakes.Depths };",
+                &[Code::UsesForm],
+            ),
+            (
+                "using D = Lakes.Depths;",
+                "uses { Lakes.Depths as D };",
+                &[Code::UsesForm],
+            ),
+            (
+                "using namespace lakes::depths;",
+                "uses { lakes.depths };",
+                &[Code::UsesForm],
+            ),
+            (
+                "require \"lakes/depths\"",
+                "uses { lakes.depths };",
+                &[Code::UsesForm],
+            ),
+            (
+                "with Lakes.Depths, Recipes;",
+                "uses { Lakes.Depths, Recipes };",
+                &[Code::UsesForm],
+            ),
+            (
+                "open Lakes.Depths",
+                "uses { Lakes.Depths };",
+                &[Code::UsesForm],
+            ),
+        ]);
+    }
+
+    /// Each source with the codes of its errors, which its fixes make the
+    /// text it is with.
+    fn fixed_with(cases: &[(&str, &str, &[Code])]) {
+        for &(source, fixed, codes) in cases {
+            let parse = parse_str(source);
+            let found: Vec<Code> = parse.errors.iter().map(|e| e.code).collect();
+            assert_eq!(found, codes, "{source}: {:#?}", parse.errors);
+            assert_eq!(fix(source), fixed, "{source}");
+        }
+    }
+
+    #[test]
+    fn other_ways_to_use_units_get_help() {
+        // Where only the program knows what is meant.
+        for source in [
+            "use lakes::depths::deepest;",
+            "using lakes::depths;",
+            "from . import depths",
+            "import \"../recipes\"",
+            "uses { lakes as l.d };",
+            "uses { \"../recipes\" };",
+        ] {
+            let parse = parse_str(source);
+            let found: Vec<Code> = parse.errors.iter().map(|e| e.code).collect();
+            assert_eq!(found, [Code::UsesForm], "{source}: {:#?}", parse.errors);
+            assert!(
+                parse.errors[0].suggestions.is_empty(),
+                "{source}: {:#?}",
+                parse.errors
+            );
+            assert!(!parse.errors[0].help.is_empty(), "{source}");
+        }
+        // SQL's `WITH`, which no `;` ends after names, isn't Ada's.
+        let parse = parse_str("with t as (select 1)");
+        assert!(
+            parse.errors.iter().all(|e| e.code != Code::UsesForm),
+            "{:#?}",
+            parse.errors
+        );
     }
 
     #[test]

@@ -1,0 +1,22 @@
+/* The catalog: what the compiler knows of a program's units, which it
+   describes as it compiles them, as a database describes itself (TTM RM
+   Prescription 25). The rules between units are its constraints: a
+   program that breaks one doesn't compile, and the tuples that break it
+   say where. Only the compiler assigns to it. */
+interface
+
+database catalog;
+
+/* Each unit of the program, by its name: main's, those it uses, and
+   those that come with the compiler. */
+var catalog.units: relation { unit: text } key { unit };
+
+/* Each unit a unit's section uses, its `interface` or its
+   `implementation`. */
+var catalog.uses: relation { unit: text, used: text, section: text };
+
+/* A unit uses units of the program. */
+constraint catalog.known_units := uses{used} <= units rename {unit as used};
+
+/* No unit uses itself, through any path. */
+constraint catalog.acyclic := is_empty{r: uses{unit, used} tclose where unit = used};

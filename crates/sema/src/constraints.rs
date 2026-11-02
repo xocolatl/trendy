@@ -77,13 +77,7 @@ fn constraint(
     if !cx.namespaces.is_first_constraint(&ident) {
         return None;
     }
-    // Its parts, those that can't fail first, as an `and` computes them,
-    // each of a kind in the order it is written.
-    let mut parts: Vec<hir::ConstraintPart> = conjuncts(&written)
-        .iter()
-        .filter_map(|conjunct| part(conjunct, &boolean, cx))
-        .collect();
-    parts.sort_by_key(|part| part.condition.can_fail());
+    let parts = parts(&written, &boolean, || ConditionNames::new(cx, false));
     let unit = cx
         .namespaces
         .unit_at(trendy_syntax::span(ident.text_range()));
@@ -95,11 +89,40 @@ fn constraint(
     })
 }
 
+/// The names in a constraint's condition, as [`parts`] checks it, which
+/// give the local variables of the value blocks in it once they are
+/// checked.
+pub(crate) trait PartNames: Names {
+    /// The local variables of the value blocks in what was checked.
+    fn locals(self) -> Vec<hir::Local>;
+}
+
+/// The parts of the constraint's condition `written`, already checked as
+/// `boolean`, each checked with names `fresh` makes: those that can't fail
+/// first, as an `and` computes them, each of a kind in the order it is
+/// written.
+pub(crate) fn parts<N: PartNames>(
+    written: &Expr,
+    boolean: &Expected,
+    fresh: impl Fn() -> N,
+) -> Vec<hir::ConstraintPart> {
+    let mut parts: Vec<hir::ConstraintPart> = conjuncts(written)
+        .iter()
+        .filter_map(|conjunct| part(conjunct, boolean, fresh()))
+        .collect();
+    parts.sort_by_key(|part| part.condition.can_fail());
+    parts
+}
+
 /// The part of a constraint's condition `written` is, a conjunct of it,
-/// with the tuples that make it false where its form says which. It is
-/// part of a condition already checked, so it has no errors of its own.
-fn part(written: &Expr, boolean: &Expected, cx: &Context) -> Option<hir::ConstraintPart> {
-    let mut names = ConditionNames::new(cx, false);
+/// with the tuples that make it false where its form says which, checked
+/// with `names`. It is part of a condition already checked, so it has no
+/// errors of its own.
+fn part<N: PartNames>(
+    written: &Expr,
+    boolean: &Expected,
+    mut names: N,
+) -> Option<hir::ConstraintPart> {
     let mut errors = Vec::new();
     let condition = Checker::new(&mut names).expr(written, Some(boolean), &mut errors)?;
     let breaking = match form(written) {
@@ -114,7 +137,7 @@ fn part(written: &Expr, boolean: &Expected, cx: &Context) -> Option<hir::Constra
     Some(hir::ConstraintPart {
         condition,
         breaking,
-        locals: names.locals.finish(),
+        locals: names.locals(),
         written: written.syntax().text().to_string(),
     })
 }
@@ -276,6 +299,12 @@ impl<'c, 'a> ConditionNames<'c, 'a> {
             },
             Form::Other => false_here(),
         }
+    }
+}
+
+impl PartNames for ConditionNames<'_, '_> {
+    fn locals(self) -> Vec<hir::Local> {
+        self.locals.finish()
     }
 }
 

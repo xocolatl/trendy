@@ -374,12 +374,21 @@ mod tests {
             path: "program.trendy",
             tree: &parse.tree,
         };
-        let prelude = trendy_sema::File {
-            name: trendy_prelude::NAME,
-            path: trendy_prelude::PATH,
-            tree: &prelude.tree,
+        let catalog = trendy_prelude::catalog::SOURCE;
+        let catalog = trendy_parser::parse(catalog, trendy_lexer::lex(catalog));
+        let library = trendy_sema::Library {
+            prelude: trendy_sema::File {
+                name: trendy_prelude::NAME,
+                path: trendy_prelude::PATH,
+                tree: &prelude.tree,
+            },
+            catalog: trendy_sema::File {
+                name: trendy_prelude::catalog::NAME,
+                path: trendy_prelude::catalog::PATH,
+                tree: &catalog.tree,
+            },
         };
-        let program = trendy_sema::analyze(&[unit], &prelude).expect("the program is valid");
+        let program = trendy_sema::analyze(&[unit], &library).expect("the program is valid");
         let program = optimized(program);
         let operator = program
             .operators

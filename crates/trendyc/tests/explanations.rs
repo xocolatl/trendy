@@ -3,31 +3,66 @@
 //! compiles cleanly, and a ```` ```trendy,error ```` block doesn't (in an
 //! explanation, it must produce that page's code). Where every error in a
 //! failing explanation example carries a fix, applying the fixes must resolve
-//! that code.
+//! that code. A ```` ```trendy,unit lakes.depths ```` block is another
+//! unit's file, `lakes/depths.trendy`, which each example after it is
+//! compiled with, as the program's main unit, until another block of that
+//! unit's.
 
 use trendy_diag::{Code, Diagnostic};
 
-/// Every error in `source`, as the compiler would report it.
-fn errors(source: &str) -> Vec<Diagnostic> {
+/// Every error in `source`, as the compiler would report it, as the main
+/// unit of a program with `units`, each a unit's name and its file's text.
+fn errors(source: &str, units: &[(String, String)]) -> Vec<Diagnostic> {
     let prelude_source = trendy_prelude::SOURCE;
     let prelude = trendy_parser::parse(prelude_source, trendy_lexer::lex(prelude_source));
     let parse = trendy_parser::parse(source, trendy_lexer::lex(source));
     if !parse.errors.is_empty() {
         return parse.errors;
     }
-    let unit = trendy_sema::File {
+    let parsed: Vec<_> = units
+        .iter()
+        .map(|(name, text)| {
+            let parse = trendy_parser::parse(text, trendy_lexer::lex(text));
+            assert!(parse.errors.is_empty(), "unit {name}: {:#?}", parse.errors);
+            (
+                name,
+                format!("{}.trendy", name.replace('.', "/")),
+                parse.tree,
+            )
+        })
+        .collect();
+    let mut files = vec![trendy_sema::File {
         name: "program",
         path: "program.trendy",
         tree: &parse.tree,
+    }];
+    files.extend(
+        parsed
+            .iter()
+            .map(|(name, path, tree)| trendy_sema::File { name, path, tree }),
+    );
+    let catalog = trendy_prelude::catalog::SOURCE;
+    let catalog = trendy_parser::parse(catalog, trendy_lexer::lex(catalog));
+    let library = trendy_sema::Library {
+        prelude: trendy_sema::File {
+            name: trendy_prelude::NAME,
+            path: trendy_prelude::PATH,
+            tree: &prelude.tree,
+        },
+        catalog: trendy_sema::File {
+            name: trendy_prelude::catalog::NAME,
+            path: trendy_prelude::catalog::PATH,
+            tree: &catalog.tree,
+        },
     };
-    let prelude = trendy_sema::File {
-        name: trendy_prelude::NAME,
-        path: trendy_prelude::PATH,
-        tree: &prelude.tree,
-    };
-    trendy_sema::analyze(&[unit], &prelude)
+    trendy_sema::analyze(&files, &library)
         .err()
         .unwrap_or_default()
+}
+
+/// The unit a ```` ```trendy,unit name ```` block is the file of.
+fn unit_of(info: &str) -> Option<&str> {
+    info.strip_prefix("trendy,unit ")
 }
 
 /// Apply each error's first suggestion, or `None` if some error has none.
@@ -80,8 +115,14 @@ fn explanation_examples_behave_as_documented() {
             );
         }
 
+        let mut units = Vec::new();
         for (info, source) in blocks {
-            let errors = errors(&source);
+            if let Some(unit) = unit_of(info) {
+                units.retain(|(name, _)| name != unit);
+                units.push((unit.to_string(), source));
+                continue;
+            }
+            let errors = errors(&source, &units);
             match info {
                 "trendy" => assert!(
                     errors.is_empty(),
@@ -93,7 +134,7 @@ fn explanation_examples_behave_as_documented() {
                         "{code}: failing example doesn't produce {code}:\n{source}\n{errors:#?}"
                     );
                     if let Some(fixed) = apply_fixes(&source, &errors) {
-                        let remaining = self::errors(&fixed);
+                        let remaining = self::errors(&fixed, &units);
                         // Fixing a wrong keyword can uncover the next mistake,
                         // but never the same one again.
                         assert!(
@@ -117,8 +158,14 @@ fn language_reference_examples_behave_as_documented() {
         .filter(|(info, _)| info.starts_with("trendy"))
         .collect();
     assert!(!blocks.is_empty());
+    let mut units = Vec::new();
     for (info, source) in blocks {
-        let errors = errors(&source);
+        if let Some(unit) = unit_of(info) {
+            units.retain(|(name, _)| name != unit);
+            units.push((unit.to_string(), source));
+            continue;
+        }
+        let errors = errors(&source, &units);
         match info {
             "trendy" => assert!(
                 errors.is_empty(),
@@ -131,6 +178,18 @@ fn language_reference_examples_behave_as_documented() {
             other => panic!("docs/language.md: unknown code block `{other}`"),
         }
     }
+}
+
+#[test]
+fn language_reference_shows_the_catalog_as_it_is() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/language.md");
+    let reference = std::fs::read_to_string(path).unwrap();
+    assert!(
+        code_blocks(&reference)
+            .iter()
+            .any(|(info, source)| info.is_empty() && source == trendy_prelude::catalog::SOURCE),
+        "docs/language.md's copy of the catalog differs from crates/prelude/src/catalog.trendy"
+    );
 }
 
 #[test]

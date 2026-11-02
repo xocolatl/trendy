@@ -163,6 +163,56 @@ operator main{} [];
   `initialization` does: a variable's initial value is computed when
   compiling, and the program starts in `main`.
 
+### Using other units
+
+A section names the units it uses with `uses`. For the unit
+`lakes/depths.trendy`:
+
+```trendy,unit lakes.depths
+interface
+
+heading lake := { name: text, depth: integer };
+```
+
+a program uses it so:
+
+```trendy
+uses { lakes.depths as depths };
+
+operator main{} [];
+```
+
+- **First in its section, once** (A0071): the interface and the
+  implementation each have their own, so that what their declarations see
+  is said at their top. A fix moves one after a declaration before the
+  first, and adds a second's units to the first's.
+- **Each unit by its path** from the directory of `main`'s file, its
+  directories and its file's stem between `.`s, as `lakes/depths.trendy`
+  is `lakes.depths`, in braces, as the units can be in any order, and,
+  after `as`, by one word the using unit calls it by instead, as `rename`
+  gives an attribute another name.
+- **Each a unit of the program** (A0015): main's, those its units use,
+  and those that come with the compiler, such as `trendy.catalog`. A
+  misspelling of one is fixed to it.
+- **No unit uses itself, through any path** (A0072), so that a unit's
+  interface is known before each unit that uses it is checked. What two
+  units need of each other goes in a unit of its own, which each uses.
+- **These rules are the catalog's constraints** (see [The
+  catalog](#the-catalog)): a program that breaks one doesn't compile, and
+  the tuples that break it are reported, each at the `uses` that says
+  what they say.
+- Other languages' imports are fixed to the `uses` they mean, as
+  Python's `from lakes.depths import deepest` is to `uses { lakes.depths
+  };`, and Delphi's `uses lakes.depths;` gets its braces (P0057). Where
+  only the program knows what is meant, as in Rust's `use
+  lakes::depths::deepest;`, the help names each reading.
+
+```trendy,error
+from lakes.depths import deepest
+
+operator main{} [];
+```
+
 ## Operators
 
 ```trendy
@@ -3480,8 +3530,8 @@ operator main{} [];
 - **In the interface:** a unit's interface may declare a database and add
   to it, as what is shared and outlives the program, while its other
   variables stay its implementation's.
-- **Declared for its definition:** the catalog records what it holds,
-  and no statement reads a database yet (A0070).
+- **Declared for its definition:** no statement reads a database yet
+  (A0070).
 - SQL's `CREATE DATABASE name` is fixed to `database name;`, and Tutorial
   D's `PRIVATE` before a relvar's type removed; SQL's `CREATE SCHEMA`, and
   Tutorial D's `REAL`, `BASE` and `PUBLIC` relvars, are reported with help
@@ -3496,6 +3546,42 @@ var kitchen.count: integer;
 constraint kitchen.stocked := is_empty{r: kitchen.pantry where grams < 0};
 
 operator main{} [];
+```
+
+### The catalog
+
+The compiler describes each program in a database of its own, the
+catalog, which the unit `trendy.catalog` declares, as a database describes
+itself (TTM RM Prescription 25). The compiler fills its relvars as it
+checks the program's units, and only it assigns to them. Their
+constraints are the rules between units: a program that breaks one
+doesn't compile, and the tuples that break it say where, as the error for
+a unit that uses another there isn't is made from the tuples of
+`uses{used}` that `units` hasn't.
+
+```
+/* The catalog: what the compiler knows of a program's units, which it
+   describes as it compiles them, as a database describes itself (TTM RM
+   Prescription 25). The rules between units are its constraints: a
+   program that breaks one doesn't compile, and the tuples that break it
+   say where. Only the compiler assigns to it. */
+interface
+
+database catalog;
+
+/* Each unit of the program, by its name: main's, those it uses, and
+   those that come with the compiler. */
+var catalog.units: relation { unit: text } key { unit };
+
+/* Each unit a unit's section uses, its `interface` or its
+   `implementation`. */
+var catalog.uses: relation { unit: text, used: text, section: text };
+
+/* A unit uses units of the program. */
+constraint catalog.known_units := uses{used} <= units rename {unit as used};
+
+/* No unit uses itself, through any path. */
+constraint catalog.acyclic := is_empty{r: uses{unit, used} tclose where unit = used};
 ```
 
 ## Arrays

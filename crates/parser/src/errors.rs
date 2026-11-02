@@ -4,8 +4,10 @@
 use trendy_diag::{Code, Diagnostic, Edit, Span, edit_distance};
 use trendy_syntax::SyntaxKind;
 use trendy_syntax::ast::Section;
+use trendy_syntax::unit::USES_RULE;
 
 use crate::Found;
+use crate::imports::{Import, Uses};
 
 pub(crate) const OPERATOR_FORM: &str = "an operator definition has the form `operator name{} [];`, or, for a read-only operator, `operator name{}: type [value];`";
 pub(crate) const HEADING_FORM: &str = "a heading lists attributes with their types: `{ name: type, … }`, as in `tuple { name: text }` or `relation { name: text }`, or names a declared one, as in `relation home`";
@@ -32,6 +34,7 @@ pub(crate) const BUILTIN_FORM: &str = "built-ins are declared as `builtin type n
 pub(crate) const TYPE_DECL_FORM: &str = "a type is declared as `type name { { component: type, … } };`, with the components of its possible representation in braces of their own";
 pub(crate) const DATABASE_FORM: &str = "a database is declared as `database name;`, and its units add relvars and constraints to it, each named after it: `var name.pantry: relation { … };`, `constraint name.stocked := …;`";
 pub(crate) const CONSTRAINT_DECL_FORM: &str = "a constraint is declared as `constraint name := condition;`, a condition on the unit's variables that holds whenever a statement ends";
+pub(crate) const USES_FORM: &str = "a section names the units it uses first, as `uses { lakes.depths, recipes as r };`: each by its path from the directory of `main`'s file, and, after `as`, by the one word the unit gives it";
 pub(crate) const KIND_FORM: &str = "a kind is declared as `kind name { requirement, … };`, with what each of its types must have, such as `<`";
 pub(crate) const ASSIGNMENT_FORM: &str = "an assignment statement is `name := value;`, or a shorthand for one: `insert r s;`, `d_insert r s;`, `delete r where p;`, `i_delete r s;` or `update r { a := x } where p;`";
 pub(crate) const ASSIGN_BLOCK_FORM: &str =
@@ -3394,6 +3397,168 @@ pub(crate) fn interface_after_implementation(word: Found, implementation: Found)
 
 /// The order of a unit's sections, for the notes of their errors.
 const SECTIONS_RULE: &str = "a unit has one interface and one implementation, the interface first; what comes before either header is the implementation's";
+
+/// Delphi's units after `uses`, at `span`, without braces. The fix
+/// encloses them.
+pub(crate) fn uses_without_braces(span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::UsesForm,
+        "a `uses` lists its units in braces",
+        span,
+        "Delphi's list",
+    )
+    .with_note(USES_RULE)
+    .with_note("braces enclose what can be in any order, as the units a section uses can")
+    .with_suggestion(
+        "enclose them in braces",
+        vec![
+            Edit {
+                span: Span::empty(span.start),
+                replacement: "{ ".to_string(),
+            },
+            Edit {
+                span: Span::empty(span.end),
+                replacement: " }".to_string(),
+            },
+        ],
+    )
+}
+
+/// `uses {};`, at `span`, which names no unit. The fix removes it, up to
+/// `end`, what follows it.
+pub(crate) fn empty_uses(span: Span, end: usize) -> Diagnostic {
+    Diagnostic::error(Code::UsesForm, "this `uses` names no unit", span, "no unit")
+        .with_note(USES_RULE)
+        .with_suggestion(
+            "remove it",
+            vec![Edit {
+                span: Span::new(span.start, end),
+                replacement: String::new(),
+            }],
+        )
+}
+
+/// A path in quotes, `path`, where a unit's name goes, as another language
+/// writes the file it imports. The fix writes the unit it names, if each
+/// of its parts is a word.
+pub(crate) fn unit_path(path: Found) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::UsesForm,
+        format!(
+            "a unit is named by its path as words, not as the text {}",
+            path.text
+        ),
+        path.span,
+        "a path in quotes",
+    )
+    .with_note(USES_RULE);
+    let written = path
+        .text
+        .strip_prefix('"')
+        .and_then(|t| t.strip_suffix('"'))
+        .filter(|t| !t.contains('\\'));
+    match written.and_then(trendy_syntax::unit::named_by) {
+        Some(unit) => d.with_suggestion(
+            format!("write `{unit}`"),
+            vec![Edit {
+                span: path.span,
+                replacement: unit,
+            }],
+        ),
+        None => d.with_help("write the unit's path from the directory of `main`'s file, its directories and its file's stem, between `.`s"),
+    }
+}
+
+/// The name a unit gives another, of several words, the rest of which, from
+/// `.`, are at `span`.
+pub(crate) fn dotted_alias(span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::UsesForm,
+        "the name a unit gives another is one word",
+        span,
+        "more words",
+    )
+    .with_note(USES_RULE)
+    .with_help("write one word after `as`, as in `uses { lakes.depths as depths };`")
+}
+
+/// Java's `.*`, at `span`, after a unit's name, which imports every name.
+/// The fix removes it.
+pub(crate) fn star_import(span: Span) -> Diagnostic {
+    Diagnostic::error(
+        Code::UsesForm,
+        "a `uses` brings every name a unit's interface declares, without Java's `.*`",
+        span,
+        "Java's import of every name",
+    )
+    .with_note(USES_RULE)
+    .with_suggestion(
+        "remove it",
+        vec![Edit {
+            span,
+            replacement: String::new(),
+        }],
+    )
+}
+
+/// `written`, Rust's and C++'s `::` or a path's `/`, at `span`, between a
+/// unit's parts. The fix writes `.`.
+pub(crate) fn unit_separator(span: Span, written: &str) -> Diagnostic {
+    Diagnostic::error(
+        Code::UsesForm,
+        format!("a unit's name separates its parts with `.`, not `{written}`"),
+        span,
+        "another separator",
+    )
+    .with_note(USES_RULE)
+    .with_suggestion(
+        "write `.`",
+        vec![Edit {
+            span,
+            replacement: ".".to_string(),
+        }],
+    )
+}
+
+/// Another language's `import`, at `span`, where a definition goes. The fix
+/// writes the `uses` it means, if that is certain.
+pub(crate) fn foreign_import(import: &Import, span: Span) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::UsesForm,
+        format!(
+            "a unit uses another with `uses {{ … }};`, not {}",
+            import.habit
+        ),
+        span,
+        "another language's import",
+    )
+    .with_note(USES_RULE);
+    match &import.uses {
+        Uses::Units(units) => {
+            let listed: Vec<String> = units
+                .iter()
+                .map(|(unit, named)| match named {
+                    Some(named) => format!("{unit} as {named}"),
+                    None => unit.clone(),
+                })
+                .collect();
+            let uses = format!("uses {{ {} }};", listed.join(", "));
+            d.with_suggestion(
+                format!("write `{uses}`"),
+                vec![Edit {
+                    span,
+                    replacement: uses,
+                }],
+            )
+        }
+        Uses::Either { item, within } => d.with_help(format!(
+            "write `uses {{ {within} }};` if the last word is a name `{within}`'s interface declares, or `uses {{ {item} }};` if `{item}` is a unit"
+        )),
+        Uses::Unknown => d.with_help(
+            "name each unit by its path from the directory of `main`'s file, its directories and its file's stem between `.`s, as in `uses { lakes.depths };`",
+        ),
+    }
+}
 
 #[cfg(test)]
 mod tests {

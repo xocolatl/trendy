@@ -1,6 +1,6 @@
 use trendy_diag::{Code, Diagnostic, Edit, Span};
-use trendy_syntax::SyntaxKind;
 use trendy_syntax::literal::{self, ApproximateProblem, IntProblem, TextProblem};
+use trendy_syntax::{SyntaxKind, is_ident_continue, is_ident_start};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Token {
@@ -58,6 +58,9 @@ pub fn lex(source: &str) -> Lexed {
             // `a*/* c */b` it is `*` and then a comment.
             errors.push(stray_comment_end(Span::new(start, start + 2)));
             (SyntaxKind::ErrorToken, start + 2)
+        } else if let Some(end) = include(&source[start..]) {
+            errors.push(foreign_include(source, Span::new(start, start + end)));
+            (SyntaxKind::ErrorToken, start + end)
         } else if c == '"' {
             (
                 SyntaxKind::TextLiteral,
@@ -104,6 +107,57 @@ pub fn lex(source: &str) -> Lexed {
     }
 
     Lexed { tokens, errors }
+}
+
+/// C's `#include` and Objective-C's `#import`, the directives that use
+/// another file, with the word after `#`.
+const INCLUDES: [(&str, &str); 2] = [("#include", "C's"), ("#import", "Objective-C's")];
+
+/// Where the directive `text` starts with ends, if it is one of
+/// [`INCLUDES`]: at the end of its line.
+fn include(text: &str) -> Option<usize> {
+    let (word, _) = INCLUDES.iter().find(|(word, _)| {
+        text.starts_with(word)
+            && !text[word.len()..]
+                .chars()
+                .next()
+                .is_some_and(is_ident_continue)
+    })?;
+    Some(text.find('\n').unwrap_or(text.len()).max(word.len()))
+}
+
+/// C's or Objective-C's directive at `span`, which uses another file. The
+/// fix writes the `uses` of the unit its path names, if it names one.
+fn foreign_include(source: &str, span: Span) -> Diagnostic {
+    let text = source[span.start..span.end].trim_end();
+    let (word, language) = INCLUDES
+        .iter()
+        .find(|(word, _)| text.starts_with(word))
+        .expect("an include directive");
+    let path = text[word.len()..].trim();
+    let unit = path
+        .strip_prefix('"')
+        .and_then(|p| p.strip_suffix('"'))
+        .or_else(|| path.strip_prefix('<').and_then(|p| p.strip_suffix('>')))
+        .and_then(trendy_syntax::unit::named_by);
+    let span = Span::new(span.start, span.start + text.len());
+    let d = Diagnostic::error(
+        Code::UsesForm,
+        format!("a unit uses another with `uses {{ … }};`, not {language} `{word}`"),
+        span,
+        "another language's directive",
+    )
+    .with_note(trendy_syntax::unit::USES_RULE);
+    match unit {
+        Some(unit) => d.with_suggestion(
+            format!("write `uses {{ {unit} }};`"),
+            vec![Edit {
+                span,
+                replacement: format!("uses {{ {unit} }};"),
+            }],
+        ),
+        None => d.with_help("name the unit by its path from the directory of `main`'s file, its directories and its file's stem between `.`s, as in `uses { lakes.depths };`"),
+    }
 }
 
 /// Operators from other languages, which the parser replaces with trendy's
@@ -423,14 +477,6 @@ fn invalid_integer(problem: &IntProblem, text: &str, span: Span) -> Diagnostic {
     }
 }
 
-fn is_ident_start(c: char) -> bool {
-    c.is_ascii_alphabetic() || c == '_'
-}
-
-fn is_ident_continue(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_'
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,6 +505,29 @@ mod tests {
     #[test]
     fn keyword_prefix_is_identifier() {
         assert_eq!(kinds("operators"), [Ident]);
+    }
+
+    #[test]
+    fn includes_are_uses() {
+        let lexed = lex("#include \"lakes/depths.h\"\nvar x := 1;");
+        assert_eq!(lexed.tokens[0].kind, ErrorToken);
+        assert_eq!(lexed.errors.len(), 1, "{:#?}", lexed.errors);
+        let error = &lexed.errors[0];
+        assert_eq!(error.code, Code::UsesForm);
+        assert_eq!(
+            error.suggestions[0].edits[0].replacement,
+            "uses { lakes.depths };"
+        );
+        assert_eq!(error.suggestions[0].edits[0].span, Span::new(0, 25));
+        let lexed = lex("#import <Foundation/Foundation.h>");
+        assert_eq!(
+            lexed.errors[0].suggestions[0].edits[0].replacement,
+            "uses { Foundation.Foundation };"
+        );
+        let lexed = lex("#include <../x.h>");
+        assert!(lexed.errors[0].suggestions.is_empty());
+        // Not a directive: `#` alone.
+        assert_eq!(lex("#includes").errors[0].code, Code::UnexpectedCharacter);
     }
 
     #[test]

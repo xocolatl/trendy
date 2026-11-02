@@ -8245,6 +8245,119 @@ fn heading_text(decl: &ast::Operator) -> String {
     text[..end].trim_end().to_string()
 }
 
+/// The unit `name`, which a `uses` names at `span`, which isn't one of the
+/// program's `units`: a misspelling of one, if it may be one, and
+/// otherwise the file it would be.
+pub(crate) fn unknown_unit(name: &str, span: Span, units: &[&str]) -> Diagnostic {
+    let path = format!("{}.trendy", name.replace('.', "/"));
+    let d = Diagnostic::error(
+        Code::UnknownName,
+        format!("unknown unit `{name}`"),
+        span,
+        "no unit of the program",
+    )
+    .with_note(format!(
+        "a unit is named by its path from the directory of `main`'s file, its directories and its file's stem between `.`s, so `{name}` is the file `{path}`"
+    ));
+    spelled_like(
+        d,
+        name,
+        span,
+        units,
+        &format!(
+            "write the file `{path}`, from the directory of `main`'s file, or name a unit of the program"
+        ),
+    )
+}
+
+/// The units of `cycle`, each using the next, and the last the first,
+/// which each of `steps` does, at its span: the `uses` of the next unit in
+/// each. `removal`, for a unit that uses itself, removes the `uses`.
+pub(crate) fn unit_cycle(
+    cycle: &[String],
+    steps: &[(String, Span)],
+    removal: Option<Edit>,
+) -> Diagnostic {
+    let quoted: Vec<String> = cycle.iter().map(|u| format!("`{u}`")).collect();
+    let message = match quoted.as_slice() {
+        [only] => format!("the unit {only} uses itself"),
+        [a, b] => format!("the units {a} and {b} use each other"),
+        _ => format!(
+            "the units {} use each other in a cycle",
+            trendy_diag::conjoin(&quoted)
+        ),
+    };
+    let next = |i: usize| &cycle[(i + 1) % cycle.len()];
+    let mut steps = steps.iter().enumerate();
+    let Some((_, (_, primary))) = steps.next() else {
+        unreachable!("a cycle has a `uses` in each of its units");
+    };
+    let mut d = Diagnostic::error(
+        Code::UnitCycle,
+        message,
+        *primary,
+        format!("`{}` uses `{}`", cycle[0], next(0)),
+    )
+    .with_note("no unit uses itself, through any path, so that a unit's interface is known before each unit that uses it is checked");
+    for (i, (unit, span)) in steps {
+        d = d.with_secondary(*span, format!("`{unit}` uses `{}`", next(i)));
+    }
+    match removal {
+        Some(removal) => d.with_suggestion("remove it", vec![removal]),
+        None => d.with_help(
+            "move what the units need of each other to a unit of its own, which they each use",
+        ),
+    }
+}
+
+/// Why a section's `uses` comes first in it, for the notes of its errors.
+const USES_FIRST: &str = "a section's `uses` comes before its declarations, once, so that what they see is said at its top";
+
+/// `uses`, after a declaration of its section, the first of which is
+/// named at `declaration`. `moved` moves it before that one.
+pub(crate) fn late_uses(uses: &ast::UsesDecl, declaration: Span, moved: Vec<Edit>) -> Diagnostic {
+    let at = uses
+        .keyword()
+        .map_or_else(|| uses.span(), |k| trendy_syntax::span(k.text_range()));
+    Diagnostic::error(
+        Code::UsesPlacement,
+        "a `uses` comes first in its section",
+        at,
+        "after a declaration",
+    )
+    .with_secondary(declaration, "the section's first declaration")
+    .with_note(USES_FIRST)
+    .with_note(trendy_syntax::unit::USES_RULE)
+    .with_suggestion("move it before the section's declarations", moved)
+}
+
+/// `uses`, a second in its section, whose first is `first`. `merged` adds
+/// its units to the first's and removes it, unless the first names none.
+pub(crate) fn second_uses(
+    uses: &ast::UsesDecl,
+    first: &ast::UsesDecl,
+    merged: Vec<Edit>,
+) -> Diagnostic {
+    let at = |u: &ast::UsesDecl| {
+        u.keyword()
+            .map_or_else(|| u.span(), |k| trendy_syntax::span(k.text_range()))
+    };
+    let d = Diagnostic::error(
+        Code::UsesPlacement,
+        "a section has one `uses`",
+        at(uses),
+        "a second `uses`",
+    )
+    .with_secondary(at(first), "the section's `uses`")
+    .with_note(USES_FIRST)
+    .with_note(trendy_syntax::unit::USES_RULE);
+    if merged.is_empty() {
+        d.with_help("name its units in the first `uses`, and remove it")
+    } else {
+        d.with_suggestion("name its units in the first `uses`", merged)
+    }
+}
+
 /// The variable `decl` declares in its unit's interface, which exports no
 /// variables. `moved` moves it to the implementation.
 pub(crate) fn interface_variable(decl: &ast::VarDecl, moved: Vec<Edit>) -> Diagnostic {

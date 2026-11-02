@@ -10,6 +10,7 @@
 
 pub mod ast;
 pub mod literal;
+pub mod unit;
 
 use std::fmt::Write;
 
@@ -204,6 +205,18 @@ pub enum SyntaxKind {
     /// section, whose declarations are those after it, up to the next.
     /// Both are contextual keywords, identifiers elsewhere.
     SectionHeader,
+    /// `uses { lakes.depths, recipes as r };`: the units whose interfaces
+    /// the section's declarations see, first in it. `uses` is a contextual
+    /// keyword, an identifier elsewhere.
+    UsesDecl,
+    /// `{ lakes.depths, recipes as r }`: the units a `uses` names.
+    UnitList,
+    /// A unit a `uses` names, with the name the unit gives it, if any:
+    /// `recipes as r`.
+    UsedUnit,
+    /// A unit's name, its path from the directory of `main`'s file, dotted:
+    /// `lakes.depths`.
+    UnitName,
     /// `heading name := { name: type, … };`: a heading with a name, which
     /// stands for it after `relation` and `tuple`. `heading` is a
     /// contextual keyword, an identifier elsewhere.
@@ -450,7 +463,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 175] = [
+    pub const ALL: [SyntaxKind; 179] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -540,6 +553,10 @@ impl SyntaxKind {
         SyntaxKind::BuiltinType,
         SyntaxKind::KindDecl,
         SyntaxKind::SectionHeader,
+        SyntaxKind::UsesDecl,
+        SyntaxKind::UnitList,
+        SyntaxKind::UsedUnit,
+        SyntaxKind::UnitName,
         SyntaxKind::HeadingDecl,
         SyntaxKind::ConstraintDecl,
         SyntaxKind::DatabaseDecl,
@@ -1045,6 +1062,10 @@ impl SyntaxKind {
             SyntaxKind::BuiltinType => "built-in type declaration",
             SyntaxKind::KindDecl => "kind declaration",
             SyntaxKind::SectionHeader => "section header",
+            SyntaxKind::UsesDecl => "`uses`",
+            SyntaxKind::UnitList => "units used",
+            SyntaxKind::UsedUnit => "unit used",
+            SyntaxKind::UnitName => "unit's name",
             SyntaxKind::HeadingDecl => "heading declaration",
             SyntaxKind::ConstraintDecl => "constraint declaration",
             SyntaxKind::DatabaseDecl => "database declaration",
@@ -1151,7 +1172,8 @@ pub fn spaced_braces(node: &SyntaxNode) -> bool {
         | SyntaxKind::AssignList
         | SyntaxKind::GatherList
         | SyntaxKind::RequirementList
-        | SyntaxKind::TypeBody => true,
+        | SyntaxKind::TypeBody
+        | SyntaxKind::UnitList => true,
         SyntaxKind::NameList => node
             .parent()
             .is_some_and(|k| matches!(k.kind(), SyntaxKind::Key | SyntaxKind::BuiltinType)),
@@ -1177,6 +1199,25 @@ impl rowan::Language for Trendy {
 pub type SyntaxNode = rowan::SyntaxNode<Trendy>;
 pub type SyntaxToken = rowan::SyntaxToken<Trendy>;
 pub type SyntaxElement = rowan::SyntaxElement<Trendy>;
+
+/// Whether an identifier can start with `c`.
+#[must_use]
+pub fn is_ident_start(c: char) -> bool {
+    c.is_ascii_alphabetic() || c == '_'
+}
+
+/// Whether an identifier can go on with `c`.
+#[must_use]
+pub fn is_ident_continue(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// Whether `word` is written as an identifier is, as a keyword is too.
+#[must_use]
+pub fn is_word(word: &str) -> bool {
+    let mut chars = word.chars();
+    chars.next().is_some_and(is_ident_start) && chars.all(is_ident_continue)
+}
 
 /// The byte range a node or token covers in the source.
 #[must_use]

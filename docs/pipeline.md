@@ -11,13 +11,15 @@ This document is about the compiler. For the language itself, see
 
 ### The prelude and the runtime
 
-**`trendy_prelude`** holds the prelude: trendy source declaring the built-in
-types and operators, and defining operators in trendy, all part of every
-program. Drivers parse it next to the program's units' files, and sema
+**`trendy_prelude`** holds the units that come with the compiler, trendy
+source that is part of every program: the prelude, declaring the built-in
+types and operators, and defining operators in trendy, and the catalog
+(`trendy_prelude::catalog`, see [sema](#sema-trendy_sema)). Drivers parse
+them next to the program's units' files (`trendy_sema::Library`), and sema
 checks them together, as one program (`ast::Program`, `sema::Files`), its
-units' texts first, main's first of all, then the prelude's, so that a
-span is an offset into them one after another, and main's unit's spans
-are those it has alone. Each file comes with its path
+units' texts first, main's first of all, then the catalog's, then the
+prelude's, so that a span is an offset into them one after another, and
+main's unit's spans are those it has alone. Each file comes with its path
 (`trendy_sema::File`), which the HIR keeps (`hir::Program::files`), each
 site naming its file by its place there (`hir::FileId`). Sema checks every built-in's
 declaration against what the compiler implements: the kinds and the
@@ -506,6 +508,18 @@ where` or `package lakes`, removed, Delphi's `end.`, removed, its
 parsed as headers and fixed to them, and `pub`, `export` or `public`
 before a definition.
 
+`uses { lakes.depths, recipes as r };` (`UsesDecl`, its `UnitList` of
+`UsedUnit`s, each a `UnitName` and an alias's `Name`), with `uses` a
+contextual keyword, names the units a section uses; a unit's name's
+parts can be keywords, as a file can be named `join.trendy`. The parser
+reports its other forms (P0057): Delphi's units without braces, an empty
+one, `::` or `/` between parts, a path in quotes, Java's `.*` and an
+alias of several words. Other languages' imports, where a definition
+goes, are read as statements (`Parser::statement_ahead`) and recognized
+(`imports`), and C's `#include` by the lexer; each is fixed to the `uses`
+it means when that is certain, the unit a path names given by
+`trendy_syntax::unit::named_by`, and otherwise reported with help.
+
 `warn e;` (`WarnStmt`), only a statement, has `warn` a contextual
 keyword as `fail` has, before a value an error can be
 (`Parser::error_follows`). PL/pgSQL's `RAISE WARNING` and `RAISE
@@ -825,6 +839,21 @@ up with where it is written, whose unit is the one that sees it
 (`Namespaces::unit_at`); a variable is found in `scope::Variables`. A
 unit's name is its path from the directory of `main`'s file, which the
 driver gives (`trendy_sema::File::name`).
+
+The rules between units are the constraints of the catalog,
+`trendy.catalog`, a unit whose interface declares the database `catalog`
+(`catalog`): sema fills its relvars, `units` with each unit's name and
+`uses` with what each section's `uses` names, evaluates each of its
+constraints of them, as a database's constraint is a condition on its
+relvars, its parameters (`ops::evaluated_with`), and reports the tuples
+that break a part of one, as a variable's constraint's parts say
+(`constraints::parts`), each at the `uses` that says what they say:
+`known_units`'s at each unit used that isn't one (A0015), and
+`acyclic`'s, the units on a cycle, once for each cycle, with the path
+round it (A0072). The catalog unlike what sema fills, or with a
+constraint sema reports no breaking of, is an internal error, as a
+built-in unlike the compiler's is. A section's `uses` is first in it, once
+(`sections::uses_placement`, A0071).
 
 Sema collects every name before checking anything, so errors can refer to
 definitions anywhere in either file. Then it resolves the headings'

@@ -39,6 +39,10 @@ macro_rules! ast_node {
 ast_node!(Program);
 ast_node!(SourceFile);
 ast_node!(SectionHeader);
+ast_node!(UsesDecl);
+ast_node!(UnitList);
+ast_node!(UsedUnit);
+ast_node!(UnitName);
 ast_node!(Operator);
 ast_node!(BuiltinOperator);
 ast_node!(BuiltinType);
@@ -144,6 +148,31 @@ pub enum Item {
     Database(DatabaseDecl),
 }
 
+impl Item {
+    /// The definition `node` is, if it is one.
+    #[must_use]
+    pub fn cast(node: SyntaxNode) -> Option<Item> {
+        Operator::cast(node.clone())
+            .map(Item::Operator)
+            .or_else(|| BuiltinOperator::cast(node.clone()).map(Item::Builtin))
+            .or_else(|| BuiltinType::cast(node.clone()).map(Item::BuiltinType))
+            .or_else(|| KindDecl::cast(node.clone()).map(Item::Kind))
+            .or_else(|| HeadingDecl::cast(node.clone()).map(Item::Heading))
+            .or_else(|| TypeDecl::cast(node.clone()).map(Item::Type))
+            .or_else(|| {
+                VarDecl::cast(node.clone()).map(|decl| {
+                    if decl.part_of().is_some() {
+                        Item::Relvar(decl)
+                    } else {
+                        Item::Variable(decl)
+                    }
+                })
+            })
+            .or_else(|| ConstraintDecl::cast(node.clone()).map(Item::Constraint))
+            .or_else(|| DatabaseDecl::cast(node).map(Item::Database))
+    }
+}
+
 impl Program {
     /// The program of `files`, with each file's tree, one after another: a
     /// span in it is an offset into their texts one after another, so the
@@ -204,34 +233,71 @@ impl SectionHeader {
     }
 }
 
+impl UsesDecl {
+    /// The word `uses`, which the parser reports in another case.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    /// The units it names, in the order written: in its braces, or, in
+    /// Delphi's `uses`, which the parser reports, without them.
+    pub fn units(&self) -> impl Iterator<Item = UsedUnit> {
+        self.0.descendants().filter_map(UsedUnit::cast)
+    }
+
+    /// The section its declarations are in, whose declarations see what it
+    /// names.
+    #[must_use]
+    pub fn section(&self) -> Section {
+        section_of(&self.0)
+    }
+}
+
+impl UsedUnit {
+    #[must_use]
+    pub fn name(&self) -> Option<UnitName> {
+        self.0.children().find_map(UnitName::cast)
+    }
+
+    /// The name the using unit gives it, after `as`.
+    #[must_use]
+    pub fn alias(&self) -> Option<Name> {
+        self.0.children().find_map(Name::cast)
+    }
+}
+
+impl UnitName {
+    /// Its parts, the directories of its path and its file's stem, as in
+    /// `lakes` and `depths`: each a word, which can be a keyword, as a
+    /// file can be named `join.trendy`.
+    pub fn parts(&self) -> impl Iterator<Item = SyntaxToken> {
+        significant_tokens(&self.0)
+            .filter(|t| t.kind() == SyntaxKind::Ident || t.kind().is_keyword())
+    }
+
+    /// Its parts joined by `.`, as in `lakes.depths`.
+    #[must_use]
+    pub fn text(&self) -> String {
+        let parts: Vec<String> = self.parts().map(|part| part.text().to_string()).collect();
+        parts.join(".")
+    }
+}
+
 impl SourceFile {
     /// Its sections' headers, in source order.
     pub fn headers(&self) -> impl Iterator<Item = SectionHeader> {
         self.0.children().filter_map(SectionHeader::cast)
     }
 
+    /// Its sections' `uses`, in source order.
+    pub fn uses(&self) -> impl Iterator<Item = UsesDecl> {
+        self.0.children().filter_map(UsesDecl::cast)
+    }
+
     /// Every definition, in source order.
     pub fn items(&self) -> impl Iterator<Item = Item> {
-        self.0.children().filter_map(|node| {
-            Operator::cast(node.clone())
-                .map(Item::Operator)
-                .or_else(|| BuiltinOperator::cast(node.clone()).map(Item::Builtin))
-                .or_else(|| BuiltinType::cast(node.clone()).map(Item::BuiltinType))
-                .or_else(|| KindDecl::cast(node.clone()).map(Item::Kind))
-                .or_else(|| HeadingDecl::cast(node.clone()).map(Item::Heading))
-                .or_else(|| TypeDecl::cast(node.clone()).map(Item::Type))
-                .or_else(|| {
-                    VarDecl::cast(node.clone()).map(|decl| {
-                        if decl.part_of().is_some() {
-                            Item::Relvar(decl)
-                        } else {
-                            Item::Variable(decl)
-                        }
-                    })
-                })
-                .or_else(|| ConstraintDecl::cast(node.clone()).map(Item::Constraint))
-                .or_else(|| DatabaseDecl::cast(node).map(Item::Database))
-        })
+        self.0.children().filter_map(Item::cast)
     }
 
     pub fn databases(&self) -> impl Iterator<Item = DatabaseDecl> {

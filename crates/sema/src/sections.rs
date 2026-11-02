@@ -21,6 +21,7 @@ use crate::errors;
 /// headings only its implementation declares, which other units couldn't
 /// see (A0067), each once.
 pub(crate) fn check(file: &SourceFile, errors: &mut Vec<Diagnostic>) {
+    uses_placement(file, errors);
     let mut implementation: BTreeMap<String, SyntaxNode> = BTreeMap::new();
     for item in file.items() {
         let (name, node) = match &item {
@@ -71,6 +72,83 @@ pub(crate) fn check(file: &SourceFile, errors: &mut Vec<Diagnostic>) {
             }
         }
     }
+}
+
+/// Report each `uses` of `file` after a declaration of its section, with
+/// a fix moving it before the first, and each second `uses` of a section,
+/// with a fix adding the units it names to the first's (A0071): a
+/// section's `uses` comes first in it, so that what its declarations see
+/// is said at its top.
+fn uses_placement(file: &SourceFile, errors: &mut Vec<Diagnostic>) {
+    let mut first_uses: BTreeMap<Section, ast::UsesDecl> = BTreeMap::new();
+    let mut first_declaration: BTreeMap<Section, SyntaxNode> = BTreeMap::new();
+    for node in file.syntax().children() {
+        let section = ast::section_of(&node);
+        if let Some(uses) = ast::UsesDecl::cast(node.clone()) {
+            if let Some(first) = first_uses.get(&section) {
+                errors.push(errors::second_uses(
+                    &uses,
+                    first,
+                    merged(file, first, &uses),
+                ));
+            } else {
+                if let Some(declaration) = first_declaration.get(&section) {
+                    errors.push(errors::late_uses(
+                        &uses,
+                        declared_at(declaration),
+                        moved_before(file, uses.syntax(), declaration),
+                    ));
+                }
+                first_uses.insert(section, uses);
+            }
+        } else if Item::cast(node.clone()).is_some() {
+            first_declaration.entry(section).or_insert(node);
+        }
+    }
+}
+
+/// The edits that add the units `second` names, but those `first` names
+/// too, to `first`'s, and remove `second`, of `file`: none, if `first`
+/// names none, which is reported.
+fn merged(file: &SourceFile, first: &ast::UsesDecl, second: &ast::UsesDecl) -> Vec<Edit> {
+    let text = |unit: &ast::UsedUnit| unit.syntax().text().to_string();
+    let Some(last) = first.units().last() else {
+        return Vec::new();
+    };
+    let named: BTreeSet<String> = first.units().map(|u| text(&u)).collect();
+    let added: Vec<String> = second
+        .units()
+        .map(|u| text(&u))
+        .filter(|u| !named.contains(u))
+        .collect();
+    let mut edits = vec![removal(file, second.syntax())];
+    if !added.is_empty() {
+        edits.insert(
+            0,
+            Edit {
+                span: Span::empty(usize::from(last.syntax().text_range().end())),
+                replacement: format!(", {}", added.join(", ")),
+            },
+        );
+    }
+    edits
+}
+
+/// The edits that move `node`, of `file`, with the comments just before
+/// it, to before the declaration `before`, with the comments just before
+/// that, and a blank line between them.
+fn moved_before(file: &SourceFile, node: &SyntaxNode, before: &SyntaxNode) -> Vec<Edit> {
+    let start = attached_start(node);
+    let text = file.syntax().text().to_string();
+    let file_start = usize::from(file.syntax().text_range().start());
+    let moved = &text[start - file_start..usize::from(node.text_range().end()) - file_start];
+    vec![
+        Edit {
+            span: Span::empty(attached_start(before)),
+            replacement: format!("{moved}\n\n"),
+        },
+        removal(file, node),
+    ]
 }
 
 /// The names of types and headings `item`, if it is in its unit's

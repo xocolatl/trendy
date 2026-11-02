@@ -26,6 +26,8 @@ pub enum Class {
     Number,
     Text,
     Comment,
+    /// A unit's name, or the name a unit gives another.
+    Unit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,8 +48,16 @@ pub fn highlights(file: &SourceFile) -> Vec<Highlight> {
 }
 
 fn classify(token: &SyntaxToken) -> Option<Highlight> {
+    let in_unit_name = token
+        .parent()
+        .is_some_and(|p| p.kind() == SyntaxKind::UnitName);
     let (class, definition) = match token.kind() {
         SyntaxKind::Comment => (Class::Comment, false),
+        // A unit's name's words, which can be keywords, as a file can be
+        // named `join.trendy`.
+        kind if in_unit_name && (kind == SyntaxKind::Ident || kind.is_keyword()) => {
+            (Class::Unit, false)
+        }
         // `union` in `type name union;` declares a union type, and takes
         // no operands.
         SyntaxKind::UnionKw
@@ -86,8 +96,8 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
     // conversion's `to` and `from`, a type test's `is`, a treat's
     // `treat`, a failure's `fail`, a warning's `warn`, a transaction's
     // `collecting`, a unit's `interface` and `implementation`, a
-    // constraint's declaration's `constraint`, and a database's
-    // declaration's `database`.
+    // constraint's declaration's `constraint`, a database's
+    // declaration's `database`, and `uses`.
     let keyword = match parent {
         Some(SyntaxKind::BuiltinType) => token.text() == "type",
         Some(SyntaxKind::AnyType) => matches!(token.text(), "any" | "type"),
@@ -117,7 +127,8 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
             | SyntaxKind::Constraint
             | SyntaxKind::TypeOrder
             | SyntaxKind::Conversion
-            | SyntaxKind::Collecting,
+            | SyntaxKind::Collecting
+            | SyntaxKind::UsesDecl,
         ) => true,
         _ => false,
     };
@@ -144,6 +155,8 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
         (Some(SyntaxKind::Name), Some(SyntaxKind::Operator | SyntaxKind::BuiltinOperator)) => {
             (Class::Operator, true)
         }
+        // The name a unit gives another, after `as`.
+        (Some(SyntaxKind::Name), Some(SyntaxKind::UsedUnit)) => (Class::Unit, true),
         // A database is a variable, one that outlives the program.
         (
             Some(SyntaxKind::Name),
@@ -627,6 +640,21 @@ mod tests {
                 ("home", Class::Type, false),
                 ("relation", Class::Keyword, false),
                 ("home", Class::Type, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn uses() {
+        assert_eq!(
+            highlight("uses { lakes.depths as d, join };"),
+            [
+                ("uses", Class::Keyword, false),
+                ("lakes", Class::Unit, false),
+                ("depths", Class::Unit, false),
+                ("as", Class::Keyword, false),
+                ("d", Class::Unit, true),
+                ("join", Class::Unit, false),
             ]
         );
     }

@@ -13,14 +13,35 @@ use trendy_syntax::ast::{self, AstNode, VarDecl};
 
 use crate::body::Context;
 use crate::check::{Checker, Lookup, Names};
+use crate::constraints::{self, PartNames};
 use crate::locals::Locals;
 use crate::operators::Operators;
 use crate::types::{self, Expected, Origin};
 use crate::{Files, Kind, Namespaces, errors, keys, ops, sections};
 
+/// Every database's relvars and constraints, checked.
+pub(crate) struct Checked {
+    /// Each database's relvars, by its identity, each by its name, with
+    /// its type, unless its declaration has errors.
+    pub(crate) relvars: BTreeMap<String, BTreeMap<String, Option<hir::Type>>>,
+    /// Each valid constraint.
+    pub(crate) constraints: Vec<DatabaseConstraint>,
+}
+
+/// A database's constraint, checked: a condition on the database's
+/// relvars, which are its parameters, in parts (see
+/// [`constraints::parts`]).
+pub(crate) struct DatabaseConstraint {
+    /// The database's identity.
+    pub(crate) database: String,
+    /// Its name in the database.
+    pub(crate) name: String,
+    pub(crate) parts: Vec<hir::ConstraintPart>,
+}
+
 /// Check every database's relvars and constraints in `files`, reporting
 /// what is wrong with them.
-pub(crate) fn check(files: &Files, cx: &Context, errors: &mut Vec<Diagnostic>) {
+pub(crate) fn check(files: &Files, cx: &Context, errors: &mut Vec<Diagnostic>) -> Checked {
     // Each database's relvars, by name, the first declaration of each, by
     // the database's identity.
     let mut relvars: BTreeMap<String, BTreeMap<String, Relvar>> = BTreeMap::new();
@@ -43,8 +64,23 @@ pub(crate) fn check(files: &Files, cx: &Context, errors: &mut Vec<Diagnostic>) {
     // Each database's constraints, by name, where each is first declared,
     // by the database's identity.
     let mut declared: BTreeMap<String, BTreeMap<String, Span>> = BTreeMap::new();
-    for decl in files.constraints().filter(|d| d.part_of().is_some()) {
-        constraint(&decl, &relvars, &mut declared, cx, errors);
+    let constraints = files
+        .constraints()
+        .filter(|d| d.part_of().is_some())
+        .filter_map(|decl| constraint(&decl, &relvars, &mut declared, cx, errors))
+        .collect();
+    Checked {
+        relvars: relvars
+            .into_iter()
+            .map(|(database, of)| {
+                let types = of
+                    .into_iter()
+                    .map(|(name, relvar)| (name, relvar.ty))
+                    .collect();
+                (database, types)
+            })
+            .collect(),
+        constraints,
     }
 }
 
@@ -147,27 +183,31 @@ fn known_database(
 
 /// Check the constraint `decl` of a database, whose relvars are
 /// `relvars`, by database: named once in it, among those `declared` in
-/// it, a boolean, mentioning its relvars alone, one or more.
+/// it, a boolean, mentioning its relvars alone, one or more. The
+/// constraint, unless it has errors, or is a duplicate, already reported,
+/// whose errors of its own are.
 fn constraint(
     decl: &ast::ConstraintDecl,
     relvars: &BTreeMap<String, BTreeMap<String, Relvar>>,
     declared: &mut BTreeMap<String, BTreeMap<String, Span>>,
     cx: &Context,
     errors: &mut Vec<Diagnostic>,
-) -> Option<()> {
+) -> Option<DatabaseConstraint> {
     let database = known_database(&decl.part_of()?, cx, errors)?;
     let ident = decl.name()?.ident()?;
     let span = trendy_syntax::span(ident.text_range());
     let names_of = declared.entry(database.identity.clone()).or_default();
-    if let Some(&first) = names_of.get(ident.text()) {
+    let first = if let Some(&first) = names_of.get(ident.text()) {
         errors.push(errors::duplicate_name(
             ident.text(),
             (Kind::Constraint, span),
             (Kind::Constraint, first),
         ));
+        false
     } else {
         names_of.insert(ident.text().to_string(), span);
-    }
+        true
+    };
     let written = decl.condition()?;
     let empty = BTreeMap::new();
     let of = relvars.get(&database.identity).unwrap_or(&empty);
@@ -191,8 +231,15 @@ fn constraint(
             holds,
             removal,
         ));
+        return None;
     }
-    Some(())
+    first.then(|| DatabaseConstraint {
+        database: database.identity,
+        name: ident.text().to_string(),
+        parts: constraints::parts(&written, &boolean, || {
+            DatabaseNames::new(cx, &database.name, of)
+        }),
+    })
 }
 
 /// The names in a database's definition: its relvars, by name, each as a
@@ -217,6 +264,12 @@ impl<'c, 'a> DatabaseNames<'c, 'a> {
             locals: Locals::default(),
             mentioned: BTreeSet::new(),
         }
+    }
+}
+
+impl PartNames for DatabaseNames<'_, '_> {
+    fn locals(self) -> Vec<hir::Local> {
+        self.locals.finish()
     }
 }
 

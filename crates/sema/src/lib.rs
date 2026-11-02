@@ -2,6 +2,7 @@ mod assign;
 mod block;
 mod body;
 mod builtins;
+mod catalog;
 mod check;
 mod constraints;
 mod databases;
@@ -26,10 +27,12 @@ use trendy_syntax::ast::{self, AstNode, HeadingDecl, Item, SourceFile, TypeDecl,
 
 use crate::operators::Operators;
 
-/// Check a parsed program with the prelude, as one unit of the two files,
-/// and translate it to HIR. The prelude's declarations are in scope as the
-/// program's own are, so the program can extend them: a subtype of the
-/// prelude's union type, a version of its specification.
+/// Check a parsed program, its units with those of the `library`, and
+/// translate it to HIR. The prelude's declarations are in scope in every
+/// unit, as its own are, so a unit can extend them: a subtype of the
+/// prelude's union type, a version of its specification. The catalog is
+/// filled with what the program's units are and use, and its constraints,
+/// the rules between units, are checked of it.
 ///
 /// This is the last layer allowed to report errors to the user. Drivers run
 /// it only on trees without syntax errors; parts that are missing anyway are
@@ -38,16 +41,17 @@ use crate::operators::Operators;
 /// # Errors
 ///
 /// Returns every semantic error, in source order. Their spans are in the
-/// units' texts, one after another, then the prelude's (see
-/// `trendy_diag::Sources`), so the first unit's are those it has alone. A
-/// declaration in the prelude that doesn't match the compiler is an
-/// internal error.
+/// units' texts, one after another, then the catalog's, then the
+/// prelude's (see `trendy_diag::Sources`), so the first unit's are those
+/// it has alone. A declaration in the prelude that doesn't match the
+/// compiler is an internal error, as is a constraint of the catalog's
+/// that sema can't report.
 ///
 /// # Panics
 ///
 /// If `units` is empty: a program has main's unit, first.
-pub fn analyze(units: &[File], prelude: &File) -> Result<hir::Program, Vec<Diagnostic>> {
-    let files = Files::new(units, prelude);
+pub fn analyze(units: &[File], library: &Library) -> Result<hir::Program, Vec<Diagnostic>> {
+    let files = Files::new(units, Some(&library.catalog), &library.prelude);
     let mut errors = Vec::new();
     for unit in &files.units {
         sections::check(unit, &mut errors);
@@ -72,8 +76,25 @@ pub fn analyze(units: &[File], prelude: &File) -> Result<hir::Program, Vec<Diagn
 /// reported as a program's would be.
 #[must_use]
 pub fn check_prelude(prelude: &File) -> Vec<Diagnostic> {
-    let files = Files::new(&[], prelude);
+    let files = Files::new(&[], None, prelude);
     let mut errors = Vec::new();
+    check(&files, &mut errors);
+    errors.sort_by_key(|d| d.span().start);
+    errors
+}
+
+/// Check the catalog, with the prelude, alone: that what it declares is
+/// valid, as a unit's declarations are, and is as the compiler fills it and
+/// reports the breaking of its constraints.
+///
+/// Every error, in source order, as [`check_prelude`] gives them.
+#[must_use]
+pub fn check_catalog(library: &Library) -> Vec<Diagnostic> {
+    let files = Files::new(&[], Some(&library.catalog), &library.prelude);
+    let mut errors = Vec::new();
+    for unit in &files.units {
+        sections::check(unit, &mut errors);
+    }
     check(&files, &mut errors);
     errors.sort_by_key(|d| d.span().start);
     errors
@@ -98,13 +119,26 @@ pub struct File<'a> {
     pub tree: &'a SourceFile,
 }
 
-/// The files checked together: the program's units', main's first, unless
-/// the prelude is checked alone, and the prelude. The prelude's
-/// declarations come first, so a name defined in both is the program's
-/// duplicate of the prelude's.
+/// The units that come with the compiler, which every program has: the
+/// prelude, whose declarations every unit sees, and the catalog,
+/// `trendy.catalog`, which describes the program's units, and whose
+/// constraints are the rules between them.
+#[derive(Clone, Copy)]
+pub struct Library<'a> {
+    pub prelude: File<'a>,
+    pub catalog: File<'a>,
+}
+
+/// The files checked together: the program's units', main's first, then
+/// the catalog's, unless the prelude is checked alone, and the prelude. The
+/// prelude's declarations come first, so a name defined in both is the
+/// program's duplicate of the prelude's.
 pub(crate) struct Files {
     prelude: SourceFile,
+    /// The program's units, the catalog's last, if it is checked.
     units: Vec<SourceFile>,
+    /// The catalog's unit, the last of `units`, if it is checked.
+    catalog: Option<hir::FileId>,
     /// Each file's path, by its [`hir::FileId`]: the units' in order, then
     /// the prelude's.
     paths: Vec<String>,
@@ -114,11 +148,15 @@ pub(crate) struct Files {
 }
 
 impl Files {
-    /// The files of `units` and `prelude`, as the trees of one program, the
-    /// units' first, so that a span is an offset into their texts one after
-    /// another.
-    fn new(units: &[File], prelude: &File) -> Files {
-        let all: Vec<&File> = units.iter().chain(std::iter::once(prelude)).collect();
+    /// The files of `units`, `catalog` and `prelude`, as the trees of one
+    /// program, the units' first, so that a span is an offset into their
+    /// texts one after another.
+    fn new(units: &[File], catalog: Option<&File>, prelude: &File) -> Files {
+        let all: Vec<&File> = units
+            .iter()
+            .chain(catalog)
+            .chain(std::iter::once(prelude))
+            .collect();
         let trees: Vec<SourceFile> = all.iter().map(|file| file.tree.clone()).collect();
         let mut files: Vec<SourceFile> = ast::Program::new(&trees).files().collect();
         let names = scope::Units::new(
@@ -130,10 +168,26 @@ impl Files {
         let prelude = files.pop().expect("a program has the files it is made of");
         Files {
             prelude,
+            catalog: catalog.map(|_| hir::FileId(units.len())),
             units: files,
             paths: all.iter().map(|file| file.path.to_string()).collect(),
             names,
         }
+    }
+
+    /// The catalog's unit, if it is checked.
+    pub(crate) fn catalog(&self) -> Option<&SourceFile> {
+        self.catalog.map(|id| &self.units[id.0])
+    }
+
+    /// Each unit's file, with its unit's name, the catalog's among them, if
+    /// it is checked, and the prelude's last.
+    pub(crate) fn named(&self) -> impl Iterator<Item = (&str, &SourceFile)> {
+        self.units
+            .iter()
+            .chain(std::iter::once(&self.prelude))
+            .enumerate()
+            .map(|(i, file)| (self.names.name(hir::FileId(i)), file))
     }
 
     /// The prelude.
@@ -258,7 +312,10 @@ pub(crate) fn check(files: &Files, errors: &mut Vec<Diagnostic>) -> Checked {
         declared: &declared,
     };
     let constraints = constraints::check(files, &context, errors);
-    databases::check(files, &context, errors);
+    let databases = databases::check(files, &context, errors);
+    // The catalog's constraints, the rules between units, checked of the
+    // program's units.
+    catalog::check(files, &context, &databases, errors);
     let mut bodies = HashMap::new();
     let mut deferred = body::Deferred::default();
     for signature in operators.iter().filter(|s| !s.read_only) {
@@ -1038,8 +1095,9 @@ mod tests {
     }
 
     thread_local! {
-        /// The prelude, parsed once for each thread's tests.
+        /// The prelude and the catalog, parsed once for each thread's tests.
         static PRELUDE: SourceFile = parse(trendy_prelude::SOURCE);
+        static CATALOG: SourceFile = parse(trendy_prelude::catalog::SOURCE);
     }
 
     fn analyze_str(source: &str) -> Result<hir::Program, Vec<Diagnostic>> {
@@ -1056,7 +1114,7 @@ mod tests {
             path: "program.trendy",
             tree: program,
         };
-        analyze(&[unit], &prelude_file(prelude))
+        CATALOG.with(|catalog| analyze(&[unit], &library(prelude, catalog)))
     }
 
     /// The program of `units`, each a unit's name and text, main's first,
@@ -1073,7 +1131,19 @@ mod tests {
             .zip(&paths)
             .map(|((&(name, _), tree), path)| File { name, path, tree })
             .collect();
-        PRELUDE.with(|prelude| analyze(&files, &prelude_file(prelude)))
+        PRELUDE.with(|prelude| CATALOG.with(|catalog| analyze(&files, &library(prelude, catalog))))
+    }
+
+    /// The library of `prelude` and `catalog`.
+    fn library<'a>(prelude: &'a SourceFile, catalog: &'a SourceFile) -> Library<'a> {
+        Library {
+            prelude: prelude_file(prelude),
+            catalog: File {
+                name: trendy_prelude::catalog::NAME,
+                path: trendy_prelude::catalog::PATH,
+                tree: catalog,
+            },
+        }
     }
 
     /// `prelude` as the prelude's file.
@@ -1103,14 +1173,12 @@ mod tests {
         errors
     }
 
-    /// The prelude's text at `span`, in the unit of the program `source`
-    /// and the prelude.
+    /// The prelude's text at `span`, in the program of `source`, the
+    /// catalog and the prelude.
     fn in_prelude(source: &str, span: Span) -> &'static str {
-        let start = span
-            .start
-            .checked_sub(source.len())
-            .expect("in the prelude");
-        &trendy_prelude::SOURCE[start..span.end - source.len()]
+        let before = source.len() + trendy_prelude::catalog::SOURCE.len();
+        let start = span.start.checked_sub(before).expect("in the prelude");
+        &trendy_prelude::SOURCE[start..span.end - before]
     }
 
     fn messages(source: &str) -> Vec<String> {
@@ -2734,8 +2802,9 @@ var zero := seg{{len: 0}};{MAIN}"
         assert_eq!(at(errors[0].primary.span), "strip");
         let declared = errors[0].secondary[0].span;
         let prelude = prelude.syntax().text().to_string();
+        let before = source.len() + trendy_prelude::catalog::SOURCE.len();
         assert_eq!(
-            &prelude[declared.start - source.len()..declared.end - source.len()],
+            &prelude[declared.start - before..declared.end - before],
             "area"
         );
     }
@@ -11300,6 +11369,152 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
 
     /// A unit that declares one of each kind of name, the same as another's.
     const LAKES: &str = "var count := 1;\nheading place := { name: text };\ntype metres { { m: integer } };\nvar depth := metres{m: 3};\nconstraint positive := count > 0;\noperator twice{n: integer}: integer [ n * 2 ];\noperator bump{} [ count := twice{n: count}; ];";
+
+    /// The errors of the program `source`, with the units `a` and `b`, and
+    /// `source` with their fixes in it applied.
+    fn with_units_a_and_b(source: &str) -> (Vec<Code>, String) {
+        let errors = analyze_units(&[("program", source), ("a", ""), ("b", "")]).unwrap_err();
+        let mut edits: Vec<_> = errors
+            .iter()
+            .filter_map(|d| d.suggestions.first())
+            .flat_map(|s| s.edits.clone())
+            .collect();
+        edits.sort_by_key(|e| std::cmp::Reverse(e.span.start));
+        let mut fixed = source.to_string();
+        for edit in edits {
+            fixed.replace_range(edit.span.start..edit.span.end, &edit.replacement);
+        }
+        (errors.iter().map(|e| e.code).collect(), fixed)
+    }
+
+    #[test]
+    fn a_sections_uses_comes_first_once() {
+        let codes = |source| with_units_a_and_b(source).0;
+        let fix = |source| with_units_a_and_b(source).1;
+        // After a declaration: moved before the section's first one.
+        let source = "/* Greets. */\noperator f{} [];\nuses { a };\noperator main{} [];";
+        assert_eq!(codes(source), [Code::UsesPlacement]);
+        assert_eq!(
+            fix(source),
+            "uses { a };\n\n/* Greets. */\noperator f{} [];\noperator main{} [];"
+        );
+        let source = "interface\n\noperator f{};\n\nuses { a };\n\nimplementation\n\nuses { b };\n\noperator f{} [];\n\noperator main{} [];";
+        assert_eq!(codes(source), [Code::UsesPlacement]);
+        assert_eq!(
+            fix(source),
+            "interface\n\nuses { a };\n\noperator f{};\n\nimplementation\n\nuses { b };\n\noperator f{} [];\n\noperator main{} [];"
+        );
+        // A second in a section: its units, but those the first names, added
+        // to the first's.
+        let source = "uses { a };\nuses { b, a };\noperator main{} [];";
+        assert_eq!(codes(source), [Code::UsesPlacement]);
+        assert_eq!(fix(source), "uses { a, b };\noperator main{} [];");
+        // One in each section.
+        let source =
+            "interface\n\nuses { a };\n\nimplementation\n\nuses { b };\n\noperator main{} [];";
+        assert!(analyze_units(&[("program", source), ("a", ""), ("b", "")]).is_ok());
+    }
+
+    #[test]
+    fn a_unit_uses_units_of_the_program() {
+        // The catalog's `known_units`, broken by a unit there isn't, at each
+        // `uses` of it, with the file it would be.
+        let errors = analyze_units(&[
+            ("program", "uses { lakes.depth };\n\noperator main{} [];"),
+            ("lakes.depths", "uses { recipes };"),
+        ])
+        .unwrap_err();
+        let messages: Vec<&str> = errors.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            ["unknown unit `lakes.depth`", "unknown unit `recipes`"]
+        );
+        assert!(errors.iter().all(|e| e.code == Code::UnknownName));
+        // A misspelling of one is fixed to it.
+        assert_eq!(
+            errors[0].suggestions[0].edits[0].replacement,
+            "lakes.depths"
+        );
+        assert!(
+            errors[1].notes[0].contains("`recipes.trendy`"),
+            "{:#?}",
+            errors[1]
+        );
+        // Those that come with the compiler are the program's.
+        assert!(
+            analyze_units(&[("program", "uses { trendy.catalog };\n\noperator main{} [];")])
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn the_catalog_is_as_the_compiler_fills_and_reports_it() {
+        let with_catalog = |catalog: &str| {
+            let (program, catalog) = (parse("operator main{} [];"), parse(catalog));
+            PRELUDE.with(|prelude| {
+                let library = library(prelude, &catalog);
+                let unit = File {
+                    name: "program",
+                    path: "program.trendy",
+                    tree: &program,
+                };
+                analyze(&[unit], &library).unwrap_err()
+            })
+        };
+        let catalog = trendy_prelude::catalog::SOURCE;
+        // A constraint the compiler doesn't report the breaking of.
+        let errors = with_catalog(&format!(
+            "{catalog}\nconstraint catalog.few := count{{r: units}} < 3;"
+        ));
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].code, Code::Internal);
+        // A relvar it doesn't fill, or one it does, unlike its own.
+        let errors = with_catalog(&catalog.replace("var catalog.uses", "var catalog.used"));
+        assert!(
+            errors.iter().any(|e| e.code == Code::Internal),
+            "{errors:#?}"
+        );
+    }
+
+    #[test]
+    fn no_unit_uses_itself() {
+        // The catalog's `acyclic`, broken by the units on a cycle, reported
+        // once for each cycle, at the first unit's `uses`.
+        let errors = analyze_units(&[
+            ("program", "uses { a };\n\noperator main{} [];"),
+            ("a", "uses { b };"),
+            ("b", "implementation\n\nuses { a };"),
+        ])
+        .unwrap_err();
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].code, Code::UnitCycle);
+        assert_eq!(errors[0].message, "the units `a` and `b` use each other");
+        assert_eq!(errors[0].secondary.len(), 1);
+        assert!(errors[0].suggestions.is_empty());
+        let errors = analyze_units(&[
+            ("program", "uses { a };\n\noperator main{} [];"),
+            ("a", "uses { b };"),
+            ("b", "uses { c };"),
+            ("c", "uses { a };"),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            errors
+                .iter()
+                .map(|e| e.message.as_str())
+                .collect::<Vec<_>>(),
+            ["the units `a`, `b` and `c` use each other in a cycle"]
+        );
+        // A unit of its own: the fix removes it from its `uses`.
+        let source = "uses { program, a };\n\noperator main{} [];";
+        let errors = analyze_units(&[("program", source), ("a", "")]).unwrap_err();
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].message, "the unit `program` uses itself");
+        let edit = &errors[0].suggestions[0].edits[0];
+        let mut fixed = source.to_string();
+        fixed.replace_range(edit.span.start..edit.span.end, &edit.replacement);
+        assert_eq!(fixed, "uses { a };\n\noperator main{} [];");
+    }
 
     #[test]
     fn units_see_their_own_names_and_the_preludes() {

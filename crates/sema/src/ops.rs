@@ -2361,6 +2361,28 @@ pub(crate) fn evaluated(expr: hir::Expr, bindings: Bindings) -> Result<hir::Expr
     substitute(expr, 0, &substitution)
 }
 
+/// `expr`, every part of which is known when compiling but its
+/// parameters, whose values `args` gives, each of its parameter's type,
+/// computed, as [`evaluated`] computes it: a condition on a database's
+/// relvars, given their values.
+///
+/// # Errors
+///
+/// Returns why it fails.
+pub(crate) fn evaluated_with(
+    expr: hir::Expr,
+    args: &BTreeMap<String, hir::Expr>,
+    bindings: Bindings,
+) -> Result<hir::Expr, Failed> {
+    let substitution = Substitution {
+        tuple: None,
+        args: Some(args),
+        locals: &[],
+        bindings,
+    };
+    substitute(expr, 0, &substitution)
+}
+
 /// `array` with `changes` made, substituted as for [`substitute`].
 ///
 /// # Errors

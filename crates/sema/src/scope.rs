@@ -30,6 +30,11 @@ impl Units {
         Units { units }
     }
 
+    /// The name of `unit`.
+    pub(crate) fn name(&self, unit: hir::FileId) -> &str {
+        &self.units[unit.0].0
+    }
+
     /// The prelude's.
     pub(crate) fn prelude(&self) -> hir::FileId {
         hir::FileId(self.units.len() - 1)

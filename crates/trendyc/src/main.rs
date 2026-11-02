@@ -52,9 +52,13 @@ fn build(input: &Path, output: &Path, format: Format) -> Result<(), String> {
         let sources = Sources::one(&path, &source);
         return Err(report(&parse.errors, format, &path, &sources));
     }
-    let prelude = prelude()?;
-    // Sema's spans are in the program, then the prelude. A unit's name is
-    // its path from the directory of `main`'s file.
+    let prelude = library_unit(trendy_prelude::SOURCE, trendy_prelude::PATH)?;
+    let catalog = library_unit(
+        trendy_prelude::catalog::SOURCE,
+        trendy_prelude::catalog::PATH,
+    )?;
+    // Sema's spans are in the program, then the catalog, then the prelude.
+    // A unit's name is its path from the directory of `main`'s file.
     let name = input
         .file_stem()
         .map(|stem| stem.to_string_lossy())
@@ -64,14 +68,25 @@ fn build(input: &Path, output: &Path, format: Format) -> Result<(), String> {
         path: &path,
         tree: &parse.tree,
     };
-    let prelude_file = trendy_sema::File {
-        name: trendy_prelude::NAME,
-        path: trendy_prelude::PATH,
-        tree: &prelude.tree,
+    let library = trendy_sema::Library {
+        prelude: trendy_sema::File {
+            name: trendy_prelude::NAME,
+            path: trendy_prelude::PATH,
+            tree: &prelude.tree,
+        },
+        catalog: trendy_sema::File {
+            name: trendy_prelude::catalog::NAME,
+            path: trendy_prelude::catalog::PATH,
+            tree: &catalog.tree,
+        },
     };
-    let hir = trendy_sema::analyze(&[unit], &prelude_file).map_err(|errors| {
+    let hir = trendy_sema::analyze(&[unit], &library).map_err(|errors| {
         let sources = Sources::new([
             (path.as_str(), source.as_str()),
+            (
+                trendy_prelude::catalog::PATH,
+                trendy_prelude::catalog::SOURCE,
+            ),
             (trendy_prelude::PATH, trendy_prelude::SOURCE),
         ]);
         report(&errors, format, &path, &sources)
@@ -85,18 +100,18 @@ fn build(input: &Path, output: &Path, format: Format) -> Result<(), String> {
     link(&object, output)
 }
 
-/// The prelude, parsed, which sema checks with the program. It is part of
-/// the compiler, so any error in it is a compiler bug: one that doesn't
-/// parse is reported here, and sema reports a declaration that doesn't
-/// match the compiler as an internal error.
-fn prelude() -> Result<trendy_parser::Parse, String> {
-    let source = trendy_prelude::SOURCE;
+/// A unit that comes with the compiler, the prelude or the catalog, of
+/// `source`, shown as `path`, parsed, which sema checks with the program.
+/// It is part of the compiler, so any error in it is a compiler bug: one
+/// that doesn't parse is reported here, and sema reports a declaration
+/// that doesn't match the compiler as an internal error.
+fn library_unit(source: &str, path: &str) -> Result<trendy_parser::Parse, String> {
     let parse = trendy_parser::parse(source, trendy_lexer::lex(source));
     if !parse.errors.is_empty() {
-        let sources = Sources::one(trendy_prelude::PATH, source);
+        let sources = Sources::one(path, source);
         let rendered = trendy_diag::render_all(&parse.errors, Format::Human, &sources);
         return Err(format!(
-            "error[X0000]: internal compiler error: the prelude doesn't parse\n{rendered}"
+            "error[X0000]: internal compiler error: `{path}` doesn't parse\n{rendered}"
         ));
     }
     Ok(parse)

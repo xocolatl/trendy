@@ -385,6 +385,7 @@ fn is_list(node: &SyntaxNode) -> bool {
             | SyntaxKind::GatherList
             | SyntaxKind::NaryExpr
             | SyntaxKind::OrderList
+            | SyntaxKind::UnitList
     )
 }
 
@@ -739,6 +740,10 @@ fn items(node: &SyntaxNode) -> usize {
         nary.operands().count()
     } else if let Some(order) = OrderList::cast(node.clone()) {
         order.items().count()
+    } else if node.kind() == SyntaxKind::UnitList {
+        node.children()
+            .filter(|n| n.kind() == SyntaxKind::UsedUnit)
+            .count()
     } else {
         0
     }
@@ -853,8 +858,8 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
     // `asc` and `desc`, a `for` loop's `in`, `heading`, before a heading's
     // name, `type`, before a type's, `constraint`, before a condition, a
     // type's `order`, a conversion's `to` and `from`, `fail`, before an
-    // error, though it is in parentheses: `fail (e)`, `warn`, and a
-    // transaction's `collecting`.
+    // error, though it is in parentheses: `fail (e)`, `warn`, a
+    // transaction's `collecting`, and `uses`.
     let contextual_keyword = prev.kind() == Ident
         && prev.parent().is_some_and(|p| match p.kind() {
             BuiltinType => prev.text() == "type",
@@ -877,7 +882,8 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
             | SyntaxKind::FailExpr
             | SyntaxKind::FailStmt
             | SyntaxKind::WarnStmt
-            | SyntaxKind::Collecting => true,
+            | SyntaxKind::Collecting
+            | SyntaxKind::UsesDecl => true,
             _ => false,
         });
     let load_keyword = next.kind() == Ident
@@ -1385,6 +1391,21 @@ mod tests {
         assert_eq!(
             fmt("interface\n/* none */\nimplementation\noperator main{} [];"),
             "interface\n\n/* none */\nimplementation\n\noperator main{} [];\n"
+        );
+    }
+
+    #[test]
+    fn uses() {
+        // Spaced braces, `.` unspaced, then a blank line.
+        assert_eq!(
+            fmt("interface\nuses{lakes . depths as d,recipes};operator main{}[];"),
+            "interface\n\nuses { lakes.depths as d, recipes };\n\noperator main{} [];\n"
+        );
+        // Too long for a line: a unit on each.
+        let long = "uses { a.b, some.very.long.unit.name.indeed, another.quite.long.unit.name as long_alias, yet.another.unit };";
+        assert_eq!(
+            fmt(long),
+            "uses {\n    a.b,\n    some.very.long.unit.name.indeed,\n    another.quite.long.unit.name as long_alias,\n    yet.another.unit,\n};\n"
         );
     }
 

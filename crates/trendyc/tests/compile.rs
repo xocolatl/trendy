@@ -400,7 +400,7 @@ fn to_text_is_what_debug_value_writes() {
     assert_eq!(run, expected);
 }
 
-/// The program `source` analyzed, with the prelude.
+/// The program `source` analyzed, with the prelude and the catalog.
 fn analyze(source: &str) -> trendy_hir::Program {
     let parse = |source: &str| {
         let parse = trendy_parser::parse(source, trendy_lexer::lex(source));
@@ -408,17 +408,25 @@ fn analyze(source: &str) -> trendy_hir::Program {
         parse.tree
     };
     let (program, prelude) = (parse(source), parse(trendy_prelude::SOURCE));
+    let catalog = parse(trendy_prelude::catalog::SOURCE);
     let unit = trendy_sema::File {
         name: "program",
         path: "program.trendy",
         tree: &program,
     };
-    let prelude = trendy_sema::File {
-        name: trendy_prelude::NAME,
-        path: trendy_prelude::PATH,
-        tree: &prelude,
+    let library = trendy_sema::Library {
+        prelude: trendy_sema::File {
+            name: trendy_prelude::NAME,
+            path: trendy_prelude::PATH,
+            tree: &prelude,
+        },
+        catalog: trendy_sema::File {
+            name: trendy_prelude::catalog::NAME,
+            path: trendy_prelude::catalog::PATH,
+            tree: &catalog,
+        },
     };
-    trendy_sema::analyze(&[unit], &prelude).unwrap()
+    trendy_sema::analyze(&[unit], &library).unwrap()
 }
 
 /// `written`, a value the program `source` wrote, read back as an
