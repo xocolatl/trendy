@@ -3295,6 +3295,84 @@ var shapes: relation { name: text, vertices: relation { v_no: integer } key { v_
 operator main{} [];
 ```
 
+## Constraints
+
+A constraint is a condition on a unit's variables, named, which holds
+whenever a statement ends: no statement leaves the variables in a state
+that breaks it. It is TTM's database constraint, of the unit's own
+variables (RM Prescription 23), as a key is a constraint on one relation
+variable, written with it. A constraint's name is defined with `:=`, as
+a variable's is, and says which constraint is broken, when one is.
+
+```trendy
+var countries := relation {
+    { country: "Kenya", native: "Kenya" },
+    { country: "Peru", native: "Perú" },
+}
+key { country };
+var languages := relation {
+    { language: "Swahili", native: "Kiswahili" },
+    { language: "Quechua", native: "Runa Simi" },
+}
+key { language };
+var official := relation {
+    { language: "Swahili", country: "Kenya" },
+    { language: "Quechua", country: "Peru" },
+}
+key { language, country };
+
+/* Each language is official in a country there is, and somewhere. */
+constraint known_countries := official{country} <= countries{country};
+constraint known_languages := official{language} <= languages{language};
+constraint official_somewhere := languages{language} <= official{language};
+
+operator main{} [];
+```
+
+- **A condition on variables,** of any type, which it mentions one or
+  more of. It is a boolean expression, so it calls read-only operators
+  only. One that mentions no variable says nothing about them, or can
+  never hold, and is an error (A0058), whose fix deletes it when it is
+  always true.
+- **The initial values satisfy it.** They are known when compiling, so a
+  constraint they break is reported then (R0023), with what breaks it
+  where its form says: the tuples of `a` that aren't in `b`, for
+  `a <= b`, and of `b` that aren't in `a`, for `a >= b`; the tuples of
+  `e`, for `is_empty{r: e}`; and the operands of an `and` that are false.
+- **A unit's own.** A unit's variables are its implementation's, so its
+  constraints are too, and one in the interface is an error, whose fix
+  moves it (A0067). A constraint is a definition, at the top level, so one
+  in an operator's body is moved before it (P0034).
+- **Names of their own:** no name refers to a constraint, so one can have
+  a variable's or an operator's name, but no two constraints can share
+  one (A0001).
+- Tutorial D's `CONSTRAINT name condition`, without `:=`, `name:
+  condition`, and SQL's `CREATE ASSERTION name CHECK (condition)` are
+  fixed to `constraint name := condition` (P0055). A constraint without a
+  name is an error with help, since its name is the program's to give.
+
+```trendy,error
+var countries := relation { { country: "Kenya" } } key { country };
+var official := relation {
+    { language: "Swahili", country: "Kenya" },
+    { language: "Quechua", country: "Peru" },
+}
+key { language, country };
+
+constraint known_countries := official{country} <= countries;
+
+operator main{} [];
+```
+
+```trendy,error
+var countries := relation { { country: "Kenya" } } key { country };
+var official := relation { { language: "Swahili", country: "Kenya" } } key { language, country };
+
+CONSTRAINT known_countries official{country} <= countries;
+
+operator main{} [];
+```
+
 ## Arrays
 
 An array is a list of values of one type, its elements, in order. An
@@ -5480,8 +5558,9 @@ are case-sensitive. The keywords are `operator`, `var`, `call`, `builtin`,
 `type` is a keyword only after `builtin` and before a type's name, `key`
 only where a variable's keys go, `value` and `from` only in `tuple from` and `value from`, and
 `load`, `from`, `order`, `asc` and `desc` only in a load, `in` only
-in a `for` loop, `collecting` only after `transaction`, and `heading`
-only before a heading's name.
+in a `for` loop, `collecting` only after `transaction`, `heading`
+only before a heading's name, and `constraint` only before a
+constraint's name or condition.
 
 Operators, values, and types with headings each have a namespace of
 their own. Values are variables and parameters, and a parameter hides a
@@ -5489,8 +5568,10 @@ variable of its name. So a variable can have an operator's name, or a
 type's, and which one a name is depends on where it is: in
 `call greet{…};` it is an operator, and as a value it is a variable or a
 parameter. No two operators can have the same name, nor two variables,
-nor two headings, nor a heading and a type (A0001), and a type's name is
-its selector's, which no other operator can have (A0057).
+nor two headings, nor a heading and a type, nor two constraints (A0001),
+and a type's name is its selector's, which no other operator can have
+(A0057). No name refers to a constraint, so constraints have a namespace
+of their own.
 
 ```trendy
 var greet := "Hello";
@@ -5724,6 +5805,7 @@ line after a comment on its own line, such as a file's header, is kept.
 | `TCLOSE R`, SQL's `WITH RECURSIVE` for what a graph reaches | `r tclose` |
 | `GROUP BY a` with the group's rows | `r group { rows := {…every attribute but a…} }` |
 | `PRIMARY KEY (a)`, `UNIQUE (a)`, `KEY { A }` | `key { a }` |
+| `CONSTRAINT c e`, `CREATE ASSERTION c CHECK (e)` | `constraint c := e;` |
 | `NATURAL JOIN`, `INNER JOIN`, `JOIN … USING (a)` | `join` |
 | `CROSS JOIN` | `times` |
 | `JOIN { R1, R2, R3 }` | `join{r1, r2, r3}` |

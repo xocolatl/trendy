@@ -30,6 +30,7 @@ pub(crate) const RENAME_FORM: &str =
 pub(crate) const TUPLE_VALUE_FORM: &str = "a tuple value has the form `tuple { name: value, … }`";
 pub(crate) const BUILTIN_FORM: &str = "built-ins are declared as `builtin type name;`, or `builtin type name: { kind, … };` with the kinds it is of, `builtin operator name{params};`, or `builtin operator name{params}: type;` with a result type, then `types { T: any type }` for type parameters, only in the prelude";
 pub(crate) const TYPE_DECL_FORM: &str = "a type is declared as `type name { { component: type, … } };`, with the components of its possible representation in braces of their own";
+pub(crate) const CONSTRAINT_DECL_FORM: &str = "a constraint is declared as `constraint name := condition;`, a condition on the unit's variables that holds whenever a statement ends";
 pub(crate) const KIND_FORM: &str = "a kind is declared as `kind name { requirement, … };`, with what each of its types must have, such as `<`";
 pub(crate) const ASSIGNMENT_FORM: &str = "an assignment statement is `name := value;`, or a shorthand for one: `insert r s;`, `d_insert r s;`, `delete r where p;`, `i_delete r s;` or `update r { a := x } where p;`";
 pub(crate) const ASSIGN_BLOCK_FORM: &str =
@@ -454,7 +455,7 @@ pub(crate) fn sql_check(found: Found) -> Diagnostic {
     )
 }
 
-/// A declaration of `what`, a heading or a type, in a body, whose keyword is
+/// A declaration of `what`, a heading, a type or a constraint, in a body, whose keyword is
 /// `keyword`, written `text`, where `span` deletes it with the whitespace
 /// before: it goes after the top-level definition that ends at
 /// `previous`, or first.
@@ -481,9 +482,11 @@ pub(crate) fn nested_definition(
         keyword,
         "inside an operator's body",
     )
-    .with_note(
-        "headings and types, as operators and the program's variables, are definitions of the program, which any operator can use; an operator's body declares only local variables",
-    )
+    .with_note(if what == "constraint" {
+        "a constraint is about the program's variables, which statements change, so it is a definition of the program, checked after every statement that assigns what it mentions; an operator's body declares only local variables"
+    } else {
+        "headings and types, as operators and the program's variables, are definitions of the program, which any operator can use; an operator's body declares only local variables"
+    })
     .with_suggestion(
         "move it before the operator",
         vec![
@@ -3059,6 +3062,105 @@ pub(crate) fn prefix_tclose(word: Found, operand: usize, end: usize) -> Diagnost
 
 /// What `tclose` is, for the notes of its errors.
 pub(crate) const TCLOSE_RULE: &str = "`r tclose` is the transitive closure of `r`, a relation of two attributes of one type, as `contains tclose` gives every part a whole contains, at any depth; it follows its operand, as the other relational operators do, so `r tclose where a = b` is `(r tclose) where a = b`";
+
+/// What a constraint's declaration is, for the notes of its errors.
+const CONSTRAINT_DECL_RULE: &str = "`constraint name := condition;` is a condition on the unit's variables, which holds whenever a statement ends; `name := …` defines a name, as for a variable, and its name says which constraint is broken, when one is";
+
+/// A constraint's declaration, whose keyword is at `keyword`, without a
+/// name, before its condition, at `condition` if it has one. What it is
+/// called is the program's to say, so there is no fix.
+pub(crate) fn unnamed_constraint(keyword: Span, condition: Option<Span>) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::ConstraintForm,
+        "a constraint has a name",
+        Span::empty(keyword.end),
+        "its name goes here",
+    )
+    .with_note(CONSTRAINT_DECL_RULE)
+    .with_help("name it, then write `:=` before its condition: `constraint known_countries := cities{country} <= countries;`");
+    match condition {
+        Some(condition) => d.with_secondary(condition, "its condition"),
+        None => d,
+    }
+}
+
+/// `:` at `colon`, between a constraint's name and its condition, where
+/// `:=` goes, after a space if `spaced`, as a name defined by what follows
+/// is written.
+pub(crate) fn constraint_colon(colon: Span, spaced: bool) -> Diagnostic {
+    Diagnostic::error(
+        Code::ConstraintForm,
+        "a constraint's name is defined by its condition with `:=`, not `:`",
+        colon,
+        "`:` pairs a name with what is given",
+    )
+    .with_note(CONSTRAINT_DECL_RULE)
+    .with_suggestion(
+        "write `:=`",
+        vec![Edit {
+            span: colon,
+            replacement: if spaced { ":=" } else { " :=" }.to_string(),
+        }],
+    )
+}
+
+/// A constraint's name, ending at `named`, then its condition, without the
+/// `:=` between, as Tutorial D's `CONSTRAINT name condition` writes it.
+pub(crate) fn constraint_without_colon_eq(named: usize) -> Diagnostic {
+    Diagnostic::error(
+        Code::ConstraintForm,
+        "`:=` goes between a constraint's name and its condition",
+        Span::empty(named),
+        "`:=` goes here",
+    )
+    .with_note(CONSTRAINT_DECL_RULE)
+    .with_suggestion(
+        "write `:=`",
+        vec![Edit {
+            span: Span::empty(named),
+            replacement: " :=".to_string(),
+        }],
+    )
+}
+
+/// SQL's `CREATE ASSERTION name CHECK (condition)`: its first two words at
+/// `words`, its `CHECK` at `check`, if it is there, and, from `start` to
+/// `end`, the parentheses around the whole condition, if it is in them.
+/// The fix makes it a constraint's declaration.
+pub(crate) fn sql_assertion(
+    words: Span,
+    check: Option<Span>,
+    parentheses: Option<(usize, usize)>,
+) -> Diagnostic {
+    let mut edits = vec![Edit {
+        span: words,
+        replacement: "constraint".to_string(),
+    }];
+    if let Some(check) = check {
+        edits.push(Edit {
+            span: check,
+            replacement: ":=".to_string(),
+        });
+    }
+    if let Some((start, end)) = parentheses {
+        edits.push(Edit {
+            span: Span::new(start, start + 1),
+            replacement: String::new(),
+        });
+        edits.push(Edit {
+            span: Span::new(end - 1, end),
+            replacement: String::new(),
+        });
+    }
+    Diagnostic::error(
+        Code::ConstraintForm,
+        "a constraint is declared `constraint name := condition;`, not as SQL's `CREATE ASSERTION`",
+        words,
+        "SQL's assertion",
+    )
+    .with_note(CONSTRAINT_DECL_RULE)
+    .with_suggestion("declare a constraint", edits)
+}
 
 /// What a unit is, for the notes of its errors.
 const UNIT_RULE: &str = "a unit is one file, named by its path from the program's root, as `lakes/depths.trendy` is `lakes.depths`; `interface` starts the declarations other units see, and `implementation` those they don't, each up to the next";

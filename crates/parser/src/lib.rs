@@ -139,6 +139,8 @@ enum StatementStart {
     Heading,
     /// A type's declaration, which goes at the top level.
     Type,
+    /// A constraint's declaration, which goes at the top level.
+    Constraint,
     /// `break;` or `LEAVE name;`, which trendy has none of.
     Exit,
     Call,
@@ -304,6 +306,7 @@ impl<'a> Parser<'a> {
                 SyntaxKind::Ident if self.at_kind() => self.kind_decl(),
                 SyntaxKind::Ident if self.at_type_decl() => self.type_decl(),
                 SyntaxKind::Ident if self.at_heading_decl() => self.heading_decl(),
+                SyntaxKind::Ident if self.at_constraint_decl(false) => self.constraint_decl(),
                 SyntaxKind::Ident if self.at_section_header() => self.section_header(),
                 _ => self.junk(found),
             }
@@ -884,6 +887,158 @@ impl<'a> Parser<'a> {
         }
         self.builder.finish_node();
         self.form = outer_form;
+    }
+
+    /// Whether a constraint's declaration starts here: `constraint`, a
+    /// contextual keyword, in any case, or SQL's `create assertion`. In a
+    /// body, `in_body`, where `constraint` can name a local variable, only
+    /// before a name and `:=` or `:`.
+    fn at_constraint_decl(&mut self, in_body: bool) -> bool {
+        let Some(first) = self.found().filter(|f| f.kind == SyntaxKind::Ident) else {
+            return false;
+        };
+        if first.text.eq_ignore_ascii_case("create") {
+            return self.found_after(1).is_some_and(|f| {
+                f.kind == SyntaxKind::Ident && f.text.eq_ignore_ascii_case("assertion")
+            });
+        }
+        first.text.eq_ignore_ascii_case("constraint")
+            && (!in_body
+                || self
+                    .found_after(1)
+                    .is_some_and(|f| f.kind == SyntaxKind::Ident)
+                    && self
+                        .found_after(2)
+                        .is_some_and(|f| matches!(f.kind, SyntaxKind::ColonEq | SyntaxKind::Colon)))
+    }
+
+    /// Whether the name a constraint's declaration gives it is next: a name
+    /// before `:=` or `:`, or before what starts its condition, as Tutorial
+    /// D's `CONSTRAINT name condition` writes it, rather than a name its
+    /// condition starts with, before an operator or the `;`.
+    fn constraint_named(&mut self) -> bool {
+        self.found().is_some_and(|f| f.kind == SyntaxKind::Ident)
+            && self.found_after(1).is_some_and(|f| {
+                matches!(
+                    f.kind,
+                    SyntaxKind::ColonEq
+                        | SyntaxKind::Colon
+                        | SyntaxKind::Ident
+                        | SyntaxKind::IntLiteral
+                        | SyntaxKind::ApproximateLiteral
+                        | SyntaxKind::TextLiteral
+                        | SyntaxKind::TrueKw
+                        | SyntaxKind::FalseKw
+                        | SyntaxKind::LParen
+                        | SyntaxKind::TupleKw
+                        | SyntaxKind::RelationKw
+                        | SyntaxKind::ArrayKw
+                        | SyntaxKind::NotKw
+                        | SyntaxKind::IfKw
+                )
+            })
+    }
+
+    /// `constraint name := condition;`: a condition the unit's variables
+    /// satisfy whenever a statement ends. Tutorial D's `CONSTRAINT name
+    /// condition`, without `:=`, `name: condition`, and SQL's `CREATE
+    /// ASSERTION name CHECK (condition)` are reported, with fixes, and a
+    /// constraint without a name, with help: what it is called is the
+    /// program's to say.
+    fn constraint_decl(&mut self) {
+        let outer_form = std::mem::replace(&mut self.form, errors::CONSTRAINT_DECL_FORM);
+        self.start_node(SyntaxKind::ConstraintDecl);
+        let keyword = self.found().expect("at a constraint's declaration");
+        self.bump();
+        // SQL's `create assertion`, as one word to replace.
+        let sql = keyword.text.eq_ignore_ascii_case("create").then(|| {
+            let assertion = self.found().expect("`assertion` follows `create`");
+            self.bump();
+            Span::new(keyword.span.start, assertion.span.end)
+        });
+        if sql.is_none() && keyword.text != "constraint" {
+            self.errors
+                .push(errors::miscased_keyword(keyword, "constraint"));
+        }
+        if !self.constraint_named() {
+            let start = self.found().map(|f| f.span.start);
+            self.expression();
+            let condition = start.map(|start| Span::new(start, self.last_end.unwrap_or(start)));
+            self.errors
+                .push(errors::unnamed_constraint(keyword.span, condition));
+            self.expect(SyntaxKind::Semicolon);
+            self.builder.finish_node();
+            self.form = outer_form;
+            return;
+        }
+        self.name(
+            "add the constraint's name after `constraint`, as in `constraint known := cities{country} <= countries;`",
+            &[SyntaxKind::ColonEq],
+        );
+        let named = self.last_end.unwrap_or(keyword.span.end);
+        let mut check = None;
+        match self.found() {
+            Some(f) if f.kind == SyntaxKind::ColonEq => {
+                self.bump();
+            }
+            Some(f)
+                if sql.is_some()
+                    && f.kind == SyntaxKind::Ident
+                    && f.text.eq_ignore_ascii_case("check") =>
+            {
+                self.bump();
+                check = Some(f.span);
+            }
+            Some(f) if f.kind == SyntaxKind::Colon => {
+                self.bump();
+                self.errors
+                    .push(errors::constraint_colon(f.span, f.span.start > named));
+            }
+            _ => self.errors.push(errors::constraint_without_colon_eq(named)),
+        }
+        let start = self.found().map_or(named, |f| f.span.start);
+        let first = self.pos;
+        self.expression();
+        let end = self.last_end.unwrap_or(start);
+        if let Some(words) = sql {
+            // The parentheses SQL's `CHECK` takes, around the whole
+            // condition, which trendy needs none of.
+            let parentheses = self.parenthesized(first).then_some((start, end));
+            self.errors
+                .push(errors::sql_assertion(words, check, parentheses));
+        }
+        self.expect(SyntaxKind::Semicolon);
+        self.builder.finish_node();
+        self.form = outer_form;
+    }
+
+    /// Whether the tokens from the one at `first` to the last consumed are
+    /// one parenthesized expression: a `(`, and the `)` that closes it.
+    fn parenthesized(&self, first: usize) -> bool {
+        let significant: Vec<&Token> = self.tokens[first..self.pos]
+            .iter()
+            .filter(|t| !t.kind.is_trivia())
+            .collect();
+        if significant
+            .first()
+            .is_none_or(|t| t.kind != SyntaxKind::LParen)
+        {
+            return false;
+        }
+        let mut depth = 0usize;
+        for (i, token) in significant.iter().enumerate() {
+            match token.kind {
+                SyntaxKind::LParen => depth += 1,
+                SyntaxKind::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return i + 1 == significant.len();
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     /// Whether a requirement starts here: an operator, or a name.
@@ -1510,6 +1665,8 @@ impl<'a> Parser<'a> {
             StatementStart::Heading
         } else if found.text == "type" && self.at_type_decl() {
             StatementStart::Type
+        } else if self.at_constraint_decl(true) {
+            StatementStart::Constraint
         } else if exit {
             StatementStart::Exit
         } else if self.at_call_keyword() {
@@ -1543,6 +1700,35 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// A heading, a type or a constraint, as `start` says, declared in a
+    /// body at `found`, as a local one: parsed as one, and moved before the
+    /// definition it is in.
+    fn nested_definition(&mut self, start: StatementStart, found: Found) {
+        let before = self.last_end.unwrap_or(found.span.start);
+        let what = match start {
+            StatementStart::Heading => {
+                self.heading_decl();
+                "heading"
+            }
+            StatementStart::Type => {
+                self.type_decl();
+                "type"
+            }
+            _ => {
+                self.constraint_decl();
+                "constraint"
+            }
+        };
+        let end = self.last_end.unwrap_or(found.span.end);
+        self.errors.push(errors::nested_definition(
+            what,
+            found.span,
+            &self.source[found.span.start..end],
+            Span::new(before, end),
+            self.previous_item,
+        ));
+    }
+
     /// A statement: a call, an assignment statement, a local variable's
     /// declaration, an `if`, a loop, or a `return`, for leaving early.
     /// Anything else is reported, and an expression, as C and JavaScript
@@ -1571,26 +1757,11 @@ impl<'a> Parser<'a> {
                 self.skip_statement(&STATEMENT_STOPS);
                 self.errors.push(errors::bare_fail(found));
             }
-            // A heading or a type declared in a body, as a local type: parsed
-            // as one, and moved before the definition it is in.
-            Some(start @ (StatementStart::Heading | StatementStart::Type)) => {
-                let before = self.last_end.unwrap_or(found.span.start);
-                let what = if start == StatementStart::Heading {
-                    self.heading_decl();
-                    "heading"
-                } else {
-                    self.type_decl();
-                    "type"
-                };
-                let end = self.last_end.unwrap_or(found.span.end);
-                self.errors.push(errors::nested_definition(
-                    what,
-                    found.span,
-                    &self.source[found.span.start..end],
-                    Span::new(before, end),
-                    self.previous_item,
-                ));
-            }
+            Some(
+                start @ (StatementStart::Heading
+                | StatementStart::Type
+                | StatementStart::Constraint),
+            ) => self.nested_definition(start, found),
             Some(StatementStart::Exit) => {
                 self.errors.push(errors::loop_exit(found));
                 self.skip_statement(&STATEMENT_STOPS);
@@ -5958,6 +6129,7 @@ impl<'a> Parser<'a> {
             )
         }) && !self.at_heading_decl()
             && !self.at_type_decl()
+            && !self.at_constraint_decl(false)
             && !self.at_section_header()
         {
             self.bump();
@@ -8095,6 +8267,79 @@ var b := tuple { fail: fail }.fail;",
         // A keyword, never a name.
         let parse = parse_str("var tclose := 1;");
         assert!(!parse.errors.is_empty());
+    }
+
+    #[test]
+    fn constraint_declarations() {
+        // A name, defined by its condition, as `:=` defines one.
+        let parse = parse_str("constraint known := cities{country} <= countries;");
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let decl = parse.tree.constraints().next().unwrap();
+        assert_eq!(decl.name().unwrap().syntax().text().to_string(), "known");
+        assert_eq!(
+            decl.condition().unwrap().syntax().text().to_string(),
+            "cities{country} <= countries"
+        );
+        // Other languages' ways, fixed: Tutorial D's capitals and no `:=`,
+        // `:`, and SQL's assertion with its parentheses.
+        for (source, fixed, codes) in [
+            (
+                "CONSTRAINT known cities{country} <= countries;",
+                "constraint known := cities{country} <= countries;",
+                &[Code::MiscasedKeyword, Code::ConstraintForm][..],
+            ),
+            (
+                "constraint known IS_EMPTY{r: r};",
+                "constraint known := IS_EMPTY{r: r};",
+                &[Code::ConstraintForm],
+            ),
+            (
+                "constraint known: a <= b;",
+                "constraint known := a <= b;",
+                &[Code::ConstraintForm],
+            ),
+            (
+                "constraint known:a <= b;",
+                "constraint known :=a <= b;",
+                &[Code::ConstraintForm],
+            ),
+            (
+                "CREATE ASSERTION known CHECK (a <= b);",
+                "constraint known := a <= b;",
+                &[Code::ConstraintForm],
+            ),
+            (
+                "create assertion known check (a <= b) and (b <= a);",
+                "constraint known := (a <= b) and (b <= a);",
+                &[Code::ConstraintForm],
+            ),
+        ] {
+            let parse = parse_str(source);
+            let found: Vec<Code> = parse.errors.iter().map(|e| e.code).collect();
+            assert_eq!(found, codes, "{source}: {:#?}", parse.errors);
+            assert_eq!(fix(source), fixed, "{source}");
+        }
+        // Without a name, which is the program's to give: no fix.
+        for source in ["constraint cities{country} <= countries;", "constraint ok;"] {
+            let parse = parse_str(source);
+            assert_eq!(parse.errors.len(), 1, "{source}: {:#?}", parse.errors);
+            assert_eq!(parse.errors[0].code, Code::ConstraintForm, "{source}");
+            assert!(parse.errors[0].suggestions.is_empty(), "{source}");
+            assert_eq!(parse.tree.constraints().count(), 1, "{source}");
+        }
+        // In a body, moved before its operator; a local variable named
+        // `constraint` is still one.
+        let source = "var a := 1;\n\noperator main{} [\n    constraint positive := a > 0;\n];";
+        let parse = parse_str(source);
+        let found: Vec<Code> = parse.errors.iter().map(|e| e.code).collect();
+        assert_eq!(found, [Code::NestedDefinition], "{:#?}", parse.errors);
+        assert_eq!(
+            fix(source),
+            "var a := 1;\n\nconstraint positive := a > 0;\n\noperator main{} [\n];"
+        );
+        let parse =
+            parse_str("operator main{} [\n    var constraint := 1;\n    constraint := 2;\n];");
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
     }
 
     #[test]

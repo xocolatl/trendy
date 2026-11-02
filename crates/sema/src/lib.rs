@@ -3,6 +3,7 @@ mod block;
 mod body;
 mod builtins;
 mod check;
+mod constraints;
 mod errors;
 mod globals;
 mod keys;
@@ -144,6 +145,10 @@ impl Files {
     pub(crate) fn variables(&self) -> impl Iterator<Item = VarDecl> {
         self.each().flat_map(|(_, file)| file.variables())
     }
+
+    pub(crate) fn constraints(&self) -> impl Iterator<Item = ast::ConstraintDecl> {
+        self.each().flat_map(|(_, file)| file.constraints())
+    }
 }
 
 /// Where each place in the files is: the sites of what runs there.
@@ -191,6 +196,8 @@ pub(crate) struct Checked {
     evaluated: globals::Evaluated,
     /// Each valid update operator's local variables and statements.
     bodies: HashMap<hir::OperatorId, (Vec<hir::Local>, hir::Block)>,
+    /// Each valid constraint on the variables.
+    constraints: Vec<hir::VariableConstraint>,
 }
 
 /// Check `files`, as one unit.
@@ -233,7 +240,8 @@ pub(crate) fn check(files: &Files, errors: &mut Vec<Diagnostic>) -> Checked {
     )
     .evaluate(files, errors);
 
-    // Then the update operators' bodies, which refer to both.
+    // Then the constraints on the variables, which their initial values
+    // satisfy, and the update operators' bodies, which refer to both.
     let context = body::Context {
         sites: &sites,
         namespaces: &namespaces,
@@ -243,6 +251,7 @@ pub(crate) fn check(files: &Files, errors: &mut Vec<Diagnostic>) -> Checked {
         variable_ids: &variable_ids,
         declarations: &declarations,
     };
+    let constraints = constraints::check(files, &context, errors);
     let mut bodies = HashMap::new();
     let mut deferred = body::Deferred::default();
     for signature in operators.iter().filter(|s| !s.read_only) {
@@ -259,6 +268,7 @@ pub(crate) fn check(files: &Files, errors: &mut Vec<Diagnostic>) -> Checked {
         operators,
         evaluated,
         bodies,
+        constraints,
     }
 }
 
@@ -316,6 +326,7 @@ impl Checked {
         hir::Program {
             operators,
             variables,
+            constraints: self.constraints,
             subtypes: self.namespaces.subtypes,
             entry,
             message,
@@ -372,6 +383,7 @@ pub(crate) enum Kind {
     /// An operator the prelude defines in trendy.
     Prelude,
     Variable,
+    Constraint,
     Heading,
     /// A built-in type.
     Type,
@@ -387,6 +399,7 @@ impl Kind {
             Kind::Operator | Kind::Prelude => "an operator",
             Kind::Builtin => "a built-in operator",
             Kind::Variable => "a variable",
+            Kind::Constraint => "a constraint",
             Kind::Heading => "a heading",
             Kind::Type => "a built-in type",
             Kind::Defined => "a type",
@@ -398,7 +411,7 @@ impl Kind {
 /// The top-level names, the prelude's and the program's, each in its
 /// namespace: its first definition, and where it is. Operators and
 /// variables have a namespace each, so a variable can have an operator's
-/// name; types and headings have a third. Operators of one name are told
+/// name; types and headings have a third, and constraints a fourth. Operators of one name are told
 /// apart by their parameters' names, which every call writes, so a name
 /// has an operator for each set of them.
 #[derive(Default)]
@@ -407,6 +420,9 @@ pub(crate) struct Namespaces {
     /// names, in the order they are defined.
     operators: HashMap<String, Vec<OperatorName>>,
     variables: HashMap<String, Span>,
+    /// Where each constraint is declared: no name refers to one, so they
+    /// have a namespace of their own.
+    constraints: HashMap<String, Span>,
     /// Where each heading is declared.
     headings: HashMap<String, Span>,
     /// Where the prelude declares each built-in type, whose name no
@@ -539,6 +555,12 @@ impl Namespaces {
         self.variables.get(name).copied()
     }
 
+    /// Whether `ident` is its constraint name's first declaration, not a
+    /// duplicate.
+    pub(crate) fn is_first_constraint(&self, ident: &SyntaxToken) -> bool {
+        self.constraints.get(ident.text()) == Some(&trendy_syntax::span(ident.text_range()))
+    }
+
     /// The heading named `name`: where it is declared, and its attributes,
     /// unless they have errors.
     pub(crate) fn heading(&self, name: &str) -> Option<(Span, Option<&hir::Heading>)> {
@@ -647,6 +669,7 @@ fn collect_names(
             Item::Builtin(ref decl) if prelude => (Kind::Builtin, decl.name(), Some(decl.params())),
             Item::BuiltinType(ref decl) if prelude => (Kind::Type, decl.name(), None),
             Item::Variable(ref decl) => (Kind::Variable, decl.name(), None),
+            Item::Constraint(ref decl) => (Kind::Constraint, decl.name(), None),
             Item::Heading(ref decl) => (Kind::Heading, decl.name(), None),
             Item::Type(ref decl) => (Kind::Defined, decl.name(), None),
             // The prelude's kinds are checked against the compiler, and
@@ -675,6 +698,7 @@ fn collect_names(
         }
         let first = match kind {
             Kind::Variable => namespaces.variable(name).map(|s| (kind, s)),
+            Kind::Constraint => namespaces.constraints.get(name).map(|&s| (kind, s)),
             _ => namespaces
                 .heading(name)
                 .map(|(s, _)| (Kind::Heading, s))
@@ -687,6 +711,7 @@ fn collect_names(
                 continue;
             }
             (None, Kind::Variable) => &mut namespaces.variables,
+            (None, Kind::Constraint) => &mut namespaces.constraints,
             (None, Kind::Defined) => &mut namespaces.types,
             (None, Kind::Type) => &mut namespaces.builtin_types,
             (None, _) => &mut namespaces.headings,
@@ -3052,6 +3077,91 @@ operator main{{}} [ var lines: array text; {main} ];"
             "debug_value"
         );
         analyze_str("operator debug_value{} [];\noperator main{} [];").unwrap();
+    }
+
+    #[test]
+    fn constraints_hold_of_the_initial_values() {
+        const DECLARED: &str = "var cities := relation {\n    { city: \"Nyeri\", country: \"Kenya\" },\n    { city: \"Cair Paravel\", country: \"Narnia\" },\n}\nkey { city };\nvar countries := relation { { country: \"Kenya\" } } key { country };\nvar stock := 5;\n";
+        // A valid one is the program's, of the variables as variables.
+        let program =
+            analyze_str(&format!("{DECLARED}constraint stocked := stock > 0;{MAIN}")).unwrap();
+        assert_eq!(program.constraints.len(), 1);
+        let constraint = &program.constraints[0];
+        assert_eq!(constraint.name, "stocked");
+        assert_eq!(constraint.written, "stock > 0");
+        let mut mentions = false;
+        constraint.condition.for_each_child(|child, _| {
+            mentions |= matches!(child, hir::Expr::Variable(_));
+        });
+        assert!(mentions, "{:#?}", constraint.condition);
+        // One the initial values break, with what breaks it where its form
+        // says: the tuples outside the right of `<=`, a false operand of
+        // `and`, and the tuples of `is_empty`'s relation.
+        for (constraint, breaches) in [
+            (
+                "cities{country} <= countries",
+                &["`tuple { country: \"Narnia\" }` isn't in `countries`"][..],
+            ),
+            (
+                "countries >= cities{country}",
+                &["`tuple { country: \"Narnia\" }` isn't in `countries`"],
+            ),
+            (
+                "stock > 0 and is_empty{r: cities where country = \"Narnia\"}",
+                &[
+                    "`cities where country = \"Narnia\"` has `tuple { city: \"Cair Paravel\", country: \"Narnia\" }`",
+                ],
+            ),
+            ("stock mod 2 = 0", &["this is false"]),
+        ] {
+            let source = format!("{DECLARED}constraint known := {constraint};{MAIN}");
+            let broken = errors(&source);
+            assert_eq!(broken.len(), 1, "{constraint}: {broken:#?}");
+            let d = &broken[0];
+            assert_eq!(d.code, Code::ConstraintViolated, "{constraint}");
+            assert_eq!(d.message, "the initial values break the constraint `known`");
+            let labels: Vec<&str> = std::iter::once(&d.primary)
+                .chain(&d.secondary)
+                .map(|l| l.message.as_str())
+                .filter(|l| *l != "false of the initial values")
+                .collect();
+            assert_eq!(labels, breaches, "{constraint}");
+        }
+        // One that mentions no variable says nothing, or can never hold.
+        let source = format!("{DECLARED}constraint always := 1 < 2;\n{MAIN}");
+        assert_eq!(fix(&source), format!("{DECLARED}operator main{{}} [];"));
+        for condition in ["1 < 2", "2 < 1"] {
+            let constant = errors(&format!("{DECLARED}constraint c := {condition};{MAIN}"));
+            assert_eq!(constant.len(), 1, "{condition}: {constant:#?}");
+            assert_eq!(constant[0].code, Code::ConstantConstraint, "{condition}");
+        }
+        // A part of it that fails is reported where it is.
+        let source = format!("{DECLARED}constraint c := 10 div (stock - 5) > 0;{MAIN}");
+        let failed = errors(&source);
+        assert_eq!(failed.len(), 1, "{failed:#?}");
+        let at = failed[0].primary.span;
+        assert_eq!(&source[at.start..at.end], "(stock - 5)");
+        // A boolean, with names of one namespace each.
+        for (constraint, code) in [
+            ("c := stock", Code::TypeMismatch),
+            ("c := stocks > 0", Code::UnknownName),
+            (
+                "c := stock > 0;\nconstraint c := stock < 9",
+                Code::DuplicateName,
+            ),
+        ] {
+            let found = errors(&format!("{DECLARED}constraint {constraint};{MAIN}"));
+            let codes: Vec<Code> = found.iter().map(|e| e.code).collect();
+            assert_eq!(codes, [code], "{constraint}: {found:#?}");
+        }
+        // A variable's name too, as nothing names a constraint as a value.
+        assert!(analyze_str(&format!("{DECLARED}constraint cities := stock > 0;{MAIN}")).is_ok());
+        // In the interface, though its variables are the implementation's.
+        let source = "interface\n\nconstraint stocked := stock > 0;\n\nimplementation\n\nvar stock := 5;\n\noperator main{} [];";
+        assert_eq!(
+            fix(source),
+            "interface\n\nimplementation\n\nvar stock := 5;\n\noperator main{} [];\nconstraint stocked := stock > 0;\n"
+        );
     }
 
     #[test]

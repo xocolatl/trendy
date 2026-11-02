@@ -85,7 +85,8 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
     // a supertype's `is`, a type's `constraint` and `order`, a
     // conversion's `to` and `from`, a type test's `is`, a treat's
     // `treat`, a failure's `fail`, a warning's `warn`, a transaction's
-    // `collecting`, and a unit's `interface` and `implementation`.
+    // `collecting`, a unit's `interface` and `implementation`, and a
+    // constraint's declaration's `constraint`.
     let keyword = match parent {
         Some(SyntaxKind::BuiltinType) => token.text() == "type",
         Some(SyntaxKind::AnyType) => matches!(token.text(), "any" | "type"),
@@ -102,6 +103,7 @@ fn word(token: &SyntaxToken) -> Option<(Class, bool)> {
             | SyntaxKind::OrderItem
             | SyntaxKind::ForStmt
             | SyntaxKind::HeadingDecl
+            | SyntaxKind::ConstraintDecl
             | SyntaxKind::TypeDecl
             | SyntaxKind::Supertype
             | SyntaxKind::IsExpr
@@ -621,6 +623,24 @@ mod tests {
                 ("home", Class::Type, false),
                 ("relation", Class::Keyword, false),
                 ("home", Class::Type, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn constraints() {
+        // The keyword, and the variables its condition mentions; its name
+        // is no value or type.
+        assert_eq!(
+            highlight("var a := 1;\nconstraint positive := a > 0;"),
+            [
+                ("var", Class::Keyword, false),
+                ("a", Class::Variable, true),
+                ("1", Class::Number, false),
+                ("constraint", Class::Keyword, false),
+                ("a", Class::Variable, false),
+                (">", Class::ExprOperator, false),
+                ("0", Class::Number, false),
             ]
         );
     }

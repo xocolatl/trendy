@@ -1,0 +1,48 @@
+/* Languages, the countries each is official in, and the rules that keep
+   them together: constraints, each a condition on the variables that
+   holds whenever a statement ends (TTM RM Prescription 23). Each name is
+   in its own language too. */
+var countries := relation {
+    { country: "Kenya", native: "Kenya" },
+    { country: "Tanzania", native: "Tanzania" },
+    { country: "India", native: "भारत" },
+    { country: "Peru", native: "Perú" },
+    { country: "Bolivia", native: "Bolivia" },
+}
+key { country };
+
+var languages := relation {
+    { language: "Swahili", native: "Kiswahili" },
+    { language: "Hindi", native: "हिन्दी" },
+}
+key { language };
+
+var official := relation {
+    { language: "Swahili", country: "Kenya" },
+    { language: "Swahili", country: "Tanzania" },
+    { language: "Hindi", country: "India" },
+}
+key { language, country };
+
+/* Every country a language is official in is one there is, and so is
+   every language, and each language is official somewhere. */
+constraint known_countries := official{country} <= countries{country};
+constraint known_languages := official{language} <= languages{language};
+constraint official_somewhere := languages{language} <= official{language};
+
+/* Quechua, official in Peru and Bolivia: a language and where it is
+   official, assigned at once, as neither holds without the other. */
+operator add_quechua{} [
+    assign {
+        insert languages relation { { language: "Quechua", native: "Runa Simi" } };
+        insert official relation {
+            { language: "Quechua", country: "Peru" },
+            { language: "Quechua", country: "Bolivia" },
+        };
+    };
+];
+
+operator main{} [
+    call add_quechua{};
+    call debug_table{r: official join languages};
+];

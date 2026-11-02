@@ -302,6 +302,12 @@ pub(crate) fn kinds(
                 decl.span(),
                 "a variable",
             )),
+            Item::Constraint(decl) => errors.push(Diagnostic::error(
+                Code::Internal,
+                "the prelude declares no constraints",
+                trendy_syntax::span(decl.syntax().text_range()),
+                "a constraint",
+            )),
             Item::Builtin(_)
             | Item::Kind(_)
             | Item::Operator(_)

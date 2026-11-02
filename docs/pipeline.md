@@ -440,6 +440,15 @@ Ada `out`, or before a value, as C#, Swift and Rust write `ref x`, `out
 x`, `&x` and `&mut x`, which the fix moves before the name. Tutorial D's `UPDATES { … }` after the parameters is consumed into an
 error node, whose fix writes `var` before each parameter it lists.
 
+`constraint name := condition;` (`ConstraintDecl`) is a definition too,
+`constraint` a contextual keyword at a definition's start, and in a
+body before a name and `:=` or `:`, where it is moved before the
+operator (P0034). Without a name, before an operator or the `;` after the
+word, the condition is parsed alone and reported, with no fix. Tutorial
+D's `CONSTRAINT name condition`, without `:=`, `name: condition`, and
+SQL's `CREATE ASSERTION name CHECK (condition)`, whose parentheses around
+the whole condition the fix removes, are reported with fixes (P0055).
+
 `heading name := { … };` (`HeadingDecl`) is a definition, `heading` a
 contextual keyword recognized at a definition's start before a name.
 After `relation` or `tuple`, in a type or a selector, a name in place of
@@ -1026,6 +1035,22 @@ tuples that share a key's values when compiling (R0008), with the
 component of another representation computed by its conversion from the
 stored one, which `hir::Defined::checks` lists with the constraints for
 sema to check first.
+
+A constraint on the variables (`constraints::check`, after the globals)
+is checked twice. Its names (`ConditionNames`) resolve a variable as a
+variable, `hir::Expr::Variable`, for the condition the program keeps
+(`hir::VariableConstraint`, in `hir::Program::constraints`, with the
+value blocks' locals and the condition's text), and then each to its
+initial value, so that the condition is computed when compiling and a
+part of it that fails is reported where it is, as in an initial value. A
+condition that mentions no variable is A0058, deleted by its fix when it
+is true. One the initial values break is R0023, whose labels say what
+breaks it where its form says: each part is checked again of the initial
+values, the false operands of an `and`, the tuples of `a minus b` for
+`a <= b`, and those of the relation `is_empty` is given. Constraints have
+a namespace of their own, for A0001, since no name refers to one. One in
+the interface is moved to the implementation (`sections::check`), as a
+variable is.
 
 An assignment's target must be a variable, not a parameter, which is
 read-only, nor an operator (A0026), and its value must have the variable's

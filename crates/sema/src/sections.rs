@@ -16,7 +16,8 @@ use trendy_syntax::{SyntaxKind, SyntaxNode};
 use crate::errors;
 
 /// Report what `file`'s interface can't have that its signatures don't
-/// show: variables, which a unit never exports, and names of types or
+/// show: variables, which a unit never exports, and constraints on them,
+/// and names of types or
 /// headings only its implementation declares, which other units couldn't
 /// see (A0067), each once.
 pub(crate) fn check(file: &SourceFile, errors: &mut Vec<Diagnostic>) {
@@ -40,6 +41,15 @@ pub(crate) fn check(file: &SourceFile, errors: &mut Vec<Diagnostic>) {
         if let Item::Variable(decl) = &item {
             if ast::section_of(decl.syntax()) == Section::Interface {
                 errors.push(errors::interface_variable(
+                    decl,
+                    moved(file, decl.syntax(), Section::Implementation),
+                ));
+            }
+            continue;
+        }
+        if let Item::Constraint(decl) = &item {
+            if ast::section_of(decl.syntax()) == Section::Interface {
+                errors.push(errors::interface_constraint(
                     decl,
                     moved(file, decl.syntax(), Section::Implementation),
                 ));
@@ -120,18 +130,20 @@ fn declared_at(node: &SyntaxNode) -> Span {
 /// is, with the blank lines after it, and written there.
 pub(crate) fn moved(file: &SourceFile, node: &SyntaxNode, to: Section) -> Vec<Edit> {
     let start = attached_start(node);
-    let end = next_start(file, node);
     let text = file.syntax().text().to_string();
     let file_start = usize::from(file.syntax().text_range().start());
     let declaration =
         text[start - file_start..usize::from(node.text_range().end()) - file_start].to_string();
-    vec![
-        Edit {
-            span: Span::new(start, end),
-            replacement: String::new(),
-        },
-        written_at_end(file, to, &declaration),
-    ]
+    vec![removal(file, node), written_at_end(file, to, &declaration)]
+}
+
+/// The edit that removes the declaration `node`, of `file`, with the
+/// comments just before it and the blank lines after it.
+pub(crate) fn removal(file: &SourceFile, node: &SyntaxNode) -> Edit {
+    Edit {
+        span: Span::new(attached_start(node), next_start(file, node)),
+        replacement: String::new(),
+    }
 }
 
 /// The edit that writes `text`, a declaration, at the end of `file`'s

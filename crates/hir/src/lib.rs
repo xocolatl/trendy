@@ -19,6 +19,9 @@ pub struct Program {
     /// the prelude's first.
     pub operators: Vec<Operator>,
     pub variables: Vec<Variable>,
+    /// The constraints on the variables, which their initial values
+    /// satisfy.
+    pub constraints: Vec<VariableConstraint>,
     /// Each type's immediate subtypes, by its name: a union type's, what
     /// a value of it can be, of which the largest decides how much room it
     /// takes, and a regular type's, defined by constraints, which decide
@@ -3126,6 +3129,23 @@ impl BinaryOp {
             _ => panic!("`{self:?}` of {lhs:?} and {rhs:?}"),
         }
     }
+}
+
+/// A constraint on the program's variables (TTM RM Prescription 23): a
+/// condition, named, that holds whenever a statement ends, so that no
+/// statement can leave the variables in a state that breaks it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VariableConstraint {
+    /// Unique among the constraints.
+    pub name: String,
+    /// The condition, a boolean computed from the variables, which it
+    /// mentions one or more of.
+    pub condition: Expr,
+    /// The local variables of the value blocks in it, which its `Let`s give
+    /// values.
+    pub locals: Vec<Local>,
+    /// The condition as it is written, which an error says is broken.
+    pub written: String,
 }
 
 /// A variable defined at the top level of the program.

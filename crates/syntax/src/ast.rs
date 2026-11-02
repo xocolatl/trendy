@@ -44,6 +44,7 @@ ast_node!(BuiltinOperator);
 ast_node!(BuiltinType);
 ast_node!(KindDecl);
 ast_node!(HeadingDecl);
+ast_node!(ConstraintDecl);
 ast_node!(TypeDecl);
 ast_node!(Supertype);
 ast_node!(TypeBody);
@@ -134,6 +135,7 @@ pub enum Item {
     Heading(HeadingDecl),
     Type(TypeDecl),
     Variable(VarDecl),
+    Constraint(ConstraintDecl),
 }
 
 impl Unit {
@@ -212,8 +214,13 @@ impl SourceFile {
                 .or_else(|| KindDecl::cast(node.clone()).map(Item::Kind))
                 .or_else(|| HeadingDecl::cast(node.clone()).map(Item::Heading))
                 .or_else(|| TypeDecl::cast(node.clone()).map(Item::Type))
-                .or_else(|| VarDecl::cast(node).map(Item::Variable))
+                .or_else(|| VarDecl::cast(node.clone()).map(Item::Variable))
+                .or_else(|| ConstraintDecl::cast(node).map(Item::Constraint))
         })
+    }
+
+    pub fn constraints(&self) -> impl Iterator<Item = ConstraintDecl> {
+        self.0.children().filter_map(ConstraintDecl::cast)
     }
 
     pub fn headings(&self) -> impl Iterator<Item = HeadingDecl> {
@@ -372,6 +379,26 @@ impl HeadingDecl {
     #[must_use]
     pub fn heading(&self) -> Option<Heading> {
         self.0.children().find_map(Heading::cast)
+    }
+}
+
+impl ConstraintDecl {
+    /// The word `constraint`, or SQL's `create`, which the parser reports.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    /// Its name, which the parser reports missing.
+    #[must_use]
+    pub fn name(&self) -> Option<Name> {
+        self.0.children().find_map(Name::cast)
+    }
+
+    /// The condition the unit's variables satisfy.
+    #[must_use]
+    pub fn condition(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
     }
 }
 

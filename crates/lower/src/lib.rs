@@ -6095,6 +6095,7 @@ mod tests {
             message: hir::OperatorId(operators.len() - 1),
             operators,
             variables,
+            constraints: Vec::new(),
             subtypes: [("error".to_string(), errors)].into(),
             entry: hir::OperatorId(entry),
         }

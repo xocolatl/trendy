@@ -57,6 +57,8 @@ pub(crate) fn duplicate_name(name: &str, this: (Kind, Span), first: (Kind, Span)
     );
     let note = if this.0 == Kind::Variable {
         "variables have a namespace of their own, so no two can have the same name, though a variable can have an operator's"
+    } else if this.0 == Kind::Constraint {
+        "constraints have a namespace of their own, so no two can have the same name, though a constraint can have any other's"
     } else {
         "headings share a namespace with the types, so no two can have the same name, nor a heading a built-in type's, though a heading can have a variable's or an operator's"
     };
@@ -8255,6 +8257,25 @@ pub(crate) fn interface_variable(decl: &ast::VarDecl, moved: Vec<Edit>) -> Diagn
     .with_suggestion("move it to the implementation", moved)
 }
 
+/// The constraint `decl`, declared in its unit's interface, though the
+/// variables it mentions are the implementation's: what is true of them is
+/// the unit's to keep. `moved` moves it to the implementation.
+pub(crate) fn interface_constraint(decl: &ast::ConstraintDecl, moved: Vec<Edit>) -> Diagnostic {
+    let at = decl.name().and_then(|n| n.ident()).map_or_else(
+        || trendy_syntax::span(decl.syntax().text_range()),
+        |ident| trendy_syntax::span(ident.text_range()),
+    );
+    Diagnostic::error(
+        Code::InterfaceDeclaration,
+        "a unit's interface exports no constraints on its variables",
+        at,
+        "a constraint",
+    )
+    .with_note(SECTIONS_RULE)
+    .with_note("a constraint is as visible as the variables it mentions: a unit's are its implementation's, and what is true of them is the unit's to keep")
+    .with_suggestion("move it to the implementation", moved)
+}
+
 /// The type or heading `name`, which its unit's interface mentions at `at`
 /// but only its implementation declares, at `declared`. `moved` moves the
 /// declaration to the interface.
@@ -8418,4 +8439,106 @@ pub(crate) fn tclose_operand(
         "project it on two attributes of one type, the ends of each arc, as {}",
         trendy_diag::disjoin(&pairs)
     ))
+}
+
+/// What a constraint on variables is, for the notes of its errors.
+const VARIABLE_CONSTRAINT_RULE: &str = "a constraint, `constraint name := condition;`, is a condition on the unit's variables that holds whenever a statement ends, and so of their initial values too, which are known when compiling (TTM RM Prescription 23)";
+
+/// The constraint `name`, whose condition, `condition`, mentions no
+/// variable, so it is `holds` whatever their values: true, which says
+/// nothing, and `removal` deletes, or false, which no values satisfy.
+pub(crate) fn variable_free_constraint(
+    name: &str,
+    condition: &Expr,
+    holds: bool,
+    removal: Edit,
+) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::ConstantConstraint,
+        format!("the constraint `{name}` mentions no variable"),
+        condition.span(),
+        if holds {
+            "true whatever the variables are"
+        } else {
+            "false whatever the variables are"
+        },
+    )
+    .with_note(VARIABLE_CONSTRAINT_RULE);
+    if holds {
+        d.with_note("one true whatever the variables are says nothing about them")
+            .with_suggestion("delete the constraint", vec![removal])
+    } else {
+        d.with_note(
+            "one false whatever the variables are can never hold, so the program could never start",
+        )
+        .with_help("write the condition on the variables whose values it is to keep true")
+    }
+}
+
+/// The constraint `name`, whose condition, `condition`, mentioning the
+/// variables `mentioned`, is false of their initial values, for the
+/// `breaches` found in it, each at the part it is about.
+pub(crate) fn constraint_broken_initially(
+    name: &str,
+    condition: &Expr,
+    breaches: Vec<(Span, String)>,
+    mentioned: &[&str],
+) -> Diagnostic {
+    let whole = condition.span();
+    let (label, breaches): (String, Vec<(Span, String)>) = match breaches.as_slice() {
+        [(span, label)] if *span == whole => (label.clone(), Vec::new()),
+        _ => ("false of the initial values".to_string(), breaches),
+    };
+    let variables: Vec<String> = mentioned.iter().map(|v| format!("`{v}`")).collect();
+    let noun = if mentioned.len() == 1 {
+        "value"
+    } else {
+        "values"
+    };
+    breaches
+        .into_iter()
+        .fold(
+            Diagnostic::error(
+                Code::ConstraintViolated,
+                format!("the initial values break the constraint `{name}`"),
+                whole,
+                label,
+            ),
+            |d, (span, label)| d.with_secondary(span, label),
+        )
+        .with_note(VARIABLE_CONSTRAINT_RULE)
+        .with_help(format!(
+            "change the initial {noun} of {}, or the constraint, so that it holds",
+            trendy_diag::disjoin(&variables)
+        ))
+}
+
+/// The most tuples a constraint's error lists of those that break it.
+const LISTED_TUPLES: usize = 3;
+
+/// `tuples`, as an error lists them, up to [`LISTED_TUPLES`], and how many
+/// more there are.
+fn listed_tuples(tuples: &[&hir::TupleValue]) -> String {
+    let mut listed: Vec<String> = tuples
+        .iter()
+        .take(LISTED_TUPLES)
+        .map(|t| format!("`tuple {t}`"))
+        .collect();
+    if tuples.len() > LISTED_TUPLES {
+        listed.push(format!("{} more", tuples.len() - LISTED_TUPLES));
+    }
+    trendy_diag::conjoin(&listed)
+}
+
+/// That `tuples`, of the left of an `<=` or the right of an `>=`, aren't in
+/// the relation written `within`.
+pub(crate) fn tuples_outside(tuples: &[&hir::TupleValue], within: &str) -> String {
+    let verb = if tuples.len() == 1 { "isn't" } else { "aren't" };
+    format!("{} {verb} in `{within}`", listed_tuples(tuples))
+}
+
+/// That the relation written `relation`, which `is_empty` says has none,
+/// has `tuples`.
+pub(crate) fn tuples_in(tuples: &[&hir::TupleValue], relation: &str) -> String {
+    format!("`{relation}` has {}", listed_tuples(tuples))
 }

@@ -942,6 +942,28 @@ fn units() {
 }
 
 #[test]
+fn constraints() {
+    // Quechua, added with where it is official at once, which the
+    // constraints the initial values satisfy hold of too.
+    let (code, stderr) = run_example("constraints");
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        [
+            "┌──────────┬──────────┬───────────┐",
+            "│ country  │ language │ native    │",
+            "├──────────┼──────────┼───────────┤",
+            "│ Bolivia  │ Quechua  │ Runa Simi │",
+            "│ India    │ Hindi    │ हिन्दी     │",
+            "│ Kenya    │ Swahili  │ Kiswahili │",
+            "│ Peru     │ Quechua  │ Runa Simi │",
+            "│ Tanzania │ Swahili  │ Kiswahili │",
+            "└──────────┴──────────┴───────────┘",
+        ]
+    );
+}
+
+#[test]
 fn transactions() {
     let (code, stderr) = run_example("transactions");
     let table = "┌──────────┬──────────┬───────┐

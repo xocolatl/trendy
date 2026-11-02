@@ -208,6 +208,10 @@ pub enum SyntaxKind {
     /// stands for it after `relation` and `tuple`. `heading` is a
     /// contextual keyword, an identifier elsewhere.
     HeadingDecl,
+    /// `constraint name := condition;`: a condition the unit's variables
+    /// satisfy whenever a statement ends. `constraint` is a contextual
+    /// keyword, an identifier elsewhere.
+    ConstraintDecl,
     /// `type name { { name: type, … } };`: a scalar type of the program's
     /// own, with its possible representation, or `type name union;`, a
     /// union type, whose values are its subtypes'. `type` is a contextual
@@ -439,7 +443,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 172] = [
+    pub const ALL: [SyntaxKind; 173] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -530,6 +534,7 @@ impl SyntaxKind {
         SyntaxKind::KindDecl,
         SyntaxKind::SectionHeader,
         SyntaxKind::HeadingDecl,
+        SyntaxKind::ConstraintDecl,
         SyntaxKind::TypeDecl,
         SyntaxKind::Supertype,
         SyntaxKind::TypeBody,
@@ -1032,6 +1037,7 @@ impl SyntaxKind {
             SyntaxKind::KindDecl => "kind declaration",
             SyntaxKind::SectionHeader => "section header",
             SyntaxKind::HeadingDecl => "heading declaration",
+            SyntaxKind::ConstraintDecl => "constraint declaration",
             SyntaxKind::TypeDecl => "type declaration",
             SyntaxKind::Supertype => "supertype",
             SyntaxKind::TypeBody => "type's representation",

@@ -98,6 +98,7 @@ codes! {
     UnitForm => "P0052",
     SectionOrder => "P0053",
     TcloseOrder => "P0054",
+    ConstraintForm => "P0055",
     DuplicateName => "A0001",
     MissingMain => "A0002",
     UnknownType => "A0003",
@@ -189,6 +190,7 @@ codes! {
     OverlappingSubtypes => "R0020",
     Failed => "R0021",
     Warned => "R0022",
+    ConstraintViolated => "R0023",
     Internal => "X0000",
 }
 

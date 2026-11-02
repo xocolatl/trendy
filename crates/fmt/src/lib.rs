@@ -958,8 +958,8 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
 }
 
 /// The whitespace between definitions, after `prev`, a `;`: declarations
-/// of one kind in a row, variables', headings', types', built-in types' or
-/// kinds', go on adjacent lines unless the source groups them with a blank
+/// of one kind in a row, variables', headings', types', built-in types',
+/// kinds' or constraints', go on adjacent lines unless the source groups them with a blank
 /// line, as `blank_line` says, and everything else is separated by a blank
 /// line.
 fn between_definitions(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'static str {
@@ -970,6 +970,7 @@ fn between_definitions(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool)
         SyntaxKind::TypeDecl,
         SyntaxKind::BuiltinType,
         SyntaxKind::KindDecl,
+        SyntaxKind::ConstraintDecl,
     ]
     .into_iter()
     .any(both);
@@ -1325,6 +1326,22 @@ mod tests {
         assert_eq!(
             fmt("operator f{} [ fail(e) ; ];"),
             "operator f{} [\n    fail (e);\n];\n"
+        );
+    }
+
+    #[test]
+    fn constraint_declarations() {
+        assert_eq!(
+            fmt(
+                "constraint known:=cities{country}<=countries;\nconstraint   some:=not is_empty{r:cities};"
+            ),
+            "constraint known := cities{country} <= countries;\nconstraint some := not is_empty{r: cities};\n"
+        );
+        // Grouped apart from the variables they are about, as the source
+        // groups them.
+        assert_eq!(
+            fmt("var a := 1;\n\nconstraint positive := a > 0;"),
+            "var a := 1;\n\nconstraint positive := a > 0;\n"
         );
     }
 

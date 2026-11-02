@@ -563,7 +563,7 @@ pub(crate) fn signatures(
                     });
                 }
             }
-            Item::Variable(_) | Item::Heading(_) => {}
+            Item::Variable(_) | Item::Heading(_) | Item::Constraint(_) => {}
         }
     }
     families(&mut list, namespaces, errors);
