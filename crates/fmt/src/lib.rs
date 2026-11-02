@@ -832,6 +832,13 @@ fn separator(prev: &SyntaxToken, next: &SyntaxToken, blank_line: bool) -> &'stat
     if prev.kind() == Semicolon {
         return between_definitions(prev, next, blank_line);
     }
+    // A section's header is alone on its line, between blank lines.
+    if prev
+        .parent()
+        .is_some_and(|p| p.kind() == SyntaxKind::SectionHeader)
+    {
+        return "\n\n";
+    }
     // Braces with spaces inside, but for an empty list's `{}`.
     let list_brace = |token: &SyntaxToken| {
         token
@@ -1311,6 +1318,22 @@ mod tests {
         assert_eq!(
             fmt("operator f{} [ fail(e) ; ];"),
             "operator f{} [\n    fail (e);\n];\n"
+        );
+    }
+
+    #[test]
+    fn sections() {
+        // A header alone on its line, between blank lines.
+        assert_eq!(
+            fmt(
+                "interface operator f{n:integer}:integer; implementation operator f{n:integer}:integer[n] ;operator main{}[];"
+            ),
+            "interface\n\noperator f{n: integer}: integer;\n\nimplementation\n\noperator f{n: integer}: integer [\n    n\n];\n\noperator main{} [];\n"
+        );
+        // With a comment after it, and an empty section.
+        assert_eq!(
+            fmt("interface\n/* none */\nimplementation\noperator main{} [];"),
+            "interface\n\n/* none */\nimplementation\n\noperator main{} [];\n"
         );
     }
 

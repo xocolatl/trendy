@@ -6,7 +6,7 @@ use std::ops::RangeInclusive;
 
 use trendy_diag::{Diagnostic, Span};
 use trendy_lexer::{Lexed, Token};
-use trendy_syntax::ast::{AstNode, SourceFile};
+use trendy_syntax::ast::{AstNode, Section, SourceFile};
 use trendy_syntax::{Precedence, SyntaxKind, TreeBuilder};
 
 use crate::sequences::bracketed_lists;
@@ -37,6 +37,7 @@ pub fn parse(source: &str, lexed: Lexed) -> Parse {
         missing: None,
         paren_calls: true,
         previous_item: None,
+        headers: Vec::new(),
         builder: TreeBuilder::new(),
         errors: lexed.errors,
     };
@@ -73,6 +74,9 @@ struct Parser<'a> {
     /// Where the top-level definition before the one being parsed ends, if
     /// there is one: where a definition written inside this one goes.
     previous_item: Option<usize>,
+    /// The sections' headers so far, each with its word: where a unit's
+    /// sections go out of order.
+    headers: Vec<(Section, Found<'a>)>,
     builder: TreeBuilder,
     errors: Vec<Diagnostic>,
 }
@@ -217,6 +221,33 @@ fn direction(word: &str) -> Option<&'static str> {
 /// an image relation.
 /// `fail`, and other languages' words for it: Java's, JavaScript's and
 /// C++'s `throw`, and Python's and Ruby's `raise`.
+/// The words that start a unit's sections, as written, and the sections
+/// they start.
+const SECTIONS: [(&str, Section); 2] = [
+    ("interface", Section::Interface),
+    ("implementation", Section::Implementation),
+];
+
+/// The words other languages name a unit with at its top: Delphi's and
+/// Pascal's `unit`, `program` and `library`, Modula-2's and Haskell's
+/// `module`, and Java's and Go's `package`.
+const UNIT_WORDS: [&str; 5] = ["unit", "program", "library", "module", "package"];
+
+/// Delphi's sections a trendy unit hasn't, which run statements as the
+/// program starts and ends.
+const UNIT_PARTS: [&str; 2] = ["initialization", "finalization"];
+
+/// The words other languages mark a declaration exported with: Rust's
+/// `pub`, JavaScript's `export` and Java's `public`.
+const EXPORT_WORDS: [&str; 3] = ["pub", "export", "public"];
+
+/// C++'s access labels, `public:` and `private:`, and the sections they
+/// are written as instead.
+const ACCESS_LABELS: [(&str, Section); 2] = [
+    ("public", Section::Interface),
+    ("private", Section::Implementation),
+];
+
 const FAIL_WORDS: [&str; 3] = ["fail", "throw", "raise"];
 
 /// PL/pgSQL's levels of `RAISE` that carry on, as `warn` does: `RAISE
@@ -273,9 +304,84 @@ impl<'a> Parser<'a> {
                 SyntaxKind::Ident if self.at_kind() => self.kind_decl(),
                 SyntaxKind::Ident if self.at_type_decl() => self.type_decl(),
                 SyntaxKind::Ident if self.at_heading_decl() => self.heading_decl(),
+                SyntaxKind::Ident if self.at_section_header() => self.section_header(),
                 _ => self.junk(found),
             }
         }
+    }
+
+    /// Whether a unit's section starts here: `interface` or
+    /// `implementation`, in any case, but not TypeScript's `interface Home
+    /// { … }`, which declares a heading, or C++'s `public:` or `private:`,
+    /// another language's way to start one.
+    fn at_section_header(&mut self) -> bool {
+        let Some(found) = self.found().filter(|f| f.kind == SyntaxKind::Ident) else {
+            return false;
+        };
+        if SECTIONS
+            .iter()
+            .any(|(word, _)| found.text.eq_ignore_ascii_case(word))
+        {
+            return true;
+        }
+        ACCESS_LABELS
+            .iter()
+            .any(|(label, _)| found.text.eq_ignore_ascii_case(label))
+            && self
+                .found_after(1)
+                .is_some_and(|f| f.kind == SyntaxKind::Colon)
+    }
+
+    /// A section's header, which [`Parser::at_section_header`] found: its
+    /// word, reported in another case, or C++'s label, fixed to it, and
+    /// where it is out of order, a second header of one section, or the
+    /// interface after the implementation.
+    fn section_header(&mut self) {
+        self.start_node(SyntaxKind::SectionHeader);
+        let word = self.found().expect("at the header");
+        self.bump();
+        let written = SECTIONS
+            .iter()
+            .find(|(written, _)| word.text.eq_ignore_ascii_case(written));
+        let section = if let Some(&(written, section)) = written {
+            if word.text != written {
+                self.errors.push(errors::miscased_keyword(word, written));
+            }
+            section
+        } else {
+            let &(_, section) = ACCESS_LABELS
+                .iter()
+                .find(|(label, _)| word.text.eq_ignore_ascii_case(label))
+                .expect("at a label");
+            let colon = self.found().expect("the label's `:` is next");
+            self.bump();
+            self.errors
+                .push(errors::access_label(word, colon.span.end, section));
+            section
+        };
+        self.builder.finish_node();
+        let earlier = self
+            .headers
+            .iter()
+            .find(|(s, _)| *s == section)
+            .map(|&(_, f)| f);
+        let implementation = self
+            .headers
+            .iter()
+            .find(|(s, _)| *s == Section::Implementation)
+            .map(|&(_, f)| f);
+        if let Some(earlier) = earlier {
+            // A second interface after the implementation has the items
+            // between them to move, so only the second implementation, or a
+            // second interface before it, is removed.
+            let removable = section == Section::Implementation || implementation.is_none();
+            self.errors
+                .push(errors::second_section(word, earlier, section, removable));
+        } else if let (Section::Interface, Some(implementation)) = (section, implementation) {
+            self.errors
+                .push(errors::interface_after_implementation(word, implementation));
+        }
+        self.headers.push((section, word));
     }
 
     /// Whether a kind declaration starts here: `kind`, a contextual keyword,
@@ -5807,6 +5913,9 @@ impl<'a> Parser<'a> {
     /// Wrap tokens that don't start a definition in an error node, up to the
     /// next definition keyword or the end of input. `first` is the next token.
     fn junk(&mut self, first: Found<'a>) {
+        if self.unit_habit(first) {
+            return;
+        }
         let name = self.found_after(1);
         let after_name = self.found_after(2);
         self.start_node(SyntaxKind::Error);
@@ -5817,11 +5926,19 @@ impl<'a> Parser<'a> {
             )
         }) && !self.at_heading_decl()
             && !self.at_type_decl()
+            && !self.at_section_header()
         {
             self.bump();
         }
         self.builder.finish_node();
         let end = self.last_end.unwrap_or(first.span.end);
+        if UNIT_PARTS
+            .iter()
+            .any(|word| first.text.eq_ignore_ascii_case(word))
+        {
+            self.errors.push(errors::unit_part(first));
+            return;
+        }
         // `VAR` or `Operator`: a definition keyword in the wrong case.
         let miscased = [SyntaxKind::OperatorKw, SyntaxKind::VarKw]
             .into_iter()
@@ -5836,6 +5953,86 @@ impl<'a> Parser<'a> {
                 Span::new(first.span.start, end),
             ),
         });
+    }
+
+    /// Another language's way to write a unit that is one token or a few,
+    /// at `first`, where a definition goes, consumed and reported: whether
+    /// it was one. Delphi's and Pascal's `unit lakes;`, `program lakes;`
+    /// and `library lakes;`, Modula-2's `MODULE lakes;`, Java's `package
+    /// lakes;` and Go's without the `;`, and Haskell's `module Lakes
+    /// where` name the unit, which its path does, and are removed, as is
+    /// Delphi's `end.` after the implementation. A word that marks a
+    /// declaration exported, as Rust's `pub` and JavaScript's `export` do,
+    /// before one, is reported, with help: what the interface declares is
+    /// exported.
+    fn unit_habit(&mut self, first: Found<'a>) -> bool {
+        let next = self.found_after(1);
+        let is = |word: &str| first.text.eq_ignore_ascii_case(word);
+        if is("end") && next.is_some_and(|f| f.kind == SyntaxKind::Dot) {
+            self.start_node(SyntaxKind::Error);
+            self.bump();
+            self.bump();
+            self.builder.finish_node();
+            let span = Span::new(first.span.start, self.last_end.unwrap_or(first.span.end));
+            self.errors
+                .push(errors::unit_end(span, self.removal_end(span)));
+            return true;
+        }
+        if EXPORT_WORDS.iter().any(|word| is(word))
+            && self.found_after(1).is_some_and(|f| {
+                matches!(f.kind, SyntaxKind::OperatorKw | SyntaxKind::VarKw)
+                    || (f.kind == SyntaxKind::Ident
+                        && ["type", "heading"]
+                            .iter()
+                            .any(|w| f.text.eq_ignore_ascii_case(w)))
+            })
+        {
+            self.start_node(SyntaxKind::Error);
+            self.bump();
+            self.builder.finish_node();
+            self.errors.push(errors::export_word(first));
+            return true;
+        }
+        if !UNIT_WORDS.iter().any(|word| is(word))
+            || next.is_none_or(|f| f.kind != SyntaxKind::Ident)
+        {
+            return false;
+        }
+        // The name, dotted, then `;`, Haskell's `where`, or nothing.
+        let mut n = 2;
+        while self
+            .found_after(n)
+            .is_some_and(|f| f.kind == SyntaxKind::Dot)
+            && self
+                .found_after(n + 1)
+                .is_some_and(|f| f.kind == SyntaxKind::Ident)
+        {
+            n += 2;
+        }
+        let ender = self
+            .found_after(n)
+            .is_some_and(|f| matches!(f.kind, SyntaxKind::Semicolon | SyntaxKind::WhereKw));
+        let tokens = if ender { n + 1 } else { n };
+        self.start_node(SyntaxKind::Error);
+        for _ in 0..tokens {
+            self.bump();
+        }
+        self.builder.finish_node();
+        let span = Span::new(first.span.start, self.last_end.unwrap_or(first.span.end));
+        self.errors.push(errors::unit_declaration(
+            first,
+            span,
+            self.removal_end(span),
+        ));
+        true
+    }
+
+    /// Where removing the text at `span` ends: after the line ends and the
+    /// blank lines that follow it, so that what comes next takes its place.
+    fn removal_end(&self, span: Span) -> usize {
+        let rest = &self.source[span.end..];
+        let kept = rest.trim_start_matches([' ', '\t', '\r', '\n']);
+        span.end + rest.len() - kept.len()
     }
 
     /// Start a node at the next significant token, so that trivia before it
@@ -7818,6 +8015,122 @@ var b := tuple { fail: fail }.fail;",
             let parse = parse_str(source);
             let codes: Vec<Code> = parse.errors.iter().map(|e| e.code).collect();
             assert_eq!(codes, [Code::FailSpelling], "{source}");
+            assert!(parse.errors[0].suggestions.is_empty(), "{source}");
+        }
+    }
+
+    #[test]
+    fn sections() {
+        // A header starts a section, which holds what follows it up to the
+        // next; what comes before any is the implementation's. Both words
+        // are names elsewhere, and TypeScript's `interface Home { … }` is
+        // a heading still.
+        let parse = parse_str(
+            "var before := 1;\ninterface\nheading lake := { name: text };\noperator deepest{lakes: relation lake}: relation lake;\nimplementation\nvar interface := 2;\noperator implementation{} [];\n",
+        );
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let sections: Vec<(Section, usize)> = parse
+            .tree
+            .items()
+            .map(|item| {
+                let node = match &item {
+                    trendy_syntax::ast::Item::Variable(v) => v.syntax().clone(),
+                    trendy_syntax::ast::Item::Heading(h) => h.syntax().clone(),
+                    trendy_syntax::ast::Item::Operator(o) => o.syntax().clone(),
+                    _ => unreachable!("none of the others"),
+                };
+                (
+                    trendy_syntax::ast::section_of(&node),
+                    usize::from(node.text_range().start()),
+                )
+            })
+            .collect();
+        let only: Vec<Section> = sections.iter().map(|&(s, _)| s).collect();
+        assert_eq!(
+            only,
+            [
+                Section::Implementation,
+                Section::Interface,
+                Section::Interface,
+                Section::Implementation,
+                Section::Implementation,
+            ]
+        );
+        let typescript = parse_str("interface Home { city: string }");
+        assert_eq!(typescript.tree.headings().count(), 1);
+        assert_eq!(typescript.tree.headers().count(), 0);
+        // Other languages' ways to write a unit, and another case, fixed.
+        for (source, fixed, code) in [
+            (
+                "unit lakes;\n\noperator main{} [];",
+                "operator main{} [];",
+                Code::UnitForm,
+            ),
+            (
+                "module Lakes where\noperator main{} [];",
+                "operator main{} [];",
+                Code::UnitForm,
+            ),
+            (
+                "package lakes.depths;\noperator main{} [];",
+                "operator main{} [];",
+                Code::UnitForm,
+            ),
+            (
+                "operator main{} [];\n\nend.\n",
+                "operator main{} [];\n\n",
+                Code::UnitForm,
+            ),
+            (
+                "public:\noperator main{} [];",
+                "interface\noperator main{} [];",
+                Code::UnitForm,
+            ),
+            (
+                "interface\nprivate:\noperator main{} [];",
+                "interface\nimplementation\noperator main{} [];",
+                Code::UnitForm,
+            ),
+            (
+                "Interface\noperator main{} [];",
+                "interface\noperator main{} [];",
+                Code::MiscasedKeyword,
+            ),
+            (
+                "implementation\noperator main{} [];\nimplementation\noperator f{} [];",
+                "implementation\noperator main{} [];\n\noperator f{} [];",
+                Code::SectionOrder,
+            ),
+        ] {
+            let parse = parse_str(source);
+            let codes: Vec<Code> = parse.errors.iter().map(|e| e.code).collect();
+            assert_eq!(codes, [code], "{source}: {:#?}", parse.errors);
+            assert_eq!(fix(source), fixed, "{source}");
+        }
+    }
+
+    #[test]
+    fn sections_reported_with_help() {
+        // What to move, or rewrite, is the program's.
+        for (source, code) in [
+            ("pub operator f{} [];", Code::UnitForm),
+            ("export type metres { { m: integer } };", Code::UnitForm),
+            (
+                "initialization\n    total := 0;\noperator main{} [];",
+                Code::UnitForm,
+            ),
+            (
+                "implementation\noperator main{} [];\ninterface\noperator f{};",
+                Code::SectionOrder,
+            ),
+            (
+                "interface\nimplementation\ninterface\noperator f{};",
+                Code::SectionOrder,
+            ),
+        ] {
+            let parse = parse_str(source);
+            let codes: Vec<Code> = parse.errors.iter().map(|e| e.code).collect();
+            assert_eq!(codes, [code], "{source}: {:#?}", parse.errors);
             assert!(parse.errors[0].suggestions.is_empty(), "{source}");
         }
     }

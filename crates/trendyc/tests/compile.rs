@@ -930,6 +930,18 @@ fn failures() {
 }
 
 #[test]
+fn units() {
+    let (code, stderr) = run_example("units");
+    assert_eq!(
+        (code, stderr.as_str()),
+        (
+            0,
+            "3\nrelation { name: text, native: text } { { name: \"Baikal\", native: \"Байкал\" } }\n"
+        )
+    );
+}
+
+#[test]
 fn transactions() {
     let (code, stderr) = run_example("transactions");
     let table = "┌──────────┬──────────┬───────┐

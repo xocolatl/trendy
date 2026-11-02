@@ -199,6 +199,10 @@ pub enum SyntaxKind {
     /// declares it, and what each must have, such as `<`. `kind` is a
     /// contextual keyword, an identifier elsewhere.
     KindDecl,
+    /// `interface` or `implementation`, alone: the start of a unit's
+    /// section, whose declarations are those after it, up to the next.
+    /// Both are contextual keywords, identifiers elsewhere.
+    SectionHeader,
     /// `heading name := { name: type, … };`: a heading with a name, which
     /// stands for it after `relation` and `tuple`. `heading` is a
     /// contextual keyword, an identifier elsewhere.
@@ -434,7 +438,7 @@ pub enum SyntaxKind {
 
 impl SyntaxKind {
     /// Every kind, indexed by its discriminant.
-    pub const ALL: [SyntaxKind; 170] = [
+    pub const ALL: [SyntaxKind; 171] = [
         SyntaxKind::Whitespace,
         SyntaxKind::Comment,
         SyntaxKind::Ident,
@@ -522,6 +526,7 @@ impl SyntaxKind {
         SyntaxKind::BuiltinOperator,
         SyntaxKind::BuiltinType,
         SyntaxKind::KindDecl,
+        SyntaxKind::SectionHeader,
         SyntaxKind::HeadingDecl,
         SyntaxKind::TypeDecl,
         SyntaxKind::Supertype,
@@ -1019,6 +1024,7 @@ impl SyntaxKind {
             SyntaxKind::BuiltinOperator => "built-in operator declaration",
             SyntaxKind::BuiltinType => "built-in type declaration",
             SyntaxKind::KindDecl => "kind declaration",
+            SyntaxKind::SectionHeader => "section header",
             SyntaxKind::HeadingDecl => "heading declaration",
             SyntaxKind::TypeDecl => "type declaration",
             SyntaxKind::Supertype => "supertype",

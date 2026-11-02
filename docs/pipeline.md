@@ -467,6 +467,22 @@ runs to a read-only body's end is its value (`Parser::at_value`). Other
 languages' `throw` and `raise`, and PL/pgSQL's `RAISE EXCEPTION`, are
 parsed as it and fixed to it (P0047).
 
+A unit's sections start with `interface` and `implementation`, each
+alone where a definition goes (`SectionHeader`), contextual keywords that
+aren't TypeScript's `interface Home { … }`, a heading's declaration. A
+header is a marker among the definitions, not a node around them, so
+nothing closes a section, and walking a file's definitions is as it was:
+a definition's section is the one the header before it starts, or the
+implementation, before any (`ast::section_of`). The parser reports a
+second header of one section, or the interface after the implementation
+(P0053), and other languages' ways to write a unit (P0052, where
+`Parser::junk` finds a word no definition starts with,
+`Parser::unit_habit`): a name for the unit, `unit lakes;`, `module Lakes
+where` or `package lakes`, removed, Delphi's `end.`, removed, its
+`initialization` and `finalization`, C++'s `public:` and `private:`,
+parsed as headers and fixed to them, and `pub`, `export` or `public`
+before a definition.
+
 `warn e;` (`WarnStmt`), only a statement, has `warn` a contextual
 keyword as `fail` has, before a value an error can be
 (`Parser::error_follows`). PL/pgSQL's `RAISE WARNING` and `RAISE
@@ -1250,6 +1266,23 @@ the type of a join's in its result (`Heading::and`); a union's have a
 common supertype, its type in the result (`Combination::heading`).
 Lowering needs nothing more: values of the types in a hierarchy are laid
 out alike, and the runtime is given each operand's descriptor.
+
+A unit's interface declares operators by their headings alone, and its
+implementation defines each, repeating its heading. Operators of one
+name and the same parameters' names are first paired so
+(`operators::paired`): an interface's declaration without a body and the
+implementation's definition with the same parameters' modes and types
+and result type are one operator, the declaration then
+`Family::Declaration` of the definition, which calls never name, and
+whose HIR operator nothing calls. A definition with another heading that
+isn't a version is reported (A0068), with a fix copying the
+declaration's, and paired still. What the interface can't have is
+reported too (A0067): a version, or an operator with a body, there
+(`operators::in_interface`), and, before the signatures, a variable, or
+a type or heading only the implementation declares that its
+declarations' parameters, results, attributes, components or supertypes
+name (`sections::check`); the fixes move the declaration to the section
+it belongs in (`sections::moved`), with the comments just before it.
 
 Operators of one name and the same parameters' names are a
 specification and its versions (`operators::families`, once every

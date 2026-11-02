@@ -3,6 +3,7 @@
 
 use trendy_diag::{Code, Diagnostic, Edit, Span, edit_distance};
 use trendy_syntax::SyntaxKind;
+use trendy_syntax::ast::Section;
 
 use crate::Found;
 
@@ -3026,6 +3027,173 @@ pub(crate) fn second_keeping(span: Span, first: Span) -> Diagnostic {
     .with_note(KEEPING_RULE)
     .with_help("write one list: the attributes to remove, or those to keep")
 }
+
+/// What a unit is, for the notes of its errors.
+const UNIT_RULE: &str = "a unit is one file, named by its path from the program's root, as `lakes/depths.trendy` is `lakes.depths`; `interface` starts the declarations other units see, and `implementation` those they don't, each up to the next";
+
+/// The languages that start a unit with `word`.
+fn unit_languages(word: &str) -> &'static str {
+    match word.to_lowercase().as_str() {
+        "module" => "Modula-2's and Haskell's",
+        "package" => "Java's and Go's",
+        _ => "Delphi's and Pascal's",
+    }
+}
+
+/// Another language's declaration of its unit's name, at `span`, which
+/// `word`, `unit` or the like, starts: a unit's path names it. The fix
+/// removes it, up to `end`, what follows it.
+pub(crate) fn unit_declaration(word: Found, span: Span, end: usize) -> Diagnostic {
+    Diagnostic::error(
+        Code::UnitForm,
+        format!(
+            "a unit is named by its path, not by {} `{}`",
+            unit_languages(word.text),
+            word.text
+        ),
+        span,
+        "another language's name for the unit",
+    )
+    .with_note(UNIT_RULE)
+    .with_suggestion(
+        "remove it",
+        vec![Edit {
+            span: Span::new(span.start, end),
+            replacement: String::new(),
+        }],
+    )
+}
+
+/// Delphi's `end.`, at `span`, which ends a unit's implementation: a unit
+/// ends where its file does. The fix removes it, up to `end`.
+pub(crate) fn unit_end(span: Span, end: usize) -> Diagnostic {
+    Diagnostic::error(
+        Code::UnitForm,
+        "a unit ends where its file does, not at Delphi's `end.`",
+        span,
+        "Delphi's end of a unit",
+    )
+    .with_note(UNIT_RULE)
+    .with_suggestion(
+        "remove it",
+        vec![Edit {
+            span: Span::new(span.start, end),
+            replacement: String::new(),
+        }],
+    )
+}
+
+/// Delphi's `initialization` or `finalization` section, at `found`, which
+/// runs statements as the program starts or ends.
+pub(crate) fn unit_part(found: Found) -> Diagnostic {
+    Diagnostic::error(
+        Code::UnitForm,
+        format!("a unit has no `{}` section", found.text.to_lowercase()),
+        found.span,
+        "Delphi's section",
+    )
+    .with_note("a unit runs nothing as the program starts or ends: a variable's initial value is computed when compiling, and the program starts in `main`, and ends where it does")
+    .with_help("compute what it computed as a variable's initial value, or do it in `main`")
+}
+
+/// `pub`, `export` or `public`, `found`, before a declaration, as another
+/// language marks one exported.
+pub(crate) fn export_word(found: Found) -> Diagnostic {
+    Diagnostic::error(
+        Code::UnitForm,
+        format!(
+            "a unit exports what its interface declares, not what is marked `{}`",
+            found.text
+        ),
+        found.span,
+        "another language's mark of an export",
+    )
+    .with_note(UNIT_RULE)
+    .with_help(format!(
+        "remove `{}`, and declare it after `interface`, its body, if it has one, after `implementation`",
+        found.text
+    ))
+}
+
+/// C++'s `public:` or `private:`, from `label` to `end`, its `:`'s end,
+/// where `section`'s header goes. The fix writes the header.
+pub(crate) fn access_label(label: Found, end: usize, section: Section) -> Diagnostic {
+    let word = section_word(section);
+    Diagnostic::error(
+        Code::UnitForm,
+        format!(
+            "a unit's section starts with `{word}`, not C++'s `{}:`",
+            label.text
+        ),
+        Span::new(label.span.start, end),
+        "C++'s access label",
+    )
+    .with_note(UNIT_RULE)
+    .with_suggestion(
+        format!("write `{word}`"),
+        vec![Edit {
+            span: Span::new(label.span.start, end),
+            replacement: word.to_string(),
+        }],
+    )
+}
+
+/// The word that starts `section`.
+fn section_word(section: Section) -> &'static str {
+    match section {
+        Section::Interface => "interface",
+        Section::Implementation => "implementation",
+    }
+}
+
+/// A second header, `word`, of `section`, which `earlier` started first.
+/// If `removable`, so that the declarations after it would be its
+/// section's still, the fix removes it.
+pub(crate) fn second_section(
+    word: Found,
+    earlier: Found,
+    section: Section,
+    removable: bool,
+) -> Diagnostic {
+    let written = section_word(section);
+    let d = Diagnostic::error(
+        Code::SectionOrder,
+        format!("a unit has one `{written}`"),
+        word.span,
+        "a second one",
+    )
+    .with_secondary(earlier.span, format!("its `{written}` starts here"))
+    .with_note(SECTIONS_RULE);
+    if !removable {
+        return d.with_help(
+            "move the declarations after this `interface` before `implementation`, after the first",
+        );
+    }
+    d.with_suggestion(
+        "remove it, so that what follows is the section's still",
+        vec![Edit {
+            span: word.span,
+            replacement: String::new(),
+        }],
+    )
+}
+
+/// `interface`, `word`, after the implementation, which `implementation`
+/// started.
+pub(crate) fn interface_after_implementation(word: Found, implementation: Found) -> Diagnostic {
+    Diagnostic::error(
+        Code::SectionOrder,
+        "a unit's interface comes before its implementation",
+        word.span,
+        "after the implementation",
+    )
+    .with_secondary(implementation.span, "the implementation starts here")
+    .with_note(SECTIONS_RULE)
+    .with_help("move `interface` and its declarations before `implementation`")
+}
+
+/// The order of a unit's sections, for the notes of their errors.
+const SECTIONS_RULE: &str = "a unit has one interface and one implementation, the interface first; what comes before either header is the implementation's";
 
 #[cfg(test)]
 mod tests {

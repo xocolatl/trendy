@@ -11,6 +11,7 @@ mod named_types;
 mod narrowed;
 mod operators;
 mod ops;
+mod sections;
 mod types;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -43,6 +44,7 @@ pub fn analyze(
 ) -> Result<hir::Program, Vec<Diagnostic>> {
     let (files, program) = Files::unit(program, prelude);
     let mut errors = Vec::new();
+    sections::check(&program, &mut errors);
     let checked = check(&files, &mut errors);
     let entry = entry(
         &program,
@@ -3050,6 +3052,76 @@ operator main{{}} [ var lines: array text; {main} ];"
             "debug_value"
         );
         analyze_str("operator debug_value{} [];\noperator main{} [];").unwrap();
+    }
+
+    #[test]
+    fn a_units_interface_declares_what_its_implementation_defines() {
+        // An interface operator's heading, and its definition repeating
+        // it, are one operator, called by its name.
+        let source = "interface\n\nheading lake := { name: text, depth: integer };\n\noperator deepest{lakes: relation lake}: relation lake;\n\noperator clear{var lakes: relation lake};\n\nimplementation\n\noperator deepest{lakes: relation lake}: relation lake [\n    lakes where depth = max{r: lakes, of: depth}\n];\n\noperator clear{var lakes: relation lake} [\n    lakes := relation {};\n];\n\noperator main{} [\n    var lakes := relation { { name: \"Baikal\", depth: 1642 } };\n    call debug_value{v: deepest{lakes: lakes}};\n    call clear{var lakes: lakes};\n];\n";
+        assert!(analyze_str(source).is_ok(), "{:#?}", errors(source));
+        // What the interface can't have, each with its fix.
+        let main = "\noperator main{} [];\n";
+        for (source, fixed, code) in [
+            (
+                format!("interface\n\nvar total := 0;\n\nimplementation\n{main}"),
+                format!("interface\n\nimplementation\n{main}\nvar total := 0;\n"),
+                Code::InterfaceDeclaration,
+            ),
+            (
+                format!(
+                    "interface\n\noperator double{{n: integer}}: integer [\n    n * 2\n];\n\nimplementation\n{main}"
+                ),
+                format!(
+                    "interface\n\noperator double{{n: integer}}: integer;\n\nimplementation\n{main}\noperator double{{n: integer}}: integer [\n    n * 2\n];\n"
+                ),
+                Code::InterfaceDeclaration,
+            ),
+            (
+                format!(
+                    "interface\n\noperator double{{n: metres}}: integer;\n\nimplementation\n\n/* A depth. */\ntype metres {{ {{ m: integer }} }};\n\noperator double{{n: metres}}: integer [\n    n.m * 2\n];\n{main}"
+                ),
+                format!(
+                    "interface\n\noperator double{{n: metres}}: integer;\n\n/* A depth. */\ntype metres {{ {{ m: integer }} }};\n\nimplementation\n\noperator double{{n: metres}}: integer [\n    n.m * 2\n];\n{main}"
+                ),
+                Code::InterfaceDeclaration,
+            ),
+            (
+                format!(
+                    "interface\n\ntype running_low is error {{ {{ sacks: integer }} }};\n\noperator message{{error: running_low}}: text [\n    \"low\"\n];\n\nimplementation\n{main}"
+                ),
+                format!(
+                    "interface\n\ntype running_low is error {{ {{ sacks: integer }} }};\n\nimplementation\n{main}\noperator message{{error: running_low}}: text [\n    \"low\"\n];\n"
+                ),
+                Code::InterfaceDeclaration,
+            ),
+            (
+                format!("interface\n\noperator clear{{n: integer}};\n\nimplementation\n{main}"),
+                format!(
+                    "interface\n\noperator clear{{n: integer}};\n\nimplementation\n{main}\noperator clear{{n: integer}} [];\n"
+                ),
+                Code::Versions,
+            ),
+            (
+                format!(
+                    "interface\n\noperator double{{n: integer}}: integer;\n\nimplementation\n\noperator double{{n: integer}}: approximate [\n    2e0\n];\n{main}"
+                ),
+                format!(
+                    "interface\n\noperator double{{n: integer}}: integer;\n\nimplementation\n\noperator double{{n: integer}}: integer [\n    2e0\n];\n{main}"
+                ),
+                Code::DefinitionMismatch,
+            ),
+        ] {
+            assert_eq!(codes(&source), [code], "{source}");
+            assert_eq!(fix(&source), fixed, "{source}");
+        }
+        // A read-only operator's missing body is the program's to give.
+        let errors = errors(&format!(
+            "interface\n\noperator double{{n: integer}}: integer;\n\nimplementation\n{main}"
+        ));
+        assert_eq!(errors[0].code, Code::Versions);
+        assert!(errors[0].suggestions.is_empty());
+        assert!(errors[0].help[0].contains("operator double{n: integer}: integer [ … ];"));
     }
 
     #[test]

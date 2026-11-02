@@ -5202,6 +5202,24 @@ pub(crate) fn bodiless_operator(decl: &ast::Operator) -> Diagnostic {
     )
     .with_note(VERSIONS_RULE)
     .with_note("an operator without a body is a specification, of a union type's values, which its versions compute, one for each of the union type's subtypes");
+    let file = decl.syntax().parent().and_then(ast::SourceFile::cast);
+    if let Some(file) = file.filter(|_| ast::section_of(decl.syntax()) == ast::Section::Interface) {
+        let d = d.with_note(SECTIONS_RULE);
+        if decl.result().is_some() {
+            return d.with_help(format!(
+                "define `{name}` in the implementation, repeating its heading, with its value: `{} [ … ];`",
+                heading_text(decl)
+            ));
+        }
+        return d.with_suggestion(
+            "define it in the implementation, repeating its heading",
+            vec![crate::sections::written_at_end(
+                &file,
+                ast::Section::Implementation,
+                &format!("{} [];", heading_text(decl)),
+            )],
+        );
+    }
     if decl.result().is_some() {
         return d.with_help(format!(
             "give `{name}` a body with its value, `[ … ]`, before its `;`, or define its versions"
@@ -8192,4 +8210,150 @@ pub(crate) fn unchosen_operator(name: &str, tied: &[&Signature], written: Writte
         "name the arguments as one of these has its parameters: {}",
         trendy_diag::disjoin(&texts)
     ))
+}
+
+/// What a unit's sections hold, for the notes of their errors.
+const SECTIONS_RULE: &str = "a unit's interface declares the types, headings and operators other units see, each operator by its heading alone, and its implementation gives each such operator's body, repeating its heading; the unit's variables, its versions and anything else no other unit sees are its implementation's";
+
+/// The span of `decl`'s name, or of all of it if it has none.
+fn operator_name_span(decl: &ast::Operator) -> Span {
+    decl.name().and_then(|n| n.ident()).map_or_else(
+        || trendy_syntax::span(decl.syntax().text_range()),
+        |ident| trendy_syntax::span(ident.text_range()),
+    )
+}
+
+/// The text of `decl`'s heading: from `operator` up to its body, or its
+/// `;` if it has none.
+fn heading_text(decl: &ast::Operator) -> String {
+    let text = decl.syntax().text().to_string();
+    let start = usize::from(decl.syntax().text_range().start());
+    let end = decl.body().map_or_else(
+        || text.trim_end().trim_end_matches(';').len(),
+        |body| usize::from(body.syntax().text_range().start()) - start,
+    );
+    text[..end].trim_end().to_string()
+}
+
+/// The variable `decl` declares in its unit's interface, which exports no
+/// variables. `moved` moves it to the implementation.
+pub(crate) fn interface_variable(decl: &ast::VarDecl, moved: Vec<Edit>) -> Diagnostic {
+    let at = decl.name().and_then(|n| n.ident()).map_or_else(
+        || trendy_syntax::span(decl.syntax().text_range()),
+        |ident| trendy_syntax::span(ident.text_range()),
+    );
+    Diagnostic::error(
+        Code::InterfaceDeclaration,
+        "a unit's interface exports no variables",
+        at,
+        "a variable",
+    )
+    .with_note(SECTIONS_RULE)
+    .with_note("a unit's variables are its own, which other units reach through its update operators, so that what is true of them is the unit's to keep")
+    .with_help("give an update operator that other units call, with an `out` parameter for what they read of it")
+    .with_suggestion("move it to the implementation", moved)
+}
+
+/// The type or heading `name`, which its unit's interface mentions at `at`
+/// but only its implementation declares, at `declared`. `moved` moves the
+/// declaration to the interface.
+pub(crate) fn implementation_name(
+    name: &str,
+    at: Span,
+    declared: Span,
+    moved: Vec<Edit>,
+) -> Diagnostic {
+    Diagnostic::error(
+        Code::InterfaceDeclaration,
+        format!("the interface mentions `{name}`, which only the implementation declares"),
+        at,
+        "only the implementation's",
+    )
+    .with_secondary(declared, "declared in the implementation")
+    .with_note(SECTIONS_RULE)
+    .with_note("a unit's interface is what other units see of it, so what it mentions is in the interface too")
+    .with_suggestion("move its declaration to the interface", moved)
+}
+
+/// The version `decl` is, in its unit's interface: a version is its
+/// implementation's, which dispatch finds.
+pub(crate) fn version_in_interface(decl: &ast::Operator) -> Diagnostic {
+    let file = decl.syntax().parent().and_then(ast::SourceFile::cast);
+    let d = Diagnostic::error(
+        Code::InterfaceDeclaration,
+        "a version goes in its unit's implementation",
+        operator_name_span(decl),
+        "a version, in the interface",
+    )
+    .with_note(SECTIONS_RULE)
+    .with_note("a call names a version's specification, and dispatch finds the version for its arguments' types, whatever unit calls it, so there is nothing about a version to export");
+    match file {
+        Some(file) => d.with_suggestion(
+            "move it to the implementation",
+            crate::sections::moved(&file, decl.syntax(), ast::Section::Implementation),
+        ),
+        None => d,
+    }
+}
+
+/// The operator `decl` defines with a body in its unit's interface, which
+/// declares its heading alone. The fix leaves the heading there, and gives
+/// the whole definition, repeating it, in the implementation.
+pub(crate) fn interface_body(decl: &ast::Operator) -> Diagnostic {
+    let body = decl.body().expect("an operator with a body");
+    let heading_end = usize::from(decl.syntax().text_range().start()) + heading_text(decl).len();
+    let body_end = usize::from(body.syntax().text_range().end());
+    let d = Diagnostic::error(
+        Code::InterfaceDeclaration,
+        "a unit's interface declares an operator's heading; its body goes in the implementation",
+        trendy_syntax::span(body.syntax().text_range()),
+        "a body, in the interface",
+    )
+    .with_note(SECTIONS_RULE);
+    let Some(file) = decl.syntax().parent().and_then(ast::SourceFile::cast) else {
+        return d;
+    };
+    let whole = decl.syntax().text().to_string();
+    d.with_suggestion(
+        "leave its heading here, and define it in the implementation",
+        vec![
+            Edit {
+                span: Span::new(heading_end, body_end),
+                replacement: String::new(),
+            },
+            crate::sections::written_at_end(&file, ast::Section::Implementation, &whole),
+        ],
+    )
+}
+
+/// The interface's declaration of an operator, `declaration`, whose
+/// definition in the implementation, `definition`, has another heading.
+/// The fix gives the definition the declaration's.
+pub(crate) fn definition_mismatch(
+    declaration: &crate::operators::Signature,
+    definition: &crate::operators::Signature,
+) -> Diagnostic {
+    let (Some(declared), Some(defined)) = (&declaration.decl, &definition.decl) else {
+        unreachable!("both are the program's own operators");
+    };
+    let start = usize::from(defined.syntax().text_range().start());
+    let end = start + heading_text(defined).len();
+    Diagnostic::error(
+        Code::DefinitionMismatch,
+        format!(
+            "`{}`'s heading in the implementation isn't the interface's",
+            declaration.name
+        ),
+        Span::new(start, end),
+        "another heading",
+    )
+    .with_secondary(operator_name_span(declared), "the interface's")
+    .with_note("the implementation repeats an interface operator's whole heading, its parameters' modes and types, and its result type, as the interface declares them")
+    .with_suggestion(
+        "write the interface's heading",
+        vec![Edit {
+            span: Span::new(start, end),
+            replacement: heading_text(declared),
+        }],
+    )
 }

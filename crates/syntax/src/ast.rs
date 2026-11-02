@@ -38,6 +38,7 @@ macro_rules! ast_node {
 
 ast_node!(Unit);
 ast_node!(SourceFile);
+ast_node!(SectionHeader);
 ast_node!(Operator);
 ast_node!(BuiltinOperator);
 ast_node!(BuiltinType);
@@ -154,7 +155,53 @@ impl Unit {
     }
 }
 
+/// The section of a unit a declaration is in: its interface, which other
+/// units see, or its implementation, which they don't.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Section {
+    Interface,
+    Implementation,
+}
+
+/// The section of its unit the declaration `node` is in: the one the
+/// nearest header before it starts, or the implementation, before any.
+#[must_use]
+pub fn section_of(node: &SyntaxNode) -> Section {
+    std::iter::successors(node.prev_sibling(), SyntaxNode::prev_sibling)
+        .find_map(SectionHeader::cast)
+        .map_or(Section::Implementation, |header| header.section())
+}
+
+impl SectionHeader {
+    /// The word, `interface` or `implementation`, in any case, which the
+    /// parser reports.
+    #[must_use]
+    pub fn keyword(&self) -> Option<SyntaxToken> {
+        significant_tokens(&self.0).next()
+    }
+
+    /// The section it starts: C++'s `public:`, which the parser reports,
+    /// starts the interface too.
+    #[must_use]
+    pub fn section(&self) -> Section {
+        let interface = self.keyword().is_some_and(|word| {
+            word.text().eq_ignore_ascii_case("interface")
+                || word.text().eq_ignore_ascii_case("public")
+        });
+        if interface {
+            Section::Interface
+        } else {
+            Section::Implementation
+        }
+    }
+}
+
 impl SourceFile {
+    /// Its sections' headers, in source order.
+    pub fn headers(&self) -> impl Iterator<Item = SectionHeader> {
+        self.0.children().filter_map(SectionHeader::cast)
+    }
+
     /// Every definition, in source order.
     pub fn items(&self) -> impl Iterator<Item = Item> {
         self.0.children().filter_map(|node| {

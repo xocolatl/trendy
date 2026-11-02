@@ -73,6 +73,88 @@ operator main{out errors: relation transaction_collection} [
 `main` takes no other parameters, and has no result type (A0019): the
 fixes make `errors` an `out` parameter, and of its type.
 
+## Units
+
+A file is a *unit*. Its *interface* declares what other units see of it,
+and its *implementation* what they don't. `interface` and
+`implementation`, each alone on its line, start them, and each holds the
+declarations after it, up to the next. What comes before either is the
+implementation's, so a file without them, as each program so far is,
+exports nothing.
+
+```trendy
+interface
+
+/* A depth, in whole metres. */
+type metres {
+    { m: integer },
+    constraint m > 0,
+};
+
+heading lake := { name: text, native: text, depth: metres };
+
+operator deepest{lakes: relation lake}: relation lake;
+
+operator record{name: text, native: text, depth: integer};
+
+operator recorded{out lakes: relation lake};
+
+implementation
+
+var known: relation lake key { name };
+
+operator deepest{lakes: relation lake}: relation lake [
+    lakes where depth.m = max{r: lakes, of: depth.m}
+];
+
+operator record{name: text, native: text, depth: integer} [
+    insert known relation { { name: name, native: native, depth: metres{m: depth} } };
+];
+
+operator recorded{out lakes: relation lake} [
+    lakes := known;
+];
+
+operator main{} [];
+```
+
+- **The interface declares types, headings and operators, each operator
+  by its heading alone.** The implementation gives each such operator's
+  body, repeating its whole heading, its parameters with their modes and
+  types, and its result type, as the interface declares them (A0068). A
+  heading with a body nowhere is a specification, whose versions give
+  its bodies (see [Union types](#union-types)).
+- **A unit's variables are its implementation's** (A0067). Other units
+  reach them through its update operators, with an `out` parameter for
+  what they read, as `recorded` gives `known`, so that what is true of
+  them is the unit's to keep. A constant is a read-only operator without
+  parameters, as the prelude's `pi{}` is.
+- **Versions go in the implementation** (A0067): a call names a
+  specification, and dispatch finds the version for its arguments'
+  types, whatever unit calls it, so there is nothing about a version to
+  export.
+- **What the interface mentions is in the interface** (A0067): its
+  operators' parameters' and results' types, its headings' attributes',
+  and its types' components' and supertypes'. An operator's body, and a
+  type's constraints and conversions, are the unit's own, and can use
+  what its implementation declares.
+- **A type the interface declares is declared with its possible
+  representations,** its logical interface (TTM RM Prescription 4): other
+  units select its values and read their components, and its constraint
+  holds whoever selects one. How its values are stored is hidden anyway.
+- **A unit has one interface and one implementation, the interface
+  first** (P0053). `interface` and `implementation` are contextual
+  keywords, names elsewhere.
+- **A unit is named by its path,** from the program's root, the directory
+  of `main`'s file, as `lakes/depths.trendy` is `lakes.depths`, so
+  nothing in the file names it. Delphi's `unit lakes;`, Haskell's
+  `module Lakes where` and the like are removed, as is Delphi's `end.`;
+  C++'s `public:` and `private:` become the headers; and Rust's `pub` and
+  JavaScript's `export` are reported, with help (P0052). A unit has no
+  section that runs as the program starts or ends, as Delphi's
+  `initialization` does: a variable's initial value is computed when
+  compiling, and the program starts in `main`.
+
 ## Operators
 
 ```trendy
@@ -5539,6 +5621,8 @@ line after a comment on its own line, such as a file's header, is kept.
 | `TYPE PLANE_FIGURE UNION;`, an abstract class | `type plane_figure union;`, whose values are its subtypes' |
 | `class Ellipse extends PlaneFigure`, `class Ellipse : PlaneFigure`, `TYPE ELLIPSE IS { PLANE_FIGURE POSSREP … }` | `type ellipse is plane_figure { { a: approximate, … } };` |
 | `throw e`, `raise e`, `panic!("…")`, `RAISE EXCEPTION '…'` | `fail e`, of an error, as `fail failure{message: "…"}` |
+| `unit lakes; interface … implementation … end.`, `module Lakes where` | a file is a unit named by its path, with `interface` and `implementation` alone on their lines |
+| `pub fn`, `export function`, `public:` | declared after `interface`, with its body after `implementation` |
 | `console.warn(…)`, `warnings.warn(…)`, `RAISE WARNING '…'` | `warn e;`, of an error, which a transaction collects, or the program writes |
 | `class NoConversion extends Exception`, an exception of a program's own | `type no_conversion is error { { unit: text } };`, with its `message{error: no_conversion}` |
 | `x instanceof Ellipse`, `isinstance(x, Ellipse)`, `x IS OF (ELLIPSE)`, `IS_ELLIPSE(X)` | `x is ellipse`, after which `x` is an ellipse in the rest of the condition |

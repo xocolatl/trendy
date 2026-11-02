@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use trendy_diag::{Diagnostic, Span};
 use trendy_hir as hir;
-use trendy_syntax::ast::{self, AstNode, Item, Said, TypeExpr};
+use trendy_syntax::ast::{self, AstNode, Item, Said, Section, TypeExpr};
 
 use crate::check::Lookup;
 use crate::types::{self, Origin, TypeParameters};
@@ -69,6 +69,10 @@ pub(crate) enum Family {
     /// One with the same parameters as another of which it is no version,
     /// which is reported.
     Duplicate,
+    /// The interface's declaration, without a body, of the operator with
+    /// this id, which the implementation defines with the same heading:
+    /// what other units see of it.
+    Declaration(hir::OperatorId),
 }
 
 /// An operator made from the declaration of a type of the program's own,
@@ -598,6 +602,7 @@ fn sets(list: &[Signature]) -> Vec<Vec<usize>> {
 /// specific than the other.
 fn families(list: &mut [Signature], namespaces: &Namespaces, errors: &mut Vec<Diagnostic>) {
     for members in sets(list) {
+        let members = paired(list, &members, errors);
         let covers = |spec: &Signature, other: &Signature| {
             other.params.iter().all(|(name, p)| {
                 spec.params
@@ -676,6 +681,12 @@ fn families(list: &mut [Signature], namespaces: &Namespaces, errors: &mut Vec<Di
             })
             .collect();
         list[spec].versions = made;
+        for &member in &members {
+            if let Some(error) = in_interface(&list[member]) {
+                errors.push(error);
+                list[member].valid = false;
+            }
+        }
         if list[spec].versions.is_empty() {
             continue;
         }
@@ -694,6 +705,84 @@ fn families(list: &mut [Signature], namespaces: &Namespaces, errors: &mut Vec<Di
             signature.valid = false;
         }
     }
+}
+
+/// The members of a set of `list`'s operators of one name and parameters'
+/// names, but the interface's declarations, without bodies, of operators
+/// the implementation defines: each is paired with the implementation's
+/// operator of the same heading, whose declaration it then is
+/// ([`Family::Declaration`]). One whose definition's heading differs from
+/// its own, the implementation's operator with a body that isn't a version
+/// of it, is reported, and paired with it still.
+fn paired(list: &mut [Signature], members: &[usize], errors: &mut Vec<Diagnostic>) -> Vec<usize> {
+    let section = |s: &Signature| s.decl.as_ref().map(|d| ast::section_of(d.syntax()));
+    let bodied = |s: &Signature| s.decl.as_ref().is_some_and(|d| d.body().is_some());
+    let covers = |spec: &Signature, other: &Signature| {
+        other.params.iter().all(|(name, p)| {
+            spec.params
+                .get(name)
+                .is_some_and(|s| p.ty.is_subtype_of(&s.ty))
+        })
+    };
+    let declarations: Vec<usize> = members
+        .iter()
+        .copied()
+        .filter(|&m| section(&list[m]) == Some(Section::Interface) && !bodied(&list[m]))
+        .collect();
+    let mut kept: Vec<usize> = members.to_vec();
+    for declaration in declarations {
+        let definitions: Vec<usize> = members
+            .iter()
+            .copied()
+            .filter(|&m| section(&list[m]) == Some(Section::Implementation) && bodied(&list[m]))
+            .collect();
+        let same = |s: &Signature| {
+            let d = &list[declaration];
+            covers(d, s)
+                && covers(s, d)
+                && s.read_only == d.read_only
+                && s.result == d.result
+                && s.params
+                    .iter()
+                    .all(|(name, p)| d.params[name].mode == p.mode)
+        };
+        let definition = definitions
+            .iter()
+            .copied()
+            .find(|&m| same(&list[m]))
+            .or_else(|| {
+                // One that isn't a version of it is its definition, mistaken.
+                let mistaken = definitions.iter().copied().find(|&m| {
+                    !covers(&list[declaration], &list[m]) || covers(&list[m], &list[declaration])
+                })?;
+                errors.push(errors::definition_mismatch(
+                    &list[declaration],
+                    &list[mistaken],
+                ));
+                list[mistaken].valid = false;
+                Some(mistaken)
+            });
+        if let Some(definition) = definition {
+            list[declaration].family = Family::Declaration(list[definition].id);
+            kept.retain(|&m| m != declaration);
+        }
+    }
+    kept
+}
+
+/// The error of `signature` if it is in its unit's interface, but belongs
+/// in its implementation: a version, which dispatch finds, or an operator
+/// with a body, whose heading alone the interface declares.
+fn in_interface(signature: &Signature) -> Option<Diagnostic> {
+    let decl = signature.decl.as_ref()?;
+    if ast::section_of(decl.syntax()) != Section::Interface {
+        return None;
+    }
+    if matches!(signature.family, Family::Version(_)) {
+        return Some(errors::version_in_interface(decl));
+    }
+    decl.body()?;
+    Some(errors::interface_body(decl))
 }
 
 /// The specification `members`, of `list`, would be versions of, written
