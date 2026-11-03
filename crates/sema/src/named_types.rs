@@ -772,21 +772,13 @@ fn specialization(
         id
     };
     let mut constraints = supertype.constraints.clone();
-    constraints.extend(decl.constraints().map(|constraint| {
-        hir::Constraint {
-            operator: numbered(),
-            text: constraint
-                .condition()
-                .map_or_else(String::new, |c| c.syntax().text().to_string()),
-        }
-    }));
+    constraints.extend(
+        decl.constraints()
+            .map(|constraint| self::constraint(&constraint, &mut numbered)),
+    );
     let converted = converted(decl, convertible, namespaces, errors);
     let mut representations = supertype.representations.clone();
-    representations.extend(converted.iter().map(|c| hir::Representation {
-        components: c.components.clone(),
-        to: numbered(),
-        from: numbered(),
-    }));
+    representations.extend(converted.iter().map(|c| representation(c, &mut numbered)));
     let defined = hir::Defined {
         name: placed.name.to_string(),
         components: supertype.components.clone(),
@@ -804,6 +796,39 @@ fn specialization(
     namespaces
         .converted
         .insert(placed.name.to_string(), converted);
+}
+
+/// The constraint `constraint` declares, an operator `numbered` gives an id.
+fn constraint(
+    constraint: &ast::Constraint,
+    numbered: &mut impl FnMut() -> hir::OperatorId,
+) -> hir::Constraint {
+    hir::Constraint {
+        operator: numbered(),
+        text: constraint
+            .condition()
+            .map_or_else(String::new, |c| c.syntax().text().to_string()),
+    }
+}
+
+/// The possible representation `converted` declares, other than the stored
+/// one: its conversions `to` the stored one and `from` it, then its own
+/// constraints, each an operator `numbered` gives an id, in that order.
+fn representation(
+    converted: &Converted,
+    numbered: &mut impl FnMut() -> hir::OperatorId,
+) -> hir::Representation {
+    let (to, from) = (numbered(), numbered());
+    hir::Representation {
+        components: converted.components.clone(),
+        to,
+        from,
+        constraints: converted
+            .decl
+            .constraints()
+            .map(|c| constraint(&c, numbered))
+            .collect(),
+    }
 }
 
 /// The possible representations `decl` declares with conversions, each
@@ -861,21 +886,12 @@ fn defined(
     };
     let constraints = decl
         .constraints()
-        .map(|constraint| hir::Constraint {
-            operator: numbered(),
-            text: constraint
-                .condition()
-                .map_or_else(String::new, |c| c.syntax().text().to_string()),
-        })
+        .map(|constraint| self::constraint(&constraint, &mut numbered))
         .collect();
     let converted = converted(decl, convertible, namespaces, errors);
     let representations = converted
         .iter()
-        .map(|c| hir::Representation {
-            components: c.components.clone(),
-            to: numbered(),
-            from: numbered(),
-        })
+        .map(|c| representation(c, &mut numbered))
         .collect();
     // Each representation, with its components resolved: the stored one's
     // are the type's.

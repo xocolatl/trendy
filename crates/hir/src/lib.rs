@@ -2039,6 +2039,14 @@ pub enum Expr {
     /// constraints, in order, is true of the components, since a type is
     /// the values its constraints are true of (TTM RM Prescription 23).
     Select(Box<Defined>, Box<Expr>),
+    /// The value of the program's own type `Defined` whose components in
+    /// its possible representation at this place in its
+    /// [`Defined::representations`] are the tuple, as that
+    /// representation's selector gives it: it fails unless each of the
+    /// representation's constraints, in order, is true of them, as given,
+    /// and is otherwise the value of the stored components its `to`
+    /// computes from them, selected as [`Expr::Select`] selects one.
+    SelectIn(Box<Defined>, usize, Box<Expr>),
     /// The components of a value of one of the program's own types, in its
     /// possible representation, as a tuple: what its `THE_` operators
     /// extract from, as `v.c` is `Extract(Components(v), c)`.
@@ -2159,7 +2167,9 @@ impl Expr {
                 Type::Relation(heading) => Type::Tuple(heading),
                 other => panic!("the only tuple of {other}"),
             },
-            Expr::Select(defined, ..) => Type::Defined(defined.clone()),
+            Expr::Select(defined, ..) | Expr::SelectIn(defined, ..) => {
+                Type::Defined(defined.clone())
+            }
             Expr::Components(value) => match value.type_with(leaf) {
                 Type::Defined(defined) => Type::Tuple(defined.components),
                 other => panic!("the components of {other}"),
@@ -2190,11 +2200,13 @@ impl Expr {
             // attributes computes them, which can fail too, as can a call,
             // which computes its operator's value, and an index can be out of
             // range, and a value treated as one of a subtype of its type
-            // needn't be one.
+            // needn't be one; a selection in a representation calls its
+            // `to`, as its constraints are checked.
             Expr::Unary(UnaryOp::Negate(Numeric::Integer), _)
             | Expr::Fail(..)
             | Expr::TreatAs(..)
             | Expr::Call(..)
+            | Expr::SelectIn(..)
             | Expr::Remove(..)
             | Expr::Rename(..)
             | Expr::And(..)
@@ -2414,6 +2426,9 @@ impl Expr {
             Expr::Unload(array, unloading) => Expr::Unload(Box::new(f(*array, 0)), unloading),
             Expr::Only(operand) => Expr::Only(Box::new(f(*operand, 0))),
             Expr::Select(defined, components) => Expr::Select(defined, Box::new(f(*components, 0))),
+            Expr::SelectIn(defined, at, components) => {
+                Expr::SelectIn(defined, at, Box::new(f(*components, 0)))
+            }
             Expr::Components(value) => Expr::Components(Box::new(f(*value, 0))),
             Expr::Treat(ty, value) => Expr::Treat(ty, Box::new(f(*value, 0))),
             Expr::TreatAs(ty, value) => Expr::TreatAs(ty, Box::new(f(*value, 0))),
@@ -2447,6 +2462,7 @@ impl Expr {
             | Expr::Ungroup(operand, _)
             | Expr::Only(operand)
             | Expr::Select(_, operand)
+            | Expr::SelectIn(_, _, operand)
             | Expr::Components(operand)
             | Expr::Treat(_, operand)
             | Expr::TreatAs(_, operand)
@@ -2596,6 +2612,9 @@ impl Expr {
             Expr::Only(operand) => Expr::Only(inst(operand)),
             // A type of the program's own has no type parameters in it.
             Expr::Select(defined, components) => Expr::Select(defined.clone(), inst(components)),
+            Expr::SelectIn(defined, at, components) => {
+                Expr::SelectIn(defined.clone(), *at, inst(components))
+            }
             Expr::Components(value) => Expr::Components(inst(value)),
             Expr::Treat(ty, value) => Expr::Treat(Box::new(ty.instantiated(types)), inst(value)),
             Expr::TreatAs(ty, value) => {
@@ -3865,12 +3884,17 @@ pub fn read_as(ty: &Type, columns: &Type) -> Type {
 /// each a read-only operator: `to` the stored one, whose value is the tuple
 /// of the stored components its `to` computes from its components, its
 /// parameters, and `from` it, whose value is the tuple of its components
-/// its `from` computes from the stored ones, its parameters.
+/// its `from` computes from the stored ones, its parameters. Its
+/// constraints say which of its components represent a value: each a
+/// read-only operator of them, its parameters, which selecting a value in
+/// it checks of them as given, before `to` converts them (TTM RM
+/// Prescription 23, as Tutorial D writes a possrep's `CONSTRAINT`).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Representation {
     pub components: Heading,
     pub to: OperatorId,
     pub from: OperatorId,
+    pub constraints: Vec<Constraint>,
 }
 
 /// Source text for the heading: `{ a: integer, b: text }` or `{}`. A
@@ -4246,12 +4270,7 @@ impl std::fmt::Display for Value {
             Value::Tuple(tuple) => write!(f, "tuple {tuple}"),
             // Its selector's invocation, as a call is written.
             Value::Defined(value) => {
-                let components: Vec<String> = value
-                    .components
-                    .attributes()
-                    .map(|(name, value)| format!("{name}: {value}"))
-                    .collect();
-                write!(f, "{}{{{}}}", value.ty.written(), components.join(", "))
+                f.write_str(&selection_text(value.ty.written(), &value.components))
             }
             Value::Relation(relation) => {
                 write!(f, "relation {} ", relation.heading)?;
@@ -4273,6 +4292,20 @@ impl std::fmt::Display for Value {
             }
         }
     }
+}
+
+/// The selector of the type named `ty` given `components`, as trendy
+/// writes it, as a value of a type of the program's own is written:
+/// `point{x: 1e0, y: 2e0}`, its components in name order. So too are the
+/// components given in another of its possible representations written,
+/// which a value of it is selected from.
+#[must_use]
+pub fn selection_text(ty: &str, components: &TupleValue) -> String {
+    let components: Vec<String> = components
+        .attributes()
+        .map(|(name, value)| format!("{name}: {value}"))
+        .collect();
+    format!("{ty}{{{}}}", components.join(", "))
 }
 
 /// A value of one of the program's own types, `ty`, which it carries, as

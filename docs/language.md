@@ -1085,9 +1085,15 @@ builtin operator parse_boolean{from: text}: boolean;
 
 /* A Unicode code point that a text can hold: from 0 to 10FFFF hex, but
    not the surrogates, D800 to DFFF, which UTF-8 can't encode, so each is a
-   Unicode scalar value. Code points are ordered by their numbers. */
+   Unicode scalar value. It is a number, `value`, or the text of it alone,
+   `character`, so that `code_point{character: "("}` is the code point of
+   `(`, and `p.character` the text of `p`. Code points are ordered by their
+   numbers. */
 type code_point {
     { value: integer },
+    { character: text, constraint length{a: to_code_points{from: character}} = 1 }
+        to { value := to_code_points{from: character}[1].value }
+        from { character := from_code_points{from: array [code_point{value: value}]} },
     constraint value >= 0 and value <= 1114111 and (value < 55296 or value > 57343),
     order [asc value],
 };
@@ -2710,7 +2716,9 @@ operator main{} [
   representation can come in any order. SQL's `check` is fixed to
   `constraint` (P0040), and a constraint inside the components' braces,
   where Tutorial D writes a possible representation's `CONSTRAINT`, is
-  moved out of them (P0041).
+  moved out of them (P0041): those of the representation a type's values
+  are stored as are the type's, though another representation's are its
+  own (see below).
 
 A type's order says how its values compare: `order [asc year, …]`, in
 its braces, compares them by the components it names, in turn, until one
@@ -2822,6 +2830,61 @@ operator main{} [
 - **`load_csv` reads a value in any representation,** from the columns
   `columns` gives its components, as in `mean: tuple { celsius: 3 }`,
   and selects it in that one (see [The prelude](#the-prelude)).
+
+A representation other than the stored one can have constraints of its
+own, after its components in its braces, as Tutorial D writes a
+possrep's `CONSTRAINT` (*The Third Manifesto*, RM Prescription 23): they
+say which of its components represent a value, where its `to` would make
+one of others too:
+
+```trendy
+type duration {
+    { seconds: integer },
+    { hours: integer, minutes: integer, constraint minutes >= 0 and minutes < 60 }
+        to { seconds := hours * 3600 + minutes * 60 }
+        from { hours := seconds div 3600, minutes := seconds mod 3600 div 60 },
+    constraint seconds >= 0,
+};
+
+operator main{} [
+    var flight := duration{hours: 7, minutes: 45};
+    call debug_value{v: flight};
+    call debug_value{v: flight.minutes};
+];
+```
+
+- **They are checked as a value is selected in the representation,** by
+  its selector, `replace` or `update` in it, or `load_csv` reading it, of
+  the components given, before its `to` converts them, as TTM checks a
+  possrep's constraint in its selector: `duration{hours: 1, minutes:
+  90}` fails (R0017), though `to` would make a value of it, two and a
+  half hours, which `duration{hours: 2, minutes: 30}` is. The failure
+  names the components as the selector was given them.
+- **They name the representation's own components alone** (A0074),
+  which are all a selection in it has; the type's constraints, in the
+  type's braces, are checked of every value, in any representation,
+  through its conversions, so they name any representation's. A fix
+  moves a constraint that names another's into the type's braces.
+- **One that selects a value in its representation,** directly or
+  through operators, would check itself again (A0036). Selecting one in
+  another representation is fine.
+- **The stored representation has none of its own:** its components are
+  a value's, so a constraint in its braces is the type's, and is moved
+  out of them (P0041), as an order is from any representation's.
+
+```trendy,error
+type duration {
+    { seconds: integer },
+    { hours: integer, minutes: integer, constraint minutes >= 0 and minutes < 60 }
+        to { seconds := hours * 3600 + minutes * 60 }
+        from { hours := seconds div 3600, minutes := seconds mod 3600 div 60 },
+    constraint seconds >= 0,
+};
+
+var long := duration{hours: 1, minutes: 90};
+
+operator main{} [];
+```
 
 ### Union types
 
@@ -4479,7 +4542,9 @@ var word := "Paraná";
 operator main{} [
     var points := to_code_points{from: word};
     call debug_value{v: points[6]};
+    call debug_value{v: points[6].character};
     call debug_value{v: length{a: points}};
+    call debug_value{v: points[1] = code_point{character: "P"}};
     call debug_value{v: from_code_points{from: points} = word};
 ];
 ```
@@ -4490,6 +4555,12 @@ operator main{} [
   is a type of its own, not an integer, as *The Third Manifesto*'s `QTY`
   is (chapter 6): its number is `p.value`, and code points are ordered by
   it. So every array of them has a text, which `from_code_points` gives.
+- **It is the text of it alone too,** another possible representation,
+  `p.character`: `code_point{character: "á"}` is `code_point{value:
+  225}`, and, of literals, a literal itself, as every selection of them
+  is. Its own constraint says the text is one code point's (see [A
+  program's own types](#a-programs-own-types)), so
+  `code_point{character: "ab"}` fails (R0017).
 - **It is no character a reader sees.** `é` can be written as one code
   point, `\u{E9}`, or as two, `e` and a combining accent, `\u{301}`, which
   are different texts. trendy has no type of one character.
@@ -4501,10 +4572,11 @@ operator main{} [
   to_code_points{from: t}}`, as Python's `len` counts them, which
   `length` or `count` of a text is fixed to (A0004).
 - **Other languages' habits are fixed:** Rust's `chars` and Java's
-  `codePoints` to `to_code_points`, and JavaScript's `String.fromCodePoint`
-  to `from_code_points` (A0015). Python's `ord` and `chr`, and
-  JavaScript's `charCodeAt` and `fromCharCode`, of one character, are
-  reported with how to write their values (A0015).
+  `codePoints` to `to_code_points`, JavaScript's `String.fromCodePoint`
+  to `from_code_points`, Python's `ord{c}` to `code_point{character:
+  c}.value`, and its `chr{n}`, as JavaScript's `String.fromCharCode` of
+  one number, to `code_point{value: n}.character` (A0015); JavaScript's
+  `charCodeAt`, of a position, is reported with how to write its value.
 
 ```trendy,error
 var word := "Zürich";

@@ -2132,9 +2132,14 @@ pub(crate) fn unknown_operator(
         "not defined",
     );
     // An operator the prelude hasn't, as SQL's `avg`, which is no
-    // misspelling of `min`, nor `log` of `cos`.
+    // misspelling of `min`, nor `log` of `cos`, with a fix where its value
+    // is written otherwise, as Python's `ord`'s is.
     if let Some((note, help)) = absent(name) {
-        return d.with_note(note).with_help(help);
+        let d = d.with_note(note);
+        return match rewritten(ident, written) {
+            Some((message, edit)) => d.with_suggestion(message, vec![edit]),
+            None => d.with_help(help),
+        };
     }
     // Other languages' names for the operators that come with the
     // compiler, such as Python's `prod` and `len`, which no closeness of
@@ -2250,16 +2255,64 @@ const ABSENT: &[(&[&str], &str, &str)] = &[
         "write it as an operator of the program's own, with those",
     ),
     (
-        &["ord", "codepointat", "charcodeat"],
+        &["ord"],
         CHARACTERS,
-        "the number of the first code point of `t` is `to_code_points{from: t}[1].value`",
+        "the number of `c`, the text of one code point, is `code_point{character: c}.value`",
+    ),
+    (
+        &["codepointat", "charcodeat"],
+        CHARACTERS,
+        "the number of the code point at position `i` of `t`, counting from 1, is `to_code_points{from: t}[i].value`",
     ),
     (
         &["chr", "unichr", "fromcharcode"],
         CHARACTERS,
-        "the text of the code point numbered `n` is `from_code_points{from: array [code_point{value: n}]}`",
+        "the text of the code point numbered `n` is `code_point{value: n}.character`",
     ),
 ];
+
+/// Of the operators in [`ABSENT`], those whose call of one argument is
+/// written otherwise, by name, lowercase, with what goes before the
+/// argument and after it: Python's `ord` and `chr`, and JavaScript's
+/// `String.fromCharCode`, are a code point's number and its text.
+const REWRITTEN: &[(&str, &str, &str)] = &[
+    ("ord", "code_point{character: ", "}.value"),
+    ("chr", "code_point{value: ", "}.character"),
+    ("unichr", "code_point{value: ", "}.character"),
+    ("fromcharcode", "code_point{value: ", "}.character"),
+];
+
+/// The call of `ident`, an operator in [`REWRITTEN`], with the arguments
+/// `written`, as trendy writes its value, if it has one argument: what to
+/// write, and the edit that writes it.
+fn rewritten(ident: &SyntaxToken, written: Option<Written>) -> Option<(String, Edit)> {
+    let lowercase = ident.text().to_lowercase();
+    let &(_, before, after) = REWRITTEN.iter().find(|(name, ..)| *name == lowercase)?;
+    let written = written?;
+    let argument = match written {
+        Written::Arguments(args) => {
+            let named: Vec<_> = args.named().collect();
+            let positional: Vec<_> = args.positional().collect();
+            match (named.as_slice(), positional.as_slice()) {
+                ([only], []) => only.value()?.syntax().text().to_string(),
+                ([], [only]) => only.value()?.syntax().text().to_string(),
+                _ => return None,
+            }
+        }
+        Written::Nothing(list) => {
+            let mut names = list.names();
+            let only = names.next().filter(|_| names.next().is_none())?;
+            only.syntax().text().to_string()
+        }
+    };
+    let replacement = format!("{before}{argument}{after}");
+    let start = trendy_syntax::span(ident.text_range()).start;
+    let edit = Edit {
+        span: Span::new(start, written.span().end),
+        replacement: replacement.clone(),
+    };
+    Some((format!("use `{replacement}`"), edit))
+}
 
 /// Of an operator other languages have and the prelude hasn't, called
 /// `name` there, in any case, what the prelude has instead, and how to
@@ -2276,7 +2329,7 @@ pub(crate) fn absent(name: &str) -> Option<(&'static str, &'static str)> {
 const MATHEMATICAL: &str = "the prelude's mathematical operators are `+`, `-`, `*`, `/`, `div`, `mod`, `sqrt`, `sin`, `cos`, `atan2` and `pi`, and it has no others yet";
 
 /// What a text is made of, in the prelude's terms.
-const CHARACTERS: &str = "trendy has no type of one character: a text is made of code points, values of the prelude's `code_point`, which `to_code_points` gives an array of, and `from_code_points` a text of";
+const CHARACTERS: &str = "a text is made of code points, values of the prelude's `code_point`, each a number, `value`, or the text of it, `character`, which `to_code_points` gives an array of, and `from_code_points` a text of";
 
 /// The edit naming the one argument of a call, written `written`, `param`,
 /// the one parameter of the operator meant, if it has another name or
@@ -5451,14 +5504,59 @@ pub(crate) fn ambiguous_versions(
 const TREAT_RULE: &str = "`treat x as t` is the value of `x`, as a value of `t`, a subtype of its type, which it fails unless it is one (*Type Inheritance and Relational Theory*, IM Prescription 14)";
 
 /// What a type's constraints are, for notes.
-const CONSTRAINT_RULE: &str = "a type is the values its constraints are true of, so selecting a value, by its selector, `replace` or `update`, fails when its components break one (TTM RM Prescription 23)";
+const CONSTRAINT_RULE: &str = "a type is the values its constraints are true of, so selecting a value, by its selector, `replace` or `update`, fails when its components break one; and a possible representation's own constraints, in its braces, say which of its components represent a value, so selecting one in it fails when those given break one (TTM RM Prescription 23)";
 
-/// `expr`, which selects `broken.value`, whose components break a
+/// What a possible representation's own constraints are.
+const REPRESENTATION_CONSTRAINT_RULE: &str = "a possible representation's own constraints, in its braces after its components, say which of them represent a value: selecting a value in it checks them of the components as given, before its `to` converts them, so they name its own components alone, while the type's constraints, in the type's braces, name any representation's, and are checked of every value";
+
+/// The component `name`, at `span`, of another possible representation of
+/// `defined` than `own`, which `constraint`, `own`'s, names. The fix moves
+/// the constraint into the type's braces, after `own`, where a constraint
+/// names any representation's components.
+pub(crate) fn other_representations_component(
+    name: &str,
+    span: Span,
+    defined: &hir::Defined,
+    constraint: &trendy_syntax::ast::Constraint,
+    own: &trendy_syntax::ast::Representation,
+) -> Diagnostic {
+    let mut components: Vec<String> = own
+        .components()
+        .into_iter()
+        .flat_map(|heading| heading.attributes().collect::<Vec<_>>())
+        .filter_map(|a| Some(a.name()?.ident()?.text().to_string()))
+        .collect();
+    components.sort();
+    let written: Vec<String> = components.iter().map(|c| format!("{c}: …")).collect();
+    let selector = format!("`{}{{{}}}`", defined.name, written.join(", "));
+    let d = Diagnostic::error(
+        Code::OtherRepresentation,
+        format!("`{name}` is a component of another representation of `{}` than {selector}, whose constraint this is", defined.name),
+        span,
+        "not one of this representation's components",
+    )
+    .with_note(REPRESENTATION_CONSTRAINT_RULE);
+    let text = constraint.syntax().text().to_string();
+    d.with_suggestion(
+        "move the constraint into the type's braces, where it can name any representation's components",
+        vec![
+            Edit {
+                span: constraint.removal(),
+                replacement: String::new(),
+            },
+            Edit {
+                span: Span::empty(usize::from(own.syntax().text_range().end())),
+                replacement: format!(", {text}"),
+            },
+        ],
+    )
+}
+
+/// `expr`, which selects `broken.selected`, whose components break a
 /// constraint of its type.
 fn broken_constraint(broken: &crate::ops::BrokenConstraint, expr: &Expr) -> Diagnostic {
-    let t = &broken.value.ty.name;
-    let value = hir::Value::Defined(broken.value.clone());
-    let message = format!("`{value}` isn't a value of `{t}`");
+    let t = &broken.ty;
+    let message = format!("`{}` isn't a value of `{t}`", broken.selected);
     let d = match broken.at {
         Some(at) => Diagnostic::error(
             Code::BrokenConstraint,
@@ -5821,12 +5919,35 @@ fn dropped(postfix: &trendy_syntax::ast::PostfixExpr, operand: &Expr) -> (Span, 
 pub(crate) fn cycle(cycle: &[Pending]) -> Diagnostic {
     let first = &cycle[0];
     // How each is written, and what the one before it does to it.
-    let shown = |p: &Pending| match p.global {
-        Global::Constraint(_) => format!("`{}`'s constraint", p.name),
-        Global::Variable(_) | Global::Operator(_) => format!("`{}`", p.name),
+    let shown = |p: &Pending| match (p.global, &p.representation) {
+        (Global::Constraint(_), Some(representation)) => {
+            format!("`{representation}`'s constraint")
+        }
+        (Global::Constraint(_), None) => format!("`{}`'s constraint", p.name),
+        (Global::Variable(_) | Global::Operator(_), _) => format!("`{}`", p.name),
+    };
+    // What selecting a value that checks it is, if it is a constraint.
+    let selecting = |p: &Pending| match &p.representation {
+        Some(representation) => format!("selects a value as `{representation}`"),
+        None => format!("selects a value of `{}`", p.name),
     };
     let names: Vec<String> = cycle.iter().map(shown).collect();
     let d = match first.global {
+        Global::Constraint(_) if first.representation.is_some() => {
+            let message = match names.as_slice() {
+                [own] => format!("{own} selects a value in its representation"),
+                [own, rest @ ..] => format!(
+                    "{own} selects a value in its representation through {}",
+                    trendy_diag::conjoin(rest)
+                ),
+                [] => unreachable!("a cycle has a global in it"),
+            };
+            Diagnostic::error(Code::Recursion, message, first.defined, "this constraint")
+                .with_note(
+                    "a possible representation's own constraints are checked whenever a value is selected in it, by its selector, `replace`, `update` or `load_csv`, so one that selects a value in it, directly or through operators, would check itself again",
+                )
+                .with_help("compute the condition from the components as given, without selecting a value in the representation")
+        }
         Global::Constraint(_) => {
             let ty = &first.name;
             let message = match names.as_slice() {
@@ -5874,16 +5995,10 @@ pub(crate) fn cycle(cycle: &[Pending]) -> Diagnostic {
         let (this, that) = (shown(pending), shown(next));
         let label = match (pending.global, next.global) {
             (_, Global::Constraint(_)) if next.global == pending.global => {
-                format!(
-                    "{this} selects a value of `{}`, which checks it again",
-                    next.name
-                )
+                format!("{this} {}, which checks it again", selecting(next))
             }
             (_, Global::Constraint(_)) => {
-                format!(
-                    "{this} selects a value of `{}`, which checks {that}",
-                    next.name
-                )
+                format!("{this} {}, which checks {that}", selecting(next))
             }
             (Global::Variable(_), _) if next.global == pending.global => {
                 format!("{this} refers to itself")

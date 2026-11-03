@@ -88,6 +88,9 @@ pub(crate) struct Pending {
     pub(crate) global: Global,
     /// Its name, as errors write it: a constraint's type's.
     pub(crate) name: String,
+    /// Of a possible representation's own constraint, the representation,
+    /// as its selector is written, `t{c: …}`.
+    pub(crate) representation: Option<String>,
     /// Where its name is defined.
     pub(crate) defined: Span,
     /// Where it refers to the next one, once it does.
@@ -174,6 +177,7 @@ impl<'a> Globals<'a> {
         self.stack.push(Pending {
             global: Global::Variable(id),
             name: ident.text().to_string(),
+            representation: None,
             defined: declared,
             via: declared,
         });
@@ -303,9 +307,19 @@ impl<'a> Globals<'a> {
             Some((ty, _)) => (Global::Constraint(id), ty.name.clone()),
             None => (Global::Operator(id), signature.name.clone()),
         };
+        // A representation's own constraint, as its selector is written.
+        let representation = signature
+            .constrains()
+            .filter(|(_, c)| c.representation().is_some_and(|r| !r.is_stored()))
+            .map(|(ty, _)| {
+                let components: Vec<String> =
+                    signature.params.keys().map(|c| format!("{c}: …")).collect();
+                format!("{}{{{}}}", ty.name, components.join(", "))
+            });
         self.stack.push(Pending {
             global,
             name,
+            representation,
             defined,
             via: defined,
         });
@@ -520,11 +534,11 @@ impl<'a> Globals<'a> {
     }
 
     /// The value of `signature`, the selector of a possible representation of
-    /// the type `defined` other than the stored one: the value with the
-    /// stored components the representation's conversion to the stored one
-    /// computes from its own, the parameters, once that conversion and the
-    /// type's constraints are checked. `None` if any has errors, reported
-    /// when it is checked.
+    /// the type `defined` other than the stored one: the value of its
+    /// components, the parameters, selected in it (see
+    /// [`hir::Expr::SelectIn`]), once its own constraints, its conversion
+    /// to the stored one and the type's constraints are checked. `None` if
+    /// any has errors, reported when it is checked.
     fn selection(
         &mut self,
         signature: &Signature,
@@ -532,37 +546,33 @@ impl<'a> Globals<'a> {
         errors: &mut Vec<Diagnostic>,
     ) -> Option<(Vec<hir::Local>, hir::Expr)> {
         // Its representation, whose components are its parameters.
-        let to = defined
+        let (position, representation) = defined
             .representations
             .iter()
-            .find(|r| signature.takes(&r.components))
-            .expect("only another representation's selector converts")
-            .to;
+            .enumerate()
+            .find(|(_, r)| signature.takes(&r.components))
+            .expect("only another representation's selector converts");
         let at = signature.defined()?;
-        let converts = self.checked(to, at, errors);
-        let constrained = self
-            .namespaces
-            .selection_checks(defined)
+        let mut checks = vec![representation.to];
+        checks.extend(representation.constraints.iter().map(|c| c.operator));
+        checks.extend(self.namespaces.selection_checks(defined));
+        if !checks
             .into_iter()
-            .all(|operator| self.checked(operator, at, errors));
-        if !converts || !constrained {
+            .all(|operator| self.checked(operator, at, errors))
+        {
             return None;
         }
-        let args = signature
+        let components = signature
             .params
             .keys()
             .map(|c| (c.clone(), hir::Expr::Parameter(c.clone())))
             .collect();
-        let components = hir::Expr::Call(hir::Call {
-            operator: to,
-            types: Vec::new(),
-            args,
-            updated: BTreeMap::new(),
-        });
-        Some((
-            Vec::new(),
-            hir::Expr::Select(Box::new(defined.clone()), Box::new(components)),
-        ))
+        let selected = hir::Expr::SelectIn(
+            Box::new(defined.clone()),
+            position,
+            Box::new(hir::Expr::Tuple(components)),
+        );
+        Some((Vec::new(), selected))
     }
 
     /// The tuple of `components`, written in `written`, that `conversion`
@@ -836,6 +846,17 @@ impl Names for ReadOnlyNames<'_, '_, '_> {
             }
             Some(Local::Invalid) => return Lookup::Reported,
             None => {}
+        }
+        // In a representation's own constraint, a component of another,
+        // which its components, as given, don't have.
+        if let Some((defined, constraint)) = self.signature().constrains()
+            && let Some(own) = constraint.representation().filter(|r| !r.is_stored())
+            && defined.representation(name).is_some()
+        {
+            errors.push(errors::other_representations_component(
+                name, span, defined, constraint, &own,
+            ));
+            return Lookup::Reported;
         }
         // In a constraint, a component of a possible representation other
         // than the stored one, which its conversion computes from the

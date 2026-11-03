@@ -174,6 +174,7 @@ codes! {
     UsesPlacement => "A0071",
     UnitCycle => "A0072",
     NameClash => "A0073",
+    OtherRepresentation => "A0074",
     Overflow => "R0001",
     DivisionByZero => "R0002",
     OutOfMemory => "R0003",

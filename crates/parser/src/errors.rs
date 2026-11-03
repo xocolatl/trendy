@@ -192,7 +192,7 @@ pub(crate) fn bare_representation(
 }
 
 /// Why a type's constraints and order go in its braces, for notes.
-const CONSTRAINT_RULE: &str = "what a type says of its values beside their components goes in the type's braces with its possible representation: its constraints, each `constraint` and a condition on the components, which say which values it has, as in `type celsius { { degrees: approximate }, constraint degrees >= -273.15e0 };`, and its order, `order [asc degrees]`";
+const CONSTRAINT_RULE: &str = "what a type says of its values beside their components goes in the type's braces with its possible representation: its constraints, each `constraint` and a condition on the components, which say which values it has, as in `type celsius { { degrees: approximate }, constraint degrees >= -273.15e0 };`, and its order, `order [asc degrees]`; a representation converted to another can have constraints of its own, after its components in its braces, which say which of them represent a value";
 
 /// Tutorial D's `ORDERED` or `ORDINAL`, `found`, saying a type has an
 /// order: a type's order is written with the components it compares.
@@ -388,53 +388,72 @@ pub(crate) fn version_name(span: Span) -> Diagnostic {
 /// What a subtype is, for its errors.
 const SUBTYPE_NOTE: &str = "a type declared `is` a union type is one of its subtypes, and its values are all the union type's (*Type Inheritance and Relational Theory*, chapter 12): `type plane_figure union;` and `type ellipse is plane_figure { { a: distance, b: distance } };`";
 
+/// What a constraint is, as an error says.
+pub(crate) const A_CONSTRAINT: &str = "a constraint";
+
 /// An order or constraints written inside a possible representation's
 /// braces, after its components, as Tutorial D writes a possrep's
-/// constraint.
+/// constraint, which are the type's.
 pub(crate) struct Inside {
     /// Where the components end, before any comma after them.
     pub(crate) components: usize,
     /// Whether a comma separates the items from them.
     pub(crate) comma: bool,
-    /// Each item's span, in order, and what it is, as in `a constraint`.
-    pub(crate) items: Vec<(Span, &'static str)>,
+    /// Each item, in order.
+    pub(crate) items: Vec<InsideItem>,
+}
+
+/// An order or a constraint inside a possible representation's braces.
+pub(crate) struct InsideItem {
+    pub(crate) span: Span,
+    /// What removing it removes: it, and what separates it from what is
+    /// before it, the components or another item.
+    pub(crate) removed: Span,
+    /// What it is, as in `a constraint`.
+    pub(crate) what: &'static str,
 }
 
 /// The order or constraints `inside`, in `source`, a possible
-/// representation's braces. The fix moves them after the braces, which end
-/// at `close`, into the type's.
+/// representation's braces, the type's, which are written in the type's:
+/// in the braces of the representation values are stored as, a constraint
+/// is the type's, and an order is a type's in any. The fix moves them
+/// after the braces, which end at `close`, into the type's.
 pub(crate) fn constraint_in_components(
     source: &str,
     inside: &Inside,
     close: Option<usize>,
 ) -> Diagnostic {
     let items = &inside.items;
-    let (first, what) = items[0];
+    let first = &items[0];
     let d = Diagnostic::error(
         Code::ConstraintInRepresentation,
-        format!("{what} goes in the type's braces, not the components'"),
-        first,
+        format!(
+            "{} goes in the type's braces, not the components'",
+            first.what
+        ),
+        first.span,
         "inside the components' braces",
     )
     .with_note(CONSTRAINT_RULE);
     let Some(close) = close else {
         return d;
     };
-    let (last, _) = items[items.len() - 1];
-    let moved: Vec<&str> = items.iter().map(|(s, _)| &source[s.start..s.end]).collect();
-    d.with_suggestion(
-        "move it after the components' braces",
-        vec![
-            Edit {
-                span: Span::new(inside.components, last.end),
-                replacement: String::new(),
-            },
-            Edit {
-                span: Span::empty(close),
-                replacement: format!(", {}", moved.join(", ")),
-            },
-        ],
-    )
+    let moved: Vec<&str> = items
+        .iter()
+        .map(|item| &source[item.span.start..item.span.end])
+        .collect();
+    let mut edits: Vec<Edit> = items
+        .iter()
+        .map(|item| Edit {
+            span: item.removed,
+            replacement: String::new(),
+        })
+        .collect();
+    edits.push(Edit {
+        span: Span::empty(close),
+        replacement: format!(", {}", moved.join(", ")),
+    });
+    d.with_suggestion("move it after the components' braces", edits)
 }
 
 /// SQL's `check`, `found`, starting a type's constraint, as a domain's or

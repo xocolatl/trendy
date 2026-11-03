@@ -158,6 +158,31 @@ var cooled := [
     t
 ];
 
+/* A duration, stored in seconds, and written in hours and minutes too.
+   A representation's own constraint, in its braces after its components,
+   says which of them represent a value: here, minutes below 60, so that
+   each duration has one representation in hours and minutes. Selecting a
+   value in it checks the constraint of the components as given, before
+   `to` converts them, which would make a value of 90 minutes too. */
+type duration {
+    { seconds: integer },
+    { hours: integer, minutes: integer, constraint minutes >= 0 and minutes < 60 }
+        to { seconds := hours * 3600 + minutes * 60 }
+        from { hours := seconds div 3600, minutes := seconds mod 3600 div 60 },
+    constraint seconds >= 0,
+};
+
+var flight_time := duration{hours: 7, minutes: 45};
+var flight_minutes := flight_time.minutes;
+var layover := flight_time replace { minutes := 15 };
+
+operator durations{hours: integer, minutes: integer} [
+    var d := duration{hours: hours, minutes: minutes};
+    call debug_value{v: d};
+    call debug_value{v: d.minutes};
+    call debug_value{v: d replace { minutes := 15 }};
+];
+
 operator temperatures{celsius: approximate, fahrenheit: approximate} [
     var cold := temperature{celsius: celsius};
     var hot := temperature{fahrenheit: fahrenheit};
@@ -200,6 +225,9 @@ operator main{} [
     call debug_value{v: warmer};
     call debug_value{v: thawed};
     call debug_value{v: cooled};
+    call debug_value{v: flight_time};
+    call debug_value{v: flight_minutes};
+    call debug_value{v: layover};
     call debug_table{r: flight_stops};
 
     call select_position{
@@ -221,6 +249,8 @@ operator main{} [
     call in_order{f: festivals, june: calendar_day{year: 2026, month: 6, day: 1}};
 
     call temperatures{celsius: -2e0, fahrenheit: 104e0};
+
+    call durations{hours: 7, minutes: 45};
 
     call list_stops{j: flight};
 ];

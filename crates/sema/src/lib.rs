@@ -3390,15 +3390,15 @@ operator main{{}} [ var lines: array text; {main} ];"
 
     #[test]
     fn the_prelude_declares_code_point_as_the_compiler_makes_it() {
-        let declared = "type code_point {\n    { value: integer },";
-        assert!(trendy_prelude::PRELUDE.source.contains(declared));
-        let source = trendy_prelude::PRELUDE
-            .source
-            .replace(
-                declared,
-                "type code_point {\n    { value: integer, plane: integer },",
-            )
-            .replace("order [asc value]", "order [asc value, asc plane]");
+        // Of other components than the compiler makes its values with.
+        let prelude = trendy_prelude::PRELUDE.source;
+        let start = prelude.find("type code_point {").unwrap();
+        let end = start + prelude[start..].find("\n};\n").unwrap() + "\n};\n".len();
+        let source = format!(
+            "{}type code_point {{ {{ value: integer, plane: integer }} }};\n{}",
+            &prelude[..start],
+            &prelude[end..]
+        );
         let errors = checked_prelude(&parse(&source));
         assert_eq!(errors.len(), 1, "{errors:#?}");
         assert_eq!(errors[0].code, Code::Internal);
@@ -3441,20 +3441,121 @@ operator main{{}} [ var lines: array text; {main} ];"
             fix(&call("fromCodePoint{to_code_points{from: word}}")),
             call("from_code_points{from: to_code_points{from: word}}")
         );
-        // A character's number, and the character of one, as Python's `ord`
-        // and `chr` give them, which trendy has no type of.
-        for (written, help) in [
-            ("ord{word}", "`to_code_points{from: t}[1].value`"),
-            (
-                "chr{233}",
-                "`from_code_points{from: array [code_point{value: n}]}`",
-            ),
+        // A character's number, and the character of a number, as Python's
+        // `ord` and `chr` give them, which are a code point's, however the
+        // argument is written.
+        let one = |written: &str| format!("var letter := \"ü\";\nvar p := {written};{MAIN}");
+        for (written, fixed) in [
+            ("ord{letter}", "code_point{character: letter}.value"),
+            ("ord{c: \"(\"}", "code_point{character: \"(\"}.value"),
+            ("chr{233}", "code_point{value: 233}.character"),
+            ("fromCharCode{233}", "code_point{value: 233}.character"),
         ] {
-            let errors = errors(&call(written));
+            let errors = errors(&one(written));
             assert_eq!(errors.len(), 1, "{errors:#?}");
             assert_eq!(errors[0].code, Code::UnknownName);
-            assert!(errors[0].help[0].contains(help), "{errors:#?}");
             assert!(errors[0].notes[0].contains("`code_point`"), "{errors:#?}");
+            assert_eq!(fix(&one(written)), one(fixed), "{written}");
+            assert!(analyze_str(&one(fixed)).is_ok(), "{fixed}");
+        }
+        // Of a position in a text, or several numbers, how to write it.
+        for (written, help) in [
+            (
+                "charCodeAt{s: word, i: 1}",
+                "`to_code_points{from: t}[i].value`",
+            ),
+            ("fromCharCode{72, 105}", "`code_point{value: n}.character`"),
+        ] {
+            let errors = errors(&call(written));
+            assert!(errors[0].suggestions.is_empty(), "{errors:#?}");
+            assert!(errors[0].help[0].contains(help), "{errors:#?}");
+        }
+    }
+
+    #[test]
+    fn a_representations_own_constraints_are_checked_as_its_components_are_given() {
+        // Which of its components represent a value: checked of those
+        // given, before its `to` converts them, which would make one.
+        let tens = "type tens {\n    { n: integer },\n    { big: integer, constraint big mod 10 = 0 }\n        to { n := big div 10 }\n        from { big := n * 10 },\n};\n";
+        let values = |source: &str| -> Vec<String> {
+            variables(&format!("{tens}{source}"))
+                .iter()
+                .map(|v| v.init.to_string())
+                .collect()
+        };
+        assert_eq!(
+            values("var a := tens{big: 20};\nvar b := tens{big: 20}.big;"),
+            ["tens{n: 2}", "20"]
+        );
+        let broken = errors(&format!("{tens}var a := tens{{big: 15}};{MAIN}"));
+        assert_eq!(broken.len(), 1, "{broken:#?}");
+        assert_eq!(broken[0].code, Code::BrokenConstraint);
+        assert_eq!(broken[0].message, "`tens{big: 15}` isn't a value of `tens`");
+        assert_eq!(broken[0].secondary[0].message, "false of them");
+        // So does a `replace` or an `update` in it, which selects in it.
+        let replaced = errors(&format!(
+            "{tens}var a := tens{{n: 2}} replace {{ big := 15 }};{MAIN}"
+        ));
+        assert_eq!(replaced[0].code, Code::BrokenConstraint, "{replaced:#?}");
+        assert_eq!(
+            replaced[0].message,
+            "`tens{big: 15}` isn't a value of `tens`"
+        );
+        // The stored representation's components are its own, so no other
+        // representation's constraint is checked of them.
+        assert_eq!(values("var a := tens{n: 3}.big;"), ["30"]);
+        // It names its own components alone, with a fix moving it into the
+        // type's braces, where it names any representation's.
+        let other = tens.replace(
+            "constraint big mod 10 = 0",
+            "constraint big mod 10 = 0 and n > 0",
+        );
+        let source = format!("{other}operator main{{}} [];");
+        assert_eq!(codes(&source), [Code::OtherRepresentation]);
+        assert_eq!(
+            fix(&source),
+            format!(
+                "{}operator main{{}} [];",
+                tens.replace(
+                    "{ big: integer, constraint big mod 10 = 0 }",
+                    "{ big: integer }"
+                )
+                .replace(
+                    "from { big := n * 10 },",
+                    "from { big := n * 10 }, constraint big mod 10 = 0 and n > 0,"
+                )
+            )
+        );
+        // One that selects a value in its representation would check
+        // itself again.
+        let cycle = tens.replace(
+            "constraint big mod 10 = 0",
+            "constraint tens{big: big}.n >= 0",
+        );
+        let errors = errors(&format!("{cycle}operator main{{}} [];"));
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].code, Code::Recursion);
+        assert_eq!(
+            errors[0].message,
+            "`tens{big: …}`'s constraint selects a value in its representation through `tens`"
+        );
+    }
+
+    #[test]
+    fn a_code_point_is_a_number_or_its_character() {
+        // A selection of literals is a literal, and its character the text
+        // of it alone.
+        let values: Vec<String> = variables(
+            "var open := code_point{character: \"(\"};\nvar closed := code_point{value: 41}.character;\nvar same := code_point{character: \"é\"} = to_code_points{from: \"é\"}[1];",
+        )
+        .iter()
+        .map(|v| v.init.to_string())
+        .collect();
+        assert_eq!(values, ["code_point{value: 40}", "\")\"", "true"]);
+        // Of one code point's text alone.
+        for written in ["\"ab\"", "\"\""] {
+            let source = format!("var c := code_point{{character: {written}}};{MAIN}");
+            assert_eq!(codes(&source), [Code::BrokenConstraint], "{written}");
         }
     }
 

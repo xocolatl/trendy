@@ -509,7 +509,12 @@ a heading's, reported once with a fix that makes them one (P0004).
 `type name { { … } };` (`TypeDecl`) is a definition too, `type` a
 contextual keyword at a definition's start before a name and `{`. Its
 braces (`TypeBody`) hold its possible representation (`Representation`),
-whose components are a `Heading`. Components written straight in the
+whose components are a `Heading`. A constraint after them in that
+`Heading` is the representation's own (`Representation::constraints`) if
+conversions follow its braces, and is otherwise the type's
+(`TypeDecl::constraints`), reported with an order there, which is a
+type's in any, and moved into the type's braces, each item on its own
+(P0041). Components written straight in the
 type's braces, or after Tutorial D's `POSSREP`, are parsed as the
 representation in its place and fixed to braces of their own (P0039);
 TypeScript's `type Home = {…}`, with its `=`, stays a heading's.
@@ -988,9 +993,22 @@ conversions, are in its `Defined` too (`hir::Representation`): each with
 its components and its conversions, to the stored one, whose value is the
 tuple of the stored components its `to` computes, and from it, whose
 value is the tuple of its own components its `from` computes, unchecked.
-Sema keeps their declarations (`Namespaces::converted`). Each has a
-selector, whose value is the value its conversion to the stored one
-computes, selected (`operators::Made`); a component of one, `v.c`, is
+Sema keeps their declarations (`Namespaces::converted`). Each can have
+constraints of its own (`hir::Representation`'s `constraints`), each a
+read-only operator whose parameters are its components, numbered after
+its conversions, whose names are its own components alone (A0074, with
+a fix moving it into the type's braces). Each has a selector, whose value
+is the selection in it, `Expr::SelectIn` of the tuple of its parameters:
+the representation's own constraints checked of those, as given, then
+the value its conversion to the stored one computes, selected, which
+folds as `Select` does (`ops::select_in`, R0017 naming the components as
+given) and is otherwise, in lowering, a call of each constraint's
+operator, then of `to`, then a selection (`FunctionBuilder::selected_in`,
+`represented`); `load_csv` checks them of a record's components read in
+the representation before converting them (`record_value`). Checking the
+selector checks its representation's constraints first, so one that
+selects a value in it closes a cycle (A0036, `Pending::representation`
+naming the representation); a component of one, `v.c`, is
 the conversion from the stored one's, called in an `Extend` of
 `v`'s stored components, so that `v` is computed once
 (`Checker::converted_component`), and a constraint names one as the

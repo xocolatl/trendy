@@ -643,7 +643,10 @@ impl<'a> Parser<'a> {
 
     /// `{ name: type, … }`: a possible representation's components. An
     /// order or constraints after them, inside their braces, as Tutorial D
-    /// writes a possrep's constraint, are parsed there, and returned.
+    /// writes a possrep's constraint, are parsed there, and those that are
+    /// the type's returned: an order, and, in the braces of the
+    /// representation values are stored as, which has no conversions, a
+    /// constraint. Another representation's constraints are its own.
     fn representation(&mut self) -> Option<errors::Inside> {
         self.start_node(SyntaxKind::Representation);
         let outer_form = std::mem::replace(&mut self.form, errors::HEADING_FORM);
@@ -666,17 +669,21 @@ impl<'a> Parser<'a> {
                     end => (end, false),
                 };
                 let mut items = Vec::new();
+                let mut before = components;
                 while let Some(start) = p.found().filter(|_| p.type_item_at(0)) {
                     // A key here is a component's, misplaced, which sema
                     // reports, knowing which component is a relation.
                     let key = p.key_at(0).is_some();
                     let what = p.type_item();
+                    let end = p.last_end.unwrap_or(start.span.end);
                     if !key {
-                        items.push((
-                            Span::new(start.span.start, p.last_end.unwrap_or(start.span.end)),
+                        items.push(errors::InsideItem {
+                            span: Span::new(start.span.start, end),
+                            removed: Span::new(before.unwrap_or(start.span.start), end),
                             what,
-                        ));
+                        });
                     }
+                    before = Some(end);
                     if p.at(SyntaxKind::Comma) {
                         p.bump();
                     }
@@ -691,7 +698,9 @@ impl<'a> Parser<'a> {
             },
         );
         // Its conversions, after the components' braces.
+        let mut converted = false;
         while self.conversion_at() {
+            converted = true;
             self.start_node(SyntaxKind::Conversion);
             let word = self.found().expect("at the word").text.to_lowercase();
             self.contextual_keyword(&word);
@@ -700,6 +709,15 @@ impl<'a> Parser<'a> {
         }
         self.form = outer_form;
         self.builder.finish_node();
+        // A converted representation's constraints are its own.
+        if let Some(found) = &mut inside
+            && converted
+        {
+            found.items.retain(|item| item.what != errors::A_CONSTRAINT);
+            if found.items.is_empty() {
+                inside = None;
+            }
+        }
         inside
     }
 
@@ -742,7 +760,7 @@ impl<'a> Parser<'a> {
             "an order"
         } else {
             self.constraint();
-            "a constraint"
+            errors::A_CONSTRAINT
         }
     }
 
@@ -9684,6 +9702,33 @@ type rule { { constraint: text } };",
         // A constraint needs a condition.
         let errors = parse_str("type angle { { radians: approximate }, constraint };").errors;
         assert_eq!(errors[0].code, Code::MissingToken);
+        // Another representation's, which converts to the stored one, is
+        // its own, in its braces: which of its components represent a
+        // value, as Tutorial D writes a possrep's.
+        let own = "type tens { { n: integer }, { big: integer, constraint big mod 10 = 0 } to { n := big div 10 } from { big := n * 10 } };";
+        let parse = parse_str(own);
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        let decl = parse.tree.types().next().unwrap();
+        assert_eq!(decl.constraints().count(), 0);
+        let representations: Vec<usize> = decl
+            .representations()
+            .map(|r| r.constraints().count())
+            .collect();
+        assert_eq!(representations, [0, 1]);
+        // An order there is still the type's, moved out alone.
+        let ordered = own.replace(
+            "constraint big mod 10 = 0",
+            "constraint big mod 10 = 0, order [asc big]",
+        );
+        let codes: Vec<Code> = parse_str(&ordered).errors.iter().map(|e| e.code).collect();
+        assert_eq!(codes, [Code::ConstraintInRepresentation]);
+        assert_eq!(
+            fix(&ordered),
+            own.replace(
+                "from { big := n * 10 }",
+                "from { big := n * 10 }, order [asc big]"
+            )
+        );
     }
 
     #[test]

@@ -720,13 +720,16 @@ fn text() {
             r#""hello, ""#,
             r#""""#,
             folded,
-            // A word's code points, how many, and its last: `á` as one,
-            // then as `a` and a combining accent; and the word again.
+            // A word's code points, how many, and its last, and whether it
+            // is `á`: as one, then as `a` and a combining accent; and the
+            // word again.
             "6",
             "code_point{value: 225}",
             "true",
+            "true",
             "7",
             "code_point{value: 769}",
+            "false",
             "true",
             // The file's lines, in its order, how many it has, and those
             // that aren't empty.
@@ -2507,6 +2510,68 @@ type polygon is plane_figure { { corners: integer } };
 }
 
 #[test]
+fn a_representations_own_constraints_when_running() {
+    // Checked of the components given to its selector, before its `to`,
+    // and of those an `update` in it gives, as the type's are of a value.
+    let source = "type tens {
+    { n: integer },
+    { big: integer, constraint big mod 10 = 0 }
+        to { n := big div 10 }
+        from { big := n * 10 },
+};
+
+operator show{given: integer} [
+    var t := tens{n: 1};
+    update t { n := 2 };
+    call debug_value{v: t.big};
+    update t { big := given };
+    call debug_value{v: t};
+];
+
+operator main{} [
+    call show{given: 30};
+    call show{given: 15};
+];
+";
+    let (code, stderr) = run_source("representation_constraints", source);
+    assert_eq!(code, 1, "{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(lines[..4], ["20", "tens{n: 3}", "20", lines[3]]);
+    assert!(
+        lines[3].starts_with(&format!(
+            "error[{}]: tens{{big: 15}} isn't a value of `tens`: it breaks the constraint `big mod 10 = 0`",
+            trendy_diag::Code::BrokenConstraint.id()
+        )),
+        "{stderr}"
+    );
+    // So too as `load_csv` reads one in it, of the record's components,
+    // writing its line, or skipping it, with its error, if the call gives
+    // errors.
+    let types = "type tens {
+    { n: integer },
+    { big: integer, constraint big mod 10 = 0 }
+        to { n := big div 10 }
+        from { big := n * 10 },
+};
+";
+    let (code, stderr) = loaded_rows(
+        "tens",
+        types,
+        "{ name: text, t: tens }",
+        "name,big\nRome,20\nOslo,15\n",
+        "tuple { name: 1, t: tuple { big: 2 } }",
+    );
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.starts_with(&format!(
+            "error[{}]: line 3 of \"PATH\" gives `t` tens{{big: 15}}, which isn't a value of `tens`: it breaks the constraint `big mod 10 = 0`",
+            trendy_diag::Code::BrokenConstraint.id()
+        )),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn csv_files_load_values_in_another_representation() {
     // A point by its polar coordinates, its distance from the origin in
     // kilometres, stored in metres.
@@ -3590,6 +3655,12 @@ fn types() {
             "true",
             "temperature{kelvin: 2.8115e2}",
             "temperature{kelvin: 3.0315e2}",
+            // A duration selected in hours and minutes, which its own
+            // constraint checks, stored in seconds, its minutes read back,
+            // and changed in that representation.
+            "duration{seconds: 27900}",
+            "45",
+            "duration{seconds: 26100}",
             "┌───────────────────────────────────────────────────┬─────────────┐",
             "│ at                                                │ stop        │",
             "├───────────────────────────────────────────────────┼─────────────┤",

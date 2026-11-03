@@ -2564,8 +2564,8 @@ fn substitute(
         hir::Expr::And(lhs, rhs) => and(vec![sub(lhs)?, sub(rhs)?])?,
         hir::Expr::Ungroup(operand, names) => ungroup(sub(operand)?, names),
         hir::Expr::Only(operand) => only(sub(operand)?)?,
-        hir::Expr::Select(defined, components) => {
-            select(defined, sub(components)?, substitution.bindings)?
+        selection @ (hir::Expr::Select(..) | hir::Expr::SelectIn(..)) => {
+            substituted_selection(selection, depth, substitution)?
         }
         hir::Expr::Components(value) => components(sub(value)?),
         hir::Expr::Treat(ty, value) => sub(value)?.treated(&ty),
@@ -2778,7 +2778,8 @@ pub(crate) fn select(
         Some((constraint, hir::Expr::Constant(hir::Value::Boolean(false)))) => {
             let written = bindings.operators.get(constraint.operator).constrains();
             Err(Failed::Constraint(Box::new(BrokenConstraint {
-                value,
+                selected: hir::Value::Defined(value.clone()).to_string(),
+                ty: value.ty.name.clone(),
                 text: constraint.text,
                 at: written.map(|(_, c)| c.span()),
             })))
@@ -2790,6 +2791,111 @@ pub(crate) fn select(
             Box::new(hir::Expr::Constant(hir::Value::Tuple(value.components))),
         )),
     }
+}
+
+/// `selection`, a `Select` or a `SelectIn`, with what `substitution` says
+/// replaced in its components, the tuple at hand `depth` `Extend`s out,
+/// and selected, as [`substitute`] simplifies an expression.
+///
+/// # Errors
+///
+/// Returns why the selection, or computing its components, fails.
+fn substituted_selection(
+    selection: hir::Expr,
+    depth: usize,
+    substitution: &Substitution,
+) -> Result<hir::Expr, Failed> {
+    let bindings = substitution.bindings;
+    match selection {
+        hir::Expr::Select(defined, components) => select(
+            defined,
+            substitute(*components, depth, substitution)?,
+            bindings,
+        ),
+        hir::Expr::SelectIn(defined, at, components) => select_in(
+            defined,
+            at,
+            substitute(*components, depth, substitution)?,
+            bindings,
+        ),
+        other => unreachable!("{other:?} selects nothing"),
+    }
+}
+
+/// The value of the program's own type `defined` whose components in its
+/// possible representation at `at` in its representations are the tuple
+/// `components`, as that representation's selector gives it: which fails
+/// unless each of its constraints is true of them, as given, and is
+/// otherwise the value of the stored components its `to` computes from
+/// them, selected as [`select`] selects one. Evaluated if they are a
+/// constant, as each constraint then is.
+///
+/// # Errors
+///
+/// Returns the constraint a constant's components break, of the
+/// representation or of the type, or why computing one fails.
+pub(crate) fn select_in(
+    defined: Box<hir::Defined>,
+    at: usize,
+    components: hir::Expr,
+    bindings: Bindings,
+) -> Result<hir::Expr, Failed> {
+    let unknown = |components| {
+        Ok(hir::Expr::SelectIn(
+            defined.clone(),
+            at,
+            Box::new(components),
+        ))
+    };
+    let Some(hir::Value::Tuple(tuple)) = known_value(&components) else {
+        return unknown(components);
+    };
+    let tuple = tuple.clone();
+    let representation = &defined.representations[at];
+    let args: BTreeMap<String, hir::Expr> = representation
+        .components
+        .attributes()
+        .map(|(name, ty)| {
+            let value = tuple
+                .get(name)
+                .expect("a selection has its representation's components");
+            (name.to_string(), typed(value.clone(), ty))
+        })
+        .collect();
+    let called = |operator| hir::Call {
+        operator,
+        types: Vec::new(),
+        args: args.clone(),
+        updated: BTreeMap::new(),
+    };
+    for constraint in &representation.constraints {
+        match call(called(constraint.operator), bindings)? {
+            hir::Expr::Constant(hir::Value::Boolean(true)) => {}
+            hir::Expr::Constant(hir::Value::Boolean(false)) => {
+                let written = bindings.operators.get(constraint.operator).constrains();
+                return Err(Failed::Constraint(Box::new(BrokenConstraint {
+                    selected: hir::selection_text(defined.written(), &tuple),
+                    ty: defined.name.clone(),
+                    text: constraint.text.clone(),
+                    at: written.map(|(_, c)| c.span()),
+                })));
+            }
+            // Known only when running, as whether they satisfy it is.
+            _ => {
+                return unknown(typed(
+                    hir::Value::Tuple(tuple),
+                    &components_type(representation),
+                ));
+            }
+        }
+    }
+    let stored = call(called(representation.to), bindings)?;
+    select(defined, stored, bindings)
+}
+
+/// The type of the tuple of `representation`'s components.
+fn components_type(representation: &hir::Representation) -> hir::Type {
+    hir::Type::Tuple(representation.components.clone())
 }
 
 /// Whether each key of each relation-valued component of `value`, a value
@@ -2976,11 +3082,14 @@ pub(crate) struct BrokenKey {
     pub(crate) at: Option<Span>,
 }
 
-/// A value of a type of the program's own whose components break one of
-/// its constraints: the condition, as it is written, at `at`.
+/// A selection of a value of a type of the program's own, named `ty`, whose
+/// components break one of its constraints, or of the representation they
+/// are given in: the selection written as its selector writes it,
+/// `selected`, and the condition, as it is written, at `at`.
 #[derive(Debug, Clone)]
 pub(crate) struct BrokenConstraint {
-    pub(crate) value: hir::DefinedValue,
+    pub(crate) selected: String,
+    pub(crate) ty: String,
     pub(crate) text: String,
     pub(crate) at: Option<Span>,
 }

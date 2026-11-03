@@ -594,9 +594,14 @@ impl TypeDecl {
     }
 
     /// Its constraints, in order: in its body, or, where the parser
-    /// reports them out of place, among the components.
+    /// reports them out of place, among the components of the
+    /// representation its values are stored as. Another representation's
+    /// are its own ([`Representation::constraints`]).
     pub fn constraints(&self) -> impl Iterator<Item = Constraint> {
-        self.0.descendants().filter_map(Constraint::cast)
+        self.0
+            .descendants()
+            .filter_map(Constraint::cast)
+            .filter(|c| c.representation().is_none_or(|r| r.is_stored()))
     }
 
     /// Its orders, of which it may have one: in its body, or, where the
@@ -645,6 +650,28 @@ impl Representation {
     /// the representation values are stored as.
     pub fn conversions(&self) -> impl Iterator<Item = Conversion> + use<> {
         self.0.children().filter_map(Conversion::cast)
+    }
+
+    /// Whether its type's values are stored as it: whether it has no
+    /// conversions.
+    #[must_use]
+    pub fn is_stored(&self) -> bool {
+        self.conversions().next().is_none()
+    }
+
+    /// Its own constraints, inside its braces, after its components, which
+    /// say which of them represent a value: none for the representation
+    /// values are stored as, whose are the type's
+    /// ([`TypeDecl::constraints`]).
+    pub fn constraints(&self) -> impl Iterator<Item = Constraint> + use<> {
+        let own = (!self.is_stored()).then(|| self.components()).flatten();
+        own.into_iter().flat_map(|heading| {
+            heading
+                .0
+                .children()
+                .filter_map(Constraint::cast)
+                .collect::<Vec<_>>()
+        })
     }
 }
 
@@ -703,8 +730,8 @@ impl TypeOrder {
         self.0.children().find_map(OrderList::cast)
     }
 
-    /// The span to delete to remove it from its type's braces, with the
-    /// comma that separates it from the rest.
+    /// The span to delete to remove it from its type's braces, or its
+    /// representation's, with the comma that separates it from the rest.
     #[must_use]
     pub fn removal(&self) -> Span {
         list_removal(&self.0)
@@ -719,14 +746,21 @@ impl Constraint {
         significant_tokens(&self.0).next()
     }
 
+    /// The possible representation whose braces it is written in, after
+    /// the components, if it isn't in the type's.
+    #[must_use]
+    pub fn representation(&self) -> Option<Representation> {
+        self.0.ancestors().find_map(Representation::cast)
+    }
+
     /// The condition every value of the type satisfies.
     #[must_use]
     pub fn condition(&self) -> Option<Expr> {
         self.0.children().find_map(Expr::cast)
     }
 
-    /// The span to delete to remove it from its type's braces, with the
-    /// comma that separates it from the rest.
+    /// The span to delete to remove it from its type's braces, or its
+    /// representation's, with the comma that separates it from the rest.
     #[must_use]
     pub fn removal(&self) -> Span {
         list_removal(&self.0)

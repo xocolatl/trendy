@@ -1031,6 +1031,29 @@ impl Lowering {
         self.descriptor(&hir::Type::Defined(Box::new(alone)))
     }
 
+    /// The descriptor of the components of `representation`, a possible
+    /// representation of `defined`, given to its selector, as if they were
+    /// a value's stored ones, so that a failure writes them as the
+    /// selector writes them, `t{c: …}`.
+    fn representation_descriptor(
+        &mut self,
+        defined: &hir::Defined,
+        representation: &hir::Representation,
+    ) -> lir::DataId {
+        let given = hir::Defined {
+            name: defined.written().to_string(),
+            components: representation.components.clone(),
+            representations: Vec::new(),
+            constraints: Vec::new(),
+            keys: BTreeMap::new(),
+            order: None,
+            supertypes: Vec::new(),
+            specialized: false,
+            specialization: None,
+        };
+        self.descriptor(&hir::Type::Defined(Box::new(given)))
+    }
+
     /// A heading's attributes, laid out as an array of `trendy_runtime::Attr`:
     /// `{ name: *u8, name_len, offset, desc: *TypeDesc }`, in name order. A
     /// wrapped attribute, which the source can't name, has none.
@@ -2485,6 +2508,12 @@ impl<'a> FunctionBuilder<'a> {
                     ..value.clone()
                 };
                 self.attributes_read(&components, own, fields, cx);
+                // Its representation's own constraints first, of them as
+                // read.
+                if !other.constraints.is_empty() {
+                    let checking = self.read_checking(&value.name, value.at, cx);
+                    self.represented(defined, other, &components.dst, &checking, cx);
+                }
                 let stored = self.converted(other.to, own, components.dst, cx);
                 self.insts.push(lir::Inst::Copy {
                     dst: target.dst.clone(),
@@ -2638,7 +2667,7 @@ impl<'a> FunctionBuilder<'a> {
         });
         let done = self.new_block();
         for constraint in subtype.own_constraints() {
-            let holds = self.holds(constraint, subtype, components, cx);
+            let holds = self.holds(constraint, &subtype.components, components, cx);
             let next = self.new_block();
             self.end_block(
                 lir::Terminator::Branch {
@@ -2658,19 +2687,19 @@ impl<'a> FunctionBuilder<'a> {
         result
     }
 
-    /// Whether `constraint`, of `defined`, is true of the value at `value`,
-    /// laid out as the tuple of its components: a call of its operator with
-    /// the components as its arguments, in a new place.
+    /// Whether `constraint` is true of the components at `value`, laid out
+    /// as the tuple of them, `components`, a value's or a representation's:
+    /// a call of its operator with the components as its arguments, in a
+    /// new place.
     fn holds(
         &mut self,
         constraint: &hir::Constraint,
-        defined: &hir::Defined,
+        components: &hir::Heading,
         value: &lir::Place,
         cx: &mut Lowering,
     ) -> lir::Place {
-        let at_hand = hir::Expr::Current(0, defined.components.clone());
-        let args: BTreeMap<String, hir::Expr> = defined
-            .components
+        let at_hand = hir::Expr::Current(0, components.clone());
+        let args: BTreeMap<String, hir::Expr> = components
             .attributes()
             .map(|(name, _)| {
                 let arg = hir::Expr::Extract(Box::new(at_hand.clone()), name.to_string());
@@ -3486,7 +3515,7 @@ impl<'a> FunctionBuilder<'a> {
             hir::Expr::Only(operand) => self.only(operand, cx),
             // A value of a type of the program's own is laid out as the tuple
             // of its components.
-            hir::Expr::Select(defined, operand) => self.selected(defined, operand, cx),
+            hir::Expr::Select(..) | hir::Expr::SelectIn(..) => self.selection(expr, cx),
             hir::Expr::Components(operand) => self.components(operand, cx),
             hir::Expr::Treat(..) | hir::Expr::TreatAs(..) | hir::Expr::Is(..) => {
                 self.typed(expr, cx)
@@ -4376,6 +4405,17 @@ impl<'a> FunctionBuilder<'a> {
         components
     }
 
+    /// The value `selection`, a `Select` or a `SelectIn`, selects.
+    fn selection(&mut self, selection: &hir::Expr, cx: &mut Lowering) -> lir::Place {
+        match selection {
+            hir::Expr::Select(defined, components) => self.selected(defined, components, cx),
+            hir::Expr::SelectIn(defined, at, components) => {
+                self.selected_in(defined, *at, components, cx)
+            }
+            other => unreachable!("{other:?} selects nothing"),
+        }
+    }
+
     /// The value of the type of the program's own `defined` selected from
     /// `components`, once each of its constraints is true of them (see
     /// [`FunctionBuilder::constrained`]): laid out as the tuple of them, or,
@@ -4387,6 +4427,38 @@ impl<'a> FunctionBuilder<'a> {
         cx: &mut Lowering,
     ) -> lir::Place {
         let value = self.place(components, cx);
+        self.selected_from(defined, value, cx)
+    }
+
+    /// The value of the type of the program's own `defined` whose
+    /// components in its possible representation at `at` are `components`,
+    /// selected in it: once each of the representation's constraints is
+    /// true of them, as given (see [`FunctionBuilder::represented`]), the
+    /// value its `to` converts them to, selected as
+    /// [`FunctionBuilder::selected`] selects one.
+    fn selected_in(
+        &mut self,
+        defined: &hir::Defined,
+        at: usize,
+        components: &hir::Expr,
+        cx: &mut Lowering,
+    ) -> lir::Place {
+        let given = self.place(components, cx);
+        let representation = &defined.representations[at];
+        self.represented(defined, representation, &given, &Checking::Selected, cx);
+        let stored = self.converted(representation.to, &representation.components, given, cx);
+        self.selected_from(defined, stored, cx)
+    }
+
+    /// The value of the type of the program's own `defined` selected from
+    /// the components at `value`, as [`FunctionBuilder::selected`] selects
+    /// one.
+    fn selected_from(
+        &mut self,
+        defined: &hir::Defined,
+        value: lir::Place,
+        cx: &mut Lowering,
+    ) -> lir::Place {
         let ty = hir::Type::Defined(Box::new(defined.clone()));
         self.constrained(defined, &value, &Checking::Selected, cx);
         if ty.root().is_none() {
@@ -4501,54 +4573,102 @@ impl<'a> FunctionBuilder<'a> {
     ) {
         self.component_keys_checked(defined, value, checking, cx);
         let descriptor = lir::Place::whole(lir::Base::Data(cx.components_descriptor(defined)));
+        let checked = CheckedComponents {
+            components: &defined.components,
+            value,
+            descriptor: &descriptor,
+            ty: &defined.name,
+        };
         for constraint in &defined.constraints {
-            let holds = self.holds(constraint, defined, value, cx);
-            let (kept, failed) = (self.new_block(), self.new_block());
-            self.end_block(
-                lir::Terminator::Branch {
-                    condition: holds,
-                    then: kept,
-                    otherwise: failed,
-                },
-                failed,
-            );
-            let (value, descriptor) = (value.clone(), descriptor.clone());
-            let constraint = self.text(&constraint.text, cx);
-            let ty = self.text(&defined.name, cx);
-            let broken = match checking {
-                Checking::Selected => Broken::Fail(Box::new(lir::Failure::BrokenConstraint {
+            self.constraint_checked(constraint, &checked, checking, cx);
+        }
+    }
+
+    /// Stop the program unless each of `representation`'s own constraints,
+    /// a possible representation of `defined`, in order, is true of the
+    /// components at `value`, as given, laid out as the tuple of them,
+    /// before its `to` converts them. The first that is false fails as
+    /// `checking` says, writing the components as its selector writes them.
+    fn represented(
+        &mut self,
+        defined: &hir::Defined,
+        representation: &hir::Representation,
+        value: &lir::Place,
+        checking: &Checking,
+        cx: &mut Lowering,
+    ) {
+        if representation.constraints.is_empty() {
+            return;
+        }
+        let descriptor = cx.representation_descriptor(defined, representation);
+        let descriptor = lir::Place::whole(lir::Base::Data(descriptor));
+        let checked = CheckedComponents {
+            components: &representation.components,
+            value,
+            descriptor: &descriptor,
+            ty: &defined.name,
+        };
+        for constraint in &representation.constraints {
+            self.constraint_checked(constraint, &checked, checking, cx);
+        }
+    }
+
+    /// Stop the program unless `constraint` is true of the components
+    /// `checked` says, as `checking` says.
+    fn constraint_checked(
+        &mut self,
+        constraint: &hir::Constraint,
+        checked: &CheckedComponents,
+        checking: &Checking,
+        cx: &mut Lowering,
+    ) {
+        let (value, descriptor) = (checked.value, checked.descriptor);
+        let holds = self.holds(constraint, checked.components, value, cx);
+        let (kept, failed) = (self.new_block(), self.new_block());
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: holds,
+                then: kept,
+                otherwise: failed,
+            },
+            failed,
+        );
+        let (value, descriptor) = (value.clone(), descriptor.clone());
+        let constraint = self.text(&constraint.text, cx);
+        let ty = self.text(checked.ty, cx);
+        let broken = match checking {
+            Checking::Selected => Broken::Fail(Box::new(lir::Failure::BrokenConstraint {
+                value,
+                descriptor,
+                ty,
+                constraint,
+            })),
+            Checking::Read { record, skip: None } => {
+                Broken::Fail(Box::new(lir::Failure::BrokenConstraintInFile {
                     value,
                     descriptor,
                     ty,
                     constraint,
-                })),
-                Checking::Read { record, skip: None } => {
-                    Broken::Fail(Box::new(lir::Failure::BrokenConstraintInFile {
-                        value,
-                        descriptor,
-                        ty,
-                        constraint,
-                        record: record.clone(),
-                    }))
-                }
-                Checking::Read {
-                    record,
-                    skip: Some(skip),
-                } => Broken::Skip {
-                    function: lir::RuntimeFn::BrokenConstraintError,
-                    args: vec![
-                        skip.errors.clone(),
-                        value,
-                        descriptor,
-                        ty,
-                        constraint,
-                        record.clone(),
-                    ],
-                    to: skip.to,
-                },
-            };
-            self.broken(broken, kept);
-        }
+                    record: record.clone(),
+                }))
+            }
+            Checking::Read {
+                record,
+                skip: Some(skip),
+            } => Broken::Skip {
+                function: lir::RuntimeFn::BrokenConstraintError,
+                args: vec![
+                    skip.errors.clone(),
+                    value,
+                    descriptor,
+                    ty,
+                    constraint,
+                    record.clone(),
+                ],
+                to: skip.to,
+            },
+        };
+        self.broken(broken, kept);
     }
 
     /// Check that the relation at `relation`, of type `ty`, has no two
@@ -5917,6 +6037,16 @@ struct Errors {
 struct InFile {
     path: lir::Place,
     lines: lir::Place,
+}
+
+/// Components a constraint is checked of: their heading, a value's or a
+/// representation's, where they are, laid out as the tuple of them, the
+/// descriptor a failure writes them with, and the name of their type.
+struct CheckedComponents<'c> {
+    components: &'c hir::Heading,
+    value: &'c lir::Place,
+    descriptor: &'c lir::Place,
+    ty: &'c str,
 }
 
 /// What a value whose components are checked against its type's keys
