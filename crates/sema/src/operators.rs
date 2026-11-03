@@ -276,20 +276,6 @@ impl Signature {
         hir::Expr::Select(defined, Box::new(hir::Expr::Tuple(components)))
     }
 
-    /// What it is called in the program, of `namespaces`: a selector as
-    /// its type is, and a type's constraint or conversion as it is named
-    /// after its type already.
-    pub(crate) fn identity(&self, namespaces: &Namespaces) -> String {
-        match &self.from_type {
-            Some(from) if from.selects().is_some() => from.defined.name.clone(),
-            Some(_) => self.name.clone(),
-            None => {
-                let params = self.written.keys().cloned().collect();
-                namespaces.operator_identity(&self.name, &params, self.unit)
-            }
-        }
-    }
-
     /// The parameters, as a call's error says what they are:
     /// `` `greet{name: text}` ``.
     pub(crate) fn text(&self) -> String {
@@ -365,6 +351,51 @@ impl Operators {
         &self.list[id.0]
     }
 
+    /// The operator `id`'s family's: its specification's, if it is a
+    /// version, the definition's, for the interface's declaration of one,
+    /// and else its own.
+    fn family_of(&self, id: hir::OperatorId) -> hir::OperatorId {
+        match self.get(id).family {
+            Family::Version(spec) => self.family_of(spec),
+            Family::Declaration(definition) => self.family_of(definition),
+            Family::Own | Family::Duplicate => id,
+        }
+    }
+
+    /// What the operator `id` is called in the program, of `namespaces`: a
+    /// selector as its type is, a type's constraint or conversion as it is
+    /// named after its type already, and another operator as its family
+    /// is, by its name, or, if another family or selector of its name and
+    /// parameters' names is another unit's, none of them the prelude's,
+    /// qualified by its specification's unit's name.
+    pub(crate) fn identity(&self, id: hir::OperatorId, namespaces: &Namespaces) -> String {
+        let signature = self.get(id);
+        match &signature.from_type {
+            Some(from) if from.selects().is_some() => return from.defined.name.clone(),
+            Some(_) => return signature.name.clone(),
+            None => {}
+        }
+        let family = self.get(self.family_of(id));
+        let named = |s: &&Signature| {
+            s.name == family.name
+                && s.written.keys().eq(family.written.keys())
+                && (s.decl.is_some() || s.from_type.as_ref().is_some_and(|f| f.selects().is_some()))
+        };
+        let families: BTreeSet<hir::OperatorId> = self
+            .list
+            .iter()
+            .filter(named)
+            .map(|s| self.family_of(s.id))
+            .collect();
+        let prelude = families
+            .iter()
+            .any(|&f| self.get(f).source == Source::Prelude);
+        let ambiguous = families.len() > 1 && !prelude;
+        namespaces
+            .units()
+            .identity(&family.name, family.unit, ambiguous)
+    }
+
     /// The selectors of the type of the program's own `defined`, in the
     /// order they are defined.
     fn selectors(&self, defined: &hir::Defined) -> impl Iterator<Item = &Signature> {
@@ -401,15 +432,20 @@ impl Operators {
             .map(|signature| signature.id)
     }
 
-    /// The operators named `name` that `viewer` sees, in the order they
-    /// are defined.
+    /// The operators named `name` that `viewer` sees: its own unit's, then
+    /// the prelude's, then the used units', by their names, as they are in
+    /// no order, each unit's in the order they are defined.
     fn seen(&self, name: &str, viewer: scope::Viewer) -> impl Iterator<Item = &Signature> {
-        self.by_name
+        let mut seen: Vec<&Signature> = self
+            .by_name
             .get(name)
             .into_iter()
             .flatten()
             .map(|&id| self.get(id))
-            .filter(move |s| self.units.sees(viewer, s.unit, s.section))
+            .filter(|s| self.units.sees(viewer, s.unit, s.section))
+            .collect();
+        seen.sort_by(|a, b| self.units.seen_order(viewer, a.unit, b.unit));
+        seen.into_iter()
     }
 
     /// The operators named `name` that what is written at `at` sees, in the
@@ -633,11 +669,15 @@ pub(crate) fn signatures(
 }
 
 /// The operators in `list` written in trendy, each by its place in it, in
-/// sets of one name and the same parameters' names: one set, if the
-/// prelude has one of them, as every unit sees it, and otherwise one for
-/// each unit, as none sees another's. A built-in's duplicate is in none, as
+/// sets of one name and the same parameters' names, each a family, of the
+/// units of `units`: those of one unit, those of the prelude's, which
+/// every unit sees, with those of the units' of their name, and each
+/// version of another unit's that its unit sees with it (see
+/// [`version_of`]). An operator of another unit's name and parameters'
+/// names, no version of it, is in no set with it, and where a unit that
+/// sees both calls them, they clash. A built-in's duplicate is in none, as
 /// it is one already.
-fn sets(list: &[Signature]) -> Vec<Vec<usize>> {
+fn sets(list: &[Signature], units: &scope::Units) -> Vec<Vec<usize>> {
     // An operator's name and its parameters' names.
     type Named = (String, Vec<String>);
     let trendy = |signature: &&Signature| {
@@ -653,19 +693,110 @@ fn sets(list: &[Signature]) -> Vec<Vec<usize>> {
             .collect();
         (signature.name.clone(), names.into_iter().cloned().collect())
     };
-    let prelude: BTreeSet<Named> = list
-        .iter()
-        .filter(trendy)
-        .filter(|signature| signature.source == Source::Prelude)
-        .map(named)
-        .collect();
-    let mut sets: BTreeMap<(Named, Option<hir::FileId>), Vec<usize>> = BTreeMap::new();
+    let mut by_name: BTreeMap<Named, Vec<usize>> = BTreeMap::new();
     for (i, signature) in list.iter().enumerate().filter(|(_, s)| trendy(s)) {
-        let named = named(signature);
-        let unit = (!prelude.contains(&named)).then_some(signature.unit);
-        sets.entry((named, unit)).or_default().push(i);
+        by_name.entry(named(signature)).or_default().push(i);
+    }
+    // Each operator's set, by the first of it, as one is joined to another.
+    let mut first: Vec<usize> = (0..list.len()).collect();
+    let find = |first: &mut Vec<usize>, mut i: usize| {
+        while first[i] != i {
+            i = first[i];
+        }
+        i
+    };
+    for members in by_name.values() {
+        for (k, &a) in members.iter().enumerate() {
+            for &b in &members[k + 1..] {
+                let (x, y) = (&list[a], &list[b]);
+                let one = x.unit == y.unit
+                    || x.source == Source::Prelude
+                    || y.source == Source::Prelude
+                    || version_of(x, y, units)
+                    || version_of(y, x, units);
+                if one {
+                    let (ra, rb) = (find(&mut first, a), find(&mut first, b));
+                    first[ra.max(rb)] = ra.min(rb);
+                }
+            }
+        }
+    }
+    let mut sets: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for members in by_name.values() {
+        for &m in members {
+            let set = find(&mut first, m);
+            sets.entry(set).or_default().push(m);
+        }
     }
     sets.into_values().collect()
+}
+
+/// The versions in `members`, of `list`, of the same types as `member`,
+/// which `spec` is the specification of: in one unit, each after the first
+/// in its file is a duplicate of it; in several, which are in no order,
+/// each is reported, naming the others, and only the first stays a
+/// version, to check the specification with.
+fn same_types(
+    list: &mut [Signature],
+    members: &[usize],
+    spec: usize,
+    member: usize,
+    namespaces: &Namespaces,
+    errors: &mut Vec<Diagnostic>,
+) -> Vec<usize> {
+    let same = |a: &Signature, b: &Signature| covers(a, b) && covers(b, a);
+    let group: Vec<usize> = members
+        .iter()
+        .copied()
+        .filter(|&m| m != spec && same(&list[m], &list[member]))
+        .collect();
+    let units: BTreeSet<hir::FileId> = group.iter().map(|&m| list[m].unit).collect();
+    if units.len() > 1 {
+        let name = |m: usize| namespaces.units().name(list[m].unit);
+        for &m in &group {
+            let others: Vec<(&str, Span)> = group
+                .iter()
+                .filter(|&&o| o != m)
+                .filter_map(|&o| Some((name(o), list[o].defined()?)))
+                .collect();
+            errors.push(errors::versions_in_units(&list[m], name(m), &others));
+        }
+    }
+    for &later in &group[1..] {
+        if units.len() > 1 {
+            list[later].family = Family::Duplicate;
+            list[later].valid = false;
+        } else {
+            duplicate(list, member, later, errors);
+        }
+    }
+    group
+}
+
+/// Whether `spec`'s parameters' types are supertypes of `other`'s, each
+/// of the same name: a specification `other` can be a version of.
+fn covers(spec: &Signature, other: &Signature) -> bool {
+    other.params.iter().all(|(name, p)| {
+        spec.params
+            .get(name)
+            .is_some_and(|s| p.ty.is_subtype_of(&s.ty))
+    })
+}
+
+/// Whether `version`, of another unit than `of`, is a version of it, as
+/// its unit's implementation sees `of`, in the interface of a unit it
+/// uses, and its parameters' types are subtypes of `of`'s, one of them a
+/// proper one (*Type Inheritance and Relational Theory*, IM Prescription
+/// 17).
+fn version_of(version: &Signature, of: &Signature, units: &scope::Units) -> bool {
+    let implementation = scope::Viewer {
+        unit: version.unit,
+        section: Section::Implementation,
+    };
+    version.unit != of.unit
+        && units.sees(implementation, of.unit, of.section)
+        && covers(of, version)
+        && !covers(version, of)
 }
 
 /// Each set of the operators in `list` written in trendy, the prelude's and
@@ -680,15 +811,8 @@ fn sets(list: &[Signature]) -> Vec<Vec<usize>> {
 /// union types' subtypes that none is for, or two are, neither more
 /// specific than the other.
 fn families(list: &mut [Signature], namespaces: &Namespaces, errors: &mut Vec<Diagnostic>) {
-    for members in sets(list) {
+    for members in sets(list, namespaces.units()) {
         let members = paired(list, &members, errors);
-        let covers = |spec: &Signature, other: &Signature| {
-            other.params.iter().all(|(name, p)| {
-                spec.params
-                    .get(name)
-                    .is_some_and(|s| p.ty.is_subtype_of(&s.ty))
-            })
-        };
         let same = |a: &Signature, b: &Signature| covers(a, b) && covers(b, a);
         let spec = members
             .iter()
@@ -716,17 +840,18 @@ fn families(list: &mut [Signature], namespaces: &Namespaces, errors: &mut Vec<Di
             continue;
         };
         let mut versions: Vec<usize> = Vec::new();
+        let mut placed: BTreeSet<usize> = BTreeSet::new();
         for &member in &members {
-            if member == spec {
+            if member == spec || placed.contains(&member) {
                 continue;
             }
-            if let Some(&earlier) = std::iter::once(&spec)
-                .chain(&versions)
-                .find(|&&e| same(&list[e], &list[member]))
-            {
-                duplicate(list, earlier, member, errors);
+            placed.insert(member);
+            if same(&list[spec], &list[member]) {
+                duplicate(list, spec, member, errors);
                 continue;
             }
+            let group = same_types(list, &members, spec, member, namespaces, errors);
+            placed.extend(group);
             if let Some(error) = errors::unlike_version(&list[member], &list[spec]) {
                 errors.push(error);
                 list[member].valid = false;

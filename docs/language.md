@@ -215,6 +215,15 @@ operator main{} [
   compiles, so a unit that gains a declaration breaks only the units that
   write its name. Operators of one name whose parameters' names differ are
   overloads, and don't clash.
+- **A unit gives versions of the specifications it sees,** another
+  unit's among them, for its own subtypes or another's, in its
+  implementation: they are one family with the specification, and
+  dispatch finds the same version from every unit. Over the whole
+  program, each combination of subtypes has its version, and only one
+  (A0063): as the units are in no order, each of several in different
+  units is reported, naming the others. An operator of another unit's name and parameters' names
+  that is no version of it is the unit's own, and clashes where a call
+  names it.
 
 - **First in its section, once** (A0071): the interface and the
   implementation each have their own, so that what their declarations see

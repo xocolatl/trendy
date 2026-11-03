@@ -17,6 +17,7 @@
 //! name. No unit can declare one of the prelude's names, which every unit
 //! sees, so those are always plain.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use trendy_diag::Span;
@@ -125,6 +126,23 @@ impl Units {
         viewer.unit == unit
             || unit == self.prelude()
             || self.uses(viewer, unit) && section == Section::Interface
+    }
+
+    /// The order in which `viewer` lists what the units `a` and `b` declare:
+    /// its own unit's first, then the prelude's, then the used units', by
+    /// their names, as they are in no order; one unit's in the order they
+    /// are declared.
+    pub(crate) fn seen_order(&self, viewer: Viewer, a: hir::FileId, b: hir::FileId) -> Ordering {
+        let rank = |unit: hir::FileId| {
+            if unit == viewer.unit {
+                (0, "")
+            } else if unit == self.prelude() {
+                (1, "")
+            } else {
+                (2, self.name(unit))
+            }
+        };
+        rank(a).cmp(&rank(b))
     }
 
     /// Whether `viewer`'s section uses `unit`.
@@ -253,7 +271,7 @@ pub(crate) fn ambiguous(declaring: impl Iterator<Item = hir::FileId>, units: &Un
 /// The declarations of one namespace, each by its name, with the unit and
 /// the section it is in, in the order they are declared.
 pub(crate) struct Declared<T> {
-    by_name: HashMap<String, Vec<Entry<T>>>,
+    by_name: BTreeMap<String, Vec<Entry<T>>>,
 }
 
 /// A declaration, in its unit's section.
@@ -266,7 +284,7 @@ struct Entry<T> {
 impl<T> Default for Declared<T> {
     fn default() -> Self {
         Declared {
-            by_name: HashMap::new(),
+            by_name: BTreeMap::new(),
         }
     }
 }
@@ -308,6 +326,8 @@ impl<T> Declared<T> {
                 used.push((e.unit, &e.value));
             }
         }
+        // By name, as the units a section uses are in no order.
+        used.sort_by(|(a, _), (b, _)| units.name(*a).cmp(units.name(*b)));
         Candidates {
             own: first(viewer.unit),
             prelude: first(units.prelude()),
@@ -315,20 +335,23 @@ impl<T> Declared<T> {
         }
     }
 
-    /// Each declaration named `name` that `viewer` sees, its own unit's
-    /// first, with the unit it is in: an operator's overloads.
+    /// Each declaration named `name` that `viewer` sees, with the unit it
+    /// is in: its own unit's first, then the prelude's, then the used
+    /// units', by their names, as they are in no order: an operator's
+    /// overloads.
     pub(crate) fn each_visible<'a>(
         &'a self,
         name: &str,
         viewer: Viewer,
         units: &'a Units,
     ) -> impl Iterator<Item = (hir::FileId, &'a T)> {
-        let entries = self.entries(name);
-        let own = entries.iter().filter(move |e| e.unit == viewer.unit);
-        let others = entries
+        let mut seen: Vec<&Entry<T>> = self
+            .entries(name)
             .iter()
-            .filter(move |e| e.unit != viewer.unit && units.sees(viewer, e.unit, e.section));
-        own.chain(others).map(|e| (e.unit, &e.value))
+            .filter(|e| units.sees(viewer, e.unit, e.section))
+            .collect();
+        seen.sort_by(|a, b| units.seen_order(viewer, a.unit, b.unit));
+        seen.into_iter().map(|e| (e.unit, &e.value))
     }
 
     /// The first declaration named `name` in `unit`.

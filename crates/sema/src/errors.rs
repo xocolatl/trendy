@@ -8265,6 +8265,39 @@ fn heading_text(decl: &ast::Operator) -> String {
     text[..end].trim_end().to_string()
 }
 
+/// `version`, in the unit `unit`, of a specification another of whose
+/// versions, each of the same types, each of `others` is, at its span, in
+/// its unit: each combination of subtypes has one version.
+pub(crate) fn versions_in_units(
+    version: &Signature,
+    unit: &str,
+    others: &[(&str, Span)],
+) -> Diagnostic {
+    let mut units: Vec<&str> = std::iter::once(unit)
+        .chain(others.iter().map(|(u, _)| *u))
+        .collect();
+    units.sort_unstable();
+    units.dedup();
+    let listed: Vec<String> = units.iter().map(|u| format!("`{u}`")).collect();
+    let mut d = Diagnostic::error(
+        Code::Versions,
+        format!(
+            "{} has a version in each of {}",
+            version.text(),
+            trendy_diag::conjoin(&listed)
+        ),
+        version.defined().expect("a version is written in trendy"),
+        format!("one of them, in `{unit}`"),
+    );
+    let mut others = others.to_vec();
+    others.sort_by_key(|(u, _)| *u);
+    for (other, at) in others {
+        d = d.with_secondary(at, format!("another, in `{other}`"));
+    }
+    d.with_note("each combination of a specification's subtypes has exactly one version over the program, so a call computes the same in every unit")
+        .with_help("keep one of them: the one in the unit that declares the subtype, or the specification")
+}
+
 /// What a unit sees, for the notes of a clash.
 const SEEN: &str = "a name a unit writes means one declaration it sees: one of its own, one of the prelude's, or one of the interface of a unit its section uses; a name more than one of those units declares means none of them, as nothing settles which by order";
 

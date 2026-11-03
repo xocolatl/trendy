@@ -839,7 +839,14 @@ and parameters' names. A declaration is found from its own name by its
 identity (`Namespaces::declared_type`), not by what its unit sees. An
 operator is seen by other units in the section it is declared in, the
 interface for the definition of one the interface declares
-(`Signature::section`). A specification and its versions
+(`Signature::section`). Operators of one name and parameters' names are
+one family (`operators::sets`) when they are one unit's, or one is the
+prelude's, or one is a version of the other's, which its unit's
+implementation sees (`operators::version_of`), so a unit's versions of
+another unit's specification are dispatched from every unit, and A0063
+holds over the program; each is called in the HIR as its family is
+(`Operators::identity`), qualified only if another family or a selector
+of its name and parameters' names is another unit's. A specification and its versions
 are one family only where every unit sees it: the prelude's, with each
 unit's versions of it, and otherwise each unit's own. Each declaration has
 one name in the HIR, its identity: its name, if one unit of the program

@@ -373,7 +373,7 @@ impl Checked {
                     }
                 };
                 hir::Operator {
-                    name: signature.identity(&self.namespaces),
+                    name: self.operators.identity(signature.id, &self.namespaces),
                     types: signature.types.clone(),
                     params: signature.params.clone(),
                     kind,
@@ -671,24 +671,6 @@ impl Namespaces {
             .each_visible(name, self.viewer(at), &self.units)
             .find(|(_, d)| d.params == *params)?;
         Some((first.kind, first.span))
-    }
-
-    /// What the operator named `name`, of parameters named `params`,
-    /// declared in `unit`, is called in the program.
-    pub(crate) fn operator_identity(
-        &self,
-        name: &str,
-        params: &BTreeSet<String>,
-        unit: hir::FileId,
-    ) -> String {
-        let ambiguous = scope::ambiguous(
-            self.operators
-                .declaring(name)
-                .filter(|(_, d)| d.params == *params)
-                .map(|(u, _)| u),
-            &self.units,
-        );
-        self.units.identity(name, unit, ambiguous)
     }
 
     /// What `name`, written at `at`, means in `namespace`, of the
@@ -11577,6 +11559,104 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
         assert_eq!(errors[0].code, Code::UnknownName);
     }
 
+    /// A unit that declares a union type, a specification of it, and a
+    /// version for its own subtype.
+    const FIGURES_UNIT: &str = "interface\n\ntype figure union;\n\ntype square is figure { { side: approximate } };\n\noperator area{f: figure}: approximate;\n\nimplementation\n\noperator area{f: square}: approximate [ f.side * f.side ];";
+
+    /// A unit that uses `figures`, with a subtype of its own, and its version.
+    const DISCS_UNIT: &str = "interface\n\nuses { figures };\n\ntype disc is figure { { r: approximate } };\n\nimplementation\n\noperator area{f: disc}: approximate [ 3e0 * f.r * f.r ];";
+
+    #[test]
+    fn a_unit_gives_versions_of_a_specification_it_sees() {
+        let main = "uses { figures, discs };\n\nvar a := area{f: disc{r: 2e0}};\nvar b := area{f: square{side: 2e0}};\n\noperator main{} [];";
+        let program = analyze_units(&[
+            ("program", main),
+            ("figures", FIGURES_UNIT),
+            ("discs", DISCS_UNIT),
+        ])
+        .unwrap();
+        let values: Vec<String> = program
+            .variables
+            .iter()
+            .map(|v| v.init.to_string())
+            .collect();
+        assert_eq!(values, ["1.2e1", "4e0"]);
+        // One family, named as its specification.
+        let areas: Vec<&str> = program
+            .operators
+            .iter()
+            .filter(|o| o.name.ends_with("area"))
+            .map(|o| o.name.as_str())
+            .collect();
+        assert_eq!(areas, ["area", "area", "area"]);
+        // Each subtype has a version, whichever unit gives it.
+        let errors = analyze_units(&[
+            ("program", "uses { figures, discs };\n\noperator main{} [];"),
+            ("figures", FIGURES_UNIT),
+            (
+                "discs",
+                "interface\n\nuses { figures };\n\ntype disc is figure { { r: approximate } };",
+            ),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            errors.iter().map(|e| e.code).collect::<Vec<_>>(),
+            [Code::Versions],
+            "{errors:#?}"
+        );
+        // And only one: as units are in no order, each of several is
+        // reported, naming the others.
+        let errors = analyze_units(&[
+            ("program", "uses { figures, discs };\n\noperator area{f: disc}: approximate [ 0e0 ];\n\noperator main{} [];"),
+            ("figures", FIGURES_UNIT),
+            ("discs", DISCS_UNIT),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            errors.iter().map(|e| e.code).collect::<Vec<_>>(),
+            [Code::Versions, Code::Versions],
+            "{errors:#?}"
+        );
+        for (error, other) in errors.iter().zip(["discs", "program"]) {
+            assert_eq!(
+                error.message,
+                "`area{f: disc}` has a version in each of `discs` and `program`"
+            );
+            assert_eq!(error.secondary.len(), 1);
+            assert_eq!(error.secondary[0].message, format!("another, in `{other}`"));
+        }
+        // Whatever order the program's units are given in.
+        let reordered = analyze_units(&[
+            ("program", "uses { figures, discs };\n\noperator area{f: disc}: approximate [ 0e0 ];\n\noperator main{} [];"),
+            ("discs", DISCS_UNIT),
+            ("figures", FIGURES_UNIT),
+        ])
+        .unwrap_err();
+        let messages = |errors: &[Diagnostic]| -> Vec<(String, Vec<String>)> {
+            errors
+                .iter()
+                .map(|e| {
+                    let secondary = e.secondary.iter().map(|l| l.message.clone()).collect();
+                    (e.message.clone(), secondary)
+                })
+                .collect()
+        };
+        assert_eq!(messages(&reordered), messages(&errors));
+        // An operator of a name and parameters' names it sees, but no
+        // version of it, is the unit's own, and clashes where it is called.
+        let errors = analyze_units(&[
+            ("program", "uses { figures };\n\noperator area{f: integer}: approximate [ 0e0 ];\nvar a := area{f: 1};\n\noperator main{} [];"),
+            ("figures", FIGURES_UNIT),
+            ("discs", DISCS_UNIT),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            errors.iter().map(|e| e.code).collect::<Vec<_>>(),
+            [Code::NameClash],
+            "{errors:#?}"
+        );
+    }
+
     #[test]
     fn an_interface_sees_its_own_uses() {
         // The implementation sees both sections' `uses`, the interface only
@@ -11626,6 +11706,21 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
             "`metres` is declared by `lakes.depths` and `seas.depths`, which this unit uses"
         );
         assert_eq!(errors[0].secondary.len(), 2);
+        // Whatever order they are used, or given, in.
+        let reordered = analyze_units(&[
+            ("program", "uses { seas.depths, lakes.depths };\n\nvar m := metres{m: 1};\nvar n: metres;\n\noperator main{} [];"),
+            ("seas.depths", seas),
+            ("lakes.depths", DEPTHS),
+        ])
+        .unwrap_err();
+        assert_eq!(reordered[0].message, errors[0].message);
+        let at = |e: &Diagnostic| {
+            e.secondary
+                .iter()
+                .map(|l| l.message.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(at(&reordered[0]), at(&errors[0]));
         // The unit's own and a used unit's.
         let errors = units("uses { seas.depths };\n\ntype metres { { m: integer } };\nvar m := metres{m: 1};\n\noperator main{} [];").unwrap_err();
         assert_eq!(
