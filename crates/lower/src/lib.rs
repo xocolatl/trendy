@@ -1133,9 +1133,9 @@ struct FunctionBuilder<'a> {
     /// Whether the function begins scopes, a statement's or a loop's,
     /// which its failure exit ends.
     begins: bool,
-    /// Where each tuple at hand is, innermost last: what `Current` refers
-    /// to, inside an `Extend`'s values.
-    tuples: Vec<lir::Place>,
+    /// Each tuple at hand, innermost last: what `Current` refers to,
+    /// inside an `Extend`'s values and a `Restrict`'s condition.
+    tuples: Vec<AtHand>,
     /// The site the code built so far leaves the program at: the
     /// statement's being lowered, or a value's in it, if any.
     site: Option<hir::Site>,
@@ -1154,8 +1154,11 @@ struct FunctionBuilder<'a> {
     exit: Option<lir::BlockId>,
     /// The slot of each binding of a `Let` whose value points to a text,
     /// relation or array, which holds references to them from the `Let` on,
-    /// until its last use, with its type: null before and after, from the
-    /// function's entry on, so that its failure exit releases each.
+    /// until its last use, and of each relation a loop looks up in and its
+    /// index, which hold them from the first tuple that needs them until
+    /// the loop ends (see [`FunctionBuilder::looked_up`]), with its type:
+    /// null before and after, from the function's entry on, so that its
+    /// failure exit releases each.
     lets: Vec<(lir::Place, hir::Type)>,
 }
 
@@ -1225,6 +1228,50 @@ impl Kept {
 struct LocalPlace {
     value: lir::Place,
     holds: bool,
+}
+
+/// A tuple at hand, which `Current` refers to: where it is, and, if it is
+/// each tuple of a relation in turn, the loop's lookups.
+struct AtHand {
+    place: lir::Place,
+    lookups: Option<Lookups>,
+}
+
+impl AtHand {
+    /// The tuple at `place`, the only one at hand: there is no loop.
+    fn one(place: lir::Place) -> AtHand {
+        AtHand {
+            place,
+            lookups: None,
+        }
+    }
+}
+
+/// The relations a loop over a relation's tuples looks up in (see
+/// [`FunctionBuilder::looked_up`]).
+struct Lookups {
+    /// Whether each local variable, by id, was bound as the loop began: a
+    /// relation looked up in reads none bound in the loop, which can differ
+    /// for each tuple.
+    bound: Vec<bool>,
+    made: Vec<Lookup>,
+}
+
+/// A relation, `operand`, of type `ty`, that a loop looks up in on the
+/// attributes `on`: the slot that keeps it, once the first tuple that
+/// needs it computes it, and the slot of its index on them.
+struct Lookup {
+    operand: hir::Expr,
+    on: Vec<String>,
+    ty: hir::Type,
+    kept: lir::Place,
+    index: lir::Place,
+}
+
+/// The type of a relation's index (see [`lir::RuntimeFn::Index`]): an
+/// array of the positions of its tuples.
+fn index_type() -> hir::Type {
+    hir::Type::Array(Box::new(hir::Type::Scalar(hir::Scalar::Integer)))
 }
 
 /// A change to an array's element, computed: the slot of each position,
@@ -2972,7 +3019,7 @@ impl<'a> FunctionBuilder<'a> {
             args,
             updated: BTreeMap::new(),
         });
-        self.tuples.push(value.clone());
+        self.tuples.push(AtHand::one(value.clone()));
         let holds = self.place(&call, cx);
         self.tuples.pop();
         holds
@@ -3002,7 +3049,7 @@ impl<'a> FunctionBuilder<'a> {
             args,
             updated: BTreeMap::new(),
         });
-        self.tuples.push(value);
+        self.tuples.push(AtHand::one(value));
         let converted = self.place(&conversion, cx);
         self.tuples.pop();
         converted
@@ -3782,7 +3829,9 @@ impl<'a> FunctionBuilder<'a> {
             hir::Expr::Combine(combination, lhs, rhs) => self.combine(*combination, lhs, rhs, cx),
             hir::Expr::Antijoin(lhs, rhs) => self.matching(lhs, rhs, true, cx),
             hir::Expr::Restrict(operand, condition) => self.restrict(operand, condition, cx),
-            hir::Expr::Current(depth, _) => self.tuples[self.tuples.len() - 1 - depth].clone(),
+            hir::Expr::Current(depth, _) => {
+                self.tuples[self.tuples.len() - 1 - depth].place.clone()
+            }
             hir::Expr::Call(call) => self.read_only_call(call, cx),
             hir::Expr::Extend(operand, _, attributes) => self.extend(expr, operand, attributes, cx),
             // Of the operands of `and` and `or`, those that can fail are
@@ -4307,7 +4356,9 @@ impl<'a> FunctionBuilder<'a> {
         match (&ty, &result_ty) {
             (hir::Type::Tuple(heading), hir::Type::Tuple(result)) => {
                 let dst = self.slot(cx.layout(&result_ty));
+                self.tuples.push(AtHand::one(src.clone()));
                 self.extended(heading, &src, attributes, result, &dst, cx);
+                self.tuples.pop();
                 dst
             }
             (hir::Type::Relation(heading), hir::Type::Relation(result)) => {
@@ -4317,9 +4368,9 @@ impl<'a> FunctionBuilder<'a> {
         }
     }
 
-    /// Build at `dst` the tuple at `src`, with `heading`, with `attributes`
-    /// added or replaced: each attribute of `result`, in name order, is
-    /// computed with `src` as the tuple at hand, or else copied from `src`.
+    /// Build at `dst` the tuple at `src`, the tuple at hand, with `heading`,
+    /// with `attributes` added or replaced: each attribute of `result`, in
+    /// name order, is computed, or else copied from `src`.
     fn extended(
         &mut self,
         heading: &hir::Heading,
@@ -4330,7 +4381,6 @@ impl<'a> FunctionBuilder<'a> {
         cx: &mut Lowering,
     ) {
         let own: Vec<&str> = heading.attributes().map(|(name, _)| name).collect();
-        self.tuples.push(src.clone());
         for (j, (name, ty)) in result.attributes().enumerate() {
             let from = if let Some(value) = attributes.get(name) {
                 self.place(value, cx)
@@ -4351,7 +4401,6 @@ impl<'a> FunctionBuilder<'a> {
                 layout: cx.layout(ty),
             });
         }
-        self.tuples.pop();
     }
 
     /// The relation at `src`, with `heading`, with `attributes` added to or
@@ -4374,12 +4423,12 @@ impl<'a> FunctionBuilder<'a> {
         count.path.push(1);
         let dst = self.allocated(&result_ty, count, cx);
         let built = hir::Type::Tuple(result.clone());
-        self.each_tuple(src, tuple, cx, |this, at_hand, index, cx| {
+        self.each_at_hand(src, tuple, cx, |this, at_hand, index, cx| {
             let to = this.element(&dst, index, result_tuple);
             // The work on each tuple in a scope of its own, which the
             // tuple built outlives.
             this.nested_scope(cx, |this, cx| {
-                this.extended(heading, &at_hand, attributes, result, &to, cx);
+                this.extended(heading, at_hand, attributes, result, &to, cx);
                 vec![(to.clone(), built.clone())]
             });
         });
@@ -4417,14 +4466,12 @@ impl<'a> FunctionBuilder<'a> {
             src: zero,
             layout: lir::Layout::Usize,
         });
-        self.each_tuple(&src, tuple.clone(), cx, |this, at_hand, _, cx| {
+        self.each_at_hand(&src, tuple.clone(), cx, |this, at_hand, _, cx| {
             // The condition, computed in a scope of its own for each tuple,
             // which nothing it made outlives.
             let keep = this.slot(lir::Layout::U8);
             this.nested_scope(cx, |this, cx| {
-                this.tuples.push(at_hand.clone());
                 let computed = this.place(condition, cx);
-                this.tuples.pop();
                 this.insts.push(lir::Inst::Copy {
                     dst: keep.clone(),
                     src: computed,
@@ -4444,7 +4491,7 @@ impl<'a> FunctionBuilder<'a> {
             let to = this.element(&dst, &kept, tuple.clone());
             this.insts.push(lir::Inst::Copy {
                 dst: to,
-                src: at_hand,
+                src: at_hand.clone(),
                 layout: tuple,
             });
             this.insts.push(lir::Inst::Increment {
@@ -4535,6 +4582,41 @@ impl<'a> FunctionBuilder<'a> {
         body(self, at_hand, &index, cx);
         self.insts.push(lir::Inst::Increment { place: index });
         self.end_block(lir::Terminator::Jump(head), done);
+    }
+
+    /// `body` of each tuple of the relation at `src`, laid out as `tuple`,
+    /// as the tuple at hand, with its index, in a loop (see
+    /// [`FunctionBuilder::each_tuple`]): the relations it looks up in are
+    /// computed once, with their indexes, at the first tuple that needs
+    /// them, and given up as it ends (see [`FunctionBuilder::looked_up`]).
+    fn each_at_hand(
+        &mut self,
+        src: &lir::Place,
+        tuple: lir::Layout,
+        cx: &mut Lowering,
+        body: impl FnOnce(&mut Self, &lir::Place, &lir::Place, &mut Lowering),
+    ) {
+        let bound = self.local_places.iter().map(Option::is_some).collect();
+        let mut made = Vec::new();
+        self.each_tuple(src, tuple, cx, |this, at_hand, index, cx| {
+            this.tuples.push(AtHand {
+                place: at_hand.clone(),
+                lookups: Some(Lookups {
+                    bound,
+                    made: Vec::new(),
+                }),
+            });
+            body(this, &at_hand, index, cx);
+            made = this
+                .tuples
+                .pop()
+                .and_then(|at_hand| at_hand.lookups)
+                .map_or_else(Vec::new, |lookups| lookups.made);
+        });
+        for lookup in made {
+            self.release_place(&lookup.kept, &lookup.ty, cx);
+            self.release_place(&lookup.index, &index_type(), cx);
+        }
     }
 
     /// The element at `index`, from 0, of `array`, a relation's tuples or
@@ -5125,25 +5207,7 @@ impl<'a> FunctionBuilder<'a> {
             unreachable!("sema joins only relations");
         };
         let result_ty = lhs_ty.and(rhs_ty);
-        let lhs_tuple = cx.layout(&hir::Type::Tuple(lhs_heading.clone()));
-        let rhs_tuple = cx.layout(&hir::Type::Tuple(rhs_heading.clone()));
-        let position =
-            |heading: &hir::Heading, name: &str| heading.attributes().position(|(a, _)| a == name);
-        let sources = attribute_names(&result_ty)
-            .map(|name| {
-                let (from_rhs, offset) = position(lhs_heading, name).map_or_else(
-                    || {
-                        let i = position(rhs_heading, name)
-                            .expect("each attribute of the result is an operand's");
-                        (1, lir::Field::Offset(rhs_tuple.clone(), vec![i]))
-                    },
-                    |i| (0, lir::Field::Offset(lhs_tuple.clone(), vec![i])),
-                );
-                lir::Field::Struct(vec![lir::Field::Usize(from_rhs), offset])
-            })
-            .collect();
-        let common = common_attributes(lhs_heading, rhs_heading, cx);
-        let common_count = cx.constant(vec![lir::Field::Usize(len(common.len()))]);
+        let joining = Joining::of(lhs_heading, rhs_heading, &result_ty, cx);
         let descriptor = |ty: &hir::Type, cx: &mut Lowering| {
             lir::Place::whole(lir::Base::Data(cx.descriptor(ty)))
         };
@@ -5153,12 +5217,9 @@ impl<'a> FunctionBuilder<'a> {
             descriptor(&result_ty, cx),
             descriptor(lhs_ty, cx),
             descriptor(rhs_ty, cx),
-            lir::Place::whole(lir::Base::Data(cx.constant(sources))),
-            lir::Place::whole(lir::Base::Data(cx.constant(common))),
-            lir::Place {
-                base: lir::Base::Data(common_count),
-                path: vec![0],
-            },
+            joining.sources,
+            joining.common,
+            joining.common_count,
         ];
         let dst = self.slot(cx.layout(&result_ty));
         self.insts.push(lir::Inst::CallRuntime {
@@ -5526,6 +5587,12 @@ impl<'a> FunctionBuilder<'a> {
     /// `lhs` and `rhs` joined, computed into a new stack slot: the AND of
     /// relations, by the runtime, or the join of tuples.
     fn joined(&mut self, lhs: &hir::Expr, rhs: &hir::Expr, cx: &mut Lowering) -> lir::Place {
+        if let Some((operand, key)) = self
+            .lookup_in(lhs, rhs)
+            .or_else(|| self.lookup_in(rhs, lhs))
+        {
+            return self.looked_up(operand, key, cx);
+        }
         let lhs_ty = self.type_of(lhs);
         let rhs_ty = self.type_of(rhs);
         let lhs = self.place(lhs, cx);
@@ -5534,6 +5601,184 @@ impl<'a> FunctionBuilder<'a> {
             hir::Type::Tuple(_) => self.tuple_join(&lhs_ty, &rhs_ty, &lhs, &rhs, cx),
             _ => self.and(&lhs_ty, &rhs_ty, lhs, rhs, cx),
         }
+    }
+
+    /// Whether the AND of `operand` and `other` is a lookup in `operand` (see
+    /// [`FunctionBuilder::looked_up`]), and of what tuple, `other`'s one:
+    /// in a loop over a relation's tuples, `other` is a relation of one
+    /// tuple, as an image relation's is of the tuple at hand's attributes,
+    /// and `operand` a relation that reads neither the tuple at hand nor a
+    /// local variable bound in the loop, and so is the same for each tuple.
+    fn lookup_in<'e>(
+        &self,
+        operand: &'e hir::Expr,
+        other: &'e hir::Expr,
+    ) -> Option<(&'e hir::Expr, &'e hir::Expr)> {
+        let lookups = self.tuples.last()?.lookups.as_ref()?;
+        let hir::Expr::Relation(_, tuples) = other else {
+            return None;
+        };
+        let [key] = tuples.as_slice() else {
+            return None;
+        };
+        if !matches!(self.type_of(operand), hir::Type::Relation(_)) {
+            return None;
+        }
+        let read = operand.tuple_read(0);
+        let bound_in_loop = |i: usize| {
+            self.local_places[i].is_some() && !lookups.bound.get(i).copied().unwrap_or(false)
+        };
+        let varies = read.whole
+            || !read.attributes.is_empty()
+            || (0..self.local_places.len())
+                .any(|i| bound_in_loop(i) && operand.reads_local(hir::LocalId(i)));
+        (!varies).then_some((operand, key))
+    }
+
+    /// The AND of the relation `operand` and a relation of the tuple `key`
+    /// alone, in a loop over a relation's tuples, for each of which
+    /// `operand` is the same (see [`FunctionBuilder::lookup_in`]), as an
+    /// image relation is of the relation it is of and the tuple at hand's
+    /// common attributes. Rather than sort `operand` again for each tuple,
+    /// as the AND does, the first tuple that needs them computes it and its
+    /// index on the common attributes ([`lir::RuntimeFn::Index`]), which
+    /// slots keep, as they do a `Let`'s binding, until the loop ends; each
+    /// tuple then finds those that agree with `key` by binary search,
+    /// already in canonical order ([`lir::RuntimeFn::Lookup`]). A lookup
+    /// in the same relation on the same attributes, elsewhere in the loop,
+    /// shares them. `operand` is computed only where it was, if at all, and
+    /// once, as its value would be the same each time.
+    fn looked_up(&mut self, operand: &hir::Expr, key: &hir::Expr, cx: &mut Lowering) -> lir::Place {
+        let rel_ty = self.type_of(operand);
+        let (hir::Type::Relation(rel_heading), hir::Type::Tuple(key_heading)) =
+            (&rel_ty, self.type_of(key))
+        else {
+            unreachable!("a lookup is in a relation, of a tuple");
+        };
+        let key_ty = hir::Type::Relation(key_heading.clone());
+        let result_ty = rel_ty.and(&key_ty);
+        let joining = Joining::of(rel_heading, &key_heading, &result_ty, cx);
+        let on: Vec<String> = rel_heading.common(&key_heading).into_iter().collect();
+        let (kept, index) = self.lookup(operand, on, &rel_ty, &joining, cx);
+        let key = self.place(key, cx);
+        let dst = self.slot(cx.layout(&result_ty));
+        let descriptor = |ty: &hir::Type, cx: &mut Lowering| {
+            lir::Place::whole(lir::Base::Data(cx.descriptor(ty)))
+        };
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Lookup,
+            args: vec![
+                dst.clone(),
+                kept,
+                index,
+                key,
+                descriptor(&result_ty, cx),
+                descriptor(&rel_ty, cx),
+                joining.sources,
+                joining.common,
+                joining.common_count,
+            ],
+        });
+        self.scoped = true;
+        dst
+    }
+
+    /// The slots of the relation `operand`, of type `rel_ty`, that the loop
+    /// at hand looks up in on the attributes `on`, which `joining` says
+    /// where they are, and of its index on them: the loop's lookup's, if
+    /// it has one, or else a new one's. Either way, code that computes them
+    /// both, if they aren't yet, comes next (see
+    /// [`FunctionBuilder::looked_up`]).
+    fn lookup(
+        &mut self,
+        operand: &hir::Expr,
+        on: Vec<String>,
+        rel_ty: &hir::Type,
+        joining: &Joining,
+        cx: &mut Lowering,
+    ) -> (lir::Place, lir::Place) {
+        let existing = self
+            .tuples
+            .last()
+            .and_then(|at_hand| at_hand.lookups.as_ref())
+            .and_then(|lookups| {
+                lookups
+                    .made
+                    .iter()
+                    .find(|lookup| lookup.operand == *operand && lookup.on == on)
+            })
+            .map(|lookup| (lookup.kept.clone(), lookup.index.clone()));
+        let (kept, index) = existing.unwrap_or_else(|| {
+            let kept = self.slot(cx.layout(rel_ty));
+            let index = self.slot(cx.layout(&index_type()));
+            self.lets.push((kept.clone(), rel_ty.clone()));
+            self.lets.push((index.clone(), index_type()));
+            let lookup = Lookup {
+                operand: operand.clone(),
+                on,
+                ty: rel_ty.clone(),
+                kept: kept.clone(),
+                index: index.clone(),
+            };
+            self.tuples
+                .last_mut()
+                .and_then(|at_hand| at_hand.lookups.as_mut())
+                .expect("a lookup is in a loop")
+                .made
+                .push(lookup);
+            (kept, index)
+        });
+        let descriptor = |ty: &hir::Type, cx: &mut Lowering| {
+            lir::Place::whole(lir::Base::Data(cx.descriptor(ty)))
+        };
+        // The first tuple that needs them computes the relation and its
+        // index: until then, the index is null.
+        let mut pointer = index.clone();
+        pointer.path.push(0);
+        let unmade = self.slot(lir::Layout::U8);
+        let null = usize_constant(0, cx);
+        self.insts.push(lir::Inst::Binary {
+            dst: unmade.clone(),
+            op: lir::BinaryOp::Compare(lir::Comparison::Equal, lir::Operand::Usize),
+            lhs: pointer,
+            rhs: null,
+        });
+        let (compute, computed) = (self.new_block(), self.new_block());
+        self.end_block(
+            lir::Terminator::Branch {
+                condition: unmade,
+                then: compute,
+                otherwise: computed,
+            },
+            compute,
+        );
+        let src = self.place(operand, cx);
+        self.insts.push(lir::Inst::Copy {
+            dst: kept.clone(),
+            src,
+            layout: cx.layout(rel_ty),
+        });
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Retain,
+            args: vec![kept.clone(), descriptor(rel_ty, cx)],
+        });
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Index,
+            args: vec![
+                index.clone(),
+                kept.clone(),
+                descriptor(rel_ty, cx),
+                descriptor(&index_type(), cx),
+                joining.common.clone(),
+                joining.common_count.clone(),
+            ],
+        });
+        self.insts.push(lir::Inst::CallRuntime {
+            function: lir::RuntimeFn::Retain,
+            args: vec![index.clone(), descriptor(&index_type(), cx)],
+        });
+        self.end_block(lir::Terminator::Jump(computed), computed);
+        (kept, index)
     }
 
     /// The join of the tuples at `lhs` and `rhs`, of types `lhs_ty` and
@@ -5936,6 +6181,54 @@ fn lower_comparison(comparison: hir::Comparison) -> lir::Comparison {
         hir::Comparison::LessOrEqual => lir::Comparison::LessOrEqual,
         hir::Comparison::Greater => lir::Comparison::Greater,
         hir::Comparison::GreaterOrEqual => lir::Comparison::GreaterOrEqual,
+    }
+}
+
+/// Where the attributes of a join of tuples with the headings `lhs` and
+/// `rhs` are, as [`lir::RuntimeFn::And`] and [`lir::RuntimeFn::Lookup`]
+/// take them: constants of, for each attribute of `result`, which operand
+/// it comes from and where it is there, and of the common attributes (see
+/// [`common_attributes`]), and their count.
+struct Joining {
+    sources: lir::Place,
+    common: lir::Place,
+    common_count: lir::Place,
+}
+
+impl Joining {
+    fn of(
+        lhs: &hir::Heading,
+        rhs: &hir::Heading,
+        result: &hir::Type,
+        cx: &mut Lowering,
+    ) -> Joining {
+        let lhs_tuple = cx.layout(&hir::Type::Tuple(lhs.clone()));
+        let rhs_tuple = cx.layout(&hir::Type::Tuple(rhs.clone()));
+        let position =
+            |heading: &hir::Heading, name: &str| heading.attributes().position(|(a, _)| a == name);
+        let sources = attribute_names(result)
+            .map(|name| {
+                let (from_rhs, offset) = position(lhs, name).map_or_else(
+                    || {
+                        let i = position(rhs, name)
+                            .expect("each attribute of the result is an operand's");
+                        (1, lir::Field::Offset(rhs_tuple.clone(), vec![i]))
+                    },
+                    |i| (0, lir::Field::Offset(lhs_tuple.clone(), vec![i])),
+                );
+                lir::Field::Struct(vec![lir::Field::Usize(from_rhs), offset])
+            })
+            .collect();
+        let common = common_attributes(lhs, rhs, cx);
+        let common_count = cx.constant(vec![lir::Field::Usize(len(common.len()))]);
+        Joining {
+            sources: lir::Place::whole(lir::Base::Data(cx.constant(sources))),
+            common: lir::Place::whole(lir::Base::Data(cx.constant(common))),
+            common_count: lir::Place {
+                base: lir::Base::Data(common_count),
+                path: vec![0],
+            },
+        }
     }
 }
 
@@ -7658,6 +7951,75 @@ mod tests {
         assert_eq!(per_tuple.first(), Some(&Begin), "{blocks:?}");
         assert_eq!(per_tuple.last(), Some(&End), "{blocks:?}");
         assert!(!per_tuple.contains(&HandOut), "{blocks:?}");
+    }
+
+    #[test]
+    fn a_loop_looks_up_in_a_relation_the_same_for_each_tuple() {
+        use lir::RuntimeFn::{And, Index, Lookup, Release};
+        // `r extend { image := s join relation { tuple { a: a } } }`, as an
+        // image relation of `s` is before its `remove`.
+        let a = || ("a".to_string(), integer());
+        let r_heading = hir::Heading::new([a()].into());
+        let s_heading = hir::Heading::new([a(), ("b".to_string(), integer())].into());
+        let key = || {
+            let a = hir::Expr::Extract(
+                Box::new(hir::Expr::Current(0, r_heading.clone())),
+                "a".to_string(),
+            );
+            hir::Expr::Relation(
+                r_heading.clone(),
+                vec![hir::Expr::Tuple([("a".to_string(), a)].into())],
+            )
+        };
+        let extended = |operand: hir::Expr| {
+            let image = hir::Expr::And(Box::new(operand), Box::new(key()));
+            let added = hir::Heading::new(
+                [("image".to_string(), hir::Type::Relation(s_heading.clone()))].into(),
+            );
+            let extend = hir::Expr::Extend(
+                Box::new(hir::Expr::Variable(hir::VariableId(0))),
+                added,
+                [("image".to_string(), image)].into(),
+            );
+            let empty = |heading: &hir::Heading| {
+                hir::Value::Relation(hir::RelationValue {
+                    heading: heading.clone(),
+                    tuples: std::collections::BTreeSet::new(),
+                })
+            };
+            let lowered = lower_program(&program(
+                vec![
+                    debug_value(),
+                    user("main", &[], vec![call(0, vec![("v", extend)])]),
+                ],
+                vec![
+                    variable("r", empty(&r_heading)),
+                    variable("s", empty(&s_heading)),
+                ],
+            ));
+            runtime_calls(&lowered.functions[0]).concat()
+        };
+        // `s` is the same for each tuple: the loop indexes it once, and
+        // gives it and its index up as it ends.
+        let calls = extended(hir::Expr::Variable(hir::VariableId(1)));
+        let count = |f: lir::RuntimeFn| calls.iter().filter(|c| **c == f).count();
+        assert_eq!(
+            (count(Index), count(Lookup), count(And)),
+            (1, 1, 0),
+            "{calls:?}"
+        );
+        let after = calls.iter().position(|c| *c == Lookup).unwrap();
+        assert_eq!(
+            calls[after..].iter().filter(|c| **c == Release).count(),
+            2,
+            "{calls:?}"
+        );
+        // A relation that reads the tuple at hand is joined anew for each.
+        let calls = extended(key());
+        assert!(
+            calls.contains(&And) && !calls.contains(&Lookup),
+            "{calls:?}"
+        );
     }
 
     #[test]

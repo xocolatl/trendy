@@ -2177,9 +2177,24 @@ as anywhere else. `Ungroup` is a call to `trendy_rt_ungroup`, with, as for
 the tuple of which ungrouped relation, and each ungrouped attribute's
 offset and its relation's tuple size; it makes every combination, then
 sorts them into the canonical order, making one of any that turn out equal.
-An image relation in the loop builds the one-tuple relation and joins it
-with `trendy_rt_and` for each tuple: correct, but a join per tuple, until
-an optimizer rewrites it into one join and a grouping.
+An image relation in a loop over a relation's tuples, an `extend`'s or a
+`where`'s, is a lookup (`FunctionBuilder::looked_up`). Sema writes `!!s`
+as the AND of `s` and a relation of the tuple at hand's common
+attributes, and an AND in a loop of a relation of one tuple and a
+relation that reads neither the tuple at hand nor a local variable bound
+in the loop (`FunctionBuilder::lookup_in`), which is the same for each
+tuple, needn't sort that relation again for each. The first tuple that
+needs it computes it and its index on the common attributes,
+`trendy_rt_index`'s array of its tuples' positions sorted by them, and
+slots keep both until the loop ends, as a `Let`'s binding is kept: null
+until then, and released by the function's failure exit and by a
+transaction's rollback. Each tuple then finds the run that agrees with
+its own by binary search (`trendy_rt_lookup`), already in canonical order,
+since the attributes the tuple adds are the same in each. So the relation
+is computed where it was, if at all, and once, as its value would be the
+same each time, and a failure in it is the same failure, where it was.
+Another lookup in the same relation, on the same attributes, in the loop
+shares them.
 
 The canonical order of a relation's tuples is `hir::Value`'s order, which
 the compiler uses for constants and the runtime reproduces

@@ -524,6 +524,25 @@ pub enum RuntimeFn {
     /// attribute: its offset in a tuple of `lhs`, its offset in one of
     /// `rhs`, and the [`Field::Address`] of its type's descriptor.
     And,
+    /// `trendy_rt_index(dst, rel, rel_desc, index_desc, common,
+    /// common_count)`: store at `dst` an index of the relation `rel`, which
+    /// the descriptor `rel_desc` describes, on its attributes in `common`,
+    /// for [`RuntimeFn::Lookup`]: an array of integers, which `index_desc`
+    /// describes, of the positions of its tuples, sorted by those
+    /// attributes, in memory the statement owns. `common` and
+    /// `common_count` are as for [`RuntimeFn::And`]'s, `rel` its left
+    /// operand.
+    Index,
+    /// `trendy_rt_lookup(dst, rel, index, key, result, rel_desc, sources,
+    /// common, common_count)`: store at `dst` the relation, of the type the
+    /// descriptor `result` describes, of every tuple made of a tuple of
+    /// `rel` and the tuple `key` that agree on their common attributes, as
+    /// [`RuntimeFn::And`] makes of `rel` and a relation of `key` alone,
+    /// finding them in `index`, `rel`'s index on those attributes (see
+    /// [`RuntimeFn::Index`]), in memory the statement owns. The other
+    /// arguments are as for [`RuntimeFn::And`]'s, `key` its right operand's
+    /// one tuple.
+    Lookup,
     /// `trendy_rt_ungroup(dst, src, result, source, sources, ungrouped,
     /// ungrouped_count)`: store at `dst` the relation, of the type the
     /// descriptor `result` describes, of every tuple made of a tuple of
@@ -635,7 +654,7 @@ pub enum RuntimeFn {
 
 impl RuntimeFn {
     /// Every runtime function, for checking the runtime against them.
-    pub const ALL: [RuntimeFn; 75] = [
+    pub const ALL: [RuntimeFn; 77] = [
         RuntimeFn::DebugValue,
         RuntimeFn::DebugTable,
         RuntimeFn::ToText,
@@ -697,6 +716,8 @@ impl RuntimeFn {
         RuntimeFn::Reshape,
         RuntimeFn::Relation,
         RuntimeFn::And,
+        RuntimeFn::Index,
+        RuntimeFn::Lookup,
         RuntimeFn::Ungroup,
         RuntimeFn::Matching,
         RuntimeFn::Tclose,
@@ -747,6 +768,8 @@ impl RuntimeFn {
             | RuntimeFn::Reshape
             | RuntimeFn::Relation
             | RuntimeFn::And
+            | RuntimeFn::Index
+            | RuntimeFn::Lookup
             | RuntimeFn::Ungroup
             | RuntimeFn::Matching
             | RuntimeFn::Tclose
@@ -866,6 +889,8 @@ impl RuntimeFn {
             RuntimeFn::Reshape => "trendy_rt_reshape",
             RuntimeFn::Relation => "trendy_rt_relation",
             RuntimeFn::And => "trendy_rt_and",
+            RuntimeFn::Index => "trendy_rt_index",
+            RuntimeFn::Lookup => "trendy_rt_lookup",
             RuntimeFn::Ungroup => "trendy_rt_ungroup",
             RuntimeFn::Matching => "trendy_rt_matching",
             RuntimeFn::Tclose => "trendy_rt_tclose",

@@ -1220,6 +1220,166 @@ pub unsafe extern "C" fn trendy_rt_and(
     })
 }
 
+/// Store at `dst` an index of the relation `rel`, which `rel_desc`
+/// describes, on the `*common_count` attributes in `common`, each `lhs`
+/// offset of which is where it is in a tuple of `rel`: an array, of the
+/// type `index_desc` describes, of the positions of its tuples, from 0,
+/// sorted by their values for those attributes, and those that agree in
+/// canonical order, in memory the statement owns. [`trendy_rt_lookup`]
+/// finds the tuples that agree with a tuple in it.
+///
+/// # Safety
+///
+/// `rel` must point to a valid relation of the type `rel_desc` describes,
+/// `index_desc` to the descriptor of an array of integers, `common` to
+/// `*common_count` attributes of `rel`'s tuples, and `dst` to memory for an
+/// array.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_index(
+    dst: *mut Text,
+    rel: *const u8,
+    rel_desc: *const TypeDesc,
+    index_desc: *const TypeDesc,
+    common: *const Common,
+    common_count: *const usize,
+) -> bool {
+    // SAFETY: guaranteed by the caller; each offset is where an attribute
+    // is in a tuple.
+    status(|| unsafe {
+        let (tuples, count) = read_slice(rel);
+        let size = (*rel_desc).element().size;
+        let common = array(common, common_count.read_unaligned());
+        let Some(bytes) = count.checked_mul(size_of::<i64>()) else {
+            return Err(out_of_memory());
+        };
+        let mut positions = Temp::<usize>::new(count)?;
+        let positions = positions.values();
+        for (i, position) in positions.iter_mut().enumerate() {
+            *position = i;
+        }
+        // The relation is in canonical order, so the positions of tuples
+        // that agree stay in it.
+        let tuple = |i: usize| tuples.add(i * size);
+        positions.sort_unstable_by(|&x, &y| {
+            on_common(common, (tuple(x), true), (tuple(y), true)).then(x.cmp(&y))
+        });
+        let index = allocate_buffer(bytes, index_desc)?;
+        for (k, &position) in positions.iter().enumerate() {
+            let position =
+                i64::try_from(position).unwrap_or_else(|_| internal_error("too many tuples"));
+            index
+                .add(k * size_of::<i64>())
+                .cast::<i64>()
+                .write_unaligned(position);
+        }
+        dst.write_unaligned(Text {
+            bytes: index,
+            len: count,
+        });
+        Ok(())
+    })
+}
+
+/// Store at `dst` the relation `result` describes whose tuples are each
+/// made of a tuple of the relation `rel` and the tuple `key` that agree on
+/// their `*common_count` common attributes in `common`, as
+/// [`trendy_rt_and`] makes them of `rel`, its left operand, and a relation
+/// of `key` alone, its right, in memory the statement owns. `index` is
+/// `rel`'s index on those attributes (see [`trendy_rt_index`]), in which
+/// the tuples that agree with `key` are a run, found by binary search.
+/// They are in canonical order, and so are the tuples made of them, as
+/// `key`'s attributes are the same in each, so they need no sorting.
+/// `rel_desc` describes `rel`, and `sources` says where each attribute of
+/// `result` comes from: 0 for `rel` and 1 for `key`.
+///
+/// # Safety
+///
+/// `rel` must point to a valid relation of the type `rel_desc` describes,
+/// `index` to its index on the `common` attributes, `key` to a valid
+/// tuple, `result` to a valid descriptor of the relation type with the
+/// attributes of both, `sources` to one source per attribute of `result`,
+/// `common` to `*common_count` common attributes, and `dst` to memory for a
+/// relation.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trendy_rt_lookup(
+    dst: *mut Text,
+    rel: *const u8,
+    index: *const u8,
+    key: *const u8,
+    result: *const TypeDesc,
+    rel_desc: *const TypeDesc,
+    sources: *const Source,
+    common: *const Common,
+    common_count: *const usize,
+) -> bool {
+    // SAFETY: guaranteed by the caller; each size and offset is the layout
+    // of the value it describes.
+    status(|| unsafe {
+        let result = &*result;
+        let (tuples, _) = read_slice(rel);
+        let (index, count) = read_slice(index);
+        let size = (*rel_desc).element().size;
+        let common = array(common, common_count.read_unaligned());
+        // The tuple at position `k` of the index.
+        let tuple = |k: usize| {
+            let position = index
+                .add(k * size_of::<i64>())
+                .cast::<i64>()
+                .read_unaligned();
+            let i = usize::try_from(position).unwrap_or_else(|_| internal_error("a position"));
+            tuples.add(i * size)
+        };
+        let agrees = |k: usize| on_common(common, (tuple(k), true), (key, false));
+        let start = partition_point(0, count, |k| agrees(k).is_lt());
+        let end = partition_point(start, count, |k| agrees(k).is_eq());
+        let result_attrs = attributes(result);
+        let sources = array(sources, result_attrs.len());
+        let element = result.element();
+        let found = end - start;
+        let Some(bytes) = found.checked_mul(element.size) else {
+            return Err(out_of_memory());
+        };
+        let made = Temp::<u8>::zeroed(element.size)?;
+        let made = made.ptr();
+        let out = allocate_buffer(bytes, result)?;
+        for k in start..end {
+            let from_rel = tuple(k);
+            for (attr, source) in result_attrs.iter().zip(sources) {
+                let from = if source.from == 1 { key } else { from_rel };
+                core::ptr::copy_nonoverlapping(
+                    from.add(source.offset),
+                    made.add(attr.offset),
+                    (*attr.desc).size,
+                );
+            }
+            copy_element(out, out.add((k - start) * element.size), made, element);
+        }
+        dst.write_unaligned(Text {
+            bytes: out,
+            len: found,
+        });
+        Ok(())
+    })
+}
+
+/// The first of `start..end` for which `before` is false, all those before
+/// it being those for which it is true, by binary search.
+#[cfg(not(test))]
+fn partition_point(start: usize, end: usize, before: impl Fn(usize) -> bool) -> usize {
+    let (mut low, mut high) = (start, end);
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if before(middle) {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    low
+}
+
 /// A relation-valued attribute that [`trendy_rt_ungroup`] ungroups: where it
 /// is in a tuple of the relation being ungrouped, and the size of the
 /// tuples of its own relation. The compiler emits an array of these, laid

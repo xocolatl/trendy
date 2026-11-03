@@ -4286,6 +4286,106 @@ fn relations() {
     assert_eq!(folded_and_run("relations"), RELATIONS);
 }
 
+/// A program whose image relations, of relations known only when it runs,
+/// are lookups, each loop's made once (`FunctionBuilder::looked_up`).
+const LOOKUPS: &str = "operator show{r: relation { a: integer }, t: relation { a: integer, b: integer }, q: relation { x: integer }, z: integer} [
+    /* Two images of `t`, which share a lookup, one of them empty. */
+    call debug_table{r: r extend { n := count{r: !!t}, total := sum{r: !!t, of: b} }};
+    call debug_table{r: r where count{r: !!t} = 1};
+    /* The inner loop's relation reads the outer tuple, so it is looked up in anew for each. */
+    call debug_table{r: q extend { per := sum{r: r extend { k := count{r: !!(t where b > x)} }, of: k} }};
+    /* One bound in the loop may differ for each tuple: no lookup. */
+    call debug_table{r: r extend { n := [ var u := t where b > 15; count{r: !!u} ] }};
+    /* Computed only where it was: never, here, so nothing divides by zero. */
+    call debug_table{r: (r where a > 100) extend { n := count{r: !!(t where 1 div z = 1)} }};
+    call debug_table{r: r where a > 100 and count{r: !!(t where 1 div z = 1)} > 0};
+    /* A failure after the lookup is made undoes it, and the loop makes it again. */
+    var tries := 0;
+    var refused: relation transaction_collection;
+    while tries < 3 loop [
+        transaction collecting refused [
+            call debug_table{r: r extend { n := count{r: !!t}, p := (10 * a + tries) div (a - 2 + tries) }};
+        ];
+        tries := tries + 1;
+    ];
+    call debug_value{v: count{r: refused}};
+    /* And one the program fails with gives it up too. */
+    call debug_table{r: r extend { n := count{r: !!t}, p := a div (a - 2) }};
+];
+
+operator main{} [
+    call show{
+        r: relation { { a: 1 }, { a: 2 }, { a: 3 } },
+        t: relation { { a: 1, b: 10 }, { a: 1, b: 20 }, { a: 2, b: 30 } },
+        q: relation { { x: 0 }, { x: 15 } },
+        z: 0,
+    };
+];
+";
+
+#[test]
+fn image_relations_are_looked_up_once_per_loop() {
+    let (code, stderr) = run_source("lookups", LOOKUPS);
+    let expected = [
+        "┌───┬───┬───────┐",
+        "│ a │ n │ total │",
+        "├───┼───┼───────┤",
+        "│ 1 │ 2 │    30 │",
+        "│ 2 │ 1 │    30 │",
+        "│ 3 │ 0 │     0 │",
+        "└───┴───┴───────┘",
+        "┌───┐",
+        "│ a │",
+        "├───┤",
+        "│ 2 │",
+        "└───┘",
+        "┌─────┬────┐",
+        "│ per │ x  │",
+        "├─────┼────┤",
+        "│   2 │ 15 │",
+        "│   3 │  0 │",
+        "└─────┴────┘",
+        "┌───┬───┐",
+        "│ a │ n │",
+        "├───┼───┤",
+        "│ 1 │ 1 │",
+        "│ 2 │ 1 │",
+        "│ 3 │ 0 │",
+        "└───┴───┘",
+        "┌───┬───┐",
+        "│ a │ n │",
+        "├───┼───┤",
+        "└───┴───┘",
+        "┌───┐",
+        "│ a │",
+        "├───┤",
+        "└───┘",
+        "┌───┬───┬────┐",
+        "│ a │ n │ p  │",
+        "├───┼───┼────┤",
+        "│ 1 │ 2 │ 12 │",
+        "│ 2 │ 1 │ 11 │",
+        "│ 3 │ 0 │ 10 │",
+        "└───┴───┴────┘",
+        "2",
+    ];
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(
+        (code, &lines[..expected.len()]),
+        (1, &expected[..]),
+        "{stderr}"
+    );
+    assert_eq!(
+        lines[expected.len()..],
+        [
+            &division("2 div 0")[..],
+            site("lookups", 23).trim_end(),
+            called("lookups", "show", 27).trim_end(),
+        ],
+        "{stderr}"
+    );
+}
+
 #[test]
 fn arrays() {
     assert_eq!(
