@@ -219,9 +219,38 @@ pub enum Section {
 /// nearest header before it starts, or the implementation, before any.
 #[must_use]
 pub fn section_of(node: &SyntaxNode) -> Section {
-    std::iter::successors(node.prev_sibling(), SyntaxNode::prev_sibling)
-        .find_map(SectionHeader::cast)
-        .map_or(Section::Implementation, |header| header.section())
+    // The siblings before it, read in the green tree, which makes no node
+    // of each, as asking for every declaration's section would.
+    let Some(parent) = node.parent() else {
+        return Section::Implementation;
+    };
+    parent
+        .green()
+        .children()
+        .take(node.index())
+        .filter_map(rowan::NodeOrToken::into_node)
+        .rfind(|n| {
+            <Trendy as rowan::Language>::kind_from_raw(n.kind()) == SyntaxKind::SectionHeader
+        })
+        .map_or(Section::Implementation, |header| {
+            let word = header
+                .children()
+                .filter_map(rowan::NodeOrToken::into_token)
+                .find(|t| !<Trendy as rowan::Language>::kind_from_raw(t.kind()).is_trivia());
+            section_started(word.map(rowan::GreenTokenData::text))
+        })
+}
+
+/// The section a header whose word is `word` starts.
+fn section_started(word: Option<&str>) -> Section {
+    let interface = word.is_some_and(|word| {
+        word.eq_ignore_ascii_case("interface") || word.eq_ignore_ascii_case("public")
+    });
+    if interface {
+        Section::Interface
+    } else {
+        Section::Implementation
+    }
 }
 
 impl SectionHeader {
@@ -236,15 +265,7 @@ impl SectionHeader {
     /// starts the interface too.
     #[must_use]
     pub fn section(&self) -> Section {
-        let interface = self.keyword().is_some_and(|word| {
-            word.text().eq_ignore_ascii_case("interface")
-                || word.text().eq_ignore_ascii_case("public")
-        });
-        if interface {
-            Section::Interface
-        } else {
-            Section::Implementation
-        }
+        section_started(self.keyword().as_ref().map(SyntaxToken::text))
     }
 }
 
@@ -593,15 +614,113 @@ impl TypeDecl {
         within.children().filter_map(Representation::cast)
     }
 
-    /// Its constraints, in order: in its body, or, where the parser
-    /// reports them out of place, among the components of the
-    /// representation its values are stored as. Another representation's
-    /// are its own ([`Representation::constraints`]).
-    pub fn constraints(&self) -> impl Iterator<Item = Constraint> {
-        self.0
-            .descendants()
-            .filter_map(Constraint::cast)
-            .filter(|c| c.representation().is_none_or(|r| r.is_stored()))
+    /// Its constraints, which say which values it has, in order: those of
+    /// the possible representation its values are stored as, whose
+    /// components are every value's, then those in its body. Another
+    /// representation's are its own ([`Possrep::constraints`]).
+    pub fn constraints(&self) -> impl Iterator<Item = Constraint> + use<> {
+        self.constraints_of(&self.possreps())
+    }
+
+    /// Its constraints, as [`TypeDecl::constraints`] gives them, of its
+    /// possible representations `possreps`, as [`TypeDecl::possreps`] gives
+    /// them.
+    pub fn constraints_of(&self, possreps: &[Possrep]) -> impl Iterator<Item = Constraint> + use<> {
+        let stored = possreps
+            .iter()
+            .find(|p| p.is_stored())
+            .map(|p| p.written.constraints().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let body = self
+            .0
+            .children()
+            .find_map(TypeBody::cast)
+            .into_iter()
+            .flat_map(|body| {
+                body.0
+                    .children()
+                    .filter_map(Constraint::cast)
+                    .collect::<Vec<_>>()
+            });
+        stored
+            .into_iter()
+            .chain(body)
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    /// Its declaration in its unit's implementation, if its unit's
+    /// interface declares it and the implementation declares it again,
+    /// which gives its possible representations' conversions, which the
+    /// type's users don't see.
+    #[must_use]
+    pub fn implementation(&self) -> Option<TypeDecl> {
+        self.other_part(Section::Interface, Section::Implementation)
+    }
+
+    /// The declaration in its unit's interface that it completes, if it is
+    /// one: a declaration, in the implementation, of a type the interface
+    /// declares, which gives its possible representations' conversions.
+    #[must_use]
+    pub fn interface(&self) -> Option<TypeDecl> {
+        self.other_part(Section::Implementation, Section::Interface)
+    }
+
+    /// The first declaration of its name in `other`, the section of its
+    /// file it isn't in, if it is in `own`.
+    fn other_part(&self, own: Section, other: Section) -> Option<TypeDecl> {
+        if section_of(&self.0) != own {
+            return None;
+        }
+        let name = self.name()?.ident()?.text().to_string();
+        // The file's declarations, each in the section of the header last
+        // before it.
+        let mut section = Section::Implementation;
+        for node in self.0.parent()?.children() {
+            if let Some(header) = SectionHeader::cast(node.clone()) {
+                section = header.section();
+            } else if section == other
+                && let Some(decl) = TypeDecl::cast(node)
+                && decl
+                    .name()
+                    .and_then(|n| n.ident())
+                    .is_some_and(|i| i.text() == name)
+            {
+                return Some(decl);
+            }
+        }
+        None
+    }
+
+    /// Its possible representations, in order, each where its components
+    /// are written, here, with where its conversions are: here too, or, if
+    /// its unit's interface declares it, in the representation of the same
+    /// components that its declaration in the implementation writes
+    /// ([`TypeDecl::implementation`]).
+    #[must_use]
+    pub fn possreps(&self) -> Vec<Possrep> {
+        self.possreps_with(self.implementation().as_ref())
+    }
+
+    /// Its possible representations, as [`TypeDecl::possreps`] gives them,
+    /// of `implementation`, its declaration in its unit's implementation,
+    /// if it has one.
+    #[must_use]
+    pub fn possreps_with(&self, implementation: Option<&TypeDecl>) -> Vec<Possrep> {
+        let implementation: Vec<Representation> = implementation
+            .map(|decl| decl.representations().collect())
+            .unwrap_or_default();
+        self.representations()
+            .map(|written| {
+                let names = written.component_names();
+                let converted = implementation
+                    .iter()
+                    .find(|r| r.component_names() == names)
+                    .cloned()
+                    .unwrap_or_else(|| written.clone());
+                Possrep { written, converted }
+            })
+            .collect()
     }
 
     /// Its orders, of which it may have one: in its body, or, where the
@@ -652,6 +771,69 @@ impl Representation {
         self.0.children().filter_map(Conversion::cast)
     }
 
+    /// The constraints inside its braces, after its components, which say
+    /// which of them represent a value.
+    pub fn constraints(&self) -> impl Iterator<Item = Constraint> + use<> {
+        self.components().into_iter().flat_map(|heading| {
+            heading
+                .0
+                .children()
+                .filter_map(Constraint::cast)
+                .collect::<Vec<_>>()
+        })
+    }
+
+    /// Its components' names, as written, in name order.
+    #[must_use]
+    pub fn component_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .components()
+            .into_iter()
+            .flat_map(|heading| heading.attributes().collect::<Vec<_>>())
+            .filter_map(|a| Some(a.name()?.ident()?.text().to_string()))
+            .collect();
+        names.sort();
+        names
+    }
+}
+
+/// A possible representation of a type, as its declarations write it: its
+/// components, with its own constraints, where the type is declared, and
+/// its conversions, there too, or, for a type its unit's interface
+/// declares, in its declaration in the implementation (see
+/// [`TypeDecl::possreps`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Possrep {
+    written: Representation,
+    converted: Representation,
+}
+
+impl Possrep {
+    /// Where its components are written.
+    #[must_use]
+    pub fn written(&self) -> &Representation {
+        &self.written
+    }
+
+    /// Where its conversions are written: where its components are, or in
+    /// its type's declaration in the implementation.
+    #[must_use]
+    pub fn converted(&self) -> &Representation {
+        &self.converted
+    }
+
+    /// Its components, each with its type.
+    #[must_use]
+    pub fn components(&self) -> Option<Heading> {
+        self.written.components()
+    }
+
+    /// Its conversions, `to` and `from`, in the order written: none for
+    /// the representation values are stored as.
+    pub fn conversions(&self) -> impl Iterator<Item = Conversion> + use<> {
+        self.converted.conversions()
+    }
+
     /// Whether its type's values are stored as it: whether it has no
     /// conversions.
     #[must_use]
@@ -659,19 +841,15 @@ impl Representation {
         self.conversions().next().is_none()
     }
 
-    /// Its own constraints, inside its braces, after its components, which
-    /// say which of them represent a value: none for the representation
-    /// values are stored as, whose are the type's
+    /// Its own constraints, which say which of its components represent a
+    /// value, checked as one is selected in it: none for the
+    /// representation values are stored as, whose components are every
+    /// value's, so that its constraints are the type's
     /// ([`TypeDecl::constraints`]).
     pub fn constraints(&self) -> impl Iterator<Item = Constraint> + use<> {
-        let own = (!self.is_stored()).then(|| self.components()).flatten();
-        own.into_iter().flat_map(|heading| {
-            heading
-                .0
-                .children()
-                .filter_map(Constraint::cast)
-                .collect::<Vec<_>>()
-        })
+        let own = (!self.is_stored()).then(|| self.written.clone());
+        own.into_iter()
+            .flat_map(|r| r.constraints().collect::<Vec<_>>())
     }
 }
 
@@ -744,13 +922,6 @@ impl Constraint {
     #[must_use]
     pub fn keyword(&self) -> Option<SyntaxToken> {
         significant_tokens(&self.0).next()
-    }
-
-    /// The possible representation whose braces it is written in, after
-    /// the components, if it isn't in the type's.
-    #[must_use]
-    pub fn representation(&self) -> Option<Representation> {
-        self.0.ancestors().find_map(Representation::cast)
     }
 
     /// The condition every value of the type satisfies.

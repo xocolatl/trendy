@@ -643,10 +643,9 @@ impl<'a> Parser<'a> {
 
     /// `{ name: type, … }`: a possible representation's components. An
     /// order or constraints after them, inside their braces, as Tutorial D
-    /// writes a possrep's constraint, are parsed there, and those that are
-    /// the type's returned: an order, and, in the braces of the
-    /// representation values are stored as, which has no conversions, a
-    /// constraint. Another representation's constraints are its own.
+    /// writes a possrep's constraint, are parsed there, and the orders
+    /// returned, as an order is the type's: the constraints are the
+    /// representation's own.
     fn representation(&mut self) -> Option<errors::Inside> {
         self.start_node(SyntaxKind::Representation);
         let outer_form = std::mem::replace(&mut self.form, errors::HEADING_FORM);
@@ -670,13 +669,19 @@ impl<'a> Parser<'a> {
                 };
                 let mut items = Vec::new();
                 let mut before = components;
+                let mut separated = comma || components.is_none();
                 while let Some(start) = p.found().filter(|_| p.type_item_at(0)) {
+                    // A constraint is a list item, after a comma, as in
+                    // Tutorial D's `{ R RATIONAL, … CONSTRAINT … }` it isn't.
+                    if !separated && p.constraint_at(0) {
+                        p.missing(SyntaxKind::Comma);
+                    }
                     // A key here is a component's, misplaced, which sema
                     // reports, knowing which component is a relation.
                     let key = p.key_at(0).is_some();
                     let what = p.type_item();
                     let end = p.last_end.unwrap_or(start.span.end);
-                    if !key {
+                    if !key && what != errors::A_CONSTRAINT {
                         items.push(errors::InsideItem {
                             span: Span::new(start.span.start, end),
                             removed: Span::new(before.unwrap_or(start.span.start), end),
@@ -684,7 +689,8 @@ impl<'a> Parser<'a> {
                         });
                     }
                     before = Some(end);
-                    if p.at(SyntaxKind::Comma) {
+                    separated = p.at(SyntaxKind::Comma);
+                    if separated {
                         p.bump();
                     }
                 }
@@ -698,9 +704,7 @@ impl<'a> Parser<'a> {
             },
         );
         // Its conversions, after the components' braces.
-        let mut converted = false;
         while self.conversion_at() {
-            converted = true;
             self.start_node(SyntaxKind::Conversion);
             let word = self.found().expect("at the word").text.to_lowercase();
             self.contextual_keyword(&word);
@@ -709,15 +713,6 @@ impl<'a> Parser<'a> {
         }
         self.form = outer_form;
         self.builder.finish_node();
-        // A converted representation's constraints are its own.
-        if let Some(found) = &mut inside
-            && converted
-        {
-            found.items.retain(|item| item.what != errors::A_CONSTRAINT);
-            if found.items.is_empty() {
-                inside = None;
-            }
-        }
         inside
     }
 
@@ -9614,7 +9609,7 @@ type rule { { order: integer } };",
         for (source, code) in [
             (
                 "type day { { year: integer, order [asc year] } };",
-                Code::ConstraintInRepresentation,
+                Code::OrderInRepresentation,
             ),
             (
                 "type day { { year: integer }, order by [asc year] };",
@@ -9662,10 +9657,9 @@ type rule { { constraint: text } };",
             })
             .collect();
         assert_eq!(counts, [(2, Some(1)), (1, Some(1)), (0, Some(1))]);
-        // SQL's `check`, the keyword in another case, and Tutorial D's
-        // constraint inside the components' braces, after a comma or
-        // not, each fixed in one edit; in components without braces of
-        // their own, the braces close before the constraint.
+        // SQL's `check`, and the keyword in another case, each fixed in
+        // one edit; in components without braces of their own, the braces
+        // close before the constraint.
         let fixed = "type angle { { radians: approximate }, constraint radians >= 0e0 };";
         for (source, code) in [
             (
@@ -9675,22 +9669,6 @@ type rule { { constraint: text } };",
             (
                 "type angle { { radians: approximate }, CONSTRAINT radians >= 0e0 };",
                 Code::MiscasedKeyword,
-            ),
-            (
-                "type angle { { radians: approximate, constraint radians >= 0e0 } };",
-                Code::ConstraintInRepresentation,
-            ),
-            (
-                "type angle { { radians: approximate constraint radians >= 0e0 } };",
-                Code::ConstraintInRepresentation,
-            ),
-            (
-                "type angle { radians: approximate, constraint radians >= 0e0 };",
-                Code::BareRepresentation,
-            ),
-            (
-                "type angle POSSREP { radians: approximate constraint radians >= 0e0 };",
-                Code::BareRepresentation,
             ),
         ] {
             let parse = parse_str(source);
@@ -9702,6 +9680,31 @@ type rule { { constraint: text } };",
         // A constraint needs a condition.
         let errors = parse_str("type angle { { radians: approximate }, constraint };").errors;
         assert_eq!(errors[0].code, Code::MissingToken);
+        // In a representation's braces, after its components, as Tutorial
+        // D writes a possrep's, one is its own, the type's if its values
+        // are stored as it; Tutorial D's, without a comma, gets one.
+        let inside = "type angle { { radians: approximate, constraint radians >= 0e0 } };";
+        let parse = parse_str(inside);
+        assert!(parse.errors.is_empty(), "{:#?}", parse.errors);
+        assert_eq!(parse.tree.types().next().unwrap().constraints().count(), 1);
+        let tutorial_d = "type angle { { radians: approximate constraint radians >= 0e0 } };";
+        let codes: Vec<Code> = parse_str(tutorial_d)
+            .errors
+            .iter()
+            .map(|e| e.code)
+            .collect();
+        assert_eq!(codes, [Code::MissingToken]);
+        assert_eq!(fix(tutorial_d), inside);
+        // Components without braces of their own, as a heading's, or after
+        // Tutorial D's `POSSREP`, get them, around what is after them too.
+        for source in [
+            "type angle { radians: approximate, constraint radians >= 0e0 };",
+            "type angle POSSREP { radians: approximate, constraint radians >= 0e0 };",
+        ] {
+            let codes: Vec<Code> = parse_str(source).errors.iter().map(|e| e.code).collect();
+            assert_eq!(codes, [Code::BareRepresentation], "{source}");
+            assert_eq!(fix(source), inside, "{source}");
+        }
         // Another representation's, which converts to the stored one, is
         // its own, in its braces: which of its components represent a
         // value, as Tutorial D writes a possrep's.
@@ -9721,7 +9724,7 @@ type rule { { constraint: text } };",
             "constraint big mod 10 = 0, order [asc big]",
         );
         let codes: Vec<Code> = parse_str(&ordered).errors.iter().map(|e| e.code).collect();
-        assert_eq!(codes, [Code::ConstraintInRepresentation]);
+        assert_eq!(codes, [Code::OrderInRepresentation]);
         assert_eq!(
             fix(&ordered),
             own.replace(

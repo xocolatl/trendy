@@ -84,7 +84,7 @@ codes! {
     ModeSpelling => "P0038",
     BareRepresentation => "P0039",
     ConstraintSpelling => "P0040",
-    ConstraintInRepresentation => "P0041",
+    OrderInRepresentation => "P0041",
     OrderedWord => "P0042",
     SupertypeSpelling => "P0043",
     TypeTestSpelling => "P0044",

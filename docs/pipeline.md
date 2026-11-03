@@ -510,12 +510,11 @@ a heading's, reported once with a fix that makes them one (P0004).
 contextual keyword at a definition's start before a name and `{`. Its
 braces (`TypeBody`) hold its possible representation (`Representation`),
 whose components are a `Heading`. A constraint after them in that
-`Heading` is the representation's own (`Representation::constraints`) if
-conversions follow its braces, and is otherwise the type's
-(`TypeDecl::constraints`), reported with an order there, which is a
-type's in any, and moved into the type's braces, each item on its own
-(P0041). Components written straight in the
-type's braces, or after Tutorial D's `POSSREP`, are parsed as the
+`Heading` is the representation's own (`Representation::constraints`),
+and the stored representation's are the type's too
+(`TypeDecl::constraints`); an order there, which is a type's in any, is
+reported and moved into the type's braces (P0041). Components written
+straight in the type's braces, or after Tutorial D's `POSSREP`, are parsed as the
 representation in its place and fixed to braces of their own (P0039);
 TypeScript's `type Home = {…}`, with its `=`, stays a heading's.
 
@@ -534,7 +533,9 @@ aren't TypeScript's `interface Home { … }`, a heading's declaration. A
 header is a marker among the definitions, not a node around them, so
 nothing closes a section, and walking a file's definitions is as it was:
 a definition's section is the one the header before it starts, or the
-implementation, before any (`ast::section_of`). The parser reports a
+implementation, before any (`ast::section_of`, which reads the
+siblings before it in the green tree, making no node of each). The
+parser reports a
 second header of one section, or the interface after the implementation
 (P0053), and other languages' ways to write a unit (P0052, where
 `Parser::junk` finds a word no definition starts with,
@@ -1498,6 +1499,23 @@ a type or heading only the implementation declares that its
 declarations' parameters, results, attributes, components or supertypes
 name (`sections::check`); the fixes move the declaration to the section
 it belongs in (`sections::moved`), with the comments just before it.
+
+A type the interface declares with several possible representations is
+declared again in the implementation, with their conversions
+(`TypeDecl::implementation`, the first declaration of its name there).
+Sema pairs the two once (`Files::parts`, by where the interface's
+starts), and the second is no item of its own (`Files::items`). A type's
+representations are the interface's, each with where its conversions
+are (`ast::Possrep`, `written` and `converted`, through
+`Namespaces::possreps`), matched by their components' names
+(`TypeDecl::possreps_with`), so everything that reads a type's
+declaration reads its representations, constraints and order where its
+users see them, and its conversions where they don't.
+`sections::types_completed` reports conversions in the interface and a
+constraint or an order in the implementation's declaration (A0067,
+moved), and representations the two don't both declare, or write
+differently (A0068); one with several and no implementation's
+declaration is reported as it converts (A0059, `named_types::convertible`).
 
 Operators of one name and the same parameters' names are a
 specification and its versions (`operators::families`, once every

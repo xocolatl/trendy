@@ -310,7 +310,7 @@ impl<'a> Globals<'a> {
         // A representation's own constraint, as its selector is written.
         let representation = signature
             .constrains()
-            .filter(|(_, c)| c.representation().is_some_and(|r| !r.is_stored()))
+            .filter(|_| signature.constrained_representation().is_some())
             .map(|(ty, _)| {
                 let components: Vec<String> =
                     signature.params.keys().map(|c| format!("{c}: …")).collect();
@@ -497,7 +497,7 @@ impl<'a> Globals<'a> {
             Made::Selector(_) => return self.selection(signature, defined, errors),
             Made::To(r) => (r, ast::Direction::To),
             Made::From(r) => (r, ast::Direction::From),
-            Made::Constraint(_) => unreachable!("a constraint is checked on its own"),
+            Made::Constraint { .. } => unreachable!("a constraint is checked on its own"),
         };
         let conversion = representation
             .conversions()
@@ -529,8 +529,8 @@ impl<'a> Globals<'a> {
         let stored = defined.stored_as();
         let (component, _) = stored.components.attributes().next()?;
         let selector = self.operators.selector(stored, component)?;
-        let decl = &self.operators.get(selector).from_type.as_ref()?.decl;
-        crate::named_types::stored(decl)?.components()
+        let from = self.operators.get(selector).from_type.as_ref()?;
+        from.stored.as_ref()?.components()
     }
 
     /// The value of `signature`, the selector of a possible representation of
@@ -848,9 +848,14 @@ impl Names for ReadOnlyNames<'_, '_, '_> {
             None => {}
         }
         // In a representation's own constraint, a component of another,
-        // which its components, as given, don't have.
+        // which its components, as given, don't have: the stored one's,
+        // though of every value, read as the others' do, so that they don't
+        // say which it is.
         if let Some((defined, constraint)) = self.signature().constrains()
-            && let Some(own) = constraint.representation().filter(|r| !r.is_stored())
+            && let Some(own) = constraint
+                .syntax()
+                .ancestors()
+                .find_map(ast::Representation::cast)
             && defined.representation(name).is_some()
         {
             errors.push(errors::other_representations_component(

@@ -90,6 +90,9 @@ pub(crate) struct FromType {
     pub(crate) defined: hir::Defined,
     /// The type's declaration, where the components are written.
     pub(crate) decl: ast::TypeDecl,
+    /// The representation the type's values are stored as, where its
+    /// components are written, unless they are a supertype's.
+    pub(crate) stored: Option<ast::Representation>,
     pub(crate) made: Made,
 }
 
@@ -101,22 +104,25 @@ pub(crate) enum Made {
     /// the value of the type with those components, of the stored
     /// representation, or with those its `to` computes from them, of
     /// another, if the type's constraints are true of them.
-    Selector(ast::Representation),
+    Selector(ast::Possrep),
     /// A constraint, true of the stored components, its parameters, if they
-    /// are those of a value of the type; or one of a possible
+    /// are those of a value of the type; or, with `own`, one of a possible
     /// representation's own, true of its components, its parameters, if
     /// they represent a value.
-    Constraint(ast::Constraint),
+    Constraint {
+        constraint: ast::Constraint,
+        own: Option<ast::Possrep>,
+    },
     /// A possible representation's conversion to the stored one, whose
     /// parameters are its components: its value is the tuple of the stored
     /// components, which its `to` computes from them, whether or not they
     /// satisfy the type's constraints. No call can name it.
-    To(ast::Representation),
+    To(ast::Possrep),
     /// A possible representation's conversion from the stored one, whose
     /// parameters are the stored components: its value is the tuple of the
     /// representation's own, which its `from` computes from them. No call
     /// can name it.
-    From(ast::Representation),
+    From(ast::Possrep),
 }
 
 impl FromType {
@@ -129,7 +135,7 @@ impl FromType {
     /// type's values are stored as, whose value is selected from its
     /// arguments with no conversion.
     pub(crate) fn selects_stored(&self) -> bool {
-        matches!(&self.made, Made::Selector(r) if r.conversions().next().is_none())
+        matches!(&self.made, Made::Selector(p) if p.is_stored())
     }
 
     /// The representation whose components are the operator's parameters:
@@ -137,14 +143,12 @@ impl FromType {
     /// representation's own, and else the stored one.
     fn parameters(&self) -> Option<ast::Representation> {
         match &self.made {
-            Made::Selector(representation) | Made::To(representation) => {
-                Some(representation.clone())
-            }
-            Made::Constraint(constraint) => constraint
-                .representation()
-                .filter(|r| !r.is_stored())
-                .or_else(|| crate::named_types::stored(&self.decl)),
-            Made::From(_) => crate::named_types::stored(&self.decl),
+            Made::Selector(possrep)
+            | Made::To(possrep)
+            | Made::Constraint {
+                own: Some(possrep), ..
+            } => Some(possrep.written().clone()),
+            Made::Constraint { own: None, .. } | Made::From(_) => self.stored.clone(),
         }
     }
 }
@@ -224,18 +228,28 @@ impl Signature {
     pub(crate) fn constrains(&self) -> Option<(&hir::Defined, &ast::Constraint)> {
         let from = self.from_type.as_ref()?;
         match &from.made {
-            Made::Constraint(constraint) => Some((&from.defined, constraint)),
+            Made::Constraint { constraint, .. } => Some((&from.defined, constraint)),
+            Made::Selector(_) | Made::To(_) | Made::From(_) => None,
+        }
+    }
+
+    /// The possible representation it is one of the own constraints of, if
+    /// it is one: a representation's own constraints, of its components as
+    /// given, are its selector's.
+    pub(crate) fn constrained_representation(&self) -> Option<&ast::Possrep> {
+        match &self.from_type.as_ref()?.made {
+            Made::Constraint { own, .. } => own.as_ref(),
             Made::Selector(_) | Made::To(_) | Made::From(_) => None,
         }
     }
 
     /// The type of the program's own and the possible representation it
     /// converts to, from the stored one, if it is a conversion.
-    pub(crate) fn converts(&self) -> Option<(&hir::Defined, &ast::Representation)> {
+    pub(crate) fn converts(&self) -> Option<(&hir::Defined, &ast::Possrep)> {
         let from = self.from_type.as_ref()?;
         match &from.made {
             Made::From(representation) => Some((&from.defined, representation)),
-            Made::Selector(_) | Made::Constraint(_) | Made::To(_) => None,
+            Made::Selector(_) | Made::Constraint { .. } | Made::To(_) => None,
         }
     }
 
@@ -253,14 +267,14 @@ impl Signature {
     /// selector, if it isn't the stored one's, or conversion, its `to` or
     /// `from`.
     pub(crate) fn defined(&self) -> Option<Span> {
-        let conversion = |r: &ast::Representation, d: ast::Direction| {
+        let conversion = |r: &ast::Possrep, d: ast::Direction| {
             r.conversions()
                 .find(|c| c.direction() == Some(d))
                 .and_then(|c| c.keyword())
         };
         let ident = match &self.from_type {
             Some(from) => match &from.made {
-                Made::Constraint(constraint) => constraint.keyword()?,
+                Made::Constraint { constraint, .. } => constraint.keyword()?,
                 Made::Selector(_) if from.selects_stored() => from.decl.name()?.ident()?,
                 Made::Selector(r) | Made::To(r) => conversion(r, ast::Direction::To)?,
                 Made::From(r) => conversion(r, ast::Direction::From)?,
@@ -1273,105 +1287,123 @@ fn operator(
 /// the representation it converts from, and its value the tuple of those
 /// of the one it converts to.
 fn numbered(files: &Files, namespaces: &Namespaces) -> Vec<Signature> {
+    let mut signatures: Vec<Signature> = files
+        .items()
+        .filter_map(|(source, item)| match item {
+            Item::Type(decl) => Some(type_operators(&decl, source, namespaces)),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    signatures.sort_by_key(|signature| signature.id);
+    signatures
+}
+
+/// The signatures [`numbered`] makes of the type `decl`, of `source`,
+/// declares: its constraints', and its possible representations'
+/// conversions' and own constraints'.
+fn type_operators(decl: &ast::TypeDecl, source: Source, namespaces: &Namespaces) -> Vec<Signature> {
+    let Some(ident) = decl.name().and_then(|n| n.ident()) else {
+        return Vec::new();
+    };
+    let Some(defined) = namespaces.declared_type(&ident) else {
+        return Vec::new();
+    };
+    if !namespaces.is_first_type(&ident) {
+        return Vec::new();
+    }
     let mut signatures = Vec::new();
-    for (source, item) in files.items() {
-        let Item::Type(decl) = item else {
-            continue;
+    let stored = namespaces.stored(decl);
+    // A read-only operator the type's declaration makes, `made`, whose
+    // value is of `result`, valid if its declaration's parts are.
+    let made =
+        |id, name, params: BTreeMap<String, hir::Parameter>, result, made, valid| Signature {
+            id,
+            name,
+            unit: namespaces.unit_at(trendy_syntax::span(ident.text_range())),
+            section: ast::section_of(decl.syntax()),
+            types: Vec::new(),
+            written: self::written(&params),
+            params,
+            unresolved: BTreeSet::new(),
+            read_only: true,
+            result: Some(result),
+            decl: None,
+            builtin: None,
+            source,
+            from_type: Some(FromType {
+                defined: defined.clone(),
+                decl: decl.clone(),
+                stored: stored.clone(),
+                made,
+            }),
+            family: Family::Own,
+            versions: Vec::new(),
+            valid,
         };
-        let Some(ident) = decl.name().and_then(|n| n.ident()) else {
-            continue;
-        };
-        let Some(defined) = namespaces.declared_type(&ident) else {
-            continue;
-        };
-        if !namespaces.is_first_type(&ident) {
-            continue;
-        }
-        // A read-only operator the type's declaration makes, `made`, whose
-        // value is of `result`, valid if its declaration's parts are.
-        let made =
-            |id, name, params: BTreeMap<String, hir::Parameter>, result, made, valid| Signature {
-                id,
-                name,
-                unit: namespaces.unit_at(trendy_syntax::span(ident.text_range())),
-                section: ast::section_of(decl.syntax()),
-                types: Vec::new(),
-                written: self::written(&params),
-                params,
-                unresolved: BTreeSet::new(),
-                read_only: true,
-                result: Some(result),
-                decl: None,
-                builtin: None,
-                source,
-                from_type: Some(FromType {
-                    defined: defined.clone(),
-                    decl: decl.clone(),
-                    made,
-                }),
-                family: Family::Own,
-                versions: Vec::new(),
-                valid,
-            };
-        let boolean = || hir::Type::Scalar(hir::Scalar::Boolean);
-        let params = component_parameters(&defined.components);
-        for (i, (constraint, written)) in defined
-            .own_constraints()
+    let boolean = || hir::Type::Scalar(hir::Scalar::Boolean);
+    let params = component_parameters(&defined.components);
+    for (i, (constraint, written)) in defined
+        .own_constraints()
+        .iter()
+        .zip(namespaces.type_constraints(decl))
+        .enumerate()
+    {
+        signatures.push(made(
+            constraint.operator,
+            format!("{} constraint {}", defined.name, i + 1),
+            params.clone(),
+            boolean(),
+            Made::Constraint {
+                constraint: written,
+                own: None,
+            },
+            true,
+        ));
+    }
+    let converted = namespaces.converted(&defined.name);
+    for (representation, converted) in defined.own_representations().iter().zip(converted) {
+        let own = component_parameters(&converted.components);
+        let names: Vec<&str> = converted.components.named().map(|(c, _)| c).collect();
+        let operator_name =
+            |what: &str| format!("{} {what} {{{}}}", defined.name, names.join(", "));
+        let tuple = |heading: &hir::Heading| hir::Type::Tuple(heading.clone());
+        signatures.push(made(
+            representation.to,
+            operator_name("from"),
+            own.clone(),
+            tuple(&defined.components),
+            Made::To(converted.decl.clone()),
+            converted.convertible,
+        ));
+        signatures.push(made(
+            representation.from,
+            operator_name("as"),
+            params.clone(),
+            tuple(&converted.components),
+            Made::From(converted.decl.clone()),
+            converted.convertible,
+        ));
+        // Its own constraints, of its components.
+        for (i, (constraint, written)) in representation
+            .constraints
             .iter()
-            .zip(decl.constraints())
+            .zip(converted.decl.constraints())
             .enumerate()
         {
             signatures.push(made(
                 constraint.operator,
-                format!("{} constraint {}", defined.name, i + 1),
-                params.clone(),
+                format!("{} constraint {}", operator_name("of"), i + 1),
+                own.clone(),
                 boolean(),
-                Made::Constraint(written),
+                Made::Constraint {
+                    constraint: written,
+                    own: Some(converted.decl.clone()),
+                },
                 true,
             ));
         }
-        let converted = namespaces.converted(&defined.name);
-        for (representation, converted) in defined.own_representations().iter().zip(converted) {
-            let own = component_parameters(&converted.components);
-            let names: Vec<&str> = converted.components.named().map(|(c, _)| c).collect();
-            let operator_name =
-                |what: &str| format!("{} {what} {{{}}}", defined.name, names.join(", "));
-            let tuple = |heading: &hir::Heading| hir::Type::Tuple(heading.clone());
-            signatures.push(made(
-                representation.to,
-                operator_name("from"),
-                own.clone(),
-                tuple(&defined.components),
-                Made::To(converted.decl.clone()),
-                converted.convertible,
-            ));
-            signatures.push(made(
-                representation.from,
-                operator_name("as"),
-                params.clone(),
-                tuple(&converted.components),
-                Made::From(converted.decl.clone()),
-                converted.convertible,
-            ));
-            // Its own constraints, of its components.
-            for (i, (constraint, written)) in representation
-                .constraints
-                .iter()
-                .zip(converted.decl.constraints())
-                .enumerate()
-            {
-                signatures.push(made(
-                    constraint.operator,
-                    format!("{} constraint {}", operator_name("of"), i + 1),
-                    own.clone(),
-                    boolean(),
-                    Made::Constraint(written),
-                    true,
-                ));
-            }
-        }
     }
-    signatures.sort_by_key(|signature| signature.id);
     signatures
 }
 
@@ -1402,6 +1434,7 @@ fn from_type(decl: &ast::TypeDecl, source: Source, namespaces: &Namespaces) -> V
         return Vec::new();
     }
     let selects = namespaces.selects(&ident);
+    let stored = namespaces.stored_possrep(decl);
     let unit = namespaces.unit_at(trendy_syntax::span(ident.text_range()));
     let made = |made: Made, params: BTreeMap<String, hir::Parameter>, result, valid| Signature {
         id: hir::OperatorId(0),
@@ -1420,6 +1453,7 @@ fn from_type(decl: &ast::TypeDecl, source: Source, namespaces: &Namespaces) -> V
         from_type: Some(FromType {
             defined: defined.clone(),
             decl: decl.clone(),
+            stored: stored.as_ref().map(|p| p.written().clone()),
             made,
         }),
         valid,
@@ -1427,7 +1461,7 @@ fn from_type(decl: &ast::TypeDecl, source: Source, namespaces: &Namespaces) -> V
         versions: Vec::new(),
     };
     let mut signatures = Vec::new();
-    if let (true, Some(stored)) = (selects, crate::named_types::stored(decl)) {
+    if let (true, Some(stored)) = (selects, stored.clone()) {
         let selector = made(
             Made::Selector(stored),
             component_parameters(&defined.components),

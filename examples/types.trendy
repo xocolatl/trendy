@@ -163,13 +163,14 @@ var cooled := [
    says which of them represent a value: here, minutes below 60, so that
    each duration has one representation in hours and minutes. Selecting a
    value in it checks the constraint of the components as given, before
-   `to` converts them, which would make a value of 90 minutes too. */
+   `to` converts them, which would make a value of 90 minutes too. The
+   stored representation's own, of its components, every value's, hold of
+   every value, as a constraint in the type's braces would. */
 type duration {
-    { seconds: integer },
+    { seconds: integer, constraint seconds >= 0 },
     { hours: integer, minutes: integer, constraint minutes >= 0 and minutes < 60 }
         to { seconds := hours * 3600 + minutes * 60 }
         from { hours := seconds div 3600, minutes := seconds mod 3600 div 60 },
-    constraint seconds >= 0,
 };
 
 var flight_time := duration{hours: 7, minutes: 45};

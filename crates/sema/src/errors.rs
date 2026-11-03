@@ -5507,7 +5507,7 @@ const TREAT_RULE: &str = "`treat x as t` is the value of `x`, as a value of `t`,
 const CONSTRAINT_RULE: &str = "a type is the values its constraints are true of, so selecting a value, by its selector, `replace` or `update`, fails when its components break one; and a possible representation's own constraints, in its braces, say which of its components represent a value, so selecting one in it fails when those given break one (TTM RM Prescription 23)";
 
 /// What a possible representation's own constraints are.
-const REPRESENTATION_CONSTRAINT_RULE: &str = "a possible representation's own constraints, in its braces after its components, say which of them represent a value: selecting a value in it checks them of the components as given, before its `to` converts them, so they name its own components alone, while the type's constraints, in the type's braces, name any representation's, and are checked of every value";
+const REPRESENTATION_CONSTRAINT_RULE: &str = "a possible representation's own constraints, in its braces after its components, say which of them represent a value: selecting a value in it checks them of the components as given, before its `to` converts them, so they name its own components alone, as the stored representation's do too, though they hold of every value, while the type's constraints, in the type's braces, name any representation's, and are checked of every value";
 
 /// The component `name`, at `span`, of another possible representation of
 /// `defined` than `own`, which `constraint`, `own`'s, names. The fix moves
@@ -5520,14 +5520,11 @@ pub(crate) fn other_representations_component(
     constraint: &trendy_syntax::ast::Constraint,
     own: &trendy_syntax::ast::Representation,
 ) -> Diagnostic {
-    let mut components: Vec<String> = own
-        .components()
-        .into_iter()
-        .flat_map(|heading| heading.attributes().collect::<Vec<_>>())
-        .filter_map(|a| Some(a.name()?.ident()?.text().to_string()))
+    let written: Vec<String> = own
+        .component_names()
+        .iter()
+        .map(|c| format!("{c}: …"))
         .collect();
-    components.sort();
-    let written: Vec<String> = components.iter().map(|c| format!("{c}: …")).collect();
     let selector = format!("`{}{{{}}}`", defined.name, written.join(", "));
     let d = Diagnostic::error(
         Code::OtherRepresentation,
@@ -5536,20 +5533,34 @@ pub(crate) fn other_representations_component(
         "not one of this representation's components",
     )
     .with_note(REPRESENTATION_CONSTRAINT_RULE);
-    let text = constraint.syntax().text().to_string();
     d.with_suggestion(
         "move the constraint into the type's braces, where it can name any representation's components",
-        vec![
-            Edit {
-                span: constraint.removal(),
-                replacement: String::new(),
-            },
-            Edit {
-                span: Span::empty(usize::from(own.syntax().text_range().end())),
-                replacement: format!(", {text}"),
-            },
-        ],
+        moved_after(
+            constraint.removal(),
+            usize::from(own.syntax().text_range().end()),
+            constraint.syntax(),
+        ),
     )
+}
+
+/// The edits that move `item`, an item of braces whose items commas
+/// separate, removed at `removal`, to just after `end`, where another
+/// braces' item ends.
+pub(crate) fn moved_after(
+    removal: Span,
+    end: usize,
+    item: &trendy_syntax::SyntaxNode,
+) -> Vec<Edit> {
+    vec![
+        Edit {
+            span: removal,
+            replacement: String::new(),
+        },
+        Edit {
+            span: Span::empty(end),
+            replacement: format!(", {}", item.text()),
+        },
+    ]
 }
 
 /// `expr`, which selects `broken.selected`, whose components break a
@@ -6041,6 +6052,30 @@ pub(crate) fn no_stored_representation(name: &str, ident: &SyntaxToken) -> Diagn
     .with_note(REPRESENTATIONS)
     .with_help("remove the conversions of the representation to store its values as")
 }
+
+/// The type `name`, which `decl`, in its unit's interface, declares with
+/// several possible representations, none with conversions, but which the
+/// implementation doesn't declare again, to say which its values are stored
+/// as and how the others convert to it and from it.
+pub(crate) fn unimplemented_type(name: &str, decl: &trendy_syntax::ast::TypeDecl) -> Diagnostic {
+    let span = decl
+        .name()
+        .and_then(|n| n.ident())
+        .map_or_else(|| decl.span(), |i| trendy_syntax::span(i.text_range()));
+    Diagnostic::error(
+        Code::Conversions,
+        format!("the interface declares `{name}` with several possible representations, but the implementation doesn't say how they convert"),
+        span,
+        "declared again in the implementation, with its conversions",
+    )
+    .with_note(IMPLEMENTED_TYPE)
+    .with_help(format!(
+        "declare `{name}` again in the implementation, with each of its representations' components, and `to` and `from` after each but the one its values are stored as"
+    ))
+}
+
+/// How a type an interface declares is completed, for notes.
+const IMPLEMENTED_TYPE: &str = "a type the interface declares shows its users its possible representations, its constraints and its order, but not which representation its values are stored as, nor how the others convert to it: its implementation declares it again, with each representation's components, and `to { … }` and `from { … }` after each but the stored one";
 
 /// `representation`, a second possible representation of the type `name`
 /// without conversions, after `stored`, the one its values are stored as.
@@ -8805,6 +8840,181 @@ pub(crate) fn interface_variable(decl: &ast::VarDecl, moved: Vec<Edit>) -> Diagn
     .with_note("a unit's variables are its own, which other units reach through its update operators, so that what is true of them is the unit's to keep")
     .with_help("give an update operator that other units call, with an `out` parameter for what they read of it")
     .with_suggestion("move it to the implementation", moved)
+}
+
+/// The selector of the type `t` in the possible representation written
+/// `representation`, quoted, with `…` for each argument, its components in
+/// name order.
+fn written_selector(t: &str, representation: &ast::Representation) -> String {
+    let written: Vec<String> = representation
+        .component_names()
+        .iter()
+        .map(|c| format!("{c}: …"))
+        .collect();
+    format!("`{t}{{{}}}`", written.join(", "))
+}
+
+/// The conversions of `converted`, possible representations of the type
+/// `decl` declares in its unit's interface, which its users don't see: they
+/// are its implementation's. `moved` moves them to its declaration there,
+/// if that is mechanical.
+pub(crate) fn interface_conversions(
+    decl: &ast::TypeDecl,
+    converted: &[ast::Representation],
+    moved: Option<Vec<Edit>>,
+) -> Diagnostic {
+    let name = decl
+        .name()
+        .and_then(|n| n.ident())
+        .map(|i| i.text().to_string())
+        .unwrap_or_default();
+    let first = converted[0]
+        .conversions()
+        .next()
+        .and_then(|c| c.keyword())
+        .map_or_else(
+            || converted[0].span(),
+            |k| trendy_syntax::span(k.text_range()),
+        );
+    let d = Diagnostic::error(
+        Code::InterfaceDeclaration,
+        format!("`{name}`'s conversions are its implementation's, which its users don't see"),
+        first,
+        "in the interface",
+    )
+    .with_note(SECTIONS_RULE)
+    .with_note(IMPLEMENTED_TYPE);
+    match moved {
+        Some(edits) => d.with_suggestion(
+            "move them to the implementation's declaration of the type",
+            edits,
+        ),
+        None => d.with_help(format!(
+            "move them after the same components in the implementation's declaration of `{name}`"
+        )),
+    }
+}
+
+/// `item`, a constraint or an order, in the declaration in the
+/// implementation of the type `name` its unit's interface declares, where
+/// the type's users see what it says of its values. `moved` moves it to the
+/// interface's declaration, if that is mechanical.
+pub(crate) fn implementation_type_item(
+    name: &str,
+    item: &trendy_syntax::SyntaxNode,
+    moved: Option<Vec<Edit>>,
+) -> Diagnostic {
+    let what = if ast::TypeOrder::cast(item.clone()).is_some() {
+        "an order"
+    } else {
+        "a constraint"
+    };
+    let d = Diagnostic::error(
+        Code::InterfaceDeclaration,
+        format!(
+            "`{name}`'s {} goes in the interface's declaration of it",
+            &what[what.find(' ').map_or(0, |i| i + 1)..]
+        ),
+        trendy_syntax::span(item.text_range()),
+        format!("{what}, in the implementation"),
+    )
+    .with_note(IMPLEMENTED_TYPE);
+    match moved {
+        Some(edits) => d.with_suggestion("move it to the interface", edits),
+        None => d.with_help("write it in the interface's declaration, after the same components"),
+    }
+}
+
+/// `representation`, in the declaration in the implementation of the type
+/// `name` its unit's interface declares, which has no representation of
+/// the same components among `interface`, the interface's.
+pub(crate) fn undeclared_representation(
+    name: &str,
+    representation: &ast::Representation,
+    interface: &[ast::Representation],
+) -> Diagnostic {
+    let declared: Vec<String> = interface
+        .iter()
+        .map(|r| written_selector(name, r))
+        .collect();
+    Diagnostic::error(
+        Code::DefinitionMismatch,
+        format!(
+            "the interface declares no representation of `{name}` with these components, {}",
+            written_selector(name, representation)
+        ),
+        representation.span(),
+        "not the interface's",
+    )
+    .with_note(IMPLEMENTED_TYPE)
+    .with_help(format!(
+        "repeat the interface's representations, {}, or declare this one there too",
+        trendy_diag::conjoin(&declared)
+    ))
+}
+
+/// `representation`, in the declaration in the implementation of the type
+/// `name` its unit's interface declares, whose components are those of
+/// `declared`, the interface's, but not as it writes them. `written`
+/// writes them so, if they have components to replace.
+pub(crate) fn representation_mismatch(
+    name: &str,
+    representation: &ast::Representation,
+    declared: &ast::Representation,
+    written: Option<Edit>,
+) -> Diagnostic {
+    let d = Diagnostic::error(
+        Code::DefinitionMismatch,
+        format!(
+            "the implementation's {} isn't written as the interface's",
+            written_selector(name, representation)
+        ),
+        representation
+            .components()
+            .map_or_else(|| representation.span(), |h| h.span()),
+        "other components",
+    )
+    .with_secondary(
+        declared
+            .components()
+            .map_or_else(|| declared.span(), |h| h.span()),
+        "the interface's",
+    )
+    .with_note(IMPLEMENTED_TYPE);
+    match written {
+        Some(edit) => d.with_suggestion("write the interface's components", vec![edit]),
+        None => d,
+    }
+}
+
+/// `part`, the declaration in the implementation of the type `name` its
+/// unit's interface declares, which doesn't repeat `missing`, of the
+/// interface's representations.
+pub(crate) fn unrepeated_representations(
+    name: &str,
+    part: &ast::TypeDecl,
+    missing: &[&ast::Representation],
+) -> Diagnostic {
+    let span = part
+        .name()
+        .and_then(|n| n.ident())
+        .map_or_else(|| part.span(), |i| trendy_syntax::span(i.text_range()));
+    let listed: Vec<String> = missing.iter().map(|r| written_selector(name, r)).collect();
+    let mut d = Diagnostic::error(
+        Code::DefinitionMismatch,
+        format!(
+            "the implementation's declaration of `{name}` doesn't repeat {}",
+            trendy_diag::conjoin(&listed)
+        ),
+        span,
+        "not every representation",
+    );
+    for representation in missing {
+        d = d.with_secondary(representation.span(), "the interface's");
+    }
+    d.with_note(IMPLEMENTED_TYPE).with_help(
+        "repeat each representation's components, with `to` and `from` after each but the one its values are stored as",
+    )
 }
 
 /// The constraint `decl`, declared in its unit's interface, though the

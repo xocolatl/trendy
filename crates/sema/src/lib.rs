@@ -18,7 +18,7 @@ mod scope;
 mod sections;
 mod types;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use trendy_diag::{Diagnostic, Span};
 use trendy_hir as hir;
@@ -143,6 +143,13 @@ pub(crate) struct Files {
     /// Each file's unit's name, and where its text ends in the program's,
     /// by its [`hir::FileId`].
     names: scope::Units,
+    /// The declarations in units' implementations of types their
+    /// interfaces declare, which complete those (see
+    /// [`ast::TypeDecl::implementation`]), each found once, by where the
+    /// interface's starts in the program's text.
+    parts: HashMap<usize, TypeDecl>,
+    /// Where each of `parts` starts: they are no items of their own.
+    part_starts: HashSet<usize>,
 }
 
 impl Files {
@@ -171,7 +178,7 @@ impl Files {
             .map(|(file, tree)| (file.name, tree))
             .collect();
         let names = scope::Units::new(&unit_files, prelude);
-        let units = files
+        let units: Vec<(Source, SourceFile)> = files
             .into_iter()
             .enumerate()
             .map(|(i, tree)| {
@@ -185,12 +192,20 @@ impl Files {
                 (source, tree)
             })
             .collect();
+        let parts: HashMap<usize, TypeDecl> = units
+            .iter()
+            .flat_map(|(_, tree)| tree.types())
+            .filter_map(|decl| Some((decl.span().start, decl.implementation()?)))
+            .collect();
+        let part_starts = parts.values().map(|part| part.span().start).collect();
         Files {
             units,
             prelude,
             catalog,
             paths: all.iter().map(|file| file.path.to_string()).collect(),
             names,
+            parts,
+            part_starts,
         }
     }
 
@@ -243,18 +258,33 @@ impl Files {
     }
 
     /// Every definition, each with the file it is in, the prelude's first,
-    /// each file's in source order.
+    /// each file's in source order: but for a type's declaration in its
+    /// unit's implementation, which completes the interface's, its part
+    /// (see [`ast::TypeDecl::implementation`]).
     pub(crate) fn items(&self) -> impl Iterator<Item = (Source, Item)> {
-        self.each()
-            .flat_map(|(source, file)| file.items().map(move |item| (source, item)))
+        self.each().flat_map(|(source, file)| {
+            file.items()
+                .filter(|item| !matches!(item, Item::Type(decl) if self.is_part(decl)))
+                .map(move |item| (source, item))
+        })
     }
 
     pub(crate) fn headings(&self) -> impl Iterator<Item = HeadingDecl> {
         self.each().flat_map(|(_, file)| file.headings())
     }
 
+    /// Whether `decl` is a type's declaration in its unit's implementation
+    /// that completes the interface's.
+    fn is_part(&self, decl: &TypeDecl) -> bool {
+        !self.part_starts.is_empty() && self.part_starts.contains(&decl.span().start)
+    }
+
+    /// Every type's declaration, but for its part in its unit's
+    /// implementation, as [`Files::items`] gives them.
     pub(crate) fn types(&self) -> impl Iterator<Item = TypeDecl> {
-        self.each().flat_map(|(_, file)| file.types())
+        self.each()
+            .flat_map(|(_, file)| file.types())
+            .filter(|decl| !self.is_part(decl))
     }
 
     pub(crate) fn variables(&self) -> impl Iterator<Item = VarDecl> {
@@ -544,6 +574,10 @@ impl Kind {
 pub(crate) struct Namespaces {
     /// The program's units, which each declaration is in one of.
     units: scope::Units,
+    /// Each type's declaration in its unit's implementation, which
+    /// completes its interface's, by where the interface's starts (see
+    /// [`ast::TypeDecl::implementation`]).
+    parts: HashMap<usize, TypeDecl>,
     /// User and built-in operators: each name's, with their parameters'
     /// names, in the order they are defined.
     operators: scope::Declared<OperatorName>,
@@ -604,8 +638,10 @@ struct OperatorName {
 /// the one its values are stored as, which they are converted to and from.
 #[derive(Clone)]
 pub(crate) struct Converted {
-    /// Its declaration, with its conversions.
-    pub(crate) decl: ast::Representation,
+    /// Its declaration: its components, with its own constraints, and its
+    /// conversions, which a type its unit's interface declares has in its
+    /// declaration in the implementation.
+    pub(crate) decl: ast::Possrep,
     /// Its components.
     pub(crate) components: hir::Heading,
     /// Whether it has each conversion once, the right way round, so that
@@ -619,10 +655,12 @@ impl Namespaces {
     /// own declarations.
     pub(crate) fn with_kinds(
         units: scope::Units,
+        parts: HashMap<usize, TypeDecl>,
         kinds: &[(hir::Kind, BTreeSet<hir::Scalar>)],
     ) -> Self {
         Namespaces {
             units,
+            parts,
             operators: scope::Declared::default(),
             variables: scope::Declared::default(),
             constraints: scope::Declared::default(),
@@ -654,6 +692,39 @@ impl Namespaces {
         self.library
             .as_ref()
             .expect("the library's types are resolved before the operators")
+    }
+
+    /// The declaration in its unit's implementation of the type `decl`
+    /// declares in the interface, if it has one.
+    pub(crate) fn implementation(&self, decl: &TypeDecl) -> Option<&TypeDecl> {
+        self.parts.get(&decl.span().start)
+    }
+
+    /// The possible representations of the type `decl` declares, each with
+    /// where its conversions are (see [`ast::TypeDecl::possreps`]).
+    pub(crate) fn possreps(&self, decl: &TypeDecl) -> Vec<ast::Possrep> {
+        decl.possreps_with(self.implementation(decl))
+    }
+
+    /// The possible representation of the type `decl` declares that its
+    /// values are stored as: the one without conversions, which the others
+    /// convert to and from.
+    pub(crate) fn stored_possrep(&self, decl: &TypeDecl) -> Option<ast::Possrep> {
+        self.possreps(decl)
+            .into_iter()
+            .find(ast::Possrep::is_stored)
+    }
+
+    /// Where the components of the possible representation of the type
+    /// `decl` declares that its values are stored as are written.
+    pub(crate) fn stored(&self, decl: &TypeDecl) -> Option<ast::Representation> {
+        self.stored_possrep(decl).map(|p| p.written().clone())
+    }
+
+    /// The constraints of the type `decl` declares, which say which values
+    /// it has (see [`ast::TypeDecl::constraints`]).
+    pub(crate) fn type_constraints(&self, decl: &TypeDecl) -> Vec<ast::Constraint> {
+        decl.constraints_of(&self.possreps(decl)).collect()
     }
 
     /// The program's units.
@@ -1097,7 +1168,7 @@ fn collect_names(
     files: &Files,
     errors: &mut Vec<Diagnostic>,
 ) -> Namespaces {
-    let mut namespaces = Namespaces::with_kinds(files.names.clone(), kinds);
+    let mut namespaces = Namespaces::with_kinds(files.names.clone(), files.parts.clone(), kinds);
     for (source, item) in files.items() {
         let prelude = source == Source::Prelude;
         let (kind, name, params) = match item {
@@ -3538,6 +3609,127 @@ operator main{{}} [ var lines: array text; {main} ];"
         assert_eq!(
             errors[0].message,
             "`tens{big: …}`'s constraint selects a value in its representation through `tens`"
+        );
+    }
+
+    #[test]
+    fn a_type_the_interface_declares_is_converted_in_the_implementation() {
+        // Its users see its representations, its constraints and its
+        // order; the implementation declares it again, with each
+        // representation's components and the conversions.
+        let interface = "interface\n\ntype duration {\n    { seconds: integer },\n    { hours: integer, minutes: integer, constraint minutes >= 0 and minutes < 60 },\n    constraint seconds >= 0,\n};\n\nimplementation\n\n";
+        let part = "type duration {\n    { seconds: integer },\n    { hours: integer, minutes: integer }\n        to { seconds := hours * 3600 + minutes * 60 }\n        from { hours := seconds div 3600, minutes := seconds mod 3600 div 60 },\n};\n\n";
+        let program = |rest: &str| format!("{interface}{part}{rest}operator main{{}} [];");
+        let values: Vec<String> = analyze_str(&program(
+            "var a := duration{hours: 1, minutes: 30}.seconds;\nvar b := duration{seconds: 5400}.minutes;\n",
+        ))
+        .unwrap()
+        .variables
+        .iter()
+        .map(|v| v.init.to_string())
+        .collect();
+        assert_eq!(values, ["5400", "30"]);
+        // Its representation's constraint, and the type's, checked as ever.
+        assert_eq!(
+            codes(&program("var a := duration{hours: 1, minutes: 90};\n")),
+            [Code::BrokenConstraint]
+        );
+        assert_eq!(
+            codes(&program("var a := duration{seconds: -1};\n")),
+            [Code::BrokenConstraint]
+        );
+        // Without the implementation's, nothing says which representation
+        // is stored, nor how the others convert.
+        let alone = format!("{interface}operator main{{}} [];");
+        assert_eq!(codes(&alone), [Code::Conversions]);
+        // Conversions in the interface are moved to the implementation, to a
+        // declaration of the type there, or to a new one.
+        let converted = interface.replace(
+            "{ hours: integer, minutes: integer, constraint minutes >= 0 and minutes < 60 },",
+            "{ hours: integer, minutes: integer, constraint minutes >= 0 and minutes < 60 }\n        to { seconds := hours * 3600 + minutes * 60 }\n        from { hours := seconds div 3600, minutes := seconds mod 3600 div 60 },",
+        );
+        let source = format!("{converted}operator main{{}} [];");
+        assert_eq!(codes(&source), [Code::InterfaceDeclaration]);
+        let fixed = fix(&source);
+        assert!(analyze_str(&fixed).is_ok(), "{fixed}");
+        assert!(
+            fixed.contains("implementation\n\noperator main{} [];\ntype duration {"),
+            "{fixed}"
+        );
+        // A constraint or an order in the implementation's is moved to the
+        // interface, where its users see it.
+        let constrained = part.replace(
+            "from { hours := seconds div 3600, minutes := seconds mod 3600 div 60 },",
+            "from { hours := seconds div 3600, minutes := seconds mod 3600 div 60 },\n    constraint seconds < 86400,",
+        );
+        let source = format!("{interface}{constrained}operator main{{}} [];");
+        assert_eq!(codes(&source), [Code::InterfaceDeclaration]);
+        let fixed = fix(&source);
+        assert!(analyze_str(&fixed).is_ok(), "{fixed}");
+        assert!(
+            fixed.contains("constraint seconds >= 0, constraint seconds < 86400,"),
+            "{fixed}"
+        );
+        // Its representations' components, as the interface writes them,
+        // each of them.
+        let retyped = part.replace(
+            "{ hours: integer, minutes: integer }",
+            "{ hours: integer, minutes: text }",
+        );
+        let source = format!("{interface}{retyped}operator main{{}} [];");
+        assert_eq!(codes(&source), [Code::DefinitionMismatch]);
+        assert_eq!(fix(&source), program(""));
+        let other = part.replace("{ hours: integer, minutes: integer }", "{ days: integer }");
+        let errors = errors(&format!("{interface}{other}operator main{{}} [];"));
+        let codes_of: Vec<Code> = errors.iter().map(|e| e.code).collect();
+        assert_eq!(
+            codes_of,
+            [Code::DefinitionMismatch, Code::DefinitionMismatch],
+            "{errors:#?}"
+        );
+        assert_eq!(
+            errors[0].message,
+            "the implementation's declaration of `duration` doesn't repeat `duration{hours: …, minutes: …}`"
+        );
+        assert_eq!(
+            errors[1].message,
+            "the interface declares no representation of `duration` with these components, `duration{days: …}`"
+        );
+    }
+
+    #[test]
+    fn the_stored_representations_own_constraints_are_the_types() {
+        // Its components are every value's, so they hold of every value,
+        // whatever representation it is selected in.
+        let temperature = "type temperature {\n    { kelvin: approximate, constraint kelvin >= 0e0 },\n    { celsius: approximate }\n        to { kelvin := celsius + 273.15e0 }\n        from { celsius := kelvin - 273.15e0 },\n};\n";
+        assert_eq!(
+            codes(&format!(
+                "{temperature}var t := temperature{{celsius: -300e0}};{MAIN}"
+            )),
+            [Code::BrokenConstraint]
+        );
+        assert_eq!(
+            codes(&format!(
+                "{temperature}var t := temperature{{kelvin: -1e0}};{MAIN}"
+            )),
+            [Code::BrokenConstraint]
+        );
+        // They name its own components alone, as another's do, so that
+        // nothing in them says which representation is stored.
+        let other = temperature.replace("kelvin >= 0e0", "celsius >= -273.15e0");
+        let source = format!("{other}operator main{{}} [];");
+        assert_eq!(codes(&source), [Code::OtherRepresentation]);
+        assert_eq!(
+            fix(&source),
+            format!(
+                "{}operator main{{}} [];",
+                other
+                    .replace(", constraint celsius >= -273.15e0 }", " }")
+                    .replace(
+                        "{ kelvin: approximate },",
+                        "{ kelvin: approximate }, constraint celsius >= -273.15e0,"
+                    )
+            )
         );
     }
 

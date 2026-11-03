@@ -14,4 +14,5 @@ operator main{} [
     call recorded{out lakes: lakes};
     call debug_value{v: count{r: lakes}};
     call debug_value{v: (deepest{lakes: lakes}){name, native}};
+    call debug_value{v: (lakes where depth < metres{cm: 50000}){name}};
 ];

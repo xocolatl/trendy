@@ -58,11 +58,11 @@ impl Decl {
     }
 
     /// The attributes it declares, or its type's components, as its values
-    /// are stored.
-    fn heading(&self) -> Option<ast::Heading> {
+    /// are stored, as `namespaces` say.
+    fn heading(&self, namespaces: &Namespaces) -> Option<ast::Heading> {
         match self {
             Decl::Heading(decl) => decl.heading(),
-            Decl::Type(decl) => stored(decl)?.components(),
+            Decl::Type(decl) => namespaces.stored(decl)?.components(),
         }
     }
 
@@ -79,14 +79,6 @@ impl Decl {
                 .collect(),
         }
     }
-}
-
-/// The possible representation of the type `decl` declares that its values
-/// are stored as: the first without conversions, which the others convert
-/// to and from.
-pub(crate) fn stored(decl: &TypeDecl) -> Option<ast::Representation> {
-    decl.representations()
-        .find(|r| r.conversions().next().is_none())
 }
 
 /// The names of `representation`'s components, as written.
@@ -208,33 +200,53 @@ fn convertible(
     decl: &TypeDecl,
     name: &str,
     inherited: Option<&Inherited>,
+    namespaces: &Namespaces,
     errors: &mut Vec<Diagnostic>,
 ) -> Vec<bool> {
-    let representations: Vec<ast::Representation> = decl.representations().collect();
-    let stored = representations
+    let possreps = namespaces.possreps(decl);
+    // Declared in its unit's interface with several, which say nothing of
+    // how they convert, it is declared again in the implementation, which
+    // does; a representation the implementation doesn't repeat is reported
+    // as the implementation is checked (`unrepeated`).
+    let implemented = namespaces.implementation(decl).is_some();
+    let unrepeated = |p: &ast::Possrep| implemented && p.converted() == p.written();
+    if inherited.is_none()
+        && possreps.len() > 1
+        && !implemented
+        && ast::section_of(decl.syntax()) == ast::Section::Interface
+        && possreps.iter().all(ast::Possrep::is_stored)
+    {
+        errors.push(errors::unimplemented_type(name, decl));
+        return vec![false; possreps.len()];
+    }
+    let stored = possreps
         .iter()
-        .position(|r| r.conversions().next().is_none());
+        .position(|p| p.is_stored() && !unrepeated(p));
     let (stored_names, mut seen) = match (inherited, stored) {
         (Some(inherited), _) => (inherited.stored.clone(), inherited.taken.clone()),
         (None, Some(stored)) => {
-            let names = component_names(&representations[stored]);
+            let names = component_names(possreps[stored].written());
             (names.clone(), names)
         }
         (None, None) => {
             if let Some(ident) = decl.name().and_then(|n| n.ident()) {
                 errors.push(errors::no_stored_representation(name, &ident));
             }
-            return vec![false; representations.len()];
+            return vec![false; possreps.len()];
         }
     };
-    representations
+    possreps
         .iter()
         .enumerate()
-        .map(|(i, representation)| {
+        .map(|(i, possrep)| {
             if inherited.is_none() && Some(i) == stored {
                 return false;
             }
-            let conversions: Vec<ast::Conversion> = representation.conversions().collect();
+            if unrepeated(possrep) {
+                return false;
+            }
+            let representation = possrep.written();
+            let conversions: Vec<ast::Conversion> = possrep.conversions().collect();
             let mut ok = true;
             match (inherited, stored) {
                 (Some(inherited), _) if conversions.is_empty() => {
@@ -249,7 +261,7 @@ fn convertible(
                     errors.push(errors::second_stored(
                         name,
                         representation,
-                        &representations[stored],
+                        possreps[stored].written(),
                     ));
                     ok = false;
                 }
@@ -278,7 +290,10 @@ fn convertible(
                 }
                 _ if conversions.is_empty() => {}
                 _ => {
-                    errors.push(errors::missing_conversion(representation, to.is_none()));
+                    errors.push(errors::missing_conversion(
+                        possrep.converted(),
+                        to.is_none(),
+                    ));
                     ok = false;
                 }
             }
@@ -416,8 +431,8 @@ fn supertypes(
             // supertype's components.
             if decl.union_keyword().is_some() {
                 errors.push(errors::union_under_regular(name, &ident));
-            } else if specialized(decl, name, supertype, errors)
-                || decl.constraints().next().is_some()
+            } else if specialized(decl, name, supertype, namespaces, errors)
+                || !namespaces.type_constraints(decl).is_empty()
             {
                 immediate.insert(name.clone(), (supertype.to_string(), at));
                 constrained.insert(name.clone());
@@ -505,11 +520,13 @@ fn lone_subtypes(
 
 /// What the subtype `name` defined by constraints, if it is one, of those
 /// `declared`, inherits from its supertypes, as `supertypes` say, for its
-/// representations' conversions (see [`Inherited`]).
+/// representations' conversions (see [`Inherited`]), as `namespaces` see
+/// their declarations.
 fn inherited<'s>(
     name: &str,
     declared: &[(String, Declared)],
     supertypes: &'s Supertypes,
+    namespaces: &Namespaces,
 ) -> Option<Inherited<'s>> {
     let supertype = supertypes.specializes(name)?;
     let decl = |n: &str| {
@@ -530,7 +547,8 @@ fn inherited<'s>(
         if let Some(next) = supertypes.specializes(at) {
             at = next;
         } else {
-            let stored = stored(&decl)
+            let stored = namespaces
+                .stored(&decl)
                 .map(|r| component_names(&r))
                 .unwrap_or_default();
             return Some(Inherited {
@@ -547,9 +565,15 @@ fn inherited<'s>(
 /// which of the supertype's values are its own, and no order of its own,
 /// since its values are the supertype's, ordered as they are; otherwise
 /// reported.
-fn specialized(decl: &TypeDecl, name: &str, supertype: &str, errors: &mut Vec<Diagnostic>) -> bool {
+fn specialized(
+    decl: &TypeDecl,
+    name: &str,
+    supertype: &str,
+    namespaces: &Namespaces,
+    errors: &mut Vec<Diagnostic>,
+) -> bool {
     let mut ok = true;
-    if decl.constraints().next().is_none() {
+    if namespaces.type_constraints(decl).is_empty() {
         errors.push(errors::unconstrained_subtype(decl, name, supertype));
         ok = false;
     }
@@ -582,10 +606,10 @@ pub(crate) fn resolve(
         .iter()
         .filter_map(|(name, declared_type)| match &declared_type.decl {
             Decl::Type(decl) if decl.union_keyword().is_none() => {
-                let inherited = inherited(name, &declared, &supertypes);
+                let inherited = inherited(name, &declared, &supertypes, namespaces);
                 Some((
                     name.clone(),
-                    convertible(decl, name, inherited.as_ref(), errors),
+                    convertible(decl, name, inherited.as_ref(), namespaces, errors),
                 ))
             }
             _ => None,
@@ -646,7 +670,7 @@ pub(crate) fn resolve(
             }
             continue;
         }
-        let Some(heading) = declared.decl.heading() else {
+        let Some(heading) = declared.decl.heading(namespaces) else {
             continue;
         };
         // One in a cycle has no attributes, but its others' errors are
@@ -773,8 +797,10 @@ fn specialization(
     };
     let mut constraints = supertype.constraints.clone();
     constraints.extend(
-        decl.constraints()
-            .map(|constraint| self::constraint(&constraint, &mut numbered)),
+        namespaces
+            .type_constraints(decl)
+            .iter()
+            .map(|constraint| self::constraint(constraint, &mut numbered)),
     );
     let converted = converted(decl, convertible, namespaces, errors);
     let mut representations = supertype.representations.clone();
@@ -841,15 +867,17 @@ fn converted(
     namespaces: &Namespaces,
     errors: &mut Vec<Diagnostic>,
 ) -> Vec<Converted> {
-    decl.representations()
+    namespaces
+        .possreps(decl)
+        .into_iter()
         .zip(convertible)
-        .filter(|(r, _)| r.conversions().next().is_some())
-        .filter_map(|(representation, &convertible)| {
-            let heading = representation.components()?;
+        .filter(|(p, _)| !p.is_stored())
+        .filter_map(|(possrep, &convertible)| {
+            let heading = possrep.components()?;
             let components =
                 types::resolve_heading(&heading, &mut TypeParameters::None, namespaces, errors)?;
             Some(Converted {
-                decl: representation,
+                decl: possrep,
                 components,
                 convertible,
             })
@@ -884,9 +912,10 @@ fn defined(
         *next += 1;
         id
     };
-    let constraints = decl
-        .constraints()
-        .map(|constraint| self::constraint(&constraint, &mut numbered))
+    let constraints = namespaces
+        .type_constraints(decl)
+        .iter()
+        .map(|constraint| self::constraint(constraint, &mut numbered))
         .collect();
     let converted = converted(decl, convertible, namespaces, errors);
     let representations = converted
@@ -895,10 +924,15 @@ fn defined(
         .collect();
     // Each representation, with its components resolved: the stored one's
     // are the type's.
-    let resolved: Vec<(ast::Representation, &hir::Heading)> = stored(decl)
+    let resolved: Vec<(ast::Representation, &hir::Heading)> = namespaces
+        .stored(decl)
         .map(|r| (r, &components))
         .into_iter()
-        .chain(converted.iter().map(|c| (c.decl.clone(), &c.components)))
+        .chain(
+            converted
+                .iter()
+                .map(|c| (c.decl.written().clone(), &c.components)),
+        )
         .collect();
     let keys = crate::keys::components(decl, name, &resolved, errors);
     let mut defined = hir::Defined {

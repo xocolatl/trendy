@@ -2,17 +2,20 @@
    the directory of the program's main file. Its interface declares what
    other units see of it: here a type, a heading, and operators, each
    operator by its heading alone. Its implementation repeats each such
-   operator's heading with its body, and keeps what no other unit sees:
-   the variable the lakes are recorded in, which other units reach only
-   through its update operators, so what is true of it is the unit's to
-   keep. */
+   operator's heading with its body, declares the type again with how its
+   representations convert, and keeps what no other unit sees: which
+   representation the type's values are stored as, and the variable the
+   lakes are recorded in, which other units reach only through its update
+   operators, so what is true of it is the unit's to keep. */
 
 interface
 
-/* A depth, in whole metres. */
+/* A depth, in whole metres, or in centimetres, of whole metres. */
 type metres {
     { m: integer },
+    { cm: integer, constraint cm mod 100 = 0 },
     constraint m > 0,
+    order [asc m],
 };
 
 /* A lake, its name in its own language too, and how deep it is. */
@@ -29,10 +32,17 @@ operator recorded{out lakes: relation lake};
 
 implementation
 
+type metres {
+    { m: integer },
+    { cm: integer }
+        to { m := cm div 100 }
+        from { cm := m * 100 },
+};
+
 var known: relation lake key { name };
 
 operator deepest{lakes: relation lake}: relation lake [
-    lakes where depth.m = max{r: lakes, of: depth.m}
+    lakes where depth = max{r: lakes, of: depth}
 ];
 
 operator record{name: text, native: text, depth: integer} [

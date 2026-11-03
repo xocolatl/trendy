@@ -192,7 +192,7 @@ pub(crate) fn bare_representation(
 }
 
 /// Why a type's constraints and order go in its braces, for notes.
-const CONSTRAINT_RULE: &str = "what a type says of its values beside their components goes in the type's braces with its possible representation: its constraints, each `constraint` and a condition on the components, which say which values it has, as in `type celsius { { degrees: approximate }, constraint degrees >= -273.15e0 };`, and its order, `order [asc degrees]`; a representation converted to another can have constraints of its own, after its components in its braces, which say which of them represent a value";
+const CONSTRAINT_RULE: &str = "a type's order goes in the type's braces with its possible representations, as its constraints do, each `constraint` and a condition on the components, which say which values it has, as in `type celsius { { degrees: approximate }, constraint degrees >= -273.15e0, order [asc degrees] };`; a representation's braces hold its components, and constraints of its own after them, which say which of its components represent a value";
 
 /// Tutorial D's `ORDERED` or `ORDINAL`, `found`, saying a type has an
 /// order: a type's order is written with the components it compares.
@@ -391,9 +391,8 @@ const SUBTYPE_NOTE: &str = "a type declared `is` a union type is one of its subt
 /// What a constraint is, as an error says.
 pub(crate) const A_CONSTRAINT: &str = "a constraint";
 
-/// An order or constraints written inside a possible representation's
-/// braces, after its components, as Tutorial D writes a possrep's
-/// constraint, which are the type's.
+/// Orders written inside a possible representation's braces, after its
+/// components, which are the type's.
 pub(crate) struct Inside {
     /// Where the components end, before any comma after them.
     pub(crate) components: usize,
@@ -413,11 +412,10 @@ pub(crate) struct InsideItem {
     pub(crate) what: &'static str,
 }
 
-/// The order or constraints `inside`, in `source`, a possible
-/// representation's braces, the type's, which are written in the type's:
-/// in the braces of the representation values are stored as, a constraint
-/// is the type's, and an order is a type's in any. The fix moves them
-/// after the braces, which end at `close`, into the type's.
+/// The orders `inside`, in `source`, a possible representation's braces,
+/// which are written in the type's, as a type's order is its own in any
+/// representation. The fix moves them after the braces, which end at
+/// `close`, into the type's.
 pub(crate) fn constraint_in_components(
     source: &str,
     inside: &Inside,
@@ -426,7 +424,7 @@ pub(crate) fn constraint_in_components(
     let items = &inside.items;
     let first = &items[0];
     let d = Diagnostic::error(
-        Code::ConstraintInRepresentation,
+        Code::OrderInRepresentation,
         format!(
             "{} goes in the type's braces, not the components'",
             first.what

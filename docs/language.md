@@ -141,9 +141,59 @@ operator main{} [];
   type's constraints and conversions, are the unit's own, and can use
   what its implementation declares.
 - **A type the interface declares is declared with its possible
-  representations,** its logical interface (TTM RM Prescription 4): other
-  units select its values and read their components, and its constraint
-  holds whoever selects one. How its values are stored is hidden anyway.
+  representations,** its logical interface (TTM RM Prescription 4): the
+  interface writes their components, its constraints, a representation's
+  own among them, and its order, which say what its values are, so that
+  other units select them, read their components and compare them, and
+  its constraints hold whoever selects one. How its representations
+  convert to each other is how its values are stored, which is the
+  unit's own (see below).
+
+A type with several possible representations the interface declares is
+declared again in the implementation, which repeats each
+representation's components and gives every one but the stored one its
+`to` and `from`, so that no other unit can tell which of them the values
+are stored as:
+
+```trendy
+interface
+
+/* The time something takes, to the second. */
+type duration {
+    { seconds: integer, constraint seconds >= 0 },
+    { hours: integer, minutes: integer, constraint minutes >= 0 and minutes < 60 },
+};
+
+implementation
+
+type duration {
+    { seconds: integer },
+    { hours: integer, minutes: integer }
+        to { seconds := hours * 3600 + minutes * 60 }
+        from { hours := seconds div 3600, minutes := seconds mod 3600 div 60 },
+};
+
+operator main{} [
+    var flight := duration{hours: 7, minutes: 45};
+    call debug_value{v: flight.minutes};
+];
+```
+
+- **The implementation's declaration completes the interface's,** with
+  nothing else: what the type is, its constraints and its order, is
+  written once, in the interface, and a constraint or an order in the
+  implementation's declaration is moved there (A0067). Conversions in the
+  interface are moved to the implementation's, which the fix writes if
+  it is missing (A0067).
+- **It repeats each representation's components** as the interface
+  writes them, with their types, as an operator's body repeats its
+  heading, so that each conversion reads beside what it converts. One the
+  interface doesn't declare, or one it doesn't repeat, is an error, with
+  components that differ in their types fixed to the interface's
+  (A0068).
+- **A type with one possible representation needs no second
+  declaration,** as it has nothing to convert, and one with several
+  declared in an interface without one is an error (A0059).
 - **A unit's names are its own.** A name written in a unit is one it
   declares, or one of the prelude's, which every unit sees, so two units
   can each declare one of a name, which is no duplicate (A0001). The
@@ -2714,11 +2764,9 @@ operator main{} [
   (A0058).
 - **The braces are a set,** so the constraints and the possible
   representation can come in any order. SQL's `check` is fixed to
-  `constraint` (P0040), and a constraint inside the components' braces,
+  `constraint` (P0040). A constraint inside the components' braces,
   where Tutorial D writes a possible representation's `CONSTRAINT`, is
-  moved out of them (P0041): those of the representation a type's values
-  are stored as are the type's, though another representation's are its
-  own (see below).
+  that representation's own (see below).
 
 A type's order says how its values compare: `order [asc year, …]`, in
 its braces, compares them by the components it names, in turn, until one
@@ -2759,8 +2807,9 @@ operator main{} [
   Tutorial D's `ORDERED` and `ORDINAL`, which have the program write
   `<` (*Type Inheritance and Relational Theory*, chapter 2), are
   reported (P0042).
-- **A type has one order** (A0008). It goes in the type's braces, not
-  the components', as a constraint does (P0041).
+- **A type has one order** (A0008). It goes in the type's braces, since
+  it compares values, not the components given to one representation's
+  selector, and is moved there from the components' (P0041).
 
 A type can have more than one possible representation. Its values are
 stored as the one without conversions, and each other converts to it,
@@ -2831,11 +2880,11 @@ operator main{} [
   `columns` gives its components, as in `mean: tuple { celsius: 3 }`,
   and selects it in that one (see [The prelude](#the-prelude)).
 
-A representation other than the stored one can have constraints of its
-own, after its components in its braces, as Tutorial D writes a
-possrep's `CONSTRAINT` (*The Third Manifesto*, RM Prescription 23): they
-say which of its components represent a value, where its `to` would make
-one of others too:
+A possible representation can have constraints of its own, after its
+components in its braces, as Tutorial D writes a possrep's `CONSTRAINT`
+(*The Third Manifesto*, RM Prescription 23): they say which of its
+components represent a value, where its `to` would make one of others
+too:
 
 ```trendy
 type duration {
@@ -2868,9 +2917,13 @@ operator main{} [
 - **One that selects a value in its representation,** directly or
   through operators, would check itself again (A0036). Selecting one in
   another representation is fine.
-- **The stored representation has none of its own:** its components are
-  a value's, so a constraint in its braces is the type's, and is moved
-  out of them (P0041), as an order is from any representation's.
+- **The stored representation's own hold of every value,** as the type's
+  do, since its components are every value's, in whatever representation
+  it is selected: `{ seconds: integer, constraint seconds >= 0 }` would
+  say what `constraint seconds >= 0` in the type's braces says. They name
+  its own components alone all the same, as the others' do, so that
+  nothing in them tells the type's users which representation is stored
+  (see [Units](#units)).
 
 ```trendy,error
 type duration {

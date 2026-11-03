@@ -22,9 +22,12 @@ use crate::errors;
 /// see (A0067), each once.
 pub(crate) fn check(file: &SourceFile, errors: &mut Vec<Diagnostic>) {
     uses_placement(file, errors);
+    types_completed(file, errors);
     let mut implementation: BTreeMap<String, SyntaxNode> = BTreeMap::new();
     for item in file.items() {
         let (name, node) = match &item {
+            // The part of a type the interface declares, which it completes.
+            Item::Type(decl) if decl.interface().is_some() => continue,
             Item::Type(decl) => (decl.name(), decl.syntax()),
             Item::Heading(decl) => (decl.name(), decl.syntax()),
             _ => continue,
@@ -71,6 +74,229 @@ pub(crate) fn check(file: &SourceFile, errors: &mut Vec<Diagnostic>) {
                 ));
             }
         }
+    }
+}
+
+/// Report what, of each type `file`'s interface declares, isn't where its
+/// users see what they need and nothing else: its possible
+/// representations' conversions, which the interface writes none of, as
+/// they are the implementation's (A0067), and its declaration in the
+/// implementation, which completes it (see
+/// [`ast::TypeDecl::implementation`]), unless it repeats the interface's
+/// representations' components as the interface writes them, with the
+/// conversions, and says nothing else (A0068, A0067).
+fn types_completed(file: &SourceFile, errors: &mut Vec<Diagnostic>) {
+    for decl in file.types() {
+        if ast::section_of(decl.syntax()) != Section::Interface {
+            continue;
+        }
+        let part = decl.implementation();
+        let converted: Vec<ast::Representation> = decl
+            .representations()
+            .filter(|r| r.conversions().next().is_some())
+            .collect();
+        if !converted.is_empty() {
+            let moved = conversions_moved(file, &decl, part.as_ref(), &converted);
+            errors.push(errors::interface_conversions(&decl, &converted, moved));
+        }
+        if let Some(part) = part {
+            part_checked(&decl, &part, errors);
+        }
+    }
+}
+
+/// The edits that move the conversions of `converted`, representations of
+/// the type `decl`, of `file`'s interface, declares, to its declaration in
+/// the implementation, `part`, after the same components there, or, if it
+/// has none, to a new one, at the implementation's end; or `None` if
+/// `part` has none of those, or they have conversions of their own.
+fn conversions_moved(
+    file: &SourceFile,
+    decl: &ast::TypeDecl,
+    part: Option<&ast::TypeDecl>,
+    converted: &[ast::Representation],
+) -> Option<Vec<Edit>> {
+    // What follows each one's components' braces: its conversions.
+    let after = |r: &ast::Representation| -> Option<(Span, String)> {
+        let heading = r.components()?;
+        let start = usize::from(heading.syntax().text_range().end());
+        let end = usize::from(r.syntax().text_range().end());
+        let text = r.syntax().text().to_string();
+        let from = start - usize::from(r.syntax().text_range().start());
+        Some((Span::new(start, end), text[from..].to_string()))
+    };
+    let mut edits = Vec::new();
+    let mut moved = Vec::new();
+    for representation in converted {
+        let (span, text) = after(representation)?;
+        edits.push(Edit {
+            span,
+            replacement: String::new(),
+        });
+        moved.push((representation, text));
+    }
+    let Some(part) = part else {
+        // A declaration of its own, with each representation's components.
+        let name = decl.name()?.ident()?.text().to_string();
+        let mut written = Vec::new();
+        for representation in decl.representations() {
+            let components = components_written(&representation)?;
+            let conversions = moved
+                .iter()
+                .find(|(r, _)| *r == &representation)
+                .map_or("", |(_, text)| text.as_str());
+            written.push(format!("    {components}{conversions},"));
+        }
+        let declaration = format!("type {name} {{\n{}\n}};", written.join("\n"));
+        edits.push(written_at_end(file, Section::Implementation, &declaration));
+        return Some(edits);
+    };
+    for (representation, text) in moved {
+        let names = representation.component_names();
+        let into = part
+            .representations()
+            .find(|r| r.component_names() == names)
+            .filter(|r| r.conversions().next().is_none())?;
+        let end = usize::from(into.components()?.syntax().text_range().end());
+        edits.push(Edit {
+            span: Span::empty(end),
+            replacement: text,
+        });
+    }
+    Some(edits)
+}
+
+/// The components of `representation`, as its braces write them, without
+/// its own constraints: `{ a: integer, b: text }`.
+fn components_written(representation: &ast::Representation) -> Option<String> {
+    let heading = representation.components()?;
+    let attributes: Vec<String> = heading
+        .attributes()
+        .map(|a| a.syntax().text().to_string())
+        .collect();
+    Some(if attributes.is_empty() {
+        "{}".to_string()
+    } else {
+        format!("{{ {} }}", attributes.join(", "))
+    })
+}
+
+/// The components of `representation`, as [`components_written`] writes
+/// them, without the spaces between their tokens, so that two written
+/// alike but for their layout compare equal.
+fn components_compared(representation: &ast::Representation) -> Option<String> {
+    let heading = representation.components()?;
+    let mut attributes: Vec<String> = heading
+        .attributes()
+        .map(|a| a.syntax().text().to_string().split_whitespace().collect())
+        .collect();
+    attributes.sort();
+    Some(attributes.join(","))
+}
+
+/// Report what `part`, the declaration in the implementation of the type
+/// `decl` declares in the interface, says beside its possible
+/// representations' components and conversions, with fixes moving it to
+/// `decl` (A0067), and each representation it doesn't repeat as the
+/// interface writes it (A0068).
+fn part_checked(decl: &ast::TypeDecl, part: &ast::TypeDecl, errors: &mut Vec<Diagnostic>) {
+    let name = decl
+        .name()
+        .and_then(|n| n.ident())
+        .map(|i| i.text().to_string())
+        .unwrap_or_default();
+    // Where an item moved into the interface's braces goes: after its last.
+    let last_item = decl
+        .body()
+        .and_then(|body| body.syntax().children().last())
+        .map(|item| usize::from(item.text_range().end()));
+    if let Some(body) = part.body() {
+        for item in body.syntax().children() {
+            let removal = if let Some(constraint) = ast::Constraint::cast(item.clone()) {
+                constraint.removal()
+            } else if let Some(order) = ast::TypeOrder::cast(item.clone()) {
+                order.removal()
+            } else {
+                continue;
+            };
+            let moved = last_item.map(|end| errors::moved_after(removal, end, &item));
+            errors.push(errors::implementation_type_item(&name, &item, moved));
+        }
+    }
+    let interface: Vec<ast::Representation> = decl.representations().collect();
+    for representation in part.representations() {
+        let names = representation.component_names();
+        match interface.iter().find(|r| r.component_names() == names) {
+            Some(declared) => representation_checked(&name, &representation, declared, errors),
+            None => errors.push(errors::undeclared_representation(
+                &name,
+                &representation,
+                &interface,
+            )),
+        }
+    }
+    let repeated: Vec<Vec<String>> = part
+        .representations()
+        .map(|r| r.component_names())
+        .collect();
+    let missing: Vec<&ast::Representation> = interface
+        .iter()
+        .filter(|r| !repeated.contains(&r.component_names()))
+        .collect();
+    if !missing.is_empty() {
+        errors.push(errors::unrepeated_representations(&name, part, &missing));
+    }
+}
+
+/// Report what `representation`, in the implementation's declaration of the
+/// type `name`, says beside its components, with fixes moving its own
+/// constraints, which the type's users see, to `declared`, the same
+/// components in the interface's (A0067), and its components, if they
+/// aren't the interface's, with a fix writing those (A0068).
+fn representation_checked(
+    name: &str,
+    representation: &ast::Representation,
+    declared: &ast::Representation,
+    errors: &mut Vec<Diagnostic>,
+) {
+    for constraint in representation.constraints() {
+        let moved = declared
+            .components()
+            .and_then(|h| h.syntax().children().last())
+            .map(|last| {
+                let end = usize::from(last.text_range().end());
+                errors::moved_after(constraint.removal(), end, constraint.syntax())
+            });
+        errors.push(errors::implementation_type_item(
+            name,
+            constraint.syntax(),
+            moved,
+        ));
+    }
+    if components_compared(representation) != components_compared(declared) {
+        let written = representation.components().and_then(|heading| {
+            let first = heading.attributes().next()?;
+            let last = heading.attributes().last()?;
+            let span = Span::new(
+                usize::from(first.syntax().text_range().start()),
+                usize::from(last.syntax().text_range().end()),
+            );
+            let interface = declared.components()?;
+            let texts: Vec<String> = interface
+                .attributes()
+                .map(|a| a.syntax().text().to_string())
+                .collect();
+            Some(Edit {
+                span,
+                replacement: texts.join(", "),
+            })
+        });
+        errors.push(errors::representation_mismatch(
+            name,
+            representation,
+            declared,
+            written,
+        ));
     }
 }
 
