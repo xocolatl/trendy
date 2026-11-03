@@ -26,10 +26,12 @@ use trendy_syntax::ast::{AstNode, Section, SourceFile, VarDecl};
 
 use crate::Namespaces;
 
-/// The program's units, by their [`hir::FileId`], the prelude's last.
+/// The program's units, by their [`hir::FileId`].
 #[derive(Clone)]
 pub(crate) struct Units {
     units: Vec<Unit>,
+    /// The prelude's.
+    prelude: hir::FileId,
 }
 
 /// A unit, as scopes see it.
@@ -55,8 +57,8 @@ pub(crate) struct Viewer {
 
 impl Units {
     /// The units of `files`, each with its name, as the trees of one
-    /// program, one after another.
-    pub(crate) fn new(files: &[(&str, &SourceFile)]) -> Self {
+    /// program, one after another, of which `prelude` is the prelude's.
+    pub(crate) fn new(files: &[(&str, &SourceFile)], prelude: hir::FileId) -> Self {
         let ids: HashMap<&str, hir::FileId> = files
             .iter()
             .enumerate()
@@ -83,7 +85,7 @@ impl Units {
                 }
             })
             .collect();
-        Units { units }
+        Units { units, prelude }
     }
 
     /// The name of `unit`.
@@ -93,7 +95,7 @@ impl Units {
 
     /// The prelude's.
     pub(crate) fn prelude(&self) -> hir::FileId {
-        hir::FileId(self.units.len() - 1)
+        self.prelude
     }
 
     /// The unit `span` is in.

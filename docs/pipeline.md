@@ -12,28 +12,41 @@ This document is about the compiler. For the language itself, see
 ### The prelude and the runtime
 
 **`trendy_prelude`** holds the units that come with the compiler, trendy
-source that is part of every program: the prelude, declaring the built-in
-types and operators, and defining operators in trendy, and the catalog
-(`trendy_prelude::catalog`, see [sema](#sema-trendy_sema)). Drivers parse
-them next to the program's units' files (`trendy_sema::Library`), and sema
-checks them together, as one program (`ast::Program`, `sema::Files`), its
-units' texts first, main's first of all, then the catalog's, then the
-prelude's, so that a span is an offset into them one after another, and
-main's unit's spans are those it has alone. Each file comes with its path
+source that is part of every program (`trendy_prelude::Unit`, each with
+its name, the path shown for it, its text, and where its file was when
+the compiler was built), listed in `trendy_prelude::UNITS`: the prelude,
+`trendy.prelude`, which every unit sees, declaring the built-in types and
+most built-in operators, and defining operators in trendy; `trendy.files`,
+which declares the operators that read files, built-ins too, and the
+errors only they give; and the catalog, `trendy.catalog` (see
+[sema](#sema-trendy_sema)). The loader parses them (`trendy_load::library`),
+and drivers give them to sema next to the program's units' files, the
+library as a list, in which sema finds the prelude and the catalog by
+their names. Sema checks them together, as one program (`ast::Program`,
+`sema::Files`), its units' texts first, main's first of all, then the
+library's, in the order `UNITS` has them, the prelude's last, so that a
+span is an offset into them one after another, and main's unit's spans
+are those it has alone. Each file comes with its path
 (`trendy_sema::File`), which the HIR keeps (`hir::Program::files`), each
-site naming its file by its place there (`hir::FileId`). Sema checks every built-in's
-declaration against what the compiler implements: the kinds and the
-scalar types first (`builtins::kinds`), and the built-in operators
-(`hir::Builtin`, `builtins::operators`) once the types they can name, the
-prelude's among them, are resolved, which makes their signatures. It
-checks the rest of the prelude with the program, in the same
-namespaces, the prelude's declarations first: nothing of it is frozen, so
-the program extends it as it does its own, with a subtype of a union type
-it declares, or a version of its specification, and a name both define
-is the program's duplicate of the prelude's. Each signature knows its
-file (`sema::Source`): a diagnostic labels the prelude's declarations, but
-no fix changes them (`types::Origin::Prelude`), as the prelude is part of
-the compiler. A built-in is read-only or
+site naming its file by its place there (`hir::FileId`). The library's
+units are units of every program: `trendy.files` and the catalog are
+seen by the units that use them, and their names are as any unit's, so
+a program's own `malformed_csv` makes both qualified. Sema checks every
+built-in's declaration against what the compiler implements: the kinds
+and the scalar types first, which only the prelude declares
+(`builtins::kinds`), and the built-in operators, which any unit of the
+library declares (`hir::Builtin`, `builtins::operators`), each once,
+once the types they can name, the prelude's among them, are resolved,
+which makes their signatures, each in its unit and section. It checks
+the rest of the library with the program, in the same namespaces, the
+prelude's declarations first: nothing of it is frozen, so the program
+extends it as it does its own, with a subtype of a union type it
+declares, or a version of its specification, and a name both define is
+the program's duplicate of the prelude's. Each signature knows what its
+unit is checked as (`sema::Source`: the program's, the prelude, or
+another unit of the library): a diagnostic labels the library's
+declarations, but no fix changes them (`types::Origin::Library`), as the
+library is part of the compiler. A built-in is read-only or
 update (`hir::ReadOnlyBuiltin`, `hir::UpdateBuiltin`). A read-only one has
 a result type, and is a function of its arguments, so its call is a value,
 which sema evaluates when compiling where they are known
@@ -70,8 +83,10 @@ its result. Its overload with `out errors`, `relation { error: error }`,
 gives a file's failures as values rather than stopping the program
 (`trendy_rt_load_text_file_with_errors`): the errors the language makes
 are the compiler's (`hir::LanguageError`, each a name, components and a
-code), which sema checks the prelude declares as subtypes of `error`
-with just those components (`builtins::failures`). The entry gives the
+code), which sema checks a unit of the library declares, once, as a
+subtype of `error` with just those components (`builtins::failures`),
+and the HIR keeps each one's identity (`hir::Program::language_errors`),
+as a program's type of its name makes it qualified. The entry gives the
 runtime a table of them, once, each kind's type's descriptor, as its
 selector writes its components, and its code (`Lowering::failures`, the
 runtime's `Failures`, which checks each kind is where it knows it), and
@@ -122,15 +137,17 @@ constraints as it is complete, inner values first (`record_value`). A
 built-in can
 have type parameters, of a kind too, and `per` parameters, declared as an
 operator's are, and checked against the compiler's, written as the
-operator sees them. A wrong prelude is an internal
-compiler error, and the tests keep it valid (`sema::check_prelude`, which
-checks it alone): a declaration that doesn't match the compiler is
-reported at it (X0000), and an error in an operator the prelude defines
-as it would be in a program. The language server
-checks the file at `trendy_prelude::SOURCE_PATH`, where the prelude was
-when it was built, as the prelude, not as a program. A built-in is added in three
-places: its declaration in `prelude.trendy`, its `hir::Builtin` entry, and
-its implementation, which is usually in the runtime. Built-ins are kept as
+operator sees them. A wrong unit of the library is an internal
+compiler error, and the tests keep them valid (`sema::check_library`,
+which checks them alone, as a program without `main`): a declaration
+that doesn't match the compiler is reported at it (X0000), and an error
+in an operator one defines as it would be in a program. The language
+server checks the file at a unit's `source_path`, where it was when the
+server was built, as that unit, with the rest of the library, not as a
+program. A built-in is added in three places: its declaration in the
+unit it belongs to, `prelude.trendy` or `files.trendy`, its
+`hir::Builtin` entry, and its implementation, which is usually in the
+runtime. Built-ins are kept as
 few as possible: an operator that can be written in trendy is defined in
 the prelude instead, and each new language feature is a reason to look for
 a built-in it can replace.
@@ -630,11 +647,14 @@ also be idempotent: formatting its own output changes nothing.
 program's units (`trendy_load::Program`): main's, named by its file's
 stem, then each unit it uses, through any path, by name, as they are in no
 order, each read from its file and parsed, and each file there is that
-couldn't be read.
+couldn't be read; and, apart, the units that come with the compiler
+(`trendy_load::library`), parsed from `trendy_prelude::UNITS`, which every
+program has, as drivers give them to sema.
 
-**Owns:** where a unit's file is: its name's path from the directory of
-main's file (`trendy_syntax::unit::path_of`), and the units that come with
-the compiler, under `trendy.`, which are no files; and that a unit that
+**Owns:** where a unit's text is: its name's path from the directory of
+main's file (`trendy_syntax::unit::path_of`), and, for the units that come
+with the compiler, under `trendy.`, which are no files, the compiler's
+own; and that a unit that
 declares a database brings each unit under its directory, used or not, as
 the database's own units, which add to it, and which every program that
 uses the database has, with all of its constraints. **Must not:** report a
@@ -2302,15 +2322,15 @@ trendy_syntax  : trendy_diag trendy_text rowan
 trendy_lexer   : trendy_diag trendy_syntax
 trendy_parser  : trendy_diag trendy_syntax trendy_lexer
 trendy_fmt     : trendy_syntax trendy_lexer
-trendy_load    : trendy_diag trendy_syntax trendy_lexer trendy_parser
+trendy_load    : trendy_diag trendy_prelude trendy_syntax trendy_lexer trendy_parser
 trendy_hir     : trendy_diag trendy_numeric trendy_text
-trendy_sema    : trendy_diag trendy_syntax trendy_hir trendy_text
+trendy_sema    : trendy_diag trendy_syntax trendy_prelude trendy_hir trendy_text
 trendy_opt     : trendy_hir
 trendy_lir     :
 trendy_lower   : trendy_hir trendy_lir
 trendy_runtime : trendy_numeric trendy_text unicode-width
 trendy_codegen : trendy_lir cranelift-codegen cranelift-frontend cranelift-module cranelift-native cranelift-object
-trendyc        : trendy_diag trendy_lexer trendy_parser trendy_load trendy_prelude trendy_sema trendy_opt trendy_lower trendy_codegen
+trendyc        : trendy_diag trendy_load trendy_sema trendy_opt trendy_lower trendy_codegen
 trendyfmt      : trendy_diag trendy_lexer trendy_parser trendy_fmt
 trendy_lsp     : trendy_diag trendy_syntax trendy_lexer trendy_parser trendy_load trendy_prelude trendy_sema trendy_fmt lsp-server lsp-types serde_json
 ```

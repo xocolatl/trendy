@@ -1006,13 +1006,12 @@ impl<'a> Checker<'a> {
             errors.push(error);
         } else {
             let of_array = self.of_array(written);
-            let operators = self.names.operators().names(span);
             errors.push(errors::unknown_operator(
-                name,
-                span,
-                &operators,
+                ident,
+                self.names.operators(),
                 Some(written),
                 of_array,
+                self.names.namespaces(),
             ));
         }
     }

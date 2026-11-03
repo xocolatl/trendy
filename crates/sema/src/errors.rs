@@ -1069,7 +1069,7 @@ pub(crate) fn type_mismatch(
             "the operator's parameters of type `{name}` all take arguments of one type"
         )),
         Origin::Type(_)
-        | Origin::Prelude(_)
+        | Origin::Library(_)
         | Origin::Component(..)
         | Origin::Variable(..)
         | Origin::Loaded(..)
@@ -1587,16 +1587,15 @@ pub(crate) fn unknown_attribute(
     }
 }
 
-/// `builtin …`, the declaration `decl` with `keyword`, outside the prelude.
 /// A kind, declared by `decl` in a program, which only the prelude
 /// declares: its types are the ones that declare it, and a program can't
 /// declare a type.
-pub(crate) fn kind_outside_prelude(decl: &trendy_syntax::ast::KindDecl) -> Diagnostic {
+pub(crate) fn kind_in_program(decl: &trendy_syntax::ast::KindDecl) -> Diagnostic {
     let span = decl
         .keyword()
         .map_or_else(|| decl.span(), |k| trendy_syntax::span(k.text_range()));
     Diagnostic::error(
-        Code::BuiltinOutsidePrelude,
+        Code::BuiltinInProgram,
         "kinds can only be declared in the prelude",
         span,
         "not allowed in a program",
@@ -1639,7 +1638,9 @@ pub(crate) fn unknown_kind(what: &SyntaxToken, namespaces: &Namespaces) -> Diagn
     }
 }
 
-pub(crate) fn builtin_outside_prelude(
+/// `builtin …`, the declaration `decl` with `keyword`, in a program: only
+/// the units that come with the compiler declare built-ins.
+pub(crate) fn builtin_in_program(
     keyword: Option<SyntaxToken>,
     decl: &trendy_syntax::SyntaxNode,
 ) -> Diagnostic {
@@ -1648,12 +1649,12 @@ pub(crate) fn builtin_outside_prelude(
         |k| trendy_syntax::span(k.text_range()),
     );
     Diagnostic::error(
-        Code::BuiltinOutsidePrelude,
-        "built-ins can only be declared in the prelude",
+        Code::BuiltinInProgram,
+        "built-ins can only be declared in the units that come with the compiler",
         span,
         "not allowed in a program",
     )
-    .with_note("the prelude declares the types and operators the compiler implements, such as `integer` and `debug_value`; they are always in scope")
+    .with_note("the units that come with the compiler declare the types and operators it implements: the prelude, `integer` and `debug_value` among them, which every unit sees, and `trendy.files`, `load_csv` among them, which a unit uses")
     .with_help("to define an operator, remove `builtin` and give it a body: `operator name{…} [ … ];`")
 }
 
@@ -2111,17 +2112,19 @@ pub(crate) fn listed_booleans(name: &str, span: Span) -> Diagnostic {
     )
 }
 
-/// An operator `name`, at `span`, that refers to nothing, called with
+/// An operator `ident` names, that refers to nothing, called with
 /// `written` arguments, if known, of which one is an array if `of_array`
-/// says so. `operators` are those in scope, each with its parameters'
-/// names.
+/// says so: `operators` say which are in scope, each with its parameters'
+/// names, and which a unit this one could use declares, and `namespaces`
+/// which unit that is.
 pub(crate) fn unknown_operator(
-    name: &str,
-    span: Span,
-    operators: &[(&str, Vec<&str>)],
+    ident: &SyntaxToken,
+    operators: &Operators,
     written: Option<Written>,
     of_array: bool,
+    namespaces: &Namespaces,
 ) -> Diagnostic {
+    let (name, span) = (ident.text(), trendy_syntax::span(ident.text_range()));
     let d = Diagnostic::error(
         Code::UnknownName,
         format!("unknown operator `{name}`"),
@@ -2137,17 +2140,37 @@ pub(crate) fn unknown_operator(
     {
         return d.with_note(note).with_help(help);
     }
-    // Other languages' names for the prelude's operators, such as Python's
-    // `prod` and `len`, which no closeness of spelling finds, or finds
-    // wrong: `len` is close to `min`.
+    // Other languages' names for the operators that come with the
+    // compiler, such as Python's `prod` and `len`, which no closeness of
+    // spelling finds, or finds wrong: `len` is close to `min`.
     let ours = elsewhere(name).map(|(relation, array)| match array {
         Some(array) if of_array => array,
         _ => relation,
     });
-    let Some((ours, params)) =
-        ours.and_then(|ours| operators.iter().find(|(name, _)| *name == ours))
-    else {
-        let names: Vec<&str> = operators.iter().map(|(name, _)| *name).collect();
+    let seen = operators.names(span);
+    // Ours, among those in scope, or else among those of the interface of
+    // a unit this one could use, as `trendy.files` declares R's
+    // `readLines`, `load_text_file`: then the fix uses the unit too.
+    let mut used = None;
+    let found = match ours {
+        Some(ours) => match seen.iter().find(|(name, _)| *name == ours) {
+            Some((ours, params)) => Some((*ours, params.clone())),
+            None => match namespaces.exporters(ours, span, Kind::Operator) {
+                (units, section) if units.len() == 1 => {
+                    used = Some((units[0], section));
+                    let unseen = operators.unseen_names(span);
+                    unseen
+                        .into_iter()
+                        .find(|(name, _)| *name == ours)
+                        .map(|(_, params)| (ours, params))
+                }
+                _ => None,
+            },
+        },
+        None => None,
+    };
+    let Some((ours, params)) = found else {
+        let names: Vec<&str> = seen.iter().map(|(name, _)| *name).collect();
         return spelled_like(
             d,
             name,
@@ -2158,7 +2181,7 @@ pub(crate) fn unknown_operator(
     };
     let mut edits = vec![Edit {
         span,
-        replacement: (*ours).to_string(),
+        replacement: ours.to_string(),
     }];
     // `len{r: a}` of an array, or Python's `len(a)`: `length`'s one
     // parameter is `a`.
@@ -2173,7 +2196,18 @@ pub(crate) fn unknown_operator(
         }
         None => String::new(),
     };
-    d.with_suggestion(format!("use `{ours}`, as trendy calls it{named}"), edits)
+    let Some((unit, section)) = used else {
+        return d.with_suggestion(format!("use `{ours}`, as trendy calls it{named}"), edits);
+    };
+    let message = format!("use `{ours}` from `{unit}`, as trendy calls it{named}");
+    let file = ident.parent_ancestors().find_map(SourceFile::cast);
+    match file.and_then(|file| sections::uses_added(&file, section, unit)) {
+        Some(added) => {
+            edits.push(added);
+            d.with_suggestion(message, edits)
+        }
+        None => d.with_help(message),
+    }
 }
 
 /// Operators other languages have and the prelude hasn't yet, by their
@@ -2280,9 +2314,9 @@ fn spelled_like(
     }
 }
 
-/// Other languages' names for operators of the prelude, lowercase, with
-/// the prelude's, of a relation if it takes one, and of an array if that is
-/// another: Python's `len` counts either, as SQL's `CARDINALITY` and Java's
+/// Other languages' names for operators that come with the compiler,
+/// lowercase, with trendy's, of a relation if it takes one, and of an array
+/// if that is another: Python's `len` counts either, as SQL's `CARDINALITY` and Java's
 /// `size` do; R's and Kotlin's `readLines` read a file's lines, as
 /// Python's and Ruby's `readlines` and .NET's `ReadAllLines` do, and
 /// pandas' and R's `read_csv` and Julia's `readcsv` a CSV file's records;
@@ -2322,8 +2356,8 @@ pub(crate) fn elsewhere(name: &str) -> Option<(&'static str, Option<&'static str
         .map(|&(_, relation, array)| (relation, array))
 }
 
-/// Other languages' names for parameters of the prelude's operators, with
-/// the operator and the prelude's name: pandas' `read_csv` chooses the
+/// Other languages' names for parameters of the built-in operators, with
+/// the operator and trendy's name: pandas' `read_csv` chooses the
 /// columns to read with `usecols`, or names a file's columns with
 /// `names`, as `load_csv`'s `columns` does both, and Python's
 /// `has_header` says what its `header` does.

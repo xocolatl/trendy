@@ -2,7 +2,8 @@
 //! uses, through any path, each at its path from the directory of `main`'s
 //! file, as a unit is named by its path from there (`lakes.depths` is
 //! `lakes/depths.trendy`). The names under `trendy.` are those of the units
-//! that come with the compiler, which are no files of the program. A unit
+//! that come with the compiler, which are no files of the program, but the
+//! compiler's own text ([`library`]), which every program has. A unit
 //! whose file there is none of isn't loaded: sema reports each `uses` of
 //! it, with the file it would be. A unit that declares a database brings
 //! each unit under its directory, used or not, as they are the database's
@@ -116,6 +117,25 @@ pub fn alone(main: &Path, source: String) -> Program {
         units: vec![parsed(name, main.display().to_string(), source)],
         unreadable: Vec::new(),
     }
+}
+
+/// The units that come with the compiler, as `trendy_prelude::UNITS`
+/// lists them, each parsed: every program has them, and sema checks them
+/// with its own units, their texts after the units' in the program's
+/// spans. They are part of the compiler, so an error in one is the
+/// compiler's.
+#[must_use]
+pub fn library() -> Vec<Unit> {
+    trendy_prelude::UNITS
+        .iter()
+        .map(|unit| {
+            parsed(
+                unit.name.to_string(),
+                unit.path.to_string(),
+                unit.source.to_string(),
+            )
+        })
+        .collect()
 }
 
 /// The unit `name`, of the file at `path`, of the text `source`, parsed.
@@ -241,5 +261,25 @@ mod tests {
         let errors = loaded.errors();
         assert_eq!(errors.len(), 1, "{errors:#?}");
         assert!(errors[0].span().start >= main.len());
+    }
+
+    #[test]
+    fn the_units_that_come_with_the_compiler_are_its_own_text() {
+        let library = library();
+        let names: Vec<&str> = library.iter().map(|u| u.name.as_str()).collect();
+        assert_eq!(names, ["trendy.files", "trendy.catalog", "trendy.prelude"]);
+        for unit in &library {
+            assert!(
+                unit.parse.errors.is_empty(),
+                "{}: {:#?}",
+                unit.name,
+                unit.parse.errors
+            );
+        }
+        // Never a program's files, though a unit uses them.
+        let root = with_files("compilers", &[("trendy/files.trendy", "")]);
+        let main = "uses { trendy.files };";
+        let loaded = program(&root.join("main.trendy"), main.to_string());
+        assert_eq!(loaded.units.len(), 1);
     }
 }

@@ -12,52 +12,50 @@ use crate::highlight::{self, Class};
 use crate::position::LineIndex;
 
 thread_local! {
-    /// The prelude and the catalog, parsed once, which sema checks every
-    /// program with. They ship with the server, and their tests in the
-    /// compiler keep them valid.
-    static PRELUDE: trendy_parser::Parse = parsed(trendy_prelude::SOURCE);
-    static CATALOG: trendy_parser::Parse = parsed(trendy_prelude::catalog::SOURCE);
+    /// The units that come with the compiler, parsed once, which sema
+    /// checks every program with. They ship with the server, and their
+    /// tests in the compiler keep them valid.
+    static LIBRARY: Vec<trendy_load::Unit> = {
+        let library = trendy_load::library();
+        assert!(
+            library.iter().all(|unit| unit.parse.errors.is_empty()),
+            "a unit of the compiler's doesn't parse"
+        );
+        library
+    };
 }
 
-/// `source`, a unit that comes with the compiler, parsed.
-fn parsed(source: &str) -> trendy_parser::Parse {
-    let parse = trendy_parser::parse(source, trendy_lexer::lex(source));
-    assert!(
-        parse.errors.is_empty(),
-        "a unit of the compiler's doesn't parse"
-    );
-    parse
-}
-
-/// The prelude's file, of its tree, `parse`.
-fn prelude(parse: &trendy_parser::Parse) -> trendy_sema::File<'_> {
-    trendy_sema::File {
-        name: trendy_prelude::NAME,
-        path: trendy_prelude::PATH,
-        tree: &parse.tree,
-    }
+/// The files of `units`, as sema takes them.
+fn files(units: &[trendy_load::Unit]) -> Vec<trendy_sema::File<'_>> {
+    units
+        .iter()
+        .map(|unit| trendy_sema::File {
+            name: &unit.name,
+            path: &unit.path,
+            tree: &unit.parse.tree,
+        })
+        .collect()
 }
 
 /// What a document is checked as.
 enum Checked {
-    /// The prelude's source, which the server was built from, alone.
-    Prelude,
-    /// The catalog's, with the prelude.
-    Catalog,
-    /// A program's main unit, with the other units of its program, the
-    /// catalog and the prelude.
+    /// The source of a unit that comes with the compiler, which the server
+    /// was built from, with the others, as the compiler checks them.
+    Library(trendy_prelude::Unit),
+    /// A program's main unit, with the other units of its program, and
+    /// those that come with the compiler.
     Program(trendy_load::Program),
 }
 
 impl Checked {
     /// What the document at `uri`, of the text `source`, is checked as.
     fn of(uri: &Uri, source: &str) -> Self {
-        if is_source(uri, trendy_prelude::SOURCE_PATH) {
-            Checked::Prelude
-        } else if is_source(uri, trendy_prelude::catalog::SOURCE_PATH) {
-            Checked::Catalog
-        } else {
-            Checked::Program(program(uri, source))
+        match trendy_prelude::UNITS
+            .iter()
+            .find(|unit| is_source(uri, unit.source_path))
+        {
+            Some(unit) => Checked::Library(*unit),
+            None => Checked::Program(program(uri, source)),
         }
     }
 }
@@ -79,64 +77,54 @@ fn program(uri: &Uri, source: &str) -> trendy_load::Program {
 /// `source`, or in the other units of its program, or if there are none,
 /// every sema error, as `checked` says it is checked.
 fn errors(uri: &Uri, source: &str, checked: &Checked) -> Vec<trendy_diag::Diagnostic> {
-    if let Checked::Program(program) = checked {
-        let errors = program.errors();
-        if !errors.is_empty() {
-            return errors;
-        }
-        let units: Vec<trendy_sema::File> = program
-            .units
-            .iter()
-            .map(|unit| trendy_sema::File {
-                name: &unit.name,
-                path: &unit.path,
-                tree: &unit.parse.tree,
-            })
-            .collect();
-        return PRELUDE.with(|parsed| {
-            CATALOG.with(|catalog| {
-                let library = trendy_sema::Library {
-                    prelude: prelude(parsed),
-                    catalog: trendy_sema::File {
-                        name: trendy_prelude::catalog::NAME,
-                        path: trendy_prelude::catalog::PATH,
-                        tree: &catalog.tree,
-                    },
-                };
-                trendy_sema::analyze(&units, &library)
+    match checked {
+        Checked::Program(program) => {
+            let errors = program.errors();
+            if !errors.is_empty() {
+                return errors;
+            }
+            LIBRARY.with(|library| {
+                trendy_sema::analyze(&files(&program.units), &files(library))
                     .err()
                     .unwrap_or_default()
             })
-        });
+        }
+        Checked::Library(unit) => {
+            let parse = trendy_parser::parse(source, trendy_lexer::lex(source));
+            if !parse.errors.is_empty() {
+                return parse.errors;
+            }
+            LIBRARY.with(|library| {
+                // The document, in its unit's place.
+                let library: Vec<trendy_sema::File> = files(library)
+                    .into_iter()
+                    .map(|file| {
+                        if file.name == unit.name {
+                            trendy_sema::File {
+                                name: unit.name,
+                                path: uri.as_str(),
+                                tree: &parse.tree,
+                            }
+                        } else {
+                            file
+                        }
+                    })
+                    .collect();
+                trendy_sema::check_library(&library)
+            })
+        }
     }
-    let parse = trendy_parser::parse(source, trendy_lexer::lex(source));
-    if !parse.errors.is_empty() {
-        return parse.errors;
-    }
-    let file = |name| trendy_sema::File {
-        name,
-        path: uri.as_str(),
-        tree: &parse.tree,
-    };
-    if matches!(checked, Checked::Prelude) {
-        return trendy_sema::check_prelude(&file(trendy_prelude::NAME));
-    }
-    PRELUDE.with(|parsed| {
-        trendy_sema::check_catalog(&trendy_sema::Library {
-            prelude: prelude(parsed),
-            catalog: file(trendy_prelude::catalog::NAME),
-        })
-    })
 }
 
 /// Where the spans of the errors in a document are: in it, or in another
 /// unit of its program, or, as sema checks it with the units that come with
 /// the compiler, in one of those, after them.
 struct Files<'a> {
-    /// The document's, then those of the other units of its program, if it
-    /// is a program's main unit, then the catalog's, unless it is the
-    /// catalog or the prelude, then the prelude's, unless it is the
-    /// prelude.
+    /// The document's, at its place among them.
+    document: usize,
+    /// Each file's: the units of the document's program, the document's
+    /// first, if it is a program's main unit, then those that come with
+    /// the compiler, the document in its unit's place if it is one of them.
     uris: Vec<Uri>,
     indexes: Vec<LineIndex<'a>>,
     sources: trendy_diag::Sources<'a>,
@@ -146,16 +134,6 @@ impl<'a> Files<'a> {
     /// The files of the errors in the document at `uri`, `source`, checked
     /// as `checked` says.
     fn new(uri: &'a Uri, source: &'a str, checked: &'a Checked) -> Self {
-        let catalog = (
-            source_uri(trendy_prelude::catalog::SOURCE_PATH),
-            trendy_prelude::catalog::PATH,
-            trendy_prelude::catalog::SOURCE,
-        );
-        let prelude = (
-            source_uri(trendy_prelude::SOURCE_PATH),
-            trendy_prelude::PATH,
-            trendy_prelude::SOURCE,
-        );
         let mut all: Vec<(Uri, &'a str, &'a str)> = match checked {
             Checked::Program(program) => program
                 .units
@@ -170,14 +148,20 @@ impl<'a> Files<'a> {
                     (at, unit.path.as_str(), unit.source.as_str())
                 })
                 .collect(),
-            Checked::Prelude | Checked::Catalog => vec![(uri.clone(), uri.as_str(), source)],
+            Checked::Library(_) => Vec::new(),
         };
-        all.extend(match checked {
-            Checked::Prelude => vec![],
-            Checked::Catalog => vec![prelude],
-            Checked::Program(_) => vec![catalog, prelude],
-        });
+        let mut document = 0;
+        for unit in trendy_prelude::UNITS {
+            match checked {
+                Checked::Library(checked) if *checked == unit => {
+                    document = all.len();
+                    all.push((uri.clone(), uri.as_str(), source));
+                }
+                _ => all.push((source_uri(unit.source_path), unit.path, unit.source)),
+            }
+        }
         Files {
+            document,
             indexes: all
                 .iter()
                 .map(|(_, _, text)| LineIndex::new(text))
@@ -258,7 +242,7 @@ fn to_lsp(files: &Files, d: &trendy_diag::Diagnostic) -> Diagnostic {
         .join("\n");
 
     let primary = files.location(d.span());
-    let in_document = primary.uri == files.uris[0];
+    let in_document = primary.uri == files.uris[files.document];
     let elsewhere = (!in_document).then_some(&d.primary);
     let related: Vec<_> = elsewhere
         .into_iter()
@@ -478,18 +462,19 @@ mod tests {
 
     #[test]
     fn the_catalog_is_checked_as_the_catalog() {
-        let catalog = source_uri(trendy_prelude::catalog::SOURCE_PATH);
+        let catalog = trendy_prelude::CATALOG;
+        let at = source_uri(catalog.source_path);
         assert!(matches!(
-            Checked::of(&catalog, trendy_prelude::catalog::SOURCE),
-            Checked::Catalog
+            Checked::of(&at, catalog.source),
+            Checked::Library(unit) if unit == catalog
         ));
-        assert_eq!(diagnostics(&catalog, trendy_prelude::catalog::SOURCE), []);
+        assert_eq!(diagnostics(&at, catalog.source), []);
         // A constraint the compiler doesn't report is an internal error.
         let wrong = format!(
             "{}\nconstraint catalog.few := count{{r: units}} < 3;",
-            trendy_prelude::catalog::SOURCE
+            catalog.source
         );
-        let diags = diagnostics(&catalog, &wrong);
+        let diags = diagnostics(&at, &wrong);
         assert_eq!(diags.len(), 1, "{diags:#?}");
         assert_eq!(
             diags[0].code,
@@ -505,32 +490,64 @@ mod tests {
 
     #[test]
     fn the_prelude_is_checked_as_the_prelude() {
-        let prelude = source_uri(trendy_prelude::SOURCE_PATH);
+        let prelude = trendy_prelude::PRELUDE;
+        let at = source_uri(prelude.source_path);
         assert!(matches!(
-            Checked::of(&prelude, trendy_prelude::SOURCE),
-            Checked::Prelude
+            Checked::of(&at, prelude.source),
+            Checked::Library(unit) if unit == prelude
         ));
-        assert_eq!(diagnostics(&prelude, trendy_prelude::SOURCE), []);
+        assert_eq!(diagnostics(&at, prelude.source), []);
         // As a program, it has built-ins it can't declare, operators the
         // prelude already has, and no `main`.
-        assert!(!diagnostics(&uri(), trendy_prelude::SOURCE).is_empty());
+        assert!(!diagnostics(&uri(), prelude.source).is_empty());
         // A declaration the compiler doesn't implement is an internal error
         // there.
-        let wrong =
-            trendy_prelude::SOURCE.replace("debug_value{v: any type}", "debug_value{v: integer}");
-        let diags = diagnostics(&prelude, &wrong);
+        let wrong = prelude
+            .source
+            .replace("debug_value{v: any type}", "debug_value{v: integer}");
+        let diags = diagnostics(&at, &wrong);
         assert_eq!(diags.len(), 1, "{diags:#?}");
         assert_eq!(
             diags[0].code,
             Some(NumberOrString::String("X0000".to_string()))
         );
         // And an error in an operator it defines is reported as a program's.
-        let wrong = trendy_prelude::SOURCE.replace("r where of}", "r where 1}");
-        let diags = diagnostics(&prelude, &wrong);
+        let wrong = prelude.source.replace("r where of}", "r where 1}");
+        let diags = diagnostics(&at, &wrong);
         assert_eq!(
             diags[0].code,
             Some(NumberOrString::String("A0004".to_string()))
         );
+    }
+
+    #[test]
+    fn trendy_files_is_checked_as_itself() {
+        let files = trendy_prelude::FILES;
+        let at = source_uri(files.source_path);
+        assert!(matches!(
+            Checked::of(&at, files.source),
+            Checked::Library(unit) if unit == files
+        ));
+        assert_eq!(diagnostics(&at, files.source), []);
+        // A declaration the compiler doesn't implement is an internal error,
+        // in the document, though the prelude comes after it.
+        let wrong = files.source.replacen(
+            "load_text_file{path: text, out lines: array text}",
+            "load_text_file{path: integer, out lines: array text}",
+            1,
+        );
+        assert_ne!(wrong, files.source);
+        let diags = diagnostics(&at, &wrong);
+        assert_eq!(diags.len(), 1, "{diags:#?}");
+        assert_eq!(
+            diags[0].code,
+            Some(NumberOrString::String("X0000".to_string()))
+        );
+        let line = wrong
+            .lines()
+            .position(|line| line.contains("load_text_file{path: integer"))
+            .unwrap();
+        assert_eq!(diags[0].range.start.line, u32::try_from(line).unwrap());
     }
 
     #[test]
@@ -575,9 +592,10 @@ mod tests {
         let related = diags[0].related_information.as_ref().unwrap();
         assert_eq!(
             related[0].location.uri,
-            source_uri(trendy_prelude::SOURCE_PATH)
+            source_uri(trendy_prelude::PRELUDE.source_path)
         );
-        let line = trendy_prelude::SOURCE
+        let line = trendy_prelude::PRELUDE
+            .source
             .lines()
             .position(|line| line.starts_with("builtin operator debug_value{"))
             .unwrap();

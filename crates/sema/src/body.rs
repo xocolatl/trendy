@@ -738,13 +738,12 @@ impl Statements<'_, '_> {
                 {
                     errors.push(error);
                 } else {
-                    let operators = cx.operators.names(span);
                     errors.push(errors::unknown_operator(
-                        name,
-                        span,
-                        &operators,
+                        &ident,
+                        cx.operators,
                         args.as_ref().map(Written::Arguments),
                         false,
+                        cx.namespaces,
                     ));
                 }
                 return None;

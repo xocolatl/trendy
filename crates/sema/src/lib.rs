@@ -27,12 +27,14 @@ use trendy_syntax::ast::{self, AstNode, HeadingDecl, Item, SourceFile, TypeDecl,
 
 use crate::operators::Operators;
 
-/// Check a parsed program, its units with those of the `library`, and
-/// translate it to HIR. The prelude's declarations are in scope in every
-/// unit, as its own are, so a unit can extend them: a subtype of the
-/// prelude's union type, a version of its specification. The catalog is
-/// filled with what the program's units are and use, and its constraints,
-/// the rules between units, are checked of it.
+/// Check a parsed program, its units with the units that come with the
+/// compiler, the `library`, and translate it to HIR. The prelude's
+/// declarations are in scope in every unit, as its own are, so a unit can
+/// extend them: a subtype of the prelude's union type, a version of its
+/// specification. The library's other units are the program's too, which
+/// a unit sees when it uses them, as it does its own. The catalog is filled
+/// with what the program's units are and use, and its constraints, the
+/// rules between units, are checked of it.
 ///
 /// This is the last layer allowed to report errors to the user. Drivers run
 /// it only on trees without syntax errors; parts that are missing anyway are
@@ -41,23 +43,24 @@ use crate::operators::Operators;
 /// # Errors
 ///
 /// Returns every semantic error, in source order. Their spans are in the
-/// units' texts, one after another, then the catalog's, then the
-/// prelude's (see `trendy_diag::Sources`), so the first unit's are those
-/// it has alone. A declaration in the prelude that doesn't match the
-/// compiler is an internal error, as is a constraint of the catalog's
-/// that sema can't report.
+/// units' texts, one after another, then the library's, in the order it
+/// has them (see `trendy_diag::Sources`), so the first unit's are those it
+/// has alone. A declaration of the library's that doesn't match the
+/// compiler is an internal error, as is a constraint of the catalog's that
+/// sema can't report.
 ///
 /// # Panics
 ///
-/// If `units` is empty: a program has main's unit, first.
-pub fn analyze(units: &[File], library: &Library) -> Result<hir::Program, Vec<Diagnostic>> {
-    let files = Files::new(units, Some(&library.catalog), &library.prelude);
+/// If `units` is empty, as a program has main's unit, first, or if the
+/// library hasn't the prelude or the catalog.
+pub fn analyze(units: &[File], library: &[File]) -> Result<hir::Program, Vec<Diagnostic>> {
+    let files = Files::new(units, library);
     let mut errors = Vec::new();
-    for unit in &files.units {
+    for unit in files.sectioned() {
         sections::check(unit, &mut errors);
     }
     let checked = check(&files, &mut errors);
-    let main = files.units.first().expect("a program has main's unit");
+    let main = files.main().expect("a program has main's unit");
     let entry = entry(main, &checked.namespaces, &checked.operators, &mut errors);
     errors.sort_by_key(|d| d.span().start);
     match entry {
@@ -66,33 +69,25 @@ pub fn analyze(units: &[File], library: &Library) -> Result<hir::Program, Vec<Di
     }
 }
 
-/// Check the prelude alone: that it declares exactly the built-ins the
-/// compiler implements, each as it implements it, and that what it defines
-/// in trendy is valid, with only its own declarations in scope.
+/// Check the units that come with the compiler, the `library`, alone, as
+/// the units of a program without `main`: that they declare exactly the
+/// built-ins the compiler implements, each as it implements it, that what
+/// they define in trendy is valid, and that the catalog is as the compiler
+/// fills it and reports the breaking of its constraints.
 ///
 /// Every error, in source order: a declaration that doesn't match the
-/// compiler is an internal error, at the declaration, since the prelude
-/// is part of the compiler, and an error in what it defines in trendy is
+/// compiler is an internal error, at the declaration, since the library is
+/// part of the compiler, and an error in what it defines in trendy is
 /// reported as a program's would be.
-#[must_use]
-pub fn check_prelude(prelude: &File) -> Vec<Diagnostic> {
-    let files = Files::new(&[], None, prelude);
-    let mut errors = Vec::new();
-    check(&files, &mut errors);
-    errors.sort_by_key(|d| d.span().start);
-    errors
-}
-
-/// Check the catalog, with the prelude, alone: that what it declares is
-/// valid, as a unit's declarations are, and is as the compiler fills it and
-/// reports the breaking of its constraints.
 ///
-/// Every error, in source order, as [`check_prelude`] gives them.
+/// # Panics
+///
+/// If the library hasn't the prelude or the catalog.
 #[must_use]
-pub fn check_catalog(library: &Library) -> Vec<Diagnostic> {
-    let files = Files::new(&[], Some(&library.catalog), &library.prelude);
+pub fn check_library(library: &[File]) -> Vec<Diagnostic> {
+    let files = Files::new(&[], library);
     let mut errors = Vec::new();
-    for unit in &files.units {
+    for unit in files.sectioned() {
         sections::check(unit, &mut errors);
     }
     check(&files, &mut errors);
@@ -100,13 +95,25 @@ pub fn check_catalog(library: &Library) -> Vec<Diagnostic> {
     errors
 }
 
-/// What a file is checked as.
+/// What a unit is checked as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Source {
-    /// A program, which declares no built-ins.
+    /// One of the program's own, which declares no built-ins.
     Program,
-    /// The prelude, which declares the built-ins, and is in every program.
+    /// The prelude, which every unit sees, and which declares the kinds and
+    /// the built-in types.
     Prelude,
+    /// Another unit that comes with the compiler, which a unit sees when it
+    /// uses it, as `trendy.files`.
+    Library,
+}
+
+impl Source {
+    /// Whether it comes with the compiler: it can declare built-in
+    /// operators, and no fix changes it.
+    pub(crate) fn is_compilers(self) -> bool {
+        self != Source::Program
+    }
 }
 
 /// A file of the program, as a driver gives it to sema: its unit's name, its
@@ -119,28 +126,19 @@ pub struct File<'a> {
     pub tree: &'a SourceFile,
 }
 
-/// The units that come with the compiler, which every program has: the
-/// prelude, whose declarations every unit sees, and the catalog,
-/// `trendy.catalog`, which describes the program's units, and whose
-/// constraints are the rules between them.
-#[derive(Clone, Copy)]
-pub struct Library<'a> {
-    pub prelude: File<'a>,
-    pub catalog: File<'a>,
-}
-
 /// The files checked together: the program's units', main's first, then
-/// the catalog's, unless the prelude is checked alone, and the prelude. The
-/// prelude's declarations come first, so a name defined in both is the
-/// program's duplicate of the prelude's.
+/// the library's, in the order the driver gives them, so that a span is an
+/// offset into their texts one after another. The prelude's declarations
+/// are visited first, so a name defined in both is the program's duplicate
+/// of the prelude's.
 pub(crate) struct Files {
-    prelude: SourceFile,
-    /// The program's units, the catalog's last, if it is checked.
-    units: Vec<SourceFile>,
-    /// The catalog's unit, the last of `units`, if it is checked.
-    catalog: Option<hir::FileId>,
-    /// Each file's path, by its [`hir::FileId`]: the units' in order, then
-    /// the prelude's.
+    /// Each unit's tree, by its [`hir::FileId`], with what it is checked as.
+    units: Vec<(Source, SourceFile)>,
+    /// The prelude's unit.
+    prelude: hir::FileId,
+    /// The catalog's unit.
+    catalog: hir::FileId,
+    /// Each file's path, by its [`hir::FileId`].
     paths: Vec<String>,
     /// Each file's unit's name, and where its text ends in the program's,
     /// by its [`hir::FileId`].
@@ -148,57 +146,100 @@ pub(crate) struct Files {
 }
 
 impl Files {
-    /// The files of `units`, `catalog` and `prelude`, as the trees of one
+    /// The files of `units` and of the `library`, as the trees of one
     /// program, the units' first, so that a span is an offset into their
     /// texts one after another.
-    fn new(units: &[File], catalog: Option<&File>, prelude: &File) -> Files {
-        let all: Vec<&File> = units
-            .iter()
-            .chain(catalog)
-            .chain(std::iter::once(prelude))
-            .collect();
+    ///
+    /// # Panics
+    ///
+    /// If the library hasn't the prelude or the catalog.
+    fn new(units: &[File], library: &[File]) -> Files {
+        let all: Vec<&File> = units.iter().chain(library).collect();
         let trees: Vec<SourceFile> = all.iter().map(|file| file.tree.clone()).collect();
-        let mut files: Vec<SourceFile> = ast::Program::new(&trees).files().collect();
+        let files: Vec<SourceFile> = ast::Program::new(&trees).files().collect();
+        let find = |unit: trendy_prelude::Unit| {
+            let at = library
+                .iter()
+                .position(|file| file.name == unit.name)
+                .unwrap_or_else(|| panic!("the library has `{}`", unit.name));
+            hir::FileId(units.len() + at)
+        };
+        let (prelude, catalog) = (find(trendy_prelude::PRELUDE), find(trendy_prelude::CATALOG));
         let unit_files: Vec<(&str, &SourceFile)> = all
             .iter()
             .zip(&files)
             .map(|(file, tree)| (file.name, tree))
             .collect();
-        let names = scope::Units::new(&unit_files);
-        let prelude = files.pop().expect("a program has the files it is made of");
+        let names = scope::Units::new(&unit_files, prelude);
+        let units = files
+            .into_iter()
+            .enumerate()
+            .map(|(i, tree)| {
+                let source = if i < units.len() {
+                    Source::Program
+                } else if hir::FileId(i) == prelude {
+                    Source::Prelude
+                } else {
+                    Source::Library
+                };
+                (source, tree)
+            })
+            .collect();
         Files {
+            units,
             prelude,
-            catalog: catalog.map(|_| hir::FileId(units.len())),
-            units: files,
+            catalog,
             paths: all.iter().map(|file| file.path.to_string()).collect(),
             names,
         }
     }
 
-    /// The catalog's unit, if it is checked.
-    pub(crate) fn catalog(&self) -> Option<&SourceFile> {
-        self.catalog.map(|id| &self.units[id.0])
+    /// Main's unit, the first, unless only the library is checked.
+    fn main(&self) -> Option<&SourceFile> {
+        self.units
+            .first()
+            .filter(|(source, _)| *source == Source::Program)
+            .map(|(_, tree)| tree)
     }
 
-    /// Each unit's file, with its unit's name, the catalog's among them, if
-    /// it is checked, and the prelude's last.
+    /// Each unit with sections, whose rules are checked: every one but
+    /// the prelude, which every unit sees whole.
+    fn sectioned(&self) -> impl Iterator<Item = &SourceFile> {
+        self.units
+            .iter()
+            .filter(|(source, _)| *source != Source::Prelude)
+            .map(|(_, tree)| tree)
+    }
+
+    /// The catalog's unit.
+    pub(crate) fn catalog(&self) -> &SourceFile {
+        &self.units[self.catalog.0].1
+    }
+
+    /// Each unit's file, with its unit's name, in the program's order.
     pub(crate) fn named(&self) -> impl Iterator<Item = (&str, &SourceFile)> {
         self.units
             .iter()
-            .chain(std::iter::once(&self.prelude))
             .enumerate()
-            .map(|(i, file)| (self.names.name(hir::FileId(i)), file))
+            .map(|(i, (_, file))| (self.names.name(hir::FileId(i)), file))
     }
 
     /// The prelude.
     pub(crate) fn prelude(&self) -> &SourceFile {
-        &self.prelude
+        &self.units[self.prelude.0].1
     }
 
-    /// Each file, with what it is checked as, the prelude first.
-    fn each(&self) -> impl Iterator<Item = (Source, &SourceFile)> {
-        std::iter::once((Source::Prelude, &self.prelude))
-            .chain(self.units.iter().map(|unit| (Source::Program, unit)))
+    /// Each file, with what it is checked as, the prelude first, then the
+    /// others in the program's order.
+    pub(crate) fn each(&self) -> impl Iterator<Item = (Source, &SourceFile)> {
+        let prelude = &self.units[self.prelude.0];
+        std::iter::once(prelude)
+            .chain(
+                self.units
+                    .iter()
+                    .filter(|(source, _)| *source != Source::Prelude),
+            )
+            .map(|(source, file)| (*source, file))
     }
 
     /// Every definition, each with the file it is in, the prelude's first,
@@ -266,21 +307,23 @@ pub(crate) struct Checked {
     bodies: HashMap<hir::OperatorId, (Vec<hir::Local>, hir::Block)>,
     /// Each valid constraint on the variables.
     constraints: Vec<hir::VariableConstraint>,
+    /// The identity of each error the language makes, declared as the
+    /// compiler makes it.
+    language_errors: BTreeMap<hir::LanguageError, String>,
 }
 
 /// Check `files`, as one unit.
 pub(crate) fn check(files: &Files, errors: &mut Vec<Diagnostic>) -> Checked {
     // The kinds and built-in types first, as the compiler implements them,
     // which only the prelude declares.
-    let kinds = builtins::kinds(&files.prelude, errors);
+    let kinds = builtins::kinds(files.prelude(), errors);
     let mut namespaces = collect_names(&kinds, files, errors);
     // Each file's path and text, in the program's order, the units' first.
     let texts: Vec<(&str, String)> = files
         .units
         .iter()
-        .chain(std::iter::once(&files.prelude))
         .zip(&files.paths)
-        .map(|(file, path)| (path.as_str(), file.syntax().text().to_string()))
+        .map(|((_, file), path)| (path.as_str(), file.syntax().text().to_string()))
         .collect();
     let sites = Sites::new(&texts);
 
@@ -292,7 +335,7 @@ pub(crate) fn check(files: &Files, errors: &mut Vec<Diagnostic>) -> Checked {
     // Every operator's signature first, so that anything can refer to an
     // operator defined after it.
     let operators = operators::signatures(files, &namespaces, errors);
-    builtins::failures(&files.prelude, &namespaces, &operators, errors);
+    let language_errors = builtins::failures(files, &namespaces, &operators, errors);
 
     // Then the globals: the variables' initial values, and the read-only
     // operators' values, which initial values can call and which read
@@ -333,6 +376,7 @@ pub(crate) fn check(files: &Files, errors: &mut Vec<Diagnostic>) -> Checked {
         evaluated,
         bodies,
         constraints,
+        language_errors,
     }
 }
 
@@ -393,6 +437,7 @@ impl Checked {
             files: files.paths.clone(),
             constraints: self.constraints,
             subtypes: self.namespaces.subtypes,
+            language_errors: self.language_errors,
             entry,
             message,
         }
@@ -1043,7 +1088,9 @@ fn collect_names(
                 };
                 (kind, op.name(), Some(op.params()))
             }
-            Item::Builtin(ref decl) if prelude => (Kind::Builtin, decl.name(), Some(decl.params())),
+            Item::Builtin(ref decl) if source.is_compilers() => {
+                (Kind::Builtin, decl.name(), Some(decl.params()))
+            }
             Item::BuiltinType(ref decl) if prelude => (Kind::Type, decl.name(), None),
             Item::Variable(ref decl) => (Kind::Variable, decl.name(), None),
             Item::Database(ref decl) => (Kind::Database, decl.name(), None),
@@ -1053,8 +1100,10 @@ fn collect_names(
             Item::Heading(ref decl) => (Kind::Heading, decl.name(), None),
             Item::Type(ref decl) => (Kind::Defined, decl.name(), None),
             // The prelude's kinds are checked against the compiler, and
-            // built-ins outside it are reported; a database's relvars and
-            // constraints are named within it (`databases::check`).
+            // built-ins outside the units that come with it are reported,
+            // as are built-in types outside the prelude; a database's
+            // relvars and constraints are named within it
+            // (`databases::check`).
             Item::Builtin(_)
             | Item::BuiltinType(_)
             | Item::Kind(_)
@@ -1210,16 +1259,45 @@ mod tests {
     }
 
     thread_local! {
-        /// The prelude and the catalog, parsed once for each thread's tests.
-        static PRELUDE: SourceFile = parse(trendy_prelude::SOURCE);
-        static CATALOG: SourceFile = parse(trendy_prelude::catalog::SOURCE);
+        /// The units that come with the compiler, as
+        /// `trendy_prelude::UNITS` lists them, parsed once for each
+        /// thread's tests.
+        static LIBRARY: Vec<SourceFile> = trendy_prelude::UNITS
+            .iter()
+            .map(|unit| parse(unit.source))
+            .collect();
+    }
+
+    /// `f` of the units that come with the compiler, as
+    /// `trendy_prelude::UNITS` lists them, with `replaced`, if given, the
+    /// tree of the unit it names, in its place.
+    fn with_library<R>(
+        replaced: Option<(trendy_prelude::Unit, &SourceFile)>,
+        f: impl FnOnce(&[File]) -> R,
+    ) -> R {
+        LIBRARY.with(|trees| {
+            let files: Vec<File> = trendy_prelude::UNITS
+                .iter()
+                .zip(trees)
+                .map(|(unit, tree)| File {
+                    name: unit.name,
+                    path: unit.path,
+                    tree: match replaced {
+                        Some((other, replacement)) if other == *unit => replacement,
+                        _ => tree,
+                    },
+                })
+                .collect();
+            f(&files)
+        })
     }
 
     fn analyze_str(source: &str) -> Result<hir::Program, Vec<Diagnostic>> {
-        PRELUDE.with(|prelude| analyze_with(&parse(source), prelude))
+        analyze_units(&[("program", source)])
     }
 
-    /// `program` analyzed, as the one unit of a program, with `prelude`.
+    /// `program` analyzed, as the one unit of a program, with `prelude` as
+    /// the prelude.
     fn analyze_with(
         program: &SourceFile,
         prelude: &SourceFile,
@@ -1229,7 +1307,9 @@ mod tests {
             path: "program.trendy",
             tree: program,
         };
-        CATALOG.with(|catalog| analyze(&[unit], &library(prelude, catalog)))
+        with_library(Some((trendy_prelude::PRELUDE, prelude)), |library| {
+            analyze(&[unit], library)
+        })
     }
 
     /// The program of `units`, each a unit's name and text, main's first,
@@ -1246,33 +1326,29 @@ mod tests {
             .zip(&paths)
             .map(|((&(name, _), tree), path)| File { name, path, tree })
             .collect();
-        PRELUDE.with(|prelude| CATALOG.with(|catalog| analyze(&files, &library(prelude, catalog))))
+        with_library(None, |library| analyze(&files, library))
     }
 
-    /// The library of `prelude` and `catalog`.
-    fn library<'a>(prelude: &'a SourceFile, catalog: &'a SourceFile) -> Library<'a> {
-        Library {
-            prelude: prelude_file(prelude),
-            catalog: File {
-                name: trendy_prelude::catalog::NAME,
-                path: trendy_prelude::catalog::PATH,
-                tree: catalog,
-            },
-        }
+    /// The errors of the units that come with the compiler, checked alone,
+    /// with `tree` as `unit`'s.
+    fn checked_with(unit: trendy_prelude::Unit, tree: &SourceFile) -> Vec<Diagnostic> {
+        with_library(Some((unit, tree)), check_library)
     }
 
-    /// `prelude` as the prelude's file.
-    fn prelude_file(prelude: &SourceFile) -> File<'_> {
-        File {
-            name: trendy_prelude::NAME,
-            path: "<prelude>",
-            tree: prelude,
-        }
-    }
-
-    /// The errors of `prelude`, checked alone.
+    /// The errors of the units that come with the compiler, checked alone,
+    /// with `prelude` as the prelude.
     fn checked_prelude(prelude: &SourceFile) -> Vec<Diagnostic> {
-        check_prelude(&prelude_file(prelude))
+        checked_with(trendy_prelude::PRELUDE, prelude)
+    }
+
+    /// Where the prelude's text starts in a program whose only unit is
+    /// `source`: after it and the other units that come with the compiler.
+    fn prelude_start(source: &str) -> usize {
+        let before = trendy_prelude::UNITS
+            .iter()
+            .take_while(|unit| unit.name != trendy_prelude::PRELUDE.name)
+            .map(|unit| unit.source.len());
+        source.len() + before.sum::<usize>()
     }
 
     /// The errors of the program `source`, each where its fix goes, in it,
@@ -1288,12 +1364,12 @@ mod tests {
         errors
     }
 
-    /// The prelude's text at `span`, in the program of `source`, the
-    /// catalog and the prelude.
+    /// The prelude's text at `span`, in the program of `source` and the
+    /// units that come with the compiler.
     fn in_prelude(source: &str, span: Span) -> &'static str {
-        let before = source.len() + trendy_prelude::catalog::SOURCE.len();
+        let before = prelude_start(source);
         let start = span.start.checked_sub(before).expect("in the prelude");
-        &trendy_prelude::SOURCE[start..span.end - before]
+        &trendy_prelude::PRELUDE.source[start..span.end - before]
     }
 
     fn messages(source: &str) -> Vec<String> {
@@ -2878,7 +2954,10 @@ var zero := seg{{len: 0}};{MAIN}"
 
     #[test]
     fn the_prelude_is_valid() {
-        assert_eq!(checked_prelude(&parse(trendy_prelude::SOURCE)), Vec::new());
+        assert_eq!(
+            checked_prelude(&parse(trendy_prelude::PRELUDE.source)),
+            Vec::new()
+        );
         // Its built-ins are a program's operators.
         let program = analyze_str("operator main{} [];").unwrap();
         let debug_value = program
@@ -2896,7 +2975,7 @@ var zero := seg{{len: 0}};{MAIN}"
     fn a_program_extends_the_prelude() {
         let prelude = format!(
             "{}\ntype shape union;\ntype square is shape {{ {{ side: integer }} }};\ntype disc is shape {{ {{ radius: integer }} }};\noperator area{{s: shape}}: integer;\noperator area{{s: square}}: integer [ s.side * s.side ];\noperator area{{s: disc}}: integer [ 3 * s.radius * s.radius ];\n",
-            trendy_prelude::SOURCE
+            trendy_prelude::PRELUDE.source
         );
         let prelude = parse(&prelude);
         assert_eq!(checked_prelude(&prelude), Vec::new());
@@ -2917,7 +2996,7 @@ var zero := seg{{len: 0}};{MAIN}"
         assert_eq!(at(errors[0].primary.span), "strip");
         let declared = errors[0].secondary[0].span;
         let prelude = prelude.syntax().text().to_string();
-        let before = source.len() + trendy_prelude::catalog::SOURCE.len();
+        let before = prelude_start(&source);
         assert_eq!(
             &prelude[declared.start - before..declared.end - before],
             "area"
@@ -3128,7 +3207,9 @@ var zero := seg{{len: 0}};{MAIN}"
     fn transactions_read_and_write_nothing() {
         let program = |main: &str| {
             format!(
-                "operator read{{out lines: array text}} [ call load_text_file{{path: \"notes.txt\", out lines: lines}}; ];
+                "uses {{ trendy.files }};
+
+operator read{{out lines: array text}} [ call load_text_file{{path: \"notes.txt\", out lines: lines}}; ];
 operator twice{{out lines: array text}} [ call read{{out lines: lines}}; ];
 operator main{{}} [ var lines: array text; {main} ];"
             )
@@ -3181,9 +3262,9 @@ operator main{{}} [ var lines: array text; {main} ];"
     }
 
     #[test]
-    fn the_prelude_has_error_and_its_messages() {
+    fn the_library_has_error_and_its_messages() {
         let vars = variables(
-            "var a := message{error: failure{message: \"why\"}};\nvar b := message{error: not_one_tuple{count: 0}};\nvar c := message{error: not_one_tuple{count: 2}};\nvar d := message{error: index_out_of_range{position: 0, length: 3}};\nvar e := message{error: index_out_of_range{position: 4, length: 0}};\nvar f := message{error: index_out_of_range{position: 4, length: 1}};\nvar g := message{error: index_out_of_range{position: 4, length: 3}};\nvar h := message{error: division_by_zero{operation: \"7 div 0\"}};\nvar i := message{error: overflow{operation: \"9223372036854775807 + 1\"}};\nvar j := message{error: unreadable_field{path: \"p.csv\", line: 1, column: 3, attribute: \"at.latitude\", type: \"approximate\", text: \"north\", out_of_range: false}};\nvar k := message{error: missing_column{path: \"p.csv\", attribute: \"km\", column: 4, columns: 3}};\nvar l := message{error: unreadable_field{path: \"p.csv\", line: 2, column: 1, attribute: \"open\", type: \"boolean\", text: \"maybe\", out_of_range: false}};\nvar m := message{error: component_key_violated_in_file{path: \"p.csv\", line: 2, attribute: \"s\", type: \"span\", component: \"days\", key: \"\", first: \"a\", second: \"b\"}};",
+            "uses { trendy.files };\n\nvar a := message{error: failure{message: \"why\"}};\nvar b := message{error: not_one_tuple{count: 0}};\nvar c := message{error: not_one_tuple{count: 2}};\nvar d := message{error: index_out_of_range{position: 0, length: 3}};\nvar e := message{error: index_out_of_range{position: 4, length: 0}};\nvar f := message{error: index_out_of_range{position: 4, length: 1}};\nvar g := message{error: index_out_of_range{position: 4, length: 3}};\nvar h := message{error: division_by_zero{operation: \"7 div 0\"}};\nvar i := message{error: overflow{operation: \"9223372036854775807 + 1\"}};\nvar j := message{error: unreadable_field{path: \"p.csv\", line: 1, column: 3, attribute: \"at.latitude\", type: \"approximate\", text: \"north\", out_of_range: false}};\nvar k := message{error: missing_column{path: \"p.csv\", attribute: \"km\", column: 4, columns: 3}};\nvar l := message{error: unreadable_field{path: \"p.csv\", line: 2, column: 1, attribute: \"open\", type: \"boolean\", text: \"maybe\", out_of_range: false}};\nvar m := message{error: component_key_violated_in_file{path: \"p.csv\", line: 2, attribute: \"s\", type: \"span\", component: \"days\", key: \"\", first: \"a\", second: \"b\"}};",
         );
         let messages: Vec<String> = vars.iter().map(|v| v.init.to_string()).collect();
         assert_eq!(
@@ -3206,30 +3287,32 @@ operator main{{}} [ var lines: array text; {main} ];"
         );
         // The compiler's contract with it: the errors the runtime makes,
         // each with its components.
-        let source = trendy_prelude::SOURCE.replace(
+        let source = trendy_prelude::FILES.source.replace(
             "type not_utf8 is error { { path: text, line: integer } };",
             "type not_utf8 is error { { path: text, line: approximate } };",
         );
-        assert_ne!(source, trendy_prelude::SOURCE);
-        let errors = checked_prelude(&parse(&source));
+        assert_ne!(source, trendy_prelude::FILES.source);
+        let errors = checked_with(trendy_prelude::FILES, &parse(&source));
         assert!(
             errors.iter().any(|d| d.code == Code::Internal
                 && d.message
                     .contains("`type not_utf8 is error { { line: integer, path: text } };`")),
             "{errors:#?}"
         );
-        let source = trendy_prelude::SOURCE.replace(
+        let source = trendy_prelude::PRELUDE.source.replace(
             "heading transaction_collection := { error: error, failed: boolean };",
             "heading transaction_collection := { error: error, failed: integer };",
         );
-        assert_ne!(source, trendy_prelude::SOURCE);
+        assert_ne!(source, trendy_prelude::PRELUDE.source);
         let errors = checked_prelude(&parse(&source));
         assert!(
             errors.iter().any(|d| d.code == Code::Internal
                 && d.message.contains("`heading transaction_collection")),
             "{errors:#?}"
         );
-        let source = trendy_prelude::SOURCE.replace("type error union;", "type error_ union;");
+        let source = trendy_prelude::PRELUDE
+            .source
+            .replace("type error union;", "type error_ union;");
         let errors = checked_prelude(&parse(&source));
         assert!(
             errors
@@ -3240,27 +3323,68 @@ operator main{{}} [ var lines: array text; {main} ];"
     }
 
     #[test]
-    fn the_prelude_declares_type_parameters_in_any_order() {
+    fn a_unit_reads_files_with_trendy_files() {
+        // Its operators and errors are its interface's, which a unit sees
+        // once it uses it, as the fix does.
+        let source = "operator main{} [\n    var lines: array text;\n    call load_text_file{path: \"rivers.txt\", out lines: lines};\n];\n";
+        let unused = errors(source);
+        assert_eq!(unused.len(), 1, "{unused:#?}");
+        assert_eq!(unused[0].code, Code::UnknownName);
+        assert_eq!(
+            unused[0].notes[0],
+            "`load_text_file` is declared by `trendy.files`, which this unit doesn't use"
+        );
+        let fixed = fix(source);
+        assert_eq!(fixed, format!("uses {{ trendy.files }};\n\n{source}"));
+        assert!(analyze_str(&fixed).is_ok(), "{fixed}");
+        let typed = "var e: relation { error: error } := relation { { error: not_utf8{path: \"a\", line: 1} } };\noperator main{} [];";
+        assert_eq!(codes(typed), [Code::UnknownName]);
+        // A unit can declare a type of one of its names, which a unit that
+        // doesn't use it means, called by its unit's name, as the error
+        // the language makes is.
+        let own = "type malformed_csv { { why: text } };\nvar m := malformed_csv{why: \"no header\"};\noperator main{} [];";
+        let program = analyze_str(own).unwrap();
+        assert_eq!(
+            program.language_errors[&hir::LanguageError::MalformedCsv],
+            "trendy.files::malformed_csv"
+        );
+        assert_eq!(
+            program.variables[0].ty.to_string(),
+            "program::malformed_csv"
+        );
+        let made = program.language_error(hir::LanguageError::MalformedCsv);
+        assert_eq!(made.name, "trendy.files::malformed_csv");
+    }
+
+    #[test]
+    fn the_library_declares_type_parameters_in_any_order() {
         // In braces, as a program's are, so the built-ins' are the same.
         let declared = "types { C: any tuple, T: any tuple }";
-        assert!(trendy_prelude::SOURCE.contains(declared));
-        let source =
-            trendy_prelude::SOURCE.replacen(declared, "types { T: any tuple, C: any tuple }", 1);
-        assert_eq!(checked_prelude(&parse(&source)), Vec::new());
+        assert!(trendy_prelude::FILES.source.contains(declared));
+        let source = trendy_prelude::FILES.source.replacen(
+            declared,
+            "types { T: any tuple, C: any tuple }",
+            1,
+        );
+        assert_eq!(
+            checked_with(trendy_prelude::FILES, &parse(&source)),
+            Vec::new()
+        );
     }
 
     #[test]
     fn the_prelude_declares_built_ins_as_the_compiler_implements_them() {
         let wrong = |from: &str, to: &str| {
-            assert!(trendy_prelude::SOURCE.contains(from), "{from}");
-            let source = trendy_prelude::SOURCE.replacen(from, to, 1);
+            assert!(trendy_prelude::PRELUDE.source.contains(from), "{from}");
+            let source = trendy_prelude::PRELUDE.source.replacen(from, to, 1);
             let errors = checked_prelude(&parse(&source));
             assert_eq!(errors.len(), 1, "{errors:#?}");
             assert_eq!(errors[0].code, Code::Internal);
             let span = errors[0].primary.span;
+            let start = prelude_start("");
             (
                 errors[0].message.clone(),
-                source[span.start..span.end].to_string(),
+                source[span.start - start..span.end - start].to_string(),
             )
         };
         // A type parameter of another kind.
@@ -3478,7 +3602,7 @@ operator main{{}} [ var lines: array text; {main} ];"
     fn builtins_and_any() {
         assert_eq!(
             codes("builtin operator show{v: integer};\noperator main{} [];"),
-            [Code::BuiltinOutsidePrelude]
+            [Code::BuiltinInProgram]
         );
         // `any type` is only a parameter's.
         let source =
@@ -7781,7 +7905,7 @@ operator main{{}} [ var lines: array text; {main} ];"
         );
         assert_eq!(
             codes("kind mine { < };\noperator main{} [];"),
-            [Code::BuiltinOutsidePrelude]
+            [Code::BuiltinInProgram]
         );
     }
 
@@ -7924,23 +8048,27 @@ operator main{{}} [ var lines: array text; {main} ];"
     fn other_languages_names_for_reading_are_fixed() {
         // A file's lines: R's and Kotlin's, Python's and Ruby's, and .NET's,
         // which they return, fixed to `load_text_file` with its argument
-        // named, then to a call with the variable its `out` argument.
+        // named, from `trendy.files`, which the unit then uses, then to a
+        // call with the variable its `out` argument.
         for written in ["readLines", "readlines", "ReadAllLines"] {
             let source =
                 format!("operator main{{}} [\n    var lines := {written}{{\"rivers.txt\"}};\n];\n");
             let fixed = fix(&source);
             assert_eq!(
                 fixed,
-                "operator main{} [\n    var lines := load_text_file{path: \"rivers.txt\"};\n];\n",
+                "uses { trendy.files };\n\noperator main{} [\n    var lines := load_text_file{path: \"rivers.txt\"};\n];\n",
                 "{written}"
             );
             let fixed = fix(&fixed);
             assert_eq!(
                 fixed,
-                "operator main{} [\n    var lines: array text;\n    call load_text_file{path: \"rivers.txt\", out lines: lines};\n];\n"
+                "uses { trendy.files };\n\noperator main{} [\n    var lines: array text;\n    call load_text_file{path: \"rivers.txt\", out lines: lines};\n];\n"
             );
             assert!(analyze_str(&fixed).is_ok(), "{fixed}");
         }
+        // A unit that uses it already only gets the name.
+        let source = "uses { trendy.files };\n\noperator main{} [\n    var lines: array text;\n    call readLines{path: \"rivers.txt\", out lines: lines};\n];\n";
+        assert_eq!(fix(source), source.replace("readLines", "load_text_file"));
         // A CSV file's records: pandas' and R's, and Julia's, whose
         // arguments the program then names, with the columns and whether
         // there is a header.
@@ -7951,7 +8079,7 @@ operator main{{}} [ var lines: array text; {main} ];"
             let fixed = fix(&fix(&source));
             assert_eq!(
                 fixed,
-                "operator main{} [\n    var rows: array tuple { city: text };\n    call load_csv{\"cities.csv\", out rows: rows};\n];\n",
+                "uses { trendy.files };\n\noperator main{} [\n    var rows: array tuple { city: text };\n    call load_csv{\"cities.csv\", out rows: rows};\n];\n",
                 "{written}"
             );
             assert_eq!(codes(&fixed), [Code::PositionalArgument]);
@@ -7985,7 +8113,7 @@ operator main{{}} [ var lines: array text; {main} ];"
     fn a_file_is_read_into_an_out_variable() {
         // A call, which reads the file when the program runs, into the
         // variable for `lines`.
-        let source = "operator main{} [\n    var rivers: array text;\n    call load_text_file{path: \"rivers.txt\", out lines: rivers};\n];\n";
+        let source = "uses { trendy.files };\n\noperator main{} [\n    var rivers: array text;\n    call load_text_file{path: \"rivers.txt\", out lines: rivers};\n];\n";
         let body = main_body(source);
         let (_, hir::Statement::Call(call)) = &body[1] else {
             panic!("{body:#?}");
@@ -8003,20 +8131,23 @@ operator main{{}} [ var lines: array text; {main} ];"
                 "var rivers: array text;\n    call load_text_file{path: \"rivers.txt\", out lines: rivers};",
             ),
         ] {
-            let source = format!("operator main{{}} [\n    {written}\n];\n");
+            let source =
+                format!("uses {{ trendy.files }};\n\noperator main{{}} [\n    {written}\n];\n");
             assert_eq!(codes(&source), [Code::OperatorAsValue], "{written}");
             assert_eq!(
                 fix(&source),
-                format!("operator main{{}} [\n    {fixed}\n];\n"),
+                format!("uses {{ trendy.files }};\n\noperator main{{}} [\n    {fixed}\n];\n"),
                 "{written}"
             );
         }
         // Not where no statement can call it: an initial value, which is
         // computed when compiling, or a read-only operator's value.
         for source in [
-            format!("var lines := load_text_file{{path: \"rivers.txt\"}};{MAIN}"),
             format!(
-                "operator rivers{{}}: array text [ load_text_file{{path: \"rivers.txt\"}} ];{MAIN}"
+                "uses {{ trendy.files }};\n\nvar lines := load_text_file{{path: \"rivers.txt\"}};{MAIN}"
+            ),
+            format!(
+                "uses {{ trendy.files }};\n\noperator rivers{{}}: array text [ load_text_file{{path: \"rivers.txt\"}} ];{MAIN}"
             ),
         ] {
             assert_eq!(codes(&source), [Code::OperatorAsValue], "{source}");
@@ -8028,7 +8159,7 @@ operator main{{}} [ var lines: array text; {main} ];"
     fn a_csv_file_is_read_into_tuples_of_types_it_can_read() {
         let call = |declared: &str| {
             format!(
-                "operator main{{}} [\n    var rows: {declared};\n    call load_csv{{path: \"cities.csv\", header: true, columns: tuple {{ city: 1 }}, out rows: rows}};\n];\n"
+                "uses {{ trendy.files }};\n\noperator main{{}} [\n    var rows: {declared};\n    call load_csv{{path: \"cities.csv\", header: true, columns: tuple {{ city: 1 }}, out rows: rows}};\n];\n"
             )
         };
         // Of text, integers, approximate numbers and booleans, read when
@@ -8053,7 +8184,7 @@ operator main{{}} [ var lines: array text; {main} ];"
         );
         // Nor of a type parameter, whose attributes, the columns, aren't
         // known here.
-        let generic = "operator read{out rows: array T} types { T: any tuple } [\n    call load_csv{path: \"cities.csv\", header: true, columns: tuple { city: 1 }, out rows: rows};\n];\noperator main{} [];";
+        let generic = "uses { trendy.files };\n\noperator read{out rows: array T} types { T: any tuple } [\n    call load_csv{path: \"cities.csv\", header: true, columns: tuple { city: 1 }, out rows: rows};\n];\noperator main{} [];";
         assert_eq!(codes(generic), [Code::UnreadableAttribute]);
         // Tuples, which an array of other values hasn't.
         let texts = errors(&call("array text"));
@@ -8071,7 +8202,7 @@ operator main{{}} [ var lines: array text; {main} ];"
     fn a_csv_files_columns_are_given_each_attribute() {
         let call = |columns: &str| {
             format!(
-                "operator main{{}} [\n    var rows: array tuple {{ city: text, people: integer }};\n    call load_csv{{path: \"cities.csv\", header: false, columns: {columns}, out rows: rows}};\n];\n"
+                "uses {{ trendy.files }};\n\noperator main{{}} [\n    var rows: array tuple {{ city: text, people: integer }};\n    call load_csv{{path: \"cities.csv\", header: false, columns: {columns}, out rows: rows}};\n];\n"
             )
         };
         analyze_str(&call("tuple { people: 3, city: 1 }")).unwrap();
@@ -8110,10 +8241,10 @@ operator main{{}} [ var lines: array text; {main} ];"
             "`city` and `people` are both read from column 2"
         );
         // Other languages' names for the parameters.
-        let source = "operator main{} [\n    var rows: array tuple { city: text };\n    call load_csv{path: \"cities.csv\", has_header: true, usecols: tuple { city: 1 }, out rows: rows};\n];\n";
+        let source = "uses { trendy.files };\n\noperator main{} [\n    var rows: array tuple { city: text };\n    call load_csv{path: \"cities.csv\", has_header: true, usecols: tuple { city: 1 }, out rows: rows};\n];\n";
         assert_eq!(
             fix(source),
-            "operator main{} [\n    var rows: array tuple { city: text };\n    call load_csv{path: \"cities.csv\", header: true, columns: tuple { city: 1 }, out rows: rows};\n];\n"
+            "uses { trendy.files };\n\noperator main{} [\n    var rows: array tuple { city: text };\n    call load_csv{path: \"cities.csv\", header: true, columns: tuple { city: 1 }, out rows: rows};\n];\n"
         );
     }
 
@@ -8556,7 +8687,7 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
     fn a_csv_file_is_read_into_values_of_a_programs_own_types() {
         let call = |declared: &str, columns: &str| {
             format!(
-                "type position {{ {{ latitude: approximate, longitude: approximate }} }};\ntype area {{ {{ name: text, parts: relation {{ part: text }} }} }};\n\noperator main{{}} [\n    var rows: array tuple {{ {declared} }};\n    call load_csv{{path: \"places.csv\", header: true, columns: {columns}, out rows: rows}};\n];\n"
+                "uses {{ trendy.files }};\n\ntype position {{ {{ latitude: approximate, longitude: approximate }} }};\ntype area {{ {{ name: text, parts: relation {{ part: text }} }} }};\n\noperator main{{}} [\n    var rows: array tuple {{ {declared} }};\n    call load_csv{{path: \"places.csv\", header: true, columns: {columns}, out rows: rows}};\n];\n"
             )
         };
         // A value's components are read from columns of their own, given
@@ -8598,7 +8729,7 @@ type entry { { on: day, title: text }, order [asc on, asc title] };
     fn a_csv_file_is_read_in_any_representation() {
         let call = |columns: &str| {
             format!(
-                "{TEMPERATURE}type bag {{\n    {{ items: relation {{ item: text }} }},\n    {{ item: text }}\n        to {{ items := relation {{ {{ item: item }} }} }}\n        from {{ item := value from items }},\n}};\n\noperator main{{}} [\n    var rows: array tuple {{ city: text, mean: temperature, contents: bag }};\n    call load_csv{{path: \"climate.csv\", header: true, columns: {columns}, out rows: rows}};\n];\n"
+                "uses {{ trendy.files }};\n\n{TEMPERATURE}type bag {{\n    {{ items: relation {{ item: text }} }},\n    {{ item: text }}\n        to {{ items := relation {{ {{ item: item }} }} }}\n        from {{ item := value from items }},\n}};\n\noperator main{{}} [\n    var rows: array tuple {{ city: text, mean: temperature, contents: bag }};\n    call load_csv{{path: \"climate.csv\", header: true, columns: {columns}, out rows: rows}};\n];\n"
             )
         };
         // A value's components are those of any of its possible
@@ -11894,17 +12025,16 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
     fn the_catalog_is_as_the_compiler_fills_and_reports_it() {
         let with_catalog = |catalog: &str| {
             let (program, catalog) = (parse("operator main{} [];"), parse(catalog));
-            PRELUDE.with(|prelude| {
-                let library = library(prelude, &catalog);
-                let unit = File {
-                    name: "program",
-                    path: "program.trendy",
-                    tree: &program,
-                };
-                analyze(&[unit], &library).unwrap_err()
+            let unit = File {
+                name: "program",
+                path: "program.trendy",
+                tree: &program,
+            };
+            with_library(Some((trendy_prelude::CATALOG, &catalog)), |library| {
+                analyze(&[unit], library).unwrap_err()
             })
         };
-        let catalog = trendy_prelude::catalog::SOURCE;
+        let catalog = trendy_prelude::CATALOG.source;
         // A constraint the compiler doesn't report the breaking of.
         let errors = with_catalog(&format!(
             "{catalog}\nconstraint catalog.few := count{{r: units}} < 3;"
@@ -12123,11 +12253,9 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
             .versions
             .iter()
             .flat_map(|v| v.params.values().map(ToString::to_string))
+            .filter(|ty| ty.ends_with("no_lake"))
             .collect();
-        assert_eq!(
-            versions[versions.len() - 2..],
-            ["program::no_lake", "lakes::no_lake"]
-        );
+        assert_eq!(versions, ["program::no_lake", "lakes::no_lake"]);
         assert!(
             message
                 .versions

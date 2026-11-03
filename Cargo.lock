@@ -581,6 +581,7 @@ dependencies = [
  "trendy_diag",
  "trendy_lexer",
  "trendy_parser",
+ "trendy_prelude",
  "trendy_syntax",
 ]
 
@@ -623,8 +624,8 @@ version = "0.1.0"
 dependencies = [
  "trendy_hir",
  "trendy_lexer",
+ "trendy_load",
  "trendy_parser",
- "trendy_prelude",
  "trendy_sema",
 ]
 

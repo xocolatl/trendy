@@ -6272,8 +6272,9 @@ mod tests {
     }
 
     /// A program of `operators` and `variables`, with what the entry's
-    /// table of errors needs of the prelude, as sema gives it: the union
-    /// type `error`, and the errors the language makes; and a `message`
+    /// table of errors needs of the units that come with the compiler, as
+    /// sema gives it: the prelude's union type `error`, and the errors the
+    /// language makes, each by its name; and a `message`
     /// for the entry to write one with, which gives every error's message
     /// as one text: none of these programs' errors is written.
     fn program(mut operators: Vec<hir::Operator>, variables: Vec<hir::Variable>) -> hir::Program {
@@ -6316,6 +6317,10 @@ mod tests {
             files: vec!["test.trendy".to_string()],
             constraints: Vec::new(),
             subtypes: [("error".to_string(), errors)].into(),
+            language_errors: hir::LanguageError::ALL
+                .iter()
+                .map(|error| (*error, error.name().to_string()))
+                .collect(),
             entry: hir::OperatorId(entry),
         }
     }

@@ -58,41 +58,26 @@ fn build(input: &Path, output: &Path, format: Format) -> Result<(), String> {
         let sources = Sources::new(program.sources());
         return Err(report(&errors, format, &path, &sources));
     }
-    let prelude = library_unit(trendy_prelude::SOURCE, trendy_prelude::PATH)?;
-    let catalog = library_unit(
-        trendy_prelude::catalog::SOURCE,
-        trendy_prelude::catalog::PATH,
-    )?;
-    let units: Vec<trendy_sema::File> = program
-        .units
-        .iter()
-        .map(|unit| trendy_sema::File {
-            name: &unit.name,
-            path: &unit.path,
-            tree: &unit.parse.tree,
-        })
-        .collect();
-    let library = trendy_sema::Library {
-        prelude: trendy_sema::File {
-            name: trendy_prelude::NAME,
-            path: trendy_prelude::PATH,
-            tree: &prelude.tree,
-        },
-        catalog: trendy_sema::File {
-            name: trendy_prelude::catalog::NAME,
-            path: trendy_prelude::catalog::PATH,
-            tree: &catalog.tree,
-        },
-    };
-    // Sema's spans are in the units, then the catalog, then the prelude.
-    let hir = trendy_sema::analyze(&units, &library).map_err(|errors| {
-        let sources = Sources::new(program.sources().chain([
-            (
-                trendy_prelude::catalog::PATH,
-                trendy_prelude::catalog::SOURCE,
+    // The units that come with the compiler, which are part of it, so one
+    // that doesn't parse is a compiler bug; their texts follow the
+    // program's units' in sema's spans.
+    let library = trendy_load::library();
+    if let Some(unit) = library.iter().find(|unit| !unit.parse.errors.is_empty()) {
+        let sources = Sources::one(&unit.path, &unit.source);
+        let rendered = trendy_diag::render_all(&unit.parse.errors, Format::Human, &sources);
+        return Err(format!(
+            "error[X0000]: internal compiler error: `{}` doesn't parse\n{rendered}",
+            unit.path
+        ));
+    }
+    let hir = trendy_sema::analyze(&files(&program.units), &files(&library)).map_err(|errors| {
+        let sources = Sources::new(
+            program.sources().chain(
+                library
+                    .iter()
+                    .map(|unit| (unit.path.as_str(), unit.source.as_str())),
             ),
-            (trendy_prelude::PATH, trendy_prelude::SOURCE),
-        ]));
+        );
         report(&errors, format, &path, &sources)
     })?;
 
@@ -104,21 +89,16 @@ fn build(input: &Path, output: &Path, format: Format) -> Result<(), String> {
     link(&object, output)
 }
 
-/// A unit that comes with the compiler, the prelude or the catalog, of
-/// `source`, shown as `path`, parsed, which sema checks with the program.
-/// It is part of the compiler, so any error in it is a compiler bug: one
-/// that doesn't parse is reported here, and sema reports a declaration
-/// that doesn't match the compiler as an internal error.
-fn library_unit(source: &str, path: &str) -> Result<trendy_parser::Parse, String> {
-    let parse = trendy_parser::parse(source, trendy_lexer::lex(source));
-    if !parse.errors.is_empty() {
-        let sources = Sources::one(path, source);
-        let rendered = trendy_diag::render_all(&parse.errors, Format::Human, &sources);
-        return Err(format!(
-            "error[X0000]: internal compiler error: `{path}` doesn't parse\n{rendered}"
-        ));
-    }
-    Ok(parse)
+/// The files of `units`, as sema takes them.
+fn files(units: &[trendy_load::Unit]) -> Vec<trendy_sema::File<'_>> {
+    units
+        .iter()
+        .map(|unit| trendy_sema::File {
+            name: &unit.name,
+            path: &unit.path,
+            tree: &unit.parse.tree,
+        })
+        .collect()
 }
 
 /// Rendered diagnostics, whose spans are in `sources`, plus for people a

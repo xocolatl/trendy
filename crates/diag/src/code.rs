@@ -113,7 +113,7 @@ codes! {
     UnknownAttribute => "A0010",
     UnknownEmptyType => "A0011",
     DuplicateTuple => "A0012",
-    BuiltinOutsidePrelude => "A0013",
+    BuiltinInProgram => "A0013",
     AnyOutsideParameter => "A0014",
     UnknownName => "A0015",
     OperatorAsValue => "A0016",

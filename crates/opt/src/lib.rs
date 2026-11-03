@@ -365,8 +365,6 @@ mod tests {
     /// its ANDs, of parameters. Each restriction's tuple at hand must have
     /// the heading of what it restricts.
     fn planned(source: &str) -> String {
-        let prelude = trendy_prelude::SOURCE;
-        let prelude = trendy_parser::parse(prelude, trendy_lexer::lex(prelude));
         let parse = trendy_parser::parse(source, trendy_lexer::lex(source));
         assert!(parse.errors.is_empty(), "{:?}", parse.errors);
         let unit = trendy_sema::File {
@@ -374,20 +372,15 @@ mod tests {
             path: "program.trendy",
             tree: &parse.tree,
         };
-        let catalog = trendy_prelude::catalog::SOURCE;
-        let catalog = trendy_parser::parse(catalog, trendy_lexer::lex(catalog));
-        let library = trendy_sema::Library {
-            prelude: trendy_sema::File {
-                name: trendy_prelude::NAME,
-                path: trendy_prelude::PATH,
-                tree: &prelude.tree,
-            },
-            catalog: trendy_sema::File {
-                name: trendy_prelude::catalog::NAME,
-                path: trendy_prelude::catalog::PATH,
-                tree: &catalog.tree,
-            },
-        };
+        let library = trendy_load::library();
+        let library: Vec<trendy_sema::File> = library
+            .iter()
+            .map(|unit| trendy_sema::File {
+                name: &unit.name,
+                path: &unit.path,
+                tree: &unit.parse.tree,
+            })
+            .collect();
         let program = trendy_sema::analyze(&[unit], &library).expect("the program is valid");
         let program = optimized(program);
         let operator = program

@@ -1,3 +1,5 @@
+uses { trendy.files };
+
 /* A cooperative's granaries, each named in its city's own language too,
    and the sacks of rice in each. */
 var granaries: relation { city: text, native: text, sacks: integer } := relation {

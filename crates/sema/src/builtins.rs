@@ -1,20 +1,22 @@
-//! The prelude's built-ins: its declarations of the kinds, types and
-//! operators the compiler implements, checked against it.
+//! The built-ins: the declarations of the kinds, types and operators the
+//! compiler implements, the prelude's and those of the other units that
+//! come with it, checked against it.
 
 use trendy_hir as hir;
-use trendy_syntax::ast::{BuiltinOperator, BuiltinType, Item, KindDecl, SourceFile};
+use trendy_syntax::ast::{self, BuiltinOperator, BuiltinType, Item, KindDecl, SourceFile};
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use trendy_diag::{Code, Diagnostic, Span};
 use trendy_syntax::SyntaxToken;
 use trendy_syntax::ast::AstNode;
 
-use crate::Namespaces;
 use crate::operators::{self, Operators, Signature};
 use crate::types::{self, TypeParameters};
+use crate::{Files, Namespaces, Source};
 
-/// An internal error, `message`, at the name `ident` in the prelude.
+/// An internal error, `message`, at the name `ident` in a unit that comes
+/// with the compiler.
 fn internal(message: String, ident: &SyntaxToken) -> Diagnostic {
     Diagnostic::error(
         Code::Internal,
@@ -53,12 +55,13 @@ fn implemented(name: &str, params: &BTreeSet<String>) -> Option<hir::Builtin> {
         .or_else(|| named().next())
 }
 
-/// The signature of the built-in operator `decl` declares, whose id is
-/// `id`, with the parameters the compiler implements, or `None` after
-/// reporting why it isn't one. It is added to those `declared`, unless it
-/// already is.
+/// The signature of the built-in operator `decl` declares, in a unit that
+/// comes with the compiler, checked as `source`, whose id is `id`, with the
+/// parameters the compiler implements, or `None` after reporting why it
+/// isn't one. It is added to those `declared`, unless it already is.
 fn builtin_operator(
     decl: &BuiltinOperator,
+    source: Source,
     id: hir::OperatorId,
     namespaces: &Namespaces,
     declared: &mut Vec<hir::Builtin>,
@@ -155,7 +158,9 @@ fn builtin_operator(
         builtin,
         types,
         params,
-        namespaces.units().prelude(),
+        namespaces.unit_at(ident_span(&ident)),
+        ast::section_of(decl.syntax()),
+        source,
     ))
 }
 
@@ -346,13 +351,15 @@ pub(crate) fn kinds(
     kinds
 }
 
-/// Add to `list` the signature of each built-in operator `prelude`
-/// declares, numbered after those it has, checking that they are exactly
-/// those the compiler implements, each with the right parameters, of types
-/// `namespaces` resolves, the prelude's own among them. A declaration that
-/// doesn't match the compiler is an internal error, as is one missing.
+/// Add to `list` the signature of each built-in operator the units that
+/// come with the compiler declare, in `files`, numbered after those it
+/// has, checking that they are exactly those the compiler implements, each
+/// declared once, with the right parameters, of types `namespaces`
+/// resolves, the prelude's own among them. A declaration that doesn't
+/// match the compiler is an internal error, as is one missing, at the
+/// prelude's end.
 pub(crate) fn operators(
-    prelude: &SourceFile,
+    files: &Files,
     namespaces: &Namespaces,
     list: &mut Vec<Signature>,
     errors: &mut Vec<Diagnostic>,
@@ -360,11 +367,12 @@ pub(crate) fn operators(
     // The built-ins declared, rightly or not, so that a wrong
     // declaration isn't missing too.
     let mut declared: Vec<hir::Builtin> = Vec::new();
-    for item in prelude.items() {
+    for (source, item) in files.items().filter(|(source, _)| source.is_compilers()) {
         if let Item::Builtin(decl) = item {
             let id = hir::OperatorId(list.len());
             list.extend(builtin_operator(
                 &decl,
+                source,
                 id,
                 namespaces,
                 &mut declared,
@@ -372,7 +380,7 @@ pub(crate) fn operators(
             ));
         }
     }
-    let end = Span::empty(prelude.span().end);
+    let end = Span::empty(files.prelude().span().end);
     for b in hir::Builtin::ALL
         .into_iter()
         .filter(|b| !declared.contains(b))
@@ -380,27 +388,33 @@ pub(crate) fn operators(
         let params = operators::params_text(&operators::written(&b.params()));
         errors.push(Diagnostic::error(
             Code::Internal,
-            format!("the prelude doesn't declare `{}{params}`", b.name()),
+            format!(
+                "no unit that comes with the compiler declares `{}{params}`",
+                b.name()
+            ),
             end,
             "missing",
         ));
     }
 }
 
-/// Report the prelude's `error` and `message` if it doesn't declare them as
-/// the compiler needs them, at its end: a program fails with a value of the
+/// The identity of each error the language makes, the type a unit that
+/// comes with the compiler, in `files`, declares for it, reporting the
+/// prelude's `error` and `message` if it doesn't declare them as the
+/// compiler needs them, at its end: a program fails with a value of the
 /// union type `error`, writing its message, which the specification
 /// `message{error: error}: text` gives. So too the errors built-ins give
-/// (`hir::LanguageError`), which the runtime makes, and the heading
+/// (`hir::LanguageError`), which the runtime makes, each a subtype of
+/// `error` that one of those units declares, and the heading
 /// `transaction_collection`, what a transaction collects
 /// (`hir::transaction_collection`), whose tuples lowering makes.
 pub(crate) fn failures(
-    prelude: &SourceFile,
+    files: &Files,
     namespaces: &Namespaces,
     operators: &Operators,
     errors: &mut Vec<Diagnostic>,
-) {
-    let end = Span::empty(prelude.span().end);
+) -> BTreeMap<hir::LanguageError, String> {
+    let end = Span::empty(files.prelude().span().end);
     if namespaces.dummy_named("error").is_none() {
         errors.push(Diagnostic::error(
             Code::Internal,
@@ -429,21 +443,44 @@ pub(crate) fn failures(
             ));
         }
     }
+    // The types the units that come with the compiler declare, by name,
+    // each with its identity.
+    let mut declared: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (source, item) in files.items() {
+        if let (true, Item::Type(decl)) = (source.is_compilers(), item)
+            && let Some(ident) = decl.name().and_then(|n| n.ident())
+        {
+            let unit = namespaces.unit_at(ident_span(&ident));
+            declared
+                .entry(ident.text().to_string())
+                .or_default()
+                .push(namespaces.type_identity(ident.text(), unit));
+        }
+    }
     // The errors the built-ins give, each a subtype of `error` with the
     // components the runtime makes it with.
+    let mut identities = BTreeMap::new();
     for error in hir::LanguageError::ALL {
-        let declared = namespaces.defined_named(error.name());
         let components = error.components();
-        let as_made = declared.is_some_and(|defined| {
-            defined.supertypes == ["error"]
-                && defined.specialization.is_none()
-                && defined.components == components
-        });
-        if !as_made {
-            errors.push(Diagnostic::error(
+        let as_made = match declared.get(error.name()).map(Vec::as_slice) {
+            Some([identity]) => namespaces
+                .defined_named(identity)
+                .filter(|defined| {
+                    defined.supertypes == ["error"]
+                        && defined.specialization.is_none()
+                        && defined.components == components
+                })
+                .map(|_| identity.clone()),
+            _ => None,
+        };
+        match as_made {
+            Some(identity) => {
+                identities.insert(error, identity);
+            }
+            None => errors.push(Diagnostic::error(
                 Code::Internal,
                 format!(
-                    "the prelude doesn't declare `type {} is error {{ {{ {} }} }};`, an error a built-in gives",
+                    "no unit that comes with the compiler declares `type {} is error {{ {{ {} }} }};` once, an error a built-in gives",
                     error.name(),
                     components
                         .attributes()
@@ -453,7 +490,8 @@ pub(crate) fn failures(
                 ),
                 end,
                 "missing",
-            ));
+            )),
         }
     }
+    identities
 }

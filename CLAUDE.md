@@ -50,10 +50,11 @@ in the "Diagnostics" section of `docs/pipeline.md`.
 
 - `docs/language.md` is the language reference. Update it with every language
   change; its examples are compiled by `crates/trendyc/tests/explanations.rs`.
-- Built-ins (types and operators) are declared in
-  `crates/prelude/src/prelude.trendy`, listed in `hir::Builtin`, and usually
-  implemented in `crates/runtime`. Sema checks the prelude against the
-  compiler, so all three must change together.
+- Built-ins (types and operators) are declared in the units that come with
+  the compiler, `crates/prelude/src/prelude.trendy` (or another of
+  `trendy_prelude::UNITS`, as `files.trendy` for reading files), listed in
+  `hir::Builtin`, and usually implemented in `crates/runtime`. Sema checks
+  those units against the compiler, so all three must change together.
 - A read-only operator, built in or a program's, is a function of its
   arguments: calls with the same arguments have the same value, whenever
   they are made (TTM RM Prescription 3). A built-in that reads input, the

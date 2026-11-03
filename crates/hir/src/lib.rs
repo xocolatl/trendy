@@ -19,8 +19,8 @@ pub struct Program {
     /// the prelude's first.
     pub operators: Vec<Operator>,
     pub variables: Vec<Variable>,
-    /// Each file of the program, by [`FileId`], its units' and the
-    /// prelude's: the path a failure in it writes it by.
+    /// Each file of the program, by [`FileId`], its units' and those that
+    /// come with the compiler: the path a failure in it writes it by.
     pub files: Vec<String>,
     /// The constraints on the variables, which their initial values
     /// satisfy.
@@ -30,6 +30,11 @@ pub struct Program {
     /// takes, and a regular type's, defined by constraints, which decide
     /// which a value of it is of (see [`Defined::specialization`]).
     pub subtypes: BTreeMap<String, Vec<Type>>,
+    /// The identity of each error the language makes, the type a unit that
+    /// comes with the compiler declares for it, as the HIR calls it: its
+    /// name, or, if a unit of the program's declares one of that name too,
+    /// its name qualified by its unit's.
+    pub language_errors: BTreeMap<LanguageError, String>,
     /// The operator the executable starts in: a user operator with no
     /// parameters.
     pub entry: OperatorId,
@@ -82,21 +87,22 @@ impl Program {
         variables
     }
 
-    /// The type of `error`, a subtype of `error` the prelude declares, as
-    /// sema checks.
+    /// The type of `error`, a subtype of `error` a unit that comes with the
+    /// compiler declares, as sema checks.
     ///
     /// # Panics
     ///
-    /// If the prelude doesn't declare it, which sema rules out.
+    /// If none declares it, which sema rules out.
     #[must_use]
     pub fn language_error(&self, error: LanguageError) -> &Defined {
+        let identity = &self.language_errors[&error];
         self.subtypes["error"]
             .iter()
             .find_map(|ty| match ty {
-                Type::Defined(defined) if defined.name == error.name() => Some(&**defined),
+                Type::Defined(defined) if defined.name == *identity => Some(&**defined),
                 _ => None,
             })
-            .expect("the prelude declares the errors the language makes")
+            .expect("the compiler's units declare the errors the language makes")
     }
 
     /// The type of `expr`, inside an operator with the parameters
@@ -415,8 +421,9 @@ pub enum OperatorKind {
         locals: Vec<Local>,
         value: Expr,
     },
-    /// Declared in the prelude and implemented by the compiler: an update
-    /// operator, or a read-only one, with a [`Builtin::result`].
+    /// Declared in a unit that comes with the compiler, and implemented by
+    /// it: an update operator, or a read-only one, with a
+    /// [`Builtin::result`].
     Builtin(Builtin),
     /// Declared without a body, as an operator of a union type's values,
     /// which its versions compute, one for each type under it: read-only,
@@ -424,9 +431,9 @@ pub enum OperatorKind {
     Specification { result: Option<Type> },
 }
 
-/// The operators the compiler implements. Each is declared in the prelude,
-/// and sema checks the declaration against [`Builtin::params`] and
-/// [`Builtin::result`].
+/// The operators the compiler implements. Each is declared in a unit that
+/// comes with the compiler, the prelude or another, and sema checks the
+/// declaration against [`Builtin::params`] and [`Builtin::result`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Builtin {
     ReadOnly(ReadOnlyBuiltin),
@@ -552,10 +559,11 @@ pub fn transaction_collection(error_type: Type) -> Heading {
 /// An error the language makes: one a built-in gives in its `out`
 /// parameter `errors`, rather than stopping the program, or one a failure
 /// of the program's values fails with, which a transaction takes. A value
-/// of a subtype of the prelude's union type `error`, which the prelude
-/// declares with these components, as sema checks, and which the runtime
-/// makes, knowing each by its place in [`LanguageError::ALL`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// of a subtype of the prelude's union type `error`, which a unit that
+/// comes with the compiler declares with these components, as sema checks,
+/// and which the runtime makes, knowing each by its place in
+/// [`LanguageError::ALL`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum LanguageError {
     /// A file can't be read, for the system's reason (R0012).
     UnreadableFile,

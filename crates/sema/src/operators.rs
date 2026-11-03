@@ -183,7 +183,7 @@ impl Signature {
     /// Where parameter `name`'s type is written.
     pub(crate) fn param_origin(&self, name: &str) -> Origin {
         match self.param_decl(name).and_then(|a| a.type_expr()) {
-            Some(written) if self.source == Source::Prelude => Origin::Prelude(written),
+            Some(written) if self.source.is_compilers() => Origin::Library(written),
             Some(written) => Origin::Type(written),
             None => Origin::Builtin,
         }
@@ -559,9 +559,28 @@ impl Operators {
     /// order they are defined.
     pub(crate) fn names(&self, at: Span) -> Vec<(&str, Vec<&str>)> {
         let viewer = self.units.viewer(at);
+        self.named(|s| self.units.sees(viewer, s.unit, s.section))
+    }
+
+    /// The operators the interface of a unit declares that what is
+    /// written at `at` doesn't see, but would if its section used the
+    /// unit, each with its name and its parameters that take values, as
+    /// [`Operators::names`] gives them.
+    pub(crate) fn unseen_names(&self, at: Span) -> Vec<(&str, Vec<&str>)> {
+        let viewer = self.units.viewer(at);
+        self.named(|s| {
+            s.section == Section::Interface
+                && s.unit != viewer.unit
+                && !self.units.sees(viewer, s.unit, s.section)
+        })
+    }
+
+    /// The operators `chosen` says, each with its name and its parameters
+    /// that take values, as [`Operators::names`] gives them.
+    fn named(&self, chosen: impl Fn(&Signature) -> bool) -> Vec<(&str, Vec<&str>)> {
         self.list
             .iter()
-            .filter(|s| self.units.sees(viewer, s.unit, s.section))
+            .filter(|s| chosen(s))
             .map(|signature| {
                 let params = signature
                     .written
@@ -578,21 +597,25 @@ impl Operators {
 impl Signature {
     /// The signature of `builtin`, whose id is `id`, with the type
     /// parameters and parameters its declaration has, which are the
-    /// compiler's. Its declaration isn't an operator's, so it points at
-    /// none (see [`Signature::param_origin`]).
+    /// compiler's, declared in the section `section` of `unit`, a unit
+    /// that comes with the compiler, checked as `source`. Its declaration
+    /// isn't an operator's, so it points at none (see
+    /// [`Signature::param_origin`]).
     pub(crate) fn builtin(
         id: hir::OperatorId,
         builtin: hir::Builtin,
         types: Vec<hir::TypeParameter>,
         params: BTreeMap<String, hir::Parameter>,
         unit: hir::FileId,
+        section: Section,
+        source: Source,
     ) -> Self {
         let result = builtin.result();
         Signature {
             id,
             name: builtin.name().to_string(),
             unit,
-            section: Section::Interface,
+            section,
             types,
             written: written(&params),
             params,
@@ -601,7 +624,7 @@ impl Signature {
             result,
             decl: None,
             builtin: Some(builtin),
-            source: Source::Prelude,
+            source,
             from_type: None,
             family: Family::Own,
             versions: Vec::new(),
@@ -613,8 +636,9 @@ impl Signature {
 /// Every operator's signature: those of the types' constraints and
 /// conversions, then the built-ins', which can name the prelude's types,
 /// then each file's operators and selectors, the prelude's first, each
-/// with its parameters and result type checked.
-/// Built-ins declared outside the prelude are reported. `main` is checked
+/// with its parameters and result type checked. Built-in operators
+/// declared outside the units that come with the compiler are reported,
+/// as are built-in types and kinds outside the prelude. `main` is checked
 /// as an update operator, even with a result type, which is reported when
 /// the entry point is.
 pub(crate) fn signatures(
@@ -631,21 +655,21 @@ pub(crate) fn signatures(
         );
         list.push(signature);
     }
-    crate::builtins::operators(files.prelude(), namespaces, &mut list, errors);
+    crate::builtins::operators(files, namespaces, &mut list, errors);
     for (source, item) in files.items() {
         match item {
             Item::Operator(op) => {
                 let id = hir::OperatorId(list.len());
                 list.extend(operator(op, id, source, namespaces, errors));
             }
-            Item::Builtin(_) | Item::BuiltinType(_) | Item::Kind(_)
-                if source == Source::Prelude => {}
-            Item::Kind(kind) => errors.push(errors::kind_outside_prelude(&kind)),
-            Item::Builtin(builtin) => errors.push(errors::builtin_outside_prelude(
+            Item::Builtin(_) if source.is_compilers() => {}
+            Item::BuiltinType(_) | Item::Kind(_) if source == Source::Prelude => {}
+            Item::Kind(kind) => errors.push(errors::kind_in_program(&kind)),
+            Item::Builtin(builtin) => errors.push(errors::builtin_in_program(
                 builtin.keyword(),
                 builtin.syntax(),
             )),
-            Item::BuiltinType(builtin) => errors.push(errors::builtin_outside_prelude(
+            Item::BuiltinType(builtin) => errors.push(errors::builtin_in_program(
                 builtin.keyword(),
                 builtin.syntax(),
             )),

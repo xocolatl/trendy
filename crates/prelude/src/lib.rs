@@ -1,41 +1,58 @@
 //! The units that come with the compiler, trendy source that is part of
-//! every program. The prelude declares the built-in operators, which the
+//! every program: the prelude ([`PRELUDE`]), which every unit sees, and
+//! which declares the built-in types and most built-in operators, which the
 //! compiler implements, and defines others in trendy; the catalog
-//! ([`catalog`]) describes the program's units, and its constraints are the
-//! rules between them.
+//! ([`CATALOG`]), which describes the program's units, and whose
+//! constraints are the rules between them; and `trendy.files` ([`FILES`]),
+//! which reads files, for the units that use it.
 //!
-//! Drivers parse them alongside the program and hand them all to sema. Only
-//! the prelude may declare `builtin` operators, and sema checks each
-//! declaration against the operator the compiler actually provides.
+//! Drivers parse them, as [`UNITS`] lists them, alongside the program and
+//! hand them all to sema. Only these units may declare `builtin`
+//! operators, and sema checks each declaration against the operator the
+//! compiler actually provides.
 
-/// The prelude's source text.
-pub const SOURCE: &str = include_str!("prelude.trendy");
+/// A unit that comes with the compiler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Unit {
+    /// Its name, under `trendy.`, which is kept for the units that come
+    /// with the compiler.
+    pub name: &'static str,
+    /// The name shown for it, as for a file, in errors and failures.
+    pub path: &'static str,
+    /// Its source text.
+    pub source: &'static str,
+    /// Where its source was when the compiler was built: the language
+    /// server checks the file there as this unit, not as a program.
+    pub source_path: &'static str,
+}
 
-/// The name shown for the prelude in internal error messages.
-pub const PATH: &str = "<prelude>";
-
-/// The prelude's unit's name, under `trendy.`, which is kept for the units
-/// that come with the compiler.
-pub const NAME: &str = "trendy.prelude";
-
-/// Where the prelude's source was when the compiler was built: the
-/// language server checks the file there as the prelude, not a program.
-pub const SOURCE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/prelude.trendy");
+/// The prelude, `trendy.prelude`, whose declarations every unit sees.
+pub const PRELUDE: Unit = Unit {
+    name: "trendy.prelude",
+    path: "<prelude>",
+    source: include_str!("prelude.trendy"),
+    source_path: concat!(env!("CARGO_MANIFEST_DIR"), "/src/prelude.trendy"),
+};
 
 /// The catalog, `trendy.catalog`: the database that describes a program's
 /// units, which the compiler fills as it checks them, and whose constraints
 /// are the rules between units.
-pub mod catalog {
-    /// The catalog's source text.
-    pub const SOURCE: &str = include_str!("catalog.trendy");
+pub const CATALOG: Unit = Unit {
+    name: "trendy.catalog",
+    path: "<catalog>",
+    source: include_str!("catalog.trendy"),
+    source_path: concat!(env!("CARGO_MANIFEST_DIR"), "/src/catalog.trendy"),
+};
 
-    /// The name shown for the catalog in internal error messages.
-    pub const PATH: &str = "<catalog>";
+/// `trendy.files`, which reads text and CSV files, and declares the errors
+/// only reading one gives.
+pub const FILES: Unit = Unit {
+    name: "trendy.files",
+    path: "<files>",
+    source: include_str!("files.trendy"),
+    source_path: concat!(env!("CARGO_MANIFEST_DIR"), "/src/files.trendy"),
+};
 
-    /// The catalog's unit's name.
-    pub const NAME: &str = "trendy.catalog";
-
-    /// Where the catalog's source was when the compiler was built: the
-    /// language server checks the file there as the catalog, not a program.
-    pub const SOURCE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/catalog.trendy");
-}
+/// Every unit that comes with the compiler, in the order their texts
+/// follow a program's units' in its spans: the prelude last.
+pub const UNITS: [Unit; 3] = [FILES, CATALOG, PRELUDE];

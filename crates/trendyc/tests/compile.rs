@@ -400,32 +400,25 @@ fn to_text_is_what_debug_value_writes() {
     assert_eq!(run, expected);
 }
 
-/// The program `source` analyzed, with the prelude and the catalog.
+/// The program `source` analyzed, with the units that come with the
+/// compiler.
 fn analyze(source: &str) -> trendy_hir::Program {
-    let parse = |source: &str| {
-        let parse = trendy_parser::parse(source, trendy_lexer::lex(source));
-        assert!(parse.errors.is_empty(), "{source}: {:#?}", parse.errors);
-        parse.tree
-    };
-    let (program, prelude) = (parse(source), parse(trendy_prelude::SOURCE));
-    let catalog = parse(trendy_prelude::catalog::SOURCE);
+    let parse = trendy_parser::parse(source, trendy_lexer::lex(source));
+    assert!(parse.errors.is_empty(), "{source}: {:#?}", parse.errors);
     let unit = trendy_sema::File {
         name: "program",
         path: "program.trendy",
-        tree: &program,
+        tree: &parse.tree,
     };
-    let library = trendy_sema::Library {
-        prelude: trendy_sema::File {
-            name: trendy_prelude::NAME,
-            path: trendy_prelude::PATH,
-            tree: &prelude,
-        },
-        catalog: trendy_sema::File {
-            name: trendy_prelude::catalog::NAME,
-            path: trendy_prelude::catalog::PATH,
-            tree: &catalog,
-        },
-    };
+    let library = trendy_load::library();
+    let library: Vec<trendy_sema::File> = library
+        .iter()
+        .map(|unit| trendy_sema::File {
+            name: &unit.name,
+            path: &unit.path,
+            tree: &unit.parse.tree,
+        })
+        .collect();
     trendy_sema::analyze(&[unit], &library).unwrap()
 }
 
@@ -788,7 +781,9 @@ fn loaded_csv(name: &str, contents: &str, header: bool, columns: &str) -> (i32, 
     let path = dir.join(format!("{name}.csv"));
     std::fs::write(&path, contents).unwrap();
     let source = format!(
-        "operator main{{}} [
+        "uses {{ trendy.files }};
+
+operator main{{}} [
     var rows: array tuple {{ city: text, people: integer, km2: approximate, capital: boolean }};
     var columns := tuple {{ {columns} }};
     call load_csv{{path: {:?}, header: {header}, columns: columns, out rows: rows}};
@@ -820,7 +815,9 @@ fn loaded_rows(
     let path = dir.join(format!("{name}.csv"));
     std::fs::write(&path, contents).unwrap();
     let source = format!(
-        "{types}
+        "uses {{ trendy.files }};
+
+{types}
 operator main{{}} [
     var rows: array tuple {heading};
     var columns := {columns};
@@ -868,7 +865,7 @@ fn csv_files_load_values_of_a_programs_own_types() {
     // record's line, the value, and the constraint: a value's components
     // are checked before it, as they are selected first.
     let broken = trendy_diag::Code::BrokenConstraint.id();
-    let site = site("csv_stops_broken", 10);
+    let site = site("csv_stops_broken", 12);
     assert_eq!(
         loaded_stops(
             "stops_broken",
@@ -882,7 +879,7 @@ fn csv_files_load_values_of_a_programs_own_types() {
             )
         )
     );
-    let site = self::site("csv_stops_unnamed", 10);
+    let site = self::site("csv_stops_unnamed", 12);
     assert_eq!(
         loaded_stops("stops_unnamed", &format!("{header}2,,9,0\n"), columns),
         (
@@ -1054,7 +1051,7 @@ fn transactions() {
         (
             0,
             format!(
-                "{moved}{table}{day}{table}warning[{}]: Cusco has 35 sacks left\n --> transactions.trendy:54:9\n{after}relation {{ failed: boolean, message: text }} {{ {{ failed: true, message: \"division by zero: 40 div 0 has no result\" }}, {{ failed: true, message: \"two tuples of `granaries` have the same values for its key {{ city }}: tuple {{ city: \\\"Dhaka\\\", native: \\\"ঢাকা\\\", sacks: 0 }} and tuple {{ city: \\\"Dhaka\\\", native: \\\"ঢাকা\\\", sacks: 30 }}\" }} }}\n",
+                "{moved}{table}{day}{table}warning[{}]: Cusco has 35 sacks left\n --> transactions.trendy:56:9\n{after}relation {{ failed: boolean, message: text }} {{ {{ failed: true, message: \"division by zero: 40 div 0 has no result\" }}, {{ failed: true, message: \"two tuples of `granaries` have the same values for its key {{ city }}: tuple {{ city: \\\"Dhaka\\\", native: \\\"ঢাকা\\\", sacks: 0 }} and tuple {{ city: \\\"Dhaka\\\", native: \\\"ঢাকা\\\", sacks: 30 }}\" }} }}\n",
                 trendy_diag::Code::Warned.id()
             )
         )
@@ -1676,7 +1673,9 @@ fn a_text_file_gives_its_errors_when_asked() {
     std::fs::write(&good, "Nile\nVolga\n").unwrap();
     std::fs::write(&bad, b"Nile\nVolga\nAmaz\xF4nas\n").unwrap();
     let source = format!(
-        "operator show{{path: text}} [
+        "uses {{ trendy.files }};
+
+operator show{{path: text}} [
     var lines: array text;
     var errors: relation {{ error: error }};
     call load_text_file{{path: path, out lines: lines, out errors: errors}};
@@ -1709,6 +1708,59 @@ operator main{{}} [
 }
 
 #[test]
+fn a_programs_type_of_an_errors_name_leaves_the_languages_error() {
+    // A program's own `unreadable_file`, and `trendy.files`'s, which a unit
+    // of it reads with: each called by its unit's name, and a load gives
+    // the language's.
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("own_error");
+    std::fs::create_dir_all(&dir).unwrap();
+    let main = dir.join("main.trendy");
+    std::fs::write(
+        &main,
+        "uses { reader };
+
+type unreadable_file { { why: text } };
+
+operator main{} [
+    call debug_value{v: unreadable_file{why: \"mine\"}};
+    call read{path: \"missing.txt\"};
+];
+",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("reader.trendy"),
+        "interface
+
+operator read{path: text};
+
+implementation
+
+uses { trendy.files };
+
+operator read{path: text} [
+    var lines: array text;
+    var errors: relation { error: error };
+    call load_text_file{path: path, out lines: lines, out errors: errors};
+    call debug_value{v: errors};
+];
+",
+    )
+    .unwrap();
+    let (code, stderr) = build_and_run(&main, &dir.join("main"), &dir);
+    assert_eq!(
+        (code, stderr),
+        (
+            0,
+            "main::unreadable_file{why: \"mine\"}
+relation { error: error } { { error: trendy.files::unreadable_file{path: \"missing.txt\", reason: \"No such file or directory\"} } }
+"
+            .to_string()
+        )
+    );
+}
+
+#[test]
 fn a_csv_file_gives_its_errors_when_asked() {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("errors");
     std::fs::create_dir_all(&dir).unwrap();
@@ -1724,7 +1776,9 @@ fn a_csv_file_gives_its_errors_when_asked() {
     let narrow = dir.join("narrow.csv");
     std::fs::write(&narrow, "Lima\n").unwrap();
     let source = format!(
-        "heading city := {{ city: text, people: integer }};
+        "uses {{ trendy.files }};
+
+heading city := {{ city: text, people: integer }};
 
 operator show{{path: text, header: boolean}} [
     var rows: array tuple city;
@@ -1780,7 +1834,9 @@ fn a_csv_record_whose_value_breaks_its_type_is_skipped_when_asked() {
     std::fs::write(&shapes, "w,h\n2,1\n3,3\n-1,2\n").unwrap();
     std::fs::write(&spans, "first,second\nmon,mon\nmon,tue\n").unwrap();
     let source = format!(
-        "type shape {{ {{ w: integer, h: integer }}, constraint w > 0 }};
+        "uses {{ trendy.files }};
+
+type shape {{ {{ w: integer, h: integer }}, constraint w > 0 }};
 type square is shape {{ constraint w = h }};
 type wide is shape {{ constraint w >= h }};
 
@@ -2118,7 +2174,9 @@ error[{overlapping}]: ellipse{{a: 5e-1, b: 5e-1}} is of both `circle` and `small
     let path = dir.join("constrained.csv");
     std::fs::write(&path, "name,a,b\nwell,2,2\npond,3,2\n").unwrap();
     let source = format!(
-        "{types}
+        "uses {{ trendy.files }};
+
+{types}
 operator main{{}} [
     var rows: array tuple {{ name: text, e: ellipse }};
     var columns := tuple {{ name: 1, e: tuple {{ a: 2, b: 3 }} }};
@@ -2364,7 +2422,7 @@ operator main{{}} [
             format!(
                 "error[{violated}]: line 3 of \"PATH\" gives `s` a value of `seg` in which two tuples of its `ends` have the same values for its key {{ x }}: tuple {{ n: 1, x: 0 }} and tuple {{ n: 2, x: 0 }}
 {}",
-                site("csv_segments", 14)
+                site("csv_segments", 16)
             )
         )
     );
@@ -2397,7 +2455,7 @@ type polygon is plane_figure { { corners: integer } };
         )
     );
     let broken = trendy_diag::Code::BrokenConstraint.id();
-    let site = site("csv_lakes_broken", 8);
+    let site = site("csv_lakes_broken", 10);
     assert_eq!(
         loaded_rows(
             "lakes_broken",
@@ -2452,7 +2510,7 @@ type point {
     // inner values first, writing the record's line and the value's name
     // as the columns give it.
     let broken = trendy_diag::Code::BrokenConstraint.id();
-    let site = site("csv_points_negative", 17);
+    let site = site("csv_points_negative", 19);
     assert_eq!(
         loaded("points_negative", "1,2,0\n2,-1,0\n"),
         (
@@ -2462,7 +2520,7 @@ type point {
             )
         )
     );
-    let site = self::site("csv_points_far", 17);
+    let site = self::site("csv_points_far", 19);
     assert_eq!(
         loaded("points_far", "1,20,0\n"),
         (
@@ -2521,7 +2579,7 @@ fn csv_files_are_loaded_when_running() {
 /// exit status, if it stops with the error `code`, writing `message`, at
 /// the call of `load_csv`.
 fn csv_failed(name: &str, code: trendy_diag::Code, message: &str) -> (i32, String) {
-    let at = site(&format!("csv_{name}"), 4);
+    let at = site(&format!("csv_{name}"), 6);
     (1, format!("error[{}]: {message}\n{at}", code.id()))
 }
 
@@ -2667,7 +2725,7 @@ fn load_text_file_reads_a_files_lines() {
     let literal = |path: &Path| format!("{:?}", path.to_str().unwrap());
     let lines = |path: &Path| {
         let source = format!(
-            "operator main{{}} [\n    var lines: array text;\n    call load_text_file{{path: {}, out lines: lines}};\n    call debug_value{{v: lines}};\n];\n",
+            "uses {{ trendy.files }};\n\noperator main{{}} [\n    var lines: array text;\n    call load_text_file{{path: {}, out lines: lines}};\n    call debug_value{{v: lines}};\n];\n",
             literal(path)
         );
         let stem = path.file_stem().unwrap().to_str().unwrap();
@@ -2698,7 +2756,7 @@ fn load_text_file_reads_a_files_lines() {
                 "error[{}]: can't read {}: No such file or directory\n{}",
                 Code::UnreadableFile.id(),
                 literal(&missing),
-                site("load_text_file_missing", 3)
+                site("load_text_file_missing", 5)
             )
         )
     );
@@ -2711,7 +2769,7 @@ fn load_text_file_reads_a_files_lines() {
                 "error[{}]: line 2 of {} isn't UTF-8 text\n{}",
                 Code::NotUtf8.id(),
                 literal(&not_utf8),
-                site("load_text_file_latin1", 3)
+                site("load_text_file_latin1", 5)
             )
         )
     );
@@ -2730,7 +2788,9 @@ fn loads_make_relations_of_arrays_when_running() {
         let path = dir.join(format!("{name}.txt"));
         std::fs::write(&path, contents).unwrap();
         let source = format!(
-            "operator main{{}} [
+            "uses {{ trendy.files }};
+
+operator main{{}} [
     var lines: array text;
     call load_text_file{{path: {:?}, out lines: lines}};
     var numbered: relation {{ line: text, n: integer }};

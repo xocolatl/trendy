@@ -1,3 +1,7 @@
+/* Reading files is the work of `trendy.files`, a unit that comes with
+   the compiler, which a unit uses as it does any other. */
+uses { trendy.files };
+
 var greeting := "hello" || ", " || "world";
 
 var nothing := "" || "";

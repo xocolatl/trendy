@@ -7,6 +7,8 @@
    by using it. What it can't say yet is written below as it should read,
    in comments, in the order the features are needed. */
 
+uses { trendy.files };
+
 /* Each recipe, its name in its own script, and how many people it serves
    as written. */
 heading recipe := { recipe: text, native_name: text, serves: integer };

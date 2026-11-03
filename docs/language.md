@@ -56,6 +56,8 @@ program where it fails. Here the records a load skips are worth
 knowing, but not failures:
 
 ```trendy
+uses { trendy.files };
+
 operator main{out errors: relation transaction_collection} [
     var rows: array tuple { city: text, people: integer };
     var skipped: relation { error: error };
@@ -240,10 +242,11 @@ operator main{} [
   after `as`, by one word the using unit calls it by instead, as `rename`
   gives an attribute another name.
 - **Each a unit of the program** (A0015): main's, those its units use,
-  and those that come with the compiler, such as `trendy.catalog`. A
-  misspelling of one is fixed to it. The compiler is given main's file,
-  and reads each unit it uses, through any path, from its file there;
-  the names under `trendy.` are the compiler's own.
+  and those that come with the compiler, `trendy.prelude`, which every
+  unit sees without using it, `trendy.files`, which reads files, and
+  `trendy.catalog`. A misspelling of one is fixed to it. The compiler is
+  given main's file, and reads each unit it uses, through any path, from
+  its file there; the names under `trendy.` are the compiler's own.
 - **No unit uses itself, through any path** (A0072), so that a unit's
   interface is known before each unit that uses it is checked. What two
   units need of each other goes in a unit of its own, which each uses.
@@ -966,10 +969,13 @@ operator main{} [];
 ### The prelude
 
 Some operators are part of every program, always in scope: the
-*prelude*'s, trendy source the compiler includes. A few the compiler
-implements itself, the *built-ins*, which the prelude declares with
-`builtin`, as it does the built-in types; the rest it defines in trendy, as
-any program could. The prelude is checked with every program, its
+*prelude*'s, trendy source the compiler includes, the unit
+`trendy.prelude`, which every unit sees without using it. A few the
+compiler implements itself, the *built-ins*, which the prelude declares
+with `builtin`, as it does the built-in types, and as the compiler's other
+units declare theirs, such as `trendy.files` (see [Reading
+files](#reading-files)); the rest it defines in trendy, as any program
+could. The prelude is checked with every program, its
 declarations as if the program had written them, so a program can extend
 what it declares as it can its own, with a subtype of a union type or a
 version of a specification (see [Union types](#union-types)), and an
@@ -1098,73 +1104,6 @@ builtin operator cos{of: approximate}: approximate;
    -π, exclusive, to π: 0 for the origin, as for any point on the positive x
    axis. */
 builtin operator atan2{y: approximate, x: approximate}: approximate;
-
-/* Read the lines of the text file at `path` into `lines`, in the file's
-   order, so that its first line is the array's element 1. `path` is
-   relative to the directory the program runs in, unless it is absolute.
-   A line ends at a line feed, or a carriage return and a line feed,
-   which aren't part of it; the last needs neither. Each call reads the
-   file as it is when the program runs: the compiler never opens it, so
-   it needn't exist until then, and two calls can read different lines,
-   so it is an update operator, which `call` invokes. A file that can't
-   be read fails (R0012), as does one that isn't UTF-8 text (R0013). */
-builtin operator load_text_file{path: text, out lines: array text};
-
-/* Read the lines of the text file at `path` into `lines`, as the other
-   `load_text_file` does, but rather than stopping the program for a file
-   that can't be read, or isn't UTF-8 text, give no lines, and its error,
-   an `unreadable_file` or a `not_utf8`, in `errors`, which is empty when
-   the file is read. */
-builtin operator load_text_file{
-    path: text,
-    out lines: array text,
-    out errors: relation { error: error },
-};
-
-/* Read the records of the CSV file at `path` into `rows`, in the file's
-   order, each a tuple whose attributes are the fields in the columns
-   `columns` gives them: it has the tuples' attributes, each the position
-   of its column, counting from 1, as `tuple { city: 1, people: 3 }`
-   reads `city` from the first column and `people` from the third. A
-   file's columns have an order and no names, so the call names them.
-   Columns it doesn't name are skipped. With `header`, the file's first
-   record is a header, which is skipped too. Each attribute is text, an
-   integer, an approximate number or a boolean, read from its field as
-   `parse_integer`, `parse_approximate` and `parse_boolean` read them,
-   and text as it is, or a value of a type of the program's own whose
-   components are, in one of its possible representations, which
-   `columns` gives a tuple of their columns, as
-   `tuple { name: 1, at: tuple { latitude: 2, longitude: 3 } }` does, and
-   which is selected from them, so that one whose components break its
-   type's constraints fails (R0017). The file is CSV as RFC 4180 has it:
-   fields separated by commas, records by line ends, as for
-   `load_text_file`, and a field with a comma, a quote or a line end in
-   quotes, each quote in it doubled. Empty lines are skipped. A file that can't be read
-   fails (R0012), as does one that isn't UTF-8 text (R0013), or isn't
-   CSV (R0015), or hasn't a column `columns` gives, which two attributes
-   can't share (R0016), or that has a field its attribute's type can't
-   read (R0014). */
-builtin operator load_csv{path: text, header: boolean, columns: C, out rows: array T}
-    types { C: any tuple, T: any tuple };
-
-/* Read the records of the CSV file at `path` into `rows`, as the other
-   `load_csv` does, but rather than stopping the program for a file it
-   can't read, give no rows, and its error in `errors`, and for a record it
-   can't, skip it, giving its error there: an `unreadable_file`, a
-   `not_utf8`, a `malformed_csv`, a `missing_column` or an
-   `unreadable_field`, or, for a value that breaks its type's constraints,
-   or its components' keys, or is of two of its subtypes, a
-   `broken_constraint_in_file`, a `component_key_violated_in_file` or an
-   `overlapping_subtypes_in_file`. A quoted field that isn't closed ends
-   the records read. `errors` is empty when every record is read. */
-builtin operator load_csv{
-    path: text,
-    header: boolean,
-    columns: C,
-    out rows: array T,
-    out errors: relation { error: error },
-}
-    types { C: any tuple, T: any tuple };
 
 /* What went wrong, when a program fails, or warns: a value of one of
    `error`'s subtypes, each a kind of failure, with what it is about as
@@ -1407,214 +1346,6 @@ operator message{error: constraint_violated_by}: text [
         || error.condition
         || "` is false of "
         || error.tuples
-];
-
-/* The file at `path` can't be read, for `reason`, the system's words for
-   why, as "No such file or directory" (R0012). */
-type unreadable_file is error { { path: text, reason: text } };
-
-operator message{error: unreadable_file}: text [
-    "can't read " || to_text{from: error.path} || ": " || error.reason
-];
-
-/* The file at `path` isn't UTF-8 text, from the line `line` on (R0013). */
-type not_utf8 is error { { path: text, line: integer } };
-
-operator message{error: not_utf8}: text [
-    "line "
-        || to_text{from: error.line}
-        || " of "
-        || to_text{from: error.path}
-        || " isn't UTF-8 text"
-];
-
-/* The CSV file at `path` isn't CSV on the line `line`, as `problem` says
-   (R0015). */
-type malformed_csv is error { { path: text, line: integer, problem: text } };
-
-operator message{error: malformed_csv}: text [
-    "line "
-        || to_text{from: error.line}
-        || " of "
-        || to_text{from: error.path}
-        || " "
-        || error.problem
-];
-
-/* `attribute`, or a component, as `columns` names it, is read from the
-   column `column`, counting from 1, but the CSV file at `path` has
-   `columns` columns (R0016). */
-type missing_column is error { { path: text, attribute: text, column: integer, columns: integer } };
-
-operator message{error: missing_column}: text [
-    var columns := if error.columns = 1 then " column" else " columns";
-    "`"
-        || error.attribute
-        || "` is read from column "
-        || to_text{from: error.column}
-        || ", but "
-        || to_text{from: error.path}
-        || " has "
-        || to_text{from: error.columns}
-        || columns
-];
-
-/* `first` and `second`, attributes, or components, as `columns` names
-   them, are both read from the column `column`, but each needs a column
-   of its own (R0016). */
-type column_shared is error { { first: text, second: text, column: integer } };
-
-operator message{error: column_shared}: text [
-    "`"
-        || error.first
-        || "` and `"
-        || error.second
-        || "` are both read from column "
-        || to_text{from: error.column}
-];
-
-/* `attribute`, or a component, as `columns` names it, is read from the
-   column `column`, below 1, but columns count from 1 (R0016). */
-type column_below_one is error { { attribute: text, column: integer } };
-
-operator message{error: column_below_one}: text [
-    "`"
-        || error.attribute
-        || "` is read from column "
-        || to_text{from: error.column}
-        || ", but columns count from 1"
-];
-
-/* The field `text`, in the column `column`, counting from 1, on the line
-   `line` of the CSV file at `path`, isn't a value of `type`, the type of
-   `attribute`, or a component, as `columns` names it, or is one out of its
-   range if `out_of_range` (R0014). */
-type unreadable_field is error {
-    {
-        path: text,
-        line: integer,
-        column: integer,
-        attribute: text,
-        type: text,
-        text: text,
-        out_of_range: boolean,
-    },
-};
-
-operator message{error: unreadable_field}: text [
-    var a := if error.type = "integer"
-        then "an integer"
-        else if error.type = "approximate"
-        then "an approximate number"
-        else "a boolean";
-    var why := if error.out_of_range then " is out of " || a || "'s range" else " isn't " || a;
-    /* With a header, line 1 is no record's. */
-    var header := if error.line = 1 then "; if line 1 is a header, `header: true` skips it" else "";
-    to_text{from: error.text}
-        || ", in column "
-        || to_text{from: error.column}
-        || " on line "
-        || to_text{from: error.line}
-        || " of "
-        || to_text{from: error.path}
-        || ","
-        || why
-        || ", the type of `"
-        || error.attribute
-        || "`"
-        || header
-];
-
-/* The record on the line `line` of the CSV file at `path` gives
-   `attribute`, or a component, as `columns` names it, `value`, written as
-   `debug_value` writes it, which isn't a value of `type`: it breaks the
-   constraint `constraint` (R0017). */
-type broken_constraint_in_file is error {
-    { path: text, line: integer, attribute: text, value: text, type: text, constraint: text },
-};
-
-operator message{error: broken_constraint_in_file}: text [
-    "line "
-        || to_text{from: error.line}
-        || " of "
-        || to_text{from: error.path}
-        || " gives `"
-        || error.attribute
-        || "` "
-        || error.value
-        || ", which isn't a value of `"
-        || error.type
-        || "`: it breaks the constraint `"
-        || error.constraint
-        || "`"
-];
-
-/* The record on the line `line` of the CSV file at `path` gives
-   `attribute`, or a component, as `columns` names it, a value of `type`
-   whose component `component`, a relation, has two tuples, `first` and
-   `second`, written as `debug_value` writes them, that share their values
-   for its key of the attributes `key`, separated by commas, which a key
-   of none allows at most one tuple (R0008). */
-type component_key_violated_in_file is error {
-    {
-        path: text,
-        line: integer,
-        attribute: text,
-        type: text,
-        component: text,
-        key: text,
-        first: text,
-        second: text,
-    },
-};
-
-operator message{error: component_key_violated_in_file}: text [
-    var tuples := if error.key = ""
-        then "its `" || error.component || "` has two tuples, but its key {} allows at most one"
-        else "two tuples of its `"
-            || error.component
-            || "` have the same values for its key { "
-            || error.key
-            || " }";
-    "line "
-        || to_text{from: error.line}
-        || " of "
-        || to_text{from: error.path}
-        || " gives `"
-        || error.attribute
-        || "` a value of `"
-        || error.type
-        || "` in which "
-        || tuples
-        || ": "
-        || error.first
-        || " and "
-        || error.second
-];
-
-/* The record on the line `line` of the CSV file at `path` gives
-   `attribute`, or a component, as `columns` names it, `value`, written as
-   `debug_value` writes it, which is of both of the subtypes `first` and
-   `second` of its type defined by constraints, but a value has one most
-   specific type (R0020). */
-type overlapping_subtypes_in_file is error {
-    { path: text, line: integer, attribute: text, value: text, first: text, second: text },
-};
-
-operator message{error: overlapping_subtypes_in_file}: text [
-    "line "
-        || to_text{from: error.line}
-        || " of "
-        || to_text{from: error.path}
-        || " gives `"
-        || error.attribute
-        || "` "
-        || error.value
-        || ", which is of both `"
-        || error.first
-        || "` and `"
-        || error.second
-        || "`, but a value has one most specific type"
 ];
 ```
 
@@ -1939,10 +1670,311 @@ var people := parse_integer{from: "8.4e6"};
 operator main{} [];
 ```
 
+### Reading files
+
+Reading a file is the work of `trendy.files`, a unit that comes with the
+compiler, which a unit uses as it does any other, `uses { trendy.files
+};`. Its interface declares the operators that read files, which the
+compiler implements, as the prelude's built-ins are, and the errors only
+reading a file gives, each a subtype of the prelude's `error`; its
+implementation gives their messages. It is a unit of every program, so
+its names are as any unit's: a unit can declare a `malformed_csv` of its
+own, and the program then calls each by its unit's name,
+`trendy.files::malformed_csv` (see [Units](#units)). Calling one of its
+operators, or naming one of its errors, in a unit that doesn't use it is
+an error whose fix uses it (A0015, A0003).
+
+```
+/* Reading files: the lines of a text file, and the records of a CSV
+   file, each read when the program runs, so by an update operator, with
+   the errors only reading a file gives. A unit that reads one uses it,
+   `uses { trendy.files };`. */
+interface
+
+/* Read the lines of the text file at `path` into `lines`, in the file's
+   order, so that its first line is the array's element 1. `path` is
+   relative to the directory the program runs in, unless it is absolute.
+   A line ends at a line feed, or a carriage return and a line feed,
+   which aren't part of it; the last needs neither. Each call reads the
+   file as it is when the program runs: the compiler never opens it, so
+   it needn't exist until then, and two calls can read different lines,
+   so it is an update operator, which `call` invokes. A file that can't
+   be read fails (R0012), as does one that isn't UTF-8 text (R0013). */
+builtin operator load_text_file{path: text, out lines: array text};
+
+/* Read the lines of the text file at `path` into `lines`, as the other
+   `load_text_file` does, but rather than stopping the program for a file
+   that can't be read, or isn't UTF-8 text, give no lines, and its error,
+   an `unreadable_file` or a `not_utf8`, in `errors`, which is empty when
+   the file is read. */
+builtin operator load_text_file{
+    path: text,
+    out lines: array text,
+    out errors: relation { error: error },
+};
+
+/* Read the records of the CSV file at `path` into `rows`, in the file's
+   order, each a tuple whose attributes are the fields in the columns
+   `columns` gives them: it has the tuples' attributes, each the position
+   of its column, counting from 1, as `tuple { city: 1, people: 3 }`
+   reads `city` from the first column and `people` from the third. A
+   file's columns have an order and no names, so the call names them.
+   Columns it doesn't name are skipped. With `header`, the file's first
+   record is a header, which is skipped too. Each attribute is text, an
+   integer, an approximate number or a boolean, read from its field as
+   `parse_integer`, `parse_approximate` and `parse_boolean` read them,
+   and text as it is, or a value of a type of the program's own whose
+   components are, in one of its possible representations, which
+   `columns` gives a tuple of their columns, as
+   `tuple { name: 1, at: tuple { latitude: 2, longitude: 3 } }` does, and
+   which is selected from them, so that one whose components break its
+   type's constraints fails (R0017). The file is CSV as RFC 4180 has it:
+   fields separated by commas, records by line ends, as for
+   `load_text_file`, and a field with a comma, a quote or a line end in
+   quotes, each quote in it doubled. Empty lines are skipped. A file that can't be read
+   fails (R0012), as does one that isn't UTF-8 text (R0013), or isn't
+   CSV (R0015), or hasn't a column `columns` gives, which two attributes
+   can't share (R0016), or that has a field its attribute's type can't
+   read (R0014). */
+builtin operator load_csv{path: text, header: boolean, columns: C, out rows: array T}
+    types { C: any tuple, T: any tuple };
+
+/* Read the records of the CSV file at `path` into `rows`, as the other
+   `load_csv` does, but rather than stopping the program for a file it
+   can't read, give no rows, and its error in `errors`, and for a record it
+   can't, skip it, giving its error there: an `unreadable_file`, a
+   `not_utf8`, a `malformed_csv`, a `missing_column` or an
+   `unreadable_field`, or, for a value that breaks its type's constraints,
+   or its components' keys, or is of two of its subtypes, a
+   `broken_constraint_in_file`, a `component_key_violated_in_file` or an
+   `overlapping_subtypes_in_file`. A quoted field that isn't closed ends
+   the records read. `errors` is empty when every record is read. */
+builtin operator load_csv{
+    path: text,
+    header: boolean,
+    columns: C,
+    out rows: array T,
+    out errors: relation { error: error },
+}
+    types { C: any tuple, T: any tuple };
+
+/* The file at `path` can't be read, for `reason`, the system's words for
+   why, as "No such file or directory" (R0012). */
+type unreadable_file is error { { path: text, reason: text } };
+
+/* The file at `path` isn't UTF-8 text, from the line `line` on (R0013). */
+type not_utf8 is error { { path: text, line: integer } };
+
+/* The CSV file at `path` isn't CSV on the line `line`, as `problem` says
+   (R0015). */
+type malformed_csv is error { { path: text, line: integer, problem: text } };
+
+/* `attribute`, or a component, as `columns` names it, is read from the
+   column `column`, counting from 1, but the CSV file at `path` has
+   `columns` columns (R0016). */
+type missing_column is error { { path: text, attribute: text, column: integer, columns: integer } };
+
+/* `first` and `second`, attributes, or components, as `columns` names
+   them, are both read from the column `column`, but each needs a column
+   of its own (R0016). */
+type column_shared is error { { first: text, second: text, column: integer } };
+
+/* `attribute`, or a component, as `columns` names it, is read from the
+   column `column`, below 1, but columns count from 1 (R0016). */
+type column_below_one is error { { attribute: text, column: integer } };
+
+/* The field `text`, in the column `column`, counting from 1, on the line
+   `line` of the CSV file at `path`, isn't a value of `type`, the type of
+   `attribute`, or a component, as `columns` names it, or is one out of its
+   range if `out_of_range` (R0014). */
+type unreadable_field is error {
+    {
+        path: text,
+        line: integer,
+        column: integer,
+        attribute: text,
+        type: text,
+        text: text,
+        out_of_range: boolean,
+    },
+};
+
+/* The record on the line `line` of the CSV file at `path` gives
+   `attribute`, or a component, as `columns` names it, `value`, written as
+   `debug_value` writes it, which isn't a value of `type`: it breaks the
+   constraint `constraint` (R0017). */
+type broken_constraint_in_file is error {
+    { path: text, line: integer, attribute: text, value: text, type: text, constraint: text },
+};
+
+/* The record on the line `line` of the CSV file at `path` gives
+   `attribute`, or a component, as `columns` names it, a value of `type`
+   whose component `component`, a relation, has two tuples, `first` and
+   `second`, written as `debug_value` writes them, that share their values
+   for its key of the attributes `key`, separated by commas, which a key
+   of none allows at most one tuple (R0008). */
+type component_key_violated_in_file is error {
+    {
+        path: text,
+        line: integer,
+        attribute: text,
+        type: text,
+        component: text,
+        key: text,
+        first: text,
+        second: text,
+    },
+};
+
+/* The record on the line `line` of the CSV file at `path` gives
+   `attribute`, or a component, as `columns` names it, `value`, written as
+   `debug_value` writes it, which is of both of the subtypes `first` and
+   `second` of its type defined by constraints, but a value has one most
+   specific type (R0020). */
+type overlapping_subtypes_in_file is error {
+    { path: text, line: integer, attribute: text, value: text, first: text, second: text },
+};
+
+implementation
+
+operator message{error: unreadable_file}: text [
+    "can't read " || to_text{from: error.path} || ": " || error.reason
+];
+
+operator message{error: not_utf8}: text [
+    "line "
+        || to_text{from: error.line}
+        || " of "
+        || to_text{from: error.path}
+        || " isn't UTF-8 text"
+];
+
+operator message{error: malformed_csv}: text [
+    "line "
+        || to_text{from: error.line}
+        || " of "
+        || to_text{from: error.path}
+        || " "
+        || error.problem
+];
+
+operator message{error: missing_column}: text [
+    var columns := if error.columns = 1 then " column" else " columns";
+    "`"
+        || error.attribute
+        || "` is read from column "
+        || to_text{from: error.column}
+        || ", but "
+        || to_text{from: error.path}
+        || " has "
+        || to_text{from: error.columns}
+        || columns
+];
+
+operator message{error: column_shared}: text [
+    "`"
+        || error.first
+        || "` and `"
+        || error.second
+        || "` are both read from column "
+        || to_text{from: error.column}
+];
+
+operator message{error: column_below_one}: text [
+    "`"
+        || error.attribute
+        || "` is read from column "
+        || to_text{from: error.column}
+        || ", but columns count from 1"
+];
+
+operator message{error: unreadable_field}: text [
+    var a := if error.type = "integer"
+        then "an integer"
+        else if error.type = "approximate"
+        then "an approximate number"
+        else "a boolean";
+    var why := if error.out_of_range then " is out of " || a || "'s range" else " isn't " || a;
+    /* With a header, line 1 is no record's. */
+    var header := if error.line = 1 then "; if line 1 is a header, `header: true` skips it" else "";
+    to_text{from: error.text}
+        || ", in column "
+        || to_text{from: error.column}
+        || " on line "
+        || to_text{from: error.line}
+        || " of "
+        || to_text{from: error.path}
+        || ","
+        || why
+        || ", the type of `"
+        || error.attribute
+        || "`"
+        || header
+];
+
+operator message{error: broken_constraint_in_file}: text [
+    "line "
+        || to_text{from: error.line}
+        || " of "
+        || to_text{from: error.path}
+        || " gives `"
+        || error.attribute
+        || "` "
+        || error.value
+        || ", which isn't a value of `"
+        || error.type
+        || "`: it breaks the constraint `"
+        || error.constraint
+        || "`"
+];
+
+operator message{error: component_key_violated_in_file}: text [
+    var tuples := if error.key = ""
+        then "its `" || error.component || "` has two tuples, but its key {} allows at most one"
+        else "two tuples of its `"
+            || error.component
+            || "` have the same values for its key { "
+            || error.key
+            || " }";
+    "line "
+        || to_text{from: error.line}
+        || " of "
+        || to_text{from: error.path}
+        || " gives `"
+        || error.attribute
+        || "` a value of `"
+        || error.type
+        || "` in which "
+        || tuples
+        || ": "
+        || error.first
+        || " and "
+        || error.second
+];
+
+operator message{error: overlapping_subtypes_in_file}: text [
+    "line "
+        || to_text{from: error.line}
+        || " of "
+        || to_text{from: error.path}
+        || " gives `"
+        || error.attribute
+        || "` "
+        || error.value
+        || ", which is of both `"
+        || error.first
+        || "` and `"
+        || error.second
+        || "`, but a value has one most specific type"
+];
+```
+
 **`load_text_file{path: text, out lines: array text}`** reads input: the
 lines of a text file, into the variable its call gives `lines`.
 
 ```trendy
+uses { trendy.files };
+
 operator main{} [
     var lines: array text;
     call load_text_file{path: "rivers.txt", out lines: lines};
@@ -1984,11 +2016,13 @@ operator main{} [
 - **Unless the call names `out errors`,** a `relation { error: error }`:
   then such a file gives no lines, and its error in `errors`, which is
   empty when the file is read. The error is an `unreadable_file{path,
-  reason}` or a `not_utf8{path, line}`, values of the prelude's subtypes
-  of `error` (see [Failures](#failures)), which the program can test and
-  read, write the message of, or fail with.
+  reason}` or a `not_utf8{path, line}`, values of `trendy.files`'s
+  subtypes of `error` (see [Failures](#failures)), which the program can
+  test and read, write the message of, or fail with.
 
 ```trendy
+uses { trendy.files };
+
 operator count_lines{path: text} [
     var lines: array text;
     var errors: relation { error: error };
@@ -2006,12 +2040,16 @@ operator main{} [
 ```
 
 ```trendy,error
+uses { trendy.files };
+
 operator main{} [
     var lines := load_text_file{path: "rivers.txt"};
 ];
 ```
 
 ```trendy,error
+uses { trendy.files };
+
 var lines := load_text_file{path: "rivers.txt"};
 
 operator main{} [];
@@ -2023,6 +2061,8 @@ variable its call gives `rows`, each a tuple of the columns `columns` gives
 its attributes.
 
 ```trendy
+uses { trendy.files };
+
 heading city := { name: text, people: integer, km2: approximate, capital: boolean };
 
 operator main{} [
@@ -2114,6 +2154,8 @@ operator main{} [
   file's, so they still stop the program.
 
 ```trendy
+uses { trendy.files };
+
 operator load_cities{path: text} [
     var rows: array tuple { city: text, people: integer };
     var errors: relation { error: error };
@@ -2134,6 +2176,8 @@ operator main{} [
 ```
 
 ```trendy,error
+uses { trendy.files };
+
 operator main{} [
     var rows: array tuple { city: text, people: integer };
     call load_csv{
@@ -3929,6 +3973,8 @@ Tutorial D's `LOAD r FROM a` is of its `LOAD a FROM r` (chapter 5), so
 lines order [asc n] remove {n};` give each other back.
 
 ```trendy
+uses { trendy.files };
+
 operator main{} [
     var texts: array text;
     call load_text_file{path: "rivers.txt", out lines: texts};
@@ -5600,7 +5646,8 @@ operator main{} [
   the message the failure writes: the failure fails with its error, which
   a transaction takes, as it takes a `fail`'s, and the program writes
   with its message and code if nothing does. A built-in that reads input gives the world's errors as
-  values instead, when its call names `out errors`: `unreadable_file {
+  values instead, when its call names `out errors`, which `trendy.files`
+  declares with it (see [Reading files](#reading-files)): `unreadable_file {
   path, reason }` (R0012) and `not_utf8 { path, line }` (R0013), from
   `load_text_file` and `load_csv`, and from `load_csv` `malformed_csv {
   path, line, problem }` (R0015), `missing_column { path, attribute,

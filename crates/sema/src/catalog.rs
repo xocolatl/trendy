@@ -70,9 +70,7 @@ pub(crate) fn check(
     databases: &databases::Checked,
     errors: &mut Vec<Diagnostic>,
 ) {
-    let Some(file) = files.catalog() else {
-        return;
-    };
+    let file = files.catalog();
     let Some(ident) = file
         .databases()
         .next()

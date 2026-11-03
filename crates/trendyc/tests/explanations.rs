@@ -13,8 +13,6 @@ use trendy_diag::{Code, Diagnostic};
 /// Every error in `source`, as the compiler would report it, as the main
 /// unit of a program with `units`, each a unit's name and its file's text.
 fn errors(source: &str, units: &[(String, String)]) -> Vec<Diagnostic> {
-    let prelude_source = trendy_prelude::SOURCE;
-    let prelude = trendy_parser::parse(prelude_source, trendy_lexer::lex(prelude_source));
     let parse = trendy_parser::parse(source, trendy_lexer::lex(source));
     if !parse.errors.is_empty() {
         return parse.errors;
@@ -41,20 +39,15 @@ fn errors(source: &str, units: &[(String, String)]) -> Vec<Diagnostic> {
             .iter()
             .map(|(name, path, tree)| trendy_sema::File { name, path, tree }),
     );
-    let catalog = trendy_prelude::catalog::SOURCE;
-    let catalog = trendy_parser::parse(catalog, trendy_lexer::lex(catalog));
-    let library = trendy_sema::Library {
-        prelude: trendy_sema::File {
-            name: trendy_prelude::NAME,
-            path: trendy_prelude::PATH,
-            tree: &prelude.tree,
-        },
-        catalog: trendy_sema::File {
-            name: trendy_prelude::catalog::NAME,
-            path: trendy_prelude::catalog::PATH,
-            tree: &catalog.tree,
-        },
-    };
+    let library = trendy_load::library();
+    let library: Vec<trendy_sema::File> = library
+        .iter()
+        .map(|unit| trendy_sema::File {
+            name: &unit.name,
+            path: &unit.path,
+            tree: &unit.parse.tree,
+        })
+        .collect();
     trendy_sema::analyze(&files, &library)
         .err()
         .unwrap_or_default()
@@ -181,25 +174,18 @@ fn language_reference_examples_behave_as_documented() {
 }
 
 #[test]
-fn language_reference_shows_the_catalog_as_it_is() {
+fn language_reference_shows_the_units_that_come_with_the_compiler_as_they_are() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/language.md");
     let reference = std::fs::read_to_string(path).unwrap();
-    assert!(
-        code_blocks(&reference)
-            .iter()
-            .any(|(info, source)| info.is_empty() && source == trendy_prelude::catalog::SOURCE),
-        "docs/language.md's copy of the catalog differs from crates/prelude/src/catalog.trendy"
-    );
-}
-
-#[test]
-fn language_reference_shows_the_prelude_as_it_is() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/language.md");
-    let reference = std::fs::read_to_string(path).unwrap();
-    assert!(
-        code_blocks(&reference)
-            .iter()
-            .any(|(info, source)| info.is_empty() && source == trendy_prelude::SOURCE),
-        "docs/language.md's copy of the prelude differs from crates/prelude/src/prelude.trendy"
-    );
+    let blocks = code_blocks(&reference);
+    for unit in trendy_prelude::UNITS {
+        assert!(
+            blocks
+                .iter()
+                .any(|(info, source)| info.is_empty() && source == unit.source),
+            "docs/language.md's copy of `{}` differs from {}",
+            unit.name,
+            unit.source_path
+        );
+    }
 }
