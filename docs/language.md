@@ -165,13 +165,21 @@ operator main{} [];
 
 ### Using other units
 
-A section names the units it uses with `uses`. For the unit
-`lakes/depths.trendy`:
+A section names the units it uses with `uses`, and sees every name their
+interfaces declare. For the unit `lakes/depths.trendy`:
 
 ```trendy,unit lakes.depths
 interface
 
-heading lake := { name: text, depth: integer };
+heading lake := { name: text, native: text, depth: integer };
+
+operator deepest{lakes: relation lake}: relation lake;
+
+implementation
+
+operator deepest{lakes: relation lake}: relation lake [
+    lakes where depth = max{r: lakes, of: depth}
+];
 ```
 
 a program uses it so:
@@ -179,8 +187,34 @@ a program uses it so:
 ```trendy
 uses { lakes.depths as depths };
 
-operator main{} [];
+var lakes := relation lake {
+    { name: "Baikal", native: "Байкал", depth: 1642 },
+    { name: "Tanganyika", native: "Tanganyika", depth: 1470 },
+};
+
+operator main{} [
+    call debug_table{r: deepest{lakes: lakes}};
+];
 ```
+
+- **It brings what the unit's interface declares:** its types, with their
+  possible representations, its headings, its operators and its
+  databases, each by its name, as the unit's own are. What the
+  implementation keeps, the program doesn't see.
+- **Nothing passes on:** what a unit uses is its own, so the units that
+  use it see none of it, and use what they need themselves.
+- **The interface sees only its own `uses`,** as each unit that uses this
+  one sees what the interface declares, which must say where what it
+  mentions comes from; the implementation sees both sections' (A0067). A
+  type or a heading the interface mentions from a unit only the
+  implementation uses is fixed by using that unit in the interface
+  instead.
+- **A clash is where the name is written** (A0073): a name more than one
+  of the units it sees declares, the unit's own among them, means none of
+  them, as nothing settles which by order. A unit that never writes it
+  compiles, so a unit that gains a declaration breaks only the units that
+  write its name. Operators of one name whose parameters' names differ are
+  overloads, and don't clash.
 
 - **First in its section, once** (A0071): the interface and the
   implementation each have their own, so that what their declarations see

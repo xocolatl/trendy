@@ -249,8 +249,14 @@ impl Statements<'_, '_> {
     /// the program's variables, which the operator may assign.
     fn assigned(&self, assigns: &narrowed::Assigns) -> BTreeMap<String, Span> {
         let signature = self.cx.operators.get(self.within);
+        // The variables its body sees.
+        let body = signature
+            .decl
+            .as_ref()
+            .map(AstNode::span)
+            .expect("an operator with a body is declared with it");
         let global = |name: &str| {
-            self.cx.declared.seen(name, signature.unit).is_some()
+            self.cx.declared.find(name, body).is_some()
                 && !signature.is_parameter(name)
                 && self.locals.find(name).is_none()
         };
@@ -712,6 +718,7 @@ impl Statements<'_, '_> {
                         name,
                         &tied,
                         Written::Arguments(args),
+                        cx.namespaces.units(),
                     ));
                 }
                 return None;

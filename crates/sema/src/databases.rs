@@ -17,7 +17,7 @@ use crate::constraints::{self, PartNames};
 use crate::locals::Locals;
 use crate::operators::Operators;
 use crate::types::{self, Expected, Origin};
-use crate::{Files, Kind, Namespaces, errors, keys, ops, sections};
+use crate::{Files, Kind, Namespace, Namespaces, errors, keys, ops, sections};
 
 /// Every database's relvars and constraints, checked.
 pub(crate) struct Checked {
@@ -172,7 +172,10 @@ fn known_database(
     let span = trendy_syntax::span(ident.text_range());
     let Some(identity) = cx.namespaces.database_named(name, span) else {
         let candidates: Vec<&str> = cx.namespaces.database_names(span).collect();
-        errors.push(errors::unknown_name(name, span, "database", &candidates));
+        errors.push(
+            errors::name_clash(name, span, Namespace::Value, cx.namespaces)
+                .unwrap_or_else(|| errors::unknown_name(name, span, "database", &candidates)),
+        );
         return None;
     };
     Some(Database {

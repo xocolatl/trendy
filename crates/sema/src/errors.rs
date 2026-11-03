@@ -16,7 +16,7 @@ use crate::globals::{Global, Pending};
 use crate::named_types::Named;
 use crate::operators::{Chosen, Operators, Signature};
 use crate::types::{Origin, TypeParameters};
-use crate::{Kind, Namespaces};
+use crate::{Kind, Namespace, Namespaces, scope, sections};
 
 /// Type names from other languages, and the built-in type each one means.
 const TYPE_ALIASES: &[(&str, hir::Scalar)] = &[
@@ -363,6 +363,11 @@ pub(crate) fn unknown_type(
 ) -> Diagnostic {
     let name = ident.text();
     let span = trendy_syntax::span(ident.text_range());
+    if let Some(d) = name_clash(name, span, Namespace::Type, namespaces)
+        .or_else(|| implementation_uses(ident, namespaces))
+    {
+        return d;
+    }
     let builtins: Vec<_> = hir::Scalar::ALL
         .iter()
         .map(|t| format!("`{}`", t.name()))
@@ -501,6 +506,11 @@ pub(crate) fn tuple_of_type(
 pub(crate) fn unknown_heading(ident: &SyntaxToken, namespaces: &Namespaces) -> Diagnostic {
     let name = ident.text();
     let span = trendy_syntax::span(ident.text_range());
+    if let Some(d) = name_clash(name, span, Namespace::Type, namespaces)
+        .or_else(|| implementation_uses(ident, namespaces))
+    {
+        return d;
+    }
     let d = Diagnostic::error(
         Code::UnknownType,
         format!("unknown heading `{name}`"),
@@ -8202,8 +8212,18 @@ pub(crate) fn shared_column(
 const OVERLOADS: &str = "operators of one name are told apart by their parameters' names, which a call names its arguments with, so it calls the one whose parameters they name";
 
 /// A call of `name`, with the arguments `written`, whose names name the
-/// parameters of none of its operators, and of `tied` equally nearly.
-pub(crate) fn unchosen_operator(name: &str, tied: &[&Signature], written: Written) -> Diagnostic {
+/// parameters of none of its operators, and of `tied` equally nearly, of
+/// the units of `units`: of several units', each with the same
+/// parameters' names, a clash.
+pub(crate) fn unchosen_operator(
+    name: &str,
+    tied: &[&Signature],
+    written: Written,
+    units: &scope::Units,
+) -> Diagnostic {
+    if let Some(d) = operator_clash(name, tied, written, units) {
+        return d;
+    }
     let span = match written {
         Written::Arguments(args) => args.span(),
         Written::Nothing(list) => list.span(),
@@ -8243,6 +8263,116 @@ fn heading_text(decl: &ast::Operator) -> String {
         |body| usize::from(body.syntax().text_range().start()) - start,
     );
     text[..end].trim_end().to_string()
+}
+
+/// What a unit sees, for the notes of a clash.
+const SEEN: &str = "a name a unit writes means one declaration it sees: one of its own, one of the prelude's, or one of the interface of a unit its section uses; a name more than one of those units declares means none of them, as nothing settles which by order";
+
+/// The name `name`, written at `span`, if what is written there sees it
+/// in `namespace` declared by more than one unit: a clash.
+pub(crate) fn name_clash(
+    name: &str,
+    span: Span,
+    namespace: Namespace,
+    namespaces: &Namespaces,
+) -> Option<Diagnostic> {
+    let declared = namespaces.clash(name, span, namespace)?;
+    let here = namespaces.units().name(namespaces.unit_at(span));
+    Some(clash(name, span, here, &declared))
+}
+
+/// The name `name`, written at `span`, in the unit `here`, which each of
+/// `declared`, with its unit's name, declares, more than one unit.
+pub(crate) fn clash(name: &str, span: Span, here: &str, declared: &[(&str, Span)]) -> Diagnostic {
+    let others: Vec<String> = declared
+        .iter()
+        .filter(|(unit, _)| *unit != here)
+        .map(|(unit, _)| format!("`{unit}`"))
+        .collect();
+    let message = if declared.iter().any(|(unit, _)| *unit == here) {
+        format!(
+            "`{name}` is declared by this unit and by {}, which it uses",
+            trendy_diag::conjoin(&others)
+        )
+    } else {
+        format!(
+            "`{name}` is declared by {}, which this unit uses",
+            trendy_diag::conjoin(&others)
+        )
+    };
+    let mut d = Diagnostic::error(
+        Code::NameClash,
+        message,
+        span,
+        "declared by more than one unit",
+    );
+    for (unit, at) in declared {
+        d = d.with_secondary(*at, format!("`{name}` in `{unit}`"));
+    }
+    d.with_note(SEEN)
+        .with_help("rename one of the declarations, or use only one of the units here")
+}
+
+/// The operator `name`, of each of `tied`, more than one unit's, all with
+/// the same parameters' names, which a call's arguments, `written`, name:
+/// a clash, of the units of `units`.
+pub(crate) fn operator_clash(
+    name: &str,
+    tied: &[&Signature],
+    written: Written,
+    units: &scope::Units,
+) -> Option<Diagnostic> {
+    let first = tied.first()?;
+    let same = tied
+        .iter()
+        .all(|s| s.written.keys().eq(first.written.keys()));
+    let several: BTreeSet<hir::FileId> = tied.iter().map(|s| s.unit).collect();
+    if !same || several.len() < 2 {
+        return None;
+    }
+    let span = written.span();
+    let here = units.name(units.at(span));
+    let declared: Vec<(&str, Span)> = tied
+        .iter()
+        .filter_map(|s| Some((units.name(s.unit), s.defined()?)))
+        .collect();
+    // Selectors are their types', which clash as types; another
+    // operator is written as the catalog keys it: its name, and its
+    // parameters' names.
+    let params: Vec<&str> = first.written.keys().map(String::as_str).collect();
+    let shown = if tied.iter().all(|s| s.selects().is_some()) {
+        name.to_string()
+    } else {
+        format!("{name}{{{}}}", params.join(", "))
+    };
+    Some(clash(&shown, span, here, &declared))
+}
+
+/// The type or heading `ident` names, in an interface, which the interface
+/// doesn't see, but its implementation does, through a unit only the
+/// implementation uses. The fix uses the unit in the interface instead.
+pub(crate) fn implementation_uses(
+    ident: &SyntaxToken,
+    namespaces: &Namespaces,
+) -> Option<Diagnostic> {
+    let name = ident.text();
+    let span = trendy_syntax::span(ident.text_range());
+    let unit = namespaces.used_by_implementation(name, span)?;
+    let d = Diagnostic::error(
+        Code::InterfaceDeclaration,
+        format!("`{name}` comes from `{unit}`, which only the implementation uses"),
+        span,
+        "not what the interface sees",
+    )
+    .with_note(SECTIONS_RULE)
+    .with_note("the interface sees only its own `uses`, as each unit that uses this one sees what the interface declares, which must say what it mentions; the implementation sees both sections' `uses`");
+    let file = ident.parent_ancestors().find_map(SourceFile::cast)?;
+    let moved = sections::into_interface_uses(&file, unit);
+    Some(if moved.is_empty() {
+        d.with_help(format!("use `{unit}` in the interface's `uses`"))
+    } else {
+        d.with_suggestion(format!("use `{unit}` in the interface"), moved)
+    })
 }
 
 /// The unit `name`, which a `uses` names at `span`, which isn't one of the

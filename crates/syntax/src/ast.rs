@@ -171,6 +171,21 @@ impl Item {
             .or_else(|| ConstraintDecl::cast(node.clone()).map(Item::Constraint))
             .or_else(|| DatabaseDecl::cast(node).map(Item::Database))
     }
+
+    #[must_use]
+    pub fn syntax(&self) -> &SyntaxNode {
+        match self {
+            Item::Operator(op) => op.syntax(),
+            Item::Builtin(decl) => decl.syntax(),
+            Item::BuiltinType(decl) => decl.syntax(),
+            Item::Kind(decl) => decl.syntax(),
+            Item::Heading(decl) => decl.syntax(),
+            Item::Type(decl) => decl.syntax(),
+            Item::Variable(decl) | Item::Relvar(decl) => decl.syntax(),
+            Item::Constraint(decl) => decl.syntax(),
+            Item::Database(decl) => decl.syntax(),
+        }
+    }
 }
 
 impl Program {

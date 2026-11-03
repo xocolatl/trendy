@@ -159,12 +159,12 @@ impl Files {
             .collect();
         let trees: Vec<SourceFile> = all.iter().map(|file| file.tree.clone()).collect();
         let mut files: Vec<SourceFile> = ast::Program::new(&trees).files().collect();
-        let names = scope::Units::new(
-            all.iter()
-                .zip(&files)
-                .map(|(file, tree)| (file.name.to_string(), tree.span().end))
-                .collect(),
-        );
+        let unit_files: Vec<(&str, &SourceFile)> = all
+            .iter()
+            .zip(&files)
+            .map(|(file, tree)| (file.name, tree))
+            .collect();
+        let names = scope::Units::new(&unit_files);
         let prelude = files.pop().expect("a program has the files it is made of");
         Files {
             prelude,
@@ -409,7 +409,11 @@ fn entry(
     operators: &Operators,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<hir::OperatorId> {
-    let mains: Vec<&operators::Signature> = operators.overloads("main", file.span()).collect();
+    // The main unit's own, not another's it sees.
+    let mains: Vec<&operators::Signature> = operators
+        .overloads("main", file.span())
+        .filter(|s| s.unit == namespaces.unit_at(file.span()))
+        .collect();
     let main = mains
         .iter()
         .find(|s| s.written.is_empty())
@@ -638,18 +642,24 @@ impl Namespaces {
         }
     }
 
-    /// The first operator named `name` that the unit `at` is in sees:
+    /// Who sees what is written at `at`: its unit, and its section.
+    fn viewer(&self, at: Span) -> scope::Viewer {
+        self.units.viewer(at)
+    }
+
+    /// The first operator named `name` that what is written at `at` sees:
     /// whether it is built in, and where it is defined.
     pub(crate) fn operator(&self, name: &str, at: Span) -> Option<(Kind, Span)> {
         let (_, first) = self
             .operators
-            .visible(name, self.unit_at(at), &self.units)?;
+            .each_visible(name, self.viewer(at), &self.units)
+            .next()?;
         Some((first.kind, first.span))
     }
 
     /// The first operator named `name` whose parameters are named
-    /// `params` that the unit `at` is in sees: whether it is built in, and
-    /// where it is defined.
+    /// `params` that what is written at `at` sees: whether it is built in,
+    /// and where it is defined.
     pub(crate) fn operator_with(
         &self,
         name: &str,
@@ -658,7 +668,7 @@ impl Namespaces {
     ) -> Option<(Kind, Span)> {
         let (_, first) = self
             .operators
-            .each_visible(name, self.unit_at(at), &self.units)
+            .each_visible(name, self.viewer(at), &self.units)
             .find(|(_, d)| d.params == *params)?;
         Some((first.kind, first.span))
     }
@@ -681,12 +691,89 @@ impl Namespaces {
         self.units.identity(name, unit, ambiguous)
     }
 
-    /// Where the variable named `name` that the unit `at` is in sees is
-    /// declared: its own.
+    /// What `name`, written at `at`, means in `namespace`, of the
+    /// declarations seen there: what kind of thing it is, and where it is
+    /// declared.
+    fn seen(&self, name: &str, at: Span, namespace: Namespace) -> scope::Seen<(Kind, Span)> {
+        let viewer = self.viewer(at);
+        let of = |table: &scope::Declared<Span>, kind: Kind| {
+            table
+                .candidates(name, viewer, &self.units)
+                .map(move |&span| (kind, span))
+        };
+        match namespace {
+            Namespace::Value => of(&self.variables, Kind::Variable)
+                .merged(of(&self.databases, Kind::Database))
+                .resolved(),
+            Namespace::Type => of(&self.types, Kind::Defined)
+                .merged(of(&self.headings, Kind::Heading))
+                .resolved(),
+        }
+    }
+
+    /// What `name`, written at `at`, means in `namespace`, if it is a
+    /// declaration of `kind`'s: its unit, and where it is declared.
+    fn seen_as(
+        &self,
+        name: &str,
+        at: Span,
+        namespace: Namespace,
+        kind: Kind,
+    ) -> Option<(hir::FileId, Span)> {
+        match self.seen(name, at, namespace).one()? {
+            (unit, (found, span)) if found == kind => Some((unit, span)),
+            _ => None,
+        }
+    }
+
+    /// The declarations of `name` that what is written at `at` sees in
+    /// `namespace` from several units, if it does, a clash: each with its
+    /// unit's name, and where it is declared.
+    pub(crate) fn clash(
+        &self,
+        name: &str,
+        at: Span,
+        namespace: Namespace,
+    ) -> Option<Vec<(&str, Span)>> {
+        match self.seen(name, at, namespace) {
+            scope::Seen::Clash(declared) => Some(
+                declared
+                    .into_iter()
+                    .map(|(unit, (_, span))| (self.units.name(unit), span))
+                    .collect(),
+            ),
+            scope::Seen::Nothing | scope::Seen::One(..) => None,
+        }
+    }
+
+    /// The unit whose interface declares the type or heading `name`, which
+    /// an interface, at `at`, doesn't see, but its implementation does,
+    /// through a unit only the implementation uses.
+    pub(crate) fn used_by_implementation(&self, name: &str, at: Span) -> Option<&str> {
+        let viewer = self.viewer(at);
+        if viewer.section != ast::Section::Interface
+            || !matches!(self.seen(name, at, Namespace::Type), scope::Seen::Nothing)
+        {
+            return None;
+        }
+        let implementation = scope::Viewer {
+            section: ast::Section::Implementation,
+            ..viewer
+        };
+        let (unit, _) = self
+            .types
+            .candidates(name, implementation, &self.units)
+            .merged(self.headings.candidates(name, implementation, &self.units))
+            .resolved()
+            .one()?;
+        (unit != viewer.unit && unit != self.units.prelude()).then(|| self.units.name(unit))
+    }
+
+    /// Where the variable named `name` that what is written at `at` sees is
+    /// declared.
     pub(crate) fn variable(&self, name: &str, at: Span) -> Option<Span> {
-        self.variables
-            .visible(name, self.unit_at(at), &self.units)
-            .map(|(_, &span)| span)
+        self.seen_as(name, at, Namespace::Value, Kind::Variable)
+            .map(|(_, span)| span)
     }
 
     /// What a variable or a database named `name`, declared in `unit`, is
@@ -701,35 +788,36 @@ impl Namespaces {
         self.units.identity(name, unit, ambiguous)
     }
 
-    /// Where the database named `name` that the unit `at` is in sees is
+    /// Where the database named `name` that what is written at `at` sees is
     /// declared.
     pub(crate) fn database(&self, name: &str, at: Span) -> Option<Span> {
-        self.databases
-            .visible(name, self.unit_at(at), &self.units)
-            .map(|(_, &span)| span)
+        self.seen_as(name, at, Namespace::Value, Kind::Database)
+            .map(|(_, span)| span)
     }
 
-    /// The identity of the database named `name` that the unit `at` is in
-    /// sees.
+    /// The identity of the database named `name` that what is written at
+    /// `at` sees.
     pub(crate) fn database_named(&self, name: &str, at: Span) -> Option<String> {
-        let (unit, _) = self
-            .databases
-            .visible(name, self.unit_at(at), &self.units)?;
+        let (unit, _) = self.seen_as(name, at, Namespace::Value, Kind::Database)?;
         Some(self.value_identity(name, unit))
     }
 
-    /// The names of the databases the unit `at` is in sees.
+    /// The names of the databases what is written at `at` sees.
     pub(crate) fn database_names(&self, at: Span) -> impl Iterator<Item = &str> {
-        self.databases.names_visible(self.unit_at(at), &self.units)
+        self.databases.names_visible(self.viewer(at), &self.units)
+    }
+
+    /// Whether `ident` is the first declaration of its name in `table`, in
+    /// its unit, not a duplicate.
+    fn is_first_in(&self, table: &scope::Declared<Span>, ident: &SyntaxToken) -> bool {
+        let span = trendy_syntax::span(ident.text_range());
+        table.first_in(ident.text(), self.unit_at(span)) == Some(&span)
     }
 
     /// Whether `ident` is its constraint name's first declaration in its
     /// unit, not a duplicate.
     pub(crate) fn is_first_constraint(&self, ident: &SyntaxToken) -> bool {
-        let span = trendy_syntax::span(ident.text_range());
-        self.constraints
-            .visible(ident.text(), self.unit_at(span), &self.units)
-            .is_some_and(|(_, &first)| first == span)
+        self.is_first_in(&self.constraints, ident)
     }
 
     /// What the constraint named `name`, declared in `unit`, is called in
@@ -742,10 +830,10 @@ impl Namespaces {
         self.units.identity(name, unit, ambiguous)
     }
 
-    /// The heading named `name` that the unit `at` is in sees: where it is
-    /// declared, and its attributes, unless they have errors.
+    /// The heading named `name` that what is written at `at` sees: where
+    /// it is declared, and its attributes, unless they have errors.
     pub(crate) fn heading(&self, name: &str, at: Span) -> Option<(Span, Option<&hir::Heading>)> {
-        let (unit, &span) = self.headings.visible(name, self.unit_at(at), &self.units)?;
+        let (unit, span) = self.seen_as(name, at, Namespace::Type, Kind::Heading)?;
         Some((span, self.attributes.get(&self.type_identity(name, unit))))
     }
 
@@ -755,18 +843,15 @@ impl Namespaces {
         self.attributes.get(identity)
     }
 
-    /// The names of the headings the unit `at` is in sees.
+    /// The names of the headings what is written at `at` sees.
     pub(crate) fn headings(&self, at: Span) -> impl Iterator<Item = &str> {
-        self.headings.names_visible(self.unit_at(at), &self.units)
+        self.headings.names_visible(self.viewer(at), &self.units)
     }
 
     /// Whether `ident` is its heading name's first declaration in its
     /// unit, not a duplicate.
     pub(crate) fn is_first_heading(&self, ident: &SyntaxToken) -> bool {
-        let span = trendy_syntax::span(ident.text_range());
-        self.headings
-            .visible(ident.text(), self.unit_at(span), &self.units)
-            .is_some_and(|(_, &first)| first == span)
+        self.is_first_in(&self.headings, ident)
     }
 
     /// What a type or a heading named `name`, declared in `unit`, is called
@@ -781,17 +866,17 @@ impl Namespaces {
         self.units.identity(name, unit, ambiguous)
     }
 
-    /// The identity of the heading named `name` that the unit `at` is in
-    /// sees.
+    /// The identity of the heading named `name` that what is written at
+    /// `at` sees.
     pub(crate) fn heading_named(&self, name: &str, at: Span) -> Option<String> {
-        let (unit, _) = self.headings.visible(name, self.unit_at(at), &self.units)?;
+        let (unit, _) = self.seen_as(name, at, Namespace::Type, Kind::Heading)?;
         Some(self.type_identity(name, unit))
     }
 
-    /// The identity of the program's own type named `name` that the unit
-    /// `at` is in sees.
+    /// The identity of the program's own type named `name` that what is
+    /// written at `at` sees.
     pub(crate) fn type_named(&self, name: &str, at: Span) -> Option<String> {
-        let (unit, _) = self.types.visible(name, self.unit_at(at), &self.units)?;
+        let (unit, _) = self.seen_as(name, at, Namespace::Type, Kind::Defined)?;
         Some(self.type_identity(name, unit))
     }
 
@@ -806,12 +891,30 @@ impl Namespaces {
             .map(|(_, &span)| span)
     }
 
-    /// The program's own type named `name` that the unit `at` is in sees:
-    /// where it is declared, and the type, unless its components have
+    /// The program's own type named `name` that what is written at `at`
+    /// sees: where it is declared, and the type, unless its components have
     /// errors.
     pub(crate) fn defined(&self, name: &str, at: Span) -> Option<(Span, Option<&hir::Defined>)> {
-        let (unit, &span) = self.types.visible(name, self.unit_at(at), &self.units)?;
+        let (unit, span) = self.seen_as(name, at, Namespace::Type, Kind::Defined)?;
         Some((span, self.defined.get(&self.type_identity(name, unit))))
+    }
+
+    /// The program's own type the name `ident` declares, unless its
+    /// components have errors: its declaration's, whatever else its unit
+    /// sees of that name.
+    pub(crate) fn declared_type(&self, ident: &SyntaxToken) -> Option<&hir::Defined> {
+        let unit = self.unit_at(trendy_syntax::span(ident.text_range()));
+        self.defined.get(&self.type_identity(ident.text(), unit))
+    }
+
+    /// Whether the operators of the name `ident` declares, a type's, in its
+    /// unit, are its selectors, as no other operator of the unit has its
+    /// name.
+    pub(crate) fn selects(&self, ident: &SyntaxToken) -> bool {
+        let unit = self.unit_at(trendy_syntax::span(ident.text_range()));
+        self.operators
+            .first_in(ident.text(), unit)
+            .is_some_and(|d| d.kind == Kind::Selector)
     }
 
     /// The program's own type whose identity is `identity`, as the HIR
@@ -820,11 +923,11 @@ impl Namespaces {
         self.defined.get(identity)
     }
 
-    /// The program's own union type named `name` that the unit `at` is in
-    /// sees, a dummy type, unless it isn't one, or its declaration has
+    /// The program's own union type named `name` that what is written at
+    /// `at` sees, a dummy type, unless it isn't one, or its declaration has
     /// errors.
     pub(crate) fn dummy(&self, name: &str, at: Span) -> Option<&hir::Dummy> {
-        let (unit, _) = self.types.visible(name, self.unit_at(at), &self.units)?;
+        let (unit, _) = self.seen_as(name, at, Namespace::Type, Kind::Defined)?;
         self.dummies.get(&self.type_identity(name, unit))
     }
 
@@ -867,34 +970,60 @@ impl Namespaces {
         self.converted.get(identity).map_or(&[], Vec::as_slice)
     }
 
-    /// The names of the program's own types the unit `at` is in sees.
+    /// The names of the program's own types what is written at `at` sees.
     pub(crate) fn defined_types(&self, at: Span) -> impl Iterator<Item = &str> {
-        self.types.names_visible(self.unit_at(at), &self.units)
+        self.types.names_visible(self.viewer(at), &self.units)
     }
 
     /// Whether `ident` is its type name's first declaration in its unit,
     /// not a duplicate.
     pub(crate) fn is_first_type(&self, ident: &SyntaxToken) -> bool {
-        let span = trendy_syntax::span(ident.text_range());
-        self.types
-            .visible(ident.text(), self.unit_at(span), &self.units)
-            .is_some_and(|(_, &first)| first == span)
+        self.is_first_in(&self.types, ident)
     }
 
-    /// The operators the unit `at` is in sees: each one's name, whether it
-    /// is built in, and where it is defined.
+    /// The operators what is written at `at` sees: each one's name, whether
+    /// it is built in, and where it is defined.
     pub(crate) fn operators(&self, at: Span) -> impl Iterator<Item = (&str, Kind, Span)> {
         self.operators
-            .each_named_visible(self.unit_at(at), &self.units)
+            .each_named_visible(self.viewer(at), &self.units)
             .map(|(name, d)| (name, d.kind, d.span))
     }
 
     /// Whether `ident` is its variable name's first declaration in its
     /// unit, not a duplicate.
     pub(crate) fn is_first_variable(&self, ident: &SyntaxToken) -> bool {
-        let span = trendy_syntax::span(ident.text_range());
-        self.variable(ident.text(), span) == Some(span)
+        self.is_first_in(&self.variables, ident)
     }
+
+    /// The first declaration in `unit`, or else the prelude, of `name` in
+    /// the namespace a declaration of `kind`'s is in, whose duplicate a
+    /// declaration of `unit`'s of that name is: what kind of thing it is,
+    /// and where it is declared.
+    fn declared_before(&self, name: &str, unit: hir::FileId, kind: Kind) -> Option<(Kind, Span)> {
+        let here = |table: &scope::Declared<Span>, kind: Kind| {
+            table
+                .each_own_or_prelude(name, unit, &self.units)
+                .next()
+                .map(|(_, &span)| (kind, span))
+        };
+        match kind {
+            Kind::Variable | Kind::Database => here(&self.variables, Kind::Variable)
+                .or_else(|| here(&self.databases, Kind::Database)),
+            Kind::Constraint => here(&self.constraints, Kind::Constraint),
+            _ => here(&self.headings, Kind::Heading)
+                .or_else(|| here(&self.types, Kind::Defined))
+                .or_else(|| self.builtin_types.get(name).map(|&s| (Kind::Type, s))),
+        }
+    }
+}
+
+/// A namespace that more than one table of declarations shares.
+#[derive(Clone, Copy)]
+pub(crate) enum Namespace {
+    /// The values': variables and databases.
+    Value,
+    /// The types': the program's own types and headings.
+    Type,
 }
 
 /// Record every top-level name in its namespace, the prelude's first,
@@ -939,11 +1068,12 @@ fn collect_names(
         };
         let (name, span) = (ident.text(), trendy_syntax::span(ident.text_range()));
         let unit = namespaces.unit_at(span);
+        let section = ast::section_of(item.syntax());
         if let Some(params) = params {
             let params = param_names(params.as_ref());
             let first = namespaces
                 .operators
-                .each_visible(name, unit, &namespaces.units)
+                .each_own_or_prelude(name, unit, &namespaces.units)
                 .find(|(_, d)| d.params == params)
                 .map(|(_, d)| (d.kind, d.span));
             match first {
@@ -956,47 +1086,32 @@ fn collect_names(
                 // tell, once they are resolved (`operators::signatures`).
                 Some(_) => {}
                 None => {
-                    namespaces
-                        .operators
-                        .insert(name, unit, OperatorName { kind, span, params });
+                    namespaces.operators.insert(
+                        name,
+                        unit,
+                        section,
+                        OperatorName { kind, span, params },
+                    );
                 }
             }
             continue;
         }
-        // A duplicate of a declaration the unit sees: its own, or the
-        // prelude's.
-        let first = match kind {
-            Kind::Variable | Kind::Database => namespaces
-                .variable(name, span)
-                .map(|s| (Kind::Variable, s))
-                .or_else(|| namespaces.database(name, span).map(|s| (Kind::Database, s))),
-            Kind::Constraint => namespaces
-                .constraints
-                .visible(name, unit, &namespaces.units)
-                .map(|(_, &s)| (kind, s)),
-            _ => namespaces
-                .heading(name, span)
-                .map(|(s, _)| (Kind::Heading, s))
-                .or_else(|| {
-                    namespaces
-                        .defined(name, span)
-                        .map(|(s, _)| (Kind::Defined, s))
-                })
-                .or_else(|| namespaces.builtin_types.get(name).map(|&s| (Kind::Type, s))),
-        };
-        if let Some(first) = first {
+        // A duplicate of a declaration of its unit's, or of the
+        // prelude's, which every unit sees: one of another unit's of that
+        // name is a clash only where a unit that sees both writes it.
+        if let Some(first) = namespaces.declared_before(name, unit, kind) {
             errors.push(errors::duplicate_name(name, (kind, span), first));
             continue;
         }
         match kind {
-            Kind::Variable => namespaces.variables.insert(name, unit, span),
-            Kind::Database => namespaces.databases.insert(name, unit, span),
-            Kind::Constraint => namespaces.constraints.insert(name, unit, span),
-            Kind::Defined => namespaces.types.insert(name, unit, span),
+            Kind::Variable => namespaces.variables.insert(name, unit, section, span),
+            Kind::Database => namespaces.databases.insert(name, unit, section, span),
+            Kind::Constraint => namespaces.constraints.insert(name, unit, section, span),
+            Kind::Defined => namespaces.types.insert(name, unit, section, span),
             Kind::Type => {
                 namespaces.builtin_types.insert(name.to_string(), span);
             }
-            _ => namespaces.headings.insert(name, unit, span),
+            _ => namespaces.headings.insert(name, unit, section, span),
         }
     }
     selectors(files, &mut namespaces, errors);
@@ -1032,9 +1147,10 @@ fn selectors(files: &Files, namespaces: &mut Namespaces, errors: &mut Vec<Diagno
         }
         let (name, span) = (ident.text(), trendy_syntax::span(ident.text_range()));
         let unit = namespaces.unit_at(span);
+        let section = ast::section_of(decl.syntax());
         let others: Vec<(Kind, Span)> = namespaces
             .operators
-            .each_visible(name, unit, &namespaces.units)
+            .each_own_or_prelude(name, unit, &namespaces.units)
             .map(|(_, other)| (other.kind, other.span))
             .collect();
         if let Some(&(kind, at)) = others
@@ -1062,6 +1178,7 @@ fn selectors(files: &Files, namespaces: &mut Namespaces, errors: &mut Vec<Diagno
             namespaces.operators.insert(
                 name,
                 unit,
+                section,
                 OperatorName {
                     kind: Kind::Selector,
                     span,
@@ -11413,6 +11530,125 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
         let source =
             "interface\n\nuses { a };\n\nimplementation\n\nuses { b };\n\noperator main{} [];";
         assert!(analyze_units(&[("program", source), ("a", ""), ("b", "")]).is_ok());
+    }
+
+    /// A unit that declares a type, a heading and operators in its
+    /// interface, and an operator its implementation keeps.
+    const DEPTHS: &str = "interface\n\ntype metres { { m: integer } };\n\nheading lake := { name: text, depth: metres };\n\noperator deepest{lakes: relation lake}: relation lake;\n\nimplementation\n\noperator deepest{lakes: relation lake}: relation lake [\n    lakes where depth.m = max{r: lakes, of: depth.m}\n];\n\noperator secret{}: integer [ 1 ];";
+
+    #[test]
+    fn a_unit_sees_the_interfaces_of_the_units_it_uses() {
+        let main = "uses { lakes.depths };\n\nvar l := relation lake { { name: \"Titicaca\", depth: metres{m: 281} } };\nvar d := deepest{lakes: l};\n\noperator main{} [];";
+        let program = analyze_units(&[("program", main), ("lakes.depths", DEPTHS)]).unwrap();
+        assert_eq!(
+            program.variables[1].ty.to_string(),
+            "relation { depth: metres, name: text }"
+        );
+        // Not what its implementation keeps.
+        let errors = analyze_units(&[
+            (
+                "program",
+                "uses { lakes.depths };\n\nvar s := secret{};\n\noperator main{} [];",
+            ),
+            ("lakes.depths", DEPTHS),
+        ])
+        .unwrap_err();
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert!(errors[0].message.contains("`secret`"), "{errors:#?}");
+        // Nor anything, without the `uses`.
+        let errors = analyze_units(&[
+            ("program", "var m := metres{m: 1};\n\noperator main{} [];"),
+            ("lakes.depths", DEPTHS),
+        ])
+        .unwrap_err();
+        assert_eq!(errors[0].code, Code::UnknownName, "{errors:#?}");
+        // What a unit uses is its own: the units that use it don't see it.
+        let between = "interface\n\nuses { lakes.depths };\n\nheading named := { name: text };";
+        let errors = analyze_units(&[
+            (
+                "program",
+                "uses { between };\n\nvar m := metres{m: 1};\n\noperator main{} [];",
+            ),
+            ("between", between),
+            ("lakes.depths", DEPTHS),
+        ])
+        .unwrap_err();
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].code, Code::UnknownName);
+    }
+
+    #[test]
+    fn an_interface_sees_its_own_uses() {
+        // The implementation sees both sections' `uses`, the interface only
+        // its own: the fix uses the unit in the interface instead.
+        let source = "interface\n\noperator count_of{lakes: relation lake}: integer;\n\nimplementation\n\nuses { lakes.depths };\n\noperator count_of{lakes: relation lake}: integer [ count{r: lakes} ];\n\noperator main{} [];";
+        let errors = analyze_units(&[("program", source), ("lakes.depths", DEPTHS)]).unwrap_err();
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].code, Code::InterfaceDeclaration);
+        assert_eq!(
+            errors[0].message,
+            "`lake` comes from `lakes.depths`, which only the implementation uses"
+        );
+        let mut edits = errors[0].suggestions[0].edits.clone();
+        edits.sort_by_key(|e| std::cmp::Reverse(e.span.start));
+        let mut fixed = source.to_string();
+        for edit in edits {
+            fixed.replace_range(edit.span.start..edit.span.end, &edit.replacement);
+        }
+        assert_eq!(
+            fixed,
+            "interface\n\nuses { lakes.depths };\n\noperator count_of{lakes: relation lake}: integer;\n\nimplementation\n\noperator count_of{lakes: relation lake}: integer [ count{r: lakes} ];\n\noperator main{} [];"
+        );
+        assert!(analyze_units(&[("program", &fixed), ("lakes.depths", DEPTHS)]).is_ok());
+    }
+
+    #[test]
+    fn a_name_two_units_declare_clashes_where_it_is_written() {
+        let seas = "interface\n\ntype metres { { m: integer } };\n\noperator deepest{lakes: relation { name: text }}: integer;\n\nimplementation\n\noperator deepest{lakes: relation { name: text }}: integer [ 0 ];";
+        let units = |main: &str| {
+            analyze_units(&[
+                ("program", main),
+                ("lakes.depths", DEPTHS),
+                ("seas.depths", seas),
+            ])
+        };
+        // Unwritten, no clash.
+        assert!(units("uses { lakes.depths, seas.depths };\n\noperator main{} [];").is_ok());
+        // Written, a clash, at each place it is.
+        let errors = units("uses { lakes.depths, seas.depths };\n\nvar m := metres{m: 1};\nvar n: metres;\n\noperator main{} [];").unwrap_err();
+        assert_eq!(errors.len(), 2, "{errors:#?}");
+        assert!(
+            errors.iter().all(|e| e.code == Code::NameClash),
+            "{errors:#?}"
+        );
+        assert_eq!(
+            errors[0].message,
+            "`metres` is declared by `lakes.depths` and `seas.depths`, which this unit uses"
+        );
+        assert_eq!(errors[0].secondary.len(), 2);
+        // The unit's own and a used unit's.
+        let errors = units("uses { seas.depths };\n\ntype metres { { m: integer } };\nvar m := metres{m: 1};\n\noperator main{} [];").unwrap_err();
+        assert_eq!(
+            errors
+                .iter()
+                .map(|e| e.message.as_str())
+                .collect::<Vec<_>>(),
+            ["`metres` is declared by this unit and by `seas.depths`, which it uses"]
+        );
+        // Operators of one name and the same parameters' names clash;
+        // those of others are overloads.
+        let errors = units("uses { lakes.depths, seas.depths };\n\noperator main{} [ call debug_value{v: deepest{lakes: relation { { name: \"Tana\" } }}}; ];").unwrap_err();
+        assert_eq!(errors[0].code, Code::NameClash, "{errors:#?}");
+        assert_eq!(
+            errors[0].message,
+            "`deepest{lakes}` is declared by `lakes.depths` and `seas.depths`, which this unit uses"
+        );
+        assert!(units("uses { seas.depths };\n\noperator deepest{seas: integer}: integer [ seas ];\nvar d := deepest{seas: 1};\n\noperator main{} [];").is_ok());
+        // Each declaration has its own name in the program.
+        let program =
+            units("uses { lakes.depths };\n\nvar m := metres{m: 1};\n\noperator main{} [];")
+                .unwrap();
+        assert_eq!(program.variables[0].ty.to_string(), "lakes.depths::metres");
     }
 
     #[test]

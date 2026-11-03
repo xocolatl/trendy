@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use trendy_diag::{Code, Diagnostic, Edit, Span};
+use trendy_diag::{Code, Diagnostic, Span};
 use trendy_hir as hir;
 use trendy_syntax::ast::{self, AstNode, Section, SourceFile};
 
@@ -316,7 +316,7 @@ fn cycles(files: &Files, on_cycles: &BTreeSet<String>) -> Vec<Diagnostic> {
             [only] => naming(files, Some(only), only)
                 .into_iter()
                 .next()
-                .map(|(file, uses, name)| entry_removal(file, &uses, &name)),
+                .map(|(file, uses, name)| sections::entry_removal(file, &uses, &name)),
             _ => None,
         };
         diagnostics.push(errors::unit_cycle(&cycle, &steps, removal));
@@ -352,34 +352,6 @@ fn path_back(using: &BTreeMap<String, BTreeSet<String>>, start: &str) -> Option<
         frontier = next;
     }
     None
-}
-
-/// The edit that removes the unit named `name` from `uses`, of `file`, or
-/// `uses` itself, if it names no other.
-fn entry_removal(file: &SourceFile, uses: &ast::UsesDecl, name: &ast::UnitName) -> Edit {
-    let units: Vec<ast::UsedUnit> = uses.units().collect();
-    let Some(i) = units
-        .iter()
-        .position(|u| u.name().is_some_and(|n| n.syntax() == name.syntax()))
-    else {
-        return sections::removal(file, uses.syntax());
-    };
-    let start = |u: &ast::UsedUnit| usize::from(u.syntax().text_range().start());
-    let span = match (units.get(i + 1), i.checked_sub(1).map(|p| &units[p])) {
-        _ if units.len() == 1 => return sections::removal(file, uses.syntax()),
-        // Up to the next unit, the `,` and the space after it with it.
-        (Some(next), _) => Span::new(start(&units[i]), start(next)),
-        // From the end of the one before, its `,` with it.
-        (None, Some(before)) => Span::new(
-            usize::from(before.syntax().text_range().end()),
-            usize::from(units[i].syntax().text_range().end()),
-        ),
-        (None, None) => return sections::removal(file, uses.syntax()),
-    };
-    Edit {
-        span,
-        replacement: String::new(),
-    }
 }
 
 /// An internal error: the catalog, at `span`, isn't as the compiler fills

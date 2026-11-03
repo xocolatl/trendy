@@ -151,6 +151,68 @@ fn moved_before(file: &SourceFile, node: &SyntaxNode, before: &SyntaxNode) -> Ve
     ]
 }
 
+/// The edit that removes the unit named `name` from `uses`, of `file`, or
+/// `uses` itself, if it names no other.
+pub(crate) fn entry_removal(file: &SourceFile, uses: &ast::UsesDecl, name: &ast::UnitName) -> Edit {
+    let units: Vec<ast::UsedUnit> = uses.units().collect();
+    let Some(i) = units
+        .iter()
+        .position(|u| u.name().is_some_and(|n| n.syntax() == name.syntax()))
+    else {
+        return removal(file, uses.syntax());
+    };
+    let start = |u: &ast::UsedUnit| usize::from(u.syntax().text_range().start());
+    let span = match (units.get(i + 1), i.checked_sub(1).map(|p| &units[p])) {
+        _ if units.len() == 1 => return removal(file, uses.syntax()),
+        // Up to the next unit, the `,` and the space after it with it.
+        (Some(next), _) => Span::new(start(&units[i]), start(next)),
+        // From the end of the one before, its `,` with it.
+        (None, Some(before)) => Span::new(
+            usize::from(before.syntax().text_range().end()),
+            usize::from(units[i].syntax().text_range().end()),
+        ),
+        (None, None) => return removal(file, uses.syntax()),
+    };
+    Edit {
+        span,
+        replacement: String::new(),
+    }
+}
+
+/// The edits that move the unit named `unit`, of `file`, from its
+/// implementation's `uses` to its interface's: its interface's `uses`
+/// names it, after its other units, or, if it has none, a new one after
+/// the interface's header does, and the implementation's no longer.
+pub(crate) fn into_interface_uses(file: &SourceFile, unit: &str) -> Vec<Edit> {
+    let mut edits = Vec::new();
+    let interface = file.uses().find(|u| u.section() == Section::Interface);
+    if let Some(last) = interface.as_ref().and_then(|u| u.units().last()) {
+        edits.push(Edit {
+            span: Span::empty(usize::from(last.syntax().text_range().end())),
+            replacement: format!(", {unit}"),
+        });
+    } else {
+        let Some(header) = file.headers().find(|h| h.section() == Section::Interface) else {
+            return Vec::new();
+        };
+        edits.push(Edit {
+            span: Span::empty(next_start(file, header.syntax())),
+            replacement: format!("uses {{ {unit} }};\n\n"),
+        });
+    }
+    for uses in file
+        .uses()
+        .filter(|u| u.section() == Section::Implementation)
+    {
+        for used in uses.units() {
+            if let Some(name) = used.name().filter(|n| n.text() == unit) {
+                edits.push(entry_removal(file, &uses, &name));
+            }
+        }
+    }
+    edits
+}
+
 /// The names of types and headings `item`, if it is in its unit's
 /// interface, mentions where other units see them, each with where: an
 /// operator's parameters' and result's types, a database's relvar's type,

@@ -1,38 +1,93 @@
 //! Which unit each declaration is in, which declarations each unit sees,
 //! and what each is called in the program.
 //!
-//! A unit sees its own declarations and the prelude's. A name declared in
-//! one unit of the program is called plainly everywhere, and one declared
-//! in several, each a declaration of its own, is qualified by its unit's
-//! name in every one of them, `lakes.depths::metres`, so that every name the
-//! HIR has is one declaration's: what the program writes is unambiguous,
-//! and lowering and the runtime can tell declarations apart by name. No
-//! unit can declare one of the prelude's names, which every unit sees, so
-//! those are always plain.
+//! A name written in a unit means a declaration it sees: one of its own,
+//! one of the prelude's, which every unit sees, or one of the interface of
+//! a unit its section uses, as the interface's `uses` are what its
+//! declarations see, and the implementation's add to them. What a unit
+//! uses never reaches the units that use it. A name that more than one of
+//! those units declares, the using unit's own among them, is a clash where
+//! it is written, which nothing settles by order, so it means none of them.
+//!
+//! A name declared in one unit of the program is called plainly everywhere,
+//! and one declared in several, each a declaration of its own, is qualified
+//! by its unit's name in every one of them, `lakes.depths::metres`, so that
+//! every name the HIR has is one declaration's: what the program writes is
+//! unambiguous, and lowering and the runtime can tell declarations apart by
+//! name. No unit can declare one of the prelude's names, which every unit
+//! sees, so those are always plain.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use trendy_diag::Span;
 use trendy_hir as hir;
-use trendy_syntax::ast::VarDecl;
+use trendy_syntax::ast::{AstNode, Section, SourceFile, VarDecl};
 
 use crate::Namespaces;
 
-/// The program's units: each one's name, and where its file's text ends in
-/// the program's, by its [`hir::FileId`], the prelude's last.
+/// The program's units, by their [`hir::FileId`], the prelude's last.
 #[derive(Clone)]
 pub(crate) struct Units {
-    units: Vec<(String, usize)>,
+    units: Vec<Unit>,
+}
+
+/// A unit, as scopes see it.
+#[derive(Clone)]
+struct Unit {
+    name: String,
+    /// Where its file's text ends in the program's.
+    end: usize,
+    /// Where each of its sections' headers starts, with the section it
+    /// starts, in order: before the first, the implementation's.
+    headers: Vec<(usize, Section)>,
+    /// The units each of its sections uses, of the program's.
+    uses: BTreeMap<Section, BTreeSet<hir::FileId>>,
+}
+
+/// Where a name is written: its unit, and the section of it, whose `uses`
+/// say which other units' interfaces it sees.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Viewer {
+    pub(crate) unit: hir::FileId,
+    pub(crate) section: Section,
 }
 
 impl Units {
-    pub(crate) fn new(units: Vec<(String, usize)>) -> Self {
+    /// The units of `files`, each with its name, as the trees of one
+    /// program, one after another.
+    pub(crate) fn new(files: &[(&str, &SourceFile)]) -> Self {
+        let ids: HashMap<&str, hir::FileId> = files
+            .iter()
+            .enumerate()
+            .map(|(i, (name, _))| (*name, hir::FileId(i)))
+            .collect();
+        let units = files
+            .iter()
+            .map(|&(name, file)| {
+                let mut uses: BTreeMap<Section, BTreeSet<hir::FileId>> = BTreeMap::new();
+                for decl in file.uses() {
+                    let known = decl
+                        .units()
+                        .filter_map(|u| ids.get(u.name()?.text().as_str()).copied());
+                    uses.entry(decl.section()).or_default().extend(known);
+                }
+                Unit {
+                    name: name.to_string(),
+                    end: file.span().end,
+                    headers: file
+                        .headers()
+                        .map(|h| (h.span().start, h.section()))
+                        .collect(),
+                    uses,
+                }
+            })
+            .collect();
         Units { units }
     }
 
     /// The name of `unit`.
     pub(crate) fn name(&self, unit: hir::FileId) -> &str {
-        &self.units[unit.0].0
+        &self.units[unit.0].name
     }
 
     /// The prelude's.
@@ -44,15 +99,40 @@ impl Units {
     pub(crate) fn at(&self, span: Span) -> hir::FileId {
         hir::FileId(
             self.units
-                .partition_point(|&(_, end)| end <= span.start)
+                .partition_point(|unit| unit.end <= span.start)
                 .min(self.units.len() - 1),
         )
     }
 
-    /// Whether the unit `viewer` sees the declarations of `unit`: its own,
-    /// and the prelude's.
-    pub(crate) fn sees(&self, viewer: hir::FileId, unit: hir::FileId) -> bool {
-        viewer == unit || unit == self.prelude()
+    /// Who sees what is written at `span`: its unit, and the section it is
+    /// in.
+    pub(crate) fn viewer(&self, span: Span) -> Viewer {
+        let unit = self.at(span);
+        let section = self.units[unit.0]
+            .headers
+            .iter()
+            .take_while(|(start, _)| *start <= span.start)
+            .last()
+            .map_or(Section::Implementation, |&(_, section)| section);
+        Viewer { unit, section }
+    }
+
+    /// Whether `viewer` sees a declaration of `unit`'s, in its `section`:
+    /// every one of its own unit's and the prelude's, and those of the
+    /// interface of a unit its section uses, which, for the
+    /// implementation, are its interface's too.
+    pub(crate) fn sees(&self, viewer: Viewer, unit: hir::FileId, section: Section) -> bool {
+        viewer.unit == unit
+            || unit == self.prelude()
+            || self.uses(viewer, unit) && section == Section::Interface
+    }
+
+    /// Whether `viewer`'s section uses `unit`.
+    fn uses(&self, viewer: Viewer, unit: hir::FileId) -> bool {
+        let uses = &self.units[viewer.unit.0].uses;
+        let of = |section| uses.get(&section).is_some_and(|used| used.contains(&unit));
+        of(Section::Interface)
+            || (viewer.section == Section::Implementation && of(Section::Implementation))
     }
 
     /// What the declaration named `name` in `unit` is called in the
@@ -60,9 +140,94 @@ impl Units {
     /// its unit's.
     pub(crate) fn identity(&self, name: &str, unit: hir::FileId, ambiguous: bool) -> String {
         if ambiguous {
-            format!("{}::{name}", self.units[unit.0].0)
+            format!("{}::{name}", self.units[unit.0].name)
         } else {
             name.to_string()
+        }
+    }
+}
+
+/// What a name a viewer writes means, of the declarations it sees.
+pub(crate) enum Seen<T> {
+    /// None of them.
+    Nothing,
+    /// This one, in this unit.
+    One(hir::FileId, T),
+    /// The first of each unit's that declares it, the viewer's own first:
+    /// a clash.
+    Clash(Vec<(hir::FileId, T)>),
+}
+
+impl<T> Seen<T> {
+    /// The declaration it is, unless it is none, or a clash.
+    pub(crate) fn one(self) -> Option<(hir::FileId, T)> {
+        match self {
+            Seen::One(unit, value) => Some((unit, value)),
+            Seen::Nothing | Seen::Clash(_) => None,
+        }
+    }
+}
+
+/// The declarations of a name a viewer sees, by where they come from.
+pub(crate) struct Candidates<T> {
+    /// The first of the viewer's own unit's.
+    own: Option<(hir::FileId, T)>,
+    /// The first of the prelude's.
+    prelude: Option<(hir::FileId, T)>,
+    /// The first of each used unit's, in its interface.
+    used: Vec<(hir::FileId, T)>,
+}
+
+impl<T> Candidates<T> {
+    /// Each declaration, of `f`.
+    pub(crate) fn map<U>(self, f: impl Fn(T) -> U) -> Candidates<U> {
+        Candidates {
+            own: self.own.map(|(unit, value)| (unit, f(value))),
+            prelude: self.prelude.map(|(unit, value)| (unit, f(value))),
+            used: self
+                .used
+                .into_iter()
+                .map(|(unit, value)| (unit, f(value)))
+                .collect(),
+        }
+    }
+
+    /// These and `other`'s, of another table of the same namespace, as
+    /// types and headings are, and variables and databases.
+    pub(crate) fn merged(mut self, other: Candidates<T>) -> Candidates<T> {
+        self.own = self.own.or(other.own);
+        self.prelude = self.prelude.or(other.prelude);
+        for (unit, value) in other.used {
+            if self.used.iter().all(|(u, _)| *u != unit) {
+                self.used.push((unit, value));
+            }
+        }
+        self
+    }
+
+    /// What the name means: the viewer's own, unless a used unit declares
+    /// it too, a clash, or else the prelude's, which no unit can declare
+    /// again, as a used unit that does is reported where it does, or else
+    /// a used unit's, the only one, or a clash, or nothing.
+    pub(crate) fn resolved(self) -> Seen<T> {
+        let Candidates { own, prelude, used } = self;
+        match (own, prelude) {
+            (Some((unit, value)), prelude) if used.is_empty() || prelude.is_some() => {
+                Seen::One(unit, value)
+            }
+            (Some(own), _) => Seen::Clash(std::iter::once(own).chain(used).collect()),
+            (None, Some((unit, value))) => Seen::One(unit, value),
+            (None, None) => {
+                let mut used = used;
+                match used.len() {
+                    0 => Seen::Nothing,
+                    1 => {
+                        let (unit, value) = used.remove(0);
+                        Seen::One(unit, value)
+                    }
+                    _ => Seen::Clash(used),
+                }
+            }
         }
     }
 }
@@ -85,10 +250,17 @@ pub(crate) fn ambiguous(declaring: impl Iterator<Item = hir::FileId>, units: &Un
     several
 }
 
-/// The declarations of one namespace, each by its name, with the unit it is
-/// in, in the order they are declared.
+/// The declarations of one namespace, each by its name, with the unit and
+/// the section it is in, in the order they are declared.
 pub(crate) struct Declared<T> {
-    by_name: HashMap<String, Vec<(hir::FileId, T)>>,
+    by_name: HashMap<String, Vec<Entry<T>>>,
+}
+
+/// A declaration, in its unit's section.
+struct Entry<T> {
+    unit: hir::FileId,
+    section: Section,
+    value: T,
 }
 
 impl<T> Default for Declared<T> {
@@ -100,43 +272,88 @@ impl<T> Default for Declared<T> {
 }
 
 impl<T> Declared<T> {
-    /// Add `value`, the declaration named `name` in `unit`.
-    pub(crate) fn insert(&mut self, name: &str, unit: hir::FileId, value: T) {
+    /// Add `value`, the declaration named `name` in `unit`'s `section`.
+    pub(crate) fn insert(&mut self, name: &str, unit: hir::FileId, section: Section, value: T) {
         self.by_name
             .entry(name.to_string())
             .or_default()
-            .push((unit, value));
+            .push(Entry {
+                unit,
+                section,
+                value,
+            });
     }
 
-    /// The declaration named `name` that the unit `viewer` sees, its own or
-    /// else the prelude's, with the unit it is in: the first, if its unit
-    /// declares it twice, which is an error.
-    pub(crate) fn visible(
-        &self,
-        name: &str,
-        viewer: hir::FileId,
-        units: &Units,
-    ) -> Option<(hir::FileId, &T)> {
-        let declared = self.by_name.get(name)?;
-        let own = declared.iter().find(|(unit, _)| *unit == viewer);
-        own.or_else(|| declared.iter().find(|(unit, _)| units.sees(viewer, *unit)))
-            .map(|(unit, value)| (*unit, value))
+    fn entries(&self, name: &str) -> &[Entry<T>] {
+        self.by_name.get(name).map_or(&[][..], Vec::as_slice)
     }
 
-    /// Each declaration named `name` that the unit `viewer` sees, its own
-    /// first, then the prelude's, with the unit it is in.
+    /// The declarations named `name` that `viewer` sees, by where they come
+    /// from.
+    pub(crate) fn candidates(&self, name: &str, viewer: Viewer, units: &Units) -> Candidates<&T> {
+        let entries = self.entries(name);
+        let first = |unit: hir::FileId| {
+            entries
+                .iter()
+                .find(|e| e.unit == unit)
+                .map(|e| (e.unit, &e.value))
+        };
+        let mut used: Vec<(hir::FileId, &T)> = Vec::new();
+        for e in entries {
+            let other = e.unit != viewer.unit && e.unit != units.prelude();
+            if other
+                && units.sees(viewer, e.unit, e.section)
+                && used.iter().all(|(u, _)| *u != e.unit)
+            {
+                used.push((e.unit, &e.value));
+            }
+        }
+        Candidates {
+            own: first(viewer.unit),
+            prelude: first(units.prelude()),
+            used,
+        }
+    }
+
+    /// Each declaration named `name` that `viewer` sees, its own unit's
+    /// first, with the unit it is in: an operator's overloads.
     pub(crate) fn each_visible<'a>(
         &'a self,
         name: &str,
-        viewer: hir::FileId,
+        viewer: Viewer,
         units: &'a Units,
     ) -> impl Iterator<Item = (hir::FileId, &'a T)> {
-        let declared = self.by_name.get(name).map_or(&[][..], Vec::as_slice);
-        let own = declared.iter().filter(move |(unit, _)| *unit == viewer);
-        let others = declared
+        let entries = self.entries(name);
+        let own = entries.iter().filter(move |e| e.unit == viewer.unit);
+        let others = entries
             .iter()
-            .filter(move |(unit, _)| *unit != viewer && units.sees(viewer, *unit));
-        own.chain(others).map(|(unit, value)| (*unit, value))
+            .filter(move |e| e.unit != viewer.unit && units.sees(viewer, e.unit, e.section));
+        own.chain(others).map(|e| (e.unit, &e.value))
+    }
+
+    /// The first declaration named `name` in `unit`.
+    pub(crate) fn first_in(&self, name: &str, unit: hir::FileId) -> Option<&T> {
+        self.entries(name)
+            .iter()
+            .find(|e| e.unit == unit)
+            .map(|e| &e.value)
+    }
+
+    /// Each declaration named `name` in `unit` or the prelude, `unit`'s
+    /// first, with the unit it is in: those another of `unit`'s duplicates.
+    pub(crate) fn each_own_or_prelude<'a>(
+        &'a self,
+        name: &str,
+        unit: hir::FileId,
+        units: &Units,
+    ) -> impl Iterator<Item = (hir::FileId, &'a T)> {
+        let prelude = units.prelude();
+        let entries = self.entries(name);
+        let own = entries.iter().filter(move |e| e.unit == unit);
+        let preludes = entries
+            .iter()
+            .filter(move |e| e.unit == prelude && e.unit != unit);
+        own.chain(preludes).map(|e| (e.unit, &e.value))
     }
 
     /// Each declaration named `name`, in any unit, with its unit.
@@ -144,53 +361,56 @@ impl<T> Declared<T> {
         &'a self,
         name: &str,
     ) -> impl Iterator<Item = (hir::FileId, &'a T)> {
-        self.by_name
-            .get(name)
-            .map_or(&[][..], Vec::as_slice)
-            .iter()
-            .map(|(unit, value)| (*unit, value))
+        self.entries(name).iter().map(|e| (e.unit, &e.value))
     }
 
     /// Remove the declarations named `name` in `unit`.
     pub(crate) fn remove_in(&mut self, name: &str, unit: hir::FileId) {
         if let Some(declared) = self.by_name.get_mut(name) {
-            declared.retain(|(u, _)| *u != unit);
+            declared.retain(|e| e.unit != unit);
         }
     }
 
-    /// Each declaration the unit `viewer` sees, with its name.
+    /// Each declaration `viewer` sees, with its name.
     pub(crate) fn each_named_visible<'a>(
         &'a self,
-        viewer: hir::FileId,
+        viewer: Viewer,
         units: &'a Units,
     ) -> impl Iterator<Item = (&'a str, &'a T)> {
         self.by_name.iter().flat_map(move |(name, declared)| {
             declared
                 .iter()
-                .filter(move |(unit, _)| units.sees(viewer, *unit))
-                .map(move |(_, value)| (name.as_str(), value))
+                .filter(move |e| units.sees(viewer, e.unit, e.section))
+                .map(move |e| (name.as_str(), &e.value))
         })
     }
 
-    /// The names the unit `viewer` sees, for suggestions.
+    /// The names `viewer` sees, for suggestions.
     pub(crate) fn names_visible<'a>(
         &'a self,
-        viewer: hir::FileId,
+        viewer: Viewer,
         units: &'a Units,
     ) -> impl Iterator<Item = &'a str> {
         self.by_name
             .iter()
-            .filter(move |(_, declared)| declared.iter().any(|(unit, _)| units.sees(viewer, *unit)))
+            .filter(move |(_, declared)| {
+                declared
+                    .iter()
+                    .any(|e| units.sees(viewer, e.unit, e.section))
+            })
             .map(|(name, _)| name.as_str())
     }
 }
 
 /// The program's variables, each by its id, its first declaration's place
 /// among them in source order, found by the name the units that see it
-/// write.
+/// write, in the namespace they share with databases.
 pub(crate) struct Variables {
     units: Units,
     ids: Declared<hir::VariableId>,
+    /// The databases, by name, whose names a unit can't give a variable it
+    /// sees, and the reverse.
+    databases: Declared<()>,
     /// Each one's first declaration, and what it is called in the program,
     /// by id.
     declared: Vec<(VarDecl, String)>,
@@ -207,26 +427,38 @@ impl Variables {
                 continue;
             };
             let unit = namespaces.unit_at(trendy_syntax::span(ident.text_range()));
-            ids.insert(ident.text(), unit, hir::VariableId(declared.len()));
+            let section = trendy_syntax::ast::section_of(decl.syntax());
+            ids.insert(ident.text(), unit, section, hir::VariableId(declared.len()));
             declared.push((decl, namespaces.value_identity(ident.text(), unit)));
+        }
+        let mut databases = Declared::default();
+        for (name, entries) in &namespaces.databases.by_name {
+            for e in entries {
+                databases.insert(name, e.unit, e.section, ());
+            }
         }
         Variables {
             units: namespaces.units().clone(),
             ids,
+            databases,
             declared,
         }
     }
 
-    /// The variable named `name` that the unit `at` is in sees.
+    /// The variable named `name` that what is written at `at` sees, unless
+    /// it sees a database of that name, or several of either.
     pub(crate) fn find(&self, name: &str, at: Span) -> Option<hir::VariableId> {
-        self.seen(name, self.units.at(at))
-    }
-
-    /// The variable named `name` that the unit `viewer` sees.
-    pub(crate) fn seen(&self, name: &str, viewer: hir::FileId) -> Option<hir::VariableId> {
-        self.ids
-            .visible(name, viewer, &self.units)
-            .map(|(_, &id)| id)
+        let viewer = self.units.viewer(at);
+        let variables = self.ids.candidates(name, viewer, &self.units).map(Some);
+        let databases = self
+            .databases
+            .candidates(name, viewer, &self.units)
+            .map(|&()| None);
+        variables
+            .merged(databases)
+            .resolved()
+            .one()
+            .and_then(|(_, id)| id.copied())
     }
 
     /// The first declaration of the variable `id`.
@@ -239,10 +471,10 @@ impl Variables {
         &self.declared[id.0].1
     }
 
-    /// The names of the variables the unit `at` is in sees, for
+    /// The names of the variables what is written at `at` sees, for
     /// suggestions.
     pub(crate) fn names(&self, at: Span) -> impl Iterator<Item = &str> {
-        self.ids.names_visible(self.units.at(at), &self.units)
+        self.ids.names_visible(self.units.viewer(at), &self.units)
     }
 
     /// How many there are.

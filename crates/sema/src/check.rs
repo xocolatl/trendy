@@ -19,7 +19,7 @@ use crate::narrowed::{self, Facts};
 use crate::operators::{ArgumentNames, Chosen, Operators, Param, Signature};
 use crate::ops::{self, Operator, Resolved};
 use crate::types::{self, Expected};
-use crate::{Namespaces, errors};
+use crate::{Namespace, Namespaces, errors};
 
 /// What a name refers to.
 pub(crate) enum Lookup {
@@ -554,6 +554,11 @@ impl<'a> Checker<'a> {
                 None
             }
             Lookup::Unknown => {
+                let namespaces = self.names.namespaces();
+                if let Some(clash) = errors::name_clash(name, span, Namespace::Value, namespaces) {
+                    errors.push(clash);
+                    return None;
+                }
                 if self.names.namespaces().database(name, span).is_some() {
                     errors.push(errors::database_as_value(name, span));
                     return None;
@@ -904,7 +909,8 @@ impl<'a> Checker<'a> {
         {
             Some(Chosen::One(signature)) => signature.clone(),
             Some(Chosen::Tied(tied)) => {
-                errors.push(errors::unchosen_operator(name, &tied, written));
+                let units = self.names.namespaces().units();
+                errors.push(errors::unchosen_operator(name, &tied, written, units));
                 return None;
             }
             None => {

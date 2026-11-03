@@ -822,10 +822,24 @@ the one they name most nearly, which its errors are checked against
 operator's parameters too when another has its name, as it does an
 instance of a generic operator, so that their symbols differ.
 
-Each unit has a scope of its own (`scope`): a name written in a unit is
-one of its own declarations, or else one of the prelude's, which every
-unit sees, never another unit's, so two units can each declare a name,
-and a duplicate is one in a unit's scope. A specification and its versions
+Each unit has a scope of its own (`scope`): a name written in a unit
+means a declaration it sees, one of its own, one of the prelude's, which
+every unit sees, or one of the interface of a unit its section uses, the
+interface's `uses` for the interface, and both sections' for the
+implementation (`scope::Viewer`, `Units::sees`); what a unit uses never
+reaches the units that use it. So two units can each declare a name, and
+a duplicate is one in a unit's scope, or of the prelude's
+(`Namespaces::declared_before`). A name more than one of the units seen
+declares is a clash where it is written: it means none of them
+(`scope::Candidates::resolved`, merging the tables of a namespace, types
+with headings and variables with databases), and the error for a name
+that refers to nothing reports it instead (A0073), as the error for
+operators the arguments' names tie between does for those of one name
+and parameters' names. A declaration is found from its own name by its
+identity (`Namespaces::declared_type`), not by what its unit sees. An
+operator is seen by other units in the section it is declared in, the
+interface for the definition of one the interface declares
+(`Signature::section`). A specification and its versions
 are one family only where every unit sees it: the prelude's, with each
 unit's versions of it, and otherwise each unit's own. Each declaration has
 one name in the HIR, its identity: its name, if one unit of the program

@@ -173,6 +173,7 @@ codes! {
     DatabasePart => "A0070",
     UsesPlacement => "A0071",
     UnitCycle => "A0072",
+    NameClash => "A0073",
     Overflow => "R0001",
     DivisionByZero => "R0002",
     OutOfMemory => "R0003",

@@ -21,6 +21,10 @@ pub(crate) struct Signature {
     pub(crate) name: String,
     /// The unit it is declared in.
     pub(crate) unit: hir::FileId,
+    /// The section of its unit it is declared in, which says whether other
+    /// units see it: the interface, too, for the implementation's
+    /// definition of an operator its interface declares.
+    pub(crate) section: Section,
     /// The type parameters: those declared with `types`, then one for each
     /// `any` written as a parameter's type.
     pub(crate) types: Vec<hir::TypeParameter>,
@@ -397,28 +401,32 @@ impl Operators {
             .map(|signature| signature.id)
     }
 
-    /// The operators named `name` that the unit `viewer` sees, in the order
-    /// they are defined.
-    fn seen(&self, name: &str, viewer: hir::FileId) -> impl Iterator<Item = &Signature> {
+    /// The operators named `name` that `viewer` sees, in the order they
+    /// are defined.
+    fn seen(&self, name: &str, viewer: scope::Viewer) -> impl Iterator<Item = &Signature> {
         self.by_name
             .get(name)
             .into_iter()
             .flatten()
             .map(|&id| self.get(id))
-            .filter(move |signature| self.units.sees(viewer, signature.unit))
+            .filter(move |s| self.units.sees(viewer, s.unit, s.section))
     }
 
-    /// The operators named `name` that the unit `at` is in sees, in the
+    /// The operators named `name` that what is written at `at` sees, in the
     /// order they are defined.
     pub(crate) fn overloads(&self, name: &str, at: Span) -> impl Iterator<Item = &Signature> {
-        self.seen(name, self.units.at(at))
+        self.seen(name, self.units.viewer(at))
     }
 
     /// The prelude's `message{error: error}: text`, a specification of its
     /// union type `error`, which writes an error's message, if the prelude
     /// declares it so.
     pub(crate) fn message(&self) -> Option<&Signature> {
-        self.seen("message", self.units.prelude()).find(|s| {
+        let prelude = scope::Viewer {
+            unit: self.units.prelude(),
+            section: Section::Interface,
+        };
+        self.seen("message", prelude).find(|s| {
             let error = s.params.get("error").map(|p| &p.ty);
             s.source == Source::Prelude
                 && s.written.keys().eq(["error"])
@@ -514,10 +522,10 @@ impl Operators {
     /// variable. A name with several operators is there for each, in the
     /// order they are defined.
     pub(crate) fn names(&self, at: Span) -> Vec<(&str, Vec<&str>)> {
-        let viewer = self.units.at(at);
+        let viewer = self.units.viewer(at);
         self.list
             .iter()
-            .filter(|signature| self.units.sees(viewer, signature.unit))
+            .filter(|s| self.units.sees(viewer, s.unit, s.section))
             .map(|signature| {
                 let params = signature
                     .written
@@ -548,6 +556,7 @@ impl Signature {
             id,
             name: builtin.name().to_string(),
             unit,
+            section: Section::Interface,
             types,
             written: written(&params),
             params,
@@ -634,11 +643,15 @@ fn sets(list: &[Signature]) -> Vec<Vec<usize>> {
     let trendy = |signature: &&Signature| {
         signature.decl.is_some() && signature.from_type.is_none() && signature.family == Family::Own
     };
+    // Its parameters' names, with a type or without, as its declaration's
+    // name is collected.
     let named = |signature: &Signature| -> Named {
-        (
-            signature.name.clone(),
-            signature.params.keys().cloned().collect(),
-        )
+        let names: BTreeSet<&String> = signature
+            .params
+            .keys()
+            .chain(&signature.unresolved)
+            .collect();
+        (signature.name.clone(), names.into_iter().cloned().collect())
     };
     let prelude: BTreeSet<Named> = list
         .iter()
@@ -812,10 +825,12 @@ fn paired(list: &mut [Signature], members: &[usize], errors: &mut Vec<Diagnostic
                     .iter()
                     .all(|(name, p)| d.params[name].mode == p.mode)
         };
+        // A declaration with errors, reported, is the definition's of its
+        // name and parameters' names, whose types can't be compared.
         let definition = definitions
             .iter()
             .copied()
-            .find(|&m| same(&list[m]))
+            .find(|&m| same(&list[m]) || !list[declaration].valid)
             .or_else(|| {
                 // One that isn't a version of it is its definition, mistaken.
                 let mistaken = definitions.iter().copied().find(|&m| {
@@ -830,6 +845,7 @@ fn paired(list: &mut [Signature], members: &[usize], errors: &mut Vec<Diagnostic
             });
         if let Some(definition) = definition {
             list[declaration].family = Family::Declaration(list[definition].id);
+            list[definition].section = Section::Interface;
             kept.retain(|&m| m != declaration);
         }
     }
@@ -1070,6 +1086,7 @@ fn operator(
         id,
         name: ident.text().to_string(),
         unit: namespaces.unit_at(trendy_syntax::span(ident.text_range())),
+        section: ast::section_of(op.syntax()),
         valid: declared_valid && params_valid && result_valid && determined && !duplicate,
         types: type_parameters,
         written: written(&seen),
@@ -1108,9 +1125,7 @@ fn numbered(files: &Files, namespaces: &Namespaces) -> Vec<Signature> {
         let Some(ident) = decl.name().and_then(|n| n.ident()) else {
             continue;
         };
-        let Some((_, Some(defined))) =
-            namespaces.defined(ident.text(), trendy_syntax::span(ident.text_range()))
-        else {
+        let Some(defined) = namespaces.declared_type(&ident) else {
             continue;
         };
         if !namespaces.is_first_type(&ident) {
@@ -1132,6 +1147,7 @@ fn numbered(files: &Files, namespaces: &Namespaces) -> Vec<Signature> {
                 id: constraint.operator,
                 name: format!("{} constraint {}", defined.name, i + 1),
                 unit: namespaces.unit_at(trendy_syntax::span(ident.text_range())),
+                section: ast::section_of(decl.syntax()),
                 types: Vec::new(),
                 written: self::written(&params),
                 params: params.clone(),
@@ -1156,6 +1172,7 @@ fn numbered(files: &Files, namespaces: &Namespaces) -> Vec<Signature> {
                     id,
                     name,
                     unit: namespaces.unit_at(trendy_syntax::span(ident.text_range())),
+                    section: ast::section_of(decl.syntax()),
                     types: Vec::new(),
                     written: self::written(&params),
                     params,
@@ -1210,19 +1227,19 @@ fn from_type(decl: &ast::TypeDecl, source: Source, namespaces: &Namespaces) -> V
         return Vec::new();
     };
     let name = ident.text();
-    let at = trendy_syntax::span(ident.text_range());
-    let Some((_, Some(defined))) = namespaces.defined(name, at) else {
+    let Some(defined) = namespaces.declared_type(&ident) else {
         return Vec::new();
     };
     if !namespaces.is_first_type(&ident) {
         return Vec::new();
     }
-    let selects = matches!(namespaces.operator(name, at), Some((Kind::Selector, _)));
+    let selects = namespaces.selects(&ident);
     let unit = namespaces.unit_at(trendy_syntax::span(ident.text_range()));
     let made = |made: Made, params: BTreeMap<String, hir::Parameter>, result, valid| Signature {
         id: hir::OperatorId(0),
         name: name.to_string(),
         unit,
+        section: ast::section_of(decl.syntax()),
         types: Vec::new(),
         written: written(&params),
         params,
