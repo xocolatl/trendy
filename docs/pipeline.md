@@ -634,7 +634,10 @@ couldn't be read.
 
 **Owns:** where a unit's file is: its name's path from the directory of
 main's file (`trendy_syntax::unit::path_of`), and the units that come with
-the compiler, under `trendy.`, which are no files. **Must not:** report a
+the compiler, under `trendy.`, which are no files; and that a unit that
+declares a database brings each unit under its directory, used or not, as
+the database's own units, which add to it, and which every program that
+uses the database has, with all of its constraints. **Must not:** report a
 unit used whose file there is none of, which sema does, as the catalog's
 `known_units`, with the file it would be; nor depend on sema. Each unit's
 lexer's and parser's errors are given in the program's spans, the units'
@@ -892,7 +895,11 @@ that break a part of one, as a variable's constraint's parts say
 (`constraints::parts`), each at the `uses` that says what they say:
 `known_units`'s at each unit used that isn't one (A0015), and
 `acyclic`'s, the units on a cycle, once for each cycle, with the path
-round it (A0072). The catalog unlike what sema fills, or with a
+round it (A0072), and `own_parts`'s, each relvar and constraint a unit
+adds to a database it isn't one of the own units of, at the database's
+name before its own (A0070): the catalog's `databases`, `parts` and
+`within` say which unit declares each database, what each unit adds to
+which, and which units' directories each is under. The catalog unlike what sema fills, or with a
 constraint sema reports no breaking of, is an internal error, as a
 built-in unlike the compiler's is. A section's `uses` is first in it, once
 (`sections::uses_placement`, A0071).

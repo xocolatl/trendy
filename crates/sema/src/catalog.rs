@@ -19,11 +19,17 @@ use crate::{Files, errors, ops, sections};
 
 /// The relvars the compiler fills, each by its name, with its attributes,
 /// each of type `text`, as the catalog declares them.
-const RELVARS: [(&str, &[&str]); 2] = [
+const RELVARS: [(&str, &[&str]); 5] = [
     // Each unit of the program, by its name.
     ("units", &["unit"]),
     // Each unit a unit's section uses, `interface` or `implementation`.
     ("uses", &["section", "unit", "used"]),
+    // Each database, by its name in the program, and the unit declaring it.
+    ("databases", &["database", "unit"]),
+    // Each relvar or constraint a unit adds to a database.
+    ("parts", &["database", "part", "unit"]),
+    // Each unit, with itself and each unit whose directory it is under.
+    ("within", &["owner", "unit"]),
 ];
 
 /// A rule between units: a constraint of the catalog's, which sema reports
@@ -36,6 +42,10 @@ enum Rule {
     /// `acyclic`: no unit uses itself, through any path. Its breaking
     /// tuples are the units on a cycle, `{unit, used}`, each used by itself.
     Acyclic,
+    /// `own_parts`: only a database's own units add to it. Its breaking
+    /// tuples are the units that add to one, each with the unit that
+    /// declares it, `{unit, owner}`, which it isn't under.
+    OwnParts,
 }
 
 impl Rule {
@@ -44,6 +54,7 @@ impl Rule {
         match name {
             "known_units" => Some(Rule::KnownUnits),
             "acyclic" => Some(Rule::Acyclic),
+            "own_parts" => Some(Rule::OwnParts),
             _ => None,
         }
     }
@@ -102,7 +113,7 @@ pub(crate) fn check(
             ));
             return;
         };
-        let tuples = filled(name, files);
+        let tuples = filled(name, files, cx);
         args.insert(
             name.to_string(),
             hir::Expr::Constant(hir::Value::Relation(hir::RelationValue { heading, tuples })),
@@ -136,7 +147,7 @@ pub(crate) fn check(
         };
         for tuples in broken(constraint, &args, cx) {
             match tuples {
-                Ok(tuples) => errors.extend(reported(rule, &tuples, files, &units)),
+                Ok(tuples) => errors.extend(reported(rule, &tuples, files, &units, cx)),
                 Err(why) => errors.push(internal(&why, span)),
             }
         }
@@ -153,9 +164,49 @@ fn as_filled(heading: &hir::Heading, attributes: &[&str]) -> bool {
 
 /// The tuples of the catalog's relvar `name`, one of [`RELVARS`], for the
 /// program of `files`.
-fn filled(name: &str, files: &Files) -> BTreeSet<hir::TupleValue> {
+fn filled(name: &str, files: &Files, cx: &Context) -> BTreeSet<hir::TupleValue> {
     let text = |t: &str| hir::Value::Text(t.to_string());
+    let tuple = |attributes: &[(&str, &str)]| {
+        hir::TupleValue::new(
+            attributes
+                .iter()
+                .map(|&(a, v)| (a.to_string(), text(v)))
+                .collect(),
+        )
+    };
     match name {
+        "databases" => files
+            .named()
+            .flat_map(|(unit, file)| {
+                declared_databases(file, cx)
+                    .into_iter()
+                    .map(|database| tuple(&[("database", &database), ("unit", unit)]))
+                    .collect::<Vec<_>>()
+            })
+            .collect(),
+        "parts" => files
+            .named()
+            .flat_map(|(unit, file)| {
+                added(file, cx)
+                    .into_iter()
+                    .map(|(database, part, _)| {
+                        tuple(&[("database", &database), ("part", &part), ("unit", unit)])
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect(),
+        "within" => {
+            let units: Vec<&str> = files.named().map(|(unit, _)| unit).collect();
+            units
+                .iter()
+                .flat_map(|&unit| {
+                    units
+                        .iter()
+                        .filter(move |&&owner| owner == unit || under(unit, owner))
+                        .map(move |&owner| tuple(&[("owner", owner), ("unit", unit)]))
+                })
+                .collect()
+        }
         "units" => files
             .named()
             .map(|(unit, _)| {
@@ -184,6 +235,47 @@ fn filled(name: &str, files: &Files) -> BTreeSet<hir::TupleValue> {
             .collect(),
         _ => unreachable!("the compiler fills the relvars it names"),
     }
+}
+
+/// Whether the unit `unit` is under the directory of the unit `owner`, as
+/// `library.loans`, of `library/loans.trendy`, is under `library`'s.
+fn under(unit: &str, owner: &str) -> bool {
+    unit.strip_prefix(owner)
+        .is_some_and(|rest| rest.starts_with('.'))
+}
+
+/// The databases `file` declares, each by its name in the program.
+fn declared_databases(file: &SourceFile, cx: &Context) -> Vec<String> {
+    file.databases()
+        .filter_map(|decl| decl.name()?.ident())
+        .map(|ident| {
+            let unit = cx
+                .namespaces
+                .unit_at(trendy_syntax::span(ident.text_range()));
+            cx.namespaces.value_identity(ident.text(), unit)
+        })
+        .collect()
+}
+
+/// What `file` adds to databases: each relvar and constraint, with its
+/// database's name in the program, its own name, and where it names the
+/// database, but for one of a database there isn't, which is reported.
+fn added(file: &SourceFile, cx: &Context) -> Vec<(String, String, Span)> {
+    let relvars = file
+        .relvars()
+        .filter_map(|decl| Some((decl.part_of()?, decl.name()?.ident()?)));
+    let constraints = file
+        .constraints()
+        .filter_map(|decl| Some((decl.part_of()?, decl.name()?.ident()?)));
+    relvars
+        .chain(constraints)
+        .filter_map(|(part_of, ident)| {
+            let written = part_of.database()?.ident()?;
+            let span = trendy_syntax::span(written.text_range());
+            let database = cx.namespaces.database_named(written.text(), span)?;
+            Some((database, ident.text().to_string(), span))
+        })
+        .collect()
 }
 
 /// The tuples that break each part of `constraint` that doesn't hold of
@@ -230,6 +322,7 @@ fn reported(
     tuples: &[hir::TupleValue],
     files: &Files,
     units: &[&str],
+    cx: &Context,
 ) -> Vec<Diagnostic> {
     let text = |tuple: &hir::TupleValue, attribute: &str| match tuple.get(attribute) {
         Some(hir::Value::Text(t)) => t.clone(),
@@ -250,6 +343,31 @@ fn reported(
             let on_cycles: BTreeSet<String> = tuples.iter().map(|t| text(t, "unit")).collect();
             cycles(files, &on_cycles)
         }
+        Rule::OwnParts => tuples
+            .iter()
+            .flat_map(|tuple| {
+                let (unit, owner) = (text(tuple, "unit"), text(tuple, "owner"));
+                let file = |name: &str| {
+                    files
+                        .named()
+                        .find(|(u, _)| *u == name)
+                        .map(|(_, file)| file)
+                };
+                // The databases `owner` declares.
+                let declared: BTreeSet<String> = file(&owner).map_or_else(BTreeSet::new, |f| {
+                    declared_databases(f, cx).into_iter().collect()
+                });
+                file(&unit)
+                    .map(|f| added(f, cx))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|(database, _, _)| declared.contains(database))
+                    .map(|(database, part, at)| {
+                        errors::foreign_part(&database, &part, at, &unit, &owner)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect(),
     }
 }
 

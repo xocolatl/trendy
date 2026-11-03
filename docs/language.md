@@ -3580,6 +3580,13 @@ operator main{} [];
 - **In the interface:** a unit's interface may declare a database and add
   to it, as what is shared and outlives the program, while its other
   variables stay its implementation's.
+- **Only its own units add to it:** the unit that declares it, and the
+  units under its directory, as `library/loans.trendy` is under
+  `library.trendy`'s (A0070, the catalog's `own_parts`). The compiler
+  reads them all, used or not, so that every program that uses the
+  database has all of its constraints, which hold for each of them (RM
+  Prescription 23). A program's own data that outlives it goes in a
+  database of its own.
 - **Declared for its definition:** no statement reads a database yet
   (A0070).
 - SQL's `CREATE DATABASE name` is fixed to `database name;`, and Tutorial
@@ -3627,11 +3634,28 @@ var catalog.units: relation { unit: text } key { unit };
    `implementation`. */
 var catalog.uses: relation { unit: text, used: text, section: text };
 
+/* Each database, by its name in the program, and the unit that declares
+   it. */
+var catalog.databases: relation { unit: text, database: text };
+
+/* Each relvar or constraint a unit adds to a database, by its name in it. */
+var catalog.parts: relation { unit: text, database: text, part: text };
+
+/* Each unit, with itself and with each unit whose directory it is under,
+   its owners: `library.loans`, of the file `library/loans.trendy`, is
+   under `library`. */
+var catalog.within: relation { unit: text, owner: text };
+
 /* A unit uses units of the program. */
 constraint catalog.known_units := uses{used} <= units rename {unit as used};
 
 /* No unit uses itself, through any path. */
 constraint catalog.acyclic := is_empty{r: uses{unit, used} tclose where unit = used};
+
+/* Only a database's own units add to it: the one that declares it, and
+   those under its directory. */
+constraint catalog.own_parts := (parts join (databases rename {unit as owner})){unit, owner}
+    <= within;
 ```
 
 ## Arrays

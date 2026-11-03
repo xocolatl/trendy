@@ -11920,6 +11920,56 @@ var here := position{latitude: -1.29e0, longitude: 36.82e0};
     }
 
     #[test]
+    fn only_a_databases_own_units_add_to_it() {
+        let library = "interface\n\ndatabase library;\n\nvar library.books: relation { isbn: text, title: text } key { isbn };";
+        let loans = "uses { library };\n\nvar library.loans: relation { isbn: text, member: integer } key { isbn };\n\nconstraint library.lent_books := loans{isbn} <= books{isbn};";
+        let program = analyze_units(&[
+            ("program", "uses { library };\n\noperator main{} [];"),
+            ("library", library),
+            ("library.loans", loans),
+            (
+                "library.loans.late",
+                "uses { library };\n\nvar library.late: relation { isbn: text };",
+            ),
+        ]);
+        assert!(program.is_ok(), "{program:#?}");
+        // Elsewhere, each relvar and constraint is reported where it names
+        // the database.
+        let main = "uses { library };\n\nvar library.reviews: relation { isbn: text, stars: integer };\n\nconstraint library.reviewed := reviews{isbn} <= books{isbn};\n\noperator main{} [];";
+        let errors = analyze_units(&[("program", main), ("library", library)]).unwrap_err();
+        assert_eq!(errors.len(), 2, "{errors:#?}");
+        assert!(
+            errors.iter().all(|e| e.code == Code::DatabasePart),
+            "{errors:#?}"
+        );
+        assert_eq!(
+            errors[0].message,
+            "only the database `library`'s own units add to it, not `program`"
+        );
+        let at = |e: &Diagnostic| &main[e.primary.span.start..e.primary.span.end];
+        assert_eq!(
+            errors.iter().map(at).collect::<Vec<_>>(),
+            ["library", "library"]
+        );
+        assert!(errors[0].help[0].contains("`library/`"), "{errors:#?}");
+        // A unit whose name only starts like the database's unit's is no
+        // unit of its.
+        let errors = analyze_units(&[
+            ("program", "uses { library };\n\noperator main{} [];"),
+            ("library", library),
+            (
+                "libraryx",
+                "uses { library };\n\nvar library.x: relation { a: integer };",
+            ),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            errors.iter().map(|e| e.code).collect::<Vec<_>>(),
+            [Code::DatabasePart]
+        );
+    }
+
+    #[test]
     fn no_unit_uses_itself() {
         // The catalog's `acyclic`, broken by the units on a cycle, reported
         // once for each cycle, at the first unit's `uses`.

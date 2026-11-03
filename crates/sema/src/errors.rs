@@ -8479,6 +8479,33 @@ pub(crate) fn unknown_unit(name: &str, span: Span, units: &[&str]) -> Diagnostic
     )
 }
 
+/// The relvar or constraint `part`, which the unit `unit` adds to the
+/// database `database`, naming it at `span`, though `unit` isn't one of the
+/// database's own units: `owner`, which declares it, or one under its
+/// directory.
+pub(crate) fn foreign_part(
+    database: &str,
+    part: &str,
+    span: Span,
+    unit: &str,
+    owner: &str,
+) -> Diagnostic {
+    let directory = trendy_syntax::unit::path_of(owner);
+    let directory = directory.strip_suffix(".trendy").unwrap_or(&directory);
+    Diagnostic::error(
+        Code::DatabasePart,
+        format!("only the database `{database}`'s own units add to it, not `{unit}`"),
+        span,
+        format!("`{part}` added to `{database}`"),
+    )
+    .with_note(format!(
+        "a database's relvars and constraints are declared in the unit that declares it, `{owner}`, and the units under its directory, `{directory}/`, so that every program that uses it has all of its constraints, which hold for every one (TTM RM Prescription 23)"
+    ))
+    .with_help(format!(
+        "declare `{part}` in a unit under `{directory}/`, or keep `{unit}`'s own data in a database of its own"
+    ))
+}
+
 /// The units of `cycle`, each using the next, and the last the first,
 /// which each of `steps` does, at its span: the `uses` of the next unit in
 /// each. `removal`, for a unit that uses itself, removes the `uses`.

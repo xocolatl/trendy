@@ -4,7 +4,10 @@
 //! `lakes/depths.trendy`). The names under `trendy.` are those of the units
 //! that come with the compiler, which are no files of the program. A unit
 //! whose file there is none of isn't loaded: sema reports each `uses` of
-//! it, with the file it would be.
+//! it, with the file it would be. A unit that declares a database brings
+//! each unit under its directory, used or not, as they are the database's
+//! own, which add to it, and every program that uses the database has all
+//! of its constraints.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -60,7 +63,8 @@ impl Program {
 
 /// The program whose main unit is the file at `main`, of the text
 /// `source`, with each unit it uses, through any path, whose file there
-/// is. Main's unit is named by its file's stem.
+/// is, and each under the directory of a unit that declares a database.
+/// Main's unit is named by its file's stem.
 #[must_use]
 pub fn program(main: &Path, source: String) -> Program {
     let root = main.parent().unwrap_or(Path::new(""));
@@ -70,9 +74,12 @@ pub fn program(main: &Path, source: String) -> Program {
     );
     let first = parsed(name, main.display().to_string(), source);
     let mut seen: BTreeSet<String> = BTreeSet::from([first.name.clone()]);
-    let mut pending = used(&first);
     let mut loaded: BTreeMap<String, Unit> = BTreeMap::new();
     let mut unreadable = Vec::new();
+    let mut pending = used(&first);
+    if declares_database(&first) {
+        pending.extend(under(root, &first.name, &mut unreadable));
+    }
     while let Some(name) = pending.pop() {
         if name.starts_with(unit::COMPILERS) || !seen.insert(name.clone()) {
             continue;
@@ -82,6 +89,9 @@ pub fn program(main: &Path, source: String) -> Program {
             Ok(source) => {
                 let unit = parsed(name.clone(), path.display().to_string(), source);
                 pending.extend(used(&unit));
+                if declares_database(&unit) {
+                    pending.extend(under(root, &name, &mut unreadable));
+                }
                 loaded.insert(name, unit);
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -117,6 +127,43 @@ fn parsed(name: String, path: String, source: String) -> Unit {
         source,
         parse,
     }
+}
+
+/// Whether `unit` declares a database.
+fn declares_database(unit: &Unit) -> bool {
+    unit.parse.tree.databases().next().is_some()
+}
+
+/// The names of the units under the directory of the unit `owner`, from
+/// `root`: of each file `*.trendy` there, through any depth, whose path's
+/// parts are words, as `library/loans.trendy` is `library.loans`. A
+/// directory there is that can't be read is added to `unreadable`.
+fn under(root: &Path, owner: &str, unreadable: &mut Vec<(String, io::Error)>) -> Vec<String> {
+    let path = unit::path_of(owner);
+    let directory = root.join(path.strip_suffix(".trendy").unwrap_or(&path));
+    let mut names = Vec::new();
+    let mut pending = vec![directory.clone()];
+    while let Some(at) = pending.pop() {
+        let entries = match std::fs::read_dir(&at) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                unreadable.push((at.display().to_string(), e));
+                continue;
+            }
+        };
+        for path in entries.flatten().map(|entry| entry.path()) {
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|e| e == "trendy") {
+                let within = path.strip_prefix(&directory).ok().and_then(Path::to_str);
+                if let Some(name) = within.and_then(unit::named_by) {
+                    names.push(format!("{owner}.{name}"));
+                }
+            }
+        }
+    }
+    names
 }
 
 /// The names of the units `unit` uses, in either section.
@@ -171,6 +218,22 @@ mod tests {
         assert_eq!(names, ["main", "lakes.depths", "lakes.names"]);
         assert!(loaded.unreadable.is_empty());
         assert!(loaded.units[1].path.ends_with("lakes/depths.trendy"));
+        // A database's own units, used or not.
+        let root = with_files(
+            "databases",
+            &[
+                ("library.trendy", "interface\n\ndatabase library;"),
+                ("library/loans.trendy", "uses { library };"),
+                ("library/loans/late.trendy", ""),
+                ("library/notes.txt", ""),
+            ],
+        );
+        let loaded = program(&root.join("main.trendy"), "uses { library };".to_string());
+        let names: Vec<&str> = loaded.units.iter().map(|u| u.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["main", "library", "library.loans", "library.loans.late"]
+        );
         // Parse errors, in the program's spans.
         let root = with_files("errors", &[("broken.trendy", "var x := ;")]);
         let main = "uses { broken };";

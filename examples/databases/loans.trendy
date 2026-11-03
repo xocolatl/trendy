@@ -1,0 +1,11 @@
+/* What is on loan from the library, a unit of its database's own, under
+   the directory of the unit that declares it. In a constraint, the
+   database's relvars are named alone, whichever of its units adds them. */
+uses { databases };
+
+/* A book is on loan to one member at a time. */
+var library.loans: relation { isbn: text, member: integer } key { isbn };
+
+/* What is on loan is a book the library has, to a member it has. */
+constraint library.lent_books := loans{isbn} <= books{isbn};
+constraint library.lent_to_members := loans{member} <= members{member};
